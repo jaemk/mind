@@ -43,7 +43,7 @@ pub struct InstalledItem {
     pub hash: String,
     /// Store copy location, relative to `~/.mind` (the file registry).
     pub store: String,
-    /// Link targets relative to `~/.claude` created for this item.
+    /// Absolute symlink paths created for this item, one per agent home.
     pub links: Vec<String>,
     /// One-line description captured at install time, for `recall`.
     #[serde(default)]

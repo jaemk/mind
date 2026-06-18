@@ -81,10 +81,19 @@ impl Sandbox {
 
     /// Run `mind <args>` against this sandbox.
     fn mind(&self, args: &[&str]) -> Run {
-        self.mind_with_input(args, None)
+        self.run(args, None, &[])
     }
 
     fn mind_with_input(&self, args: &[&str], input: Option<&str>) -> Run {
+        self.run(args, input, &[])
+    }
+
+    /// Run `mind` with additional environment variables (e.g. MIND_AGENT_HOMES).
+    fn mind_env(&self, args: &[&str], envs: &[(&str, &str)]) -> Run {
+        self.run(args, None, envs)
+    }
+
+    fn run(&self, args: &[&str], input: Option<&str>, envs: &[(&str, &str)]) -> Run {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_mind"));
         cmd.args(args)
             .env("MIND_HOME", &self.mind_home)
@@ -92,6 +101,9 @@ impl Sandbox {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .stdin(Stdio::piped());
+        for (k, v) in envs {
+            cmd.env(k, v);
+        }
         let mut child = cmd.spawn().expect("spawn mind");
         if let Some(text) = input {
             use std::io::Write;
@@ -220,7 +232,7 @@ fn probe_filters_by_substring() {
 
 #[test]
 fn learn_installs_and_creates_symlink() {
-    // spec: CLI-30, STO-2, LIFE-5
+    // spec: CLI-30, STO-2, STO-14, LIFE-5
     let sb = melded();
     let r = sb.mind(&["learn", "review"]);
     assert!(r.success, "{}", r.stderr);
@@ -1185,4 +1197,46 @@ fn detach_is_an_alias_for_unmeld() {
             .stdout
             .contains("no sources melded")
     );
+}
+
+#[test]
+fn learn_links_into_all_configured_homes() {
+    // spec: STO-14, LIFE-40
+    let sb = Sandbox::new();
+    let home_a = sb.base.join("homeA");
+    let home_b = sb.base.join("homeB");
+    write(
+        &sb.mind_home.join("config.toml"),
+        &format!(
+            "homes = [\"{}\", \"{}\"]\n",
+            home_a.display(),
+            home_b.display()
+        ),
+    );
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    assert!(sb.mind(&["learn", "review"]).success);
+
+    // The item is linked into both homes.
+    assert!(std::fs::symlink_metadata(home_a.join("skills/review")).is_ok());
+    assert!(std::fs::symlink_metadata(home_b.join("skills/review")).is_ok());
+
+    // forget removes it from every home (via the recorded link registry).
+    assert!(sb.mind(&["forget", "review"]).success);
+    assert!(std::fs::symlink_metadata(home_a.join("skills/review")).is_err());
+    assert!(std::fs::symlink_metadata(home_b.join("skills/review")).is_err());
+}
+
+#[test]
+fn learn_links_into_homes_from_env() {
+    // spec: STO-14
+    let sb = Sandbox::new();
+    let home_a = sb.base.join("envA");
+    let home_b = sb.base.join("envB");
+    let homes = format!("{}:{}", home_a.display(), home_b.display());
+    let env = [("MIND_AGENT_HOMES", homes.as_str())];
+
+    assert!(sb.mind_env(&["meld", &sb.source_spec()], &env).success);
+    assert!(sb.mind_env(&["learn", "review"], &env).success);
+    assert!(std::fs::symlink_metadata(home_a.join("skills/review")).is_ok());
+    assert!(std::fs::symlink_metadata(home_b.join("skills/review")).is_ok());
 }

@@ -7,17 +7,19 @@
 //!   sources/<host>/<owner>/<repo> bare-ish clones of each melded repo
 //!   store/<kind>/<name>/          the installed copy of each item
 //!
-//! ~/.claude/
+//! <agent home>/                     (one or more; default ~/.claude)
 //!   skills/<name>  -> symlink into store/skill/<name>
 //!   agents/<name>.md -> symlink into store/agent/<name>
 //!   rules/<name>.md  -> symlink into store/rule/<name>
 //! ```
 //!
-//! Every root is overridable via an environment variable so the test harness
-//! can point them at temp dirs: `MIND_HOME`, `CLAUDE_HOME`.
+//! Items are linked into every configured agent home (see [`Paths::agent_homes`]).
+//! Roots are overridable via environment variables so the test harness can point
+//! them at temp dirs: `MIND_HOME`, `CLAUDE_HOME`, `MIND_AGENT_HOMES`.
 
 use std::path::{Path, PathBuf};
 
+use crate::config::Config;
 use crate::error::{ItemKind, MindError, Result};
 
 /// Resolved filesystem roots for a `mind` invocation.
@@ -93,7 +95,7 @@ impl Paths {
         self.tmp_dir().join("backup").join(kind.as_str()).join(name)
     }
 
-    /// The default link target for an item, relative to `claude_home`.
+    /// The default link target for an item, relative to an agent home.
     pub fn default_link_rel(&self, kind: ItemKind, name: &str) -> String {
         match kind {
             ItemKind::Skill => format!("skills/{name}"),
@@ -102,9 +104,26 @@ impl Paths {
         }
     }
 
-    /// Resolve a claude-home-relative link target to an absolute path.
-    pub fn link_from_rel(&self, rel: &str) -> PathBuf {
-        self.claude_home.join(rel)
+    /// The agent homes items are linked into, in order: `$MIND_AGENT_HOMES` (a
+    /// `:`-separated path list), else `homes` from `~/.mind/config.toml`, else
+    /// `[claude_home]`. A leading `~` is expanded.
+    pub fn agent_homes(&self) -> Result<Vec<PathBuf>> {
+        if let Some(raw) = std::env::var_os("MIND_AGENT_HOMES") {
+            let homes: Vec<PathBuf> = raw
+                .to_string_lossy()
+                .split(':')
+                .filter(|p| !p.is_empty())
+                .map(expand_home)
+                .collect();
+            if !homes.is_empty() {
+                return Ok(homes);
+            }
+        }
+        let configured = Config::load(&self.mind_home)?.homes;
+        if !configured.is_empty() {
+            return Ok(configured.iter().map(|h| expand_home(h)).collect());
+        }
+        Ok(vec![self.claude_home.clone()])
     }
 
     /// Create the `~/.mind` scaffolding if it does not yet exist.
@@ -118,6 +137,19 @@ impl Paths {
 
 fn home() -> Result<PathBuf> {
     dirs::home_dir().ok_or(MindError::HomeDirNotFound)
+}
+
+/// Expand a leading `~` / `~/` to the home directory; other paths pass through.
+fn expand_home(path: &str) -> PathBuf {
+    if path == "~" {
+        return dirs::home_dir().unwrap_or_else(|| PathBuf::from(path));
+    }
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Some(h) = dirs::home_dir()
+    {
+        return h.join(rest);
+    }
+    PathBuf::from(path)
 }
 
 /// `mkdir -p` that tags failures with the offending path.

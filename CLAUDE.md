@@ -1,7 +1,8 @@
 # mind
 
 A manager for agent tooling (skills, agents, rules) that melds with arbitrary
-git repos and links installed items into `~/.claude`.
+git repos and links installed items into one or more agent homes (default
+`~/.claude`; see `Paths::agent_homes`).
 
 The behavioral spec lives in [spec/](spec/) and is the reference to verify
 against. Each statement there has a stable ID (e.g. `LIFE-4`); tests cite the IDs

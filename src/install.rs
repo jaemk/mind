@@ -72,17 +72,26 @@ pub fn install(
         return Err(e);
     }
 
-    // 3. Ensure the symlink. On failure, roll the store back.
+    // 3. Link the store copy into every agent home. On any failure, undo the
+    //    links made so far and roll the store back.
     let link_rel = item
         .link_rel
         .clone()
         .unwrap_or_else(|| paths.default_link_rel(kind, &name));
-    if let Err(e) = ensure_link(paths, &store, &link_rel) {
-        let _ = remove_path(&store);
-        if had_backup {
-            let _ = rename(&backup, &store);
+    let mut links: Vec<std::path::PathBuf> = Vec::new();
+    for home in paths.agent_homes()? {
+        let link = home.join(&link_rel);
+        if let Err(e) = ensure_link(&store, &link) {
+            for made in &links {
+                let _ = remove_path(made);
+            }
+            let _ = remove_path(&store);
+            if had_backup {
+                let _ = rename(&backup, &store);
+            }
+            return Err(e);
         }
-        return Err(e);
+        links.push(link);
     }
 
     // 4. Success: drop the backup.
@@ -98,28 +107,31 @@ pub fn install(
         commit: commit.to_string(),
         hash: hash_path(&item.path)?,
         store: paths.store_rel(kind, &item.effective_name()),
-        links: vec![link_rel],
+        links: links
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect(),
         description: item.description.clone(),
     })
 }
 
-/// Remove an installed item using its recorded file registry.
+/// Remove an installed item using its recorded file registry (absolute link
+/// paths across every agent home, then the store copy).
 pub fn uninstall(paths: &Paths, item: &InstalledItem) -> Result<()> {
     for link in &item.links {
-        remove_path(&paths.link_from_rel(link))?;
+        remove_path(Path::new(link))?;
     }
     remove_path(&paths.mind_home.join(&item.store))?;
     Ok(())
 }
 
-/// Create (or refresh) the symlink at `link_rel` pointing to `store`.
-fn ensure_link(paths: &Paths, store: &Path, link_rel: &str) -> Result<()> {
-    let link = paths.link_from_rel(link_rel);
+/// Create (or refresh) a symlink at `link` pointing to `store`.
+fn ensure_link(store: &Path, link: &Path) -> Result<()> {
     if let Some(parent) = link.parent() {
         mkdir_p(parent)?;
     }
-    remove_path(&link)?;
-    symlink(store, &link)
+    remove_path(link)?;
+    symlink(store, link)
 }
 
 /// Rewrite `{{ns:name}}` tokens in every text file under the staged copy.

@@ -59,8 +59,9 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 ## learn
 
 - `CLI-30` `learn <item>` with an exact ref installs the single matching item
-  (see lifecycle.md), recording it in the manifest; a ref matching none is
-  `ItemNotFound` and one matching several is `AmbiguousItem`.
+  into every configured agent home (see lifecycle.md, STO-14), recording it in
+  the manifest; a ref matching none is `ItemNotFound` and one matching several is
+  `AmbiguousItem`.
 - `CLI-31` When the ref name is a glob (`*`, `?`, `[`), `learn` installs every
   matching item. The kind prefix, source qualifier, and glob compose: `'*'` is
   everything, `'skill:*'` all skills, `'owner/repo#*'` all items of one source,

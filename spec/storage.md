@@ -12,7 +12,7 @@ The on-disk layout and the two persisted JSON files.
   store/<kind>/<name>/          installed copy of each item (name is effective)
   .tmp/staging|backup/...        scratch for transactional installs
 
-~/.claude/
+<agent home>/                   (one or more; default ~/.claude)
   skills/<name>      -> store/skill/<name>
   agents/<name>.md   -> store/agent/<name>
   rules/<name>.md    -> store/rule/<name>
@@ -20,11 +20,16 @@ The on-disk layout and the two persisted JSON files.
 
 - `STO-1` The mind root is `$MIND_HOME` if set, else `~/.mind`. The claude root is
   `$CLAUDE_HOME` if set, else `~/.claude`. Both overrides are honored everywhere.
-- `STO-2` The default link target for an item is `skills/<name>` (skill),
-  `agents/<name>.md` (agent), or `rules/<name>.md` (rule), where `<name>` is the
-  effective name. A `mind.toml` item may override the link target.
+- `STO-2` The default link target for an item, relative to an agent home, is
+  `skills/<name>` (skill), `agents/<name>.md` (agent), or `rules/<name>.md`
+  (rule), where `<name>` is the effective name. A `mind.toml` item may override
+  the link target (applied in every home).
 - `STO-3` Store and link paths use the effective name, so namespaced items do not
   collide with same-named items from other sources.
+- `STO-14` The agent homes items are linked into are, in order: `$MIND_AGENT_HOMES`
+  (a `:`-separated path list), else `homes` in `~/.mind/config.toml`, else
+  `[claude root]`. A leading `~` is expanded. An unknown key in `config.toml` is
+  an error (`Toml`).
 
 ## Source registry (sources.json)
 
@@ -44,7 +49,7 @@ The on-disk layout and the two persisted JSON files.
 - `STO-20` The manifest maps `kind:effective_name` to an installed item.
 - `STO-21` Each installed item records: `kind`, `name` (effective), `bare_name`,
   `source`, `commit`, `hash` (of source content), `store` (path relative to the
-  mind root), `links` (paths relative to the claude root), `description`.
+  mind root), `links` (absolute symlink paths, one per agent home), `description`.
 - `STO-22` `(source, kind, bare_name)` is the item's stable identity (see
   lifecycle.md). `store` and `links` are its file registry, used by uninstall.
 - `STO-23` A missing manifest file is treated as empty.

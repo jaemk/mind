@@ -44,7 +44,7 @@ pub enum Command {
         name: String,
     },
 
-    /// Install items into ~/.claude.
+    /// Install items into every configured agent home (default ~/.claude).
     ///
     /// The item ref may be exact, or a glob to install many: `'*'` for everything,
     /// `'skill:*'` for all skills, `'owner/repo#*'` for all of one source.

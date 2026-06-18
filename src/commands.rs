@@ -499,7 +499,7 @@ pub fn recall(paths: &Paths, sources: bool, item: Option<&str>) -> Result<()> {
         println!("  hash    {}", short(&found.hash));
         println!("  store   {}", paths.mind_home.join(&found.store).display());
         for link in &found.links {
-            println!("  link    {}", paths.link_from_rel(link).display());
+            println!("  link    {link}");
         }
         return Ok(());
     }
@@ -593,10 +593,9 @@ pub fn introspect(paths: &Paths) -> Result<()> {
     }
 
     for it in manifest.items.values() {
-        for link_rel in &it.links {
-            let link = paths.link_from_rel(link_rel);
-            if std::fs::symlink_metadata(&link).is_err() {
-                println!("{}: symlink missing at {}", it.key(), link.display());
+        for link in &it.links {
+            if std::fs::symlink_metadata(link).is_err() {
+                println!("{}: symlink missing at {link}", it.key());
                 issues += 1;
             }
         }

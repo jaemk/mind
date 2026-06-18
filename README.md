@@ -1,7 +1,8 @@
 # mind
 
 A manager for agent tooling (skills, agents, rules) that melds arbitrary git
-repos and links installed items into `~/.claude`. Modeled on Homebrew.
+repos and links installed items into your agent directories (default
+`~/.claude`). Modeled on Homebrew.
 
 ## Install
 
@@ -30,6 +31,18 @@ The repo is not named `homebrew-mind`, so the tap needs its clone URL.
 A source repo exposes items by convention (`skills/<n>/SKILL.md`,
 `agents/<n>.md`, `rules/<n>.md`) or via a `mind.toml`. See [spec/](spec/) for the
 full behavioral spec.
+
+## Agent directories
+
+`learn` links items into every configured agent home (each is linked at its kind
+subdir: `skills/`, `agents/`, `rules/`). The default is `~/.claude`. Configure
+more in `~/.mind/config.toml`:
+
+```toml
+homes = ["~/.claude", "~/.config/some-other-agent"]
+```
+
+or for one invocation, set `MIND_AGENT_HOMES` to a `:`-separated path list.
 
 ## Develop
 
