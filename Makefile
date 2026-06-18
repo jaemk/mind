@@ -15,6 +15,7 @@ help:
 	@echo "  test       cargo test (all features)"
 	@echo "  check      fmt-check + clippy + test"
 	@echo "  release    tag v$(VERSION) and push it (triggers the release workflow)"
+	@echo "             override: make release TAG=v1.2.3  (or VERSION=1.2.3)"
 	@echo "  clean      cargo clean"
 
 build:
@@ -35,8 +36,9 @@ test:
 # The gates CI should enforce, runnable in one shot locally.
 check: fmt-check clippy test
 
-# Tag the current commit as v<Cargo.toml version> and push it, which triggers
-# .github/workflows/release.yml. Requires a clean tree and an unused tag.
+# Tag the current commit and push it, which triggers .github/workflows/release.yml.
+# Defaults to v<Cargo.toml version>; override with `make release TAG=v1.2.3` or
+# `make release VERSION=1.2.3`. Requires a clean tree and an unused tag.
 release:
 	@test -z "$$(git status --porcelain)" || { echo "error: working tree is dirty; commit first"; exit 1; }
 	@if git rev-parse -q --verify "refs/tags/$(TAG)" >/dev/null; then \
