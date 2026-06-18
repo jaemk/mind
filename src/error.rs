@@ -74,10 +74,14 @@ pub enum MindError {
     #[error("mind.toml at {path}: {msg}")]
     MindToml { path: PathBuf, msg: String },
 
-    #[error("'{spec}' is not a valid repo spec (expected 'owner/repo', a github shorthand, or a git URL)")]
+    #[error(
+        "'{spec}' is not a valid repo spec (expected 'owner/repo', a github shorthand, or a git URL)"
+    )]
     InvalidRepoSpec { spec: String },
 
-    #[error("'{name}' is not a valid item ref (expected 'name', 'skill:name', 'agent:name', 'rule:name', or 'owner/repo#name')")]
+    #[error(
+        "'{name}' is not a valid item ref (expected 'name', 'skill:name', 'agent:name', 'rule:name', or 'owner/repo#name')"
+    )]
     InvalidItemRef { name: String },
 
     #[error("source '{name}' is already melded (from {url})")]
@@ -92,7 +96,9 @@ pub enum MindError {
         candidates: Vec<String>,
     },
 
-    #[error("no item matches '{query}' across {sources} melded source(s); run `mind sync` then `mind probe`")]
+    #[error(
+        "no item matches '{query}' across {sources} melded source(s); run `mind sync` then `mind probe`"
+    )]
     ItemNotFound { query: String, sources: usize },
 
     #[error("'{query}' is ambiguous; matches: {}", candidates.join(", "))]

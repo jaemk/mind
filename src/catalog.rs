@@ -129,7 +129,13 @@ fn scan_globs(
     for skill_md in resolve_globs(root, &discover.skills)? {
         // The glob points at the SKILL.md; the item is its parent dir.
         if let Some(dir) = skill_md.parent() {
-            out.push(make_item(source, prefix, ItemKind::Skill, dir.to_path_buf(), &skill_md));
+            out.push(make_item(
+                source,
+                prefix,
+                ItemKind::Skill,
+                dir.to_path_buf(),
+                &skill_md,
+            ));
         }
     }
     for (kind, globs) in [

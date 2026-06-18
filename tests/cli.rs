@@ -63,7 +63,10 @@ impl Sandbox {
                 &source.join("agents/dev.md"),
                 "---\nname: dev\ndescription: Implements a spec with tests\n---\n# dev agent\n",
             );
-            write(&source.join("rules/style.md"), "---\ndescription: ASCII only\n---\n# style rule\n");
+            write(
+                &source.join("rules/style.md"),
+                "---\ndescription: ASCII only\n---\n# style rule\n",
+            );
         } else {
             write(&source.join("README.md"), "# registry\n");
         }
@@ -137,7 +140,11 @@ impl Sandbox {
     /// The base dir name, which becomes the `owner` for this sandbox's local
     /// source (so the source identity is `<base_name>/<source dir name>`).
     fn base_name(&self) -> String {
-        self.base.file_name().unwrap().to_string_lossy().into_owned()
+        self.base
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()
     }
 }
 
@@ -221,7 +228,10 @@ fn learn_installs_and_creates_symlink() {
 
     let link = sb.claude_home.join("skills/review");
     let meta = std::fs::symlink_metadata(&link).expect("symlink should exist");
-    assert!(meta.file_type().is_symlink(), "expected a symlink at {link:?}");
+    assert!(
+        meta.file_type().is_symlink(),
+        "expected a symlink at {link:?}"
+    );
 }
 
 #[test]
@@ -301,7 +311,11 @@ fn evolve_yes_applies_and_is_then_idempotent() {
 
     let applied = sb.mind(&["evolve", "--yes"]);
     assert!(applied.success, "{}", applied.stderr);
-    assert!(applied.stdout.contains("evolved skill:review"), "{}", applied.stdout);
+    assert!(
+        applied.stdout.contains("evolved skill:review"),
+        "{}",
+        applied.stdout
+    );
 
     let after = sb.mind(&["recall", "skill:review"]).stdout;
     assert_ne!(before, after, "commit/hash should have advanced");
@@ -320,7 +334,10 @@ fn forget_removes_symlink_and_manifest_entry() {
     assert!(r.success, "{}", r.stderr);
 
     let link = sb.claude_home.join("skills/review");
-    assert!(std::fs::symlink_metadata(&link).is_err(), "symlink should be gone");
+    assert!(
+        std::fs::symlink_metadata(&link).is_err(),
+        "symlink should be gone"
+    );
 
     let list = sb.mind(&["recall"]);
     assert!(list.stdout.contains("nothing learned"), "{}", list.stdout);
@@ -346,7 +363,11 @@ fn probe_surfaces_frontmatter_descriptions() {
         "expected skill description in probe output: {}",
         r.stdout
     );
-    assert!(r.stdout.contains("Implements a spec with tests"), "{}", r.stdout);
+    assert!(
+        r.stdout.contains("Implements a spec with tests"),
+        "{}",
+        r.stdout
+    );
 }
 
 #[test]
@@ -355,7 +376,11 @@ fn recall_detail_shows_description() {
     let sb = melded();
     sb.mind(&["learn", "review"]);
     let r = sb.mind(&["recall", "skill:review"]);
-    assert!(r.stdout.contains("desc    Review the diff for bugs"), "{}", r.stdout);
+    assert!(
+        r.stdout.contains("desc    Review the diff for bugs"),
+        "{}",
+        r.stdout
+    );
 }
 
 #[test]
@@ -390,11 +415,19 @@ fn mind_toml_is_authoritative_and_overrides_link_and_description() {
     assert!(!probe.stdout.contains("skill:review"), "{}", probe.stdout);
     // Description override beats frontmatter.
     assert!(probe.stdout.contains("override wins"), "{}", probe.stdout);
-    assert!(!probe.stdout.contains("from frontmatter"), "{}", probe.stdout);
+    assert!(
+        !probe.stdout.contains("from frontmatter"),
+        "{}",
+        probe.stdout
+    );
 
     // [source].description surfaces in `recall --sources`.
     let sources = sb.mind(&["recall", "--sources"]);
-    assert!(sources.stdout.contains("a test library"), "{}", sources.stdout);
+    assert!(
+        sources.stdout.contains("a test library"),
+        "{}",
+        sources.stdout
+    );
 
     // Custom link target is honored.
     assert!(sb.mind(&["learn", "style"]).success);
@@ -420,7 +453,11 @@ fn mind_toml_discover_globs_find_items() {
 
     let probe = sb.mind(&["probe"]);
     assert!(probe.stdout.contains("skill:foo"), "{}", probe.stdout);
-    assert!(probe.stdout.contains("a glob-found skill"), "{}", probe.stdout);
+    assert!(
+        probe.stdout.contains("a glob-found skill"),
+        "{}",
+        probe.stdout
+    );
     // Convention scanning is off, so the conventional skill is absent.
     assert!(!probe.stdout.contains("skill:review"), "{}", probe.stdout);
 }
@@ -429,7 +466,10 @@ fn mind_toml_discover_globs_find_items() {
 fn mind_toml_discover_exclude_drops_matches() {
     // spec: DSC-37
     let sb = Sandbox::new();
-    sb.write_and_commit("packages/foo/SKILL.md", "---\ndescription: foo\n---\n# foo\n");
+    sb.write_and_commit(
+        "packages/foo/SKILL.md",
+        "---\ndescription: foo\n---\n# foo\n",
+    );
     sb.write_and_commit(
         "packages/internal-x/SKILL.md",
         "---\ndescription: internal\n---\n# internal\n",
@@ -447,7 +487,11 @@ fn mind_toml_discover_exclude_drops_matches() {
 
     let probe = sb.mind(&["probe"]);
     assert!(probe.stdout.contains("skill:foo"), "{}", probe.stdout);
-    assert!(!probe.stdout.contains("skill:internal-x"), "{}", probe.stdout);
+    assert!(
+        !probe.stdout.contains("skill:internal-x"),
+        "{}",
+        probe.stdout
+    );
 }
 
 #[test]
@@ -503,11 +547,17 @@ fn super_source_meld_is_cycle_safe() {
     let b = Sandbox::bare("bb");
     a.write_and_commit(
         "mind.toml",
-        &format!("[discover]\nsources = [{{ source = \"{}\" }}]\n", b.source_spec()),
+        &format!(
+            "[discover]\nsources = [{{ source = \"{}\" }}]\n",
+            b.source_spec()
+        ),
     );
     b.write_and_commit(
         "mind.toml",
-        &format!("[discover]\nsources = [{{ source = \"{}\" }}]\n", a.source_spec()),
+        &format!(
+            "[discover]\nsources = [{{ source = \"{}\" }}]\n",
+            a.source_spec()
+        ),
     );
     let spec = a.source_spec();
     let r = a.mind(&["meld", &spec]);
@@ -518,7 +568,10 @@ fn super_source_meld_is_cycle_safe() {
 fn invalid_mind_toml_errors_clearly() {
     // spec: DSC-31
     let sb = Sandbox::new();
-    sb.write_and_commit("mind.toml", "[[items]]\nkind = \"spell\"\nname = \"x\"\npath = \"x\"\n");
+    sb.write_and_commit(
+        "mind.toml",
+        "[[items]]\nkind = \"spell\"\nname = \"x\"\npath = \"x\"\n",
+    );
     let spec = sb.source_spec();
     let r = sb.mind(&["meld", &spec]);
     assert!(!r.success);
@@ -552,7 +605,12 @@ fn meld_as_prefixes_names_links_and_refs() {
     // Install under the prefixed name; symlink lands at the prefixed location.
     assert!(sb.mind(&["learn", "jk-review"]).success);
     let link = sb.claude_home.join("skills/jk-review");
-    assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
 
     let sources = sb.mind(&["recall", "--sources"]);
     assert!(sources.stdout.contains("as:jk"), "{}", sources.stdout);
@@ -575,7 +633,11 @@ fn mind_toml_prefix_auto_applies_and_alias_overrides() {
     let spec2 = sb2.source_spec();
     assert!(sb2.mind(&["meld", &spec2, "--as", "zz"]).success);
     let probe2 = sb2.mind(&["probe"]);
-    assert!(probe2.stdout.contains("skill:zz-review"), "{}", probe2.stdout);
+    assert!(
+        probe2.stdout.contains("skill:zz-review"),
+        "{}",
+        probe2.stdout
+    );
     assert!(!probe2.stdout.contains("ag-review"), "{}", probe2.stdout);
 }
 
@@ -593,7 +655,10 @@ fn ns_token_expands_to_prefixed_reference_on_install() {
 
     let store = sb.mind_home.join("store/agent/jk-lead");
     let body = std::fs::read_to_string(&store).expect("installed agent file");
-    assert!(body.contains("the jk-dev agent"), "expected expanded ref: {body}");
+    assert!(
+        body.contains("the jk-dev agent"),
+        "expected expanded ref: {body}"
+    );
     assert!(!body.contains("{{ns:dev}}"), "token should be gone: {body}");
 }
 
@@ -659,7 +724,11 @@ fn no_warning_when_unprefixed() {
     let spec = sb.source_spec();
     let r = sb.mind(&["meld", &spec]); // no prefix -> bare refs are correct
     assert!(r.success);
-    assert!(!r.stderr.contains("references sibling(s) in prose"), "{}", r.stderr);
+    assert!(
+        !r.stderr.contains("references sibling(s) in prose"),
+        "{}",
+        r.stderr
+    );
 }
 
 #[test]
@@ -676,7 +745,11 @@ fn evolve_treats_a_prefix_change_as_a_rename() {
 
     let r = sb.mind(&["evolve", "--yes"]);
     assert!(r.success, "{}", r.stderr);
-    assert!(r.stdout.contains("rename"), "report should flag rename: {}", r.stdout);
+    assert!(
+        r.stdout.contains("rename"),
+        "report should flag rename: {}",
+        r.stdout
+    );
     assert!(
         r.stdout.contains("evolved skill:review -> skill:jk-review"),
         "{}",
@@ -685,7 +758,11 @@ fn evolve_treats_a_prefix_change_as_a_rename() {
 
     // Manifest now holds only the renamed item.
     let recall = sb.mind(&["recall"]);
-    assert!(recall.stdout.contains("skill:jk-review"), "{}", recall.stdout);
+    assert!(
+        recall.stdout.contains("skill:jk-review"),
+        "{}",
+        recall.stdout
+    );
     assert!(!recall.stdout.contains("skill:review"), "{}", recall.stdout);
 
     // Symlinks moved; the old one is gone, the new one exists.
@@ -704,7 +781,11 @@ fn unmeld_removes_source_but_keeps_installed_items() {
     assert!(sb.mind(&["unmeld", "agents"]).success);
 
     // Source is gone.
-    assert!(sb.mind(&["recall", "--sources"]).stdout.contains("no sources melded"));
+    assert!(
+        sb.mind(&["recall", "--sources"])
+            .stdout
+            .contains("no sources melded")
+    );
     // The installed item is left in place.
     assert!(std::fs::symlink_metadata(sb.claude_home.join("skills/review")).is_ok());
     assert!(sb.mind(&["recall"]).stdout.contains("skill:review"));
@@ -757,7 +838,10 @@ fn unmeld_full_name_resolves_basename_collision() {
     assert!(amb.stderr.contains("multiple sources"), "{}", amb.stderr);
 
     // Full owner/repo unmelds exactly one; the basename is then unambiguous.
-    assert!(a.mind(&["unmeld", &format!("{}/agents", a.base_name())]).success);
+    assert!(
+        a.mind(&["unmeld", &format!("{}/agents", a.base_name())])
+            .success
+    );
     assert!(a.mind(&["unmeld", "agents"]).success);
 }
 
@@ -838,7 +922,10 @@ fn failed_upgrade_preserves_the_previous_version() {
 
     // The previously installed good version is untouched.
     let body = std::fs::read_to_string(&store).expect("old store copy should remain");
-    assert!(body.contains("jk-dev"), "old version should be intact: {body}");
+    assert!(
+        body.contains("jk-dev"),
+        "old version should be intact: {body}"
+    );
     assert!(std::fs::symlink_metadata(sb.claude_home.join("agents/jk-lead.md")).is_ok());
 }
 
@@ -894,8 +981,14 @@ fn evolve_item_filter_limits_to_one() {
 fn mind_toml_unions_items_and_discover() {
     // spec: DSC-34
     let sb = Sandbox::new();
-    sb.write_and_commit("packages/foo/SKILL.md", "---\ndescription: foo\n---\n# foo\n");
-    sb.write_and_commit("extra/special.md", "---\nname: special\ndescription: x\n---\n# special\n");
+    sb.write_and_commit(
+        "packages/foo/SKILL.md",
+        "---\ndescription: foo\n---\n# foo\n",
+    );
+    sb.write_and_commit(
+        "extra/special.md",
+        "---\nname: special\ndescription: x\n---\n# special\n",
+    );
     sb.write_and_commit(
         "mind.toml",
         concat!(

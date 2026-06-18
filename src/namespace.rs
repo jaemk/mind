@@ -149,7 +149,10 @@ mod tests {
     #[test]
     fn expand_passes_content_without_tokens() {
         let s = sibs(&["test"]);
-        assert_eq!(expand("no tokens here", &None, &s).unwrap(), "no tokens here");
+        assert_eq!(
+            expand("no tokens here", &None, &s).unwrap(),
+            "no tokens here"
+        );
     }
 
     #[test]

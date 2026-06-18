@@ -169,7 +169,10 @@ pub fn unmeld(paths: &Paths, name: &str) -> Result<()> {
         many => {
             return Err(MindError::AmbiguousSource {
                 query: name.to_string(),
-                candidates: many.iter().map(|i| registry.sources[*i].name.clone()).collect(),
+                candidates: many
+                    .iter()
+                    .map(|i| registry.sources[*i].name.clone())
+                    .collect(),
             });
         }
     };
@@ -224,9 +227,7 @@ pub fn forget(paths: &Paths, item_ref: &str) -> Result<()> {
     let key = manifest
         .items
         .values()
-        .filter(|it| {
-            parsed.kind.is_none_or(|k| it.kind == k) && it.name == parsed.name
-        })
+        .filter(|it| parsed.kind.is_none_or(|k| it.kind == k) && it.name == parsed.name)
         .map(|it| it.key())
         .next()
         .ok_or_else(|| MindError::NotInstalled {
@@ -263,7 +264,11 @@ pub fn sync(paths: &Paths) -> Result<()> {
         let changed = source.commit.as_deref() != Some(new_commit.as_str());
         source.commit = Some(new_commit.clone());
         source.description = MindToml::load(&dir)?.and_then(|mt| mt.source.description);
-        println!("{} ({})", if changed { "updated" } else { "up to date" }, short(&new_commit));
+        println!(
+            "{} ({})",
+            if changed { "updated" } else { "up to date" },
+            short(&new_commit)
+        );
     }
     registry.save(paths)?;
     Ok(())
@@ -364,18 +369,22 @@ fn print_upgrade_report(registry: &Registry, pending: &[Upgrade]) {
         } else {
             println!("  {} [{}]", up.cat.key(), up.cat.source);
         }
-        println!("    hash    {} -> {}", short(&up.old.hash), short(&up.new_hash));
+        println!(
+            "    hash    {} -> {}",
+            short(&up.old.hash),
+            short(&up.new_hash)
+        );
         println!(
             "    commit  {} -> {}",
             short(&up.old.commit),
             short(&up.new_commit)
         );
-        if let Some(src) = registry.find(&up.cat.source) {
-            if !up.old.commit.is_empty() && !up.new_commit.is_empty() {
-                if let Some(url) = src.compare_url(&up.old.commit, &up.new_commit) {
-                    println!("    diff    {url}");
-                }
-            }
+        if let Some(src) = registry.find(&up.cat.source)
+            && !up.old.commit.is_empty()
+            && !up.new_commit.is_empty()
+            && let Some(url) = src.compare_url(&up.old.commit, &up.new_commit)
+        {
+            println!("    diff    {url}");
         }
         println!();
     }
@@ -390,7 +399,11 @@ pub fn recall(paths: &Paths, sources: bool, item: Option<&str>) -> Result<()> {
             return Ok(());
         }
         for s in &registry.sources {
-            let commit = s.commit.as_deref().map(short).unwrap_or_else(|| "unsynced".into());
+            let commit = s
+                .commit
+                .as_deref()
+                .map(short)
+                .unwrap_or_else(|| "unsynced".into());
             let ns = match &s.alias {
                 Some(a) => format!(" as:{a}"),
                 None => String::new(),
@@ -452,7 +465,7 @@ pub fn probe(paths: &Paths, query: Option<&str>) -> Result<()> {
         .iter()
         .filter(|it| q.is_empty() || it.effective_name().contains(q))
         .collect();
-    hits.sort_by(|a, b| a.key().cmp(&b.key()));
+    hits.sort_by_key(|a| a.key());
 
     if hits.is_empty() {
         if registry.sources.is_empty() {
@@ -499,9 +512,10 @@ pub fn introspect(paths: &Paths) -> Result<()> {
             }
         }
         // Match on stable identity (source, kind, bare_name).
-        match catalog.iter().find(|c| {
-            c.kind == it.kind && c.name == it.bare_name && c.source == it.source
-        }) {
+        match catalog
+            .iter()
+            .find(|c| c.kind == it.kind && c.name == it.bare_name && c.source == it.source)
+        {
             None => {
                 println!("{}: no longer present in source '{}'", it.key(), it.source);
                 issues += 1;
@@ -514,18 +528,22 @@ pub fn introspect(paths: &Paths) -> Result<()> {
                         cat.effective_name()
                     );
                     issues += 1;
-                } else if let Ok(h) = hash_path(&cat.path) {
-                    if h != it.hash {
-                        println!("{}: upstream changed; run `mind evolve`", it.key());
-                        issues += 1;
-                    }
+                } else if let Ok(h) = hash_path(&cat.path)
+                    && h != it.hash
+                {
+                    println!("{}: upstream changed; run `mind evolve`", it.key());
+                    issues += 1;
                 }
             }
         }
     }
 
     if issues == 0 {
-        println!("all good: {} source(s), {} item(s) installed", registry.sources.len(), manifest.items.len());
+        println!(
+            "all good: {} source(s), {} item(s) installed",
+            registry.sources.len(),
+            manifest.items.len()
+        );
     } else {
         println!("\n{issues} issue(s) found");
     }
@@ -568,7 +586,11 @@ fn confirm(prompt: &str) -> Result<bool> {
     let _ = std::io::stdout().flush();
     let mut line = String::new();
     let stdin = std::io::stdin();
-    if stdin.read_line(&mut line).map_err(|e| MindError::io("<stdin>", e))? == 0 {
+    if stdin
+        .read_line(&mut line)
+        .map_err(|e| MindError::io("<stdin>", e))?
+        == 0
+    {
         return Ok(false); // EOF -> treat as No
     }
     let ans = line.trim().to_ascii_lowercase();

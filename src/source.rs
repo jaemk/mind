@@ -184,8 +184,14 @@ mod tests {
 
     #[test]
     fn identity_is_host_owner_repo_so_basenames_can_repeat() {
-        assert_eq!(parse_spec("james/agents").unwrap().name, "github.com/james/agents");
-        assert_eq!(parse_spec("bob/agents").unwrap().name, "github.com/bob/agents");
+        assert_eq!(
+            parse_spec("james/agents").unwrap().name,
+            "github.com/james/agents"
+        );
+        assert_eq!(
+            parse_spec("bob/agents").unwrap().name,
+            "github.com/bob/agents"
+        );
         // Same basename, different owner -> distinct identities.
         assert_ne!(
             parse_spec("james/agents").unwrap().name,

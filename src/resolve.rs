@@ -85,7 +85,9 @@ pub fn resolve<'a>(
         .filter(|it| {
             r.kind.is_none_or(|k| it.kind == k)
                 && it.effective_name() == r.name
-                && r.source.as_ref().is_none_or(|s| source_matches(&it.source, s))
+                && r.source
+                    .as_ref()
+                    .is_none_or(|s| source_matches(&it.source, s))
         })
         .collect();
 

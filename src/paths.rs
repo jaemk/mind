@@ -82,7 +82,10 @@ impl Paths {
 
     /// Where a new item copy is built before it is swapped into the store.
     pub fn staging_path(&self, kind: ItemKind, name: &str) -> PathBuf {
-        self.tmp_dir().join("staging").join(kind.as_str()).join(name)
+        self.tmp_dir()
+            .join("staging")
+            .join(kind.as_str())
+            .join(name)
     }
 
     /// Where the previous store copy is held during a swap, for rollback.

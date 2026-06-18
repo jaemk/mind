@@ -23,8 +23,7 @@ const ALLOWLIST: &[&str] = &[
     "LIFE-3", "LIFE-6", "LIFE-15", "LIFE-21",
     // Namespacing: install-time application and the token's written form are
     // definitional, exercised by the expansion tests.
-    "NS-3", "NS-10",
-    // Discovery edge: missing directories yield no items.
+    "NS-3", "NS-10", // Discovery edge: missing directories yield no items.
     "DSC-13",
 ];
 
@@ -49,7 +48,10 @@ fn every_spec_id_is_cited_or_allowlisted() {
 
     // The allowlist must not rot: every entry must be a real defined ID.
     let stale: Vec<_> = allow.difference(&defined).cloned().collect();
-    assert!(stale.is_empty(), "ALLOWLIST references unknown spec IDs: {stale:?}");
+    assert!(
+        stale.is_empty(),
+        "ALLOWLIST references unknown spec IDs: {stale:?}"
+    );
 
     // Keep the allowlist tight: a now-cited ID should be removed from it.
     let redundant: Vec<_> = allow.intersection(&cited).cloned().collect();
@@ -92,12 +94,12 @@ fn defined_ids() -> BTreeSet<String> {
     for md in files_with_ext(&root().join("spec"), "md") {
         let text = std::fs::read_to_string(&md).unwrap();
         for line in text.lines() {
-            if let Some(rest) = line.trim_start().strip_prefix("- `") {
-                if let Some(end) = rest.find('`') {
-                    let tok = &rest[..end];
-                    if is_id(tok) {
-                        out.insert(tok.to_string());
-                    }
+            if let Some(rest) = line.trim_start().strip_prefix("- `")
+                && let Some(end) = rest.find('`')
+            {
+                let tok = &rest[..end];
+                if is_id(tok) {
+                    out.insert(tok.to_string());
                 }
             }
         }

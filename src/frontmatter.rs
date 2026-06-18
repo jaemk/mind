@@ -27,10 +27,10 @@ pub fn field(text: &str, key: &str) -> Option<String> {
         if line.trim() == "---" {
             break; // end of frontmatter
         }
-        if let Some(rest) = line.strip_prefix(key) {
-            if let Some(value) = rest.strip_prefix(':') {
-                return Some(unquote(value.trim()));
-            }
+        if let Some(rest) = line.strip_prefix(key)
+            && let Some(value) = rest.strip_prefix(':')
+        {
+            return Some(unquote(value.trim()));
         }
     }
     None

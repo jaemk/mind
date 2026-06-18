@@ -125,7 +125,6 @@ impl MindToml {
     /// Whether this file takes over item discovery (vs. leaving it to
     /// convention). Nested `[discover].sources` alone does not.
     pub fn is_authoritative(&self) -> bool {
-        !self.items.is_empty()
-            || self.discover.as_ref().is_some_and(|d| d.has_item_globs())
+        !self.items.is_empty() || self.discover.as_ref().is_some_and(|d| d.has_item_globs())
     }
 }
