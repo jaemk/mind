@@ -1,7 +1,7 @@
 # mind
 
-A brew-like manager for agent tooling (skills, agents, rules) that melds with
-arbitrary GitHub repos and links installed items into `~/.claude`.
+A manager for agent tooling (skills, agents, rules) that melds with arbitrary
+git repos and links installed items into `~/.claude`.
 
 The behavioral spec lives in [spec/](spec/) and is the reference to verify
 against. Each statement there has a stable ID (e.g. `LIFE-4`); tests cite the IDs
@@ -14,7 +14,7 @@ fails when a defined spec ID is neither cited by a test nor listed in its
 ALLOWLIST, and when a test cites an ID that the spec does not define. So a new
 spec ID forces a coverage decision - add a citing test or an allowlist entry with
 a reason - and a test cannot cite an undocumented behavior. CI is
-`.github/workflows/ci.yml` (runs `cargo test --all`).
+`.github/workflows/ci.yml` (runs `make check`).
 
 ## Spec is mandatory for features
 
@@ -30,19 +30,19 @@ A feature is not complete until its spec is updated and its status reflects
 reality. The coverage gate enforces the test/spec linkage; the status column is
 maintained by hand.
 
-## Verb model (brew analogy)
+## Verb model
 
-| brew | mind | does |
-|------|------|------|
-| tap | `meld <repo>` | clone a source repo and register it |
-| (untap) | `unmeld <name>` | drop a source |
-| install | `learn <item>` | copy item to the store, symlink into `~/.claude` |
-| uninstall | `forget <item>` | remove symlink + store copy |
-| update | `sync` | fetch every source, refresh recorded commit |
-| upgrade | `evolve [--yes] [item]` | report hash/commit deltas, then (on `--yes` or a `[y/N]` yes) re-link |
-| list / info | `recall [--sources] [item]` | what's installed / source list / item details |
-| search | `probe [query]` | search melded catalogs |
-| doctor | `introspect` | report drift, broken symlinks, unsynced sources |
+| command | does |
+|---------|------|
+| `meld <repo>` | clone a source repo and register it |
+| `unmeld <name>` | drop a source |
+| `learn <item>` | copy item to the store, symlink into `~/.claude` |
+| `forget <item>` | remove symlink + store copy |
+| `sync` | fetch every source, refresh recorded commit |
+| `evolve [--yes] [item]` | report hash/commit deltas, then (on `--yes` or a `[y/N]` yes) re-link |
+| `recall [--sources] [item]` | what's installed / source list / item details |
+| `probe [query]` | search melded catalogs |
+| `introspect` | report drift, broken symlinks, unsynced sources |
 
 ## Layout
 

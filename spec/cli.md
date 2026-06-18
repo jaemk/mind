@@ -1,18 +1,18 @@
 # CLI
 
-The `mind` command surface. Verbs follow `brew` on a knowledge metaphor.
+The `mind` command surface. Verbs use a knowledge metaphor.
 
-| brew | mind |
-|------|------|
-| tap | `meld <repo> [--as <prefix>]` |
-| (untap) | `unmeld <name>` (alias: `detach`) |
-| install | `learn <item>` |
-| uninstall | `forget <item>` (alias: `unlearn`) |
-| update | `sync` |
-| upgrade | `evolve [--yes] [item]` |
-| list / info | `recall [--sources] [item]` |
-| search | `probe [query]` |
-| doctor | `introspect` |
+| command | role |
+|---------|------|
+| `meld <repo> [--as <prefix>]` | connect a source |
+| `unmeld <name>` (alias: `detach`) | disconnect a source |
+| `learn <item>` | install |
+| `forget <item>` (alias: `unlearn`) | uninstall |
+| `sync` | refresh sources |
+| `evolve [--yes] [item]` | upgrade installed |
+| `recall [--sources] [item]` | list / info |
+| `probe [query]` | search |
+| `introspect` | diagnose |
 
 ## Item refs
 
