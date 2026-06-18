@@ -9,18 +9,18 @@ class Mind < Formula
   on_macos do
     on_arm do
       url "https://github.com/jaemk/mind/releases/download/v0.1.0/mind-0.1.0-aarch64-apple-darwin.tar.gz"
-      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+      sha256 "3c327b5220ee25b5cdd1e8d7667b854069f421ee32bef7a3b7d92954b287bac1"
     end
   end
 
   on_linux do
     on_arm do
       url "https://github.com/jaemk/mind/releases/download/v0.1.0/mind-0.1.0-aarch64-unknown-linux-gnu.tar.gz"
-      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+      sha256 "e50d647870e869ba40e89953104ecebcc6e9785ea74f82b252efa5ec9cd884f6"
     end
     on_intel do
       url "https://github.com/jaemk/mind/releases/download/v0.1.0/mind-0.1.0-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+      sha256 "65510217c0ca63b84077e42094a2d63c0a273697665ce1ecdd199f488e46c9a7"
     end
   end
 
