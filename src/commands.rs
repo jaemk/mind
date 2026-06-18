@@ -228,26 +228,42 @@ pub fn learn(paths: &Paths, item_ref: &str, dry_run: bool) -> Result<()> {
         return Ok(());
     }
 
+    // Install each target. If one fails mid-batch, stop but still persist the
+    // items already installed, so the manifest always matches what is on disk.
     let mut manifest = Manifest::load(paths)?;
+    let mut failure = None;
     for target in &targets {
-        let source = registry
-            .find(&target.source)
-            .ok_or_else(|| MindError::SourceNotFound {
-                name: target.source.clone(),
-            })?;
-        let commit = source.commit.clone().unwrap_or_default();
+        let commit = match registry.find(&target.source) {
+            Some(s) => s.commit.clone().unwrap_or_default(),
+            None => {
+                failure = Some(MindError::SourceNotFound {
+                    name: target.source.clone(),
+                });
+                break;
+            }
+        };
         let siblings = siblings_of(&items, &target.source);
-        let installed = install::install(paths, target, &commit, &siblings)?;
-        println!(
-            "learned {} from {} ({})",
-            installed.key(),
-            installed.source,
-            short(&installed.commit)
-        );
-        manifest.insert(installed);
+        match install::install(paths, target, &commit, &siblings) {
+            Ok(installed) => {
+                println!(
+                    "learned {} from {} ({})",
+                    installed.key(),
+                    installed.source,
+                    short(&installed.commit)
+                );
+                manifest.insert(installed);
+            }
+            Err(e) => {
+                failure = Some(e);
+                break;
+            }
+        }
     }
     manifest.save(paths)?;
-    Ok(())
+    match failure {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 /// If two selected items would install under the same `kind:name`, return that

@@ -62,12 +62,18 @@ The `mind` command surface. Verbs follow `brew` on a knowledge metaphor.
   (see lifecycle.md), recording it in the manifest; a ref matching none is
   `ItemNotFound` and one matching several is `AmbiguousItem`.
 - `CLI-31` When the ref name is a glob (`*`, `?`, `[`), `learn` installs every
-  matching item. `'*'` is everything, `'skill:*'` all skills, `'owner/repo#*'`
-  all items of one source. A glob matching nothing is `ItemNotFound`.
+  matching item. The kind prefix, source qualifier, and glob compose: `'*'` is
+  everything, `'skill:*'` all skills, `'owner/repo#*'` all items of one source,
+  `'owner/repo#skill:*'` all skills of one source. A glob matching nothing is
+  `ItemNotFound`.
 - `CLI-32` `--dry-run` (`-n`) lists the items that would be installed and installs
   nothing.
-- `CLI-33` If the selected set contains two items that would install under the
-  same `kind:name`, `learn` errors (`AmbiguousItem`) and installs nothing.
+- `CLI-33` The collision check runs before any install: if the selected set
+  contains two items that would install under the same `kind:name`, `learn`
+  errors (`AmbiguousItem`) and installs nothing.
+- `CLI-34` If a later item in a multi-item `learn` fails, the items already
+  installed are still recorded in the manifest (state stays consistent with
+  disk) and the failure is reported.
 
 ## forget
 

@@ -256,6 +256,11 @@ mod tests {
         assert_eq!(select(&items, &parse_item_ref("*").unwrap()).len(), 4);
         // Source-scoped glob.
         assert_eq!(select(&items, &parse_item_ref("a#*").unwrap()).len(), 3);
+        // Source + kind + glob compose: skills of source a.
+        assert_eq!(
+            select(&items, &parse_item_ref("a#skill:*").unwrap()).len(),
+            2
+        );
         // Exact name (no glob) still matches by equality.
         assert_eq!(select(&items, &parse_item_ref("dev").unwrap()).len(), 1);
     }

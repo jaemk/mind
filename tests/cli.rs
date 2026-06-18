@@ -1123,3 +1123,44 @@ fn probe_columns_align_with_long_names() {
         "source column misaligned: {cols:?}\n{probe}"
     );
 }
+
+#[test]
+fn learn_source_and_kind_glob_compose() {
+    // spec: CLI-31
+    let sb = melded();
+    // All skills of this source: review only (fixture has one skill).
+    assert!(sb.mind(&["learn", "agents#skill:*"]).success);
+    let recall = sb.mind(&["recall"]).stdout;
+    assert!(recall.contains("skill:review"), "{recall}");
+    assert!(!recall.contains("agent:dev"), "{recall}");
+}
+
+#[test]
+fn learn_partial_failure_persists_successes() {
+    // spec: CLI-34
+    let sb = Sandbox::new();
+    // A skill that sorts after `review` (so review installs first) and has a
+    // broken reference, so the batch installs one item and then fails.
+    sb.write_and_commit(
+        "skills/zzz/SKILL.md",
+        "---\ndescription: bad\n---\nsee {{ns:ghost}}\n",
+    );
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+
+    let r = sb.mind(&["learn", "skill:*"]);
+    assert!(!r.success, "should fail on the bad reference");
+    assert!(r.stderr.contains("does not match any item"), "{}", r.stderr);
+
+    // The item installed before the failure is recorded in the manifest.
+    let recall = sb.mind(&["recall"]).stdout;
+    assert!(
+        recall.contains("skill:review"),
+        "successes should persist: {recall}"
+    );
+    // And the manifest matches disk: introspect finds no missing-link issues.
+    let ins = sb.mind(&["introspect"]).stdout;
+    assert!(
+        !ins.contains("symlink missing"),
+        "manifest/disk drift: {ins}"
+    );
+}
