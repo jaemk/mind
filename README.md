@@ -7,6 +7,7 @@ repos and links installed items into `~/.claude`. Modeled on Homebrew.
 
 ```
 brew tap jaemk/mind https://github.com/jaemk/mind
+brew trust jaemk/mind
 brew install mind
 ```
 
