@@ -22,7 +22,6 @@ sha() {
 }
 
 mac_arm="$(sha aarch64-apple-darwin)"
-mac_x86="$(sha x86_64-apple-darwin)"
 lin_arm="$(sha aarch64-unknown-linux-gnu)"
 lin_x86="$(sha x86_64-unknown-linux-gnu)"
 
@@ -39,10 +38,6 @@ class Mind < Formula
     on_arm do
       url "${base}/mind-${version}-aarch64-apple-darwin.tar.gz"
       sha256 "${mac_arm}"
-    end
-    on_intel do
-      url "${base}/mind-${version}-x86_64-apple-darwin.tar.gz"
-      sha256 "${mac_x86}"
     end
   end
 

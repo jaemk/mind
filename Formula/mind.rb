@@ -11,10 +11,6 @@ class Mind < Formula
       url "https://github.com/jaemk/mind/releases/download/v0.1.0/mind-0.1.0-aarch64-apple-darwin.tar.gz"
       sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     end
-    on_intel do
-      url "https://github.com/jaemk/mind/releases/download/v0.1.0/mind-0.1.0-x86_64-apple-darwin.tar.gz"
-      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
-    end
   end
 
   on_linux do
