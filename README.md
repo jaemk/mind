@@ -6,9 +6,11 @@ repos and links installed items into `~/.claude`. Modeled on Homebrew.
 ## Install
 
 ```
-brew tap jaemk/mind
+brew tap jaemk/mind https://github.com/jaemk/mind
 brew install mind
 ```
+
+The repo is not named `homebrew-mind`, so the tap needs its clone URL.
 
 ## Usage
 
