@@ -22,6 +22,7 @@ and verified.
 | Curated super-source (`[discover].sources`, nested `as`) | done | DSC-38, DSC-39 |
 | Namespacing: prefix, `{{ns:}}` tokens, unguarded-ref warning | done | [namespacing.md](namespacing.md) |
 | Transactional install, upgrade, rename, uninstall, drift | done | [lifecycle.md](lifecycle.md) |
+| Release pipeline + Homebrew tap (tag-driven) | done | `.github/workflows/release.yml`, `Formula/mind.rb` |
 
 ## Documents
 
