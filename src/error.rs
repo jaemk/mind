@@ -71,6 +71,16 @@ pub enum MindError {
         source: toml::de::Error,
     },
 
+    #[error("failed to write {path}: {source}")]
+    TomlWrite {
+        path: PathBuf,
+        #[source]
+        source: toml::ser::Error,
+    },
+
+    #[error("'{path}' is not a configured agent home (lobe)")]
+    UnknownLobe { path: String },
+
     #[error("mind.toml at {path}: {msg}")]
     MindToml { path: PathBuf, msg: String },
 

@@ -1240,3 +1240,70 @@ fn learn_links_into_homes_from_env() {
     assert!(std::fs::symlink_metadata(home_a.join("skills/review")).is_ok());
     assert!(std::fs::symlink_metadata(home_b.join("skills/review")).is_ok());
 }
+
+#[test]
+fn config_lobes_add_list_remove() {
+    // spec: CLI-111, CLI-112, CLI-113
+    let sb = Sandbox::new();
+    let home_a = sb.base.join("lobeA");
+    let home_b = sb.base.join("lobeB");
+    let (a, b) = (home_a.display().to_string(), home_b.display().to_string());
+
+    assert!(sb.mind(&["config", "lobes", "add", &a]).success);
+    assert!(sb.mind(&["config", "lobes", "add", &b]).success);
+
+    let list = sb.mind(&["config", "lobes", "list"]).stdout;
+    assert!(list.contains(&a), "{list}");
+    assert!(list.contains(&b), "{list}");
+
+    // Configured lobes drive where learn links.
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    assert!(sb.mind(&["learn", "review"]).success);
+    assert!(std::fs::symlink_metadata(home_a.join("skills/review")).is_ok());
+    assert!(std::fs::symlink_metadata(home_b.join("skills/review")).is_ok());
+
+    // Remove one; it drops from the list, removing a missing one errors.
+    assert!(sb.mind(&["config", "lobes", "remove", &a]).success);
+    let list2 = sb.mind(&["config", "lobes", "list"]).stdout;
+    assert!(!list2.contains(&a), "{list2}");
+    assert!(list2.contains(&b), "{list2}");
+    let bad = sb.mind(&["config", "lobes", "remove", &a]);
+    assert!(!bad.success);
+    assert!(
+        bad.stderr.contains("not a configured agent home"),
+        "{}",
+        bad.stderr
+    );
+}
+
+#[test]
+fn config_target_is_an_alias_for_lobes() {
+    // spec: CLI-111
+    let sb = Sandbox::new();
+    let home = sb.base.join("viaTarget").display().to_string();
+    assert!(sb.mind(&["config", "target", "add", &home]).success);
+    assert!(
+        sb.mind(&["config", "target", "list"])
+            .stdout
+            .contains(&home)
+    );
+}
+
+#[test]
+fn config_show_reports_path_and_homes() {
+    // spec: CLI-110
+    let sb = Sandbox::new();
+
+    // Before any config, show states the (absent) path and the default home.
+    let before = sb.mind(&["config", "show"]);
+    assert!(before.success, "{}", before.stderr);
+    assert!(before.stdout.contains("config.toml"), "{}", before.stdout);
+    assert!(before.stdout.contains("default"), "{}", before.stdout);
+
+    // After adding a lobe, show lists it.
+    let home = sb.base.join("shownLobe").display().to_string();
+    assert!(sb.mind(&["config", "lobes", "add", &home]).success);
+    let after = sb.mind(&["config", "show"]).stdout;
+    assert!(after.contains("homes"), "{after}");
+    assert!(after.contains(&home), "{after}");
+}

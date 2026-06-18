@@ -13,6 +13,7 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 | `recall [--sources] [item]` | list / info |
 | `probe [query]` | search |
 | `introspect` | diagnose |
+| `config show` / `config lobes ...` | view/edit config |
 
 ## Item refs
 
@@ -125,6 +126,18 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   items whose links are missing, items no longer present upstream, items whose
   namespace changed, and items whose source content drifted. It reports a clean
   summary when there are no issues.
+
+## config
+
+- `CLI-110` `config show` prints the config file path (noting when it does not
+  exist yet) and its key/value pairs (`homes`, with the default shown when
+  unset). It also notes when `MIND_AGENT_HOMES` is set and overrides `homes`.
+- `CLI-111` `config lobes list` (alias `config target list`) lists the configured
+  agent homes, or the default home when none are configured.
+- `CLI-112` `config lobes add <path>` appends an agent home to `config.toml`,
+  creating the file if needed; adding one already present is a no-op.
+- `CLI-113` `config lobes remove <path>` drops a configured agent home; a path
+  that is not configured is an error (`UnknownLobe`).
 
 ## Exit status
 

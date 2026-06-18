@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::io::Write;
 
 use crate::catalog::{self, CatalogItem};
+use crate::config::Config;
 use crate::error::{MindError, Result};
 use crate::git;
 use crate::hash::hash_path;
@@ -635,6 +636,73 @@ pub fn introspect(paths: &Paths) -> Result<()> {
     } else {
         println!("\n{issues} issue(s) found");
     }
+    Ok(())
+}
+
+/// `mind config show` — print the config file location and its key/value pairs.
+pub fn config_show(paths: &Paths) -> Result<()> {
+    let file = Config::path(&paths.mind_home);
+    let cfg = Config::load(&paths.mind_home)?;
+    if file.exists() {
+        println!("config file: {}", file.display());
+    } else {
+        println!("config file: {} (not created yet)", file.display());
+    }
+    if cfg.homes.is_empty() {
+        println!("  homes = []  (default: {})", paths.claude_home.display());
+    } else {
+        println!("  homes = {:?}", cfg.homes);
+    }
+    if let Some(env) = std::env::var_os("MIND_AGENT_HOMES") {
+        println!(
+            "note: MIND_AGENT_HOMES is set and overrides homes: {}",
+            env.to_string_lossy()
+        );
+    }
+    Ok(())
+}
+
+/// `mind config lobes add <path>` — add an agent home.
+pub fn lobe_add(paths: &Paths, path: &str) -> Result<()> {
+    let mut cfg = Config::load(&paths.mind_home)?;
+    if cfg.homes.iter().any(|h| h == path) {
+        println!("lobe already configured: {path}");
+        return Ok(());
+    }
+    cfg.homes.push(path.to_string());
+    cfg.save(&paths.mind_home)?;
+    println!("added lobe {path}");
+    Ok(())
+}
+
+/// `mind config lobes list` — list configured agent homes.
+pub fn lobe_list(paths: &Paths) -> Result<()> {
+    let cfg = Config::load(&paths.mind_home)?;
+    if cfg.homes.is_empty() {
+        println!("{}  (default)", paths.claude_home.display());
+    } else {
+        for h in &cfg.homes {
+            println!("{h}");
+        }
+    }
+    if std::env::var_os("MIND_AGENT_HOMES").is_some() {
+        println!("note: MIND_AGENT_HOMES is set and overrides the above");
+    }
+    Ok(())
+}
+
+/// `mind config lobes remove <path>` — drop an agent home.
+pub fn lobe_remove(paths: &Paths, path: &str) -> Result<()> {
+    let mut cfg = Config::load(&paths.mind_home)?;
+    let before = cfg.homes.len();
+    cfg.homes.retain(|h| h != path);
+    if cfg.homes.len() == before {
+        return Err(MindError::UnknownLobe {
+            path: path.to_string(),
+        });
+    }
+    cfg.save(&paths.mind_home)?;
+    println!("removed lobe {path}");
     Ok(())
 }
 

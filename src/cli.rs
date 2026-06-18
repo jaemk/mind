@@ -98,4 +98,41 @@ pub enum Command {
 
     /// Diagnose drift, broken symlinks, and unsynced sources.
     Introspect,
+
+    /// View and edit configuration (`~/.mind/config.toml`).
+    Config {
+        #[command(subcommand)]
+        action: ConfigCmd,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ConfigCmd {
+    /// Print the current config and where the file lives.
+    Show,
+
+    /// Manage agent homes ("lobes") - the directories items are linked into.
+    #[command(visible_alias = "target")]
+    Lobes {
+        #[command(subcommand)]
+        action: LobesCmd,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum LobesCmd {
+    /// Add an agent home.
+    Add {
+        /// Directory to link items into (a leading `~` is expanded at use).
+        path: String,
+    },
+
+    /// List configured agent homes.
+    List,
+
+    /// Remove an agent home.
+    Remove {
+        /// The configured directory to drop.
+        path: String,
+    },
 }

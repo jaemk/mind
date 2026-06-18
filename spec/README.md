@@ -17,6 +17,7 @@ and verified.
 | `learn` glob selection + `--dry-run`; `probe` install/hash; aligned columns | done | CLI-31, CLI-32, CLI-33, CLI-81, CLI-82 |
 | On-disk layout, source registry, manifest + file registry | done | [storage.md](storage.md) |
 | Multiple agent homes (link into all configured dirs) | done | STO-14, LIFE-40 |
+| `config show` + `config lobes` (manage agent homes) | done | CLI-110, CLI-111, CLI-112, CLI-113 |
 | Source identity = `host/owner/repo` (collision fix, suffix selectors) | done | STO-13, CLI-5, CLI-20 |
 | Convention discovery + frontmatter descriptions | done | [discovery.md](discovery.md) |
 | `mind.toml`: `[source]`, `[[items]]`, `[discover]` item globs | done | [discovery.md](discovery.md) |

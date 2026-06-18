@@ -16,7 +16,7 @@ mod source;
 
 use clap::Parser;
 
-use cli::{Cli, Command};
+use cli::{Cli, Command, ConfigCmd, LobesCmd};
 use error::Result;
 use paths::Paths;
 
@@ -49,5 +49,13 @@ fn run(cli: Cli) -> Result<()> {
         Command::Recall { sources, item } => commands::recall(&paths, sources, item.as_deref()),
         Command::Probe { query } => commands::probe(&paths, query.as_deref()),
         Command::Introspect => commands::introspect(&paths),
+        Command::Config { action } => match action {
+            ConfigCmd::Show => commands::config_show(&paths),
+            ConfigCmd::Lobes { action } => match action {
+                LobesCmd::Add { path } => commands::lobe_add(&paths, &path),
+                LobesCmd::List => commands::lobe_list(&paths),
+                LobesCmd::Remove { path } => commands::lobe_remove(&paths, &path),
+            },
+        },
     }
 }
