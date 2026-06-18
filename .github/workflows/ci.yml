@@ -1,0 +1,18 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Runs the full suite, including the spec-coverage gate
+      # (tests/spec_coverage.rs), which fails if a spec ID is neither cited by a
+      # test nor allowlisted.
+      - run: cargo test --all
