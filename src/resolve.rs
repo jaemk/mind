@@ -74,6 +74,31 @@ pub fn source_matches(full_name: &str, selector: &str) -> bool {
     full_name == selector || full_name.ends_with(&format!("/{selector}"))
 }
 
+/// Whether a ref name is a glob pattern (selects many) rather than an exact name.
+pub fn is_glob(name: &str) -> bool {
+    name.contains(['*', '?', '['])
+}
+
+/// Select every catalog item matching `r`: the name as a glob when it contains
+/// glob metacharacters, else by exact effective name, with the kind and source
+/// qualifier filtering as in [`resolve`]. Used for multi-item `learn`.
+pub fn select<'a>(items: &'a [CatalogItem], r: &ItemRef) -> Vec<&'a CatalogItem> {
+    let pattern = glob::Pattern::new(&r.name).ok();
+    items
+        .iter()
+        .filter(|it| {
+            r.kind.is_none_or(|k| it.kind == k)
+                && r.source
+                    .as_ref()
+                    .is_none_or(|s| source_matches(&it.source, s))
+                && match &pattern {
+                    Some(p) => p.matches(&it.effective_name()),
+                    None => it.effective_name() == r.name,
+                }
+        })
+        .collect()
+}
+
 /// Find the single catalog item matching `r`, erroring on none or ambiguity.
 pub fn resolve<'a>(
     items: &'a [CatalogItem],
@@ -109,7 +134,7 @@ pub fn resolve<'a>(
 
 #[cfg(test)]
 mod tests {
-    // spec: CLI-1, CLI-2, CLI-3, CLI-4, CLI-5 (item ref parsing and resolution)
+    // spec: CLI-1, CLI-2, CLI-3, CLI-4, CLI-5, CLI-31 (item ref parsing, resolution, selection)
     use super::*;
     use std::path::PathBuf;
 
@@ -205,5 +230,33 @@ mod tests {
         ];
         let r = parse_item_ref("agent:x").unwrap();
         assert_eq!(resolve(&items, &r, 1).unwrap().kind, ItemKind::Agent);
+    }
+
+    #[test]
+    fn detects_glob_patterns() {
+        assert!(is_glob("*"));
+        assert!(is_glob("review*"));
+        assert!(is_glob("skill:*"));
+        assert!(!is_glob("review"));
+    }
+
+    #[test]
+    fn select_matches_glob_kind_and_source() {
+        let items = vec![
+            cat(ItemKind::Skill, "review", "a"),
+            cat(ItemKind::Skill, "release", "a"),
+            cat(ItemKind::Agent, "dev", "a"),
+            cat(ItemKind::Skill, "review", "b"),
+        ];
+        // Glob over all skills.
+        assert_eq!(select(&items, &parse_item_ref("skill:*").unwrap()).len(), 3);
+        // Prefix glob.
+        assert_eq!(select(&items, &parse_item_ref("rele*").unwrap()).len(), 1);
+        // Everything.
+        assert_eq!(select(&items, &parse_item_ref("*").unwrap()).len(), 4);
+        // Source-scoped glob.
+        assert_eq!(select(&items, &parse_item_ref("a#*").unwrap()).len(), 3);
+        // Exact name (no glob) still matches by equality.
+        assert_eq!(select(&items, &parse_item_ref("dev").unwrap()).len(), 1);
     }
 }

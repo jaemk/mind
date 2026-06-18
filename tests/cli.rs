@@ -1019,3 +1019,107 @@ fn sync_preserves_consumer_alias() {
     // Items remain namespaced under the alias after sync.
     assert!(sb.mind(&["probe"]).stdout.contains("skill:jk-review"));
 }
+
+#[test]
+fn learn_glob_installs_all_matches() {
+    // spec: CLI-31
+    let sb = melded();
+    assert!(sb.mind(&["learn", "*"]).success);
+    let recall = sb.mind(&["recall"]).stdout;
+    assert!(recall.contains("skill:review"), "{recall}");
+    assert!(recall.contains("agent:dev"), "{recall}");
+    assert!(recall.contains("rule:style"), "{recall}");
+}
+
+#[test]
+fn learn_kind_glob_limits_to_kind() {
+    // spec: CLI-31
+    let sb = melded();
+    assert!(sb.mind(&["learn", "skill:*"]).success);
+    let recall = sb.mind(&["recall"]).stdout;
+    assert!(recall.contains("skill:review"), "{recall}");
+    assert!(!recall.contains("agent:dev"), "{recall}");
+}
+
+#[test]
+fn learn_dry_run_installs_nothing() {
+    // spec: CLI-32
+    let sb = melded();
+    let r = sb.mind(&["learn", "*", "--dry-run"]);
+    assert!(r.success, "{}", r.stderr);
+    assert!(r.stdout.contains("dry run"), "{}", r.stdout);
+    assert!(
+        r.stdout.contains("skill:review"),
+        "plan should list items: {}",
+        r.stdout
+    );
+    // Nothing was actually installed.
+    assert!(sb.mind(&["recall"]).stdout.contains("nothing learned"));
+    assert!(std::fs::symlink_metadata(sb.claude_home.join("skills/review")).is_err());
+}
+
+#[test]
+fn learn_glob_collision_errors_and_installs_nothing() {
+    // spec: CLI-33
+    let a = Sandbox::new();
+    let b = Sandbox::new(); // same item names, different source
+    assert!(a.mind(&["meld", &a.source_spec()]).success);
+    assert!(a.mind(&["meld", &b.source_spec()]).success);
+
+    // '*' matches review/dev/style from both sources -> same install names collide.
+    let r = a.mind(&["learn", "*"]);
+    assert!(!r.success);
+    assert!(r.stderr.contains("ambiguous"), "{}", r.stderr);
+    assert!(a.mind(&["recall"]).stdout.contains("nothing learned"));
+}
+
+#[test]
+fn probe_marks_installed_and_shows_hash() {
+    // spec: CLI-81
+    let sb = melded();
+    assert!(sb.mind(&["learn", "review"]).success);
+    let probe = sb.mind(&["probe"]).stdout;
+
+    let review = probe.lines().find(|l| l.contains("skill:review")).unwrap();
+    assert!(
+        review.starts_with('*'),
+        "installed item should be marked: {review:?}"
+    );
+    let dev = probe.lines().find(|l| l.contains("agent:dev")).unwrap();
+    assert!(
+        !dev.starts_with('*'),
+        "uninstalled item should not be marked: {dev:?}"
+    );
+
+    // A short (8 hex) content hash appears on the row.
+    assert!(
+        review
+            .split_whitespace()
+            .any(|t| t.len() == 8 && t.chars().all(|c| c.is_ascii_hexdigit())),
+        "expected a short hash: {review:?}"
+    );
+}
+
+#[test]
+fn probe_columns_align_with_long_names() {
+    // spec: CLI-82
+    let sb = Sandbox::new();
+    // A key longer than the old fixed width, to exercise dynamic column sizing.
+    sb.write_and_commit(
+        "skills/consumer-experience-review/SKILL.md",
+        "---\ndescription: long-named skill\n---\n# x\n",
+    );
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+
+    let probe = sb.mind(&["probe"]).stdout;
+    let cols: Vec<usize> = probe
+        .lines()
+        .filter(|l| l.contains("/agents"))
+        .map(|l| l.find("local/").expect("source column on every row"))
+        .collect();
+    assert!(cols.len() >= 2, "expected several rows: {probe}");
+    assert!(
+        cols.iter().all(|&c| c == cols[0]),
+        "source column misaligned: {cols:?}\n{probe}"
+    );
+}

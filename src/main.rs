@@ -41,7 +41,7 @@ fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Meld { repo, alias } => commands::meld(&paths, &repo, alias),
         Command::Unmeld { name } => commands::unmeld(&paths, &name),
-        Command::Learn { item } => commands::learn(&paths, &item),
+        Command::Learn { item, dry_run } => commands::learn(&paths, &item, dry_run),
         Command::Forget { item } => commands::forget(&paths, &item),
         Command::Sync => commands::sync(&paths),
         Command::Evolve { yes, item } => commands::evolve(&paths, yes, item.as_deref()),

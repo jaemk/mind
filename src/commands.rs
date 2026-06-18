@@ -11,7 +11,7 @@ use crate::install;
 use crate::manifest::Manifest;
 use crate::mindfile::MindToml;
 use crate::paths::Paths;
-use crate::resolve::{parse_item_ref, resolve};
+use crate::resolve::{is_glob, parse_item_ref, resolve, select};
 use crate::source::{Registry, parse_spec};
 
 /// `mind meld <repo> [--as <prefix>]` — register and clone a source.
@@ -190,33 +190,74 @@ pub fn unmeld(paths: &Paths, name: &str) -> Result<()> {
     Ok(())
 }
 
-/// `mind learn <item>` — install one item.
-pub fn learn(paths: &Paths, item_ref: &str) -> Result<()> {
+/// `mind learn <item> [--dry-run]` — install one item, or many via a glob.
+pub fn learn(paths: &Paths, item_ref: &str, dry_run: bool) -> Result<()> {
     let registry = Registry::load(paths)?;
     let items = catalog::scan(paths, &registry)?;
     let parsed = parse_item_ref(item_ref)?;
-    let target = resolve(&items, &parsed, registry.sources.len())?;
 
-    let source = registry
-        .find(&target.source)
-        .ok_or_else(|| MindError::SourceNotFound {
-            name: target.source.clone(),
-        })?;
-    let commit = source.commit.clone().unwrap_or_default();
+    // A glob selects every match; an exact ref must resolve to exactly one.
+    let targets: Vec<&CatalogItem> = if is_glob(&parsed.name) {
+        let matches = select(&items, &parsed);
+        if matches.is_empty() {
+            return Err(MindError::ItemNotFound {
+                query: parsed.name.clone(),
+                sources: registry.sources.len(),
+            });
+        }
+        matches
+    } else {
+        vec![resolve(&items, &parsed, registry.sources.len())?]
+    };
 
-    let siblings = siblings_of(&items, &target.source);
-    let installed = install::install(paths, target, &commit, &siblings)?;
+    // Two matches that install under the same name would clobber each other.
+    if let Some((key, sources)) = colliding_install(&targets) {
+        return Err(MindError::AmbiguousItem {
+            query: key,
+            candidates: sources,
+        });
+    }
+
+    if dry_run {
+        println!("(dry run) would learn {} item(s):", targets.len());
+        let rows = targets
+            .iter()
+            .map(|t| vec![t.key(), t.source.clone()])
+            .collect::<Vec<_>>();
+        print_rows(&rows);
+        return Ok(());
+    }
+
     let mut manifest = Manifest::load(paths)?;
-    manifest.insert(installed.clone());
+    for target in &targets {
+        let source = registry
+            .find(&target.source)
+            .ok_or_else(|| MindError::SourceNotFound {
+                name: target.source.clone(),
+            })?;
+        let commit = source.commit.clone().unwrap_or_default();
+        let siblings = siblings_of(&items, &target.source);
+        let installed = install::install(paths, target, &commit, &siblings)?;
+        println!(
+            "learned {} from {} ({})",
+            installed.key(),
+            installed.source,
+            short(&installed.commit)
+        );
+        manifest.insert(installed);
+    }
     manifest.save(paths)?;
-
-    println!(
-        "learned {} from {} ({})",
-        installed.key(),
-        installed.source,
-        short(&installed.commit)
-    );
     Ok(())
+}
+
+/// If two selected items would install under the same `kind:name`, return that
+/// key and the sources that collide on it.
+fn colliding_install(targets: &[&CatalogItem]) -> Option<(String, Vec<String>)> {
+    let mut by_key: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    for t in targets {
+        by_key.entry(t.key()).or_default().push(t.source.clone());
+    }
+    by_key.into_iter().find(|(_, sources)| sources.len() > 1)
 }
 
 /// `mind forget <item>` — uninstall one item.
@@ -398,21 +439,28 @@ pub fn recall(paths: &Paths, sources: bool, item: Option<&str>) -> Result<()> {
             println!("no sources melded");
             return Ok(());
         }
-        for s in &registry.sources {
-            let commit = s
-                .commit
-                .as_deref()
-                .map(short)
-                .unwrap_or_else(|| "unsynced".into());
-            let ns = match &s.alias {
-                Some(a) => format!(" as:{a}"),
-                None => String::new(),
-            };
-            match &s.description {
-                Some(d) => println!("{:<16} {}  [{}{}]  {}", s.name, s.url, commit, ns, d),
-                None => println!("{:<16} {}  [{}{}]", s.name, s.url, commit, ns),
-            }
-        }
+        let rows = registry
+            .sources
+            .iter()
+            .map(|s| {
+                let commit = s
+                    .commit
+                    .as_deref()
+                    .map(short)
+                    .unwrap_or_else(|| "unsynced".into());
+                let ns = match &s.alias {
+                    Some(a) => format!(" as:{a}"),
+                    None => String::new(),
+                };
+                vec![
+                    s.name.clone(),
+                    s.url.clone(),
+                    format!("[{commit}{ns}]"),
+                    s.description.clone().unwrap_or_default(),
+                ]
+            })
+            .collect::<Vec<_>>();
+        print_rows(&rows);
         return Ok(());
     }
 
@@ -444,22 +492,28 @@ pub fn recall(paths: &Paths, sources: bool, item: Option<&str>) -> Result<()> {
         println!("nothing learned yet; `mind probe` to see what's available");
         return Ok(());
     }
-    for it in manifest.items.values() {
-        println!(
-            "{:<24} {:<12} {:<9} {}",
-            it.key(),
-            it.source,
-            short(&it.commit),
-            summary(it.description.as_deref(), 60)
-        );
-    }
+    let rows = manifest
+        .items
+        .values()
+        .map(|it| {
+            vec![
+                it.key(),
+                it.source.clone(),
+                short(&it.commit),
+                summary(it.description.as_deref(), 60),
+            ]
+        })
+        .collect::<Vec<_>>();
+    print_rows(&rows);
     Ok(())
 }
 
-/// `mind probe [query]`.
+/// `mind probe [query]`. A leading `*` marks installed items; the hash is of the
+/// current source content.
 pub fn probe(paths: &Paths, query: Option<&str>) -> Result<()> {
     let registry = Registry::load(paths)?;
     let items = catalog::scan(paths, &registry)?;
+    let manifest = Manifest::load(paths)?;
     let q = query.unwrap_or("");
     let mut hits: Vec<&CatalogItem> = items
         .iter()
@@ -475,14 +529,33 @@ pub fn probe(paths: &Paths, query: Option<&str>) -> Result<()> {
         }
         return Ok(());
     }
-    for it in hits {
-        let s = summary(it.description.as_deref(), 60);
-        if s.is_empty() {
-            println!("{:<24} {}", it.key(), it.source);
-        } else {
-            println!("{:<24} {:<12} {}", it.key(), it.source, s);
-        }
-    }
+
+    let installed = |it: &CatalogItem| {
+        manifest
+            .items
+            .values()
+            .any(|m| m.source == it.source && m.kind == it.kind && m.bare_name == it.name)
+    };
+    let rows = hits
+        .iter()
+        .map(|it| {
+            let hash = hash_path(&it.path)
+                .map(|h| short(&h))
+                .unwrap_or_else(|_| "-".into());
+            vec![
+                if installed(it) {
+                    "*".into()
+                } else {
+                    String::new()
+                },
+                it.key(),
+                it.source.clone(),
+                hash,
+                summary(it.description.as_deref(), 60),
+            ]
+        })
+        .collect::<Vec<_>>();
+    print_rows(&rows);
     Ok(())
 }
 
@@ -565,6 +638,39 @@ fn short(s: &str) -> String {
         "-".to_string()
     } else {
         s.chars().take(8).collect()
+    }
+}
+
+/// Print rows as aligned columns: every column except the last is left-padded to
+/// the widest value in that column; the last column (a description) is left as-is.
+/// Trailing empty cells are trimmed.
+fn print_rows(rows: &[Vec<String>]) {
+    let Some(ncols) = rows.iter().map(Vec::len).max() else {
+        return;
+    };
+    let mut widths = vec![0usize; ncols];
+    for row in rows {
+        for (i, cell) in row.iter().enumerate() {
+            if i + 1 < ncols {
+                widths[i] = widths[i].max(cell.chars().count());
+            }
+        }
+    }
+    for row in rows {
+        let mut line = String::new();
+        for (i, cell) in row.iter().enumerate() {
+            if i > 0 {
+                line.push_str("  ");
+            }
+            if i + 1 < ncols {
+                let pad = widths[i].saturating_sub(cell.chars().count());
+                line.push_str(cell);
+                line.extend(std::iter::repeat_n(' ', pad));
+            } else {
+                line.push_str(cell);
+            }
+        }
+        println!("{}", line.trim_end());
     }
 }
 

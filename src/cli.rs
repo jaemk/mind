@@ -43,10 +43,17 @@ pub enum Command {
         name: String,
     },
 
-    /// Install an item into ~/.claude (like `brew install`).
+    /// Install items into ~/.claude (like `brew install`).
+    ///
+    /// The item ref may be exact, or a glob to install many: `'*'` for everything,
+    /// `'skill:*'` for all skills, `'owner/repo#*'` for all of one source.
     Learn {
-        /// Item ref: `name`, `skill:name`, `agent:name`, `rule:name`, or `owner/repo#name`.
+        /// Item ref or glob: `name`, `skill:name`, `owner/repo#name`, `'review*'`, `'*'`.
         item: String,
+
+        /// Show what would be installed without installing anything.
+        #[arg(short = 'n', long = "dry-run")]
+        dry_run: bool,
     },
 
     /// Remove an installed item (like `brew uninstall`).

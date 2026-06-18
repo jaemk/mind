@@ -14,6 +14,7 @@ and verified.
 | Feature | Status | Spec |
 |---------|--------|------|
 | Core verbs (meld, learn, forget, sync, evolve, recall, probe, introspect) | done | [cli.md](cli.md) |
+| `learn` glob selection + `--dry-run`; `probe` install/hash; aligned columns | done | CLI-31, CLI-32, CLI-33, CLI-81, CLI-82 |
 | On-disk layout, source registry, manifest + file registry | done | [storage.md](storage.md) |
 | Source identity = `host/owner/repo` (collision fix, suffix selectors) | done | STO-13, CLI-5, CLI-20 |
 | Convention discovery + frontmatter descriptions | done | [discovery.md](discovery.md) |

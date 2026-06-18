@@ -58,8 +58,16 @@ The `mind` command surface. Verbs follow `brew` on a knowledge metaphor.
 
 ## learn
 
-- `CLI-30` `learn <item>` resolves the ref against the catalog and installs the
-  single matching item (see lifecycle.md), recording it in the manifest.
+- `CLI-30` `learn <item>` with an exact ref installs the single matching item
+  (see lifecycle.md), recording it in the manifest; a ref matching none is
+  `ItemNotFound` and one matching several is `AmbiguousItem`.
+- `CLI-31` When the ref name is a glob (`*`, `?`, `[`), `learn` installs every
+  matching item. `'*'` is everything, `'skill:*'` all skills, `'owner/repo#*'`
+  all items of one source. A glob matching nothing is `ItemNotFound`.
+- `CLI-32` `--dry-run` (`-n`) lists the items that would be installed and installs
+  nothing.
+- `CLI-33` If the selected set contains two items that would install under the
+  same `kind:name`, `learn` errors (`AmbiguousItem`) and installs nothing.
 
 ## forget
 
@@ -98,6 +106,11 @@ The `mind` command surface. Verbs follow `brew` on a knowledge metaphor.
 - `CLI-80` `probe [query]` lists available catalog items (effective name, source,
   one-line description), filtered to those whose effective name contains `query`.
   An empty query lists everything.
+- `CLI-81` `probe` marks installed items with a leading `*` and shows each item's
+  short content hash.
+- `CLI-82` List outputs (`probe`, `recall`) left-align columns padded to the
+  widest value in each column, so rows stay aligned regardless of item-name
+  length.
 
 ## introspect
 
