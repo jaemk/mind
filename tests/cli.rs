@@ -1208,7 +1208,7 @@ fn learn_links_into_all_configured_homes() {
     write(
         &sb.mind_home.join("config.toml"),
         &format!(
-            "homes = [\"{}\", \"{}\"]\n",
+            "lobes = [\"{}\", \"{}\"]\n",
             home_a.display(),
             home_b.display()
         ),
@@ -1290,20 +1290,43 @@ fn config_target_is_an_alias_for_lobes() {
 }
 
 #[test]
-fn config_show_reports_path_and_homes() {
-    // spec: CLI-110
+fn config_show_creates_default_and_reports_lobes() {
+    // spec: CLI-110, STO-15
     let sb = Sandbox::new();
+    let cfg_path = sb.mind_home.join("config.toml");
+    assert!(!cfg_path.exists());
 
-    // Before any config, show states the (absent) path and the default home.
-    let before = sb.mind(&["config", "show"]);
-    assert!(before.success, "{}", before.stderr);
-    assert!(before.stdout.contains("config.toml"), "{}", before.stdout);
-    assert!(before.stdout.contains("default"), "{}", before.stdout);
+    // show creates the config with the default lobe (the claude home).
+    let show = sb.mind(&["config", "show"]);
+    assert!(show.success, "{}", show.stderr);
+    assert!(cfg_path.exists(), "config should be created on show");
+    assert!(show.stdout.contains("config.toml"), "{}", show.stdout);
+    assert!(show.stdout.contains("lobes"), "{}", show.stdout);
+    assert!(
+        show.stdout.contains(&sb.claude_home.display().to_string()),
+        "default lobe should be the claude home: {}",
+        show.stdout
+    );
 
-    // After adding a lobe, show lists it.
+    // After adding a lobe, show lists it too.
     let home = sb.base.join("shownLobe").display().to_string();
     assert!(sb.mind(&["config", "lobes", "add", &home]).success);
-    let after = sb.mind(&["config", "show"]).stdout;
-    assert!(after.contains("homes"), "{after}");
-    assert!(after.contains(&home), "{after}");
+    assert!(sb.mind(&["config", "show"]).stdout.contains(&home));
+}
+
+#[test]
+fn config_is_created_with_default_lobe_on_first_use() {
+    // spec: STO-15
+    let sb = Sandbox::new();
+    let cfg_path = sb.mind_home.join("config.toml");
+    assert!(!cfg_path.exists());
+    // A layout-creating command materializes the default config.
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    assert!(cfg_path.exists(), "meld should create the default config");
+    let body = std::fs::read_to_string(&cfg_path).unwrap();
+    assert!(body.contains("lobes"), "{body}");
+    assert!(
+        body.contains(&sb.claude_home.display().to_string()),
+        "default lobe should be the claude home: {body}"
+    );
 }

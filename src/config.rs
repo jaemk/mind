@@ -11,11 +11,11 @@ use crate::error::{MindError, Result};
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    /// Directories `mind` links installed items into ("lobes"). Empty means "use
+    /// Agent homes ("lobes") `mind` links installed items into. Empty means "use
     /// the default" (see [`crate::paths::Paths::agent_homes`]). `~` is expanded
     /// at resolution time; entries are stored verbatim.
     #[serde(default)]
-    pub homes: Vec<String>,
+    pub lobes: Vec<String>,
 }
 
 impl Config {

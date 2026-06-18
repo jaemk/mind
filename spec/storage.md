@@ -26,10 +26,13 @@ The on-disk layout and the two persisted JSON files.
   the link target (applied in every home).
 - `STO-3` Store and link paths use the effective name, so namespaced items do not
   collide with same-named items from other sources.
-- `STO-14` The agent homes items are linked into are, in order: `$MIND_AGENT_HOMES`
-  (a `:`-separated path list), else `homes` in `~/.mind/config.toml`, else
-  `[claude root]`. A leading `~` is expanded. An unknown key in `config.toml` is
-  an error (`Toml`).
+- `STO-14` The agent homes ("lobes") items are linked into are, in order:
+  `$MIND_AGENT_HOMES` (a `:`-separated path list), else `lobes` in
+  `~/.mind/config.toml`, else `[claude root]`. A leading `~` is expanded. An
+  unknown key in `config.toml` is an error (`Toml`).
+- `STO-15` When `~/.mind/config.toml` does not exist, it is created with the
+  default lobe (the `$CLAUDE_HOME` override if set, else `~/.claude`) on first
+  use (any command that sets up the layout, or any `config` command).
 
 ## Source registry (sources.json)
 

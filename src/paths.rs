@@ -119,18 +119,39 @@ impl Paths {
                 return Ok(homes);
             }
         }
-        let configured = Config::load(&self.mind_home)?.homes;
+        let configured = Config::load(&self.mind_home)?.lobes;
         if !configured.is_empty() {
             return Ok(configured.iter().map(|h| expand_home(h)).collect());
         }
         Ok(vec![self.claude_home.clone()])
     }
 
-    /// Create the `~/.mind` scaffolding if it does not yet exist.
+    /// The default lobe written into a fresh config: the `$CLAUDE_HOME` override
+    /// if set, else `~/.claude`.
+    pub fn default_lobe(&self) -> String {
+        match std::env::var_os("CLAUDE_HOME") {
+            Some(v) => v.to_string_lossy().into_owned(),
+            None => "~/.claude".to_string(),
+        }
+    }
+
+    /// Create `config.toml` with default values if it does not exist yet.
+    pub fn ensure_config(&self) -> Result<()> {
+        if !Config::path(&self.mind_home).exists() {
+            Config {
+                lobes: vec![self.default_lobe()],
+            }
+            .save(&self.mind_home)?;
+        }
+        Ok(())
+    }
+
+    /// Create the `~/.mind` scaffolding (and a default config) if absent.
     pub fn ensure_layout(&self) -> Result<()> {
         mkdir_p(&self.mind_home)?;
         mkdir_p(&self.sources_dir())?;
         mkdir_p(&self.store_dir())?;
+        self.ensure_config()?;
         Ok(())
     }
 }

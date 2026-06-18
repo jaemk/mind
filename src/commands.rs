@@ -641,21 +641,18 @@ pub fn introspect(paths: &Paths) -> Result<()> {
 
 /// `mind config show` — print the config file location and its key/value pairs.
 pub fn config_show(paths: &Paths) -> Result<()> {
+    paths.ensure_config()?;
     let file = Config::path(&paths.mind_home);
     let cfg = Config::load(&paths.mind_home)?;
-    if file.exists() {
-        println!("config file: {}", file.display());
+    println!("config file: {}", file.display());
+    if cfg.lobes.is_empty() {
+        println!("  lobes = []  (default: {})", paths.claude_home.display());
     } else {
-        println!("config file: {} (not created yet)", file.display());
-    }
-    if cfg.homes.is_empty() {
-        println!("  homes = []  (default: {})", paths.claude_home.display());
-    } else {
-        println!("  homes = {:?}", cfg.homes);
+        println!("  lobes = {:?}", cfg.lobes);
     }
     if let Some(env) = std::env::var_os("MIND_AGENT_HOMES") {
         println!(
-            "note: MIND_AGENT_HOMES is set and overrides homes: {}",
+            "note: MIND_AGENT_HOMES is set and overrides lobes: {}",
             env.to_string_lossy()
         );
     }
@@ -664,12 +661,13 @@ pub fn config_show(paths: &Paths) -> Result<()> {
 
 /// `mind config lobes add <path>` — add an agent home.
 pub fn lobe_add(paths: &Paths, path: &str) -> Result<()> {
+    paths.ensure_config()?;
     let mut cfg = Config::load(&paths.mind_home)?;
-    if cfg.homes.iter().any(|h| h == path) {
+    if cfg.lobes.iter().any(|h| h == path) {
         println!("lobe already configured: {path}");
         return Ok(());
     }
-    cfg.homes.push(path.to_string());
+    cfg.lobes.push(path.to_string());
     cfg.save(&paths.mind_home)?;
     println!("added lobe {path}");
     Ok(())
@@ -677,11 +675,12 @@ pub fn lobe_add(paths: &Paths, path: &str) -> Result<()> {
 
 /// `mind config lobes list` — list configured agent homes.
 pub fn lobe_list(paths: &Paths) -> Result<()> {
+    paths.ensure_config()?;
     let cfg = Config::load(&paths.mind_home)?;
-    if cfg.homes.is_empty() {
+    if cfg.lobes.is_empty() {
         println!("{}  (default)", paths.claude_home.display());
     } else {
-        for h in &cfg.homes {
+        for h in &cfg.lobes {
             println!("{h}");
         }
     }
@@ -693,10 +692,11 @@ pub fn lobe_list(paths: &Paths) -> Result<()> {
 
 /// `mind config lobes remove <path>` — drop an agent home.
 pub fn lobe_remove(paths: &Paths, path: &str) -> Result<()> {
+    paths.ensure_config()?;
     let mut cfg = Config::load(&paths.mind_home)?;
-    let before = cfg.homes.len();
-    cfg.homes.retain(|h| h != path);
-    if cfg.homes.len() == before {
+    let before = cfg.lobes.len();
+    cfg.lobes.retain(|h| h != path);
+    if cfg.lobes.len() == before {
         return Err(MindError::UnknownLobe {
             path: path.to_string(),
         });

@@ -39,8 +39,10 @@ subdir: `skills/`, `agents/`, `rules/`). The default is `~/.claude`. Configure
 more in `~/.mind/config.toml`:
 
 ```toml
-homes = ["~/.claude", "~/.config/some-other-agent"]
+lobes = ["~/.claude", "~/.config/some-other-agent"]
 ```
+
+The file is created with the default lobe (`~/.claude`) on first use.
 
 or for one invocation, set `MIND_AGENT_HOMES` to a `:`-separated path list.
 

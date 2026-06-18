@@ -129,9 +129,9 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 
 ## config
 
-- `CLI-110` `config show` prints the config file path (noting when it does not
-  exist yet) and its key/value pairs (`homes`, with the default shown when
-  unset). It also notes when `MIND_AGENT_HOMES` is set and overrides `homes`.
+- `CLI-110` `config show` creates the config if absent (STO-15), then prints the
+  config file path and its key/value pairs (`lobes`, with the default shown when
+  unset). It also notes when `MIND_AGENT_HOMES` is set and overrides `lobes`.
 - `CLI-111` `config lobes list` (alias `config target list`) lists the configured
   agent homes, or the default home when none are configured.
 - `CLI-112` `config lobes add <path>` appends an agent home to `config.toml`,
