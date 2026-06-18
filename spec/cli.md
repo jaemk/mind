@@ -5,9 +5,9 @@ The `mind` command surface. Verbs follow `brew` on a knowledge metaphor.
 | brew | mind |
 |------|------|
 | tap | `meld <repo> [--as <prefix>]` |
-| (untap) | `unmeld <name>` |
+| (untap) | `unmeld <name>` (alias: `detach`) |
 | install | `learn <item>` |
-| uninstall | `forget <item>` |
+| uninstall | `forget <item>` (alias: `unlearn`) |
 | update | `sync` |
 | upgrade | `evolve [--yes] [item]` |
 | list / info | `recall [--sources] [item]` |
@@ -49,10 +49,10 @@ The `mind` command surface. Verbs follow `brew` on a knowledge metaphor.
 
 ## unmeld
 
-- `CLI-20` `unmeld <name>` removes the source's clone and registry entry. `name`
-  is the full `host/owner/repo` or an unambiguous trailing suffix (e.g. `repo` or
-  `owner/repo`); an unknown name is `SourceNotFound` and an ambiguous suffix is
-  `AmbiguousSource`.
+- `CLI-20` `unmeld <name>` (alias: `detach`) removes the source's clone and
+  registry entry. `name` is the full `host/owner/repo` or an unambiguous trailing
+  suffix (e.g. `repo` or `owner/repo`); an unknown name is `SourceNotFound` and an
+  ambiguous suffix is `AmbiguousSource`.
 - `CLI-21` `unmeld` does not remove items already installed from the source;
   those are removed with `forget`.
 
@@ -77,9 +77,9 @@ The `mind` command surface. Verbs follow `brew` on a knowledge metaphor.
 
 ## forget
 
-- `CLI-40` `forget <item>` removes an installed item using its file registry and
-  deletes its manifest entry. An item that is not installed is an error
-  (`NotInstalled`).
+- `CLI-40` `forget <item>` (alias: `unlearn`) removes an installed item using its
+  file registry and deletes its manifest entry. An item that is not installed is
+  an error (`NotInstalled`).
 
 ## sync
 

@@ -18,9 +18,9 @@ The repo is not named `homebrew-mind`, so the tap needs its clone URL.
 | command | does |
 |---------|------|
 | `mind meld <repo> [--as <prefix>]` | clone and register a source (like `brew tap`) |
-| `mind unmeld <name>` | drop a source |
+| `mind unmeld <name>` (alias `detach`) | drop a source |
 | `mind learn <item>` | install a skill/agent/rule |
-| `mind forget <item>` | remove an installed item |
+| `mind forget <item>` (alias `unlearn`) | remove an installed item |
 | `mind sync` | refresh every source |
 | `mind evolve [--yes] [item]` | upgrade installed items |
 | `mind recall [--sources] [item]` | list installed items / sources / details |

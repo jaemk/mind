@@ -1164,3 +1164,25 @@ fn learn_partial_failure_persists_successes() {
         "manifest/disk drift: {ins}"
     );
 }
+
+#[test]
+fn unlearn_is_an_alias_for_forget() {
+    // spec: CLI-40
+    let sb = melded();
+    assert!(sb.mind(&["learn", "review"]).success);
+    assert!(sb.mind(&["unlearn", "review"]).success);
+    assert!(std::fs::symlink_metadata(sb.claude_home.join("skills/review")).is_err());
+    assert!(sb.mind(&["recall"]).stdout.contains("nothing learned"));
+}
+
+#[test]
+fn detach_is_an_alias_for_unmeld() {
+    // spec: CLI-20
+    let sb = melded();
+    assert!(sb.mind(&["detach", "agents"]).success);
+    assert!(
+        sb.mind(&["recall", "--sources"])
+            .stdout
+            .contains("no sources melded")
+    );
+}

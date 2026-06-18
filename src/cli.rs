@@ -38,6 +38,7 @@ pub enum Command {
     },
 
     /// Unmeld a source, removing its clone and catalog entry.
+    #[command(visible_alias = "detach")]
     Unmeld {
         /// The source name (see `mind recall --sources`).
         name: String,
@@ -57,6 +58,7 @@ pub enum Command {
     },
 
     /// Remove an installed item (like `brew uninstall`).
+    #[command(visible_alias = "unlearn")]
     Forget {
         /// The installed item ref.
         item: String,
