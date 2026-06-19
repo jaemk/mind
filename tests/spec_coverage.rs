@@ -25,6 +25,19 @@ const ALLOWLIST: &[&str] = &[
     // definitional, exercised by the expansion tests.
     "NS-3", "NS-10", // Discovery edge: missing directories yield no items.
     "DSC-13",
+    // Planned features (see spec/README.md feature status = planned): documented
+    // with stable IDs ahead of implementation. Each must move to a citing test
+    // when built, at which point it is removed from this allowlist.
+    //   scan roots (subtree/monorepo sources)
+    "DSC-50", "DSC-51", "DSC-52", "DSC-53", "STO-17", "CLI-16",
+    //   version pinning
+    "DSC-41", "STO-18", "CLI-17", "CLI-18", "CLI-55",
+    //   review verb (author-side source validation)
+    "CLI-130", "CLI-131", "CLI-132", "CLI-133",
+    //   probe matches description text
+    "CLI-85",
+    //   self-update verb (in-place binary upgrade via the self_update crate)
+    "CLI-140", "CLI-141", "CLI-142", "CLI-143",
 ];
 
 #[test]

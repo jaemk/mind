@@ -4,7 +4,7 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 
 | command | role |
 |---------|------|
-| `meld <repo> [--as <prefix>]` | connect a source |
+| `meld <repo> [--as <prefix>] [--root <dir>] [--follow-branch\|--pin-tag\|--pin-ref <ref>]` | connect a source |
 | `unmeld <name>` (alias: `detach`) | disconnect a source |
 | `learn <item>` | install |
 | `forget <item>` (alias: `unlearn`) | uninstall |
@@ -12,7 +12,9 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 | `evolve [--yes] [item]` | upgrade installed |
 | `recall [--sources] [item]` | list / info |
 | `probe [query]` | search |
+| `review <target> [--as <prefix>]` | validate a source for publishing |
 | `introspect` | diagnose |
+| `self-update [--check] [--yes]` | upgrade the `mind` binary itself |
 | `config show` / `config lobes ...` | view/edit config |
 | `completions <shell>` | print a shell completion script |
 | `man` | print the roff man page |
@@ -50,6 +52,18 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 - `CLI-15` If the melded repo's `mind.toml` lists `[discover].sources`, each is
   melded recursively (see DSC-38), so one `meld` can pull in a curated set. When
   more than one source is added, `meld` reports the total count.
+- `CLI-16` `meld --root <dir>` (repeatable) sets the source's scan roots,
+  overriding any `[source].roots` (DSC-51). The roots are persisted on the source
+  (STO-17). A root that is not a directory in the clone is `InvalidRoot`.
+- `CLI-17` `meld` accepts at most one of `--follow-branch <branch>`,
+  `--pin-tag <tag>`, `--pin-ref <commit>`; supplying more than one is
+  `ConflictingPin`. The chosen pin is persisted on the source (STO-18). With none
+  given, the source's `[source]` pin directive (DSC-41) applies, else the default
+  is `--follow-branch` tracking the remote default branch.
+- `CLI-18` `meld` clones at the pinned point: `--pin-tag` / `--pin-ref` check out
+  that tag / commit; `--follow-branch` tracks the named branch (default the remote
+  default branch). The recorded commit is the resolved HEAD of that point. A pin
+  that does not resolve in the remote is a `Git` error and nothing is registered.
 
 ## unmeld
 
@@ -112,6 +126,14 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   progress made (the recorded commits of the sources that succeeded), reports
   each failure, and exits non-zero (`SyncFailed`). With a failure, the `--evolve`
   pass is skipped.
+- `CLI-55` `sync` resolves each source against its recorded pin (STO-18): a
+  `follow-branch` source resets to that branch's current tip and updates the
+  recorded commit; a `pin-tag` / `pin-ref` source re-fetches but stays at the
+  pinned tag / commit, so its recorded commit moves only if the upstream tag was
+  moved (a moved tag is reset to). `sync` never changes the pin itself (cf.
+  CLI-52 for aliases). `evolve` and `introspect` operate on the synced (pinned)
+  content, so a `pin-tag` source does not report drift as upstream's default
+  branch advances past the tag.
 
 ## evolve
 
@@ -160,6 +182,34 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 - `CLI-84` `probe --json` emits the rows as a JSON array on stdout instead of the
   table; each row carries the installed flag, kind, effective name, source,
   content hash, and description.
+- `CLI-85` `probe`'s query matches an item whose effective name *or* description
+  contains the query, case-insensitively. This supersedes the name-only matching
+  of CLI-80 so an item is found by what it does, not only by its name. The
+  `--kind` / `--source` filters (CLI-83) still compose with the query.
+
+## review
+
+`review` is the author-side counterpart to `introspect`: it validates a source
+*before* it is published or melded, surfacing the problems that would otherwise
+only appear at meld or install time. It is read-only and installs nothing.
+
+- `CLI-130` `review <target>` validates a source for publishing. `<target>` is a
+  local path, a repo spec (the forms accepted by `meld`, CLI-11; cloned to a temp
+  area for the check), or the selector of an already-melded source (matched like
+  `unmeld`, CLI-20).
+- `CLI-131` `review` reports, for the source and per item: `mind.toml` parse and
+  schema errors (DSC-30, DSC-31), items whose frontmatter yields no description
+  (DSC-20), `{{ns:}}` tokens whose referent is not a real sibling (which would be
+  `BadReference` at install), and unguarded prose references to siblings under the
+  effective prefix (the meld-time heuristic, CLI-14).
+- `CLI-132` `review`'s exit status: a hard error (malformed `mind.toml`, an unknown
+  item kind, a conflicting `[source]` pin, or an unresolved `{{ns:}}` token) exits
+  non-zero; advisory findings only (unguarded references, missing descriptions)
+  exit zero. It changes nothing on disk in either case.
+- `CLI-133` `review --as <prefix>` evaluates the source under a prospective
+  namespace, so token expansion and the unguarded-reference scan are checked as
+  they would install under that prefix. With no flag the effective prefix is the
+  source's own `[source].prefix` if any, else none.
 
 ## introspect
 
@@ -175,6 +225,31 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 - `CLI-92` `introspect --json` emits the findings as JSON on stdout: an object
   with an `issues` array (each carrying a stable `kind` tag, a `target`, and a
   `message`) plus the source and item counts. An empty `issues` array means clean.
+
+## self-update
+
+`self-update` upgrades the `mind` executable itself (distinct from `evolve`, which
+upgrades installed items, and `sync`, which refreshes sources). It is built on the
+`self_update` crate and resolves the same release artifacts as the install script
+and the Homebrew formula.
+
+- `CLI-140` `self-update` compares the running version against the latest published
+  release. With nothing newer it reports up to date and changes nothing. With a
+  newer release it replaces the running executable in place with the release binary
+  for the current platform.
+- `CLI-141` Unless `--yes` is given, `self-update` prompts `[y/N]` (default No, EOF
+  counts as No) before replacing the binary, mirroring `evolve` (CLI-60). `--check`
+  reports the latest available version and whether an update is pending, then exits
+  without downloading or replacing anything.
+- `CLI-142` The release artifact is selected exactly as the install script and the
+  Homebrew formula select it (`mind-<version>-<target>.tar.gz` from the GitHub
+  release for the running platform), so every install path resolves the same
+  binary. A platform with no published artifact is an error and nothing is changed.
+- `CLI-143` The replacement is atomic: the new binary is downloaded and verified,
+  then swapped for the running executable, so any failure leaves the existing
+  binary intact. A Homebrew-managed install is upgraded with `brew upgrade` instead;
+  `self-update` replaces the binary it runs from and does not coordinate with a
+  package manager.
 
 ## config
 

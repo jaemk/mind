@@ -50,6 +50,14 @@ The on-disk layout and the two persisted JSON files.
   clone path under `sources/`). Repos that share a basename, or even an
   `owner/repo` across different hosts, are distinct sources and coexist in one
   registry.
+- `STO-17` A source records an optional `roots`: the consumer `--root` override
+  (repo-root-relative directories, see DSC-51). Persisted at meld and not changed
+  by `sync`. Absent means convention discovery uses `[source].roots` or the repo
+  root (DSC-50).
+- `STO-18` A source records its `pin`: the kind (`follow-branch` | `tag` | `ref`)
+  and value (see DSC-41, CLI-17). Persisted at meld and not changed by `sync`. The
+  implicit default when unset is `follow-branch` tracking the remote default
+  branch.
 
 ## Manifest (manifest.json)
 

@@ -28,6 +28,7 @@ and verified.
 | `forget`/`recall`/`evolve` honor kind + source qualifier, error on ambiguity | done | CLI-40, CLI-63, CLI-71 |
 | Clobber guard: refuse to overwrite a non-mind link target | done | LIFE-41 |
 | Release pipeline + Homebrew tap (tag-driven) | done | `.github/workflows/release.yml`, `Formula/mind.rb` |
+| `curl \| sh` install script (Linux/macOS-arm) | done | `resources/install.sh` |
 | `forget` glob selection | done | CLI-41 |
 | `unmeld --forget` (purge installed items) | done | CLI-22 |
 | `introspect --fix` (re-link missing symlinks) | done | CLI-91 |
@@ -37,6 +38,13 @@ and verified.
 | `sync` per-source resilience (continue + report, exit non-zero) | done | CLI-54 |
 | `--json` output (recall, probe, introspect) | done | CLI-73, CLI-84, CLI-92 |
 | Shell completions + man page | done | CLI-120, CLI-121 |
+| Scan roots: `[source].roots` + `meld --root` (monorepo/subtree sources) | planned | DSC-50, DSC-51, DSC-52, DSC-53, STO-17, CLI-16 |
+| Version pinning: `--follow-branch`/`--pin-tag`/`--pin-ref` + `[source]` directive | planned | DSC-41, STO-18, CLI-17, CLI-18, CLI-55 |
+| `review` verb: author-side source validation | planned | CLI-130, CLI-131, CLI-132, CLI-133 |
+| `self-update` verb: in-place upgrade of the `mind` binary (via the `self_update` crate) | planned | CLI-140, CLI-141, CLI-142, CLI-143 |
+| `probe` matches description text, not just name | planned | CLI-85 |
+| README quickstart, mental model, troubleshooting/FAQ | planned | [../README.md](../README.md) |
+| Starter source example (plain convention layout) | planned | [../examples/](../examples/) |
 
 ## Documents
 

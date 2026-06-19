@@ -41,6 +41,9 @@ Three layers, in order:
 description = "..."          # optional; shown by recall --sources
 prefix = "jk"                # optional; namespace (see namespacing.md)
 min-mind-version = "0.2"     # minimum mind version; enforced at scan/meld (DSC-40)
+roots = ["packages/tools"]   # optional; convention scan roots (DSC-50)
+follow-branch = "main"       # optional; pin directive, one of
+                             #   follow-branch / pin-tag / pin-ref (DSC-41)
 
 [[items]]                     # explicit inventory (authoritative)
 kind = "skill"               # skill | agent | rule
@@ -86,3 +89,33 @@ sources = [
   (`IncompatibleVersion`) rather than proceeding against a format it predates.
   Versions compare by dotted numeric component (a missing component is 0, so
   `0.2` == `0.2.0`); a non-numeric component counts as 0.
+- `DSC-41` `[source]` may declare a pin: exactly one of `follow-branch = "<branch>"`,
+  `pin-tag = "<tag>"`, or `pin-ref = "<commit>"`. It is read from the source's
+  default-branch `mind.toml` and supplies the default pin when the consumer gives
+  no `--follow-branch` / `--pin-tag` / `--pin-ref` flag at meld (CLI-17); a
+  consumer flag overrides it. Declaring more than one is a `MindToml` error. (See
+  CLI-18 for clone behavior and CLI-55 for how `sync` treats each pin kind.)
+
+## Scan roots
+
+By default convention discovery (DSC-10..12) scans the repo root. A monorepo, or
+a repo whose agent tooling lives in a subtree, can point the scan at one or more
+subdirectories instead.
+
+- `DSC-50` `[source].roots` is an optional list of repo-root-relative directories.
+  When set, convention discovery scans for `skills/`, `agents/`, `rules/` under
+  *each* listed root rather than at the repo root. Unset means a single implicit
+  root of the repo root (the DSC-10..13 behavior, unchanged).
+- `DSC-51` `meld --root <dir>` (repeatable) overrides `[source].roots` entirely:
+  convention discovery scans only the consumer-specified roots, letting a consumer
+  narrow a broad source to exactly the subtree they want. The override is persisted
+  on the source (STO-17) and applied by later scans and `sync`.
+- `DSC-52` Scan roots affect convention discovery only. An authoritative `mind.toml`
+  (one declaring `[[items]]` or `[discover]` item globs, DSC-3) keeps its
+  repo-root-relative paths and ignores `roots`; if `--root` is passed for such a
+  source, `meld` prints a note that it is ignored. A `--root` or `[source].roots`
+  path that is not a directory in the clone is an error (`InvalidRoot`).
+- `DSC-53` When scanning multiple roots, results are unioned. Two roots that yield
+  the same kind and bare name within one source is an error (`DuplicateItem`),
+  since an item's identity is `(source, kind, bare_name)` and the collision could
+  not be installed unambiguously.
