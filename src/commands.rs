@@ -3,6 +3,8 @@
 use std::collections::HashSet;
 use std::io::Write;
 
+use serde::Serialize;
+
 use crate::catalog::{self, CatalogItem};
 use crate::config::Config;
 use crate::error::{ItemKind, MindError, Result};
@@ -353,29 +355,55 @@ pub fn sync(paths: &Paths, then_evolve: bool) -> Result<()> {
         println!("no sources melded; run `mind meld <owner/repo>`");
         return Ok(());
     }
+    // A per-source failure (e.g. a network error on one remote) must not abort
+    // the whole run: refresh each source independently, persist whatever
+    // progress was made, then report the failures and exit non-zero.
+    let total = registry.sources.len();
+    let mut failures: Vec<String> = Vec::new();
     for source in &mut registry.sources {
         let dir = source.clone_dir(paths);
         print!("syncing {} ... ", source.name);
         let _ = std::io::stdout().flush();
-        if dir.join(".git").is_dir() {
-            git::fetch_and_reset(&source.url, &dir)?;
-        } else {
-            if let Some(parent) = dir.parent() {
-                crate::paths::mkdir_p(parent)?;
+        let refreshed = (|| -> Result<(String, bool, Option<String>)> {
+            if dir.join(".git").is_dir() {
+                git::fetch_and_reset(&source.url, &dir)?;
+            } else {
+                if let Some(parent) = dir.parent() {
+                    crate::paths::mkdir_p(parent)?;
+                }
+                git::clone(&source.url, &dir)?;
             }
-            git::clone(&source.url, &dir)?;
+            let new_commit = git::head_commit(&source.url, &dir)?;
+            let changed = source.commit.as_deref() != Some(new_commit.as_str());
+            let desc = MindToml::load(&dir)?.and_then(|mt| mt.source.description);
+            Ok((new_commit, changed, desc))
+        })();
+        match refreshed {
+            Ok((new_commit, changed, desc)) => {
+                source.commit = Some(new_commit.clone());
+                source.description = desc;
+                println!(
+                    "{} ({})",
+                    if changed { "updated" } else { "up to date" },
+                    short(&new_commit)
+                );
+            }
+            Err(e) => {
+                println!("failed");
+                eprintln!("  {}: {e}", source.name);
+                failures.push(source.name.clone());
+            }
         }
-        let new_commit = git::head_commit(&source.url, &dir)?;
-        let changed = source.commit.as_deref() != Some(new_commit.as_str());
-        source.commit = Some(new_commit.clone());
-        source.description = MindToml::load(&dir)?.and_then(|mt| mt.source.description);
-        println!(
-            "{} ({})",
-            if changed { "updated" } else { "up to date" },
-            short(&new_commit)
-        );
     }
+    // Save the progress made before reporting any failure, so the recorded
+    // commits stay consistent with what is on disk.
     registry.save(paths)?;
+    if !failures.is_empty() {
+        return Err(MindError::SyncFailed {
+            failed: failures.len(),
+            total,
+        });
+    }
     if then_evolve {
         evolve(paths, false, None)?;
     }
@@ -500,18 +528,31 @@ fn print_upgrade_report(registry: &Registry, pending: &[Upgrade]) {
     }
 }
 
-/// `mind recall [--sources] [item] [--kind K] [--source S]`. The `--kind` and
-/// `--source` filters narrow the installed-items listing; they do not apply to
-/// `--sources` or to a single-item lookup (use a `kind:`/`owner/repo#` ref there).
+/// `mind recall [--sources] [item] [--kind K] [--source S] [--json]`. The
+/// `--kind` and `--source` filters narrow the installed-items listing; they do
+/// not apply to `--sources` or to a single-item lookup (use a `kind:`/
+/// `owner/repo#` ref there). `--json` emits the data as JSON on stdout.
 pub fn recall(
     paths: &Paths,
     sources: bool,
     item: Option<&str>,
     kind: Option<ItemKind>,
     source: Option<&str>,
+    json: bool,
 ) -> Result<()> {
+    // The listing filters are meaningless for --sources or a single-item lookup;
+    // say so rather than silently ignoring them.
+    if (sources || item.is_some()) && (kind.is_some() || source.is_some()) {
+        eprintln!(
+            "note: --kind/--source filter the item listing; ignored with --sources or a single item"
+        );
+    }
+
     if sources {
         let registry = Registry::load(paths)?;
+        if json {
+            return print_json(&registry.sources);
+        }
         if registry.sources.is_empty() {
             println!("no sources melded");
             return Ok(());
@@ -545,6 +586,9 @@ pub fn recall(
     if let Some(item_ref) = item {
         let parsed = parse_item_ref(item_ref)?;
         let found = crate::resolve::resolve_installed(&manifest.items, &parsed)?;
+        if json {
+            return print_json(found);
+        }
         println!("{}", found.key());
         if let Some(d) = &found.description {
             println!("  desc    {d}");
@@ -559,11 +603,7 @@ pub fn recall(
         return Ok(());
     }
 
-    if manifest.items.is_empty() {
-        println!("nothing learned yet; `mind probe` to see what's available");
-        return Ok(());
-    }
-    let filtered: Vec<_> = manifest
+    let filtered: Vec<&crate::manifest::InstalledItem> = manifest
         .items
         .values()
         .filter(|it| {
@@ -571,6 +611,13 @@ pub fn recall(
                 && source.is_none_or(|s| source_matches(&it.source, s))
         })
         .collect();
+    if json {
+        return print_json(&filtered);
+    }
+    if manifest.items.is_empty() {
+        println!("nothing learned yet; `mind probe` to see what's available");
+        return Ok(());
+    }
     if filtered.is_empty() {
         println!("no installed items match the filter");
         return Ok(());
@@ -590,14 +637,16 @@ pub fn recall(
     Ok(())
 }
 
-/// `mind probe [query] [--kind K] [--source S]`. A leading `*` marks installed
-/// items; the hash is of the current source content. `--kind` and `--source`
-/// narrow the listing and compose with the substring query.
+/// `mind probe [query] [--kind K] [--source S] [--json]`. A leading `*` marks
+/// installed items; the hash is of the current source content. `--kind` and
+/// `--source` narrow the listing and compose with the substring query. `--json`
+/// emits the rows as JSON on stdout.
 pub fn probe(
     paths: &Paths,
     query: Option<&str>,
     kind: Option<ItemKind>,
     source: Option<&str>,
+    json: bool,
 ) -> Result<()> {
     let registry = Registry::load(paths)?;
     let items = catalog::scan(paths, &registry)?;
@@ -613,6 +662,28 @@ pub fn probe(
         .collect();
     hits.sort_by_key(|a| a.key());
 
+    let installed = |it: &CatalogItem| {
+        manifest
+            .items
+            .values()
+            .any(|m| m.source == it.source && m.kind == it.kind && m.bare_name == it.name)
+    };
+
+    if json {
+        let rows: Vec<ProbeRow> = hits
+            .iter()
+            .map(|it| ProbeRow {
+                installed: installed(it),
+                kind: it.kind.as_str(),
+                name: it.effective_name(),
+                source: &it.source,
+                hash: hash_path(&it.path).ok(),
+                description: it.description.as_deref(),
+            })
+            .collect();
+        return print_json(&rows);
+    }
+
     if hits.is_empty() {
         if registry.sources.is_empty() {
             println!("no sources melded; run `mind meld <owner/repo>`");
@@ -622,12 +693,6 @@ pub fn probe(
         return Ok(());
     }
 
-    let installed = |it: &CatalogItem| {
-        manifest
-            .items
-            .values()
-            .any(|m| m.source == it.source && m.kind == it.kind && m.bare_name == it.name)
-    };
     let rows = hits
         .iter()
         .map(|it| {
@@ -651,22 +716,50 @@ pub fn probe(
     Ok(())
 }
 
-/// `mind introspect [--fix]` — report drift and breakage. With `--fix`, repair
-/// what can be fixed without changing versions: recreate missing symlinks from
-/// each item's file registry. Drifted or renamed items are left to `evolve`.
-pub fn introspect(paths: &Paths, fix: bool) -> Result<()> {
+/// One `probe --json` row.
+#[derive(Serialize)]
+struct ProbeRow<'a> {
+    installed: bool,
+    kind: &'a str,
+    name: String,
+    source: &'a str,
+    hash: Option<String>,
+    description: Option<&'a str>,
+}
+
+/// One diagnostic finding from `introspect`. `kind` is a stable machine tag;
+/// `message` is the human line.
+#[derive(Serialize)]
+struct Issue {
+    kind: &'static str,
+    target: String,
+    message: String,
+}
+
+/// `mind introspect [--fix] [--json]` — report drift and breakage. With `--fix`,
+/// repair what can be fixed without changing versions: recreate missing symlinks
+/// from each item's file registry. Drifted or renamed items are left to
+/// `evolve`. `--json` emits the findings as JSON on stdout.
+pub fn introspect(paths: &Paths, fix: bool, json: bool) -> Result<()> {
     let registry = Registry::load(paths)?;
     let catalog = catalog::scan(paths, &registry)?;
     let manifest = Manifest::load(paths)?;
-    let mut issues = 0;
+    let mut issues: Vec<Issue> = Vec::new();
+    let mut repaired: Vec<String> = Vec::new();
 
     for s in &registry.sources {
         if !s.clone_dir(paths).join(".git").is_dir() {
-            println!("source '{}' has no clone on disk; run `mind sync`", s.name);
-            issues += 1;
+            issues.push(Issue {
+                kind: "no-clone",
+                target: s.name.clone(),
+                message: format!("source '{}' has no clone on disk; run `mind sync`", s.name),
+            });
         } else if s.commit.is_none() {
-            println!("source '{}' was never synced; run `mind sync`", s.name);
-            issues += 1;
+            issues.push(Issue {
+                kind: "never-synced",
+                target: s.name.clone(),
+                message: format!("source '{}' was never synced; run `mind sync`", s.name),
+            });
         }
     }
 
@@ -679,14 +772,17 @@ pub fn introspect(paths: &Paths, fix: bool) -> Result<()> {
         if !missing.is_empty() {
             // With --fix, re-link from the store copy; report only what cannot
             // be repaired (e.g. the store copy itself is gone).
-            let repaired = if fix { install::relink(paths, it)? } else { 0 };
-            if repaired > 0 {
-                println!("{}: relinked {repaired} missing symlink(s)", it.key());
+            let n = if fix { install::relink(paths, it)? } else { 0 };
+            if n > 0 {
+                repaired.push(format!("{}: relinked {n} missing symlink(s)", it.key()));
             }
             for link in &missing {
                 if std::fs::symlink_metadata(link).is_err() {
-                    println!("{}: symlink missing at {link}", it.key());
-                    issues += 1;
+                    issues.push(Issue {
+                        kind: "missing-link",
+                        target: it.key(),
+                        message: format!("{}: symlink missing at {link}", it.key()),
+                    });
                 }
             }
         }
@@ -695,36 +791,63 @@ pub fn introspect(paths: &Paths, fix: bool) -> Result<()> {
             .iter()
             .find(|c| c.kind == it.kind && c.name == it.bare_name && c.source == it.source)
         {
-            None => {
-                println!("{}: no longer present in source '{}'", it.key(), it.source);
-                issues += 1;
-            }
+            None => issues.push(Issue {
+                kind: "removed-upstream",
+                target: it.key(),
+                message: format!("{}: no longer present in source '{}'", it.key(), it.source),
+            }),
             Some(cat) => {
                 if cat.effective_name() != it.name {
-                    println!(
-                        "{}: namespace changed to '{}'; run `mind evolve`",
-                        it.key(),
-                        cat.effective_name()
-                    );
-                    issues += 1;
+                    issues.push(Issue {
+                        kind: "namespace-changed",
+                        target: it.key(),
+                        message: format!(
+                            "{}: namespace changed to '{}'; run `mind evolve`",
+                            it.key(),
+                            cat.effective_name()
+                        ),
+                    });
                 } else if let Ok(h) = hash_path(&cat.path)
                     && h != it.hash
                 {
-                    println!("{}: upstream changed; run `mind evolve`", it.key());
-                    issues += 1;
+                    issues.push(Issue {
+                        kind: "drifted",
+                        target: it.key(),
+                        message: format!("{}: upstream changed; run `mind evolve`", it.key()),
+                    });
                 }
             }
         }
     }
 
-    if issues == 0 {
+    if json {
+        #[derive(Serialize)]
+        struct Report<'a> {
+            issues: &'a [Issue],
+            sources: usize,
+            items: usize,
+        }
+        return print_json(&Report {
+            issues: &issues,
+            sources: registry.sources.len(),
+            items: manifest.items.len(),
+        });
+    }
+
+    for note in &repaired {
+        println!("{note}");
+    }
+    for issue in &issues {
+        println!("{}", issue.message);
+    }
+    if issues.is_empty() {
         println!(
             "all good: {} source(s), {} item(s) installed",
             registry.sources.len(),
             manifest.items.len()
         );
     } else {
-        println!("\n{issues} issue(s) found");
+        println!("\n{} issue(s) found", issues.len());
     }
     Ok(())
 }
@@ -796,7 +919,33 @@ pub fn lobe_remove(paths: &Paths, path: &str) -> Result<()> {
     Ok(())
 }
 
+/// `mind completions <shell>` — write a shell completion script to stdout.
+pub fn completions(shell: clap_complete::Shell) {
+    use clap::CommandFactory;
+    let mut cmd = crate::cli::Cli::command();
+    clap_complete::generate(shell, &mut cmd, "mind", &mut std::io::stdout());
+}
+
+/// `mind man` — write the roff man page to stdout.
+pub fn man() -> Result<()> {
+    use clap::CommandFactory;
+    let mut out = Vec::new();
+    clap_mangen::Man::new(crate::cli::Cli::command())
+        .render(&mut out)
+        .map_err(|e| MindError::io("<man>", e))?;
+    std::io::stdout()
+        .write_all(&out)
+        .map_err(|e| MindError::io("<stdout>", e))
+}
+
 // --- helpers ---------------------------------------------------------------
+
+/// Serialize `value` as pretty JSON to stdout (for the `--json` flags).
+fn print_json<T: Serialize>(value: &T) -> Result<()> {
+    let s = serde_json::to_string_pretty(value).map_err(|e| MindError::json("json output", e))?;
+    println!("{s}");
+    Ok(())
+}
 
 /// A throwaway registry holding just one source, for catalog scans during meld.
 fn single(source: &crate::source::Source) -> Registry {

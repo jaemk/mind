@@ -51,24 +51,28 @@ fn run(cli: Cli) -> Result<()> {
             item,
             kind,
             source,
+            json,
         } => commands::recall(
             &paths,
             sources,
             item.as_deref(),
             kind.map(|k| k.to_kind()),
             source.as_deref(),
+            json,
         ),
         Command::Probe {
             query,
             kind,
             source,
+            json,
         } => commands::probe(
             &paths,
             query.as_deref(),
             kind.map(|k| k.to_kind()),
             source.as_deref(),
+            json,
         ),
-        Command::Introspect { fix } => commands::introspect(&paths, fix),
+        Command::Introspect { fix, json } => commands::introspect(&paths, fix, json),
         Command::Config { action } => match action {
             ConfigCmd::Show => commands::config_show(&paths),
             ConfigCmd::Lobes { action } => match action {
@@ -77,5 +81,10 @@ fn run(cli: Cli) -> Result<()> {
                 LobesCmd::Remove { path } => commands::lobe_remove(&paths, &path),
             },
         },
+        Command::Completions { shell } => {
+            commands::completions(shell);
+            Ok(())
+        }
+        Command::Man => commands::man(),
     }
 }

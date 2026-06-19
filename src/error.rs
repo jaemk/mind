@@ -120,6 +120,9 @@ pub enum MindError {
     #[error("'{name}' is not installed")]
     NotInstalled { name: String },
 
+    #[error("sync failed for {failed} of {total} source(s); see the messages above")]
+    SyncFailed { failed: usize, total: usize },
+
     #[error(
         "source '{source_name}' requires mind >= {required}, but this is mind {running}; upgrade mind"
     )]

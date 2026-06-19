@@ -1486,6 +1486,12 @@ fn probe_and_recall_filter_by_kind_and_source() {
     let only_agents = sb.mind(&["recall", "--kind", "agent"]).stdout;
     assert!(only_agents.contains("agent:dev"), "{only_agents}");
     assert!(!only_agents.contains("skill:review"), "{only_agents}");
+
+    // Filters are meaningless with --sources; recall says so rather than
+    // silently ignoring them.
+    let warned = sb.mind(&["recall", "--sources", "--kind", "skill"]);
+    assert!(warned.success, "{}", warned.stderr);
+    assert!(warned.stderr.contains("ignored"), "{}", warned.stderr);
 }
 
 #[test]
@@ -1524,4 +1530,136 @@ fn config_is_created_with_default_lobe_on_first_use() {
         body.contains(&sb.claude_home.display().to_string()),
         "default lobe should be the claude home: {body}"
     );
+}
+
+#[test]
+fn sync_continues_past_a_failed_source() {
+    // spec: CLI-54
+    let a = Sandbox::new(); // healthy
+    let b = Sandbox::new(); // will be broken
+    assert!(a.mind(&["meld", &a.source_spec()]).success);
+    assert!(a.mind(&["meld", &b.source_spec()]).success);
+
+    // Break b's remote and advance a's, then sync both.
+    std::fs::remove_dir_all(&b.source).unwrap();
+    a.edit_source();
+    let r = a.mind(&["sync"]);
+
+    // The run reports the failure and exits non-zero...
+    assert!(!r.success, "sync should exit non-zero when a source fails");
+    assert!(
+        r.stdout.contains("failed") || r.stderr.contains("failed"),
+        "broken source reported: {} / {}",
+        r.stdout,
+        r.stderr
+    );
+    // ...but the healthy source was still refreshed (progress persisted).
+    assert!(r.stdout.contains("updated"), "healthy source: {}", r.stdout);
+    let sources = a.mind(&["recall", "--sources"]).stdout;
+    assert!(
+        sources.contains(&format!("{}/agents", a.base_name())),
+        "{sources}"
+    );
+    assert!(
+        sources.contains(&format!("{}/agents", b.base_name())),
+        "{sources}"
+    );
+}
+
+#[test]
+fn recall_json_emits_items_and_sources() {
+    // spec: CLI-73
+    let sb = melded();
+    assert!(sb.mind(&["learn", "review"]).success);
+
+    // Listing is a JSON array of installed items.
+    let items = sb.mind(&["recall", "--json"]);
+    assert!(items.success, "{}", items.stderr);
+    assert!(
+        items.stdout.trim_start().starts_with('['),
+        "{}",
+        items.stdout
+    );
+    assert!(
+        items.stdout.contains("\"kind\": \"skill\""),
+        "{}",
+        items.stdout
+    );
+    assert!(
+        items.stdout.contains("\"name\": \"review\""),
+        "{}",
+        items.stdout
+    );
+
+    // A single-item lookup is a JSON object.
+    let one = sb.mind(&["recall", "skill:review", "--json"]).stdout;
+    assert!(one.trim_start().starts_with('{'), "{one}");
+    assert!(one.contains("\"hash\""), "{one}");
+
+    // --sources is a JSON array of sources.
+    let srcs = sb.mind(&["recall", "--sources", "--json"]).stdout;
+    assert!(srcs.trim_start().starts_with('['), "{srcs}");
+    assert!(srcs.contains("\"url\""), "{srcs}");
+
+    // An empty listing is `[]`, not a human message.
+    assert!(sb.mind(&["forget", "review"]).success);
+    let empty = sb.mind(&["recall", "--json"]).stdout;
+    assert_eq!(empty.trim(), "[]", "{empty}");
+}
+
+#[test]
+fn probe_json_emits_rows() {
+    // spec: CLI-84
+    let sb = melded();
+    assert!(sb.mind(&["learn", "review"]).success);
+    let r = sb.mind(&["probe", "--json"]);
+    assert!(r.success, "{}", r.stderr);
+    assert!(r.stdout.trim_start().starts_with('['), "{}", r.stdout);
+    assert!(r.stdout.contains("\"installed\""), "{}", r.stdout);
+    assert!(r.stdout.contains("\"name\": \"review\""), "{}", r.stdout);
+    // The installed item carries installed:true.
+    assert!(r.stdout.contains("true"), "{}", r.stdout);
+}
+
+#[test]
+fn introspect_json_emits_report() {
+    // spec: CLI-92
+    let sb = melded();
+    assert!(sb.mind(&["learn", "review"]).success);
+
+    // Clean: an object with an (empty) issues array and counts.
+    let clean = sb.mind(&["introspect", "--json"]).stdout;
+    assert!(clean.trim_start().starts_with('{'), "{clean}");
+    assert!(clean.contains("\"issues\""), "{clean}");
+    assert!(clean.contains("\"items\""), "{clean}");
+
+    // A broken link surfaces as a missing-link issue with its stable kind tag.
+    std::fs::remove_file(sb.claude_home.join("skills/review")).unwrap();
+    let broken = sb.mind(&["introspect", "--json"]).stdout;
+    assert!(broken.contains("\"missing-link\""), "{broken}");
+}
+
+#[test]
+fn completions_emit_a_shell_script() {
+    // spec: CLI-120
+    let sb = Sandbox::new();
+    let r = sb.mind(&["completions", "bash"]);
+    assert!(r.success, "{}", r.stderr);
+    // A bash completion script registers a completion function for `mind`.
+    assert!(r.stdout.contains("_mind"), "{}", r.stdout);
+    assert!(r.stdout.contains("complete"), "{}", r.stdout);
+
+    // An unknown shell is rejected by the arg parser.
+    assert!(!sb.mind(&["completions", "tcsh"]).success);
+}
+
+#[test]
+fn man_page_renders_roff() {
+    // spec: CLI-121
+    let sb = Sandbox::new();
+    let r = sb.mind(&["man"]);
+    assert!(r.success, "{}", r.stderr);
+    // roff man pages open with a .TH title header.
+    assert!(r.stdout.contains(".TH"), "{}", r.stdout);
+    assert!(r.stdout.to_lowercase().contains("mind"), "{}", r.stdout);
 }

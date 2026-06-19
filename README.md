@@ -19,14 +19,15 @@ The repo is not named `homebrew-mind`, so the tap needs its clone URL.
 | command | does |
 |---------|------|
 | `mind meld <repo> [--as <prefix>]` | clone and register a source |
-| `mind unmeld <name>` (alias `detach`) | drop a source |
-| `mind learn <item>` | install a skill/agent/rule |
-| `mind forget <item>` (alias `unlearn`) | remove an installed item |
-| `mind sync` | refresh every source |
+| `mind unmeld <name> [--forget]` (alias `detach`) | drop a source (optionally its items) |
+| `mind learn <item>` | install a skill/agent/rule (glob installs many) |
+| `mind forget <item>` (alias `unlearn`) | remove an installed item (glob removes many) |
+| `mind sync [--evolve]` | refresh every source (optionally upgrade after) |
 | `mind evolve [--yes] [item]` | upgrade installed items |
-| `mind recall [--sources] [item]` | list installed items / sources / details |
-| `mind probe [query]` | search available items |
-| `mind introspect` | report drift and broken links |
+| `mind recall [--sources] [item] [--kind K] [--source S] [--json]` | list installed items / sources / details |
+| `mind probe [query] [--kind K] [--source S] [--json]` | search available items |
+| `mind introspect [--fix] [--json]` | report drift and broken links (optionally repair) |
+| `mind completions <shell>` / `mind man` | shell completions / man page |
 
 A source repo exposes items by convention (`skills/<n>/SKILL.md`,
 `agents/<n>.md`, `rules/<n>.md`) or via a `mind.toml`. See [spec/](spec/) for the

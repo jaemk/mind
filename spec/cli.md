@@ -14,6 +14,8 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 | `probe [query]` | search |
 | `introspect` | diagnose |
 | `config show` / `config lobes ...` | view/edit config |
+| `completions <shell>` | print a shell completion script |
+| `man` | print the roff man page |
 
 ## Item refs
 
@@ -105,6 +107,11 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   (reporting pending upgrades and prompting before applying, exactly like
   `evolve`), so a single command both fetches upstream and applies pending
   upgrades.
+- `CLI-54` A per-source failure (e.g. a network error on one remote) does not
+  abort the run: `sync` refreshes each source independently, persists the
+  progress made (the recorded commits of the sources that succeeded), reports
+  each failure, and exits non-zero (`SyncFailed`). With a failure, the `--evolve`
+  pass is skipped.
 
 ## evolve
 
@@ -130,6 +137,9 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   none is `NotInstalled`.
 - `CLI-72` `recall --sources` lists melded sources (name, url, short commit,
   alias, description).
+- `CLI-73` `recall --json` emits the data as JSON on stdout instead of the table:
+  an array of installed items for the listing, the single item for a lookup, or
+  an array of sources with `--sources`. An empty listing is `[]`.
 
 ## probe
 
@@ -144,7 +154,12 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 - `CLI-83` `probe` and `recall` accept `--kind <skill|agent|rule>` and
   `--source <selector>` filters that narrow the listing, composing with `probe`'s
   substring query. For `recall` they apply to the installed-items listing, not to
-  `--sources` or a single-item lookup (use a `kind:` / `owner/repo#` ref there).
+  `--sources` or a single-item lookup (use a `kind:` / `owner/repo#` ref there);
+  passing them with `--sources` or a single item prints a note that they are
+  ignored.
+- `CLI-84` `probe --json` emits the rows as a JSON array on stdout instead of the
+  table; each row carries the installed flag, kind, effective name, source,
+  content hash, and description.
 
 ## introspect
 
@@ -157,6 +172,9 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   (re-linking the existing store copy). If the store copy itself is gone the link
   is left reported, not recreated. Drifted or renamed items are still left to
   `evolve`.
+- `CLI-92` `introspect --json` emits the findings as JSON on stdout: an object
+  with an `issues` array (each carrying a stable `kind` tag, a `target`, and a
+  `message`) plus the source and item counts. An empty `issues` array means clean.
 
 ## config
 
@@ -170,6 +188,14 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   creating the file if needed; adding one already present is a no-op.
 - `CLI-113` `config lobes remove <path>` drops a configured agent home; a path
   that is not configured is an error (`UnknownLobe`).
+
+## completions / man
+
+- `CLI-120` `completions <shell>` writes a shell completion script for the named
+  shell (bash, zsh, fish, elvish, powershell) to stdout, generated from the
+  command tree.
+- `CLI-121` `man` writes the roff man page for `mind` to stdout, generated from
+  the command tree.
 
 ## Exit status
 

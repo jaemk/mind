@@ -34,6 +34,9 @@ and verified.
 | `sync --evolve` (refresh then upgrade) | done | CLI-53 |
 | `probe`/`recall` `--kind` / `--source` filters | done | CLI-83 |
 | Enforce `min-mind-version` | done | DSC-40 |
+| `sync` per-source resilience (continue + report, exit non-zero) | done | CLI-54 |
+| `--json` output (recall, probe, introspect) | done | CLI-73, CLI-84, CLI-92 |
+| Shell completions + man page | done | CLI-120, CLI-121 |
 
 ## Documents
 

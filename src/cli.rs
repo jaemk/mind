@@ -124,6 +124,10 @@ pub enum Command {
         /// Only list items from a source matching this selector (listing only).
         #[arg(long)]
         source: Option<String>,
+
+        /// Emit JSON instead of the human-readable table.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Search melded catalogs for available items.
@@ -138,6 +142,10 @@ pub enum Command {
         /// Only list items from a source matching this selector.
         #[arg(long)]
         source: Option<String>,
+
+        /// Emit JSON instead of the human-readable table.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Diagnose drift, broken symlinks, and unsynced sources.
@@ -145,6 +153,10 @@ pub enum Command {
         /// Repair what is fixable without changing versions (recreate missing links).
         #[arg(long)]
         fix: bool,
+
+        /// Emit JSON instead of the human-readable report.
+        #[arg(long)]
+        json: bool,
     },
 
     /// View and edit configuration (`~/.mind/config.toml`).
@@ -152,6 +164,16 @@ pub enum Command {
         #[command(subcommand)]
         action: ConfigCmd,
     },
+
+    /// Print a shell completion script to stdout.
+    Completions {
+        /// Shell to generate completions for.
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
+
+    /// Print the mind man page (roff) to stdout.
+    Man,
 }
 
 #[derive(Debug, Subcommand)]

@@ -276,6 +276,10 @@ fn symlink(target: &Path, link: &Path) -> Result<()> {
 
 #[cfg(not(unix))]
 fn symlink(target: &Path, link: &Path) -> Result<()> {
-    // On non-unix, fall back to a copy so the layout still works.
+    // On non-unix, fall back to a copy so the layout still works. Known
+    // limitation: a copied link is not recognized as mind's own by the clobber
+    // guard (`ensure_unoccupied` keys on "symlink into the store"), so reinstall
+    // / evolve over it reports `LinkOccupied`. mind is unix-first; see the
+    // platform-limitation note in spec/lifecycle.md.
     copy_recursive(target, link)
 }

@@ -31,6 +31,15 @@ preserve the previous version until the new one is proven.
   free to write. This keeps `learn` from silently deleting a user's file at the
   link path.
 
+> Platform limitation (non-unix): links are realized as real symlinks only on
+> unix. On platforms without symlink support the install falls back to copying
+> the item into the link location. Because the clobber guard (LIFE-41) and the
+> idempotent-reinstall path recognize ownership by "is a symlink into the store",
+> that fallback copy is not recognized as mind's own: a reinstall or `evolve`
+> over it reports `LinkOccupied`, and `introspect`/`forget` cannot tell it apart
+> from a user's file. mind is therefore supported on unix; non-unix is
+> copy-only and best-effort. This is a documented limitation, not yet addressed.
+
 ## Upgrade (evolve)
 
 - `LIFE-10` evolve matches each installed item to a catalog item by stable
