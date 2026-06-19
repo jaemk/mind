@@ -18,8 +18,10 @@ preserve the previous version until the new one is proven.
 - `LIFE-5` Install records the item in the manifest: effective name, bare name,
   source, current commit, hash of the source content, store path, link path(s),
   and description.
-- `LIFE-6` Re-installing an item replaces its store copy and link cleanly (the
-  swap is idempotent for the same effective name).
+- `LIFE-6` Re-installing an item replaces its store copy and link cleanly: the
+  swap is idempotent for the same effective name on unix, where the existing
+  link is mind's own symlink into the store (see the platform-limitation note;
+  the non-unix copy fallback is not recognized as mind's own).
 - `LIFE-40` The store copy is linked into every configured agent home (see
   STO-14). If any link cannot be created, the links already made and the store
   swap are rolled back. Uninstall removes the recorded link in every home.

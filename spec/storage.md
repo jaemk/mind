@@ -52,7 +52,9 @@ The on-disk layout and the two persisted JSON files.
 - `STO-20` The manifest maps `kind:effective_name` to an installed item.
 - `STO-21` Each installed item records: `kind`, `name` (effective), `bare_name`,
   `source`, `commit`, `hash` (of source content), `store` (path relative to the
-  mind root), `links` (absolute symlink paths, one per agent home), `description`.
+  mind root), `links` (the symlink path created in each agent home, one per home;
+  absolute when the home path is, since the home path is recorded verbatim after
+  `~` expansion), `description`.
 - `STO-22` `(source, kind, bare_name)` is the item's stable identity (see
   lifecycle.md). `store` and `links` are its file registry, used by uninstall.
 - `STO-23` A missing manifest file is treated as empty.
