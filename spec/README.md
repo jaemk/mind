@@ -46,6 +46,7 @@ and verified.
 | `probe` matches description text, not just name | planned | CLI-85 |
 | README quickstart, mental model, troubleshooting/FAQ | planned | [../README.md](../README.md) |
 | Starter source example (plain convention layout) | planned | [../examples/](../examples/) |
+| Interactive TUI: `probe` default, Installed/Available tree, full-parity actions, preview + registry meld | planned | [tui.md](tui.md) |
 
 ## Documents
 
@@ -54,6 +55,8 @@ and verified.
 - [discovery.md](discovery.md) - how a source's items are discovered and described.
 - [namespacing.md](namespacing.md) - prefixes, `{{ns:}}` reference tokens, warnings.
 - [lifecycle.md](lifecycle.md) - install, upgrade, uninstall, and drift semantics.
+- [tui.md](tui.md) - the interactive TUI (`probe` default): browse, search, and
+  the interactive front end for the CLI verbs.
 
 ## Conventions
 

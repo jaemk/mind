@@ -38,6 +38,10 @@ const ALLOWLIST: &[&str] = &[
     "CLI-85",
     //   self-update verb (in-place binary upgrade via the self_update crate)
     "CLI-140", "CLI-141", "CLI-142", "CLI-143",
+    //   interactive TUI (probe default; see spec/tui.md)
+    "TUI-1", "TUI-2", "TUI-10", "TUI-11", "TUI-12", "TUI-13", "TUI-14", "TUI-15",
+    "TUI-20", "TUI-21", "TUI-22", "TUI-23", "TUI-24", "TUI-25",
+    "TUI-30", "TUI-31", "TUI-40", "TUI-41",
 ];
 
 #[test]

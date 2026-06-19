@@ -4,6 +4,7 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 
 | command | role |
 |---------|------|
+| `probe [query] [--no-tui]` | interactive browser (default); catalog listing with `--no-tui`/`--json` |
 | `meld <repo> [--as <prefix>] [--root <dir>] [--follow-branch\|--pin-tag\|--pin-ref <ref>]` | connect a source |
 | `unmeld <name>` (alias: `detach`) | disconnect a source |
 | `learn <item>` | install |
@@ -11,7 +12,6 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 | `sync` | refresh sources |
 | `evolve [--yes] [item]` | upgrade installed |
 | `recall [--sources] [item]` | list / info |
-| `probe [query]` | search |
 | `review <target> [--as <prefix>]` | validate a source for publishing |
 | `introspect` | diagnose |
 | `self-update [--check] [--yes]` | upgrade the `mind` binary itself |
@@ -164,6 +164,10 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   an array of sources with `--sources`. An empty listing is `[]`.
 
 ## probe
+
+`probe` launches the interactive TUI by default (tui.md, TUI-1). The IDs below
+define the non-interactive catalog listing, which `probe` prints instead when
+`--no-tui` or `--json` is given or stdout is not a TTY (TUI-2).
 
 - `CLI-80` `probe [query]` lists available catalog items (effective name, source,
   one-line description), filtered to those whose effective name contains `query`.
