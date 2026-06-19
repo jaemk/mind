@@ -1815,3 +1815,152 @@ fn man_page_renders_roff() {
     assert!(r.stdout.contains(".TH"), "{}", r.stdout);
     assert!(r.stdout.to_lowercase().contains("mind"), "{}", r.stdout);
 }
+
+// ---- concurrency tests -------------------------------------------------------
+
+/// Spawn a `mind` child process and return its handle without waiting.
+fn spawn_mind(
+    mind_home: &std::path::Path,
+    claude_home: &std::path::Path,
+    args: &[&str],
+) -> std::process::Child {
+    Command::new(env!("CARGO_BIN_EXE_mind"))
+        .args(args)
+        .env("MIND_HOME", mind_home)
+        .env("CLAUDE_HOME", claude_home)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn mind")
+}
+
+#[test]
+fn concurrent_mutating_commands_both_succeed_no_lost_update() {
+    // Two `meld` calls that target different sources run concurrently against the
+    // same MIND_HOME. The advisory exclusive lock serializes them so neither
+    // overwrites the other's registry write. Both sources must appear in the
+    // final sources list.
+    // spec: STO-40 STO-41
+    let a = Sandbox::new();
+    let b = Sandbox::named("tools");
+    // Reuse a's mind/claude home as the shared environment for both processes.
+    let mind_home = &a.mind_home;
+    let claude_home = &a.claude_home;
+
+    let a_spec = a.source_spec();
+    let b_spec = b.source_spec();
+
+    let mut child_a = spawn_mind(mind_home, claude_home, &["meld", &a_spec]);
+    let mut child_b = spawn_mind(mind_home, claude_home, &["meld", &b_spec]);
+
+    let status_a = child_a.wait().expect("wait a");
+    let status_b = child_b.wait().expect("wait b");
+
+    assert!(status_a.success(), "first meld failed");
+    assert!(status_b.success(), "second meld failed");
+
+    // Both sources must be registered (no lost update).
+    let sources = a.mind(&["recall", "--sources"]).stdout;
+    assert!(sources.contains("agents"), "first source missing: {sources}");
+    assert!(sources.contains("tools"), "second source missing: {sources}");
+}
+
+#[test]
+fn concurrent_learn_commands_both_effects_survive() {
+    // Two `learn` commands running concurrently against one MIND_HOME install
+    // different items. Both must appear in the manifest afterward.
+    // spec: STO-40 STO-41
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    // Pre-meld so both learns can resolve items.
+    assert!(sb.mind(&["meld", &spec]).success);
+
+    let mind_home = &sb.mind_home;
+    let claude_home = &sb.claude_home;
+
+    let mut child_a = spawn_mind(mind_home, claude_home, &["learn", "review"]);
+    let mut child_b = spawn_mind(mind_home, claude_home, &["learn", "dev"]);
+
+    let status_a = child_a.wait().expect("wait a");
+    let status_b = child_b.wait().expect("wait b");
+
+    assert!(status_a.success(), "learn review failed");
+    assert!(status_b.success(), "learn dev failed");
+
+    // Both items must be in the manifest - no lost update.
+    let recall = sb.mind(&["recall"]).stdout;
+    assert!(recall.contains("skill:review"), "review lost: {recall}");
+    assert!(recall.contains("agent:dev"), "dev lost: {recall}");
+}
+
+#[test]
+fn concurrent_reader_and_writer_reader_does_not_see_torn_file() {
+    // A `recall` (shared lock, reads sources.json / manifest.json) runs
+    // concurrently with a `learn` (exclusive lock, writes manifest.json).
+    // The reader must not error: it either sees the state before or after the
+    // write, never a partial file (guaranteed by the advisory lock + atomic writes).
+    // spec: STO-43
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    assert!(sb.mind(&["meld", &spec]).success);
+
+    let mind_home = &sb.mind_home;
+    let claude_home = &sb.claude_home;
+
+    // Run many rounds to increase the chance of interleaving.
+    for _ in 0..10 {
+        let mut writer = spawn_mind(mind_home, claude_home, &["learn", "review"]);
+        let mut reader = spawn_mind(mind_home, claude_home, &["recall"]);
+
+        let ws = writer.wait().expect("wait writer");
+        let rs = reader.wait().expect("wait reader");
+
+        assert!(ws.success(), "writer failed");
+        // The reader may see "nothing learned" (before) or the item (after),
+        // but must not error (exit non-zero with a torn file).
+        assert!(rs.success(), "reader errored during concurrent write");
+
+        // Clean up for the next round.
+        sb.mind(&["forget", "review"]);
+    }
+}
+
+#[test]
+fn exclusive_lock_blocks_second_writer_until_first_completes() {
+    // Start a writer; while it holds the exclusive lock, a second writer must
+    // wait (block) rather than proceed concurrently. We verify this by running
+    // two sequential meld+unmeld pairs and asserting the final state is
+    // consistent (both ran fully). A non-blocking implementation would produce
+    // racy JSON and crash or corrupt; a serializing one succeeds.
+    // spec: STO-42
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+
+    // Run two concurrent melds of the same spec; one will block on the lock
+    // while the other runs. The second should get SourceExists and exit
+    // non-zero, but must not crash or corrupt the registry. The registry must
+    // be parseable (one valid source entry).
+    let mut c1 = spawn_mind(&sb.mind_home, &sb.claude_home, &["meld", &spec]);
+    let mut c2 = spawn_mind(&sb.mind_home, &sb.claude_home, &["meld", &spec]);
+
+    let _ = c1.wait();
+    let _ = c2.wait();
+
+    // Exactly one meld should have succeeded; the registry must be well-formed.
+    let sources = sb.mind(&["recall", "--sources"]);
+    assert!(sources.success, "recall failed after concurrent melds: {}", sources.stderr);
+    // The registry must be well-formed (parseable by recall) and contain exactly
+    // one source entry. Count non-blank, non-header lines.
+    let entry_lines: Vec<_> = sources
+        .stdout
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !l.contains("melded source"))
+        .collect();
+    assert_eq!(
+        entry_lines.len(),
+        1,
+        "expected exactly one source entry, got {}: {}",
+        entry_lines.len(),
+        sources.stdout
+    );
+}

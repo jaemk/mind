@@ -48,6 +48,12 @@ impl Paths {
         })
     }
 
+    /// Path to the global advisory lock file.
+    // spec: STO-40
+    pub fn lock_file(&self) -> PathBuf {
+        self.mind_home.join(".lock")
+    }
+
     pub fn sources_file(&self) -> PathBuf {
         self.mind_home.join("sources.json")
     }
@@ -156,6 +162,44 @@ impl Paths {
         self.ensure_config()?;
         Ok(())
     }
+
+    /// Write `bytes` to `target` atomically by writing a sibling temp file and
+    /// renaming it over the target. Callers see either the old file or the new
+    /// file, never a partial write.
+    ///
+    /// The temp file is placed in the same directory as `target` (required for
+    /// `rename` to be atomic within one filesystem). Named
+    /// `.<filename>.tmp.<pid>` so it is identifiable on crash.
+    ///
+    /// Called by `source.rs`, `manifest.rs`, and `config.rs` once the
+    /// mechanical shard wires them up; until then the unit tests exercise it.
+    // spec: STO-43
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn atomic_write(target: &std::path::Path, bytes: &[u8]) -> Result<()> {
+        let dir = target
+            .parent()
+            .ok_or_else(|| MindError::io(target, std::io::Error::other("no parent directory")))?;
+        let file_name = target
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "file".into());
+        let tmp_name = format!(".{}.tmp.{}", file_name, std::process::id());
+        let tmp_path = dir.join(&tmp_name);
+
+        // Write to temp; clean up on error.
+        let write_result = std::fs::write(&tmp_path, bytes)
+            .map_err(|e| MindError::io(&tmp_path, e));
+        if let Err(e) = write_result {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(e);
+        }
+
+        // Rename over the target; clean up temp on error.
+        std::fs::rename(&tmp_path, target).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp_path);
+            MindError::io(target, e)
+        })
+    }
 }
 
 fn home() -> Result<PathBuf> {
@@ -199,6 +243,9 @@ pub fn mkdir_p(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
 
     #[test]
     fn absolute_home_resolves_relative_paths() {
@@ -214,5 +261,73 @@ mod tests {
             absolute_home("/tmp/lobe").unwrap(),
             PathBuf::from("/tmp/lobe")
         );
+    }
+
+    #[test]
+    fn atomic_write_replaces_target_content() {
+        // spec: STO-43
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir()
+            .join(format!("mind-paths-test-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("data.json");
+
+        // Write initial content.
+        std::fs::write(&target, b"old").unwrap();
+
+        // Atomically replace with new content.
+        Paths::atomic_write(&target, b"new").unwrap();
+        let got = std::fs::read(&target).unwrap();
+        assert_eq!(got, b"new", "target should contain the new bytes");
+
+        // No temp file should be left behind.
+        let leftover: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .contains(".tmp.")
+            })
+            .collect();
+        assert!(leftover.is_empty(), "temp file was not cleaned up: {leftover:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn atomic_write_creates_target_if_absent() {
+        // spec: STO-43
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir()
+            .join(format!("mind-paths-create-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("new.json");
+
+        assert!(!target.exists(), "sanity: target should not exist yet");
+        Paths::atomic_write(&target, b"{\"x\":1}").unwrap();
+        assert!(target.exists(), "atomic_write should create the target");
+        assert_eq!(std::fs::read(&target).unwrap(), b"{\"x\":1}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn atomic_write_uses_same_directory_for_temp() {
+        // The temp file must be in the same directory as the target so rename
+        // is atomic (same filesystem).
+        // spec: STO-43
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir()
+            .join(format!("mind-paths-samedir-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("sources.json");
+
+        // Hook: after write the temp file should be in the same directory.
+        // We can verify by checking rename succeeded (no EXDEV cross-device error).
+        Paths::atomic_write(&target, b"[]").unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"[]");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

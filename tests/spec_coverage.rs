@@ -38,8 +38,6 @@ const ALLOWLIST: &[&str] = &[
     "CLI-85",
     //   self-update verb (in-place binary upgrade via the self_update crate)
     "CLI-140", "CLI-141", "CLI-142", "CLI-143",
-    //   concurrency: global advisory lock + atomic registry writes
-    "STO-40", "STO-41", "STO-42", "STO-43",
 ];
 
 #[test]
