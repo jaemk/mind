@@ -42,6 +42,7 @@ and verified.
 | Version pinning: `--follow-branch`/`--pin-tag`/`--pin-ref` + `[source]` directive | planned | DSC-41, STO-18, CLI-17, CLI-18, CLI-55 |
 | `review` verb: author-side source validation | planned | CLI-130, CLI-131, CLI-132, CLI-133 |
 | `self-update` verb: in-place upgrade of the `mind` binary (via the `self_update` crate) | planned | CLI-140, CLI-141, CLI-142, CLI-143 |
+| Concurrency: global advisory lock + atomic registry writes (via `fd-lock`) | planned | STO-40, STO-41, STO-42, STO-43 |
 | `probe` matches description text, not just name | planned | CLI-85 |
 | README quickstart, mental model, troubleshooting/FAQ | planned | [../README.md](../README.md) |
 | Starter source example (plain convention layout) | planned | [../examples/](../examples/) |

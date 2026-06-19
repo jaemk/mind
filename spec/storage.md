@@ -11,6 +11,7 @@ The on-disk layout and the two persisted JSON files.
   sources/<host>/<owner>/<repo> clone of each melded repo
   store/<kind>/<name>/          installed copy of each item (name is effective)
   .tmp/staging|backup/...        scratch for transactional installs
+  .lock                         global advisory lock (STO-40)
 
 <agent home>/                   (one or more; default ~/.claude)
   skills/<name>      -> store/skill/<name>
@@ -69,6 +70,40 @@ The on-disk layout and the two persisted JSON files.
 - `STO-22` `(source, kind, bare_name)` is the item's stable identity (see
   lifecycle.md). `store` and `links` are its file registry, used by uninstall.
 - `STO-23` A missing manifest file is treated as empty.
+
+## Concurrency and durability
+
+mind may be invoked from more than one process at once. State stays consistent
+through a single global advisory lock plus atomic file writes; together these
+prevent the lost-update and torn-read races a plain read-modify-write would allow.
+
+- `STO-40` A single advisory lock file at `<mind root>/.lock` guards all access to
+  mind's persisted state (`sources.json`, `manifest.json`, the store, the links,
+  and `config.toml`). A command acquires the lock before it reads state and holds
+  it until the command completes, so a mutating command's read-modify-write cycle
+  is never interleaved with another process's (and two installs of the same item
+  cannot share the `.tmp/staging|backup` scratch). The lock lives under the mind
+  root, so a `MIND_HOME` override (e.g. a test's temp home) gets its own isolated
+  lock.
+- `STO-41` The lock is acquired exclusively by mutating commands (`meld`, `unmeld`,
+  `learn`, `forget`, `sync`, `evolve`, `introspect --fix`, `config lobes add` /
+  `remove`) and shared by read-only commands (`recall`, `probe`, `introspect`,
+  `config show`). An exclusive holder excludes all others; multiple shared readers
+  proceed concurrently but never observe a writer mid-update, so each reader gets a
+  consistent cross-file snapshot of the registry and manifest. First-use creation
+  of the default `config.toml` (STO-15) is idempotent and written atomically
+  (STO-43), so it is safe even when triggered from a shared-lock command.
+- `STO-42` Lock acquisition blocks until the lock is available. The lock is
+  advisory (it constrains only mind, which always takes it) and is released when
+  the holding process exits, including on crash, so an aborted run never wedges the
+  next one. A failure to create or lock the file is an `Io` error carrying the lock
+  path.
+- `STO-43` `sources.json`, `manifest.json`, and `config.toml` are written
+  atomically: the new contents are written to a temporary file in the same
+  directory and renamed over the target (an atomic replace within one filesystem).
+  A reader therefore sees either the old file or the new file, never a partial one,
+  and a crash mid-write leaves the previous file intact. This holds independently
+  of the lock, so it protects even a lock-less reader.
 
 ## Errors
 
