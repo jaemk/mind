@@ -42,6 +42,23 @@ pub fn install(
     let staging = paths.staging_path(kind, &name);
     let backup = paths.backup_path(kind, &name);
 
+    // 0. Resolve where this item will link, and refuse up front to overwrite any
+    //    target that is not mind's own symlink (a user's file/dir/foreign link).
+    //    This runs before staging, so a clobber aborts touching nothing.
+    let link_rel = item
+        .link_rel
+        .clone()
+        .unwrap_or_else(|| paths.default_link_rel(kind, &name));
+    let store_root = paths.store_dir();
+    let planned_links: Vec<std::path::PathBuf> = paths
+        .agent_homes()?
+        .iter()
+        .map(|home| home.join(&link_rel))
+        .collect();
+    for link in &planned_links {
+        ensure_unoccupied(&store_root, link)?;
+    }
+
     // 1. Stage and validate the new copy. Live install is untouched until step 2.
     remove_path(&staging)?;
     if let Some(parent) = staging.parent() {
@@ -72,15 +89,11 @@ pub fn install(
         return Err(e);
     }
 
-    // 3. Link the store copy into every agent home. On any failure, undo the
-    //    links made so far and roll the store back.
-    let link_rel = item
-        .link_rel
-        .clone()
-        .unwrap_or_else(|| paths.default_link_rel(kind, &name));
+    // 3. Link the store copy into every agent home (targets were checked free in
+    //    step 0). On any failure, undo the links made so far and roll the store
+    //    back.
     let mut links: Vec<std::path::PathBuf> = Vec::new();
-    for home in paths.agent_homes()? {
-        let link = home.join(&link_rel);
+    for link in planned_links {
         if let Err(e) = ensure_link(&store, &link) {
             for made in &links {
                 let _ = remove_path(made);
@@ -123,6 +136,28 @@ pub fn uninstall(paths: &Paths, item: &InstalledItem) -> Result<()> {
     }
     remove_path(&paths.mind_home.join(&item.store))?;
     Ok(())
+}
+
+/// Refuse to install over a link target that mind does not own. A target is
+/// "ours" only if it is a symlink pointing into the store root; a regular file,
+/// a directory, or a symlink elsewhere is the user's and is left untouched
+/// (`LinkOccupied`). A missing target is free.
+fn ensure_unoccupied(store_root: &Path, link: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(link) {
+        Ok(meta) => {
+            let ours = meta.file_type().is_symlink()
+                && std::fs::read_link(link).is_ok_and(|t| t.starts_with(store_root));
+            if ours {
+                Ok(())
+            } else {
+                Err(MindError::LinkOccupied {
+                    path: link.display().to_string(),
+                })
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(MindError::io(link, e)),
+    }
 }
 
 /// Create (or refresh) a symlink at `link` pointing to `store`.

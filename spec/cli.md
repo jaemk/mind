@@ -46,7 +46,8 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   siblings are reported as warnings (see namespacing.md). Warnings do not fail
   the command.
 - `CLI-15` If the melded repo's `mind.toml` lists `[discover].sources`, each is
-  melded recursively (see DSC-38), so one `meld` can pull in a curated set.
+  melded recursively (see DSC-38), so one `meld` can pull in a curated set. When
+  more than one source is added, `meld` reports the total count.
 
 ## unmeld
 
@@ -56,6 +57,9 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   ambiguous suffix is `AmbiguousSource`.
 - `CLI-21` `unmeld` does not remove items already installed from the source;
   those are removed with `forget`.
+- `CLI-22` (planned) `unmeld --forget` also removes every item installed from the
+  source (each via its file registry, then its manifest entry), so dropping a
+  source can clean up after itself in one step. Not yet implemented.
 
 ## learn
 
@@ -80,8 +84,14 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 ## forget
 
 - `CLI-40` `forget <item>` (alias: `unlearn`) removes an installed item using its
-  file registry and deletes its manifest entry. An item that is not installed is
-  an error (`NotInstalled`).
+  file registry and deletes its manifest entry. The ref is matched against the
+  manifest by effective name, honoring a `kind:` prefix and an `owner/repo#`
+  source qualifier; a bare name that matches more than one installed item (e.g.
+  a skill and an agent of the same name) is `AmbiguousItem`, and one matching
+  none is `NotInstalled`.
+- `CLI-41` (planned) When the ref name is a glob, `forget` uninstalls every
+  matching installed item, mirroring `learn`'s glob selection (CLI-31). Not yet
+  implemented.
 
 ## sync
 
@@ -89,6 +99,9 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   branch, and updates the recorded commit and `[source].description`.
 - `CLI-51` With no sources melded, `sync` reports that and exits successfully.
 - `CLI-52` `sync` does not change consumer aliases.
+- `CLI-53` (planned) `sync --evolve` runs an `evolve` pass after refreshing
+  sources, so a single command both fetches upstream and applies pending
+  upgrades. Not yet implemented.
 
 ## evolve
 
@@ -97,7 +110,10 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 - `CLI-61` The report lists, per item, the hash and commit deltas, and a compare
   URL when the source host supports one. A namespace change is shown as a rename.
 - `CLI-62` `--yes` applies upgrades without prompting.
-- `CLI-63` An optional `item` limits evolve to the matching installed item(s).
+- `CLI-63` An optional `item` limits evolve to the matching installed item(s),
+  matched against the manifest by effective name and honoring a `kind:` prefix
+  and an `owner/repo#` source qualifier. The ref may match several installed
+  items, all of which are evolved.
 - `CLI-64` With nothing pending, `evolve` reports up to date and changes nothing.
 
 ## recall
@@ -105,7 +121,10 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 - `CLI-70` `recall` lists installed items (effective name, source, short commit,
   one-line description).
 - `CLI-71` `recall <item>` shows one installed item's detail: description, source,
-  commit, hash, store path, and link path(s).
+  commit, hash, store path, and link path(s). The ref is matched against the
+  manifest by effective name, honoring a `kind:` prefix and an `owner/repo#`
+  source qualifier; an ambiguous bare name is `AmbiguousItem` and one matching
+  none is `NotInstalled`.
 - `CLI-72` `recall --sources` lists melded sources (name, url, short commit,
   alias, description).
 
@@ -119,6 +138,9 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 - `CLI-82` List outputs (`probe`, `recall`) left-align columns padded to the
   widest value in each column, so rows stay aligned regardless of item-name
   length.
+- `CLI-83` (planned) `probe` and `recall` accept `--kind <skill|agent|rule>` and
+  `--source <selector>` filters that narrow the listing, composing with the
+  substring query. Not yet implemented.
 
 ## introspect
 
@@ -126,14 +148,19 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   items whose links are missing, items no longer present upstream, items whose
   namespace changed, and items whose source content drifted. It reports a clean
   summary when there are no issues.
+- `CLI-91` (planned) `introspect --fix` repairs what it can without changing
+  versions: it recreates missing link(s) for installed items from their file
+  registry (re-linking the existing store copy). Drifted or renamed items are
+  still left to `evolve`. Not yet implemented.
 
 ## config
 
 - `CLI-110` `config show` creates the config if absent (STO-15), then prints the
   config file path and its key/value pairs (`lobes`, with the default shown when
   unset). It also notes when `MIND_AGENT_HOMES` is set and overrides `lobes`.
-- `CLI-111` `config lobes list` (alias `config target list`) lists the configured
-  agent homes, or the default home when none are configured.
+- `CLI-111` `config lobes list` lists the configured agent homes, or the default
+  home when none are configured. `target` is a visible alias of the whole `lobes`
+  subcommand, so `config target list` / `add` / `remove` all work too.
 - `CLI-112` `config lobes add <path>` appends an agent home to `config.toml`,
   creating the file if needed; adding one already present is a no-op.
 - `CLI-113` `config lobes remove <path>` drops a configured agent home; a path

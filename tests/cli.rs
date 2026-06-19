@@ -365,6 +365,71 @@ fn forget_unknown_item_errors() {
 }
 
 #[test]
+fn forget_bare_name_is_ambiguous_across_kinds_and_qualifier_resolves() {
+    // spec: CLI-40, CLI-71
+    let sb = Sandbox::bare("dup");
+    sb.write_and_commit(
+        "skills/dup/SKILL.md",
+        "---\nname: dup\ndescription: skill dup\n---\n# dup skill\n",
+    );
+    sb.write_and_commit(
+        "agents/dup.md",
+        "---\nname: dup\ndescription: agent dup\n---\n# dup agent\n",
+    );
+    let spec = sb.source_spec();
+    assert!(sb.mind(&["meld", &spec]).success);
+    assert!(sb.mind(&["learn", "skill:dup"]).success);
+    assert!(sb.mind(&["learn", "agent:dup"]).success);
+
+    // A bare name now matches both the skill and the agent -> ambiguous.
+    let bare = sb.mind(&["forget", "dup"]);
+    assert!(!bare.success);
+    assert!(bare.stderr.contains("ambiguous"), "{}", bare.stderr);
+    // recall <item> with the same bare name is ambiguous too.
+    assert!(!sb.mind(&["recall", "dup"]).success);
+
+    // A wrong source qualifier matches nothing.
+    let wrong = sb.mind(&["forget", "other/repo#skill:dup"]);
+    assert!(!wrong.success);
+    assert!(wrong.stderr.contains("not installed"), "{}", wrong.stderr);
+
+    // The kind prefix disambiguates and forgets exactly one.
+    assert!(sb.mind(&["forget", "skill:dup"]).success);
+    assert!(sb.mind(&["recall"]).stdout.contains("agent:dup"));
+    assert!(!sb.mind(&["recall"]).stdout.contains("skill:dup"));
+}
+
+#[test]
+fn learn_refuses_to_clobber_a_user_file() {
+    // spec: LIFE-41
+    let sb = melded();
+    // The user already has their own directory where the skill would link.
+    let target = sb.claude_home.join("skills/review");
+    write(&target.join("MINE.md"), "do not delete me");
+
+    let r = sb.mind(&["learn", "review"]);
+    assert!(!r.success, "learn should refuse to overwrite a user file");
+    assert!(
+        r.stderr.contains("managed by mind") || r.stderr.contains("already exists"),
+        "{}",
+        r.stderr
+    );
+    // The user's file is untouched and nothing was recorded.
+    assert!(target.join("MINE.md").exists(), "user file was deleted");
+    assert!(sb.mind(&["recall"]).stdout.contains("nothing learned"));
+}
+
+#[test]
+fn relearn_replaces_minds_own_symlink() {
+    // spec: LIFE-41
+    let sb = melded();
+    assert!(sb.mind(&["learn", "review"]).success);
+    // Re-learning over mind's own symlink (it points into the store) is allowed.
+    let again = sb.mind(&["learn", "review"]);
+    assert!(again.success, "{}", again.stderr);
+}
+
+#[test]
 fn probe_surfaces_frontmatter_descriptions() {
     // spec: DSC-2, DSC-20
     let sb = melded();

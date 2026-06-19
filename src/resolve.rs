@@ -2,6 +2,7 @@
 
 use crate::catalog::CatalogItem;
 use crate::error::{ItemKind, MindError, Result};
+use crate::manifest::InstalledItem;
 
 /// A parsed item ref, before it is matched against a catalog.
 #[derive(Debug, Clone)]
@@ -132,6 +133,43 @@ pub fn resolve<'a>(
     }
 }
 
+/// Whether an installed item matches a parsed ref: its kind (when the ref names
+/// one), its effective installed name, and the source qualifier (when given).
+/// Used by `forget`, `recall <item>`, and `evolve [item]`, which match against
+/// the manifest rather than the catalog.
+pub fn installed_matches(it: &InstalledItem, r: &ItemRef) -> bool {
+    r.kind.is_none_or(|k| it.kind == k)
+        && it.name == r.name
+        && r.source
+            .as_ref()
+            .is_none_or(|s| source_matches(&it.source, s))
+}
+
+/// Find the installed items matching `r`. Errors `NotInstalled` on no match and
+/// `AmbiguousItem` on more than one (e.g. a bare name shared across kinds).
+pub fn resolve_installed<'a>(
+    items: &'a std::collections::BTreeMap<String, InstalledItem>,
+    r: &ItemRef,
+) -> Result<&'a InstalledItem> {
+    let matches: Vec<&InstalledItem> = items
+        .values()
+        .filter(|it| installed_matches(it, r))
+        .collect();
+    match matches.as_slice() {
+        [] => Err(MindError::NotInstalled {
+            name: r.name.clone(),
+        }),
+        [only] => Ok(only),
+        many => Err(MindError::AmbiguousItem {
+            query: r.name.clone(),
+            candidates: many
+                .iter()
+                .map(|it| format!("{}#{}", it.source, it.key()))
+                .collect(),
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     // spec: CLI-1, CLI-2, CLI-3, CLI-4, CLI-5, CLI-31 (item ref parsing, resolution, selection)
@@ -230,6 +268,51 @@ mod tests {
         ];
         let r = parse_item_ref("agent:x").unwrap();
         assert_eq!(resolve(&items, &r, 1).unwrap().kind, ItemKind::Agent);
+    }
+
+    fn inst(kind: ItemKind, name: &str, source: &str) -> InstalledItem {
+        InstalledItem {
+            kind,
+            name: name.to_string(),
+            bare_name: name.to_string(),
+            source: source.to_string(),
+            commit: String::new(),
+            hash: String::new(),
+            store: String::new(),
+            links: Vec::new(),
+            description: None,
+        }
+    }
+
+    fn manifest(items: Vec<InstalledItem>) -> std::collections::BTreeMap<String, InstalledItem> {
+        items.into_iter().map(|it| (it.key(), it)).collect()
+    }
+
+    #[test]
+    fn installed_lookup_honors_kind_and_source_qualifier() {
+        // spec: CLI-40, CLI-63, CLI-71
+        let m = manifest(vec![
+            inst(ItemKind::Skill, "review", "github.com/james/agents"),
+            inst(ItemKind::Agent, "review", "github.com/james/agents"),
+        ]);
+        // A bare name shared across kinds is ambiguous.
+        let bare = parse_item_ref("review").unwrap();
+        assert!(matches!(
+            resolve_installed(&m, &bare),
+            Err(MindError::AmbiguousItem { .. })
+        ));
+        // A kind prefix disambiguates.
+        let skill = parse_item_ref("skill:review").unwrap();
+        assert_eq!(resolve_installed(&m, &skill).unwrap().kind, ItemKind::Skill);
+        // A source qualifier that does not match yields NotInstalled.
+        let wrong = parse_item_ref("other/repo#skill:review").unwrap();
+        assert!(matches!(
+            resolve_installed(&m, &wrong),
+            Err(MindError::NotInstalled { .. })
+        ));
+        // A matching source qualifier resolves.
+        let right = parse_item_ref("james/agents#skill:review").unwrap();
+        assert_eq!(resolve_installed(&m, &right).unwrap().kind, ItemKind::Skill);
     }
 
     #[test]

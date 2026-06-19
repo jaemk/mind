@@ -23,6 +23,13 @@ preserve the previous version until the new one is proven.
   swap are rolled back. Uninstall removes the recorded link in every home.
 - `LIFE-6` Re-installing an item replaces its store copy and link cleanly (the
   swap is idempotent for the same effective name).
+- `LIFE-41` Before anything is staged or swapped, every planned link target is
+  checked. A target that already exists and is not mind's own symlink (a regular
+  file, a directory, or a symlink pointing outside the store) is the user's, so
+  the install fails with `LinkOccupied` and touches nothing. A target that is
+  absent, or is a symlink into the store (mind's own, e.g. a reinstall), is
+  free to write. This keeps `learn` from silently deleting a user's file at the
+  link path.
 
 ## Upgrade (evolve)
 

@@ -105,7 +105,7 @@ impl Paths {
     }
 
     /// The agent homes items are linked into, in order: `$MIND_AGENT_HOMES` (a
-    /// `:`-separated path list), else `homes` from `~/.mind/config.toml`, else
+    /// `:`-separated path list), else `lobes` from `~/.mind/config.toml`, else
     /// `[claude_home]`. A leading `~` is expanded.
     pub fn agent_homes(&self) -> Result<Vec<PathBuf>> {
         if let Some(raw) = std::env::var_os("MIND_AGENT_HOMES") {

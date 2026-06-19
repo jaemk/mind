@@ -282,15 +282,9 @@ pub fn forget(paths: &Paths, item_ref: &str) -> Result<()> {
     let mut manifest = Manifest::load(paths)?;
     let parsed = parse_item_ref(item_ref)?;
 
-    let key = manifest
-        .items
-        .values()
-        .filter(|it| parsed.kind.is_none_or(|k| it.kind == k) && it.name == parsed.name)
-        .map(|it| it.key())
-        .next()
-        .ok_or_else(|| MindError::NotInstalled {
-            name: parsed.name.clone(),
-        })?;
+    // Honor the kind prefix and source qualifier, and error on an ambiguous bare
+    // name (e.g. one shared by a skill and an agent) rather than picking one.
+    let key = crate::resolve::resolve_installed(&manifest.items, &parsed)?.key();
 
     let item = manifest.items.remove(&key).expect("key just found");
     install::uninstall(paths, &item)?;
@@ -343,8 +337,10 @@ pub fn evolve(paths: &Paths, yes: bool, item_ref: Option<&str>) -> Result<()> {
 
     for installed in manifest.items.values() {
         if let Some(f) = &filter {
-            // Filter matches the installed (effective) name.
-            if f.name != installed.name || !f.kind.is_none_or(|k| k == installed.kind) {
+            // Limit to the matching installed item(s): the effective name, plus
+            // the kind prefix and source qualifier when the ref gives them. A ref
+            // may legitimately match several installed items, all of which evolve.
+            if !crate::resolve::installed_matches(installed, f) {
                 continue;
             }
         }
@@ -484,13 +480,7 @@ pub fn recall(paths: &Paths, sources: bool, item: Option<&str>) -> Result<()> {
     let manifest = Manifest::load(paths)?;
     if let Some(item_ref) = item {
         let parsed = parse_item_ref(item_ref)?;
-        let found = manifest
-            .items
-            .values()
-            .find(|it| parsed.kind.is_none_or(|k| it.kind == k) && it.name == parsed.name)
-            .ok_or_else(|| MindError::NotInstalled {
-                name: parsed.name.clone(),
-            })?;
+        let found = crate::resolve::resolve_installed(&manifest.items, &parsed)?;
         println!("{}", found.key());
         if let Some(d) = &found.description {
             println!("  desc    {d}");

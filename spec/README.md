@@ -25,7 +25,15 @@ and verified.
 | Curated super-source (`[discover].sources`, nested `as`) | done | DSC-38, DSC-39 |
 | Namespacing: prefix, `{{ns:}}` tokens, unguarded-ref warning | done | [namespacing.md](namespacing.md) |
 | Transactional install, upgrade, rename, uninstall, drift | done | [lifecycle.md](lifecycle.md) |
+| `forget`/`recall`/`evolve` honor kind + source qualifier, error on ambiguity | done | CLI-40, CLI-63, CLI-71 |
+| Clobber guard: refuse to overwrite a non-mind link target | done | LIFE-41 |
 | Release pipeline + Homebrew tap (tag-driven) | done | `.github/workflows/release.yml`, `Formula/mind.rb` |
+| `forget` glob selection | planned | CLI-41 |
+| `unmeld --forget` (purge installed items) | planned | CLI-22 |
+| `introspect --fix` (re-link missing symlinks) | planned | CLI-91 |
+| `sync --evolve` (refresh then upgrade) | planned | CLI-53 |
+| `probe`/`recall` `--kind` / `--source` filters | planned | CLI-83 |
+| Enforce `min-mind-version` | planned | DSC-40 |
 
 ## Documents
 

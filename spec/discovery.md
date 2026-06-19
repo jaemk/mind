@@ -81,3 +81,7 @@ sources = [
   source is registered independently and tracks its own upstream commit.
 - `DSC-39` A `[discover].sources` entry may set `as = "<prefix>"` to impose a
   namespace on that nested source (equivalent to `meld --as`).
+- `DSC-40` (planned) When a source's `[source].min-mind-version` is greater than
+  the running `mind` version, melding or scanning that source is an error
+  (`IncompatibleVersion`) rather than proceeding against a format it predates.
+  Currently the field is parsed but not enforced. Not yet implemented.

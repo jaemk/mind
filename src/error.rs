@@ -120,6 +120,11 @@ pub enum MindError {
     #[error("'{name}' is not installed")]
     NotInstalled { name: String },
 
+    #[error(
+        "{path} already exists and is not managed by mind; remove it (or `mind forget` the item) before installing"
+    )]
+    LinkOccupied { path: String },
+
     #[error("{item}: reference {{ns:{referent}}} does not match any item in source '{in_source}'")]
     BadReference {
         item: String,
