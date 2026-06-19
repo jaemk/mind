@@ -156,6 +156,19 @@ mod tests {
     }
 
     #[test]
+    fn expand_trims_token_and_leaves_unterminated_verbatim() {
+        // spec: NS-15
+        let s = sibs(&["dev"]);
+        // Whitespace inside the token is trimmed before the sibling lookup.
+        assert_eq!(
+            expand("{{ns:  dev  }}", &Some("jk".into()), &s).unwrap(),
+            "jk-dev"
+        );
+        // An unterminated token (no closing `}}`) is passed through unchanged.
+        assert_eq!(expand("see {{ns:dev", &None, &s).unwrap(), "see {{ns:dev");
+    }
+
+    #[test]
     fn unguarded_finds_bare_prose_refs_only() {
         let s = sibs(&["test", "planner"]);
         // 'test' appears in prose; 'planner' only inside a token (guarded).

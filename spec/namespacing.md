@@ -3,6 +3,35 @@
 Prefixing a source so its items do not collide with same-named items from other
 sources, and keeping intra-source references resolvable across a prefix.
 
+## Overview
+
+Two melded sources can each ship an item of the same name (both a `review`),
+which would collide at the same install path. A prefix namespaces a source so
+every item from it installs under `<prefix>-<name>`, keeping the two distinct.
+
+The prefix is an install-time transform, not part of an item's identity. The
+catalog holds bare names; the prefix is applied when an item is installed, so its
+effective name, store path, symlink, and ref all use it. An item's stable
+identity stays `(source, kind, bare_name)`, so a later prefix change reads as a
+rename of the same item rather than a new one (see lifecycle.md).
+
+Prefixing breaks references between items in the same source: the Claude harness
+resolves agents and skills by the name in the text at runtime, so "the dev agent"
+no longer resolves once `dev` installs as `jk-dev`. Authors write such references
+as `{{ns:name}}` tokens instead. On install, each token is expanded to the
+referent's effective name (bare when unprefixed, `<prefix>-name` when prefixed)
+and validated against the source's siblings. Expansion happens in the staging
+copy during the transactional install, so a bad reference fails before the live
+install is touched. The recorded content hash is of the source (token) form, not
+the expanded copy, so drift detection compares source with source.
+
+A source whose items reference siblings in bare prose (no token) breaks under a
+prefix. mind does not guess and rewrite prose, since sibling names are often
+common words; instead `meld` warns when it sees a likely unguarded reference and
+leaves the fix to the author.
+
+The rest of this document states these rules normatively.
+
 ## Effective prefix
 
 - `NS-1` A source's effective prefix is, in order: its consumer `alias` (from
@@ -28,6 +57,9 @@ at runtime. Prefixing changes installed names, so references must be rewritten.
   files are not scanned.
 - `NS-14` Expansion runs whether or not a prefix is in effect, so a token-using
   source installs correctly with or without a namespace.
+- `NS-15` Token edge cases: whitespace inside a token (`{{ns: name }}`) is
+  trimmed before the sibling lookup; an unterminated token (`{{ns:` with no
+  closing `}}`) is left verbatim rather than treated as a reference or an error.
 
 ## Unguarded-reference warning
 
