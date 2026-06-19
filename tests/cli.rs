@@ -290,6 +290,172 @@ fn probe_filters_by_substring() {
 }
 
 #[test]
+fn probe_matches_description_text() {
+    // spec: CLI-85
+    // The fixture's skill:review has description "Review the diff for bugs".
+    // Querying "bugs" is only present in the description, not the item name.
+    let sb = melded();
+    let r = sb.mind(&["probe", "bugs"]);
+    assert!(r.success, "probe failed: {}", r.stderr);
+    assert!(
+        r.stdout.contains("skill:review"),
+        "expected skill:review in output: {}",
+        r.stdout
+    );
+    // agent:dev description is "Implements a spec with tests" - no "bugs"
+    assert!(
+        !r.stdout.contains("agent:dev"),
+        "unexpected agent:dev in output: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn probe_query_is_case_insensitive() {
+    // spec: CLI-85
+    // "Review" (capitalized) matches item name "review" case-insensitively.
+    let sb = melded();
+    let r = sb.mind(&["probe", "REVIEW"]);
+    assert!(r.success, "probe failed: {}", r.stderr);
+    assert!(
+        r.stdout.contains("skill:review"),
+        "expected skill:review in output: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn probe_description_query_composes_with_kind_filter() {
+    // spec: CLI-85, CLI-83
+    // The agent:dev description contains "spec". Filter to agents only.
+    let sb = melded();
+    let r = sb.mind(&["probe", "--kind", "agent", "spec"]);
+    assert!(r.success, "probe failed: {}", r.stderr);
+    assert!(
+        r.stdout.contains("agent:dev"),
+        "expected agent:dev in output: {}",
+        r.stdout
+    );
+    // skill:review description mentions "diff" not "spec"; should be excluded
+    assert!(
+        !r.stdout.contains("skill:review"),
+        "unexpected skill:review in output: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn probe_description_query_composes_with_source_filter() {
+    // spec: CLI-85, CLI-83
+    // Implementor flagged this gap: --source composition with a
+    // description-only query had no integration test (only --kind did).
+    //
+    // Meld two sources. The standard fixture (`agents`) describes its review
+    // skill as "Review the diff for bugs". A second source (`tools`) carries a
+    // review skill whose description has the unique word "kubernetes", absent
+    // from every item in `agents`. Querying that word with --source must match
+    // the item in `tools` by description and exclude `agents` entirely.
+    let agents = melded();
+    let tools = Sandbox::named("tools");
+    tools.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\nname: review\ndescription: Deploy onto kubernetes clusters\n---\n# review skill\n",
+    );
+    assert!(
+        agents.mind(&["meld", &tools.source_spec()]).success,
+        "meld of second source failed"
+    );
+
+    // --source tools + the description-only query matches the tools item and
+    // names the tools source.
+    let in_tools = agents.mind(&["probe", "--source", "tools", "kubernetes"]);
+    assert!(in_tools.success, "probe failed: {}", in_tools.stderr);
+    assert!(
+        in_tools.stdout.contains("skill:review"),
+        "expected skill:review from tools: {}",
+        in_tools.stdout
+    );
+    assert!(
+        in_tools.stdout.contains("tools"),
+        "expected the tools source column: {}",
+        in_tools.stdout
+    );
+
+    // The same query scoped to the other source matches nothing: "kubernetes"
+    // is not in any `agents` item, so the source filter composes (it does not
+    // leak across sources).
+    let in_agents = agents.mind(&["probe", "--source", "agents", "kubernetes"]);
+    assert!(in_agents.success, "probe failed: {}", in_agents.stderr);
+    assert!(
+        !in_agents.stdout.contains("skill:review"),
+        "kubernetes must not match any agents item: {}",
+        in_agents.stdout
+    );
+    assert!(
+        in_agents.stdout.contains("no items match"),
+        "expected an empty-result note: {}",
+        in_agents.stdout
+    );
+}
+
+#[test]
+fn probe_query_matches_name_in_one_item_and_description_in_another() {
+    // spec: CLI-85
+    // A single query resolves via the NAME of one item and the DESCRIPTION of
+    // another in the same result set. "audit" is the skill's name and also
+    // appears only inside the agent's description, so both must be returned.
+    let sb = Sandbox::named("dual");
+    // skill:audit - "audit" only in the NAME.
+    sb.write_and_commit(
+        "skills/audit/SKILL.md",
+        "---\nname: audit\ndescription: Inspect changes carefully\n---\n# audit\n",
+    );
+    // agent:dev - "audit" only in the DESCRIPTION, not the name.
+    sb.write_and_commit(
+        "agents/dev.md",
+        "---\nname: dev\ndescription: Run an audit before shipping\n---\n# dev\n",
+    );
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+
+    let r = sb.mind(&["probe", "audit"]);
+    assert!(r.success, "probe failed: {}", r.stderr);
+    // Matched by name.
+    assert!(
+        r.stdout.contains("skill:audit"),
+        "expected skill:audit (name match): {}",
+        r.stdout
+    );
+    // Matched by description in a different item.
+    assert!(
+        r.stdout.contains("agent:dev"),
+        "expected agent:dev (description match): {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn probe_matches_substring_in_middle_of_word() {
+    // spec: CLI-85
+    // The match is a raw substring, not a word-boundary match: a query that is
+    // a fragment inside a longer word still matches.
+    let sb = Sandbox::named("frag");
+    sb.write_and_commit(
+        "agents/dev.md",
+        "---\nname: dev\ndescription: Performs refactoring of modules\n---\n# dev\n",
+    );
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+
+    // "factor" is in the middle of "refactoring".
+    let r = sb.mind(&["probe", "factor"]);
+    assert!(r.success, "probe failed: {}", r.stderr);
+    assert!(
+        r.stdout.contains("agent:dev"),
+        "expected mid-word substring match: {}",
+        r.stdout
+    );
+}
+
+#[test]
 fn learn_installs_and_creates_symlink() {
     // spec: CLI-30, STO-2, STO-14, LIFE-5
     let sb = melded();

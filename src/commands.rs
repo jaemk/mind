@@ -685,7 +685,7 @@ pub fn probe(
     let mut hits: Vec<&CatalogItem> = items
         .iter()
         .filter(|it| {
-            (q.is_empty() || it.effective_name().contains(q))
+            catalog::matches_query(it, q) // spec: CLI-85
                 && kind.is_none_or(|k| it.kind == k)
                 && source.is_none_or(|s| source_matches(&it.source, s))
         })

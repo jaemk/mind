@@ -57,6 +57,21 @@ impl CatalogItem {
     }
 }
 
+/// True when `query` matches the item by effective name or description,
+/// case-insensitively. An empty query matches everything. (spec: CLI-85)
+pub(crate) fn matches_query(item: &CatalogItem, query: &str) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+    let q = query.to_lowercase();
+    if item.effective_name().to_lowercase().contains(&q) {
+        return true;
+    }
+    item.description
+        .as_deref()
+        .is_some_and(|d| d.to_lowercase().contains(&q))
+}
+
 /// Scan every melded source for installable items.
 pub fn scan(paths: &Paths, registry: &Registry) -> Result<Vec<CatalogItem>> {
     let mut items = Vec::new();
@@ -280,4 +295,123 @@ fn file_name(p: &Path) -> String {
     p.file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::ItemKind;
+    use std::path::PathBuf;
+
+    fn make_test_item(name: &str, description: Option<&str>) -> CatalogItem {
+        CatalogItem {
+            kind: ItemKind::Skill,
+            name: name.to_string(),
+            source: "test-source".to_string(),
+            prefix: None,
+            path: PathBuf::from("/tmp/fake"),
+            description: description.map(|s| s.to_string()),
+            link_rel: None,
+        }
+    }
+
+    #[test]
+    fn empty_query_matches_all() {
+        // spec: CLI-85
+        let item = make_test_item("review", Some("Review the diff for bugs"));
+        assert!(matches_query(&item, ""));
+    }
+
+    #[test]
+    fn matches_by_effective_name() {
+        // spec: CLI-85
+        let item = make_test_item("review", Some("Review the diff for bugs"));
+        assert!(matches_query(&item, "review"));
+    }
+
+    #[test]
+    fn matches_by_description_when_name_does_not_contain_query() {
+        // spec: CLI-85
+        // "bugs" is only in the description, not the name
+        let item = make_test_item("review", Some("Review the diff for bugs"));
+        assert!(!item.effective_name().contains("bugs"));
+        assert!(matches_query(&item, "bugs"));
+    }
+
+    #[test]
+    fn match_is_case_insensitive_on_name() {
+        // spec: CLI-85
+        let item = make_test_item("Review", None);
+        assert!(matches_query(&item, "REVIEW"));
+        assert!(matches_query(&item, "review"));
+        assert!(matches_query(&item, "ReViEw"));
+    }
+
+    #[test]
+    fn match_is_case_insensitive_on_description() {
+        // spec: CLI-85
+        let item = make_test_item("x", Some("Implements a Spec with Tests"));
+        assert!(matches_query(&item, "SPEC"));
+        assert!(matches_query(&item, "spec"));
+    }
+
+    #[test]
+    fn no_match_when_query_absent_from_both_name_and_description() {
+        // spec: CLI-85
+        let item = make_test_item("review", Some("Review the diff for bugs"));
+        assert!(!matches_query(&item, "python"));
+    }
+
+    #[test]
+    fn no_match_when_description_is_none_and_name_does_not_match() {
+        // spec: CLI-85
+        let item = make_test_item("review", None);
+        assert!(!matches_query(&item, "bugs"));
+    }
+
+    #[test]
+    fn empty_description_does_not_match_a_nonempty_query() {
+        // spec: CLI-85
+        // Some("") is distinct from None: an empty description string must not
+        // spuriously match a non-empty query (it would if `contains` were
+        // reasoned about backwards). The empty *query* still matches (all),
+        // but a non-empty query against an empty description must not.
+        let item = make_test_item("x", Some(""));
+        assert!(matches_query(&item, ""));
+        assert!(!matches_query(&item, "anything"));
+    }
+
+    #[test]
+    fn whitespace_query_matches_a_description_that_contains_whitespace() {
+        // spec: CLI-85
+        // A non-empty query is a raw substring; it is not trimmed. A query of a
+        // single space matches a description containing a space but a name that
+        // has none.
+        let item = make_test_item("review", Some("Review the diff"));
+        assert!(!item.effective_name().contains(' '));
+        assert!(matches_query(&item, " "));
+    }
+
+    #[test]
+    fn substring_in_middle_of_word_matches() {
+        // spec: CLI-85
+        // Matching is substring, not word-boundary: a fragment inside a longer
+        // word matches both in the name and in the description.
+        let by_name = make_test_item("refactor", None);
+        assert!(matches_query(&by_name, "factor"));
+        let by_desc = make_test_item("x", Some("Performs refactoring"));
+        assert!(matches_query(&by_desc, "factor"));
+    }
+
+    #[test]
+    fn prefix_is_used_in_effective_name_match() {
+        // spec: CLI-85
+        let mut item = make_test_item("review", None);
+        item.prefix = Some("jk".to_string());
+        // effective_name() is "jk-review"
+        assert!(matches_query(&item, "jk-review"));
+        assert!(matches_query(&item, "jk"));
+        // "review" is a substring of "jk-review", so it also matches
+        assert!(matches_query(&item, "review"));
+    }
 }

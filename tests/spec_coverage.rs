@@ -34,8 +34,6 @@ const ALLOWLIST: &[&str] = &[
     "DSC-41", "STO-18", "CLI-17", "CLI-18", "CLI-55",
     //   review verb (author-side source validation)
     "CLI-130", "CLI-131", "CLI-132", "CLI-133",
-    //   probe matches description text
-    "CLI-85",
     //   self-update verb (in-place binary upgrade via the self_update crate)
     "CLI-140", "CLI-141", "CLI-142", "CLI-143",
     //   interactive TUI (probe default; see spec/tui.md)
