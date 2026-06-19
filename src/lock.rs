@@ -164,6 +164,174 @@ mod tests {
     }
 
     #[test]
+    fn exclusive_lock_excludes_a_second_exclusive_holder() {
+        // Hold an exclusive lock on one handle; a second handle's try_write must
+        // be refused while the first is held, then succeed once it is dropped.
+        // This is the core mutual-exclusion guarantee; it would fail if write()
+        // did not take a real OS-level exclusive lock.
+        // spec: STO-41 STO-42
+        let (paths, base) = temp_paths("exclexcl");
+        mkdir_p(&paths.mind_home).unwrap();
+        let lock_path = paths.lock_file();
+
+        let f1 = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        let f2 = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        let mut l1 = RwLock::new(f1);
+        let mut l2 = RwLock::new(f2);
+
+        let g1 = l1.write().expect("first exclusive lock");
+        assert!(
+            l2.try_write().is_err(),
+            "a second exclusive lock must be refused while the first is held"
+        );
+        drop(g1);
+        // After release the second exclusive lock must now succeed.
+        let _g2 = l2
+            .try_write()
+            .expect("second exclusive lock should succeed after the first is released");
+        cleanup(&base);
+    }
+
+    #[test]
+    fn exclusive_lock_excludes_a_shared_reader() {
+        // A held exclusive lock must block shared readers too: a reader must not
+        // observe a writer mid-update. try_read must be refused while the
+        // exclusive lock is held.
+        // spec: STO-41 STO-42
+        let (paths, base) = temp_paths("exclshared");
+        mkdir_p(&paths.mind_home).unwrap();
+        let lock_path = paths.lock_file();
+
+        let f1 = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        let f2 = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        let mut l1 = RwLock::new(f1);
+        let l2 = RwLock::new(f2);
+
+        let g1 = l1.write().expect("exclusive lock");
+        assert!(
+            l2.try_read().is_err(),
+            "a shared reader must be refused while an exclusive lock is held"
+        );
+        drop(g1);
+        let _g2 = l2
+            .try_read()
+            .expect("shared read should succeed after the exclusive lock is released");
+        cleanup(&base);
+    }
+
+    #[test]
+    fn shared_lock_excludes_an_exclusive_writer() {
+        // A held shared lock must block a would-be exclusive writer: the writer
+        // cannot begin a mutation while a reader holds the snapshot.
+        // spec: STO-41 STO-42
+        let (paths, base) = temp_paths("sharedexcl");
+        mkdir_p(&paths.mind_home).unwrap();
+        let lock_path = paths.lock_file();
+
+        let f1 = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        let f2 = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        let l1 = RwLock::new(f1);
+        let mut l2 = RwLock::new(f2);
+
+        let g1 = l1.read().expect("shared lock");
+        assert!(
+            l2.try_write().is_err(),
+            "an exclusive writer must be refused while a shared lock is held"
+        );
+        drop(g1);
+        let _g2 = l2
+            .try_write()
+            .expect("exclusive write should succeed after the shared lock is released");
+        cleanup(&base);
+    }
+
+    #[test]
+    fn exclusive_write_blocks_until_holder_releases() {
+        // End-to-end through the public API (open + write): a second exclusive
+        // acquisition must BLOCK (not error, not proceed) until the first is
+        // released. We prove blocking by ordering: thread B records the time it
+        // acquires, and must acquire only after thread A has held the lock for a
+        // measurable interval. A non-locking implementation would let B proceed
+        // immediately and the ordering invariant would fail.
+        // spec: STO-42
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
+        use std::time::{Duration, Instant};
+
+        let (paths, base) = temp_paths("blockwait");
+        mkdir_p(&paths.mind_home).unwrap();
+        let paths = Arc::new(paths);
+        let a_released = Arc::new(AtomicBool::new(false));
+
+        let hold = Duration::from_millis(300);
+        let p_a = Arc::clone(&paths);
+        let rel_a = Arc::clone(&a_released);
+        let a = std::thread::spawn(move || {
+            let mut lock = open(&p_a).expect("open A");
+            let guard = lock.write().expect("A exclusive");
+            // Hold long enough that B must observe the release ordering.
+            std::thread::sleep(hold);
+            rel_a.store(true, Ordering::SeqCst);
+            drop(guard);
+        });
+
+        // Give A a head start so it acquires first.
+        std::thread::sleep(Duration::from_millis(50));
+
+        let p_b = Arc::clone(&paths);
+        let rel_b = Arc::clone(&a_released);
+        let start = Instant::now();
+        let b = std::thread::spawn(move || {
+            let mut lock = open(&p_b).expect("open B");
+            let _guard = lock.write().expect("B exclusive");
+            // When B finally acquires, A must already have released.
+            assert!(
+                rel_b.load(Ordering::SeqCst),
+                "B acquired the exclusive lock before A released it (no mutual exclusion)"
+            );
+            start.elapsed()
+        });
+
+        a.join().unwrap();
+        let waited = b.join().unwrap();
+        assert!(
+            waited >= Duration::from_millis(200),
+            "B should have blocked roughly until A released; only waited {waited:?}"
+        );
+        cleanup(&base);
+    }
+
+    #[test]
     fn lock_failure_is_io_error_with_lock_path() {
         // When we cannot open the lock file (e.g. the path is a directory),
         // the error must be MindError::Io carrying the lock file path.

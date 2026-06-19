@@ -313,6 +313,79 @@ mod tests {
     }
 
     #[test]
+    fn atomic_write_errors_and_leaves_no_temp_when_dir_is_missing() {
+        // If the target's parent directory does not exist, the temp write fails.
+        // atomic_write must return an Io error (not panic) and must not leave a
+        // stray temp file behind (there is nowhere to leave it, but the cleanup
+        // path must run without error).
+        // spec: STO-43
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let missing_dir = std::env::temp_dir()
+            .join(format!("mind-paths-missing-{}-{n}", std::process::id()));
+        // Deliberately do NOT create missing_dir.
+        let target = missing_dir.join("data.json");
+
+        let result = Paths::atomic_write(&target, b"data");
+        match result {
+            Err(MindError::Io { .. }) => {}
+            other => panic!("expected Io error for missing parent dir, got {other:?}"),
+        }
+        assert!(
+            !target.exists(),
+            "target must not exist after a failed atomic_write"
+        );
+        assert!(
+            !missing_dir.exists(),
+            "atomic_write must not create the parent directory"
+        );
+    }
+
+    #[test]
+    fn atomic_write_preserves_existing_target_on_write_failure() {
+        // A crash/error mid-write must leave the previous file intact (STO-43:
+        // "a crash mid-write leaves the previous file intact"). We force the temp
+        // write to fail by making the target a path under a *file* (so the temp's
+        // parent is not a directory), and assert the original target is unchanged.
+        // spec: STO-43
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir()
+            .join(format!("mind-paths-failkeep-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // `blocker` is a regular file; treating it as a directory makes any write
+        // under it fail (ENOTDIR), exercising the temp-write error branch.
+        let blocker = dir.join("blocker");
+        std::fs::write(&blocker, b"i am a file").unwrap();
+        let target = blocker.join("data.json");
+
+        let result = Paths::atomic_write(&target, b"new");
+        assert!(
+            matches!(result, Err(MindError::Io { .. })),
+            "expected Io error when temp parent is a file, got {result:?}"
+        );
+        // The blocker file must be untouched (not clobbered by a temp file name).
+        assert_eq!(
+            std::fs::read(&blocker).unwrap(),
+            b"i am a file",
+            "unrelated sibling content must be preserved on failure"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn atomic_write_to_pathless_target_is_an_error() {
+        // A target with no parent (the filesystem root) cannot host a sibling
+        // temp; atomic_write must surface that as an Io error, not panic.
+        // spec: STO-43
+        let result = Paths::atomic_write(std::path::Path::new("/"), b"x");
+        assert!(
+            matches!(result, Err(MindError::Io { .. })),
+            "writing to a target with no usable parent must be an Io error, got {result:?}"
+        );
+    }
+
+    #[test]
     fn atomic_write_uses_same_directory_for_temp() {
         // The temp file must be in the same directory as the target so rename
         // is atomic (same filesystem).

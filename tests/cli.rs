@@ -1894,6 +1894,37 @@ fn concurrent_learn_commands_both_effects_survive() {
 }
 
 #[test]
+fn three_concurrent_learns_no_lost_update() {
+    // Three learns of distinct items race against one MIND_HOME. Each is a
+    // read-modify-write of manifest.json; without the exclusive lock at least one
+    // entry would be lost to a clobbering write. All three must survive.
+    // Repeat to make a lost update under a broken lock overwhelmingly likely.
+    // spec: STO-40 STO-41
+    for _ in 0..15 {
+        let sb = Sandbox::new();
+        let spec = sb.source_spec();
+        assert!(sb.mind(&["meld", &spec]).success);
+
+        let mind_home = &sb.mind_home;
+        let claude_home = &sb.claude_home;
+
+        let mut ca = spawn_mind(mind_home, claude_home, &["learn", "review"]);
+        let mut cb = spawn_mind(mind_home, claude_home, &["learn", "dev"]);
+        let mut cc = spawn_mind(mind_home, claude_home, &["learn", "style"]);
+
+        assert!(ca.wait().expect("wait a").success(), "learn review failed");
+        assert!(cb.wait().expect("wait b").success(), "learn dev failed");
+        assert!(cc.wait().expect("wait c").success(), "learn style failed");
+
+        let recall = sb.mind(&["recall"]);
+        assert!(recall.success, "recall failed: {}", recall.stderr);
+        assert!(recall.stdout.contains("skill:review"), "review lost: {}", recall.stdout);
+        assert!(recall.stdout.contains("agent:dev"), "dev lost: {}", recall.stdout);
+        assert!(recall.stdout.contains("rule:style"), "style lost: {}", recall.stdout);
+    }
+}
+
+#[test]
 fn concurrent_reader_and_writer_reader_does_not_see_torn_file() {
     // A `recall` (shared lock, reads sources.json / manifest.json) runs
     // concurrently with a `learn` (exclusive lock, writes manifest.json).
@@ -1907,18 +1938,39 @@ fn concurrent_reader_and_writer_reader_does_not_see_torn_file() {
     let mind_home = &sb.mind_home;
     let claude_home = &sb.claude_home;
 
-    // Run many rounds to increase the chance of interleaving.
-    for _ in 0..10 {
+    // Run many rounds to increase the chance of interleaving. Each round races a
+    // reader against both a learn (write) and the forget cleanup (another write),
+    // widening the window in which a torn read could occur.
+    for _ in 0..40 {
         let mut writer = spawn_mind(mind_home, claude_home, &["learn", "review"]);
-        let mut reader = spawn_mind(mind_home, claude_home, &["recall"]);
+        let reader1 = spawn_mind(mind_home, claude_home, &["recall"]);
+        let reader2 = spawn_mind(mind_home, claude_home, &["recall", "--sources"]);
 
         let ws = writer.wait().expect("wait writer");
-        let rs = reader.wait().expect("wait reader");
+        let r1 = reader1.wait_with_output().expect("wait reader1");
+        let r2 = reader2.wait_with_output().expect("wait reader2");
 
         assert!(ws.success(), "writer failed");
         // The reader may see "nothing learned" (before) or the item (after),
-        // but must not error (exit non-zero with a torn file).
-        assert!(rs.success(), "reader errored during concurrent write");
+        // but must never error: a torn manifest.json would surface as a Json
+        // parse error and a non-zero exit.
+        assert!(
+            r1.status.success(),
+            "recall errored during concurrent write: {}",
+            String::from_utf8_lossy(&r1.stderr)
+        );
+        assert!(
+            r2.status.success(),
+            "recall --sources errored during concurrent write: {}",
+            String::from_utf8_lossy(&r2.stderr)
+        );
+        // The reader must not have hit a parse failure even on a successful exit
+        // (defensive: a partial file that happened to parse to junk).
+        let err1 = String::from_utf8_lossy(&r1.stderr);
+        assert!(
+            !err1.contains("expected") && !err1.to_lowercase().contains("json"),
+            "reader saw a torn/partial file: {err1}"
+        );
 
         // Clean up for the next round.
         sb.mind(&["forget", "review"]);
