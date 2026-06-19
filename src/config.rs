@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{MindError, Result};
+use crate::paths::Paths;
 
 /// Persistent settings. Currently just the agent homes ("lobes") to link items
 /// into.
@@ -45,6 +46,6 @@ impl Config {
             path: file.clone(),
             source: e,
         })?;
-        std::fs::write(&file, text).map_err(|e| MindError::io(&file, e))
+        Paths::atomic_write(&file, text.as_bytes())
     }
 }

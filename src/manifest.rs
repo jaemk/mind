@@ -81,7 +81,7 @@ impl Manifest {
         let file = paths.manifest_file();
         let json =
             serde_json::to_vec_pretty(self).map_err(|e| MindError::json("manifest.json", e))?;
-        std::fs::write(&file, json).map_err(|e| MindError::io(&file, e))
+        Paths::atomic_write(&file, &json)
     }
 
     pub fn insert(&mut self, item: InstalledItem) {

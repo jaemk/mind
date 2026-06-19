@@ -174,7 +174,6 @@ impl Paths {
     /// Called by `source.rs`, `manifest.rs`, and `config.rs` once the
     /// mechanical shard wires them up; until then the unit tests exercise it.
     // spec: STO-43
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn atomic_write(target: &std::path::Path, bytes: &[u8]) -> Result<()> {
         let dir = target
             .parent()

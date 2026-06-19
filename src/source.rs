@@ -159,7 +159,7 @@ impl Registry {
         let file = paths.sources_file();
         let json =
             serde_json::to_vec_pretty(self).map_err(|e| MindError::json("sources.json", e))?;
-        std::fs::write(&file, json).map_err(|e| MindError::io(&file, e))
+        Paths::atomic_write(&file, &json)
     }
 
     pub fn find(&self, name: &str) -> Option<&Source> {
