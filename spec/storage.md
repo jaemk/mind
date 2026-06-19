@@ -33,6 +33,10 @@ The on-disk layout and the two persisted JSON files.
 - `STO-15` When `~/.mind/config.toml` does not exist, it is created with the
   default lobe (the `$CLAUDE_HOME` override if set, else `~/.claude`) on first
   use (any command that sets up the layout, or any `config` command).
+- `STO-16` An agent home given as a relative path (after `~` expansion) is
+  resolved to an absolute path against the current directory before items are
+  linked, so the link paths recorded in the manifest do not depend on the
+  working directory at a later command (e.g. an `uninstall` run elsewhere).
 
 ## Source registry (sources.json)
 
@@ -52,9 +56,8 @@ The on-disk layout and the two persisted JSON files.
 - `STO-20` The manifest maps `kind:effective_name` to an installed item.
 - `STO-21` Each installed item records: `kind`, `name` (effective), `bare_name`,
   `source`, `commit`, `hash` (of source content), `store` (path relative to the
-  mind root), `links` (the symlink path created in each agent home, one per home;
-  absolute when the home path is, since the home path is recorded verbatim after
-  `~` expansion), `description`.
+  mind root), `links` (absolute symlink paths, one per agent home; a relative
+  lobe is resolved to absolute first, see STO-16), `description`.
 - `STO-22` `(source, kind, bare_name)` is the item's stable identity (see
   lifecycle.md). `store` and `links` are its file registry, used by uninstall.
 - `STO-23` A missing manifest file is treated as empty.

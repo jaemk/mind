@@ -93,6 +93,25 @@ impl Sandbox {
         self.run(args, None, envs)
     }
 
+    /// Run `mind` with the child's working directory set to `cwd` (for testing
+    /// how relative paths are resolved).
+    fn mind_cwd(&self, args: &[&str], cwd: &Path) -> Run {
+        let out = Command::new(env!("CARGO_BIN_EXE_mind"))
+            .args(args)
+            .current_dir(cwd)
+            .env("MIND_HOME", &self.mind_home)
+            .env("CLAUDE_HOME", &self.claude_home)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .expect("run mind");
+        Run {
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            success: out.status.success(),
+        }
+    }
+
     fn run(&self, args: &[&str], input: Option<&str>, envs: &[(&str, &str)]) -> Run {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_mind"));
         cmd.args(args)
@@ -1651,6 +1670,62 @@ fn completions_emit_a_shell_script() {
 
     // An unknown shell is rejected by the arg parser.
     assert!(!sb.mind(&["completions", "tcsh"]).success);
+}
+
+#[test]
+fn relative_lobe_is_canonicalized_to_absolute() {
+    // spec: STO-16
+    let sb = Sandbox::new();
+    // Configure a *relative* lobe. mind must resolve it against the working
+    // directory at install time so the recorded link path is absolute and does
+    // not depend on the cwd at a later uninstall.
+    write(&sb.mind_home.join("config.toml"), "lobes = [\"rellobe\"]\n");
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+
+    // Learn with the child cwd set to the sandbox base, so "rellobe" -> <base>/rellobe.
+    let r = sb.mind_cwd(&["learn", "review"], &sb.base);
+    assert!(r.success, "{}", r.stderr);
+    let link = sb.base.join("rellobe/skills/review");
+    assert!(
+        std::fs::symlink_metadata(&link).is_ok(),
+        "link should be created at the resolved absolute path {link:?}"
+    );
+
+    // The recorded link path is absolute (not the relative "rellobe/...").
+    let detail = sb.mind(&["recall", "skill:review"]).stdout;
+    assert!(
+        detail.contains(&link.display().to_string()),
+        "recorded link should be the absolute path: {detail}"
+    );
+
+    // And forget, run from a *different* cwd, still removes it (the path was
+    // absolute, not cwd-relative).
+    assert!(sb.mind_cwd(&["forget", "review"], &sb.mind_home).success);
+    assert!(
+        std::fs::symlink_metadata(&link).is_err(),
+        "link should be gone"
+    );
+}
+
+#[test]
+fn unguarded_ref_warning_scans_all_files_of_an_item() {
+    // spec: NS-20
+    let sb = Sandbox::new();
+    // A skill whose bare prose reference to sibling `dev` lives in a secondary
+    // file, not SKILL.md. The warning must still catch it (scan is item-wide).
+    sb.write_and_commit(
+        "skills/lead/SKILL.md",
+        "---\nname: lead\ndescription: lead skill\n---\n# lead\n",
+    );
+    sb.write_and_commit("skills/lead/NOTES.md", "Delegate to the dev agent.\n");
+
+    let r = sb.mind(&["meld", &sb.source_spec(), "--as", "jk"]);
+    assert!(r.success, "{}", r.stderr);
+    assert!(
+        r.stderr.contains("skill:jk-lead") && r.stderr.contains("dev"),
+        "warning should cite a sibling ref found in a non-SKILL.md file: {}",
+        r.stderr
+    );
 }
 
 #[test]

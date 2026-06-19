@@ -117,7 +117,9 @@ fn meld_recursive(
 }
 
 /// Warn when a namespaced source references siblings in bare prose, which
-/// prefixing will break unless rewritten as `{{ns:name}}` tokens.
+/// prefixing will break unless rewritten as `{{ns:name}}` tokens. Scans every
+/// text file of each item (the whole skill directory, or the agent/rule file),
+/// matching the breadth of install-time `{{ns:}}` expansion.
 fn warn_unguarded_references(items: &[CatalogItem]) {
     // Only meaningful once a prefix is in effect.
     if !items.iter().any(|it| it.prefix.is_some()) {
@@ -126,11 +128,18 @@ fn warn_unguarded_references(items: &[CatalogItem]) {
     let siblings: std::collections::HashSet<String> =
         items.iter().map(|it| it.name.clone()).collect();
     for item in items {
-        let Ok(content) = std::fs::read_to_string(meta_path(item)) else {
-            continue;
-        };
-        let mut refs = crate::namespace::unguarded_refs(&content, &siblings);
-        refs.retain(|r| r != &item.name); // self-mentions are fine
+        let mut refs: Vec<String> = Vec::new();
+        for file in item_files(item) {
+            let Ok(content) = std::fs::read_to_string(&file) else {
+                continue; // skip non-UTF-8 / unreadable files
+            };
+            for r in crate::namespace::unguarded_refs(&content, &siblings) {
+                // Self-mentions are fine; dedup across files.
+                if r != item.name && !refs.contains(&r) {
+                    refs.push(r);
+                }
+            }
+        }
         if !refs.is_empty() {
             eprintln!(
                 "warning: {} references sibling(s) in prose: {}; prefixing may break them at runtime (use {{{{ns:name}}}})",
@@ -141,11 +150,32 @@ fn warn_unguarded_references(items: &[CatalogItem]) {
     }
 }
 
-/// The file whose text describes/uses an item (SKILL.md for skills).
-fn meta_path(item: &CatalogItem) -> std::path::PathBuf {
-    match item.kind {
-        crate::error::ItemKind::Skill => item.path.join("SKILL.md"),
-        _ => item.path.clone(),
+/// Every text file belonging to an item: all files under a skill directory, or
+/// the single agent/rule `.md` file. Sorted for deterministic warning output.
+fn item_files(item: &CatalogItem) -> Vec<std::path::PathBuf> {
+    if item.path.is_dir() {
+        let mut files = Vec::new();
+        collect_files(&item.path, &mut files);
+        files.sort();
+        files
+    } else {
+        vec![item.path.clone()]
+    }
+}
+
+/// Recursively collect every file under `dir` (best-effort; unreadable dirs are
+/// skipped, since this only feeds the advisory warning).
+fn collect_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files(&path, out);
+        } else {
+            out.push(path);
+        }
     }
 }
 

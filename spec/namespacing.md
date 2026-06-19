@@ -31,9 +31,11 @@ at runtime. Prefixing changes installed names, so references must be rewritten.
 
 ## Unguarded-reference warning
 
-- `NS-20` When melding a source with a prefix in effect, each item's text is
-  scanned for sibling names that appear in bare prose (outside any `{{ns:}}`
-  token), and each such item is reported as a warning.
+- `NS-20` When melding a source with a prefix in effect, every text file of each
+  item (the whole skill directory, or the agent/rule file) is scanned for sibling
+  names that appear in bare prose (outside any `{{ns:}}` token), matching the
+  breadth of install-time expansion; each item with such a reference is reported
+  as a warning.
 - `NS-21` Matching is whole-word (alphanumeric, `_`, and `-` are word
   characters); an item's own name is not reported against itself.
 - `NS-22` The warning is advisory and heuristic: it does not fail `meld` and does

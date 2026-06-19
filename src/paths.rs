@@ -106,24 +106,26 @@ impl Paths {
 
     /// The agent homes items are linked into, in order: `$MIND_AGENT_HOMES` (a
     /// `:`-separated path list), else `lobes` from `~/.mind/config.toml`, else
-    /// `[claude_home]`. A leading `~` is expanded.
+    /// `[claude_home]`. A leading `~` is expanded, and a relative path is resolved
+    /// to absolute against the current directory, so the link paths recorded in
+    /// the manifest never depend on the working directory at a later uninstall.
     pub fn agent_homes(&self) -> Result<Vec<PathBuf>> {
         if let Some(raw) = std::env::var_os("MIND_AGENT_HOMES") {
-            let homes: Vec<PathBuf> = raw
+            let homes = raw
                 .to_string_lossy()
                 .split(':')
                 .filter(|p| !p.is_empty())
-                .map(expand_home)
-                .collect();
+                .map(absolute_home)
+                .collect::<Result<Vec<_>>>()?;
             if !homes.is_empty() {
                 return Ok(homes);
             }
         }
         let configured = Config::load(&self.mind_home)?.lobes;
         if !configured.is_empty() {
-            return Ok(configured.iter().map(|h| expand_home(h)).collect());
+            return configured.iter().map(|h| absolute_home(h)).collect();
         }
-        Ok(vec![self.claude_home.clone()])
+        Ok(vec![make_absolute(self.claude_home.clone())?])
     }
 
     /// The default lobe written into a fresh config: the `$CLAUDE_HOME` override
@@ -173,7 +175,44 @@ fn expand_home(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
+/// Expand `~` and then resolve a relative agent-home path to an absolute one.
+fn absolute_home(path: &str) -> Result<PathBuf> {
+    make_absolute(expand_home(path))
+}
+
+/// Resolve a path to absolute against the current directory, leaving an
+/// already-absolute path unchanged. Does not touch the filesystem (no symlink
+/// resolution), so it works for a home that does not exist yet.
+fn make_absolute(path: PathBuf) -> Result<PathBuf> {
+    if path.is_absolute() {
+        return Ok(path);
+    }
+    let cwd = std::env::current_dir().map_err(|e| MindError::io(".", e))?;
+    Ok(cwd.join(path))
+}
+
 /// `mkdir -p` that tags failures with the offending path.
 pub fn mkdir_p(path: &Path) -> Result<()> {
     std::fs::create_dir_all(path).map_err(|e| MindError::io(path, e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn absolute_home_resolves_relative_paths() {
+        // spec: STO-16
+        let abs = absolute_home("rellobe").unwrap();
+        assert!(
+            abs.is_absolute(),
+            "relative lobe should become absolute: {abs:?}"
+        );
+        assert!(abs.ends_with("rellobe"));
+        // An already-absolute path is unchanged.
+        assert_eq!(
+            absolute_home("/tmp/lobe").unwrap(),
+            PathBuf::from("/tmp/lobe")
+        );
+    }
 }
