@@ -37,13 +37,15 @@ maintained by hand.
 |---------|------|
 | `meld <repo>` | clone a source repo and register it |
 | `unmeld <name>` | drop a source |
-| `learn <item>` | copy item to the store, symlink into `~/.claude` |
+| `learn <item>` | copy item to the store, symlink into each agent home (lobe) |
 | `forget <item>` | remove symlink + store copy |
 | `sync` | fetch every source, refresh recorded commit |
 | `evolve [--yes] [item]` | report hash/commit deltas, then (on `--yes` or a `[y/N]` yes) re-link |
 | `recall [--sources] [item]` | what's installed / source list / item details |
 | `probe [query]` | search melded catalogs |
 | `introspect` | report drift, broken symlinks, unsynced sources |
+| `config show` / `config lobes ...` | view config / manage agent homes (lobes) |
+| `completions <shell>` / `man` | shell completion script / roff man page |
 
 ## Layout
 

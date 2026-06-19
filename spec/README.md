@@ -13,7 +13,7 @@ and verified.
 
 | Feature | Status | Spec |
 |---------|--------|------|
-| Core verbs (meld, learn, forget, sync, evolve, recall, probe, introspect) | done | [cli.md](cli.md) |
+| Core verbs (meld, unmeld, learn, forget, sync, evolve, recall, probe, introspect) | done | [cli.md](cli.md) |
 | `learn` glob selection + `--dry-run`; `probe` install/hash; aligned columns | done | CLI-31, CLI-32, CLI-33, CLI-81, CLI-82 |
 | On-disk layout, source registry, manifest + file registry | done | [storage.md](storage.md) |
 | Multiple agent homes (link into all configured dirs) | done | STO-14, LIFE-40 |
