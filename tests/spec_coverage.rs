@@ -29,8 +29,7 @@ const ALLOWLIST: &[&str] = &[
     // with stable IDs ahead of implementation. Each must move to a citing test
     // when built, at which point it is removed from this allowlist.
     //   version pinning: now implemented; IDs removed from allowlist and cited in tests.
-    //   review verb (author-side source validation)
-    "CLI-130", "CLI-131", "CLI-132", "CLI-133",
+    //   review verb: now implemented; IDs removed from allowlist and cited in tests.
     //   self-update verb (in-place binary upgrade via the self_update crate)
     "CLI-140", "CLI-141", "CLI-142", "CLI-143",
     //   interactive TUI (probe default; see spec/tui.md)

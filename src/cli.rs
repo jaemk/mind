@@ -170,6 +170,21 @@ pub enum Command {
         json: bool,
     },
 
+    /// Validate a source for publishing (author-side, read-only).
+    ///
+    /// `<target>` may be a local path, a melded-source selector (same forms as
+    /// `unmeld`), or a repo spec (same forms as `meld`). A repo spec is
+    /// shallow-cloned to a temp area and removed afterward.
+    Review {
+        /// The source to validate: a local path, melded-source selector, or repo spec.
+        target: String,
+
+        /// Evaluate the source under this prospective prefix (affects effective
+        /// names, `{{ns:}}` expansion, and the unguarded-reference scan).
+        #[arg(long = "as", value_name = "PREFIX")]
+        alias: Option<String>,
+    },
+
     /// Diagnose drift, broken symlinks, and unsynced sources.
     Introspect {
         /// Repair what is fixable without changing versions (recreate missing links).

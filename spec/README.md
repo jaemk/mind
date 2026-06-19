@@ -40,7 +40,7 @@ and verified.
 | Shell completions + man page | done | CLI-120, CLI-121 |
 | Scan roots: `[source].roots` + `meld --root` (monorepo/subtree sources) | done | DSC-50, DSC-51, DSC-52, DSC-53, STO-17, CLI-16 |
 | Version pinning: `--follow-branch`/`--pin-tag`/`--pin-ref` + `[source]` directive | done | DSC-41, STO-18, CLI-17, CLI-18, CLI-55 |
-| `review` verb: author-side source validation | planned | CLI-130, CLI-131, CLI-132, CLI-133 |
+| `review` verb: author-side source validation | done | CLI-130, CLI-131, CLI-132, CLI-133 |
 | `self-update` verb: in-place upgrade of the `mind` binary (via the `self_update` crate) | planned | CLI-140, CLI-141, CLI-142, CLI-143 |
 | Concurrency: global advisory lock + atomic registry writes (via `fd-lock`) | done | STO-40, STO-41, STO-42, STO-43 |
 | `probe` matches description text, not just name | done | CLI-85 |

@@ -1007,6 +1007,45 @@ pub fn introspect(paths: &Paths, fix: bool, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// `mind review <target> [--as <prefix>]` — validate a source for publishing.
+///
+/// Read-only. Collects hard errors and advisory findings; hard errors cause a
+/// non-zero exit (CLI-132). Installs nothing and changes nothing on disk.
+///
+/// spec: CLI-130, CLI-131, CLI-132, CLI-133
+pub fn review(paths: &Paths, target: &str, alias: Option<String>) -> Result<()> {
+    let result = crate::review::review(paths, target, alias)?;
+
+    // Print hard findings first, then advisory.
+    for f in &result.hard {
+        eprintln!("error [{}]: {}", f.kind, f.message);
+    }
+    for f in &result.advisory {
+        println!("advisory [{}]: {}", f.kind, f.message);
+    }
+
+    if result.hard.is_empty() {
+        if result.advisory.is_empty() {
+            println!("review: no issues found");
+        } else {
+            println!(
+                "review: {} advisory finding(s); source is publishable",
+                result.advisory.len()
+            );
+        }
+        Ok(())
+    } else {
+        println!(
+            "\nreview: {} hard error(s), {} advisory finding(s)",
+            result.hard.len(),
+            result.advisory.len()
+        );
+        Err(crate::error::MindError::ReviewFailed {
+            hard: result.hard.len(),
+        })
+    }
+}
+
 /// `mind config show` — print the config file location and its key/value pairs.
 pub fn config_show(paths: &Paths) -> Result<()> {
     paths.ensure_config()?;

@@ -174,6 +174,9 @@ pub enum MindError {
         kind: ItemKind,
         name: String,
     },
+
+    #[error("review found {hard} hard error(s); see the findings above")]
+    ReviewFailed { hard: usize },
 }
 
 fn status_suffix(status: Option<ExitStatus>) -> String {

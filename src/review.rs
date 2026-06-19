@@ -1,0 +1,1016 @@
+//! Author-side source validation: `mind review <target>`.
+//!
+//! Validates a source before it is published or melded, surfacing every problem
+//! that would otherwise only appear at meld/install time. Read-only; installs
+//! nothing and changes nothing on disk.
+//!
+//! spec: CLI-130, CLI-131, CLI-132, CLI-133
+
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+
+use crate::catalog::{scan_source_at, CatalogItem};
+use crate::error::{MindError, Result};
+use crate::git;
+use crate::mindfile::MindToml;
+use crate::paths::{self, Paths};
+use crate::resolve::source_matches;
+use crate::source::{Registry, Source, parse_spec};
+
+/// A single finding from a review run.
+#[derive(Debug)]
+pub struct Finding {
+    /// Machine-stable tag.
+    pub kind: &'static str,
+    /// Human-readable message.
+    pub message: String,
+}
+
+impl Finding {
+    fn hard(kind: &'static str, message: impl Into<String>) -> Self {
+        Finding {
+            kind,
+            message: message.into(),
+        }
+    }
+
+    fn advisory(kind: &'static str, message: impl Into<String>) -> Self {
+        Finding {
+            kind,
+            message: message.into(),
+        }
+    }
+}
+
+/// The result of a review run.
+pub struct ReviewResult {
+    pub hard: Vec<Finding>,
+    pub advisory: Vec<Finding>,
+}
+
+/// `mind review <target> [--as <prefix>]`
+///
+/// Returns Ok(ReviewResult) where the hard and advisory findings are collected.
+/// The caller decides whether to exit non-zero (any hard findings => non-zero).
+///
+/// spec: CLI-130, CLI-131, CLI-132, CLI-133
+pub fn review(paths: &Paths, target: &str, alias: Option<String>) -> Result<ReviewResult> {
+    let (source_dir, _temp_guard) = resolve_target(paths, target, &alias)?;
+    run_checks(paths, &source_dir, alias)
+}
+
+/// Resolve `target` to a source directory. Returns the path and an optional
+/// temp-dir guard that removes the cloned directory when dropped. The guard is
+/// `Some` only for remote-spec targets.
+///
+/// Precedence: exact/suffix registry match > local path > remote spec.
+/// spec: CLI-130
+fn resolve_target(
+    paths: &Paths,
+    target: &str,
+    alias: &Option<String>,
+) -> Result<(PathBuf, Option<TempDirGuard>)> {
+    // Try registry match first (exact or suffix).
+    // This covers both the melded-selector case and the "owner/repo" ambiguity.
+    if let Some(dir) = try_registry_match(paths, target)? {
+        return Ok((dir, None));
+    }
+
+    // Parse as a spec (local path or remote).
+    let source = parse_spec(target)?;
+
+    // Local path: the URL is the filesystem path; no clone needed.
+    if source.host == "local" {
+        let dir = PathBuf::from(&source.url);
+        if !dir.is_dir() {
+            return Err(MindError::Io {
+                path: dir,
+                source: std::io::Error::new(std::io::ErrorKind::NotFound, "not a directory"),
+            });
+        }
+        let _ = alias; // alias is applied at check time, not here
+        return Ok((dir, None));
+    }
+
+    // Remote spec: shallow-clone to a temp dir, register a drop guard.
+    paths.ensure_layout()?;
+    let tmp = paths.tmp_dir().join(format!(
+        "review-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos()
+    ));
+    paths::mkdir_p(&tmp)?;
+    let guard = TempDirGuard(tmp.clone());
+
+    git::clone(&source.url, &tmp)?;
+    Ok((tmp, Some(guard)))
+}
+
+/// Look up `target` as a registry selector. Returns the clone dir if found.
+fn try_registry_match(paths: &Paths, target: &str) -> Result<Option<PathBuf>> {
+    let registry = Registry::load(paths)?;
+    let matches: Vec<&Source> = registry
+        .sources
+        .iter()
+        .filter(|s| source_matches(&s.name, target))
+        .collect();
+
+    match matches.as_slice() {
+        [] => Ok(None),
+        [only] => {
+            let dir = only.clone_dir(paths);
+            Ok(Some(dir))
+        }
+        many => Err(MindError::AmbiguousSource {
+            query: target.to_string(),
+            candidates: many.iter().map(|s| s.name.clone()).collect(),
+        }),
+    }
+}
+
+/// Run all checks against the source directory. Returns collected findings.
+///
+/// spec: CLI-131, CLI-132, CLI-133
+fn run_checks(
+    _paths: &Paths,
+    source_dir: &Path,
+    alias: Option<String>,
+) -> Result<ReviewResult> {
+    let mut hard: Vec<Finding> = Vec::new();
+    let mut advisory: Vec<Finding> = Vec::new();
+
+    // --- Check 1: mind.toml parse + schema ---
+    // A malformed or schema-violating mind.toml is a hard error (CLI-132).
+    let mindfile = match MindToml::load(source_dir) {
+        Ok(mf) => mf,
+        Err(e) => {
+            hard.push(Finding::hard(
+                "toml-parse-error",
+                format!("mind.toml error: {e}"),
+            ));
+            return Ok(ReviewResult { hard, advisory });
+        }
+    };
+
+    // --- Check 2: conflicting [source] pin directive ---
+    // Two pin directives is a hard error (CLI-132).
+    if let Some(ref mf) = mindfile {
+        let toml_path = source_dir.join("mind.toml");
+        if let Err(e) = mf.source.pin_directive(&toml_path) {
+            hard.push(Finding::hard(
+                "conflicting-pin",
+                format!("{e}"),
+            ));
+            // Don't abort here; other checks may still be useful.
+        }
+    }
+
+    // --- Check 3: catalog scan (version gate + unknown kind) ---
+    // Build a synthetic source for scanning. Use scan_source_at so we can pass
+    // the actual source_dir directly, bypassing the clone_dir() path resolution
+    // that catalog::scan uses (which would require the dir to live at the
+    // standard sources/<host>/<owner>/<repo> location).
+    let source = build_source(source_dir, &mindfile, alias);
+
+    // Scan. IncompatibleVersion and unknown-kind are hard errors (CLI-132).
+    let mut items: Vec<CatalogItem> = Vec::new();
+    match scan_source_at(source_dir, &source, &mut items) {
+        Ok(()) => {}
+        Err(MindError::IncompatibleVersion {
+            ref source_name,
+            ref required,
+            ref running,
+        }) => {
+            hard.push(Finding::hard(
+                "incompatible-version",
+                format!(
+                    "source '{}' requires mind >= {required}; this is mind {running}",
+                    source_name
+                ),
+            ));
+            return Ok(ReviewResult { hard, advisory });
+        }
+        Err(MindError::MindToml { ref msg, .. }) if msg.contains("unknown item kind") => {
+            hard.push(Finding::hard(
+                "unknown-kind",
+                format!("mind.toml error: {msg}"),
+            ));
+            return Ok(ReviewResult { hard, advisory });
+        }
+        Err(e) => {
+            hard.push(Finding::hard(
+                "scan-error",
+                format!("scan error: {e}"),
+            ));
+            return Ok(ReviewResult { hard, advisory });
+        }
+    };
+
+    // --- Check 4: missing descriptions (advisory) ---
+    // CLI-132: missing description is advisory only.
+    for item in &items {
+        if item.description.is_none() {
+            advisory.push(Finding::advisory(
+                "missing-description",
+                format!("{}: no description in frontmatter or mind.toml", item.key()),
+            ));
+        }
+    }
+
+    // --- Check 5: {{ns:}} token resolution (hard error) ---
+    // An unresolved {{ns:}} token would be a BadReference at install time.
+    // spec: CLI-132
+    let source_name = source.name.clone();
+    let siblings = siblings_of_source(&items, &source_name);
+    let prefix = source.alias.clone().or_else(|| {
+        mindfile
+            .as_ref()
+            .and_then(|m| m.source.prefix.clone())
+    });
+
+    for item in &items {
+        for file in item_files(item) {
+            let content = match std::fs::read_to_string(&file) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            if let Err(bad_ref) = crate::namespace::expand(&content, &prefix, &siblings) {
+                hard.push(Finding::hard(
+                    "bad-reference",
+                    format!(
+                        "{}: {{{{ns:{}}}}} does not resolve to any sibling in this source",
+                        item.key(),
+                        bad_ref
+                    ),
+                ));
+            }
+        }
+    }
+
+    // --- Check 6: unguarded prose references (advisory, only when prefix in effect) ---
+    // CLI-132: advisory; CLI-133: only when a prefix applies.
+    if prefix.is_some() {
+        for item in &items {
+            let mut refs: Vec<String> = Vec::new();
+            for file in item_files(item) {
+                let Ok(content) = std::fs::read_to_string(&file) else {
+                    continue;
+                };
+                for r in crate::namespace::unguarded_refs(&content, &siblings) {
+                    if r != item.name && !refs.contains(&r) {
+                        refs.push(r);
+                    }
+                }
+            }
+            if !refs.is_empty() {
+                advisory.push(Finding::advisory(
+                    "unguarded-reference",
+                    format!(
+                        "{}: references sibling(s) in prose: {}; prefixing may break them at runtime (use {{{{ns:name}}}})",
+                        item.key(),
+                        refs.join(", ")
+                    ),
+                ));
+            }
+        }
+    }
+
+    Ok(ReviewResult { hard, advisory })
+}
+
+/// Build a synthetic `Source` for the directory being reviewed.
+fn build_source(
+    source_dir: &Path,
+    mindfile: &Option<MindToml>,
+    alias: Option<String>,
+) -> Source {
+    // Derive a source-like identity from the path.
+    let url = source_dir.to_string_lossy().into_owned();
+    let mut comps = url.trim_end_matches('/').rsplit('/');
+    let repo = comps
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("repo")
+        .to_string();
+    let owner = comps
+        .next()
+        .filter(|s| !s.is_empty() && *s != "." && *s != "..")
+        .unwrap_or("local")
+        .to_string();
+
+    let description = mindfile
+        .as_ref()
+        .and_then(|m| m.source.description.clone());
+
+    Source {
+        name: format!("local/{owner}/{repo}"),
+        url: url.clone(),
+        host: "local".to_string(),
+        owner,
+        repo,
+        commit: None,
+        description,
+        alias,
+        pin: crate::source::Pin::default(),
+        roots: None,
+    }
+}
+
+/// The set of bare item names for the given source, for reference validation.
+fn siblings_of_source(items: &[CatalogItem], source: &str) -> HashSet<String> {
+    items
+        .iter()
+        .filter(|it| it.source == source)
+        .map(|it| it.name.clone())
+        .collect()
+}
+
+/// All text files for an item: every file under a skill dir, or the single
+/// agent/rule file.
+pub(crate) fn item_files(item: &CatalogItem) -> Vec<PathBuf> {
+    if item.path.is_dir() {
+        let mut files = Vec::new();
+        collect_files(&item.path, &mut files);
+        files.sort();
+        files
+    } else {
+        vec![item.path.clone()]
+    }
+}
+
+/// Recursively collect every file under `dir`.
+pub(crate) fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files(&path, out);
+        } else {
+            out.push(path);
+        }
+    }
+}
+
+/// A RAII guard that removes a temp directory on drop.
+struct TempDirGuard(PathBuf);
+
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::paths::Paths;
+    use crate::source::Pin;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static UNIT_COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    struct TmpDir(PathBuf);
+    impl TmpDir {
+        fn new() -> Self {
+            let n = UNIT_COUNTER.fetch_add(1, Ordering::SeqCst);
+            let p = std::env::temp_dir()
+                .join(format!("mind-review-unit-{}-{n}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&p);
+            std::fs::create_dir_all(&p).unwrap();
+            TmpDir(p)
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl Drop for TmpDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn write_file(path: &Path, contents: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+
+    fn paths_for(base: &Path) -> Paths {
+        Paths {
+            mind_home: base.to_path_buf(),
+            claude_home: base.join("claude"),
+        }
+    }
+
+    /// Build a registry Source pointing at `clone_dir` and a Paths that sees it.
+    fn make_source(name: &str, clone_dir: &Path) -> Source {
+        Source {
+            name: name.to_string(),
+            url: clone_dir.to_string_lossy().into_owned(),
+            host: "local".to_string(),
+            owner: "test".to_string(),
+            repo: name.rsplit('/').next().unwrap_or(name).to_string(),
+            commit: None,
+            description: None,
+            alias: None,
+            pin: Pin::default(),
+            roots: None,
+        }
+    }
+
+    // --- target resolution precedence (CLI-130) ---
+
+    /// When a bare `owner/repo`-style string matches a registry entry, it must
+    /// resolve via the registry (not be re-parsed as a spec).
+    /// spec: CLI-130
+    #[test]
+    fn registry_match_beats_spec_for_ambiguous_target() {
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+
+        // Build a minimal registry with one source whose name ends in "agents".
+        let source_dir = base.join("sources/local/test/agents");
+        write_file(
+            &source_dir.join("skills/review/SKILL.md"),
+            "---\ndescription: review\n---\n# review\n",
+        );
+
+        // Write a sources.json pointing at the source dir.
+        let registry = crate::source::Registry {
+            sources: vec![make_source("local/test/agents", &source_dir)],
+        };
+        let paths = paths_for(base);
+        std::fs::create_dir_all(base.join("sources")).unwrap();
+        registry.save(&paths).unwrap();
+
+        // "agents" is a suffix match on "local/test/agents" in the registry.
+        let result = try_registry_match(&paths, "agents").unwrap();
+        assert!(
+            result.is_some(),
+            "suffix match in registry must return the clone dir"
+        );
+        let dir = result.unwrap();
+        assert!(
+            dir.ends_with("agents"),
+            "should resolve to the registered clone dir: {dir:?}"
+        );
+    }
+
+    /// A target that matches no registry entry is returned as None, so the
+    /// caller can fall through to spec/path parsing.
+    /// spec: CLI-130
+    #[test]
+    fn unknown_target_returns_none_from_registry_match() {
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let paths = paths_for(base);
+
+        let result = try_registry_match(&paths, "owner/nonexistent").unwrap();
+        assert!(result.is_none(), "no match should give None");
+    }
+
+    // --- hard vs advisory classification (CLI-132) ---
+
+    /// A source with all valid items and descriptions has no findings at all.
+    /// spec: CLI-130, CLI-131
+    #[test]
+    fn clean_source_has_no_findings() {
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let source_dir = base.join("src");
+        write_file(
+            &source_dir.join("skills/review/SKILL.md"),
+            "---\ndescription: Review the diff\n---\n# review\n",
+        );
+        let paths = paths_for(base);
+
+        let result = run_checks(&paths, &source_dir, None).unwrap();
+        assert!(result.hard.is_empty(), "expected no hard findings: {:?}", result.hard);
+        assert!(
+            result.advisory.is_empty(),
+            "expected no advisory findings: {:?}",
+            result.advisory
+        );
+    }
+
+    /// Missing description is advisory, not hard.
+    /// spec: CLI-132
+    #[test]
+    fn missing_description_is_advisory() {
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let source_dir = base.join("src");
+        write_file(
+            &source_dir.join("agents/dev.md"),
+            "# dev agent\nno frontmatter here\n",
+        );
+        let paths = paths_for(base);
+
+        let result = run_checks(&paths, &source_dir, None).unwrap();
+        assert!(result.hard.is_empty(), "missing description must not be hard");
+        assert!(
+            result.advisory.iter().any(|f| f.kind == "missing-description"),
+            "expected missing-description advisory: {:?}",
+            result.advisory
+        );
+    }
+
+    /// A malformed mind.toml (TOML parse error) is a hard error.
+    /// spec: CLI-132
+    #[test]
+    fn malformed_toml_is_hard_error() {
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let source_dir = base.join("src");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(source_dir.join("mind.toml"), "[[[[bad toml").unwrap();
+        let paths = paths_for(base);
+
+        let result = run_checks(&paths, &source_dir, None).unwrap();
+        assert!(
+            !result.hard.is_empty(),
+            "malformed TOML must produce a hard finding"
+        );
+        assert!(
+            result.hard.iter().any(|f| f.kind == "toml-parse-error"),
+            "expected toml-parse-error: {:?}",
+            result.hard
+        );
+    }
+
+    /// An unknown item kind in [[items]] is a hard error.
+    /// spec: CLI-132
+    #[test]
+    fn unknown_item_kind_is_hard_error() {
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let source_dir = base.join("src");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(
+            source_dir.join("mind.toml"),
+            "[[items]]\nkind = \"spell\"\nname = \"x\"\npath = \"x.md\"\n",
+        )
+        .unwrap();
+        let paths = paths_for(base);
+
+        let result = run_checks(&paths, &source_dir, None).unwrap();
+        assert!(
+            !result.hard.is_empty(),
+            "unknown kind must produce a hard finding"
+        );
+        assert!(
+            result.hard.iter().any(|f| f.kind == "unknown-kind"),
+            "expected unknown-kind: {:?}",
+            result.hard
+        );
+    }
+
+    /// A conflicting [source] pin directive is a hard error.
+    /// spec: CLI-132
+    #[test]
+    fn conflicting_pin_is_hard_error() {
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let source_dir = base.join("src");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(
+            source_dir.join("mind.toml"),
+            "[source]\nfollow-branch = \"main\"\npin-tag = \"v1.0\"\n",
+        )
+        .unwrap();
+        let paths = paths_for(base);
+
+        let result = run_checks(&paths, &source_dir, None).unwrap();
+        assert!(
+            !result.hard.is_empty(),
+            "conflicting pin must produce a hard finding"
+        );
+        assert!(
+            result.hard.iter().any(|f| f.kind == "conflicting-pin"),
+            "expected conflicting-pin: {:?}",
+            result.hard
+        );
+    }
+
+    /// An unresolved {{ns:}} token is a hard error.
+    /// spec: CLI-132
+    #[test]
+    fn bad_ns_token_is_hard_error() {
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let source_dir = base.join("src");
+        write_file(
+            &source_dir.join("agents/lead.md"),
+            "---\ndescription: lead\n---\nDelegate to {{ns:nope}}.\n",
+        );
+        let paths = paths_for(base);
+
+        let result = run_checks(&paths, &source_dir, None).unwrap();
+        assert!(
+            !result.hard.is_empty(),
+            "unresolved ns token must produce a hard finding"
+        );
+        assert!(
+            result.hard.iter().any(|f| f.kind == "bad-reference"),
+            "expected bad-reference: {:?}",
+            result.hard
+        );
+    }
+
+    /// Unguarded prose references under a prefix are advisory, not hard.
+    /// spec: CLI-132, CLI-133
+    #[test]
+    fn unguarded_ref_under_prefix_is_advisory() {
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let source_dir = base.join("src");
+        write_file(
+            &source_dir.join("agents/lead.md"),
+            "---\ndescription: lead\n---\nDelegate to the dev agent.\n",
+        );
+        write_file(
+            &source_dir.join("agents/dev.md"),
+            "---\ndescription: dev\n---\n# dev\n",
+        );
+        let paths = paths_for(base);
+
+        // With --as jk: a prefix is in effect, so the unguarded ref is flagged.
+        let result = run_checks(&paths, &source_dir, Some("jk".to_string())).unwrap();
+        assert!(result.hard.is_empty(), "unguarded ref must not be hard: {:?}", result.hard);
+        assert!(
+            result.advisory.iter().any(|f| f.kind == "unguarded-reference"),
+            "expected unguarded-reference advisory: {:?}",
+            result.advisory
+        );
+    }
+
+    /// Without a prefix, unguarded refs are not reported at all.
+    /// spec: CLI-133
+    #[test]
+    fn unguarded_ref_without_prefix_not_reported() {
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let source_dir = base.join("src");
+        write_file(
+            &source_dir.join("agents/lead.md"),
+            "---\ndescription: lead\n---\nDelegate to the dev agent.\n",
+        );
+        write_file(
+            &source_dir.join("agents/dev.md"),
+            "---\ndescription: dev\n---\n# dev\n",
+        );
+        let paths = paths_for(base);
+
+        // No alias: no prefix, unguarded refs irrelevant.
+        let result = run_checks(&paths, &source_dir, None).unwrap();
+        assert!(result.hard.is_empty());
+        assert!(
+            result.advisory.iter().all(|f| f.kind != "unguarded-reference"),
+            "unguarded ref should not be reported without a prefix: {:?}",
+            result.advisory
+        );
+    }
+
+    /// A source with a [source].prefix that is not overridden by --as also
+    /// triggers unguarded-reference detection.
+    /// spec: CLI-131, CLI-133
+    #[test]
+    fn source_prefix_also_triggers_unguarded_check() {
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let source_dir = base.join("src");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(
+            source_dir.join("mind.toml"),
+            "[source]\nprefix = \"ag\"\n",
+        )
+        .unwrap();
+        write_file(
+            &source_dir.join("agents/lead.md"),
+            "---\ndescription: lead\n---\nDelegate to dev.\n",
+        );
+        write_file(
+            &source_dir.join("agents/dev.md"),
+            "---\ndescription: dev\n---\n# dev\n",
+        );
+        let paths = paths_for(base);
+
+        // No consumer alias: the source's own prefix should trigger the check.
+        let result = run_checks(&paths, &source_dir, None).unwrap();
+        assert!(result.hard.is_empty(), "should be hard-clean: {:?}", result.hard);
+        assert!(
+            result.advisory.iter().any(|f| f.kind == "unguarded-reference"),
+            "source prefix should trigger unguarded-reference check: {:?}",
+            result.advisory
+        );
+    }
+
+    /// A `min-mind-version` the running binary cannot satisfy is a hard error
+    /// classified as `incompatible-version` (not a generic scan error). The
+    /// existing tests never exercise the IncompatibleVersion scan arm.
+    /// spec: CLI-131, CLI-132
+    #[test]
+    fn incompatible_min_version_is_hard_error() {
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let source_dir = base.join("src");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(
+            source_dir.join("mind.toml"),
+            "[source]\nmin-mind-version = \"99.0\"\n",
+        )
+        .unwrap();
+        let paths = paths_for(base);
+
+        let result = run_checks(&paths, &source_dir, None).unwrap();
+        assert!(
+            result.hard.iter().any(|f| f.kind == "incompatible-version"),
+            "expected incompatible-version hard finding: {:?}",
+            result.hard
+        );
+    }
+
+    /// Two distinct bad `{{ns:}}` tokens in two items must BOTH be reported as
+    /// hard findings, not short-circuit after the first. CLI-132 counts every
+    /// hard finding so the printer can report the true total. This guards the
+    /// no-`return`-after-bad-reference behavior of Check 5.
+    /// spec: CLI-131, CLI-132
+    #[test]
+    fn multiple_bad_ns_tokens_all_reported() {
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let source_dir = base.join("src");
+        write_file(
+            &source_dir.join("agents/lead.md"),
+            "---\ndescription: lead\n---\nDelegate to {{ns:nope}}.\n",
+        );
+        write_file(
+            &source_dir.join("agents/boss.md"),
+            "---\ndescription: boss\n---\nDefer to {{ns:alsonope}}.\n",
+        );
+        let paths = paths_for(base);
+
+        let result = run_checks(&paths, &source_dir, None).unwrap();
+        let bad: Vec<&Finding> = result
+            .hard
+            .iter()
+            .filter(|f| f.kind == "bad-reference")
+            .collect();
+        assert_eq!(
+            bad.len(),
+            2,
+            "both bad-reference findings must be present: {:?}",
+            result.hard
+        );
+    }
+
+    /// A bad `{{ns:}}` token AND an unknown item kind are different hard checks;
+    /// here the unknown kind aborts the scan, so the report is the unknown-kind
+    /// finding. This documents that an unknown kind is a scan-level hard error
+    /// that prevents per-item reference checks (which need a scanned catalog).
+    /// spec: CLI-132
+    #[test]
+    fn unknown_kind_blocks_before_reference_checks() {
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let source_dir = base.join("src");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        // Authoritative mind.toml with a bad kind: scan fails before items exist.
+        std::fs::write(
+            source_dir.join("mind.toml"),
+            "[[items]]\nkind = \"spell\"\nname = \"x\"\npath = \"x.md\"\n",
+        )
+        .unwrap();
+        write_file(
+            &source_dir.join("agents/lead.md"),
+            "---\ndescription: lead\n---\nDelegate to {{ns:nope}}.\n",
+        );
+        let paths = paths_for(base);
+
+        let result = run_checks(&paths, &source_dir, None).unwrap();
+        assert!(
+            result.hard.iter().any(|f| f.kind == "unknown-kind"),
+            "expected unknown-kind to surface: {:?}",
+            result.hard
+        );
+        // The scan aborted, so no per-item reference checks ran.
+        assert!(
+            result.hard.iter().all(|f| f.kind != "bad-reference"),
+            "reference checks must not run once the scan failed: {:?}",
+            result.hard
+        );
+    }
+
+    /// `--as <prefix>` overrides the source's own `[source].prefix` for token
+    /// expansion: a token that resolves to a *prefixed* sibling stays clean.
+    /// Confirms the consumer alias flows into effective-name resolution.
+    /// spec: CLI-133
+    #[test]
+    fn alias_flows_into_token_resolution() {
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let source_dir = base.join("src");
+        write_file(
+            &source_dir.join("agents/lead.md"),
+            "---\ndescription: lead\n---\nDelegate to {{ns:dev}}.\n",
+        );
+        write_file(
+            &source_dir.join("agents/dev.md"),
+            "---\ndescription: dev\n---\n# dev\n",
+        );
+        let paths = paths_for(base);
+
+        // dev is a real sibling, so {{ns:dev}} resolves under any prefix.
+        let result = run_checks(&paths, &source_dir, Some("jk".to_string())).unwrap();
+        assert!(
+            result.hard.iter().all(|f| f.kind != "bad-reference"),
+            "valid token must resolve under --as prefix: {:?}",
+            result.hard
+        );
+    }
+
+    // --- registry resolution edge cases (CLI-130) ---
+
+    /// A selector that matches two registered sources is an AmbiguousSource
+    /// error, not a panic or a silent pick. `try_registry_match` must surface
+    /// every candidate.
+    /// spec: CLI-130
+    #[test]
+    fn ambiguous_selector_errors_with_candidates() {
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let paths = paths_for(base);
+        std::fs::create_dir_all(base.join("sources")).unwrap();
+
+        // Two sources whose names both end in "agents".
+        let d1 = base.join("sources/local/alice/agents");
+        let d2 = base.join("sources/local/bob/agents");
+        std::fs::create_dir_all(&d1).unwrap();
+        std::fs::create_dir_all(&d2).unwrap();
+        let registry = crate::source::Registry {
+            sources: vec![
+                make_source("local/alice/agents", &d1),
+                make_source("local/bob/agents", &d2),
+            ],
+        };
+        registry.save(&paths).unwrap();
+
+        let err = try_registry_match(&paths, "agents").unwrap_err();
+        match err {
+            MindError::AmbiguousSource { query, candidates } => {
+                assert_eq!(query, "agents");
+                assert_eq!(candidates.len(), 2, "both candidates listed: {candidates:?}");
+            }
+            other => panic!("expected AmbiguousSource, got {other:?}"),
+        }
+    }
+
+    // --- repo-spec clone + temp cleanup (CLI-130) ---
+    //
+    // The remote-spec branch of `resolve_target` is not reachable through the
+    // public `review()` entry point without a network remote (parse_spec maps
+    // every offline-cloneable target to host="local", which skips the clone).
+    // These tests drive the exact clone+guard+cleanup sequence that branch runs,
+    // against a real local bare repo, so the no-disk-change guarantee (CLI-130)
+    // is exercised end to end and a neutered guard would fail them.
+
+    /// Build a bare git repo at `base/remote.git` containing one clean skill,
+    /// returning its path. `git clone <path>` works fully offline.
+    fn make_bare_remote(base: &Path) -> PathBuf {
+        let work = base.join("remote-work");
+        write_file(
+            &work.join("skills/review/SKILL.md"),
+            "---\ndescription: Review the diff\n---\n# review\n",
+        );
+        run_git(&work, &["-c", "init.defaultBranch=main", "init", "-q"]);
+        run_git(&work, &["config", "user.email", "t@t"]);
+        run_git(&work, &["config", "user.name", "t"]);
+        run_git(&work, &["add", "-A"]);
+        run_git(&work, &["commit", "-qm", "initial"]);
+
+        let bare = base.join("remote.git");
+        run_git(
+            base,
+            &[
+                "clone",
+                "--bare",
+                "-q",
+                &work.to_string_lossy(),
+                &bare.to_string_lossy(),
+            ],
+        );
+        bare
+    }
+
+    fn run_git(dir: &Path, args: &[&str]) {
+        std::fs::create_dir_all(dir).unwrap();
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?} failed in {dir:?}");
+    }
+
+    /// Replicates resolve_target's remote branch: mkdir a temp dir under
+    /// MIND_HOME/.tmp, install the drop guard, clone the bare repo into it, run
+    /// the checks, then drop the guard. After the guard drops, the temp area
+    /// must be empty (CLI-130: clone removed after the check). Mirrors the
+    /// production sequence at review.rs resolve_target lines 96-109.
+    fn review_via_clone(paths: &Paths, bare: &Path, alias: Option<String>) -> ReviewResult {
+        paths.ensure_layout().unwrap();
+        let tmp = paths.tmp_dir().join(format!(
+            "review-{}-{}",
+            std::process::id(),
+            UNIT_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ));
+        paths::mkdir_p(&tmp).unwrap();
+        let guard = TempDirGuard(tmp.clone());
+        git::clone(&bare.to_string_lossy(), &tmp).unwrap();
+        assert!(tmp.is_dir(), "clone target should exist mid-review");
+        let result = run_checks(paths, &tmp, alias).unwrap();
+        drop(guard);
+        assert!(
+            !tmp.exists(),
+            "TempDirGuard must remove the clone on drop: {tmp:?}"
+        );
+        result
+    }
+
+    /// A successful review of a freshly cloned bare repo leaves no temp dir
+    /// behind and the MIND_HOME/.tmp scratch area is empty afterward.
+    /// spec: CLI-130
+    #[test]
+    fn clone_review_success_leaves_no_temp() {
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let bare = make_bare_remote(base);
+        let paths = paths_for(base);
+
+        let result = review_via_clone(&paths, &bare, None);
+        assert!(result.hard.is_empty(), "clean clone: {:?}", result.hard);
+        assert_no_review_temp(&paths);
+    }
+
+    /// Even when the cloned repo has a HARD finding, the temp clone is still
+    /// removed. The guard drops at the end of the review scope regardless of the
+    /// findings. spec: CLI-130, CLI-132
+    #[test]
+    fn clone_review_with_hard_finding_still_cleans_up() {
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        // A bare repo whose only item carries an unresolved {{ns:}} token.
+        let work = base.join("remote-work");
+        write_file(
+            &work.join("agents/lead.md"),
+            "---\ndescription: lead\n---\nDelegate to {{ns:nope}}.\n",
+        );
+        run_git(&work, &["-c", "init.defaultBranch=main", "init", "-q"]);
+        run_git(&work, &["config", "user.email", "t@t"]);
+        run_git(&work, &["config", "user.name", "t"]);
+        run_git(&work, &["add", "-A"]);
+        run_git(&work, &["commit", "-qm", "bad"]);
+        let bare = base.join("remote.git");
+        run_git(
+            base,
+            &[
+                "clone",
+                "--bare",
+                "-q",
+                &work.to_string_lossy(),
+                &bare.to_string_lossy(),
+            ],
+        );
+        let paths = paths_for(base);
+
+        let result = review_via_clone(&paths, &bare, None);
+        assert!(
+            result.hard.iter().any(|f| f.kind == "bad-reference"),
+            "expected the hard finding from the clone: {:?}",
+            result.hard
+        );
+        assert_no_review_temp(&paths);
+    }
+
+    /// Assert no `review-*` scratch dir survives under MIND_HOME/.tmp.
+    fn assert_no_review_temp(paths: &Paths) {
+        let tdir = paths.tmp_dir();
+        if !tdir.exists() {
+            return;
+        }
+        for entry in std::fs::read_dir(&tdir).unwrap().flatten() {
+            let name = entry.file_name();
+            assert!(
+                !name.to_string_lossy().starts_with("review-"),
+                "leftover review temp dir: {:?}",
+                entry.path()
+            );
+        }
+    }
+}

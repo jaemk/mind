@@ -13,6 +13,7 @@ mod mindfile;
 mod namespace;
 mod paths;
 mod resolve;
+mod review;
 mod source;
 
 use clap::Parser;
@@ -76,6 +77,7 @@ fn lock_mode(command: &Command) -> LockMode {
         // Read-only commands.
         Command::Recall { .. }
         | Command::Probe { .. }
+        | Command::Review { .. }
         | Command::Introspect { fix: false, .. }
         | Command::Config {
             action:
@@ -149,6 +151,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             source.as_deref(),
             json,
         ),
+        Command::Review { target, alias } => commands::review(paths, &target, alias),
         Command::Introspect { fix, json } => commands::introspect(paths, fix, json),
         Command::Config { action } => match action {
             ConfigCmd::Show => commands::config_show(paths),
@@ -217,6 +220,12 @@ mod tests {
         assert_eq!(mode_of(&["mind", "recall", "--sources"]), LockMode::Shared);
         assert_eq!(mode_of(&["mind", "probe"]), LockMode::Shared);
         assert_eq!(mode_of(&["mind", "probe", "rev"]), LockMode::Shared);
+        // review is read-only: it installs nothing and changes no disk state.
+        assert_eq!(mode_of(&["mind", "review", "/some/path"]), LockMode::Shared);
+        assert_eq!(
+            mode_of(&["mind", "review", "/some/path", "--as", "jk"]),
+            LockMode::Shared
+        );
         // introspect WITHOUT --fix is a read-only diagnosis -> shared.
         assert_eq!(mode_of(&["mind", "introspect"]), LockMode::Shared);
         assert_eq!(mode_of(&["mind", "config", "show"]), LockMode::Shared);

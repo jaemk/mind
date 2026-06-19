@@ -241,6 +241,23 @@ fn git(dir: &Path, args: &[&str]) {
     assert!(status.success(), "git {args:?} failed in {dir:?}");
 }
 
+/// Assert no `review-*` scratch dir survives under `<mind_home>/.tmp` (the
+/// remote-clone area). CLI-130: review changes nothing on disk.
+fn assert_no_review_temp(mind_home: &Path) {
+    let tdir = mind_home.join(".tmp");
+    if !tdir.is_dir() {
+        return;
+    }
+    for entry in std::fs::read_dir(&tdir).unwrap().flatten() {
+        let name = entry.file_name();
+        assert!(
+            !name.to_string_lossy().starts_with("review-"),
+            "leftover review temp dir: {:?}",
+            entry.path()
+        );
+    }
+}
+
 /// Meld + learn the standard fixture; returns the ready sandbox.
 fn melded() -> Sandbox {
     let sb = Sandbox::new();
@@ -3188,5 +3205,298 @@ fn mindfile_roots_discovered_without_flag() {
         probe.stdout.contains("skill:pack"),
         "item under toolbox/ should be found: {}",
         probe.stdout
+    );
+}
+
+// ---- review verb tests (CLI-130, CLI-131, CLI-132, CLI-133) -------------------
+
+#[test]
+fn review_clean_local_path_exits_zero() {
+    // A clean local source (valid mind.toml if present, items with descriptions,
+    // no bad tokens) exits 0 with no blocking issues.
+    // spec: CLI-130, CLI-131
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+
+    let r = sb.mind(&["review", &spec]);
+    assert!(r.success, "clean source should exit 0: stdout={} stderr={}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("no issues") || r.stdout.contains("publishable") || r.stderr.is_empty(),
+        "expected clean report: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+    // review must not leave any trace in the registry.
+    assert!(
+        sb.mind(&["recall", "--sources"]).stdout.contains("no sources melded"),
+        "review must not register anything"
+    );
+}
+
+#[test]
+fn review_malformed_mind_toml_exits_nonzero() {
+    // A malformed mind.toml is a hard error -> exit non-zero.
+    // spec: CLI-132
+    let sb = Sandbox::new();
+    sb.write_and_commit("mind.toml", "[[[[bad toml");
+    let spec = sb.source_spec();
+
+    let r = sb.mind(&["review", &spec]);
+    assert!(!r.success, "malformed mind.toml must exit non-zero: stdout={} stderr={}", r.stdout, r.stderr);
+}
+
+#[test]
+fn review_unknown_item_kind_exits_nonzero() {
+    // An [[items]] entry with an unknown kind is a hard error -> exit non-zero.
+    // spec: CLI-132
+    let sb = Sandbox::new();
+    sb.write_and_commit(
+        "mind.toml",
+        "[[items]]\nkind = \"spell\"\nname = \"x\"\npath = \"x.md\"\n",
+    );
+    let spec = sb.source_spec();
+
+    let r = sb.mind(&["review", &spec]);
+    assert!(!r.success, "unknown kind must exit non-zero: stdout={} stderr={}", r.stdout, r.stderr);
+    assert!(
+        r.stderr.contains("unknown-kind") || r.stderr.contains("unknown item kind"),
+        "expected unknown-kind in output: stderr={}",
+        r.stderr
+    );
+}
+
+#[test]
+fn review_bad_ns_token_exits_nonzero() {
+    // An item with {{ns:nope}} that doesn't resolve to any sibling is hard.
+    // spec: CLI-132
+    let sb = Sandbox::new();
+    sb.write_and_commit(
+        "agents/lead.md",
+        "---\ndescription: lead\n---\nDelegate to {{ns:nope}}.\n",
+    );
+    let spec = sb.source_spec();
+
+    let r = sb.mind(&["review", &spec]);
+    assert!(!r.success, "bad ns token must exit non-zero: stdout={} stderr={}", r.stdout, r.stderr);
+    assert!(
+        r.stderr.contains("bad-reference") || r.stderr.contains("does not resolve"),
+        "expected bad-reference in output: stderr={}",
+        r.stderr
+    );
+}
+
+#[test]
+fn review_conflicting_pin_exits_nonzero() {
+    // A [source] section with two conflicting pin directives is a hard error.
+    // spec: CLI-132
+    let sb = Sandbox::new();
+    sb.write_and_commit(
+        "mind.toml",
+        "[source]\nfollow-branch = \"main\"\npin-tag = \"v1.0\"\n",
+    );
+    let spec = sb.source_spec();
+
+    let r = sb.mind(&["review", &spec]);
+    assert!(!r.success, "conflicting pin must exit non-zero: stdout={} stderr={}", r.stdout, r.stderr);
+    assert!(
+        r.stderr.contains("conflicting-pin") || r.stderr.contains("conflicting pin"),
+        "expected conflicting-pin in output: stderr={}",
+        r.stderr
+    );
+}
+
+#[test]
+fn review_missing_description_is_advisory_exit_zero() {
+    // An item with no description is advisory only -> exit 0 with finding printed.
+    // spec: CLI-132
+    let sb = Sandbox::new();
+    sb.write_and_commit(
+        "agents/nodesc.md",
+        "# no frontmatter here\nsome content\n",
+    );
+    // Remove the default fixture items so only nodesc.md is in the source.
+    let source_dir = sb.source.clone();
+    std::fs::remove_dir_all(source_dir.join("skills")).ok();
+    std::fs::remove_dir_all(source_dir.join("rules")).ok();
+    std::fs::remove_file(source_dir.join("agents/dev.md")).ok();
+    git(&source_dir, &["add", "-A"]);
+    git(&source_dir, &["commit", "-qm", "nodesc only"]);
+
+    let spec = sb.source_spec();
+    let r = sb.mind(&["review", &spec]);
+    assert!(r.success, "missing description is advisory, must exit 0: stdout={} stderr={}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("missing-description") || r.stdout.contains("advisory"),
+        "expected advisory finding in stdout: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn review_unguarded_ref_under_as_is_advisory_exit_zero() {
+    // An unguarded prose reference under --as <prefix> is advisory -> exit 0.
+    // spec: CLI-132, CLI-133
+    let sb = Sandbox::new();
+    sb.write_and_commit(
+        "agents/lead.md",
+        "---\ndescription: lead\n---\nDelegate to the dev agent.\n",
+    );
+    let spec = sb.source_spec();
+
+    let r = sb.mind(&["review", &spec, "--as", "jk"]);
+    assert!(r.success, "unguarded ref advisory must exit 0: stdout={} stderr={}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("unguarded-reference") || r.stdout.contains("advisory"),
+        "expected advisory finding: stdout={}",
+        r.stdout
+    );
+    // No hard errors.
+    assert!(
+        !r.stderr.contains("error ["),
+        "must have no hard errors: stderr={}",
+        r.stderr
+    );
+}
+
+#[test]
+fn review_melded_selector_resolves_via_registry() {
+    // `review <melded-selector>` resolves the target via the registry.
+    // spec: CLI-130
+    let sb = melded();
+
+    // After meld, "agents" (the repo basename) is a registered suffix selector.
+    let r = sb.mind(&["review", "agents"]);
+    assert!(r.success, "review via registry selector must succeed: stdout={} stderr={}", r.stdout, r.stderr);
+}
+
+#[test]
+fn review_with_prefix_flag_evaluates_under_that_namespace() {
+    // `review --as <prefix>` evaluates under the prospective prefix.
+    // The source has a good token {{ns:dev}} that expands fine under prefix 'jk'.
+    // spec: CLI-133
+    let sb = Sandbox::new();
+    sb.write_and_commit(
+        "agents/lead.md",
+        "---\ndescription: lead\n---\nDelegate to {{ns:dev}}.\n",
+    );
+    let spec = sb.source_spec();
+
+    // With --as jk: the token {{ns:dev}} should resolve to jk-dev (a sibling).
+    let r = sb.mind(&["review", &spec, "--as", "jk"]);
+    // dev is a sibling, so no bad-reference error.
+    assert!(r.success, "valid ns token with prefix must exit 0: stdout={} stderr={}", r.stdout, r.stderr);
+    // No bad-reference hard error.
+    assert!(
+        !r.stderr.contains("bad-reference"),
+        "valid token must not produce bad-reference: stderr={}",
+        r.stderr
+    );
+}
+
+#[test]
+fn review_local_path_target_is_left_intact() {
+    // CLI-130: a local-path target is the user's working dir, NOT a temp clone,
+    // so review must leave it on disk and unmodified. Only the remote-spec path
+    // clones to a temp area; a local path is read in place.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+
+    let skill = sb.source.join("skills/review/SKILL.md");
+    let before = std::fs::read_to_string(&skill).unwrap();
+
+    let r = sb.mind(&["review", &spec]);
+    assert!(r.success, "clean local review should exit 0: {} {}", r.stdout, r.stderr);
+
+    // The source dir and its files still exist and are byte-identical.
+    assert!(sb.source.is_dir(), "local source dir must survive review");
+    let after = std::fs::read_to_string(&skill).unwrap();
+    assert_eq!(before, after, "review must not modify the local source");
+    // And nothing was cloned into the scratch area.
+    assert_no_review_temp(&sb.mind_home);
+}
+
+#[test]
+fn review_remote_spec_clone_failure_exits_nonzero_and_leaves_no_temp() {
+    // CLI-130: a repo-spec target is shallow-cloned to a temp area. When the
+    // clone itself FAILS (unreachable remote), review must exit non-zero and
+    // leave nothing behind under MIND_HOME/.tmp. Uses a refused-connection URL
+    // so the clone fails fast without real network egress.
+    let sb = Sandbox::new();
+
+    // parse_spec keeps this as host="127.0.0.1:1" (non-local), so review takes
+    // the clone branch; the connection is refused, so the clone errors.
+    let r = sb.mind(&["review", "https://127.0.0.1:1/owner/repo"]);
+    assert!(
+        !r.success,
+        "a failed clone must exit non-zero: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+    // No leftover scratch dir, and no registry mutation.
+    assert_no_review_temp(&sb.mind_home);
+    assert!(
+        sb.mind(&["recall", "--sources"]).stdout.contains("no sources melded"),
+        "failed review must not register anything"
+    );
+}
+
+#[test]
+fn review_report_lists_every_advisory_finding() {
+    // CLI-131: the report names per-item results, not just an exit code. With a
+    // clean item, a missing-description item, and an unguarded-ref item under a
+    // prefix, ALL advisories must be printed (not just the first).
+    let sb = Sandbox::new();
+    // lead.md: has a description AND an unguarded prose ref to sibling `dev`.
+    sb.write_and_commit(
+        "agents/lead.md",
+        "---\ndescription: lead\n---\nDelegate to the dev agent.\n",
+    );
+    // nodesc.md: a sibling with no description (advisory: missing-description).
+    sb.write_and_commit("agents/nodesc.md", "# no frontmatter\nbody\n");
+    let spec = sb.source_spec();
+
+    let r = sb.mind(&["review", &spec, "--as", "jk"]);
+    assert!(r.success, "advisory-only review exits 0: {} {}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("missing-description"),
+        "missing-description advisory must be printed: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("unguarded-reference"),
+        "unguarded-reference advisory must be printed: {}",
+        r.stdout
+    );
+    // The clean fixture skill (skill:review has a description) is not flagged
+    // for a missing description.
+    assert!(
+        !r.stdout.contains("skill:review: no description"),
+        "clean item must not be flagged missing-description: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn review_multiple_hard_errors_all_reported_and_counted() {
+    // CLI-132: two distinct hard problems (two unresolved {{ns:}} tokens in two
+    // items) both surface and the summary counts more than one hard error.
+    let sb = Sandbox::new();
+    sb.write_and_commit(
+        "agents/lead.md",
+        "---\ndescription: lead\n---\nDelegate to {{ns:nope}}.\n",
+    );
+    sb.write_and_commit(
+        "agents/boss.md",
+        "---\ndescription: boss\n---\nDefer to {{ns:alsonope}}.\n",
+    );
+    let spec = sb.source_spec();
+
+    let r = sb.mind(&["review", &spec]);
+    assert!(!r.success, "multiple hard errors must exit non-zero: {} {}", r.stdout, r.stderr);
+    assert!(r.stderr.contains("nope"), "first bad ref reported: {}", r.stderr);
+    assert!(r.stderr.contains("alsonope"), "second bad ref reported: {}", r.stderr);
+    // The summary line reports a hard-error count greater than one.
+    assert!(
+        r.stdout.contains("2 hard error(s)"),
+        "summary must count both hard errors: {}",
+        r.stdout
     );
 }

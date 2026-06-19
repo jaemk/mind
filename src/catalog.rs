@@ -81,9 +81,20 @@ pub fn scan(paths: &Paths, registry: &Registry) -> Result<Vec<CatalogItem>> {
     Ok(items)
 }
 
-fn scan_source(paths: &Paths, source: &Source, out: &mut Vec<CatalogItem>) -> Result<()> {
+pub(crate) fn scan_source(paths: &Paths, source: &Source, out: &mut Vec<CatalogItem>) -> Result<()> {
     let clone_root = source.clone_dir(paths);
-    let mindfile = MindToml::load(&clone_root)?;
+    scan_source_at(clone_root, source, out)
+}
+
+/// Scan a source whose clone root is known directly (e.g. for `review`, where
+/// the directory may not live under the standard sources tree).
+pub(crate) fn scan_source_at(
+    clone_root: impl AsRef<std::path::Path>,
+    source: &Source,
+    out: &mut Vec<CatalogItem>,
+) -> Result<()> {
+    let clone_root = clone_root.as_ref();
+    let mindfile = MindToml::load(clone_root)?;
 
     // Reject a source that requires a newer `mind` than the one running, rather
     // than scanning it against a format this version may predate (DSC-40).
@@ -110,10 +121,10 @@ fn scan_source(paths: &Paths, source: &Source, out: &mut Vec<CatalogItem>) -> Re
             // spec: DSC-52 — authoritative mind.toml ignores scan roots entirely;
             // its paths are always repo-root-relative.
             for decl in &mt.items {
-                out.push(from_decl(&clone_root, source, &prefix, decl)?);
+                out.push(from_decl(clone_root, source, &prefix, decl)?);
             }
             if let Some(discover) = &mt.discover {
-                scan_globs(&clone_root, source, &prefix, discover, out)?;
+                scan_globs(clone_root, source, &prefix, discover, out)?;
             }
             Ok(())
         }
@@ -147,7 +158,7 @@ fn scan_source(paths: &Paths, source: &Source, out: &mut Vec<CatalogItem>) -> Re
                     .starts_with(
                         clone_root
                             .canonicalize()
-                            .unwrap_or_else(|_| clone_root.clone()),
+                            .unwrap_or_else(|_| clone_root.to_path_buf()),
                     )
                 {
                     return Err(MindError::InvalidRoot {
