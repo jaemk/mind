@@ -71,6 +71,12 @@ pub enum Command {
         /// At most one of --follow-branch, --pin-tag, --pin-ref may be given.
         #[arg(long, value_name = "COMMIT")]
         pin_ref: Option<String>,
+
+        /// Set the source's convention-scan roots to one or more repo-root-relative
+        /// directories (repeatable). Overrides `[source].roots` in mind.toml.
+        /// Persisted on the source and used by later scans and sync (CLI-16).
+        #[arg(long = "root", value_name = "DIR")]
+        roots: Vec<String>,
     },
 
     /// Unmeld a source, removing its clone and catalog entry.

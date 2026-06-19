@@ -17,7 +17,7 @@ use crate::paths::Paths;
 use crate::resolve::{is_glob, parse_item_ref, resolve, select, select_installed, source_matches};
 use crate::source::{Pin, Registry, parse_spec};
 
-/// `mind meld <repo> [--as <prefix>] [--follow-branch|--pin-tag|--pin-ref]`
+/// `mind meld <repo> [--as <prefix>] [--root <dir>] [--follow-branch|--pin-tag|--pin-ref]`
 /// — register and clone a source.
 ///
 /// If the source's `mind.toml` lists nested `[discover].sources`, each is melded
@@ -27,6 +27,7 @@ pub fn meld(
     paths: &Paths,
     repo: &str,
     alias: Option<String>,
+    roots: Vec<String>,
     follow_branch: Option<String>,
     pin_tag: Option<String>,
     pin_ref: Option<String>,
@@ -44,6 +45,7 @@ pub fn meld(
         &mut registry,
         repo,
         alias,
+        roots,
         consumer_pin,
         true,
         &mut visited,
@@ -95,11 +97,14 @@ fn resolve_pin_flags(
 ///
 /// `consumer_pin` is the caller-supplied pin (CLI flags or None for a nested
 /// source that inherits no pin override).
+/// `roots` is the consumer `--root` override (empty => no override).
+#[allow(clippy::too_many_arguments)]
 fn meld_recursive(
     paths: &Paths,
     registry: &mut Registry,
     repo: &str,
     alias: Option<String>,
+    roots: Vec<String>,
     consumer_pin: Option<Pin>,
     top_level: bool,
     visited: &mut HashSet<String>,
@@ -181,6 +186,21 @@ fn meld_recursive(
     source.pin = effective_pin;
     source.commit = Some(git::head_commit(&source.url, &dir)?);
 
+    // Persist the consumer's --root override (STO-17, DSC-51).
+    // DSC-52: if --root is given for an authoritative source, print a note.
+    let is_authoritative = mindfile.as_ref().is_some_and(|m| m.is_authoritative());
+    if !roots.is_empty() {
+        if is_authoritative {
+            // spec: DSC-52
+            println!(
+                "note: {} uses an authoritative mind.toml; --root is ignored",
+                source.name
+            );
+        } else {
+            source.roots = Some(roots);
+        }
+    }
+
     // Scan before registering. If the source is rejected here (e.g. the
     // version gate, DSC-40), remove the clone so no orphan is left on disk.
     let items = match catalog::scan(paths, &single(&source)) {
@@ -208,7 +228,8 @@ fn meld_recursive(
                 registry,
                 &entry.source,
                 entry.alias.clone(),
-                None, // no consumer pin for nested sources
+                vec![], // no consumer roots for nested sources
+                None,   // no consumer pin for nested sources
                 false,
                 visited,
             )?;

@@ -48,6 +48,10 @@ pub struct SourceMeta {
     /// Pin directive: fix to a specific commit (DSC-41).
     #[serde(rename = "pin-ref")]
     pub pin_ref: Option<String>,
+    /// Convention scan roots (DSC-50). When set, convention discovery scans
+    /// under each listed repo-root-relative directory instead of the repo root.
+    #[serde(default)]
+    pub roots: Option<Vec<String>>,
 }
 
 impl SourceMeta {

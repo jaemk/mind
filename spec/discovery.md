@@ -105,7 +105,9 @@ subdirectories instead.
 - `DSC-50` `[source].roots` is an optional list of repo-root-relative directories.
   When set, convention discovery scans for `skills/`, `agents/`, `rules/` under
   *each* listed root rather than at the repo root. Unset means a single implicit
-  root of the repo root (the DSC-10..13 behavior, unchanged).
+  root of the repo root (the DSC-10..13 behavior, unchanged). An explicitly empty
+  list (`roots = []`) is distinct from unset: it scans zero roots and so
+  discovers nothing.
 - `DSC-51` `meld --root <dir>` (repeatable) overrides `[source].roots` entirely:
   convention discovery scans only the consumer-specified roots, letting a consumer
   narrow a broad source to exactly the subtree they want. The override is persisted

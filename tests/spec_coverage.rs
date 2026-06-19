@@ -28,8 +28,6 @@ const ALLOWLIST: &[&str] = &[
     // Planned features (see spec/README.md feature status = planned): documented
     // with stable IDs ahead of implementation. Each must move to a citing test
     // when built, at which point it is removed from this allowlist.
-    //   scan roots (subtree/monorepo sources)
-    "DSC-50", "DSC-51", "DSC-52", "DSC-53", "STO-17", "CLI-16",
     //   version pinning: now implemented; IDs removed from allowlist and cited in tests.
     //   review verb (author-side source validation)
     "CLI-130", "CLI-131", "CLI-132", "CLI-133",

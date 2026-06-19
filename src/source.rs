@@ -54,6 +54,12 @@ pub struct Source {
     /// Absent in older sources.json files deserializes as `DefaultBranch`.
     #[serde(default)]
     pub pin: Pin,
+    /// Consumer-supplied scan roots from `meld --root` (STO-17). When set,
+    /// convention discovery scans under each of these repo-root-relative dirs
+    /// instead of the repo root. Persisted at meld and not changed by sync.
+    /// None => use `[source].roots` from mind.toml, or the repo root.
+    #[serde(default)]
+    pub roots: Option<Vec<String>>,
 }
 
 impl Source {
@@ -155,6 +161,7 @@ fn make_source(host: &str, owner: &str, repo: &str, url: String) -> Source {
         description: None,
         alias: None,
         pin: Pin::default(),
+        roots: None,
     }
 }
 

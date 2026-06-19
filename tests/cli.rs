@@ -2965,3 +2965,228 @@ fn sync_pin_tag_picks_up_moved_upstream_tag() {
     assert!(pin_json.contains("\"tag\""), "{pin_json}");
     assert!(pin_json.contains("v1.0"), "{pin_json}");
 }
+
+// ---- scan roots integration tests (DSC-50, DSC-51, DSC-52, DSC-53, STO-17, CLI-16) ---
+
+/// Read the `roots` field from the first source in sources.json as a JSON
+/// string (for assertions without pulling in a serde dependency in tests).
+fn read_source_roots_json(sb: &Sandbox) -> String {
+    let json =
+        std::fs::read_to_string(sb.mind_home.join("sources.json")).expect("sources.json");
+    // Look for "roots": [ ... ]; return the whole array value.
+    if let Some(start) = json.find("\"roots\":") {
+        let after = &json[start + "\"roots\":".len()..];
+        // Find the opening bracket.
+        if let Some(arr_start) = after.find('[') {
+            let arr = &after[arr_start..];
+            let mut depth = 0usize;
+            let mut end = 0;
+            for (i, c) in arr.char_indices() {
+                match c {
+                    '[' => depth += 1,
+                    ']' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = i + 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            return arr[..end].to_string();
+        }
+    }
+    // No roots field: return "null" to signal absence.
+    "null".to_string()
+}
+
+#[test]
+fn meld_root_persists_in_sources_json_and_probe_shows_subtree_items() {
+    // spec: DSC-51, STO-17, CLI-16
+    // A sandbox whose items live under a subdirectory "sub/".
+    let sb = Sandbox::bare("subtree");
+    // Items under "sub/" only.
+    sb.write_and_commit(
+        "sub/skills/deploy/SKILL.md",
+        "---\ndescription: deploy skill\n---\n# deploy\n",
+    );
+    sb.write_and_commit(
+        "sub/agents/ops.md",
+        "---\ndescription: ops agent\n---\n# ops\n",
+    );
+    // Nothing at the repo root (no conventional dirs).
+    let spec = sb.source_spec();
+
+    let r = sb.mind(&["meld", &spec, "--root", "sub"]);
+    assert!(r.success, "meld --root: {}", r.stderr);
+
+    // The root is persisted in sources.json.
+    let roots_json = read_source_roots_json(&sb);
+    assert!(roots_json.contains("sub"), "roots should be persisted: {roots_json}");
+
+    // probe shows the subtree items.
+    let probe = sb.mind(&["probe"]);
+    assert!(probe.stdout.contains("skill:deploy"), "subtree skill: {}", probe.stdout);
+    assert!(probe.stdout.contains("agent:ops"), "subtree agent: {}", probe.stdout);
+}
+
+#[test]
+fn meld_root_on_authoritative_source_prints_note() {
+    // spec: DSC-52 — --root on an authoritative source prints a note and is ignored.
+    let sb = Sandbox::bare("auth-source");
+    sb.write_and_commit(
+        "pkg/style.md",
+        "---\ndescription: style rule\n---\n# style\n",
+    );
+    sb.write_and_commit(
+        "mind.toml",
+        concat!(
+            "[[items]]\n",
+            "kind = \"rule\"\n",
+            "name = \"style\"\n",
+            "path = \"pkg/style.md\"\n",
+        ),
+    );
+    let spec = sb.source_spec();
+    let r = sb.mind(&["meld", &spec, "--root", "pkg"]);
+    assert!(r.success, "meld should succeed even with ignored --root: {}", r.stderr);
+    // The note appears on stdout.
+    assert!(
+        r.stdout.contains("ignored") || r.stdout.contains("note"),
+        "expected an 'ignored' note: {}",
+        r.stdout
+    );
+    // The explicit item is still discovered via the authoritative mind.toml.
+    let probe = sb.mind(&["probe"]);
+    assert!(probe.stdout.contains("rule:style"), "authoritative item still discovered: {}", probe.stdout);
+}
+
+#[test]
+fn meld_root_nonexistent_dir_exits_nonzero() {
+    // spec: DSC-52 (last sentence), CLI-16 — a --root that is not a directory in
+    // the clone is an InvalidRoot error and exits non-zero.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    let r = sb.mind(&["meld", &spec, "--root", "does-not-exist"]);
+    assert!(!r.success, "meld with missing root must fail");
+    assert!(
+        r.stderr.contains("InvalidRoot") || r.stderr.contains("not a directory"),
+        "expected InvalidRoot error: {}",
+        r.stderr
+    );
+    // Nothing is registered.
+    assert!(
+        sb.mind(&["recall", "--sources"])
+            .stdout
+            .contains("no sources melded"),
+        "nothing should be registered after an invalid root"
+    );
+}
+
+#[test]
+fn sync_preserves_roots() {
+    // spec: STO-17 — the roots override is persisted at meld and not changed by sync.
+    let sb = Sandbox::bare("roots-sync");
+    sb.write_and_commit(
+        "sub/skills/deploy/SKILL.md",
+        "---\ndescription: deploy\n---\n# deploy\n",
+    );
+    let spec = sb.source_spec();
+    assert!(sb.mind(&["meld", &spec, "--root", "sub"]).success);
+
+    // Capture roots before sync.
+    let roots_before = read_source_roots_json(&sb);
+    assert!(roots_before.contains("sub"), "roots should be set: {roots_before}");
+
+    // sync must not change the roots field.
+    assert!(sb.mind(&["sync"]).success);
+    let roots_after = read_source_roots_json(&sb);
+    assert_eq!(
+        roots_before, roots_after,
+        "sync must not modify the recorded roots"
+    );
+
+    // After sync, probe still shows the subtree items.
+    let probe = sb.mind(&["probe"]);
+    assert!(probe.stdout.contains("skill:deploy"), "subtree item still visible after sync: {}", probe.stdout);
+}
+
+#[test]
+fn two_root_flags_union_and_both_persist() {
+    // spec: DSC-51, DSC-53, STO-17, CLI-16
+    // `meld --root a --root b` is repeatable: both subtrees are scanned and
+    // unioned, and BOTH roots are persisted in sources.json. Drives the real CLI
+    // arg parsing (the unit tests set Source.roots directly, so this is the only
+    // check that the repeated flag actually threads through).
+    let sb = Sandbox::bare("two-roots");
+    sb.write_and_commit(
+        "a/skills/alpha/SKILL.md",
+        "---\ndescription: alpha skill\n---\n# alpha\n",
+    );
+    sb.write_and_commit(
+        "b/agents/beta.md",
+        "---\ndescription: beta agent\n---\n# beta\n",
+    );
+    let spec = sb.source_spec();
+
+    let r = sb.mind(&["meld", &spec, "--root", "a", "--root", "b"]);
+    assert!(r.success, "meld --root a --root b: {}", r.stderr);
+
+    // Both roots persisted.
+    let roots_json = read_source_roots_json(&sb);
+    assert!(roots_json.contains("\"a\""), "root a persisted: {roots_json}");
+    assert!(roots_json.contains("\"b\""), "root b persisted: {roots_json}");
+
+    // Both subtrees discovered.
+    let probe = sb.mind(&["probe"]);
+    assert!(probe.stdout.contains("skill:alpha"), "root a item: {}", probe.stdout);
+    assert!(probe.stdout.contains("agent:beta"), "root b item: {}", probe.stdout);
+}
+
+#[test]
+fn meld_absolute_root_exits_nonzero() {
+    // spec: DSC-52, CLI-16
+    // An absolute --root is rejected via the real CLI (the unit test exercises
+    // scan_source directly; this confirms the binary surfaces InvalidRoot and
+    // registers nothing).
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    let r = sb.mind(&["meld", &spec, "--root", "/tmp"]);
+    assert!(!r.success, "absolute root must fail");
+    assert!(
+        r.stderr.contains("InvalidRoot") || r.stderr.contains("not a directory"),
+        "expected InvalidRoot: {}",
+        r.stderr
+    );
+    assert!(
+        sb.mind(&["recall", "--sources"])
+            .stdout
+            .contains("no sources melded"),
+        "nothing registered after an absolute root"
+    );
+}
+
+#[test]
+fn mindfile_roots_discovered_without_flag() {
+    // spec: DSC-50 — [source].roots in mind.toml is respected without any --root flag.
+    let sb = Sandbox::bare("toml-roots");
+    sb.write_and_commit(
+        "toolbox/skills/pack/SKILL.md",
+        "---\ndescription: pack skill\n---\n# pack\n",
+    );
+    sb.write_and_commit(
+        "mind.toml",
+        "[source]\nroots = [\"toolbox\"]\n",
+    );
+    let spec = sb.source_spec();
+    let r = sb.mind(&["meld", &spec]);
+    assert!(r.success, "meld with roots in mind.toml: {}", r.stderr);
+
+    let probe = sb.mind(&["probe"]);
+    assert!(
+        probe.stdout.contains("skill:pack"),
+        "item under toolbox/ should be found: {}",
+        probe.stdout
+    );
+}

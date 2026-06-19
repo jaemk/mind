@@ -11,7 +11,7 @@ use std::process::ExitStatus;
 pub type Result<T> = std::result::Result<T, MindError>;
 
 /// The item kinds `mind` knows how to install.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ItemKind {
     Skill,
     Agent,
@@ -162,6 +162,18 @@ pub enum MindError {
         "conflicting pin flags: {first} and {second} cannot both be given; supply at most one of --follow-branch, --pin-tag, --pin-ref"
     )]
     ConflictingPin { first: String, second: String },
+
+    #[error("source '{source_name}': scan root '{root}' is not a directory in the clone")]
+    InvalidRoot { source_name: String, root: String },
+
+    #[error(
+        "source '{source_name}': {kind} '{name}' appears under more than one scan root; roots must not yield the same item"
+    )]
+    DuplicateItem {
+        source_name: String,
+        kind: ItemKind,
+        name: String,
+    },
 }
 
 fn status_suffix(status: Option<ExitStatus>) -> String {
