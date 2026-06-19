@@ -31,7 +31,8 @@ The repo is not named `homebrew-mind`, so the tap needs its clone URL.
 
 A source repo exposes items by convention (`skills/<n>/SKILL.md`,
 `agents/<n>.md`, `rules/<n>.md`) or via a `mind.toml`. See [spec/](spec/) for the
-full behavioral spec.
+full behavioral spec, and [examples/namespacing/](examples/namespacing/) for a
+worked example of `{{ns:}}` reference tokens.
 
 ## Agent directories
 

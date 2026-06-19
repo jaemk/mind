@@ -42,6 +42,31 @@ impl Sandbox {
         Sandbox::build(name, false)
     }
 
+    /// A source repo populated from `examples/<name>` in the crate, committed.
+    /// Lets a test drive a shipped example so it cannot rot.
+    fn from_example(name: &str) -> Sandbox {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let base = std::env::temp_dir().join(format!("mind-it-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let source = base.join(name);
+        let sb = Sandbox {
+            base: base.clone(),
+            source: source.clone(),
+            mind_home: base.join("mind"),
+            claude_home: base.join("claude"),
+        };
+        let example = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("examples")
+            .join(name);
+        copy_dir(&example, &source);
+        git(&source, &["-c", "init.defaultBranch=main", "init", "-q"]);
+        git(&source, &["config", "user.email", "t@t"]);
+        git(&source, &["config", "user.name", "t"]);
+        git(&source, &["add", "-A"]);
+        git(&source, &["commit", "-qm", "initial"]);
+        sb
+    }
+
     fn build(name: &str, with_fixture: bool) -> Sandbox {
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
         let base = std::env::temp_dir().join(format!("mind-it-{}-{n}", std::process::id()));
@@ -188,6 +213,21 @@ impl Drop for Sandbox {
 fn write(path: &Path, contents: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, contents).unwrap();
+}
+
+/// Recursively copy `src` into `dst` (files and subdirectories).
+fn copy_dir(src: &Path, dst: &Path) {
+    std::fs::create_dir_all(dst).unwrap();
+    for entry in std::fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if from.is_dir() {
+            copy_dir(&from, &to);
+        } else {
+            std::fs::copy(&from, &to).unwrap();
+        }
+    }
 }
 
 fn git(dir: &Path, args: &[&str]) {
@@ -1726,6 +1766,43 @@ fn unguarded_ref_warning_scans_all_files_of_an_item() {
         "warning should cite a sibling ref found in a non-SKILL.md file: {}",
         r.stderr
     );
+}
+
+#[test]
+fn example_namespacing_expands_references() {
+    // spec: NS-11, NS-14
+    // Prefixed: tokens expand to the prefixed effective names, and a guarded
+    // source produces no unguarded-reference warning.
+    let jk = Sandbox::from_example("namespacing");
+    let meld = jk.mind(&["meld", &jk.source_spec(), "--as", "jk"]);
+    assert!(meld.success, "{}", meld.stderr);
+    assert!(
+        !meld.stderr.contains("references sibling(s) in prose"),
+        "all refs are tokens, so no warning: {}",
+        meld.stderr
+    );
+    assert!(jk.mind(&["learn", "jk-lead"]).success);
+    let lead = std::fs::read_to_string(jk.mind_home.join("store/agent/jk-lead")).unwrap();
+    assert!(lead.contains("the jk-dev agent"), "{lead}");
+    assert!(lead.contains("the jk-review skill"), "{lead}");
+    assert!(lead.contains("the jk-style rule"), "{lead}");
+    assert!(!lead.contains("{{ns:"), "tokens should be gone: {lead}");
+    // The skill references a rule from inside its directory; it expands too.
+    assert!(jk.mind(&["learn", "jk-review"]).success);
+    let review =
+        std::fs::read_to_string(jk.mind_home.join("store/skill/jk-review/SKILL.md")).unwrap();
+    assert!(review.contains("jk-style rule"), "{review}");
+    assert!(!review.contains("{{ns:"), "tokens should be gone: {review}");
+
+    // Unprefixed: the same tokens expand to the bare names.
+    let bare = Sandbox::from_example("namespacing");
+    assert!(bare.mind(&["meld", &bare.source_spec()]).success);
+    assert!(bare.mind(&["learn", "lead"]).success);
+    let lead2 = std::fs::read_to_string(bare.mind_home.join("store/agent/lead")).unwrap();
+    assert!(lead2.contains("the dev agent"), "{lead2}");
+    assert!(lead2.contains("the review skill"), "{lead2}");
+    assert!(lead2.contains("the style rule"), "{lead2}");
+    assert!(!lead2.contains("{{ns:"), "{lead2}");
 }
 
 #[test]
