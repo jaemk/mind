@@ -110,7 +110,13 @@ fn run(cli: Cli) -> Result<()> {
 
 fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
     match cli.command {
-        Command::Meld { repo, alias } => commands::meld(paths, &repo, alias),
+        Command::Meld {
+            repo,
+            alias,
+            follow_branch,
+            pin_tag,
+            pin_ref,
+        } => commands::meld(paths, &repo, alias, follow_branch, pin_tag, pin_ref),
         Command::Unmeld { name, forget } => commands::unmeld(paths, &name, forget),
         Command::Learn { item, dry_run } => commands::learn(paths, &item, dry_run),
         Command::Forget { item } => commands::forget(paths, &item),

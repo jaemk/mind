@@ -55,6 +55,22 @@ pub enum Command {
         /// (overrides the repo's own `[source].prefix`).
         #[arg(long = "as", value_name = "PREFIX")]
         alias: Option<String>,
+
+        /// Track a named branch (overrides the repo's [source] pin directive).
+        /// At most one of --follow-branch, --pin-tag, --pin-ref may be given
+        /// (CLI-17: more than one is a `ConflictingPin` error).
+        #[arg(long, value_name = "BRANCH")]
+        follow_branch: Option<String>,
+
+        /// Fix to a tag (overrides the repo's [source] pin directive).
+        /// At most one of --follow-branch, --pin-tag, --pin-ref may be given.
+        #[arg(long, value_name = "TAG")]
+        pin_tag: Option<String>,
+
+        /// Fix to a specific commit (overrides the repo's [source] pin directive).
+        /// At most one of --follow-branch, --pin-tag, --pin-ref may be given.
+        #[arg(long, value_name = "COMMIT")]
+        pin_ref: Option<String>,
     },
 
     /// Unmeld a source, removing its clone and catalog entry.

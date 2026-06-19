@@ -7,6 +7,25 @@ use serde::{Deserialize, Serialize};
 use crate::error::{MindError, Result};
 use crate::paths::Paths;
 
+/// The version-pin recorded on a melded source (STO-18).
+///
+/// Persisted at meld time and never changed by `sync`. The implicit default
+/// (when absent from sources.json) is `DefaultBranch`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "kebab-case")]
+pub enum Pin {
+    /// Track the remote default branch (no explicit pin; the implicit default).
+    #[default]
+    DefaultBranch,
+    /// Track a named branch: reset to that branch tip on sync.
+    FollowBranch(String),
+    /// Fixed to a tag: re-fetches tags on sync; resets to that tag (moves if
+    /// the upstream tag was re-pointed, stays if it was not).
+    Tag(String),
+    /// Fixed to a specific commit sha: effectively immutable across syncs.
+    Ref(String),
+}
+
 /// One melded source repo.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Source {
@@ -31,6 +50,10 @@ pub struct Source {
     /// own `[source].prefix`. Persisted (never changed by `sync`).
     #[serde(default)]
     pub alias: Option<String>,
+    /// The version pin (STO-18). Persisted at meld and not changed by sync.
+    /// Absent in older sources.json files deserializes as `DefaultBranch`.
+    #[serde(default)]
+    pub pin: Pin,
 }
 
 impl Source {
@@ -131,6 +154,7 @@ fn make_source(host: &str, owner: &str, repo: &str, url: String) -> Source {
         commit: None,
         description: None,
         alias: None,
+        pin: Pin::default(),
     }
 }
 
@@ -170,6 +194,7 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     // spec: CLI-11 (repo spec parsing), CLI-61 (compare url), STO-13 (identity)
+    // spec: STO-18 (pin serde round-trip)
     use super::*;
 
     #[test]
@@ -256,5 +281,46 @@ mod tests {
         );
         let local = parse_spec("/tmp/x").unwrap();
         assert_eq!(local.compare_url("aaaa", "bbbb"), None);
+    }
+
+    #[test]
+    fn pin_serde_round_trips() {
+        // spec: STO-18
+        // Each Pin variant must serialize to a tagged JSON object and deserialize
+        // back losslessly.  Also verifies that a missing `pin` field (older
+        // sources.json) deserializes as DefaultBranch.
+        let cases = [
+            (
+                Pin::DefaultBranch,
+                r#"{"kind":"default-branch"}"#,
+            ),
+            (
+                Pin::FollowBranch("main".into()),
+                r#"{"kind":"follow-branch","value":"main"}"#,
+            ),
+            (
+                Pin::Tag("v1.0".into()),
+                r#"{"kind":"tag","value":"v1.0"}"#,
+            ),
+            (
+                Pin::Ref("abc1234".into()),
+                r#"{"kind":"ref","value":"abc1234"}"#,
+            ),
+        ];
+        for (pin, expected_json) in &cases {
+            let json = serde_json::to_string(pin).unwrap();
+            assert_eq!(
+                json, *expected_json,
+                "serialization mismatch for {pin:?}"
+            );
+            let roundtripped: Pin = serde_json::from_str(&json).unwrap();
+            assert_eq!(roundtripped, *pin, "round-trip failed for {pin:?}");
+        }
+        // Missing pin field in a Source's JSON -> DefaultBranch default.
+        let src_json = r#"{
+            "name":"local/a/b","url":"/a/b","host":"local","owner":"a","repo":"b"
+        }"#;
+        let src: Source = serde_json::from_str(src_json).unwrap();
+        assert_eq!(src.pin, Pin::DefaultBranch, "absent pin should default to DefaultBranch");
     }
 }

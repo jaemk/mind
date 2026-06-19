@@ -15,18 +15,39 @@ use crate::manifest::Manifest;
 use crate::mindfile::MindToml;
 use crate::paths::Paths;
 use crate::resolve::{is_glob, parse_item_ref, resolve, select, select_installed, source_matches};
-use crate::source::{Registry, parse_spec};
+use crate::source::{Pin, Registry, parse_spec};
 
-/// `mind meld <repo> [--as <prefix>]` — register and clone a source.
+/// `mind meld <repo> [--as <prefix>] [--follow-branch|--pin-tag|--pin-ref]`
+/// — register and clone a source.
 ///
 /// If the source's `mind.toml` lists nested `[discover].sources`, each is melded
 /// too (recursively), so a repo can act as a curated super-source. Nested
 /// sources are skipped if already registered, and cycles are guarded by URL.
-pub fn meld(paths: &Paths, repo: &str, alias: Option<String>) -> Result<()> {
+pub fn meld(
+    paths: &Paths,
+    repo: &str,
+    alias: Option<String>,
+    follow_branch: Option<String>,
+    pin_tag: Option<String>,
+    pin_ref: Option<String>,
+) -> Result<()> {
+    // Resolve the consumer-supplied pin flags into a single Pin. The flags are
+    // independent at the clap layer, so more than one surfaces here as the
+    // structured `ConflictingPin` error (CLI-17) rather than a clap usage string.
+    let consumer_pin = resolve_pin_flags(follow_branch, pin_tag, pin_ref)?;
+
     paths.ensure_layout()?;
     let mut registry = Registry::load(paths)?;
     let mut visited = HashSet::new();
-    let added = meld_recursive(paths, &mut registry, repo, alias, true, &mut visited)?;
+    let added = meld_recursive(
+        paths,
+        &mut registry,
+        repo,
+        alias,
+        consumer_pin,
+        true,
+        &mut visited,
+    )?;
     registry.save(paths)?;
     if added > 1 {
         println!("melded {added} source(s)");
@@ -34,14 +55,52 @@ pub fn meld(paths: &Paths, repo: &str, alias: Option<String>) -> Result<()> {
     Ok(())
 }
 
+/// Parse the three optional pin CLI flags into a single `Option<Pin>`.
+/// More than one set flag is a `ConflictingPin` error (CLI-17). The flags are
+/// kept independent at the clap layer so this structured error is what the user
+/// sees, rather than a clap usage string.
+fn resolve_pin_flags(
+    follow_branch: Option<String>,
+    pin_tag: Option<String>,
+    pin_ref: Option<String>,
+) -> Result<Option<Pin>> {
+    match (follow_branch, pin_tag, pin_ref) {
+        (None, None, None) => Ok(None),
+        (Some(b), None, None) => Ok(Some(Pin::FollowBranch(b))),
+        (None, Some(t), None) => Ok(Some(Pin::Tag(t))),
+        (None, None, Some(r)) => Ok(Some(Pin::Ref(r))),
+        (b, t, r) => {
+            // More than one is set; name the first two for the error.
+            let mut names = Vec::new();
+            if b.is_some() {
+                names.push("--follow-branch");
+            }
+            if t.is_some() {
+                names.push("--pin-tag");
+            }
+            if r.is_some() {
+                names.push("--pin-ref");
+            }
+            Err(MindError::ConflictingPin {
+                first: names[0].to_string(),
+                second: names[1].to_string(),
+            })
+        }
+    }
+}
+
 /// Meld one source and then its nested sources. Returns how many sources were
 /// newly added to the registry. `top_level` distinguishes the user's own meld
 /// (errors on a duplicate) from a curated nested meld (skips a duplicate).
+///
+/// `consumer_pin` is the caller-supplied pin (CLI flags or None for a nested
+/// source that inherits no pin override).
 fn meld_recursive(
     paths: &Paths,
     registry: &mut Registry,
     repo: &str,
     alias: Option<String>,
+    consumer_pin: Option<Pin>,
     top_level: bool,
     visited: &mut HashSet<String>,
 ) -> Result<usize> {
@@ -77,11 +136,50 @@ fn meld_recursive(
         crate::paths::mkdir_p(parent)?;
     }
 
+    // We need to clone before reading mind.toml (it lives inside the clone).
+    // For the initial clone we use the default branch so we can read the file,
+    // then immediately re-clone at the resolved pin if needed. For local/file://
+    // repos this is cheap; for real remotes the first clone is always needed.
+    //
+    // Optimisation: if the consumer already specified a pin (consumer_pin is
+    // Some), or if after reading the mindfile we get a directive, we re-clone at
+    // the right point. For DefaultBranch the first clone is already correct.
+
     println!("melding {} from {}", source.name, source.url);
+
+    // Step 1: clone the default branch to read mind.toml.
     git::clone(&source.url, &dir)?;
-    source.commit = Some(git::head_commit(&source.url, &dir)?);
     let mindfile = MindToml::load(&dir)?;
     source.description = mindfile.as_ref().and_then(|m| m.source.description.clone());
+
+    // Step 2: resolve the effective pin (CLI-17, DSC-41):
+    //   consumer flag > [source] directive > DefaultBranch.
+    let toml_path = dir.join("mind.toml");
+    let directive_pin = mindfile
+        .as_ref()
+        .map(|m| m.source.pin_directive(&toml_path))
+        .transpose()?
+        .flatten();
+    let effective_pin = consumer_pin.or(directive_pin).unwrap_or(Pin::DefaultBranch);
+
+    // Step 3: if the effective pin is not DefaultBranch, re-clone at that point.
+    // A pin that does not resolve in the remote is a `Git` error and must leave
+    // nothing behind (CLI-18). `clone_at` for a ref clones first and then checks
+    // out the sha, so a bad ref leaves a half-built clone dir; clean it up on any
+    // failure of the re-clone so no orphan is left on disk.
+    if effective_pin != Pin::DefaultBranch {
+        std::fs::remove_dir_all(&dir).map_err(|e| MindError::io(&dir, e))?;
+        if let Err(e) = git::clone_at(&source.url, &dir, &effective_pin) {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(e);
+        }
+        // Reload description in case pin lands on a different mind.toml.
+        let mf2 = MindToml::load(&dir)?;
+        source.description = mf2.as_ref().and_then(|m| m.source.description.clone());
+    }
+
+    source.pin = effective_pin;
+    source.commit = Some(git::head_commit(&source.url, &dir)?);
 
     // Scan before registering. If the source is rejected here (e.g. the
     // version gate, DSC-40), remove the clone so no orphan is left on disk.
@@ -103,11 +201,14 @@ fn meld_recursive(
         .map(|d| &d.sources)
     {
         for entry in nested {
+            // Nested sources from a curated super-source get no pin override;
+            // they read their own [source] directive or default to DefaultBranch.
             added += meld_recursive(
                 paths,
                 registry,
                 &entry.source,
                 entry.alias.clone(),
+                None, // no consumer pin for nested sources
                 false,
                 visited,
             )?;
@@ -395,13 +496,16 @@ pub fn sync(paths: &Paths, then_evolve: bool) -> Result<()> {
         print!("syncing {} ... ", source.name);
         let _ = std::io::stdout().flush();
         let refreshed = (|| -> Result<(String, bool, Option<String>)> {
+            // CLI-55: resolve the source against its recorded pin (never change
+            // the pin itself, only move HEAD to the pinned point).
+            let pin = source.pin.clone();
             if dir.join(".git").is_dir() {
-                git::fetch_and_reset(&source.url, &dir)?;
+                git::sync_to_pin(&source.url, &dir, &pin)?;
             } else {
                 if let Some(parent) = dir.parent() {
                     crate::paths::mkdir_p(parent)?;
                 }
-                git::clone(&source.url, &dir)?;
+                git::clone_at(&source.url, &dir, &pin)?;
             }
             let new_commit = git::head_commit(&source.url, &dir)?;
             let changed = source.commit.as_deref() != Some(new_commit.as_str());

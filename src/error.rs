@@ -157,6 +157,11 @@ pub enum MindError {
 
     #[error("git executable not found on PATH; install git to meld and sync sources")]
     GitNotFound,
+
+    #[error(
+        "conflicting pin flags: {first} and {second} cannot both be given; supply at most one of --follow-branch, --pin-tag, --pin-ref"
+    )]
+    ConflictingPin { first: String, second: String },
 }
 
 fn status_suffix(status: Option<ExitStatus>) -> String {

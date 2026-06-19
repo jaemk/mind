@@ -2182,3 +2182,786 @@ fn exclusive_lock_blocks_second_writer_until_first_completes() {
         sources.stdout
     );
 }
+
+// ---- version pinning tests (DSC-41, STO-18, CLI-17, CLI-18, CLI-55) ---------
+
+/// Build a sandbox repo that has a `stable` branch and a `v1.0` tag at the
+/// initial commit, then advance `main` further. Returns (sandbox, sha_at_v1_0,
+/// sha_at_main_tip).
+fn make_pinnable_repo(name: &str) -> (Sandbox, String, String) {
+    let sb = Sandbox::bare(name);
+
+    // Write an initial file and commit it. This becomes the tagged commit.
+    write(
+        &sb.source.join("agents/dev.md"),
+        "---\nname: dev\ndescription: dev agent v1\n---\n# dev v1\n",
+    );
+    git(&sb.source, &["add", "-A"]);
+    git(&sb.source, &["commit", "-qm", "initial"]);
+
+    // Read the sha of that initial commit.
+    let sha_v1 = {
+        let out = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&sb.source)
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+
+    // Tag it and create a `stable` branch pointing here.
+    git(&sb.source, &["tag", "v1.0"]);
+    git(&sb.source, &["branch", "stable"]);
+
+    // Advance main with a second commit.
+    write(
+        &sb.source.join("agents/dev.md"),
+        "---\nname: dev\ndescription: dev agent v2\n---\n# dev v2\n",
+    );
+    git(&sb.source, &["commit", "-aqm", "v2 commit"]);
+
+    let sha_v2 = {
+        let out = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&sb.source)
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+
+    (sb, sha_v1, sha_v2)
+}
+
+/// Read the `pin` field from a source's entry in sources.json.  Returns the
+/// JSON object as a string so callers can assert on kind/value without pulling
+/// in a serde dependency here.
+fn read_source_pin_json(sb: &Sandbox) -> String {
+    let json =
+        std::fs::read_to_string(sb.mind_home.join("sources.json")).expect("sources.json");
+    // Extract the `pin` object from the JSON.  The file is pretty-printed so
+    // the pin block spans multiple lines; grab everything between `"pin": ` and
+    // the next top-level `}` after it.
+    let start = json.find("\"pin\":").expect("pin key in sources.json");
+    // Find the matching `}` for the pin object.
+    let after = &json[start..];
+    let obj_start = after.find('{').expect("pin object open brace");
+    let obj_str = &after[obj_start..];
+    let mut depth = 0usize;
+    let mut end = 0;
+    for (i, c) in obj_str.char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = i + 1;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    obj_str[..end].to_string()
+}
+
+/// Read the recorded commit for the first source in sources.json.
+fn read_source_commit(sb: &Sandbox) -> String {
+    let json =
+        std::fs::read_to_string(sb.mind_home.join("sources.json")).expect("sources.json");
+    // Extract "commit": "sha" from the JSON.
+    let key = "\"commit\": \"";
+    let start = json.find(key).expect("commit key") + key.len();
+    let end = json[start..].find('"').expect("closing quote") + start;
+    json[start..end].to_string()
+}
+
+#[test]
+fn meld_follow_branch_clones_named_branch_and_persists_pin() {
+    // spec: CLI-17, CLI-18, STO-18
+    let (sb, sha_v1, _sha_v2) = make_pinnable_repo("pintest-follow");
+    let spec = sb.source_spec();
+
+    let r = sb.mind(&["meld", &spec, "--follow-branch", "stable"]);
+    assert!(r.success, "meld --follow-branch: {}", r.stderr);
+
+    // The recorded commit is at stable (sha_v1), not main tip (sha_v2).
+    let commit = read_source_commit(&sb);
+    assert_eq!(
+        commit, sha_v1,
+        "follow-branch=stable should record sha_v1"
+    );
+
+    // The persisted pin has kind=follow-branch and value=stable.
+    let pin_json = read_source_pin_json(&sb);
+    assert!(
+        pin_json.contains("follow-branch"),
+        "pin kind should be follow-branch: {pin_json}"
+    );
+    assert!(
+        pin_json.contains("stable"),
+        "pin value should be stable: {pin_json}"
+    );
+}
+
+#[test]
+fn meld_pin_tag_clones_at_tag_and_persists_pin() {
+    // spec: CLI-17, CLI-18, STO-18
+    let (sb, sha_v1, _sha_v2) = make_pinnable_repo("pintest-tag");
+    let spec = sb.source_spec();
+
+    let r = sb.mind(&["meld", &spec, "--pin-tag", "v1.0"]);
+    assert!(r.success, "meld --pin-tag: {}", r.stderr);
+
+    // Should be at the tagged commit.
+    let commit = read_source_commit(&sb);
+    assert_eq!(commit, sha_v1, "pin-tag=v1.0 should record sha_v1");
+
+    let pin_json = read_source_pin_json(&sb);
+    assert!(
+        pin_json.contains("\"tag\""),
+        "pin kind should be tag: {pin_json}"
+    );
+    assert!(
+        pin_json.contains("v1.0"),
+        "pin value should be v1.0: {pin_json}"
+    );
+}
+
+#[test]
+fn meld_pin_ref_clones_at_specific_commit_and_persists_pin() {
+    // spec: CLI-17, CLI-18, STO-18
+    let (sb, sha_v1, _sha_v2) = make_pinnable_repo("pintest-ref");
+    let spec = sb.source_spec();
+
+    let r = sb.mind(&["meld", &spec, "--pin-ref", &sha_v1]);
+    assert!(r.success, "meld --pin-ref: {}", r.stderr);
+
+    let commit = read_source_commit(&sb);
+    assert_eq!(commit, sha_v1, "pin-ref should record sha_v1");
+
+    let pin_json = read_source_pin_json(&sb);
+    assert!(
+        pin_json.contains("\"ref\""),
+        "pin kind should be ref: {pin_json}"
+    );
+    assert!(
+        pin_json.contains(&sha_v1),
+        "pin value should be the sha: {pin_json}"
+    );
+}
+
+#[test]
+fn meld_default_branch_pin_is_at_main_tip() {
+    // spec: CLI-17 (no flag -> default branch), STO-18 (DefaultBranch persisted)
+    let (sb, _sha_v1, sha_v2) = make_pinnable_repo("pintest-default");
+    let spec = sb.source_spec();
+
+    let r = sb.mind(&["meld", &spec]);
+    assert!(r.success, "meld default: {}", r.stderr);
+
+    // Default branch (main) tip is sha_v2.
+    let commit = read_source_commit(&sb);
+    assert_eq!(commit, sha_v2, "default branch should be at main tip");
+
+    let pin_json = read_source_pin_json(&sb);
+    assert!(
+        pin_json.contains("default-branch"),
+        "pin kind should be default-branch: {pin_json}"
+    );
+}
+
+#[test]
+fn meld_two_pin_flags_is_conflicting_pin_error() {
+    // spec: CLI-17 (at most one pin flag)
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+
+    // Two flags at once is an error.
+    let r = sb.mind(&["meld", &spec, "--follow-branch", "main", "--pin-tag", "v1"]);
+    assert!(
+        !r.success,
+        "two pin flags must be rejected: stdout={} stderr={}",
+        r.stdout,
+        r.stderr
+    );
+    // CLI-17 names the structured `ConflictingPin` error, so the flags are kept
+    // independent at the clap layer and this is what surfaces (not a clap usage
+    // string). The exit is non-zero and nothing is registered.
+    assert!(
+        r.stderr.contains("conflicting pin flags"),
+        "expected the structured ConflictingPin error, got stderr={}",
+        r.stderr
+    );
+    let sources = sb.mind(&["recall", "--sources"]);
+    assert!(
+        sources.stdout.contains("no sources melded"),
+        "nothing should be registered after a conflict error: {}",
+        sources.stdout
+    );
+}
+
+#[test]
+fn source_directive_follow_branch_applies_when_no_consumer_flag() {
+    // spec: DSC-41, CLI-17 (directive supplies default when no consumer flag)
+    let (sb, sha_v1, _sha_v2) = make_pinnable_repo("pintest-directive-follow");
+    sb.write_and_commit(
+        "mind.toml",
+        "[source]\nfollow-branch = \"stable\"\n",
+    );
+    let spec = sb.source_spec();
+
+    let r = sb.mind(&["meld", &spec]);
+    assert!(r.success, "meld with directive: {}", r.stderr);
+
+    // Directive follow-branch=stable => clone at stable (sha_v1).
+    let commit = read_source_commit(&sb);
+    assert_eq!(
+        commit, sha_v1,
+        "directive follow-branch=stable should land on sha_v1"
+    );
+
+    let pin_json = read_source_pin_json(&sb);
+    assert!(
+        pin_json.contains("follow-branch"),
+        "pin kind should be follow-branch: {pin_json}"
+    );
+}
+
+#[test]
+fn consumer_flag_overrides_source_directive() {
+    // spec: DSC-41, CLI-17 (consumer flag overrides directive)
+    let (sb, sha_v1, _sha_v2) = make_pinnable_repo("pintest-override");
+    // Directive says follow stable (sha_v1); consumer says --follow-branch main.
+    // Adding the mind.toml advances main by one more commit, so we capture the
+    // resulting tip AFTER that commit.
+    sb.write_and_commit(
+        "mind.toml",
+        "[source]\nfollow-branch = \"stable\"\n",
+    );
+    // sha_main_tip is HEAD of main after the mind.toml commit.
+    let sha_main_tip = {
+        let out = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&sb.source)
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    let spec = sb.source_spec();
+
+    // Consumer says --follow-branch main which overrides the directive.
+    let r = sb.mind(&["meld", &spec, "--follow-branch", "main"]);
+    assert!(r.success, "meld override: {}", r.stderr);
+
+    let commit = read_source_commit(&sb);
+    assert_eq!(
+        commit, sha_main_tip,
+        "consumer --follow-branch main should override directive and land on main tip"
+    );
+    // Verify directive sha_v1 was NOT used (different commit).
+    assert_ne!(commit, sha_v1, "directive must not take precedence over consumer flag");
+}
+
+#[test]
+fn sync_follow_branch_advances_commit() {
+    // spec: CLI-55 (follow-branch resets to branch tip on sync)
+    let (sb, sha_v1, _sha_v2) = make_pinnable_repo("pintest-sync-follow");
+    let spec = sb.source_spec();
+
+    // Meld at stable (sha_v1).
+    assert!(
+        sb.mind(&["meld", &spec, "--follow-branch", "stable"])
+            .success
+    );
+    let before = read_source_commit(&sb);
+    assert_eq!(before, sha_v1);
+
+    // Advance the `stable` branch on the remote.
+    write(
+        &sb.source.join("agents/dev.md"),
+        "---\nname: dev\ndescription: dev agent v3\n---\n# dev v3\n",
+    );
+    git(&sb.source, &["commit", "-aqm", "v3 on stable"]);
+    // Move stable to the new HEAD.
+    let sha_v3 = {
+        let out = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&sb.source)
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    // The new commit is on main; create stable pointing at it.
+    git(&sb.source, &["branch", "-f", "stable", &sha_v3]);
+
+    let r = sb.mind(&["sync"]);
+    assert!(r.success, "sync follow-branch: {}", r.stderr);
+
+    let after = read_source_commit(&sb);
+    assert_eq!(
+        after, sha_v3,
+        "follow-branch source should advance on sync"
+    );
+}
+
+#[test]
+fn sync_pin_ref_stays_fixed() {
+    // spec: CLI-55 (pin-ref source stays fixed on sync)
+    let (sb, sha_v1, _sha_v2) = make_pinnable_repo("pintest-sync-ref");
+    let spec = sb.source_spec();
+
+    assert!(sb.mind(&["meld", &spec, "--pin-ref", &sha_v1]).success);
+    let before = read_source_commit(&sb);
+    assert_eq!(before, sha_v1);
+
+    // Advance main further.
+    write(
+        &sb.source.join("agents/dev.md"),
+        "---\nname: dev\ndescription: v99\n---\n# v99\n",
+    );
+    git(&sb.source, &["commit", "-aqm", "v99"]);
+
+    let r = sb.mind(&["sync"]);
+    assert!(r.success, "sync pin-ref: {}", r.stderr);
+
+    let after = read_source_commit(&sb);
+    assert_eq!(after, sha_v1, "pin-ref should be immutable across sync");
+}
+
+#[test]
+fn sync_does_not_change_pin() {
+    // spec: CLI-55 (sync never changes the pin itself, only moves HEAD)
+    let (sb, _sha_v1, _sha_v2) = make_pinnable_repo("pintest-sync-nopin");
+    let spec = sb.source_spec();
+
+    assert!(
+        sb.mind(&["meld", &spec, "--follow-branch", "stable"])
+            .success
+    );
+
+    // Capture the pin before sync.
+    let pin_before = read_source_pin_json(&sb);
+
+    sb.mind(&["sync"]);
+
+    // Pin must be identical after sync.
+    let pin_after = read_source_pin_json(&sb);
+    assert_eq!(
+        pin_before, pin_after,
+        "sync must not modify the recorded pin"
+    );
+    // Specifically still follow-branch=stable.
+    assert!(pin_after.contains("follow-branch"), "{pin_after}");
+    assert!(pin_after.contains("stable"), "{pin_after}");
+}
+
+#[test]
+fn source_directive_conflict_is_error() {
+    // spec: DSC-41 (more than one pin directive is a MindToml error)
+    let sb = Sandbox::new();
+    sb.write_and_commit(
+        "mind.toml",
+        "[source]\nfollow-branch = \"main\"\npin-tag = \"v1.0\"\n",
+    );
+    let spec = sb.source_spec();
+
+    let r = sb.mind(&["meld", &spec]);
+    assert!(!r.success, "conflicting directives should fail meld");
+    assert!(
+        r.stderr.contains("conflicting pin") || r.stderr.contains("mind.toml"),
+        "expected pin conflict error: {}",
+        r.stderr
+    );
+    assert!(
+        sb.mind(&["recall", "--sources"])
+            .stdout
+            .contains("no sources melded"),
+        "nothing should be registered"
+    );
+}
+
+#[test]
+fn existing_sources_json_without_pin_field_loads_as_default_branch() {
+    // spec: STO-18 (missing pin field -> DefaultBranch default)
+    // Write a sources.json that has no "pin" field, simulating an older registry
+    // written before version pinning was added.  sync must still work and treat
+    // the source as DefaultBranch.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+
+    // First meld so the clone exists on disk.
+    assert!(sb.mind(&["meld", &spec]).success);
+
+    // Rewrite sources.json without the `pin` field, in the format that
+    // an old `mind` would have written.
+    let path = sb.mind_home.join("sources.json");
+    // Read the real file to get the actual name/url/host/owner/repo/commit values.
+    let json = std::fs::read_to_string(&path).unwrap();
+    // Extract the "name" value for use in the hand-crafted JSON.
+    let name_start = json.find("\"name\": \"").unwrap() + "\"name\": \"".len();
+    let name_end = json[name_start..].find('"').unwrap() + name_start;
+    let name_val = &json[name_start..name_end];
+
+    let url_start = json.find("\"url\": \"").unwrap() + "\"url\": \"".len();
+    let url_end = json[url_start..].find('"').unwrap() + url_start;
+    let url_val = &json[url_start..url_end];
+
+    // Build a minimal sources.json with no pin field.
+    let no_pin_json = format!(
+        r#"{{
+  "sources": [
+    {{
+      "name": "{name_val}",
+      "url": "{url_val}",
+      "host": "local",
+      "owner": "x",
+      "repo": "agents",
+      "commit": null
+    }}
+  ]
+}}"#
+    );
+    std::fs::write(&path, no_pin_json).unwrap();
+
+    // sync must not error (reads missing pin as DefaultBranch).
+    let r = sb.mind(&["sync"]);
+    assert!(
+        r.success,
+        "sync on old sources.json (no pin field) should succeed: {}",
+        r.stderr
+    );
+}
+
+/// The on-disk clone dir for the sandbox's local source:
+/// `<mind_home>/sources/local/<base_name>/<repo>`.
+fn clone_dir_of(sb: &Sandbox, repo: &str) -> PathBuf {
+    sb.mind_home
+        .join("sources")
+        .join("local")
+        .join(sb.base_name())
+        .join(repo)
+}
+
+#[test]
+fn meld_pin_ref_unresolvable_is_git_error_and_registers_nothing() {
+    // spec: CLI-18 — a pin that does not resolve in the remote is a `Git` error
+    // and nothing is registered. The two-step clone re-clones at the resolved
+    // pin after reading mind.toml; a failure of that second clone must not leave
+    // a registered source nor a stray clone dir on disk.
+    let (sb, _v1, _v2) = make_pinnable_repo("pintest-bad-ref");
+    let spec = sb.source_spec();
+
+    // A 40-char hex sha that does not exist in the remote.
+    let bogus = "0123456789abcdef0123456789abcdef01234567";
+    let r = sb.mind(&["meld", &spec, "--pin-ref", bogus]);
+    assert!(
+        !r.success,
+        "unresolvable --pin-ref must fail: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+    // It is a structured Git error (the checkout against the bogus sha fails).
+    assert!(
+        r.stderr.contains("git"),
+        "expected a git error, got stderr={}",
+        r.stderr
+    );
+
+    // Nothing registered.
+    let sources = sb.mind(&["recall", "--sources"]);
+    assert!(
+        sources.stdout.contains("no sources melded"),
+        "no source must be registered after an unresolvable pin: {}",
+        sources.stdout
+    );
+    // sources.json, if present, must not list the source.
+    let sources_json = sb.mind_home.join("sources.json");
+    if sources_json.exists() {
+        let json = std::fs::read_to_string(&sources_json).unwrap();
+        assert!(
+            !json.contains("pintest-bad-ref"),
+            "sources.json must not contain the failed source: {json}"
+        );
+    }
+    // No stray clone dir is left under MIND_HOME for this source.
+    let clone = clone_dir_of(&sb, "pintest-bad-ref");
+    assert!(
+        !clone.exists(),
+        "an unresolvable pin must not leave a stray clone dir at {}",
+        clone.display()
+    );
+}
+
+#[test]
+fn meld_pin_tag_unresolvable_is_git_error_and_registers_nothing() {
+    // spec: CLI-18 — same as above for a tag that does not exist in the remote.
+    // Here the re-clone uses `clone --branch <tag>` which fails outright, so the
+    // staging clone dir never materializes.
+    let (sb, _v1, _v2) = make_pinnable_repo("pintest-bad-tag");
+    let spec = sb.source_spec();
+
+    let r = sb.mind(&["meld", &spec, "--pin-tag", "v9.9-does-not-exist"]);
+    assert!(
+        !r.success,
+        "unresolvable --pin-tag must fail: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr.contains("git"),
+        "expected a git error, got stderr={}",
+        r.stderr
+    );
+
+    let sources = sb.mind(&["recall", "--sources"]);
+    assert!(
+        sources.stdout.contains("no sources melded"),
+        "no source must be registered after an unresolvable tag pin: {}",
+        sources.stdout
+    );
+    let clone = clone_dir_of(&sb, "pintest-bad-tag");
+    assert!(
+        !clone.exists(),
+        "an unresolvable tag pin must not leave a stray clone dir at {}",
+        clone.display()
+    );
+}
+
+#[test]
+fn sync_reclones_when_clone_dir_is_missing() {
+    // spec: CLI-55 — sync resolves each source against its recorded pin. If the
+    // clone dir has been removed out from under the registry, sync must recover
+    // by re-cloning at the recorded pin rather than erroring, landing back on the
+    // pinned commit.
+    let (sb, sha_v1, _v2) = make_pinnable_repo("pintest-sync-missing");
+    let spec = sb.source_spec();
+
+    assert!(sb.mind(&["meld", &spec, "--pin-tag", "v1.0"]).success);
+    assert_eq!(read_source_commit(&sb), sha_v1);
+
+    // Delete the clone dir, simulating a wiped/partial sources tree.
+    let clone = clone_dir_of(&sb, "pintest-sync-missing");
+    assert!(clone.exists(), "clone should exist after meld");
+    std::fs::remove_dir_all(&clone).unwrap();
+
+    let r = sb.mind(&["sync"]);
+    assert!(
+        r.success,
+        "sync must recover a missing clone dir: {}",
+        r.stderr
+    );
+    // Recovered and still pinned at v1.0 (sha_v1), not main tip.
+    assert_eq!(
+        read_source_commit(&sb),
+        sha_v1,
+        "re-clone on sync must honor the recorded pin"
+    );
+    assert!(
+        clone.join(".git").is_dir(),
+        "sync should have re-created the clone"
+    );
+}
+
+#[test]
+fn pin_persists_across_repeated_syncs_while_commit_advances() {
+    // spec: STO-18, CLI-55 — the recorded pin is untouched by sync across
+    // repeated runs, even as a follow-branch source's recorded commit advances.
+    let (sb, sha_v1, _v2) = make_pinnable_repo("pintest-multi-sync");
+    let spec = sb.source_spec();
+
+    assert!(
+        sb.mind(&["meld", &spec, "--follow-branch", "stable"])
+            .success
+    );
+    assert_eq!(read_source_commit(&sb), sha_v1);
+    let pin_initial = read_source_pin_json(&sb);
+
+    // First sync with no upstream change: commit stays, pin stays.
+    assert!(sb.mind(&["sync"]).success);
+    assert_eq!(read_source_commit(&sb), sha_v1);
+    assert_eq!(read_source_pin_json(&sb), pin_initial);
+
+    // Advance `stable` upstream, then sync: commit moves, pin still untouched.
+    write(
+        &sb.source.join("agents/dev.md"),
+        "---\nname: dev\ndescription: stable v3\n---\n# stable v3\n",
+    );
+    git(&sb.source, &["commit", "-aqm", "v3 on stable"]);
+    let sha_v3 = {
+        let out = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&sb.source)
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    git(&sb.source, &["branch", "-f", "stable", &sha_v3]);
+
+    assert!(sb.mind(&["sync"]).success);
+    assert_eq!(
+        read_source_commit(&sb),
+        sha_v3,
+        "follow-branch commit should advance across repeated syncs"
+    );
+    assert_eq!(
+        read_source_pin_json(&sb),
+        pin_initial,
+        "pin value must stay untouched across repeated syncs"
+    );
+
+    // A third sync with no further change keeps both stable.
+    assert!(sb.mind(&["sync"]).success);
+    assert_eq!(read_source_commit(&sb), sha_v3);
+    assert_eq!(read_source_pin_json(&sb), pin_initial);
+}
+
+#[test]
+fn source_directive_pin_tag_applies_when_no_consumer_flag() {
+    // spec: DSC-41 — a `pin-tag` directive supplies the default pin when the
+    // consumer gives no flag (parity with the follow-branch directive test).
+    let (sb, sha_v1, _v2) = make_pinnable_repo("pintest-directive-tag");
+    sb.write_and_commit("mind.toml", "[source]\npin-tag = \"v1.0\"\n");
+    let spec = sb.source_spec();
+
+    let r = sb.mind(&["meld", &spec]);
+    assert!(r.success, "meld with pin-tag directive: {}", r.stderr);
+
+    // The directive lands the clone on the tagged commit (sha_v1), not main tip.
+    assert_eq!(
+        read_source_commit(&sb),
+        sha_v1,
+        "directive pin-tag=v1.0 should land on the tagged commit"
+    );
+    let pin_json = read_source_pin_json(&sb);
+    assert!(pin_json.contains("\"tag\""), "pin kind should be tag: {pin_json}");
+    assert!(pin_json.contains("v1.0"), "pin value should be v1.0: {pin_json}");
+}
+
+#[test]
+fn source_directive_pin_ref_applies_when_no_consumer_flag() {
+    // spec: DSC-41 — a `pin-ref` directive supplies the default pin when the
+    // consumer gives no flag.
+    let (sb, sha_v1, _v2) = make_pinnable_repo("pintest-directive-ref");
+    // The directive must name a commit that exists in the default-branch clone,
+    // since the directive is read from the default-branch mind.toml. sha_v1 is an
+    // ancestor of main tip, so it is reachable.
+    sb.write_and_commit("mind.toml", &format!("[source]\npin-ref = \"{sha_v1}\"\n"));
+    let spec = sb.source_spec();
+
+    let r = sb.mind(&["meld", &spec]);
+    assert!(r.success, "meld with pin-ref directive: {}", r.stderr);
+
+    assert_eq!(
+        read_source_commit(&sb),
+        sha_v1,
+        "directive pin-ref should land on the named commit"
+    );
+    let pin_json = read_source_pin_json(&sb);
+    assert!(pin_json.contains("\"ref\""), "pin kind should be ref: {pin_json}");
+    assert!(pin_json.contains(&sha_v1), "pin value should be the sha: {pin_json}");
+}
+
+#[test]
+fn consumer_pin_ref_overrides_follow_branch_directive() {
+    // spec: DSC-41, CLI-17 — a consumer flag of a DIFFERENT kind overrides the
+    // directive (not just same-kind override). Directive follows `stable`; the
+    // consumer pins a specific ref instead.
+    let (sb, sha_v1, _v2) = make_pinnable_repo("pintest-cross-override");
+    sb.write_and_commit("mind.toml", "[source]\nfollow-branch = \"stable\"\n");
+    let spec = sb.source_spec();
+
+    // Consumer pins the main-tip commit (after the mind.toml commit).
+    let sha_main_tip = {
+        let out = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&sb.source)
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+
+    let r = sb.mind(&["meld", &spec, "--pin-ref", &sha_main_tip]);
+    assert!(r.success, "meld cross-kind override: {}", r.stderr);
+
+    assert_eq!(
+        read_source_commit(&sb),
+        sha_main_tip,
+        "consumer --pin-ref must override the follow-branch directive"
+    );
+    assert_ne!(
+        read_source_commit(&sb),
+        sha_v1,
+        "the stable directive must not win over the consumer ref"
+    );
+    let pin_json = read_source_pin_json(&sb);
+    assert!(
+        pin_json.contains("\"ref\""),
+        "persisted pin kind should be the consumer's ref, not follow-branch: {pin_json}"
+    );
+}
+
+#[test]
+fn meld_rejects_unknown_source_pin_field() {
+    // spec: DSC-41 — `[source]` is `deny_unknown_fields`, so a misspelled pin
+    // directive (e.g. `pin-branch` instead of `follow-branch`) is a parse error,
+    // not a silently-ignored field that would leave the source on the default.
+    let (sb, _v1, _v2) = make_pinnable_repo("pintest-unknown-field");
+    sb.write_and_commit("mind.toml", "[source]\npin-branch = \"stable\"\n");
+    let spec = sb.source_spec();
+
+    let r = sb.mind(&["meld", &spec]);
+    assert!(
+        !r.success,
+        "an unknown [source] field must fail meld: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr.contains("mind.toml") || r.stderr.contains("pin-branch"),
+        "expected a mind.toml parse error naming the bad field: {}",
+        r.stderr
+    );
+    assert!(
+        sb.mind(&["recall", "--sources"])
+            .stdout
+            .contains("no sources melded"),
+        "nothing should be registered after a mind.toml parse error"
+    );
+}
+
+#[test]
+fn sync_pin_tag_picks_up_moved_upstream_tag() {
+    // spec: CLI-55 — the moved-tag force-fetch is observable end-to-end via the
+    // CLI: a re-pointed upstream tag advances the recorded commit on sync (the
+    // git-layer unit test alone does not exercise the meld+sync+registry path).
+    let (sb, sha_v1, _v2) = make_pinnable_repo("pintest-moved-tag");
+    let spec = sb.source_spec();
+
+    assert!(sb.mind(&["meld", &spec, "--pin-tag", "v1.0"]).success);
+    assert_eq!(read_source_commit(&sb), sha_v1, "pinned at v1.0 == sha_v1");
+
+    // Add a new commit upstream and re-point v1.0 at it.
+    write(
+        &sb.source.join("agents/dev.md"),
+        "---\nname: dev\ndescription: retagged\n---\n# retagged\n",
+    );
+    git(&sb.source, &["commit", "-aqm", "retag target"]);
+    let sha_new = {
+        let out = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&sb.source)
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    git(&sb.source, &["tag", "-f", "v1.0", &sha_new]);
+
+    let r = sb.mind(&["sync"]);
+    assert!(r.success, "sync after moving tag: {}", r.stderr);
+    assert_eq!(
+        read_source_commit(&sb),
+        sha_new,
+        "a re-pointed upstream tag must be picked up by sync (force-fetch)"
+    );
+    // And the pin itself is unchanged (still tag v1.0).
+    let pin_json = read_source_pin_json(&sb);
+    assert!(pin_json.contains("\"tag\""), "{pin_json}");
+    assert!(pin_json.contains("v1.0"), "{pin_json}");
+}

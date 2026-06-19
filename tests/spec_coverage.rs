@@ -30,8 +30,7 @@ const ALLOWLIST: &[&str] = &[
     // when built, at which point it is removed from this allowlist.
     //   scan roots (subtree/monorepo sources)
     "DSC-50", "DSC-51", "DSC-52", "DSC-53", "STO-17", "CLI-16",
-    //   version pinning
-    "DSC-41", "STO-18", "CLI-17", "CLI-18", "CLI-55",
+    //   version pinning: now implemented; IDs removed from allowlist and cited in tests.
     //   review verb (author-side source validation)
     "CLI-130", "CLI-131", "CLI-132", "CLI-133",
     //   self-update verb (in-place binary upgrade via the self_update crate)
