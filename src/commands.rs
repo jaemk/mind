@@ -5,14 +5,14 @@ use std::io::Write;
 
 use crate::catalog::{self, CatalogItem};
 use crate::config::Config;
-use crate::error::{MindError, Result};
+use crate::error::{ItemKind, MindError, Result};
 use crate::git;
 use crate::hash::hash_path;
 use crate::install;
 use crate::manifest::Manifest;
 use crate::mindfile::MindToml;
 use crate::paths::Paths;
-use crate::resolve::{is_glob, parse_item_ref, resolve, select};
+use crate::resolve::{is_glob, parse_item_ref, resolve, select, select_installed, source_matches};
 use crate::source::{Registry, parse_spec};
 
 /// `mind meld <repo> [--as <prefix>]` — register and clone a source.
@@ -81,7 +81,15 @@ fn meld_recursive(
     let mindfile = MindToml::load(&dir)?;
     source.description = mindfile.as_ref().and_then(|m| m.source.description.clone());
 
-    let items = catalog::scan(paths, &single(&source))?;
+    // Scan before registering. If the source is rejected here (e.g. the
+    // version gate, DSC-40), remove the clone so no orphan is left on disk.
+    let items = match catalog::scan(paths, &single(&source)) {
+        Ok(items) => items,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(e);
+        }
+    };
     warn_unguarded_references(&items);
     println!("melded {} ({} item(s))", source.name, items.len());
     registry.sources.push(source);
@@ -148,15 +156,16 @@ fn siblings_of(items: &[CatalogItem], source: &str) -> std::collections::HashSet
         .collect()
 }
 
-/// `mind unmeld <name>` — drop a source. `name` may be the full `owner/repo` or
-/// an unambiguous repo basename.
-pub fn unmeld(paths: &Paths, name: &str) -> Result<()> {
+/// `mind unmeld <name> [--forget]` — drop a source. `name` may be the full
+/// `owner/repo` or an unambiguous repo basename. With `--forget`, every item
+/// installed from the source is uninstalled (via its file registry) first.
+pub fn unmeld(paths: &Paths, name: &str, forget: bool) -> Result<()> {
     let mut registry = Registry::load(paths)?;
     let matched: Vec<usize> = registry
         .sources
         .iter()
         .enumerate()
-        .filter(|(_, s)| crate::resolve::source_matches(&s.name, name))
+        .filter(|(_, s)| source_matches(&s.name, name))
         .map(|(i, _)| i)
         .collect();
 
@@ -179,15 +188,43 @@ pub fn unmeld(paths: &Paths, name: &str) -> Result<()> {
     };
 
     let source = registry.sources.remove(idx);
+
+    // With --forget, remove every item installed from this source before the
+    // source itself, each via its recorded file registry, then re-key the manifest.
+    let mut forgotten = 0;
+    if forget {
+        let mut manifest = Manifest::load(paths)?;
+        let keys: Vec<String> = manifest
+            .items
+            .values()
+            .filter(|it| it.source == source.name)
+            .map(|it| it.key())
+            .collect();
+        for key in keys {
+            if let Some(item) = manifest.items.remove(&key) {
+                install::uninstall(paths, &item)?;
+                forgotten += 1;
+            }
+        }
+        manifest.save(paths)?;
+    }
+
     let dir = source.clone_dir(paths);
     if dir.exists() {
         std::fs::remove_dir_all(&dir).map_err(|e| MindError::io(&dir, e))?;
     }
     registry.save(paths)?;
-    println!(
-        "unmelded {} (installed items left untouched; `mind forget` to remove them)",
-        source.name
-    );
+    if forget {
+        println!(
+            "unmelded {} ({forgotten} installed item(s) removed)",
+            source.name
+        );
+    } else {
+        println!(
+            "unmelded {} (installed items left untouched; `mind forget` to remove them)",
+            source.name
+        );
+    }
     Ok(())
 }
 
@@ -277,24 +314,40 @@ fn colliding_install(targets: &[&CatalogItem]) -> Option<(String, Vec<String>)> 
     by_key.into_iter().find(|(_, sources)| sources.len() > 1)
 }
 
-/// `mind forget <item>` — uninstall one item.
+/// `mind forget <item>` — uninstall one item, or many via a glob.
 pub fn forget(paths: &Paths, item_ref: &str) -> Result<()> {
     let mut manifest = Manifest::load(paths)?;
     let parsed = parse_item_ref(item_ref)?;
 
-    // Honor the kind prefix and source qualifier, and error on an ambiguous bare
-    // name (e.g. one shared by a skill and an agent) rather than picking one.
-    let key = crate::resolve::resolve_installed(&manifest.items, &parsed)?.key();
+    // A glob uninstalls every installed match (mirroring `learn`'s selection);
+    // an exact ref honors the kind prefix and source qualifier and errors on an
+    // ambiguous bare name (e.g. one shared by a skill and an agent).
+    let keys: Vec<String> = if is_glob(&parsed.name) {
+        let matches = select_installed(&manifest.items, &parsed);
+        if matches.is_empty() {
+            return Err(MindError::NotInstalled {
+                name: parsed.name.clone(),
+            });
+        }
+        matches.iter().map(|it| it.key()).collect()
+    } else {
+        vec![crate::resolve::resolve_installed(&manifest.items, &parsed)?.key()]
+    };
 
-    let item = manifest.items.remove(&key).expect("key just found");
-    install::uninstall(paths, &item)?;
+    for key in keys {
+        let item = manifest.items.remove(&key).expect("key from manifest");
+        install::uninstall(paths, &item)?;
+        println!("forgot {key}");
+    }
     manifest.save(paths)?;
-    println!("forgot {key}");
     Ok(())
 }
 
-/// `mind sync` — fetch every source and refresh its recorded commit.
-pub fn sync(paths: &Paths) -> Result<()> {
+/// `mind sync [--evolve]` — fetch every source and refresh its recorded commit.
+/// With `--evolve`, an `evolve` pass runs after the refresh (reporting pending
+/// upgrades and prompting before applying, exactly like `mind evolve`), so one
+/// command both fetches upstream and applies pending upgrades.
+pub fn sync(paths: &Paths, then_evolve: bool) -> Result<()> {
     let mut registry = Registry::load(paths)?;
     if registry.sources.is_empty() {
         println!("no sources melded; run `mind meld <owner/repo>`");
@@ -323,6 +376,9 @@ pub fn sync(paths: &Paths) -> Result<()> {
         );
     }
     registry.save(paths)?;
+    if then_evolve {
+        evolve(paths, false, None)?;
+    }
     Ok(())
 }
 
@@ -444,8 +500,16 @@ fn print_upgrade_report(registry: &Registry, pending: &[Upgrade]) {
     }
 }
 
-/// `mind recall [--sources] [item]`.
-pub fn recall(paths: &Paths, sources: bool, item: Option<&str>) -> Result<()> {
+/// `mind recall [--sources] [item] [--kind K] [--source S]`. The `--kind` and
+/// `--source` filters narrow the installed-items listing; they do not apply to
+/// `--sources` or to a single-item lookup (use a `kind:`/`owner/repo#` ref there).
+pub fn recall(
+    paths: &Paths,
+    sources: bool,
+    item: Option<&str>,
+    kind: Option<ItemKind>,
+    source: Option<&str>,
+) -> Result<()> {
     if sources {
         let registry = Registry::load(paths)?;
         if registry.sources.is_empty() {
@@ -499,9 +563,20 @@ pub fn recall(paths: &Paths, sources: bool, item: Option<&str>) -> Result<()> {
         println!("nothing learned yet; `mind probe` to see what's available");
         return Ok(());
     }
-    let rows = manifest
+    let filtered: Vec<_> = manifest
         .items
         .values()
+        .filter(|it| {
+            kind.is_none_or(|k| it.kind == k)
+                && source.is_none_or(|s| source_matches(&it.source, s))
+        })
+        .collect();
+    if filtered.is_empty() {
+        println!("no installed items match the filter");
+        return Ok(());
+    }
+    let rows = filtered
+        .iter()
         .map(|it| {
             vec![
                 it.key(),
@@ -515,16 +590,26 @@ pub fn recall(paths: &Paths, sources: bool, item: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// `mind probe [query]`. A leading `*` marks installed items; the hash is of the
-/// current source content.
-pub fn probe(paths: &Paths, query: Option<&str>) -> Result<()> {
+/// `mind probe [query] [--kind K] [--source S]`. A leading `*` marks installed
+/// items; the hash is of the current source content. `--kind` and `--source`
+/// narrow the listing and compose with the substring query.
+pub fn probe(
+    paths: &Paths,
+    query: Option<&str>,
+    kind: Option<ItemKind>,
+    source: Option<&str>,
+) -> Result<()> {
     let registry = Registry::load(paths)?;
     let items = catalog::scan(paths, &registry)?;
     let manifest = Manifest::load(paths)?;
     let q = query.unwrap_or("");
     let mut hits: Vec<&CatalogItem> = items
         .iter()
-        .filter(|it| q.is_empty() || it.effective_name().contains(q))
+        .filter(|it| {
+            (q.is_empty() || it.effective_name().contains(q))
+                && kind.is_none_or(|k| it.kind == k)
+                && source.is_none_or(|s| source_matches(&it.source, s))
+        })
         .collect();
     hits.sort_by_key(|a| a.key());
 
@@ -566,8 +651,10 @@ pub fn probe(paths: &Paths, query: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// `mind introspect` — report drift and breakage.
-pub fn introspect(paths: &Paths) -> Result<()> {
+/// `mind introspect [--fix]` — report drift and breakage. With `--fix`, repair
+/// what can be fixed without changing versions: recreate missing symlinks from
+/// each item's file registry. Drifted or renamed items are left to `evolve`.
+pub fn introspect(paths: &Paths, fix: bool) -> Result<()> {
     let registry = Registry::load(paths)?;
     let catalog = catalog::scan(paths, &registry)?;
     let manifest = Manifest::load(paths)?;
@@ -584,10 +671,23 @@ pub fn introspect(paths: &Paths) -> Result<()> {
     }
 
     for it in manifest.items.values() {
-        for link in &it.links {
-            if std::fs::symlink_metadata(link).is_err() {
-                println!("{}: symlink missing at {link}", it.key());
-                issues += 1;
+        let missing: Vec<&String> = it
+            .links
+            .iter()
+            .filter(|link| std::fs::symlink_metadata(link).is_err())
+            .collect();
+        if !missing.is_empty() {
+            // With --fix, re-link from the store copy; report only what cannot
+            // be repaired (e.g. the store copy itself is gone).
+            let repaired = if fix { install::relink(paths, it)? } else { 0 };
+            if repaired > 0 {
+                println!("{}: relinked {repaired} missing symlink(s)", it.key());
+            }
+            for link in &missing {
+                if std::fs::symlink_metadata(link).is_err() {
+                    println!("{}: symlink missing at {link}", it.key());
+                    issues += 1;
+                }
             }
         }
         // Match on stable identity (source, kind, bare_name).

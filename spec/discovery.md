@@ -40,7 +40,7 @@ Three layers, in order:
 [source]
 description = "..."          # optional; shown by recall --sources
 prefix = "jk"                # optional; namespace (see namespacing.md)
-min-mind-version = "0.2"     # reserved; parsed, not yet enforced
+min-mind-version = "0.2"     # minimum mind version; enforced at scan/meld (DSC-40)
 
 [[items]]                     # explicit inventory (authoritative)
 kind = "skill"               # skill | agent | rule
@@ -81,7 +81,8 @@ sources = [
   source is registered independently and tracks its own upstream commit.
 - `DSC-39` A `[discover].sources` entry may set `as = "<prefix>"` to impose a
   namespace on that nested source (equivalent to `meld --as`).
-- `DSC-40` (planned) When a source's `[source].min-mind-version` is greater than
-  the running `mind` version, melding or scanning that source is an error
+- `DSC-40` When a source's `[source].min-mind-version` is greater than the
+  running `mind` version, melding or scanning that source is an error
   (`IncompatibleVersion`) rather than proceeding against a format it predates.
-  Currently the field is parsed but not enforced. Not yet implemented.
+  Versions compare by dotted numeric component (a missing component is 0, so
+  `0.2` == `0.2.0`); a non-numeric component counts as 0.

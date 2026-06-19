@@ -10,7 +10,27 @@
 //!   probe  -> find available items
 //!   introspect -> diagnose drift
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+
+use crate::error::ItemKind;
+
+/// An item kind as accepted on the command line (`--kind skill|agent|rule`).
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum KindArg {
+    Skill,
+    Agent,
+    Rule,
+}
+
+impl KindArg {
+    pub fn to_kind(self) -> ItemKind {
+        match self {
+            KindArg::Skill => ItemKind::Skill,
+            KindArg::Agent => ItemKind::Agent,
+            KindArg::Rule => ItemKind::Rule,
+        }
+    }
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -42,6 +62,10 @@ pub enum Command {
     Unmeld {
         /// The source name (see `mind recall --sources`).
         name: String,
+
+        /// Also uninstall every item installed from this source.
+        #[arg(long)]
+        forget: bool,
     },
 
     /// Install items into every configured agent home (default ~/.claude).
@@ -57,15 +81,19 @@ pub enum Command {
         dry_run: bool,
     },
 
-    /// Remove an installed item.
+    /// Remove an installed item, or many via a glob.
     #[command(visible_alias = "unlearn")]
     Forget {
-        /// The installed item ref.
+        /// The installed item ref or glob: `name`, `skill:name`, `'review*'`, `'*'`.
         item: String,
     },
 
     /// Refresh every melded source's clone and catalog.
-    Sync,
+    Sync {
+        /// After refreshing, run an `evolve` pass (report + prompt) to apply upgrades.
+        #[arg(long)]
+        evolve: bool,
+    },
 
     /// Upgrade installed items to their latest source version.
     ///
@@ -88,16 +116,36 @@ pub enum Command {
 
         /// Show details for a single installed item.
         item: Option<String>,
+
+        /// Only list items of this kind (listing only).
+        #[arg(long, value_enum)]
+        kind: Option<KindArg>,
+
+        /// Only list items from a source matching this selector (listing only).
+        #[arg(long)]
+        source: Option<String>,
     },
 
     /// Search melded catalogs for available items.
     Probe {
         /// Substring to match against item names; empty lists everything.
         query: Option<String>,
+
+        /// Only list items of this kind.
+        #[arg(long, value_enum)]
+        kind: Option<KindArg>,
+
+        /// Only list items from a source matching this selector.
+        #[arg(long)]
+        source: Option<String>,
     },
 
     /// Diagnose drift, broken symlinks, and unsynced sources.
-    Introspect,
+    Introspect {
+        /// Repair what is fixable without changing versions (recreate missing links).
+        #[arg(long)]
+        fix: bool,
+    },
 
     /// View and edit configuration (`~/.mind/config.toml`).
     Config {

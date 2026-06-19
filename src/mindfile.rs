@@ -33,10 +33,10 @@ pub struct SourceMeta {
     /// Namespace prefix applied to every item from this source (see
     /// [`crate::namespace`]). A consumer `meld --as` overrides it.
     pub prefix: Option<String>,
-    /// Reserved: the minimum `mind` version this repo expects. Parsed so a repo
-    /// can declare it now; version gating is not yet enforced.
+    /// The minimum `mind` version this repo expects. Enforced at scan/meld time:
+    /// a source requiring a newer `mind` than the one running is rejected (see
+    /// [`version_at_least`] and `catalog::scan`).
     #[serde(rename = "min-mind-version")]
-    #[allow(dead_code)]
     pub min_mind_version: Option<String>,
 }
 
@@ -105,6 +105,27 @@ impl Discover {
     }
 }
 
+/// Whether `running` satisfies `>= required`, comparing dotted numeric version
+/// components (a missing component counts as 0, so `0.2` == `0.2.0`). A
+/// non-numeric component compares as 0, so a prerelease/build suffix is ignored.
+pub fn version_at_least(running: &str, required: &str) -> bool {
+    let parse = |v: &str| -> Vec<u64> {
+        v.split('.')
+            .map(|c| c.trim().parse::<u64>().unwrap_or(0))
+            .collect()
+    };
+    let r = parse(running);
+    let req = parse(required);
+    for i in 0..r.len().max(req.len()) {
+        let a = r.get(i).copied().unwrap_or(0);
+        let b = req.get(i).copied().unwrap_or(0);
+        if a != b {
+            return a > b;
+        }
+    }
+    true
+}
+
 impl MindToml {
     /// Load `mind.toml` from a repo root, returning `None` if absent.
     pub fn load(root: &Path) -> Result<Option<MindToml>> {
@@ -126,5 +147,23 @@ impl MindToml {
     /// convention). Nested `[discover].sources` alone does not.
     pub fn is_authoritative(&self) -> bool {
         !self.items.is_empty() || self.discover.as_ref().is_some_and(|d| d.has_item_globs())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn version_comparison_orders_dotted_components() {
+        // spec: DSC-40
+        assert!(version_at_least("0.2.0", "0.2"));
+        assert!(version_at_least("0.2", "0.2.0"));
+        assert!(version_at_least("1.0.0", "0.9.9"));
+        assert!(version_at_least("0.10.0", "0.9.0"));
+        assert!(!version_at_least("0.1.0", "0.2"));
+        assert!(!version_at_least("0.1.0", "0.1.1"));
+        // Non-numeric / suffix components count as 0.
+        assert!(version_at_least("0.2.0-rc1", "0.2"));
     }
 }

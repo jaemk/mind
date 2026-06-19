@@ -57,9 +57,10 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   ambiguous suffix is `AmbiguousSource`.
 - `CLI-21` `unmeld` does not remove items already installed from the source;
   those are removed with `forget`.
-- `CLI-22` (planned) `unmeld --forget` also removes every item installed from the
-  source (each via its file registry, then its manifest entry), so dropping a
-  source can clean up after itself in one step. Not yet implemented.
+- `CLI-22` `unmeld --forget` also removes every item installed from the source
+  (each via its file registry, then its manifest entry), so dropping a source
+  cleans up after itself in one step. Without `--forget`, installed items are
+  left in place (CLI-21).
 
 ## learn
 
@@ -89,9 +90,10 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   source qualifier; a bare name that matches more than one installed item (e.g.
   a skill and an agent of the same name) is `AmbiguousItem`, and one matching
   none is `NotInstalled`.
-- `CLI-41` (planned) When the ref name is a glob, `forget` uninstalls every
-  matching installed item, mirroring `learn`'s glob selection (CLI-31). Not yet
-  implemented.
+- `CLI-41` When the ref name is a glob, `forget` uninstalls every matching
+  installed item, mirroring `learn`'s glob selection (CLI-31). The kind prefix
+  and source qualifier compose with the glob. A glob matching no installed item
+  is `NotInstalled`.
 
 ## sync
 
@@ -99,9 +101,10 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   branch, and updates the recorded commit and `[source].description`.
 - `CLI-51` With no sources melded, `sync` reports that and exits successfully.
 - `CLI-52` `sync` does not change consumer aliases.
-- `CLI-53` (planned) `sync --evolve` runs an `evolve` pass after refreshing
-  sources, so a single command both fetches upstream and applies pending
-  upgrades. Not yet implemented.
+- `CLI-53` `sync --evolve` runs an `evolve` pass after refreshing sources
+  (reporting pending upgrades and prompting before applying, exactly like
+  `evolve`), so a single command both fetches upstream and applies pending
+  upgrades.
 
 ## evolve
 
@@ -138,9 +141,10 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 - `CLI-82` List outputs (`probe`, `recall`) left-align columns padded to the
   widest value in each column, so rows stay aligned regardless of item-name
   length.
-- `CLI-83` (planned) `probe` and `recall` accept `--kind <skill|agent|rule>` and
-  `--source <selector>` filters that narrow the listing, composing with the
-  substring query. Not yet implemented.
+- `CLI-83` `probe` and `recall` accept `--kind <skill|agent|rule>` and
+  `--source <selector>` filters that narrow the listing, composing with `probe`'s
+  substring query. For `recall` they apply to the installed-items listing, not to
+  `--sources` or a single-item lookup (use a `kind:` / `owner/repo#` ref there).
 
 ## introspect
 
@@ -148,10 +152,11 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   items whose links are missing, items no longer present upstream, items whose
   namespace changed, and items whose source content drifted. It reports a clean
   summary when there are no issues.
-- `CLI-91` (planned) `introspect --fix` repairs what it can without changing
-  versions: it recreates missing link(s) for installed items from their file
-  registry (re-linking the existing store copy). Drifted or renamed items are
-  still left to `evolve`. Not yet implemented.
+- `CLI-91` `introspect --fix` repairs what it can without changing versions: it
+  recreates missing link(s) for installed items from their file registry
+  (re-linking the existing store copy). If the store copy itself is gone the link
+  is left reported, not recreated. Drifted or renamed items are still left to
+  `evolve`.
 
 ## config
 

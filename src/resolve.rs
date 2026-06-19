@@ -145,6 +145,29 @@ pub fn installed_matches(it: &InstalledItem, r: &ItemRef) -> bool {
             .is_none_or(|s| source_matches(&it.source, s))
 }
 
+/// Select every installed item matching `r`: the name as a glob when it contains
+/// glob metacharacters, else by exact effective name, honoring the kind and
+/// source qualifier as in [`installed_matches`]. Used for multi-item `forget`.
+pub fn select_installed<'a>(
+    items: &'a std::collections::BTreeMap<String, InstalledItem>,
+    r: &ItemRef,
+) -> Vec<&'a InstalledItem> {
+    let pattern = glob::Pattern::new(&r.name).ok();
+    items
+        .values()
+        .filter(|it| {
+            r.kind.is_none_or(|k| it.kind == k)
+                && r.source
+                    .as_ref()
+                    .is_none_or(|s| source_matches(&it.source, s))
+                && match &pattern {
+                    Some(p) => p.matches(&it.name),
+                    None => it.name == r.name,
+                }
+        })
+        .collect()
+}
+
 /// Find the installed items matching `r`. Errors `NotInstalled` on no match and
 /// `AmbiguousItem` on more than one (e.g. a bare name shared across kinds).
 pub fn resolve_installed<'a>(
@@ -313,6 +336,40 @@ mod tests {
         // A matching source qualifier resolves.
         let right = parse_item_ref("james/agents#skill:review").unwrap();
         assert_eq!(resolve_installed(&m, &right).unwrap().kind, ItemKind::Skill);
+    }
+
+    #[test]
+    fn select_installed_matches_glob_kind_and_source() {
+        // spec: CLI-41
+        // The manifest is keyed by `kind:effective_name`, so names are distinct.
+        let m = manifest(vec![
+            inst(ItemKind::Skill, "review", "github.com/james/agents"),
+            inst(ItemKind::Skill, "release", "github.com/james/agents"),
+            inst(ItemKind::Agent, "dev", "github.com/james/agents"),
+            inst(ItemKind::Skill, "audit", "github.com/bob/agents"),
+        ]);
+        // Glob over all skills (across both sources).
+        assert_eq!(
+            select_installed(&m, &parse_item_ref("skill:*").unwrap()).len(),
+            3
+        );
+        // Prefix glob.
+        assert_eq!(
+            select_installed(&m, &parse_item_ref("rele*").unwrap()).len(),
+            1
+        );
+        // Everything.
+        assert_eq!(select_installed(&m, &parse_item_ref("*").unwrap()).len(), 4);
+        // Source-scoped glob.
+        assert_eq!(
+            select_installed(&m, &parse_item_ref("bob/agents#*").unwrap()).len(),
+            1
+        );
+        // Exact name (no glob) still matches by equality.
+        assert_eq!(
+            select_installed(&m, &parse_item_ref("review").unwrap()).len(),
+            1
+        );
     }
 
     #[test]

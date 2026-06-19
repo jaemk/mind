@@ -1380,6 +1380,136 @@ fn config_show_creates_default_and_reports_lobes() {
 }
 
 #[test]
+fn forget_glob_uninstalls_all_matches() {
+    // spec: CLI-41
+    let sb = melded();
+    assert!(sb.mind(&["learn", "*"]).success);
+    assert!(sb.mind(&["recall"]).stdout.contains("skill:review"));
+
+    // A kind glob forgets only that kind.
+    assert!(sb.mind(&["forget", "skill:*"]).success);
+    let after = sb.mind(&["recall"]).stdout;
+    assert!(!after.contains("skill:review"), "{after}");
+    assert!(after.contains("agent:dev"), "{after}");
+    assert!(std::fs::symlink_metadata(sb.claude_home.join("skills/review")).is_err());
+
+    // A bare `*` forgets everything that is left.
+    assert!(sb.mind(&["forget", "*"]).success);
+    assert!(sb.mind(&["recall"]).stdout.contains("nothing learned"));
+
+    // A glob matching no installed item is an error.
+    let none = sb.mind(&["forget", "zzz*"]);
+    assert!(!none.success);
+    assert!(none.stderr.contains("not installed"), "{}", none.stderr);
+}
+
+#[test]
+fn unmeld_forget_purges_installed_items() {
+    // spec: CLI-22
+    let sb = melded();
+    assert!(sb.mind(&["learn", "review"]).success);
+    assert!(sb.mind(&["learn", "dev"]).success);
+
+    let r = sb.mind(&["unmeld", "agents", "--forget"]);
+    assert!(r.success, "{}", r.stderr);
+    assert!(r.stdout.contains("removed"), "{}", r.stdout);
+
+    // Both the source and every installed item are gone.
+    assert!(
+        sb.mind(&["recall", "--sources"])
+            .stdout
+            .contains("no sources melded")
+    );
+    assert!(sb.mind(&["recall"]).stdout.contains("nothing learned"));
+    assert!(std::fs::symlink_metadata(sb.claude_home.join("skills/review")).is_err());
+    assert!(std::fs::symlink_metadata(sb.claude_home.join("agents/dev.md")).is_err());
+}
+
+#[test]
+fn introspect_fix_relinks_missing_symlink() {
+    // spec: CLI-91
+    let sb = melded();
+    assert!(sb.mind(&["learn", "review"]).success);
+    let link = sb.claude_home.join("skills/review");
+    std::fs::remove_file(&link).unwrap();
+
+    let r = sb.mind(&["introspect", "--fix"]);
+    assert!(r.success, "{}", r.stderr);
+    assert!(r.stdout.contains("relinked"), "{}", r.stdout);
+
+    // The link is back and introspect is now clean.
+    assert!(std::fs::symlink_metadata(&link).is_ok());
+    assert!(sb.mind(&["introspect"]).stdout.contains("all good"));
+}
+
+#[test]
+fn sync_evolve_refreshes_then_applies_upgrades() {
+    // spec: CLI-53
+    let sb = melded();
+    assert!(sb.mind(&["learn", "review"]).success);
+    let before = sb.mind(&["recall", "skill:review"]).stdout;
+
+    sb.edit_source(); // upstream change, not yet synced
+
+    // One command fetches the change and (on `y`) applies the upgrade.
+    let r = sb.mind_with_input(&["sync", "--evolve"], Some("y\n"));
+    assert!(r.success, "{}", r.stderr);
+    assert!(r.stdout.contains("updated"), "sync ran: {}", r.stdout);
+    assert!(
+        r.stdout.contains("evolved skill:review"),
+        "evolve applied: {}",
+        r.stdout
+    );
+
+    let after = sb.mind(&["recall", "skill:review"]).stdout;
+    assert_ne!(before, after, "commit/hash should have advanced");
+}
+
+#[test]
+fn probe_and_recall_filter_by_kind_and_source() {
+    // spec: CLI-83
+    let sb = melded();
+
+    // probe --kind narrows to one kind, composing with the substring query.
+    let skills = sb.mind(&["probe", "--kind", "skill"]).stdout;
+    assert!(skills.contains("skill:review"), "{skills}");
+    assert!(!skills.contains("agent:dev"), "{skills}");
+
+    // probe --source narrows by source selector (the repo basename suffix).
+    let by_source = sb.mind(&["probe", "--source", "agents"]).stdout;
+    assert!(by_source.contains("skill:review"), "{by_source}");
+    let no_source = sb.mind(&["probe", "--source", "nope"]).stdout;
+    assert!(!no_source.contains("skill:review"), "{no_source}");
+
+    // recall --kind filters the installed listing.
+    assert!(sb.mind(&["learn", "*"]).success);
+    let only_agents = sb.mind(&["recall", "--kind", "agent"]).stdout;
+    assert!(only_agents.contains("agent:dev"), "{only_agents}");
+    assert!(!only_agents.contains("skill:review"), "{only_agents}");
+}
+
+#[test]
+fn meld_rejects_source_requiring_a_newer_mind() {
+    // spec: DSC-40
+    let sb = Sandbox::new();
+    sb.write_and_commit("mind.toml", "[source]\nmin-mind-version = \"9.0\"\n");
+    let r = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(!r.success, "should refuse a too-new source");
+    assert!(r.stderr.contains("requires mind"), "{}", r.stderr);
+    // Rejected: the source is not registered.
+    assert!(
+        sb.mind(&["recall", "--sources"])
+            .stdout
+            .contains("no sources melded")
+    );
+
+    // A satisfiable floor melds fine.
+    let ok = Sandbox::new();
+    ok.write_and_commit("mind.toml", "[source]\nmin-mind-version = \"0.0.1\"\n");
+    assert!(ok.mind(&["meld", &ok.source_spec()]).success);
+}
+
+#[test]
 fn config_is_created_with_default_lobe_on_first_use() {
     // spec: STO-15
     let sb = Sandbox::new();

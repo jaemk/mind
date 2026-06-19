@@ -28,12 +28,12 @@ and verified.
 | `forget`/`recall`/`evolve` honor kind + source qualifier, error on ambiguity | done | CLI-40, CLI-63, CLI-71 |
 | Clobber guard: refuse to overwrite a non-mind link target | done | LIFE-41 |
 | Release pipeline + Homebrew tap (tag-driven) | done | `.github/workflows/release.yml`, `Formula/mind.rb` |
-| `forget` glob selection | planned | CLI-41 |
-| `unmeld --forget` (purge installed items) | planned | CLI-22 |
-| `introspect --fix` (re-link missing symlinks) | planned | CLI-91 |
-| `sync --evolve` (refresh then upgrade) | planned | CLI-53 |
-| `probe`/`recall` `--kind` / `--source` filters | planned | CLI-83 |
-| Enforce `min-mind-version` | planned | DSC-40 |
+| `forget` glob selection | done | CLI-41 |
+| `unmeld --forget` (purge installed items) | done | CLI-22 |
+| `introspect --fix` (re-link missing symlinks) | done | CLI-91 |
+| `sync --evolve` (refresh then upgrade) | done | CLI-53 |
+| `probe`/`recall` `--kind` / `--source` filters | done | CLI-83 |
+| Enforce `min-mind-version` | done | DSC-40 |
 
 ## Documents
 

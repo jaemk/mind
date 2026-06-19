@@ -138,6 +138,26 @@ pub fn uninstall(paths: &Paths, item: &InstalledItem) -> Result<()> {
     Ok(())
 }
 
+/// Recreate any missing links for an installed item, pointing at its existing
+/// store copy. Returns the number of links repaired. Used by `introspect --fix`.
+/// If the store copy itself is gone there is nothing to link to, so it repairs
+/// nothing (that is drift for `evolve`/`learn` to resolve, not a re-link).
+pub fn relink(paths: &Paths, item: &InstalledItem) -> Result<usize> {
+    let store = paths.mind_home.join(&item.store);
+    if !store.exists() {
+        return Ok(0);
+    }
+    let mut fixed = 0;
+    for link in &item.links {
+        let link = Path::new(link);
+        if std::fs::symlink_metadata(link).is_err() {
+            ensure_link(&store, link)?;
+            fixed += 1;
+        }
+    }
+    Ok(fixed)
+}
+
 /// Refuse to install over a link target that mind does not own. A target is
 /// "ours" only if it is a symlink pointing into the store root; a regular file,
 /// a directory, or a symlink elsewhere is the user's and is left untouched

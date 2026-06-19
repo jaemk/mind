@@ -70,6 +70,20 @@ fn scan_source(paths: &Paths, source: &Source, out: &mut Vec<CatalogItem>) -> Re
     let root = source.clone_dir(paths);
     let mindfile = MindToml::load(&root)?;
 
+    // Reject a source that requires a newer `mind` than the one running, rather
+    // than scanning it against a format this version may predate (DSC-40).
+    if let Some(required) = mindfile
+        .as_ref()
+        .and_then(|m| m.source.min_mind_version.as_deref())
+        && !crate::mindfile::version_at_least(env!("CARGO_PKG_VERSION"), required)
+    {
+        return Err(MindError::IncompatibleVersion {
+            source_name: source.name.clone(),
+            required: required.to_string(),
+            running: env!("CARGO_PKG_VERSION").to_string(),
+        });
+    }
+
     // Effective prefix: consumer alias wins over the repo's own declaration.
     let prefix = source
         .alias

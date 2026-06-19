@@ -25,10 +25,6 @@ const ALLOWLIST: &[&str] = &[
     // definitional, exercised by the expansion tests.
     "NS-3", "NS-10", // Discovery edge: missing directories yield no items.
     "DSC-13",
-    // Planned features: documented with an ID and a status of `planned` in the
-    // feature table, but not yet implemented, so no test covers them. Remove the
-    // entry when the feature lands and a citing test is added.
-    "CLI-22", "CLI-41", "CLI-53", "CLI-83", "CLI-91", "DSC-40",
 ];
 
 #[test]

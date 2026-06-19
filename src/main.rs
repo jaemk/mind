@@ -41,14 +41,34 @@ fn run(cli: Cli) -> Result<()> {
     let paths = Paths::resolve()?;
     match cli.command {
         Command::Meld { repo, alias } => commands::meld(&paths, &repo, alias),
-        Command::Unmeld { name } => commands::unmeld(&paths, &name),
+        Command::Unmeld { name, forget } => commands::unmeld(&paths, &name, forget),
         Command::Learn { item, dry_run } => commands::learn(&paths, &item, dry_run),
         Command::Forget { item } => commands::forget(&paths, &item),
-        Command::Sync => commands::sync(&paths),
+        Command::Sync { evolve } => commands::sync(&paths, evolve),
         Command::Evolve { yes, item } => commands::evolve(&paths, yes, item.as_deref()),
-        Command::Recall { sources, item } => commands::recall(&paths, sources, item.as_deref()),
-        Command::Probe { query } => commands::probe(&paths, query.as_deref()),
-        Command::Introspect => commands::introspect(&paths),
+        Command::Recall {
+            sources,
+            item,
+            kind,
+            source,
+        } => commands::recall(
+            &paths,
+            sources,
+            item.as_deref(),
+            kind.map(|k| k.to_kind()),
+            source.as_deref(),
+        ),
+        Command::Probe {
+            query,
+            kind,
+            source,
+        } => commands::probe(
+            &paths,
+            query.as_deref(),
+            kind.map(|k| k.to_kind()),
+            source.as_deref(),
+        ),
+        Command::Introspect { fix } => commands::introspect(&paths, fix),
         Command::Config { action } => match action {
             ConfigCmd::Show => commands::config_show(&paths),
             ConfigCmd::Lobes { action } => match action {

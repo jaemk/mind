@@ -121,6 +121,15 @@ pub enum MindError {
     NotInstalled { name: String },
 
     #[error(
+        "source '{source_name}' requires mind >= {required}, but this is mind {running}; upgrade mind"
+    )]
+    IncompatibleVersion {
+        source_name: String,
+        required: String,
+        running: String,
+    },
+
+    #[error(
         "{path} already exists and is not managed by mind; remove it (or `mind forget` the item) before installing"
     )]
     LinkOccupied { path: String },
