@@ -2154,6 +2154,42 @@ fn example_namespacing_expands_references() {
 }
 
 #[test]
+fn example_starter_convention_discovery() {
+    // spec: DSC-10, DSC-11, DSC-12, DSC-20, CLI-85
+    // The starter example ships no mind.toml: items are found by convention and
+    // their descriptions come from each item's frontmatter.
+    let sb = Sandbox::from_example("starter");
+    let meld = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(meld.success, "{}", meld.stderr);
+
+    // probe falls back to the listing on a non-TTY (piped) stdout; all three
+    // convention items appear with their kinds.
+    let probe = sb.mind(&["probe"]);
+    assert!(probe.success, "{}", probe.stderr);
+    assert!(probe.stdout.contains("skill:greet"), "{}", probe.stdout);
+    assert!(probe.stdout.contains("agent:scribe"), "{}", probe.stdout);
+    assert!(probe.stdout.contains("rule:tone"), "{}", probe.stdout);
+
+    // A query that matches only a description (CLI-85): "plain" is in tone's
+    // frontmatter description, not its name.
+    let by_desc = sb.mind(&["probe", "plain"]);
+    assert!(by_desc.success, "{}", by_desc.stderr);
+    assert!(by_desc.stdout.contains("rule:tone"), "{}", by_desc.stdout);
+    assert!(
+        !by_desc.stdout.contains("agent:scribe"),
+        "a description-only match should not list unrelated items: {}",
+        by_desc.stdout
+    );
+
+    // Installing a convention item links it from the store.
+    assert!(sb.mind(&["learn", "greet"]).success);
+    assert!(
+        sb.mind_home.join("store/skill/greet/SKILL.md").exists(),
+        "greet should be copied into the store"
+    );
+}
+
+#[test]
 fn man_page_renders_roff() {
     // spec: CLI-121
     let sb = Sandbox::new();

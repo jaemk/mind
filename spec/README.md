@@ -44,8 +44,8 @@ and verified.
 | `self-update` verb: in-place upgrade of the `mind` binary (via the `self_update` crate) | planned | CLI-140, CLI-141, CLI-142, CLI-143 |
 | Concurrency: global advisory lock + atomic registry writes (via `fd-lock`) | done | STO-40, STO-41, STO-42, STO-43 |
 | `probe` matches description text, not just name | done | CLI-85 |
-| README quickstart, mental model, troubleshooting/FAQ | planned | [../README.md](../README.md) |
-| Starter source example (plain convention layout) | planned | [../examples/](../examples/) |
+| README quickstart, mental model, troubleshooting/FAQ | done | [../README.md](../README.md) |
+| Starter source example (plain convention layout) | done | [../examples/](../examples/) |
 | Interactive TUI: `probe` default, Installed/Available tree, full-parity actions, preview + registry meld | done | [tui.md](tui.md) |
 
 ## Documents
