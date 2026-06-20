@@ -42,6 +42,7 @@ and verified.
 | Version pinning: `--follow-branch`/`--pin-tag`/`--pin-ref` + `[source]` directive | done | DSC-41, STO-18, CLI-17, CLI-18, CLI-55 |
 | `review` verb: author-side source validation | done | CLI-130, CLI-131, CLI-132, CLI-133 |
 | `self-update` verb: in-place upgrade of the `mind` binary (via the `self_update` crate) | planned | CLI-140, CLI-141, CLI-142, CLI-143 |
+| Within-source dependency resolution: a partial `learn` pulls in referenced siblings; dependency-tree display + install order | planned | [dependencies.md](dependencies.md) |
 | Concurrency: global advisory lock + atomic registry writes (via `fd-lock`) | done | STO-40, STO-41, STO-42, STO-43 |
 | `probe` matches description text, not just name | done | CLI-85 |
 | README quickstart, mental model, troubleshooting/FAQ | done | [../README.md](../README.md) |
@@ -55,6 +56,8 @@ and verified.
 - [discovery.md](discovery.md) - how a source's items are discovered and described.
 - [namespacing.md](namespacing.md) - prefixes, `{{ns:}}` reference tokens, warnings.
 - [lifecycle.md](lifecycle.md) - install, upgrade, uninstall, and drift semantics.
+- [dependencies.md](dependencies.md) - within-source dependency resolution: a
+  partial `learn` pulls in referenced siblings, with a dependency tree and order.
 - [tui.md](tui.md) - the interactive TUI (`probe` default): browse, search, and
   the interactive front end for the CLI verbs.
 
