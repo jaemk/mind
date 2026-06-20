@@ -59,6 +59,82 @@ pub fn review(paths: &Paths, target: &str, alias: Option<String>) -> Result<Revi
     run_checks(paths, &source_dir, alias)
 }
 
+/// `mind review --policy <path>` — validate a managed policy file.
+///
+/// Calls [`crate::policy::load_file`] at the given path. A parse error, unknown
+/// key, or invariant violation surfaces as a hard finding and causes a non-zero
+/// exit (reusing the same `ReviewResult`/exit machinery as source review so CLI
+/// output and exit semantics are identical). On success, prints a clean "valid"
+/// message and optionally advisory findings.
+///
+/// spec: POL-50
+pub fn review_policy(path: &Path) -> crate::error::Result<ReviewResult> {
+    let mut hard: Vec<Finding> = Vec::new();
+    let mut advisory: Vec<Finding> = Vec::new();
+
+    match crate::policy::load_file(path) {
+        Err(e) => {
+            hard.push(Finding::hard("invalid-policy", format!("{e}")));
+        }
+        Ok(policy) => {
+            // Advisory: lock=true but allow is empty means everything is blocked.
+            if policy.lock() && policy.allow().is_empty() {
+                advisory.push(Finding::advisory(
+                    "lock-without-allow",
+                    "lock=true but [sources].allow is empty; every meld will be blocked",
+                ));
+            }
+            // Advisory: auto_meld entries present without lock or pinned constraints
+            // means org-provisioned sources float freely.
+            if !policy.auto_meld().is_empty() && !policy.pinned() && !policy.lock() {
+                advisory.push(Finding::advisory(
+                    "unpinned-auto-meld",
+                    "[[sources.auto_meld]] entries are present but pinned=false and lock=false; \
+                     org-provisioned sources will track floating branches",
+                ));
+            }
+        }
+    }
+
+    Ok(ReviewResult { hard, advisory })
+}
+
+/// Print the result of a `review --policy` run and exit non-zero on hard errors.
+/// Mirrors the output format of `commands::review` so the two modes are consistent.
+///
+/// spec: POL-50
+pub fn dispatch_policy(path: &Path) -> crate::error::Result<()> {
+    let result = review_policy(path)?;
+
+    for f in &result.hard {
+        eprintln!("error [{}]: {}", f.kind, f.message);
+    }
+    for f in &result.advisory {
+        println!("advisory [{}]: {}", f.kind, f.message);
+    }
+
+    if result.hard.is_empty() {
+        if result.advisory.is_empty() {
+            println!("review --policy: valid (no issues found)");
+        } else {
+            println!(
+                "review --policy: valid ({} advisory finding(s))",
+                result.advisory.len()
+            );
+        }
+        Ok(())
+    } else {
+        println!(
+            "\nreview --policy: {} hard error(s), {} advisory finding(s)",
+            result.hard.len(),
+            result.advisory.len()
+        );
+        Err(MindError::ReviewFailed {
+            hard: result.hard.len(),
+        })
+    }
+}
+
 /// Resolve `target` to a source directory. Returns the path and an optional
 /// temp-dir guard that removes the cloned directory when dropped. The guard is
 /// `Some` only for remote-spec targets.
@@ -1006,6 +1082,108 @@ mod tests {
             result.hard
         );
         assert_no_review_temp(&paths);
+    }
+
+    // --- review --policy tests (POL-50) ---
+
+    /// A well-formed policy file produces no hard findings and exits successfully.
+    /// spec: POL-50
+    #[test]
+    fn policy_review_valid_file_passes() {
+        let tmp = TmpDir::new();
+        let policy_path = tmp.path().join("policy.toml");
+        std::fs::write(
+            &policy_path,
+            "[sources]\nallow = [\"github.com/acme/*\"]\nlock = true\n\
+             [[sources.auto_meld]]\nrepo = \"github.com/acme/baseline\"\n",
+        )
+        .unwrap();
+
+        let result = review_policy(&policy_path).unwrap();
+        assert!(
+            result.hard.is_empty(),
+            "valid policy must have no hard findings: {:?}",
+            result.hard
+        );
+    }
+
+    /// A policy with an unknown key (POL-5) is reported as a hard finding.
+    /// spec: POL-50
+    #[test]
+    fn policy_review_unknown_key_is_hard() {
+        let tmp = TmpDir::new();
+        let policy_path = tmp.path().join("policy.toml");
+        // "allowed" is not a valid key; "allow" is.
+        std::fs::write(
+            &policy_path,
+            "[sources]\nallowed = [\"github.com/acme/*\"]\n",
+        )
+        .unwrap();
+
+        let result = review_policy(&policy_path).unwrap();
+        assert!(
+            !result.hard.is_empty(),
+            "unknown key must produce a hard finding"
+        );
+        assert!(
+            result.hard.iter().any(|f| f.kind == "invalid-policy"),
+            "expected invalid-policy finding: {:?}",
+            result.hard
+        );
+    }
+
+    /// A policy with pinned=true and an unpinned auto_meld entry (POL-21) is
+    /// reported as a hard finding by review.
+    /// spec: POL-50
+    #[test]
+    fn policy_review_unpinned_entry_with_pinned_flag_is_hard() {
+        let tmp = TmpDir::new();
+        let policy_path = tmp.path().join("policy.toml");
+        // auto_meld entry uses default branch (no tag/ref), but pinned=true.
+        std::fs::write(
+            &policy_path,
+            "[sources]\npinned = true\n\
+             [[sources.auto_meld]]\nrepo = \"github.com/acme/baseline\"\n",
+        )
+        .unwrap();
+
+        let result = review_policy(&policy_path).unwrap();
+        assert!(
+            !result.hard.is_empty(),
+            "pinned=true with unpinned auto_meld must be a hard finding (POL-21)"
+        );
+        assert!(
+            result.hard.iter().any(|f| f.kind == "invalid-policy"),
+            "expected invalid-policy finding: {:?}",
+            result.hard
+        );
+    }
+
+    /// A policy with lock=true and an auto_meld entry outside allow (POL-31) is
+    /// reported as a hard finding by review.
+    /// spec: POL-50
+    #[test]
+    fn policy_review_auto_meld_outside_allow_with_lock_is_hard() {
+        let tmp = TmpDir::new();
+        let policy_path = tmp.path().join("policy.toml");
+        // auto_meld repo "github.com/other/x" does not match allow pattern.
+        std::fs::write(
+            &policy_path,
+            "[sources]\nlock = true\nallow = [\"github.com/acme/*\"]\n\
+             [[sources.auto_meld]]\nrepo = \"github.com/other/x\"\n",
+        )
+        .unwrap();
+
+        let result = review_policy(&policy_path).unwrap();
+        assert!(
+            !result.hard.is_empty(),
+            "lock=true with auto_meld outside allow must be a hard finding (POL-31)"
+        );
+        assert!(
+            result.hard.iter().any(|f| f.kind == "invalid-policy"),
+            "expected invalid-policy finding: {:?}",
+            result.hard
+        );
     }
 
     /// Assert no `review-*` scratch dir survives under MIND_HOME/.tmp.

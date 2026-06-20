@@ -13,6 +13,7 @@ mod manifest;
 mod mindfile;
 mod namespace;
 mod paths;
+mod policy;
 mod resolve;
 mod review;
 mod source;
@@ -191,7 +192,20 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
                 )
             }
         }
-        Command::Review { target, alias } => commands::review(paths, &target, alias),
+        Command::Review {
+            target,
+            alias,
+            policy,
+        } => match (target, policy) {
+            (_, Some(p)) => review::dispatch_policy(&p),
+            (Some(t), None) => commands::review(paths, &t, alias),
+            (None, None) => {
+                eprintln!(
+                    "error: `review` requires either a <target> or --policy <path>; see `mind review --help`"
+                );
+                Err(crate::error::MindError::ReviewFailed { hard: 1 })
+            }
+        },
         Command::Introspect { fix, json } => commands::introspect(paths, fix, json),
         Command::Config { action } => match action {
             ConfigCmd::Show => commands::config_show(paths),
@@ -267,6 +281,11 @@ mod tests {
         assert_eq!(mode_of(&["mind", "review", "/some/path"]), LockMode::Shared);
         assert_eq!(
             mode_of(&["mind", "review", "/some/path", "--as", "jk"]),
+            LockMode::Shared
+        );
+        // review --policy is also read-only (POL-50).
+        assert_eq!(
+            mode_of(&["mind", "review", "--policy", "/etc/mind/policy.toml"]),
             LockMode::Shared
         );
         // introspect WITHOUT --fix is a read-only diagnosis -> shared.

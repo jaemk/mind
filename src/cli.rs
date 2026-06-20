@@ -183,19 +183,30 @@ pub enum Command {
         no_tui: bool,
     },
 
-    /// Validate a source for publishing (author-side, read-only).
+    /// Validate a source or a managed policy file (author-side, read-only).
     ///
-    /// `<target>` may be a local path, a melded-source selector (same forms as
-    /// `unmeld`), or a repo spec (same forms as `meld`). A repo spec is
-    /// shallow-cloned to a temp area and removed afterward.
+    /// Source mode: `<target>` may be a local path, a melded-source selector
+    /// (same forms as `unmeld`), or a repo spec (same forms as `meld`). A repo
+    /// spec is shallow-cloned to a temp area and removed afterward.
+    ///
+    /// Policy mode: `--policy <path>` validates a managed policy TOML file at an
+    /// explicit path without consulting the system policy path or env. Exactly
+    /// one of `<target>` or `--policy` must be given.
     Review {
         /// The source to validate: a local path, melded-source selector, or repo spec.
-        target: String,
+        /// Mutually exclusive in intent with `--policy`; supply exactly one.
+        target: Option<String>,
 
         /// Evaluate the source under this prospective prefix (affects effective
         /// names, `{{ns:}}` expansion, and the unguarded-reference scan).
+        /// Ignored when `--policy` is given.
         #[arg(long = "as", value_name = "PREFIX")]
         alias: Option<String>,
+
+        /// Validate a managed policy TOML file at this path instead of a source.
+        /// Mutually exclusive in intent with `<target>`; supply exactly one.
+        #[arg(long, value_name = "PATH")]
+        policy: Option<std::path::PathBuf>,
     },
 
     /// Diagnose drift, broken symlinks, and unsynced sources.
