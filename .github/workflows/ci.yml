@@ -14,7 +14,8 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-      # `make check` = fmt-check + clippy (-D warnings) + tests, including the
+      # `make ci` = fmt-check + clippy (-D warnings) + tests, including the
       # spec-coverage gate (tests/spec_coverage.rs), which fails if a spec ID is
-      # neither cited by a test nor allowlisted.
-      - run: make check
+      # neither cited by a test nor allowlisted. (`make check` is the local gate:
+      # same lints and tests, but formats in place instead of just checking.)
+      - run: make ci
