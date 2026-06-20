@@ -2,9 +2,12 @@
 //!
 //! Each action acquires the EXCLUSIVE lock for its duration, then releases it.
 //! The verb functions (commands::learn/forget/sync/evolve/unmeld) print to stdout
-//! normally; since the TUI is in alt-screen we capture their output and surface
-//! errors through the App state (TUI-24). The action returns an updated Snapshot
-//! so the App can refresh without a separate poll.
+//! normally. Their output is NOT suppressed or captured; ratatui repaints the
+//! alt-screen on the next draw cycle, which overwrites any stray output. This is
+//! a known limitation: command output is visible briefly before the next redraw.
+//! Errors are returned as MindError so the App can surface them inline (TUI-24).
+//! The action returns an updated Snapshot so the App can refresh without a
+//! separate poll.
 //!
 //! No verb logic is reimplemented here; we call the existing command functions
 //! directly (TUI-20..23).
@@ -17,8 +20,8 @@ use crate::tui::app::{ActionKind, PendingAction};
 use crate::tui::data::{self, Snapshot};
 
 /// Execute a confirmed action under an exclusive lock, returning a fresh
-/// snapshot. Output from command functions is suppressed so it does not
-/// corrupt the alt-screen display (TUI-24).
+/// snapshot. Output from command functions is NOT suppressed; ratatui repaints
+/// the alt-screen on the next draw, overwriting any stray output (TUI-24).
 // spec: TUI-20 TUI-21 TUI-22 TUI-23 TUI-24 TUI-25 STO-40 STO-41
 pub fn execute(paths: &Paths, action: PendingAction) -> Result<Snapshot> {
     // Acquire the exclusive lock for the duration of the action (TUI-25).
@@ -26,14 +29,23 @@ pub fn execute(paths: &Paths, action: PendingAction) -> Result<Snapshot> {
     let mut lock = lock::open(paths)?;
     let _guard = lock.write()?;
 
-    // Execute the appropriate command function. We capture stdout to prevent
-    // raw-mode terminal corruption (TUI-24). Errors are returned as MindError
-    // so the App can display them inline.
+    // Execute the appropriate command function. Command output goes straight to
+    // stdout; ratatui repaints the alt-screen on the next draw (TUI-24). Errors
+    // are returned as MindError so the App can display them inline.
     match action.kind {
-        ActionKind::Learn { item_key, .. } => {
-            // Use the item key directly as the item ref for `learn`.
+        ActionKind::Learn { item_key, source } => {
+            // When the user picked an item from a specific source (captured at
+            // action-construction time), qualify the ref as `{source}#{item_key}`
+            // so resolve pins the exact source and avoids AmbiguousItem when two
+            // sources expose the same bare name.  Fall back to the bare key when
+            // no source was recorded (e.g. item is unique across all sources).
             // spec: TUI-20
-            commands::learn(paths, &item_key, false)?;
+            let item_ref = if source.is_empty() {
+                item_key
+            } else {
+                format!("{source}#{item_key}")
+            };
+            commands::learn(paths, &item_ref, false)?;
         }
         ActionKind::Forget { item_key } => {
             // spec: TUI-20
@@ -65,9 +77,9 @@ pub fn execute(paths: &Paths, action: PendingAction) -> Result<Snapshot> {
         }
     }
 
-    // Load a fresh snapshot while still holding the exclusive lock.
-    // (load_inner is re-exported as a private function; we call try_poll after
-    // releasing, but here we want the updated state immediately.)
+    // Drop the exclusive lock BEFORE calling data::load. data::load acquires
+    // its own shared lock on a separate fd; holding the exclusive flock here
+    // while it tries to take a shared lock on the same file would self-deadlock.
     drop(_guard);
     data::load(paths)
 }
@@ -528,6 +540,111 @@ mod tests {
             snap.lobes.contains(&lobe_path),
             "snapshot after LobeAdd must include the new lobe: {:?}", snap.lobes
         );
+        cleanup(&base);
+    }
+
+    /// Create a named source git repo under `base/<dir_name>` that ships a single
+    /// skill named `skill_name`. Returns the repo path.
+    fn make_named_source_repo(
+        base: &std::path::Path,
+        dir_name: &str,
+        skill_name: &str,
+    ) -> std::path::PathBuf {
+        use std::process::Command;
+        let src = base.join(dir_name);
+        std::fs::create_dir_all(src.join("skills").join(skill_name)).unwrap();
+        std::fs::write(
+            src.join("skills").join(skill_name).join("SKILL.md"),
+            format!(
+                "---\ndescription: {skill_name} skill from {dir_name}\n---\n# {skill_name}\n"
+            ),
+        )
+        .unwrap();
+        init_git_repo(&src);
+        Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(&src)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-qm", "initial"])
+            .current_dir(&src)
+            .output()
+            .unwrap();
+        src
+    }
+
+    #[test]
+    fn execute_learn_with_source_resolves_when_two_sources_have_same_skill() {
+        // spec: TUI-20 - when two melded sources both expose a skill with the same
+        // bare name, ActionKind::Learn must pass a source-qualified ref
+        // (`{source}#{item_key}`) to commands::learn so resolve picks the item the
+        // user selected rather than returning AmbiguousItem.
+        //
+        // Regression: the old code dropped the `source` field and passed only the
+        // bare `item_key`, which triggered MindError::AmbiguousItem.
+        let (paths, base) = temp_paths();
+        crate::paths::mkdir_p(&paths.mind_home).unwrap();
+        // Pin the lobe to the isolated claude_home so install does not touch
+        // the real ~/.claude (agent_homes() falls back to config, which defaults
+        // to ~/.claude when CLAUDE_HOME is unset).
+        crate::config::Config {
+            lobes: vec![paths.claude_home.to_str().unwrap().to_string()],
+        }
+        .save(&paths.mind_home)
+        .unwrap();
+
+        // Two source repos that both ship "skill:review".
+        let src_a = make_named_source_repo(&base, "source-alpha", "review");
+        let src_b = make_named_source_repo(&base, "source-beta", "review");
+
+        commands::meld(&paths, src_a.to_str().unwrap(), None, vec![], None, None, None)
+            .expect("meld source-alpha");
+        commands::meld(&paths, src_b.to_str().unwrap(), None, vec![], None, None, None)
+            .expect("meld source-beta");
+
+        // The registry should now have two sources.
+        let registry = crate::source::Registry::load(&paths).unwrap();
+        assert_eq!(registry.sources.len(), 2, "two sources must be registered");
+
+        // Pick the name of source-alpha to install from.
+        let source_name = registry
+            .sources
+            .iter()
+            .find(|s| s.name.ends_with("source-alpha"))
+            .map(|s| s.name.clone())
+            .expect("source-alpha must be registered");
+
+        // Build the Learn action as the TUI would: item_key = "skill:review",
+        // source = the chosen source name.
+        let action = PendingAction {
+            kind: ActionKind::Learn {
+                item_key: "skill:review".to_string(),
+                source: source_name.clone(),
+            },
+            description: "Learn skill:review from source-alpha?".to_string(),
+        };
+
+        // Without the fix this returned MindError::AmbiguousItem.
+        let result = execute(&paths, action);
+        assert!(
+            result.is_ok(),
+            "learn with source qualifier must succeed (not AmbiguousItem): {:?}",
+            result.err()
+        );
+
+        // Verify the installed item came from source-alpha, not source-beta.
+        let manifest = crate::manifest::Manifest::load(&paths).unwrap();
+        let item = manifest
+            .items
+            .get("skill:review")
+            .expect("skill:review must be in manifest after learn");
+        assert!(
+            item.source.ends_with("source-alpha"),
+            "installed item must come from source-alpha, got: {}",
+            item.source
+        );
+
         cleanup(&base);
     }
 }

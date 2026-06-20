@@ -154,7 +154,7 @@ fn meld_recursive(
 
     // Step 1: clone the default branch to read mind.toml.
     git::clone(&source.url, &dir)?;
-    let mindfile = MindToml::load(&dir)?;
+    let mut mindfile = MindToml::load(&dir)?;
     source.description = mindfile.as_ref().and_then(|m| m.source.description.clone());
 
     // Step 2: resolve the effective pin (CLI-17, DSC-41):
@@ -178,9 +178,14 @@ fn meld_recursive(
             let _ = std::fs::remove_dir_all(&dir);
             return Err(e);
         }
-        // Reload description in case pin lands on a different mind.toml.
-        let mf2 = MindToml::load(&dir)?;
-        source.description = mf2.as_ref().and_then(|m| m.source.description.clone());
+        // The pin may land on a different mind.toml than the default branch.
+        // Reload it so all downstream reads (description, the DSC-52
+        // is_authoritative gate, and the nested [discover].sources loop) see the
+        // pinned content, not the default branch's. The catalog scan below
+        // already re-reads mind.toml from disk, so item discovery was correct;
+        // only these in-memory reads were stale.
+        mindfile = MindToml::load(&dir)?;
+        source.description = mindfile.as_ref().and_then(|m| m.source.description.clone());
     }
 
     source.pin = effective_pin;

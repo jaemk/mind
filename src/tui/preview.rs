@@ -9,6 +9,7 @@
 //! melded sources.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::catalog::{self, CatalogItem};
 use crate::error::Result;
@@ -16,6 +17,11 @@ use crate::git;
 use crate::mindfile::MindToml;
 use crate::paths::Paths;
 use crate::source::{Registry, parse_spec};
+
+/// Process-wide counter ensuring each `preview` call gets a unique temp dir,
+/// even when multiple previews for repos with the same bare name run in the
+/// same process (M4 fix: prevents path collisions between concurrent previews).
+static PREVIEW_NONCE: AtomicU64 = AtomicU64::new(0);
 
 /// A preview of a not-yet-melded source: a temp clone with its catalog.
 /// Constructed by `preview()` and dropped (which cleans up the temp clone)
@@ -42,16 +48,24 @@ impl Drop for SourcePreview {
     }
 }
 
+/// Build the temp-dir name for a preview, incorporating a per-call nonce so
+/// two previews of repos with the same bare name never collide.
+// spec: TUI-30
+fn preview_temp_name(repo: &str, pid: u32, nonce: u64) -> String {
+    format!("preview-{repo}-{pid}-{nonce}")
+}
+
 /// Shallow-clone a repo spec to a temp area and return its preview catalog.
 /// Does not register the source. On error, any partial clone is cleaned up.
 // spec: TUI-30
 #[allow(dead_code)] // called from TUI interactive meld flow (TUI-30)
 pub fn preview(paths: &Paths, spec: &str) -> Result<SourcePreview> {
     let source = parse_spec(spec)?;
-    let temp_dir = paths.mind_home.join(".tmp").join(format!(
-        "preview-{}-{}",
-        source.repo,
-        std::process::id()
+    let nonce = PREVIEW_NONCE.fetch_add(1, Ordering::SeqCst);
+    let temp_dir = paths.mind_home.join(".tmp").join(preview_temp_name(
+        &source.repo,
+        std::process::id(),
+        nonce,
     ));
     if temp_dir.exists() {
         std::fs::remove_dir_all(&temp_dir)
@@ -327,5 +341,45 @@ mod tests {
         // Either InvalidRepoSpec or a Git error.
         assert!(result.is_err(), "invalid spec should return an error");
         cleanup(&base);
+    }
+
+    /// Two successive calls to `preview_temp_name` with the same repo and pid
+    /// but distinct nonces must produce distinct names. This proves the M4 fix:
+    /// previewing `alice/agents` then `bob/agents` (same bare repo name "agents")
+    /// in one process no longer maps to the same temp path.
+    // spec: TUI-30
+    #[test]
+    fn preview_temp_names_are_unique_for_same_repo() {
+        let pid = std::process::id();
+        let name1 = preview_temp_name("agents", pid, 0);
+        let name2 = preview_temp_name("agents", pid, 1);
+        assert_ne!(
+            name1, name2,
+            "successive preview temp names for the same repo must differ: {name1} vs {name2}"
+        );
+        // Both must contain the repo name so they remain identifiable.
+        assert!(name1.contains("agents"), "name1 must contain repo name: {name1}");
+        assert!(name2.contains("agents"), "name2 must contain repo name: {name2}");
+    }
+
+    /// The nonce increments across two real `preview` calls, so the temp dirs
+    /// they would occupy are always distinct even when the bare repo names match.
+    // spec: TUI-30
+    #[test]
+    fn preview_nonce_advances_across_calls() {
+        // Read two successive nonce values from the global counter to verify
+        // monotone advancement; no clone needed.
+        let n1 = PREVIEW_NONCE.fetch_add(1, Ordering::SeqCst);
+        let n2 = PREVIEW_NONCE.fetch_add(1, Ordering::SeqCst);
+        assert!(
+            n2 > n1,
+            "PREVIEW_NONCE must advance: got {n1} then {n2}"
+        );
+        let pid = std::process::id();
+        assert_ne!(
+            preview_temp_name("agents", pid, n1),
+            preview_temp_name("agents", pid, n2),
+            "names built from consecutive nonces must differ"
+        );
     }
 }

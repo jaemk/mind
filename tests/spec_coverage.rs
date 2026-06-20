@@ -33,11 +33,12 @@ const ALLOWLIST: &[&str] = &[
     //   self-update verb (in-place binary upgrade via the self_update crate)
     "CLI-140", "CLI-141", "CLI-142", "CLI-143",
     //   interactive TUI: IDs with automatable logic are now cited from tests
-    //   in src/tui/*.rs. Only the following remain allowlisted because they
-    //   require a real TTY to observe and cannot be verified in a headless CI:
+    //   in src/tui/*.rs. Only the following remains allowlisted because it
+    //   requires a real TTY to observe and cannot be verified in a headless CI:
     //     TUI-1:  interactive launch requires a physical TTY - untestable headlessly.
-    //     TUI-40: terminal restore on panic/error requires a real terminal to observe.
-    "TUI-1", "TUI-40",
+    //   TUI-40 (terminal restore on panic) is now cited: the poison-recovery path
+    //   is exercised by a unit test in src/tui/term.rs.
+    "TUI-1",
 ];
 
 #[test]

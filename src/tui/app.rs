@@ -157,6 +157,13 @@ impl App {
     /// list for the lobes modal (TUI-23).
     // spec: TUI-15
     pub fn apply_snapshot(&mut self, snapshot: Snapshot) {
+        // Any successful snapshot-applying refresh ends a mutation: clearing the
+        // flag here is what re-arms the once-a-second poll after a successful
+        // learn/forget/sync/evolve/meld/lobe action (TUI-15). The mid-action
+        // assertion in `take_pending_action` still holds because the flag is set
+        // and observed before any snapshot is applied.
+        // spec: TUI-15
+        self.mutating = false;
         // Refresh lobes from snapshot before storing (TUI-23).
         // spec: TUI-23
         self.lobes = snapshot.lobes.clone();
@@ -815,6 +822,33 @@ mod tests {
         assert!(app.pending_action.is_none(), "pending_action should be cleared after take");
         assert!(!app.modal_visible, "modal should be hidden after take");
         assert!(app.mutating, "mutating should be true while action runs");
+    }
+
+    #[test]
+    fn successful_action_clears_mutating_so_poll_rearms() {
+        // spec: TUI-15 - the success path (take_pending_action sets mutating,
+        // then apply_snapshot applies the refreshed data) MUST clear the
+        // mutating flag. Otherwise the once-a-second poll, gated on
+        // `!is_mutating()`, stops forever after the first successful action.
+        let mut app = App::new(String::new(), None, None);
+        app.pending_action = Some(PendingAction {
+            kind: ActionKind::Sync,
+            description: "Sync all?".to_string(),
+        });
+        app.modal_visible = true;
+
+        // Confirm the action: this is what the `y` path does before executing.
+        let taken = app.take_pending_action();
+        assert!(taken.is_some(), "confirm should yield the pending action");
+        assert!(app.is_mutating(), "mutating is set while the action runs");
+
+        // The action succeeded and produced a snapshot; the success path in
+        // handle_key applies it. Applying any snapshot must re-arm the poll.
+        app.apply_snapshot(make_snapshot());
+        assert!(
+            !app.is_mutating(),
+            "a successful snapshot-applying refresh must clear mutating"
+        );
     }
 
     #[test]

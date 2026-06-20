@@ -72,7 +72,7 @@ mind learn greet
 
 | command | does |
 |---------|------|
-| `mind meld <repo> [--as <prefix>] [--root <dir>] [--follow-branch/--pin-tag/--pin-ref <ref>]` | clone and register a source (optionally namespaced, subtree-scoped, version-pinned) |
+| `mind meld <repo> [--as <prefix>] [--root <dir>] [--follow-branch <branch> | --pin-tag <tag> | --pin-ref <commit>]` | clone and register a source (optionally namespaced, subtree-scoped, version-pinned) |
 | `mind unmeld <name> [--forget]` (alias `detach`) | drop a source (optionally its items) |
 | `mind learn <item>` | install a skill/agent/rule (glob installs many) |
 | `mind forget <item>` (alias `unlearn`) | remove an installed item (glob removes many) |
@@ -91,7 +91,7 @@ A source repo exposes items by convention (`skills/<n>/SKILL.md`,
 under a prefix, and [spec/](spec/) for the full behavioral spec.
 
 `mind probe` with no flags opens an interactive browser of melded sources and
-items (search, install, meld, sync, evolve) when stdout is a terminal. `--no-tui`
+items (search, install, remove, meld, unmeld, sync, evolve) when stdout is a terminal. `--no-tui`
 or `--json`, or a piped/redirected stdout, prints the listing instead.
 
 ## Agent directories

@@ -3701,3 +3701,156 @@ fn review_multiple_hard_errors_all_reported_and_counted() {
         r.stdout
     );
 }
+
+#[test]
+fn meld_pin_tag_uses_pinned_mindfile_for_authoritativeness_not_default_branch() {
+    // spec: DSC-52, DSC-41, STO-18
+    //
+    // Regression (M2, stale mindfile after pinned re-clone): meld step 1 clones
+    // the default branch and reads its mind.toml; step 3 re-clones at the
+    // resolved pin. The `is_authoritative` gate (which decides whether a
+    // consumer `--root` is honored or ignored, DSC-52) must read the PINNED
+    // mind.toml, not the default branch's.
+    //
+    // Here the TAGGED commit (v1.0) is NON-authoritative ([source] metadata
+    // only) and ships its items under `sub/`, so `--root sub` must be honored.
+    // The DEFAULT branch tip is AUTHORITATIVE ([[items]] present); if meld read
+    // that stale file it would ignore `--root` and print the DSC-52 note.
+    let sb = Sandbox::bare("pinned-authoritativeness");
+
+    // --- Tagged commit (v1.0): non-authoritative mind.toml + item under sub/. ---
+    sb.write_and_commit(
+        "sub/skills/deploy/SKILL.md",
+        "---\ndescription: deploy skill\n---\n# deploy\n",
+    );
+    sb.write_and_commit(
+        "mind.toml",
+        // [source] only: no [[items]] and no [discover] -> NOT authoritative,
+        // so convention scanning (under the chosen --root) stays on.
+        "[source]\ndescription = \"non-authoritative at v1.0\"\n",
+    );
+    git(&sb.source, &["tag", "v1.0"]);
+
+    // --- Default branch tip: authoritative mind.toml ([[items]] present). ---
+    sb.write_and_commit(
+        "pkg/style.md",
+        "---\ndescription: style rule\n---\n# style\n",
+    );
+    sb.write_and_commit(
+        "mind.toml",
+        concat!(
+            "[source]\n",
+            "description = \"authoritative at main tip\"\n\n",
+            "[[items]]\n",
+            "kind = \"rule\"\n",
+            "name = \"style\"\n",
+            "path = \"pkg/style.md\"\n",
+        ),
+    );
+
+    let spec = sb.source_spec();
+    let r = sb.mind(&["meld", &spec, "--pin-tag", "v1.0", "--root", "sub"]);
+    assert!(r.success, "meld --pin-tag v1.0 --root sub: {}", r.stderr);
+
+    // The pinned (non-authoritative) file means --root is HONORED, so the
+    // DSC-52 "ignored" note must NOT print (it would if the default branch's
+    // authoritative file were read).
+    assert!(
+        !r.stdout.contains("ignored"),
+        "--root must be honored against the pinned non-authoritative mind.toml, \
+         not ignored against the default branch's authoritative one: {}",
+        r.stdout
+    );
+
+    // And the root is actually persisted (only happens on the non-authoritative path).
+    let roots_json = read_source_roots_json(&sb);
+    assert!(
+        roots_json.contains("sub"),
+        "root from the pinned file must be persisted: {roots_json}"
+    );
+
+    // The pinned description (not the default branch's) is recorded.
+    let sources = sb.mind(&["recall", "--sources"]);
+    assert!(
+        sources.stdout.contains("non-authoritative at v1.0"),
+        "pinned [source].description should be recorded: {}",
+        sources.stdout
+    );
+    assert!(
+        !sources.stdout.contains("authoritative at main tip"),
+        "default branch description must not leak through: {}",
+        sources.stdout
+    );
+
+    // The pinned subtree item is discovered; the default branch's item is not.
+    let probe = sb.mind(&["probe"]);
+    assert!(
+        probe.stdout.contains("skill:deploy"),
+        "pinned subtree item should be discovered: {}",
+        probe.stdout
+    );
+    assert!(
+        !probe.stdout.contains("rule:style"),
+        "default branch's authoritative item must not appear: {}",
+        probe.stdout
+    );
+}
+
+#[test]
+fn meld_pin_tag_uses_pinned_mindfile_for_nested_discovery_not_default_branch() {
+    // spec: DSC-52, DSC-41, STO-18
+    //
+    // Companion to the authoritativeness regression: the nested
+    // [discover].sources loop must also read the PINNED mind.toml, not the
+    // default branch's. The default branch declares a nested source that does
+    // not exist on disk; if meld read it, the recursive meld would fail. The
+    // tagged commit declares no nested sources, so meld must succeed and pull in
+    // exactly one source.
+    let sb = Sandbox::bare("pinned-nested-discovery");
+
+    // Tagged commit: a plain non-authoritative mind.toml, no nested sources,
+    // one convention item.
+    sb.write_and_commit(
+        "agents/dev.md",
+        "---\ndescription: dev agent\n---\n# dev\n",
+    );
+    sb.write_and_commit(
+        "mind.toml",
+        "[source]\ndescription = \"no nested sources at v1.0\"\n",
+    );
+    git(&sb.source, &["tag", "v1.0"]);
+
+    // Default branch tip: declares a nested source pointing at a path that does
+    // not exist, which would make a recursive meld fail if it were read.
+    sb.write_and_commit(
+        "mind.toml",
+        concat!(
+            "[source]\n",
+            "description = \"nested at main tip\"\n\n",
+            "[[discover.sources]]\n",
+            "source = \"/nonexistent/nested/repo\"\n",
+        ),
+    );
+
+    let spec = sb.source_spec();
+    let r = sb.mind(&["meld", &spec, "--pin-tag", "v1.0"]);
+    assert!(
+        r.success,
+        "meld must use the pinned (no-nested) mind.toml and succeed: {} {}",
+        r.stdout, r.stderr
+    );
+
+    // Exactly one source was melded (no phantom nested source from the default
+    // branch). recall --sources lists the single pinned source.
+    let sources = sb.mind(&["recall", "--sources"]);
+    assert!(
+        sources.stdout.contains("no nested sources at v1.0"),
+        "pinned source description should be present: {}",
+        sources.stdout
+    );
+    assert!(
+        !sources.stdout.contains("/nonexistent/nested/repo"),
+        "default branch's nested source must not be melded: {}",
+        sources.stdout
+    );
+}

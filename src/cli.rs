@@ -159,7 +159,7 @@ pub enum Command {
     /// is not a TTY (piped or redirected). The query, `--kind`, and `--source`
     /// arguments seed the initial search/filter state in both modes.
     Probe {
-        /// Substring to match against item names; empty lists everything.
+        /// Case-insensitive substring matched against item names and descriptions; empty lists everything.
         query: Option<String>,
 
         /// Only list items of this kind.

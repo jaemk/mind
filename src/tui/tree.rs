@@ -348,18 +348,27 @@ fn build_available_group(
 }
 
 /// True if an installed item matches the search query.
-/// Reuses `catalog::matches_query` semantics (CLI-85 / TUI-14).
-// spec: TUI-14
+/// Delegates to `catalog::matches_query` (CLI-85 / TUI-14) so both installed
+/// and available search share one source of truth.
+// spec: TUI-14 CLI-85
 fn item_matches_search_installed(item: &crate::tui::data::SnapshotInstalled, search: &str) -> bool {
     if search.is_empty() {
         return true;
     }
-    let q = search.to_lowercase();
-    item.name.to_lowercase().contains(&q)
-        || item
-            .description
-            .as_deref()
-            .is_some_and(|d| d.to_lowercase().contains(&q))
+    // Build a temporary CatalogItem to reuse catalog::matches_query exactly,
+    // mirroring item_matches_search_available. The installed name is already the
+    // effective (possibly prefixed) name, so prefix is None to avoid
+    // double-prefixing via effective_name().
+    let fake = catalog::CatalogItem {
+        kind: item.kind,
+        name: item.name.clone(),
+        source: item.source.clone(),
+        prefix: None,
+        path: std::path::PathBuf::new(),
+        description: item.description.clone(),
+        link_rel: None,
+    };
+    catalog::matches_query(&fake, search)
 }
 
 /// True if an available item matches the search query.
@@ -402,28 +411,14 @@ fn flatten_node(
     expanded: &HashSet<String>,
     out: &mut Vec<FlatNode>,
 ) {
-    // Group headers, source nodes, and kind-buckets are auto-expanded by
-    // default so items are immediately visible in the tree. Only item-detail
-    // nodes (InstalledItem / AvailableItem children) require explicit expansion.
-    // The user can collapse any node with the Collapse key.
+    // Structural nodes (group headers, source nodes, kind-buckets) are
+    // auto-expanded so items are immediately visible. Item-detail nodes
+    // (InstalledItem / AvailableItem children) require explicit expansion:
+    // the caller adds their ID to the `expanded` set to reveal them.
     let is_auto_expanded = matches!(
         node.node,
         TreeNode::InstalledGroup | TreeNode::AvailableGroup | TreeNode::Source(_) | TreeNode::KindBucket { .. }
     );
-    // A node is explicitly collapsed if it has been removed from the expanded
-    // set after being auto-expanded (we track collapsed IDs separately).
-    // For simplicity: auto-expanded nodes show their children unless the user
-    // has explicitly collapsed them (i.e., the ID is absent from `expanded`
-    // ONLY if it was previously inserted and then removed). We detect this by
-    // checking: if auto-expanded AND the id is in expanded -> collapsed by user.
-    // But that's the wrong model; instead: the `expanded` set is additive for
-    // items (need to add to see detail), while auto-expanded nodes need to be
-    // tracked in a separate "collapsed" set.
-    //
-    // Pragmatic: auto-expanded nodes show children unless their id is in the
-    // `expanded` set prefixed with "collapsed:". For now, just auto-expand all
-    // structural nodes so items are always visible; the user can't collapse them
-    // in this iteration (a future improvement). Items require explicit expand.
     let is_expanded = is_auto_expanded || expanded.contains(&node.id);
     let expandable = !node.children.is_empty();
     out.push(FlatNode {
@@ -769,6 +764,41 @@ mod tests {
         let flat = flatten_tree(&nodes, &HashSet::new());
         let any_suggested = flat.iter().any(|n| matches!(&n.node, TreeNode::SuggestedSource(_)));
         assert!(!any_suggested, "no suggestions -> no SuggestedSource nodes");
+    }
+
+    #[test]
+    fn installed_search_matches_description_not_just_name() {
+        // spec: CLI-85
+        // An installed item whose NAME does not contain the query but whose
+        // DESCRIPTION does must still be matched. This proves item_matches_search_installed
+        // delegates to catalog::matches_query (same logic as available search),
+        // rather than reimplementing an inline name-only check.
+        let mut item = make_installed("skill:fmt", "fmt", "src/a", ItemKind::Skill);
+        item.description = Some("automated code formatter".to_string());
+        // A second installed item with neither name nor description matching.
+        let other = make_installed("skill:lint", "lint", "src/a", ItemKind::Skill);
+
+        let snap = snap_with(vec![item, other], vec![]);
+        // "formatter" appears only in the first item's description.
+        let nodes = build_tree(&snap, "formatter", None, None, false, false);
+        let flat = flatten_tree(&nodes, &HashSet::new());
+
+        let has_fmt = flat
+            .iter()
+            .any(|n| matches!(&n.node, TreeNode::InstalledItem(i) if i.name == "fmt"));
+        let has_lint = flat
+            .iter()
+            .any(|n| matches!(&n.node, TreeNode::InstalledItem(i) if i.name == "lint"));
+
+        assert!(
+            has_fmt,
+            "installed item should be matched by description: {:?}",
+            flat.iter().map(|n| &n.label).collect::<Vec<_>>()
+        );
+        assert!(
+            !has_lint,
+            "installed item with no name/desc match must be filtered out"
+        );
     }
 
     #[test]

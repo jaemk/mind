@@ -198,7 +198,40 @@ fn handle_key(paths: &Paths, app: &mut app::App, k: crossterm::event::KeyEvent) 
         return;
     }
 
+    // --- Search-focused mode (TUI-14): the search box owns the keyboard. ---
+    // Once `/` focuses search, every printable key extends the query rather than
+    // routing through `key_to_intent` (which would treat i/d/s/e/m/q as actions
+    // or quit). This is what makes the search box actually usable.
+    // spec: TUI-14
+    if app.search_focused {
+        match k.code {
+            KeyCode::Enter | KeyCode::Tab => {
+                // Submit: close/unfocus search but keep the filter in effect.
+                app.apply_intent(crate::tui::event::Intent::SearchSubmit);
+            }
+            KeyCode::Esc => {
+                // Esc clears the query and unfocuses search.
+                app.apply_intent(crate::tui::event::Intent::SearchClear);
+            }
+            KeyCode::Backspace => {
+                app.apply_intent(crate::tui::event::Intent::SearchBackspace);
+            }
+            KeyCode::Char(c) => {
+                app.apply_intent(crate::tui::event::Intent::SearchChar(c));
+            }
+            _ => {}
+        }
+        return;
+    }
+
     // Normal mode.
+    // Esc while a confirm modal is up must cancel the action, not wipe the
+    // search filter (key_to_intent maps Esc -> SearchClear unconditionally).
+    // spec: TUI-24
+    if app.modal_visible && k.code == KeyCode::Esc {
+        app.apply_intent(crate::tui::event::Intent::CancelAction);
+        return;
+    }
     let intent = crate::tui::event::key_to_intent(k);
     match intent {
         crate::tui::event::Intent::Quit => {
@@ -263,5 +296,112 @@ fn run_preview(paths: &Paths, app: &mut app::App, spec: String) {
                 message: format!("{e}"),
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! These tests drive REAL crossterm KeyEvents through `handle_key`, exercising
+    //! `key_to_intent` and the mode-routing the app.rs tests bypass (they call
+    //! `apply_intent` directly). That routing is exactly where the search-focus
+    //! and confirm-modal-Esc bugs lived.
+    use super::*;
+    use crate::tui::app::{ActionKind, App, PendingAction};
+    use crate::tui::data::{Snapshot, SnapshotAvailable, SnapshotInstalled};
+    use crate::error::ItemKind;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    /// A throwaway `Paths` pointing at a temp dir. The key paths under test
+    /// (search-focused input, confirm-modal cancel) route to `apply_intent` and
+    /// never touch disk, so this is only here to satisfy `handle_key`'s signature.
+    fn temp_paths() -> Paths {
+        let base = std::env::temp_dir().join(format!("mind-tui-test-{}", std::process::id()));
+        Paths {
+            mind_home: base.join("mind"),
+            claude_home: base.join("claude"),
+        }
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn seeded_app() -> App {
+        let mut app = App::new(String::new(), None, None);
+        app.apply_snapshot(Snapshot {
+            generation: 1,
+            installed: vec![SnapshotInstalled {
+                key: "skill:review".to_string(),
+                name: "review".to_string(),
+                source: "local/agents".to_string(),
+                kind: ItemKind::Skill,
+                commit: "abc12345".to_string(),
+                description: Some("Review skill".to_string()),
+            }],
+            available: vec![SnapshotAvailable {
+                key: "agent:dev".to_string(),
+                name: "dev".to_string(),
+                source: "local/agents".to_string(),
+                kind: ItemKind::Agent,
+                description: Some("Dev agent".to_string()),
+                path: std::path::PathBuf::from("/fake/path"),
+            }],
+            source_names: vec!["local/agents".to_string()],
+            suggestions: vec![],
+            lobes: vec![],
+        });
+        app
+    }
+
+    #[test]
+    fn search_focused_routes_action_letter_to_query() {
+        // spec: TUI-14 - with search focused, an action letter like 'd' (which
+        // key_to_intent maps to ActionForget) must extend the query instead of
+        // triggering a forget. This is the bug: handle_key had no search branch.
+        let paths = temp_paths();
+        let mut app = seeded_app();
+        // Focus search via the real `/` key.
+        handle_key(&paths, &mut app, key(KeyCode::Char('/')));
+        assert!(app.search_focused, "'/' must focus the search box");
+
+        handle_key(&paths, &mut app, key(KeyCode::Char('d')));
+        assert_eq!(app.search, "d", "'d' must be appended to the query while search-focused");
+        assert!(app.pending_action.is_none(), "'d' must NOT initiate a forget while searching");
+        assert!(!app.modal_visible, "no confirm modal should open from typing in search");
+    }
+
+    #[test]
+    fn search_focused_q_does_not_quit() {
+        // spec: TUI-14 - 'q' (the quit key in normal mode) must type into the
+        // query while search is focused, never quit the TUI mid-search.
+        let paths = temp_paths();
+        let mut app = seeded_app();
+        handle_key(&paths, &mut app, key(KeyCode::Char('/')));
+        handle_key(&paths, &mut app, key(KeyCode::Char('q')));
+        assert!(!app.should_quit(), "'q' must not quit while search is focused");
+        assert_eq!(app.search, "q", "'q' must be typed into the query");
+    }
+
+    #[test]
+    fn confirm_modal_esc_cancels_and_keeps_search_filter() {
+        // spec: TUI-24 - with a confirm modal up, Esc must cancel the pending
+        // action. It must NOT fall through to key_to_intent (which maps Esc to
+        // SearchClear) and wipe the user's search filter as a side effect.
+        let paths = temp_paths();
+        let mut app = seeded_app();
+        // Establish a search filter (not focused: a settled filter from /-then-Tab).
+        app.search = "rev".to_string();
+        // Stage a pending action + confirm modal.
+        app.pending_action = Some(PendingAction {
+            kind: ActionKind::Sync,
+            description: "Sync all?".to_string(),
+        });
+        app.modal_visible = true;
+
+        handle_key(&paths, &mut app, key(KeyCode::Esc));
+
+        assert!(app.pending_action.is_none(), "Esc must cancel the pending action");
+        assert!(!app.modal_visible, "Esc must dismiss the confirm modal");
+        assert_eq!(app.search, "rev", "Esc-to-cancel must leave the search filter intact");
     }
 }
