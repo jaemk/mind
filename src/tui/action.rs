@@ -93,25 +93,40 @@ mod tests {
 
     static COUNTER: AtomicU32 = AtomicU32::new(0);
 
-    fn temp_paths() -> (Paths, std::path::PathBuf) {
+    /// A temp base dir that removes itself on drop, so each test self-cleans
+    /// even when an assertion panics (Drop runs during unwinding). Derefs to the
+    /// base `Path` so existing `&base` call sites coerce unchanged.
+    struct TempDir(std::path::PathBuf);
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    impl std::ops::Deref for TempDir {
+        type Target = std::path::Path;
+        fn deref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    fn temp_paths() -> (Paths, TempDir) {
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
         let base = std::env::temp_dir()
             .join(format!("mind-tui-action-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
         let paths = Paths {
             mind_home: base.join("mind"),
             claude_home: base.join("claude"),
         };
-        (paths, base)
-    }
-
-    fn cleanup(base: &std::path::Path) {
-        let _ = std::fs::remove_dir_all(base);
+        (paths, TempDir(base))
     }
 
     #[test]
     fn execute_forget_on_unknown_item_returns_error() {
         // spec: TUI-24 - errors are returned as MindError, not panics.
-        let (paths, base) = temp_paths();
+        let (paths, _base) = temp_paths();
         crate::paths::mkdir_p(&paths.mind_home).unwrap();
         let action = PendingAction {
             kind: ActionKind::Forget {
@@ -121,16 +136,14 @@ mod tests {
         };
         let result = execute(&paths, action);
         // Should return an error (NotInstalled), not panic.
-        assert!(result.is_err(), "forget on unknown item should return an error");
-        cleanup(&base);
-    }
+        assert!(result.is_err(), "forget on unknown item should return an error");    }
 
     #[test]
     fn execute_sync_on_empty_registry_succeeds() {
         // spec: TUI-22 TUI-24 TUI-25
         // Sync with no sources: should succeed (prints "no sources melded") and
         // return an empty snapshot.
-        let (paths, base) = temp_paths();
+        let (paths, _base) = temp_paths();
         crate::paths::mkdir_p(&paths.mind_home).unwrap();
         let action = PendingAction {
             kind: ActionKind::Sync,
@@ -139,9 +152,7 @@ mod tests {
         let result = execute(&paths, action);
         assert!(result.is_ok(), "sync on empty registry should succeed: {:?}", result.err());
         let snap = result.unwrap();
-        assert!(snap.installed.is_empty());
-        cleanup(&base);
-    }
+        assert!(snap.installed.is_empty());    }
 
     #[test]
     fn execute_takes_exclusive_lock() {
@@ -168,9 +179,7 @@ mod tests {
         });
 
         let result = handle.join().unwrap();
-        assert!(result.is_ok(), "execute should succeed: {:?}", result.err());
-        cleanup(&base);
-    }
+        assert!(result.is_ok(), "execute should succeed: {:?}", result.err());    }
 
     #[test]
     fn execute_lock_is_exclusive_not_shared() {
@@ -186,7 +195,7 @@ mod tests {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::time::{Duration, Instant};
 
-        let (paths, base) = temp_paths();
+        let (paths, _base) = temp_paths();
         crate::paths::mkdir_p(&paths.mind_home).unwrap();
         let paths = Arc::new(paths);
         let reader_released = Arc::new(AtomicBool::new(false));
@@ -231,23 +240,19 @@ mod tests {
         );
         assert!(result.is_ok(), "execute should still succeed: {:?}", result.err());
 
-        reader.join().unwrap();
-        cleanup(&base);
-    }
+        reader.join().unwrap();    }
 
     #[test]
     fn execute_evolve_with_no_pending_succeeds() {
         // spec: TUI-22 TUI-24
-        let (paths, base) = temp_paths();
+        let (paths, _base) = temp_paths();
         crate::paths::mkdir_p(&paths.mind_home).unwrap();
         let action = PendingAction {
             kind: ActionKind::Evolve,
             description: "evolve?".to_string(),
         };
         let result = execute(&paths, action);
-        assert!(result.is_ok(), "evolve with nothing to do should succeed: {:?}", result.err());
-        cleanup(&base);
-    }
+        assert!(result.is_ok(), "evolve with nothing to do should succeed: {:?}", result.err());    }
 
     fn init_git_repo(dir: &std::path::Path) {
         use std::process::Command;
@@ -298,9 +303,7 @@ mod tests {
         assert!(
             snap.source_names.iter().any(|n| n.contains("source-repo-action")),
             "newly melded source should appear in snapshot: {:?}", snap.source_names
-        );
-        cleanup(&base);
-    }
+        );    }
 
     /// Register a melded source and record one installed item attributed to it,
     /// with an EMPTY file registry so uninstall touches no agent home (keeping the
@@ -360,9 +363,7 @@ mod tests {
             !manifest2.items.values().any(|i| i.key() == "skill:build"),
             "skill:build must be purged by unmeld --forget: {:?}",
             manifest2.items.keys().collect::<Vec<_>>()
-        );
-        cleanup(&base);
-    }
+        );    }
 
     #[test]
     fn execute_unmeld_without_forget_keeps_installed_items() {
@@ -390,9 +391,7 @@ mod tests {
         assert!(
             manifest2.items.values().any(|i| i.key() == "skill:build"),
             "skill:build must survive a non-forget unmeld"
-        );
-        cleanup(&base);
-    }
+        );    }
 
     #[test]
     fn decline_preview_leaves_nothing_registered_and_no_temp_dir() {
@@ -421,9 +420,7 @@ mod tests {
         assert!(
             registry.sources.is_empty(),
             "registry must remain empty after declining a preview: {:?}", registry.sources
-        );
-        cleanup(&base);
-    }
+        );    }
 
     // --- TUI-23: lobe add / remove dispatch ---
 
@@ -447,9 +444,7 @@ mod tests {
         assert!(
             cfg.lobes.contains(&lobe_path),
             "lobe must appear in config after LobeAdd: {:?}", cfg.lobes
-        );
-        cleanup(&base);
-    }
+        );    }
 
     #[test]
     fn execute_lobe_remove_drops_lobe_from_config() {
@@ -478,15 +473,13 @@ mod tests {
         assert!(
             !cfg.lobes.contains(&lobe_path),
             "lobe must be absent from config after LobeRemove: {:?}", cfg.lobes
-        );
-        cleanup(&base);
-    }
+        );    }
 
     #[test]
     fn execute_lobe_remove_nonexistent_returns_error() {
         // spec: TUI-23 TUI-24 - removing a lobe that was never added returns
         // MindError::UnknownLobe, not a panic; the error is surfaced in-UI.
-        let (paths, base) = temp_paths();
+        let (paths, _base) = temp_paths();
         crate::paths::mkdir_p(&paths.mind_home).unwrap();
 
         let action = PendingAction {
@@ -498,9 +491,7 @@ mod tests {
         assert!(
             matches!(result.unwrap_err(), crate::error::MindError::UnknownLobe { .. }),
             "error must be MindError::UnknownLobe"
-        );
-        cleanup(&base);
-    }
+        );    }
 
     #[test]
     fn execute_lobe_add_duplicate_is_idempotent() {
@@ -519,9 +510,7 @@ mod tests {
 
         let cfg = crate::config::Config::load(&paths.mind_home).unwrap();
         let count = cfg.lobes.iter().filter(|l| *l == &lobe_path).count();
-        assert_eq!(count, 1, "duplicate lobe add must not produce duplicate entries");
-        cleanup(&base);
-    }
+        assert_eq!(count, 1, "duplicate lobe add must not produce duplicate entries");    }
 
     #[test]
     fn execute_lobe_add_snapshot_includes_new_lobe() {
@@ -539,9 +528,7 @@ mod tests {
         assert!(
             snap.lobes.contains(&lobe_path),
             "snapshot after LobeAdd must include the new lobe: {:?}", snap.lobes
-        );
-        cleanup(&base);
-    }
+        );    }
 
     /// Create a named source git repo under `base/<dir_name>` that ships a single
     /// skill named `skill_name`. Returns the repo path.
@@ -644,7 +631,5 @@ mod tests {
             "installed item must come from source-alpha, got: {}",
             item.source
         );
-
-        cleanup(&base);
     }
 }

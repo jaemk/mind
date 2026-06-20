@@ -76,11 +76,29 @@ fn collect_files(
 mod tests {
     use super::*;
 
-    fn tmp(name: &str) -> std::path::PathBuf {
+    /// A temp dir that removes itself on drop, so each test self-cleans even
+    /// when an assertion panics (Drop runs during unwinding). Derefs to the dir
+    /// `Path` so existing `&dir` / `dir.join(..)` call sites are unchanged.
+    struct TmpDir(std::path::PathBuf);
+
+    impl Drop for TmpDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    impl std::ops::Deref for TmpDir {
+        type Target = std::path::Path;
+        fn deref(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    fn tmp(name: &str) -> TmpDir {
         let dir = std::env::temp_dir().join(format!("mind-hashtest-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        dir
+        TmpDir(dir)
     }
 
     #[test]
