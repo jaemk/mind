@@ -81,7 +81,11 @@ pub fn scan(paths: &Paths, registry: &Registry) -> Result<Vec<CatalogItem>> {
     Ok(items)
 }
 
-pub(crate) fn scan_source(paths: &Paths, source: &Source, out: &mut Vec<CatalogItem>) -> Result<()> {
+pub(crate) fn scan_source(
+    paths: &Paths,
+    source: &Source,
+    out: &mut Vec<CatalogItem>,
+) -> Result<()> {
     let clone_root = source.clone_dir(paths);
     scan_source_at(clone_root, source, out)
 }
@@ -135,10 +139,7 @@ pub(crate) fn scan_source_at(
             let effective_roots: Vec<String> = source
                 .roots
                 .clone()
-                .or_else(|| {
-                    mt.as_ref()
-                        .and_then(|m| m.source.roots.clone())
-                })
+                .or_else(|| mt.as_ref().and_then(|m| m.source.roots.clone()))
                 .unwrap_or_else(|| vec![".".to_string()]);
 
             // Validate each root: must exist as a directory inside the clone and
@@ -397,8 +398,8 @@ mod tests {
     impl TmpDir {
         fn new() -> Self {
             let n = UNIT_COUNTER.fetch_add(1, Ordering::SeqCst);
-            let p = std::env::temp_dir()
-                .join(format!("mind-catalog-unit-{}-{n}", std::process::id()));
+            let p =
+                std::env::temp_dir().join(format!("mind-catalog-unit-{}-{n}", std::process::id()));
             let _ = std::fs::remove_dir_all(&p);
             std::fs::create_dir_all(&p).unwrap();
             TmpDir(p)
@@ -461,10 +462,7 @@ mod tests {
             "---\ndescription: do agent\n---\n# do\n",
         );
         // Write a mind.toml with roots = ["tools"].
-        write_file(
-            &clone.join("mind.toml"),
-            "[source]\nroots = [\"tools\"]\n",
-        );
+        write_file(&clone.join("mind.toml"), "[source]\nroots = [\"tools\"]\n");
 
         let paths = paths_for(base);
         let source = make_source_for(&clone);
@@ -508,8 +506,14 @@ mod tests {
         scan_source(&paths, &source, &mut items).unwrap();
 
         let names: Vec<_> = items.iter().map(|i| i.name.as_str()).collect();
-        assert!(names.contains(&"alpha"), "override root 'a' expected: {names:?}");
-        assert!(!names.contains(&"beta"), "toml root 'b' should be ignored: {names:?}");
+        assert!(
+            names.contains(&"alpha"),
+            "override root 'a' expected: {names:?}"
+        );
+        assert!(
+            !names.contains(&"beta"),
+            "toml root 'b' should be ignored: {names:?}"
+        );
     }
 
     #[test]
@@ -628,7 +632,10 @@ mod tests {
         let names: Vec<_> = items.iter().map(|i| i.name.as_str()).collect();
         // Only the explicitly declared item; the convention root is ignored.
         assert!(names.contains(&"style"), "expected 'style': {names:?}");
-        assert!(!names.contains(&"review"), "convention scan should be ignored: {names:?}");
+        assert!(
+            !names.contains(&"review"),
+            "convention scan should be ignored: {names:?}"
+        );
     }
 
     #[test]
@@ -713,7 +720,10 @@ mod tests {
             matches!(err, MindError::InvalidRoot { ref root, .. } if root == "../other"),
             "escaping root must be InvalidRoot, not a silent read outside the clone: {err}"
         );
-        assert!(items.is_empty(), "no items should leak from outside the clone");
+        assert!(
+            items.is_empty(),
+            "no items should leak from outside the clone"
+        );
     }
 
     #[test]
@@ -738,7 +748,10 @@ mod tests {
         let mut items = Vec::new();
         scan_source(&paths, &source, &mut items).unwrap();
         let names: Vec<_> = items.iter().map(|i| i.name.as_str()).collect();
-        assert!(names.contains(&"build"), "in-clone .. should resolve: {names:?}");
+        assert!(
+            names.contains(&"build"),
+            "in-clone .. should resolve: {names:?}"
+        );
     }
 
     #[test]
@@ -861,7 +874,10 @@ mod tests {
         let mut items = Vec::new();
         scan_source(&paths, &source, &mut items).unwrap();
         let names: Vec<_> = items.iter().map(|i| i.name.as_str()).collect();
-        assert!(names.contains(&"review"), "unset roots scans the repo root: {names:?}");
+        assert!(
+            names.contains(&"review"),
+            "unset roots scans the repo root: {names:?}"
+        );
     }
 
     fn make_test_item(name: &str, description: Option<&str>) -> CatalogItem {

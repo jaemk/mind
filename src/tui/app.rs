@@ -194,10 +194,7 @@ impl App {
         };
 
         // Remember what was selected by ID so we can restore after rebuild.
-        let selected_id = self
-            .visible
-            .get(self.selected)
-            .map(|n| n.id.clone());
+        let selected_id = self.visible.get(self.selected).map(|n| n.id.clone());
 
         let nodes = crate::tui::tree::build_tree(
             snap,
@@ -470,11 +467,7 @@ impl App {
             return;
         };
         if let TreeNode::AvailableItem(ref item) = node.node {
-            let desc = format!(
-                "Install {} from {}?",
-                item.key,
-                item.source
-            );
+            let desc = format!("Install {} from {}?", item.key, item.source);
             self.pending_action = Some(PendingAction {
                 kind: ActionKind::Learn {
                     item_key: item.key.clone(),
@@ -615,14 +608,13 @@ impl App {
     pub fn set_size(&mut self, w: u16, h: u16) {
         self.size = (w, h);
     }
-
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::data::{Snapshot, SnapshotInstalled, SnapshotAvailable};
     use crate::error::ItemKind;
+    use crate::tui::data::{Snapshot, SnapshotAvailable, SnapshotInstalled};
 
     fn make_snapshot() -> Snapshot {
         Snapshot {
@@ -652,7 +644,11 @@ mod tests {
     #[test]
     fn new_app_seeds_from_cli_args() {
         // spec: TUI-2
-        let app = App::new("review".to_string(), Some(ItemKind::Skill), Some("src".to_string()));
+        let app = App::new(
+            "review".to_string(),
+            Some(ItemKind::Skill),
+            Some("src".to_string()),
+        );
         assert_eq!(app.search, "review");
         assert_eq!(app.kind_filter, Some(ItemKind::Skill));
         assert_eq!(app.source_filter, Some("src".to_string()));
@@ -664,7 +660,10 @@ mod tests {
         let mut app = App::new(String::new(), None, None);
         app.apply_snapshot(make_snapshot());
         // Should have at least the group headers + some items
-        assert!(!app.visible.is_empty(), "tree should be non-empty after snapshot");
+        assert!(
+            !app.visible.is_empty(),
+            "tree should be non-empty after snapshot"
+        );
     }
 
     #[test]
@@ -676,7 +675,11 @@ mod tests {
         let initial = app.selected;
         if app.visible.len() > 1 {
             app.apply_intent(Intent::MoveDown);
-            assert_eq!(app.selected, initial + 1, "MoveDown should advance selection");
+            assert_eq!(
+                app.selected,
+                initial + 1,
+                "MoveDown should advance selection"
+            );
         }
     }
 
@@ -713,11 +716,16 @@ mod tests {
         app.rebuild_tree();
         // Either fewer nodes or the same (headers may remain)
         // The key assertion: items not matching query should be hidden
-        let matched: Vec<_> = app.visible.iter()
+        let matched: Vec<_> = app
+            .visible
+            .iter()
             .filter(|n| n.label.contains("zzznomatch"))
             .collect();
-        assert!(matched.is_empty(), "non-matching items should be hidden: {:?}",
-            app.visible.iter().map(|n| &n.label).collect::<Vec<_>>());
+        assert!(
+            matched.is_empty(),
+            "non-matching items should be hidden: {:?}",
+            app.visible.iter().map(|n| &n.label).collect::<Vec<_>>()
+        );
         let _ = all_count;
     }
 
@@ -731,7 +739,10 @@ mod tests {
             app.selected = idx;
             let id = app.visible[idx].id.clone();
             app.apply_intent(Intent::Expand);
-            assert!(app.expanded.contains(&id), "expand should add to expanded set");
+            assert!(
+                app.expanded.contains(&id),
+                "expand should add to expanded set"
+            );
         }
     }
 
@@ -749,7 +760,10 @@ mod tests {
             if let Some(new_idx) = app.visible.iter().position(|n| n.id == id) {
                 app.selected = new_idx;
                 app.apply_intent(Intent::Collapse);
-                assert!(!app.expanded.contains(&id), "collapse should remove from expanded set");
+                assert!(
+                    !app.expanded.contains(&id),
+                    "collapse should remove from expanded set"
+                );
             }
         }
     }
@@ -769,7 +783,10 @@ mod tests {
             app.apply_snapshot(snap2);
             // Selection should still point to same id if it exists
             if let Some(idx) = app.visible.iter().position(|n| n.id == id) {
-                assert_eq!(app.selected, idx, "selection should be preserved by ID after refresh");
+                assert_eq!(
+                    app.selected, idx,
+                    "selection should be preserved by ID after refresh"
+                );
             }
         }
     }
@@ -799,13 +816,22 @@ mod tests {
         snap2.generation = 2;
         app.apply_snapshot_if_changed(snap2);
 
-        assert_eq!(app.search, search_before, "search query must survive a refresh");
-        assert_eq!(app.expanded, expanded_before, "expansion set must survive a refresh");
+        assert_eq!(
+            app.search, search_before,
+            "search query must survive a refresh"
+        );
+        assert_eq!(
+            app.expanded, expanded_before,
+            "expansion set must survive a refresh"
+        );
         // And the search filter is still in effect after the refresh.
         let has_unfiltered = app.visible.iter().any(|n| {
             matches!(&n.node, crate::tui::tree::TreeNode::InstalledItem(i) if i.name == "review")
         });
-        assert!(!has_unfiltered, "the preserved 'dev' search must still hide non-matching items");
+        assert!(
+            !has_unfiltered,
+            "the preserved 'dev' search must still hide non-matching items"
+        );
     }
 
     #[test]
@@ -818,8 +844,14 @@ mod tests {
         });
         app.modal_visible = true;
         let taken = app.take_pending_action();
-        assert!(taken.is_some(), "take_pending_action should return the pending action");
-        assert!(app.pending_action.is_none(), "pending_action should be cleared after take");
+        assert!(
+            taken.is_some(),
+            "take_pending_action should return the pending action"
+        );
+        assert!(
+            app.pending_action.is_none(),
+            "pending_action should be cleared after take"
+        );
         assert!(!app.modal_visible, "modal should be hidden after take");
         assert!(app.mutating, "mutating should be true while action runs");
     }
@@ -895,8 +927,14 @@ mod tests {
         snap_same.installed.clear();
         app.apply_snapshot_if_changed(snap_same);
 
-        assert_eq!(app.selected, selected_before, "selection must be unchanged on equal generation");
-        assert_eq!(app.expanded, expanded_before, "expansion must be unchanged on equal generation");
+        assert_eq!(
+            app.selected, selected_before,
+            "selection must be unchanged on equal generation"
+        );
+        assert_eq!(
+            app.expanded, expanded_before,
+            "expansion must be unchanged on equal generation"
+        );
         let visible_after: Vec<String> = app.visible.iter().map(|n| n.id.clone()).collect();
         assert_eq!(
             visible_after, visible_before,
@@ -927,7 +965,10 @@ mod tests {
             .visible
             .iter()
             .any(|n| matches!(&n.node, crate::tui::tree::TreeNode::InstalledItem(_)));
-        assert!(!still_installed, "a higher generation must rebuild and reflect the new data");
+        assert!(
+            !still_installed,
+            "a higher generation must rebuild and reflect the new data"
+        );
     }
 
     #[test]
@@ -946,15 +987,24 @@ mod tests {
             .expect("installed item should be visible");
         app.selected = idx;
         app.apply_intent(Intent::ActionForget);
-        assert!(app.modal_visible, "forget must open a confirm modal (destructive gating)");
-        let pending = app.pending_action.as_ref().expect("forget must set a pending action");
+        assert!(
+            app.modal_visible,
+            "forget must open a confirm modal (destructive gating)"
+        );
+        let pending = app
+            .pending_action
+            .as_ref()
+            .expect("forget must set a pending action");
         assert!(
             matches!(&pending.kind, ActionKind::Forget { item_key } if item_key == "skill:review"),
             "pending action should be Forget for the selected item"
         );
         // Declining (n) must clear it WITHOUT mutating.
         app.apply_intent(Intent::CancelAction);
-        assert!(app.pending_action.is_none(), "decline clears the pending forget");
+        assert!(
+            app.pending_action.is_none(),
+            "decline clears the pending forget"
+        );
         assert!(!app.modal_visible);
     }
 
@@ -965,19 +1015,30 @@ mod tests {
         // sits as a pending action and does not run.
         let mut app = App::new(String::new(), None, None);
         app.pending_action = Some(PendingAction {
-            kind: ActionKind::Unmeld { name: "local/x".to_string(), forget: true },
+            kind: ActionKind::Unmeld {
+                name: "local/x".to_string(),
+                forget: true,
+            },
             description: "Unmeld local/x --forget?".to_string(),
         });
         app.modal_visible = true;
         // No confirmation yet: the action is still pending (not executed).
-        assert!(app.pending_action.is_some(), "destructive action waits for confirm");
+        assert!(
+            app.pending_action.is_some(),
+            "destructive action waits for confirm"
+        );
         // Confirm: take_pending_action yields it (the executor then runs it).
-        let taken = app.take_pending_action().expect("confirm yields the action");
+        let taken = app
+            .take_pending_action()
+            .expect("confirm yields the action");
         assert!(
             matches!(taken.kind, ActionKind::Unmeld { forget: true, .. }),
             "the destructive forget flag must survive through confirmation"
         );
-        assert!(app.mutating, "mutating flag is set once the action is taken");
+        assert!(
+            app.mutating,
+            "mutating flag is set once the action is taken"
+        );
     }
 
     #[test]
@@ -1048,8 +1109,14 @@ mod tests {
         let mut app = App::new(String::new(), None, None);
         app.apply_snapshot(make_snapshot());
         app.apply_intent(Intent::ActionMeld);
-        assert!(app.spec_input_active, "ActionMeld should activate spec input");
-        assert!(app.spec_input_text.is_empty(), "spec input text should be empty initially");
+        assert!(
+            app.spec_input_active,
+            "ActionMeld should activate spec input"
+        );
+        assert!(
+            app.spec_input_text.is_empty(),
+            "spec input text should be empty initially"
+        );
     }
 
     #[test]
@@ -1088,9 +1155,18 @@ mod tests {
         app.spec_input_active = true;
         app.spec_input_text = "some/repo".to_string();
         app.apply_intent(Intent::CancelAction);
-        assert!(!app.spec_input_active, "spec input should be inactive after cancel");
-        assert!(app.spec_input_text.is_empty(), "spec input text should be cleared on cancel");
-        assert!(app.pending_action.is_none(), "no action should be pending after cancel");
+        assert!(
+            !app.spec_input_active,
+            "spec input should be inactive after cancel"
+        );
+        assert!(
+            app.spec_input_text.is_empty(),
+            "spec input text should be cleared on cancel"
+        );
+        assert!(
+            app.pending_action.is_none(),
+            "no action should be pending after cancel"
+        );
     }
 
     #[test]
@@ -1103,9 +1179,18 @@ mod tests {
             spec: "github.com/a/repo".to_string(),
             name: "repo (2 items)".to_string(),
         });
-        assert!(!app.spec_input_active, "spec input should be inactive after preview ready");
-        assert!(app.modal_visible, "confirm modal should be visible after preview ready");
-        let action = app.pending_action.as_ref().expect("pending action should be set");
+        assert!(
+            !app.spec_input_active,
+            "spec input should be inactive after preview ready"
+        );
+        assert!(
+            app.modal_visible,
+            "confirm modal should be visible after preview ready"
+        );
+        let action = app
+            .pending_action
+            .as_ref()
+            .expect("pending action should be set");
         assert!(
             matches!(&action.kind, ActionKind::Meld { spec } if spec == "github.com/a/repo"),
             "pending action should be Meld with the submitted spec"
@@ -1121,14 +1206,23 @@ mod tests {
         app.apply_intent(Intent::PreviewError {
             message: "git clone failed".to_string(),
         });
-        assert!(!app.spec_input_active, "spec input should be inactive after preview error");
-        assert!(app.active_preview.is_none(), "no preview should remain after error");
+        assert!(
+            !app.spec_input_active,
+            "spec input should be inactive after preview error"
+        );
+        assert!(
+            app.active_preview.is_none(),
+            "no preview should remain after error"
+        );
         assert_eq!(
             app.error.as_deref(),
             Some("git clone failed"),
             "error should be surfaced inline"
         );
-        assert!(app.pending_action.is_none(), "no action should be pending after error");
+        assert!(
+            app.pending_action.is_none(),
+            "no action should be pending after error"
+        );
     }
 
     #[test]
@@ -1139,15 +1233,23 @@ mod tests {
         // Simulate a live preview (SourcePreview::Drop removes temp dir, but since
         // we can't create a real temp clone in a unit test we just check state).
         app.pending_action = Some(PendingAction {
-            kind: ActionKind::Meld { spec: "some/repo".to_string() },
+            kind: ActionKind::Meld {
+                spec: "some/repo".to_string(),
+            },
             description: "Meld some/repo?".to_string(),
         });
         app.modal_visible = true;
         // Set a dummy (no-op) active_preview indication - can't construct SourcePreview
         // directly in a unit test, so we just verify the field gets cleared.
         app.apply_intent(Intent::CancelAction);
-        assert!(app.active_preview.is_none(), "active_preview must be cleared on decline");
-        assert!(app.pending_action.is_none(), "pending action must be cleared on decline");
+        assert!(
+            app.active_preview.is_none(),
+            "active_preview must be cleared on decline"
+        );
+        assert!(
+            app.pending_action.is_none(),
+            "pending action must be cleared on decline"
+        );
         assert!(!app.modal_visible);
     }
 
@@ -1170,9 +1272,10 @@ mod tests {
         app.apply_snapshot(snap);
 
         // Find the SuggestedSource node in visible.
-        let idx = app.visible.iter().position(|n| {
-            matches!(&n.node, TreeNode::SuggestedSource(s) if s.name == "some-repo")
-        });
+        let idx = app
+            .visible
+            .iter()
+            .position(|n| matches!(&n.node, TreeNode::SuggestedSource(s) if s.name == "some-repo"));
         if let Some(idx) = idx {
             app.selected = idx;
             app.apply_intent(Intent::Expand);
@@ -1193,11 +1296,14 @@ mod tests {
                 false,
             );
             let flat = crate::tui::tree::flatten_tree(&nodes, &std::collections::HashSet::new());
-            let has_sug = flat.iter().any(|n| {
-                matches!(&n.node, TreeNode::SuggestedSource(s) if s.name == "some-repo")
-            });
-            assert!(has_sug, "SuggestedSource node should appear in the Available tree: {:?}",
-                flat.iter().map(|n| &n.label).collect::<Vec<_>>());
+            let has_sug = flat
+                .iter()
+                .any(|n| matches!(&n.node, TreeNode::SuggestedSource(s) if s.name == "some-repo"));
+            assert!(
+                has_sug,
+                "SuggestedSource node should appear in the Available tree: {:?}",
+                flat.iter().map(|n| &n.label).collect::<Vec<_>>()
+            );
         }
     }
 
@@ -1219,11 +1325,14 @@ mod tests {
         let nodes = build_tree(&snap, "", None, None, false, false);
         let flat = flatten_tree(&nodes, &HashSet::new());
 
-        let has_sug = flat.iter().any(|n| {
-            matches!(&n.node, TreeNode::SuggestedSource(s) if s.name == "suggested")
-        });
-        assert!(has_sug, "SuggestedSource should appear in Available tree: {:?}",
-            flat.iter().map(|n| &n.label).collect::<Vec<_>>());
+        let has_sug = flat
+            .iter()
+            .any(|n| matches!(&n.node, TreeNode::SuggestedSource(s) if s.name == "suggested"));
+        assert!(
+            has_sug,
+            "SuggestedSource should appear in Available tree: {:?}",
+            flat.iter().map(|n| &n.label).collect::<Vec<_>>()
+        );
     }
 
     // --- TUI-23: lobe management state transitions ---
@@ -1238,7 +1347,10 @@ mod tests {
         app.apply_snapshot(snap);
         assert!(!app.lobes_modal_visible, "modal should be closed initially");
         app.apply_intent(Intent::ActionLobes);
-        assert!(app.lobes_modal_visible, "ActionLobes must open the lobes modal");
+        assert!(
+            app.lobes_modal_visible,
+            "ActionLobes must open the lobes modal"
+        );
         assert_eq!(app.lobes, vec!["/home/user/.custom-ai"]);
     }
 
@@ -1268,7 +1380,10 @@ mod tests {
         app.lobes_modal_visible = true;
         assert!(!app.lobe_input_active);
         app.apply_intent(Intent::ActionLobeAdd);
-        assert!(app.lobe_input_active, "ActionLobeAdd must activate lobe-path input");
+        assert!(
+            app.lobe_input_active,
+            "ActionLobeAdd must activate lobe-path input"
+        );
         assert!(app.lobe_input_text.is_empty(), "input text starts empty");
     }
 
@@ -1278,7 +1393,10 @@ mod tests {
         let mut app = App::new(String::new(), None, None);
         app.lobes_modal_visible = false;
         app.apply_intent(Intent::ActionLobeAdd);
-        assert!(!app.lobe_input_active, "ActionLobeAdd must not activate input when modal is closed");
+        assert!(
+            !app.lobe_input_active,
+            "ActionLobeAdd must not activate input when modal is closed"
+        );
     }
 
     #[test]
@@ -1310,11 +1428,26 @@ mod tests {
         app.lobe_input_active = true;
         app.lobe_input_text = "~/.other-ai".to_string();
         app.submit_lobe_add();
-        assert!(!app.lobe_input_active, "input should be inactive after submit");
-        assert!(app.lobe_input_text.is_empty(), "input text cleared after submit");
-        assert!(!app.lobes_modal_visible, "lobes modal closed to show confirm modal");
-        assert!(app.modal_visible, "confirm modal must be visible (TUI-24 gating)");
-        let action = app.pending_action.as_ref().expect("pending action must be set");
+        assert!(
+            !app.lobe_input_active,
+            "input should be inactive after submit"
+        );
+        assert!(
+            app.lobe_input_text.is_empty(),
+            "input text cleared after submit"
+        );
+        assert!(
+            !app.lobes_modal_visible,
+            "lobes modal closed to show confirm modal"
+        );
+        assert!(
+            app.modal_visible,
+            "confirm modal must be visible (TUI-24 gating)"
+        );
+        let action = app
+            .pending_action
+            .as_ref()
+            .expect("pending action must be set");
         assert!(
             matches!(&action.kind, ActionKind::LobeAdd { path } if path == "~/.other-ai"),
             "pending action must be LobeAdd with the submitted path"
@@ -1330,7 +1463,10 @@ mod tests {
         app.lobe_input_text.clear();
         app.submit_lobe_add();
         assert!(!app.lobe_input_active);
-        assert!(app.lobes_modal_visible, "empty submit returns to lobes modal");
+        assert!(
+            app.lobes_modal_visible,
+            "empty submit returns to lobes modal"
+        );
         assert!(app.pending_action.is_none(), "no action set on empty path");
     }
 
@@ -1343,9 +1479,18 @@ mod tests {
         app.lobes_selected = 1;
         app.lobes_modal_visible = true;
         app.apply_intent(Intent::ActionLobeRemove);
-        assert!(!app.lobes_modal_visible, "lobes modal closes when confirm modal opens");
-        assert!(app.modal_visible, "confirm modal must be visible (TUI-24 gating)");
-        let action = app.pending_action.as_ref().expect("pending action must be set");
+        assert!(
+            !app.lobes_modal_visible,
+            "lobes modal closes when confirm modal opens"
+        );
+        assert!(
+            app.modal_visible,
+            "confirm modal must be visible (TUI-24 gating)"
+        );
+        let action = app
+            .pending_action
+            .as_ref()
+            .expect("pending action must be set");
         assert!(
             matches!(&action.kind, ActionKind::LobeRemove { path } if path == "~/.other"),
             "LobeRemove action must target the selected lobe"
@@ -1359,8 +1504,14 @@ mod tests {
         app.lobes = vec![];
         app.lobes_modal_visible = true;
         app.apply_intent(Intent::ActionLobeRemove);
-        assert!(app.pending_action.is_none(), "no action set when lobes list is empty");
-        assert!(app.lobes_modal_visible, "modal stays open when nothing to remove");
+        assert!(
+            app.pending_action.is_none(),
+            "no action set when lobes list is empty"
+        );
+        assert!(
+            app.lobes_modal_visible,
+            "modal stays open when nothing to remove"
+        );
     }
 
     #[test]
@@ -1372,9 +1523,18 @@ mod tests {
         app.lobe_input_text = "/partial".to_string();
         app.lobes_modal_visible = false; // simulating state during input
         app.apply_intent(Intent::CancelAction);
-        assert!(!app.lobe_input_active, "input must be inactive after cancel");
-        assert!(app.lobe_input_text.is_empty(), "input text cleared on cancel");
-        assert!(app.lobes_modal_visible, "cancel during input returns to lobes modal");
+        assert!(
+            !app.lobe_input_active,
+            "input must be inactive after cancel"
+        );
+        assert!(
+            app.lobe_input_text.is_empty(),
+            "input text cleared on cancel"
+        );
+        assert!(
+            app.lobes_modal_visible,
+            "cancel during input returns to lobes modal"
+        );
     }
 
     #[test]
@@ -1398,9 +1558,14 @@ mod tests {
         app.lobes_modal_visible = true;
         app.apply_intent(Intent::ActionLobeRemove);
         // Action is now pending but NOT yet taken (not executed).
-        assert!(app.pending_action.is_some(), "LobeRemove waits in pending_action");
+        assert!(
+            app.pending_action.is_some(),
+            "LobeRemove waits in pending_action"
+        );
         // Confirming yields the action for execution.
-        let taken = app.take_pending_action().expect("confirm yields the action");
+        let taken = app
+            .take_pending_action()
+            .expect("confirm yields the action");
         assert!(
             matches!(taken.kind, ActionKind::LobeRemove { path } if path == "~/.x"),
             "the LobeRemove action must survive through confirmation"

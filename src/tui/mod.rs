@@ -306,9 +306,9 @@ mod tests {
     //! `apply_intent` directly). That routing is exactly where the search-focus
     //! and confirm-modal-Esc bugs lived.
     use super::*;
+    use crate::error::ItemKind;
     use crate::tui::app::{ActionKind, App, PendingAction};
     use crate::tui::data::{Snapshot, SnapshotAvailable, SnapshotInstalled};
-    use crate::error::ItemKind;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     /// A throwaway `Paths` pointing at a temp dir. The key paths under test
@@ -365,9 +365,18 @@ mod tests {
         assert!(app.search_focused, "'/' must focus the search box");
 
         handle_key(&paths, &mut app, key(KeyCode::Char('d')));
-        assert_eq!(app.search, "d", "'d' must be appended to the query while search-focused");
-        assert!(app.pending_action.is_none(), "'d' must NOT initiate a forget while searching");
-        assert!(!app.modal_visible, "no confirm modal should open from typing in search");
+        assert_eq!(
+            app.search, "d",
+            "'d' must be appended to the query while search-focused"
+        );
+        assert!(
+            app.pending_action.is_none(),
+            "'d' must NOT initiate a forget while searching"
+        );
+        assert!(
+            !app.modal_visible,
+            "no confirm modal should open from typing in search"
+        );
     }
 
     #[test]
@@ -378,7 +387,10 @@ mod tests {
         let mut app = seeded_app();
         handle_key(&paths, &mut app, key(KeyCode::Char('/')));
         handle_key(&paths, &mut app, key(KeyCode::Char('q')));
-        assert!(!app.should_quit(), "'q' must not quit while search is focused");
+        assert!(
+            !app.should_quit(),
+            "'q' must not quit while search is focused"
+        );
         assert_eq!(app.search, "q", "'q' must be typed into the query");
     }
 
@@ -400,8 +412,14 @@ mod tests {
 
         handle_key(&paths, &mut app, key(KeyCode::Esc));
 
-        assert!(app.pending_action.is_none(), "Esc must cancel the pending action");
+        assert!(
+            app.pending_action.is_none(),
+            "Esc must cancel the pending action"
+        );
         assert!(!app.modal_visible, "Esc must dismiss the confirm modal");
-        assert_eq!(app.search, "rev", "Esc-to-cancel must leave the search filter intact");
+        assert_eq!(
+            app.search, "rev",
+            "Esc-to-cancel must leave the search filter intact"
+        );
     }
 }

@@ -150,8 +150,7 @@ mod tests {
 
     fn temp_paths() -> (Paths, std::path::PathBuf) {
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let base = std::env::temp_dir()
-            .join(format!("mind-tui-data-{}-{n}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("mind-tui-data-{}-{n}", std::process::id()));
         let paths = Paths {
             mind_home: base.join("mind"),
             claude_home: base.join("claude"),
@@ -181,15 +180,18 @@ mod tests {
         let (paths, base) = temp_paths();
         crate::paths::mkdir_p(&paths.mind_home).unwrap();
         let snap = try_poll(&paths);
-        assert!(snap.is_some(), "try_poll should succeed when no exclusive lock is held");
+        assert!(
+            snap.is_some(),
+            "try_poll should succeed when no exclusive lock is held"
+        );
         cleanup(&base);
     }
 
     #[test]
     fn try_poll_returns_none_when_exclusive_lock_held() {
         // spec: TUI-25 (non-blocking poll skips while mutation holds exclusive lock)
-        use std::fs::OpenOptions;
         use fd_lock::RwLock;
+        use std::fs::OpenOptions;
 
         let (paths, base) = temp_paths();
         crate::paths::mkdir_p(&paths.mind_home).unwrap();

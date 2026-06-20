@@ -87,8 +87,8 @@ pub fn execute(paths: &Paths, action: PendingAction) -> Result<Snapshot> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::app::{ActionKind, PendingAction};
     use crate::paths::Paths;
+    use crate::tui::app::{ActionKind, PendingAction};
     use std::sync::atomic::{AtomicU32, Ordering};
 
     static COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -113,8 +113,7 @@ mod tests {
 
     fn temp_paths() -> (Paths, TempDir) {
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let base = std::env::temp_dir()
-            .join(format!("mind-tui-action-{}-{n}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("mind-tui-action-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let paths = Paths {
             mind_home: base.join("mind"),
@@ -136,7 +135,11 @@ mod tests {
         };
         let result = execute(&paths, action);
         // Should return an error (NotInstalled), not panic.
-        assert!(result.is_err(), "forget on unknown item should return an error");    }
+        assert!(
+            result.is_err(),
+            "forget on unknown item should return an error"
+        );
+    }
 
     #[test]
     fn execute_sync_on_empty_registry_succeeds() {
@@ -150,9 +153,14 @@ mod tests {
             description: "sync?".to_string(),
         };
         let result = execute(&paths, action);
-        assert!(result.is_ok(), "sync on empty registry should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "sync on empty registry should succeed: {:?}",
+            result.err()
+        );
         let snap = result.unwrap();
-        assert!(snap.installed.is_empty());    }
+        assert!(snap.installed.is_empty());
+    }
 
     #[test]
     fn execute_takes_exclusive_lock() {
@@ -179,7 +187,8 @@ mod tests {
         });
 
         let result = handle.join().unwrap();
-        assert!(result.is_ok(), "execute should succeed: {:?}", result.err());    }
+        assert!(result.is_ok(), "execute should succeed: {:?}", result.err());
+    }
 
     #[test]
     fn execute_lock_is_exclusive_not_shared() {
@@ -238,9 +247,14 @@ mod tests {
             "execute should have blocked behind the shared reader (exclusive lock); \
              only waited {waited:?} - lock is not exclusive"
         );
-        assert!(result.is_ok(), "execute should still succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "execute should still succeed: {:?}",
+            result.err()
+        );
 
-        reader.join().unwrap();    }
+        reader.join().unwrap();
+    }
 
     #[test]
     fn execute_evolve_with_no_pending_succeeds() {
@@ -252,7 +266,12 @@ mod tests {
             description: "evolve?".to_string(),
         };
         let result = execute(&paths, action);
-        assert!(result.is_ok(), "evolve with nothing to do should succeed: {:?}", result.err());    }
+        assert!(
+            result.is_ok(),
+            "evolve with nothing to do should succeed: {:?}",
+            result.err()
+        );
+    }
 
     fn init_git_repo(dir: &std::path::Path) {
         use std::process::Command;
@@ -276,10 +295,19 @@ mod tests {
         std::fs::write(
             src.join("skills/build/SKILL.md"),
             "---\ndescription: build skill\n---\n# build\n",
-        ).unwrap();
+        )
+        .unwrap();
         init_git_repo(&src);
-        Command::new("git").args(["add", "-A"]).current_dir(&src).output().unwrap();
-        Command::new("git").args(["commit", "-qm", "initial"]).current_dir(&src).output().unwrap();
+        Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(&src)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-qm", "initial"])
+            .current_dir(&src)
+            .output()
+            .unwrap();
         src
     }
 
@@ -301,9 +329,13 @@ mod tests {
         let snap = result.unwrap();
         // The source should now be in the snapshot's source list.
         assert!(
-            snap.source_names.iter().any(|n| n.contains("source-repo-action")),
-            "newly melded source should appear in snapshot: {:?}", snap.source_names
-        );    }
+            snap.source_names
+                .iter()
+                .any(|n| n.contains("source-repo-action")),
+            "newly melded source should appear in snapshot: {:?}",
+            snap.source_names
+        );
+    }
 
     /// Register a melded source and record one installed item attributed to it,
     /// with an EMPTY file registry so uninstall touches no agent home (keeping the
@@ -351,19 +383,25 @@ mod tests {
             description: format!("Unmeld {source_name} --forget?"),
         };
         let result = execute(&paths, action);
-        assert!(result.is_ok(), "destructive unmeld should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "destructive unmeld should succeed: {:?}",
+            result.err()
+        );
 
         let registry2 = crate::source::Registry::load(&paths).unwrap();
         assert!(
             registry2.sources.is_empty(),
-            "source must be removed after unmeld: {:?}", registry2.sources
+            "source must be removed after unmeld: {:?}",
+            registry2.sources
         );
         let manifest2 = crate::manifest::Manifest::load(&paths).unwrap();
         assert!(
             !manifest2.items.values().any(|i| i.key() == "skill:build"),
             "skill:build must be purged by unmeld --forget: {:?}",
             manifest2.items.keys().collect::<Vec<_>>()
-        );    }
+        );
+    }
 
     #[test]
     fn execute_unmeld_without_forget_keeps_installed_items() {
@@ -391,7 +429,8 @@ mod tests {
         assert!(
             manifest2.items.values().any(|i| i.key() == "skill:build"),
             "skill:build must survive a non-forget unmeld"
-        );    }
+        );
+    }
 
     #[test]
     fn decline_preview_leaves_nothing_registered_and_no_temp_dir() {
@@ -407,20 +446,28 @@ mod tests {
         // Run a preview (shallow clone to temp area).
         let prev = preview::preview(&paths, &spec).expect("preview should succeed");
         let temp_dir = prev.temp_dir.clone();
-        assert!(temp_dir.exists(), "temp dir should exist while preview is live");
+        assert!(
+            temp_dir.exists(),
+            "temp dir should exist while preview is live"
+        );
 
         // Simulate declining: drop the preview (no meld action issued).
         // SourcePreview::Drop removes the temp clone.
         drop(prev);
 
-        assert!(!temp_dir.exists(), "temp dir must be removed when preview is dropped (decline)");
+        assert!(
+            !temp_dir.exists(),
+            "temp dir must be removed when preview is dropped (decline)"
+        );
 
         // Registry should be empty (meld was never called).
         let registry = crate::source::Registry::load(&paths).unwrap();
         assert!(
             registry.sources.is_empty(),
-            "registry must remain empty after declining a preview: {:?}", registry.sources
-        );    }
+            "registry must remain empty after declining a preview: {:?}",
+            registry.sources
+        );
+    }
 
     // --- TUI-23: lobe add / remove dispatch ---
 
@@ -433,7 +480,9 @@ mod tests {
         let lobe_path = base.join("custom-ai").to_str().unwrap().to_string();
 
         let action = PendingAction {
-            kind: ActionKind::LobeAdd { path: lobe_path.clone() },
+            kind: ActionKind::LobeAdd {
+                path: lobe_path.clone(),
+            },
             description: format!("Add lobe {lobe_path}?"),
         };
         let result = execute(&paths, action);
@@ -443,8 +492,10 @@ mod tests {
         let cfg = crate::config::Config::load(&paths.mind_home).unwrap();
         assert!(
             cfg.lobes.contains(&lobe_path),
-            "lobe must appear in config after LobeAdd: {:?}", cfg.lobes
-        );    }
+            "lobe must appear in config after LobeAdd: {:?}",
+            cfg.lobes
+        );
+    }
 
     #[test]
     fn execute_lobe_remove_drops_lobe_from_config() {
@@ -456,24 +507,34 @@ mod tests {
 
         // First add the lobe so we can remove it.
         let add_action = PendingAction {
-            kind: ActionKind::LobeAdd { path: lobe_path.clone() },
+            kind: ActionKind::LobeAdd {
+                path: lobe_path.clone(),
+            },
             description: format!("Add {lobe_path}?"),
         };
         execute(&paths, add_action).expect("LobeAdd prerequisite");
 
         // Now remove it.
         let remove_action = PendingAction {
-            kind: ActionKind::LobeRemove { path: lobe_path.clone() },
+            kind: ActionKind::LobeRemove {
+                path: lobe_path.clone(),
+            },
             description: format!("Remove lobe {lobe_path}?"),
         };
         let result = execute(&paths, remove_action);
-        assert!(result.is_ok(), "LobeRemove should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "LobeRemove should succeed: {:?}",
+            result.err()
+        );
 
         let cfg = crate::config::Config::load(&paths.mind_home).unwrap();
         assert!(
             !cfg.lobes.contains(&lobe_path),
-            "lobe must be absent from config after LobeRemove: {:?}", cfg.lobes
-        );    }
+            "lobe must be absent from config after LobeRemove: {:?}",
+            cfg.lobes
+        );
+    }
 
     #[test]
     fn execute_lobe_remove_nonexistent_returns_error() {
@@ -483,15 +544,24 @@ mod tests {
         crate::paths::mkdir_p(&paths.mind_home).unwrap();
 
         let action = PendingAction {
-            kind: ActionKind::LobeRemove { path: "/does/not/exist".to_string() },
+            kind: ActionKind::LobeRemove {
+                path: "/does/not/exist".to_string(),
+            },
             description: "Remove nonexistent lobe?".to_string(),
         };
         let result = execute(&paths, action);
-        assert!(result.is_err(), "LobeRemove of unknown path must return an error");
         assert!(
-            matches!(result.unwrap_err(), crate::error::MindError::UnknownLobe { .. }),
+            result.is_err(),
+            "LobeRemove of unknown path must return an error"
+        );
+        assert!(
+            matches!(
+                result.unwrap_err(),
+                crate::error::MindError::UnknownLobe { .. }
+            ),
             "error must be MindError::UnknownLobe"
-        );    }
+        );
+    }
 
     #[test]
     fn execute_lobe_add_duplicate_is_idempotent() {
@@ -502,7 +572,9 @@ mod tests {
 
         for _ in 0..2 {
             let action = PendingAction {
-                kind: ActionKind::LobeAdd { path: lobe_path.clone() },
+                kind: ActionKind::LobeAdd {
+                    path: lobe_path.clone(),
+                },
                 description: format!("Add {lobe_path}?"),
             };
             execute(&paths, action).expect("LobeAdd must succeed");
@@ -510,7 +582,11 @@ mod tests {
 
         let cfg = crate::config::Config::load(&paths.mind_home).unwrap();
         let count = cfg.lobes.iter().filter(|l| *l == &lobe_path).count();
-        assert_eq!(count, 1, "duplicate lobe add must not produce duplicate entries");    }
+        assert_eq!(
+            count, 1,
+            "duplicate lobe add must not produce duplicate entries"
+        );
+    }
 
     #[test]
     fn execute_lobe_add_snapshot_includes_new_lobe() {
@@ -521,14 +597,18 @@ mod tests {
         let lobe_path = base.join("custom-ai").to_str().unwrap().to_string();
 
         let action = PendingAction {
-            kind: ActionKind::LobeAdd { path: lobe_path.clone() },
+            kind: ActionKind::LobeAdd {
+                path: lobe_path.clone(),
+            },
             description: format!("Add {lobe_path}?"),
         };
         let snap = execute(&paths, action).expect("LobeAdd must succeed");
         assert!(
             snap.lobes.contains(&lobe_path),
-            "snapshot after LobeAdd must include the new lobe: {:?}", snap.lobes
-        );    }
+            "snapshot after LobeAdd must include the new lobe: {:?}",
+            snap.lobes
+        );
+    }
 
     /// Create a named source git repo under `base/<dir_name>` that ships a single
     /// skill named `skill_name`. Returns the repo path.
@@ -542,9 +622,7 @@ mod tests {
         std::fs::create_dir_all(src.join("skills").join(skill_name)).unwrap();
         std::fs::write(
             src.join("skills").join(skill_name).join("SKILL.md"),
-            format!(
-                "---\ndescription: {skill_name} skill from {dir_name}\n---\n# {skill_name}\n"
-            ),
+            format!("---\ndescription: {skill_name} skill from {dir_name}\n---\n# {skill_name}\n"),
         )
         .unwrap();
         init_git_repo(&src);
@@ -585,10 +663,26 @@ mod tests {
         let src_a = make_named_source_repo(&base, "source-alpha", "review");
         let src_b = make_named_source_repo(&base, "source-beta", "review");
 
-        commands::meld(&paths, src_a.to_str().unwrap(), None, vec![], None, None, None)
-            .expect("meld source-alpha");
-        commands::meld(&paths, src_b.to_str().unwrap(), None, vec![], None, None, None)
-            .expect("meld source-beta");
+        commands::meld(
+            &paths,
+            src_a.to_str().unwrap(),
+            None,
+            vec![],
+            None,
+            None,
+            None,
+        )
+        .expect("meld source-alpha");
+        commands::meld(
+            &paths,
+            src_b.to_str().unwrap(),
+            None,
+            vec![],
+            None,
+            None,
+            None,
+        )
+        .expect("meld source-beta");
 
         // The registry should now have two sources.
         let registry = crate::source::Registry::load(&paths).unwrap();

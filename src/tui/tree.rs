@@ -114,7 +114,11 @@ pub fn build_tree(
     roots.push(Node {
         id: "group:installed".to_string(),
         label: installed_label,
-        children: if installed_collapsed { vec![] } else { installed_node.children },
+        children: if installed_collapsed {
+            vec![]
+        } else {
+            installed_node.children
+        },
         node: TreeNode::InstalledGroup,
     });
 
@@ -130,7 +134,11 @@ pub fn build_tree(
     roots.push(Node {
         id: "group:available".to_string(),
         label: available_label,
-        children: if available_collapsed { vec![] } else { available_node.children },
+        children: if available_collapsed {
+            vec![]
+        } else {
+            available_node.children
+        },
         node: TreeNode::AvailableGroup,
     });
 
@@ -157,8 +165,10 @@ fn build_installed_group(
     source_filter: Option<&str>,
 ) -> Node {
     // Group installed items by source -> kind.
-    let mut by_source: std::collections::BTreeMap<String, Vec<&crate::tui::data::SnapshotInstalled>> =
-        std::collections::BTreeMap::new();
+    let mut by_source: std::collections::BTreeMap<
+        String,
+        Vec<&crate::tui::data::SnapshotInstalled>,
+    > = std::collections::BTreeMap::new();
     for item in &snap.installed {
         if kind_filter.is_some_and(|kf| item.kind != kf) {
             continue;
@@ -174,8 +184,10 @@ fn build_installed_group(
 
     let mut source_nodes = Vec::new();
     for (src_name, items) in &by_source {
-        let mut kind_map: std::collections::BTreeMap<ItemKind, Vec<&&crate::tui::data::SnapshotInstalled>> =
-            std::collections::BTreeMap::new();
+        let mut kind_map: std::collections::BTreeMap<
+            ItemKind,
+            Vec<&&crate::tui::data::SnapshotInstalled>,
+        > = std::collections::BTreeMap::new();
         for item in items {
             kind_map.entry(item.kind).or_default().push(item);
         }
@@ -190,7 +202,10 @@ fn build_installed_group(
                         "{} [{}]{}",
                         it.name,
                         short_commit(&it.commit),
-                        it.description.as_deref().map(|d| format!(" - {}", truncate(d, 50))).unwrap_or_default()
+                        it.description
+                            .as_deref()
+                            .map(|d| format!(" - {}", truncate(d, 50)))
+                            .unwrap_or_default()
                     ),
                     node: TreeNode::InstalledItem(InstalledInfo {
                         key: it.key.clone(),
@@ -245,8 +260,10 @@ fn build_available_group(
     // Installed item keys (for de-dup).
     let installed_keys: HashSet<String> = snap.installed.iter().map(|i| i.key.clone()).collect();
 
-    let mut by_source: std::collections::BTreeMap<String, Vec<&crate::tui::data::SnapshotAvailable>> =
-        std::collections::BTreeMap::new();
+    let mut by_source: std::collections::BTreeMap<
+        String,
+        Vec<&crate::tui::data::SnapshotAvailable>,
+    > = std::collections::BTreeMap::new();
 
     for item in &snap.available {
         // De-duplicate: skip items already installed.
@@ -268,8 +285,10 @@ fn build_available_group(
 
     let mut source_nodes = Vec::new();
     for (src_name, items) in &by_source {
-        let mut kind_map: std::collections::BTreeMap<ItemKind, Vec<&&crate::tui::data::SnapshotAvailable>> =
-            std::collections::BTreeMap::new();
+        let mut kind_map: std::collections::BTreeMap<
+            ItemKind,
+            Vec<&&crate::tui::data::SnapshotAvailable>,
+        > = std::collections::BTreeMap::new();
         for item in items {
             kind_map.entry(item.kind).or_default().push(item);
         }
@@ -283,7 +302,10 @@ fn build_available_group(
                     label: format!(
                         "{}{}",
                         it.name,
-                        it.description.as_deref().map(|d| format!(" - {}", truncate(d, 50))).unwrap_or_default()
+                        it.description
+                            .as_deref()
+                            .map(|d| format!(" - {}", truncate(d, 50)))
+                            .unwrap_or_default()
                     ),
                     node: TreeNode::AvailableItem(AvailableInfo {
                         key: it.key.clone(),
@@ -405,19 +427,17 @@ pub fn flatten_tree(nodes: &[Node], expanded: &HashSet<String>) -> Vec<FlatNode>
     out
 }
 
-fn flatten_node(
-    node: &Node,
-    depth: usize,
-    expanded: &HashSet<String>,
-    out: &mut Vec<FlatNode>,
-) {
+fn flatten_node(node: &Node, depth: usize, expanded: &HashSet<String>, out: &mut Vec<FlatNode>) {
     // Structural nodes (group headers, source nodes, kind-buckets) are
     // auto-expanded so items are immediately visible. Item-detail nodes
     // (InstalledItem / AvailableItem children) require explicit expansion:
     // the caller adds their ID to the `expanded` set to reveal them.
     let is_auto_expanded = matches!(
         node.node,
-        TreeNode::InstalledGroup | TreeNode::AvailableGroup | TreeNode::Source(_) | TreeNode::KindBucket { .. }
+        TreeNode::InstalledGroup
+            | TreeNode::AvailableGroup
+            | TreeNode::Source(_)
+            | TreeNode::KindBucket { .. }
     );
     let is_expanded = is_auto_expanded || expanded.contains(&node.id);
     let expandable = !node.children.is_empty();
@@ -457,8 +477,8 @@ fn truncate(s: &str, max: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::data::{Snapshot, SnapshotInstalled, SnapshotAvailable};
     use crate::error::ItemKind;
+    use crate::tui::data::{Snapshot, SnapshotAvailable, SnapshotInstalled};
     use std::collections::HashSet;
 
     fn make_installed(key: &str, name: &str, source: &str, kind: ItemKind) -> SnapshotInstalled {
@@ -498,7 +518,12 @@ mod tests {
     fn tree_has_installed_and_available_groups() {
         // spec: TUI-10
         let snap = snap_with(
-            vec![make_installed("skill:review", "review", "src/a", ItemKind::Skill)],
+            vec![make_installed(
+                "skill:review",
+                "review",
+                "src/a",
+                ItemKind::Skill,
+            )],
             vec![make_available("agent:dev", "dev", "src/a", ItemKind::Agent)],
         );
         let nodes = build_tree(&snap, "", None, None, false, false);
@@ -511,15 +536,26 @@ mod tests {
     fn installed_group_contains_installed_items() {
         // spec: TUI-12
         let snap = snap_with(
-            vec![make_installed("skill:review", "review", "src/a", ItemKind::Skill)],
+            vec![make_installed(
+                "skill:review",
+                "review",
+                "src/a",
+                ItemKind::Skill,
+            )],
             vec![],
         );
         let nodes = build_tree(&snap, "", None, None, false, false);
         // Flatten and look for InstalledItem
         let flat = flatten_tree(&nodes, &HashSet::new());
         // Group headers are always expanded, so items appear even without expansion
-        let has_review = flat.iter().any(|n| matches!(&n.node, TreeNode::InstalledItem(i) if i.name == "review"));
-        assert!(has_review, "installed item should appear in flat tree: {:?}", flat.iter().map(|n| &n.label).collect::<Vec<_>>());
+        let has_review = flat
+            .iter()
+            .any(|n| matches!(&n.node, TreeNode::InstalledItem(i) if i.name == "review"));
+        assert!(
+            has_review,
+            "installed item should appear in flat tree: {:?}",
+            flat.iter().map(|n| &n.label).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -532,8 +568,13 @@ mod tests {
         let nodes = build_tree(&snap, "", None, None, false, false);
         let flat = flatten_tree(&nodes, &HashSet::new());
         // Should not appear under Available
-        let avail_review = flat.iter().any(|n| matches!(&n.node, TreeNode::AvailableItem(i) if i.name == "review"));
-        assert!(!avail_review, "installed item must not appear in Available tree");
+        let avail_review = flat
+            .iter()
+            .any(|n| matches!(&n.node, TreeNode::AvailableItem(i) if i.name == "review"));
+        assert!(
+            !avail_review,
+            "installed item must not appear in Available tree"
+        );
     }
 
     #[test]
@@ -549,8 +590,12 @@ mod tests {
         // Search for "dev" only
         let nodes = build_tree(&snap, "dev", None, None, false, false);
         let flat = flatten_tree(&nodes, &HashSet::new());
-        let has_dev = flat.iter().any(|n| matches!(&n.node, TreeNode::AvailableItem(i) if i.name == "dev"));
-        let has_plan = flat.iter().any(|n| matches!(&n.node, TreeNode::AvailableItem(i) if i.name == "plan"));
+        let has_dev = flat
+            .iter()
+            .any(|n| matches!(&n.node, TreeNode::AvailableItem(i) if i.name == "dev"));
+        let has_plan = flat
+            .iter()
+            .any(|n| matches!(&n.node, TreeNode::AvailableItem(i) if i.name == "plan"));
         assert!(has_dev, "dev should match search 'dev'");
         assert!(!has_plan, "plan should not match search 'dev'");
     }
@@ -560,11 +605,18 @@ mod tests {
         // spec: TUI-14
         let snap = snap_with(
             vec![],
-            vec![make_available("skill:Review", "Review", "src/a", ItemKind::Skill)],
+            vec![make_available(
+                "skill:Review",
+                "Review",
+                "src/a",
+                ItemKind::Skill,
+            )],
         );
         let nodes = build_tree(&snap, "review", None, None, false, false);
         let flat = flatten_tree(&nodes, &HashSet::new());
-        let found = flat.iter().any(|n| matches!(&n.node, TreeNode::AvailableItem(i) if i.name == "Review"));
+        let found = flat
+            .iter()
+            .any(|n| matches!(&n.node, TreeNode::AvailableItem(i) if i.name == "Review"));
         assert!(found, "search should be case-insensitive");
     }
 
@@ -576,7 +628,9 @@ mod tests {
         let snap = snap_with(vec![], vec![item]);
         let nodes = build_tree(&snap, "formatter", None, None, false, false);
         let flat = flatten_tree(&nodes, &HashSet::new());
-        let found = flat.iter().any(|n| matches!(&n.node, TreeNode::AvailableItem(i) if i.name == "x"));
+        let found = flat
+            .iter()
+            .any(|n| matches!(&n.node, TreeNode::AvailableItem(i) if i.name == "x"));
         assert!(found, "search should match description text");
     }
 
@@ -592,8 +646,12 @@ mod tests {
         );
         let nodes = build_tree(&snap, "", Some(ItemKind::Skill), None, false, false);
         let flat = flatten_tree(&nodes, &HashSet::new());
-        let has_skill = flat.iter().any(|n| matches!(&n.node, TreeNode::AvailableItem(i) if i.name == "s"));
-        let has_agent = flat.iter().any(|n| matches!(&n.node, TreeNode::AvailableItem(i) if i.name == "a"));
+        let has_skill = flat
+            .iter()
+            .any(|n| matches!(&n.node, TreeNode::AvailableItem(i) if i.name == "s"));
+        let has_agent = flat
+            .iter()
+            .any(|n| matches!(&n.node, TreeNode::AvailableItem(i) if i.name == "a"));
         assert!(has_skill, "skill should survive kind=Skill filter");
         assert!(!has_agent, "agent should be filtered out by kind=Skill");
     }
@@ -605,17 +663,29 @@ mod tests {
         // immediately without any explicit expansion. This gives the user a
         // usable default view.
         let snap = snap_with(
-            vec![make_installed("skill:review", "review", "src/a", ItemKind::Skill)],
+            vec![make_installed(
+                "skill:review",
+                "review",
+                "src/a",
+                ItemKind::Skill,
+            )],
             vec![],
         );
         let nodes = build_tree(&snap, "", None, None, false, false);
         let flat = flatten_tree(&nodes, &HashSet::new());
-        let group_visible = flat.iter().any(|n| matches!(&n.node, TreeNode::InstalledGroup));
+        let group_visible = flat
+            .iter()
+            .any(|n| matches!(&n.node, TreeNode::InstalledGroup));
         assert!(group_visible, "group header should always be visible");
         // With auto-expansion, items should be visible too.
-        let item_visible = flat.iter().any(|n| matches!(&n.node, TreeNode::InstalledItem(_)));
-        assert!(item_visible, "items should be visible by default (auto-expand): {:?}",
-            flat.iter().map(|n| &n.label).collect::<Vec<_>>());
+        let item_visible = flat
+            .iter()
+            .any(|n| matches!(&n.node, TreeNode::InstalledItem(_)));
+        assert!(
+            item_visible,
+            "items should be visible by default (auto-expand): {:?}",
+            flat.iter().map(|n| &n.label).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -642,9 +712,18 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert!(names.contains(&"review"), "review matches both axes: {names:?}");
-        assert!(!names.contains(&"build"), "build fails the search axis: {names:?}");
-        assert!(!names.contains(&"render"), "render fails the kind axis: {names:?}");
+        assert!(
+            names.contains(&"review"),
+            "review matches both axes: {names:?}"
+        );
+        assert!(
+            !names.contains(&"build"),
+            "build fails the search axis: {names:?}"
+        );
+        assert!(
+            !names.contains(&"render"),
+            "render fails the kind axis: {names:?}"
+        );
     }
 
     #[test]
@@ -663,11 +742,23 @@ mod tests {
         let nodes = build_tree(&snap, "review", None, Some("a/agents"), false, false);
         let flat = flatten_tree(&nodes, &HashSet::new());
         // Only the a/agents review survives both filters.
-        let from_a = flat.iter().any(|n| matches!(&n.node, TreeNode::Source(s) if s.name == "a/agents"));
-        let from_b = flat.iter().any(|n| matches!(&n.node, TreeNode::Source(s) if s.name == "b/agents"));
-        assert!(from_a, "a/agents source should remain after composed filters");
-        assert!(!from_b, "b/agents source must be excluded by the source filter");
-        let has_build = flat.iter().any(|n| matches!(&n.node, TreeNode::AvailableItem(i) if i.name == "build"));
+        let from_a = flat
+            .iter()
+            .any(|n| matches!(&n.node, TreeNode::Source(s) if s.name == "a/agents"));
+        let from_b = flat
+            .iter()
+            .any(|n| matches!(&n.node, TreeNode::Source(s) if s.name == "b/agents"));
+        assert!(
+            from_a,
+            "a/agents source should remain after composed filters"
+        );
+        assert!(
+            !from_b,
+            "b/agents source must be excluded by the source filter"
+        );
+        let has_build = flat
+            .iter()
+            .any(|n| matches!(&n.node, TreeNode::AvailableItem(i) if i.name == "build"));
         assert!(!has_build, "build must be excluded by the search filter");
     }
 
@@ -684,8 +775,14 @@ mod tests {
                 make_available("rule:style", "style", "src/a", ItemKind::Rule),
             ],
         );
-        let filtered = flatten_tree(&build_tree(&snap, "review", None, None, false, false), &HashSet::new());
-        let restored = flatten_tree(&build_tree(&snap, "", None, None, false, false), &HashSet::new());
+        let filtered = flatten_tree(
+            &build_tree(&snap, "review", None, None, false, false),
+            &HashSet::new(),
+        );
+        let restored = flatten_tree(
+            &build_tree(&snap, "", None, None, false, false),
+            &HashSet::new(),
+        );
 
         let filtered_items = filtered
             .iter()
@@ -695,12 +792,20 @@ mod tests {
             .iter()
             .filter(|n| matches!(&n.node, TreeNode::AvailableItem(_)))
             .count();
-        assert_eq!(filtered_items, 1, "search 'review' should match exactly one item");
-        assert_eq!(restored_items, 3, "clearing the search restores all three items");
+        assert_eq!(
+            filtered_items, 1,
+            "search 'review' should match exactly one item"
+        );
+        assert_eq!(
+            restored_items, 3,
+            "clearing the search restores all three items"
+        );
         // The previously hidden items are back.
         for want in ["dev", "style", "review"] {
             assert!(
-                restored.iter().any(|n| matches!(&n.node, TreeNode::AvailableItem(i) if i.name == want)),
+                restored
+                    .iter()
+                    .any(|n| matches!(&n.node, TreeNode::AvailableItem(i) if i.name == want)),
                 "{want} should reappear after clearing search"
             );
         }
@@ -716,15 +821,32 @@ mod tests {
         let other = make_available("agent:fmt", "fmt", "src/a", ItemKind::Agent);
         let snap = snap_with(vec![], vec![item, other]);
         // "formatter" appears only in the skill's description; kind=Skill is active.
-        let nodes = build_tree(&snap, "formatter", Some(ItemKind::Skill), None, false, false);
+        let nodes = build_tree(
+            &snap,
+            "formatter",
+            Some(ItemKind::Skill),
+            None,
+            false,
+            false,
+        );
         let flat = flatten_tree(&nodes, &HashSet::new());
-        let has_skill = flat.iter().any(|n| matches!(&n.node, TreeNode::AvailableItem(i)
-            if i.name == "fmt" && i.kind == ItemKind::Skill));
-        let has_agent = flat.iter().any(|n| matches!(&n.node, TreeNode::AvailableItem(i)
-            if i.kind == ItemKind::Agent));
-        assert!(has_skill, "description-only match must surface the skill: {:?}",
-            flat.iter().map(|n| &n.label).collect::<Vec<_>>());
-        assert!(!has_agent, "the agent (wrong kind, no desc match) must be filtered out");
+        let has_skill = flat.iter().any(|n| {
+            matches!(&n.node, TreeNode::AvailableItem(i)
+            if i.name == "fmt" && i.kind == ItemKind::Skill)
+        });
+        let has_agent = flat.iter().any(|n| {
+            matches!(&n.node, TreeNode::AvailableItem(i)
+            if i.kind == ItemKind::Agent)
+        });
+        assert!(
+            has_skill,
+            "description-only match must surface the skill: {:?}",
+            flat.iter().map(|n| &n.label).collect::<Vec<_>>()
+        );
+        assert!(
+            !has_agent,
+            "the agent (wrong kind, no desc match) must be filtered out"
+        );
     }
 
     #[test]
@@ -743,12 +865,17 @@ mod tests {
             .filter(|n| matches!(&n.node, TreeNode::AvailableItem(i) if i.name == "review"))
             .count();
         assert_eq!(
-            review_count, 2,
+            review_count,
+            2,
             "both uninstalled same-name items should appear (one per source): {:?}",
             flat.iter().map(|n| &n.label).collect::<Vec<_>>()
         );
-        let source_a = flat.iter().any(|n| matches!(&n.node, TreeNode::Source(s) if s.name == "a/agents"));
-        let source_b = flat.iter().any(|n| matches!(&n.node, TreeNode::Source(s) if s.name == "b/agents"));
+        let source_a = flat
+            .iter()
+            .any(|n| matches!(&n.node, TreeNode::Source(s) if s.name == "a/agents"));
+        let source_b = flat
+            .iter()
+            .any(|n| matches!(&n.node, TreeNode::Source(s) if s.name == "b/agents"));
         assert!(source_a && source_b, "both source nodes should be present");
     }
 
@@ -762,7 +889,9 @@ mod tests {
         let snap = snap_with(vec![], vec![]); // no suggestions
         let nodes = build_tree(&snap, "", None, None, false, false);
         let flat = flatten_tree(&nodes, &HashSet::new());
-        let any_suggested = flat.iter().any(|n| matches!(&n.node, TreeNode::SuggestedSource(_)));
+        let any_suggested = flat
+            .iter()
+            .any(|n| matches!(&n.node, TreeNode::SuggestedSource(_)));
         assert!(!any_suggested, "no suggestions -> no SuggestedSource nodes");
     }
 
@@ -812,7 +941,13 @@ mod tests {
         let nodes = build_tree(&snap, "", None, None, false, false);
         let flat = flatten_tree(&nodes, &HashSet::new());
         // Same key is deduped regardless of source name
-        let avail_count = flat.iter().filter(|n| matches!(&n.node, TreeNode::AvailableItem(i) if i.name == "review")).count();
-        assert_eq!(avail_count, 0, "same key in available should be deduped vs installed");
+        let avail_count = flat
+            .iter()
+            .filter(|n| matches!(&n.node, TreeNode::AvailableItem(i) if i.name == "review"))
+            .count();
+        assert_eq!(
+            avail_count, 0,
+            "same key in available should be deduped vs installed"
+        );
     }
 }

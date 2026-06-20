@@ -63,7 +63,11 @@ fn draw_frame(frame: &mut Frame, app: &App) {
 }
 
 fn draw_search_bar(frame: &mut Frame, app: &App, area: Rect) {
-    let title = if app.search_focused { "Search (ESC to clear)" } else { "Search (/) to focus" };
+    let title = if app.search_focused {
+        "Search (ESC to clear)"
+    } else {
+        "Search (/) to focus"
+    };
     let style = if app.search_focused {
         Style::default().fg(Color::Yellow)
     } else {
@@ -159,13 +163,12 @@ fn draw_spec_input(frame: &mut Frame, app: &App, area: Rect) {
 
     let hint = "Enter a repo spec (path, host/owner/repo) then press Enter. Esc to cancel.";
     let text = format!("{hint}\n\n> {}", app.spec_input_text);
-    let widget = Paragraph::new(text)
-        .block(
-            Block::default()
-                .title("Meld: enter repo spec")
-                .borders(Borders::ALL)
-                .style(Style::default().fg(Color::Yellow)),
-        );
+    let widget = Paragraph::new(text).block(
+        Block::default()
+            .title("Meld: enter repo spec")
+            .borders(Borders::ALL)
+            .style(Style::default().fg(Color::Yellow)),
+    );
     frame.render_widget(ratatui::widgets::Clear, modal_area);
     frame.render_widget(widget, modal_area);
 }
@@ -175,7 +178,9 @@ fn draw_spec_input(frame: &mut Frame, app: &App, area: Rect) {
 // spec: TUI-23 CLI-111 CLI-112 CLI-113
 fn draw_lobes_modal(frame: &mut Frame, app: &App, area: Rect) {
     let w = (area.width * 2 / 3).max(50);
-    let h = (app.lobes.len() as u16 + 8).min(area.height.saturating_sub(4)).max(8);
+    let h = (app.lobes.len() as u16 + 8)
+        .min(area.height.saturating_sub(4))
+        .max(8);
     let x = (area.width.saturating_sub(w)) / 2;
     let y = (area.height.saturating_sub(h)) / 2;
     let modal_area = Rect::new(x, y, w, h);
@@ -198,10 +203,7 @@ fn draw_lobes_modal(frame: &mut Frame, app: &App, area: Rect) {
                 } else {
                     Style::default().fg(Color::Cyan)
                 };
-                ListItem::new(Line::from(vec![Span::styled(
-                    format!("  {lobe}"),
-                    style,
-                )]))
+                ListItem::new(Line::from(vec![Span::styled(format!("  {lobe}"), style)]))
             })
             .collect()
     };
@@ -224,8 +226,11 @@ fn draw_lobes_modal(frame: &mut Frame, app: &App, area: Rect) {
         .constraints([Constraint::Min(list_h), Constraint::Length(hint_h)])
         .split(inner);
 
-    let list = List::new(items)
-        .highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD));
+    let list = List::new(items).highlight_style(
+        Style::default()
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
+    );
     frame.render_widget(list, splits[0]);
 
     let hint = Paragraph::new(hint_line).style(Style::default().fg(Color::DarkGray));
@@ -244,19 +249,20 @@ fn draw_lobe_input(frame: &mut Frame, app: &App, area: Rect) {
 
     let hint = "Enter the agent home path (e.g. ~/.other-ai) then press Enter. Esc to cancel.";
     let text = format!("{hint}\n\n> {}", app.lobe_input_text);
-    let widget = Paragraph::new(text)
-        .block(
-            Block::default()
-                .title("Add Agent Home (Lobe)")
-                .borders(Borders::ALL)
-                .style(Style::default().fg(Color::Yellow)),
-        );
+    let widget = Paragraph::new(text).block(
+        Block::default()
+            .title("Add Agent Home (Lobe)")
+            .borders(Borders::ALL)
+            .style(Style::default().fg(Color::Yellow)),
+    );
     frame.render_widget(ratatui::widgets::Clear, modal_area);
     frame.render_widget(widget, modal_area);
 }
 
 fn draw_modal(frame: &mut Frame, app: &App, area: Rect) {
-    let Some(action) = &app.pending_action else { return };
+    let Some(action) = &app.pending_action else {
+        return;
+    };
 
     // Center a small dialog.
     let w = (area.width / 2).max(40);
@@ -266,13 +272,12 @@ fn draw_modal(frame: &mut Frame, app: &App, area: Rect) {
     let modal_area = Rect::new(x, y, w, h);
 
     let text = format!("{}\n\n  [y] confirm   [n/Esc] cancel", action.description);
-    let widget = Paragraph::new(text)
-        .block(
-            Block::default()
-                .title("Confirm")
-                .borders(Borders::ALL)
-                .style(Style::default().fg(Color::Yellow)),
-        );
+    let widget = Paragraph::new(text).block(
+        Block::default()
+            .title("Confirm")
+            .borders(Borders::ALL)
+            .style(Style::default().fg(Color::Yellow)),
+    );
     frame.render_widget(ratatui::widgets::Clear, modal_area);
     frame.render_widget(widget, modal_area);
 }

@@ -218,7 +218,10 @@ mod tests {
     #[test]
     fn backspace_maps_to_search_backspace() {
         // spec: TUI-11
-        assert_eq!(key_to_intent(key(KeyCode::Backspace)), Intent::SearchBackspace);
+        assert_eq!(
+            key_to_intent(key(KeyCode::Backspace)),
+            Intent::SearchBackspace
+        );
     }
 
     #[test]
@@ -269,7 +272,10 @@ mod tests {
     #[test]
     fn y_maps_to_confirm_action() {
         // spec: TUI-24
-        assert_eq!(key_to_intent(key(KeyCode::Char('y'))), Intent::ConfirmAction);
+        assert_eq!(
+            key_to_intent(key(KeyCode::Char('y'))),
+            Intent::ConfirmAction
+        );
     }
 
     #[test]
@@ -281,8 +287,14 @@ mod tests {
     #[test]
     fn printable_char_becomes_search_char() {
         // spec: TUI-14
-        assert_eq!(key_to_intent(key(KeyCode::Char('r'))), Intent::SearchChar('r'));
-        assert_eq!(key_to_intent(key(KeyCode::Char('0'))), Intent::SearchChar('0'));
+        assert_eq!(
+            key_to_intent(key(KeyCode::Char('r'))),
+            Intent::SearchChar('r')
+        );
+        assert_eq!(
+            key_to_intent(key(KeyCode::Char('0'))),
+            Intent::SearchChar('0')
+        );
     }
 
     // spec: TUI-30 - spec-input intents are defined in the enum and match the
@@ -311,10 +323,7 @@ mod tests {
             message: "clone failed".to_string(),
         };
         // These must not equal each other or their components.
-        assert_ne!(
-            std::mem::discriminant(&ready),
-            std::mem::discriminant(&err)
-        );
+        assert_ne!(std::mem::discriminant(&ready), std::mem::discriminant(&err));
         if let Intent::PreviewReady { spec, name } = &ready {
             assert_eq!(spec, "github.com/a/b");
             assert_eq!(name, "b (3 items)");

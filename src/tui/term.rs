@@ -65,7 +65,9 @@ impl TermGuard {
         *slot = Some(terminal);
         drop(slot);
 
-        Ok(TermGuard { prev_hook: Some(prev_hook) })
+        Ok(TermGuard {
+            prev_hook: Some(prev_hook),
+        })
     }
 }
 
@@ -94,8 +96,8 @@ impl Drop for TermGuard {
 /// lets the panic hook and the RAII `Drop` still reach the terminal to restore
 /// it instead of panicking a second time and leaving raw mode + alt-screen on
 /// the terminal (TUI-40).
-fn lock_terminal()
--> std::sync::MutexGuard<'static, Option<Terminal<CrosstermBackend<io::Stdout>>>> {
+fn lock_terminal() -> std::sync::MutexGuard<'static, Option<Terminal<CrosstermBackend<io::Stdout>>>>
+{
     TERMINAL.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -116,7 +118,9 @@ fn restore() -> std::result::Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Wrapper giving `DerefMut` access to the global terminal.
-pub struct TerminalGuard(std::sync::MutexGuard<'static, Option<Terminal<CrosstermBackend<io::Stdout>>>>);
+pub struct TerminalGuard(
+    std::sync::MutexGuard<'static, Option<Terminal<CrosstermBackend<io::Stdout>>>>,
+);
 
 impl std::ops::Deref for TerminalGuard {
     type Target = Terminal<CrosstermBackend<io::Stdout>>;
@@ -163,7 +167,10 @@ mod tests {
             let _guard = TERMINAL.lock().unwrap();
             panic!("intentional poison");
         });
-        assert!(handle.join().is_err(), "poisoning thread should have panicked");
+        assert!(
+            handle.join().is_err(),
+            "poisoning thread should have panicked"
+        );
         assert!(TERMINAL.is_poisoned(), "mutex should now be poisoned");
 
         // The fix: restore() must not panic and must return Ok despite poison.
@@ -208,7 +215,9 @@ mod tests {
             let _ = restore();
             hook_for_panic(info);
         }));
-        let guard = TermGuard { prev_hook: Some(prev_hook) };
+        let guard = TermGuard {
+            prev_hook: Some(prev_hook),
+        };
 
         // While our wrapper is installed, a panic still reaches the sentinel
         // (the wrapper calls the prior hook on a real panic).

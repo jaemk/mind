@@ -1930,7 +1930,11 @@ fn probe_fallback_with_query_filters_listing() {
     // spec: TUI-2 - query arg applies in fallback (non-TUI) mode.
     let sb = melded();
     let r = sb.mind(&["probe", "--no-tui", "review"]);
-    assert!(r.success, "probe --no-tui query should succeed: {}", r.stderr);
+    assert!(
+        r.success,
+        "probe --no-tui query should succeed: {}",
+        r.stderr
+    );
     assert!(r.stdout.contains("skill:review"), "listing: {}", r.stdout);
     assert!(!r.stdout.contains("agent:dev"), "filtered: {}", r.stdout);
 }
@@ -1940,7 +1944,11 @@ fn probe_fallback_with_kind_filter_narrows_listing() {
     // spec: TUI-2 - --kind arg applies in fallback mode.
     let sb = melded();
     let r = sb.mind(&["probe", "--no-tui", "--kind", "skill"]);
-    assert!(r.success, "probe --no-tui --kind should succeed: {}", r.stderr);
+    assert!(
+        r.success,
+        "probe --no-tui --kind should succeed: {}",
+        r.stderr
+    );
     assert!(r.stdout.contains("skill:review"), "listing: {}", r.stdout);
     assert!(!r.stdout.contains("agent:dev"), "filtered: {}", r.stdout);
     assert!(!r.stdout.contains("rule:style"), "filtered: {}", r.stdout);
@@ -1956,7 +1964,10 @@ fn probe_fallback_seed_query_with_no_tui() {
     assert!(r1.success);
     assert!(r2.success);
     // Both produce the same result (same filter applied).
-    assert_eq!(r1.stdout, r2.stdout, "--no-tui must not change filter behavior");
+    assert_eq!(
+        r1.stdout, r2.stdout,
+        "--no-tui must not change filter behavior"
+    );
 }
 
 #[test]
@@ -1966,11 +1977,23 @@ fn probe_fallback_with_source_filter_narrows_listing() {
     // previously exercised in fallback; this closes the --source axis.
     let sb = melded();
     let matched = sb.mind(&["probe", "--no-tui", "--source", "agents"]);
-    assert!(matched.success, "probe --no-tui --source should succeed: {}", matched.stderr);
-    assert!(matched.stdout.contains("skill:review"), "matching source listing: {}", matched.stdout);
+    assert!(
+        matched.success,
+        "probe --no-tui --source should succeed: {}",
+        matched.stderr
+    );
+    assert!(
+        matched.stdout.contains("skill:review"),
+        "matching source listing: {}",
+        matched.stdout
+    );
 
     let unmatched = sb.mind(&["probe", "--no-tui", "--source", "nonesuch"]);
-    assert!(unmatched.success, "probe --no-tui --source nonesuch should succeed: {}", unmatched.stderr);
+    assert!(
+        unmatched.success,
+        "probe --no-tui --source nonesuch should succeed: {}",
+        unmatched.stderr
+    );
     assert!(
         !unmatched.stdout.contains("skill:review"),
         "a non-matching --source must exclude items: {}",
@@ -2012,7 +2035,9 @@ fn probe_non_tty_returns_promptly_and_does_not_hang() {
                 if Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
-                    panic!("non-TTY `mind probe` did not exit within 10s - it likely entered the TUI event loop instead of falling back");
+                    panic!(
+                        "non-TTY `mind probe` did not exit within 10s - it likely entered the TUI event loop instead of falling back"
+                    );
                 }
                 std::thread::sleep(Duration::from_millis(25));
             }
@@ -2021,7 +2046,10 @@ fn probe_non_tty_returns_promptly_and_does_not_hang() {
 
     let out = child.wait_with_output().expect("collect output");
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("skill:review"), "fallback listing expected: {stdout}");
+    assert!(
+        stdout.contains("skill:review"),
+        "fallback listing expected: {stdout}"
+    );
     assert!(
         !stdout.contains("\x1b[?1049h"),
         "non-TTY probe must not enter the alt-screen"
@@ -2245,8 +2273,14 @@ fn concurrent_mutating_commands_both_succeed_no_lost_update() {
 
     // Both sources must be registered (no lost update).
     let sources = a.mind(&["recall", "--sources"]).stdout;
-    assert!(sources.contains("agents"), "first source missing: {sources}");
-    assert!(sources.contains("tools"), "second source missing: {sources}");
+    assert!(
+        sources.contains("agents"),
+        "first source missing: {sources}"
+    );
+    assert!(
+        sources.contains("tools"),
+        "second source missing: {sources}"
+    );
 }
 
 #[test]
@@ -2302,9 +2336,21 @@ fn three_concurrent_learns_no_lost_update() {
 
         let recall = sb.mind(&["recall"]);
         assert!(recall.success, "recall failed: {}", recall.stderr);
-        assert!(recall.stdout.contains("skill:review"), "review lost: {}", recall.stdout);
-        assert!(recall.stdout.contains("agent:dev"), "dev lost: {}", recall.stdout);
-        assert!(recall.stdout.contains("rule:style"), "style lost: {}", recall.stdout);
+        assert!(
+            recall.stdout.contains("skill:review"),
+            "review lost: {}",
+            recall.stdout
+        );
+        assert!(
+            recall.stdout.contains("agent:dev"),
+            "dev lost: {}",
+            recall.stdout
+        );
+        assert!(
+            recall.stdout.contains("rule:style"),
+            "style lost: {}",
+            recall.stdout
+        );
     }
 }
 
@@ -2384,7 +2430,11 @@ fn exclusive_lock_blocks_second_writer_until_first_completes() {
 
     // Exactly one meld should have succeeded; the registry must be well-formed.
     let sources = sb.mind(&["recall", "--sources"]);
-    assert!(sources.success, "recall failed after concurrent melds: {}", sources.stderr);
+    assert!(
+        sources.success,
+        "recall failed after concurrent melds: {}",
+        sources.stderr
+    );
     // The registry must be well-formed (parseable by recall) and contain exactly
     // one source entry. Count non-blank, non-header lines.
     let entry_lines: Vec<_> = sources
@@ -2454,8 +2504,7 @@ fn make_pinnable_repo(name: &str) -> (Sandbox, String, String) {
 /// JSON object as a string so callers can assert on kind/value without pulling
 /// in a serde dependency here.
 fn read_source_pin_json(sb: &Sandbox) -> String {
-    let json =
-        std::fs::read_to_string(sb.mind_home.join("sources.json")).expect("sources.json");
+    let json = std::fs::read_to_string(sb.mind_home.join("sources.json")).expect("sources.json");
     // Extract the `pin` object from the JSON.  The file is pretty-printed so
     // the pin block spans multiple lines; grab everything between `"pin": ` and
     // the next top-level `}` after it.
@@ -2484,8 +2533,7 @@ fn read_source_pin_json(sb: &Sandbox) -> String {
 
 /// Read the recorded commit for the first source in sources.json.
 fn read_source_commit(sb: &Sandbox) -> String {
-    let json =
-        std::fs::read_to_string(sb.mind_home.join("sources.json")).expect("sources.json");
+    let json = std::fs::read_to_string(sb.mind_home.join("sources.json")).expect("sources.json");
     // Extract "commit": "sha" from the JSON.
     let key = "\"commit\": \"";
     let start = json.find(key).expect("commit key") + key.len();
@@ -2504,10 +2552,7 @@ fn meld_follow_branch_clones_named_branch_and_persists_pin() {
 
     // The recorded commit is at stable (sha_v1), not main tip (sha_v2).
     let commit = read_source_commit(&sb);
-    assert_eq!(
-        commit, sha_v1,
-        "follow-branch=stable should record sha_v1"
-    );
+    assert_eq!(commit, sha_v1, "follow-branch=stable should record sha_v1");
 
     // The persisted pin has kind=follow-branch and value=stable.
     let pin_json = read_source_pin_json(&sb);
@@ -2599,8 +2644,7 @@ fn meld_two_pin_flags_is_conflicting_pin_error() {
     assert!(
         !r.success,
         "two pin flags must be rejected: stdout={} stderr={}",
-        r.stdout,
-        r.stderr
+        r.stdout, r.stderr
     );
     // CLI-17 names the structured `ConflictingPin` error, so the flags are kept
     // independent at the clap layer and this is what surfaces (not a clap usage
@@ -2622,10 +2666,7 @@ fn meld_two_pin_flags_is_conflicting_pin_error() {
 fn source_directive_follow_branch_applies_when_no_consumer_flag() {
     // spec: DSC-41, CLI-17 (directive supplies default when no consumer flag)
     let (sb, sha_v1, _sha_v2) = make_pinnable_repo("pintest-directive-follow");
-    sb.write_and_commit(
-        "mind.toml",
-        "[source]\nfollow-branch = \"stable\"\n",
-    );
+    sb.write_and_commit("mind.toml", "[source]\nfollow-branch = \"stable\"\n");
     let spec = sb.source_spec();
 
     let r = sb.mind(&["meld", &spec]);
@@ -2652,10 +2693,7 @@ fn consumer_flag_overrides_source_directive() {
     // Directive says follow stable (sha_v1); consumer says --follow-branch main.
     // Adding the mind.toml advances main by one more commit, so we capture the
     // resulting tip AFTER that commit.
-    sb.write_and_commit(
-        "mind.toml",
-        "[source]\nfollow-branch = \"stable\"\n",
-    );
+    sb.write_and_commit("mind.toml", "[source]\nfollow-branch = \"stable\"\n");
     // sha_main_tip is HEAD of main after the mind.toml commit.
     let sha_main_tip = {
         let out = std::process::Command::new("git")
@@ -2677,7 +2715,10 @@ fn consumer_flag_overrides_source_directive() {
         "consumer --follow-branch main should override directive and land on main tip"
     );
     // Verify directive sha_v1 was NOT used (different commit).
-    assert_ne!(commit, sha_v1, "directive must not take precedence over consumer flag");
+    assert_ne!(
+        commit, sha_v1,
+        "directive must not take precedence over consumer flag"
+    );
 }
 
 #[test]
@@ -2716,10 +2757,7 @@ fn sync_follow_branch_advances_commit() {
     assert!(r.success, "sync follow-branch: {}", r.stderr);
 
     let after = read_source_commit(&sb);
-    assert_eq!(
-        after, sha_v3,
-        "follow-branch source should advance on sync"
-    );
+    assert_eq!(after, sha_v3, "follow-branch source should advance on sync");
 }
 
 #[test]
@@ -3049,8 +3087,14 @@ fn source_directive_pin_tag_applies_when_no_consumer_flag() {
         "directive pin-tag=v1.0 should land on the tagged commit"
     );
     let pin_json = read_source_pin_json(&sb);
-    assert!(pin_json.contains("\"tag\""), "pin kind should be tag: {pin_json}");
-    assert!(pin_json.contains("v1.0"), "pin value should be v1.0: {pin_json}");
+    assert!(
+        pin_json.contains("\"tag\""),
+        "pin kind should be tag: {pin_json}"
+    );
+    assert!(
+        pin_json.contains("v1.0"),
+        "pin value should be v1.0: {pin_json}"
+    );
 }
 
 #[test]
@@ -3073,8 +3117,14 @@ fn source_directive_pin_ref_applies_when_no_consumer_flag() {
         "directive pin-ref should land on the named commit"
     );
     let pin_json = read_source_pin_json(&sb);
-    assert!(pin_json.contains("\"ref\""), "pin kind should be ref: {pin_json}");
-    assert!(pin_json.contains(&sha_v1), "pin value should be the sha: {pin_json}");
+    assert!(
+        pin_json.contains("\"ref\""),
+        "pin kind should be ref: {pin_json}"
+    );
+    assert!(
+        pin_json.contains(&sha_v1),
+        "pin value should be the sha: {pin_json}"
+    );
 }
 
 #[test]
@@ -3189,8 +3239,7 @@ fn sync_pin_tag_picks_up_moved_upstream_tag() {
 /// Read the `roots` field from the first source in sources.json as a JSON
 /// string (for assertions without pulling in a serde dependency in tests).
 fn read_source_roots_json(sb: &Sandbox) -> String {
-    let json =
-        std::fs::read_to_string(sb.mind_home.join("sources.json")).expect("sources.json");
+    let json = std::fs::read_to_string(sb.mind_home.join("sources.json")).expect("sources.json");
     // Look for "roots": [ ... ]; return the whole array value.
     if let Some(start) = json.find("\"roots\":") {
         let after = &json[start + "\"roots\":".len()..];
@@ -3241,12 +3290,23 @@ fn meld_root_persists_in_sources_json_and_probe_shows_subtree_items() {
 
     // The root is persisted in sources.json.
     let roots_json = read_source_roots_json(&sb);
-    assert!(roots_json.contains("sub"), "roots should be persisted: {roots_json}");
+    assert!(
+        roots_json.contains("sub"),
+        "roots should be persisted: {roots_json}"
+    );
 
     // probe shows the subtree items.
     let probe = sb.mind(&["probe"]);
-    assert!(probe.stdout.contains("skill:deploy"), "subtree skill: {}", probe.stdout);
-    assert!(probe.stdout.contains("agent:ops"), "subtree agent: {}", probe.stdout);
+    assert!(
+        probe.stdout.contains("skill:deploy"),
+        "subtree skill: {}",
+        probe.stdout
+    );
+    assert!(
+        probe.stdout.contains("agent:ops"),
+        "subtree agent: {}",
+        probe.stdout
+    );
 }
 
 #[test]
@@ -3268,7 +3328,11 @@ fn meld_root_on_authoritative_source_prints_note() {
     );
     let spec = sb.source_spec();
     let r = sb.mind(&["meld", &spec, "--root", "pkg"]);
-    assert!(r.success, "meld should succeed even with ignored --root: {}", r.stderr);
+    assert!(
+        r.success,
+        "meld should succeed even with ignored --root: {}",
+        r.stderr
+    );
     // The note appears on stdout.
     assert!(
         r.stdout.contains("ignored") || r.stdout.contains("note"),
@@ -3277,7 +3341,11 @@ fn meld_root_on_authoritative_source_prints_note() {
     );
     // The explicit item is still discovered via the authoritative mind.toml.
     let probe = sb.mind(&["probe"]);
-    assert!(probe.stdout.contains("rule:style"), "authoritative item still discovered: {}", probe.stdout);
+    assert!(
+        probe.stdout.contains("rule:style"),
+        "authoritative item still discovered: {}",
+        probe.stdout
+    );
 }
 
 #[test]
@@ -3315,7 +3383,10 @@ fn sync_preserves_roots() {
 
     // Capture roots before sync.
     let roots_before = read_source_roots_json(&sb);
-    assert!(roots_before.contains("sub"), "roots should be set: {roots_before}");
+    assert!(
+        roots_before.contains("sub"),
+        "roots should be set: {roots_before}"
+    );
 
     // sync must not change the roots field.
     assert!(sb.mind(&["sync"]).success);
@@ -3327,7 +3398,11 @@ fn sync_preserves_roots() {
 
     // After sync, probe still shows the subtree items.
     let probe = sb.mind(&["probe"]);
-    assert!(probe.stdout.contains("skill:deploy"), "subtree item still visible after sync: {}", probe.stdout);
+    assert!(
+        probe.stdout.contains("skill:deploy"),
+        "subtree item still visible after sync: {}",
+        probe.stdout
+    );
 }
 
 #[test]
@@ -3353,13 +3428,27 @@ fn two_root_flags_union_and_both_persist() {
 
     // Both roots persisted.
     let roots_json = read_source_roots_json(&sb);
-    assert!(roots_json.contains("\"a\""), "root a persisted: {roots_json}");
-    assert!(roots_json.contains("\"b\""), "root b persisted: {roots_json}");
+    assert!(
+        roots_json.contains("\"a\""),
+        "root a persisted: {roots_json}"
+    );
+    assert!(
+        roots_json.contains("\"b\""),
+        "root b persisted: {roots_json}"
+    );
 
     // Both subtrees discovered.
     let probe = sb.mind(&["probe"]);
-    assert!(probe.stdout.contains("skill:alpha"), "root a item: {}", probe.stdout);
-    assert!(probe.stdout.contains("agent:beta"), "root b item: {}", probe.stdout);
+    assert!(
+        probe.stdout.contains("skill:alpha"),
+        "root a item: {}",
+        probe.stdout
+    );
+    assert!(
+        probe.stdout.contains("agent:beta"),
+        "root b item: {}",
+        probe.stdout
+    );
 }
 
 #[test]
@@ -3393,10 +3482,7 @@ fn mindfile_roots_discovered_without_flag() {
         "toolbox/skills/pack/SKILL.md",
         "---\ndescription: pack skill\n---\n# pack\n",
     );
-    sb.write_and_commit(
-        "mind.toml",
-        "[source]\nroots = [\"toolbox\"]\n",
-    );
+    sb.write_and_commit("mind.toml", "[source]\nroots = [\"toolbox\"]\n");
     let spec = sb.source_spec();
     let r = sb.mind(&["meld", &spec]);
     assert!(r.success, "meld with roots in mind.toml: {}", r.stderr);
@@ -3420,15 +3506,22 @@ fn review_clean_local_path_exits_zero() {
     let spec = sb.source_spec();
 
     let r = sb.mind(&["review", &spec]);
-    assert!(r.success, "clean source should exit 0: stdout={} stderr={}", r.stdout, r.stderr);
+    assert!(
+        r.success,
+        "clean source should exit 0: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
     assert!(
         r.stdout.contains("no issues") || r.stdout.contains("publishable") || r.stderr.is_empty(),
         "expected clean report: stdout={} stderr={}",
-        r.stdout, r.stderr
+        r.stdout,
+        r.stderr
     );
     // review must not leave any trace in the registry.
     assert!(
-        sb.mind(&["recall", "--sources"]).stdout.contains("no sources melded"),
+        sb.mind(&["recall", "--sources"])
+            .stdout
+            .contains("no sources melded"),
         "review must not register anything"
     );
 }
@@ -3442,7 +3535,11 @@ fn review_malformed_mind_toml_exits_nonzero() {
     let spec = sb.source_spec();
 
     let r = sb.mind(&["review", &spec]);
-    assert!(!r.success, "malformed mind.toml must exit non-zero: stdout={} stderr={}", r.stdout, r.stderr);
+    assert!(
+        !r.success,
+        "malformed mind.toml must exit non-zero: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
 }
 
 #[test]
@@ -3457,7 +3554,11 @@ fn review_unknown_item_kind_exits_nonzero() {
     let spec = sb.source_spec();
 
     let r = sb.mind(&["review", &spec]);
-    assert!(!r.success, "unknown kind must exit non-zero: stdout={} stderr={}", r.stdout, r.stderr);
+    assert!(
+        !r.success,
+        "unknown kind must exit non-zero: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
     assert!(
         r.stderr.contains("unknown-kind") || r.stderr.contains("unknown item kind"),
         "expected unknown-kind in output: stderr={}",
@@ -3477,7 +3578,11 @@ fn review_bad_ns_token_exits_nonzero() {
     let spec = sb.source_spec();
 
     let r = sb.mind(&["review", &spec]);
-    assert!(!r.success, "bad ns token must exit non-zero: stdout={} stderr={}", r.stdout, r.stderr);
+    assert!(
+        !r.success,
+        "bad ns token must exit non-zero: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
     assert!(
         r.stderr.contains("bad-reference") || r.stderr.contains("does not resolve"),
         "expected bad-reference in output: stderr={}",
@@ -3497,7 +3602,11 @@ fn review_conflicting_pin_exits_nonzero() {
     let spec = sb.source_spec();
 
     let r = sb.mind(&["review", &spec]);
-    assert!(!r.success, "conflicting pin must exit non-zero: stdout={} stderr={}", r.stdout, r.stderr);
+    assert!(
+        !r.success,
+        "conflicting pin must exit non-zero: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
     assert!(
         r.stderr.contains("conflicting-pin") || r.stderr.contains("conflicting pin"),
         "expected conflicting-pin in output: stderr={}",
@@ -3510,10 +3619,7 @@ fn review_missing_description_is_advisory_exit_zero() {
     // An item with no description is advisory only -> exit 0 with finding printed.
     // spec: CLI-132
     let sb = Sandbox::new();
-    sb.write_and_commit(
-        "agents/nodesc.md",
-        "# no frontmatter here\nsome content\n",
-    );
+    sb.write_and_commit("agents/nodesc.md", "# no frontmatter here\nsome content\n");
     // Remove the default fixture items so only nodesc.md is in the source.
     let source_dir = sb.source.clone();
     std::fs::remove_dir_all(source_dir.join("skills")).ok();
@@ -3524,7 +3630,11 @@ fn review_missing_description_is_advisory_exit_zero() {
 
     let spec = sb.source_spec();
     let r = sb.mind(&["review", &spec]);
-    assert!(r.success, "missing description is advisory, must exit 0: stdout={} stderr={}", r.stdout, r.stderr);
+    assert!(
+        r.success,
+        "missing description is advisory, must exit 0: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
     assert!(
         r.stdout.contains("missing-description") || r.stdout.contains("advisory"),
         "expected advisory finding in stdout: {}",
@@ -3544,7 +3654,11 @@ fn review_unguarded_ref_under_as_is_advisory_exit_zero() {
     let spec = sb.source_spec();
 
     let r = sb.mind(&["review", &spec, "--as", "jk"]);
-    assert!(r.success, "unguarded ref advisory must exit 0: stdout={} stderr={}", r.stdout, r.stderr);
+    assert!(
+        r.success,
+        "unguarded ref advisory must exit 0: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
     assert!(
         r.stdout.contains("unguarded-reference") || r.stdout.contains("advisory"),
         "expected advisory finding: stdout={}",
@@ -3566,7 +3680,11 @@ fn review_melded_selector_resolves_via_registry() {
 
     // After meld, "agents" (the repo basename) is a registered suffix selector.
     let r = sb.mind(&["review", "agents"]);
-    assert!(r.success, "review via registry selector must succeed: stdout={} stderr={}", r.stdout, r.stderr);
+    assert!(
+        r.success,
+        "review via registry selector must succeed: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
 }
 
 #[test]
@@ -3584,7 +3702,11 @@ fn review_with_prefix_flag_evaluates_under_that_namespace() {
     // With --as jk: the token {{ns:dev}} should resolve to jk-dev (a sibling).
     let r = sb.mind(&["review", &spec, "--as", "jk"]);
     // dev is a sibling, so no bad-reference error.
-    assert!(r.success, "valid ns token with prefix must exit 0: stdout={} stderr={}", r.stdout, r.stderr);
+    assert!(
+        r.success,
+        "valid ns token with prefix must exit 0: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
     // No bad-reference hard error.
     assert!(
         !r.stderr.contains("bad-reference"),
@@ -3605,7 +3727,11 @@ fn review_local_path_target_is_left_intact() {
     let before = std::fs::read_to_string(&skill).unwrap();
 
     let r = sb.mind(&["review", &spec]);
-    assert!(r.success, "clean local review should exit 0: {} {}", r.stdout, r.stderr);
+    assert!(
+        r.success,
+        "clean local review should exit 0: {} {}",
+        r.stdout, r.stderr
+    );
 
     // The source dir and its files still exist and are byte-identical.
     assert!(sb.source.is_dir(), "local source dir must survive review");
@@ -3634,7 +3760,9 @@ fn review_remote_spec_clone_failure_exits_nonzero_and_leaves_no_temp() {
     // No leftover scratch dir, and no registry mutation.
     assert_no_review_temp(&sb.mind_home);
     assert!(
-        sb.mind(&["recall", "--sources"]).stdout.contains("no sources melded"),
+        sb.mind(&["recall", "--sources"])
+            .stdout
+            .contains("no sources melded"),
         "failed review must not register anything"
     );
 }
@@ -3655,7 +3783,11 @@ fn review_report_lists_every_advisory_finding() {
     let spec = sb.source_spec();
 
     let r = sb.mind(&["review", &spec, "--as", "jk"]);
-    assert!(r.success, "advisory-only review exits 0: {} {}", r.stdout, r.stderr);
+    assert!(
+        r.success,
+        "advisory-only review exits 0: {} {}",
+        r.stdout, r.stderr
+    );
     assert!(
         r.stdout.contains("missing-description"),
         "missing-description advisory must be printed: {}",
@@ -3691,9 +3823,21 @@ fn review_multiple_hard_errors_all_reported_and_counted() {
     let spec = sb.source_spec();
 
     let r = sb.mind(&["review", &spec]);
-    assert!(!r.success, "multiple hard errors must exit non-zero: {} {}", r.stdout, r.stderr);
-    assert!(r.stderr.contains("nope"), "first bad ref reported: {}", r.stderr);
-    assert!(r.stderr.contains("alsonope"), "second bad ref reported: {}", r.stderr);
+    assert!(
+        !r.success,
+        "multiple hard errors must exit non-zero: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr.contains("nope"),
+        "first bad ref reported: {}",
+        r.stderr
+    );
+    assert!(
+        r.stderr.contains("alsonope"),
+        "second bad ref reported: {}",
+        r.stderr
+    );
     // The summary line reports a hard-error count greater than one.
     assert!(
         r.stdout.contains("2 hard error(s)"),
@@ -3810,10 +3954,7 @@ fn meld_pin_tag_uses_pinned_mindfile_for_nested_discovery_not_default_branch() {
 
     // Tagged commit: a plain non-authoritative mind.toml, no nested sources,
     // one convention item.
-    sb.write_and_commit(
-        "agents/dev.md",
-        "---\ndescription: dev agent\n---\n# dev\n",
-    );
+    sb.write_and_commit("agents/dev.md", "---\ndescription: dev agent\n---\n# dev\n");
     sb.write_and_commit(
         "mind.toml",
         "[source]\ndescription = \"no nested sources at v1.0\"\n",

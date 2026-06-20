@@ -110,11 +110,7 @@ pub fn sync_to_pin(url: &str, dir: &Path, pin: &Pin) -> Result<()> {
             run(url, Some(dir), &["reset", "--hard", &head])?;
         }
         Pin::FollowBranch(branch) => {
-            run(
-                url,
-                Some(dir),
-                &["fetch", "--depth", "1", "origin", branch],
-            )?;
+            run(url, Some(dir), &["fetch", "--depth", "1", "origin", branch])?;
             run(url, Some(dir), &["reset", "--hard", "FETCH_HEAD"])?;
         }
         Pin::Tag(tag) => {
@@ -159,8 +155,8 @@ mod tests {
     /// Create a temp directory with a unique name for test isolation.
     fn tmpdir(tag: &str) -> PathBuf {
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir()
-            .join(format!("mind-git-test-{}-{}-{n}", std::process::id(), tag));
+        let dir =
+            std::env::temp_dir().join(format!("mind-git-test-{}-{}-{n}", std::process::id(), tag));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir

@@ -297,18 +297,12 @@ mod tests {
         // back losslessly.  Also verifies that a missing `pin` field (older
         // sources.json) deserializes as DefaultBranch.
         let cases = [
-            (
-                Pin::DefaultBranch,
-                r#"{"kind":"default-branch"}"#,
-            ),
+            (Pin::DefaultBranch, r#"{"kind":"default-branch"}"#),
             (
                 Pin::FollowBranch("main".into()),
                 r#"{"kind":"follow-branch","value":"main"}"#,
             ),
-            (
-                Pin::Tag("v1.0".into()),
-                r#"{"kind":"tag","value":"v1.0"}"#,
-            ),
+            (Pin::Tag("v1.0".into()), r#"{"kind":"tag","value":"v1.0"}"#),
             (
                 Pin::Ref("abc1234".into()),
                 r#"{"kind":"ref","value":"abc1234"}"#,
@@ -316,10 +310,7 @@ mod tests {
         ];
         for (pin, expected_json) in &cases {
             let json = serde_json::to_string(pin).unwrap();
-            assert_eq!(
-                json, *expected_json,
-                "serialization mismatch for {pin:?}"
-            );
+            assert_eq!(json, *expected_json, "serialization mismatch for {pin:?}");
             let roundtripped: Pin = serde_json::from_str(&json).unwrap();
             assert_eq!(roundtripped, *pin, "round-trip failed for {pin:?}");
         }
@@ -328,6 +319,10 @@ mod tests {
             "name":"local/a/b","url":"/a/b","host":"local","owner":"a","repo":"b"
         }"#;
         let src: Source = serde_json::from_str(src_json).unwrap();
-        assert_eq!(src.pin, Pin::DefaultBranch, "absent pin should default to DefaultBranch");
+        assert_eq!(
+            src.pin,
+            Pin::DefaultBranch,
+            "absent pin should default to DefaultBranch"
+        );
     }
 }

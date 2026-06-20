@@ -9,7 +9,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use crate::catalog::{scan_source_at, CatalogItem};
+use crate::catalog::{CatalogItem, scan_source_at};
 use crate::error::{MindError, Result};
 use crate::git;
 use crate::mindfile::MindToml;
@@ -134,11 +134,7 @@ fn try_registry_match(paths: &Paths, target: &str) -> Result<Option<PathBuf>> {
 /// Run all checks against the source directory. Returns collected findings.
 ///
 /// spec: CLI-131, CLI-132, CLI-133
-fn run_checks(
-    _paths: &Paths,
-    source_dir: &Path,
-    alias: Option<String>,
-) -> Result<ReviewResult> {
+fn run_checks(_paths: &Paths, source_dir: &Path, alias: Option<String>) -> Result<ReviewResult> {
     let mut hard: Vec<Finding> = Vec::new();
     let mut advisory: Vec<Finding> = Vec::new();
 
@@ -160,10 +156,7 @@ fn run_checks(
     if let Some(ref mf) = mindfile {
         let toml_path = source_dir.join("mind.toml");
         if let Err(e) = mf.source.pin_directive(&toml_path) {
-            hard.push(Finding::hard(
-                "conflicting-pin",
-                format!("{e}"),
-            ));
+            hard.push(Finding::hard("conflicting-pin", format!("{e}")));
             // Don't abort here; other checks may still be useful.
         }
     }
@@ -201,10 +194,7 @@ fn run_checks(
             return Ok(ReviewResult { hard, advisory });
         }
         Err(e) => {
-            hard.push(Finding::hard(
-                "scan-error",
-                format!("scan error: {e}"),
-            ));
+            hard.push(Finding::hard("scan-error", format!("scan error: {e}")));
             return Ok(ReviewResult { hard, advisory });
         }
     };
@@ -225,11 +215,10 @@ fn run_checks(
     // spec: CLI-132
     let source_name = source.name.clone();
     let siblings = siblings_of_source(&items, &source_name);
-    let prefix = source.alias.clone().or_else(|| {
-        mindfile
-            .as_ref()
-            .and_then(|m| m.source.prefix.clone())
-    });
+    let prefix = source
+        .alias
+        .clone()
+        .or_else(|| mindfile.as_ref().and_then(|m| m.source.prefix.clone()));
 
     for item in &items {
         for file in item_files(item) {
@@ -282,11 +271,7 @@ fn run_checks(
 }
 
 /// Build a synthetic `Source` for the directory being reviewed.
-fn build_source(
-    source_dir: &Path,
-    mindfile: &Option<MindToml>,
-    alias: Option<String>,
-) -> Source {
+fn build_source(source_dir: &Path, mindfile: &Option<MindToml>, alias: Option<String>) -> Source {
     // Derive a source-like identity from the path.
     let url = source_dir.to_string_lossy().into_owned();
     let mut comps = url.trim_end_matches('/').rsplit('/');
@@ -301,9 +286,7 @@ fn build_source(
         .unwrap_or("local")
         .to_string();
 
-    let description = mindfile
-        .as_ref()
-        .and_then(|m| m.source.description.clone());
+    let description = mindfile.as_ref().and_then(|m| m.source.description.clone());
 
     Source {
         name: format!("local/{owner}/{repo}"),
@@ -378,8 +361,8 @@ mod tests {
     impl TmpDir {
         fn new() -> Self {
             let n = UNIT_COUNTER.fetch_add(1, Ordering::SeqCst);
-            let p = std::env::temp_dir()
-                .join(format!("mind-review-unit-{}-{n}", std::process::id()));
+            let p =
+                std::env::temp_dir().join(format!("mind-review-unit-{}-{n}", std::process::id()));
             let _ = std::fs::remove_dir_all(&p);
             std::fs::create_dir_all(&p).unwrap();
             TmpDir(p)
@@ -489,7 +472,11 @@ mod tests {
         let paths = paths_for(base);
 
         let result = run_checks(&paths, &source_dir, None).unwrap();
-        assert!(result.hard.is_empty(), "expected no hard findings: {:?}", result.hard);
+        assert!(
+            result.hard.is_empty(),
+            "expected no hard findings: {:?}",
+            result.hard
+        );
         assert!(
             result.advisory.is_empty(),
             "expected no advisory findings: {:?}",
@@ -511,9 +498,15 @@ mod tests {
         let paths = paths_for(base);
 
         let result = run_checks(&paths, &source_dir, None).unwrap();
-        assert!(result.hard.is_empty(), "missing description must not be hard");
         assert!(
-            result.advisory.iter().any(|f| f.kind == "missing-description"),
+            result.hard.is_empty(),
+            "missing description must not be hard"
+        );
+        assert!(
+            result
+                .advisory
+                .iter()
+                .any(|f| f.kind == "missing-description"),
             "expected missing-description advisory: {:?}",
             result.advisory
         );
@@ -640,9 +633,16 @@ mod tests {
 
         // With --as jk: a prefix is in effect, so the unguarded ref is flagged.
         let result = run_checks(&paths, &source_dir, Some("jk".to_string())).unwrap();
-        assert!(result.hard.is_empty(), "unguarded ref must not be hard: {:?}", result.hard);
         assert!(
-            result.advisory.iter().any(|f| f.kind == "unguarded-reference"),
+            result.hard.is_empty(),
+            "unguarded ref must not be hard: {:?}",
+            result.hard
+        );
+        assert!(
+            result
+                .advisory
+                .iter()
+                .any(|f| f.kind == "unguarded-reference"),
             "expected unguarded-reference advisory: {:?}",
             result.advisory
         );
@@ -669,7 +669,10 @@ mod tests {
         let result = run_checks(&paths, &source_dir, None).unwrap();
         assert!(result.hard.is_empty());
         assert!(
-            result.advisory.iter().all(|f| f.kind != "unguarded-reference"),
+            result
+                .advisory
+                .iter()
+                .all(|f| f.kind != "unguarded-reference"),
             "unguarded ref should not be reported without a prefix: {:?}",
             result.advisory
         );
@@ -684,11 +687,7 @@ mod tests {
         let base = tmp.path();
         let source_dir = base.join("src");
         std::fs::create_dir_all(&source_dir).unwrap();
-        std::fs::write(
-            source_dir.join("mind.toml"),
-            "[source]\nprefix = \"ag\"\n",
-        )
-        .unwrap();
+        std::fs::write(source_dir.join("mind.toml"), "[source]\nprefix = \"ag\"\n").unwrap();
         write_file(
             &source_dir.join("agents/lead.md"),
             "---\ndescription: lead\n---\nDelegate to dev.\n",
@@ -701,9 +700,16 @@ mod tests {
 
         // No consumer alias: the source's own prefix should trigger the check.
         let result = run_checks(&paths, &source_dir, None).unwrap();
-        assert!(result.hard.is_empty(), "should be hard-clean: {:?}", result.hard);
         assert!(
-            result.advisory.iter().any(|f| f.kind == "unguarded-reference"),
+            result.hard.is_empty(),
+            "should be hard-clean: {:?}",
+            result.hard
+        );
+        assert!(
+            result
+                .advisory
+                .iter()
+                .any(|f| f.kind == "unguarded-reference"),
             "source prefix should trigger unguarded-reference check: {:?}",
             result.advisory
         );
@@ -863,7 +869,11 @@ mod tests {
         match err {
             MindError::AmbiguousSource { query, candidates } => {
                 assert_eq!(query, "agents");
-                assert_eq!(candidates.len(), 2, "both candidates listed: {candidates:?}");
+                assert_eq!(
+                    candidates.len(),
+                    2,
+                    "both candidates listed: {candidates:?}"
+                );
             }
             other => panic!("expected AmbiguousSource, got {other:?}"),
         }

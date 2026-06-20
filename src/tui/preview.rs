@@ -165,8 +165,8 @@ mod tests {
 
     fn temp_base() -> (PathBuf, PathBuf) {
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let base = std::env::temp_dir()
-            .join(format!("mind-tui-preview-{}-{n}", std::process::id()));
+        let base =
+            std::env::temp_dir().join(format!("mind-tui-preview-{}-{n}", std::process::id()));
         let mind = base.join("mind");
         crate::paths::mkdir_p(&mind).unwrap();
         (base, mind)
@@ -197,7 +197,8 @@ mod tests {
         std::fs::write(
             src.join("skills/meld/SKILL.md"),
             "---\ndescription: meld skill\n---\n# meld\n",
-        ).unwrap();
+        )
+        .unwrap();
         init_git_repo(&src);
         Command::new("git")
             .args(["add", "-A"])
@@ -231,11 +232,17 @@ mod tests {
             "preview catalog should contain the 'meld' skill"
         );
         // The temp dir should exist while the preview is live.
-        assert!(prev.temp_dir.exists(), "temp clone should exist while preview is live");
+        assert!(
+            prev.temp_dir.exists(),
+            "temp clone should exist while preview is live"
+        );
         // Dropping the preview discards the clone.
         let temp = prev.temp_dir.clone();
         drop(prev);
-        assert!(!temp.exists(), "temp clone should be removed after preview is dropped");
+        assert!(
+            !temp.exists(),
+            "temp clone should be removed after preview is dropped"
+        );
         cleanup(&base);
     }
 
@@ -248,7 +255,10 @@ mod tests {
             claude_home: base.join("claude"),
         };
         let suggestions = suggested_registry(&paths).unwrap();
-        assert!(suggestions.is_empty(), "no suggestions with no melded sources");
+        assert!(
+            suggestions.is_empty(),
+            "no suggestions with no melded sources"
+        );
         cleanup(&base);
     }
 
@@ -262,10 +272,7 @@ mod tests {
         let nested_src = make_source_repo(&base);
         let super_src = base.join("super-source");
         std::fs::create_dir_all(&super_src).unwrap();
-        std::fs::write(
-            super_src.join("README.md"),
-            "# super\n",
-        ).unwrap();
+        std::fs::write(super_src.join("README.md"), "# super\n").unwrap();
         // mind.toml pointing at the nested source.
         std::fs::write(
             super_src.join("mind.toml"),
@@ -275,8 +282,16 @@ mod tests {
             ),
         ).unwrap();
         init_git_repo(&super_src);
-        Command::new("git").args(["add", "-A"]).current_dir(&super_src).output().unwrap();
-        Command::new("git").args(["commit", "-qm", "init"]).current_dir(&super_src).output().unwrap();
+        Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(&super_src)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-qm", "init"])
+            .current_dir(&super_src)
+            .output()
+            .unwrap();
 
         // Build paths with the super-source melded.
         let paths = Paths {
@@ -290,17 +305,29 @@ mod tests {
         let clone_dir = super_source_parsed.clone_dir(&paths);
         crate::paths::mkdir_p(clone_dir.parent().unwrap()).unwrap();
         Command::new("git")
-            .args(["clone", super_src.to_str().unwrap(), clone_dir.to_str().unwrap()])
+            .args([
+                "clone",
+                super_src.to_str().unwrap(),
+                clone_dir.to_str().unwrap(),
+            ])
             .output()
             .unwrap();
 
-        let registry = Registry { sources: vec![super_source_parsed.clone()] };
+        let registry = Registry {
+            sources: vec![super_source_parsed.clone()],
+        };
         registry.save(&paths).unwrap();
 
         // Nested source NOT yet melded -> should appear in suggestions.
         let suggestions = suggested_registry(&paths).unwrap();
-        let has_nested = suggestions.iter().any(|s| s.url.contains(nested_src.file_name().unwrap().to_str().unwrap()));
-        assert!(has_nested, "nested source should be suggested when not yet melded: {suggestions:?}");
+        let has_nested = suggestions.iter().any(|s| {
+            s.url
+                .contains(nested_src.file_name().unwrap().to_str().unwrap())
+        });
+        assert!(
+            has_nested,
+            "nested source should be suggested when not yet melded: {suggestions:?}"
+        );
 
         // Now meld the nested source (add it to registry).
         if let Ok(n) = parse_spec(nested_src.to_str().unwrap()) {
@@ -358,8 +385,14 @@ mod tests {
             "successive preview temp names for the same repo must differ: {name1} vs {name2}"
         );
         // Both must contain the repo name so they remain identifiable.
-        assert!(name1.contains("agents"), "name1 must contain repo name: {name1}");
-        assert!(name2.contains("agents"), "name2 must contain repo name: {name2}");
+        assert!(
+            name1.contains("agents"),
+            "name1 must contain repo name: {name1}"
+        );
+        assert!(
+            name2.contains("agents"),
+            "name2 must contain repo name: {name2}"
+        );
     }
 
     /// The nonce increments across two real `preview` calls, so the temp dirs
@@ -371,10 +404,7 @@ mod tests {
         // monotone advancement; no clone needed.
         let n1 = PREVIEW_NONCE.fetch_add(1, Ordering::SeqCst);
         let n2 = PREVIEW_NONCE.fetch_add(1, Ordering::SeqCst);
-        assert!(
-            n2 > n1,
-            "PREVIEW_NONCE must advance: got {n1} then {n2}"
-        );
+        assert!(n2 > n1, "PREVIEW_NONCE must advance: got {n1} then {n2}");
         let pid = std::process::id();
         assert_ne!(
             preview_temp_name("agents", pid, n1),

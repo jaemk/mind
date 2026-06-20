@@ -84,9 +84,7 @@ fn lock_mode(command: &Command) -> LockMode {
         // probe in TUI mode: the TUI manages its own per-op locks (TUI-25).
         // TUI-1 is the launch entry point (requires a real TTY; allowlisted).
         // spec: TUI-25
-        Command::Probe {
-            no_tui, json, ..
-        } if probe_launches_tui(*no_tui, *json) => LockMode::None,
+        Command::Probe { no_tui, json, .. } if probe_launches_tui(*no_tui, *json) => LockMode::None,
 
         // Read-only commands (including probe in fallback/listing mode).
         Command::Recall { .. }
@@ -226,7 +224,10 @@ mod tests {
         // Every mutating verb must hold the exclusive lock so its
         // read-modify-write cycle is never interleaved with another process.
         // spec: STO-41
-        assert_eq!(mode_of(&["mind", "meld", "owner/repo"]), LockMode::Exclusive);
+        assert_eq!(
+            mode_of(&["mind", "meld", "owner/repo"]),
+            LockMode::Exclusive
+        );
         assert_eq!(mode_of(&["mind", "unmeld", "src"]), LockMode::Exclusive);
         assert_eq!(mode_of(&["mind", "learn", "review"]), LockMode::Exclusive);
         assert_eq!(mode_of(&["mind", "forget", "review"]), LockMode::Exclusive);

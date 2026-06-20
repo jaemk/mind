@@ -186,8 +186,8 @@ impl Paths {
         let tmp_path = dir.join(&tmp_name);
 
         // Write to temp; clean up on error.
-        let write_result = std::fs::write(&tmp_path, bytes)
-            .map_err(|e| MindError::io(&tmp_path, e));
+        let write_result =
+            std::fs::write(&tmp_path, bytes).map_err(|e| MindError::io(&tmp_path, e));
         if let Err(e) = write_result {
             let _ = std::fs::remove_file(&tmp_path);
             return Err(e);
@@ -266,8 +266,7 @@ mod tests {
     fn atomic_write_replaces_target_content() {
         // spec: STO-43
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir()
-            .join(format!("mind-paths-test-{}-{n}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("mind-paths-test-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let target = dir.join("data.json");
 
@@ -283,13 +282,12 @@ mod tests {
         let leftover: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
             .flatten()
-            .filter(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .contains(".tmp.")
-            })
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
             .collect();
-        assert!(leftover.is_empty(), "temp file was not cleaned up: {leftover:?}");
+        assert!(
+            leftover.is_empty(),
+            "temp file was not cleaned up: {leftover:?}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -298,8 +296,8 @@ mod tests {
     fn atomic_write_creates_target_if_absent() {
         // spec: STO-43
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir()
-            .join(format!("mind-paths-create-{}-{n}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("mind-paths-create-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let target = dir.join("new.json");
 
@@ -319,8 +317,8 @@ mod tests {
         // path must run without error).
         // spec: STO-43
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let missing_dir = std::env::temp_dir()
-            .join(format!("mind-paths-missing-{}-{n}", std::process::id()));
+        let missing_dir =
+            std::env::temp_dir().join(format!("mind-paths-missing-{}-{n}", std::process::id()));
         // Deliberately do NOT create missing_dir.
         let target = missing_dir.join("data.json");
 
@@ -347,8 +345,8 @@ mod tests {
         // parent is not a directory), and assert the original target is unchanged.
         // spec: STO-43
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir()
-            .join(format!("mind-paths-failkeep-{}-{n}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("mind-paths-failkeep-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
 
         // `blocker` is a regular file; treating it as a directory makes any write
@@ -390,8 +388,8 @@ mod tests {
         // is atomic (same filesystem).
         // spec: STO-43
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir()
-            .join(format!("mind-paths-samedir-{}-{n}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("mind-paths-samedir-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let target = dir.join("sources.json");
 
