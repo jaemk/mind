@@ -16,6 +16,37 @@ pub struct PendingAction {
     pub kind: ActionKind,
     /// Human-readable description shown in the confirm dialog.
     pub description: String,
+    /// The dependency tree to show in the confirm modal (DEP-40). Only set for a
+    /// Learn action whose closure adds dependencies beyond the explicit
+    /// selection; `None` for every other action and for a Learn that pulls in
+    /// nothing extra (the confirm stays as before in that case).
+    // spec: DEP-40
+    pub dep_tree: Option<String>,
+}
+
+impl PendingAction {
+    /// Construct a pending action with no dependency tree (the common case for
+    /// every non-Learn action and for a Learn that adds no dependencies).
+    pub fn new(kind: ActionKind, description: String) -> Self {
+        PendingAction {
+            kind,
+            description,
+            dep_tree: None,
+        }
+    }
+}
+
+/// Build the source-qualified learn ref the TUI/CLI use for an Available item:
+/// `{source}#{item_key}` when a source is recorded, else the bare `item_key`.
+/// This mirrors the qualification `action::execute` applies for `ActionKind::Learn`
+/// so the previewed tree (DEP-40) matches what confirming installs (DEP-41).
+// spec: DEP-40
+pub fn learn_ref(item_key: &str, source: &str) -> String {
+    if source.is_empty() {
+        item_key.to_string()
+    } else {
+        format!("{source}#{item_key}")
+    }
 }
 
 /// What kind of action is being confirmed.
@@ -82,6 +113,11 @@ pub struct App {
     pub active_preview: Option<SourcePreview>,
     /// Set by expand of a SuggestedSource; the event loop consumes this to call preview().
     pub pending_preview_spec: Option<String>,
+    /// Set by `initiate_learn`; the event loop consumes this to call
+    /// `commands::learn_preview` (I/O) and stash the resulting dependency tree
+    /// onto the pending Learn action so the confirm modal can show it (DEP-40).
+    // spec: DEP-40
+    pub pending_learn_ref: Option<String>,
 
     // --- lobe management state (TUI-23) ---
     /// True when the lobes management modal is open (list + add/remove).
@@ -140,6 +176,7 @@ impl App {
             spec_input_text: String::new(),
             active_preview: None,
             pending_preview_spec: None,
+            pending_learn_ref: None,
             lobes_modal_visible: false,
             lobes: Vec::new(),
             lobes_selected: 0,
@@ -355,6 +392,10 @@ impl App {
                     // Discard any active preview on decline (TUI-30).
                     // spec: TUI-30
                     self.active_preview = None;
+                    // Drop any queued learn-preview request: declining installs
+                    // nothing (DEP-41), so the closure tree is never fetched.
+                    // spec: DEP-41
+                    self.pending_learn_ref = None;
                 }
             }
             // spec: TUI-30
@@ -380,10 +421,10 @@ impl App {
                 self.spec_input_active = false;
                 // Active preview already set by the event loop.
                 let desc = format!("Preview: {} - confirm meld?", name);
-                self.pending_action = Some(PendingAction {
-                    kind: ActionKind::Meld { spec: spec.clone() },
-                    description: desc,
-                });
+                self.pending_action = Some(PendingAction::new(
+                    ActionKind::Meld { spec: spec.clone() },
+                    desc,
+                ));
                 self.modal_visible = true;
                 self.status = None;
                 self.error = None;
@@ -417,10 +458,8 @@ impl App {
                 if self.lobes_modal_visible && !self.lobes.is_empty() {
                     let path = self.lobes[self.lobes_selected].clone();
                     let desc = format!("Remove agent home (lobe) \"{}\"?", path);
-                    self.pending_action = Some(PendingAction {
-                        kind: ActionKind::LobeRemove { path },
-                        description: desc,
-                    });
+                    self.pending_action =
+                        Some(PendingAction::new(ActionKind::LobeRemove { path }, desc));
                     self.lobes_modal_visible = false;
                     self.modal_visible = true;
                 }
@@ -468,14 +507,32 @@ impl App {
         };
         if let TreeNode::AvailableItem(ref item) = node.node {
             let desc = format!("Install {} from {}?", item.key, item.source);
-            self.pending_action = Some(PendingAction {
-                kind: ActionKind::Learn {
+            // Queue the dependency-tree preview (DEP-40): the event loop in mod.rs
+            // consumes `pending_learn_ref`, calls `commands::learn_preview` (I/O,
+            // kept out of this pure model), and stashes the tree onto this pending
+            // action via `set_learn_dep_tree` before the modal is drawn.
+            // spec: DEP-40
+            self.pending_learn_ref = Some(learn_ref(&item.key, &item.source));
+            self.pending_action = Some(PendingAction::new(
+                ActionKind::Learn {
                     item_key: item.key.clone(),
                     source: item.source.clone(),
                 },
-                description: desc,
-            });
+                desc,
+            ));
             self.modal_visible = true;
+        }
+    }
+
+    /// Stash the dependency tree (computed by the I/O layer via
+    /// `commands::learn_preview`) onto the pending Learn action so the confirm
+    /// modal can render it (DEP-40). A no-op if there is no pending action.
+    /// `tree` is the rendered closure tree; pass `None` when the closure adds no
+    /// dependencies (the confirm then stays as before).
+    // spec: DEP-40
+    pub fn set_learn_dep_tree(&mut self, tree: Option<String>) {
+        if let Some(pending) = self.pending_action.as_mut() {
+            pending.dep_tree = tree;
         }
     }
 
@@ -486,29 +543,29 @@ impl App {
         };
         if let TreeNode::InstalledItem(ref item) = node.node {
             let desc = format!("Forget (uninstall) {}?", item.key);
-            self.pending_action = Some(PendingAction {
-                kind: ActionKind::Forget {
+            self.pending_action = Some(PendingAction::new(
+                ActionKind::Forget {
                     item_key: item.key.clone(),
                 },
-                description: desc,
-            });
+                desc,
+            ));
             self.modal_visible = true;
         }
     }
 
     fn initiate_sync(&mut self) {
-        self.pending_action = Some(PendingAction {
-            kind: ActionKind::Sync,
-            description: "Sync all sources?".to_string(),
-        });
+        self.pending_action = Some(PendingAction::new(
+            ActionKind::Sync,
+            "Sync all sources?".to_string(),
+        ));
         self.modal_visible = true;
     }
 
     fn initiate_evolve(&mut self) {
-        self.pending_action = Some(PendingAction {
-            kind: ActionKind::Evolve,
-            description: "Evolve all pending items?".to_string(),
-        });
+        self.pending_action = Some(PendingAction::new(
+            ActionKind::Evolve,
+            "Evolve all pending items?".to_string(),
+        ));
         self.modal_visible = true;
     }
 
@@ -535,10 +592,7 @@ impl App {
         self.lobe_input_text.clear();
         self.lobes_modal_visible = false;
         let desc = format!("Add agent home (lobe) \"{}\"?", path);
-        self.pending_action = Some(PendingAction {
-            kind: ActionKind::LobeAdd { path },
-            description: desc,
-        });
+        self.pending_action = Some(PendingAction::new(ActionKind::LobeAdd { path }, desc));
         self.modal_visible = true;
     }
 
@@ -548,13 +602,13 @@ impl App {
         };
         if let TreeNode::Source(ref src) = node.node {
             let desc = format!("Unmeld source {}?", src.name);
-            self.pending_action = Some(PendingAction {
-                kind: ActionKind::Unmeld {
+            self.pending_action = Some(PendingAction::new(
+                ActionKind::Unmeld {
                     name: src.name.clone(),
                     forget: false,
                 },
-                description: desc,
-            });
+                desc,
+            ));
             self.modal_visible = true;
         }
     }
@@ -838,10 +892,10 @@ mod tests {
     fn pending_action_set_and_taken() {
         // spec: TUI-24
         let mut app = App::new(String::new(), None, None);
-        app.pending_action = Some(PendingAction {
-            kind: ActionKind::Sync,
-            description: "Sync all?".to_string(),
-        });
+        app.pending_action = Some(PendingAction::new(
+            ActionKind::Sync,
+            "Sync all?".to_string(),
+        ));
         app.modal_visible = true;
         let taken = app.take_pending_action();
         assert!(
@@ -863,10 +917,10 @@ mod tests {
         // mutating flag. Otherwise the once-a-second poll, gated on
         // `!is_mutating()`, stops forever after the first successful action.
         let mut app = App::new(String::new(), None, None);
-        app.pending_action = Some(PendingAction {
-            kind: ActionKind::Sync,
-            description: "Sync all?".to_string(),
-        });
+        app.pending_action = Some(PendingAction::new(
+            ActionKind::Sync,
+            "Sync all?".to_string(),
+        ));
         app.modal_visible = true;
 
         // Confirm the action: this is what the `y` path does before executing.
@@ -887,10 +941,7 @@ mod tests {
     fn cancel_action_clears_pending() {
         // spec: TUI-24
         let mut app = App::new(String::new(), None, None);
-        app.pending_action = Some(PendingAction {
-            kind: ActionKind::Sync,
-            description: "Sync?".to_string(),
-        });
+        app.pending_action = Some(PendingAction::new(ActionKind::Sync, "Sync?".to_string()));
         app.modal_visible = true;
         app.apply_intent(Intent::CancelAction);
         assert!(app.pending_action.is_none());
@@ -1014,13 +1065,13 @@ mod tests {
         // executor by take_pending_action (the confirm step). Until confirmed it
         // sits as a pending action and does not run.
         let mut app = App::new(String::new(), None, None);
-        app.pending_action = Some(PendingAction {
-            kind: ActionKind::Unmeld {
+        app.pending_action = Some(PendingAction::new(
+            ActionKind::Unmeld {
                 name: "local/x".to_string(),
                 forget: true,
             },
-            description: "Unmeld local/x --forget?".to_string(),
-        });
+            "Unmeld local/x --forget?".to_string(),
+        ));
         app.modal_visible = true;
         // No confirmation yet: the action is still pending (not executed).
         assert!(
@@ -1232,12 +1283,12 @@ mod tests {
         let mut app = App::new(String::new(), None, None);
         // Simulate a live preview (SourcePreview::Drop removes temp dir, but since
         // we can't create a real temp clone in a unit test we just check state).
-        app.pending_action = Some(PendingAction {
-            kind: ActionKind::Meld {
+        app.pending_action = Some(PendingAction::new(
+            ActionKind::Meld {
                 spec: "some/repo".to_string(),
             },
-            description: "Meld some/repo?".to_string(),
-        });
+            "Meld some/repo?".to_string(),
+        ));
         app.modal_visible = true;
         // Set a dummy (no-op) active_preview indication - can't construct SourcePreview
         // directly in a unit test, so we just verify the field gets cleared.
@@ -1588,5 +1639,175 @@ mod tests {
         assert_eq!(app.lobes_selected, 2);
         app.apply_intent(Intent::LobeSelectDown); // already at bottom
         assert_eq!(app.lobes_selected, 2);
+    }
+
+    // --- DEP-40: dependency tree surfaced in the Learn confirm ---
+
+    #[test]
+    fn learn_ref_qualifies_with_source() {
+        // spec: DEP-40 - the previewed ref must match what action::execute installs
+        // (`{source}#{item_key}`), so the tree shown is the tree that gets applied.
+        // A bare key is used only when no source is recorded.
+        assert_eq!(
+            learn_ref("skill:review", "local/agents"),
+            "local/agents#skill:review"
+        );
+        assert_eq!(learn_ref("skill:review", ""), "skill:review");
+    }
+
+    #[test]
+    fn initiate_learn_queues_a_learn_preview_request() {
+        // spec: DEP-40 - choosing to install an Available item stages the Learn
+        // confirm AND queues a learn-preview request (the source-qualified ref) for
+        // the I/O layer to resolve the dependency tree. Without this the confirm
+        // could never carry a tree.
+        let mut app = App::new(String::new(), None, None);
+        app.apply_snapshot(make_snapshot());
+        let idx = app
+            .visible
+            .iter()
+            .position(|n| matches!(&n.node, crate::tui::tree::TreeNode::AvailableItem(_)))
+            .expect("an available item should be visible");
+        app.selected = idx;
+        app.apply_intent(Intent::ActionLearn);
+
+        assert!(app.modal_visible, "learn must open the confirm modal");
+        assert!(
+            matches!(
+                app.pending_action.as_ref().map(|p| &p.kind),
+                Some(ActionKind::Learn { .. })
+            ),
+            "a Learn action must be pending"
+        );
+        // The fixture's available item is `agent:dev` from `local/agents`.
+        assert_eq!(
+            app.pending_learn_ref.as_deref(),
+            Some("local/agents#agent:dev"),
+            "initiate_learn must queue the source-qualified learn ref for preview"
+        );
+        // The tree is not computed yet (that is the I/O layer's job).
+        assert!(
+            app.pending_action.as_ref().unwrap().dep_tree.is_none(),
+            "the tree is filled in later by the I/O layer, not by the pure model"
+        );
+    }
+
+    #[test]
+    fn set_learn_dep_tree_attaches_tree_to_confirm() {
+        // spec: DEP-40 - the I/O layer stashes the resolved dependency tree onto
+        // the pending Learn action via set_learn_dep_tree; the confirm state then
+        // carries it for the modal to render. A regression that drops the tree from
+        // the confirm fails here.
+        let mut app = App::new(String::new(), None, None);
+        app.pending_action = Some(PendingAction::new(
+            ActionKind::Learn {
+                item_key: "skill:review".to_string(),
+                source: "local/agents".to_string(),
+            },
+            "Install skill:review from local/agents?".to_string(),
+        ));
+        let tree = "review (selected)\n  dev (dependency)".to_string();
+        app.set_learn_dep_tree(Some(tree.clone()));
+        assert_eq!(
+            app.pending_action.as_ref().unwrap().dep_tree.as_deref(),
+            Some(tree.as_str()),
+            "set_learn_dep_tree must attach the tree to the pending Learn action"
+        );
+    }
+
+    #[test]
+    fn decline_clears_queued_learn_preview() {
+        // spec: DEP-41 - declining a Learn (CancelAction) installs nothing: the
+        // queued learn-preview request and pending action are dropped.
+        let mut app = App::new(String::new(), None, None);
+        app.apply_snapshot(make_snapshot());
+        let idx = app
+            .visible
+            .iter()
+            .position(|n| matches!(&n.node, crate::tui::tree::TreeNode::AvailableItem(_)))
+            .expect("an available item should be visible");
+        app.selected = idx;
+        app.apply_intent(Intent::ActionLearn);
+        assert!(app.pending_learn_ref.is_some(), "learn queued a preview");
+
+        app.apply_intent(Intent::CancelAction);
+        assert!(
+            app.pending_action.is_none(),
+            "decline clears the pending Learn"
+        );
+        assert!(
+            app.pending_learn_ref.is_none(),
+            "decline drops the queued learn-preview request (nothing installed)"
+        );
+    }
+
+    #[test]
+    fn pending_learn_ref_survives_a_non_confirm_intent_without_panic() {
+        // spec: DEP-40 - the event loop consumes `pending_learn_ref` (.take()) only
+        // AFTER routing the intent. If a different, non-confirm intent (e.g. a cursor
+        // move) is applied while a learn-preview is still queued, the pure model must
+        // not panic and must leave the queued ref intact for the I/O layer to drain
+        // on the next pass. This pins that movement does not disturb the queued ref.
+        let mut app = App::new(String::new(), None, None);
+        app.apply_snapshot(make_snapshot());
+        let idx = app
+            .visible
+            .iter()
+            .position(|n| matches!(&n.node, crate::tui::tree::TreeNode::AvailableItem(_)))
+            .expect("an available item should be visible");
+        app.selected = idx;
+        app.apply_intent(Intent::ActionLearn);
+        let queued = app
+            .pending_learn_ref
+            .clone()
+            .expect("learn must queue a preview ref");
+
+        // A movement intent fires before the event loop drains the queued ref.
+        app.apply_intent(Intent::MoveUp);
+        app.apply_intent(Intent::MoveDown);
+
+        // State stays sane: the Learn is still pending and the queued ref is intact.
+        assert!(
+            matches!(
+                app.pending_action.as_ref().map(|p| &p.kind),
+                Some(ActionKind::Learn { .. })
+            ),
+            "the pending Learn must survive an interleaved movement intent"
+        );
+        assert_eq!(
+            app.pending_learn_ref.as_deref(),
+            Some(queued.as_str()),
+            "the queued learn-preview ref must NOT be disturbed by a non-confirm intent"
+        );
+        assert!(app.modal_visible, "the confirm modal stays open");
+    }
+
+    #[test]
+    fn set_learn_dep_tree_none_keeps_confirm_plain() {
+        // spec: DEP-40 - the no-deps case: the I/O layer calls
+        // set_learn_dep_tree(None) when the closure adds nothing. Even if a stale tree
+        // was previously attached, passing None must clear it so the confirm stays a
+        // plain prompt with no stray closure. A regression that ignored a None (only
+        // ever set Some) would leave the stale tree and fail here.
+        let mut app = App::new(String::new(), None, None);
+        app.pending_action = Some(PendingAction::new(
+            ActionKind::Learn {
+                item_key: "skill:solo".to_string(),
+                source: "local/agents".to_string(),
+            },
+            "Install skill:solo from local/agents?".to_string(),
+        ));
+        // First a tree is attached...
+        app.set_learn_dep_tree(Some("- skill:solo [selected]".to_string()));
+        assert!(
+            app.pending_action.as_ref().unwrap().dep_tree.is_some(),
+            "precondition: a tree was attached"
+        );
+        // ...then the no-deps verdict clears it.
+        app.set_learn_dep_tree(None);
+        assert!(
+            app.pending_action.as_ref().unwrap().dep_tree.is_none(),
+            "set_learn_dep_tree(None) must clear the tree so the confirm stays plain"
+        );
     }
 }

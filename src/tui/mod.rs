@@ -269,6 +269,13 @@ fn handle_key(paths: &Paths, app: &mut app::App, k: crossterm::event::KeyEvent) 
             if let Some(spec) = app.pending_preview_spec.take() {
                 run_preview(paths, app, spec);
             }
+            // After intent: if a Learn was initiated, compute its dependency tree
+            // (I/O: reads files + manifest) and stash it onto the pending action so
+            // the confirm modal shows what the closure will pull in (DEP-40).
+            // spec: DEP-40
+            if let Some(item_ref) = app.pending_learn_ref.take() {
+                run_learn_preview(paths, app, &item_ref);
+            }
         }
     }
 }
@@ -295,6 +302,32 @@ fn run_preview(paths: &Paths, app: &mut app::App, spec: String) {
             app.apply_intent(crate::tui::event::Intent::PreviewError {
                 message: format!("{e}"),
             });
+        }
+    }
+}
+
+/// Compute the dependency tree for a Learn selection and stash it onto the
+/// pending action so the confirm modal can render it (DEP-40). The actual file
+/// and manifest reads live here in the I/O layer, not in the pure App model.
+///
+/// The tree is only attached when the closure adds dependencies beyond the
+/// explicit selection; when it adds nothing, the confirm stays as before (just
+/// the description). A `learn_preview` error is surfaced inline (TUI-24) and the
+/// pending action is cleared so we never confirm an install we could not plan.
+// spec: DEP-40
+fn run_learn_preview(paths: &Paths, app: &mut app::App, item_ref: &str) {
+    match crate::commands::learn_preview(paths, item_ref) {
+        Ok(plan) => {
+            if plan.adds_dependencies {
+                app.set_learn_dep_tree(Some(plan.tree));
+            } else {
+                app.set_learn_dep_tree(None);
+            }
+        }
+        Err(e) => {
+            app.pending_action = None;
+            app.modal_visible = false;
+            app.set_error(format!("{e}"));
         }
     }
 }
@@ -404,10 +437,10 @@ mod tests {
         // Establish a search filter (not focused: a settled filter from /-then-Tab).
         app.search = "rev".to_string();
         // Stage a pending action + confirm modal.
-        app.pending_action = Some(PendingAction {
-            kind: ActionKind::Sync,
-            description: "Sync all?".to_string(),
-        });
+        app.pending_action = Some(PendingAction::new(
+            ActionKind::Sync,
+            "Sync all?".to_string(),
+        ));
         app.modal_visible = true;
 
         handle_key(&paths, &mut app, key(KeyCode::Esc));
@@ -420,6 +453,261 @@ mod tests {
         assert_eq!(
             app.search, "rev",
             "Esc-to-cancel must leave the search filter intact"
+        );
+    }
+
+    /// A self-cleaning temp base dir (removes itself on drop, even on panic).
+    struct OwnedTemp(std::path::PathBuf);
+    impl Drop for OwnedTemp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn run_learn_preview_lands_tree_in_pending_action() {
+        // spec: DEP-40 - the I/O seam: given a real melded source whose skill
+        // references an agent via {{ns:}}, run_learn_preview (called from the event
+        // loop) must compute the dependency tree and stash it onto the pending
+        // Learn action so the confirm modal can show it. This pins that the tree
+        // actually reaches App state (not just that learn_preview exists).
+        use std::process::Command;
+
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base =
+            std::env::temp_dir().join(format!("mind-tui-mod-dep-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let _owned = OwnedTemp(base.clone());
+        let paths = Paths {
+            mind_home: base.join("mind"),
+            claude_home: base.join("claude"),
+        };
+        crate::paths::mkdir_p(&paths.mind_home).unwrap();
+        // Pin the lobe to the isolated claude_home (hermeticity).
+        crate::config::Config {
+            lobes: vec![paths.claude_home.to_str().unwrap().to_string()],
+        }
+        .save(&paths.mind_home)
+        .unwrap();
+
+        // Build a source: skill `review` references agent `dev` via {{ns:dev}}.
+        let src = base.join("dep-source");
+        std::fs::create_dir_all(src.join("skills/review")).unwrap();
+        std::fs::write(
+            src.join("skills/review/SKILL.md"),
+            "---\ndescription: review skill\n---\n# review\nHand off to {{ns:dev}}.\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(src.join("agents")).unwrap();
+        std::fs::write(
+            src.join("agents/dev.md"),
+            "---\nname: dev\ndescription: dev agent\n---\n# dev\n",
+        )
+        .unwrap();
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(&src)
+                .output()
+                .expect("git");
+        };
+        git(&["-c", "init.defaultBranch=main", "init", "-q"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "initial"]);
+        crate::commands::meld(
+            &paths,
+            src.to_str().unwrap(),
+            None,
+            vec![],
+            None,
+            None,
+            None,
+        )
+        .expect("meld");
+
+        let source_name = crate::source::Registry::load(&paths).unwrap().sources[0]
+            .name
+            .clone();
+
+        // Stage the Learn pending action as initiate_learn would.
+        let mut app = app::App::new(String::new(), None, None);
+        app.pending_action = Some(app::PendingAction::new(
+            app::ActionKind::Learn {
+                item_key: "skill:review".to_string(),
+                source: source_name.clone(),
+            },
+            "Install skill:review?".to_string(),
+        ));
+        let item_ref = app::learn_ref("skill:review", &source_name);
+
+        run_learn_preview(&paths, &mut app, &item_ref);
+
+        let tree = app
+            .pending_action
+            .as_ref()
+            .expect("pending action survives a successful preview")
+            .dep_tree
+            .clone()
+            .expect("the dependency tree must be stashed onto the Learn confirm");
+        assert!(
+            tree.contains("review"),
+            "tree must mention the selected skill: {tree}"
+        );
+        assert!(
+            tree.contains("dev"),
+            "tree must mention the pulled-in dependency agent: {tree}"
+        );
+    }
+
+    #[test]
+    fn run_learn_preview_no_deps_leaves_tree_none() {
+        // spec: DEP-40 - when the selected item references NOTHING, its closure
+        // adds no dependencies, so run_learn_preview must leave the pending Learn
+        // confirm WITHOUT a tree (dep_tree stays None). A regression that always
+        // attached a tree (or rendered a single-node "tree") would fail here, and
+        // the confirm modal would then show a stray closure for a plain install.
+        use std::process::Command;
+
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base =
+            std::env::temp_dir().join(format!("mind-tui-mod-nodep-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let _owned = OwnedTemp(base.clone());
+        let paths = Paths {
+            mind_home: base.join("mind"),
+            claude_home: base.join("claude"),
+        };
+        crate::paths::mkdir_p(&paths.mind_home).unwrap();
+        crate::config::Config {
+            lobes: vec![paths.claude_home.to_str().unwrap().to_string()],
+        }
+        .save(&paths.mind_home)
+        .unwrap();
+
+        // Source with a single self-contained skill: no `{{ns:}}` tokens at all.
+        let src = base.join("plain-source");
+        std::fs::create_dir_all(src.join("skills/solo")).unwrap();
+        std::fs::write(
+            src.join("skills/solo/SKILL.md"),
+            "---\ndescription: solo skill\n---\n# solo\nNo references here.\n",
+        )
+        .unwrap();
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(&src)
+                .output()
+                .expect("git");
+        };
+        git(&["-c", "init.defaultBranch=main", "init", "-q"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "initial"]);
+        crate::commands::meld(
+            &paths,
+            src.to_str().unwrap(),
+            None,
+            vec![],
+            None,
+            None,
+            None,
+        )
+        .expect("meld");
+
+        let source_name = crate::source::Registry::load(&paths).unwrap().sources[0]
+            .name
+            .clone();
+
+        let mut app = app::App::new(String::new(), None, None);
+        app.pending_action = Some(app::PendingAction::new(
+            app::ActionKind::Learn {
+                item_key: "skill:solo".to_string(),
+                source: source_name.clone(),
+            },
+            "Install skill:solo?".to_string(),
+        ));
+        // Seed a non-None tree to prove run_learn_preview actively clears it on the
+        // no-deps path (set_learn_dep_tree(None)), rather than just leaving it alone.
+        app.set_learn_dep_tree(Some("stale tree".to_string()));
+
+        let item_ref = app::learn_ref("skill:solo", &source_name);
+        run_learn_preview(&paths, &mut app, &item_ref);
+
+        let pending = app
+            .pending_action
+            .as_ref()
+            .expect("a no-deps preview must keep the pending Learn action");
+        assert!(
+            pending.dep_tree.is_none(),
+            "a selection that references nothing must carry NO dependency tree, got: {:?}",
+            pending.dep_tree
+        );
+        assert!(
+            app.error.is_none(),
+            "a successful no-deps preview sets no error"
+        );
+    }
+
+    #[test]
+    fn run_learn_preview_error_clears_pending_and_surfaces_error() {
+        // spec: DEP-40 - an unresolvable learn ref (no such item) must NOT silently
+        // attach a tree. run_learn_preview surfaces the error inline (TUI-24) and
+        // clears the pending action + hides the modal, so the user never confirms an
+        // install that could not even be planned. A regression that swallowed the
+        // error and left the pending action would fail both assertions.
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base =
+            std::env::temp_dir().join(format!("mind-tui-mod-err-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let _owned = OwnedTemp(base.clone());
+        let paths = Paths {
+            mind_home: base.join("mind"),
+            claude_home: base.join("claude"),
+        };
+        crate::paths::mkdir_p(&paths.mind_home).unwrap();
+        crate::config::Config {
+            lobes: vec![paths.claude_home.to_str().unwrap().to_string()],
+        }
+        .save(&paths.mind_home)
+        .unwrap();
+        // No source melded: any learn ref is unresolvable.
+
+        let mut app = app::App::new(String::new(), None, None);
+        app.pending_action = Some(app::PendingAction::new(
+            app::ActionKind::Learn {
+                item_key: "skill:ghost".to_string(),
+                source: "no/such-source".to_string(),
+            },
+            "Install skill:ghost?".to_string(),
+        ));
+        app.modal_visible = true;
+
+        run_learn_preview(&paths, &mut app, "no/such-source#skill:ghost");
+
+        assert!(
+            app.pending_action.is_none(),
+            "a preview error must clear the pending action (no stale confirm to apply)"
+        );
+        assert!(
+            !app.modal_visible,
+            "a preview error must hide the confirm modal"
+        );
+        assert!(
+            app.error.is_some(),
+            "a preview error must be surfaced inline, got error: {:?}",
+            app.error
         );
     }
 }

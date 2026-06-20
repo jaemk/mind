@@ -387,8 +387,30 @@ pub fn unmeld(paths: &Paths, name: &str, forget: bool) -> Result<()> {
     Ok(())
 }
 
-/// `mind learn <item> [--dry-run]` — install one item, or many via a glob.
-pub fn learn(paths: &Paths, item_ref: &str, dry_run: bool) -> Result<()> {
+/// The dependency-aware plan for a `learn` selection: the rendered dependency
+/// tree, whether the closure adds items beyond the explicit selection, and how
+/// many items would actually be installed (the install-order length, which
+/// excludes already-installed items per DEP-23).
+///
+/// Computed without installing, so the CLI and the interactive TUI confirm step
+/// share one resolution (DEP-21): the TUI calls [`learn_preview`] for its tree.
+// Consumed by the interactive TUI confirm step (DEP-40), which lands in a
+// sibling change; allow until that wiring uses it.
+#[allow(dead_code)]
+pub struct LearnPlan {
+    pub tree: String,
+    pub adds_dependencies: bool,
+    pub install_count: usize,
+}
+
+/// Resolve a `learn` selection (loading the registry, scanning the catalog, and
+/// running the dependency closure) without installing anything. Returns the
+/// catalog, the registry, and the [`crate::deps::Resolution`] so both `learn`
+/// and `learn_preview` share one computation.
+fn resolve_learn(
+    paths: &Paths,
+    item_ref: &str,
+) -> Result<(Registry, Vec<CatalogItem>, crate::deps::Resolution)> {
     let registry = Registry::load(paths)?;
     let items = catalog::scan(paths, &registry)?;
     let parsed = parse_item_ref(item_ref)?;
@@ -407,17 +429,79 @@ pub fn learn(paths: &Paths, item_ref: &str, dry_run: bool) -> Result<()> {
         vec![resolve(&items, &parsed, registry.sources.len())?]
     };
 
-    // Two matches that install under the same name would clobber each other.
-    if let Some((key, sources)) = colliding_install(&targets) {
+    // Map the explicitly selected items back to indices into `items` (by
+    // identity: a CatalogItem is a unique (source, kind, name)).
+    let selected_idx: Vec<usize> = targets
+        .iter()
+        .filter_map(|t| {
+            items
+                .iter()
+                .position(|c| c.kind == t.kind && c.name == t.name && c.source == t.source)
+        })
+        .collect();
+
+    // What is already installed (manifest keys are `CatalogItem::key()` form).
+    let manifest = Manifest::load(paths)?;
+    let installed: HashSet<String> = manifest.items.keys().cloned().collect();
+
+    // The `read` closure feeds each item's concatenated UTF-8 text to the
+    // resolver so it can scan for `{{ns:}}` tokens (DEP-1).
+    let read = |item: &CatalogItem| -> String {
+        let mut parts: Vec<String> = Vec::new();
+        for file in item_files(item) {
+            if let Ok(content) = std::fs::read_to_string(&file) {
+                parts.push(content);
+            }
+        }
+        parts.join("\n")
+    };
+
+    let resolution = crate::deps::resolve(&items, &selected_idx, &installed, read);
+    Ok((registry, items, resolution))
+}
+
+/// Resolve a `learn` selection's dependency closure without installing it
+/// (DEP-21). Used by the CLI dry-run/prompt path and by the interactive TUI's
+/// confirm step so both compute identical trees.
+// Consumed by the interactive TUI confirm step (DEP-40); allow until wired.
+#[allow(dead_code)]
+pub fn learn_preview(paths: &Paths, item_ref: &str) -> Result<LearnPlan> {
+    let (_registry, items, resolution) = resolve_learn(paths, item_ref)?;
+    Ok(LearnPlan {
+        tree: resolution.render_tree(&items),
+        adds_dependencies: resolution.adds_dependencies(),
+        install_count: resolution.install_order().len(),
+    })
+}
+
+/// `mind learn <item> [--dry-run] [--yes]` — install one item, its
+/// intra-source dependency closure (DEP-30), or many via a glob.
+pub fn learn(paths: &Paths, item_ref: &str, dry_run: bool, yes: bool) -> Result<()> {
+    let (registry, items, resolution) = resolve_learn(paths, item_ref)?;
+
+    // The full closure to install, dependency-first (DEP-21, DEP-30), excluding
+    // already-installed items (DEP-23).
+    let order = resolution.install_order();
+    let closure: Vec<&CatalogItem> = order.iter().map(|&i| &items[i]).collect();
+
+    // DEP-30: the collision check (CLI-33) runs over the FULL closure, not just
+    // the explicit selection, so two items that would clobber each other abort
+    // before anything is installed.
+    if let Some((key, sources)) = colliding_install(&closure) {
         return Err(MindError::AmbiguousItem {
             query: key,
             candidates: sources,
         });
     }
 
+    // DEP-32: --dry-run renders the dependency tree (when deps were added) and
+    // lists the full closure, installing nothing.
     if dry_run {
-        println!("(dry run) would learn {} item(s):", targets.len());
-        let rows = targets
+        if resolution.adds_dependencies() {
+            print!("{}", resolution.render_tree(&items));
+        }
+        println!("(dry run) would learn {} item(s):", closure.len());
+        let rows = closure
             .iter()
             .map(|t| vec![t.key(), t.source.clone()])
             .collect::<Vec<_>>();
@@ -425,11 +509,23 @@ pub fn learn(paths: &Paths, item_ref: &str, dry_run: bool) -> Result<()> {
         return Ok(());
     }
 
-    // Install each target. If one fails mid-batch, stop but still persist the
-    // items already installed, so the manifest always matches what is on disk.
+    // DEP-31: when the closure adds items beyond the explicit selection, show the
+    // tree and prompt; proceed only on a yes (or `--yes`). When it adds nothing,
+    // install directly with no prompt and no tree (CLI-30 behavior unchanged).
+    if resolution.adds_dependencies() && !yes {
+        print!("{}", resolution.render_tree(&items));
+        if !confirm("install this dependency closure?")? {
+            println!("cancelled; nothing installed");
+            return Ok(());
+        }
+    }
+
+    // Install each item in dependency-first order. If one fails mid-batch, stop
+    // but still persist the items already installed, so the manifest always
+    // matches what is on disk.
     let mut manifest = Manifest::load(paths)?;
     let mut failure = None;
-    for target in &targets {
+    for target in &closure {
         let commit = match registry.find(&target.source) {
             Some(s) => s.commit.clone().unwrap_or_default(),
             None => {

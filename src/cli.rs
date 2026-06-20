@@ -101,6 +101,10 @@ pub enum Command {
         /// Show what would be installed without installing anything.
         #[arg(short = 'n', long = "dry-run")]
         dry_run: bool,
+
+        /// Install the dependency closure without the interactive [y/N] prompt.
+        #[arg(short = 'y', long = "yes")]
+        yes: bool,
     },
 
     /// Remove an installed item, or many via a glob.

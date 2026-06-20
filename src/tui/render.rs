@@ -259,19 +259,49 @@ fn draw_lobe_input(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(widget, modal_area);
 }
 
+/// Build the confirm-modal body text. When the (Learn) action carries a
+/// dependency tree (DEP-40), the tree is included between the prompt and the key
+/// hint so a regression that drops it from the confirm is observable without a
+/// TTY. Otherwise the modal stays as a single prompt line plus the hint.
+// spec: DEP-40
+fn confirm_modal_text(action: &crate::tui::app::PendingAction) -> String {
+    match action.dep_tree.as_deref() {
+        Some(tree) => format!(
+            "{}\n\n{}\n  [y] confirm   [n/Esc] cancel",
+            action.description,
+            tree.trim_end_matches('\n')
+        ),
+        None => format!("{}\n\n  [y] confirm   [n/Esc] cancel", action.description),
+    }
+}
+
 fn draw_modal(frame: &mut Frame, app: &App, area: Rect) {
     let Some(action) = &app.pending_action else {
         return;
     };
 
-    // Center a small dialog.
-    let w = (area.width / 2).max(40);
-    let h = 5u16;
+    // When a Learn action carries a dependency tree (DEP-40), show it between the
+    // prompt and the key hint so the user sees the closure the confirm will pull
+    // in (the selected / dependency / already-installed distinction comes from
+    // the rendered tree itself). The tree is multi-line ASCII; size the modal to
+    // fit it (bounded by the available height).
+    // spec: DEP-40
+    let text = confirm_modal_text(action);
+
+    // Center a dialog sized to the content. Width grows to fit the widest line
+    // (tree rows can be long), height to the line count, both bounded by the area.
+    let line_count = text.lines().count() as u16;
+    let content_w = text.lines().map(|l| l.chars().count()).max().unwrap_or(0) as u16;
+    let w = (content_w + 4)
+        .max(area.width / 2)
+        .max(40)
+        .min(area.width.max(1));
+    // +2 for the top/bottom borders.
+    let h = (line_count + 2).max(5).min(area.height.max(1));
     let x = (area.width.saturating_sub(w)) / 2;
     let y = (area.height.saturating_sub(h)) / 2;
     let modal_area = Rect::new(x, y, w, h);
 
-    let text = format!("{}\n\n  [y] confirm   [n/Esc] cancel", action.description);
     let widget = Paragraph::new(text).block(
         Block::default()
             .title("Confirm")
@@ -280,4 +310,130 @@ fn draw_modal(frame: &mut Frame, app: &App, area: Rect) {
     );
     frame.render_widget(ratatui::widgets::Clear, modal_area);
     frame.render_widget(widget, modal_area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::confirm_modal_text;
+    use crate::tui::app::{ActionKind, PendingAction};
+
+    #[test]
+    fn confirm_modal_includes_dependency_tree_for_learn() {
+        // spec: DEP-40 - a Learn confirm carrying a dependency tree must render
+        // that tree in the modal body (so the user sees the closure before
+        // applying). A regression that drops the tree from the confirm fails here
+        // without needing a TTY.
+        let tree = "review (selected)\n  dev (dependency)\n    test (already installed)";
+        let mut action = PendingAction::new(
+            ActionKind::Learn {
+                item_key: "skill:review".to_string(),
+                source: "local/agents".to_string(),
+            },
+            "Install skill:review from local/agents?".to_string(),
+        );
+        action.dep_tree = Some(tree.to_string());
+
+        let body = confirm_modal_text(&action);
+        // Each tree line must appear verbatim in the modal body.
+        for line in tree.lines() {
+            assert!(
+                body.contains(line),
+                "confirm modal must show the dependency tree line {line:?}; body was:\n{body}"
+            );
+        }
+        // The prompt and key hint must still be present.
+        assert!(
+            body.contains("Install skill:review from local/agents?"),
+            "modal must keep the action description"
+        );
+        assert!(
+            body.contains("[y] confirm"),
+            "modal must keep the confirm hint"
+        );
+    }
+
+    #[test]
+    fn confirm_modal_places_tree_between_prompt_and_key_hint() {
+        // spec: DEP-40 - ORDER is load-bearing: the dependency tree must appear AFTER
+        // the prompt line and BEFORE the key-hint/confirm line. The previous test only
+        // checks the tree lines are present somewhere; this pins their position, so a
+        // regression that reordered (tree before prompt, or hint before tree) fails.
+        let tree = "- skill:review [selected]\n  - agent:dev [dep]\n    - skill:build [installed]";
+        let mut action = PendingAction::new(
+            ActionKind::Learn {
+                item_key: "skill:review".to_string(),
+                source: "local/agents".to_string(),
+            },
+            "Install skill:review from local/agents?".to_string(),
+        );
+        action.dep_tree = Some(tree.to_string());
+
+        let body = confirm_modal_text(&action);
+        let lines: Vec<&str> = body.lines().collect();
+
+        // Prompt is the first line.
+        assert_eq!(
+            lines.first().copied(),
+            Some("Install skill:review from local/agents?"),
+            "the prompt must be the first line of the modal body: {body:?}"
+        );
+
+        let prompt_idx = 0usize;
+        let tree_first_idx = lines
+            .iter()
+            .position(|l| l.contains("skill:review [selected]"))
+            .expect("tree root line must be present");
+        let tree_last_idx = lines
+            .iter()
+            .position(|l| l.contains("skill:build [installed]"))
+            .expect("tree leaf line must be present");
+        let hint_idx = lines
+            .iter()
+            .position(|l| l.contains("[y] confirm"))
+            .expect("key-hint line must be present");
+
+        assert!(
+            prompt_idx < tree_first_idx,
+            "the tree must come AFTER the prompt line: {body:?}"
+        );
+        assert!(
+            tree_last_idx < hint_idx,
+            "the key hint must come AFTER the whole tree: {body:?}"
+        );
+        // The tree lines are contiguous and in source order.
+        assert!(
+            tree_first_idx < tree_last_idx,
+            "tree lines must keep their source order (root before leaf): {body:?}"
+        );
+
+        // A 3-line tree, a 1-line prompt, a 1-line hint, plus the two blank
+        // separators -> exactly 6 lines. This pins that NO tree line was dropped or
+        // truncated (a truncation regression would change the count).
+        assert_eq!(
+            lines.len(),
+            6,
+            "prompt + blank + 3 tree lines + blank + hint = 6 lines; got {}: {body:?}",
+            lines.len()
+        );
+        // And every one of the three tree rows survived verbatim.
+        for row in tree.lines() {
+            assert!(
+                lines.contains(&row),
+                "tree row {row:?} must appear verbatim (no truncation): {body:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn confirm_modal_omits_tree_when_no_dependencies() {
+        // spec: DEP-40 - when no dependency tree is attached (closure adds
+        // nothing, or a non-Learn action), the confirm stays a plain prompt: no
+        // stray tree, just the description and the key hint.
+        let action = PendingAction::new(ActionKind::Sync, "Sync all sources?".to_string());
+        let body = confirm_modal_text(&action);
+        assert_eq!(
+            body, "Sync all sources?\n\n  [y] confirm   [n/Esc] cancel",
+            "a treeless confirm must be exactly the prompt plus the key hint"
+        );
+    }
 }

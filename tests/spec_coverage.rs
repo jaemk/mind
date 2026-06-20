@@ -33,10 +33,12 @@ const ALLOWLIST: &[&str] = &[
     //   self-update verb (in-place binary upgrade via the self_update crate)
     "CLI-140", "CLI-141", "CLI-142", "CLI-143",
     //   within-source dependency resolution (a partial `learn` pulls in the
-    //   siblings its items reference; see spec/dependencies.md). Move each to a
-    //   citing test when built.
-    "DEP-1", "DEP-2", "DEP-3", "DEP-10", "DEP-11", "DEP-12", "DEP-20", "DEP-21", "DEP-22", "DEP-23",
-    "DEP-30", "DEP-31", "DEP-32", "DEP-40", "DEP-41", "DEP-50",
+    //   siblings its items reference; see spec/dependencies.md) is fully cited:
+    //   the resolution core (DEP-1..23, DEP-31 interaction) from tests in
+    //   src/deps.rs and src/namespace.rs, the `learn` wiring (DEP-30/31/32) and
+    //   the explicit non-goal (DEP-50) from tests/cli.rs, and the interactive TUI
+    //   confirm-and-install of the closure (DEP-40/41) from tests in src/tui/*.rs.
+    //   No DEP IDs remain allowlisted.
     //   interactive TUI: IDs with automatable logic are now cited from tests
     //   in src/tui/*.rs. Only the following remains allowlisted because it
     //   requires a real TTY to observe and cannot be verified in a headless CI:

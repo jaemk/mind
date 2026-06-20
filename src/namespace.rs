@@ -52,6 +52,36 @@ pub fn expand(
     Ok(out)
 }
 
+/// Extract the bare name of every `{{ns:name}}` token in `content`.
+///
+/// Mirrors [`expand`]'s inline parser: the open delimiter is `{{ns:`, the name
+/// is the text up to the next `}}` with surrounding whitespace trimmed, and an
+/// unterminated token (no closing `}}`) stops the scan and is not a reference
+/// (NS-15). Names are returned in first-seen order, de-duplicated. These are the
+/// intra-source dependency edges (DEP-1).
+///
+/// Consumed by [`crate::deps`]; until the `learn`/TUI paths wire dependency
+/// resolution in, it is exercised only by tests.
+#[allow(dead_code)]
+pub fn referenced_names(content: &str) -> Vec<String> {
+    const OPEN: &str = "{{ns:";
+    let mut names: Vec<String> = Vec::new();
+    let mut rest = content;
+    while let Some(pos) = rest.find(OPEN) {
+        let after = &rest[pos + OPEN.len()..];
+        let Some(end) = after.find("}}") else {
+            // Unterminated token: stop, exactly like `expand` does.
+            break;
+        };
+        let name = after[..end].trim();
+        if !name.is_empty() && !names.iter().any(|n| n == name) {
+            names.push(name.to_string());
+        }
+        rest = &after[end + 2..];
+    }
+    names
+}
+
 /// Find sibling names referenced in bare prose (outside any `{{ns:}}` token).
 ///
 /// Heuristic and advisory: used to warn when a source is about to be prefixed
@@ -182,5 +212,84 @@ mod tests {
         // "doing" must not match the sibling "do".
         assert!(unguarded_refs("doing work", &s).is_empty());
         assert_eq!(unguarded_refs("just do it", &s), vec!["do".to_string()]);
+    }
+
+    #[test]
+    fn referenced_names_extracts_tokens_in_order_deduped() {
+        // spec: DEP-1
+        // Bare names from each token, first-seen order, de-duplicated.
+        let got = referenced_names("see {{ns:test}} then {{ns:do}} then {{ns:test}}");
+        assert_eq!(got, vec!["test".to_string(), "do".to_string()]);
+    }
+
+    #[test]
+    fn referenced_names_trims_whitespace_inside_token() {
+        // spec: DEP-1
+        // Whitespace inside a token is trimmed, mirroring `expand`.
+        let got = referenced_names("{{ns:  dev  }}");
+        assert_eq!(got, vec!["dev".to_string()]);
+    }
+
+    #[test]
+    fn referenced_names_no_tokens_is_empty() {
+        // spec: DEP-1
+        assert!(referenced_names("plain prose, no tokens").is_empty());
+    }
+
+    #[test]
+    fn referenced_names_unterminated_token_is_not_a_reference() {
+        // spec: NS-15
+        // An unterminated token (no closing `}}`) stops the scan, exactly like
+        // `expand` leaves the remainder verbatim. A terminated token before it is
+        // still captured; the dangling one is not.
+        assert!(referenced_names("see {{ns:dev").is_empty());
+        assert_eq!(
+            referenced_names("{{ns:test}} then {{ns:dev"),
+            vec!["test".to_string()]
+        );
+    }
+
+    #[test]
+    fn referenced_names_empty_token_is_skipped() {
+        // spec: NS-15
+        // A token with an empty name (`{{ns:}}`) or whitespace-only name
+        // (`{{ns:   }}`) trims to "" and is not a reference: it is skipped, but
+        // the scan continues past it to any following valid token.
+        assert!(referenced_names("{{ns:}}").is_empty());
+        assert!(referenced_names("{{ns:   }}").is_empty());
+        assert_eq!(
+            referenced_names("{{ns:}} then {{ns:dev}}"),
+            vec!["dev".to_string()]
+        );
+    }
+
+    #[test]
+    fn referenced_names_valid_then_unterminated_returns_valid_only() {
+        // spec: NS-15
+        // A valid terminated token followed by an unterminated one yields the
+        // valid name then stops at the dangling token (which is not a reference).
+        assert_eq!(
+            referenced_names("use {{ns:dev}} and then {{ns:planner"),
+            vec!["dev".to_string()]
+        );
+    }
+
+    #[test]
+    fn referenced_names_whitespace_or_empty_content_is_empty() {
+        // spec: NS-15
+        // Whitespace-only or empty content carries no tokens and no references.
+        assert!(referenced_names("").is_empty());
+        assert!(referenced_names("   \n\t  ").is_empty());
+    }
+
+    #[test]
+    fn referenced_names_empty_token_does_not_swallow_following_close() {
+        // spec: NS-15
+        // `{{ns:}}{{ns:dev}}` is two adjacent tokens: the first is empty (skipped)
+        // and the scan resumes after its `}}`, so the second is still parsed.
+        assert_eq!(
+            referenced_names("{{ns:}}{{ns:dev}}"),
+            vec!["dev".to_string()]
+        );
     }
 }

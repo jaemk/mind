@@ -45,7 +45,10 @@ pub fn execute(paths: &Paths, action: PendingAction) -> Result<Snapshot> {
             } else {
                 format!("{source}#{item_key}")
             };
-            commands::learn(paths, &item_ref, false)?;
+            // `yes = true`: the TUI confirms in its own UI (the closure prompt
+            // lands in the TUI shard); never block on the CLI's stdin [y/N]
+            // prompt from inside raw mode.
+            commands::learn(paths, &item_ref, false, true)?;
         }
         ActionKind::Forget { item_key } => {
             // spec: TUI-20
@@ -132,6 +135,7 @@ mod tests {
                 item_key: "skill:nonexistent".to_string(),
             },
             description: "test".to_string(),
+            dep_tree: None,
         };
         let result = execute(&paths, action);
         // Should return an error (NotInstalled), not panic.
@@ -151,6 +155,7 @@ mod tests {
         let action = PendingAction {
             kind: ActionKind::Sync,
             description: "sync?".to_string(),
+            dep_tree: None,
         };
         let result = execute(&paths, action);
         assert!(
@@ -180,6 +185,7 @@ mod tests {
             let action = PendingAction {
                 kind: ActionKind::Sync,
                 description: "sync".to_string(),
+                dep_tree: None,
             };
             // The sync itself is fast (no sources); verify it runs under the
             // lock and returns a valid snapshot.
@@ -232,6 +238,7 @@ mod tests {
             PendingAction {
                 kind: ActionKind::Sync,
                 description: "sync".to_string(),
+                dep_tree: None,
             },
         );
         let waited = start.elapsed();
@@ -264,6 +271,7 @@ mod tests {
         let action = PendingAction {
             kind: ActionKind::Evolve,
             description: "evolve?".to_string(),
+            dep_tree: None,
         };
         let result = execute(&paths, action);
         assert!(
@@ -323,6 +331,7 @@ mod tests {
         let action = PendingAction {
             kind: ActionKind::Meld { spec: spec.clone() },
             description: format!("Meld {spec}?"),
+            dep_tree: None,
         };
         let result = execute(&paths, action);
         assert!(result.is_ok(), "meld should succeed: {:?}", result.err());
@@ -381,6 +390,7 @@ mod tests {
                 forget: true,
             },
             description: format!("Unmeld {source_name} --forget?"),
+            dep_tree: None,
         };
         let result = execute(&paths, action);
         assert!(
@@ -419,6 +429,7 @@ mod tests {
                 forget: false,
             },
             description: format!("Unmeld {source_name}?"),
+            dep_tree: None,
         };
         let result = execute(&paths, action);
         assert!(result.is_ok(), "unmeld should succeed: {:?}", result.err());
@@ -484,6 +495,7 @@ mod tests {
                 path: lobe_path.clone(),
             },
             description: format!("Add lobe {lobe_path}?"),
+            dep_tree: None,
         };
         let result = execute(&paths, action);
         assert!(result.is_ok(), "LobeAdd should succeed: {:?}", result.err());
@@ -511,6 +523,7 @@ mod tests {
                 path: lobe_path.clone(),
             },
             description: format!("Add {lobe_path}?"),
+            dep_tree: None,
         };
         execute(&paths, add_action).expect("LobeAdd prerequisite");
 
@@ -520,6 +533,7 @@ mod tests {
                 path: lobe_path.clone(),
             },
             description: format!("Remove lobe {lobe_path}?"),
+            dep_tree: None,
         };
         let result = execute(&paths, remove_action);
         assert!(
@@ -548,6 +562,7 @@ mod tests {
                 path: "/does/not/exist".to_string(),
             },
             description: "Remove nonexistent lobe?".to_string(),
+            dep_tree: None,
         };
         let result = execute(&paths, action);
         assert!(
@@ -576,6 +591,7 @@ mod tests {
                     path: lobe_path.clone(),
                 },
                 description: format!("Add {lobe_path}?"),
+                dep_tree: None,
             };
             execute(&paths, action).expect("LobeAdd must succeed");
         }
@@ -601,6 +617,7 @@ mod tests {
                 path: lobe_path.clone(),
             },
             description: format!("Add {lobe_path}?"),
+            dep_tree: None,
         };
         let snap = execute(&paths, action).expect("LobeAdd must succeed");
         assert!(
@@ -637,6 +654,346 @@ mod tests {
             .output()
             .unwrap();
         src
+    }
+
+    /// Create a source git repo under `base/dep-source` shipping a skill `review`
+    /// that references agent `dev` via a `{{ns:dev}}` token, plus the `dev` agent
+    /// it depends on. Returns the repo path. Used to exercise the within-source
+    /// dependency closure (DEP-41).
+    fn make_dep_source_repo(base: &std::path::Path) -> std::path::PathBuf {
+        use std::process::Command;
+        let src = base.join("dep-source");
+        std::fs::create_dir_all(src.join("skills/review")).unwrap();
+        std::fs::write(
+            src.join("skills/review/SKILL.md"),
+            "---\ndescription: review skill\n---\n# review\nHand off to {{ns:dev}}.\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(src.join("agents")).unwrap();
+        std::fs::write(
+            src.join("agents/dev.md"),
+            "---\nname: dev\ndescription: dev agent\n---\n# dev\n",
+        )
+        .unwrap();
+        init_git_repo(&src);
+        Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(&src)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-qm", "initial"])
+            .current_dir(&src)
+            .output()
+            .unwrap();
+        src
+    }
+
+    #[test]
+    fn execute_learn_installs_whole_dependency_closure() {
+        // spec: DEP-41 - confirming a Learn in the TUI installs the whole
+        // within-source closure dependency-first: `skill:review` references agent
+        // `dev` via {{ns:dev}}, so executing the Learn must install BOTH the skill
+        // and the agent it pulls in. (Declining is the contrast case below: it
+        // never executes, so nothing is installed.)
+        let (paths, base) = temp_paths();
+        crate::paths::mkdir_p(&paths.mind_home).unwrap();
+        // Pin the lobe to the isolated claude_home so the install never touches the
+        // real ~/.claude (agent_homes() otherwise defaults to ~/.claude).
+        crate::config::Config {
+            lobes: vec![paths.claude_home.to_str().unwrap().to_string()],
+        }
+        .save(&paths.mind_home)
+        .unwrap();
+
+        let src = make_dep_source_repo(&base);
+        commands::meld(
+            &paths,
+            src.to_str().unwrap(),
+            None,
+            vec![],
+            None,
+            None,
+            None,
+        )
+        .expect("meld dep-source");
+
+        let source_name = crate::source::Registry::load(&paths).unwrap().sources[0]
+            .name
+            .clone();
+
+        // Decline path: building the action but NOT executing must leave the
+        // manifest empty (declining installs nothing, DEP-41).
+        let _declined = PendingAction {
+            kind: ActionKind::Learn {
+                item_key: "skill:review".to_string(),
+                source: source_name.clone(),
+            },
+            description: "Install skill:review?".to_string(),
+            dep_tree: Some("review (selected)\n  dev (dependency)".to_string()),
+        };
+        let pre = crate::manifest::Manifest::load(&paths).unwrap();
+        assert!(
+            pre.items.is_empty(),
+            "declining (not executing) must install nothing: {:?}",
+            pre.items.keys().collect::<Vec<_>>()
+        );
+
+        // Confirm path: execute installs the whole closure.
+        let action = PendingAction {
+            kind: ActionKind::Learn {
+                item_key: "skill:review".to_string(),
+                source: source_name.clone(),
+            },
+            description: "Install skill:review?".to_string(),
+            dep_tree: Some("review (selected)\n  dev (dependency)".to_string()),
+        };
+        let result = execute(&paths, action);
+        assert!(
+            result.is_ok(),
+            "learn of the closure must succeed: {:?}",
+            result.err()
+        );
+
+        let manifest = crate::manifest::Manifest::load(&paths).unwrap();
+        assert!(
+            manifest.items.contains_key("skill:review"),
+            "the explicitly selected skill must be installed: {:?}",
+            manifest.items.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            manifest.items.contains_key("agent:dev"),
+            "the referenced agent (the dependency) must be pulled in: {:?}",
+            manifest.items.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// Create a source repo under `base/chain-source` shipping a transitive
+    /// dependency chain `skill:review` -> `agent:dev` -> `skill:build`: the skill
+    /// references the agent via `{{ns:dev}}`, and the agent in turn references the
+    /// `build` skill via `{{ns:build}}`. Used to exercise the TRANSITIVE closure
+    /// (DEP-41 over DEP-11): selecting only `review` must pull in `dev` AND `build`.
+    fn make_chain_source_repo(base: &std::path::Path) -> std::path::PathBuf {
+        use std::process::Command;
+        let src = base.join("chain-source");
+        std::fs::create_dir_all(src.join("skills/review")).unwrap();
+        std::fs::write(
+            src.join("skills/review/SKILL.md"),
+            "---\ndescription: review skill\n---\n# review\nHand off to {{ns:dev}}.\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(src.join("agents")).unwrap();
+        std::fs::write(
+            src.join("agents/dev.md"),
+            "---\nname: dev\ndescription: dev agent\n---\n# dev\nUse {{ns:build}} to compile.\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(src.join("skills/build")).unwrap();
+        std::fs::write(
+            src.join("skills/build/SKILL.md"),
+            "---\ndescription: build skill\n---\n# build\n",
+        )
+        .unwrap();
+        init_git_repo(&src);
+        Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(&src)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-qm", "initial"])
+            .current_dir(&src)
+            .output()
+            .unwrap();
+        src
+    }
+
+    #[test]
+    fn execute_learn_installs_transitive_closure_dependency_first() {
+        // spec: DEP-41 - confirming a Learn in the TUI installs the WHOLE transitive
+        // within-source closure (DEP-11), not just the direct dependency. The chain
+        // is `skill:review` -> `agent:dev` -> `skill:build`: selecting only `review`
+        // through `execute(ActionKind::Learn)` must install all THREE members. The
+        // 2-member test (`..._installs_whole_dependency_closure`) would still pass if
+        // transitivity regressed and only the direct dep were pulled; this one fails.
+        let (paths, base) = temp_paths();
+        crate::paths::mkdir_p(&paths.mind_home).unwrap();
+        // Pin the lobe to the isolated claude_home so the install never touches the
+        // real ~/.claude (agent_homes() otherwise defaults to ~/.claude).
+        crate::config::Config {
+            lobes: vec![paths.claude_home.to_str().unwrap().to_string()],
+        }
+        .save(&paths.mind_home)
+        .unwrap();
+
+        let src = make_chain_source_repo(&base);
+        commands::meld(
+            &paths,
+            src.to_str().unwrap(),
+            None,
+            vec![],
+            None,
+            None,
+            None,
+        )
+        .expect("meld chain-source");
+
+        let source_name = crate::source::Registry::load(&paths).unwrap().sources[0]
+            .name
+            .clone();
+
+        let action = PendingAction {
+            kind: ActionKind::Learn {
+                item_key: "skill:review".to_string(),
+                source: source_name.clone(),
+            },
+            description: "Install skill:review?".to_string(),
+            dep_tree: Some(
+                "- skill:review [selected]\n  - agent:dev [dep]\n    - skill:build [dep]"
+                    .to_string(),
+            ),
+        };
+        let result = execute(&paths, action);
+        assert!(
+            result.is_ok(),
+            "learn of the transitive closure must succeed: {:?}",
+            result.err()
+        );
+
+        let manifest = crate::manifest::Manifest::load(&paths).unwrap();
+        // All three members of the transitive closure must be present.
+        for key in ["skill:review", "agent:dev", "skill:build"] {
+            assert!(
+                manifest.items.contains_key(key),
+                "transitive closure member {key} must be installed: {:?}",
+                manifest.items.keys().collect::<Vec<_>>()
+            );
+        }
+
+        // Dependency-first ordering (DEP-30): a dependency's recorded commit/source
+        // must be present before its dependent could reference it. We assert the
+        // install committed every member to the same source so the closure is one
+        // coherent unit (a partial install would drop the transitive `build`).
+        for key in ["skill:review", "agent:dev", "skill:build"] {
+            let item = manifest.items.get(key).unwrap();
+            assert_eq!(
+                item.source, source_name,
+                "closure member {key} must be attributed to the selected source"
+            );
+        }
+    }
+
+    #[test]
+    fn execute_learn_does_not_reinstall_already_installed_dependency() {
+        // spec: DEP-41 DEP-23 - when a referenced dependency is ALREADY installed,
+        // confirming the Learn through the TUI installs the rest of the closure but
+        // does NOT re-install (or duplicate) the already-present dependency. The
+        // manifest is keyed `kind:name`, so a duplicate would overwrite rather than
+        // create a second entry; we assert the dependency keeps its ORIGINAL recorded
+        // commit (a re-install would rewrite it) and that exactly one entry exists.
+        let (paths, base) = temp_paths();
+        crate::paths::mkdir_p(&paths.mind_home).unwrap();
+        crate::config::Config {
+            lobes: vec![paths.claude_home.to_str().unwrap().to_string()],
+        }
+        .save(&paths.mind_home)
+        .unwrap();
+
+        let src = make_dep_source_repo(&base); // skill:review -> agent:dev
+        commands::meld(
+            &paths,
+            src.to_str().unwrap(),
+            None,
+            vec![],
+            None,
+            None,
+            None,
+        )
+        .expect("meld dep-source");
+        let source_name = crate::source::Registry::load(&paths).unwrap().sources[0]
+            .name
+            .clone();
+
+        // Pre-install ONLY the dependency `agent:dev` via the same Learn path. After
+        // this the manifest holds exactly agent:dev (review references it, but dev
+        // has no deps so selecting dev installs only dev).
+        let pre = PendingAction {
+            kind: ActionKind::Learn {
+                item_key: "agent:dev".to_string(),
+                source: source_name.clone(),
+            },
+            description: "Install agent:dev?".to_string(),
+            dep_tree: None,
+        };
+        execute(&paths, pre).expect("pre-install of agent:dev must succeed");
+
+        let before = crate::manifest::Manifest::load(&paths).unwrap();
+        assert!(
+            before.items.contains_key("agent:dev"),
+            "agent:dev must be installed before the second learn"
+        );
+        let dev_commit_before = before.items.get("agent:dev").unwrap().commit.clone();
+        let dev_hash_before = before.items.get("agent:dev").unwrap().hash.clone();
+        assert!(
+            !before.items.contains_key("skill:review"),
+            "skill:review must NOT be installed yet"
+        );
+
+        // The plan the TUI confirm is built from (the same resolution execute will
+        // apply): the closure pulls in `dev` (so a tree is shown) but, because dev is
+        // already installed (DEP-23), exactly ONE item is in the install order. If a
+        // regression re-installed already-installed deps, install_count would be 2.
+        let plan = crate::commands::learn_preview(
+            &paths,
+            &crate::tui::app::learn_ref("skill:review", &source_name),
+        )
+        .expect("learn_preview must succeed");
+        assert!(
+            plan.adds_dependencies,
+            "the closure still pulls in the (already-installed) dep, so a tree is shown"
+        );
+        assert_eq!(
+            plan.install_count, 1,
+            "DEP-23: only the not-yet-installed `review` installs; the already-installed \
+             dep is excluded from the install order"
+        );
+
+        // Now learn `skill:review`. Its closure is {review, dev}, but dev is already
+        // installed (DEP-23): only review should be newly installed; dev untouched.
+        let action = PendingAction {
+            kind: ActionKind::Learn {
+                item_key: "skill:review".to_string(),
+                source: source_name.clone(),
+            },
+            description: "Install skill:review?".to_string(),
+            dep_tree: Some("- skill:review [selected]\n  - agent:dev [installed]".to_string()),
+        };
+        execute(&paths, action).expect("learn of review must succeed");
+
+        let after = crate::manifest::Manifest::load(&paths).unwrap();
+        assert!(
+            after.items.contains_key("skill:review"),
+            "skill:review must now be installed"
+        );
+        // Exactly one copy of the dependency (manifest is keyed kind:name).
+        let dev_count = after.items.keys().filter(|k| *k == "agent:dev").count();
+        assert_eq!(
+            dev_count,
+            1,
+            "the already-installed dependency must appear exactly once, not duplicated: {:?}",
+            after.items.keys().collect::<Vec<_>>()
+        );
+        // And it was NOT re-installed: its recorded commit/hash are unchanged from
+        // the original install (a re-install would have rewritten the registry entry).
+        let dev_after = after.items.get("agent:dev").unwrap();
+        assert_eq!(
+            dev_after.commit, dev_commit_before,
+            "already-installed dependency must keep its original commit (not re-installed)"
+        );
+        assert_eq!(
+            dev_after.hash, dev_hash_before,
+            "already-installed dependency must keep its original hash (not re-installed)"
+        );
     }
 
     #[test]
@@ -704,6 +1061,7 @@ mod tests {
                 source: source_name.clone(),
             },
             description: "Learn skill:review from source-alpha?".to_string(),
+            dep_tree: None,
         };
 
         // Without the fix this returned MindError::AmbiguousItem.

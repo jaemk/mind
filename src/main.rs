@@ -2,6 +2,7 @@ mod catalog;
 mod cli;
 mod commands;
 mod config;
+mod deps;
 mod error;
 mod frontmatter;
 mod git;
@@ -144,7 +145,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             pin_ref,
         } => commands::meld(paths, &repo, alias, roots, follow_branch, pin_tag, pin_ref),
         Command::Unmeld { name, forget } => commands::unmeld(paths, &name, forget),
-        Command::Learn { item, dry_run } => commands::learn(paths, &item, dry_run),
+        Command::Learn { item, dry_run, yes } => commands::learn(paths, &item, dry_run, yes),
         Command::Forget { item } => commands::forget(paths, &item),
         Command::Sync { evolve } => commands::sync(paths, evolve),
         Command::Evolve { yes, item } => commands::evolve(paths, yes, item.as_deref()),

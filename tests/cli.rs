@@ -970,7 +970,8 @@ fn ns_token_expands_to_prefixed_reference_on_install() {
     );
     let spec = sb.source_spec();
     assert!(sb.mind(&["meld", &spec, "--as", "jk"]).success);
-    assert!(sb.mind(&["learn", "jk-lead"]).success);
+    // `lead` references {{ns:dev}}; the closure prompt is confirmed with --yes.
+    assert!(sb.mind(&["learn", "jk-lead", "--yes"]).success);
 
     let store = sb.mind_home.join("store/agent/jk-lead");
     let body = std::fs::read_to_string(&store).expect("installed agent file");
@@ -991,7 +992,7 @@ fn ns_token_expands_to_bare_reference_without_prefix() {
     );
     let spec = sb.source_spec();
     assert!(sb.mind(&["meld", &spec]).success);
-    assert!(sb.mind(&["learn", "lead"]).success);
+    assert!(sb.mind(&["learn", "lead", "--yes"]).success);
 
     let body = std::fs::read_to_string(sb.mind_home.join("store/agent/lead")).unwrap();
     assert!(body.contains("the dev agent"), "{body}");
@@ -1224,7 +1225,8 @@ fn failed_upgrade_preserves_the_previous_version() {
     );
     let spec = sb.source_spec();
     assert!(sb.mind(&["meld", &spec, "--as", "jk"]).success);
-    assert!(sb.mind(&["learn", "jk-lead"]).success);
+    // `lead` references {{ns:dev}}; confirm the closure with --yes.
+    assert!(sb.mind(&["learn", "jk-lead", "--yes"]).success);
     let store = sb.mind_home.join("store/agent/jk-lead");
     assert!(std::fs::read_to_string(&store).unwrap().contains("jk-dev"));
 
@@ -1482,6 +1484,333 @@ fn learn_partial_failure_persists_successes() {
         !ins.contains("symlink missing"),
         "manifest/disk drift: {ins}"
     );
+}
+
+/// A source whose skill `review` references the agent `reviewer` via a
+/// `{{ns:}}` token, so a partial `learn skill:review` must pull in `reviewer`
+/// (its intra-source dependency). Returns the melded sandbox.
+fn dep_fixture() -> Sandbox {
+    let sb = Sandbox::bare("agents-and-skills");
+    sb.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\nname: review\ndescription: Review the diff\n---\n# review\nhand off to {{ns:reviewer}}\n",
+    );
+    sb.write_and_commit(
+        "agents/reviewer.md",
+        "---\nname: reviewer\ndescription: Reviews changes\n---\n# reviewer agent\n",
+    );
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    sb
+}
+
+#[test]
+fn learn_yes_installs_referenced_dependency_closure() {
+    // spec: DEP-30
+    // A partial `learn skill:review --yes` installs the whole closure: the
+    // selected skill AND the agent it references via {{ns:reviewer}}. Both are
+    // recorded in the manifest (dependency-first install order is internal and
+    // not directly observable, so we assert the closure was applied).
+    let sb = dep_fixture();
+    let r = sb.mind(&["learn", "skill:review", "--yes"]);
+    assert!(r.success, "{}", r.stderr);
+
+    let recall = sb.mind(&["recall"]).stdout;
+    assert!(
+        recall.contains("skill:review"),
+        "selected skill installed: {recall}"
+    );
+    assert!(
+        recall.contains("agent:reviewer"),
+        "referenced dependency pulled into the closure: {recall}"
+    );
+}
+
+#[test]
+fn learn_whole_source_glob_pulls_no_extras() {
+    // spec: DEP-10 DEP-31
+    // Selecting the whole source is full coverage: resolution is a no-op, so
+    // `learn` installs directly with no prompt and adds nothing beyond the
+    // two items that are already the entire source.
+    let sb = dep_fixture();
+    let r = sb.mind(&["learn", "agents-and-skills#*"]);
+    assert!(r.success, "{}", r.stderr);
+
+    let recall = sb.mind(&["recall"]).stdout;
+    assert!(recall.contains("skill:review"), "{recall}");
+    assert!(recall.contains("agent:reviewer"), "{recall}");
+}
+
+#[test]
+fn learn_dependency_dry_run_renders_tree_and_installs_nothing() {
+    // spec: DEP-32
+    // `--dry-run` over a partial selection renders the dependency tree (which
+    // names the pulled-in `reviewer`) and lists the closure, but installs
+    // nothing: the manifest stays empty.
+    let sb = dep_fixture();
+    let r = sb.mind(&["learn", "skill:review", "--dry-run"]);
+    assert!(r.success, "{}", r.stderr);
+    assert!(r.stdout.contains("dry run"), "{}", r.stdout);
+    assert!(
+        r.stdout.contains("skill:review [selected]"),
+        "tree should head with the selected skill: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("agent:reviewer [dep]"),
+        "tree should mark the pulled-in dependency: {}",
+        r.stdout
+    );
+
+    // Nothing was installed.
+    assert!(sb.mind(&["recall"]).stdout.contains("nothing learned"));
+    assert!(std::fs::symlink_metadata(sb.claude_home.join("agents/reviewer.md")).is_err());
+}
+
+#[test]
+fn forget_does_not_remove_a_dependency() {
+    // spec: DEP-50
+    // After installing the closure, forgetting the skill leaves its pulled-in
+    // dependency installed: `forget` is per-item and never auto-removes deps.
+    let sb = dep_fixture();
+    assert!(sb.mind(&["learn", "skill:review", "--yes"]).success);
+    assert!(sb.mind(&["forget", "skill:review"]).success);
+
+    let recall = sb.mind(&["recall"]).stdout;
+    assert!(
+        !recall.contains("skill:review"),
+        "the forgotten skill is gone: {recall}"
+    );
+    assert!(
+        recall.contains("agent:reviewer"),
+        "the dependency stays installed: {recall}"
+    );
+}
+
+#[test]
+fn learn_installs_dependency_before_dependent() {
+    // spec: DEP-30 DEP-21
+    // The closure installs dependency-first: the agent `reviewer` (a pulled-in
+    // dependency) installs BEFORE the skill `review` that references it. The
+    // "learned ..." lines are emitted in install order, so the dependency line
+    // must precede the dependent's line in stdout.
+    let sb = dep_fixture();
+    let r = sb.mind(&["learn", "skill:review", "--yes"]);
+    assert!(r.success, "{}", r.stderr);
+
+    let dep_line = r
+        .stdout
+        .lines()
+        .position(|l| l.starts_with("learned agent:reviewer "))
+        .unwrap_or_else(|| panic!("missing reviewer learned line: {}", r.stdout));
+    let dependent_line = r
+        .stdout
+        .lines()
+        .position(|l| l.starts_with("learned skill:review "))
+        .unwrap_or_else(|| panic!("missing review learned line: {}", r.stdout));
+    assert!(
+        dep_line < dependent_line,
+        "dependency must install before its dependent: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn learn_dependency_prompt_decline_installs_nothing() {
+    // spec: DEP-31
+    // When the closure adds a pulled-in dependency, `learn` (no --yes) prints
+    // the tree and prompts. Answering "n" cancels: nothing is installed, the
+    // manifest holds neither item, and no symlinks are created.
+    let sb = dep_fixture();
+    let r = sb.mind_with_input(&["learn", "skill:review"], Some("n\n"));
+    assert!(r.success, "{}", r.stderr);
+    // The dependency tree is shown before the prompt.
+    assert!(
+        r.stdout.contains("skill:review [selected]"),
+        "tree should head with the selected skill: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("agent:reviewer [dep]"),
+        "tree should mark the pulled-in dependency: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("cancelled; nothing installed"),
+        "decline should print the cancelled line: {}",
+        r.stdout
+    );
+
+    // Nothing installed: manifest empty, no symlinks for either item.
+    assert!(sb.mind(&["recall"]).stdout.contains("nothing learned"));
+    assert!(std::fs::symlink_metadata(sb.claude_home.join("skills/review")).is_err());
+    assert!(std::fs::symlink_metadata(sb.claude_home.join("agents/reviewer.md")).is_err());
+}
+
+#[test]
+fn learn_dependency_prompt_defaults_to_no_on_eof() {
+    // spec: DEP-31
+    // With no stdin (immediate EOF on the prompt), the `[y/N]` default is No, so
+    // the closure is not installed. The prompt and tree are still shown.
+    let sb = dep_fixture();
+    let r = sb.mind_with_input(&["learn", "skill:review"], Some(""));
+    assert!(r.success, "{}", r.stderr);
+    assert!(
+        r.stdout.contains("agent:reviewer [dep]"),
+        "tree should still render before the prompt: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("cancelled; nothing installed"),
+        "EOF should default to No: {}",
+        r.stdout
+    );
+
+    // Nothing installed.
+    assert!(sb.mind(&["recall"]).stdout.contains("nothing learned"));
+    assert!(std::fs::symlink_metadata(sb.claude_home.join("skills/review")).is_err());
+    assert!(std::fs::symlink_metadata(sb.claude_home.join("agents/reviewer.md")).is_err());
+}
+
+#[test]
+fn learn_dependency_prompt_accept_installs_closure() {
+    // spec: DEP-31
+    // Answering "y" to the prompt (without --yes) confirms: the whole closure
+    // installs, both the selected skill and its pulled-in dependency.
+    let sb = dep_fixture();
+    let r = sb.mind_with_input(&["learn", "skill:review"], Some("y\n"));
+    assert!(r.success, "{}", r.stderr);
+    assert!(
+        r.stdout.contains("agent:reviewer [dep]"),
+        "tree should render before the prompt: {}",
+        r.stdout
+    );
+
+    let recall = sb.mind(&["recall"]).stdout;
+    assert!(
+        recall.contains("skill:review"),
+        "selected skill installed on confirm: {recall}"
+    );
+    assert!(
+        recall.contains("agent:reviewer"),
+        "dependency installed on confirm: {recall}"
+    );
+}
+
+#[test]
+fn learn_pulls_dependency_referenced_in_non_skill_md_file() {
+    // spec: DEP-1
+    // The dependency scan covers the WHOLE skill directory (matching NS-20's
+    // breadth), not just SKILL.md. A `{{ns:reviewer}}` token living in a sibling
+    // file (extra.md) inside the skill dir still pulls in the agent.
+    let sb = Sandbox::bare("nonmd-deps");
+    sb.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\nname: review\ndescription: Review the diff\n---\n# review\n",
+    );
+    sb.write_and_commit(
+        "skills/review/extra.md",
+        "see {{ns:reviewer}} for handoff\n",
+    );
+    sb.write_and_commit(
+        "agents/reviewer.md",
+        "---\nname: reviewer\ndescription: Reviews changes\n---\n# reviewer agent\n",
+    );
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+
+    let r = sb.mind(&["learn", "skill:review", "--yes"]);
+    assert!(r.success, "{}", r.stderr);
+    let recall = sb.mind(&["recall"]).stdout;
+    assert!(
+        recall.contains("skill:review"),
+        "selected skill installed: {recall}"
+    );
+    assert!(
+        recall.contains("agent:reviewer"),
+        "token in a non-SKILL.md file still pulls the dependency: {recall}"
+    );
+}
+
+#[test]
+fn learn_dependency_already_installed_prompts_but_reinstalls_only_new() {
+    // spec: DEP-23 DEP-31
+    // Install the dependency alone first. A later partial `learn skill:review`
+    // still shows the closure (so it still prompts, the dependency is part of
+    // the tree) but the already-installed reviewer is marked [installed] and is
+    // not reinstalled; only the new `review` installs.
+    let sb = dep_fixture();
+    assert!(sb.mind(&["learn", "agent:reviewer", "--yes"]).success);
+
+    let r = sb.mind_with_input(&["learn", "skill:review"], Some("y\n"));
+    assert!(r.success, "{}", r.stderr);
+    // The tree marks the dependency as already installed (DEP-23).
+    assert!(
+        r.stdout.contains("agent:reviewer [installed]"),
+        "already-installed dep should be marked [installed]: {}",
+        r.stdout
+    );
+    // Only the new item is (re)installed; reviewer is not learned again.
+    assert!(
+        r.stdout.contains("learned skill:review "),
+        "the new skill installs: {}",
+        r.stdout
+    );
+    assert!(
+        !r.stdout.contains("learned agent:reviewer "),
+        "the already-installed dependency is not reinstalled: {}",
+        r.stdout
+    );
+
+    // Exactly one reviewer in the manifest (not duplicated), plus the skill.
+    let recall = sb.mind(&["recall"]).stdout;
+    assert_eq!(
+        recall.matches("agent:reviewer").count(),
+        1,
+        "reviewer must not be duplicated: {recall}"
+    );
+    assert!(recall.contains("skill:review"), "{recall}");
+}
+
+#[test]
+fn learn_closure_collision_via_pulled_dependency_aborts() {
+    // spec: DEP-30
+    // The collision check runs over the FULL closure, not just the explicit
+    // selection. Two sources each carry a skill that references its own
+    // `{{ns:reviewer}}` agent. Selecting `skill:*` selects two non-colliding
+    // skills, but the closure pulls in BOTH `agent:reviewer` items, which
+    // collide on `agent:reviewer`. Learn must report the collision and install
+    // nothing.
+    let a = Sandbox::bare("coll-a");
+    a.write_and_commit(
+        "skills/areview/SKILL.md",
+        "---\nname: areview\ndescription: A review\n---\n# areview\nuse {{ns:reviewer}}\n",
+    );
+    a.write_and_commit(
+        "agents/reviewer.md",
+        "---\nname: reviewer\ndescription: A reviewer\n---\n# reviewer\n",
+    );
+    let b = Sandbox::bare("coll-b");
+    b.write_and_commit(
+        "skills/breview/SKILL.md",
+        "---\nname: breview\ndescription: B review\n---\n# breview\nuse {{ns:reviewer}}\n",
+    );
+    b.write_and_commit(
+        "agents/reviewer.md",
+        "---\nname: reviewer\ndescription: B reviewer\n---\n# reviewer\n",
+    );
+    assert!(a.mind(&["meld", &a.source_spec()]).success);
+    assert!(a.mind(&["meld", &b.source_spec()]).success);
+
+    // The explicit selection (two distinct skills) does not collide; the
+    // collision only arises once the pulled-in reviewers join the closure.
+    let r = a.mind(&["learn", "skill:*", "--yes"]);
+    assert!(!r.success, "closure collision should abort: {}", r.stdout);
+    assert!(
+        r.stderr.contains("ambiguous"),
+        "collision should be reported as ambiguous: {}",
+        r.stderr
+    );
+    // Nothing installed.
+    assert!(a.mind(&["recall"]).stdout.contains("nothing learned"));
 }
 
 #[test]
@@ -2157,14 +2486,16 @@ fn example_namespacing_expands_references() {
         "all refs are tokens, so no warning: {}",
         meld.stderr
     );
-    assert!(jk.mind(&["learn", "jk-lead"]).success);
+    // `lead` references siblings via {{ns:}}, so a partial learn pulls in the
+    // closure and prompts (DEP-31); `--yes` confirms.
+    assert!(jk.mind(&["learn", "jk-lead", "--yes"]).success);
     let lead = std::fs::read_to_string(jk.mind_home.join("store/agent/jk-lead")).unwrap();
     assert!(lead.contains("the jk-dev agent"), "{lead}");
     assert!(lead.contains("the jk-review skill"), "{lead}");
     assert!(lead.contains("the jk-style rule"), "{lead}");
     assert!(!lead.contains("{{ns:"), "tokens should be gone: {lead}");
     // The skill references a rule from inside its directory; it expands too.
-    assert!(jk.mind(&["learn", "jk-review"]).success);
+    assert!(jk.mind(&["learn", "jk-review", "--yes"]).success);
     let review =
         std::fs::read_to_string(jk.mind_home.join("store/skill/jk-review/SKILL.md")).unwrap();
     assert!(review.contains("jk-style rule"), "{review}");
@@ -2173,7 +2504,7 @@ fn example_namespacing_expands_references() {
     // Unprefixed: the same tokens expand to the bare names.
     let bare = Sandbox::from_example("namespacing");
     assert!(bare.mind(&["meld", &bare.source_spec()]).success);
-    assert!(bare.mind(&["learn", "lead"]).success);
+    assert!(bare.mind(&["learn", "lead", "--yes"]).success);
     let lead2 = std::fs::read_to_string(bare.mind_home.join("store/agent/lead")).unwrap();
     assert!(lead2.contains("the dev agent"), "{lead2}");
     assert!(lead2.contains("the review skill"), "{lead2}");
