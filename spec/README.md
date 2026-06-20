@@ -42,6 +42,7 @@ and verified.
 | Version pinning: `--follow-branch`/`--pin-tag`/`--pin-ref` + `[source]` directive | done | DSC-41, STO-18, CLI-17, CLI-18, CLI-55 |
 | `review` verb: author-side source validation | done | CLI-130, CLI-131, CLI-132, CLI-133 |
 | `self-update` verb: in-place upgrade of the `mind` binary (via the `self_update` crate) | planned | CLI-140, CLI-141, CLI-142, CLI-143 |
+| Managed policy (enterprise): trusted-source allowlist, require-pinned, auto-meld, lobe lock; `mind review --policy` | planned | [policy.md](policy.md) |
 | Within-source dependency resolution: a partial `learn` pulls in referenced siblings; dependency-tree display + install order | done | [dependencies.md](dependencies.md) |
 | Concurrency: global advisory lock + atomic registry writes (via `fd-lock`) | done | STO-40, STO-41, STO-42, STO-43 |
 | `probe` matches description text, not just name | done | CLI-85 |
@@ -60,6 +61,9 @@ and verified.
   partial `learn` pulls in referenced siblings, with a dependency tree and order.
 - [tui.md](tui.md) - the interactive TUI (`probe` default): browse, search, and
   the interactive front end for the CLI verbs.
+- [policy.md](policy.md) - the enterprise managed policy: a fixed-path,
+  admin-controlled file that restricts a client to trusted sources and locks
+  related settings.
 
 ## Conventions
 
