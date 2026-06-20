@@ -689,4 +689,286 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&base);
     }
+
+    // ---- gap-closing managed-policy lobe tests -----------------------------
+
+    // POL-41: the unlocked union must draw the user's homes from the
+    // $MIND_AGENT_HOMES source, not only from config lobes. With an unlocked
+    // policy target and MIND_AGENT_HOMES set (no config), the env home appears in
+    // the union, after the policy target, with no duplicates.
+    #[test]
+    fn pol41_unions_policy_with_env_agent_homes() {
+        // spec: POL-41
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let base_dir =
+            std::env::temp_dir().join(format!("mind-pol41-env-{}-{n}", std::process::id()));
+        let policy_target = base_dir.join("policy-base");
+        let env_lobe = base_dir.join("env-lobe");
+        let policy_toml = format!(
+            "[lobes]\nlock = false\ntargets = [\"{policy_target}\"]\n",
+            policy_target = policy_target.display()
+        );
+        let (paths, base, _policy_file, _guard) = setup_policy_test(&policy_toml);
+
+        // Drive user homes via the env var (no config.toml written), to exercise
+        // the $MIND_AGENT_HOMES source of user homes specifically.
+        // SAFETY: ENV_LOCK is held.
+        unsafe {
+            std::env::set_var("MIND_AGENT_HOMES", env_lobe.to_str().unwrap());
+        }
+
+        let homes = paths.agent_homes();
+
+        // Restore env before any asserts that might panic.
+        // SAFETY: ENV_LOCK is held.
+        unsafe {
+            std::env::remove_var("MIND_AGENT_HOMES");
+        }
+        let homes = homes.unwrap();
+
+        assert_eq!(
+            homes,
+            vec![policy_target.clone(), env_lobe.clone()],
+            "POL-41: unlocked union must be [policy target, env home], targets first, deduped"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+        let _ = std::fs::remove_dir_all(&base_dir);
+    }
+
+    // POL-40: a lock with MULTIPLE targets returns exactly those targets in
+    // declaration order, even when several user homes are set via env (all
+    // ignored under the lock).
+    #[test]
+    fn pol40_lock_true_multiple_targets_in_order_ignores_user_homes() {
+        // spec: POL-40
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let base_dir =
+            std::env::temp_dir().join(format!("mind-pol40-multi-{}-{n}", std::process::id()));
+        let t1 = base_dir.join("target-a");
+        let t2 = base_dir.join("target-b");
+        let t3 = base_dir.join("target-c");
+        let policy_toml = format!(
+            "[lobes]\nlock = true\ntargets = [\"{t1}\", \"{t2}\", \"{t3}\"]\n",
+            t1 = t1.display(),
+            t2 = t2.display(),
+            t3 = t3.display(),
+        );
+        let (paths, base, _policy_file, _guard) = setup_policy_test(&policy_toml);
+
+        // Multiple user homes via env - all must be ignored under the lock.
+        let e1 = base_dir.join("env-1");
+        let e2 = base_dir.join("env-2");
+        let env_val = format!("{}:{}", e1.display(), e2.display());
+        // Also write a config lobe to confirm config is ignored too.
+        let cfg_lobe = base_dir.join("cfg-lobe");
+        std::fs::write(
+            paths.mind_home.join("config.toml"),
+            format!("lobes = [\"{}\"]\n", cfg_lobe.display()),
+        )
+        .unwrap();
+        // SAFETY: ENV_LOCK is held.
+        unsafe {
+            std::env::set_var("MIND_AGENT_HOMES", &env_val);
+        }
+
+        let homes = paths.agent_homes();
+
+        // SAFETY: ENV_LOCK is held.
+        unsafe {
+            std::env::remove_var("MIND_AGENT_HOMES");
+        }
+        let homes = homes.unwrap();
+
+        assert_eq!(
+            homes,
+            vec![t1.clone(), t2.clone(), t3.clone()],
+            "POL-40: locked policy must return exactly the targets in order"
+        );
+        assert!(!homes.contains(&e1) && !homes.contains(&e2));
+        assert!(!homes.contains(&cfg_lobe));
+
+        let _ = std::fs::remove_dir_all(&base);
+        let _ = std::fs::remove_dir_all(&base_dir);
+    }
+
+    // POL-41: unlocked union with MULTIPLE targets and MULTIPLE user homes, where
+    // one user home duplicates a policy target. Asserts the exact deduped order:
+    // all targets first (in order), then the user homes not already present (in
+    // order), with the overlap dropped.
+    #[test]
+    fn pol41_multiple_targets_and_homes_exact_deduped_order() {
+        // spec: POL-41
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let base_dir =
+            std::env::temp_dir().join(format!("mind-pol41-multi-{}-{n}", std::process::id()));
+        let t1 = base_dir.join("t1");
+        let t2 = base_dir.join("t2"); // also a user home (overlap)
+        let u_extra = base_dir.join("u-extra");
+        let policy_toml = format!(
+            "[lobes]\nlock = false\ntargets = [\"{t1}\", \"{t2}\"]\n",
+            t1 = t1.display(),
+            t2 = t2.display(),
+        );
+        let (paths, base, _policy_file, _guard) = setup_policy_test(&policy_toml);
+
+        // User homes (via env): t2 (overlaps target) then u_extra. Order matters:
+        // t2 must be dropped as a dup, u_extra kept and appended last.
+        let env_val = format!("{}:{}", t2.display(), u_extra.display());
+        // SAFETY: ENV_LOCK is held.
+        unsafe {
+            std::env::set_var("MIND_AGENT_HOMES", &env_val);
+        }
+
+        let homes = paths.agent_homes();
+
+        // SAFETY: ENV_LOCK is held.
+        unsafe {
+            std::env::remove_var("MIND_AGENT_HOMES");
+        }
+        let homes = homes.unwrap();
+
+        assert_eq!(
+            homes,
+            vec![t1.clone(), t2.clone(), u_extra.clone()],
+            "POL-41: targets first in order, then non-duplicate user homes; overlap dropped"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+        let _ = std::fs::remove_dir_all(&base_dir);
+    }
+
+    // POL-4 inert via the $MIND_AGENT_HOMES source (not config): with no policy
+    // and MIND_AGENT_HOMES set, agent_homes returns those homes unchanged.
+    #[test]
+    fn pol4_inert_no_policy_uses_env_agent_homes_unchanged() {
+        // spec: POL-40
+        // spec: POL-41
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let base = std::env::temp_dir().join(format!("mind-pol4-env-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let mind_home = base.join("mind");
+        let claude_home = base.join("claude");
+        std::fs::create_dir_all(&mind_home).unwrap();
+        std::fs::create_dir_all(&claude_home).unwrap();
+
+        let env1 = base.join("env-home-1");
+        let env2 = base.join("env-home-2");
+        let env_val = format!("{}:{}", env1.display(), env2.display());
+        // No policy file; env drives user homes.
+        // SAFETY: ENV_LOCK is held.
+        unsafe {
+            std::env::remove_var("MIND_POLICY_FILE");
+            std::env::set_var("MIND_AGENT_HOMES", &env_val);
+        }
+
+        let paths = Paths {
+            mind_home,
+            claude_home,
+        };
+        let homes = paths.agent_homes();
+
+        // SAFETY: ENV_LOCK is held.
+        unsafe {
+            std::env::remove_var("MIND_AGENT_HOMES");
+        }
+        let homes = homes.unwrap();
+
+        assert_eq!(
+            homes,
+            vec![env1.clone(), env2.clone()],
+            "POL-4 inert: without a policy, $MIND_AGENT_HOMES homes must be returned unchanged"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // POL-40: a locked target written with a leading `~` is expanded to the home
+    // directory and resolved to an absolute path (via absolute_home), so the
+    // effective home never depends on the working directory.
+    #[test]
+    fn pol40_lock_target_tilde_is_expanded_to_absolute() {
+        // spec: POL-40
+        let policy_toml = "[lobes]\nlock = true\ntargets = [\"~/.claude-managed\"]\n";
+        let (paths, base, _policy_file, _guard) = setup_policy_test(policy_toml);
+
+        let homes = paths.agent_homes().unwrap();
+        assert_eq!(homes.len(), 1);
+        let got = &homes[0];
+        assert!(
+            got.is_absolute(),
+            "tilde target must resolve absolute: {got:?}"
+        );
+        assert!(
+            got.ends_with(".claude-managed"),
+            "tilde target must expand under home: {got:?}"
+        );
+        let home = dirs::home_dir().expect("home dir for tilde expansion");
+        assert_eq!(
+            got,
+            &home.join(".claude-managed"),
+            "POL-40: `~` target must expand to <home>/.claude-managed"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // POL-40: a RELATIVE locked target is resolved to an absolute path against the
+    // current directory (make_absolute), so a later uninstall sees a stable,
+    // cwd-independent home rather than the verbatim relative string.
+    #[test]
+    fn pol40_lock_relative_target_becomes_absolute() {
+        // spec: POL-40
+        let policy_toml = "[lobes]\nlock = true\ntargets = [\"managed-rel-lobe\"]\n";
+        let (paths, base, _policy_file, _guard) = setup_policy_test(policy_toml);
+
+        let homes = paths.agent_homes().unwrap();
+        assert_eq!(homes.len(), 1);
+        let got = &homes[0];
+        assert!(
+            got.is_absolute(),
+            "POL-40: a relative target must be resolved to absolute: {got:?}"
+        );
+        assert!(
+            got.ends_with("managed-rel-lobe"),
+            "the relative component must be preserved: {got:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // POL-41: an unlocked relative target is likewise resolved to absolute before
+    // the union, so the targets-first entry is a stable absolute path.
+    #[test]
+    fn pol41_unlocked_relative_target_becomes_absolute() {
+        // spec: POL-41
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let base_dir =
+            std::env::temp_dir().join(format!("mind-pol41-rel-{}-{n}", std::process::id()));
+        let user_lobe = base_dir.join("user-lobe");
+        let policy_toml = "[lobes]\nlock = false\ntargets = [\"unlocked-rel-lobe\"]\n";
+        let (paths, base, _policy_file, _guard) = setup_policy_test(policy_toml);
+
+        // SAFETY: ENV_LOCK is held.
+        unsafe {
+            std::env::set_var("MIND_AGENT_HOMES", user_lobe.to_str().unwrap());
+        }
+        let homes = paths.agent_homes();
+        // SAFETY: ENV_LOCK is held.
+        unsafe {
+            std::env::remove_var("MIND_AGENT_HOMES");
+        }
+        let homes = homes.unwrap();
+
+        assert_eq!(homes.len(), 2, "target + one user home: {homes:?}");
+        assert!(
+            homes[0].is_absolute() && homes[0].ends_with("unlocked-rel-lobe"),
+            "POL-41: unlocked relative target must resolve absolute, first: {homes:?}"
+        );
+        assert_eq!(homes[1], user_lobe, "user home follows the target");
+
+        let _ = std::fs::remove_dir_all(&base);
+        let _ = std::fs::remove_dir_all(&base_dir);
+    }
 }

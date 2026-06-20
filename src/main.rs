@@ -306,6 +306,27 @@ mod tests {
         assert_eq!(mode_of(&["mind", "man"]), LockMode::None);
     }
 
+    /// `mind review` with neither a `<target>` nor `--policy` is a usage error:
+    /// the `(None, None)` dispatch arm prints guidance and returns
+    /// `ReviewFailed { hard: 1 }` so the process exits non-zero. This arm is only
+    /// reachable through `dispatch`, so drive it there directly.
+    /// spec: POL-50
+    #[test]
+    fn review_without_target_or_policy_is_usage_error() {
+        let cli = Cli::try_parse_from(["mind", "review"]).expect("bare review parses");
+        // The arm returns before touching persisted state, so any Paths works.
+        let paths = Paths {
+            mind_home: std::env::temp_dir().join("mind-review-usage-test"),
+            claude_home: std::env::temp_dir().join("mind-review-usage-test-claude"),
+        };
+        match dispatch(cli, &paths) {
+            Err(error::MindError::ReviewFailed { hard }) => {
+                assert_eq!(hard, 1, "no-target/no-policy is a single hard usage error");
+            }
+            other => panic!("expected Err(ReviewFailed) usage error, got {other:?}"),
+        }
+    }
+
     #[test]
     fn introspect_fix_flag_flips_the_lock_mode() {
         // Pin the exact boundary: the same verb is shared without --fix and

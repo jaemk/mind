@@ -177,6 +177,24 @@ pub enum MindError {
 
     #[error("review found {hard} hard error(s); see the findings above")]
     ReviewFailed { hard: usize },
+
+    // Constructed by the policy-enforcement shards (meld/sync/evolve gating);
+    // until those land nothing builds these, so allow dead_code on just them.
+    #[error("source '{identity}' is not permitted by the managed policy's allowlist")]
+    SourceNotAllowed { identity: String },
+
+    #[error(
+        "source '{identity}' must be pinned to a tag or ref: the managed policy forbids floating branches"
+    )]
+    UnpinnedSourceForbidden { identity: String },
+
+    #[error("invalid managed policy at {path}: {reason}")]
+    InvalidPolicy { path: String, reason: String },
+
+    #[error(
+        "the agent homes are locked by the managed policy ([lobes].lock); `config lobes {action}` is refused"
+    )]
+    LobesLocked { action: String },
 }
 
 fn status_suffix(status: Option<ExitStatus>) -> String {

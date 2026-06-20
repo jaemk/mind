@@ -31,11 +31,11 @@ lock   = true
 pinned = true
 
 [[sources.auto_meld]]
-repo = "github.com/acme/agent-baseline"
+repo = "acme/agent-baseline"
 tag  = "v1.4.0"
 
 [[sources.auto_meld]]
-repo = "github.com/acme/security-rules"
+repo = "acme/security-rules"
 ref  = "9f3a1c2e"
 
 [lobes]
@@ -91,14 +91,18 @@ The rest of this document states the rules normatively. Source identity is
 
 ## Auto-meld (org provisioning)
 
-- `POL-30` `[sources].auto_meld` is a list of tables, each with `repo` (a source
-  identity or repo spec) and an optional pin: `tag`, `ref`, or `follow_branch`.
+- `POL-30` `[sources].auto_meld` is a list of tables, each with `repo` (a repo
+  spec as `meld` accepts: `owner/repo`, a URL, `git@...`, or a path) and an
+  optional pin: `tag`, `ref`, or `follow_branch`.
   `mind` provisions these by melding any that are not already melded. It is a base
   set, not an exclusive one: when `[sources].lock` is off the user may meld
   additional sources beyond it (POL-13); when locked, only `allow`-matching
   sources are permitted (POL-11).
-- `POL-31` Every `auto_meld` entry must satisfy `allow` when `lock` is true; an
-  `auto_meld` source outside the allowlist is an invalid policy (POL-5).
+- `POL-31` Every `auto_meld` entry must satisfy `allow` when `lock` is true,
+  matched on the `host/owner/repo` identity derived from its `repo` spec (the
+  same form POL-11 enforces at meld time, so a shorthand spec validates against a
+  host-qualified pattern). An entry whose identity is outside the allowlist, or
+  whose `repo` does not parse, is an invalid policy (POL-5).
 - `POL-32` Auto-meld provisioning runs during `sync` (and on first use when an
   entry is missing), using each entry's declared pin. It is idempotent: an entry
   already melded at the declared pin is left unchanged. `auto_meld` may point at a

@@ -1095,7 +1095,7 @@ mod tests {
         std::fs::write(
             &policy_path,
             "[sources]\nallow = [\"github.com/acme/*\"]\nlock = true\n\
-             [[sources.auto_meld]]\nrepo = \"github.com/acme/baseline\"\n",
+             [[sources.auto_meld]]\nrepo = \"acme/baseline\"\n",
         )
         .unwrap();
 
@@ -1184,6 +1184,199 @@ mod tests {
             "expected invalid-policy finding: {:?}",
             result.hard
         );
+    }
+
+    /// A malformed (un-parseable) TOML policy is a hard `invalid-policy`
+    /// finding, exactly like an unknown key. Drives `review_policy` through the
+    /// `load_file` Err arm with a parse error rather than a semantic one.
+    /// spec: POL-50
+    #[test]
+    fn policy_review_malformed_toml_is_hard() {
+        let tmp = TmpDir::new();
+        let policy_path = tmp.path().join("policy.toml");
+        std::fs::write(&policy_path, "[sources\nallow = [").unwrap();
+
+        let result = review_policy(&policy_path).unwrap();
+        assert_eq!(
+            result.hard.len(),
+            1,
+            "malformed TOML must be exactly one hard finding: {:?}",
+            result.hard
+        );
+        assert_eq!(result.hard[0].kind, "invalid-policy");
+        assert!(
+            result.advisory.is_empty(),
+            "a parse failure yields no advisories: {:?}",
+            result.advisory
+        );
+    }
+
+    /// An `auto_meld` entry declaring two pins (tag + ref) is rejected at parse
+    /// time (POL-5) and surfaces as a hard `invalid-policy` finding via review.
+    /// spec: POL-50
+    #[test]
+    fn policy_review_two_pins_is_hard() {
+        let tmp = TmpDir::new();
+        let policy_path = tmp.path().join("policy.toml");
+        std::fs::write(
+            &policy_path,
+            "[[sources.auto_meld]]\nrepo = \"github.com/acme/a\"\ntag = \"v1\"\nref = \"abc123\"\n",
+        )
+        .unwrap();
+
+        let result = review_policy(&policy_path).unwrap();
+        assert!(
+            result.hard.iter().any(|f| f.kind == "invalid-policy"),
+            "two-pin auto_meld must be a hard finding: {:?}",
+            result.hard
+        );
+    }
+
+    /// A valid-but-empty policy (every control off, no auto_meld) reviews
+    /// completely clean: zero hard, zero advisory.
+    /// spec: POL-50
+    #[test]
+    fn policy_review_empty_policy_is_clean() {
+        let tmp = TmpDir::new();
+        let policy_path = tmp.path().join("policy.toml");
+        std::fs::write(&policy_path, "").unwrap();
+
+        let result = review_policy(&policy_path).unwrap();
+        assert!(
+            result.hard.is_empty(),
+            "empty policy must have no hard findings: {:?}",
+            result.hard
+        );
+        assert!(
+            result.advisory.is_empty(),
+            "empty policy must have no advisory findings: {:?}",
+            result.advisory
+        );
+    }
+
+    /// `lock = true` with an empty `allow` is a valid policy but an advisory:
+    /// every meld would be blocked. It is NOT a hard finding, so dispatch
+    /// returns Ok.
+    /// spec: POL-50
+    #[test]
+    fn policy_review_lock_without_allow_is_advisory_only() {
+        let tmp = TmpDir::new();
+        let policy_path = tmp.path().join("policy.toml");
+        // lock=true, no allow, no auto_meld: validate() passes, advisory fires.
+        std::fs::write(&policy_path, "[sources]\nlock = true\n").unwrap();
+
+        let result = review_policy(&policy_path).unwrap();
+        assert!(
+            result.hard.is_empty(),
+            "lock-without-allow must not be hard: {:?}",
+            result.hard
+        );
+        assert!(
+            result
+                .advisory
+                .iter()
+                .any(|f| f.kind == "lock-without-allow"),
+            "expected lock-without-allow advisory: {:?}",
+            result.advisory
+        );
+        // An advisory-only result is not a failure: dispatch returns Ok.
+        dispatch_policy(&policy_path)
+            .expect("advisory-only policy must dispatch Ok (advisories never fail)");
+    }
+
+    /// An `auto_meld` entry present with `pinned = false` and `lock = false`
+    /// floats freely: an advisory (`unpinned-auto-meld`), not a hard finding.
+    /// The policy is valid (no invariant applies when neither flag is set).
+    /// spec: POL-50
+    #[test]
+    fn policy_review_unpinned_auto_meld_is_advisory_only() {
+        let tmp = TmpDir::new();
+        let policy_path = tmp.path().join("policy.toml");
+        std::fs::write(
+            &policy_path,
+            "[[sources.auto_meld]]\nrepo = \"github.com/acme/baseline\"\n",
+        )
+        .unwrap();
+
+        let result = review_policy(&policy_path).unwrap();
+        assert!(
+            result.hard.is_empty(),
+            "unpinned floating auto_meld must not be hard: {:?}",
+            result.hard
+        );
+        assert!(
+            result
+                .advisory
+                .iter()
+                .any(|f| f.kind == "unpinned-auto-meld"),
+            "expected unpinned-auto-meld advisory: {:?}",
+            result.advisory
+        );
+        dispatch_policy(&policy_path).expect("advisory-only policy must dispatch Ok");
+    }
+
+    /// `dispatch_policy` contract, success arm: a valid policy returns Ok(())
+    /// and does not raise ReviewFailed. Drives the real dispatch path that the
+    /// CLI routes `review --policy` through.
+    /// spec: POL-50
+    #[test]
+    fn dispatch_policy_valid_returns_ok() {
+        let tmp = TmpDir::new();
+        let policy_path = tmp.path().join("policy.toml");
+        std::fs::write(
+            &policy_path,
+            "[sources]\nallow = [\"github.com/acme/*\"]\nlock = true\n\
+             [[sources.auto_meld]]\nrepo = \"acme/baseline\"\n",
+        )
+        .unwrap();
+
+        assert!(
+            dispatch_policy(&policy_path).is_ok(),
+            "a valid policy must dispatch Ok with no error"
+        );
+    }
+
+    /// `dispatch_policy` contract, failure arm: a policy with a hard finding
+    /// returns `Err(ReviewFailed { hard })` with the hard count, which is what
+    /// drives the non-zero process exit. Here the file does not exist, so
+    /// load_file errors -> one hard finding.
+    /// spec: POL-50
+    #[test]
+    fn dispatch_policy_hard_returns_review_failed() {
+        let tmp = TmpDir::new();
+        let policy_path = tmp.path().join("missing-policy.toml");
+        // Deliberately do not create the file: load_file returns an io error,
+        // which review_policy maps to a single hard invalid-policy finding.
+
+        match dispatch_policy(&policy_path) {
+            Err(MindError::ReviewFailed { hard }) => {
+                assert_eq!(hard, 1, "one hard finding => ReviewFailed.hard == 1");
+            }
+            other => panic!("expected Err(ReviewFailed), got {other:?}"),
+        }
+    }
+
+    /// `dispatch_policy` failure arm with a semantic (validate) hard error:
+    /// pinned=true + unpinned auto_meld (POL-21) makes load_file Err, dispatch
+    /// returns ReviewFailed. Confirms `--policy` actually runs validate(), not
+    /// just a parse. spec: POL-50
+    #[test]
+    fn dispatch_policy_validate_failure_returns_review_failed() {
+        let tmp = TmpDir::new();
+        let policy_path = tmp.path().join("policy.toml");
+        std::fs::write(
+            &policy_path,
+            "[sources]\npinned = true\n\
+             [[sources.auto_meld]]\nrepo = \"github.com/acme/baseline\"\n",
+        )
+        .unwrap();
+
+        match dispatch_policy(&policy_path) {
+            Err(MindError::ReviewFailed { hard }) => {
+                assert_eq!(hard, 1, "the POL-21 invariant is one hard finding");
+            }
+            other => panic!("expected Err(ReviewFailed) from validate failure, got {other:?}"),
+        }
     }
 
     /// Assert no `review-*` scratch dir survives under MIND_HOME/.tmp.

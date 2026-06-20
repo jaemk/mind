@@ -4326,3 +4326,687 @@ fn meld_pin_tag_uses_pinned_mindfile_for_nested_discovery_not_default_branch() {
         sources.stdout
     );
 }
+
+// --- managed policy enforcement (POL-*) ------------------------------------
+//
+// The policy is injected via $MIND_POLICY_FILE, which `Policy::load` honors only
+// when no system policy file exists at the fixed per-OS path (POL-2). The test
+// environment has no such system file, so the env var is authoritative here.
+// Non-policy tests above never set MIND_POLICY_FILE, so they stay unmanaged
+// (POL-4 inert). A local path-melded source's identity is `local/<base>/<name>`
+// (see source.rs make_source / Sandbox::base_name), where <base> is the dynamic
+// temp-dir name; the allow patterns below use `local/*/<name>` so the single
+// segment wildcard matches that base deterministically without hardcoding it.
+
+/// Write a policy TOML to the sandbox base and return its absolute path string,
+/// for use as the `MIND_POLICY_FILE` env value.
+fn write_policy(sb: &Sandbox, body: &str) -> String {
+    let path = sb.base.join("policy.toml");
+    write(&path, body);
+    path.to_string_lossy().into_owned()
+}
+
+/// Count the melded sources by reading sources.json (0 when the file is absent).
+fn source_count(sb: &Sandbox) -> usize {
+    let path = sb.mind_home.join("sources.json");
+    let Ok(json) = std::fs::read_to_string(&path) else {
+        return 0;
+    };
+    json.matches("\"url\"").count()
+}
+
+#[test]
+fn meld_refused_when_not_in_allow_and_locked() {
+    // spec: POL-11
+    let sb = Sandbox::named("agents");
+    let spec = sb.source_spec();
+    // allow lists a different repo name; lock enforces it.
+    let policy = write_policy(
+        &sb,
+        "[sources]\nlock = true\nallow = [\"local/*/other-repo\"]\n",
+    );
+    let r = sb.mind_env(&["meld", &spec], &[("MIND_POLICY_FILE", policy.as_str())]);
+    assert!(
+        !r.success,
+        "locked non-allowed meld must fail: {}",
+        r.stdout
+    );
+    assert!(
+        r.stderr.contains("not permitted") || r.stderr.contains("not permitted by the managed"),
+        "error should mention the source is not permitted: {}",
+        r.stderr
+    );
+    // Nothing registered and no clone left on disk for the source. The source's
+    // clone dir is sources/local/<base>/agents; the refusal removes it.
+    assert_eq!(source_count(&sb), 0, "registry must be unchanged");
+    let clone_dir = sb
+        .mind_home
+        .join("sources")
+        .join("local")
+        .join(sb.base_name())
+        .join("agents");
+    assert!(
+        !clone_dir.exists(),
+        "no clone should be left at {}",
+        clone_dir.display()
+    );
+}
+
+#[test]
+fn meld_allowed_when_not_in_allow_but_unlocked() {
+    // spec: POL-13
+    let sb = Sandbox::named("agents");
+    let spec = sb.source_spec();
+    // lock is off, so allow is advisory: a non-match warns but proceeds.
+    let policy = write_policy(
+        &sb,
+        "[sources]\nlock = false\nallow = [\"local/*/other-repo\"]\n",
+    );
+    let r = sb.mind_env(&["meld", &spec], &[("MIND_POLICY_FILE", policy.as_str())]);
+    assert!(
+        r.success,
+        "unlocked non-allowed meld must succeed: {}",
+        r.stderr
+    );
+    assert!(
+        r.stderr.contains("advisory") || r.stderr.contains("not in the managed policy"),
+        "a warning should be printed: {}",
+        r.stderr
+    );
+    assert_eq!(source_count(&sb), 1, "source should be registered");
+}
+
+#[test]
+fn policy_is_authoritative_over_explicit_user_meld() {
+    // spec: POL-3
+    // The user explicitly asks to meld this exact source, but a locked policy
+    // that does not allow it refuses regardless of user intent.
+    let sb = Sandbox::named("agents");
+    let spec = sb.source_spec();
+    let policy = write_policy(&sb, "[sources]\nlock = true\nallow = []\n");
+    let r = sb.mind_env(&["meld", &spec], &[("MIND_POLICY_FILE", policy.as_str())]);
+    assert!(
+        !r.success,
+        "policy must override the user's explicit meld request: {}",
+        r.stdout
+    );
+    assert!(
+        r.stderr.contains("not permitted"),
+        "refusal should be explained: {}",
+        r.stderr
+    );
+    assert_eq!(source_count(&sb), 0, "registry must be unchanged");
+}
+
+#[test]
+fn meld_pinned_policy_refuses_floating_branch_and_allows_tag() {
+    // spec: POL-20
+    let (sb, _sha_v1, _sha_v2) = make_pinnable_repo("pintest-policy");
+    let spec = sb.source_spec();
+    // pinned requires a tag/ref. allow matches this repo so only the pin gates.
+    let policy = write_policy(
+        &sb,
+        "[sources]\npinned = true\nlock = true\nallow = [\"local/*/pintest-policy\"]\n",
+    );
+
+    // No pin flag => default branch => refused.
+    let floating = sb.mind_env(&["meld", &spec], &[("MIND_POLICY_FILE", policy.as_str())]);
+    assert!(
+        !floating.success,
+        "pinned policy must refuse a default-branch meld: {}",
+        floating.stdout
+    );
+    assert!(
+        floating.stderr.contains("must be pinned"),
+        "refusal should mention pinning: {}",
+        floating.stderr
+    );
+    assert_eq!(source_count(&sb), 0, "nothing registered on refusal");
+
+    // A tag pin satisfies the policy.
+    let tagged = sb.mind_env(
+        &["meld", &spec, "--pin-tag", "v1.0"],
+        &[("MIND_POLICY_FILE", policy.as_str())],
+    );
+    assert!(
+        tagged.success,
+        "pinned policy must accept a --pin-tag meld: {}",
+        tagged.stderr
+    );
+    assert_eq!(source_count(&sb), 1, "tagged source should be registered");
+}
+
+#[test]
+fn learn_skips_disallowed_source_when_locked() {
+    // spec: POL-12
+    // Meld under no policy, then apply a locked policy that no longer allows the
+    // source: learn must skip it with a notice and not error.
+    let sb = melded(); // melds + learns nothing extra; source is registered
+    // Confirm the source is present and not yet learned beyond `review`.
+    let policy = write_policy(
+        &sb,
+        "[sources]\nlock = true\nallow = [\"local/*/never-match\"]\n",
+    );
+    let r = sb.mind_env(
+        &["learn", "agent:dev"],
+        &[("MIND_POLICY_FILE", policy.as_str())],
+    );
+    assert!(
+        r.success,
+        "learn must not error when skipping disallowed sources: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stdout.contains("skipping") && r.stdout.contains("not permitted"),
+        "learn should report the skipped source: {}",
+        r.stdout
+    );
+    // The item was not installed.
+    let recall = sb.mind_env(&["recall"], &[("MIND_POLICY_FILE", policy.as_str())]);
+    assert!(
+        !recall.stdout.contains("agent:dev"),
+        "the disallowed item must not be installed: {}",
+        recall.stdout
+    );
+}
+
+#[test]
+fn sync_skips_disallowed_source_when_locked() {
+    // spec: POL-12
+    let sb = melded();
+    let policy = write_policy(
+        &sb,
+        "[sources]\nlock = true\nallow = [\"local/*/never-match\"]\n",
+    );
+    let r = sb.mind_env(&["sync"], &[("MIND_POLICY_FILE", policy.as_str())]);
+    assert!(
+        r.success,
+        "sync must not error on a skipped source: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stdout.contains("skipping") && r.stdout.contains("not permitted"),
+        "sync should report the skipped source: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn sync_provisions_auto_meld_and_is_idempotent() {
+    // spec: POL-32
+    // The policy declares an auto_meld entry (pinned to a tag). `sync` provisions
+    // it: the source appears in the registry. A second sync is a no-op (no new
+    // source, no error).
+    let (sb, _v1, _v2) = make_pinnable_repo("automeld-src");
+    let spec = sb.source_spec();
+    // lock/pinned off so the entry validates without an allow/pin match check on
+    // the path spec; the entry itself carries a tag pin.
+    let body = format!(
+        "[[sources.auto_meld]]\nrepo = \"{spec}\"\ntag = \"v1.0\"\n",
+        spec = spec.replace('\\', "\\\\")
+    );
+    let policy = write_policy(&sb, &body);
+
+    assert_eq!(source_count(&sb), 0, "registry starts empty");
+    let r = sb.mind_env(&["sync"], &[("MIND_POLICY_FILE", policy.as_str())]);
+    assert!(
+        r.success,
+        "auto-meld sync should succeed: {} {}",
+        r.stdout, r.stderr
+    );
+    assert_eq!(
+        source_count(&sb),
+        1,
+        "auto_meld entry should be provisioned into the registry: {}",
+        r.stdout
+    );
+
+    // Idempotent: a second sync provisions nothing new and still succeeds.
+    let r2 = sb.mind_env(&["sync"], &[("MIND_POLICY_FILE", policy.as_str())]);
+    assert!(
+        r2.success,
+        "second sync should succeed: {} {}",
+        r2.stdout, r2.stderr
+    );
+    assert_eq!(
+        source_count(&sb),
+        1,
+        "auto-meld provisioning must be idempotent: {}",
+        r2.stdout
+    );
+}
+
+#[test]
+fn config_lobes_add_refused_when_lobes_locked() {
+    // spec: POL-40
+    let sb = Sandbox::named("agents");
+    let policy = write_policy(&sb, "[lobes]\nlock = true\ntargets = [\"~/.claude\"]\n");
+
+    // Snapshot the lobe list before the refused add.
+    let before = sb.mind_env(
+        &["config", "lobes", "list"],
+        &[("MIND_POLICY_FILE", policy.as_str())],
+    );
+    assert!(before.success, "list before: {}", before.stderr);
+
+    let r = sb.mind_env(
+        &["config", "lobes", "add", "/tmp/some-home"],
+        &[("MIND_POLICY_FILE", policy.as_str())],
+    );
+    assert!(!r.success, "locked lobes add must be refused: {}", r.stdout);
+    assert!(
+        r.stderr.contains("lock") || r.stderr.contains("refused") || r.stderr.contains("pinned"),
+        "refusal should be explained: {}",
+        r.stderr
+    );
+
+    // The lobe list is unchanged: the path was not added.
+    let after = sb.mind_env(
+        &["config", "lobes", "list"],
+        &[("MIND_POLICY_FILE", policy.as_str())],
+    );
+    assert!(
+        !after.stdout.contains("/tmp/some-home"),
+        "the refused lobe must not appear: {}",
+        after.stdout
+    );
+}
+
+#[test]
+fn evolve_skips_disallowed_source_when_locked() {
+    // spec: POL-12
+    // evolve operates only on sources whose identity matches allow. Meld + learn
+    // under no policy, drift the source upstream so an upgrade is pending, then
+    // run evolve under a locked policy that no longer allows the source: the
+    // pending upgrade is reported as skipped (not applied) and evolve exits zero.
+    let sb = melded();
+    let learn = sb.mind(&["learn", "skill:review"]);
+    assert!(
+        learn.success,
+        "learn failed: {} {}",
+        learn.stdout, learn.stderr
+    );
+    let before = sb.mind(&["recall", "skill:review"]).stdout;
+
+    // Drift the source and refresh the clone (unmanaged sync), so the catalog now
+    // differs from the installed hash and evolve would otherwise upgrade it.
+    sb.edit_source();
+    let synced = sb.mind(&["sync"]);
+    assert!(
+        synced.success,
+        "sync failed: {} {}",
+        synced.stdout, synced.stderr
+    );
+
+    // Now a locked policy that does not allow the source. evolve must skip it.
+    let policy = write_policy(
+        &sb,
+        "[sources]\nlock = true\nallow = [\"local/*/never-match\"]\n",
+    );
+    let r = sb.mind_env(
+        &["evolve", "--yes"],
+        &[("MIND_POLICY_FILE", policy.as_str())],
+    );
+    assert!(
+        r.success,
+        "evolve must not error when skipping disallowed sources: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stdout.contains("skipping") && r.stdout.contains("not permitted"),
+        "evolve should report the skipped source: {}",
+        r.stdout
+    );
+    assert!(
+        !r.stdout.contains("evolved"),
+        "the disallowed item must not be evolved: {}",
+        r.stdout
+    );
+
+    // The installed item is unchanged: its recorded commit/hash did not advance.
+    let after = sb
+        .mind_env(
+            &["recall", "skill:review"],
+            &[("MIND_POLICY_FILE", policy.as_str())],
+        )
+        .stdout;
+    assert_eq!(
+        before, after,
+        "the skipped item must stay at its old version: before={before} after={after}"
+    );
+}
+
+#[test]
+fn evolve_applies_allowed_source_while_skipping_disallowed() {
+    // spec: POL-12
+    // The "rest proceed" half of POL-12: a locked allowlist that matches the
+    // source lets evolve apply the pending upgrade (the same drift that is skipped
+    // in the test above is applied here because the source matches allow).
+    let sb = melded();
+    let learn = sb.mind(&["learn", "skill:review"]);
+    assert!(
+        learn.success,
+        "learn failed: {} {}",
+        learn.stdout, learn.stderr
+    );
+
+    sb.edit_source();
+    let synced = sb.mind(&["sync"]);
+    assert!(
+        synced.success,
+        "sync failed: {} {}",
+        synced.stdout, synced.stderr
+    );
+
+    // The allow pattern matches this sandbox's local identity, so the lock does
+    // not exclude it; the pending upgrade applies.
+    let policy = write_policy(
+        &sb,
+        "[sources]\nlock = true\nallow = [\"local/*/agents\"]\n",
+    );
+    let r = sb.mind_env(
+        &["evolve", "--yes"],
+        &[("MIND_POLICY_FILE", policy.as_str())],
+    );
+    assert!(r.success, "evolve failed: {} {}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("evolved skill:review"),
+        "an allowed source must evolve: {}",
+        r.stdout
+    );
+    assert!(
+        !r.stdout.contains("skipping"),
+        "an allowed source must not be skipped: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn sync_provisions_auto_meld_under_lock_and_is_idempotent() {
+    // spec: POL-32
+    // The locked + pinned + allowed round-trip: a locked policy whose auto_meld
+    // entry is pinned to a tag and satisfies allow (POL-31) is provisioned by
+    // sync, and re-provisioning is idempotent. This exercises the full enforced
+    // path (the meld inside provisioning runs under the same locked policy), not
+    // just the unlocked provisioning above.
+    let (sb, _v1, _v2) = make_pinnable_repo("automeld-locked");
+    let spec = sb.source_spec();
+    let escaped = spec.replace('\\', "\\\\");
+    // allow must satisfy BOTH allowlist checks for this entry: POL-31 policy
+    // validation matches the raw `repo` string (here the local fixture path), and
+    // runtime meld enforcement matches the parsed identity `local/<base>/<name>`.
+    // For a real `host/owner/repo` spec these coincide; for a local-path fixture
+    // they differ in segment shape, so the allow list carries one pattern for each
+    // form: `<base>/*` for the raw path and `local/*/automeld-locked` for the
+    // identity. Both use a single-segment `*`, never crossing a `/`.
+    let raw_pat = sb.base.join("*").to_string_lossy().replace('\\', "\\\\");
+    let body = format!(
+        "[sources]\nlock = true\npinned = true\nallow = [\"{raw_pat}\", \"local/*/automeld-locked\"]\n\n[[sources.auto_meld]]\nrepo = \"{escaped}\"\ntag = \"v1.0\"\n"
+    );
+    let policy = write_policy(&sb, &body);
+
+    assert_eq!(source_count(&sb), 0, "registry starts empty");
+    let r = sb.mind_env(&["sync"], &[("MIND_POLICY_FILE", policy.as_str())]);
+    assert!(
+        r.success,
+        "locked+pinned auto-meld sync should succeed: {} {}",
+        r.stdout, r.stderr
+    );
+    assert_eq!(
+        source_count(&sb),
+        1,
+        "the allowed+pinned auto_meld entry should be provisioned under lock: {}",
+        r.stdout
+    );
+
+    // The recorded pin is the declared tag, not a floating branch.
+    let pin_json = read_source_pin_json(&sb);
+    assert!(
+        pin_json.contains("\"tag\"") && pin_json.contains("v1.0"),
+        "auto_meld entry should be provisioned at its declared tag pin: {pin_json}"
+    );
+
+    // Idempotent under the same locked policy: no second provisioning, no error.
+    let r2 = sb.mind_env(&["sync"], &[("MIND_POLICY_FILE", policy.as_str())]);
+    assert!(
+        r2.success,
+        "second locked sync should succeed: {} {}",
+        r2.stdout, r2.stderr
+    );
+    assert_eq!(
+        source_count(&sb),
+        1,
+        "locked auto-meld provisioning must be idempotent: {}",
+        r2.stdout
+    );
+}
+
+#[test]
+fn auto_meld_entry_already_melded_is_not_remelded() {
+    // spec: POL-32
+    // Idempotency at the entry level: a source already present in the registry
+    // (here melded by the user before any policy applied) is left unchanged when
+    // an auto_meld entry names the same identity. No duplicate, no error.
+    let (sb, _v1, _v2) = make_pinnable_repo("automeld-pre");
+    let spec = sb.source_spec();
+
+    // User melds it first (unmanaged), pinned to the tag.
+    let pre = sb.mind(&["meld", &spec, "--pin-tag", "v1.0"]);
+    assert!(
+        pre.success,
+        "pre-meld failed: {} {}",
+        pre.stdout, pre.stderr
+    );
+    assert_eq!(source_count(&sb), 1, "source melded once");
+
+    // Now a policy whose auto_meld names the same source.
+    let escaped = spec.replace('\\', "\\\\");
+    let body = format!("[[sources.auto_meld]]\nrepo = \"{escaped}\"\ntag = \"v1.0\"\n");
+    let policy = write_policy(&sb, &body);
+    let r = sb.mind_env(&["sync"], &[("MIND_POLICY_FILE", policy.as_str())]);
+    assert!(r.success, "sync failed: {} {}", r.stdout, r.stderr);
+    assert_eq!(
+        source_count(&sb),
+        1,
+        "an already-melded auto_meld entry must not be re-melded: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn meld_pinned_policy_accepts_source_directive_tag() {
+    // spec: POL-20
+    // The pin may come from the source's own mind.toml `[source]` directive
+    // (DSC-41), not just the --pin-tag flag. A directive that resolves to a tag
+    // satisfies pinned = true and the meld is accepted.
+    let (sb, sha_v1, _v2) = make_pinnable_repo("pindir-tag");
+    sb.write_and_commit("mind.toml", "[source]\npin-tag = \"v1.0\"\n");
+    let spec = sb.source_spec();
+    let policy = write_policy(
+        &sb,
+        "[sources]\npinned = true\nlock = true\nallow = [\"local/*/pindir-tag\"]\n",
+    );
+
+    // No consumer pin flag: the [source] directive supplies the tag pin.
+    let r = sb.mind_env(&["meld", &spec], &[("MIND_POLICY_FILE", policy.as_str())]);
+    assert!(
+        r.success,
+        "a [source] tag directive must satisfy a pinned policy: {} {}",
+        r.stdout, r.stderr
+    );
+    assert_eq!(
+        source_count(&sb),
+        1,
+        "the directive-pinned source should register"
+    );
+    // The landed pin is the directive's tag (sha_v1), not the floating main tip.
+    assert_eq!(
+        read_source_commit(&sb),
+        sha_v1,
+        "the directive tag pin should land on the tagged commit"
+    );
+}
+
+#[test]
+fn meld_pinned_policy_refuses_source_directive_floating_branch() {
+    // spec: POL-20
+    // The negative of the directive case: a `[source]` directive that resolves to
+    // a floating branch (follow-branch) does NOT satisfy pinned = true and is
+    // refused, leaving nothing registered.
+    let (sb, _v1, _v2) = make_pinnable_repo("pindir-branch");
+    sb.write_and_commit("mind.toml", "[source]\nfollow-branch = \"stable\"\n");
+    let spec = sb.source_spec();
+    let policy = write_policy(
+        &sb,
+        "[sources]\npinned = true\nlock = true\nallow = [\"local/*/pindir-branch\"]\n",
+    );
+
+    let r = sb.mind_env(&["meld", &spec], &[("MIND_POLICY_FILE", policy.as_str())]);
+    assert!(
+        !r.success,
+        "a [source] follow-branch directive must be refused under a pinned policy: {}",
+        r.stdout
+    );
+    assert!(
+        r.stderr.contains("must be pinned"),
+        "refusal should mention pinning: {}",
+        r.stderr
+    );
+    assert_eq!(
+        source_count(&sb),
+        0,
+        "nothing registered on a floating refusal"
+    );
+}
+
+#[test]
+fn config_lobes_add_allowed_when_lobes_not_locked() {
+    // spec: POL-40
+    // The refusal is specific to the lobe lock: with [lobes].lock = false (and a
+    // policy otherwise present), `config lobes add` still works. The lock is the
+    // only thing that pins the agent homes.
+    let sb = Sandbox::named("agents");
+    let policy = write_policy(&sb, "[lobes]\nlock = false\ntargets = [\"~/.claude\"]\n");
+    let lobe = sb.base.join("extra-home");
+    let lobe_str = lobe.to_string_lossy().into_owned();
+
+    let r = sb.mind_env(
+        &["config", "lobes", "add", &lobe_str],
+        &[("MIND_POLICY_FILE", policy.as_str())],
+    );
+    assert!(
+        r.success,
+        "an unlocked lobes add must succeed: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stdout.contains("added lobe"),
+        "the add should be reported: {}",
+        r.stdout
+    );
+
+    // The lobe is now listed, confirming the write took effect.
+    let after = sb.mind_env(
+        &["config", "lobes", "list"],
+        &[("MIND_POLICY_FILE", policy.as_str())],
+    );
+    assert!(
+        after.stdout.contains(&lobe_str),
+        "the added lobe must appear in the list: {}",
+        after.stdout
+    );
+}
+
+#[test]
+fn config_lobes_add_allowed_with_no_lobes_section() {
+    // spec: POL-40
+    // A policy that controls only sources (no [lobes] section at all) leaves the
+    // lobe lock unset, so `config lobes add` is unaffected.
+    let sb = Sandbox::named("agents");
+    let policy = write_policy(
+        &sb,
+        "[sources]\nlock = true\nallow = [\"local/*/agents\"]\n",
+    );
+    let lobe = sb.base.join("home-no-lobes-section");
+    let lobe_str = lobe.to_string_lossy().into_owned();
+
+    let r = sb.mind_env(
+        &["config", "lobes", "add", &lobe_str],
+        &[("MIND_POLICY_FILE", policy.as_str())],
+    );
+    assert!(
+        r.success,
+        "lobes add must work when the policy has no [lobes] lock: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(r.stdout.contains("added lobe"), "{}", r.stdout);
+}
+
+#[test]
+fn meld_refused_when_not_allowed_leaves_no_clone_and_no_registry() {
+    // spec: POL-11
+    // Reinforce the "nothing cloned or registered" half: after a refused meld the
+    // clone dir is absent AND sources.json records nothing (no partial registry),
+    // and no link leaked into the hermetic claude_home.
+    let sb = Sandbox::named("agents");
+    let spec = sb.source_spec();
+    let policy = write_policy(
+        &sb,
+        "[sources]\nlock = true\nallow = [\"local/*/other-repo\"]\n",
+    );
+    let r = sb.mind_env(&["meld", &spec], &[("MIND_POLICY_FILE", policy.as_str())]);
+    assert!(!r.success, "refused meld must fail: {}", r.stdout);
+
+    assert_eq!(source_count(&sb), 0, "registry must record nothing");
+
+    let clone_dir = sb
+        .mind_home
+        .join("sources")
+        .join("local")
+        .join(sb.base_name())
+        .join("agents");
+    assert!(
+        !clone_dir.exists(),
+        "no clone should survive a refusal at {}",
+        clone_dir.display()
+    );
+    let leaked = sb.claude_home.join("agents/dev.md");
+    assert!(
+        std::fs::symlink_metadata(&leaked).is_err(),
+        "no item should be installed on a refused meld"
+    );
+}
+
+#[test]
+fn meld_unlocked_advisory_warning_text() {
+    // spec: POL-13
+    // The advisory warning under lock=false names the allowlist and explains it is
+    // not enforced because the lock is off.
+    let sb = Sandbox::named("agents");
+    let spec = sb.source_spec();
+    let policy = write_policy(
+        &sb,
+        "[sources]\nlock = false\nallow = [\"local/*/other-repo\"]\n",
+    );
+    let r = sb.mind_env(&["meld", &spec], &[("MIND_POLICY_FILE", policy.as_str())]);
+    assert!(
+        r.success,
+        "advisory meld must succeed: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr.contains("allowlist") && r.stderr.contains("advisory"),
+        "warning should name the allowlist and mark it advisory: {}",
+        r.stderr
+    );
+    assert!(
+        r.stderr.contains("lock is false"),
+        "warning should explain the lock is off: {}",
+        r.stderr
+    );
+    assert_eq!(
+        source_count(&sb),
+        1,
+        "the advisory source is still registered"
+    );
+}

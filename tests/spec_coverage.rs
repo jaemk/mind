@@ -32,11 +32,11 @@ const ALLOWLIST: &[&str] = &[
     //   review verb: now implemented; IDs removed from allowlist and cited in tests.
     //   self-update verb (in-place binary upgrade via the self_update crate)
     "CLI-140", "CLI-141", "CLI-142", "CLI-143",
-    //   enterprise managed policy (allowlist, require-pinned, auto-meld, lobe
-    //   lock, `mind review --policy`; see spec/policy.md). Move each to a citing
-    //   test when built.
-    "POL-1", "POL-2", "POL-3", "POL-4", "POL-5", "POL-10", "POL-11", "POL-12", "POL-13", "POL-20",
-    "POL-21", "POL-30", "POL-31", "POL-32", "POL-40", "POL-41", "POL-50",
+    //   enterprise managed policy (see spec/policy.md) is fully cited: the core
+    //   (parse/locate/allow_matches/validate) from src/policy.rs, the enforcement
+    //   (lock/pinned refusal, learn/sync/evolve gating, auto-meld provisioning,
+    //   lobe lock) from tests/cli.rs and src/paths.rs, and `mind review --policy`
+    //   from src/review.rs. No POL IDs remain allowlisted.
     //   within-source dependency resolution (a partial `learn` pulls in the
     //   siblings its items reference; see spec/dependencies.md) is fully cited:
     //   the resolution core (DEP-1..23, DEP-31 interaction) from tests in

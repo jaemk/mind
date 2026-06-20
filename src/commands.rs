@@ -14,6 +14,7 @@ use crate::install;
 use crate::manifest::Manifest;
 use crate::mindfile::MindToml;
 use crate::paths::Paths;
+use crate::policy::Policy;
 use crate::resolve::{is_glob, parse_item_ref, resolve, select, select_installed, source_matches};
 use crate::source::{Pin, Registry, parse_spec};
 
@@ -38,6 +39,9 @@ pub fn meld(
     let consumer_pin = resolve_pin_flags(follow_branch, pin_tag, pin_ref)?;
 
     paths.ensure_layout()?;
+    // POL-3: the managed policy is authoritative over user intent. Load it once
+    // (Err = invalid policy, fail closed via `?`; None = unmanaged, inert).
+    let policy = Policy::load()?;
     let mut registry = Registry::load(paths)?;
     let mut visited = HashSet::new();
     let added = meld_recursive(
@@ -49,6 +53,7 @@ pub fn meld(
         consumer_pin,
         true,
         &mut visited,
+        policy.as_ref(),
     )?;
     registry.save(paths)?;
     if added > 1 {
@@ -108,6 +113,7 @@ fn meld_recursive(
     consumer_pin: Option<Pin>,
     top_level: bool,
     visited: &mut HashSet<String>,
+    policy: Option<&Policy>,
 ) -> Result<usize> {
     let mut source = parse_spec(repo)?;
     source.alias = alias;
@@ -166,6 +172,32 @@ fn meld_recursive(
         .transpose()?
         .flatten();
     let effective_pin = consumer_pin.or(directive_pin).unwrap_or(Pin::DefaultBranch);
+
+    // Managed-policy enforcement (POL-3 authoritative). The identity is known and
+    // the effective pin is resolved, but nothing is registered yet and the only
+    // thing on disk is the throwaway default-branch clone (removed on refusal), so
+    // a refusal here leaves nothing behind.
+    if let Some(policy) = policy {
+        let identity = source.name.clone();
+        let allowed = policy.allow_matches(&identity);
+        if policy.lock() && !allowed {
+            // POL-11: locked allowlist refuses a non-matching source outright.
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(MindError::SourceNotAllowed { identity });
+        }
+        if !policy.lock() && !allowed {
+            // POL-13: with lock off, allow is advisory; warn but proceed.
+            eprintln!(
+                "warning: source '{identity}' is not in the managed policy's allowlist (advisory; not enforced because [sources].lock is false)"
+            );
+        }
+        if policy.pinned() && matches!(effective_pin, Pin::DefaultBranch | Pin::FollowBranch(_)) {
+            // POL-20: pinned policy forbids a floating branch (default branch or
+            // --follow-branch); only a tag/ref pin is permitted.
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(MindError::UnpinnedSourceForbidden { identity });
+        }
+    }
 
     // Step 3: if the effective pin is not DefaultBranch, re-clone at that point.
     // A pin that does not resolve in the remote is a `Git` error and must leave
@@ -237,6 +269,7 @@ fn meld_recursive(
                 None,   // no consumer pin for nested sources
                 false,
                 visited,
+                policy,
             )?;
         }
     }
@@ -477,6 +510,8 @@ pub fn learn_preview(paths: &Paths, item_ref: &str) -> Result<LearnPlan> {
 /// `mind learn <item> [--dry-run] [--yes]` — install one item, its
 /// intra-source dependency closure (DEP-30), or many via a glob.
 pub fn learn(paths: &Paths, item_ref: &str, dry_run: bool, yes: bool) -> Result<()> {
+    // POL-3: load the managed policy once (fail closed on Err; None = inert).
+    let policy = Policy::load()?;
     let (registry, items, resolution) = resolve_learn(paths, item_ref)?;
 
     // The full closure to install, dependency-first (DEP-21, DEP-30), excluding
@@ -526,6 +561,19 @@ pub fn learn(paths: &Paths, item_ref: &str, dry_run: bool, yes: bool) -> Result<
     let mut manifest = Manifest::load(paths)?;
     let mut failure = None;
     for target in &closure {
+        // POL-12: with the allowlist locked, skip (and report) any item whose
+        // source identity is no longer allowed; install from the rest.
+        if let Some(policy) = policy.as_ref()
+            && policy.lock()
+            && !policy.allow_matches(&target.source)
+        {
+            println!(
+                "skipping {} from {}: source not permitted by the managed policy's allowlist",
+                target.key(),
+                target.source
+            );
+            continue;
+        }
         let commit = match registry.find(&target.source) {
             Some(s) => s.commit.clone().unwrap_or_default(),
             None => {
@@ -603,7 +651,46 @@ pub fn forget(paths: &Paths, item_ref: &str) -> Result<()> {
 /// upgrades and prompting before applying, exactly like `mind evolve`), so one
 /// command both fetches upstream and applies pending upgrades.
 pub fn sync(paths: &Paths, then_evolve: bool) -> Result<()> {
+    // POL-3: load the managed policy once (fail closed on Err; None = inert).
+    let policy = Policy::load()?;
     let mut registry = Registry::load(paths)?;
+
+    // POL-32: provision the policy's auto-meld base set before syncing. Each entry
+    // not already in the registry is melded at its declared pin; an entry already
+    // present is left unchanged (idempotent). Reuses the meld path, so auto-meld
+    // entries discover nested sources just like a user meld. Entries satisfy
+    // allow/pinned by policy validation (POL-21/POL-31), so they pass the meld
+    // enforcement above.
+    if let Some(policy) = policy.as_ref() {
+        paths.ensure_layout()?;
+        let mut visited = HashSet::new();
+        let mut provisioned = 0usize;
+        for am in policy.auto_meld() {
+            // Idempotency: derive the entry's identity and skip if already melded.
+            // (meld_recursive also skips a same-URL duplicate, but checking here
+            // avoids the clone attempt and the "melding ..." chatter.)
+            if let Ok(spec) = parse_spec(&am.repo)
+                && registry.find(&spec.name).is_some()
+            {
+                continue;
+            }
+            provisioned += meld_recursive(
+                paths,
+                &mut registry,
+                &am.repo,
+                None,
+                vec![],
+                Some(am.pin.clone()),
+                false, // skip (not error) if a same-URL entry is already present
+                &mut visited,
+                Some(policy),
+            )?;
+        }
+        if provisioned > 0 {
+            registry.save(paths)?;
+        }
+    }
+
     if registry.sources.is_empty() {
         println!("no sources melded; run `mind meld <owner/repo>`");
         return Ok(());
@@ -614,6 +701,18 @@ pub fn sync(paths: &Paths, then_evolve: bool) -> Result<()> {
     let total = registry.sources.len();
     let mut failures: Vec<String> = Vec::new();
     for source in &mut registry.sources {
+        // POL-12: with the allowlist locked, do not sync a source whose identity
+        // is no longer allowed; report and skip it (the rest still sync).
+        if let Some(policy) = policy.as_ref()
+            && policy.lock()
+            && !policy.allow_matches(&source.name)
+        {
+            println!(
+                "skipping {}: source not permitted by the managed policy's allowlist",
+                source.name
+            );
+            continue;
+        }
         let dir = source.clone_dir(paths);
         print!("syncing {} ... ", source.name);
         let _ = std::io::stdout().flush();
@@ -668,6 +767,8 @@ pub fn sync(paths: &Paths, then_evolve: bool) -> Result<()> {
 
 /// `mind evolve [--yes] [item]` — report and optionally apply upgrades.
 pub fn evolve(paths: &Paths, yes: bool, item_ref: Option<&str>) -> Result<()> {
+    // POL-3: load the managed policy once (fail closed on Err; None = inert).
+    let policy = Policy::load()?;
     let registry = Registry::load(paths)?;
     let catalog = catalog::scan(paths, &registry)?;
     let manifest = Manifest::load(paths)?;
@@ -676,6 +777,19 @@ pub fn evolve(paths: &Paths, yes: bool, item_ref: Option<&str>) -> Result<()> {
     let mut pending: Vec<Upgrade> = Vec::new();
 
     for installed in manifest.items.values() {
+        // POL-12: with the allowlist locked, do not upgrade from a source whose
+        // identity is no longer allowed; report and skip it.
+        if let Some(policy) = policy.as_ref()
+            && policy.lock()
+            && !policy.allow_matches(&installed.source)
+        {
+            println!(
+                "skipping {} from {}: source not permitted by the managed policy's allowlist",
+                installed.key(),
+                installed.source
+            );
+            continue;
+        }
         if let Some(f) = &filter {
             // Limit to the matching installed item(s): the effective name, plus
             // the kind prefix and source qualifier when the ref gives them. A ref
@@ -1169,6 +1283,13 @@ pub fn config_show(paths: &Paths) -> Result<()> {
 
 /// `mind config lobes add <path>` — add an agent home.
 pub fn lobe_add(paths: &Paths, path: &str) -> Result<()> {
+    // POL-40: a lobe lock pins the effective agent homes; refuse and change
+    // nothing. Load the policy first so the refusal precedes any config write.
+    if let Some(policy) = Policy::load()?
+        && policy.lobes_lock()
+    {
+        return Err(lobes_locked_error("add"));
+    }
     paths.ensure_config()?;
     let mut cfg = Config::load(&paths.mind_home)?;
     if cfg.lobes.iter().any(|h| h == path) {
@@ -1200,6 +1321,13 @@ pub fn lobe_list(paths: &Paths) -> Result<()> {
 
 /// `mind config lobes remove <path>` — drop an agent home.
 pub fn lobe_remove(paths: &Paths, path: &str) -> Result<()> {
+    // POL-40: a lobe lock pins the effective agent homes; refuse and change
+    // nothing.
+    if let Some(policy) = Policy::load()?
+        && policy.lobes_lock()
+    {
+        return Err(lobes_locked_error("remove"));
+    }
     paths.ensure_config()?;
     let mut cfg = Config::load(&paths.mind_home)?;
     let before = cfg.lobes.len();
@@ -1234,6 +1362,15 @@ pub fn man() -> Result<()> {
 }
 
 // --- helpers ---------------------------------------------------------------
+
+/// Build the refusal error for a locked `config lobes <action>` (POL-40). The
+/// effective agent homes are pinned by `[lobes].lock`, so the action changes
+/// nothing.
+fn lobes_locked_error(action: &str) -> MindError {
+    MindError::LobesLocked {
+        action: action.to_string(),
+    }
+}
 
 /// Serialize `value` as pretty JSON to stdout (for the `--json` flags).
 fn print_json<T: Serialize>(value: &T) -> Result<()> {
