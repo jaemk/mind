@@ -46,7 +46,7 @@ and verified.
 | `probe` matches description text, not just name | done | CLI-85 |
 | README quickstart, mental model, troubleshooting/FAQ | planned | [../README.md](../README.md) |
 | Starter source example (plain convention layout) | planned | [../examples/](../examples/) |
-| Interactive TUI: `probe` default, Installed/Available tree, full-parity actions, preview + registry meld | planned | [tui.md](tui.md) |
+| Interactive TUI: `probe` default, Installed/Available tree, full-parity actions, preview + registry meld | done | [tui.md](tui.md) |
 
 ## Documents
 

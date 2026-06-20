@@ -1863,6 +1863,171 @@ fn probe_json_emits_rows() {
     assert!(r.stdout.contains("true"), "{}", r.stdout);
 }
 
+// --- TUI-2 fallback tests ---------------------------------------------------
+//
+// TUI-2: `probe` falls back to the non-interactive catalog listing when
+// `--no-tui` is given, `--json` is given, or stdout is not a TTY (piped or
+// redirected). The `query`, `--kind`, `--source` args apply in both modes.
+//
+// These tests run `mind probe` with stdout piped (non-TTY), which is the same
+// condition the test harness always uses. We verify that:
+//   (a) the plain listing is produced (not raw-mode garbage),
+//   (b) `--no-tui` produces the same listing,
+//   (c) `--json` produces JSON (not raw-mode garbage),
+//   (d) query/--kind/--source args are honoured in fallback mode.
+// TUI-1 (interactive launch with a real TTY) is allowlisted; it cannot be
+// verified headlessly. These tests verify TUI-2 (fallback) and are sufficient
+// to prove the opt-out logic is correct.
+
+#[test]
+fn probe_fallback_on_non_tty_stdout_produces_listing() {
+    // spec: TUI-2
+    // The test harness pipes stdout, so is_terminal() returns false; probe must
+    // fall back to the plain catalog listing rather than entering raw mode.
+    let sb = melded();
+    let r = sb.mind(&["probe"]);
+    assert!(r.success, "probe fallback should succeed: {}", r.stderr);
+    // Listing shows all three kinds.
+    assert!(r.stdout.contains("skill:review"), "listing: {}", r.stdout);
+    assert!(r.stdout.contains("agent:dev"), "listing: {}", r.stdout);
+    assert!(r.stdout.contains("rule:style"), "listing: {}", r.stdout);
+    // No ANSI raw-mode escape sequences (the listing does not use ratatui).
+    assert!(
+        !r.stdout.contains("\x1b[?1049h"),
+        "raw-mode alt-screen escape must not appear in fallback output"
+    );
+}
+
+#[test]
+fn probe_no_tui_flag_produces_listing() {
+    // spec: TUI-2 - `--no-tui` forces the plain listing even on a TTY.
+    let sb = melded();
+    let r = sb.mind(&["probe", "--no-tui"]);
+    assert!(r.success, "probe --no-tui should succeed: {}", r.stderr);
+    assert!(r.stdout.contains("skill:review"), "listing: {}", r.stdout);
+    assert!(r.stdout.contains("agent:dev"), "listing: {}", r.stdout);
+}
+
+#[test]
+fn probe_json_flag_produces_json_not_tui() {
+    // spec: TUI-2 - `--json` forces JSON output; must not enter raw mode.
+    let sb = melded();
+    let r = sb.mind(&["probe", "--json"]);
+    assert!(r.success, "probe --json should succeed: {}", r.stderr);
+    assert!(
+        r.stdout.trim_start().starts_with('['),
+        "probe --json must produce a JSON array: {}",
+        r.stdout
+    );
+    assert!(
+        !r.stdout.contains("\x1b[?1049h"),
+        "probe --json must not enter alt-screen"
+    );
+}
+
+#[test]
+fn probe_fallback_with_query_filters_listing() {
+    // spec: TUI-2 - query arg applies in fallback (non-TUI) mode.
+    let sb = melded();
+    let r = sb.mind(&["probe", "--no-tui", "review"]);
+    assert!(r.success, "probe --no-tui query should succeed: {}", r.stderr);
+    assert!(r.stdout.contains("skill:review"), "listing: {}", r.stdout);
+    assert!(!r.stdout.contains("agent:dev"), "filtered: {}", r.stdout);
+}
+
+#[test]
+fn probe_fallback_with_kind_filter_narrows_listing() {
+    // spec: TUI-2 - --kind arg applies in fallback mode.
+    let sb = melded();
+    let r = sb.mind(&["probe", "--no-tui", "--kind", "skill"]);
+    assert!(r.success, "probe --no-tui --kind should succeed: {}", r.stderr);
+    assert!(r.stdout.contains("skill:review"), "listing: {}", r.stdout);
+    assert!(!r.stdout.contains("agent:dev"), "filtered: {}", r.stdout);
+    assert!(!r.stdout.contains("rule:style"), "filtered: {}", r.stdout);
+}
+
+#[test]
+fn probe_fallback_seed_query_with_no_tui() {
+    // spec: TUI-2 - query args are seed state in both modes; with --no-tui the
+    // query filters the listing (same as plain `probe <query>`).
+    let sb = melded();
+    let r1 = sb.mind(&["probe", "review"]);
+    let r2 = sb.mind(&["probe", "--no-tui", "review"]);
+    assert!(r1.success);
+    assert!(r2.success);
+    // Both produce the same result (same filter applied).
+    assert_eq!(r1.stdout, r2.stdout, "--no-tui must not change filter behavior");
+}
+
+#[test]
+fn probe_fallback_with_source_filter_narrows_listing() {
+    // spec: TUI-2 - the --source seed arg filters the listing in fallback mode,
+    // matching plain `probe --source` (CLI-83). Only query and --kind were
+    // previously exercised in fallback; this closes the --source axis.
+    let sb = melded();
+    let matched = sb.mind(&["probe", "--no-tui", "--source", "agents"]);
+    assert!(matched.success, "probe --no-tui --source should succeed: {}", matched.stderr);
+    assert!(matched.stdout.contains("skill:review"), "matching source listing: {}", matched.stdout);
+
+    let unmatched = sb.mind(&["probe", "--no-tui", "--source", "nonesuch"]);
+    assert!(unmatched.success, "probe --no-tui --source nonesuch should succeed: {}", unmatched.stderr);
+    assert!(
+        !unmatched.stdout.contains("skill:review"),
+        "a non-matching --source must exclude items: {}",
+        unmatched.stdout
+    );
+}
+
+#[test]
+fn probe_non_tty_returns_promptly_and_does_not_hang() {
+    // spec: TUI-2 - a non-TTY `mind probe` (the harness pipes stdout) must fall
+    // back to the listing and EXIT, never entering the interactive event loop
+    // that blocks on terminal input. Regression guard: if the fallback branch
+    // broke and the TUI launched here, the process would block on event::read
+    // and this bounded wait would time out.
+    use std::time::{Duration, Instant};
+
+    let sb = melded();
+    // Spawn directly so we can bound the wall-clock time. stdin is the inherited
+    // null/closed handle of the test process (not a TTY), matching the non-TTY
+    // condition; we do NOT feed any input, so a real TUI would hang.
+    let mut child = Command::new(env!("CARGO_BIN_EXE_mind"))
+        .args(["probe"])
+        .env("MIND_HOME", &sb.mind_home)
+        .env("CLAUDE_HOME", &sb.claude_home)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn mind probe");
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match child.try_wait().expect("try_wait") {
+            Some(status) => {
+                assert!(status.success(), "non-TTY probe should exit successfully");
+                break;
+            }
+            None => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("non-TTY `mind probe` did not exit within 10s - it likely entered the TUI event loop instead of falling back");
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        }
+    }
+
+    let out = child.wait_with_output().expect("collect output");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("skill:review"), "fallback listing expected: {stdout}");
+    assert!(
+        !stdout.contains("\x1b[?1049h"),
+        "non-TTY probe must not enter the alt-screen"
+    );
+}
+
 #[test]
 fn introspect_json_emits_report() {
     // spec: CLI-92
@@ -2661,7 +2826,7 @@ fn clone_dir_of(sb: &Sandbox, repo: &str) -> PathBuf {
 
 #[test]
 fn meld_pin_ref_unresolvable_is_git_error_and_registers_nothing() {
-    // spec: CLI-18 — a pin that does not resolve in the remote is a `Git` error
+    // spec: CLI-18 - a pin that does not resolve in the remote is a `Git` error
     // and nothing is registered. The two-step clone re-clones at the resolved
     // pin after reading mind.toml; a failure of that second clone must not leave
     // a registered source nor a stray clone dir on disk.
@@ -2710,7 +2875,7 @@ fn meld_pin_ref_unresolvable_is_git_error_and_registers_nothing() {
 
 #[test]
 fn meld_pin_tag_unresolvable_is_git_error_and_registers_nothing() {
-    // spec: CLI-18 — same as above for a tag that does not exist in the remote.
+    // spec: CLI-18 - same as above for a tag that does not exist in the remote.
     // Here the re-clone uses `clone --branch <tag>` which fails outright, so the
     // staging clone dir never materializes.
     let (sb, _v1, _v2) = make_pinnable_repo("pintest-bad-tag");
@@ -2744,7 +2909,7 @@ fn meld_pin_tag_unresolvable_is_git_error_and_registers_nothing() {
 
 #[test]
 fn sync_reclones_when_clone_dir_is_missing() {
-    // spec: CLI-55 — sync resolves each source against its recorded pin. If the
+    // spec: CLI-55 - sync resolves each source against its recorded pin. If the
     // clone dir has been removed out from under the registry, sync must recover
     // by re-cloning at the recorded pin rather than erroring, landing back on the
     // pinned commit.
@@ -2779,7 +2944,7 @@ fn sync_reclones_when_clone_dir_is_missing() {
 
 #[test]
 fn pin_persists_across_repeated_syncs_while_commit_advances() {
-    // spec: STO-18, CLI-55 — the recorded pin is untouched by sync across
+    // spec: STO-18, CLI-55 - the recorded pin is untouched by sync across
     // repeated runs, even as a follow-branch source's recorded commit advances.
     let (sb, sha_v1, _v2) = make_pinnable_repo("pintest-multi-sync");
     let spec = sb.source_spec();
@@ -2832,7 +2997,7 @@ fn pin_persists_across_repeated_syncs_while_commit_advances() {
 
 #[test]
 fn source_directive_pin_tag_applies_when_no_consumer_flag() {
-    // spec: DSC-41 — a `pin-tag` directive supplies the default pin when the
+    // spec: DSC-41 - a `pin-tag` directive supplies the default pin when the
     // consumer gives no flag (parity with the follow-branch directive test).
     let (sb, sha_v1, _v2) = make_pinnable_repo("pintest-directive-tag");
     sb.write_and_commit("mind.toml", "[source]\npin-tag = \"v1.0\"\n");
@@ -2854,7 +3019,7 @@ fn source_directive_pin_tag_applies_when_no_consumer_flag() {
 
 #[test]
 fn source_directive_pin_ref_applies_when_no_consumer_flag() {
-    // spec: DSC-41 — a `pin-ref` directive supplies the default pin when the
+    // spec: DSC-41 - a `pin-ref` directive supplies the default pin when the
     // consumer gives no flag.
     let (sb, sha_v1, _v2) = make_pinnable_repo("pintest-directive-ref");
     // The directive must name a commit that exists in the default-branch clone,
@@ -2878,7 +3043,7 @@ fn source_directive_pin_ref_applies_when_no_consumer_flag() {
 
 #[test]
 fn consumer_pin_ref_overrides_follow_branch_directive() {
-    // spec: DSC-41, CLI-17 — a consumer flag of a DIFFERENT kind overrides the
+    // spec: DSC-41, CLI-17 - a consumer flag of a DIFFERENT kind overrides the
     // directive (not just same-kind override). Directive follows `stable`; the
     // consumer pins a specific ref instead.
     let (sb, sha_v1, _v2) = make_pinnable_repo("pintest-cross-override");
@@ -2917,7 +3082,7 @@ fn consumer_pin_ref_overrides_follow_branch_directive() {
 
 #[test]
 fn meld_rejects_unknown_source_pin_field() {
-    // spec: DSC-41 — `[source]` is `deny_unknown_fields`, so a misspelled pin
+    // spec: DSC-41 - `[source]` is `deny_unknown_fields`, so a misspelled pin
     // directive (e.g. `pin-branch` instead of `follow-branch`) is a parse error,
     // not a silently-ignored field that would leave the source on the default.
     let (sb, _v1, _v2) = make_pinnable_repo("pintest-unknown-field");
@@ -2945,7 +3110,7 @@ fn meld_rejects_unknown_source_pin_field() {
 
 #[test]
 fn sync_pin_tag_picks_up_moved_upstream_tag() {
-    // spec: CLI-55 — the moved-tag force-fetch is observable end-to-end via the
+    // spec: CLI-55 - the moved-tag force-fetch is observable end-to-end via the
     // CLI: a re-pointed upstream tag advances the recorded commit on sync (the
     // git-layer unit test alone does not exercise the meld+sync+registry path).
     let (sb, sha_v1, _v2) = make_pinnable_repo("pintest-moved-tag");
@@ -3050,7 +3215,7 @@ fn meld_root_persists_in_sources_json_and_probe_shows_subtree_items() {
 
 #[test]
 fn meld_root_on_authoritative_source_prints_note() {
-    // spec: DSC-52 — --root on an authoritative source prints a note and is ignored.
+    // spec: DSC-52 - --root on an authoritative source prints a note and is ignored.
     let sb = Sandbox::bare("auth-source");
     sb.write_and_commit(
         "pkg/style.md",
@@ -3081,7 +3246,7 @@ fn meld_root_on_authoritative_source_prints_note() {
 
 #[test]
 fn meld_root_nonexistent_dir_exits_nonzero() {
-    // spec: DSC-52 (last sentence), CLI-16 — a --root that is not a directory in
+    // spec: DSC-52 (last sentence), CLI-16 - a --root that is not a directory in
     // the clone is an InvalidRoot error and exits non-zero.
     let sb = Sandbox::new();
     let spec = sb.source_spec();
@@ -3103,7 +3268,7 @@ fn meld_root_nonexistent_dir_exits_nonzero() {
 
 #[test]
 fn sync_preserves_roots() {
-    // spec: STO-17 — the roots override is persisted at meld and not changed by sync.
+    // spec: STO-17 - the roots override is persisted at meld and not changed by sync.
     let sb = Sandbox::bare("roots-sync");
     sb.write_and_commit(
         "sub/skills/deploy/SKILL.md",
@@ -3186,7 +3351,7 @@ fn meld_absolute_root_exits_nonzero() {
 
 #[test]
 fn mindfile_roots_discovered_without_flag() {
-    // spec: DSC-50 — [source].roots in mind.toml is respected without any --root flag.
+    // spec: DSC-50 - [source].roots in mind.toml is respected without any --root flag.
     let sb = Sandbox::bare("toml-roots");
     sb.write_and_commit(
         "toolbox/skills/pack/SKILL.md",

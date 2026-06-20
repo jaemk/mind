@@ -11,7 +11,7 @@ use std::process::ExitStatus;
 pub type Result<T> = std::result::Result<T, MindError>;
 
 /// The item kinds `mind` knows how to install.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum ItemKind {
     Skill,
     Agent,

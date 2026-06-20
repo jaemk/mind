@@ -152,7 +152,12 @@ pub enum Command {
         json: bool,
     },
 
-    /// Search melded catalogs for available items.
+    /// Search melded catalogs for available items, or launch the interactive TUI.
+    ///
+    /// With a TTY and no opt-out, `probe` launches the interactive browser.
+    /// Falls back to the catalog listing when `--no-tui`, `--json`, or stdout
+    /// is not a TTY (piped or redirected). The query, `--kind`, and `--source`
+    /// arguments seed the initial search/filter state in both modes.
     Probe {
         /// Substring to match against item names; empty lists everything.
         query: Option<String>,
@@ -168,6 +173,10 @@ pub enum Command {
         /// Emit JSON instead of the human-readable table.
         #[arg(long)]
         json: bool,
+
+        /// Skip the interactive TUI and use the plain catalog listing.
+        #[arg(long)]
+        no_tui: bool,
     },
 
     /// Validate a source for publishing (author-side, read-only).

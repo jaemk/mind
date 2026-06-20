@@ -84,6 +84,15 @@ impl MindLock {
             .map_err(|e| MindError::io(&self.path, e))?;
         Ok(ReadGuard { _guard: guard })
     }
+
+    /// Try to acquire a shared lock without blocking. Returns `None` if the
+    /// lock is already held exclusively by another process (e.g. during a TUI
+    /// poll tick while a mutation is in progress). The TUI uses this for its
+    /// ~1s refresh poll so it never freezes behind a writer (TUI-15, TUI-25).
+    // spec: TUI-25
+    pub fn try_read(&self) -> Option<ReadGuard<'_>> {
+        self.inner.try_read().ok().map(|g| ReadGuard { _guard: g })
+    }
 }
 
 #[cfg(test)]

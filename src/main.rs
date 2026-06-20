@@ -15,6 +15,9 @@ mod paths;
 mod resolve;
 mod review;
 mod source;
+mod tui;
+
+use std::io::IsTerminal;
 
 use clap::Parser;
 
@@ -53,6 +56,10 @@ enum LockMode {
 /// Decide which lock a command needs. This is the single source of truth for the
 /// STO-41 mapping; it is unit-tested per variant so a new or reclassified command
 /// cannot silently take the wrong lock.
+///
+/// For `probe` in interactive TUI mode (TTY + no opt-out), no outer lock is
+/// acquired: the TUI takes the lock per-operation itself (TUI-25). In fallback
+/// mode (non-TTY, `--no-tui`, `--json`), `probe` takes the normal shared lock.
 // spec: STO-41
 fn lock_mode(command: &Command) -> LockMode {
     match command {
@@ -74,7 +81,14 @@ fn lock_mode(command: &Command) -> LockMode {
                 },
         } => LockMode::Exclusive,
 
-        // Read-only commands.
+        // probe in TUI mode: the TUI manages its own per-op locks (TUI-25).
+        // TUI-1 is the launch entry point (requires a real TTY; allowlisted).
+        // spec: TUI-25
+        Command::Probe {
+            no_tui, json, ..
+        } if probe_launches_tui(*no_tui, *json) => LockMode::None,
+
+        // Read-only commands (including probe in fallback/listing mode).
         Command::Recall { .. }
         | Command::Probe { .. }
         | Command::Review { .. }
@@ -87,6 +101,17 @@ fn lock_mode(command: &Command) -> LockMode {
                 },
         } => LockMode::Shared,
     }
+}
+
+/// True when `probe` will launch the interactive TUI: the flags permit it AND
+/// stdout is a TTY. This is the single test for the TUI/fallback branch; it is
+/// used in both `lock_mode` and `dispatch` so the decision stays consistent.
+///
+/// TUI-1 (interactive launch) requires a real TTY to verify; it is allowlisted
+/// rather than cited. TUI-2 (fallback) is tested in tests/cli.rs.
+// spec: TUI-2
+fn probe_launches_tui(no_tui: bool, json: bool) -> bool {
+    !no_tui && !json && std::io::stdout().is_terminal()
 }
 
 fn run(cli: Cli) -> Result<()> {
@@ -144,13 +169,29 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             kind,
             source,
             json,
-        } => commands::probe(
-            paths,
-            query.as_deref(),
-            kind.map(|k| k.to_kind()),
-            source.as_deref(),
-            json,
-        ),
+            no_tui,
+        } => {
+            if probe_launches_tui(no_tui, json) {
+                // TUI mode: the interactive browser manages its own locks.
+                // spec: TUI-2
+                tui::run(
+                    paths,
+                    query.as_deref(),
+                    kind.map(|k| k.to_kind()),
+                    source.as_deref(),
+                )
+            } else {
+                // Fallback listing mode.
+                // spec: TUI-2
+                commands::probe(
+                    paths,
+                    query.as_deref(),
+                    kind.map(|k| k.to_kind()),
+                    source.as_deref(),
+                    json,
+                )
+            }
+        }
         Command::Review { target, alias } => commands::review(paths, &target, alias),
         Command::Introspect { fix, json } => commands::introspect(paths, fix, json),
         Command::Config { action } => match action {
