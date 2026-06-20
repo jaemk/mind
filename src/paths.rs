@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::Config;
 use crate::error::{ItemKind, MindError, Result};
+use crate::policy::Policy;
 
 /// Resolved filesystem roots for a `mind` invocation.
 #[derive(Debug, Clone)]
@@ -110,28 +111,85 @@ impl Paths {
         }
     }
 
-    /// The agent homes items are linked into, in order: `$MIND_AGENT_HOMES` (a
-    /// `:`-separated path list), else `lobes` from `~/.mind/config.toml`, else
-    /// `[claude_home]`. A leading `~` is expanded, and a relative path is resolved
-    /// to absolute against the current directory, so the link paths recorded in
-    /// the manifest never depend on the working directory at a later uninstall.
+    /// The agent homes items are linked into. Without a managed policy this is,
+    /// in order: `$MIND_AGENT_HOMES` (a `:`-separated path list), else `lobes`
+    /// from `~/.mind/config.toml`, else `[claude_home]`.
+    ///
+    /// When a managed policy is in effect:
+    /// - `[lobes].lock = true` (POL-40): the effective homes are exactly
+    ///   `[lobes].targets`; `$MIND_AGENT_HOMES` and config `lobes` are ignored.
+    ///   An empty `targets` under a lock falls back to the default (`claude_home`).
+    /// - `[lobes].lock = false` (POL-41): `[lobes].targets` is a base set that is
+    ///   unioned with the user's normally-resolved homes (deduped; targets first).
+    ///
+    /// A leading `~` is expanded, and a relative path is resolved to absolute
+    /// against the current directory, so the link paths recorded in the manifest
+    /// never depend on the working directory at a later uninstall.
     pub fn agent_homes(&self) -> Result<Vec<PathBuf>> {
-        if let Some(raw) = std::env::var_os("MIND_AGENT_HOMES") {
-            let homes = raw
-                .to_string_lossy()
-                .split(':')
-                .filter(|p| !p.is_empty())
-                .map(absolute_home)
-                .collect::<Result<Vec<_>>>()?;
-            if !homes.is_empty() {
-                return Ok(homes);
+        // Compute the user's normal homes (pre-policy).
+        let user_homes: Vec<PathBuf> = {
+            let mut h = Vec::new();
+            if let Some(raw) = std::env::var_os("MIND_AGENT_HOMES") {
+                let parsed = raw
+                    .to_string_lossy()
+                    .split(':')
+                    .filter(|p| !p.is_empty())
+                    .map(absolute_home)
+                    .collect::<Result<Vec<_>>>()?;
+                if !parsed.is_empty() {
+                    h = parsed;
+                }
+            }
+            if h.is_empty() {
+                let configured = Config::load(&self.mind_home)?.lobes;
+                if !configured.is_empty() {
+                    h = configured
+                        .iter()
+                        .map(|p| absolute_home(p))
+                        .collect::<Result<Vec<_>>>()?;
+                }
+            }
+            if h.is_empty() {
+                h = vec![make_absolute(self.claude_home.clone())?];
+            }
+            h
+        };
+
+        // Apply managed-policy lobe rules when a policy is in effect.
+        // spec: POL-40
+        // spec: POL-41
+        match Policy::load()? {
+            Some(policy) if policy.lobes_lock() => {
+                // POL-40: locked - use exactly the policy targets, ignoring user homes.
+                let targets = policy.lobes_targets();
+                if targets.is_empty() {
+                    // Empty targets under a lock pins the default.
+                    Ok(vec![make_absolute(self.claude_home.clone())?])
+                } else {
+                    targets.iter().map(|p| absolute_home(p)).collect()
+                }
+            }
+            Some(policy) => {
+                // POL-41: not locked - union policy targets with user homes (targets first, deduped).
+                let mut result: Vec<PathBuf> = Vec::new();
+                for p in policy.lobes_targets() {
+                    result.push(absolute_home(p)?);
+                }
+                for h in user_homes {
+                    if !result.contains(&h) {
+                        result.push(h);
+                    }
+                }
+                if result.is_empty() {
+                    result = vec![make_absolute(self.claude_home.clone())?];
+                }
+                Ok(result)
+            }
+            None => {
+                // POL-4 inert: no policy, use user homes as-is.
+                Ok(user_homes)
             }
         }
-        let configured = Config::load(&self.mind_home)?.lobes;
-        if !configured.is_empty() {
-            return configured.iter().map(|h| absolute_home(h)).collect();
-        }
-        Ok(vec![make_absolute(self.claude_home.clone())?])
     }
 
     /// The default lobe written into a fresh config: the `$CLAUDE_HOME` override
@@ -242,9 +300,14 @@ pub fn mkdir_p(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    /// Serialize all tests that touch process-global env vars (`MIND_POLICY_FILE`,
+    /// `MIND_AGENT_HOMES`, `MIND_HOME`, `CLAUDE_HOME`).
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn absolute_home_resolves_relative_paths() {
@@ -399,5 +462,231 @@ mod tests {
         assert_eq!(std::fs::read(&target).unwrap(), b"[]");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- managed-policy lobe tests -----------------------------------------
+
+    /// Write a policy.toml, build a Paths pointing at a temp dir, and set
+    /// MIND_POLICY_FILE. Returns (Paths, managed-dir, policy-file-path, guard).
+    /// The guard must be held for the duration of the test; drop it last to
+    /// restore the env var.
+    fn setup_policy_test(
+        policy_toml: &str,
+    ) -> (Paths, PathBuf, PathBuf, std::sync::MutexGuard<'static, ()>) {
+        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let base =
+            std::env::temp_dir().join(format!("mind-policy-lobe-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let mind_home = base.join("mind");
+        let claude_home = base.join("claude");
+        std::fs::create_dir_all(&mind_home).unwrap();
+        std::fs::create_dir_all(&claude_home).unwrap();
+        let policy_file = base.join("policy.toml");
+        std::fs::write(&policy_file, policy_toml).unwrap();
+        // Unset MIND_AGENT_HOMES so it doesn't bleed in from the outer env.
+        // SAFETY: ENV_LOCK is held, so no concurrent env reads on other threads.
+        unsafe {
+            std::env::remove_var("MIND_AGENT_HOMES");
+            std::env::set_var("MIND_POLICY_FILE", &policy_file);
+        }
+        let paths = Paths {
+            mind_home,
+            claude_home,
+        };
+        (paths, base, policy_file, guard)
+    }
+
+    // POL-40: with lobes.lock=true and explicit targets, agent_homes returns
+    // exactly the policy targets, ignoring $MIND_AGENT_HOMES and config lobes.
+    #[test]
+    fn pol40_lock_true_uses_exactly_policy_targets() {
+        // spec: POL-40
+        let managed = {
+            let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+            std::env::temp_dir().join(format!("mind-managed-lobe-{}-{n}", std::process::id()))
+        };
+        let policy_toml = format!(
+            "[lobes]\nlock = true\ntargets = [\"{managed}\"]\n",
+            managed = managed.display()
+        );
+        let (paths, base, _policy_file, _guard) = setup_policy_test(&policy_toml);
+
+        // Write a config with a different lobe - it must be ignored under lock.
+        let other_lobe = base.join("other-lobe");
+        let config_toml = format!(
+            "lobes = [\"{other_lobe}\"]\n",
+            other_lobe = other_lobe.display()
+        );
+        std::fs::write(paths.mind_home.join("config.toml"), &config_toml).unwrap();
+
+        // Also set MIND_AGENT_HOMES to yet another path - also must be ignored.
+        let env_lobe = base.join("env-lobe");
+        // SAFETY: ENV_LOCK is held.
+        unsafe {
+            std::env::set_var("MIND_AGENT_HOMES", env_lobe.to_str().unwrap());
+        }
+
+        let homes = paths.agent_homes().unwrap();
+
+        // Restore env before any asserts that might panic.
+        // SAFETY: ENV_LOCK is held.
+        unsafe {
+            std::env::remove_var("MIND_AGENT_HOMES");
+        }
+
+        assert_eq!(
+            homes,
+            vec![managed.clone()],
+            "POL-40: locked policy must return exactly the managed target, not config/env homes"
+        );
+        assert!(
+            !homes.contains(&other_lobe),
+            "config lobe must be ignored under lock"
+        );
+        assert!(
+            !homes.contains(&env_lobe),
+            "MIND_AGENT_HOMES must be ignored under lock"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // POL-40: with lobes.lock=true and empty targets, agent_homes falls back to
+    // the default (claude_home), not an empty list.
+    #[test]
+    fn pol40_lock_true_empty_targets_falls_back_to_default() {
+        // spec: POL-40
+        let policy_toml = "[lobes]\nlock = true\ntargets = []\n";
+        let (paths, base, _policy_file, _guard) = setup_policy_test(policy_toml);
+
+        let homes = paths.agent_homes().unwrap();
+        assert_eq!(
+            homes,
+            vec![paths.claude_home.clone()],
+            "POL-40: empty targets under a lock must fall back to the default (claude_home)"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // POL-41: with lobes.lock=false (or absent) and policy targets set, agent_homes
+    // returns the union of policy targets and user homes, with targets first and
+    // no duplicates.
+    #[test]
+    fn pol41_lock_false_unions_policy_and_user_homes() {
+        // spec: POL-41
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let base_dir = std::env::temp_dir().join(format!("mind-pol41-{}-{n}", std::process::id()));
+        let policy_target = base_dir.join("policy-base");
+        let user_lobe = base_dir.join("user-lobe");
+        let policy_toml = format!(
+            "[lobes]\nlock = false\ntargets = [\"{policy_target}\"]\n",
+            policy_target = policy_target.display()
+        );
+        let (paths, base, _policy_file, _guard) = setup_policy_test(&policy_toml);
+
+        // Write a config with a user lobe.
+        let config_toml = format!(
+            "lobes = [\"{user_lobe}\"]\n",
+            user_lobe = user_lobe.display()
+        );
+        std::fs::write(paths.mind_home.join("config.toml"), &config_toml).unwrap();
+
+        let homes = paths.agent_homes().unwrap();
+        assert!(
+            homes.contains(&policy_target),
+            "POL-41: policy target must be present in union: {homes:?}"
+        );
+        assert!(
+            homes.contains(&user_lobe),
+            "POL-41: user lobe must also be present: {homes:?}"
+        );
+        // Policy target is first.
+        assert_eq!(
+            homes[0], policy_target,
+            "POL-41: policy target must come first in the union"
+        );
+        // No duplicates.
+        let deduped: Vec<_> = {
+            let mut seen = std::collections::HashSet::new();
+            homes.iter().filter(|h| seen.insert(*h)).cloned().collect()
+        };
+        assert_eq!(homes, deduped, "POL-41: result must not contain duplicates");
+
+        let _ = std::fs::remove_dir_all(&base);
+        let _ = std::fs::remove_dir_all(&base_dir);
+    }
+
+    // POL-41: when a policy target is already in the user's homes, it is not
+    // duplicated in the result.
+    #[test]
+    fn pol41_deduplicates_overlapping_target_and_user_home() {
+        // spec: POL-41
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let shared =
+            std::env::temp_dir().join(format!("mind-pol41-shared-{}-{n}", std::process::id()));
+        let policy_toml = format!(
+            "[lobes]\nlock = false\ntargets = [\"{shared}\"]\n",
+            shared = shared.display()
+        );
+        let (paths, base, _policy_file, _guard) = setup_policy_test(&policy_toml);
+
+        // User config also lists the same path.
+        let config_toml = format!("lobes = [\"{shared}\"]\n", shared = shared.display());
+        std::fs::write(paths.mind_home.join("config.toml"), &config_toml).unwrap();
+
+        let homes = paths.agent_homes().unwrap();
+        assert_eq!(
+            homes.len(),
+            1,
+            "POL-41: identical target + user lobe must be deduped to one entry: {homes:?}"
+        );
+        assert_eq!(homes[0], shared);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // POL-4 inert: with no MIND_POLICY_FILE set and no system policy file,
+    // agent_homes behaves exactly as before the policy feature (uses config lobes).
+    #[test]
+    fn pol4_inert_no_policy_uses_user_config() {
+        // spec: POL-40
+        // spec: POL-41
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let base = std::env::temp_dir().join(format!("mind-pol4-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let mind_home = base.join("mind");
+        let claude_home = base.join("claude");
+        std::fs::create_dir_all(&mind_home).unwrap();
+        std::fs::create_dir_all(&claude_home).unwrap();
+
+        // Ensure no policy env var is set.
+        // SAFETY: ENV_LOCK is held, so no concurrent env reads on other threads.
+        unsafe {
+            std::env::remove_var("MIND_POLICY_FILE");
+            std::env::remove_var("MIND_AGENT_HOMES");
+        }
+
+        let user_lobe = base.join("user-lobe");
+        let config_toml = format!(
+            "lobes = [\"{user_lobe}\"]\n",
+            user_lobe = user_lobe.display()
+        );
+        std::fs::write(mind_home.join("config.toml"), &config_toml).unwrap();
+
+        let paths = Paths {
+            mind_home,
+            claude_home,
+        };
+        let homes = paths.agent_homes().unwrap();
+        assert_eq!(
+            homes,
+            vec![user_lobe.clone()],
+            "POL-4 inert: without a policy, user config lobes must be used as-is"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
