@@ -39,8 +39,8 @@ repo = "github.com/acme/security-rules"
 ref  = "9f3a1c2e"
 
 [lobes]
-lock = true
-set  = ["~/.claude"]
+lock    = true
+targets = ["~/.claude"]
 ```
 
 The rest of this document states the rules normatively. Source identity is
@@ -93,7 +93,10 @@ The rest of this document states the rules normatively. Source identity is
 
 - `POL-30` `[sources].auto_meld` is a list of tables, each with `repo` (a source
   identity or repo spec) and an optional pin: `tag`, `ref`, or `follow_branch`.
-  `mind` provisions these by melding any that are not already melded.
+  `mind` provisions these by melding any that are not already melded. It is a base
+  set, not an exclusive one: when `[sources].lock` is off the user may meld
+  additional sources beyond it (POL-13); when locked, only `allow`-matching
+  sources are permitted (POL-11).
 - `POL-31` Every `auto_meld` entry must satisfy `allow` when `lock` is true; an
   `auto_meld` source outside the allowlist is an invalid policy (POL-5).
 - `POL-32` Auto-meld provisioning runs during `sync` (and on first use when an
@@ -103,12 +106,16 @@ The rest of this document states the rules normatively. Source identity is
 
 ## Lobe lock
 
-- `POL-40` With `[lobes].lock = true`, `config lobes add` / `config lobes remove`
-  are refused and the user's `lobes` (from `~/.mind/config.toml`) and
-  `$MIND_AGENT_HOMES` are ignored.
-- `POL-41` `[lobes].set`, when present, defines the managed agent homes that
-  override the user's configuration while the lobe lock is in effect; absent, the
-  lock pins the existing default (`~/.claude`).
+- `POL-40` With `[lobes].lock = true`, the effective agent homes are exactly
+  `[lobes].targets`; `config lobes add` / `config lobes remove` are refused and
+  the user's `lobes` (from `~/.mind/config.toml`) and `$MIND_AGENT_HOMES` are
+  ignored. With `targets` absent under a lock, the lock pins the default
+  (`~/.claude`).
+- `POL-41` With `[lobes].lock` absent or false, `[lobes].targets` is a base set
+  the user extends: the effective agent homes are `targets` unioned with the
+  user's configured `lobes` (the policy's targets are always present, and the user
+  may add more). This mirrors `auto_meld` (POL-30): a policy-provided base that
+  the user can add to when the corresponding lock is off.
 
 ## Validation (`mind review --policy`)
 
