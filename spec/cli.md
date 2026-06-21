@@ -64,14 +64,14 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   that tag / commit; `--follow-branch` tracks the named branch (default the remote
   default branch). The recorded commit is the resolved HEAD of that point. A pin
   that does not resolve in the remote is a `Git` error and nothing is registered.
-- `CLI-19` With `ssh = true` in `~/.mind/config.toml`, `meld` (and `sync`
-  auto-meld) rewrites an https remote to its `git@host:owner/repo` SSH form before
-  cloning, so authentication uses the user's SSH key/agent. A local path and an
-  explicit `git@...` / `ssh://` spec are left unchanged; the rewritten URL is
-  recorded, so later `sync`s reuse SSH. Independently, `mind` always runs git with
-  `GIT_TERMINAL_PROMPT=0`: git never prompts for an https username/password on the
-  terminal (which would corrupt the TUI or hang a non-interactive run); it fails
-  fast instead, so use SSH or a credential helper to authenticate.
+- `CLI-19` An explicit `git@host:owner/repo` (or `ssh://`) spec clones over SSH
+  using the user's key/agent, with no username/password prompt. With `ssh = true`
+  in `~/.mind/config.toml`, `meld` (and `sync` auto-meld) also rewrites an https
+  remote to its `git@host:owner/repo` SSH form before cloning, so the `owner/repo`
+  shorthand uses SSH too. A local path and an explicit `git@...` / `ssh://` spec
+  are left unchanged; the rewritten URL is recorded, so later `sync`s reuse SSH.
+  An https remote still authenticates as git normally does (a credential helper,
+  or the interactive prompt).
 
 ## unmeld
 

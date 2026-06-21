@@ -13,11 +13,6 @@ fn run(url: &str, cwd: Option<&Path>, args: &[&str]) -> Result<String> {
         cmd.current_dir(dir);
     }
     cmd.args(args);
-    // Never prompt for an https username/password on the controlling terminal: in
-    // the TUI such a prompt corrupts the alt-screen, and anywhere it can hang a
-    // non-interactive run. git fails fast instead; use SSH (see config `ssh`) or a
-    // credential helper to authenticate. SSH keys still work via the agent / config.
-    cmd.env("GIT_TERMINAL_PROMPT", "0");
 
     let output = match cmd.output() {
         Ok(o) => o,
