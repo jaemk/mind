@@ -2549,6 +2549,21 @@ fn example_starter_convention_discovery() {
 }
 
 #[test]
+fn example_policy_validates() {
+    // spec: POL-50
+    // The shipped example managed policy validates clean via `review --policy`,
+    // so the example cannot rot as the policy parser/validator changes.
+    let sb = Sandbox::new();
+    let policy = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/policy/policy.toml");
+    let r = sb.mind(&["review", "--policy", policy.to_str().unwrap()]);
+    assert!(
+        r.success,
+        "example policy must validate clean:\nstdout: {}\nstderr: {}",
+        r.stdout, r.stderr
+    );
+}
+
+#[test]
 fn man_page_renders_roff() {
     // spec: CLI-121
     let sb = Sandbox::new();

@@ -43,8 +43,9 @@ lock    = true
 targets = ["~/.claude"]
 ```
 
-The rest of this document states the rules normatively. Source identity is
-`host/owner/repo` (see storage.md).
+A worked example is at [../examples/policy/](../examples/policy/). The rest of
+this document states the rules normatively. Source identity is `host/owner/repo`
+(see storage.md).
 
 ## The policy file
 

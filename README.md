@@ -88,7 +88,8 @@ A source repo exposes items by convention (`skills/<n>/SKILL.md`,
 `agents/<n>.md`, `rules/<n>.md`) or via a `mind.toml`. See
 [examples/starter/](examples/starter/) for the plain convention layout,
 [examples/namespacing/](examples/namespacing/) for `{{ns:}}` reference tokens
-under a prefix, and [spec/](spec/) for the full behavioral spec.
+under a prefix, [examples/policy/](examples/policy/) for an enterprise managed
+policy, and [spec/](spec/) for the full behavioral spec.
 
 `mind probe` with no flags opens an interactive browser of melded sources and
 items (search, install, remove, meld, unmeld, sync, evolve) when stdout is a terminal. `--no-tui`

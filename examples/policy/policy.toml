@@ -1,0 +1,44 @@
+# Example mind managed policy (enterprise).
+#
+# An organization deploys this file out of band (MDM / configuration management)
+# to the fixed per-OS system path, owned by an administrator and not writable by
+# regular users:
+#   Linux:   /etc/mind/policy.toml
+#   macOS:   /Library/Application Support/mind/policy.toml
+#   Windows: %PROGRAMDATA%\mind\policy.toml
+#
+# mind reads it on every invocation and enforces it. With no policy file present,
+# mind is unmanaged and every control below is off. See spec/policy.md.
+#
+# Validate before deploying:  mind review --policy examples/policy/policy.toml
+
+[sources]
+# Allowlist matched against a source's host/owner/repo identity. `*` matches
+# within one path segment.
+allow = ["github.com/acme/*", "github.example.com/platform/*"]
+
+# Refuse to meld any source whose identity is not in `allow`. Without lock, the
+# allowlist is advisory (a non-matching meld warns but proceeds).
+lock = true
+
+# Every meld must resolve to a tag or ref; floating branches are refused. When
+# pinned, every auto_meld entry below must declare a tag or ref.
+pinned = true
+
+# Sources mind provisions automatically (melds if not already present), during
+# `sync`. `repo` is a repo spec as `meld` accepts (owner/repo, a URL, git@, or a
+# path); its derived host/owner/repo identity must satisfy `allow` under lock.
+[[sources.auto_meld]]
+repo = "acme/agent-baseline"
+tag = "v1.4.0"
+
+[[sources.auto_meld]]
+repo = "https://github.example.com/platform/security-rules"
+ref = "9f3a1c2e7b1d0a4c5e6f8a9b0c1d2e3f40516273"
+
+[lobes]
+# Lock the agent homes: `config lobes` edits and $MIND_AGENT_HOMES are refused,
+# and the effective homes are exactly `targets`. With lock off, `targets` is a
+# base set the user's configured lobes are unioned onto.
+lock = true
+targets = ["~/.claude"]
