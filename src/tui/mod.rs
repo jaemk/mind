@@ -250,9 +250,15 @@ fn handle_key(paths: &Paths, app: &mut app::App, k: crossterm::event::KeyEvent) 
                 // on failure clean up the temp dir (SourcePreview::drop removes it).
                 app.active_preview = None;
                 match result {
-                    Ok(snapshot) => {
+                    Ok((snapshot, msg)) => {
                         app.apply_snapshot(snapshot);
-                        app.set_status("Done.".to_string());
+                        // Show the verb's own summary line (captured, never printed
+                        // to the alt-screen); fall back to a generic note.
+                        app.set_status(if msg.is_empty() {
+                            "Done.".to_string()
+                        } else {
+                            msg
+                        });
                     }
                     Err(e) => {
                         app.set_error(format!("{e}"));

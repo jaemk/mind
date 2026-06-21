@@ -67,7 +67,9 @@ manifest, and store.
 - `TUI-24` Every mutating action confirms before applying; destructive actions
   (`forget`, `unmeld --forget`) require an explicit confirmation. Results and
   errors are shown inline; a `MindError` is surfaced in the UI, not printed to a
-  hidden stderr. After a successful mutation the affected tree refreshes.
+  hidden stderr. The verb's own stdout is captured for the duration of the action
+  so it cannot corrupt the alternate screen; a one-line summary of it is shown in
+  the status bar. After a successful mutation the affected tree refreshes.
 - `TUI-25` The TUI holds no lock while idle. It acquires the global lock
   (storage.md) only for the duration of a single operation: a shared lock while
   loading or refreshing state, an exclusive lock for each mutating action

@@ -450,6 +450,7 @@ dependencies = [
  "dirs",
  "fd-lock",
  "glob",
+ "libc",
  "ratatui",
  "serde",
  "serde_json",

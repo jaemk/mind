@@ -1,13 +1,12 @@
 //! Execute a confirmed TUI action by calling the appropriate `commands::*` fn.
 //!
 //! Each action acquires the EXCLUSIVE lock for its duration, then releases it.
-//! The verb functions (commands::learn/forget/sync/upgrade/unmeld) print to stdout
-//! normally. Their output is NOT suppressed or captured; ratatui repaints the
-//! alt-screen on the next draw cycle, which overwrites any stray output. This is
-//! a known limitation: command output is visible briefly before the next redraw.
-//! Errors are returned as MindError so the App can surface them inline (TUI-24).
-//! The action returns an updated Snapshot so the App can refresh without a
-//! separate poll.
+//! The verb functions (commands::learn/forget/sync/upgrade/unmeld) print to
+//! stdout. In the TUI's alternate screen / raw mode that stray output corrupts
+//! the display (line feeds without carriage returns staircase and scroll), so we
+//! capture stdout for the duration of the action (TUI-24) and surface a one-line
+//! summary in the status bar instead of letting it reach the terminal. Errors
+//! are returned as MindError so the App can show them inline.
 //!
 //! No verb logic is reimplemented here; we call the existing command functions
 //! directly (TUI-20..23).
@@ -19,20 +18,39 @@ use crate::paths::Paths;
 use crate::tui::app::{ActionKind, PendingAction};
 use crate::tui::data::{self, Snapshot};
 
+/// Serialize the stdout redirect in `with_captured_stdout`: it dup2's the
+/// process-global stdout fd, so two captures must never overlap. The TUI runs
+/// actions one at a time, but the unit tests run concurrently.
+static CAPTURE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static CAPTURE_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 /// Execute a confirmed action under an exclusive lock, returning a fresh
-/// snapshot. Output from command functions is NOT suppressed; ratatui repaints
-/// the alt-screen on the next draw, overwriting any stray output (TUI-24).
+/// snapshot and a one-line summary of the verb's output. The verb prints to
+/// stdout; we capture it so it cannot corrupt the alternate screen and show the
+/// summary in the status bar instead (TUI-24).
 // spec: TUI-20 TUI-21 TUI-22 TUI-23 TUI-24 TUI-25 STO-40 STO-41
-pub fn execute(paths: &Paths, action: PendingAction) -> Result<Snapshot> {
+pub fn execute(paths: &Paths, action: PendingAction) -> Result<(Snapshot, String)> {
     // Acquire the exclusive lock for the duration of the action (TUI-25).
     // spec: STO-40 STO-41 TUI-25
     let mut lock = lock::open(paths)?;
     let _guard = lock.write()?;
 
-    // Execute the appropriate command function. Command output goes straight to
-    // stdout; ratatui repaints the alt-screen on the next draw (TUI-24). Errors
-    // are returned as MindError so the App can display them inline.
-    match action.kind {
+    // Run the verb with stdout captured so nothing leaks onto the alt-screen.
+    let (result, captured) = with_captured_stdout(|| dispatch(paths, action.kind));
+    result?;
+
+    // Drop the exclusive lock BEFORE calling data::load. data::load acquires
+    // its own shared lock on a separate fd; holding the exclusive flock here
+    // while it tries to take a shared lock on the same file would self-deadlock.
+    drop(_guard);
+    let snapshot = data::load(paths)?;
+    Ok((snapshot, summary_line(&captured)))
+}
+
+/// Dispatch one confirmed action to its command function. No verb logic is
+/// reimplemented here (TUI-20..23).
+fn dispatch(paths: &Paths, kind: ActionKind) -> Result<()> {
+    match kind {
         ActionKind::Learn { item_key, source } => {
             // When the user picked an item from a specific source (captured at
             // action-construction time), qualify the ref as `{source}#{item_key}`
@@ -50,41 +68,97 @@ pub fn execute(paths: &Paths, action: PendingAction) -> Result<Snapshot> {
             // prompt from inside raw mode.
             commands::learn(paths, &item_ref, false, true)?;
         }
-        ActionKind::Forget { item_key } => {
-            // spec: TUI-20
-            commands::forget(paths, &item_key)?;
-        }
+        // spec: TUI-20
+        ActionKind::Forget { item_key } => commands::forget(paths, &item_key)?,
+        // spec: TUI-21
         ActionKind::Meld { spec } => {
-            // spec: TUI-21
-            commands::meld(paths, &spec, None, vec![], None, None, None, None, false)?;
+            commands::meld(paths, &spec, None, vec![], None, None, None, None, false)?
         }
-        ActionKind::Unmeld { name, forget } => {
-            // spec: TUI-21
-            commands::unmeld(paths, &name, forget)?;
-        }
-        ActionKind::Sync => {
-            // spec: TUI-22
-            commands::sync(paths, false, false)?;
-        }
-        ActionKind::Upgrade => {
-            // spec: TUI-22 - `yes: true` so it applies without prompting on stdin.
-            commands::upgrade(paths, true, None, false)?;
-        }
-        ActionKind::LobeAdd { path } => {
-            // spec: TUI-23 CLI-112
-            commands::lobe_add(paths, &path)?;
-        }
-        ActionKind::LobeRemove { path } => {
-            // spec: TUI-23 CLI-113
-            commands::lobe_remove(paths, &path)?;
+        // spec: TUI-21
+        ActionKind::Unmeld { name, forget } => commands::unmeld(paths, &name, forget)?,
+        // spec: TUI-22
+        ActionKind::Sync => commands::sync(paths, false, false)?,
+        // spec: TUI-22 - `yes: true` so it applies without prompting on stdin.
+        ActionKind::Upgrade => commands::upgrade(paths, true, None, false)?,
+        // spec: TUI-23 CLI-112
+        ActionKind::LobeAdd { path } => commands::lobe_add(paths, &path)?,
+        // spec: TUI-23 CLI-113
+        ActionKind::LobeRemove { path } => commands::lobe_remove(paths, &path)?,
+    }
+    Ok(())
+}
+
+/// The last non-empty line of captured output, trimmed, for the status bar.
+fn summary_line(captured: &str) -> String {
+    captured
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// Run `f` with the process stdout redirected to a capture buffer, returning its
+/// result and whatever it wrote (TUI-24). The dup2 mutates the process-global
+/// stdout fd, so the whole sequence is serialized and the original fd is always
+/// restored, even if `f` panics.
+#[cfg(unix)]
+fn with_captured_stdout<R>(f: impl FnOnce() -> R) -> (R, String) {
+    use std::io::{Read, Seek, Write};
+    use std::os::unix::io::AsRawFd;
+
+    /// Restore the saved stdout fd on drop, so a panic in the action cannot leave
+    /// the terminal redirected.
+    struct FdRestore(libc::c_int);
+    impl Drop for FdRestore {
+        fn drop(&mut self) {
+            let _ = std::io::stdout().flush();
+            unsafe {
+                libc::dup2(self.0, libc::STDOUT_FILENO);
+                libc::close(self.0);
+            }
         }
     }
 
-    // Drop the exclusive lock BEFORE calling data::load. data::load acquires
-    // its own shared lock on a separate fd; holding the exclusive flock here
-    // while it tries to take a shared lock on the same file would self-deadlock.
-    drop(_guard);
-    data::load(paths)
+    // Serialize: the redirect below is a process-global side effect.
+    let _serialize = CAPTURE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let seq = CAPTURE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("mind-tui-capture-{}-{seq}", std::process::id()));
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path)
+    else {
+        return (f(), String::new()); // capture unavailable: run as-is
+    };
+    let _ = std::fs::remove_file(&path); // unlink now; the open fd keeps it alive
+
+    let _ = std::io::stdout().flush();
+    let saved = unsafe { libc::dup(libc::STDOUT_FILENO) };
+    if saved < 0 {
+        return (f(), String::new());
+    }
+    let result = {
+        unsafe {
+            libc::dup2(file.as_raw_fd(), libc::STDOUT_FILENO);
+        }
+        let _restore = FdRestore(saved); // restores stdout on drop (incl. panic)
+        f()
+    };
+
+    let mut buf = String::new();
+    let _ = file.rewind();
+    let _ = file.read_to_string(&mut buf);
+    (result, buf)
+}
+
+#[cfg(not(unix))]
+fn with_captured_stdout<R>(f: impl FnOnce() -> R) -> (R, String) {
+    (f(), String::new())
 }
 
 #[cfg(test)]
@@ -126,6 +200,24 @@ mod tests {
     }
 
     #[test]
+    fn summary_line_is_the_last_nonempty_line() {
+        // spec: TUI-24 - captured verb output is reduced to a one-line status
+        // summary (the last non-empty line) instead of corrupting the alt-screen.
+        use super::summary_line;
+        assert_eq!(
+            summary_line("everything is up to date\n"),
+            "everything is up to date"
+        );
+        assert_eq!(
+            summary_line("upgraded skill:review\n"),
+            "upgraded skill:review"
+        );
+        assert_eq!(summary_line("first\nlast\n\n"), "last");
+        assert_eq!(summary_line("   \n  \n"), "");
+        assert_eq!(summary_line(""), "");
+    }
+
+    #[test]
     fn execute_forget_on_unknown_item_returns_error() {
         // spec: TUI-24 - errors are returned as MindError, not panics.
         let (paths, _base) = temp_paths();
@@ -163,7 +255,7 @@ mod tests {
             "sync on empty registry should succeed: {:?}",
             result.err()
         );
-        let snap = result.unwrap();
+        let (snap, _msg) = result.unwrap();
         assert!(snap.installed.is_empty());
     }
 
@@ -335,7 +427,7 @@ mod tests {
         };
         let result = execute(&paths, action);
         assert!(result.is_ok(), "meld should succeed: {:?}", result.err());
-        let snap = result.unwrap();
+        let (snap, _msg) = result.unwrap();
         // The source should now be in the snapshot's source list.
         assert!(
             snap.source_names
@@ -619,7 +711,7 @@ mod tests {
             description: format!("Add {lobe_path}?"),
             dep_tree: None,
         };
-        let snap = execute(&paths, action).expect("LobeAdd must succeed");
+        let (snap, _msg) = execute(&paths, action).expect("LobeAdd must succeed");
         assert!(
             snap.lobes.contains(&lobe_path),
             "snapshot after LobeAdd must include the new lobe: {:?}",
