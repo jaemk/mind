@@ -17,10 +17,12 @@ re-runs during `evolve` when the source updates.
 The hook is arbitrary code execution: it can run any command with the user's
 privileges. So `mind` never runs a hook without first showing the user what will
 run and where it came from (source identity, the pin and commit, the clone path,
-and the exact command), with an explicit warning, and a prompt that defaults to
-declining. `--dangerously-skip-install-hook-check` bypasses the prompt for users
-who have already vetted the source. The prompt is the trust boundary; the shown
-pin and commit let the user inspect the repo at that exact point before approving.
+and the exact command), with an explicit warning, and a prompt with three choices:
+run the hook and continue, skip the hook but still install the source and its
+items, or abort and install nothing. The default never runs the hook.
+`--dangerously-skip-install-hook-check` bypasses the prompt for users who have
+already vetted the source. The prompt is the trust boundary; the shown pin and
+commit let the user inspect the repo at that exact point before approving.
 
 The rest of this document states the rules normatively. Source identity is
 `host/owner/repo` (see storage.md); a source's pin is its `Pin` (see cli.md,
@@ -55,16 +57,21 @@ CLI-17).
 - `HOOK-20` Before running any hook, `mind` prints the source identity, the
   resolved pin (the branch, tag, or ref) and the commit, the clone path, and the
   exact command that will run, with a clear warning that this executes arbitrary
-  code from the source, and then prompts `[y/N]` defaulting to No. When a
-  `--install-hook` overrides the source's declared `[source].install` (HOOK-2),
-  the prompt also shows the declared command and states plainly that the
-  user-supplied command is replacing it.
-- `HOOK-21` Declining (the default) skips the hook and continues: the source and
-  its items still install, with a notice that the declared tooling was not built
-  and the items may not work until the hook is run.
+  code from the source. It then offers three choices: (1) run the hook and
+  continue the install; (2) skip the hook but continue, installing the source and
+  its items without building the tooling; or (3) abort, installing nothing. The
+  default (a bare Enter) is choice 2, so `mind` never runs the hook without an
+  explicit choice. When a `--install-hook` overrides the source's declared
+  `[source].install` (HOOK-2), the prompt also shows the declared command and
+  states plainly that the user-supplied command is replacing it.
+- `HOOK-21` Skipping the hook (choice 2, the default) still installs the source
+  and its items: only the declared tooling is not built. `mind` says so and notes
+  the items may not work until the hook is run. Aborting (choice 3) installs
+  nothing: the source is not registered, as for a declined meld.
 - `HOOK-22` When stdin is not a TTY (a script, CI, or managed-policy auto-meld,
-  POL-32), `mind` never runs a hook silently: the hook is skipped and reported
-  unless `--dangerously-skip-install-hook-check` is given.
+  POL-32), `mind` never runs a hook silently and never aborts: it takes the skip
+  path (the source and its items install, the tooling is not built) and reports
+  it, unless `--dangerously-skip-install-hook-check` is given.
 - `HOOK-23` `--dangerously-skip-install-hook-check` runs the hook without
   prompting, and is what enables hooks in non-interactive use. The flag name is
   deliberately explicit about the risk.
