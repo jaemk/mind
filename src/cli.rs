@@ -94,6 +94,17 @@ pub enum Command {
         /// prints a note, so the tooling is not built; pass this to run it unattended.
         #[arg(long)]
         dangerously_skip_install_hook_check: bool,
+
+        /// Only register the source; do not prompt to install its items. By
+        /// default, `meld` previews the source's items and offers to install them
+        /// all (the interactive form of `learn '<source>#*'`).
+        #[arg(long)]
+        link_only: bool,
+
+        /// Install the melded source's items without the confirmation prompt
+        /// (also installs in a non-TTY context). Ignored with `--link-only`.
+        #[arg(short = 'y', long)]
+        yes: bool,
     },
 
     /// Unmeld a source, removing its clone and catalog entry.

@@ -721,6 +721,57 @@ pub fn learn(paths: &Paths, item_ref: &str, dry_run: bool, yes: bool) -> Result<
     }
 }
 
+/// After a `meld`, offer to install the newly melded source's items (CLI-23).
+/// This is the interactive form of `learn '<source>#*'`: it previews the items
+/// that would be installed and prompts, then installs the whole source on a yes.
+/// `--link-only` skips this entirely (the caller does not invoke it). A source
+/// with no installable items (e.g. a curated super-source) is a no-op.
+///
+/// With `yes`, it installs without prompting (and in a non-TTY context). Without
+/// `yes` in a non-TTY context it installs nothing and prints how to install
+/// later, mirroring the install-hook non-TTY behavior (HOOK-22): a scripted meld
+/// stays register-only unless `--yes` is given.
+// spec: CLI-23
+pub fn install_melded_source(paths: &Paths, repo: &str, yes: bool) -> Result<()> {
+    let source_name = parse_spec(repo)?.name;
+    let item_ref = format!("{source_name}#*");
+
+    // Resolve what would install (excludes already-installed items, DEP-23). A
+    // source that offers nothing matching is an ItemNotFound here; treat it as
+    // "nothing to install" rather than an error.
+    let plan = match learn_preview(paths, &item_ref) {
+        Ok(plan) => plan,
+        Err(MindError::ItemNotFound { .. }) => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    if plan.install_count == 0 {
+        return Ok(());
+    }
+
+    if yes {
+        return learn(paths, &item_ref, false, true);
+    }
+    if !crate::hook::is_tty() {
+        println!(
+            "note: {source_name} has {} item(s) to install; run `mind learn '{item_ref}'` (or re-meld with --yes)",
+            plan.install_count
+        );
+        return Ok(());
+    }
+
+    // Interactive: show the install preview (the dry-run list), then prompt.
+    learn(paths, &item_ref, true, false)?;
+    if confirm(&format!(
+        "install these {} item(s) now?",
+        plan.install_count
+    ))? {
+        learn(paths, &item_ref, false, true)
+    } else {
+        println!("skipped; run `mind learn '{item_ref}'` to install later");
+        Ok(())
+    }
+}
+
 /// If two selected items would install under the same `kind:name`, return that
 /// key and the sources that collide on it.
 fn colliding_install(targets: &[&CatalogItem]) -> Option<(String, Vec<String>)> {

@@ -72,6 +72,16 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   are left unchanged; the rewritten URL is recorded, so later `sync`s reuse SSH.
   An https remote still authenticates as git normally does (a credential helper,
   or the interactive prompt).
+- `CLI-23` By default, after registering the source, `meld` previews its items
+  and prompts to install them all (the interactive form of `learn '<source>#*'`),
+  installing the whole source on a yes. `--link-only` stops at registering the
+  source; its items remain available to `learn` later. `--yes` installs without
+  prompting, including in a non-TTY context; without `--yes` a non-TTY `meld`
+  registers only and prints how to install later (mirroring the install-hook
+  non-TTY behavior, HOOK-22). Only the top-level source is offered (a curated
+  super-source's nested sources are not auto-installed), already-installed items
+  are skipped (DEP-23), and a source install hook is still handled by its own
+  prompt during the meld (HOOK-20).
 
 ## unmeld
 

@@ -277,6 +277,64 @@ fn meld_registers_source_and_lists_items() {
 }
 
 #[test]
+fn meld_yes_installs_all_source_items() {
+    // spec: CLI-23 - `meld --yes` registers the source and installs all of its
+    // items without prompting (so it works in this non-TTY harness too).
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    let r = sb.mind(&["meld", &spec, "--yes"]);
+    assert!(r.success, "meld --yes failed: {} {}", r.stdout, r.stderr);
+    let recall = sb.mind(&["recall"]);
+    for item in ["review", "dev", "style"] {
+        assert!(
+            recall.stdout.contains(item),
+            "{item} should be installed after `meld --yes`: {}",
+            recall.stdout
+        );
+    }
+}
+
+#[test]
+fn meld_link_only_registers_without_installing() {
+    // spec: CLI-23 - `--link-only` stops at registering the source; nothing is
+    // installed and there is no install prompt.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    assert!(sb.mind(&["meld", &spec, "--link-only"]).success);
+    assert!(
+        sb.mind(&["recall", "--sources"]).stdout.contains("agents"),
+        "the source must be registered"
+    );
+    assert!(
+        !sb.mind(&["recall"]).stdout.contains("review"),
+        "--link-only must not install any items"
+    );
+}
+
+#[test]
+fn meld_default_non_tty_registers_only_and_notes_install() {
+    // spec: CLI-23 - a default `meld` over piped (non-TTY) stdin registers the
+    // source but installs nothing, and prints how to install later.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    let r = sb.mind(&["meld", &spec]);
+    assert!(r.success, "meld failed: {} {}", r.stdout, r.stderr);
+    assert!(
+        sb.mind(&["recall", "--sources"]).stdout.contains("agents"),
+        "the source must be registered"
+    );
+    assert!(
+        !sb.mind(&["recall"]).stdout.contains("review"),
+        "a non-TTY default meld must not install items"
+    );
+    assert!(
+        r.stdout.contains("learn") && r.stdout.contains("#*"),
+        "it should note how to install later: {}",
+        r.stdout
+    );
+}
+
+#[test]
 fn meld_twice_errors() {
     // spec: CLI-12
     let sb = melded();

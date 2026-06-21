@@ -149,17 +149,28 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             pin_ref,
             install_hook,
             dangerously_skip_install_hook_check,
-        } => commands::meld(
-            paths,
-            &repo,
-            alias,
-            roots,
-            follow_branch,
-            pin_tag,
-            pin_ref,
-            install_hook,
-            dangerously_skip_install_hook_check,
-        ),
+            link_only,
+            yes,
+        } => {
+            commands::meld(
+                paths,
+                &repo,
+                alias,
+                roots,
+                follow_branch,
+                pin_tag,
+                pin_ref,
+                install_hook,
+                dangerously_skip_install_hook_check,
+            )?;
+            // CLI-23: by default, offer to install the melded source's items right
+            // away (preview + prompt). `--link-only` stops at registering it.
+            if link_only {
+                Ok(())
+            } else {
+                commands::install_melded_source(paths, &repo, yes)
+            }
+        }
         Command::Unmeld { name, forget } => commands::unmeld(paths, &name, forget),
         Command::Learn { item, dry_run, yes } => commands::learn(paths, &item, dry_run, yes),
         Command::Forget { item } => commands::forget(paths, &item),
