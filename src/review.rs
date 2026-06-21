@@ -315,7 +315,19 @@ fn run_checks(_paths: &Paths, source_dir: &Path, alias: Option<String>) -> Resul
         }
     }
 
-    // --- Check 6: unguarded prose references (advisory, only when prefix in effect) ---
+    // --- Check 6: declared install hook (advisory) ---
+    // HOOK-40: surface a declared install hook so a consumer sees, before
+    // melding, that the source will ask to run arbitrary code.
+    if let Some(ref mf) = mindfile
+        && let Some(cmd) = mf.source.install.as_deref()
+    {
+        advisory.push(Finding::advisory(
+            "install-hook",
+            format!("source declares an install hook (runs on meld): {cmd}"),
+        ));
+    }
+
+    // --- Check 7: unguarded prose references (advisory, only when prefix in effect) ---
     // CLI-132: advisory; CLI-133: only when a prefix applies.
     if prefix.is_some() {
         for item in &items {
@@ -375,6 +387,8 @@ fn build_source(source_dir: &Path, mindfile: &Option<MindToml>, alias: Option<St
         alias,
         pin: crate::source::Pin::default(),
         roots: None,
+        install_hook: None,
+        install_hook_commit: None,
     }
 }
 
@@ -478,6 +492,8 @@ mod tests {
             alias: None,
             pin: Pin::default(),
             roots: None,
+            install_hook: None,
+            install_hook_commit: None,
         }
     }
 
@@ -720,6 +736,81 @@ mod tests {
                 .iter()
                 .any(|f| f.kind == "unguarded-reference"),
             "expected unguarded-reference advisory: {:?}",
+            result.advisory
+        );
+    }
+
+    /// A source whose mind.toml declares [source].install produces an advisory
+    /// finding with kind "install-hook" containing the declared command.
+    /// spec: HOOK-40
+    #[test]
+    fn declared_install_hook_is_advisory() {
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let source_dir = base.join("src");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(
+            source_dir.join("mind.toml"),
+            "[source]\ninstall = \"make build && make install\"\n",
+        )
+        .unwrap();
+        // Add a valid item so the source is otherwise clean.
+        write_file(
+            &source_dir.join("agents/tool.md"),
+            "---\ndescription: tool agent\n---\n# tool\n",
+        );
+        let paths = paths_for(base);
+
+        let result = run_checks(&paths, &source_dir, None).unwrap();
+        assert!(
+            result.hard.is_empty(),
+            "declared install hook must not be a hard finding: {:?}",
+            result.hard
+        );
+        let hook_findings: Vec<&Finding> = result
+            .advisory
+            .iter()
+            .filter(|f| f.kind == "install-hook")
+            .collect();
+        assert_eq!(
+            hook_findings.len(),
+            1,
+            "expected exactly one install-hook advisory: {:?}",
+            result.advisory
+        );
+        assert!(
+            hook_findings[0]
+                .message
+                .contains("make build && make install"),
+            "advisory message must include the declared command: {}",
+            hook_findings[0].message
+        );
+    }
+
+    /// A source with no [source].install declared produces no install-hook
+    /// advisory. Confirms the check is absent, not spurious.
+    /// spec: HOOK-40
+    #[test]
+    fn no_install_hook_produces_no_advisory() {
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let source_dir = base.join("src");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(
+            source_dir.join("mind.toml"),
+            "[source]\ndescription = \"tools\"\n",
+        )
+        .unwrap();
+        write_file(
+            &source_dir.join("agents/tool.md"),
+            "---\ndescription: tool agent\n---\n# tool\n",
+        );
+        let paths = paths_for(base);
+
+        let result = run_checks(&paths, &source_dir, None).unwrap();
+        assert!(
+            result.advisory.iter().all(|f| f.kind != "install-hook"),
+            "no install hook declared => no install-hook advisory: {:?}",
             result.advisory
         );
     }

@@ -5048,3 +5048,255 @@ fn meld_unlocked_advisory_warning_text() {
         "the advisory source is still registered"
     );
 }
+
+/// A sandbox whose source declares an install hook command in mind.toml.
+/// `[source]` with only `install =` is NOT authoritative, so the three
+/// convention items are still discovered.
+fn sandbox_with_declared_hook(name: &str, cmd: &str) -> Sandbox {
+    let sb = Sandbox::named(name);
+    sb.write_and_commit("mind.toml", &format!("[source]\ninstall = \"{cmd}\"\n"));
+    sb
+}
+
+#[test]
+fn meld_with_declared_hook_non_tty_skips_but_still_installs() {
+    // spec: HOOK-22, HOOK-21
+    // stdin is not a TTY in this harness, so a declared hook takes the skip
+    // path (HOOK-22): the source and its items still install (HOOK-21), but the
+    // tooling is not built. The clone-dir marker the hook would create must not
+    // appear, the run is reported as skipped, and the registry records the hook
+    // command with a NULL install_hook_commit (never ran).
+    let sb = sandbox_with_declared_hook("agents", "touch hookran");
+    let spec = sb.source_spec();
+
+    let r = sb.mind(&["meld", &spec]);
+    assert!(r.success, "meld should still succeed: {}", r.stderr);
+
+    // The source is registered (HOOK-21: skipping still installs the source).
+    let sources = sb.mind(&["recall", "--sources"]);
+    assert!(
+        sources.stdout.contains("agents"),
+        "source must be registered after a skipped hook: {}",
+        sources.stdout
+    );
+
+    // The items are still discoverable / learnable (the tooling, not the items,
+    // is what the skip drops).
+    assert!(
+        sb.mind(&["learn", "review"]).success,
+        "items must install even when the hook is skipped"
+    );
+
+    // The hook did NOT run: its marker is absent from the clone dir.
+    let marker = clone_dir_of(&sb, "agents").join("hookran");
+    assert!(
+        !marker.exists(),
+        "the install hook must not have run: {} exists",
+        marker.display()
+    );
+
+    // The skip is reported to the user.
+    let reported = r.stdout.contains("skipped") || r.stderr.contains("skipped");
+    assert!(
+        reported,
+        "the skip must be reported: {} {}",
+        r.stdout, r.stderr
+    );
+
+    // The registry records the hook command but with a null run-commit.
+    let json = std::fs::read_to_string(sb.mind_home.join("sources.json")).unwrap();
+    assert!(
+        json.contains("touch hookran"),
+        "registry must record the hook command: {json}"
+    );
+    assert!(
+        json.contains("\"install_hook_commit\": null"),
+        "install_hook_commit must be null after a skipped hook: {json}"
+    );
+}
+
+#[test]
+fn meld_dangerously_skip_runs_hook_and_records_it() {
+    // spec: HOOK-23, HOOK-10, HOOK-31
+    // --dangerously-skip-install-hook-check runs the hook without prompting
+    // (HOOK-23). It runs in the clone after checkout (HOOK-10), so its marker
+    // lands in the clone dir, and the registry records both the command and the
+    // commit it ran at (HOOK-31).
+    let sb = sandbox_with_declared_hook("agents", "touch hookran");
+    let spec = sb.source_spec();
+
+    let r = sb.mind(&["meld", &spec, "--dangerously-skip-install-hook-check"]);
+    assert!(r.success, "meld should succeed: {}", r.stderr);
+
+    // HOOK-10: the hook ran in the clone dir.
+    let marker = clone_dir_of(&sb, "agents").join("hookran");
+    assert!(
+        marker.exists(),
+        "the install hook must have run in the clone: {} missing",
+        marker.display()
+    );
+
+    // HOOK-31: the registry records the command and a non-null run-commit.
+    let json = std::fs::read_to_string(sb.mind_home.join("sources.json")).unwrap();
+    assert!(
+        json.contains("touch hookran"),
+        "registry must record the hook command: {json}"
+    );
+    assert!(
+        !json.contains("\"install_hook_commit\": null"),
+        "install_hook_commit must be non-null after the hook ran: {json}"
+    );
+    assert!(
+        json.contains("install_hook_commit"),
+        "registry must carry the install_hook_commit field: {json}"
+    );
+}
+
+#[test]
+fn meld_hook_nonzero_exit_fails_and_registers_nothing() {
+    // spec: HOOK-30
+    // A non-zero hook exit is a HookFailed error that fails the meld: the source
+    // is not registered and the clone is removed, as for any failed meld.
+    let sb = sandbox_with_declared_hook("agents", "exit 1");
+    let spec = sb.source_spec();
+
+    let r = sb.mind(&["meld", &spec, "--dangerously-skip-install-hook-check"]);
+    assert!(
+        !r.success,
+        "a non-zero hook exit must fail the meld: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr.contains("install hook") && r.stderr.contains("failed"),
+        "stderr must report the failed install hook: {}",
+        r.stderr
+    );
+
+    // Nothing registered.
+    let sources = sb.mind(&["recall", "--sources"]);
+    assert!(
+        sources.stdout.contains("no sources melded"),
+        "no source must be registered after a failed hook: {}",
+        sources.stdout
+    );
+    let sources_json = sb.mind_home.join("sources.json");
+    if sources_json.exists() {
+        let json = std::fs::read_to_string(&sources_json).unwrap();
+        assert!(
+            !json.contains("\"repo\": \"agents\""),
+            "sources.json must not list the source after a failed hook: {json}"
+        );
+    }
+
+    // The clone dir was removed.
+    let clone = clone_dir_of(&sb, "agents");
+    assert!(
+        !clone.exists(),
+        "a failed hook must not leave a stray clone dir at {}",
+        clone.display()
+    );
+}
+
+#[test]
+fn meld_install_hook_flag_supplies_hook_without_mind_toml() {
+    // spec: HOOK-2
+    // --install-hook supplies a hook for a repo that ships no mind.toml. With
+    // --dangerously-skip-install-hook-check it runs, and the registry records
+    // the supplied command and a non-null run-commit.
+    let sb = Sandbox::new(); // no mind.toml
+    let spec = sb.source_spec();
+
+    let r = sb.mind(&[
+        "meld",
+        &spec,
+        "--install-hook",
+        "touch hookran",
+        "--dangerously-skip-install-hook-check",
+    ]);
+    assert!(r.success, "meld should succeed: {}", r.stderr);
+
+    let marker = clone_dir_of(&sb, "agents").join("hookran");
+    assert!(
+        marker.exists(),
+        "the supplied hook must have run: {} missing",
+        marker.display()
+    );
+
+    let json = std::fs::read_to_string(sb.mind_home.join("sources.json")).unwrap();
+    assert!(
+        json.contains("touch hookran"),
+        "registry must record the supplied hook command: {json}"
+    );
+    assert!(
+        !json.contains("\"install_hook_commit\": null"),
+        "install_hook_commit must be non-null after the supplied hook ran: {json}"
+    );
+}
+
+#[test]
+fn recall_sources_shows_install_hook_marker() {
+    // spec: HOOK-31
+    // recall --sources reports that a source carries an install hook.
+    let sb = sandbox_with_declared_hook("agents", "touch hookran");
+    let spec = sb.source_spec();
+    assert!(
+        sb.mind(&["meld", &spec, "--dangerously-skip-install-hook-check"])
+            .success
+    );
+
+    let sources = sb.mind(&["recall", "--sources"]);
+    assert!(sources.success, "recall failed: {}", sources.stderr);
+    assert!(
+        sources.stdout.contains("hook"),
+        "recall --sources must mark a source with an install hook: {}",
+        sources.stdout
+    );
+}
+
+#[test]
+fn evolve_reruns_hook_after_source_advances() {
+    // spec: HOOK-11
+    // After a source advances to a new commit, evolve re-runs the hook (the
+    // tooling tracks the source). When the source has not advanced, evolve does
+    // not re-run the hook (the recorded run-commit already equals the commit).
+    let sb = sandbox_with_declared_hook("agents", "touch hookran");
+    let spec = sb.source_spec();
+    assert!(
+        sb.mind(&["meld", &spec, "--dangerously-skip-install-hook-check"])
+            .success,
+        "initial meld should run the hook and record commit C1"
+    );
+
+    let marker = clone_dir_of(&sb, "agents").join("hookran");
+    assert!(marker.exists(), "the hook should have run on meld");
+
+    // Clear the marker so a re-run is observable.
+    std::fs::remove_file(&marker).unwrap();
+
+    // Advance the source and sync (sync alone must not run the hook).
+    sb.edit_source();
+    assert!(sb.mind(&["sync"]).success);
+    assert!(
+        !marker.exists(),
+        "sync alone must not re-run the hook (HOOK-11)"
+    );
+
+    // evolve sees the new commit and re-runs the hook.
+    let ev = sb.mind(&["evolve", "-y", "--dangerously-skip-install-hook-check"]);
+    assert!(ev.success, "evolve failed: {} {}", ev.stdout, ev.stderr);
+    assert!(
+        marker.exists(),
+        "evolve must re-run the hook after the source advanced: {} missing",
+        marker.display()
+    );
+
+    // The recorded run-commit advanced to the new commit; a second evolve with
+    // no source change must NOT re-run the hook.
+    std::fs::remove_file(&marker).unwrap();
+    let again = sb.mind(&["evolve", "-y", "--dangerously-skip-install-hook-check"]);
+    assert!(again.success, "second evolve failed: {}", again.stderr);
+    assert!(
+        !marker.exists(),
+        "evolve must not re-run the hook when the source has not advanced"
+    );
+}

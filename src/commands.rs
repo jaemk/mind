@@ -24,6 +24,7 @@ use crate::source::{Pin, Registry, parse_spec};
 /// If the source's `mind.toml` lists nested `[discover].sources`, each is melded
 /// too (recursively), so a repo can act as a curated super-source. Nested
 /// sources are skipped if already registered, and cycles are guarded by URL.
+#[allow(clippy::too_many_arguments)]
 pub fn meld(
     paths: &Paths,
     repo: &str,
@@ -32,6 +33,8 @@ pub fn meld(
     follow_branch: Option<String>,
     pin_tag: Option<String>,
     pin_ref: Option<String>,
+    install_hook: Option<String>,
+    dangerously_skip_install_hook_check: bool,
 ) -> Result<()> {
     // Resolve the consumer-supplied pin flags into a single Pin. The flags are
     // independent at the clap layer, so more than one surfaces here as the
@@ -54,6 +57,8 @@ pub fn meld(
         true,
         &mut visited,
         policy.as_ref(),
+        install_hook,
+        dangerously_skip_install_hook_check,
     )?;
     registry.save(paths)?;
     if added > 1 {
@@ -96,6 +101,26 @@ fn resolve_pin_flags(
     }
 }
 
+/// A short human description of a `Pin` for the hook disclosure (HOOK-20).
+/// Shared by `meld_recursive` and `evolve` so both render the pin the same way.
+fn pin_description(pin: &Pin) -> String {
+    match pin {
+        Pin::DefaultBranch => "default branch".to_string(),
+        Pin::FollowBranch(b) => format!("branch {b}"),
+        Pin::Tag(t) => format!("tag {t}"),
+        Pin::Ref(r) => format!("ref {r}"),
+    }
+}
+
+/// Whether `evolve` should re-offer a source's install hook (HOOK-11): a hook is
+/// in effect AND the commit it last ran at differs from the source's current
+/// commit. A None `install_hook_commit` (a recorded-but-never-run hook from a
+/// skipped meld) differs from any Some(commit), so it is re-offered too.
+fn hook_rerun_warranted(source: &crate::source::Source) -> bool {
+    source.install_hook.is_some()
+        && source.install_hook_commit.as_deref() != source.commit.as_deref()
+}
+
 /// Meld one source and then its nested sources. Returns how many sources were
 /// newly added to the registry. `top_level` distinguishes the user's own meld
 /// (errors on a duplicate) from a curated nested meld (skips a duplicate).
@@ -114,6 +139,8 @@ fn meld_recursive(
     top_level: bool,
     visited: &mut HashSet<String>,
     policy: Option<&Policy>,
+    install_hook: Option<String>,
+    dangerously_skip_hook_check: bool,
 ) -> Result<usize> {
     let mut source = parse_spec(repo)?;
     source.alias = alias;
@@ -249,6 +276,82 @@ fn meld_recursive(
     };
     warn_unguarded_references(&items);
     println!("melded {} ({} item(s))", source.name, items.len());
+
+    // Install hook (HOOK-10): the working tree is now checked out at the resolved
+    // pin, so the hook runs in the right tree. Resolve the effective hook (a
+    // consumer `--install-hook` overrides a declared `[source].install`).
+    {
+        let declared = mindfile.as_ref().and_then(|m| m.source.install.clone());
+        let supplied = install_hook;
+        match crate::hook::resolve_hook(declared.as_deref(), supplied.as_deref()) {
+            None => {
+                // HOOK-3: no hook in effect; proceed unchanged.
+            }
+            Some((cmd, overrides)) => {
+                let cmd = cmd.to_string();
+                let pin_desc = pin_description(&source.pin);
+                let commit = source.commit.clone().unwrap_or_default();
+                let clone_path = dir.display().to_string();
+
+                // Decide run / skip / abort.
+                let choice = if dangerously_skip_hook_check {
+                    // HOOK-23: run without prompting.
+                    println!(
+                        "note: running install hook for {} without the safety prompt (--dangerously-skip-install-hook-check)",
+                        source.name
+                    );
+                    crate::hook::HookChoice::RunAndContinue
+                } else if !crate::hook::is_tty() {
+                    // HOOK-22: no TTY; never run silently, never abort. Take the
+                    // skip path.
+                    crate::hook::HookChoice::SkipAndContinue
+                } else {
+                    let disclosure = crate::hook::disclosure_text(
+                        &source.name,
+                        &pin_desc,
+                        &commit,
+                        &clone_path,
+                        &cmd,
+                        if overrides { declared.as_deref() } else { None },
+                    );
+                    crate::hook::prompt_choice(&disclosure)?
+                };
+
+                match choice {
+                    crate::hook::HookChoice::RunAndContinue => {
+                        // HOOK-30: a non-zero exit fails the meld; remove the clone
+                        // so the source is not left registered.
+                        if let Err(e) = crate::hook::run_hook(&cmd, &dir, &source.name) {
+                            let _ = std::fs::remove_dir_all(&dir);
+                            return Err(e);
+                        }
+                        // HOOK-31: record the command and the commit it ran at.
+                        source.install_hook = Some(cmd);
+                        source.install_hook_commit = source.commit.clone();
+                    }
+                    crate::hook::HookChoice::SkipAndContinue => {
+                        // HOOK-21 / HOOK-22: install the source and its items, but
+                        // do not build the tooling. Record the hook command so
+                        // `evolve` can re-offer it, but leave install_hook_commit
+                        // None (the hook has not been run).
+                        println!(
+                            "note: skipped the install hook for {}; its items may not work until the hook is run",
+                            source.name
+                        );
+                        source.install_hook = Some(cmd);
+                    }
+                    crate::hook::HookChoice::Abort => {
+                        // HOOK-21: aborting installs nothing; the source is not
+                        // registered.
+                        let _ = std::fs::remove_dir_all(&dir);
+                        println!("aborted; nothing installed");
+                        return Ok(0);
+                    }
+                }
+            }
+        }
+    }
+
     registry.sources.push(source);
 
     let mut added = 1;
@@ -270,6 +373,8 @@ fn meld_recursive(
                 false,
                 visited,
                 policy,
+                None, // no consumer install hook for nested sources
+                dangerously_skip_hook_check,
             )?;
         }
     }
@@ -684,6 +789,8 @@ pub fn sync(paths: &Paths, then_evolve: bool) -> Result<()> {
                 false, // skip (not error) if a same-URL entry is already present
                 &mut visited,
                 Some(policy),
+                None,  // auto-meld supplies no install hook
+                false, // auto-meld is non-TTY, so its hooks take the HOOK-22 skip path
             )?;
         }
         if provisioned > 0 {
@@ -760,16 +867,27 @@ pub fn sync(paths: &Paths, then_evolve: bool) -> Result<()> {
         });
     }
     if then_evolve {
-        evolve(paths, false, None)?;
+        evolve(paths, false, None, false)?;
     }
     Ok(())
 }
 
 /// `mind evolve [--yes] [item]` — report and optionally apply upgrades.
-pub fn evolve(paths: &Paths, yes: bool, item_ref: Option<&str>) -> Result<()> {
+pub fn evolve(
+    paths: &Paths,
+    yes: bool,
+    item_ref: Option<&str>,
+    dangerously_skip_hook_check: bool,
+) -> Result<()> {
     // POL-3: load the managed policy once (fail closed on Err; None = inert).
     let policy = Policy::load()?;
-    let registry = Registry::load(paths)?;
+    let mut registry = Registry::load(paths)?;
+
+    // HOOK-11: re-run a source's install hook when its commit has advanced past
+    // the commit the hook last ran at (or it was recorded but never run). This is
+    // a source-level pass, separate from the per-item upgrade loop below.
+    rerun_source_hooks(paths, &mut registry, dangerously_skip_hook_check)?;
+
     let catalog = catalog::scan(paths, &registry)?;
     let manifest = Manifest::load(paths)?;
 
@@ -851,6 +969,80 @@ pub fn evolve(paths: &Paths, yes: bool, item_ref: Option<&str>) -> Result<()> {
         manifest.insert(installed);
     }
     manifest.save(paths)?;
+    Ok(())
+}
+
+/// HOOK-11: re-run each source's install hook when warranted (the source
+/// advanced past the commit the hook last ran at, or the hook was recorded but
+/// never run). Same trust boundary as `meld`: prompt and disclose, unless the
+/// `--dangerously-skip-install-hook-check` flag is set or there is no TTY. In
+/// `evolve`, Abort is treated as Skip: the source is already registered, so
+/// declining the re-run just leaves the existing install in place. Persists the
+/// registry only if a hook was run and its recorded commit advanced.
+fn rerun_source_hooks(
+    paths: &Paths,
+    registry: &mut Registry,
+    dangerously_skip_hook_check: bool,
+) -> Result<()> {
+    let mut changed = false;
+    for source in &mut registry.sources {
+        if !hook_rerun_warranted(source) {
+            continue;
+        }
+        // `hook_rerun_warranted` guarantees install_hook is Some.
+        let cmd = source
+            .install_hook
+            .clone()
+            .expect("warranted re-run has a hook command");
+        let dir = source.clone_dir(paths);
+        let pin_desc = pin_description(&source.pin);
+        let commit = source.commit.clone().unwrap_or_default();
+        let clone_path = dir.display().to_string();
+
+        let run = if dangerously_skip_hook_check {
+            // HOOK-23: re-run without prompting.
+            println!(
+                "note: re-running install hook for {} without the safety prompt (--dangerously-skip-install-hook-check)",
+                source.name
+            );
+            true
+        } else if !crate::hook::is_tty() {
+            // HOOK-22: no TTY; never run silently. Skip the re-run.
+            println!(
+                "note: skipped re-running the install hook for {} (no TTY); its tooling may be out of date until the hook is re-run",
+                source.name
+            );
+            false
+        } else {
+            let disclosure = crate::hook::disclosure_text(
+                &source.name,
+                &pin_desc,
+                &commit,
+                &clone_path,
+                &cmd,
+                None,
+            );
+            // Abort is treated as Skip here (the source is already registered).
+            matches!(
+                crate::hook::prompt_choice(&disclosure)?,
+                crate::hook::HookChoice::RunAndContinue
+            )
+        };
+
+        if run {
+            // HOOK-30: a non-zero exit is a hard error. The source stays
+            // registered (it is an existing install), so do not remove anything;
+            // just propagate the failure.
+            crate::hook::run_hook(&cmd, &dir, &source.name)?;
+            // HOOK-31: record the commit the hook ran at.
+            source.install_hook_commit = source.commit.clone();
+            changed = true;
+            println!("re-ran install hook for {}", source.name);
+        }
+    }
+    if changed {
+        registry.save(paths)?;
+    }
     Ok(())
 }
 
@@ -971,10 +1163,16 @@ pub fn recall(
                     Some(a) => format!(" as:{a}"),
                     None => String::new(),
                 };
+                // HOOK-31: surface that a source carries an install hook.
+                let hook = if s.install_hook.is_some() {
+                    " hook"
+                } else {
+                    ""
+                };
                 vec![
                     s.name.clone(),
                     s.url.clone(),
-                    format!("[{commit}{ns}]"),
+                    format!("[{commit}{ns}{hook}]"),
                     s.description.clone().unwrap_or_default(),
                 ]
             })
@@ -1704,5 +1902,60 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Build a bare `Source` for the `hook_rerun_warranted` truth table. Uses
+    /// `parse_spec` so the identity fields are filled the same way `meld` fills
+    /// them; the test only manipulates the commit and hook fields.
+    fn hook_source(
+        commit: Option<&str>,
+        install_hook: Option<&str>,
+        install_hook_commit: Option<&str>,
+    ) -> crate::source::Source {
+        let mut s = crate::source::parse_spec("acme/tools").expect("spec parses");
+        s.commit = commit.map(str::to_string);
+        s.install_hook = install_hook.map(str::to_string);
+        s.install_hook_commit = install_hook_commit.map(str::to_string);
+        s
+    }
+
+    // spec: HOOK-11
+    #[test]
+    fn hook_rerun_warranted_truth_table() {
+        // No hook in effect: never re-run, whatever the commits.
+        assert!(
+            !hook_rerun_warranted(&hook_source(Some("abc1234"), None, None)),
+            "no install_hook means no re-run"
+        );
+        assert!(
+            !hook_rerun_warranted(&hook_source(Some("abc1234"), None, Some("old0000"))),
+            "no install_hook means no re-run even with a recorded run commit"
+        );
+
+        // Hook already ran at the current commit: nothing to do.
+        assert!(
+            !hook_rerun_warranted(&hook_source(
+                Some("abc1234"),
+                Some("make install"),
+                Some("abc1234"),
+            )),
+            "install_hook_commit == commit means the hook already ran here"
+        );
+
+        // Hook recorded but never run (skipped meld): re-offer it.
+        assert!(
+            hook_rerun_warranted(&hook_source(Some("abc1234"), Some("make install"), None)),
+            "a recorded-but-never-run hook is re-offered"
+        );
+
+        // Commit advanced past the commit the hook last ran at: re-offer it.
+        assert!(
+            hook_rerun_warranted(&hook_source(
+                Some("def5678"),
+                Some("make install"),
+                Some("abc1234"),
+            )),
+            "an advanced commit warrants a re-run"
+        );
     }
 }

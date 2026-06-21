@@ -427,6 +427,8 @@ mod tests {
             alias: None,
             pin: Pin::default(),
             roots: None,
+            install_hook: None,
+            install_hook_commit: None,
         }
     }
 

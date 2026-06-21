@@ -43,7 +43,7 @@ and verified.
 | `review` verb: author-side source validation | done | CLI-130, CLI-131, CLI-132, CLI-133 |
 | `self-update` verb: in-place upgrade of the `mind` binary (via the `self_update` crate) | planned | CLI-140, CLI-141, CLI-142, CLI-143 |
 | Managed policy (enterprise): trusted-source allowlist, require-pinned, auto-meld, lobe lock; `mind review --policy` | done | [policy.md](policy.md) |
-| Install hooks: `[source].install` / `meld --install-hook`, safety prompt, `--dangerously-skip-install-hook-check` | planned | [install-hooks.md](install-hooks.md) |
+| Install hooks: `[source].install` / `meld --install-hook`, safety prompt, `--dangerously-skip-install-hook-check` | done | [install-hooks.md](install-hooks.md) |
 | Within-source dependency resolution: a partial `learn` pulls in referenced siblings; dependency-tree display + install order | done | [dependencies.md](dependencies.md) |
 | Concurrency: global advisory lock + atomic registry writes (via `fd-lock`) | done | STO-40, STO-41, STO-42, STO-43 |
 | `probe` matches description text, not just name | done | CLI-85 |

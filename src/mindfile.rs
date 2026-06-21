@@ -31,6 +31,11 @@ pub struct MindToml {
 #[serde(deny_unknown_fields)]
 pub struct SourceMeta {
     pub description: Option<String>,
+    /// An install hook (HOOK-1): a shell command the maintainer declares to build
+    /// or install the tooling this source's items rely on. Run on `meld` after
+    /// checkout, gated by a safety prompt (see spec/install-hooks.md). `None` when
+    /// the source declares no hook.
+    pub install: Option<String>,
     /// Namespace prefix applied to every item from this source (see
     /// [`crate::namespace`]). A consumer `meld --as` overrides it.
     pub prefix: Option<String>,
@@ -214,6 +219,25 @@ mod tests {
         assert!(!version_at_least("0.1.0", "0.1.1"));
         // Non-numeric / suffix components count as 0.
         assert!(version_at_least("0.2.0-rc1", "0.2"));
+    }
+
+    #[test]
+    fn source_install_hook_parses() {
+        // spec: HOOK-1
+        let toml = r#"
+            [source]
+            description = "tools"
+            install = "make build && make install"
+        "#;
+        let parsed: MindToml = toml::from_str(toml).expect("parse");
+        assert_eq!(
+            parsed.source.install.as_deref(),
+            Some("make build && make install")
+        );
+
+        // Absent install => None.
+        let none: MindToml = toml::from_str("[source]\ndescription = \"x\"\n").unwrap();
+        assert_eq!(none.source.install, None);
     }
 
     #[test]

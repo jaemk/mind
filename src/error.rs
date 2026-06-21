@@ -195,6 +195,18 @@ pub enum MindError {
         "the agent homes are locked by the managed policy ([lobes].lock); `config lobes {action}` is refused"
     )]
     LobesLocked { action: String },
+
+    #[error(
+        "install hook for source '{identity}' failed{}: {}\n  command: {command}",
+        status_suffix(*status),
+        if stderr.is_empty() { "<no stderr>" } else { stderr }
+    )]
+    HookFailed {
+        identity: String,
+        command: String,
+        status: Option<ExitStatus>,
+        stderr: String,
+    },
 }
 
 fn status_suffix(status: Option<ExitStatus>) -> String {
@@ -219,5 +231,25 @@ impl MindError {
             what: what.into(),
             source,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hook_failed_displays_identity_and_command() {
+        // spec: HOOK-30
+        let e = MindError::HookFailed {
+            identity: "github.com/acme/tools".into(),
+            command: "make install".into(),
+            status: None,
+            stderr: "boom".into(),
+        };
+        let msg = e.to_string();
+        assert!(msg.contains("github.com/acme/tools"), "msg: {msg}");
+        assert!(msg.contains("make install"), "msg: {msg}");
+        assert!(msg.contains("boom"), "msg: {msg}");
     }
 }

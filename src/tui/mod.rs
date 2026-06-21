@@ -527,6 +527,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            false,
         )
         .expect("meld");
 
@@ -620,6 +622,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            false,
         )
         .expect("meld");
 

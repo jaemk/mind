@@ -60,6 +60,18 @@ pub struct Source {
     /// None => use `[source].roots` from mind.toml, or the repo root.
     #[serde(default)]
     pub roots: Option<Vec<String>>,
+    /// The install hook command in effect for this source (HOOK-31), if any:
+    /// the maintainer's `[source].install` or a consumer `meld --install-hook`
+    /// override. `None` when the source has no hook. Persisted; lets `recall`/
+    /// `introspect` report a source has a hook and `evolve` detect a changed
+    /// command.
+    #[serde(default)]
+    pub install_hook: Option<String>,
+    /// The commit the install hook last ran at (HOOK-31), or `None` if the hook
+    /// is recorded but has not been run yet (the user skipped it). Lets `evolve`
+    /// detect the source advanced past the last hook run and re-prompt (HOOK-11).
+    #[serde(default)]
+    pub install_hook_commit: Option<String>,
 }
 
 impl Source {
@@ -162,6 +174,8 @@ fn make_source(host: &str, owner: &str, repo: &str, url: String) -> Source {
         alias: None,
         pin: Pin::default(),
         roots: None,
+        install_hook: None,
+        install_hook_commit: None,
     }
 }
 
@@ -323,6 +337,41 @@ mod tests {
             src.pin,
             Pin::DefaultBranch,
             "absent pin should default to DefaultBranch"
+        );
+    }
+
+    #[test]
+    fn install_hook_fields_round_trip_and_default_absent() {
+        // spec: HOOK-31
+        // Older sources.json without the fields => both None (serde default).
+        let src_json = r#"{
+            "name":"local/a/b","url":"/a/b","host":"local","owner":"a","repo":"b"
+        }"#;
+        let src: Source = serde_json::from_str(src_json).unwrap();
+        assert_eq!(
+            src.install_hook, None,
+            "absent install_hook should default to None"
+        );
+        assert_eq!(
+            src.install_hook_commit, None,
+            "absent install_hook_commit should default to None"
+        );
+
+        // A source carrying both fields round-trips losslessly.
+        let mut s = parse_spec("acme/tools").unwrap();
+        s.install_hook = Some("make install".into());
+        s.install_hook_commit = Some("abc1234".into());
+        let json = serde_json::to_string(&s).unwrap();
+        let back: Source = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            back.install_hook.as_deref(),
+            Some("make install"),
+            "install_hook did not round-trip"
+        );
+        assert_eq!(
+            back.install_hook_commit.as_deref(),
+            Some("abc1234"),
+            "install_hook_commit did not round-trip"
         );
     }
 }

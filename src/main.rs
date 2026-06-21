@@ -7,6 +7,7 @@ mod error;
 mod frontmatter;
 mod git;
 mod hash;
+mod hook;
 mod install;
 mod lock;
 mod manifest;
@@ -144,12 +145,33 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             follow_branch,
             pin_tag,
             pin_ref,
-        } => commands::meld(paths, &repo, alias, roots, follow_branch, pin_tag, pin_ref),
+            install_hook,
+            dangerously_skip_install_hook_check,
+        } => commands::meld(
+            paths,
+            &repo,
+            alias,
+            roots,
+            follow_branch,
+            pin_tag,
+            pin_ref,
+            install_hook,
+            dangerously_skip_install_hook_check,
+        ),
         Command::Unmeld { name, forget } => commands::unmeld(paths, &name, forget),
         Command::Learn { item, dry_run, yes } => commands::learn(paths, &item, dry_run, yes),
         Command::Forget { item } => commands::forget(paths, &item),
         Command::Sync { evolve } => commands::sync(paths, evolve),
-        Command::Evolve { yes, item } => commands::evolve(paths, yes, item.as_deref()),
+        Command::Evolve {
+            yes,
+            item,
+            dangerously_skip_install_hook_check,
+        } => commands::evolve(
+            paths,
+            yes,
+            item.as_deref(),
+            dangerously_skip_install_hook_check,
+        ),
         Command::Recall {
             sources,
             item,

@@ -56,7 +56,7 @@ pub fn execute(paths: &Paths, action: PendingAction) -> Result<Snapshot> {
         }
         ActionKind::Meld { spec } => {
             // spec: TUI-21
-            commands::meld(paths, &spec, None, vec![], None, None, None)?;
+            commands::meld(paths, &spec, None, vec![], None, None, None, None, false)?;
         }
         ActionKind::Unmeld { name, forget } => {
             // spec: TUI-21
@@ -68,7 +68,7 @@ pub fn execute(paths: &Paths, action: PendingAction) -> Result<Snapshot> {
         }
         ActionKind::Evolve => {
             // spec: TUI-22 - `yes: true` so it applies without prompting on stdin.
-            commands::evolve(paths, true, None)?;
+            commands::evolve(paths, true, None, false)?;
         }
         ActionKind::LobeAdd { path } => {
             // spec: TUI-23 CLI-112
@@ -354,7 +354,7 @@ mod tests {
         use crate::manifest::{InstalledItem, Manifest};
         let src = make_source_repo(base);
         let spec = src.to_str().unwrap().to_string();
-        commands::meld(paths, &spec, None, vec![], None, None, None).expect("meld");
+        commands::meld(paths, &spec, None, vec![], None, None, None, None, false).expect("meld");
         let source_name = crate::source::Registry::load(paths).unwrap().sources[0]
             .name
             .clone();
@@ -715,6 +715,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            false,
         )
         .expect("meld dep-source");
 
@@ -835,6 +837,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            false,
         )
         .expect("meld chain-source");
 
@@ -908,6 +912,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            false,
         )
         .expect("meld dep-source");
         let source_name = crate::source::Registry::load(&paths).unwrap().sources[0]
@@ -1028,6 +1034,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            false,
         )
         .expect("meld source-alpha");
         commands::meld(
@@ -1038,6 +1046,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            false,
         )
         .expect("meld source-beta");
 

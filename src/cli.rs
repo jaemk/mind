@@ -77,6 +77,17 @@ pub enum Command {
         /// Persisted on the source and used by later scans and sync (CLI-16).
         #[arg(long = "root", value_name = "DIR")]
         roots: Vec<String>,
+
+        /// Supply or override the source's install hook: a shell command run
+        /// after checkout to build the tooling its items rely on. Overriding a
+        /// declared `[source].install` is shown loudly in the safety prompt.
+        #[arg(long, value_name = "CMD")]
+        install_hook: Option<String>,
+
+        /// Run the install hook without the safety prompt. This executes
+        /// arbitrary code from the source; only use it for a source you trust.
+        #[arg(long)]
+        dangerously_skip_install_hook_check: bool,
     },
 
     /// Unmeld a source, removing its clone and catalog entry.
@@ -137,6 +148,12 @@ pub enum Command {
 
         /// Only upgrade this item; default is every installed item.
         item: Option<String>,
+
+        /// Re-run a source's install hook without the safety prompt when its
+        /// commit advanced. This executes arbitrary code from the source; only
+        /// use it for a source you trust.
+        #[arg(long)]
+        dangerously_skip_install_hook_check: bool,
     },
 
     /// List installed items, or show one item's details.
