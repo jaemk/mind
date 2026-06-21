@@ -5,7 +5,8 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 | command | role |
 |---------|------|
 | `probe [query] [--no-tui]` | interactive browser (default); catalog listing with `--no-tui`/`--json` |
-| `meld <repo> [--as <prefix>] [--root <dir>] [--follow-branch\|--pin-tag\|--pin-ref <ref>]` | connect a source |
+| `meld [<repo>] [--link-only] [--yes] [--as <prefix>] [--root <dir>] [--follow-branch\|--pin-tag\|--pin-ref <ref>]` | connect a source (default `.`), then install its items |
+| `init-source [<path>] [--template]` | scaffold `mind.toml` + detect references (maintainer) |
 | `unmeld <name>` (alias: `detach`) | disconnect a source |
 | `learn <item>` | install |
 | `forget <item>` (alias: `unlearn`) | uninstall |
@@ -89,6 +90,10 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   non-interactive meld accepts the declared prefix as-is. An empty alias (`--as
   ''` or the "no prefix" answer) explicitly overrides a declared prefix to none.
   A source that declares no prefix is not prompted.
+- `CLI-25` `meld` with no `<repo>` argument defaults to the current directory
+  (`.`), melding the repo the command is run in. Combined with the default
+  install (CLI-23), running `mind meld` inside a source repo (e.g. one with a
+  `mind.toml`) registers and installs that source.
 
 ## unmeld
 

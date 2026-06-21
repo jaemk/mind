@@ -30,6 +30,10 @@ const ALLOWLIST: &[&str] = &[
     // when built, at which point it is removed from this allowlist.
     //   version pinning: now implemented; IDs removed from allowlist and cited in tests.
     //   review verb: now implemented; IDs removed from allowlist and cited in tests.
+    //   meld no-arg defaults to `.` (CLI-25) and the maintainer `init-source`
+    //   scaffolder (INIT-1..6; see spec/init-source.md) are documented ahead of
+    //   implementation. Move each to a citing test when built.
+    "CLI-25", "INIT-1", "INIT-2", "INIT-3", "INIT-4", "INIT-5", "INIT-6",
     //   self-update `evolve` verb: in-place upgrade of the mind binary using the
     //   same native curl/wget downloader as resources/install.sh (no external
     //   crate). The pure logic (platform triple, version compare/decision, the
