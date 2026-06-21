@@ -235,6 +235,20 @@ impl Policy {
                 }
             }
         }
+        // POL-40: every [lobes].targets entry must be a non-empty, non-whitespace
+        // path. An empty string silently resolves to the current working directory
+        // in Paths::agent_homes, which would link managed homes into wherever `mind`
+        // runs. Fail closed at load time so the problem is never silently acted on.
+        for target in &self.lobes_targets {
+            if target.trim().is_empty() {
+                return Err(MindError::InvalidPolicy {
+                    path: path.display().to_string(),
+                    reason: "[lobes].targets contains an empty or whitespace-only entry; \
+                             each target must be a non-empty path"
+                        .to_string(),
+                });
+            }
+        }
         Ok(())
     }
 
@@ -964,5 +978,58 @@ tag = "v2.0.0"
             "source 'github.com/acme/a' must be pinned to a tag or ref: \
              the managed policy forbids floating branches"
         );
+    }
+
+    // POL-40: a [lobes].targets entry that is empty or all-whitespace must be
+    // rejected at validation time (fail closed) so an empty string never silently
+    // resolves to the current working directory in Paths::agent_homes.
+    // spec: POL-40
+    #[test]
+    fn lobes_targets_empty_entry_is_invalid() {
+        // Literally empty string entry.
+        let empty = r#"
+[lobes]
+targets = [""]
+"#;
+        let err = parse(empty).unwrap_err();
+        match err {
+            MindError::InvalidPolicy { reason, .. } => {
+                assert!(
+                    reason.contains("empty or whitespace"),
+                    "reason should name the problem: {reason}"
+                );
+                assert!(
+                    reason.contains("[lobes].targets"),
+                    "reason should name the field: {reason}"
+                );
+            }
+            other => panic!("expected InvalidPolicy, got {other:?}"),
+        }
+
+        // Whitespace-only entry.
+        let whitespace = "[lobes]\ntargets = [\"   \"]\n";
+        let err = parse(whitespace).unwrap_err();
+        assert!(
+            matches!(err, MindError::InvalidPolicy { .. }),
+            "whitespace-only target must also be rejected: {err:?}"
+        );
+
+        // Mixed list: one valid entry, one empty - still rejected.
+        let mixed = "[lobes]\ntargets = [\"~/.claude\", \"\"]\n";
+        let err = parse(mixed).unwrap_err();
+        assert!(
+            matches!(err, MindError::InvalidPolicy { .. }),
+            "mixed list with an empty entry must be rejected: {err:?}"
+        );
+
+        // A normal, non-empty target passes validation.
+        let ok = "[lobes]\ntargets = [\"~/.claude\"]\n";
+        let p = parse(ok).expect("non-empty target must be valid");
+        assert_eq!(p.lobes_targets(), &["~/.claude".to_string()]);
+
+        // Multiple valid targets also pass.
+        let multi = "[lobes]\ntargets = [\"~/.claude\", \"/opt/agent-home\"]\n";
+        let p = parse(multi).expect("multiple non-empty targets must be valid");
+        assert_eq!(p.lobes_targets().len(), 2);
     }
 }
