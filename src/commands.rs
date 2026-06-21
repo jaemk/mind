@@ -273,6 +273,24 @@ fn meld_recursive(
         }
     }
 
+    // CLI-24: a source that declares `[source].prefix` and was not melded with an
+    // explicit `--as` prefix prompts (interactively) whether to namespace its
+    // items under that prefix. The choice becomes the source alias, so the scan
+    // and the later install use the chosen names. Non-interactive runs accept the
+    // declared prefix as-is (alias stays None).
+    if top_level
+        && source.alias.is_none()
+        && crate::hook::is_tty()
+        && let Some(declared) = mindfile.as_ref().and_then(|m| m.source.prefix.clone())
+        && !declared.is_empty()
+    {
+        let answer = prompt_line(&format!(
+            "{} suggests the prefix '{declared}'.\n  use it? [Y]es / type a different prefix / [n]o prefix: ",
+            source.name
+        ))?;
+        source.alias = crate::namespace::prefix_choice(&answer);
+    }
+
     // Scan before registering. If the source is rejected here (e.g. the
     // version gate, DSC-40), remove the clone so no orphan is left on disk.
     let items = match catalog::scan(paths, &single(&source)) {
@@ -1790,6 +1808,23 @@ fn summary(desc: Option<&str>, max: usize) -> String {
     }
     let cut: String = first.chars().take(max.saturating_sub(1)).collect();
     format!("{}...", cut.trim_end())
+}
+
+/// Print `prompt` and read one line from stdin (trimmed by the caller). EOF
+/// yields an empty string. Used for free-form answers like the prefix prompt
+/// (CLI-24), where `[y/N]` is not enough.
+fn prompt_line(prompt: &str) -> Result<String> {
+    print!("{prompt}");
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    if std::io::stdin()
+        .read_line(&mut line)
+        .map_err(|e| MindError::io("<stdin>", e))?
+        == 0
+    {
+        return Ok(String::new()); // EOF -> empty (accept the declared prefix)
+    }
+    Ok(line)
 }
 
 /// Prompt `[y/N]` on the terminal; default No.

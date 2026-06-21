@@ -335,6 +335,43 @@ fn meld_default_non_tty_registers_only_and_notes_install() {
 }
 
 #[test]
+fn meld_uses_declared_prefix_when_installing() {
+    // spec: CLI-24 - a non-interactive meld accepts a source's declared
+    // `[source].prefix`; installed items are namespaced `<prefix>-<name>`.
+    let sb = Sandbox::new();
+    sb.write_and_commit("mind.toml", "[source]\nprefix = \"jk\"\n");
+    let spec = sb.source_spec();
+    assert!(
+        sb.mind(&["meld", &spec, "--yes"]).success,
+        "meld of a prefixed source should succeed"
+    );
+    let recall = sb.mind(&["recall"]).stdout;
+    assert!(
+        recall.contains("jk-review"),
+        "items must carry the declared prefix: {recall}"
+    );
+}
+
+#[test]
+fn meld_as_empty_overrides_a_declared_prefix() {
+    // spec: CLI-24 - `--as ''` is the explicit "no prefix" override and
+    // suppresses a declared `[source].prefix`.
+    let sb = Sandbox::new();
+    sb.write_and_commit("mind.toml", "[source]\nprefix = \"jk\"\n");
+    let spec = sb.source_spec();
+    assert!(
+        sb.mind(&["meld", &spec, "--as", "", "--yes"]).success,
+        "meld --as '' should succeed"
+    );
+    let recall = sb.mind(&["recall"]).stdout;
+    assert!(recall.contains("review"), "items must install: {recall}");
+    assert!(
+        !recall.contains("jk-"),
+        "the declared prefix must be overridden to none: {recall}"
+    );
+}
+
+#[test]
 fn meld_twice_errors() {
     // spec: CLI-12
     let sb = melded();

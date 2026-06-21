@@ -13,11 +13,27 @@
 
 use std::collections::HashSet;
 
-/// Apply an effective prefix to a bare item name.
+/// Apply an effective prefix to a bare item name. An empty prefix is treated as
+/// no prefix (the "no prefix" override; see [`prefix_choice`]).
 pub fn apply(bare: &str, prefix: &Option<String>) -> String {
     match prefix {
-        Some(p) => format!("{p}-{bare}"),
-        None => bare.to_string(),
+        Some(p) if !p.is_empty() => format!("{p}-{bare}"),
+        _ => bare.to_string(),
+    }
+}
+
+/// Interpret the user's answer to the meld prefix prompt for a source that
+/// declares `[source].prefix` (CLI-24). Returns the alias to set on the source:
+/// `None` keeps the declared prefix; `Some("")` is the explicit "no prefix"
+/// override; `Some(other)` is a custom prefix. Empty / `y` / `yes` accept the
+/// declared prefix, `n` / `no` / `none` drop it, and anything else is taken
+/// verbatim (trimmed) as a custom prefix.
+pub fn prefix_choice(answer: &str) -> Option<String> {
+    let a = answer.trim();
+    match a.to_ascii_lowercase().as_str() {
+        "" | "y" | "yes" => None,
+        "n" | "no" | "none" => Some(String::new()),
+        _ => Some(a.to_string()),
     }
 }
 
@@ -150,6 +166,22 @@ mod tests {
     fn apply_prefixes_or_passes_through() {
         assert_eq!(apply("review", &Some("jk".into())), "jk-review");
         assert_eq!(apply("review", &None), "review");
+        // An empty prefix is "no prefix" (the override), not a leading dash.
+        assert_eq!(apply("review", &Some(String::new())), "review");
+    }
+
+    #[test]
+    fn prefix_choice_interprets_the_meld_prompt() {
+        // spec: CLI-24
+        // Empty / yes -> keep the declared prefix (no alias change).
+        assert_eq!(prefix_choice(""), None);
+        assert_eq!(prefix_choice("y"), None);
+        assert_eq!(prefix_choice("YES"), None);
+        // no/none -> the explicit "no prefix" override (empty alias).
+        assert_eq!(prefix_choice("n"), Some(String::new()));
+        assert_eq!(prefix_choice("none"), Some(String::new()));
+        // Anything else is a custom prefix, trimmed and verbatim-cased.
+        assert_eq!(prefix_choice("  MyPfx "), Some("MyPfx".to_string()));
     }
 
     #[test]

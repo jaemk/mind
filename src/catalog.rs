@@ -114,11 +114,14 @@ pub(crate) fn scan_source_at(
         });
     }
 
-    // Effective prefix: consumer alias wins over the repo's own declaration.
+    // Effective prefix: consumer alias wins over the repo's own declaration. An
+    // empty alias (`--as ''`, or the meld prompt's "no prefix" choice) is the
+    // explicit "no prefix" override and suppresses a declared `[source].prefix`.
     let prefix = source
         .alias
         .clone()
-        .or_else(|| mindfile.as_ref().and_then(|m| m.source.prefix.clone()));
+        .or_else(|| mindfile.as_ref().and_then(|m| m.source.prefix.clone()))
+        .filter(|p| !p.is_empty());
 
     match mindfile {
         Some(mt) if mt.is_authoritative() => {

@@ -82,6 +82,13 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   super-source's nested sources are not auto-installed), already-installed items
   are skipped (DEP-23), and a source install hook is still handled by its own
   prompt during the meld (HOOK-20).
+- `CLI-24` When a source declares `[source].prefix` and no `--as` was given, an
+  interactive `meld` prompts whether to namespace its items under that prefix:
+  accept it, type a different prefix, or choose none. The choice becomes the
+  source alias and applies to the scan and the install (`<prefix>-<name>`). A
+  non-interactive meld accepts the declared prefix as-is. An empty alias (`--as
+  ''` or the "no prefix" answer) explicitly overrides a declared prefix to none.
+  A source that declares no prefix is not prompted.
 
 ## unmeld
 
