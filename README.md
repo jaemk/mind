@@ -124,9 +124,11 @@ Because a hook is arbitrary code, `mind` discloses the source identity, pin, com
 and exact command before running anything, and prompts with three choices: run it, skip it but
 still install the source (the default), or abort and install nothing. In a non-TTY context (CI,
 scripts) the hook is skipped and a note is printed; `--dangerously-skip-install-hook-check` runs
-it unattended. `evolve` re-runs the hook when a source advances to a new commit. `recall
---sources` marks sources that carry a hook with a ` hook` token in their bracketed column.
-`mind review <repo>` shows a source's declared hook before you meld it. See
+it unattended.
+
+`evolve` re-runs the hook when a source advances to a new commit. `recall --sources` marks a
+source that carries a hook with a ` hook` token in its column. `mind review <repo>` shows a
+source's declared hook before you meld it. See
 [spec/install-hooks.md](spec/install-hooks.md) for the full behavior.
 
 ## Troubleshooting
