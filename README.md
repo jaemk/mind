@@ -154,6 +154,12 @@ status bracket. `mind review <repo>` shows a source's declared hook before you m
   `~/.mind/config.toml`. Override the roots with `MIND_HOME` and `CLAUDE_HOME`.
 - Before publishing a source, run `mind review <path>` to check its `mind.toml`,
   item kinds, `{{ns:}}` references, and pin directive.
+- A meld fails to authenticate over https (or you want to use an SSH key). mind
+  runs git non-interactively (no username/password prompt), so set `ssh = true`
+  in `~/.mind/config.toml` to clone via your SSH key/agent, or meld an explicit
+  `git@host:owner/repo` spec.
+- Stuck in the TUI. Press `q` in the main view, or Ctrl-C twice from anywhere
+  (search box, dialogs) to force exit.
 
 ## Develop
 

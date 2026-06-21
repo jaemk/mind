@@ -95,6 +95,21 @@ impl Source {
             None
         }
     }
+
+    /// The SSH clone URL (`git@host:owner/repo`) for this source's identity.
+    pub fn ssh_url(&self) -> String {
+        format!("git@{}:{}/{}", self.host, self.owner, self.repo)
+    }
+
+    /// Switch the clone URL to SSH when `prefer_ssh` is set and this is an https
+    /// remote (not a local path). The new URL is persisted on the source, so
+    /// later `sync`s reuse SSH too. A no-op for local paths and for URLs that are
+    /// already SSH (an explicit `git@...` or `ssh://`).
+    pub fn prefer_ssh(&mut self, prefer_ssh: bool) {
+        if prefer_ssh && self.host != "local" && self.url.starts_with("https://") {
+            self.url = self.ssh_url();
+        }
+    }
 }
 
 /// Parse a user-supplied repo spec into a [`Source`] (without touching disk).
@@ -291,6 +306,39 @@ mod tests {
             }
             assert!(parse_spec(bad).is_err(), "expected error for {bad:?}");
         }
+    }
+
+    #[test]
+    fn ssh_url_uses_the_git_at_form() {
+        // spec: CLI-19
+        let s = parse_spec("james/agents").unwrap();
+        assert_eq!(s.ssh_url(), "git@github.com:james/agents");
+    }
+
+    #[test]
+    fn prefer_ssh_rewrites_https_remotes_only() {
+        // spec: CLI-19
+        // https shorthand -> ssh, and the rewrite persists on the source.
+        let mut s = parse_spec("james/agents").unwrap();
+        s.prefer_ssh(true);
+        assert_eq!(s.url, "git@github.com:james/agents");
+
+        // An explicit git@ URL is already SSH: unchanged.
+        let mut g = parse_spec("git@github.com:foo/bar.git").unwrap();
+        let before = g.url.clone();
+        g.prefer_ssh(true);
+        assert_eq!(g.url, before);
+
+        // A local path is never rewritten.
+        let mut l = parse_spec("/tmp/x").unwrap();
+        let lbefore = l.url.clone();
+        l.prefer_ssh(true);
+        assert_eq!(l.url, lbefore);
+
+        // prefer_ssh = false is a no-op: the https URL is kept.
+        let mut h = parse_spec("james/agents").unwrap();
+        h.prefer_ssh(false);
+        assert_eq!(h.url, "https://github.com/james/agents");
     }
 
     #[test]

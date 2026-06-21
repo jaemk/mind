@@ -208,6 +208,7 @@ impl Paths {
         if !Config::path(&self.mind_home).exists() {
             Config {
                 lobes: vec![self.default_lobe()],
+                ..Default::default()
             }
             .save(&self.mind_home)?;
         }

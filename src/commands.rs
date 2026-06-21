@@ -45,6 +45,8 @@ pub fn meld(
     // POL-3: the managed policy is authoritative over user intent. Load it once
     // (Err = invalid policy, fail closed via `?`; None = unmanaged, inert).
     let policy = Policy::load()?;
+    // CLI-19: prefer SSH for remotes when the user's config asks for it.
+    let prefer_ssh = Config::load(&paths.mind_home)?.ssh;
     let mut registry = Registry::load(paths)?;
     let mut visited = HashSet::new();
     let added = meld_recursive(
@@ -59,6 +61,7 @@ pub fn meld(
         policy.as_ref(),
         install_hook,
         dangerously_skip_install_hook_check,
+        prefer_ssh,
     )?;
     registry.save(paths)?;
     if added > 1 {
@@ -141,9 +144,14 @@ fn meld_recursive(
     policy: Option<&Policy>,
     install_hook: Option<String>,
     dangerously_skip_hook_check: bool,
+    prefer_ssh: bool,
 ) -> Result<usize> {
     let mut source = parse_spec(repo)?;
     source.alias = alias;
+    // CLI-19: rewrite an https remote to its SSH form when SSH is preferred, so
+    // the clone uses the user's key (no https username/password prompt). Done
+    // before the cycle guard so the recorded URL is the one we actually clone.
+    source.prefer_ssh(prefer_ssh);
 
     // Cycle guard: don't process the same URL twice in one meld run.
     if !visited.insert(source.url.clone()) {
@@ -375,6 +383,7 @@ fn meld_recursive(
                 policy,
                 None, // no consumer install hook for nested sources
                 dangerously_skip_hook_check,
+                prefer_ssh, // nested sources inherit the SSH preference
             )?;
         }
     }
@@ -761,6 +770,8 @@ pub fn forget(paths: &Paths, item_ref: &str) -> Result<()> {
 pub fn sync(paths: &Paths, then_upgrade: bool, dangerously_skip_hook_check: bool) -> Result<()> {
     // POL-3: load the managed policy once (fail closed on Err; None = inert).
     let policy = Policy::load()?;
+    // CLI-19: auto-meld honors the user's SSH preference too.
+    let prefer_ssh = Config::load(&paths.mind_home)?.ssh;
     let mut registry = Registry::load(paths)?;
 
     // POL-32: provision the policy's auto-meld base set before syncing. Each entry
@@ -794,6 +805,7 @@ pub fn sync(paths: &Paths, then_upgrade: bool, dangerously_skip_hook_check: bool
                 Some(policy),
                 None,  // auto-meld supplies no install hook
                 false, // auto-meld is non-TTY, so its hooks take the HOOK-22 skip path
+                prefer_ssh,
             )?;
         }
         if provisioned > 0 {
@@ -1548,6 +1560,7 @@ pub fn config_show(paths: &Paths) -> Result<()> {
     } else {
         println!("  lobes = {:?}", cfg.lobes);
     }
+    println!("  ssh = {}  (prefer SSH for melded remotes)", cfg.ssh);
     if let Some(env) = std::env::var_os("MIND_AGENT_HOMES") {
         println!(
             "note: MIND_AGENT_HOMES is set and overrides lobes: {}",

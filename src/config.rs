@@ -17,6 +17,14 @@ pub struct Config {
     /// at resolution time; entries are stored verbatim.
     #[serde(default)]
     pub lobes: Vec<String>,
+
+    /// Prefer SSH for melded remotes. When true, `meld` rewrites an https remote
+    /// (e.g. a `owner/repo` shorthand) to its `git@host:owner/repo` SSH form, so
+    /// cloning uses the user's SSH key/agent instead of prompting for an https
+    /// username/password (CLI-19). Local paths and explicit `git@`/`ssh://` specs
+    /// are unaffected. Default false (https).
+    #[serde(default)]
+    pub ssh: bool,
 }
 
 impl Config {

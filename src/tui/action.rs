@@ -794,6 +794,7 @@ mod tests {
         // real ~/.claude (agent_homes() otherwise defaults to ~/.claude).
         crate::config::Config {
             lobes: vec![paths.claude_home.to_str().unwrap().to_string()],
+            ..Default::default()
         }
         .save(&paths.mind_home)
         .unwrap();
@@ -916,6 +917,7 @@ mod tests {
         // real ~/.claude (agent_homes() otherwise defaults to ~/.claude).
         crate::config::Config {
             lobes: vec![paths.claude_home.to_str().unwrap().to_string()],
+            ..Default::default()
         }
         .save(&paths.mind_home)
         .unwrap();
@@ -991,6 +993,7 @@ mod tests {
         crate::paths::mkdir_p(&paths.mind_home).unwrap();
         crate::config::Config {
             lobes: vec![paths.claude_home.to_str().unwrap().to_string()],
+            ..Default::default()
         }
         .save(&paths.mind_home)
         .unwrap();
@@ -1110,6 +1113,7 @@ mod tests {
         // to ~/.claude when CLAUDE_HOME is unset).
         crate::config::Config {
             lobes: vec![paths.claude_home.to_str().unwrap().to_string()],
+            ..Default::default()
         }
         .save(&paths.mind_home)
         .unwrap();

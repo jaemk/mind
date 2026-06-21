@@ -121,7 +121,22 @@ fn event_loop(paths: &Paths, app: &mut app::App) -> Result<()> {
 /// mode as needed.
 // spec: TUI-30 TUI-23
 fn handle_key(paths: &Paths, app: &mut app::App, k: crossterm::event::KeyEvent) {
-    use crossterm::event::KeyCode;
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    // --- Force exit (TUI-43): Ctrl-C is intercepted before any mode routing, so
+    // it works even while typing in the search/spec/lobe input boxes (where a
+    // bare `Char('c')` would otherwise be entered as text). One Ctrl-C arms; a
+    // second consecutive Ctrl-C force-exits. Any other key disarms.
+    if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) {
+        if app.ctrl_c_armed {
+            app.quit = true;
+        } else {
+            app.ctrl_c_armed = true;
+            app.set_status("Press Ctrl-C again to force exit.".to_string());
+        }
+        return;
+    }
+    app.ctrl_c_armed = false;
 
     // --- Lobe-path input mode (TUI-23): user is typing a new lobe path. ---
     if app.lobe_input_active {
@@ -462,6 +477,51 @@ mod tests {
         );
     }
 
+    #[test]
+    fn double_ctrl_c_force_exits_from_input_mode() {
+        // spec: TUI-43 - Ctrl-C must force-exit even from a text-input mode, where
+        // a bare key is typed into the box. First Ctrl-C arms (no quit, not typed);
+        // a second consecutive Ctrl-C exits.
+        let paths = temp_paths();
+        let mut app = seeded_app();
+        app.spec_input_active = true; // typing a repo spec: keys go into the box
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+
+        handle_key(&paths, &mut app, ctrl_c);
+        assert!(!app.should_quit(), "one Ctrl-C must not exit");
+        assert!(app.ctrl_c_armed, "one Ctrl-C arms the force-exit");
+        assert_eq!(
+            app.spec_input_text, "",
+            "Ctrl-C must not be typed into the input box"
+        );
+
+        handle_key(&paths, &mut app, ctrl_c);
+        assert!(
+            app.should_quit(),
+            "a second consecutive Ctrl-C must force exit"
+        );
+    }
+
+    #[test]
+    fn a_key_between_ctrl_c_disarms_force_exit() {
+        // spec: TUI-43 - the two Ctrl-C must be consecutive; any other key resets
+        // the arm so a single stray Ctrl-C never quits.
+        let paths = temp_paths();
+        let mut app = seeded_app();
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+
+        handle_key(&paths, &mut app, ctrl_c);
+        assert!(app.ctrl_c_armed);
+        handle_key(&paths, &mut app, key(KeyCode::Char('j'))); // navigate: disarms
+        assert!(!app.ctrl_c_armed, "another key must disarm the force-exit");
+
+        handle_key(&paths, &mut app, ctrl_c);
+        assert!(
+            !app.should_quit(),
+            "a lone Ctrl-C after a reset must not exit"
+        );
+    }
+
     /// A self-cleaning temp base dir (removes itself on drop, even on panic).
     struct OwnedTemp(std::path::PathBuf);
     impl Drop for OwnedTemp {
@@ -495,6 +555,7 @@ mod tests {
         // Pin the lobe to the isolated claude_home (hermeticity).
         crate::config::Config {
             lobes: vec![paths.claude_home.to_str().unwrap().to_string()],
+            ..Default::default()
         }
         .save(&paths.mind_home)
         .unwrap();
@@ -596,6 +657,7 @@ mod tests {
         crate::paths::mkdir_p(&paths.mind_home).unwrap();
         crate::config::Config {
             lobes: vec![paths.claude_home.to_str().unwrap().to_string()],
+            ..Default::default()
         }
         .save(&paths.mind_home)
         .unwrap();
@@ -689,6 +751,7 @@ mod tests {
         crate::paths::mkdir_p(&paths.mind_home).unwrap();
         crate::config::Config {
             lobes: vec![paths.claude_home.to_str().unwrap().to_string()],
+            ..Default::default()
         }
         .save(&paths.mind_home)
         .unwrap();

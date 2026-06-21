@@ -103,3 +103,8 @@ manifest, and store.
   there is no minimum-width requirement. The TUI may use Unicode (box drawing,
   geometric node markers) for presentation; the ASCII-only convention applies to
   written prose, not the interface.
+- `TUI-43` Ctrl-C is a force-exit available from every mode (the search box, the
+  spec-input and lobe-path inputs, and the modals), not only the normal-mode `q`.
+  It is intercepted before mode routing, so a `Char('c')` is never entered as
+  text. One Ctrl-C arms and shows a hint; a second consecutive Ctrl-C exits, so a
+  single accidental Ctrl-C while typing does not quit. Any other key disarms.

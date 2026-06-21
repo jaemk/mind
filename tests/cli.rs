@@ -1879,6 +1879,31 @@ fn learn_links_into_homes_from_env() {
 }
 
 #[test]
+fn meld_with_ssh_config_still_melds_a_local_source() {
+    // spec: CLI-19 - `ssh = true` makes meld prefer SSH for https remotes, but a
+    // local path is never rewritten, so a local-path meld still works and the
+    // recorded URL stays the local path (no git@ rewrite).
+    let sb = Sandbox::new();
+    write(&sb.mind_home.join("config.toml"), "ssh = true\n");
+    let spec = sb.source_spec();
+    let r = sb.mind(&["meld", &spec]);
+    assert!(
+        r.success,
+        "ssh-config meld of a local source should succeed: {}",
+        r.stderr
+    );
+    let json = std::fs::read_to_string(sb.mind_home.join("sources.json")).unwrap();
+    assert!(
+        json.contains(&spec),
+        "a local source URL must be unchanged under ssh=true: {json}"
+    );
+    assert!(
+        !json.contains("git@"),
+        "a local path must not be rewritten to git@: {json}"
+    );
+}
+
+#[test]
 fn config_lobes_add_list_remove() {
     // spec: CLI-111, CLI-112, CLI-113
     let sb = Sandbox::new();

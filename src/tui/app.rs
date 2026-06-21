@@ -137,6 +137,9 @@ pub struct App {
     pub mutating: bool,
     pub quit: bool,
     pub search_focused: bool,
+    /// True after one Ctrl-C: a second consecutive Ctrl-C force-exits from any
+    /// mode (TUI-43). Any other key disarms it.
+    pub ctrl_c_armed: bool,
 }
 
 /// One row in the flat (display) tree.
@@ -186,6 +189,7 @@ impl App {
             mutating: false,
             quit: false,
             search_focused: false,
+            ctrl_c_armed: false,
         }
     }
 
