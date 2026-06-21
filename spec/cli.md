@@ -214,6 +214,9 @@ only appear at meld or install time. It is read-only and installs nothing.
   namespace, so token expansion and the unguarded-reference scan are checked as
   they would install under that prefix. With no flag the effective prefix is the
   source's own `[source].prefix` if any, else none.
+- `CLI-134` Supplying both `<target>` and `--policy` to `review` is a usage
+  error: clap rejects the combination before any logic runs, exits non-zero, and
+  prints a conflict diagnostic to stderr.
 
 ## introspect
 

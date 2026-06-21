@@ -4193,6 +4193,29 @@ fn review_multiple_hard_errors_all_reported_and_counted() {
 }
 
 #[test]
+fn review_target_and_policy_are_mutually_exclusive() {
+    // spec: CLI-134
+    // Supplying both <target> and --policy is a clap usage error: exits non-zero
+    // and prints a conflict diagnostic before any logic runs.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    // The policy file need not exist; clap rejects the combination before any
+    // I/O is attempted.
+    let policy_path = sb.base.join("policy.toml").to_string_lossy().into_owned();
+    let r = sb.mind(&["review", &spec, "--policy", &policy_path]);
+    assert!(
+        !r.success,
+        "review with both <target> and --policy must exit non-zero: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr.contains("cannot be used with"),
+        "clap conflict diagnostic must appear in stderr: {}",
+        r.stderr
+    );
+}
+
+#[test]
 fn meld_pin_tag_uses_pinned_mindfile_for_authoritativeness_not_default_branch() {
     // spec: DSC-52, DSC-41, STO-18
     //

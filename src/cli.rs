@@ -94,6 +94,11 @@ pub enum Command {
     ///
     /// The item ref may be exact, or a glob to install many: `'*'` for everything,
     /// `'skill:*'` for all skills, `'owner/repo#*'` for all of one source.
+    ///
+    /// When selecting a subset of a source's items, `learn` also installs the
+    /// intra-source `{{ns:}}` dependencies those items reference (the closure),
+    /// printing a dependency tree and prompting before installing; `--dry-run`
+    /// previews the closure without installing anything and `--yes` skips the prompt.
     Learn {
         /// Item ref or glob: `name`, `skill:name`, `owner/repo#name`, `'review*'`, `'*'`.
         item: String,
@@ -191,10 +196,11 @@ pub enum Command {
     ///
     /// Policy mode: `--policy <path>` validates a managed policy TOML file at an
     /// explicit path without consulting the system policy path or env. Exactly
-    /// one of `<target>` or `--policy` must be given.
+    /// one of `<target>` or `--policy` must be given; supplying both is an error.
     Review {
         /// The source to validate: a local path, melded-source selector, or repo spec.
-        /// Mutually exclusive in intent with `--policy`; supply exactly one.
+        /// Cannot be used with `--policy`; supply exactly one of the two.
+        #[arg(conflicts_with = "policy")]
         target: Option<String>,
 
         /// Evaluate the source under this prospective prefix (affects effective
@@ -204,8 +210,8 @@ pub enum Command {
         alias: Option<String>,
 
         /// Validate a managed policy TOML file at this path instead of a source.
-        /// Mutually exclusive in intent with `<target>`; supply exactly one.
-        #[arg(long, value_name = "PATH")]
+        /// Cannot be used with `<target>`; supply exactly one of the two.
+        #[arg(long, value_name = "PATH", conflicts_with = "target")]
         policy: Option<std::path::PathBuf>,
     },
 
