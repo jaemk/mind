@@ -372,6 +372,100 @@ fn meld_as_empty_overrides_a_declared_prefix() {
 }
 
 #[test]
+fn meld_with_no_arg_melds_the_current_directory() {
+    // spec: CLI-25 - `mind meld` with no repo argument melds the directory it is
+    // run in. `--link-only` keeps the test to just the registration.
+    let sb = Sandbox::new();
+    let r = sb.mind_cwd(&["meld", "--link-only"], &sb.source);
+    assert!(
+        r.success,
+        "no-arg meld of the cwd failed: {} {}",
+        r.stdout, r.stderr
+    );
+    let sources = sb.mind(&["recall", "--sources"]).stdout;
+    assert!(
+        sources.contains("agents"),
+        "the current directory must be registered as a source: {sources}"
+    );
+}
+
+#[test]
+fn init_source_reports_refs_scaffolds_toml_and_templates() {
+    // spec: INIT-1, INIT-2, INIT-3, INIT-4, INIT-5, INIT-6
+    let sb = Sandbox::new();
+    let repo = sb.base.join("authoring");
+    // skill `review` references agent `dev` in bare prose and `style` via a token.
+    write(
+        &repo.join("skills/review/SKILL.md"),
+        "---\ndescription: review\n---\n# review\nHand off to dev, then see {{ns:style}}.\n",
+    );
+    write(
+        &repo.join("agents/dev.md"),
+        "---\nname: dev\ndescription: dev\n---\n# dev\n",
+    );
+    write(
+        &repo.join("rules/style.md"),
+        "---\ndescription: style\n---\n# style\n",
+    );
+    let dir = repo.to_str().unwrap();
+
+    // Report mode: items + reference graph + scaffold; nothing in the store.
+    let r = sb.mind(&["init-source", dir]);
+    assert!(r.success, "init-source failed: {} {}", r.stdout, r.stderr);
+    // INIT-2 / INIT-4: items and references are reported.
+    assert!(
+        r.stdout.contains("review") && r.stdout.contains("dev") && r.stdout.contains("style"),
+        "items and references must be reported: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("bare"),
+        "the bare `dev` mention must be flagged as a templating candidate: {}",
+        r.stdout
+    );
+    // INIT-3: a mind.toml is scaffolded when absent.
+    assert!(
+        repo.join("mind.toml").exists(),
+        "mind.toml must be scaffolded"
+    );
+    // INIT-6: init-source registers nothing (no store state).
+    assert!(
+        !sb.mind_home.join("sources.json").exists(),
+        "init-source must not write to the store"
+    );
+
+    // INIT-3: an existing mind.toml is left unchanged on a re-run.
+    let toml_before = std::fs::read_to_string(repo.join("mind.toml")).unwrap();
+    assert!(sb.mind(&["init-source", dir]).success);
+    assert_eq!(
+        std::fs::read_to_string(repo.join("mind.toml")).unwrap(),
+        toml_before,
+        "an existing mind.toml must not be overwritten"
+    );
+
+    // INIT-5: --template wraps the bare `dev`; the existing `{{ns:style}}` survives.
+    let t = sb.mind(&["init-source", dir, "--template"]);
+    assert!(
+        t.success,
+        "init-source --template failed: {} {}",
+        t.stdout, t.stderr
+    );
+    let review = std::fs::read_to_string(repo.join("skills/review/SKILL.md")).unwrap();
+    assert!(
+        review.contains("{{ns:dev}}"),
+        "the bare `dev` reference must be templated: {review}"
+    );
+    assert!(
+        review.contains("{{ns:style}}"),
+        "the existing token must survive: {review}"
+    );
+    assert!(
+        !review.contains("to dev,"),
+        "the bare `dev` must be replaced, not duplicated: {review}"
+    );
+}
+
+#[test]
 fn meld_twice_errors() {
     // spec: CLI-12
     let sb = melded();

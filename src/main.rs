@@ -67,8 +67,9 @@ enum LockMode {
 // spec: STO-41
 fn lock_mode(command: &Command) -> LockMode {
     match command {
-        // No persisted state touched.
-        Command::Completions { .. } | Command::Man => LockMode::None,
+        // No persisted state touched (init-source operates on the repo dir, not
+        // the store).
+        Command::Completions { .. } | Command::Man | Command::InitSource { .. } => LockMode::None,
 
         // Mutating commands.
         Command::Meld { .. }
@@ -152,6 +153,16 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             link_only,
             yes,
         } => {
+            // CLI-25: no repo argument (or an explicit `.`/`./`) melds the
+            // current directory. Resolve it to an absolute path so `parse_spec`
+            // derives a sensible `local/<parent>/<dir>` identity.
+            let repo = match repo.as_deref() {
+                None | Some(".") | Some("./") => std::env::current_dir()
+                    .map_err(|e| crate::error::MindError::io(".", e))?
+                    .to_string_lossy()
+                    .into_owned(),
+                Some(r) => r.to_string(),
+            };
             commands::meld(
                 paths,
                 &repo,
@@ -171,6 +182,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
                 commands::install_melded_source(paths, &repo, yes)
             }
         }
+        Command::InitSource { path, template } => commands::init_source(path.as_deref(), template),
         Command::Unmeld { name, forget } => commands::unmeld(paths, &name, forget),
         Command::Learn { item, dry_run, yes } => commands::learn(paths, &item, dry_run, yes),
         Command::Forget { item } => commands::forget(paths, &item),

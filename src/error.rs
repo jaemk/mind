@@ -221,6 +221,9 @@ pub enum MindError {
         "cannot replace the running binary at {path}: it is not writable; reinstall with elevated privileges (e.g. sudo) or, for a Homebrew install, run `brew upgrade mind`"
     )]
     TargetNotWritable { path: String },
+
+    #[error("'{path}' is not a directory")]
+    NotADirectory { path: String },
 }
 
 fn status_suffix(status: Option<ExitStatus>) -> String {

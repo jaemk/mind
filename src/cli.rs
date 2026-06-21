@@ -50,7 +50,8 @@ pub enum Command {
     /// Meld with a source repo so its items become available.
     Meld {
         /// Repo spec: `owner/repo`, `github:owner/repo`, or a full git URL.
-        repo: String,
+        /// Defaults to the current directory (`.`) when omitted (CLI-25).
+        repo: Option<String>,
 
         /// Namespace every item from this source under this prefix
         /// (overrides the repo's own `[source].prefix`).
@@ -105,6 +106,22 @@ pub enum Command {
         /// (also installs in a non-TTY context). Ignored with `--link-only`.
         #[arg(short = 'y', long)]
         yes: bool,
+    },
+
+    /// Scaffold a `mind.toml` and report the references among a source's items.
+    ///
+    /// For source maintainers: discovers the items the repo offers, reports which
+    /// items reference which siblings, and creates a starter `mind.toml` if none
+    /// exists. With `--template`, also rewrites bare sibling references into
+    /// `{{ns:}}` tokens so the source stays resolvable under a prefix.
+    InitSource {
+        /// The source repo directory (default the current directory).
+        path: Option<String>,
+
+        /// Rewrite bare sibling references into `{{ns:name}}` tokens. This edits
+        /// the repo's item files; it is heuristic, so review the result.
+        #[arg(long)]
+        template: bool,
     },
 
     /// Unmeld a source, removing its clone and catalog entry.

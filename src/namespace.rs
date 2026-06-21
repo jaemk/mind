@@ -22,6 +22,83 @@ pub fn apply(bare: &str, prefix: &Option<String>) -> String {
     }
 }
 
+/// Whether `c` is part of an item-name word (alphanumerics plus `-`/`_`), used
+/// for whole-word matching when templating bare references.
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '-' || c == '_'
+}
+
+/// Rewrite bare whole-word sibling mentions in `content` into `{{ns:name}}`
+/// tokens, skipping any text already inside a `{{ns:}}` token (INIT-5). Returns
+/// the new content and the number of replacements made. Heuristic: a sibling
+/// name that is also an ordinary word will be wrapped, so callers (init-source)
+/// keep this opt-in and reviewable.
+pub fn templatize(content: &str, siblings: &HashSet<String>) -> (String, usize) {
+    const OPEN: &str = "{{ns:";
+    let mut out = String::with_capacity(content.len());
+    let mut count = 0;
+    let mut rest = content;
+    while let Some(pos) = rest.find(OPEN) {
+        let (rep, n) = wrap_bare_words(&rest[..pos], siblings);
+        out.push_str(&rep);
+        count += n;
+        // Copy the token span verbatim (do not re-wrap inside it).
+        let after = &rest[pos + OPEN.len()..];
+        match after.find("}}") {
+            Some(end) => {
+                let token_end = pos + OPEN.len() + end + 2;
+                out.push_str(&rest[pos..token_end]);
+                rest = &rest[token_end..];
+            }
+            None => {
+                // Unterminated token: copy the remainder verbatim and stop.
+                out.push_str(&rest[pos..]);
+                rest = "";
+                break;
+            }
+        }
+    }
+    let (rep, n) = wrap_bare_words(rest, siblings);
+    out.push_str(&rep);
+    count += n;
+    (out, count)
+}
+
+/// Wrap whole-word sibling names in `prose` (no `{{ns:}}` tokens) with tokens.
+fn wrap_bare_words(prose: &str, siblings: &HashSet<String>) -> (String, usize) {
+    let mut out = String::with_capacity(prose.len());
+    let mut count = 0;
+    let mut word = String::new();
+    for c in prose.chars() {
+        if is_word_char(c) {
+            word.push(c);
+        } else {
+            count += emit_word(&word, siblings, &mut out);
+            word.clear();
+            out.push(c);
+        }
+    }
+    count += emit_word(&word, siblings, &mut out);
+    (out, count)
+}
+
+/// Emit one word: wrapped as a token when it is a sibling name, else verbatim.
+/// Returns 1 if it was wrapped.
+fn emit_word(word: &str, siblings: &HashSet<String>, out: &mut String) -> usize {
+    if word.is_empty() {
+        return 0;
+    }
+    if siblings.contains(word) {
+        out.push_str("{{ns:");
+        out.push_str(word);
+        out.push_str("}}");
+        1
+    } else {
+        out.push_str(word);
+        0
+    }
+}
+
 /// Interpret the user's answer to the meld prefix prompt for a source that
 /// declares `[source].prefix` (CLI-24). Returns the alias to set on the source:
 /// `None` keeps the declared prefix; `Some("")` is the explicit "no prefix"
@@ -168,6 +245,23 @@ mod tests {
         assert_eq!(apply("review", &None), "review");
         // An empty prefix is "no prefix" (the override), not a leading dash.
         assert_eq!(apply("review", &Some(String::new())), "review");
+    }
+
+    #[test]
+    fn templatize_wraps_bare_siblings_and_skips_tokens() {
+        // spec: INIT-5
+        let s = sibs(&["dev", "style"]);
+        let (out, n) = templatize("hand off to dev, see {{ns:style}}, not develop", &s);
+        assert_eq!(
+            out, "hand off to {{ns:dev}}, see {{ns:style}}, not develop",
+            "bare `dev` is wrapped; the token and the longer word `develop` are left alone"
+        );
+        assert_eq!(n, 1, "only the one bare sibling mention is rewritten");
+
+        // Idempotent: a second pass changes nothing (everything is now tokenized).
+        let (again, m) = templatize(&out, &s);
+        assert_eq!(again, out);
+        assert_eq!(m, 0);
     }
 
     #[test]

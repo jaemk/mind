@@ -46,8 +46,8 @@ and verified.
 | Install hooks: `[source].install` / `meld --install-hook`, safety prompt, `--dangerously-skip-install-hook-check` | done | [install-hooks.md](install-hooks.md) |
 | Within-source dependency resolution: a partial `learn` pulls in referenced siblings; dependency-tree display + install order | done | [dependencies.md](dependencies.md) |
 | `meld` installs by default (`--link-only`/`--yes`); no-arg melds `.`; prefix prompt when declared | done (`--link-only`/`--yes`/prefix) | CLI-23, CLI-24 |
-| `meld` with no arg defaults to the current directory | planned | CLI-25 |
-| `init-source`: scaffold `mind.toml`, detect references, `{{ns:}}` templating (maintainer) | planned | [init-source.md](init-source.md) |
+| `meld` with no arg defaults to the current directory | done | CLI-25 |
+| `init-source`: scaffold `mind.toml`, detect references, `{{ns:}}` templating (maintainer) | done | [init-source.md](init-source.md) |
 | Concurrency: global advisory lock + atomic registry writes (via `fd-lock`) | done | STO-40, STO-41, STO-42, STO-43 |
 | `probe` matches description text, not just name | done | CLI-85 |
 | README quickstart, mental model, troubleshooting/FAQ | done | [../README.md](../README.md) |

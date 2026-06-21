@@ -480,6 +480,119 @@ fn siblings_of(items: &[CatalogItem], source: &str) -> std::collections::HashSet
         .collect()
 }
 
+/// `mind init-source [path] [--template]` — maintainer scaffolding. Discovers the
+/// repo's items, reports the intra-source reference graph, scaffolds a `mind.toml`
+/// if absent, and (with `--template`) rewrites bare sibling references into
+/// `{{ns:}}` tokens. Operates only on the target directory: no store, no agent
+/// home, no network (INIT-6).
+// spec: INIT-1 INIT-2 INIT-3 INIT-4 INIT-6
+pub fn init_source(dir: Option<&str>, template: bool) -> Result<()> {
+    let dir = dir.unwrap_or(".");
+    let path = std::path::Path::new(dir);
+    if !path.is_dir() {
+        return Err(MindError::NotADirectory {
+            path: dir.to_string(),
+        });
+    }
+    let root = path.canonicalize().map_err(|e| MindError::io(path, e))?;
+
+    // Discover items exactly as melding would (INIT-2): build a local Source for
+    // the directory and scan it (honors convention + mind.toml + min-mind-version).
+    let source = parse_spec(&root.to_string_lossy())?;
+    let mut items: Vec<CatalogItem> = Vec::new();
+    catalog::scan_source_at(&root, &source, &mut items)?;
+
+    println!("init-source: {}", root.display());
+    if items.is_empty() {
+        println!("  no items found (skills/<name>/SKILL.md, agents/<name>.md, rules/<name>.md)");
+    } else {
+        println!("  {} item(s):", items.len());
+        for it in &items {
+            println!("    {} {}", it.kind, it.name);
+        }
+    }
+
+    // Reference graph (INIT-4): per item, the siblings it references via tokens
+    // and the ones it mentions in bare prose (templating candidates).
+    let siblings: std::collections::HashSet<String> =
+        items.iter().map(|it| it.name.clone()).collect();
+    let mut any_bare = false;
+    for it in &items {
+        let content = read_item_text(it);
+        let tokens: Vec<String> = crate::namespace::referenced_names(&content)
+            .into_iter()
+            .filter(|n| n != &it.name)
+            .collect();
+        let bare: Vec<String> = crate::namespace::unguarded_refs(&content, &siblings)
+            .into_iter()
+            .filter(|n| n != &it.name)
+            .collect();
+        if tokens.is_empty() && bare.is_empty() {
+            continue;
+        }
+        println!("  {} {} references:", it.kind, it.name);
+        if !tokens.is_empty() {
+            println!("    tokenized: {}", tokens.join(", "));
+        }
+        if !bare.is_empty() {
+            any_bare = true;
+            println!("    bare (templating candidates): {}", bare.join(", "));
+        }
+    }
+    if any_bare && !template {
+        println!(
+            "  run `mind init-source {dir} --template` to wrap the bare references as {{{{ns:name}}}}"
+        );
+    }
+
+    // mind.toml scaffold (INIT-3): create only when absent; never overwrite.
+    let toml_path = root.join("mind.toml");
+    if toml_path.exists() {
+        println!("  mind.toml already exists; left unchanged");
+    } else {
+        let scaffold = "[source]\ndescription = \"\"   # what this source offers\n# prefix = \"jk\"    # namespace items as jk-<name>\n";
+        std::fs::write(&toml_path, scaffold).map_err(|e| MindError::io(&toml_path, e))?;
+        println!("  wrote mind.toml");
+    }
+
+    // Templating (INIT-5): rewrite bare sibling mentions to tokens, per file.
+    if template {
+        let mut total = 0usize;
+        for it in &items {
+            // Exclude the item's own name so a self-mention is not wrapped.
+            let mut sibs = siblings.clone();
+            sibs.remove(&it.name);
+            for file in item_files(it) {
+                let Ok(content) = std::fs::read_to_string(&file) else {
+                    continue; // skip non-UTF-8 / unreadable files
+                };
+                let (rewritten, n) = crate::namespace::templatize(&content, &sibs);
+                if n > 0 {
+                    std::fs::write(&file, &rewritten).map_err(|e| MindError::io(&file, e))?;
+                    println!("  templated {n} reference(s) in {}", file.display());
+                    total += n;
+                }
+            }
+        }
+        if total == 0 {
+            println!("  no bare references to template");
+        }
+    }
+    Ok(())
+}
+
+/// Read all of an item's text files into one buffer, for reference detection.
+fn read_item_text(item: &CatalogItem) -> String {
+    let mut buf = String::new();
+    for file in item_files(item) {
+        if let Ok(content) = std::fs::read_to_string(&file) {
+            buf.push_str(&content);
+            buf.push('\n');
+        }
+    }
+    buf
+}
+
 /// `mind unmeld <name> [--forget]` — drop a source. `name` may be the full
 /// `owner/repo` or an unambiguous repo basename. With `--forget`, every item
 /// installed from the source is uninstalled (via its file registry) first.

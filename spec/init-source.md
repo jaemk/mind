@@ -1,6 +1,6 @@
 # init-source (maintainer scaffolding)
 
-Status: planned. `mind init-source` helps a source author prepare a repo for
+Status: done. `mind init-source` helps a source author prepare a repo for
 melding: it scaffolds a `mind.toml`, reports the references among the repo's
 items (the intra-source dependency graph), and optionally rewrites bare sibling
 references into `{{ns:}}` templating so the source stays resolvable under a

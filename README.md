@@ -73,7 +73,8 @@ mind learn greet
 
 | command | does |
 |---------|------|
-| `mind meld <repo> [--link-only] [--yes] [--as <prefix>] [--root <dir>] [--follow-branch <branch> | --pin-tag <tag> | --pin-ref <commit>] [--install-hook <cmd>] [--dangerously-skip-install-hook-check]` | clone and register a source, then prompt to install its items (`--link-only` registers only; `--yes` installs without prompting) |
+| `mind meld [<repo>] [--link-only] [--yes] [--as <prefix>] [--root <dir>] [--follow-branch <branch> | --pin-tag <tag> | --pin-ref <commit>] [--install-hook <cmd>] [--dangerously-skip-install-hook-check]` | clone and register a source (default `.`), then prompt to install its items (`--link-only` registers only; `--yes` installs without prompting) |
+| `mind init-source [<path>] [--template]` | scaffold `mind.toml` + report references; `--template` rewrites bare refs as `{{ns:}}` (maintainer) |
 | `mind unmeld <name> [--forget]` (alias `detach`) | drop a source (optionally its items) |
 | `mind learn [--yes] <item>` | install a skill/agent/rule (glob installs many); a partial selection also pulls in the source siblings it references |
 | `mind forget <item>` (alias `unlearn`) | remove an installed item (glob removes many) |
