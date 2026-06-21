@@ -140,6 +140,11 @@ pub enum Command {
         /// After refreshing, run an `evolve` pass (report + prompt) to apply upgrades.
         #[arg(long)]
         evolve: bool,
+
+        /// Run install-hook re-runs without the safety prompt during the
+        /// `--evolve` pass (executes arbitrary code; only with `--evolve`).
+        #[arg(long)]
+        dangerously_skip_install_hook_check: bool,
     },
 
     /// Upgrade installed items to their latest source version.

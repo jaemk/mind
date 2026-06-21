@@ -161,7 +161,10 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
         Command::Unmeld { name, forget } => commands::unmeld(paths, &name, forget),
         Command::Learn { item, dry_run, yes } => commands::learn(paths, &item, dry_run, yes),
         Command::Forget { item } => commands::forget(paths, &item),
-        Command::Sync { evolve } => commands::sync(paths, evolve),
+        Command::Sync {
+            evolve,
+            dangerously_skip_install_hook_check,
+        } => commands::sync(paths, evolve, dangerously_skip_install_hook_check),
         Command::Evolve {
             yes,
             item,
@@ -358,6 +361,82 @@ mod tests {
             mode_of(&["mind", "introspect"]),
             mode_of(&["mind", "introspect", "--fix"]),
             "introspect and introspect --fix must take different locks"
+        );
+    }
+
+    /// `sync --evolve --dangerously-skip-install-hook-check` must parse and the
+    /// flag must be forwarded to the evolve pass so non-TTY CI can trigger hook
+    /// re-runs unattended (HOOK-11, HOOK-23). Verified here by inspecting the
+    /// parsed struct; the end-to-end behavior is covered by tests/cli.rs.
+    // spec: HOOK-11 HOOK-23
+    #[test]
+    fn sync_dangerously_skip_install_hook_check_parses() {
+        // Without the flag: parses, field is false.
+        let cli =
+            Cli::try_parse_from(["mind", "sync", "--evolve"]).expect("sync --evolve should parse");
+        match cli.command {
+            Command::Sync {
+                evolve,
+                dangerously_skip_install_hook_check,
+            } => {
+                assert!(evolve, "--evolve should be true");
+                assert!(
+                    !dangerously_skip_install_hook_check,
+                    "flag absent: should be false"
+                );
+            }
+            other => panic!("expected Sync, got {other:?}"),
+        }
+
+        // With the flag: parses, field is true.
+        let cli = Cli::try_parse_from([
+            "mind",
+            "sync",
+            "--evolve",
+            "--dangerously-skip-install-hook-check",
+        ])
+        .expect("sync --evolve --dangerously-skip-install-hook-check should parse");
+        match cli.command {
+            Command::Sync {
+                evolve,
+                dangerously_skip_install_hook_check,
+            } => {
+                assert!(evolve, "--evolve should be true");
+                assert!(
+                    dangerously_skip_install_hook_check,
+                    "flag present: should be true"
+                );
+            }
+            other => panic!("expected Sync, got {other:?}"),
+        }
+
+        // Flag without --evolve also parses (the flag is unused but not invalid).
+        let cli = Cli::try_parse_from(["mind", "sync", "--dangerously-skip-install-hook-check"])
+            .expect("sync --dangerously-skip-install-hook-check should parse");
+        match cli.command {
+            Command::Sync {
+                evolve,
+                dangerously_skip_install_hook_check,
+            } => {
+                assert!(!evolve, "--evolve absent: should be false");
+                assert!(
+                    dangerously_skip_install_hook_check,
+                    "flag present: should be true"
+                );
+            }
+            other => panic!("expected Sync, got {other:?}"),
+        }
+
+        // Confirm the lock mode is still Exclusive with the new flag.
+        assert_eq!(
+            mode_of(&[
+                "mind",
+                "sync",
+                "--evolve",
+                "--dangerously-skip-install-hook-check"
+            ]),
+            LockMode::Exclusive,
+            "sync --evolve --dangerously-skip-install-hook-check must take the exclusive lock"
         );
     }
 }

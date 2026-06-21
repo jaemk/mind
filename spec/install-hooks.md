@@ -40,7 +40,8 @@ CLI-17).
   command, and states that the user-supplied command is what will run, so the user
   cannot miss that they replaced the maintainer's hook.
 - `HOOK-3` With no `[source].install` and no `--install-hook`, `meld` runs no hook
-  (behavior is unchanged from a source without one).
+  (behavior is unchanged from a source without one). An empty or whitespace-only value
+  for either field is treated the same as absent: no hook runs and nothing is recorded.
 
 ## When a hook runs
 

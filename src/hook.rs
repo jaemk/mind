@@ -114,7 +114,7 @@ pub fn disclosure_text(
 /// Read one line from `reader` and return the parsed `HookChoice` (HOOK-20).
 /// EOF (zero bytes read) returns `SkipAndContinue` so that an absent or unclear
 /// reply NEVER runs the hook and NEVER aborts.
-pub fn read_choice<R: BufRead>(mut reader: R) -> Result<HookChoice> {
+fn read_choice<R: BufRead>(mut reader: R) -> Result<HookChoice> {
     let mut line = String::new();
     match reader.read_line(&mut line) {
         Ok(0) => Ok(HookChoice::SkipAndContinue), // EOF => skip, never abort

@@ -76,7 +76,7 @@ mind learn greet
 | `mind unmeld <name> [--forget]` (alias `detach`) | drop a source (optionally its items) |
 | `mind learn [--yes] <item>` | install a skill/agent/rule (glob installs many); a partial selection also pulls in the source siblings it references |
 | `mind forget <item>` (alias `unlearn`) | remove an installed item (glob removes many) |
-| `mind sync [--evolve]` | refresh every source (optionally upgrade after) |
+| `mind sync [--evolve] [--dangerously-skip-install-hook-check]` | refresh every source (optionally upgrade after; flag allows unattended hook re-runs) |
 | `mind evolve [--yes] [--dangerously-skip-install-hook-check] [item]` | upgrade installed items (re-runs install hooks on sources that advance) |
 | `mind recall [--sources] [item] [--kind K] [--source S] [--json]` | list installed items / sources / details |
 | `mind probe [query] [--kind K] [--source S] [--json] [--no-tui]` | browse and search items (interactive TUI on a terminal) |
@@ -122,13 +122,19 @@ install = "make build"
 
 Because a hook is arbitrary code, `mind` discloses the source identity, pin, commit, clone path,
 and exact command before running anything, and prompts with three choices: run it, skip it but
-still install the source (the default), or abort and install nothing. In a non-TTY context (CI,
-scripts) the hook is skipped and a note is printed; `--dangerously-skip-install-hook-check` runs
-it unattended.
+still install the source (the default), or abort and install nothing (abort applies to the initial
+`meld`; on an `evolve` re-run the source is already installed, so abort is treated as skip). In a
+non-TTY context (CI, scripts) the hook is skipped and a note is printed;
+`--dangerously-skip-install-hook-check` runs it unattended. Overriding a source's declared
+`[source].install` with `--install-hook` is announced in the prompt, which shows both the declared
+and the overriding command.
 
-`evolve` re-runs the hook when a source advances to a new commit. `recall --sources` marks a
-source that carries a hook with a ` hook` token in its column. `mind review <repo>` shows a
-source's declared hook before you meld it. See
+A skipped hook is recorded and re-offered by `mind evolve`, so you can run it later without the
+source needing to advance first. `evolve` also re-runs the hook when a source advances to a new
+commit; `sync --evolve` accepts `--dangerously-skip-install-hook-check` too, so a CI pipeline can
+run hook re-runs unattended (without it, a non-TTY `sync --evolve` skips them). `recall --sources`
+marks a source that carries a hook with a ` hook` token in its status bracket. `mind review <repo>`
+shows a source's declared hook before you meld it. See
 [spec/install-hooks.md](spec/install-hooks.md) for the full behavior.
 
 ## Troubleshooting

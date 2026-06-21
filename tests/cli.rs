@@ -5312,6 +5312,58 @@ fn evolve_reruns_hook_after_source_advances() {
 }
 
 #[test]
+fn sync_evolve_runs_hook_rerun_only_with_the_skip_check_flag() {
+    // spec: HOOK-11, HOOK-23
+    // `sync --evolve` drives an evolve pass, so it must honor the same hook
+    // re-run rules. In a non-TTY context the re-run is skipped (HOOK-22), and
+    // `--dangerously-skip-install-hook-check` threaded through `sync` is what
+    // runs it unattended (HOOK-23) -- the CI workflow the flag exists for.
+    let sb = sandbox_with_declared_hook("agents", "touch hookran");
+    let spec = sb.source_spec();
+    assert!(
+        sb.mind(&["meld", &spec, "--dangerously-skip-install-hook-check"])
+            .success,
+        "initial meld should run the hook and record commit C1"
+    );
+
+    let marker = clone_dir_of(&sb, "agents").join("hookran");
+    assert!(marker.exists(), "the hook should have run on meld");
+    std::fs::remove_file(&marker).unwrap();
+
+    // Advance the source so a re-run is warranted (the recorded run-commit now
+    // lags the source's commit).
+    sb.edit_source();
+
+    // `sync --evolve` with no flag: sync advances the commit, the evolve pass
+    // sees the new commit but takes the non-TTY skip path, so the hook does not
+    // re-run.
+    let no_flag = sb.mind(&["sync", "--evolve"]);
+    assert!(
+        no_flag.success,
+        "sync --evolve failed: {} {}",
+        no_flag.stdout, no_flag.stderr
+    );
+    assert!(
+        !marker.exists(),
+        "sync --evolve without the flag must not re-run the hook (HOOK-22)"
+    );
+
+    // `sync --evolve --dangerously-skip-install-hook-check`: the flag now
+    // reaches the evolve pass, which re-runs the still-warranted hook unattended.
+    let with_flag = sb.mind(&["sync", "--evolve", "--dangerously-skip-install-hook-check"]);
+    assert!(
+        with_flag.success,
+        "sync --evolve --dangerously-skip-install-hook-check failed: {} {}",
+        with_flag.stdout, with_flag.stderr
+    );
+    assert!(
+        marker.exists(),
+        "sync --evolve with the flag must re-run the hook unattended: {} missing",
+        marker.display()
+    );
+}
+
+#[test]
 fn scoped_evolve_does_not_rerun_unrelated_source_hook() {
     // spec: HOOK-11
     // A scoped `evolve <item>` must NOT re-run install hooks (arbitrary code) for

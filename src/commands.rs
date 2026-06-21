@@ -751,11 +751,14 @@ pub fn forget(paths: &Paths, item_ref: &str) -> Result<()> {
     Ok(())
 }
 
-/// `mind sync [--evolve]` — fetch every source and refresh its recorded commit.
-/// With `--evolve`, an `evolve` pass runs after the refresh (reporting pending
-/// upgrades and prompting before applying, exactly like `mind evolve`), so one
-/// command both fetches upstream and applies pending upgrades.
-pub fn sync(paths: &Paths, then_evolve: bool) -> Result<()> {
+/// `mind sync [--evolve] [--dangerously-skip-install-hook-check]` — fetch every
+/// source and refresh its recorded commit. With `--evolve`, an `evolve` pass
+/// runs after the refresh (reporting pending upgrades and prompting before
+/// applying, exactly like `mind evolve`), so one command both fetches upstream
+/// and applies pending upgrades. `dangerously_skip_hook_check` is forwarded to
+/// the `evolve` pass so install-hook re-runs can run unattended in CI (HOOK-11,
+/// HOOK-23); it is unused when `--evolve` is absent.
+pub fn sync(paths: &Paths, then_evolve: bool, dangerously_skip_hook_check: bool) -> Result<()> {
     // POL-3: load the managed policy once (fail closed on Err; None = inert).
     let policy = Policy::load()?;
     let mut registry = Registry::load(paths)?;
@@ -867,7 +870,8 @@ pub fn sync(paths: &Paths, then_evolve: bool) -> Result<()> {
         });
     }
     if then_evolve {
-        evolve(paths, false, None, false)?;
+        // spec: HOOK-11, HOOK-23
+        evolve(paths, false, None, dangerously_skip_hook_check)?;
     }
     Ok(())
 }

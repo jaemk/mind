@@ -64,7 +64,7 @@ pub fn execute(paths: &Paths, action: PendingAction) -> Result<Snapshot> {
         }
         ActionKind::Sync => {
             // spec: TUI-22
-            commands::sync(paths, false)?;
+            commands::sync(paths, false, false)?;
         }
         ActionKind::Evolve => {
             // spec: TUI-22 - `yes: true` so it applies without prompting on stdin.
