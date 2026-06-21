@@ -1,6 +1,6 @@
 # Within-source dependency resolution
 
-Status: planned. Installing a selected subset of a source's items pulls in the
+Status: done. Installing a selected subset of a source's items pulls in the
 other items in that source those items reference, so a partial `learn` installs a
 working set rather than a dangling one.
 

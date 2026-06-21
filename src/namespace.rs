@@ -58,11 +58,7 @@ pub fn expand(
 /// is the text up to the next `}}` with surrounding whitespace trimmed, and an
 /// unterminated token (no closing `}}`) stops the scan and is not a reference
 /// (NS-15). Names are returned in first-seen order, de-duplicated. These are the
-/// intra-source dependency edges (DEP-1).
-///
-/// Consumed by [`crate::deps`]; until the `learn`/TUI paths wire dependency
-/// resolution in, it is exercised only by tests.
-#[allow(dead_code)]
+/// intra-source dependency edges (DEP-1). Called by [`crate::deps::resolve`].
 pub fn referenced_names(content: &str) -> Vec<String> {
     const OPEN: &str = "{{ns:";
     let mut names: Vec<String> = Vec::new();

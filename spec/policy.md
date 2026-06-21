@@ -1,6 +1,6 @@
 # Managed policy (enterprise)
 
-Status: planned. A managed policy file, controlled by an organization and not
+Status: done. A managed policy file, controlled by an organization and not
 editable by regular users, restricts a `mind` client to a trusted set of sources
 and locks related settings. Modeled on Claude Code's managed settings: a file at
 a fixed system path takes precedence over user configuration and the user cannot
@@ -74,9 +74,10 @@ this document states the rules normatively. Source identity is `host/owner/repo`
   `github.com/acme/*` matches every repo under `acme`).
 - `POL-11` With `[sources].lock = true`, `meld` refuses any repo whose identity
   does not match `allow` (`SourceNotAllowed`); nothing is cloned or registered.
-- `POL-12` `learn`, `sync`, and `evolve` operate only on sources whose identity
-  matches `allow`. A source already in the registry that is no longer allowed is
-  reported and skipped, not updated or installed from.
+- `POL-12` When `lock` is true (POL-13), `learn`, `sync`, and `evolve` operate
+  only on sources whose identity matches `allow`. A source already in the registry
+  that is no longer allowed is reported and skipped, not updated or installed from.
+  With `lock` off, `allow` is advisory and these verbs are not restricted.
 - `POL-13` With `lock` absent or false, `allow` is advisory: a non-matching
   `meld` is warned about but not refused. `lock` is the enforcement switch.
 
@@ -104,10 +105,10 @@ this document states the rules normatively. Source identity is `host/owner/repo`
   same form POL-11 enforces at meld time, so a shorthand spec validates against a
   host-qualified pattern). An entry whose identity is outside the allowlist, or
   whose `repo` does not parse, is an invalid policy (POL-5).
-- `POL-32` Auto-meld provisioning runs during `sync` (and on first use when an
-  entry is missing), using each entry's declared pin. It is idempotent: an entry
-  already melded at the declared pin is left unchanged. `auto_meld` may point at a
-  curated super-source, which then discovers its nested sources (DSC-38).
+- `POL-32` Auto-meld provisioning runs during `sync`, using each entry's declared
+  pin. It is idempotent: an entry already melded at the declared pin is left
+  unchanged. `auto_meld` may point at a curated super-source, which then discovers
+  its nested sources (DSC-38).
 
 ## Lobe lock
 

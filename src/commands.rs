@@ -777,26 +777,22 @@ pub fn evolve(paths: &Paths, yes: bool, item_ref: Option<&str>) -> Result<()> {
     let mut pending: Vec<Upgrade> = Vec::new();
 
     for installed in manifest.items.values() {
-        // POL-12: with the allowlist locked, do not upgrade from a source whose
-        // identity is no longer allowed; report and skip it.
-        if let Some(policy) = policy.as_ref()
-            && policy.lock()
-            && !policy.allow_matches(&installed.source)
-        {
-            println!(
-                "skipping {} from {}: source not permitted by the managed policy's allowlist",
-                installed.key(),
-                installed.source
-            );
-            continue;
-        }
-        if let Some(f) = &filter {
-            // Limit to the matching installed item(s): the effective name, plus
-            // the kind prefix and source qualifier when the ref gives them. A ref
-            // may legitimately match several installed items, all of which evolve.
-            if !crate::resolve::installed_matches(installed, f) {
+        match evolve_item_disposition(installed, filter.as_ref(), policy.as_ref()) {
+            // Out of the scoped selection: silent skip, no output.
+            EvolveDisposition::OutOfScope => continue,
+            // POL-12: in-scope but the source is no longer allowed by the locked
+            // allowlist; report and skip. The item-ref filter is checked first,
+            // so a scoped evolve never emits skip lines for out-of-scope sources
+            // the user never selected.
+            EvolveDisposition::PolicyBlocked => {
+                println!(
+                    "skipping {} from {}: source not permitted by the managed policy's allowlist",
+                    installed.key(),
+                    installed.source
+                );
                 continue;
             }
+            EvolveDisposition::Consider => {}
         }
         // Match on stable identity (source, kind, bare_name) so a prefix change
         // is seen as a rename of the same item, not an orphan-plus-new-item.
@@ -856,6 +852,41 @@ pub fn evolve(paths: &Paths, yes: bool, item_ref: Option<&str>) -> Result<()> {
     }
     manifest.save(paths)?;
     Ok(())
+}
+
+/// What `evolve` should do with one installed item before the catalog lookup.
+#[derive(Debug, PartialEq, Eq)]
+enum EvolveDisposition {
+    /// The item is outside the scoped item-ref selection: skip silently.
+    OutOfScope,
+    /// In scope, but its source is barred by the locked policy allowlist
+    /// (POL-12): print a skip line.
+    PolicyBlocked,
+    /// In scope and permitted: consider it for an upgrade.
+    Consider,
+}
+
+/// Decide an installed item's `evolve` disposition. The item-ref filter is
+/// applied first (POL-12 ordering fix): a scoped `evolve <item>` must not emit
+/// policy-skip lines for sources the user never selected. The policy block is
+/// only ever reported for items that passed the filter.
+fn evolve_item_disposition(
+    installed: &crate::manifest::InstalledItem,
+    filter: Option<&crate::resolve::ItemRef>,
+    policy: Option<&Policy>,
+) -> EvolveDisposition {
+    if let Some(f) = filter
+        && !crate::resolve::installed_matches(installed, f)
+    {
+        return EvolveDisposition::OutOfScope;
+    }
+    if let Some(policy) = policy
+        && policy.lock()
+        && !policy.allow_matches(&installed.source)
+    {
+        return EvolveDisposition::PolicyBlocked;
+    }
+    EvolveDisposition::Consider
 }
 
 struct Upgrade {
@@ -1313,10 +1344,22 @@ pub fn lobe_list(paths: &Paths) -> Result<()> {
             println!("{h}");
         }
     }
-    if std::env::var_os("MIND_AGENT_HOMES").is_some() {
+    // POL-40: under a managed lobe lock, `Paths::agent_homes` ignores
+    // $MIND_AGENT_HOMES, so the override note would be false. Suppress it when a
+    // policy is in effect and lobes are locked; otherwise behavior is unchanged.
+    let lobes_locked = matches!(Policy::load()?, Some(p) if p.lobes_lock());
+    if show_override_note(std::env::var_os("MIND_AGENT_HOMES").is_some(), lobes_locked) {
         println!("note: MIND_AGENT_HOMES is set and overrides the above");
     }
     Ok(())
+}
+
+/// POL-40: the `config lobes list` override note is shown only when
+/// `$MIND_AGENT_HOMES` is set AND it actually takes effect. Under a managed lobe
+/// lock `Paths::agent_homes` ignores the env var, so the note would be false;
+/// suppress it.
+fn show_override_note(env_set: bool, lobes_locked: bool) -> bool {
+    env_set && !lobes_locked
 }
 
 /// `mind config lobes remove <path>` — drop an agent home.
@@ -1455,4 +1498,211 @@ fn confirm(prompt: &str) -> Result<bool> {
     }
     let ans = line.trim().to_ascii_lowercase();
     Ok(ans == "y" || ans == "yes")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::ItemKind;
+    use crate::manifest::InstalledItem;
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    /// Serialize every test that mutates process-global env vars
+    /// (`MIND_POLICY_FILE`, `MIND_AGENT_HOMES`). Env is process-wide, so these
+    /// tests cannot run concurrently.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Write `policy_toml` to a temp file and point `$MIND_POLICY_FILE` at it,
+    /// also clearing `$MIND_AGENT_HOMES` so the outer env never bleeds in.
+    /// Returns the held env guard (drop last) and the base temp dir.
+    fn with_policy(policy_toml: &str) -> (std::sync::MutexGuard<'static, ()>, PathBuf) {
+        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let base = std::env::temp_dir().join(format!("mind-cmd-test-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let policy_file = base.join("policy.toml");
+        std::fs::write(&policy_file, policy_toml).unwrap();
+        // SAFETY: ENV_LOCK is held, so no other test reads env concurrently.
+        unsafe {
+            std::env::remove_var("MIND_AGENT_HOMES");
+            std::env::set_var("MIND_POLICY_FILE", policy_file.to_str().unwrap());
+        }
+        (guard, base)
+    }
+
+    fn item(name: &str, source: &str) -> InstalledItem {
+        InstalledItem {
+            kind: ItemKind::Skill,
+            name: name.to_string(),
+            bare_name: name.to_string(),
+            source: source.to_string(),
+            commit: "deadbeef".to_string(),
+            hash: "h".to_string(),
+            store: format!("store/skills/{name}"),
+            links: vec![],
+            description: None,
+        }
+    }
+
+    // ---- F2: POL-40 override-note suppression --------------------------------
+
+    // spec: POL-40
+    // The override note is shown only when the env var is set AND actually takes
+    // effect. Under a lobe lock the env var is ignored, so suppress it.
+    #[test]
+    fn pol40_override_note_predicate() {
+        // Unlocked: env var set -> show the note (behavior unchanged).
+        assert!(show_override_note(true, false));
+        // Locked: env var ignored by agent_homes -> suppress the note.
+        assert!(!show_override_note(true, true));
+        // Env var unset -> never show, locked or not.
+        assert!(!show_override_note(false, false));
+        assert!(!show_override_note(false, true));
+    }
+
+    // spec: POL-40
+    // End-to-end against a real `$MIND_POLICY_FILE`: with `[lobes].lock = true`
+    // the loaded policy reports lobes_lock(), so the override note must be
+    // suppressed even though `$MIND_AGENT_HOMES` is set. Drives the same
+    // `Policy::load()?` + `lobes_lock()` path `lobe_list` uses.
+    #[test]
+    fn pol40_locked_policy_suppresses_override_note() {
+        let managed = std::env::temp_dir().join("mind-pol40-managed-target");
+        let policy_toml = format!(
+            "[lobes]\nlock = true\ntargets = [\"{}\"]\n",
+            managed.display()
+        );
+        let (_guard, base) = with_policy(&policy_toml);
+        // Simulate the user setting the override var (ignored under lock).
+        // SAFETY: ENV_LOCK held.
+        unsafe {
+            std::env::set_var("MIND_AGENT_HOMES", base.join("env-lobe").to_str().unwrap());
+        }
+
+        let policy = Policy::load().unwrap().expect("policy should load");
+        let env_set = std::env::var_os("MIND_AGENT_HOMES").is_some();
+        let lobes_locked = policy.lobes_lock();
+
+        // SAFETY: ENV_LOCK held.
+        unsafe {
+            std::env::remove_var("MIND_AGENT_HOMES");
+        }
+
+        assert!(env_set, "test must have the override var set");
+        assert!(lobes_locked, "policy must report a lobe lock");
+        assert!(
+            !show_override_note(env_set, lobes_locked),
+            "POL-40: a locked policy must suppress the false override note"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // spec: POL-40
+    // With a policy present but lobes unlocked (lock = false), the override note
+    // is still shown when the env var is set: the env var really does take
+    // effect, so the fix must not change the unlocked path.
+    #[test]
+    fn pol40_unlocked_keeps_override_note() {
+        let policy_toml = "[lobes]\nlock = false\n";
+        let (_guard, base) = with_policy(policy_toml);
+        // SAFETY: ENV_LOCK held.
+        unsafe {
+            std::env::set_var("MIND_AGENT_HOMES", base.join("env-lobe").to_str().unwrap());
+        }
+
+        let lobes_locked = matches!(Policy::load().unwrap(), Some(p) if p.lobes_lock());
+        let env_set = std::env::var_os("MIND_AGENT_HOMES").is_some();
+
+        // SAFETY: ENV_LOCK held.
+        unsafe {
+            std::env::remove_var("MIND_AGENT_HOMES");
+        }
+
+        assert!(!lobes_locked, "lock = false means no lobe lock");
+        assert!(
+            show_override_note(env_set, lobes_locked),
+            "unlocked behavior must be unchanged: the note still shows"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ---- F3: POL-12 scoped-evolve skip ordering ------------------------------
+
+    // spec: POL-12
+    // A scoped `evolve <item>` must apply the item-ref filter before the policy
+    // skip, so an out-of-scope item from a disallowed source produces no skip
+    // line. The pre-fix ordering (policy skip first) would classify it as
+    // PolicyBlocked and print a skip line for a source the user never selected.
+    #[test]
+    fn pol12_scoped_evolve_no_skip_for_out_of_scope_source() {
+        // Locked allowlist that permits only `allowed-src`.
+        let policy_toml = concat!(
+            "[sources]\n",
+            "lock = true\n",
+            "allow = [\"github.com/me/allowed-src\"]\n",
+        );
+        let (_guard, base) = with_policy(policy_toml);
+        let policy = Policy::load().unwrap().expect("policy should load");
+        assert!(policy.lock());
+
+        // The user scopes to an item from the allowed source.
+        let selected = item("wanted", "github.com/me/allowed-src");
+        // An installed item from a *disallowed* source the user did NOT select.
+        let other = item("unwanted", "github.com/them/blocked-src");
+
+        let filter = parse_item_ref("wanted").unwrap();
+
+        // Out-of-scope item: silently skipped, never reported as PolicyBlocked.
+        assert_eq!(
+            evolve_item_disposition(&other, Some(&filter), Some(&policy)),
+            EvolveDisposition::OutOfScope,
+            "POL-12: an unselected item must not be policy-skipped (no skip line)"
+        );
+        // The selected, allowed item is considered for upgrade.
+        assert_eq!(
+            evolve_item_disposition(&selected, Some(&filter), Some(&policy)),
+            EvolveDisposition::Consider,
+        );
+
+        // Sanity: with no scope filter, the disallowed item IS policy-blocked
+        // (the existing unscoped behavior is preserved).
+        assert_eq!(
+            evolve_item_disposition(&other, None, Some(&policy)),
+            EvolveDisposition::PolicyBlocked,
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // spec: POL-12
+    // When the scoped item itself comes from a disallowed source, it passes the
+    // filter and is then correctly reported as PolicyBlocked (the skip is for an
+    // item the user actually selected, which is the intended behavior).
+    #[test]
+    fn pol12_scoped_evolve_skips_selected_disallowed_item() {
+        let policy_toml = concat!(
+            "[sources]\n",
+            "lock = true\n",
+            "allow = [\"github.com/me/allowed-src\"]\n",
+        );
+        let (_guard, base) = with_policy(policy_toml);
+        let policy = Policy::load().unwrap().expect("policy should load");
+
+        let selected = item("blocked-item", "github.com/them/blocked-src");
+        let filter = parse_item_ref("blocked-item").unwrap();
+
+        assert_eq!(
+            evolve_item_disposition(&selected, Some(&filter), Some(&policy)),
+            EvolveDisposition::PolicyBlocked,
+            "a selected item from a disallowed source is still reported"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }

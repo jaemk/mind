@@ -74,13 +74,13 @@ mind learn greet
 |---------|------|
 | `mind meld <repo> [--as <prefix>] [--root <dir>] [--follow-branch <branch> | --pin-tag <tag> | --pin-ref <commit>]` | clone and register a source (optionally namespaced, subtree-scoped, version-pinned) |
 | `mind unmeld <name> [--forget]` (alias `detach`) | drop a source (optionally its items) |
-| `mind learn <item>` | install a skill/agent/rule (glob installs many) |
+| `mind learn [--yes] <item>` | install a skill/agent/rule (glob installs many); a partial selection also pulls in the source siblings it references |
 | `mind forget <item>` (alias `unlearn`) | remove an installed item (glob removes many) |
 | `mind sync [--evolve]` | refresh every source (optionally upgrade after) |
 | `mind evolve [--yes] [item]` | upgrade installed items |
 | `mind recall [--sources] [item] [--kind K] [--source S] [--json]` | list installed items / sources / details |
 | `mind probe [query] [--kind K] [--source S] [--json] [--no-tui]` | browse and search items (interactive TUI on a terminal) |
-| `mind review <target> [--as <prefix>]` | validate a source for publishing (read-only) |
+| `mind review <target> [--as <prefix>]` / `mind review --policy <path>` | validate a source for publishing, or validate a managed policy file (read-only) |
 | `mind introspect [--fix] [--json]` | report drift and broken links (optionally repair) |
 | `mind completions <shell>` / `mind man` | shell completions / man page |
 
