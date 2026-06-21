@@ -93,3 +93,11 @@ manifest, and store.
   leaves the terminal in a broken state.
 - `TUI-41` Quitting leaves no partial state: every mutation was already committed
   per-action under the lock (TUI-25), so there is nothing to roll back on exit.
+- `TUI-42` Rendering is responsive to the terminal size: the status and key-hint
+  lines wrap to the available width (growing to a bounded number of rows), and
+  every centered overlay (the confirm modal, the meld and lobe-path input
+  dialogs, the lobes modal) is clamped to the terminal width and height. Content
+  is never cut off the right edge or pushed off screen on a narrow terminal, so
+  there is no minimum-width requirement. The TUI may use Unicode (box drawing,
+  geometric node markers) for presentation; the ASCII-only convention applies to
+  written prose, not the interface.
