@@ -9,7 +9,7 @@ repos and links installed items into your agent directories (default
 ### Linux (install script)
 
 ```
-curl -fsSL https://raw.githubusercontent.com/jaemk/mind/main/resources/install.sh | sh
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/jaemk/mind/main/resources/install.sh | sh
 ```
 
 Downloads the release binary for your platform (x86_64 / aarch64) and installs it
@@ -17,7 +17,7 @@ to `~/.local/bin`. Override the target dir with `MIND_INSTALL_DIR` or pin a vers
 with `MIND_VERSION`:
 
 ```
-curl -fsSL https://raw.githubusercontent.com/jaemk/mind/main/resources/install.sh \
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/jaemk/mind/main/resources/install.sh \
   | MIND_INSTALL_DIR=/usr/local/bin MIND_VERSION=0.2.0 sh
 ```
 

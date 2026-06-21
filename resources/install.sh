@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 # mind installer: download the release binary for this platform and drop it on PATH.
 #
-#   curl -fsSL https://raw.githubusercontent.com/jaemk/mind/main/resources/install.sh | sh
+#   curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/jaemk/mind/main/resources/install.sh | sh
 #
 # Honors:
 #   MIND_VERSION       version to install (e.g. 0.2.0); default: latest release
@@ -20,9 +20,9 @@ err() {
 fetch() {
 	# fetch <url> -> stdout
 	if command -v curl >/dev/null 2>&1; then
-		curl -fsSL "$1"
+		curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL "$1"
 	elif command -v wget >/dev/null 2>&1; then
-		wget -qO- "$1"
+		wget --https-only -qO- "$1"
 	else
 		err "need curl or wget on PATH"
 	fi
@@ -31,9 +31,9 @@ fetch() {
 fetch_to() {
 	# fetch_to <url> <dest-file>
 	if command -v curl >/dev/null 2>&1; then
-		curl -fsSL "$1" -o "$2"
+		curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL "$1" -o "$2"
 	else
-		wget -qO "$2" "$1"
+		wget --https-only -qO "$2" "$1"
 	fi
 }
 
@@ -43,7 +43,7 @@ arch="$(uname -m)"
 case "$os" in
 Linux) os_part="unknown-linux-gnu" ;;
 Darwin) os_part="apple-darwin" ;;
-*) err "unsupported OS: $os (use the Homebrew tap or build from source)" ;;
+*) err "unsupported OS: $os (must build from source)" ;;
 esac
 case "$arch" in
 x86_64 | amd64) arch_part="x86_64" ;;
@@ -54,7 +54,7 @@ target="${arch_part}-${os_part}"
 
 # macOS x86_64 has no prebuilt binary (only Apple Silicon is published).
 if [ "$os" = "Darwin" ] && [ "$arch_part" = "x86_64" ]; then
-	err "no prebuilt binary for Intel macOS; use 'brew install mind' or build from source"
+	err "no prebuilt binary for Intel macOS; must build from source"
 fi
 
 # Resolve the version: explicit MIND_VERSION, else the latest release tag.
