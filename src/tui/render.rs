@@ -146,7 +146,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_hints(frame: &mut Frame, area: Rect) {
-    let hints = "j/k:move  Enter:expand  i:install  d:delete  s:sync  e:upgrade  m:meld(preview)  Enter on ?:preview  C:lobes  q:quit";
+    let hints = "j/k:move  Enter:expand  i:install  d:delete  s:sync  u:upgrade  m:meld(preview)  Enter on ?:preview  C:lobes  q:quit";
     let text = Span::styled(hints, Style::default().fg(Color::DarkGray));
     frame.render_widget(Paragraph::new(Line::from(vec![text])), area);
 }

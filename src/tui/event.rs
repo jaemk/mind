@@ -111,7 +111,7 @@ pub fn key_to_intent(key: KeyEvent) -> Intent {
         (KeyCode::Char('i'), KeyModifiers::NONE) => Intent::ActionLearn,
         (KeyCode::Char('d'), KeyModifiers::NONE) => Intent::ActionForget,
         (KeyCode::Char('s'), KeyModifiers::NONE) => Intent::ActionSync,
-        (KeyCode::Char('e'), KeyModifiers::NONE) => Intent::ActionUpgrade,
+        (KeyCode::Char('u'), KeyModifiers::NONE) => Intent::ActionUpgrade,
         (KeyCode::Char('m'), KeyModifiers::NONE) => Intent::ActionMeld,
         (KeyCode::Char('U'), KeyModifiers::SHIFT) => Intent::ActionUnmeld,
         // Lobe management: `C` opens the lobes modal (TUI-23).
@@ -258,10 +258,10 @@ mod tests {
     }
 
     #[test]
-    fn e_maps_to_upgrade() {
+    fn u_maps_to_upgrade() {
         // spec: TUI-22
         assert_eq!(
-            key_to_intent(key(KeyCode::Char('e'))),
+            key_to_intent(key(KeyCode::Char('u'))),
             Intent::ActionUpgrade
         );
     }
