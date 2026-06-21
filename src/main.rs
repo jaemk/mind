@@ -17,6 +17,7 @@ mod paths;
 mod policy;
 mod resolve;
 mod review;
+mod selfupdate;
 mod source;
 mod tui;
 
@@ -75,6 +76,7 @@ fn lock_mode(command: &Command) -> LockMode {
         | Command::Learn { .. }
         | Command::Forget { .. }
         | Command::Sync { .. }
+        | Command::Upgrade { .. }
         | Command::Evolve { .. }
         | Command::Introspect { fix: true, .. }
         | Command::Config {
@@ -162,19 +164,24 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
         Command::Learn { item, dry_run, yes } => commands::learn(paths, &item, dry_run, yes),
         Command::Forget { item } => commands::forget(paths, &item),
         Command::Sync {
-            evolve,
+            upgrade,
             dangerously_skip_install_hook_check,
-        } => commands::sync(paths, evolve, dangerously_skip_install_hook_check),
-        Command::Evolve {
+        } => commands::sync(paths, upgrade, dangerously_skip_install_hook_check),
+        Command::Upgrade {
             yes,
             item,
             dangerously_skip_install_hook_check,
-        } => commands::evolve(
+        } => commands::upgrade(
             paths,
             yes,
             item.as_deref(),
             dangerously_skip_install_hook_check,
         ),
+        Command::Evolve {
+            check,
+            yes,
+            version,
+        } => selfupdate::run(check, yes, version),
         Command::Recall {
             sources,
             item,
@@ -272,9 +279,17 @@ mod tests {
         assert_eq!(mode_of(&["mind", "learn", "review"]), LockMode::Exclusive);
         assert_eq!(mode_of(&["mind", "forget", "review"]), LockMode::Exclusive);
         assert_eq!(mode_of(&["mind", "sync"]), LockMode::Exclusive);
-        assert_eq!(mode_of(&["mind", "sync", "--evolve"]), LockMode::Exclusive);
+        assert_eq!(mode_of(&["mind", "sync", "--upgrade"]), LockMode::Exclusive);
+        assert_eq!(mode_of(&["mind", "upgrade"]), LockMode::Exclusive);
+        assert_eq!(mode_of(&["mind", "upgrade", "--yes"]), LockMode::Exclusive);
+        // `evolve` is now the binary self-update verb; it mutates the on-disk
+        // binary and must take the exclusive lock.
         assert_eq!(mode_of(&["mind", "evolve"]), LockMode::Exclusive);
-        assert_eq!(mode_of(&["mind", "evolve", "--yes"]), LockMode::Exclusive);
+        assert_eq!(mode_of(&["mind", "evolve", "--check"]), LockMode::Exclusive);
+        assert_eq!(
+            mode_of(&["mind", "evolve", "--version", "1.2.3"]),
+            LockMode::Exclusive
+        );
         // introspect --fix is mutating (it recreates links) and MUST be exclusive,
         // not shared. This is the easy-to-get-wrong case.
         assert_eq!(
@@ -364,22 +379,22 @@ mod tests {
         );
     }
 
-    /// `sync --evolve --dangerously-skip-install-hook-check` must parse and the
-    /// flag must be forwarded to the evolve pass so non-TTY CI can trigger hook
+    /// `sync --upgrade --dangerously-skip-install-hook-check` must parse and the
+    /// flag must be forwarded to the upgrade pass so non-TTY CI can trigger hook
     /// re-runs unattended (HOOK-11, HOOK-23). Verified here by inspecting the
     /// parsed struct; the end-to-end behavior is covered by tests/cli.rs.
     // spec: HOOK-11 HOOK-23
     #[test]
     fn sync_dangerously_skip_install_hook_check_parses() {
         // Without the flag: parses, field is false.
-        let cli =
-            Cli::try_parse_from(["mind", "sync", "--evolve"]).expect("sync --evolve should parse");
+        let cli = Cli::try_parse_from(["mind", "sync", "--upgrade"])
+            .expect("sync --upgrade should parse");
         match cli.command {
             Command::Sync {
-                evolve,
+                upgrade,
                 dangerously_skip_install_hook_check,
             } => {
-                assert!(evolve, "--evolve should be true");
+                assert!(upgrade, "--upgrade should be true");
                 assert!(
                     !dangerously_skip_install_hook_check,
                     "flag absent: should be false"
@@ -392,16 +407,16 @@ mod tests {
         let cli = Cli::try_parse_from([
             "mind",
             "sync",
-            "--evolve",
+            "--upgrade",
             "--dangerously-skip-install-hook-check",
         ])
-        .expect("sync --evolve --dangerously-skip-install-hook-check should parse");
+        .expect("sync --upgrade --dangerously-skip-install-hook-check should parse");
         match cli.command {
             Command::Sync {
-                evolve,
+                upgrade,
                 dangerously_skip_install_hook_check,
             } => {
-                assert!(evolve, "--evolve should be true");
+                assert!(upgrade, "--upgrade should be true");
                 assert!(
                     dangerously_skip_install_hook_check,
                     "flag present: should be true"
@@ -410,11 +425,11 @@ mod tests {
             other => panic!("expected Sync, got {other:?}"),
         }
 
-        // Flag without --evolve is now a parse error (HOOK-23: the flag requires
-        // --evolve so it cannot be a silent no-op).
+        // Flag without --upgrade is now a parse error (HOOK-23: the flag requires
+        // --upgrade so it cannot be a silent no-op).
         assert!(
             Cli::try_parse_from(["mind", "sync", "--dangerously-skip-install-hook-check"]).is_err(),
-            "sync --dangerously-skip-install-hook-check without --evolve must be a parse error"
+            "sync --dangerously-skip-install-hook-check without --upgrade must be a parse error"
         );
 
         // Confirm the lock mode is still Exclusive with the new flag.
@@ -422,11 +437,57 @@ mod tests {
             mode_of(&[
                 "mind",
                 "sync",
-                "--evolve",
+                "--upgrade",
                 "--dangerously-skip-install-hook-check"
             ]),
             LockMode::Exclusive,
-            "sync --evolve --dangerously-skip-install-hook-check must take the exclusive lock"
+            "sync --upgrade --dangerously-skip-install-hook-check must take the exclusive lock"
+        );
+    }
+
+    /// `evolve` (the binary self-update verb) parses with and without its flags
+    /// and classifies Exclusive. `--version` resolves the target offline.
+    #[test]
+    fn evolve_self_update_parses_and_is_exclusive() {
+        // Bare evolve parses.
+        let cli = Cli::try_parse_from(["mind", "evolve"]).expect("evolve should parse");
+        match cli.command {
+            Command::Evolve {
+                check,
+                yes,
+                version,
+            } => {
+                assert!(!check);
+                assert!(!yes);
+                assert_eq!(version, None);
+            }
+            other => panic!("expected Evolve, got {other:?}"),
+        }
+
+        // evolve --check parses with the flag set.
+        let cli =
+            Cli::try_parse_from(["mind", "evolve", "--check"]).expect("evolve --check parses");
+        match cli.command {
+            Command::Evolve { check, .. } => assert!(check, "--check should be true"),
+            other => panic!("expected Evolve, got {other:?}"),
+        }
+
+        // evolve --version <v> carries the explicit version.
+        let cli = Cli::try_parse_from(["mind", "evolve", "--version", "1.2.3"])
+            .expect("evolve --version parses");
+        match cli.command {
+            Command::Evolve { version, .. } => {
+                assert_eq!(version.as_deref(), Some("1.2.3"));
+            }
+            other => panic!("expected Evolve, got {other:?}"),
+        }
+
+        // All three forms classify Exclusive (they mutate the on-disk binary).
+        assert_eq!(mode_of(&["mind", "evolve"]), LockMode::Exclusive);
+        assert_eq!(mode_of(&["mind", "evolve", "--check"]), LockMode::Exclusive);
+        assert_eq!(
+            mode_of(&["mind", "evolve", "--version", "1.2.3"]),
+            LockMode::Exclusive
         );
     }
 }

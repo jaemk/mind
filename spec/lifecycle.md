@@ -37,18 +37,18 @@ preserve the previous version until the new one is proven.
 > unix. On platforms without symlink support the install falls back to copying
 > the item into the link location. Because the clobber guard (LIFE-41) and the
 > idempotent-reinstall path recognize ownership by "is a symlink into the store",
-> that fallback copy is not recognized as mind's own: a reinstall or `evolve`
+> that fallback copy is not recognized as mind's own: a reinstall or `upgrade`
 > over it reports `LinkOccupied`, and `introspect`/`forget` cannot tell it apart
 > from a user's file. mind is therefore supported on unix; non-unix is
 > copy-only and best-effort. This is a documented limitation, not yet addressed.
 
-## Upgrade (evolve)
+## Upgrade
 
-- `LIFE-10` evolve matches each installed item to a catalog item by stable
+- `LIFE-10` upgrade matches each installed item to a catalog item by stable
   identity `(source, kind, bare_name)`, not by effective name.
 - `LIFE-11` An item is pending when its source-content hash changed, or its
   effective name changed (a namespace change), or both.
-- `LIFE-12` An installed item with no catalog match is left alone by evolve and is
+- `LIFE-12` An installed item with no catalog match is left alone by upgrade and is
   reported by introspect.
 - `LIFE-13` Applying a content-only upgrade reinstalls under the same effective
   name (transactional swap).
@@ -70,6 +70,6 @@ preserve the previous version until the new one is proven.
 - `LIFE-31` An installed item whose stable identity no longer matches any catalog
   item is reported as no longer present upstream.
 - `LIFE-32` An installed item whose catalog match now has a different effective
-  name is reported as a namespace change, directing the user to evolve.
+  name is reported as a namespace change, directing the user to upgrade.
 - `LIFE-33` An installed item whose source-content hash differs from the recorded
-  hash is reported as drifted, directing the user to evolve.
+  hash is reported as drifted, directing the user to upgrade.

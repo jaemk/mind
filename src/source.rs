@@ -63,12 +63,12 @@ pub struct Source {
     /// The install hook command in effect for this source (HOOK-31), if any:
     /// the maintainer's `[source].install` or a consumer `meld --install-hook`
     /// override. `None` when the source has no hook. Persisted; lets `recall`/
-    /// `introspect` report a source has a hook and `evolve` detect a changed
+    /// `introspect` report a source has a hook and `upgrade` detect a changed
     /// command.
     #[serde(default)]
     pub install_hook: Option<String>,
     /// The commit the install hook last ran at (HOOK-31), or `None` if the hook
-    /// is recorded but has not been run yet (the user skipped it). Lets `evolve`
+    /// is recorded but has not been run yet (the user skipped it). Lets `upgrade`
     /// detect the source advanced past the last hook run and re-prompt (HOOK-11).
     #[serde(default)]
     pub install_hook_commit: Option<String>,
@@ -84,7 +84,7 @@ impl Source {
             .join(&self.repo)
     }
 
-    /// A browser URL to compare two commits, for `mind evolve` output.
+    /// A browser URL to compare two commits, for `mind upgrade` output.
     pub fn compare_url(&self, from: &str, to: &str) -> Option<String> {
         if self.host == "github.com" {
             Some(format!(

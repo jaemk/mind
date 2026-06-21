@@ -178,7 +178,7 @@ pub enum MindError {
     #[error("review found {hard} hard error(s); see the findings above")]
     ReviewFailed { hard: usize },
 
-    // Constructed by the policy-enforcement shards (meld/sync/evolve gating);
+    // Constructed by the policy-enforcement paths (meld/sync/upgrade gating);
     // until those land nothing builds these, so allow dead_code on just them.
     #[error("source '{identity}' is not permitted by the managed policy's allowlist")]
     SourceNotAllowed { identity: String },
@@ -207,6 +207,20 @@ pub enum MindError {
         status: Option<ExitStatus>,
         stderr: String,
     },
+
+    #[error("no prebuilt `mind` binary for this platform ({os}/{arch}); build from source instead")]
+    UnsupportedPlatform { os: String, arch: String },
+
+    #[error("failed to download {url}: {reason}")]
+    DownloadFailed { url: String, reason: String },
+
+    #[error("the downloaded release archive did not contain a 'mind' binary")]
+    ReleaseAssetEmpty,
+
+    #[error(
+        "cannot replace the running binary at {path}: it is not writable; reinstall with elevated privileges (e.g. sudo) or, for a Homebrew install, run `brew upgrade mind`"
+    )]
+    TargetNotWritable { path: String },
 }
 
 fn status_suffix(status: Option<ExitStatus>) -> String {

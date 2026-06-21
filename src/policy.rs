@@ -10,7 +10,7 @@
 //! The locate seam ([`locate_with`]) is factored out so the system-path/env
 //! precedence (POL-1, POL-2) is unit-testable without touching `/etc`.
 //!
-//! The enforcement shards (`meld`/`sync`/`evolve`/`config lobes`/`review`) consume
+//! The enforcement shards (`meld`/`sync`/`upgrade`/`config lobes`/`review`) consume
 //! the public API here; until they wire it up the module is exercised only by its
 //! own tests, so the API trips dead-code warnings. Scope the allow to this file
 //! (mirroring how `src/deps.rs` was bootstrapped).

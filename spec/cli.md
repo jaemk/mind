@@ -10,11 +10,11 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 | `learn <item>` | install |
 | `forget <item>` (alias: `unlearn`) | uninstall |
 | `sync` | refresh sources |
-| `evolve [--yes] [item]` | upgrade installed |
+| `upgrade [--yes] [item]` | upgrade installed |
 | `recall [--sources] [item]` | list / info |
 | `review <target> [--as <prefix>]` | validate a source for publishing |
 | `introspect` | diagnose |
-| `self-update [--check] [--yes]` | upgrade the `mind` binary itself |
+| `evolve [--check] [--yes] [--version <v>]` | update the `mind` binary itself |
 | `config show` / `config lobes ...` | view/edit config |
 | `completions <shell>` | print a shell completion script |
 | `man` | print the roff man page |
@@ -117,36 +117,36 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   branch, and updates the recorded commit and `[source].description`.
 - `CLI-51` With no sources melded, `sync` reports that and exits successfully.
 - `CLI-52` `sync` does not change consumer aliases.
-- `CLI-53` `sync --evolve` runs an `evolve` pass after refreshing sources
+- `CLI-53` `sync --upgrade` runs an `upgrade` pass after refreshing sources
   (reporting pending upgrades and prompting before applying, exactly like
-  `evolve`), so a single command both fetches upstream and applies pending
+  `upgrade`), so a single command both fetches upstream and applies pending
   upgrades.
 - `CLI-54` A per-source failure (e.g. a network error on one remote) does not
   abort the run: `sync` refreshes each source independently, persists the
   progress made (the recorded commits of the sources that succeeded), reports
-  each failure, and exits non-zero (`SyncFailed`). With a failure, the `--evolve`
+  each failure, and exits non-zero (`SyncFailed`). With a failure, the `--upgrade`
   pass is skipped.
 - `CLI-55` `sync` resolves each source against its recorded pin (STO-18): a
   `follow-branch` source resets to that branch's current tip and updates the
   recorded commit; a `pin-tag` / `pin-ref` source re-fetches but stays at the
   pinned tag / commit, so its recorded commit moves only if the upstream tag was
   moved (a moved tag is reset to). `sync` never changes the pin itself (cf.
-  CLI-52 for aliases). `evolve` and `introspect` operate on the synced (pinned)
+  CLI-52 for aliases). `upgrade` and `introspect` operate on the synced (pinned)
   content, so a `pin-tag` source does not report drift as upstream's default
   branch advances past the tag.
 
-## evolve
+## upgrade
 
-- `CLI-60` `evolve` reports pending upgrades and, unless `--yes` is given, prompts
+- `CLI-60` `upgrade` reports pending upgrades and, unless `--yes` is given, prompts
   `[y/N]` (default No; EOF counts as No) before applying anything.
 - `CLI-61` The report lists, per item, the hash and commit deltas, and a compare
   URL when the source host supports one. A namespace change is shown as a rename.
 - `CLI-62` `--yes` applies upgrades without prompting.
-- `CLI-63` An optional `item` limits evolve to the matching installed item(s),
+- `CLI-63` An optional `item` limits upgrade to the matching installed item(s),
   matched against the manifest by effective name and honoring a `kind:` prefix
   and an `owner/repo#` source qualifier. The ref may match several installed
-  items, all of which are evolved.
-- `CLI-64` With nothing pending, `evolve` reports up to date and changes nothing.
+  items, all of which are upgraded.
+- `CLI-64` With nothing pending, `upgrade` reports up to date and changes nothing.
 
 ## recall
 
@@ -228,24 +228,24 @@ only appear at meld or install time. It is read-only and installs nothing.
   recreates missing link(s) for installed items from their file registry
   (re-linking the existing store copy). If the store copy itself is gone the link
   is left reported, not recreated. Drifted or renamed items are still left to
-  `evolve`.
+  `upgrade`.
 - `CLI-92` `introspect --json` emits the findings as JSON on stdout: an object
   with an `issues` array (each carrying a stable `kind` tag, a `target`, and a
   `message`) plus the source and item counts. An empty `issues` array means clean.
 
-## self-update
+## evolve
 
-`self-update` upgrades the `mind` executable itself (distinct from `evolve`, which
-upgrades installed items, and `sync`, which refreshes sources). It is built on the
-`self_update` crate and resolves the same release artifacts as the install script
-and the Homebrew formula.
+`evolve` upgrades the `mind` executable itself (distinct from `upgrade`, which
+upgrades installed items, and `sync`, which refreshes sources). It uses the same
+native curl/wget downloader as `resources/install.sh` and resolves the same
+release artifacts as the install script and the Homebrew formula.
 
-- `CLI-140` `self-update` compares the running version against the latest published
+- `CLI-140` `evolve` compares the running version against the latest published
   release. With nothing newer it reports up to date and changes nothing. With a
   newer release it replaces the running executable in place with the release binary
   for the current platform.
-- `CLI-141` Unless `--yes` is given, `self-update` prompts `[y/N]` (default No, EOF
-  counts as No) before replacing the binary, mirroring `evolve` (CLI-60). `--check`
+- `CLI-141` Unless `--yes` is given, `evolve` prompts `[y/N]` (default No, EOF
+  counts as No) before replacing the binary, mirroring `upgrade` (CLI-60). `--check`
   reports the latest available version and whether an update is pending, then exits
   without downloading or replacing anything.
 - `CLI-142` The release artifact is selected exactly as the install script and the
@@ -255,7 +255,7 @@ and the Homebrew formula.
 - `CLI-143` The replacement is atomic: the new binary is downloaded and verified,
   then swapped for the running executable, so any failure leaves the existing
   binary intact. A Homebrew-managed install is upgraded with `brew upgrade` instead;
-  `self-update` replaces the binary it runs from and does not coordinate with a
+  `evolve` replaces the binary it runs from and does not coordinate with a
   package manager.
 
 ## config

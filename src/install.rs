@@ -141,7 +141,7 @@ pub fn uninstall(paths: &Paths, item: &InstalledItem) -> Result<()> {
 /// Recreate any missing links for an installed item, pointing at its existing
 /// store copy. Returns the number of links repaired. Used by `introspect --fix`.
 /// If the store copy itself is gone there is nothing to link to, so it repairs
-/// nothing (that is drift for `evolve`/`learn` to resolve, not a re-link).
+/// nothing (that is drift for `upgrade`/`learn` to resolve, not a re-link).
 pub fn relink(paths: &Paths, item: &InstalledItem) -> Result<usize> {
     let store = paths.mind_home.join(&item.store);
     if !store.exists() {
@@ -279,7 +279,7 @@ fn symlink(target: &Path, link: &Path) -> Result<()> {
     // On non-unix, fall back to a copy so the layout still works. Known
     // limitation: a copied link is not recognized as mind's own by the clobber
     // guard (`ensure_unoccupied` keys on "symlink into the store"), so reinstall
-    // / evolve over it reports `LinkOccupied`. mind is unix-first; see the
+    // / upgrade over it reports `LinkOccupied`. mind is unix-first; see the
     // platform-limitation note in spec/lifecycle.md.
     copy_recursive(target, link)
 }

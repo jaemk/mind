@@ -102,7 +102,7 @@ fn resolve_pin_flags(
 }
 
 /// A short human description of a `Pin` for the hook disclosure (HOOK-20).
-/// Shared by `meld_recursive` and `evolve` so both render the pin the same way.
+/// Shared by `meld_recursive` and `upgrade` so both render the pin the same way.
 fn pin_description(pin: &Pin) -> String {
     match pin {
         Pin::DefaultBranch => "default branch".to_string(),
@@ -112,7 +112,7 @@ fn pin_description(pin: &Pin) -> String {
     }
 }
 
-/// Whether `evolve` should re-offer a source's install hook (HOOK-11): a hook is
+/// Whether `upgrade` should re-offer a source's install hook (HOOK-11): a hook is
 /// in effect AND the commit it last ran at differs from the source's current
 /// commit. A None `install_hook_commit` (a recorded-but-never-run hook from a
 /// skipped meld) differs from any Some(commit), so it is re-offered too.
@@ -332,7 +332,7 @@ fn meld_recursive(
                     crate::hook::HookChoice::SkipAndContinue => {
                         // HOOK-21 / HOOK-22: install the source and its items, but
                         // do not build the tooling. Record the hook command so
-                        // `evolve` can re-offer it, but leave install_hook_commit
+                        // `upgrade` can re-offer it, but leave install_hook_commit
                         // None (the hook has not been run).
                         println!(
                             "note: skipped the install hook for {}; its items may not work until the hook is run",
@@ -751,14 +751,14 @@ pub fn forget(paths: &Paths, item_ref: &str) -> Result<()> {
     Ok(())
 }
 
-/// `mind sync [--evolve] [--dangerously-skip-install-hook-check]` — fetch every
-/// source and refresh its recorded commit. With `--evolve`, an `evolve` pass
+/// `mind sync [--upgrade] [--dangerously-skip-install-hook-check]` — fetch every
+/// source and refresh its recorded commit. With `--upgrade`, an `upgrade` pass
 /// runs after the refresh (reporting pending upgrades and prompting before
-/// applying, exactly like `mind evolve`), so one command both fetches upstream
+/// applying, exactly like `mind upgrade`), so one command both fetches upstream
 /// and applies pending upgrades. `dangerously_skip_hook_check` is forwarded to
-/// the `evolve` pass so install-hook re-runs can run unattended in CI (HOOK-11,
-/// HOOK-23); it is unused when `--evolve` is absent.
-pub fn sync(paths: &Paths, then_evolve: bool, dangerously_skip_hook_check: bool) -> Result<()> {
+/// the `upgrade` pass so install-hook re-runs can run unattended in CI (HOOK-11,
+/// HOOK-23); it is unused when `--upgrade` is absent.
+pub fn sync(paths: &Paths, then_upgrade: bool, dangerously_skip_hook_check: bool) -> Result<()> {
     // POL-3: load the managed policy once (fail closed on Err; None = inert).
     let policy = Policy::load()?;
     let mut registry = Registry::load(paths)?;
@@ -869,15 +869,15 @@ pub fn sync(paths: &Paths, then_evolve: bool, dangerously_skip_hook_check: bool)
             total,
         });
     }
-    if then_evolve {
+    if then_upgrade {
         // spec: HOOK-11, HOOK-23
-        evolve(paths, false, None, dangerously_skip_hook_check)?;
+        upgrade(paths, false, None, dangerously_skip_hook_check)?;
     }
     Ok(())
 }
 
-/// `mind evolve [--yes] [item]` — report and optionally apply upgrades.
-pub fn evolve(
+/// `mind upgrade [--yes] [item]` — report and optionally apply upgrades.
+pub fn upgrade(
     paths: &Paths,
     yes: bool,
     item_ref: Option<&str>,
@@ -890,7 +890,7 @@ pub fn evolve(
 
     let filter = item_ref.map(parse_item_ref).transpose()?;
 
-    // HOOK-11 scope: a scoped `evolve <item>` must not re-run install hooks
+    // HOOK-11 scope: a scoped `upgrade <item>` must not re-run install hooks
     // (arbitrary code) for sources unrelated to the targeted item. When a filter
     // is present, restrict the hook re-run to sources that have at least one
     // INSTALLED item matching the filter (the same scoping the per-item loop uses
@@ -920,14 +920,14 @@ pub fn evolve(
     let mut pending: Vec<Upgrade> = Vec::new();
 
     for installed in manifest.items.values() {
-        match evolve_item_disposition(installed, filter.as_ref(), policy.as_ref()) {
+        match upgrade_item_disposition(installed, filter.as_ref(), policy.as_ref()) {
             // Out of the scoped selection: silent skip, no output.
-            EvolveDisposition::OutOfScope => continue,
+            UpgradeDisposition::OutOfScope => continue,
             // POL-12: in-scope but the source is no longer allowed by the locked
             // allowlist; report and skip. The item-ref filter is checked first,
-            // so a scoped evolve never emits skip lines for out-of-scope sources
+            // so a scoped upgrade never emits skip lines for out-of-scope sources
             // the user never selected.
-            EvolveDisposition::PolicyBlocked => {
+            UpgradeDisposition::PolicyBlocked => {
                 println!(
                     "skipping {} from {}: source not permitted by the managed policy's allowlist",
                     installed.key(),
@@ -935,7 +935,7 @@ pub fn evolve(
                 );
                 continue;
             }
-            EvolveDisposition::Consider => {}
+            UpgradeDisposition::Consider => {}
         }
         // Match on stable identity (source, kind, bare_name) so a prefix change
         // is seen as a rename of the same item, not an orphan-plus-new-item.
@@ -987,9 +987,9 @@ pub fn evolve(
             // Rename: drop the old item (by its file registry) and re-key.
             install::uninstall(paths, &up.old)?;
             manifest.items.remove(&up.old.key());
-            println!("evolved {} -> {}", up.old.key(), installed.key());
+            println!("upgraded {} -> {}", up.old.key(), installed.key());
         } else {
-            println!("evolved {}", installed.key());
+            println!("upgraded {}", installed.key());
         }
         manifest.insert(installed);
     }
@@ -1001,7 +1001,7 @@ pub fn evolve(
 /// advanced past the commit the hook last ran at, or the hook was recorded but
 /// never run). Same trust boundary as `meld`: prompt and disclose, unless the
 /// `--dangerously-skip-install-hook-check` flag is set or there is no TTY. In
-/// `evolve`, Abort is treated as Skip: the source is already registered, so
+/// `upgrade`, Abort is treated as Skip: the source is already registered, so
 /// declining the re-run just leaves the existing install in place. Persists the
 /// registry only if a hook was run and its recorded commit advanced.
 fn rerun_source_hooks(
@@ -1016,7 +1016,7 @@ fn rerun_source_hooks(
         if !hook_rerun_warranted(source) {
             continue;
         }
-        // HOOK-11 scope: a scoped `evolve <item>` restricts the hook re-run to
+        // HOOK-11 scope: a scoped `upgrade <item>` restricts the hook re-run to
         // sources implicated by the filter. `None` = unscoped (all sources).
         if let Some(scope) = in_scope
             && !scope.contains(&source.name)
@@ -1093,9 +1093,9 @@ fn rerun_source_hooks(
     Ok(())
 }
 
-/// What `evolve` should do with one installed item before the catalog lookup.
+/// What `upgrade` should do with one installed item before the catalog lookup.
 #[derive(Debug, PartialEq, Eq)]
-enum EvolveDisposition {
+enum UpgradeDisposition {
     /// The item is outside the scoped item-ref selection: skip silently.
     OutOfScope,
     /// In scope, but its source is barred by the locked policy allowlist
@@ -1105,27 +1105,27 @@ enum EvolveDisposition {
     Consider,
 }
 
-/// Decide an installed item's `evolve` disposition. The item-ref filter is
-/// applied first (POL-12 ordering fix): a scoped `evolve <item>` must not emit
+/// Decide an installed item's `upgrade` disposition. The item-ref filter is
+/// applied first (POL-12 ordering fix): a scoped `upgrade <item>` must not emit
 /// policy-skip lines for sources the user never selected. The policy block is
 /// only ever reported for items that passed the filter.
-fn evolve_item_disposition(
+fn upgrade_item_disposition(
     installed: &crate::manifest::InstalledItem,
     filter: Option<&crate::resolve::ItemRef>,
     policy: Option<&Policy>,
-) -> EvolveDisposition {
+) -> UpgradeDisposition {
     if let Some(f) = filter
         && !crate::resolve::installed_matches(installed, f)
     {
-        return EvolveDisposition::OutOfScope;
+        return UpgradeDisposition::OutOfScope;
     }
     if let Some(policy) = policy
         && policy.lock()
         && !policy.allow_matches(&installed.source)
     {
-        return EvolveDisposition::PolicyBlocked;
+        return UpgradeDisposition::PolicyBlocked;
     }
-    EvolveDisposition::Consider
+    UpgradeDisposition::Consider
 }
 
 struct Upgrade {
@@ -1385,7 +1385,7 @@ struct Issue {
 /// `mind introspect [--fix] [--json]` — report drift and breakage. With `--fix`,
 /// repair what can be fixed without changing versions: recreate missing symlinks
 /// from each item's file registry. Drifted or renamed items are left to
-/// `evolve`. `--json` emits the findings as JSON on stdout.
+/// `upgrade`. `--json` emits the findings as JSON on stdout.
 pub fn introspect(paths: &Paths, fix: bool, json: bool) -> Result<()> {
     let registry = Registry::load(paths)?;
     let catalog = catalog::scan(paths, &registry)?;
@@ -1448,7 +1448,7 @@ pub fn introspect(paths: &Paths, fix: bool, json: bool) -> Result<()> {
                         kind: "namespace-changed",
                         target: it.key(),
                         message: format!(
-                            "{}: namespace changed to '{}'; run `mind evolve`",
+                            "{}: namespace changed to '{}'; run `mind upgrade`",
                             it.key(),
                             cat.effective_name()
                         ),
@@ -1459,7 +1459,7 @@ pub fn introspect(paths: &Paths, fix: bool, json: bool) -> Result<()> {
                     issues.push(Issue {
                         kind: "drifted",
                         target: it.key(),
-                        message: format!("{}: upstream changed; run `mind evolve`", it.key()),
+                        message: format!("{}: upstream changed; run `mind upgrade`", it.key()),
                     });
                 }
             }
@@ -1729,7 +1729,7 @@ fn summary(desc: Option<&str>, max: usize) -> String {
 }
 
 /// Prompt `[y/N]` on the terminal; default No.
-fn confirm(prompt: &str) -> Result<bool> {
+pub(crate) fn confirm(prompt: &str) -> Result<bool> {
     print!("\n{prompt} [y/N] ");
     let _ = std::io::stdout().flush();
     let mut line = String::new();
@@ -1877,15 +1877,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    // ---- F3: POL-12 scoped-evolve skip ordering ------------------------------
+    // ---- F3: POL-12 scoped-upgrade skip ordering -----------------------------
 
     // spec: POL-12
-    // A scoped `evolve <item>` must apply the item-ref filter before the policy
+    // A scoped `upgrade <item>` must apply the item-ref filter before the policy
     // skip, so an out-of-scope item from a disallowed source produces no skip
     // line. The pre-fix ordering (policy skip first) would classify it as
     // PolicyBlocked and print a skip line for a source the user never selected.
     #[test]
-    fn pol12_scoped_evolve_no_skip_for_out_of_scope_source() {
+    fn pol12_scoped_upgrade_no_skip_for_out_of_scope_source() {
         // Locked allowlist that permits only `allowed-src`.
         let policy_toml = concat!(
             "[sources]\n",
@@ -1905,21 +1905,21 @@ mod tests {
 
         // Out-of-scope item: silently skipped, never reported as PolicyBlocked.
         assert_eq!(
-            evolve_item_disposition(&other, Some(&filter), Some(&policy)),
-            EvolveDisposition::OutOfScope,
+            upgrade_item_disposition(&other, Some(&filter), Some(&policy)),
+            UpgradeDisposition::OutOfScope,
             "POL-12: an unselected item must not be policy-skipped (no skip line)"
         );
         // The selected, allowed item is considered for upgrade.
         assert_eq!(
-            evolve_item_disposition(&selected, Some(&filter), Some(&policy)),
-            EvolveDisposition::Consider,
+            upgrade_item_disposition(&selected, Some(&filter), Some(&policy)),
+            UpgradeDisposition::Consider,
         );
 
         // Sanity: with no scope filter, the disallowed item IS policy-blocked
         // (the existing unscoped behavior is preserved).
         assert_eq!(
-            evolve_item_disposition(&other, None, Some(&policy)),
-            EvolveDisposition::PolicyBlocked,
+            upgrade_item_disposition(&other, None, Some(&policy)),
+            UpgradeDisposition::PolicyBlocked,
         );
 
         let _ = std::fs::remove_dir_all(&base);
@@ -1930,7 +1930,7 @@ mod tests {
     // filter and is then correctly reported as PolicyBlocked (the skip is for an
     // item the user actually selected, which is the intended behavior).
     #[test]
-    fn pol12_scoped_evolve_skips_selected_disallowed_item() {
+    fn pol12_scoped_upgrade_skips_selected_disallowed_item() {
         let policy_toml = concat!(
             "[sources]\n",
             "lock = true\n",
@@ -1943,8 +1943,8 @@ mod tests {
         let filter = parse_item_ref("blocked-item").unwrap();
 
         assert_eq!(
-            evolve_item_disposition(&selected, Some(&filter), Some(&policy)),
-            EvolveDisposition::PolicyBlocked,
+            upgrade_item_disposition(&selected, Some(&filter), Some(&policy)),
+            UpgradeDisposition::PolicyBlocked,
             "a selected item from a disallowed source is still reported"
         );
 

@@ -166,7 +166,7 @@ impl Sandbox {
         }
     }
 
-    /// Change the skill upstream and commit, so a `sync` + `evolve` sees a delta.
+    /// Change the skill upstream and commit, so a `sync` + `upgrade` sees a delta.
     fn edit_source(&self) {
         write(
             &self.source.join("skills/review/SKILL.md"),
@@ -523,16 +523,16 @@ fn introspect_is_clean_after_learn() {
 }
 
 #[test]
-fn evolve_reports_nothing_when_up_to_date() {
+fn upgrade_reports_nothing_when_up_to_date() {
     // spec: CLI-64
     let sb = melded();
     sb.mind(&["learn", "review"]);
-    let r = sb.mind(&["evolve"]);
+    let r = sb.mind(&["upgrade"]);
     assert!(r.stdout.contains("up to date"), "{}", r.stdout);
 }
 
 #[test]
-fn evolve_reports_delta_and_declining_changes_nothing() {
+fn upgrade_reports_delta_and_declining_changes_nothing() {
     // spec: CLI-60, CLI-61
     let sb = melded();
     sb.mind(&["learn", "review"]);
@@ -540,7 +540,7 @@ fn evolve_reports_delta_and_declining_changes_nothing() {
     sb.mind(&["sync"]);
 
     // Dry-run report: shows hash and commit deltas with arrows.
-    let report = sb.mind_with_input(&["evolve"], Some("n\n"));
+    let report = sb.mind_with_input(&["upgrade"], Some("n\n"));
     assert!(report.stdout.contains("skill:review"), "{}", report.stdout);
     assert!(report.stdout.contains("hash"), "{}", report.stdout);
     assert!(report.stdout.contains("->"), "{}", report.stdout);
@@ -548,13 +548,13 @@ fn evolve_reports_delta_and_declining_changes_nothing() {
 
     // Declining must leave the installed commit untouched.
     let before = sb.mind(&["recall", "skill:review"]).stdout;
-    let again = sb.mind_with_input(&["evolve"], Some("n\n"));
+    let again = sb.mind_with_input(&["upgrade"], Some("n\n"));
     assert!(again.stdout.contains("aborted"));
     assert_eq!(before, sb.mind(&["recall", "skill:review"]).stdout);
 }
 
 #[test]
-fn evolve_yes_applies_and_is_then_idempotent() {
+fn upgrade_yes_applies_and_is_then_idempotent() {
     // spec: CLI-62, LIFE-13
     let sb = melded();
     sb.mind(&["learn", "review"]);
@@ -563,10 +563,10 @@ fn evolve_yes_applies_and_is_then_idempotent() {
     sb.edit_source();
     sb.mind(&["sync"]);
 
-    let applied = sb.mind(&["evolve", "--yes"]);
+    let applied = sb.mind(&["upgrade", "--yes"]);
     assert!(applied.success, "{}", applied.stderr);
     assert!(
-        applied.stdout.contains("evolved skill:review"),
+        applied.stdout.contains("upgraded skill:review"),
         "{}",
         applied.stdout
     );
@@ -575,7 +575,7 @@ fn evolve_yes_applies_and_is_then_idempotent() {
     assert_ne!(before, after, "commit/hash should have advanced");
 
     // Running again finds nothing to do.
-    let idem = sb.mind(&["evolve"]);
+    let idem = sb.mind(&["upgrade"]);
     assert!(idem.stdout.contains("up to date"), "{}", idem.stdout);
 }
 
@@ -1052,7 +1052,7 @@ fn no_warning_when_unprefixed() {
 }
 
 #[test]
-fn evolve_treats_a_prefix_change_as_a_rename() {
+fn upgrade_treats_a_prefix_change_as_a_rename() {
     // spec: LIFE-10, LIFE-11, LIFE-14, CLI-61
     let sb = Sandbox::new();
     let spec = sb.source_spec();
@@ -1063,7 +1063,7 @@ fn evolve_treats_a_prefix_change_as_a_rename() {
     sb.write_and_commit("mind.toml", "[source]\nprefix = \"jk\"\n");
     assert!(sb.mind(&["sync"]).success);
 
-    let r = sb.mind(&["evolve", "--yes"]);
+    let r = sb.mind(&["upgrade", "--yes"]);
     assert!(r.success, "{}", r.stderr);
     assert!(
         r.stdout.contains("rename"),
@@ -1071,7 +1071,8 @@ fn evolve_treats_a_prefix_change_as_a_rename() {
         r.stdout
     );
     assert!(
-        r.stdout.contains("evolved skill:review -> skill:jk-review"),
+        r.stdout
+            .contains("upgraded skill:review -> skill:jk-review"),
         "{}",
         r.stdout
     );
@@ -1237,8 +1238,8 @@ fn failed_upgrade_preserves_the_previous_version() {
     );
     assert!(sb.mind(&["sync"]).success);
 
-    let r = sb.mind(&["evolve", "--yes"]);
-    assert!(!r.success, "evolve should fail on the bad reference");
+    let r = sb.mind(&["upgrade", "--yes"]);
+    assert!(!r.success, "upgrade should fail on the bad reference");
     assert!(r.stderr.contains("does not match any item"), "{}", r.stderr);
 
     // The previously installed good version is untouched.
@@ -1260,8 +1261,8 @@ fn removed_upstream_item_is_left_alone_and_flagged() {
     sb.remove_and_commit("agents/dev.md");
     assert!(sb.mind(&["sync"]).success);
 
-    // evolve does not touch an item with no catalog match.
-    let ev = sb.mind(&["evolve", "--yes"]);
+    // upgrade does not touch an item with no catalog match.
+    let ev = sb.mind(&["upgrade", "--yes"]);
     assert!(ev.success, "{}", ev.stderr);
     assert!(ev.stdout.contains("up to date"), "{}", ev.stdout);
     assert!(sb.mind(&["recall"]).stdout.contains("agent:dev"));
@@ -1272,7 +1273,7 @@ fn removed_upstream_item_is_left_alone_and_flagged() {
 }
 
 #[test]
-fn evolve_item_filter_limits_to_one() {
+fn upgrade_item_filter_limits_to_one() {
     // spec: CLI-63
     let sb = melded();
     assert!(sb.mind(&["learn", "review"]).success);
@@ -1286,14 +1287,14 @@ fn evolve_item_filter_limits_to_one() {
     );
     assert!(sb.mind(&["sync"]).success);
 
-    // Filtered evolve upgrades only the named item.
-    let ev = sb.mind(&["evolve", "--yes", "review"]);
+    // Filtered upgrade applies only the named item.
+    let ev = sb.mind(&["upgrade", "--yes", "review"]);
     assert!(ev.success, "{}", ev.stderr);
-    assert!(ev.stdout.contains("evolved skill:review"), "{}", ev.stdout);
+    assert!(ev.stdout.contains("upgraded skill:review"), "{}", ev.stdout);
     assert!(!ev.stdout.contains("agent:dev"), "{}", ev.stdout);
 
-    // dev is still pending (reported by an unfiltered, declined evolve).
-    let rest = sb.mind(&["evolve"]);
+    // dev is still pending (reported by an unfiltered, declined upgrade).
+    let rest = sb.mind(&["upgrade"]);
     assert!(rest.stdout.contains("agent:dev"), "{}", rest.stdout);
     assert!(!rest.stdout.contains("skill:review"), "{}", rest.stdout);
 }
@@ -2014,7 +2015,7 @@ fn introspect_fix_relinks_missing_symlink() {
 }
 
 #[test]
-fn sync_evolve_refreshes_then_applies_upgrades() {
+fn sync_upgrade_refreshes_then_applies_upgrades() {
     // spec: CLI-53
     let sb = melded();
     assert!(sb.mind(&["learn", "review"]).success);
@@ -2023,12 +2024,12 @@ fn sync_evolve_refreshes_then_applies_upgrades() {
     sb.edit_source(); // upstream change, not yet synced
 
     // One command fetches the change and (on `y`) applies the upgrade.
-    let r = sb.mind_with_input(&["sync", "--evolve"], Some("y\n"));
+    let r = sb.mind_with_input(&["sync", "--upgrade"], Some("y\n"));
     assert!(r.success, "{}", r.stderr);
     assert!(r.stdout.contains("updated"), "sync ran: {}", r.stdout);
     assert!(
-        r.stdout.contains("evolved skill:review"),
-        "evolve applied: {}",
+        r.stdout.contains("upgraded skill:review"),
+        "upgrade applied: {}",
         r.stdout
     );
 
@@ -4651,12 +4652,12 @@ fn config_lobes_add_refused_when_lobes_locked() {
 }
 
 #[test]
-fn evolve_skips_disallowed_source_when_locked() {
+fn upgrade_skips_disallowed_source_when_locked() {
     // spec: POL-12
-    // evolve operates only on sources whose identity matches allow. Meld + learn
+    // upgrade operates only on sources whose identity matches allow. Meld + learn
     // under no policy, drift the source upstream so an upgrade is pending, then
-    // run evolve under a locked policy that no longer allows the source: the
-    // pending upgrade is reported as skipped (not applied) and evolve exits zero.
+    // run upgrade under a locked policy that no longer allows the source: the
+    // pending upgrade is reported as skipped (not applied) and upgrade exits zero.
     let sb = melded();
     let learn = sb.mind(&["learn", "skill:review"]);
     assert!(
@@ -4667,7 +4668,7 @@ fn evolve_skips_disallowed_source_when_locked() {
     let before = sb.mind(&["recall", "skill:review"]).stdout;
 
     // Drift the source and refresh the clone (unmanaged sync), so the catalog now
-    // differs from the installed hash and evolve would otherwise upgrade it.
+    // differs from the installed hash and upgrade would otherwise apply it.
     sb.edit_source();
     let synced = sb.mind(&["sync"]);
     assert!(
@@ -4676,28 +4677,28 @@ fn evolve_skips_disallowed_source_when_locked() {
         synced.stdout, synced.stderr
     );
 
-    // Now a locked policy that does not allow the source. evolve must skip it.
+    // Now a locked policy that does not allow the source. upgrade must skip it.
     let policy = write_policy(
         &sb,
         "[sources]\nlock = true\nallow = [\"local/*/never-match\"]\n",
     );
     let r = sb.mind_env(
-        &["evolve", "--yes"],
+        &["upgrade", "--yes"],
         &[("MIND_POLICY_FILE", policy.as_str())],
     );
     assert!(
         r.success,
-        "evolve must not error when skipping disallowed sources: {} {}",
+        "upgrade must not error when skipping disallowed sources: {} {}",
         r.stdout, r.stderr
     );
     assert!(
         r.stdout.contains("skipping") && r.stdout.contains("not permitted"),
-        "evolve should report the skipped source: {}",
+        "upgrade should report the skipped source: {}",
         r.stdout
     );
     assert!(
-        !r.stdout.contains("evolved"),
-        "the disallowed item must not be evolved: {}",
+        !r.stdout.contains("upgraded"),
+        "the disallowed item must not be upgraded: {}",
         r.stdout
     );
 
@@ -4715,10 +4716,10 @@ fn evolve_skips_disallowed_source_when_locked() {
 }
 
 #[test]
-fn evolve_applies_allowed_source_while_skipping_disallowed() {
+fn upgrade_applies_allowed_source_while_skipping_disallowed() {
     // spec: POL-12
     // The "rest proceed" half of POL-12: a locked allowlist that matches the
-    // source lets evolve apply the pending upgrade (the same drift that is skipped
+    // source lets upgrade apply the pending upgrade (the same drift that is skipped
     // in the test above is applied here because the source matches allow).
     let sb = melded();
     let learn = sb.mind(&["learn", "skill:review"]);
@@ -4743,13 +4744,13 @@ fn evolve_applies_allowed_source_while_skipping_disallowed() {
         "[sources]\nlock = true\nallow = [\"local/*/agents\"]\n",
     );
     let r = sb.mind_env(
-        &["evolve", "--yes"],
+        &["upgrade", "--yes"],
         &[("MIND_POLICY_FILE", policy.as_str())],
     );
-    assert!(r.success, "evolve failed: {} {}", r.stdout, r.stderr);
+    assert!(r.success, "upgrade failed: {} {}", r.stdout, r.stderr);
     assert!(
-        r.stdout.contains("evolved skill:review"),
-        "an allowed source must evolve: {}",
+        r.stdout.contains("upgraded skill:review"),
+        "an allowed source must be upgraded: {}",
         r.stdout
     );
     assert!(
@@ -5264,10 +5265,10 @@ fn recall_sources_shows_install_hook_marker() {
 }
 
 #[test]
-fn evolve_reruns_hook_after_source_advances() {
+fn upgrade_reruns_hook_after_source_advances() {
     // spec: HOOK-11
-    // After a source advances to a new commit, evolve re-runs the hook (the
-    // tooling tracks the source). When the source has not advanced, evolve does
+    // After a source advances to a new commit, upgrade re-runs the hook (the
+    // tooling tracks the source). When the source has not advanced, upgrade does
     // not re-run the hook (the recorded run-commit already equals the commit).
     let sb = sandbox_with_declared_hook("agents", "touch hookran");
     let spec = sb.source_spec();
@@ -5291,30 +5292,30 @@ fn evolve_reruns_hook_after_source_advances() {
         "sync alone must not re-run the hook (HOOK-11)"
     );
 
-    // evolve sees the new commit and re-runs the hook.
-    let ev = sb.mind(&["evolve", "-y", "--dangerously-skip-install-hook-check"]);
-    assert!(ev.success, "evolve failed: {} {}", ev.stdout, ev.stderr);
+    // upgrade sees the new commit and re-runs the hook.
+    let ev = sb.mind(&["upgrade", "-y", "--dangerously-skip-install-hook-check"]);
+    assert!(ev.success, "upgrade failed: {} {}", ev.stdout, ev.stderr);
     assert!(
         marker.exists(),
-        "evolve must re-run the hook after the source advanced: {} missing",
+        "upgrade must re-run the hook after the source advanced: {} missing",
         marker.display()
     );
 
-    // The recorded run-commit advanced to the new commit; a second evolve with
+    // The recorded run-commit advanced to the new commit; a second upgrade with
     // no source change must NOT re-run the hook.
     std::fs::remove_file(&marker).unwrap();
-    let again = sb.mind(&["evolve", "-y", "--dangerously-skip-install-hook-check"]);
-    assert!(again.success, "second evolve failed: {}", again.stderr);
+    let again = sb.mind(&["upgrade", "-y", "--dangerously-skip-install-hook-check"]);
+    assert!(again.success, "second upgrade failed: {}", again.stderr);
     assert!(
         !marker.exists(),
-        "evolve must not re-run the hook when the source has not advanced"
+        "upgrade must not re-run the hook when the source has not advanced"
     );
 }
 
 #[test]
-fn sync_evolve_runs_hook_rerun_only_with_the_skip_check_flag() {
+fn sync_upgrade_runs_hook_rerun_only_with_the_skip_check_flag() {
     // spec: HOOK-11, HOOK-23
-    // `sync --evolve` drives an evolve pass, so it must honor the same hook
+    // `sync --upgrade` drives an upgrade pass, so it must honor the same hook
     // re-run rules. In a non-TTY context the re-run is skipped (HOOK-22), and
     // `--dangerously-skip-install-hook-check` threaded through `sync` is what
     // runs it unattended (HOOK-23) -- the CI workflow the flag exists for.
@@ -5334,44 +5335,44 @@ fn sync_evolve_runs_hook_rerun_only_with_the_skip_check_flag() {
     // lags the source's commit).
     sb.edit_source();
 
-    // `sync --evolve` with no flag: sync advances the commit, the evolve pass
+    // `sync --upgrade` with no flag: sync advances the commit, the upgrade pass
     // sees the new commit but takes the non-TTY skip path, so the hook does not
     // re-run.
-    let no_flag = sb.mind(&["sync", "--evolve"]);
+    let no_flag = sb.mind(&["sync", "--upgrade"]);
     assert!(
         no_flag.success,
-        "sync --evolve failed: {} {}",
+        "sync --upgrade failed: {} {}",
         no_flag.stdout, no_flag.stderr
     );
     assert!(
         !marker.exists(),
-        "sync --evolve without the flag must not re-run the hook (HOOK-22)"
+        "sync --upgrade without the flag must not re-run the hook (HOOK-22)"
     );
 
-    // `sync --evolve --dangerously-skip-install-hook-check`: the flag now
-    // reaches the evolve pass, which re-runs the still-warranted hook unattended.
-    let with_flag = sb.mind(&["sync", "--evolve", "--dangerously-skip-install-hook-check"]);
+    // `sync --upgrade --dangerously-skip-install-hook-check`: the flag now
+    // reaches the upgrade pass, which re-runs the still-warranted hook unattended.
+    let with_flag = sb.mind(&["sync", "--upgrade", "--dangerously-skip-install-hook-check"]);
     assert!(
         with_flag.success,
-        "sync --evolve --dangerously-skip-install-hook-check failed: {} {}",
+        "sync --upgrade --dangerously-skip-install-hook-check failed: {} {}",
         with_flag.stdout, with_flag.stderr
     );
     assert!(
         marker.exists(),
-        "sync --evolve with the flag must re-run the hook unattended: {} missing",
+        "sync --upgrade with the flag must re-run the hook unattended: {} missing",
         marker.display()
     );
 }
 
 #[test]
-fn scoped_evolve_does_not_rerun_unrelated_source_hook() {
+fn scoped_upgrade_does_not_rerun_unrelated_source_hook() {
     // spec: HOOK-11
-    // A scoped `evolve <item>` must NOT re-run install hooks (arbitrary code) for
+    // A scoped `upgrade <item>` must NOT re-run install hooks (arbitrary code) for
     // sources unrelated to the targeted item. Meld a hooked source (`agents`,
     // recorded via --dangerously-skip-install-hook-check) plus a second,
     // hook-free source (`tools`); learn an item only from `tools`; advance the
-    // hooked source and sync. A scoped evolve targeting the `tools` item must
-    // leave the hooked source's marker untouched, while an UNSCOPED evolve (the
+    // hooked source and sync. A scoped upgrade targeting the `tools` item must
+    // leave the hooked source's marker untouched, while an UNSCOPED upgrade (the
     // positive control) does re-run it.
     let agents = sandbox_with_declared_hook("agents", "touch hookran");
     let agents_spec = agents.source_spec();
@@ -5410,50 +5411,50 @@ fn scoped_evolve_does_not_rerun_unrelated_source_hook() {
     std::fs::remove_file(&marker).unwrap();
 
     // Advance the hooked source so its commit moves past the recorded run-commit,
-    // i.e. an UNSCOPED evolve would re-run its hook. sync alone must not.
+    // i.e. an UNSCOPED upgrade would re-run its hook. sync alone must not.
     agents.edit_source();
     assert!(agents.mind(&["sync"]).success, "sync failed");
     assert!(!marker.exists(), "sync alone must not re-run the hook");
 
-    // Scoped evolve targeting the OTHER source's item: the hooked source is out
+    // Scoped upgrade targeting the OTHER source's item: the hooked source is out
     // of scope, so its hook must NOT re-run even though its commit advanced.
     let scoped = agents.mind(&[
-        "evolve",
+        "upgrade",
         "tools#skill:review",
         "-y",
         "--dangerously-skip-install-hook-check",
     ]);
     assert!(
         scoped.success,
-        "scoped evolve failed: {} {}",
+        "scoped upgrade failed: {} {}",
         scoped.stdout, scoped.stderr
     );
     assert!(
         !marker.exists(),
-        "a scoped evolve of an unrelated item must not re-run the hooked source's hook: {} exists",
+        "a scoped upgrade of an unrelated item must not re-run the hooked source's hook: {} exists",
         marker.display()
     );
 
-    // Positive control: an UNSCOPED evolve DOES re-run the hooked source's hook.
-    let unscoped = agents.mind(&["evolve", "-y", "--dangerously-skip-install-hook-check"]);
+    // Positive control: an UNSCOPED upgrade DOES re-run the hooked source's hook.
+    let unscoped = agents.mind(&["upgrade", "-y", "--dangerously-skip-install-hook-check"]);
     assert!(
         unscoped.success,
-        "unscoped evolve failed: {} {}",
+        "unscoped upgrade failed: {} {}",
         unscoped.stdout, unscoped.stderr
     );
     assert!(
         marker.exists(),
-        "an unscoped evolve must re-run the hooked source's hook: {} missing",
+        "an unscoped upgrade must re-run the hooked source's hook: {} missing",
         marker.display()
     );
 }
 
 #[test]
-fn evolve_skips_disallowed_source_hook_when_locked() {
+fn upgrade_skips_disallowed_source_hook_when_locked() {
     // spec: POL-12
     // Install hooks are arbitrary code; running a disallowed source's hook would
     // violate POL-12. Meld + record a hooked source while it is allowed, then
-    // advance it and run evolve under a locked policy whose `allow` excludes the
+    // advance it and run upgrade under a locked policy whose `allow` excludes the
     // source: the hook must NOT re-run (marker not re-created) and the skip is
     // reported.
     let sb = sandbox_with_declared_hook("agents", "touch hookran");
@@ -5468,7 +5469,7 @@ fn evolve_skips_disallowed_source_hook_when_locked() {
     assert!(marker.exists(), "the hook should have run on meld");
     std::fs::remove_file(&marker).unwrap();
 
-    // Advance the source so an UNSCOPED evolve would otherwise re-run the hook.
+    // Advance the source so an UNSCOPED upgrade would otherwise re-run the hook.
     sb.edit_source();
     assert!(sb.mind(&["sync"]).success, "sync failed");
     assert!(!marker.exists(), "sync alone must not re-run the hook");
@@ -5479,12 +5480,12 @@ fn evolve_skips_disallowed_source_hook_when_locked() {
         "[sources]\nlock = true\nallow = [\"local/*/never-match\"]\n",
     );
     let r = sb.mind_env(
-        &["evolve", "-y", "--dangerously-skip-install-hook-check"],
+        &["upgrade", "-y", "--dangerously-skip-install-hook-check"],
         &[("MIND_POLICY_FILE", policy.as_str())],
     );
     assert!(
         r.success,
-        "evolve must not error when skipping a disallowed source's hook: {} {}",
+        "upgrade must not error when skipping a disallowed source's hook: {} {}",
         r.stdout, r.stderr
     );
     assert!(
@@ -5497,6 +5498,89 @@ fn evolve_skips_disallowed_source_hook_when_locked() {
             && r.stdout
                 .contains("not permitted by the managed policy's allowlist"),
         "the skipped hook must be reported: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn evolve_check_with_explicit_version_reports_update_and_changes_nothing() {
+    // spec: CLI-141
+    // `evolve --check --version <X>` makes zero network calls (an explicit
+    // --version bypasses the GitHub API). When X > the running version, the
+    // command must succeed and report the update as available.
+    let sb = Sandbox::new(); // empty sandbox; no sources or manifest needed
+    let r = sb.mind(&["evolve", "--check", "--version", "9.9.9"]);
+    assert!(
+        r.success,
+        "evolve --check --version 9.9.9 should succeed: {} {}",
+        r.stdout, r.stderr
+    );
+    // The output must contain the target version and signal it is available.
+    assert!(
+        r.stdout.contains("9.9.9"),
+        "expected target version 9.9.9 in output: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("available"),
+        "expected 'available' in output: {}",
+        r.stdout
+    );
+    // Nothing on disk changed: no source or manifest files exist in the sandbox.
+    assert!(
+        !sb.mind_home.join("sources.json").exists(),
+        "no sources.json should be written by evolve --check"
+    );
+    assert!(
+        !sb.mind_home.join("manifest.json").exists(),
+        "no manifest.json should be written by evolve --check"
+    );
+}
+
+#[test]
+fn evolve_check_at_current_version_reports_up_to_date() {
+    // spec: CLI-141
+    // When the explicit --version equals the running binary version, evolve
+    // --check reports up to date and exits zero, with zero network calls.
+    let sb = Sandbox::new();
+    let current = env!("CARGO_PKG_VERSION");
+    let r = sb.mind(&["evolve", "--check", "--version", current]);
+    assert!(
+        r.success,
+        "evolve --check --version {current} should succeed: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stdout.contains("up to date"),
+        "expected 'up to date' in output for version {current}: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn help_lists_upgrade_and_evolve_not_self_update() {
+    // Confirm clap renders both subcommands with the right names.
+    // No spec cite needed; this is a structural smoke test.
+    let sb = Sandbox::new();
+    let r = sb.mind(&["--help"]);
+    assert!(
+        r.success,
+        "mind --help should succeed: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stdout.contains("upgrade"),
+        "help must list the 'upgrade' subcommand: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("evolve"),
+        "help must list the 'evolve' subcommand: {}",
+        r.stdout
+    );
+    assert!(
+        !r.stdout.contains("self-update"),
+        "help must NOT contain 'self-update': {}",
         r.stdout
     );
 }

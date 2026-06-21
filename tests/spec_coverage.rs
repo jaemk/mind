@@ -30,13 +30,19 @@ const ALLOWLIST: &[&str] = &[
     // when built, at which point it is removed from this allowlist.
     //   version pinning: now implemented; IDs removed from allowlist and cited in tests.
     //   review verb: now implemented; IDs removed from allowlist and cited in tests.
-    //   self-update verb (in-place binary upgrade via the self_update crate)
-    "CLI-140", "CLI-141", "CLI-142", "CLI-143",
+    //   self-update `evolve` verb: in-place upgrade of the mind binary using the
+    //   same native curl/wget downloader as resources/install.sh (no external
+    //   crate). The pure logic (platform triple, version compare/decision, the
+    //   --check report) is cited from src/selfupdate.rs and tests/cli.rs
+    //   (CLI-140, CLI-141). The network download (CLI-142) and the binary swap
+    //   (CLI-143) need a real release and a writable install path, so they cannot
+    //   run headlessly and stay allowlisted.
+    "CLI-142", "CLI-143",
     //   install hooks (source-declared or user-supplied build command gated by a
     //   safety prompt; see spec/install-hooks.md) is fully cited: the core
     //   (parse/resolve/disclosure/run) from src/hook.rs, the data/error/parse
     //   pieces from src/source.rs, src/error.rs, src/mindfile.rs, the `review`
-    //   advisory from src/review.rs, the meld/evolve wiring (run/skip/abort,
+    //   advisory from src/review.rs, the meld/upgrade wiring (run/skip/abort,
     //   re-run gating, recording) from tests/cli.rs and src/commands.rs. No HOOK
     //   IDs remain allowlisted.
     //   enterprise managed policy (see spec/policy.md) is fully cited: the core

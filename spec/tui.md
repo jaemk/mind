@@ -2,7 +2,7 @@
 
 `mind probe` launches an interactive terminal UI: a browsable, searchable view of
 every source and item, and the interactive front end for the rest of the CLI
-(meld, learn, sync, evolve, config). The non-interactive catalog listing
+(meld, learn, sync, upgrade, config). The non-interactive catalog listing
 (cli.md, CLI-80..85) remains available behind an opt-out. Built on `ratatui` +
 `crossterm`.
 
@@ -59,8 +59,8 @@ manifest, and store.
   selected Installed item (`forget`, CLI-40).
 - `TUI-21` Meld the selected/entered source (`meld`, CLI-10); unmeld a melded
   source (`unmeld`, CLI-20), offering the `--forget` purge (CLI-22).
-- `TUI-22` Sync all or the selected source (`sync`, CLI-50); evolve pending or the
-  selected item(s) (`evolve`, CLI-60), showing the same deltas and confirming
+- `TUI-22` Sync all or the selected source (`sync`, CLI-50); upgrade pending or the
+  selected item(s) (`upgrade`, CLI-60), showing the same deltas and confirming
   before applying (CLI-61).
 - `TUI-23` View and manage agent homes (`config lobes` list / add / remove,
   CLI-111..113).

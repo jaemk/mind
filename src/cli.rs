@@ -5,7 +5,8 @@
 //!   learn  -> install an item
 //!   forget -> remove an item
 //!   sync   -> refresh source catalogs
-//!   evolve -> upgrade installed items
+//!   upgrade -> upgrade installed items
+//!   evolve -> upgrade the mind binary itself
 //!   recall -> show what's installed
 //!   probe  -> find available items
 //!   introspect -> diagnose drift
@@ -137,13 +138,13 @@ pub enum Command {
 
     /// Refresh every melded source's clone and catalog.
     Sync {
-        /// After refreshing, run an `evolve` pass (report + prompt) to apply upgrades.
+        /// After refreshing, run an `upgrade` pass (report + prompt) to apply upgrades.
         #[arg(long)]
-        evolve: bool,
+        upgrade: bool,
 
         /// Run install-hook re-runs without the safety prompt during the
-        /// `--evolve` pass (executes arbitrary code; only with `--evolve`).
-        #[arg(long, requires = "evolve")]
+        /// `--upgrade` pass (executes arbitrary code; only with `--upgrade`).
+        #[arg(long, requires = "upgrade")]
         dangerously_skip_install_hook_check: bool,
     },
 
@@ -151,7 +152,7 @@ pub enum Command {
     ///
     /// By default this only *reports* pending upgrades (hash and commit deltas
     /// plus a compare link per source) and prompts before changing anything.
-    Evolve {
+    Upgrade {
         /// Apply upgrades without the interactive [y/N] prompt.
         #[arg(short = 'y', long = "yes")]
         yes: bool,
@@ -161,11 +162,31 @@ pub enum Command {
 
         /// Re-run a source's install hook without the safety prompt when its
         /// commit advanced. This executes arbitrary code from the source; only
-        /// use it for a source you trust. Without this flag, a non-TTY evolve
+        /// use it for a source you trust. Without this flag, a non-TTY upgrade
         /// (CI, scripts) skips the hook re-run and just prints a note; pass this
         /// to run it unattended.
         #[arg(long)]
         dangerously_skip_install_hook_check: bool,
+    },
+
+    /// Update the `mind` binary itself to the latest release (or `--version`).
+    ///
+    /// Downloads the release binary for this platform and replaces the running
+    /// executable in place. `--check` reports whether an update is available and
+    /// changes nothing. Without `--yes` it prompts before replacing.
+    // Disable clap's auto `--version` flag on this subcommand so the explicit
+    // `--version <VERSION>` argument below (pin a target release) owns the name.
+    #[command(disable_version_flag = true)]
+    Evolve {
+        /// Report whether an update is available, then exit without changing anything.
+        #[arg(long)]
+        check: bool,
+        /// Replace the binary without the confirmation prompt.
+        #[arg(short = 'y', long)]
+        yes: bool,
+        /// Update to this exact version instead of the latest release.
+        #[arg(long, value_name = "VERSION")]
+        version: Option<String>,
     },
 
     /// List installed items, or show one item's details.

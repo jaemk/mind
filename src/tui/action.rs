@@ -1,7 +1,7 @@
 //! Execute a confirmed TUI action by calling the appropriate `commands::*` fn.
 //!
 //! Each action acquires the EXCLUSIVE lock for its duration, then releases it.
-//! The verb functions (commands::learn/forget/sync/evolve/unmeld) print to stdout
+//! The verb functions (commands::learn/forget/sync/upgrade/unmeld) print to stdout
 //! normally. Their output is NOT suppressed or captured; ratatui repaints the
 //! alt-screen on the next draw cycle, which overwrites any stray output. This is
 //! a known limitation: command output is visible briefly before the next redraw.
@@ -66,9 +66,9 @@ pub fn execute(paths: &Paths, action: PendingAction) -> Result<Snapshot> {
             // spec: TUI-22
             commands::sync(paths, false, false)?;
         }
-        ActionKind::Evolve => {
+        ActionKind::Upgrade => {
             // spec: TUI-22 - `yes: true` so it applies without prompting on stdin.
-            commands::evolve(paths, true, None, false)?;
+            commands::upgrade(paths, true, None, false)?;
         }
         ActionKind::LobeAdd { path } => {
             // spec: TUI-23 CLI-112
@@ -264,19 +264,19 @@ mod tests {
     }
 
     #[test]
-    fn execute_evolve_with_no_pending_succeeds() {
+    fn execute_upgrade_with_no_pending_succeeds() {
         // spec: TUI-22 TUI-24
         let (paths, _base) = temp_paths();
         crate::paths::mkdir_p(&paths.mind_home).unwrap();
         let action = PendingAction {
-            kind: ActionKind::Evolve,
-            description: "evolve?".to_string(),
+            kind: ActionKind::Upgrade,
+            description: "upgrade?".to_string(),
             dep_tree: None,
         };
         let result = execute(&paths, action);
         assert!(
             result.is_ok(),
-            "evolve with nothing to do should succeed: {:?}",
+            "upgrade with nothing to do should succeed: {:?}",
             result.err()
         );
     }

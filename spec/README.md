@@ -13,7 +13,7 @@ and verified.
 
 | Feature | Status | Spec |
 |---------|--------|------|
-| Core verbs (meld, unmeld, learn, forget, sync, evolve, recall, probe, introspect) | done | [cli.md](cli.md) |
+| Core verbs (meld, unmeld, learn, forget, sync, upgrade, recall, probe, introspect) | done | [cli.md](cli.md) |
 | `learn` glob selection + `--dry-run`; `probe` install/hash; aligned columns | done | CLI-31, CLI-32, CLI-33, CLI-81, CLI-82 |
 | On-disk layout, source registry, manifest + file registry | done | [storage.md](storage.md) |
 | Multiple agent homes (link into all configured dirs) | done | STO-14, LIFE-40 |
@@ -25,14 +25,14 @@ and verified.
 | Curated super-source (`[discover].sources`, nested `as`) | done | DSC-38, DSC-39 |
 | Namespacing: prefix, `{{ns:}}` tokens, unguarded-ref warning | done | [namespacing.md](namespacing.md) |
 | Transactional install, upgrade, rename, uninstall, drift | done | [lifecycle.md](lifecycle.md) |
-| `forget`/`recall`/`evolve` honor kind + source qualifier, error on ambiguity | done | CLI-40, CLI-63, CLI-71 |
+| `forget`/`recall`/`upgrade` honor kind + source qualifier, error on ambiguity | done | CLI-40, CLI-63, CLI-71 |
 | Clobber guard: refuse to overwrite a non-mind link target | done | LIFE-41 |
 | Release pipeline + Homebrew tap (tag-driven) | done | `.github/workflows/release.yml`, `Formula/mind.rb` |
 | `curl \| sh` install script (Linux/macOS-arm) | done | `resources/install.sh` |
 | `forget` glob selection | done | CLI-41 |
 | `unmeld --forget` (purge installed items) | done | CLI-22 |
 | `introspect --fix` (re-link missing symlinks) | done | CLI-91 |
-| `sync --evolve` (refresh then upgrade) | done | CLI-53 |
+| `sync --upgrade` (refresh then upgrade) | done | CLI-53 |
 | `probe`/`recall` `--kind` / `--source` filters | done | CLI-83 |
 | Enforce `min-mind-version` | done | DSC-40 |
 | `sync` per-source resilience (continue + report, exit non-zero) | done | CLI-54 |
@@ -41,7 +41,7 @@ and verified.
 | Scan roots: `[source].roots` + `meld --root` (monorepo/subtree sources) | done | DSC-50, DSC-51, DSC-52, DSC-53, STO-17, CLI-16 |
 | Version pinning: `--follow-branch`/`--pin-tag`/`--pin-ref` + `[source]` directive | done | DSC-41, STO-18, CLI-17, CLI-18, CLI-55 |
 | `review` verb: author-side source validation | done | CLI-130, CLI-131, CLI-132, CLI-133 |
-| `self-update` verb: in-place upgrade of the `mind` binary (via the `self_update` crate) | planned | CLI-140, CLI-141, CLI-142, CLI-143 |
+| `evolve` verb: in-place upgrade of the `mind` binary | done | CLI-140, CLI-141, CLI-142, CLI-143 |
 | Managed policy (enterprise): trusted-source allowlist, require-pinned, auto-meld, lobe lock; `mind review --policy` | done | [policy.md](policy.md) |
 | Install hooks: `[source].install` / `meld --install-hook`, safety prompt, `--dangerously-skip-install-hook-check` | done | [install-hooks.md](install-hooks.md) |
 | Within-source dependency resolution: a partial `learn` pulls in referenced siblings; dependency-tree display + install order | done | [dependencies.md](dependencies.md) |

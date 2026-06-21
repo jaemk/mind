@@ -86,7 +86,7 @@ prevent the lost-update and torn-read races a plain read-modify-write would allo
   root, so a `MIND_HOME` override (e.g. a test's temp home) gets its own isolated
   lock.
 - `STO-41` The lock is acquired exclusively by mutating commands (`meld`, `unmeld`,
-  `learn`, `forget`, `sync`, `evolve`, `introspect --fix`, `config lobes add` /
+  `learn`, `forget`, `sync`, `upgrade`, `introspect --fix`, `config lobes add` /
   `remove`) and shared by read-only commands (`recall`, `probe`, `introspect`,
   `config show`). An exclusive holder excludes all others; multiple shared readers
   proceed concurrently but never observe a writer mid-update, so each reader gets a

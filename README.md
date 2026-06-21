@@ -63,8 +63,9 @@ mind learn greet
 - `mind learn <item>` copies the item into the *store* (`~/.mind/store`) and
   symlinks it into each *lobe* (agent home, default `~/.claude`). `forget`
   reverses it.
-- `sync` refreshes every source's clone; `evolve` upgrades installed items to the
+- `sync` refreshes every source's clone; `upgrade` upgrades installed items to the
   refreshed version, reporting hash and commit deltas before changing anything.
+  `evolve` updates the mind binary itself.
 - `recall` and `probe` inspect what is installed and what is available;
   `introspect` reports drift and broken links.
 
@@ -76,8 +77,9 @@ mind learn greet
 | `mind unmeld <name> [--forget]` (alias `detach`) | drop a source (optionally its items) |
 | `mind learn [--yes] <item>` | install a skill/agent/rule (glob installs many); a partial selection also pulls in the source siblings it references |
 | `mind forget <item>` (alias `unlearn`) | remove an installed item (glob removes many) |
-| `mind sync [--evolve] [--dangerously-skip-install-hook-check]` | refresh every source (optionally upgrade after; flag allows unattended hook re-runs) |
-| `mind evolve [--yes] [--dangerously-skip-install-hook-check] [item]` | upgrade installed items (re-runs install hooks on sources that advance) |
+| `mind sync [--upgrade] [--dangerously-skip-install-hook-check]` | refresh every source (optionally upgrade after; flag allows unattended hook re-runs) |
+| `mind upgrade [--yes] [--dangerously-skip-install-hook-check] [item]` | upgrade installed items to their latest source version (re-runs install hooks on sources that advance) |
+| `mind evolve [--check] [--yes] [--version <v>]` | update the mind binary itself to the latest release (or --version) |
 | `mind recall [--sources] [item] [--kind K] [--source S] [--json]` | list installed items / sources / details |
 | `mind probe [query] [--kind K] [--source S] [--json] [--no-tui]` | browse and search items (interactive TUI on a terminal) |
 | `mind review <target> [--as <prefix>]` / `mind review --policy <path>` | validate a source for publishing, or validate a managed policy file (read-only) |
@@ -92,7 +94,7 @@ under a prefix, [examples/policy/](examples/policy/) for an enterprise managed
 policy, and [spec/](spec/) for the full behavioral spec.
 
 `mind probe` with no flags opens an interactive browser of melded sources and
-items (search, install, remove, meld, unmeld, sync, evolve) when stdout is a terminal. `--no-tui`
+items (search, install, remove, meld, unmeld, sync, upgrade) when stdout is a terminal. `--no-tui`
 or `--json`, or a piped/redirected stdout, prints the listing instead.
 
 ## Agent directories
@@ -127,12 +129,12 @@ scripts) the hook is skipped and a note is printed; `--dangerously-skip-install-
 it unattended. Overriding a source's declared `[source].install` with `--install-hook` is
 announced in the prompt, which shows both the declared and the overriding command.
 
-A skipped hook is recorded and re-offered by `mind evolve`, so you can run it later without the
-source needing to advance first. On an `evolve` re-run the source is already installed, so abort
-is treated as skip. `evolve` also re-runs the hook when a source advances to a new commit.
-`sync --evolve` accepts `--dangerously-skip-install-hook-check` so a CI pipeline can run hook
-re-runs unattended. Without the flag, a non-TTY `sync --evolve` skips hook re-runs (the same as
-`evolve`). `recall --sources` marks a source that carries a hook with a ` hook` token in its
+A skipped hook is recorded and re-offered by `mind upgrade`, so you can run it later without the
+source needing to advance first. On an `upgrade` re-run the source is already installed, so abort
+is treated as skip. `upgrade` also re-runs the hook when a source advances to a new commit.
+`sync --upgrade` accepts `--dangerously-skip-install-hook-check` so a CI pipeline can run hook
+re-runs unattended. Without the flag, a non-TTY `sync --upgrade` skips hook re-runs (the same as
+`upgrade`). `recall --sources` marks a source that carries a hook with a ` hook` token in its
 status bracket. `mind review <repo>` shows a source's declared hook before you meld it. See
 [spec/install-hooks.md](spec/install-hooks.md) for the full behavior.
 

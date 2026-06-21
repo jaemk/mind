@@ -12,9 +12,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   supplies `meld --install-hook <cmd>`, to build the tooling its items rely on.
   Because the hook is arbitrary code, `mind` discloses it and prompts with three
   choices (run / skip but still install / abort). A non-TTY run skips it;
-  `--dangerously-skip-install-hook-check` runs it unattended. `evolve` (and
-  `sync --evolve`) re-run a hook when the source advances, and `mind review`
+  `--dangerously-skip-install-hook-check` runs it unattended. `upgrade` (and
+  `sync --upgrade`) re-run a hook when the source advances, and `mind review`
   surfaces a declared hook before melding.
+- `evolve` updates the `mind` binary itself in place, resolving the same release
+  artifact as the install script (no external crate). `--check` reports whether
+  an update is available without changing anything; `--version <v>` targets an
+  exact release.
 - Enterprise managed policy: an admin-controlled file at a fixed system path
   restricts a client to a trusted-source allowlist, can require pinned sources,
   provisions an auto-meld base set, and locks the agent homes. Validate one with
@@ -45,10 +49,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Concurrency safety: a global advisory lock (`fd-lock`) and atomic registry and
   config writes via `Paths::atomic_write`.
 - Smaller additions: `learn` glob selection and `--dry-run`, `forget` glob,
-  `unmeld --forget`, `introspect --fix`, `sync --evolve`, `probe`/`recall`
+  `unmeld --forget`, `introspect --fix`, `sync --upgrade`, `probe`/`recall`
   `--kind`/`--source` filters, `probe` matching description text,
   `min-mind-version` enforcement, partial-`learn` persistence, and the
   `unlearn`/`detach` aliases.
+
+### Changed
+
+- Renamed the item-upgrade verb `evolve` to `upgrade` (and the `sync --evolve`
+  flag to `sync --upgrade`), freeing `evolve` for binary self-update.
 
 ## [0.1.0] - 2026-06-17
 

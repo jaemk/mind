@@ -44,8 +44,8 @@ pub enum Intent {
     ActionForget,
     /// Sync all sources (TUI-22).
     ActionSync,
-    /// Evolve pending items (TUI-22).
-    ActionEvolve,
+    /// Upgrade pending items (TUI-22).
+    ActionUpgrade,
     /// Meld a source (TUI-21).
     ActionMeld,
     /// Unmeld a source (TUI-21).
@@ -111,7 +111,7 @@ pub fn key_to_intent(key: KeyEvent) -> Intent {
         (KeyCode::Char('i'), KeyModifiers::NONE) => Intent::ActionLearn,
         (KeyCode::Char('d'), KeyModifiers::NONE) => Intent::ActionForget,
         (KeyCode::Char('s'), KeyModifiers::NONE) => Intent::ActionSync,
-        (KeyCode::Char('e'), KeyModifiers::NONE) => Intent::ActionEvolve,
+        (KeyCode::Char('e'), KeyModifiers::NONE) => Intent::ActionUpgrade,
         (KeyCode::Char('m'), KeyModifiers::NONE) => Intent::ActionMeld,
         (KeyCode::Char('U'), KeyModifiers::SHIFT) => Intent::ActionUnmeld,
         // Lobe management: `C` opens the lobes modal (TUI-23).
@@ -258,9 +258,12 @@ mod tests {
     }
 
     #[test]
-    fn e_maps_to_evolve() {
+    fn e_maps_to_upgrade() {
         // spec: TUI-22
-        assert_eq!(key_to_intent(key(KeyCode::Char('e'))), Intent::ActionEvolve);
+        assert_eq!(
+            key_to_intent(key(KeyCode::Char('e'))),
+            Intent::ActionUpgrade
+        );
     }
 
     #[test]

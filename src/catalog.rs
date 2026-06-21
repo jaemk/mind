@@ -26,7 +26,7 @@ use crate::source::{Registry, Source};
 /// appears in the repo. The namespace prefix and `{{ns:}}` token expansion are
 /// install-time transforms, applied by `install.rs`, not baked in here. The
 /// stable identity of an item is therefore `(source, kind, name)`, which is what
-/// `evolve` matches on across a prefix change.
+/// `upgrade` matches on across a prefix change.
 #[derive(Debug, Clone)]
 pub struct CatalogItem {
     pub kind: ItemKind,

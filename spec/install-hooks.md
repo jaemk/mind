@@ -12,7 +12,7 @@ An install hook is a shell command associated with a source. The maintainer
 declares it in `mind.toml`, or a user supplies one on the command line (for a repo
 that ships no `mind.toml`, or to override the declared one, in which case the
 override is shown loudly). The hook runs in the source's clone during `meld`, and
-re-runs during `evolve` when the source updates.
+re-runs during `upgrade` when the source updates.
 
 The hook is arbitrary code execution: it can run any command with the user's
 privileges. So `mind` never runs a hook without first showing the user what will
@@ -48,7 +48,7 @@ CLI-17).
 - `HOOK-10` An install hook runs during `meld`, once, in the source's clone
   directory, after the working tree is checked out at the resolved pin. It is a
   source-level step; `learn` does not run hooks.
-- `HOOK-11` `evolve` re-runs a source's hook (subject to the same prompt) when the
+- `HOOK-11` `upgrade` re-runs a source's hook (subject to the same prompt) when the
   source has advanced to a new commit and a hook is in effect, so the tooling
   tracks the source. `sync` alone (which only fetches and records the new commit)
   does not run the hook.
@@ -85,7 +85,7 @@ CLI-17).
   the system (an installed binary, a global package) are outside `mind`'s state
   and are not rolled back.
 - `HOOK-31` `mind` records the in-effect hook command and the commit it ran at on
-  the source registry entry, so `evolve` can detect a changed command or commit
+  the source registry entry, so `upgrade` can detect a changed command or commit
   and re-prompt (HOOK-11), and `recall` / `introspect` can report that a source
   has an install hook.
 

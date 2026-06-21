@@ -76,7 +76,7 @@ normatively. Source identity is `host/owner/repo` (see storage.md).
   `github.com/acme/*` matches every repo under `acme`).
 - `POL-11` With `[sources].lock = true`, `meld` refuses any repo whose identity
   does not match `allow` (`SourceNotAllowed`); nothing is cloned or registered.
-- `POL-12` When `lock` is true (POL-13), `learn`, `sync`, and `evolve` operate
+- `POL-12` When `lock` is true (POL-13), `learn`, `sync`, and `upgrade` operate
   only on sources whose identity matches `allow`. A source already in the registry
   that is no longer allowed is reported and skipped, not updated or installed from.
   With `lock` off, `allow` is advisory and these verbs are not restricted.

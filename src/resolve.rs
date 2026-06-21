@@ -135,7 +135,7 @@ pub fn resolve<'a>(
 
 /// Whether an installed item matches a parsed ref: its kind (when the ref names
 /// one), its effective installed name, and the source qualifier (when given).
-/// Used by `forget`, `recall <item>`, and `evolve [item]`, which match against
+/// Used by `forget`, `recall <item>`, and `upgrade [item]`, which match against
 /// the manifest rather than the catalog.
 pub fn installed_matches(it: &InstalledItem, r: &ItemRef) -> bool {
     r.kind.is_none_or(|k| it.kind == k)

@@ -63,8 +63,8 @@ pub enum ActionKind {
     Unmeld { name: String, forget: bool },
     /// Sync all sources (TUI-22).
     Sync,
-    /// Evolve pending items (TUI-22).
-    Evolve,
+    /// Upgrade pending items (TUI-22).
+    Upgrade,
     /// Add an agent home (lobe) via `config lobes add` (TUI-23, CLI-112).
     // spec: TUI-23
     LobeAdd { path: String },
@@ -196,7 +196,7 @@ impl App {
     pub fn apply_snapshot(&mut self, snapshot: Snapshot) {
         // Any successful snapshot-applying refresh ends a mutation: clearing the
         // flag here is what re-arms the once-a-second poll after a successful
-        // learn/forget/sync/evolve/meld/lobe action (TUI-15). The mid-action
+        // learn/forget/sync/upgrade/meld/lobe action (TUI-15). The mid-action
         // assertion in `take_pending_action` still holds because the flag is set
         // and observed before any snapshot is applied.
         // spec: TUI-15
@@ -361,8 +361,8 @@ impl App {
             Intent::ActionSync => {
                 self.initiate_sync();
             }
-            Intent::ActionEvolve => {
-                self.initiate_evolve();
+            Intent::ActionUpgrade => {
+                self.initiate_upgrade();
             }
             Intent::ActionMeld => {
                 self.initiate_meld();
@@ -561,10 +561,10 @@ impl App {
         self.modal_visible = true;
     }
 
-    fn initiate_evolve(&mut self) {
+    fn initiate_upgrade(&mut self) {
         self.pending_action = Some(PendingAction::new(
-            ActionKind::Evolve,
-            "Evolve all pending items?".to_string(),
+            ActionKind::Upgrade,
+            "Upgrade all pending items?".to_string(),
         ));
         self.modal_visible = true;
     }
