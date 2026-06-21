@@ -56,7 +56,12 @@ Each action invokes the same verb the CLI exposes, against the same registry,
 manifest, and store.
 
 - `TUI-20` Install the selected Available item (`learn`, CLI-30); uninstall the
-  selected Installed item (`forget`, CLI-40).
+  selected Installed item (`forget`, CLI-40). Installing on a higher node selects
+  in bulk, so the user need not name each item: a Source installs every available
+  item from it (`learn '<source>#*'`), a kind bucket every item of that kind
+  (`<source>#<kind>:*`), and the Available group everything (`learn '*'`). The
+  selection flows through the same closure/confirm path, and already-installed
+  items are skipped (DEP-23).
 - `TUI-21` Meld the selected/entered source (`meld`, CLI-10); unmeld a melded
   source (`unmeld`, CLI-20), offering the `--forget` purge (CLI-22).
 - `TUI-22` Sync all or the selected source (`sync`, CLI-50); upgrade pending or the

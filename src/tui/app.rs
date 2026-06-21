@@ -504,28 +504,54 @@ impl App {
         h.saturating_sub(6).max(1)
     }
 
-    /// Initiate an install action for the currently selected available item.
+    /// Initiate an install action for the selected node. On a single available
+    /// item it installs that item; on a Source it installs every available item
+    /// from that source (`<source>#*`); on a kind bucket every item of that kind
+    /// (`<source>#<kind>:*`); on the Available group everything available (`*`).
+    /// The glob goes through the same learn flow (closure preview + confirm), and
+    /// `learn` skips anything already installed, so this is the interactive form
+    /// of `learn '<source>#*'` (TUI-20).
+    // spec: TUI-20
     fn initiate_learn(&mut self) {
         let Some(node) = self.visible.get(self.selected) else {
             return;
         };
-        if let TreeNode::AvailableItem(ref item) = node.node {
-            let desc = format!("Install {} from {}?", item.key, item.source);
-            // Queue the dependency-tree preview (DEP-40): the event loop in mod.rs
-            // consumes `pending_learn_ref`, calls `commands::learn_preview` (I/O,
-            // kept out of this pure model), and stashes the tree onto this pending
-            // action via `set_learn_dep_tree` before the modal is drawn.
-            // spec: DEP-40
-            self.pending_learn_ref = Some(learn_ref(&item.key, &item.source));
-            self.pending_action = Some(PendingAction::new(
-                ActionKind::Learn {
-                    item_key: item.key.clone(),
-                    source: item.source.clone(),
-                },
-                desc,
-            ));
-            self.modal_visible = true;
-        }
+        // Map the selected node to a learn selection: (item_key, source, prompt).
+        let (item_key, source, desc) = match &node.node {
+            TreeNode::AvailableItem(item) => (
+                item.key.clone(),
+                item.source.clone(),
+                format!("Install {} from {}?", item.key, item.source),
+            ),
+            TreeNode::Source(src) => (
+                "*".to_string(),
+                src.name.clone(),
+                format!("Install all available items from {}?", src.name),
+            ),
+            TreeNode::KindBucket { source, kind } => (
+                format!("{kind}:*"),
+                source.clone(),
+                format!("Install all {kind} items from {source}?"),
+            ),
+            TreeNode::AvailableGroup => (
+                "*".to_string(),
+                String::new(),
+                "Install all available items?".to_string(),
+            ),
+            // Nothing to install for installed items/groups or a suggested source.
+            _ => return,
+        };
+        // Queue the dependency-tree preview (DEP-40): the event loop in mod.rs
+        // consumes `pending_learn_ref`, calls `commands::learn_preview` (I/O, kept
+        // out of this pure model), and stashes the tree onto this pending action
+        // via `set_learn_dep_tree` before the modal is drawn.
+        // spec: DEP-40
+        self.pending_learn_ref = Some(learn_ref(&item_key, &source));
+        self.pending_action = Some(PendingAction::new(
+            ActionKind::Learn { item_key, source },
+            desc,
+        ));
+        self.modal_visible = true;
     }
 
     /// Stash the dependency tree (computed by the I/O layer via
@@ -1103,6 +1129,66 @@ mod tests {
         assert!(!app.should_quit());
         app.apply_intent(Intent::Quit);
         assert!(app.should_quit());
+    }
+
+    #[test]
+    fn learn_on_a_source_node_installs_all_from_that_source() {
+        // spec: TUI-20 - pressing install (`i`) on a Source node queues a glob
+        // learn of the whole source (`<source>#*`), so the user need not select
+        // each item. The glob flows through the same confirm/closure path and
+        // `learn` skips anything already installed.
+        let mut app = App::new(String::new(), None, None);
+        app.visible = vec![FlatNode {
+            id: "s".into(),
+            label: "agents".into(),
+            depth: 1,
+            expandable: true,
+            expanded: false,
+            node: TreeNode::Source(crate::tui::tree::SourceInfo {
+                name: "local/agents".into(),
+                installed: false,
+            }),
+        }];
+        app.selected = 0;
+        app.apply_intent(Intent::ActionLearn);
+        assert_eq!(
+            app.pending_learn_ref.as_deref(),
+            Some("local/agents#*"),
+            "a Source install must queue the whole-source glob"
+        );
+        match &app.pending_action.as_ref().expect("a pending Learn").kind {
+            ActionKind::Learn { item_key, source } => {
+                assert_eq!(item_key, "*");
+                assert_eq!(source, "local/agents");
+            }
+            other => panic!("expected Learn, got {other:?}"),
+        }
+        assert!(app.modal_visible, "the confirm modal opens");
+    }
+
+    #[test]
+    fn learn_on_the_available_group_installs_everything() {
+        // spec: TUI-20 - installing on the Available group queues a learn of every
+        // available item (`*`), with no single source.
+        let mut app = App::new(String::new(), None, None);
+        app.visible = vec![FlatNode {
+            id: "avail".into(),
+            label: "Available".into(),
+            depth: 0,
+            expandable: true,
+            expanded: true,
+            node: TreeNode::AvailableGroup,
+        }];
+        app.selected = 0;
+        app.apply_intent(Intent::ActionLearn);
+        assert_eq!(app.pending_learn_ref.as_deref(), Some("*"));
+        match &app.pending_action.as_ref().expect("a pending Learn").kind {
+            ActionKind::Learn { item_key, source } => {
+                assert_eq!(item_key, "*");
+                assert!(source.is_empty(), "a group install has no single source");
+            }
+            other => panic!("expected Learn, got {other:?}"),
+        }
     }
 
     #[test]
