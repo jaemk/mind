@@ -882,16 +882,37 @@ pub fn evolve(
     // POL-3: load the managed policy once (fail closed on Err; None = inert).
     let policy = Policy::load()?;
     let mut registry = Registry::load(paths)?;
+    let manifest = Manifest::load(paths)?;
+
+    let filter = item_ref.map(parse_item_ref).transpose()?;
+
+    // HOOK-11 scope: a scoped `evolve <item>` must not re-run install hooks
+    // (arbitrary code) for sources unrelated to the targeted item. When a filter
+    // is present, restrict the hook re-run to sources that have at least one
+    // INSTALLED item matching the filter (the same scoping the per-item loop uses
+    // via `installed_matches`). With no filter, `None` means every source is in
+    // scope, leaving the unscoped behavior unchanged.
+    let hook_scope: Option<HashSet<String>> = filter.as_ref().map(|f| {
+        manifest
+            .items
+            .values()
+            .filter(|it| crate::resolve::installed_matches(it, f))
+            .map(|it| it.source.clone())
+            .collect()
+    });
 
     // HOOK-11: re-run a source's install hook when its commit has advanced past
     // the commit the hook last ran at (or it was recorded but never run). This is
     // a source-level pass, separate from the per-item upgrade loop below.
-    rerun_source_hooks(paths, &mut registry, dangerously_skip_hook_check)?;
+    rerun_source_hooks(
+        paths,
+        &mut registry,
+        dangerously_skip_hook_check,
+        hook_scope.as_ref(),
+        policy.as_ref(),
+    )?;
 
     let catalog = catalog::scan(paths, &registry)?;
-    let manifest = Manifest::load(paths)?;
-
-    let filter = item_ref.map(parse_item_ref).transpose()?;
     let mut pending: Vec<Upgrade> = Vec::new();
 
     for installed in manifest.items.values() {
@@ -983,10 +1004,32 @@ fn rerun_source_hooks(
     paths: &Paths,
     registry: &mut Registry,
     dangerously_skip_hook_check: bool,
+    in_scope: Option<&HashSet<String>>,
+    policy: Option<&Policy>,
 ) -> Result<()> {
     let mut changed = false;
     for source in &mut registry.sources {
         if !hook_rerun_warranted(source) {
+            continue;
+        }
+        // HOOK-11 scope: a scoped `evolve <item>` restricts the hook re-run to
+        // sources implicated by the filter. `None` = unscoped (all sources).
+        if let Some(scope) = in_scope
+            && !scope.contains(&source.name)
+        {
+            continue;
+        }
+        // POL-12: with the allowlist locked, do not re-run the install hook
+        // (arbitrary code) for a source whose identity is no longer allowed;
+        // report and skip it, exactly as the per-item loop does.
+        if let Some(policy) = policy
+            && policy.lock()
+            && !policy.allow_matches(&source.name)
+        {
+            println!(
+                "skipping install hook for {}: source not permitted by the managed policy's allowlist",
+                source.name
+            );
             continue;
         }
         // `hook_rerun_warranted` guarantees install_hook is Some.

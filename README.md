@@ -72,12 +72,12 @@ mind learn greet
 
 | command | does |
 |---------|------|
-| `mind meld <repo> [--as <prefix>] [--root <dir>] [--follow-branch <branch> | --pin-tag <tag> | --pin-ref <commit>]` | clone and register a source (optionally namespaced, subtree-scoped, version-pinned) |
+| `mind meld <repo> [--as <prefix>] [--root <dir>] [--follow-branch <branch> | --pin-tag <tag> | --pin-ref <commit>] [--install-hook <cmd>] [--dangerously-skip-install-hook-check]` | clone and register a source (optionally namespaced, subtree-scoped, version-pinned, with an install hook) |
 | `mind unmeld <name> [--forget]` (alias `detach`) | drop a source (optionally its items) |
 | `mind learn [--yes] <item>` | install a skill/agent/rule (glob installs many); a partial selection also pulls in the source siblings it references |
 | `mind forget <item>` (alias `unlearn`) | remove an installed item (glob removes many) |
 | `mind sync [--evolve]` | refresh every source (optionally upgrade after) |
-| `mind evolve [--yes] [item]` | upgrade installed items |
+| `mind evolve [--yes] [--dangerously-skip-install-hook-check] [item]` | upgrade installed items (re-runs install hooks on sources that advance) |
 | `mind recall [--sources] [item] [--kind K] [--source S] [--json]` | list installed items / sources / details |
 | `mind probe [query] [--kind K] [--source S] [--json] [--no-tui]` | browse and search items (interactive TUI on a terminal) |
 | `mind review <target> [--as <prefix>]` / `mind review --policy <path>` | validate a source for publishing, or validate a managed policy file (read-only) |
@@ -108,6 +108,26 @@ lobes = ["~/.claude", "~/.config/some-other-agent"]
 The file is created with the default lobe (`~/.claude`) on first use.
 
 or for one invocation, set `MIND_AGENT_HOMES` to a `:`-separated path list.
+
+## Install hooks
+
+A source can declare an install hook in `mind.toml`: a shell command that builds or installs
+the tooling its items rely on. A user can supply or override it with `meld --install-hook <cmd>`.
+
+```toml
+# mind.toml in a source repo
+[source]
+install = "make build"
+```
+
+Because a hook is arbitrary code, `mind` discloses the source identity, pin, commit, clone path,
+and exact command before running anything, and prompts with three choices: run it, skip it but
+still install the source (the default), or abort and install nothing. In a non-TTY context (CI,
+scripts) the hook is skipped and a note is printed; `--dangerously-skip-install-hook-check` runs
+it unattended. `evolve` re-runs the hook when a source advances to a new commit. `recall
+--sources` marks sources that carry a hook with a ` hook` token in their bracketed column.
+`mind review <repo>` shows a source's declared hook before you meld it. See
+[spec/install-hooks.md](spec/install-hooks.md) for the full behavior.
 
 ## Troubleshooting
 

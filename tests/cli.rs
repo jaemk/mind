@@ -5095,11 +5095,18 @@ fn meld_with_declared_hook_non_tty_skips_but_still_installs() {
         marker.display()
     );
 
-    // The skip is reported to the user.
-    let reported = r.stdout.contains("skipped") || r.stderr.contains("skipped");
+    // The skip is reported to the user with the exact note `meld_recursive`
+    // prints on the HOOK-22 skip path (commands.rs); the source name in the
+    // middle is the full `host/owner/repo` identity, so assert the two stable
+    // fragments around it. A regression that drops or rewords the note fails
+    // here rather than passing on any bare "skipped".
+    let prefix = "note: skipped the install hook for ";
+    let suffix = "; its items may not work until the hook is run";
+    let reported = (r.stdout.contains(prefix) && r.stdout.contains(suffix))
+        || (r.stderr.contains(prefix) && r.stderr.contains(suffix));
     assert!(
         reported,
-        "the skip must be reported: {} {}",
+        "the skip must be reported with the exact note: {} {}",
         r.stdout, r.stderr
     );
 
@@ -5246,9 +5253,12 @@ fn recall_sources_shows_install_hook_marker() {
 
     let sources = sb.mind(&["recall", "--sources"]);
     assert!(sources.success, "recall failed: {}", sources.stderr);
+    // The marker is the ` hook` token inside the bracketed commit/alias column
+    // (commands.rs `recall`), e.g. `[<commit> hook]`. Assert the exact bracketed
+    // token so a regression that drops the marker (or renames the column) fails.
     assert!(
-        sources.stdout.contains("hook"),
-        "recall --sources must mark a source with an install hook: {}",
+        sources.stdout.contains(" hook]"),
+        "recall --sources must mark a source with the bracketed ` hook]` token: {}",
         sources.stdout
     );
 }
@@ -5298,5 +5308,143 @@ fn evolve_reruns_hook_after_source_advances() {
     assert!(
         !marker.exists(),
         "evolve must not re-run the hook when the source has not advanced"
+    );
+}
+
+#[test]
+fn scoped_evolve_does_not_rerun_unrelated_source_hook() {
+    // spec: HOOK-11
+    // A scoped `evolve <item>` must NOT re-run install hooks (arbitrary code) for
+    // sources unrelated to the targeted item. Meld a hooked source (`agents`,
+    // recorded via --dangerously-skip-install-hook-check) plus a second,
+    // hook-free source (`tools`); learn an item only from `tools`; advance the
+    // hooked source and sync. A scoped evolve targeting the `tools` item must
+    // leave the hooked source's marker untouched, while an UNSCOPED evolve (the
+    // positive control) does re-run it.
+    let agents = sandbox_with_declared_hook("agents", "touch hookran");
+    let agents_spec = agents.source_spec();
+    assert!(
+        agents
+            .mind(&[
+                "meld",
+                &agents_spec,
+                "--dangerously-skip-install-hook-check"
+            ])
+            .success,
+        "initial meld of the hooked source should run the hook and record its commit"
+    );
+
+    let tools = Sandbox::named("tools");
+    assert!(
+        agents.mind(&["meld", &tools.source_spec()]).success,
+        "meld of the second (hook-free) source failed"
+    );
+
+    // Learn an item from the OTHER source only, source-qualified so it resolves
+    // unambiguously across the two sources that share fixture item names.
+    let learn = agents.mind(&["learn", "tools#skill:review"]);
+    assert!(
+        learn.success,
+        "learn failed: {} {}",
+        learn.stdout, learn.stderr
+    );
+
+    // The hook ran on meld; clear its marker so any re-run is observable.
+    let marker = clone_dir_of(&agents, "agents").join("hookran");
+    assert!(
+        marker.exists(),
+        "the hook should have run on the initial meld"
+    );
+    std::fs::remove_file(&marker).unwrap();
+
+    // Advance the hooked source so its commit moves past the recorded run-commit,
+    // i.e. an UNSCOPED evolve would re-run its hook. sync alone must not.
+    agents.edit_source();
+    assert!(agents.mind(&["sync"]).success, "sync failed");
+    assert!(!marker.exists(), "sync alone must not re-run the hook");
+
+    // Scoped evolve targeting the OTHER source's item: the hooked source is out
+    // of scope, so its hook must NOT re-run even though its commit advanced.
+    let scoped = agents.mind(&[
+        "evolve",
+        "tools#skill:review",
+        "-y",
+        "--dangerously-skip-install-hook-check",
+    ]);
+    assert!(
+        scoped.success,
+        "scoped evolve failed: {} {}",
+        scoped.stdout, scoped.stderr
+    );
+    assert!(
+        !marker.exists(),
+        "a scoped evolve of an unrelated item must not re-run the hooked source's hook: {} exists",
+        marker.display()
+    );
+
+    // Positive control: an UNSCOPED evolve DOES re-run the hooked source's hook.
+    let unscoped = agents.mind(&["evolve", "-y", "--dangerously-skip-install-hook-check"]);
+    assert!(
+        unscoped.success,
+        "unscoped evolve failed: {} {}",
+        unscoped.stdout, unscoped.stderr
+    );
+    assert!(
+        marker.exists(),
+        "an unscoped evolve must re-run the hooked source's hook: {} missing",
+        marker.display()
+    );
+}
+
+#[test]
+fn evolve_skips_disallowed_source_hook_when_locked() {
+    // spec: POL-12
+    // Install hooks are arbitrary code; running a disallowed source's hook would
+    // violate POL-12. Meld + record a hooked source while it is allowed, then
+    // advance it and run evolve under a locked policy whose `allow` excludes the
+    // source: the hook must NOT re-run (marker not re-created) and the skip is
+    // reported.
+    let sb = sandbox_with_declared_hook("agents", "touch hookran");
+    let spec = sb.source_spec();
+    assert!(
+        sb.mind(&["meld", &spec, "--dangerously-skip-install-hook-check"])
+            .success,
+        "initial meld should run the hook and record its commit"
+    );
+
+    let marker = clone_dir_of(&sb, "agents").join("hookran");
+    assert!(marker.exists(), "the hook should have run on meld");
+    std::fs::remove_file(&marker).unwrap();
+
+    // Advance the source so an UNSCOPED evolve would otherwise re-run the hook.
+    sb.edit_source();
+    assert!(sb.mind(&["sync"]).success, "sync failed");
+    assert!(!marker.exists(), "sync alone must not re-run the hook");
+
+    // A locked policy whose allowlist excludes this source.
+    let policy = write_policy(
+        &sb,
+        "[sources]\nlock = true\nallow = [\"local/*/never-match\"]\n",
+    );
+    let r = sb.mind_env(
+        &["evolve", "-y", "--dangerously-skip-install-hook-check"],
+        &[("MIND_POLICY_FILE", policy.as_str())],
+    );
+    assert!(
+        r.success,
+        "evolve must not error when skipping a disallowed source's hook: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        !marker.exists(),
+        "a policy-disallowed source's hook must not re-run: {} exists",
+        marker.display()
+    );
+    assert!(
+        r.stdout.contains("skipping install hook for")
+            && r.stdout
+                .contains("not permitted by the managed policy's allowlist"),
+        "the skipped hook must be reported: {}",
+        r.stdout
     );
 }

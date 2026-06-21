@@ -237,6 +237,23 @@ fn run_checks(_paths: &Paths, source_dir: &Path, alias: Option<String>) -> Resul
         }
     }
 
+    // --- Check 6 (hoisted): declared install hook (advisory) ---
+    // HOOK-40: surface a declared install hook so a consumer sees, before
+    // melding, that the source will ask to run arbitrary code. This is placed
+    // before any early-returning scan checks so it fires on every code path
+    // where the mind.toml parsed successfully and declares an install hook,
+    // including paths that encounter version-gate, unknown-kind, or other scan
+    // errors later. It must NOT fire when mind.toml itself failed to parse
+    // (Check 1's hard-error path returns before reaching here).
+    if let Some(ref mf) = mindfile
+        && let Some(cmd) = mf.source.install.as_deref()
+    {
+        advisory.push(Finding::advisory(
+            "install-hook",
+            format!("source declares an install hook (runs on meld): {cmd}"),
+        ));
+    }
+
     // --- Check 3: catalog scan (version gate + unknown kind) ---
     // Build a synthetic source for scanning. Use scan_source_at so we can pass
     // the actual source_dir directly, bypassing the clone_dir() path resolution
@@ -313,18 +330,6 @@ fn run_checks(_paths: &Paths, source_dir: &Path, alias: Option<String>) -> Resul
                 ));
             }
         }
-    }
-
-    // --- Check 6: declared install hook (advisory) ---
-    // HOOK-40: surface a declared install hook so a consumer sees, before
-    // melding, that the source will ask to run arbitrary code.
-    if let Some(ref mf) = mindfile
-        && let Some(cmd) = mf.source.install.as_deref()
-    {
-        advisory.push(Finding::advisory(
-            "install-hook",
-            format!("source declares an install hook (runs on meld): {cmd}"),
-        ));
     }
 
     // --- Check 7: unguarded prose references (advisory, only when prefix in effect) ---
@@ -783,6 +788,59 @@ mod tests {
                 .message
                 .contains("make build && make install"),
             "advisory message must include the declared command: {}",
+            hook_findings[0].message
+        );
+    }
+
+    /// A source that BOTH declares [source].install AND triggers a hard scan
+    /// error (unknown item kind in [[items]]) must still emit the install-hook
+    /// advisory. Before the fix, the early return from Check 3 discarded the
+    /// advisory. After the fix, the advisory is pushed before Check 3 runs.
+    ///
+    /// This test is the regression guard for the HOOK-40 reachability bug: it
+    /// must FAIL against code where Check 6 is placed after Check 3, and PASS
+    /// after the hoist.
+    /// spec: HOOK-40
+    #[test]
+    fn install_hook_advisory_survives_scan_hard_error() {
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let source_dir = base.join("src");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        // Authoritative mind.toml: declares an install hook AND an unknown item
+        // kind. The unknown-kind arm triggers an early return from the scan check.
+        std::fs::write(
+            source_dir.join("mind.toml"),
+            "[source]\ninstall = \"make tooling\"\n\
+             [[items]]\nkind = \"spell\"\nname = \"x\"\npath = \"x.md\"\n",
+        )
+        .unwrap();
+        let paths = paths_for(base);
+
+        let result = run_checks(&paths, &source_dir, None).unwrap();
+
+        // The scan must have produced the unknown-kind hard finding.
+        assert!(
+            result.hard.iter().any(|f| f.kind == "unknown-kind"),
+            "expected unknown-kind hard finding: {:?}",
+            result.hard
+        );
+
+        // The install-hook advisory must still be present despite the early return.
+        let hook_findings: Vec<&Finding> = result
+            .advisory
+            .iter()
+            .filter(|f| f.kind == "install-hook")
+            .collect();
+        assert_eq!(
+            hook_findings.len(),
+            1,
+            "install-hook advisory must survive an early-returning scan error (HOOK-40 reachability bug): {:?}",
+            result.advisory
+        );
+        assert!(
+            hook_findings[0].message.contains("make tooling"),
+            "advisory must include the declared command: {}",
             hook_findings[0].message
         );
     }

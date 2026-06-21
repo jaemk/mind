@@ -1,6 +1,6 @@
 # Install hooks
 
-Status: planned. Some agent libraries ship tooling (binaries, scripts) that their
+Status: done. Some agent libraries ship tooling (binaries, scripts) that their
 skills or agents depend on, which must be built or installed before the items
 work. An install hook is a command a source declares (or a user supplies) that
 `mind` runs to perform that setup. Because the command is arbitrary code from the

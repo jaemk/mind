@@ -3,6 +3,7 @@
 //! items rely on. Because it is arbitrary code from the source, `mind` discloses
 //! it and prompts before running (see spec/install-hooks.md).
 
+use std::io::BufRead;
 use std::io::IsTerminal;
 use std::io::Write as _;
 use std::path::Path;
@@ -32,15 +33,19 @@ pub fn parse_hook_choice(input: &str) -> HookChoice {
 
 /// Resolve the effective hook command (HOOK-2, HOOK-3). A consumer-supplied
 /// command (`--install-hook`) overrides a declared `[source].install`. Returns
-/// `Some((command, overrides_declared))` or `None` when neither is set.
-/// `overrides_declared` is true only when `supplied` is Some AND `declared` is Some.
+/// `Some((command, overrides_declared))` or `None` when neither is non-empty.
+/// `overrides_declared` is true only when `supplied` is non-empty AND `declared`
+/// is non-empty. Empty or whitespace-only values are treated as absent (HOOK-3).
 pub fn resolve_hook<'a>(
     declared: Option<&'a str>,
     supplied: Option<&'a str>,
 ) -> Option<(&'a str, bool)> {
-    match (declared, supplied) {
-        (_, Some(s)) => {
-            let overrides = declared.is_some();
+    // Treat empty/whitespace as absent per HOOK-3.
+    let effective_supplied = supplied.map(str::trim).filter(|s| !s.is_empty());
+    let effective_declared = declared.map(str::trim).filter(|s| !s.is_empty());
+    match (effective_declared, effective_supplied) {
+        (decl, Some(s)) => {
+            let overrides = decl.is_some();
             Some((s, overrides))
         }
         (Some(d), None) => Some((d, false)),
@@ -106,9 +111,21 @@ pub fn disclosure_text(
     out
 }
 
+/// Read one line from `reader` and return the parsed `HookChoice` (HOOK-20).
+/// EOF (zero bytes read) returns `SkipAndContinue` so that an absent or unclear
+/// reply NEVER runs the hook and NEVER aborts.
+pub fn read_choice<R: BufRead>(mut reader: R) -> Result<HookChoice> {
+    let mut line = String::new();
+    match reader.read_line(&mut line) {
+        Ok(0) => Ok(HookChoice::SkipAndContinue), // EOF => skip, never abort
+        Ok(_) => Ok(parse_hook_choice(&line)),
+        Err(e) => Err(MindError::io("<stdin>", e)),
+    }
+}
+
 /// Print the disclosure and the three choices, read one line from stdin, and
-/// return the parsed choice (HOOK-20). The interactive read is the untestable
-/// seam; keep it thin (delegate parsing to `parse_hook_choice`).
+/// return the parsed choice (HOOK-20). Delegates the read to `read_choice` so
+/// the read path is independently testable.
 pub fn prompt_choice(disclosure: &str) -> Result<HookChoice> {
     print!("{disclosure}");
     println!("  [1] Run the hook and continue");
@@ -119,12 +136,7 @@ pub fn prompt_choice(disclosure: &str) -> Result<HookChoice> {
         .flush()
         .map_err(|e| MindError::io("<stdout>", e))?;
 
-    let mut line = String::new();
-    match std::io::stdin().read_line(&mut line) {
-        Ok(0) => Ok(HookChoice::SkipAndContinue), // EOF => skip, never abort
-        Ok(_) => Ok(parse_hook_choice(&line)),
-        Err(e) => Err(MindError::io("<stdin>", e)),
-    }
+    read_choice(std::io::stdin().lock())
 }
 
 /// Run `command` via the shell (`sh -c <command>`) in `clone_dir` (HOOK-30).
@@ -160,6 +172,37 @@ pub fn run_hook(command: &str, clone_dir: &Path, identity: &str) -> Result<()> {
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    /// RAII guard that removes a temp directory when dropped.
+    /// Uses process id + atomic counter to avoid collisions between parallel or
+    /// stale runs.
+    struct TempDir(std::path::PathBuf);
+
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+            let path = std::env::temp_dir().join(format!(
+                "mind-hook-test-{}-{}-{n}",
+                std::process::id(),
+                tag
+            ));
+            fs::create_dir_all(&path).expect("create temp dir");
+            TempDir(path)
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
 
     // ---- parse_hook_choice ----
 
@@ -203,6 +246,49 @@ mod tests {
         assert_eq!(parse_hook_choice(" 3 "), HookChoice::Abort);
     }
 
+    // ---- read_choice (tests the stdin read path, not just the parser) ----
+
+    // spec: HOOK-20
+    // EOF (empty reader) must produce SkipAndContinue: an absent reply never
+    // runs and never aborts.
+    #[test]
+    fn read_choice_eof_returns_skip_and_continue() {
+        let reader = std::io::Cursor::new("");
+        let result = read_choice(reader).expect("read_choice should not error on EOF");
+        assert_eq!(
+            result,
+            HookChoice::SkipAndContinue,
+            "EOF must yield SkipAndContinue, not run or abort"
+        );
+    }
+
+    // spec: HOOK-20
+    // "3\n" through the read path must produce Abort (not just the parser).
+    #[test]
+    fn read_choice_abort_on_3() {
+        let reader = std::io::Cursor::new("3\n");
+        let result = read_choice(reader).expect("read_choice should not error");
+        assert_eq!(result, HookChoice::Abort);
+    }
+
+    // spec: HOOK-20
+    // "1\n" through the read path must produce RunAndContinue.
+    #[test]
+    fn read_choice_run_and_continue_on_1() {
+        let reader = std::io::Cursor::new("1\n");
+        let result = read_choice(reader).expect("read_choice should not error");
+        assert_eq!(result, HookChoice::RunAndContinue);
+    }
+
+    // spec: HOOK-20
+    // "2\n" through the read path must produce SkipAndContinue.
+    #[test]
+    fn read_choice_skip_and_continue_on_2() {
+        let reader = std::io::Cursor::new("2\n");
+        let result = read_choice(reader).expect("read_choice should not error");
+        assert_eq!(result, HookChoice::SkipAndContinue);
+    }
+
     // ---- resolve_hook ----
 
     // spec: HOOK-2
@@ -231,6 +317,54 @@ mod tests {
     fn resolve_hook_both_none_is_none() {
         let result = resolve_hook(None, None);
         assert_eq!(result, None);
+    }
+
+    // spec: HOOK-3
+    // Empty declared with no supplied => None (empty is treated as absent).
+    #[test]
+    fn resolve_hook_empty_declared_no_supplied_is_none() {
+        let result = resolve_hook(Some(""), None);
+        assert_eq!(result, None, "empty declared must be treated as absent");
+    }
+
+    // spec: HOOK-3
+    // No declared with empty supplied => None (empty is treated as absent).
+    #[test]
+    fn resolve_hook_no_declared_empty_supplied_is_none() {
+        let result = resolve_hook(None, Some(""));
+        assert_eq!(result, None, "empty supplied must be treated as absent");
+    }
+
+    // spec: HOOK-3
+    // Whitespace-only declared => None.
+    #[test]
+    fn resolve_hook_whitespace_declared_is_none() {
+        let result = resolve_hook(Some("   "), None);
+        assert_eq!(
+            result, None,
+            "whitespace-only declared must be treated as absent"
+        );
+    }
+
+    // spec: HOOK-3
+    // Whitespace supplied with a real declared => falls back to the declared
+    // (whitespace supplied does not override).
+    #[test]
+    fn resolve_hook_whitespace_supplied_falls_back_to_declared() {
+        let result = resolve_hook(Some("make install"), Some("  "));
+        assert_eq!(
+            result,
+            Some(("make install", false)),
+            "whitespace supplied should not override a real declared"
+        );
+    }
+
+    // spec: HOOK-3
+    // A real supplied still overrides a real declared (regression guard).
+    #[test]
+    fn resolve_hook_real_supplied_overrides_real_declared() {
+        let result = resolve_hook(Some("make install"), Some("./override.sh"));
+        assert_eq!(result, Some(("./override.sh", true)));
     }
 
     // ---- disclosure_text ----
@@ -302,31 +436,10 @@ mod tests {
 
     // ---- run_hook ----
 
-    /// RAII guard that removes a temp directory when dropped.
-    struct TempDir(std::path::PathBuf);
-
-    impl TempDir {
-        fn new(suffix: &str) -> Self {
-            let path = std::env::temp_dir().join(suffix);
-            fs::create_dir_all(&path).expect("create temp dir");
-            TempDir(path)
-        }
-
-        fn path(&self) -> &std::path::Path {
-            &self.0
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
     // spec: HOOK-30
     #[test]
     fn run_hook_success_creates_marker_file() {
-        let dir = TempDir::new("mind-hook-test-success-run");
+        let dir = TempDir::new("success");
         let marker = dir.path().join("marker.txt");
         let marker_str = marker.to_str().expect("marker path is utf8");
         let command = format!("touch {marker_str}");
@@ -341,7 +454,7 @@ mod tests {
     // spec: HOOK-30
     #[test]
     fn run_hook_nonzero_exit_returns_hook_failed() {
-        let dir = TempDir::new("mind-hook-test-fail-run");
+        let dir = TempDir::new("fail");
         let result = run_hook("exit 3", dir.path(), "github.com/test/repo");
         match result {
             Err(MindError::HookFailed {
@@ -366,7 +479,7 @@ mod tests {
     // spec: HOOK-30
     #[test]
     fn run_hook_identity_and_command_propagate_to_error() {
-        let dir = TempDir::new("mind-hook-test-propagate-run");
+        let dir = TempDir::new("propagate");
         let result = run_hook("false", dir.path(), "github.com/acme/special");
         match result {
             Err(MindError::HookFailed {

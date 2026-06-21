@@ -79,13 +79,18 @@ pub enum Command {
         roots: Vec<String>,
 
         /// Supply or override the source's install hook: a shell command run
-        /// after checkout to build the tooling its items rely on. Overriding a
-        /// declared `[source].install` is shown loudly in the safety prompt.
+        /// after checkout to build the tooling its items rely on. Before it runs,
+        /// a prompt offers three choices: run it, skip it but still install the
+        /// source (the default), or abort and install nothing. Overriding a
+        /// declared `[source].install` is shown loudly in that prompt. Use
+        /// `mind review <repo>` to see a source's declared hook before melding.
         #[arg(long, value_name = "CMD")]
         install_hook: Option<String>,
 
         /// Run the install hook without the safety prompt. This executes
         /// arbitrary code from the source; only use it for a source you trust.
+        /// Without this flag, a non-TTY run (CI, scripts) skips the hook and just
+        /// prints a note, so the tooling is not built; pass this to run it unattended.
         #[arg(long)]
         dangerously_skip_install_hook_check: bool,
     },
@@ -151,7 +156,9 @@ pub enum Command {
 
         /// Re-run a source's install hook without the safety prompt when its
         /// commit advanced. This executes arbitrary code from the source; only
-        /// use it for a source you trust.
+        /// use it for a source you trust. Without this flag, a non-TTY evolve
+        /// (CI, scripts) skips the hook re-run and just prints a note; pass this
+        /// to run it unattended.
         #[arg(long)]
         dangerously_skip_install_hook_check: bool,
     },
