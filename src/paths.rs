@@ -166,24 +166,26 @@ impl Paths {
                     // Empty targets under a lock pins the default.
                     Ok(vec![make_absolute(self.claude_home.clone())?])
                 } else {
-                    targets.iter().map(|p| absolute_home(p)).collect()
+                    let resolved: Vec<PathBuf> = targets
+                        .iter()
+                        .map(|p| absolute_home(p))
+                        .collect::<Result<_>>()?;
+                    Ok(dedup_paths(resolved))
                 }
             }
             Some(policy) => {
-                // POL-41: not locked - union policy targets with user homes (targets first, deduped).
+                // POL-41: not locked - union policy targets with user homes (targets first,
+                // deduped). The whole result is deduped to collapse duplicate targets and
+                // targets that equal a user home.
+                // spec: POL-41
                 let mut result: Vec<PathBuf> = Vec::new();
                 for p in policy.lobes_targets() {
                     result.push(absolute_home(p)?);
                 }
                 for h in user_homes {
-                    if !result.contains(&h) {
-                        result.push(h);
-                    }
+                    result.push(h);
                 }
-                if result.is_empty() {
-                    result = vec![make_absolute(self.claude_home.clone())?];
-                }
-                Ok(result)
+                Ok(dedup_paths(result))
             }
             None => {
                 // POL-4 inert: no policy, use user homes as-is.
@@ -290,6 +292,15 @@ fn make_absolute(path: PathBuf) -> Result<PathBuf> {
     }
     let cwd = std::env::current_dir().map_err(|e| MindError::io(".", e))?;
     Ok(cwd.join(path))
+}
+
+/// Deduplicate a `Vec<PathBuf>` preserving first-seen order.
+fn dedup_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut seen = std::collections::HashSet::new();
+    paths
+        .into_iter()
+        .filter(|p| seen.insert(p.clone()))
+        .collect()
 }
 
 /// `mkdir -p` that tags failures with the offending path.
@@ -967,6 +978,92 @@ mod tests {
             "POL-41: unlocked relative target must resolve absolute, first: {homes:?}"
         );
         assert_eq!(homes[1], user_lobe, "user home follows the target");
+
+        let _ = std::fs::remove_dir_all(&base);
+        let _ = std::fs::remove_dir_all(&base_dir);
+    }
+
+    // POL-41: duplicate entries within `targets` itself (e.g. the policy TOML
+    // lists the same path twice) collapse to a single entry. A target that
+    // duplicates the user home is also collapsed. The deduped result preserves
+    // first-seen order.
+    #[test]
+    fn pol41_duplicate_targets_collapse_to_one_entry() {
+        // spec: POL-41
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let base_dir =
+            std::env::temp_dir().join(format!("mind-pol41-dup-{}-{n}", std::process::id()));
+        let dup_target = base_dir.join("dup-target");
+        let user_lobe = base_dir.join("user-lobe");
+
+        // targets has dup_target listed twice.
+        let policy_toml = format!(
+            "[lobes]\nlock = false\ntargets = [\"{dup}\", \"{dup}\"]\n",
+            dup = dup_target.display(),
+        );
+        let (paths, base, _policy_file, _guard) = setup_policy_test(&policy_toml);
+
+        // User home is distinct from the duplicated target.
+        let config_toml = format!(
+            "lobes = [\"{user_lobe}\"]\n",
+            user_lobe = user_lobe.display()
+        );
+        std::fs::write(paths.mind_home.join("config.toml"), &config_toml).unwrap();
+
+        let homes = paths.agent_homes().unwrap();
+
+        // dup_target appears only once (duplicate within targets collapsed), then user_lobe.
+        assert_eq!(
+            homes,
+            vec![dup_target.clone(), user_lobe.clone()],
+            "POL-41: duplicate targets must collapse to one entry, user home follows: {homes:?}"
+        );
+
+        // Also verify: duplicate target that also equals the user home collapses to one.
+        let shared = base_dir.join("shared");
+        let policy_toml2 = format!(
+            "[lobes]\nlock = false\ntargets = [\"{shared}\", \"{shared}\"]\n",
+            shared = shared.display(),
+        );
+        std::fs::write(base.join("policy.toml"), &policy_toml2).unwrap();
+        let config_toml2 = format!("lobes = [\"{shared}\"]\n", shared = shared.display());
+        std::fs::write(paths.mind_home.join("config.toml"), &config_toml2).unwrap();
+
+        let homes2 = paths.agent_homes().unwrap();
+        assert_eq!(
+            homes2,
+            vec![shared.clone()],
+            "POL-41: duplicates across targets and user home must all collapse to one: {homes2:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+        let _ = std::fs::remove_dir_all(&base_dir);
+    }
+
+    // POL-40: duplicate entries within `targets` in a LOCKED policy collapse to
+    // a single entry. The dedup must apply in the locked branch too.
+    #[test]
+    fn pol40_duplicate_targets_collapse_to_one_entry() {
+        // spec: POL-41
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let base_dir =
+            std::env::temp_dir().join(format!("mind-pol40-dup-{}-{n}", std::process::id()));
+        let dup_target = base_dir.join("dup-locked");
+
+        // targets has the same path twice under a lock.
+        let policy_toml = format!(
+            "[lobes]\nlock = true\ntargets = [\"{dup}\", \"{dup}\"]\n",
+            dup = dup_target.display(),
+        );
+        let (paths, base, _policy_file, _guard) = setup_policy_test(&policy_toml);
+
+        let homes = paths.agent_homes().unwrap();
+
+        assert_eq!(
+            homes,
+            vec![dup_target.clone()],
+            "POL-40: duplicate locked targets must collapse to one entry: {homes:?}"
+        );
 
         let _ = std::fs::remove_dir_all(&base);
         let _ = std::fs::remove_dir_all(&base_dir);
