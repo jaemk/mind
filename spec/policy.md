@@ -43,9 +43,11 @@ lock    = true
 targets = ["~/.claude"]
 ```
 
-A worked example is at [../examples/policy/](../examples/policy/). The rest of
-this document states the rules normatively. Source identity is `host/owner/repo`
-(see storage.md).
+A worked example is at [../examples/policy/](../examples/policy/). How a policy
+should govern install hooks (a source's build command, arbitrary code) is an open
+research item, not yet specified here; see the research section in
+[install-hooks.md](install-hooks.md). The rest of this document states the rules
+normatively. Source identity is `host/owner/repo` (see storage.md).
 
 ## The policy file
 

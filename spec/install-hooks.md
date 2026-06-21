@@ -9,8 +9,9 @@ source, `mind` shows it and prompts before running it.
 ## Overview
 
 An install hook is a shell command associated with a source. The maintainer
-declares it in `mind.toml`, or a user supplies one on the command line for a repo
-that ships no `mind.toml`. The hook runs in the source's clone during `meld`, and
+declares it in `mind.toml`, or a user supplies one on the command line (for a repo
+that ships no `mind.toml`, or to override the declared one, in which case the
+override is shown loudly). The hook runs in the source's clone during `meld`, and
 re-runs during `evolve` when the source updates.
 
 The hook is arbitrary code execution: it can run any command with the user's
@@ -30,11 +31,12 @@ CLI-17).
 - `HOOK-1` `[source].install` in a repo's `mind.toml` is a shell command string
   that declares the source's install hook (run to build or install the tooling
   the source's items rely on).
-- `HOOK-2` `mind meld <repo> --install-hook <cmd>` supplies an install hook for a
-  source that does not declare one, so a user can run a build for a repo with no
-  `mind.toml`. Supplying `--install-hook` for a source whose `mind.toml` already
-  declares `[source].install` is a `ConflictingInstallHook` error: the user should
-  review the declared hook (HOOK-40) rather than silently override it.
+- `HOOK-2` `mind meld <repo> --install-hook <cmd>` supplies an install hook, both
+  for a repo with no `mind.toml` and to override one a source declares. When it
+  overrides a declared `[source].install`, the override is loud and obvious: the
+  safety prompt (HOOK-20) shows the source's declared command and the overriding
+  command, and states that the user-supplied command is what will run, so the user
+  cannot miss that they replaced the maintainer's hook.
 - `HOOK-3` With no `[source].install` and no `--install-hook`, `meld` runs no hook
   (behavior is unchanged from a source without one).
 
@@ -52,8 +54,11 @@ CLI-17).
 
 - `HOOK-20` Before running any hook, `mind` prints the source identity, the
   resolved pin (the branch, tag, or ref) and the commit, the clone path, and the
-  exact command, with a clear warning that this executes arbitrary code from the
-  source, and then prompts `[y/N]` defaulting to No.
+  exact command that will run, with a clear warning that this executes arbitrary
+  code from the source, and then prompts `[y/N]` defaulting to No. When a
+  `--install-hook` overrides the source's declared `[source].install` (HOOK-2),
+  the prompt also shows the declared command and states plainly that the
+  user-supplied command is replacing it.
 - `HOOK-21` Declining (the default) skips the hook and continues: the source and
   its items still install, with a notice that the declared tooling was not built
   and the items may not work until the hook is run.
@@ -82,3 +87,34 @@ CLI-17).
   hook as an advisory finding (showing the command), so a consumer can see, before
   melding, that the source will ask to run code, and a maintainer can confirm the
   hook is what they intend to publish (CLI-130).
+
+## Managed-policy composition (research needed)
+
+Install hooks are arbitrary code execution, which is exactly what an enterprise
+managed policy (policy.md) exists to control, so the two compose. This section is
+NOT yet specified: it records the design space and open questions to research
+before any normative rule or stable ID is added. The default in the meantime is
+the unmanaged behavior above (prompt, default No; non-TTY skips per HOOK-22).
+
+Open questions to resolve:
+
+- Stance. Should a policy forbid hooks outright (refuse to meld a source that
+  declares one, or always skip hooks), allow them with the prompt unchanged, or
+  pre-approve a specific set? A locked-down org likely wants "forbid" or
+  "pre-approve", not "prompt".
+- Pre-approval shape. If pre-approving, what is the unit: a source identity plus an
+  expected exact command, plus a pinned commit, so a hook runs unattended only when
+  it matches the approved (source, command, commit) triple and is refused otherwise?
+- Bypass control. Should a policy be able to disallow
+  `--dangerously-skip-install-hook-check` (force the prompt, or forbid running
+  hooks at all), so a user cannot opt out of the policy's stance?
+- Non-interactive provisioning. `auto_meld` (POL-32) runs during `sync` with no
+  TTY, so a declared hook is skipped today (HOOK-22). A policy that provisions a
+  source whose tooling is required needs a way to pre-approve that hook, or the
+  provisioned source is left without its tooling.
+- Audit. Whether a managed deployment should record each hook execution (source,
+  command, commit, and how it was approved) for compliance.
+
+The crux is the threat model: a hook is the most dangerous surface mind has, so the
+policy's relationship to it should be deliberate. Resolve these before assigning
+stable IDs and folding the rules into policy.md.
