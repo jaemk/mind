@@ -32,6 +32,11 @@ const ALLOWLIST: &[&str] = &[
     //   review verb: now implemented; IDs removed from allowlist and cited in tests.
     //   self-update verb (in-place binary upgrade via the self_update crate)
     "CLI-140", "CLI-141", "CLI-142", "CLI-143",
+    //   install hooks (source-declared or user-supplied build command gated by a
+    //   safety prompt; see spec/install-hooks.md). Move each to a citing test when
+    //   built.
+    "HOOK-1", "HOOK-2", "HOOK-3", "HOOK-10", "HOOK-11", "HOOK-20", "HOOK-21", "HOOK-22", "HOOK-23",
+    "HOOK-30", "HOOK-31", "HOOK-40",
     //   enterprise managed policy (see spec/policy.md) is fully cited: the core
     //   (parse/locate/allow_matches/validate) from src/policy.rs, the enforcement
     //   (lock/pinned refusal, learn/sync/evolve gating, auto-meld provisioning,
