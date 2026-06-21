@@ -410,22 +410,12 @@ mod tests {
             other => panic!("expected Sync, got {other:?}"),
         }
 
-        // Flag without --evolve also parses (the flag is unused but not invalid).
-        let cli = Cli::try_parse_from(["mind", "sync", "--dangerously-skip-install-hook-check"])
-            .expect("sync --dangerously-skip-install-hook-check should parse");
-        match cli.command {
-            Command::Sync {
-                evolve,
-                dangerously_skip_install_hook_check,
-            } => {
-                assert!(!evolve, "--evolve absent: should be false");
-                assert!(
-                    dangerously_skip_install_hook_check,
-                    "flag present: should be true"
-                );
-            }
-            other => panic!("expected Sync, got {other:?}"),
-        }
+        // Flag without --evolve is now a parse error (HOOK-23: the flag requires
+        // --evolve so it cannot be a silent no-op).
+        assert!(
+            Cli::try_parse_from(["mind", "sync", "--dangerously-skip-install-hook-check"]).is_err(),
+            "sync --dangerously-skip-install-hook-check without --evolve must be a parse error"
+        );
 
         // Confirm the lock mode is still Exclusive with the new flag.
         assert_eq!(

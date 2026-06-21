@@ -143,7 +143,7 @@ pub enum Command {
 
         /// Run install-hook re-runs without the safety prompt during the
         /// `--evolve` pass (executes arbitrary code; only with `--evolve`).
-        #[arg(long)]
+        #[arg(long, requires = "evolve")]
         dangerously_skip_install_hook_check: bool,
     },
 

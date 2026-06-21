@@ -122,19 +122,18 @@ install = "make build"
 
 Because a hook is arbitrary code, `mind` discloses the source identity, pin, commit, clone path,
 and exact command before running anything, and prompts with three choices: run it, skip it but
-still install the source (the default), or abort and install nothing (abort applies to the initial
-`meld`; on an `evolve` re-run the source is already installed, so abort is treated as skip). In a
-non-TTY context (CI, scripts) the hook is skipped and a note is printed;
-`--dangerously-skip-install-hook-check` runs it unattended. Overriding a source's declared
-`[source].install` with `--install-hook` is announced in the prompt, which shows both the declared
-and the overriding command.
+still install the source (the default), or abort and install nothing. In a non-TTY context (CI,
+scripts) the hook is skipped and a note is printed; `--dangerously-skip-install-hook-check` runs
+it unattended. Overriding a source's declared `[source].install` with `--install-hook` is
+announced in the prompt, which shows both the declared and the overriding command.
 
 A skipped hook is recorded and re-offered by `mind evolve`, so you can run it later without the
-source needing to advance first. `evolve` also re-runs the hook when a source advances to a new
-commit; `sync --evolve` accepts `--dangerously-skip-install-hook-check` too, so a CI pipeline can
-run hook re-runs unattended (without it, a non-TTY `sync --evolve` skips them). `recall --sources`
-marks a source that carries a hook with a ` hook` token in its status bracket. `mind review <repo>`
-shows a source's declared hook before you meld it. See
+source needing to advance first. On an `evolve` re-run the source is already installed, so abort
+is treated as skip. `evolve` also re-runs the hook when a source advances to a new commit.
+`sync --evolve` accepts `--dangerously-skip-install-hook-check` so a CI pipeline can run hook
+re-runs unattended. Without the flag, a non-TTY `sync --evolve` skips hook re-runs (the same as
+`evolve`). `recall --sources` marks a source that carries a hook with a ` hook` token in its
+status bracket. `mind review <repo>` shows a source's declared hook before you meld it. See
 [spec/install-hooks.md](spec/install-hooks.md) for the full behavior.
 
 ## Troubleshooting
