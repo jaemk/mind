@@ -224,6 +224,9 @@ pub enum MindError {
 
     #[error("'{path}' is not a directory")]
     NotADirectory { path: String },
+
+    #[error("{action} needs confirmation; re-run with --yes (or in an interactive terminal)")]
+    ConfirmationRequired { action: String },
 }
 
 fn status_suffix(status: Option<ExitStatus>) -> String {

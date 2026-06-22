@@ -70,7 +70,9 @@ fn dispatch(paths: &Paths, kind: ActionKind) -> Result<()> {
             commands::learn(paths, &item_ref, false, true, commands::Clobber::Error)?;
         }
         // spec: TUI-20
-        ActionKind::Forget { item_key } => commands::forget(paths, &item_key)?,
+        // `yes = true`: the TUI confirms destructive actions in its own UI
+        // (TUI-24) and acts on a single resolved item, so never read a CLI prompt.
+        ActionKind::Forget { item_key } => commands::forget(paths, &item_key, true)?,
         // spec: TUI-21
         ActionKind::Meld { spec } => {
             commands::meld(paths, &spec, None, vec![], None, None, None, None, false)?

@@ -214,7 +214,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
                 commands::Clobber::Prompt
             },
         ),
-        Command::Forget { item } => commands::forget(paths, &item),
+        Command::Forget { item, yes } => commands::forget(paths, &item, yes),
         Command::Sync {
             upgrade,
             dangerously_skip_install_hook_check,

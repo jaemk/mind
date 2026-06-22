@@ -2310,14 +2310,47 @@ fn forget_glob_uninstalls_all_matches() {
     assert!(after.contains("agent:dev"), "{after}");
     assert!(std::fs::symlink_metadata(sb.claude_home.join("skills/review")).is_err());
 
-    // A bare `*` forgets everything that is left.
-    assert!(sb.mind(&["forget", "*"]).success);
+    // A bare `*` forgets everything that is left (multi-match needs --yes, CLI-42).
+    assert!(sb.mind(&["forget", "*", "--yes"]).success);
     assert!(sb.mind(&["recall"]).stdout.contains("nothing learned"));
 
     // A glob matching no installed item is an error.
     let none = sb.mind(&["forget", "zzz*"]);
     assert!(!none.success);
     assert!(none.stderr.contains("not installed"), "{}", none.stderr);
+}
+
+#[test]
+fn forget_confirms_before_removing_multiple_items() {
+    // spec: CLI-42 - a multi-match glob refuses in a non-TTY context without
+    // --yes (rather than removing silently), and lists what it would remove.
+    let sb = melded();
+    assert!(sb.mind(&["learn", "*"]).success);
+
+    let r = sb.mind(&["forget", "*"]);
+    assert!(
+        !r.success,
+        "a multi-item forget must refuse without --yes: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("would remove") && r.stdout.contains("skill:review"),
+        "it must list what would be removed: {}",
+        r.stdout
+    );
+    assert!(
+        r.stderr.contains("needs confirmation"),
+        "non-TTY refusal: {}",
+        r.stderr
+    );
+    // Nothing was removed.
+    assert!(
+        sb.mind(&["recall"]).stdout.contains("skill:review"),
+        "items must remain after a refused forget"
+    );
+
+    // A single exact forget is not prompted.
+    assert!(sb.mind(&["forget", "skill:review"]).success);
 }
 
 #[test]

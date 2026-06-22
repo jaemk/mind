@@ -77,7 +77,7 @@ mind learn greet
 | `mind init-source [<path>] [--template]` | scaffold `mind.toml` + report references; `--template` rewrites bare refs as `{{ns:}}` (maintainer) |
 | `mind unmeld <name> [--forget]` (alias `detach`) | drop a source (optionally its items) |
 | `mind learn [--yes] [--force] <item>` | install a skill/agent/rule (glob installs many); a partial selection also pulls in the source siblings it references. `--force` overwrites a conflicting non-mind link target (without it, a conflict prompts on a TTY) |
-| `mind forget <item>` (alias `unlearn`) | remove an installed item (glob removes many) |
+| `mind forget [--yes] <item>` (alias `unlearn`) | remove an installed item (glob removes many; a multi-match glob confirms first, `--yes` skips) |
 | `mind sync [--upgrade] [--dangerously-skip-install-hook-check]` | refresh every source (optionally upgrade after; flag allows unattended hook re-runs) |
 | `mind upgrade [--yes] [--dangerously-skip-install-hook-check] [item]` | upgrade installed items to their latest source version (re-runs install hooks on sources that advance) |
 | `mind evolve [--check] [--yes] [--version <v>]` | update the mind binary itself to the latest release (or --version) |

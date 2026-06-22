@@ -1121,7 +1121,7 @@ fn colliding_install(targets: &[&CatalogItem]) -> Option<(String, Vec<String>)> 
 }
 
 /// `mind forget <item>` — uninstall one item, or many via a glob.
-pub fn forget(paths: &Paths, item_ref: &str) -> Result<()> {
+pub fn forget(paths: &Paths, item_ref: &str, yes: bool) -> Result<()> {
     let mut manifest = Manifest::load(paths)?;
     let parsed = parse_item_ref(item_ref)?;
 
@@ -1139,6 +1139,25 @@ pub fn forget(paths: &Paths, item_ref: &str) -> Result<()> {
     } else {
         vec![crate::resolve::resolve_installed(&manifest.items, &parsed)?.key()]
     };
+
+    // CLI-42: removing more than one item (typically a glob that matched more
+    // broadly than intended) lists the matches and confirms first. `--yes` skips;
+    // a non-TTY run without `--yes` refuses rather than removing silently.
+    if keys.len() > 1 && !yes {
+        println!("forget would remove {} item(s):", keys.len());
+        for key in &keys {
+            println!("  {key}");
+        }
+        if !crate::hook::is_tty() {
+            return Err(MindError::ConfirmationRequired {
+                action: format!("removing {} items", keys.len()),
+            });
+        }
+        if !confirm("remove these item(s)?")? {
+            println!("cancelled; nothing removed");
+            return Ok(());
+        }
+    }
 
     for key in keys {
         let item = manifest.items.remove(&key).expect("key from manifest");

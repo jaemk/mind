@@ -160,6 +160,11 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   installed item, mirroring `learn`'s glob selection (CLI-31). The kind prefix
   and source qualifier compose with the glob. A glob matching no installed item
   is `NotInstalled`.
+- `CLI-42` When `forget` would remove more than one item (a glob that matched
+  more broadly than intended), it lists the matched items and confirms before
+  removing any. `--yes` (`-y`) skips the prompt; a non-TTY run without `--yes`
+  refuses (`ConfirmationRequired`) rather than removing silently. Removing a
+  single exact match is not prompted.
 
 ## sync
 

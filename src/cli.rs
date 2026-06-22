@@ -173,6 +173,11 @@ pub enum Command {
     Forget {
         /// The installed item ref or glob: `name`, `skill:name`, `'review*'`, `'*'`.
         item: String,
+
+        /// Remove without the confirmation prompt shown when a glob matches more
+        /// than one item.
+        #[arg(short = 'y', long)]
+        yes: bool,
     },
 
     /// Refresh every melded source's clone and catalog.
