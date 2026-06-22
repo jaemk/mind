@@ -4,6 +4,15 @@ All notable changes to `mind` are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-06-22
+
+### Fixed
+
+- `meld --as <prefix>` on an already-melded source was ignored, leaving its items
+  at their plain names. A re-meld with `--as` now updates the source's prefix and
+  renames its installed items (and re-expands intra-source `{{ns:}}` references) to
+  the new effective names; `--as ''` removes the prefix.
+
 ## [0.3.0] - 2026-06-22
 
 ### Added
@@ -105,6 +114,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovery, frontmatter descriptions, transactional install/upgrade/uninstall
   with a file registry, and a tag-driven release pipeline with a Homebrew tap.
 
+[0.3.1]: https://github.com/jaemk/mind/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/jaemk/mind/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jaemk/mind/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jaemk/mind/releases/tag/v0.1.0
