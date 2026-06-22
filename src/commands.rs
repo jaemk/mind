@@ -933,6 +933,81 @@ pub fn install_melded_source(paths: &Paths, repo: &str, yes: bool) -> Result<()>
     }
 }
 
+/// True when the repo spec resolves to an already-registered source.
+pub fn is_melded(paths: &Paths, repo: &str) -> Result<bool> {
+    let name = parse_spec(repo)?.name;
+    Ok(Registry::load(paths)?.find(&name).is_some())
+}
+
+/// Re-melding an already-melded source (CLI-12). It does not re-clone or
+/// re-register: it ensures the source's items are installed, installing any that
+/// are missing just as a fresh meld does (CLI-23), and otherwise (or with
+/// `--link-only`) prints a status of the source's items and the commit each is
+/// installed at.
+// spec: CLI-12
+pub fn remeld(paths: &Paths, repo: &str, link_only: bool, yes: bool) -> Result<()> {
+    let source_name = parse_spec(repo)?.name;
+    println!("{source_name} is already melded");
+
+    if !link_only {
+        let item_ref = format!("{source_name}#*");
+        let to_install = match learn_preview(paths, &item_ref) {
+            Ok(plan) => plan.install_count,
+            Err(MindError::ItemNotFound { .. }) => 0,
+            Err(e) => return Err(e),
+        };
+        if to_install > 0 {
+            return install_melded_source(paths, repo, yes);
+        }
+    }
+    source_status(paths, &source_name)
+}
+
+/// Print every item the source offers with its install state and the source
+/// commit it was installed from, noting items whose commit lags the source
+/// (CLI-12). Items are matched to the manifest by stable identity (source, kind,
+/// bare name), so a prefix change does not lose them.
+fn source_status(paths: &Paths, source_name: &str) -> Result<()> {
+    let registry = Registry::load(paths)?;
+    let Some(source) = registry.find(source_name) else {
+        return Err(MindError::SourceNotFound {
+            name: source_name.to_string(),
+        });
+    };
+    let items = catalog::scan(paths, &single(source))?;
+    let manifest = Manifest::load(paths)?;
+
+    let head = source
+        .commit
+        .as_deref()
+        .map(short)
+        .unwrap_or_else(|| "?".to_string());
+    println!("{source_name}: {} item(s) (source @ {head})", items.len());
+    for it in &items {
+        let installed = manifest
+            .items
+            .values()
+            .find(|m| m.source == it.source && m.kind == it.kind && m.bare_name == it.name);
+        match installed {
+            Some(m) => {
+                let lag = match source.commit.as_deref() {
+                    Some(c) if c != m.commit => {
+                        format!(" (outdated; source @ {}, run `mind upgrade`)", short(c))
+                    }
+                    _ => String::new(),
+                };
+                println!("  {}  installed @ {}{}", it.key(), short(&m.commit), lag);
+            }
+            None => println!(
+                "  {}  not installed (run `mind learn '{}'`)",
+                it.key(),
+                it.key()
+            ),
+        }
+    }
+    Ok(())
+}
+
 /// If two selected items would install under the same `kind:name`, return that
 /// key and the sources that collide on it.
 fn colliding_install(targets: &[&CatalogItem]) -> Option<(String, Vec<String>)> {

@@ -43,8 +43,14 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   a full git URL (`https://host/owner/repo[.git]`), an SSH form
   (`git@host:owner/repo[.git]`), and a local path or `file://` URL. A spec that
   parses to none of these is an error (`InvalidRepoSpec`).
-- `CLI-12` Melding a repo whose source name is already registered is an error
-  (`SourceExists`); nothing is changed.
+- `CLI-12` Re-melding a repo whose source name is already registered is not an
+  error and does not re-clone or re-register. It ensures the source's items are
+  installed: if any are missing it installs them (the default-install flow,
+  CLI-23, honoring `--yes` and the non-TTY note). When nothing remains to install
+  (or with `--link-only`) it prints a status of the source's items: each item's
+  effective name, whether it is installed, and the commit it was installed from,
+  flagging items whose commit lags the source. Items are matched by stable
+  identity (source, kind, bare name), so a prefix change does not lose them.
 - `CLI-13` `--as <prefix>` sets the source's namespace, overriding any
   `[source].prefix`. It is persisted and is not changed by `sync`.
 - `CLI-14` After melding, if a prefix is in effect, unguarded prose references to

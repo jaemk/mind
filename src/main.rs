@@ -163,23 +163,29 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
                     .into_owned(),
                 Some(r) => r.to_string(),
             };
-            commands::meld(
-                paths,
-                &repo,
-                alias,
-                roots,
-                follow_branch,
-                pin_tag,
-                pin_ref,
-                install_hook,
-                dangerously_skip_install_hook_check,
-            )?;
-            // CLI-23: by default, offer to install the melded source's items right
-            // away (preview + prompt). `--link-only` stops at registering it.
-            if link_only {
-                Ok(())
+            // CLI-12: re-melding an already-melded source is not an error; it
+            // ensures the items are installed, else reports their status.
+            if commands::is_melded(paths, &repo)? {
+                commands::remeld(paths, &repo, link_only, yes)
             } else {
-                commands::install_melded_source(paths, &repo, yes)
+                commands::meld(
+                    paths,
+                    &repo,
+                    alias,
+                    roots,
+                    follow_branch,
+                    pin_tag,
+                    pin_ref,
+                    install_hook,
+                    dangerously_skip_install_hook_check,
+                )?;
+                // CLI-23: by default, offer to install the melded source's items
+                // right away (preview + prompt). `--link-only` stops at registering.
+                if link_only {
+                    Ok(())
+                } else {
+                    commands::install_melded_source(paths, &repo, yes)
+                }
             }
         }
         Command::InitSource { path, template } => commands::init_source(path.as_deref(), template),

@@ -481,13 +481,47 @@ fn review_with_no_target_reviews_the_current_directory() {
 }
 
 #[test]
-fn meld_twice_errors() {
-    // spec: CLI-12
-    let sb = melded();
+fn remeld_of_an_uninstalled_source_offers_to_install() {
+    // spec: CLI-12 - re-melding is not an error; with items still uninstalled it
+    // routes to the default install flow (here non-TTY, so it notes how to install).
+    let sb = melded(); // non-TTY meld registers but does not install
     let spec = sb.source_spec();
     let r = sb.mind(&["meld", &spec]);
-    assert!(!r.success);
-    assert!(r.stderr.contains("already melded"), "stderr: {}", r.stderr);
+    assert!(r.success, "re-meld should not error: {}", r.stderr);
+    assert!(
+        r.stdout.contains("already melded"),
+        "re-meld must report the source is already melded: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("to install"),
+        "with items uninstalled, re-meld must offer to install them: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn remeld_of_an_installed_source_shows_item_status() {
+    // spec: CLI-12 - when nothing remains to install, re-melding prints each
+    // item's install state and the commit it was installed from.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    assert!(
+        sb.mind(&["meld", &spec, "--yes"]).success,
+        "initial meld+install"
+    );
+    let r = sb.mind(&["meld", &spec]);
+    assert!(r.success, "re-meld should not error: {}", r.stderr);
+    assert!(
+        r.stdout.contains("already melded"),
+        "re-meld must report the source is already melded: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("skill:review") && r.stdout.contains("installed @"),
+        "re-meld of a fully installed source must show item status with commits: {}",
+        r.stdout
+    );
 }
 
 #[test]
