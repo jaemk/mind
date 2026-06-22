@@ -580,7 +580,7 @@ pub fn init_source(dir: Option<&str>, template: bool) -> Result<()> {
     if toml_path.exists() {
         println!("  mind.toml already exists; left unchanged");
     } else {
-        let scaffold = "[source]\ndescription = \"\"   # what this source offers\n# prefix = \"jk\"    # namespace items as jk-<name>\n";
+        let scaffold = "[source]\ndescription = \"\"   # what this source offers\n# prefix = \"prefix\"   # namespace items as prefix-<name>\n";
         std::fs::write(&toml_path, scaffold).map_err(|e| MindError::io(&toml_path, e))?;
         println!("  wrote mind.toml");
     }

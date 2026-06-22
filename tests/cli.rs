@@ -424,10 +424,12 @@ fn init_source_reports_refs_scaffolds_toml_and_templates() {
          in the same format as `review`: {}",
         r.stdout
     );
-    // INIT-3: a mind.toml is scaffolded when absent.
+    // INIT-3: a mind.toml is scaffolded when absent, with a `[source]` table and
+    // a commented-out generic prefix example whose value matches its comment.
+    let scaffold = std::fs::read_to_string(repo.join("mind.toml")).unwrap();
     assert!(
-        repo.join("mind.toml").exists(),
-        "mind.toml must be scaffolded"
+        scaffold.contains("[source]") && scaffold.contains("# prefix = \"prefix\""),
+        "scaffold must carry a [source] table and a generic commented prefix: {scaffold}"
     );
     // INIT-6: init-source registers nothing (no store state).
     assert!(
