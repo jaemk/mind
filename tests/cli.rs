@@ -525,6 +525,43 @@ fn remeld_of_an_installed_source_shows_item_status() {
 }
 
 #[test]
+fn remeld_with_as_reprefixes_installed_items() {
+    // spec: CLI-13 - a re-meld with --as changes the prefix and renames the
+    // installed items (and their links) to the new effective names.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    assert!(
+        sb.mind(&["meld", &spec, "--yes"]).success,
+        "initial meld+install"
+    );
+    assert!(
+        sb.claude_home.join("skills/review").exists(),
+        "item installs unprefixed first"
+    );
+
+    let r = sb.mind(&["meld", &spec, "--as", "jk", "--yes"]);
+    assert!(r.success, "re-meld --as failed: {} {}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("renamed skill:review -> skill:jk-review"),
+        "re-meld --as must rename installed items: {}",
+        r.stdout
+    );
+    assert!(
+        std::fs::symlink_metadata(sb.claude_home.join("skills/jk-review")).is_ok(),
+        "the prefixed link must exist"
+    );
+    assert!(
+        std::fs::symlink_metadata(sb.claude_home.join("skills/review")).is_err(),
+        "the old unprefixed link must be gone"
+    );
+    let recall = sb.mind(&["recall"]).stdout;
+    assert!(
+        recall.contains("jk-review"),
+        "recall must show the re-prefixed name: {recall}"
+    );
+}
+
+#[test]
 fn probe_lists_all_three_kinds() {
     // spec: CLI-80, DSC-1, DSC-10, DSC-11, DSC-12, DSC-36
     let sb = melded();

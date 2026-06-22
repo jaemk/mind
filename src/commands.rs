@@ -986,12 +986,32 @@ pub fn is_melded(paths: &Paths, repo: &str) -> Result<bool> {
 pub fn remeld(
     paths: &Paths,
     repo: &str,
+    alias: Option<String>,
     link_only: bool,
     yes: bool,
     clobber: Clobber,
 ) -> Result<()> {
     let source_name = parse_spec(repo)?.name;
     println!("{source_name} is already melded");
+
+    // CLI-13: an explicit `--as` on a re-meld changes the source's prefix. Update
+    // the recorded alias and rename its installed items to the new effective
+    // names (`<prefix>-<bare>`), so re-melding with a prefix actually re-namespaces
+    // an already-melded source. `--as ''` removes the prefix.
+    if let Some(new_alias) = alias {
+        let mut registry = Registry::load(paths)?;
+        if let Some(source) = registry.sources.iter_mut().find(|s| s.name == source_name) {
+            let current = source.alias.clone().unwrap_or_default();
+            if current != new_alias {
+                source.alias = Some(new_alias);
+                registry.save(paths)?;
+                let renamed = reprefix_source(paths, &registry, &source_name)?;
+                if renamed == 0 {
+                    println!("prefix updated; no installed items to rename");
+                }
+            }
+        }
+    }
 
     if !link_only {
         let item_ref = format!("{source_name}#*");
@@ -1050,6 +1070,44 @@ fn source_status(paths: &Paths, source_name: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Rename a source's installed items to their current effective names after its
+/// prefix changed (CLI-13). The registry must already carry the new alias.
+/// Matches the manifest by stable identity (source, kind, bare name) and reuses
+/// the upgrade rename step: install the new name, then drop the old item by its
+/// file registry and re-key the manifest. Returns the number renamed.
+fn reprefix_source(paths: &Paths, registry: &Registry, source_name: &str) -> Result<usize> {
+    let catalog = catalog::scan(paths, registry)?;
+    let mut manifest = Manifest::load(paths)?;
+    let installed: Vec<crate::manifest::InstalledItem> = manifest
+        .items
+        .values()
+        .filter(|it| it.source == source_name)
+        .cloned()
+        .collect();
+
+    let mut count = 0;
+    for old in installed {
+        let Some(cat) = catalog
+            .iter()
+            .find(|c| c.kind == old.kind && c.name == old.bare_name && c.source == old.source)
+        else {
+            continue; // item removed upstream; introspect reports it
+        };
+        if cat.effective_name() == old.name {
+            continue; // prefix unchanged for this item
+        }
+        let siblings = siblings_of(&catalog, &old.source);
+        let new = install::install(paths, cat, &old.commit, &siblings, false)?;
+        install::uninstall(paths, &old)?;
+        manifest.items.remove(&old.key());
+        println!("renamed {} -> {}", old.key(), new.key());
+        manifest.insert(new);
+        count += 1;
+    }
+    manifest.save(paths)?;
+    Ok(count)
 }
 
 /// If two selected items would install under the same `kind:name`, return that

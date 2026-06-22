@@ -174,7 +174,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             // CLI-12: re-melding an already-melded source is not an error; it
             // ensures the items are installed, else reports their status.
             if commands::is_melded(paths, &repo)? {
-                commands::remeld(paths, &repo, link_only, yes, clobber)
+                commands::remeld(paths, &repo, alias, link_only, yes, clobber)
             } else {
                 commands::meld(
                     paths,

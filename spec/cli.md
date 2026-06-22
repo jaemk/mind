@@ -52,7 +52,11 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   flagging items whose commit lags the source. Items are matched by stable
   identity (source, kind, bare name), so a prefix change does not lose them.
 - `CLI-13` `--as <prefix>` sets the source's namespace, overriding any
-  `[source].prefix`. It is persisted and is not changed by `sync`.
+  `[source].prefix`. It is persisted and is not changed by `sync`. Given on a
+  re-meld of an already-melded source (CLI-12), `--as` changes the source's
+  prefix and renames its installed items to the new effective names (the upgrade
+  rename, matched by stable identity), re-expanding intra-source `{{ns:}}`
+  references to those names. `--as ''` removes the prefix.
 - `CLI-14` After melding, if a prefix is in effect, unguarded prose references to
   siblings are reported as warnings (see namespacing.md). Warnings do not fail
   the command.
