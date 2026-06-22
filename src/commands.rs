@@ -273,10 +273,23 @@ fn meld_recursive(
         }
     }
 
+    // Scan before registering. If the source is rejected here (e.g. the
+    // version gate, DSC-40), remove the clone so no orphan is left on disk.
+    let mut items = match catalog::scan(paths, &single(&source)) {
+        Ok(items) => items,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&dir);
+            return Err(e);
+        }
+    };
+
     // CLI-24: a source that declares `[source].prefix` and was not melded with an
     // explicit `--as` prefix prompts (interactively) whether to namespace its
-    // items under that prefix. The choice becomes the source alias, so the scan
-    // and the later install use the chosen names. Non-interactive runs accept the
+    // items under that prefix. The items were scanned with no alias, so their
+    // effective names already reflect the declared prefix; show them so the choice
+    // is concrete (the names the items will install as). The choice becomes the
+    // source alias; if it differs from the declared prefix, re-scan so the recorded
+    // names, the warning, and the count match. Non-interactive runs accept the
     // declared prefix as-is (alias stays None).
     if top_level
         && source.alias.is_none()
@@ -284,22 +297,29 @@ fn meld_recursive(
         && let Some(declared) = mindfile.as_ref().and_then(|m| m.source.prefix.clone())
         && !declared.is_empty()
     {
+        let preview = if items.is_empty() {
+            String::new()
+        } else {
+            let names: Vec<String> = items.iter().map(|it| it.key()).collect();
+            format!("\n  items would install as: {}", names.join(", "))
+        };
         let answer = prompt_line(&format!(
-            "{} suggests the prefix '{declared}'.\n  use it? [Y]es / type a different prefix / [n]o prefix: ",
+            "{} suggests the prefix '{declared}'.{preview}\n  use it? [Y]es / type a different prefix / [n]o prefix: ",
             source.name
         ))?;
-        source.alias = crate::namespace::prefix_choice(&answer);
+        let chosen = crate::namespace::prefix_choice(&answer);
+        if chosen != source.alias {
+            source.alias = chosen;
+            items = match catalog::scan(paths, &single(&source)) {
+                Ok(items) => items,
+                Err(e) => {
+                    let _ = std::fs::remove_dir_all(&dir);
+                    return Err(e);
+                }
+            };
+        }
     }
 
-    // Scan before registering. If the source is rejected here (e.g. the
-    // version gate, DSC-40), remove the clone so no orphan is left on disk.
-    let items = match catalog::scan(paths, &single(&source)) {
-        Ok(items) => items,
-        Err(e) => {
-            let _ = std::fs::remove_dir_all(&dir);
-            return Err(e);
-        }
-    };
     warn_unguarded_references(&items);
     println!("melded {} ({} item(s))", source.name, items.len());
 
