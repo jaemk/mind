@@ -270,14 +270,16 @@ pub enum Command {
     ///
     /// Source mode: `<target>` may be a local path, a melded-source selector
     /// (same forms as `unmeld`), or a repo spec (same forms as `meld`). A repo
-    /// spec is shallow-cloned to a temp area and removed afterward.
+    /// spec is shallow-cloned to a temp area and removed afterward. With no
+    /// `<target>`, the current directory is validated.
     ///
     /// Policy mode: `--policy <path>` validates a managed policy TOML file at an
-    /// explicit path without consulting the system policy path or env. Exactly
-    /// one of `<target>` or `--policy` must be given; supplying both is an error.
+    /// explicit path without consulting the system policy path or env. Supplying
+    /// both `<target>` and `--policy` is an error.
     Review {
-        /// The source to validate: a local path, melded-source selector, or repo spec.
-        /// Cannot be used with `--policy`; supply exactly one of the two.
+        /// The source to validate: a local path, melded-source selector, or repo
+        /// spec. Defaults to the current directory (`.`) when omitted (CLI-26).
+        /// Cannot be used with `--policy`.
         #[arg(conflicts_with = "policy")]
         target: Option<String>,
 

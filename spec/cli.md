@@ -13,7 +13,7 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 | `sync` | refresh sources |
 | `upgrade [--yes] [item]` | upgrade installed |
 | `recall [--sources] [item]` | list / info |
-| `review <target> [--as <prefix>]` | validate a source for publishing |
+| `review [<target>] [--as <prefix>]` (default `.`) / `review --policy <path>` | validate a source / a policy file |
 | `introspect` | diagnose |
 | `evolve [--check] [--yes] [--version <v>]` | update the `mind` binary itself |
 | `config show` / `config lobes ...` | view/edit config |
@@ -231,6 +231,10 @@ only appear at meld or install time. It is read-only and installs nothing.
   local path, a repo spec (the forms accepted by `meld`, CLI-11; cloned to a temp
   area for the check), or the selector of an already-melded source (matched like
   `unmeld`, CLI-20).
+- `CLI-26` `review` with no `<target>` (or an explicit `.`/`./`) validates the
+  current directory, so a maintainer can `mind review` in their repo. It is the
+  read-only counterpart to `init-source` (init-source.md). `--policy` is the
+  separate policy-validation mode and takes no current-directory default.
 - `CLI-131` `review` reports, for the source and per item: `mind.toml` parse and
   schema errors (DSC-30, DSC-31), items whose frontmatter yields no description
   (DSC-20), `{{ns:}}` tokens whose referent is not a real sibling (which would be

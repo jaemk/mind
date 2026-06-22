@@ -251,16 +251,23 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             target,
             alias,
             policy,
-        } => match (target, policy) {
-            (_, Some(p)) => review::dispatch_policy(&p),
-            (Some(t), None) => commands::review(paths, &t, alias),
-            (None, None) => {
-                eprintln!(
-                    "error: `review` requires either a <target> or --policy <path>; see `mind review --help`"
-                );
-                Err(crate::error::MindError::ReviewFailed { hard: 1 })
+        } => {
+            if let Some(p) = policy {
+                review::dispatch_policy(&p)
+            } else {
+                // CLI-26: no <target> (or an explicit `.`/`./`) reviews the
+                // current directory, resolved to an absolute path so a local
+                // source is identified.
+                let target = match target.as_deref() {
+                    None | Some(".") | Some("./") => std::env::current_dir()
+                        .map_err(|e| crate::error::MindError::io(".", e))?
+                        .to_string_lossy()
+                        .into_owned(),
+                    Some(t) => t.to_string(),
+                };
+                commands::review(paths, &target, alias)
             }
-        },
+        }
         Command::Introspect { fix, json } => commands::introspect(paths, fix, json),
         Command::Config { action } => match action {
             ConfigCmd::Show => commands::config_show(paths),
@@ -369,25 +376,23 @@ mod tests {
         assert_eq!(mode_of(&["mind", "man"]), LockMode::None);
     }
 
-    /// `mind review` with neither a `<target>` nor `--policy` is a usage error:
-    /// the `(None, None)` dispatch arm prints guidance and returns
-    /// `ReviewFailed { hard: 1 }` so the process exits non-zero. This arm is only
-    /// reachable through `dispatch`, so drive it there directly.
-    /// spec: POL-50
+    /// `review` with no `<target>` and no `--policy` is a valid invocation: it
+    /// defaults to the current directory (CLI-26). Supplying BOTH a `<target>`
+    /// and `--policy` is a usage error (CLI-134). Verified at the parse layer.
+    // spec: CLI-26 CLI-134
     #[test]
-    fn review_without_target_or_policy_is_usage_error() {
-        let cli = Cli::try_parse_from(["mind", "review"]).expect("bare review parses");
-        // The arm returns before touching persisted state, so any Paths works.
-        let paths = Paths {
-            mind_home: std::env::temp_dir().join("mind-review-usage-test"),
-            claude_home: std::env::temp_dir().join("mind-review-usage-test-claude"),
-        };
-        match dispatch(cli, &paths) {
-            Err(error::MindError::ReviewFailed { hard }) => {
-                assert_eq!(hard, 1, "no-target/no-policy is a single hard usage error");
-            }
-            other => panic!("expected Err(ReviewFailed) usage error, got {other:?}"),
-        }
+    fn review_target_and_policy_are_mutually_exclusive() {
+        // Bare `review` parses (it defaults to `.` at dispatch time).
+        assert!(
+            Cli::try_parse_from(["mind", "review"]).is_ok(),
+            "a bare `review` must parse (defaults to the current directory)"
+        );
+        // Both a target and --policy together is rejected by clap.
+        assert!(
+            Cli::try_parse_from(["mind", "review", "owner/repo", "--policy", "/tmp/p.toml"])
+                .is_err(),
+            "review with both a <target> and --policy must be a usage error"
+        );
     }
 
     #[test]

@@ -466,6 +466,18 @@ fn init_source_reports_refs_scaffolds_toml_and_templates() {
 }
 
 #[test]
+fn review_with_no_target_reviews_the_current_directory() {
+    // spec: CLI-26 - `mind review` with no <target> validates the cwd.
+    let sb = Sandbox::new();
+    let r = sb.mind_cwd(&["review"], &sb.source);
+    assert!(
+        r.success,
+        "a bare `review` of the current directory should succeed for a clean source: {} {}",
+        r.stdout, r.stderr
+    );
+}
+
+#[test]
 fn meld_twice_errors() {
     // spec: CLI-12
     let sb = melded();
