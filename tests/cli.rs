@@ -727,6 +727,51 @@ fn learn_installs_and_creates_symlink() {
 }
 
 #[test]
+fn learn_force_overwrites_a_conflicting_target() {
+    // spec: CLI-35, LIFE-41
+    let sb = melded();
+    // Plant a user file where the rule `style` would link.
+    let link = sb.claude_home.join("rules/style.md");
+    write(&link, "the user's own file\n");
+
+    // Without --force, the clobber guard refuses (non-TTY: no prompt, no change).
+    let r = sb.mind(&["learn", "style"]);
+    assert!(
+        !r.success,
+        "learn must refuse to clobber a foreign target: {}",
+        r.stdout
+    );
+    assert!(
+        r.stderr.contains("not managed by mind"),
+        "expected a clobber error: {}",
+        r.stderr
+    );
+    assert!(
+        !std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the user's file must be left untouched without --force"
+    );
+
+    // With --force, the target is replaced by mind's symlink.
+    let f = sb.mind(&["learn", "style", "--force"]);
+    assert!(
+        f.success,
+        "learn --force should overwrite: {} {}",
+        f.stdout, f.stderr
+    );
+    assert!(f.stdout.contains("learned rule:style"), "{}", f.stdout);
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .expect("link should exist")
+            .file_type()
+            .is_symlink(),
+        "--force must replace the file with mind's symlink"
+    );
+}
+
+#[test]
 fn recall_lists_and_shows_item_details() {
     // spec: CLI-70, CLI-71
     let sb = melded();

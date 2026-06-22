@@ -135,6 +135,14 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 - `CLI-34` If a later item in a multi-item `learn` fails, the items already
   installed are still recorded in the manifest (state stays consistent with
   disk) and the failure is reported.
+- `CLI-35` `learn --force` (`-f`) overwrites a link target that already exists
+  and is not managed by mind (the clobber guard, LIFE-41), replacing the user's
+  file, directory, or foreign link. Without `--force`, hitting such a conflict
+  prompts on a TTY to overwrite that one target (a yes installs it forced, a no
+  refuses it) and, in a non-TTY context, refuses with `LinkOccupied` as before.
+  The forced overwrite stays transactional: it is decided before staging, so a
+  refusal changes nothing. `meld --force` applies the same to its default
+  install.
 
 ## forget
 

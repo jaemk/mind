@@ -784,7 +784,26 @@ pub fn learn_preview(paths: &Paths, item_ref: &str) -> Result<LearnPlan> {
 
 /// `mind learn <item> [--dry-run] [--yes]` — install one item, its
 /// intra-source dependency closure (DEP-30), or many via a glob.
-pub fn learn(paths: &Paths, item_ref: &str, dry_run: bool, yes: bool) -> Result<()> {
+/// How to handle a link target that already exists and is not mind's own
+/// (the clobber guard, LIFE-41), encountered during install.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Clobber {
+    /// Refuse and surface `LinkOccupied` (the default; used by the TUI, which
+    /// shows the error in the UI rather than reading a terminal prompt).
+    Error,
+    /// On a TTY, prompt to overwrite the conflicting target; otherwise refuse.
+    Prompt,
+    /// Overwrite the conflicting target without asking (`--force`).
+    Force,
+}
+
+pub fn learn(
+    paths: &Paths,
+    item_ref: &str,
+    dry_run: bool,
+    yes: bool,
+    clobber: Clobber,
+) -> Result<()> {
     // POL-3: load the managed policy once (fail closed on Err; None = inert).
     let policy = Policy::load()?;
     let (registry, items, resolution) = resolve_learn(paths, item_ref)?;
@@ -859,7 +878,26 @@ pub fn learn(paths: &Paths, item_ref: &str, dry_run: bool, yes: bool) -> Result<
             }
         };
         let siblings = siblings_of(&items, &target.source);
-        match install::install(paths, target, &commit, &siblings) {
+        let force = clobber == Clobber::Force;
+        let mut result = install::install(paths, target, &commit, &siblings, force);
+        // CLI-34: a conflicting (non-mind) target refuses by default. With
+        // `Prompt` (the default `learn`), offer to overwrite it on a TTY; on a
+        // yes, retry forced. `install` aborts before touching anything on a
+        // clobber, so the retry is safe.
+        if let Err(MindError::LinkOccupied { path }) = &result
+            && clobber == Clobber::Prompt
+            && crate::hook::is_tty()
+        {
+            let path = path.clone();
+            result = if confirm(&format!(
+                "{path} exists and is not managed by mind; overwrite it?"
+            ))? {
+                install::install(paths, target, &commit, &siblings, true)
+            } else {
+                Err(MindError::LinkOccupied { path })
+            };
+        }
+        match result {
             Ok(installed) => {
                 println!(
                     "learned {} from {} ({})",
@@ -893,7 +931,7 @@ pub fn learn(paths: &Paths, item_ref: &str, dry_run: bool, yes: bool) -> Result<
 /// later, mirroring the install-hook non-TTY behavior (HOOK-22): a scripted meld
 /// stays register-only unless `--yes` is given.
 // spec: CLI-23
-pub fn install_melded_source(paths: &Paths, repo: &str, yes: bool) -> Result<()> {
+pub fn install_melded_source(paths: &Paths, repo: &str, yes: bool, clobber: Clobber) -> Result<()> {
     let source_name = parse_spec(repo)?.name;
     let item_ref = format!("{source_name}#*");
 
@@ -910,7 +948,7 @@ pub fn install_melded_source(paths: &Paths, repo: &str, yes: bool) -> Result<()>
     }
 
     if yes {
-        return learn(paths, &item_ref, false, true);
+        return learn(paths, &item_ref, false, true, clobber);
     }
     if !crate::hook::is_tty() {
         println!(
@@ -921,12 +959,12 @@ pub fn install_melded_source(paths: &Paths, repo: &str, yes: bool) -> Result<()>
     }
 
     // Interactive: show the install preview (the dry-run list), then prompt.
-    learn(paths, &item_ref, true, false)?;
+    learn(paths, &item_ref, true, false, clobber)?;
     if confirm(&format!(
         "install these {} item(s) now?",
         plan.install_count
     ))? {
-        learn(paths, &item_ref, false, true)
+        learn(paths, &item_ref, false, true, clobber)
     } else {
         println!("skipped; run `mind learn '{item_ref}'` to install later");
         Ok(())
@@ -945,7 +983,13 @@ pub fn is_melded(paths: &Paths, repo: &str) -> Result<bool> {
 /// `--link-only`) prints a status of the source's items and the commit each is
 /// installed at.
 // spec: CLI-12
-pub fn remeld(paths: &Paths, repo: &str, link_only: bool, yes: bool) -> Result<()> {
+pub fn remeld(
+    paths: &Paths,
+    repo: &str,
+    link_only: bool,
+    yes: bool,
+    clobber: Clobber,
+) -> Result<()> {
     let source_name = parse_spec(repo)?.name;
     println!("{source_name} is already melded");
 
@@ -957,7 +1001,7 @@ pub fn remeld(paths: &Paths, repo: &str, link_only: bool, yes: bool) -> Result<(
             Err(e) => return Err(e),
         };
         if to_install > 0 {
-            return install_melded_source(paths, repo, yes);
+            return install_melded_source(paths, repo, yes, clobber);
         }
     }
     source_status(paths, &source_name)
@@ -1280,8 +1324,9 @@ pub fn upgrade(
     for up in &pending {
         let siblings = siblings_of(&catalog, &up.cat.source);
         // Build the new version first; the old copy is preserved until this
-        // succeeds (transactional install).
-        let installed = install::install(paths, &up.cat, &up.new_commit, &siblings)?;
+        // succeeds (transactional install). An upgrade never force-overwrites a
+        // foreign target; that is for an explicit `learn --force`.
+        let installed = install::install(paths, &up.cat, &up.new_commit, &siblings, false)?;
         if up.new_name != up.old.name {
             // Rename: drop the old item (by its file registry) and re-key.
             install::uninstall(paths, &up.old)?;

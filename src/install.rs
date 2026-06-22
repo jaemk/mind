@@ -35,6 +35,7 @@ pub fn install(
     item: &CatalogItem,
     commit: &str,
     siblings: &HashSet<String>,
+    force: bool,
 ) -> Result<InstalledItem> {
     let kind = item.kind;
     let name = item.effective_name();
@@ -44,7 +45,9 @@ pub fn install(
 
     // 0. Resolve where this item will link, and refuse up front to overwrite any
     //    target that is not mind's own symlink (a user's file/dir/foreign link).
-    //    This runs before staging, so a clobber aborts touching nothing.
+    //    This runs before staging, so a clobber aborts touching nothing. With
+    //    `force`, the guard is skipped and step 3 overwrites the conflicting
+    //    target (LIFE-41).
     let link_rel = item
         .link_rel
         .clone()
@@ -55,8 +58,10 @@ pub fn install(
         .iter()
         .map(|home| home.join(&link_rel))
         .collect();
-    for link in &planned_links {
-        ensure_unoccupied(&store_root, link)?;
+    if !force {
+        for link in &planned_links {
+            ensure_unoccupied(&store_root, link)?;
+        }
     }
 
     // 1. Stage and validate the new copy. Live install is untouched until step 2.

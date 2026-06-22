@@ -65,8 +65,9 @@ fn dispatch(paths: &Paths, kind: ActionKind) -> Result<()> {
             };
             // `yes = true`: the TUI confirms in its own UI (the closure prompt
             // lands in the TUI shard); never block on the CLI's stdin [y/N]
-            // prompt from inside raw mode.
-            commands::learn(paths, &item_ref, false, true)?;
+            // prompt from inside raw mode. `Clobber::Error` surfaces a clobber as
+            // an error in the UI rather than reading a terminal prompt.
+            commands::learn(paths, &item_ref, false, true, commands::Clobber::Error)?;
         }
         // spec: TUI-20
         ActionKind::Forget { item_key } => commands::forget(paths, &item_key)?,

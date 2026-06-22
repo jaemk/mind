@@ -76,7 +76,7 @@ mind learn greet
 | `mind meld [<repo>] [--link-only] [--yes] [--as <prefix>] [--root <dir>] [--follow-branch <branch> | --pin-tag <tag> | --pin-ref <commit>] [--install-hook <cmd>] [--dangerously-skip-install-hook-check]` | clone and register a source (default `.`), then prompt to install its items (`--link-only` registers only; `--yes` installs without prompting). Re-melding an already-melded source installs any missing items, else shows each item's install state and commit |
 | `mind init-source [<path>] [--template]` | scaffold `mind.toml` + report references; `--template` rewrites bare refs as `{{ns:}}` (maintainer) |
 | `mind unmeld <name> [--forget]` (alias `detach`) | drop a source (optionally its items) |
-| `mind learn [--yes] <item>` | install a skill/agent/rule (glob installs many); a partial selection also pulls in the source siblings it references |
+| `mind learn [--yes] [--force] <item>` | install a skill/agent/rule (glob installs many); a partial selection also pulls in the source siblings it references. `--force` overwrites a conflicting non-mind link target (without it, a conflict prompts on a TTY) |
 | `mind forget <item>` (alias `unlearn`) | remove an installed item (glob removes many) |
 | `mind sync [--upgrade] [--dangerously-skip-install-hook-check]` | refresh every source (optionally upgrade after; flag allows unattended hook re-runs) |
 | `mind upgrade [--yes] [--dangerously-skip-install-hook-check] [item]` | upgrade installed items to their latest source version (re-runs install hooks on sources that advance) |

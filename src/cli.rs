@@ -106,6 +106,11 @@ pub enum Command {
         /// (also installs in a non-TTY context). Ignored with `--link-only`.
         #[arg(short = 'y', long)]
         yes: bool,
+
+        /// When installing, overwrite link targets that already exist and are not
+        /// managed by mind. Without it, a conflict prompts on a TTY.
+        #[arg(short = 'f', long)]
+        force: bool,
     },
 
     /// Scaffold a `mind.toml` and report the references among a source's items.
@@ -155,6 +160,12 @@ pub enum Command {
         /// Install the dependency closure without the interactive [y/N] prompt.
         #[arg(short = 'y', long = "yes")]
         yes: bool,
+
+        /// Overwrite a link target that already exists and is not managed by
+        /// mind (a user's file/dir/foreign link). Without it, a conflict prompts
+        /// on a TTY and otherwise refuses.
+        #[arg(short = 'f', long)]
+        force: bool,
     },
 
     /// Remove an installed item, or many via a glob.

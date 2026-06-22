@@ -152,6 +152,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             dangerously_skip_install_hook_check,
             link_only,
             yes,
+            force,
         } => {
             // CLI-25: no repo argument (or an explicit `.`/`./`) melds the
             // current directory. Resolve it to an absolute path so `parse_spec`
@@ -163,10 +164,17 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
                     .into_owned(),
                 Some(r) => r.to_string(),
             };
+            // CLI-34: `--force` overwrites a conflicting target; otherwise a
+            // conflict prompts on a TTY (Clobber::Prompt).
+            let clobber = if force {
+                commands::Clobber::Force
+            } else {
+                commands::Clobber::Prompt
+            };
             // CLI-12: re-melding an already-melded source is not an error; it
             // ensures the items are installed, else reports their status.
             if commands::is_melded(paths, &repo)? {
-                commands::remeld(paths, &repo, link_only, yes)
+                commands::remeld(paths, &repo, link_only, yes, clobber)
             } else {
                 commands::meld(
                     paths,
@@ -184,13 +192,28 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
                 if link_only {
                     Ok(())
                 } else {
-                    commands::install_melded_source(paths, &repo, yes)
+                    commands::install_melded_source(paths, &repo, yes, clobber)
                 }
             }
         }
         Command::InitSource { path, template } => commands::init_source(path.as_deref(), template),
         Command::Unmeld { name, forget } => commands::unmeld(paths, &name, forget),
-        Command::Learn { item, dry_run, yes } => commands::learn(paths, &item, dry_run, yes),
+        Command::Learn {
+            item,
+            dry_run,
+            yes,
+            force,
+        } => commands::learn(
+            paths,
+            &item,
+            dry_run,
+            yes,
+            if force {
+                commands::Clobber::Force
+            } else {
+                commands::Clobber::Prompt
+            },
+        ),
         Command::Forget { item } => commands::forget(paths, &item),
         Command::Sync {
             upgrade,

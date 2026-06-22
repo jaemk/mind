@@ -31,7 +31,9 @@ preserve the previous version until the new one is proven.
   the install fails with `LinkOccupied` and touches nothing. A target that is
   absent, or is a symlink into the store (mind's own, e.g. a reinstall), is
   free to write. This keeps `learn` from silently deleting a user's file at the
-  link path.
+  link path. The guard is overridable per install with force (`learn --force`,
+  CLI-35): when forced, the check is skipped and the conflicting target is
+  replaced.
 
 > Platform limitation (non-unix): links are realized as real symlinks only on
 > unix. On platforms without symlink support the install falls back to copying
