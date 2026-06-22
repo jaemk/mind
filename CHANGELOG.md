@@ -4,6 +4,16 @@ All notable changes to `mind` are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-06-22
+
+### Added
+
+- `learn --force` (`-f`) and `meld --force` overwrite a link target that already
+  exists and is not managed by mind (a user's file, directory, or foreign link).
+  Without `--force`, hitting such a conflict prompts on a TTY to overwrite that
+  target and otherwise refuses, as before. The overwrite stays transactional:
+  it is decided before staging, so a refusal changes nothing.
+
 ## [0.2.0] - 2026-06-22
 
 ### Added
@@ -95,5 +105,6 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovery, frontmatter descriptions, transactional install/upgrade/uninstall
   with a file registry, and a tag-driven release pipeline with a Homebrew tap.
 
+[0.3.0]: https://github.com/jaemk/mind/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jaemk/mind/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jaemk/mind/releases/tag/v0.1.0
