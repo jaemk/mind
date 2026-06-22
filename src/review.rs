@@ -27,18 +27,31 @@ pub struct Finding {
 }
 
 impl Finding {
-    fn hard(kind: &'static str, message: impl Into<String>) -> Self {
+    pub(crate) fn hard(kind: &'static str, message: impl Into<String>) -> Self {
         Finding {
             kind,
             message: message.into(),
         }
     }
 
-    fn advisory(kind: &'static str, message: impl Into<String>) -> Self {
+    pub(crate) fn advisory(kind: &'static str, message: impl Into<String>) -> Self {
         Finding {
             kind,
             message: message.into(),
         }
+    }
+}
+
+/// Print findings in the shared format: `error [kind]: message` for hard
+/// findings (to stderr) and `advisory [kind]: message` for advisory findings (to
+/// stdout). `review`, `review --policy`, and `init-source` all print through this
+/// so their findings read identically.
+pub(crate) fn print_findings(hard: &[Finding], advisory: &[Finding]) {
+    for f in hard {
+        eprintln!("error [{}]: {}", f.kind, f.message);
+    }
+    for f in advisory {
+        println!("advisory [{}]: {}", f.kind, f.message);
     }
 }
 
@@ -106,12 +119,7 @@ pub fn review_policy(path: &Path) -> crate::error::Result<ReviewResult> {
 pub fn dispatch_policy(path: &Path) -> crate::error::Result<()> {
     let result = review_policy(path)?;
 
-    for f in &result.hard {
-        eprintln!("error [{}]: {}", f.kind, f.message);
-    }
-    for f in &result.advisory {
-        println!("advisory [{}]: {}", f.kind, f.message);
-    }
+    print_findings(&result.hard, &result.advisory);
 
     if result.hard.is_empty() {
         if result.advisory.is_empty() {

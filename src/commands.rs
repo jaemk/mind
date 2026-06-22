@@ -513,10 +513,12 @@ pub fn init_source(dir: Option<&str>, template: bool) -> Result<()> {
     }
 
     // Reference graph (INIT-4): per item, the siblings it references via tokens
-    // and the ones it mentions in bare prose (templating candidates).
+    // (informational) and the ones it mentions in bare prose. The bare mentions
+    // are reported as `unguarded-reference` advisories in the same format as
+    // `review` (CLI-131), so review and init-source read identically.
     let siblings: std::collections::HashSet<String> =
         items.iter().map(|it| it.name.clone()).collect();
-    let mut any_bare = false;
+    let mut findings: Vec<crate::review::Finding> = Vec::new();
     for it in &items {
         let content = read_item_text(it);
         let tokens: Vec<String> = crate::namespace::referenced_names(&content)
@@ -527,21 +529,29 @@ pub fn init_source(dir: Option<&str>, template: bool) -> Result<()> {
             .into_iter()
             .filter(|n| n != &it.name)
             .collect();
-        if tokens.is_empty() && bare.is_empty() {
-            continue;
-        }
-        println!("  {} {} references:", it.kind, it.name);
         if !tokens.is_empty() {
-            println!("    tokenized: {}", tokens.join(", "));
+            println!(
+                "  {} {} -> {} (tokenized)",
+                it.kind,
+                it.name,
+                tokens.join(", ")
+            );
         }
         if !bare.is_empty() {
-            any_bare = true;
-            println!("    bare (templating candidates): {}", bare.join(", "));
+            findings.push(crate::review::Finding::advisory(
+                "unguarded-reference",
+                format!(
+                    "{}: references sibling(s) in prose: {}; prefixing may break them at runtime (use {{{{ns:name}}}})",
+                    it.key(),
+                    bare.join(", ")
+                ),
+            ));
         }
     }
-    if any_bare && !template {
+    crate::review::print_findings(&[], &findings);
+    if !findings.is_empty() && !template {
         println!(
-            "  run `mind init-source {dir} --template` to wrap the bare references as {{{{ns:name}}}}"
+            "run `mind init-source {dir} --template` to wrap the bare references as {{{{ns:name}}}}"
         );
     }
 
@@ -1701,13 +1711,8 @@ pub fn introspect(paths: &Paths, fix: bool, json: bool) -> Result<()> {
 pub fn review(paths: &Paths, target: &str, alias: Option<String>) -> Result<()> {
     let result = crate::review::review(paths, target, alias)?;
 
-    // Print hard findings first, then advisory.
-    for f in &result.hard {
-        eprintln!("error [{}]: {}", f.kind, f.message);
-    }
-    for f in &result.advisory {
-        println!("advisory [{}]: {}", f.kind, f.message);
-    }
+    // Print hard then advisory findings in the shared format.
+    crate::review::print_findings(&result.hard, &result.advisory);
 
     if result.hard.is_empty() {
         if result.advisory.is_empty() {

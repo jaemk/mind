@@ -43,8 +43,10 @@ namespacing.md.
 - `INIT-4` `init-source` reports the intra-source dependency graph: for each
   item, the siblings it already references via `{{ns:name}}` tokens (the DEP-1
   edges) and the siblings it mentions in bare prose (the unguarded references,
-  NS-21). The bare mentions are listed as templating candidates, since they break
-  under a prefix unless tokenized.
+  NS-21). The bare mentions are emitted as `unguarded-reference` advisory
+  findings in the same `advisory [kind]: message` format `review` uses (CLI-131),
+  so the two commands' findings read identically; they break under a prefix
+  unless tokenized.
 - `INIT-5` With `--template`, `init-source` rewrites each bare whole-word sibling
   mention in an item's text to its `{{ns:name}}` token (NS-10), writes the changed
   files, and reports each rewrite. Text already inside a `{{ns:}}` token is left

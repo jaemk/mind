@@ -419,8 +419,9 @@ fn init_source_reports_refs_scaffolds_toml_and_templates() {
         r.stdout
     );
     assert!(
-        r.stdout.contains("bare"),
-        "the bare `dev` mention must be flagged as a templating candidate: {}",
+        r.stdout.contains("advisory [unguarded-reference]"),
+        "the bare `dev` mention must be flagged as an unguarded-reference advisory, \
+         in the same format as `review`: {}",
         r.stdout
     );
     // INIT-3: a mind.toml is scaffolded when absent.
