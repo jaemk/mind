@@ -4,10 +4,25 @@ All notable changes to `mind` are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.2.0] - 2026-06-21
+## [0.2.0] - 2026-06-22
 
 ### Added
 
+- `meld` installs the source's items by default: it previews them and prompts,
+  installing the whole source (the interactive form of `learn '<source>#*'`).
+  `--link-only` registers without installing; `--yes` installs without
+  prompting. Re-melding an already-melded source installs any missing items, or
+  prints each item's install state and the commit it was installed from.
+- `meld` with no repo argument melds the current directory, so running it inside
+  a source repo registers and installs that source.
+- `init-source`: a maintainer command that scaffolds a `mind.toml`, reports the
+  references among a source's items, and (with `--template`) rewrites bare
+  sibling references into `{{ns:}}` tokens so the source stays resolvable under a
+  prefix.
+- Namespacing: a source `prefix`, `{{ns:}}` reference tokens that expand to the
+  effective (prefixed) name on install, and an unguarded-reference warning. When
+  a source declares `[source].prefix`, an interactive `meld` previews the
+  resulting names and asks whether to use that prefix, a different one, or none.
 - Install hooks: a source declares `[source].install` in `mind.toml`, or a user
   supplies `meld --install-hook <cmd>`, to build the tooling its items rely on.
   Because the hook is arbitrary code, `mind` discloses it and prompts with three
@@ -29,23 +44,27 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   order. `--dry-run` previews it; `--yes` skips the prompt.
 - Interactive TUI: `probe` with no flags opens a browser (Installed/Available
   tree, search, item preview) with full parity to the CLI verbs (install,
-  remove, meld, unmeld, sync, evolve). Falls back to the listing when piped or
-  with `--no-tui`/`--json`.
-- `review` verb: author-side source validation of a `mind.toml`, item kinds,
-  `{{ns:}}` references, and pin directive, without installing anything.
+  remove, meld, unmeld, sync, upgrade). Installing on a source or group installs
+  everything under it without naming each item. It is responsive to the terminal
+  size with Unicode styling, and a double Ctrl-C force-exits from any mode. Falls
+  back to the listing when piped or with `--no-tui`/`--json`.
+- `review` validates a source for publishing (its `mind.toml`, item kinds,
+  `{{ns:}}` references, and pin directive) without installing anything; with no
+  target it validates the current directory. `review` and `init-source` share
+  one finding-output format.
+- SSH remotes: meld a `git@host:owner/repo` spec, or set `ssh = true` in the
+  config so the `owner/repo` shorthand clones over SSH.
 - Version pinning: `meld --follow-branch`/`--pin-tag`/`--pin-ref` and a
   `[source]` pin directive, recorded per source and honored by `sync`.
 - Scan roots for monorepo/subtree sources: `[source].roots` and a repeatable
   `meld --root <dir>`.
-- Namespacing: a source `prefix`, `{{ns:}}` reference tokens that expand to the
-  effective (prefixed) name on install, and an unguarded-reference warning.
 - Curated super-source: `[discover].sources` melds nested sources recursively;
   `[discover]` supports per-kind include/exclude globs.
 - Multiple agent homes ("lobes"): `config show` and `config lobes add/list/remove`;
   `learn` links into every configured home.
 - `--json` output for `recall`, `probe`, and `introspect`; shell completions
   (`mind completions <shell>`) and a man page (`mind man`).
-- `curl | sh` install script and a Homebrew tap.
+- `curl | sh` install script (with explicit https) and a Homebrew tap.
 - Concurrency safety: a global advisory lock (`fd-lock`) and atomic registry and
   config writes via `Paths::atomic_write`.
 - Smaller additions: `learn` glob selection and `--dry-run`, `forget` glob,
@@ -58,6 +77,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Renamed the item-upgrade verb `evolve` to `upgrade` (and the `sync --evolve`
   flag to `sync --upgrade`), freeing `evolve` for binary self-update.
+- Re-melding an already-melded source is no longer an error: it installs missing
+  items or reports the source's item status instead.
+
+### Fixed
+
+- `evolve` detected `curl`/`wget` by spawning `command -v`, a shell builtin with
+  no executable, so it always reported "need curl or wget on PATH" even with curl
+  installed. The check now runs in a shell.
 
 ## [0.1.0] - 2026-06-17
 
