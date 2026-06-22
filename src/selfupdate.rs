@@ -308,10 +308,13 @@ fn fetch_to_file(url: &str, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Whether a command exists on PATH.
+/// Whether a command exists on PATH. `command -v` is a shell builtin, not an
+/// executable, so it must run inside a shell (`Command::new("command")` would
+/// just fail to spawn and report everything as missing).
 fn have(cmd: &str) -> bool {
-    Command::new("command")
-        .args(["-v", cmd])
+    Command::new("sh")
+        .arg("-c")
+        .arg(format!("command -v {cmd}"))
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
@@ -320,6 +323,18 @@ fn have(cmd: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn have_detects_present_and_absent_commands() {
+        // `sh` is on PATH on every supported platform; a builtin like `command`
+        // is not an executable, so the old `Command::new("command")` probe wrongly
+        // reported everything missing. This guards that regression.
+        assert!(have("sh"), "`sh` must be detected on PATH");
+        assert!(
+            !have("mind-no-such-binary-xyzzy"),
+            "a nonexistent command must not be detected"
+        );
+    }
 
     #[test]
     fn target_triple_maps_supported_platforms() {
