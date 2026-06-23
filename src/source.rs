@@ -26,6 +26,21 @@ pub enum Pin {
     Ref(String),
 }
 
+/// A recorded install hook for a source (HOOK-55).
+///
+/// Tracks the command and the commit at which it last ran. When `ran_at` is
+/// `None` the hook was recorded but skipped, so `upgrade` should re-offer it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordedHook {
+    /// The install hook command that was offered.
+    pub command: String,
+    /// The source commit this hook last RAN at; `None` if it was recorded but
+    /// skipped (so `upgrade` can re-offer it). Mirrors the old
+    /// `install_hook_commit == None` "recorded but never run" state.
+    #[serde(default)]
+    pub ran_at: Option<String>,
+}
+
 /// One melded source repo.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Source {
@@ -60,23 +75,45 @@ pub struct Source {
     /// None => use `[source].roots` from mind.toml, or the repo root.
     #[serde(default)]
     pub roots: Option<Vec<String>>,
-    /// The install hook command in effect for this source (HOOK-31), if any:
-    /// the maintainer's `[source].install` or a consumer `meld --install-hook`
-    /// override. `None` when the source has no hook. Persisted; lets `recall`/
-    /// `introspect` report a source has a hook and `upgrade` detect a changed
-    /// command.
+    /// The install hooks recorded for this source (HOOK-55). Supersedes the
+    /// legacy single `install_hook`/`install_hook_commit` pair, which is
+    /// migrated into this on load. Each entry records the command and the commit
+    /// it last ran at.
     #[serde(default)]
+    pub install_hooks: Vec<RecordedHook>,
+    /// Legacy: the install hook command in effect for this source (HOOK-31).
+    /// Load-only; migrated into `install_hooks` by `migrate_legacy_hook` and
+    /// not re-emitted once migrated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub install_hook: Option<String>,
-    /// The commit the install hook last ran at (HOOK-31), or `None` if the hook
-    /// is recorded but has not been run yet (the user skipped it). Lets `upgrade`
-    /// detect the source advanced past the last hook run and re-prompt (HOOK-11).
-    #[serde(default)]
+    /// Legacy: the commit the install hook last ran at (HOOK-31). Load-only;
+    /// migrated into `install_hooks` by `migrate_legacy_hook` and not
+    /// re-emitted once migrated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub install_hook_commit: Option<String>,
 }
 
 impl Source {
-    /// On-disk clone location: `<mind>/sources/<host>/<owner>/<repo>`.
+    /// Whether this is a local-path source (`host == "local"`).
+    pub fn is_local(&self) -> bool {
+        self.host == "local"
+    }
+
+    /// Whether this source is read live from its working tree rather than a clone
+    /// (CLI-27): a local source with no pin in effect. A pinned local source is
+    /// cloned (a snapshot at the pin), so pinning still works. `mind` never deletes
+    /// a linked source's directory (it is the user's working tree).
+    pub fn is_linked(&self) -> bool {
+        self.is_local() && self.pin == Pin::DefaultBranch
+    }
+
+    /// Where `mind` reads this source's content. A linked source is its working
+    /// tree (`url` is the path); any other source (remote, or a pinned local) lives
+    /// in the cloned sources tree.
     pub fn clone_dir(&self, paths: &Paths) -> PathBuf {
+        if self.is_linked() {
+            return PathBuf::from(&self.url);
+        }
         paths
             .sources_dir()
             .join(&self.host)
@@ -109,6 +146,36 @@ impl Source {
         if prefer_ssh && self.host != "local" && self.url.starts_with("https://") {
             self.url = self.ssh_url();
         }
+    }
+
+    /// Fold a legacy `install_hook`/`install_hook_commit` pair (from an older
+    /// sources.json) into `install_hooks`, then clear the legacy fields so they
+    /// are not re-emitted. A no-op when there is no legacy hook or it is already
+    /// represented. Idempotent.
+    pub fn migrate_legacy_hook(&mut self) {
+        if self.install_hooks.is_empty()
+            && let Some(cmd) = self.install_hook.take()
+            && !cmd.trim().is_empty()
+        {
+            let ran_at = self.install_hook_commit.take();
+            self.install_hooks.push(RecordedHook {
+                command: cmd,
+                ran_at,
+            });
+        }
+        // Clear legacy fields regardless so they stop being emitted.
+        self.install_hook = None;
+        self.install_hook_commit = None;
+    }
+
+    /// The recorded install hooks whose last-run commit differs from `current`
+    /// (i.e. never run, or the source has advanced) - the ones `upgrade` should
+    /// re-offer (HOOK-55). `current` is the source's current commit.
+    pub fn pending_install_hooks(&self, current: Option<&str>) -> Vec<&RecordedHook> {
+        self.install_hooks
+            .iter()
+            .filter(|h| h.ran_at.as_deref() != current)
+            .collect()
     }
 }
 
@@ -189,6 +256,7 @@ fn make_source(host: &str, owner: &str, repo: &str, url: String) -> Source {
         alias: None,
         pin: Pin::default(),
         roots: None,
+        install_hooks: Vec::new(),
         install_hook: None,
         install_hook_commit: None,
     }
@@ -203,11 +271,19 @@ pub struct Registry {
 
 impl Registry {
     /// Load the registry, returning an empty one if the file does not exist.
+    ///
+    /// Migrates any legacy `install_hook`/`install_hook_commit` pairs into
+    /// `install_hooks` transparently on load (HOOK-55).
     pub fn load(paths: &Paths) -> Result<Self> {
         let file = paths.sources_file();
         match std::fs::read(&file) {
             Ok(bytes) => {
-                serde_json::from_slice(&bytes).map_err(|e| MindError::json("sources.json", e))
+                let mut reg: Registry = serde_json::from_slice(&bytes)
+                    .map_err(|e| MindError::json("sources.json", e))?;
+                for src in &mut reg.sources {
+                    src.migrate_legacy_hook();
+                }
+                Ok(reg)
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Registry::default()),
             Err(e) => Err(MindError::io(&file, e)),
@@ -390,8 +466,8 @@ mod tests {
 
     #[test]
     fn install_hook_fields_round_trip_and_default_absent() {
-        // spec: HOOK-31
-        // Older sources.json without the fields => both None (serde default).
+        // spec: HOOK-31, HOOK-55
+        // Older sources.json without any hook fields => legacy fields None, install_hooks empty.
         let src_json = r#"{
             "name":"local/a/b","url":"/a/b","host":"local","owner":"a","repo":"b"
         }"#;
@@ -404,22 +480,257 @@ mod tests {
             src.install_hook_commit, None,
             "absent install_hook_commit should default to None"
         );
+        assert!(
+            src.install_hooks.is_empty(),
+            "absent install_hooks should default to empty"
+        );
 
-        // A source carrying both fields round-trips losslessly.
+        // A source carrying the legacy fields can be deserialized (load-only path).
+        // After calling migrate_legacy_hook the pair is folded into install_hooks
+        // and the legacy fields are cleared (HOOK-55 migration).
         let mut s = parse_spec("acme/tools").unwrap();
         s.install_hook = Some("make install".into());
         s.install_hook_commit = Some("abc1234".into());
+        s.migrate_legacy_hook();
+        assert_eq!(s.install_hook, None, "legacy field cleared after migration");
+        assert_eq!(
+            s.install_hook_commit, None,
+            "legacy commit field cleared after migration"
+        );
+        assert_eq!(s.install_hooks.len(), 1, "hook migrated into install_hooks");
+        assert_eq!(s.install_hooks[0].command, "make install");
+        assert_eq!(s.install_hooks[0].ran_at.as_deref(), Some("abc1234"));
+    }
+
+    // --- HOOK-55 tests ---
+
+    #[test]
+    fn recorded_hook_serde_round_trip_with_ran_at_some() {
+        // spec: HOOK-55
+        let hook = RecordedHook {
+            command: "make install".into(),
+            ran_at: Some("deadbeef".into()),
+        };
+        let json = serde_json::to_string(&hook).unwrap();
+        let back: RecordedHook = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            back, hook,
+            "RecordedHook with ran_at=Some did not round-trip"
+        );
+    }
+
+    #[test]
+    fn recorded_hook_serde_round_trip_with_ran_at_none() {
+        // spec: HOOK-55
+        let hook = RecordedHook {
+            command: "make install".into(),
+            ran_at: None,
+        };
+        let json = serde_json::to_string(&hook).unwrap();
+        // ran_at=None should be absent (default) in the emitted JSON.
+        let back: RecordedHook = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            back, hook,
+            "RecordedHook with ran_at=None did not round-trip"
+        );
+    }
+
+    #[test]
+    fn install_hooks_vec_round_trips_on_source() {
+        // spec: HOOK-55
+        let mut s = parse_spec("acme/tools").unwrap();
+        s.install_hooks = vec![
+            RecordedHook {
+                command: "make setup".into(),
+                ran_at: Some("aaa".into()),
+            },
+            RecordedHook {
+                command: "make install".into(),
+                ran_at: None,
+            },
+        ];
         let json = serde_json::to_string(&s).unwrap();
         let back: Source = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.install_hooks.len(), 2);
+        assert_eq!(back.install_hooks[0].command, "make setup");
+        assert_eq!(back.install_hooks[0].ran_at.as_deref(), Some("aaa"));
+        assert_eq!(back.install_hooks[1].command, "make install");
+        assert_eq!(back.install_hooks[1].ran_at, None);
+    }
+
+    #[test]
+    fn migrate_legacy_hook_with_commit() {
+        // spec: HOOK-55
+        // A legacy entry (install_hook + install_hook_commit) migrates into a
+        // single RecordedHook with the right command and ran_at.
+        let legacy_json = r#"{
+            "name":"local/a/b","url":"/a/b","host":"local","owner":"a","repo":"b",
+            "install_hook":"./setup.sh",
+            "install_hook_commit":"cafebabe"
+        }"#;
+        let mut src: Source = serde_json::from_str(legacy_json).unwrap();
+        // Legacy fields are present before migration.
+        assert_eq!(src.install_hook.as_deref(), Some("./setup.sh"));
+        assert_eq!(src.install_hook_commit.as_deref(), Some("cafebabe"));
+        assert!(src.install_hooks.is_empty());
+
+        src.migrate_legacy_hook();
+
+        assert_eq!(src.install_hooks.len(), 1, "hook should have been migrated");
+        assert_eq!(src.install_hooks[0].command, "./setup.sh");
+        assert_eq!(src.install_hooks[0].ran_at.as_deref(), Some("cafebabe"));
+        assert_eq!(src.install_hook, None, "legacy field should be cleared");
         assert_eq!(
-            back.install_hook.as_deref(),
-            Some("make install"),
-            "install_hook did not round-trip"
+            src.install_hook_commit, None,
+            "legacy commit should be cleared"
+        );
+
+        // After migration the legacy fields must not appear in serialized JSON.
+        let json = serde_json::to_string(&src).unwrap();
+        assert!(
+            !json.contains("install_hook_commit"),
+            "legacy commit must not re-emit"
+        );
+        // install_hook key should not appear (it's None, skip_serializing_if applies).
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(
+            v.get("install_hook").is_none(),
+            "install_hook must not re-emit"
+        );
+    }
+
+    #[test]
+    fn migrate_legacy_hook_without_commit() {
+        // spec: HOOK-55
+        // A legacy entry with only install_hook (skipped run, no commit) migrates
+        // with ran_at=None.
+        let legacy_json = r#"{
+            "name":"local/a/b","url":"/a/b","host":"local","owner":"a","repo":"b",
+            "install_hook":"./setup.sh"
+        }"#;
+        let mut src: Source = serde_json::from_str(legacy_json).unwrap();
+        src.migrate_legacy_hook();
+
+        assert_eq!(src.install_hooks.len(), 1);
+        assert_eq!(src.install_hooks[0].command, "./setup.sh");
+        assert_eq!(
+            src.install_hooks[0].ran_at, None,
+            "skipped hook: ran_at should be None"
+        );
+        assert_eq!(src.install_hook, None);
+    }
+
+    #[test]
+    fn migrate_legacy_hook_is_idempotent() {
+        // spec: HOOK-55
+        // Calling migrate_legacy_hook twice does not duplicate entries.
+        let legacy_json = r#"{
+            "name":"local/a/b","url":"/a/b","host":"local","owner":"a","repo":"b",
+            "install_hook":"./setup.sh",
+            "install_hook_commit":"deadbeef"
+        }"#;
+        let mut src: Source = serde_json::from_str(legacy_json).unwrap();
+        src.migrate_legacy_hook();
+        src.migrate_legacy_hook();
+        assert_eq!(
+            src.install_hooks.len(),
+            1,
+            "idempotent: should not duplicate"
+        );
+        assert_eq!(src.install_hooks[0].command, "./setup.sh");
+    }
+
+    #[test]
+    fn migrate_legacy_hook_noop_when_install_hooks_already_populated() {
+        // spec: HOOK-55
+        // When install_hooks already has entries, migration must not add more,
+        // even if legacy fields are also present.
+        let mut src = parse_spec("acme/tools").unwrap();
+        src.install_hooks = vec![RecordedHook {
+            command: "pre-existing".into(),
+            ran_at: Some("aaa".into()),
+        }];
+        src.install_hook = Some("./old-hook.sh".into());
+        src.install_hook_commit = Some("bbb".into());
+
+        src.migrate_legacy_hook();
+
+        assert_eq!(src.install_hooks.len(), 1, "must not add a second hook");
+        assert_eq!(src.install_hooks[0].command, "pre-existing");
+        assert_eq!(
+            src.install_hook, None,
+            "legacy field cleared even when skipped"
         );
         assert_eq!(
-            back.install_hook_commit.as_deref(),
-            Some("abc1234"),
-            "install_hook_commit did not round-trip"
+            src.install_hook_commit, None,
+            "legacy commit cleared even when skipped"
         );
+    }
+
+    #[test]
+    fn absent_install_hooks_defaults_to_empty() {
+        // spec: HOOK-55
+        // A sources.json entry with no hook fields at all deserializes with an
+        // empty install_hooks vec (back-compat).
+        let src_json = r#"{
+            "name":"local/a/b","url":"/a/b","host":"local","owner":"a","repo":"b"
+        }"#;
+        let src: Source = serde_json::from_str(src_json).unwrap();
+        assert!(
+            src.install_hooks.is_empty(),
+            "install_hooks should default to empty"
+        );
+    }
+
+    #[test]
+    fn pending_install_hooks_returns_unrun_and_advanced() {
+        // spec: HOOK-55
+        // pending_install_hooks returns entries whose ran_at differs from current.
+        let mut src = parse_spec("acme/tools").unwrap();
+        src.install_hooks = vec![
+            // Never run (ran_at=None) -> pending regardless of current.
+            RecordedHook {
+                command: "hook-a".into(),
+                ran_at: None,
+            },
+            // Ran at "aaa", current is "bbb" -> advanced -> pending.
+            RecordedHook {
+                command: "hook-b".into(),
+                ran_at: Some("aaa".into()),
+            },
+            // Ran at "bbb", current is "bbb" -> up-to-date -> NOT pending.
+            RecordedHook {
+                command: "hook-c".into(),
+                ran_at: Some("bbb".into()),
+            },
+        ];
+
+        let pending = src.pending_install_hooks(Some("bbb"));
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0].command, "hook-a");
+        assert_eq!(pending[1].command, "hook-b");
+    }
+
+    #[test]
+    fn pending_install_hooks_all_pending_when_no_current_commit() {
+        // spec: HOOK-55
+        // When current is None (never synced), all hooks with ran_at=Some(_) are
+        // pending, and hooks with ran_at=None are also pending.
+        let mut src = parse_spec("acme/tools").unwrap();
+        src.install_hooks = vec![
+            RecordedHook {
+                command: "hook-a".into(),
+                ran_at: None,
+            },
+            RecordedHook {
+                command: "hook-b".into(),
+                ran_at: Some("aaa".into()),
+            },
+        ];
+        let pending = src.pending_install_hooks(None);
+        // hook-a: ran_at=None == current=None -> NOT pending.
+        // hook-b: ran_at=Some("aaa") != current=None -> pending.
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].command, "hook-b");
     }
 }

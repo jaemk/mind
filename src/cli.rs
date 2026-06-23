@@ -49,8 +49,17 @@ pub struct Cli {
 pub enum Command {
     /// Meld with a source repo so its items become available.
     Meld {
-        /// Repo spec: `owner/repo`, `github:owner/repo`, or a full git URL.
-        /// Defaults to the current directory (`.`) when omitted (CLI-25).
+        /// Repo spec to meld. Supported forms:
+        ///
+        /// - Local path:   `/path/to/repo`  or  `file:///path/to/repo`  or  `.`
+        ///
+        /// - GitHub HTTPS: `owner/repo`  or  `https://github.com/owner/repo`
+        ///
+        /// - GitHub SSH:   `git@github.com:owner/repo`
+        ///
+        /// - Any git URL:  `https://example.com/repo.git`
+        ///
+        /// Defaults to the current directory (`.`) when omitted.
         repo: Option<String>,
 
         /// Namespace every item from this source under this prefix
@@ -59,8 +68,8 @@ pub enum Command {
         alias: Option<String>,
 
         /// Track a named branch (overrides the repo's [source] pin directive).
-        /// At most one of --follow-branch, --pin-tag, --pin-ref may be given
-        /// (CLI-17: more than one is a `ConflictingPin` error).
+        /// At most one of --follow-branch, --pin-tag, --pin-ref may be given;
+        /// more than one is an error.
         #[arg(long, value_name = "BRANCH")]
         follow_branch: Option<String>,
 
@@ -76,7 +85,7 @@ pub enum Command {
 
         /// Set the source's convention-scan roots to one or more repo-root-relative
         /// directories (repeatable). Overrides `[source].roots` in mind.toml.
-        /// Persisted on the source and used by later scans and sync (CLI-16).
+        /// Persisted on the source and used by later scans and sync.
         #[arg(long = "root", value_name = "DIR")]
         roots: Vec<String>,
 
@@ -135,9 +144,27 @@ pub enum Command {
         /// The source name (see `mind recall --sources`).
         name: String,
 
-        /// Also uninstall every item installed from this source.
+        /// Remove only the source, leaving its installed items in place (the
+        /// opt-out from the default item removal, mirroring `meld --link-only`).
         #[arg(long)]
-        forget: bool,
+        unlink_only: bool,
+
+        /// Remove the source's items without the confirmation prompt shown when
+        /// more than one item would be removed.
+        #[arg(short = 'y', long)]
+        yes: bool,
+
+        /// Supply or override the source's uninstall hook: a shell command run
+        /// in the clone before the source is removed. Replaces the source's
+        /// declared uninstall hook(s); the override is shown loudly in the prompt.
+        #[arg(long, value_name = "CMD")]
+        uninstall_hook: Option<String>,
+
+        /// Run uninstall hooks without the safety prompt. This executes
+        /// arbitrary code from the source; only use it for a source you trust.
+        /// Without this flag, a non-TTY run skips the hook and prints a note.
+        #[arg(long)]
+        dangerously_skip_install_hook_check: bool,
     },
 
     /// Install items into every configured agent home (default ~/.claude).
@@ -294,7 +321,7 @@ pub enum Command {
     /// both `<target>` and `--policy` is an error.
     Review {
         /// The source to validate: a local path, melded-source selector, or repo
-        /// spec. Defaults to the current directory (`.`) when omitted (CLI-26).
+        /// spec. Defaults to the current directory (`.`) when omitted.
         /// Cannot be used with `--policy`.
         #[arg(conflicts_with = "policy")]
         target: Option<String>,

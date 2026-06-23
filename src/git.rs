@@ -2,9 +2,49 @@
 
 use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::error::{MindError, Result};
 use crate::source::Pin;
+
+/// When set, every `git` child runs non-interactively: it never prompts on the
+/// controlling terminal for credentials, an SSH passphrase, or a host-key
+/// confirmation. The TUI turns this on while it owns the terminal so an
+/// auth-required remote fails fast with an error instead of hanging the UI on a
+/// hidden prompt; the suspended interactive meld (term::with_suspended) turns it
+/// back off so a real passphrase/host-key prompt works on the normal terminal.
+static NONINTERACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Set the process-wide non-interactive git mode (see [`NONINTERACTIVE`]).
+pub fn set_noninteractive(on: bool) {
+    NONINTERACTIVE.store(on, Ordering::Relaxed);
+}
+
+/// The env pairs that make a `git` child non-interactive. `GIT_TERMINAL_PROMPT=0`
+/// stops git's own credential prompts; wrapping the ssh command in `BatchMode=yes`
+/// stops ssh's passphrase and host-key prompts (`base_ssh` preserves a user's
+/// custom ssh invocation). A short `ConnectTimeout` avoids a long network hang.
+// spec: TUI-45
+fn noninteractive_env_pairs(base_ssh: &str) -> [(&'static str, String); 2] {
+    [
+        ("GIT_TERMINAL_PROMPT", "0".to_string()),
+        (
+            "GIT_SSH_COMMAND",
+            format!("{base_ssh} -o BatchMode=yes -o ConnectTimeout=10"),
+        ),
+    ]
+}
+
+/// Apply the non-interactive environment to a `git` child when the mode is on.
+fn apply_noninteractive_env(cmd: &mut Command) {
+    if !NONINTERACTIVE.load(Ordering::Relaxed) {
+        return;
+    }
+    let base = std::env::var("GIT_SSH_COMMAND").unwrap_or_else(|_| "ssh".to_string());
+    for (k, v) in noninteractive_env_pairs(&base) {
+        cmd.env(k, v);
+    }
+}
 
 /// Run `git <args>` in `cwd`, returning trimmed stdout on success.
 fn run(url: &str, cwd: Option<&Path>, args: &[&str]) -> Result<String> {
@@ -13,6 +53,7 @@ fn run(url: &str, cwd: Option<&Path>, args: &[&str]) -> Result<String> {
         cmd.current_dir(dir);
     }
     cmd.args(args);
+    apply_noninteractive_env(&mut cmd);
 
     let output = match cmd.output() {
         Ok(o) => o,
@@ -151,6 +192,43 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    #[test]
+    fn noninteractive_env_disables_git_and_ssh_prompts() {
+        // spec: TUI-45 - the non-interactive env makes git fail fast instead of
+        // prompting: git's own prompts are off and ssh runs in BatchMode (no
+        // passphrase/host-key prompt). A custom base ssh command is preserved.
+        let pairs = noninteractive_env_pairs("ssh");
+        let map: std::collections::HashMap<_, _> = pairs.iter().cloned().collect();
+        assert_eq!(
+            map.get("GIT_TERMINAL_PROMPT").map(String::as_str),
+            Some("0")
+        );
+        let ssh = map.get("GIT_SSH_COMMAND").expect("GIT_SSH_COMMAND set");
+        assert!(
+            ssh.contains("BatchMode=yes"),
+            "ssh must be BatchMode: {ssh}"
+        );
+        assert!(ssh.starts_with("ssh "), "base ssh command preserved: {ssh}");
+
+        // A user's custom ssh command is kept as the base.
+        let custom = noninteractive_env_pairs("ssh -i /my/key");
+        let ssh2 = &custom[1].1;
+        assert!(
+            ssh2.starts_with("ssh -i /my/key ") && ssh2.contains("BatchMode=yes"),
+            "custom base ssh command must be preserved and wrapped: {ssh2}"
+        );
+    }
+
+    #[test]
+    fn set_noninteractive_toggles_the_flag() {
+        // spec: TUI-45 - the global flag the TUI flips on (while it owns the
+        // terminal) and off (during a suspended interactive meld) round-trips.
+        set_noninteractive(true);
+        assert!(NONINTERACTIVE.load(Ordering::Relaxed));
+        set_noninteractive(false);
+        assert!(!NONINTERACTIVE.load(Ordering::Relaxed));
+    }
 
     /// Create a temp directory with a unique name for test isolation.
     fn tmpdir(tag: &str) -> PathBuf {

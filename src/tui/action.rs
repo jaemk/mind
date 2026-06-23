@@ -30,13 +30,39 @@ static CAPTURE_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32:
 /// summary in the status bar instead (TUI-24).
 // spec: TUI-20 TUI-21 TUI-22 TUI-23 TUI-24 TUI-25 STO-40 STO-41
 pub fn execute(paths: &Paths, action: PendingAction) -> Result<(Snapshot, String)> {
+    execute_inner(paths, action, true)
+}
+
+/// Like `execute` but WITHOUT capturing stdout: the verb prints to, and reads
+/// from, the real terminal. The caller must have suspended the TUI first
+/// (`term::with_suspended`) so the verb's interactive prompts (a `meld`'s hook
+/// and install confirmation) behave exactly as they do from the CLI (TUI-44).
+// spec: TUI-44 TUI-30 TUI-25
+pub fn execute_interactive(paths: &Paths, action: PendingAction) -> Result<(Snapshot, String)> {
+    execute_inner(paths, action, false)
+}
+
+/// Shared body of `execute` / `execute_interactive`. With `capture` true the
+/// verb's stdout is redirected to a buffer (so stray output cannot corrupt the
+/// alt-screen) and reduced to a one-line summary; with `capture` false the verb
+/// runs on the real terminal and the summary is empty.
+fn execute_inner(
+    paths: &Paths,
+    action: PendingAction,
+    capture: bool,
+) -> Result<(Snapshot, String)> {
     // Acquire the exclusive lock for the duration of the action (TUI-25).
     // spec: STO-40 STO-41 TUI-25
     let mut lock = lock::open(paths)?;
     let _guard = lock.write()?;
 
-    // Run the verb with stdout captured so nothing leaks onto the alt-screen.
-    let (result, captured) = with_captured_stdout(|| dispatch(paths, action.kind));
+    let (result, captured) = if capture {
+        // Run the verb with stdout captured so nothing leaks onto the alt-screen.
+        with_captured_stdout(|| dispatch(paths, action.kind))
+    } else {
+        // Interactive: the TUI is suspended, so let the verb own the terminal.
+        (dispatch(paths, action.kind), String::new())
+    };
     result?;
 
     // Drop the exclusive lock BEFORE calling data::load. data::load acquires
@@ -78,7 +104,11 @@ fn dispatch(paths: &Paths, kind: ActionKind) -> Result<()> {
             commands::meld(paths, &spec, None, vec![], None, None, None, None, false)?
         }
         // spec: TUI-21
-        ActionKind::Unmeld { name, forget } => commands::unmeld(paths, &name, forget)?,
+        // The TUI's `forget` toggle maps to the inverted `--unlink-only`; `yes =
+        // true` so it never reads a CLI prompt from inside raw mode.
+        ActionKind::Unmeld { name, forget } => {
+            commands::unmeld(paths, &name, !forget, true, false, None)?
+        }
         // spec: TUI-22
         ActionKind::Sync => commands::sync(paths, false, false)?,
         // spec: TUI-22 - `yes: true` so it applies without prompting on stdin.
@@ -439,6 +469,40 @@ mod tests {
             "newly melded source should appear in snapshot: {:?}",
             snap.source_names
         );
+    }
+
+    #[test]
+    fn execute_interactive_melds_without_capturing_stdout() {
+        // spec: TUI-44 - the interactive executor runs the verb on the real
+        // terminal (no stdout capture) and still acquires the lock and reloads the
+        // snapshot. In a non-TTY test the meld takes the non-interactive path (no
+        // install prompt), so this exercises the uncaptured code path safely.
+        let (paths, base) = temp_paths();
+        crate::paths::mkdir_p(&paths.mind_home).unwrap();
+        let src = make_source_repo(&base);
+        let spec = src.to_str().unwrap().to_string();
+
+        let action = PendingAction {
+            kind: ActionKind::Meld { spec: spec.clone() },
+            description: format!("Meld {spec}?"),
+            dep_tree: None,
+        };
+        let result = execute_interactive(&paths, action);
+        assert!(
+            result.is_ok(),
+            "interactive meld should succeed: {:?}",
+            result.err()
+        );
+        let (snap, msg) = result.unwrap();
+        assert!(
+            snap.source_names
+                .iter()
+                .any(|n| n.contains("source-repo-action")),
+            "interactively melded source must appear in the reloaded snapshot: {:?}",
+            snap.source_names
+        );
+        // Uncaptured: there is no captured summary line.
+        assert_eq!(msg, "", "interactive execute captures no stdout summary");
     }
 
     /// Register a melded source and record one installed item attributed to it,

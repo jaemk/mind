@@ -415,43 +415,68 @@ fn item_matches_search_available(item: &crate::tui::data::SnapshotAvailable, sea
     catalog::matches_query(&fake, search)
 }
 
-/// Flatten the tree into a displayable list, respecting expansion state.
-/// A group header is always shown. A node's children are shown only if the
-/// node's ID is in `expanded`.
-// spec: TUI-10 TUI-11
-pub fn flatten_tree(nodes: &[Node], expanded: &HashSet<String>) -> Vec<FlatNode> {
-    let mut out = Vec::new();
-    for node in nodes {
-        flatten_node(node, 0, expanded, &mut out);
-    }
-    out
-}
-
-fn flatten_node(node: &Node, depth: usize, expanded: &HashSet<String>, out: &mut Vec<FlatNode>) {
-    // Structural nodes (group headers, source nodes, kind-buckets) are
-    // auto-expanded so items are immediately visible. Item-detail nodes
-    // (InstalledItem / AvailableItem children) require explicit expansion:
-    // the caller adds their ID to the `expanded` set to reveal them.
-    let is_auto_expanded = matches!(
-        node.node,
+/// Returns true for structural nodes that are auto-expanded by default
+/// (InstalledGroup, AvailableGroup, Source, KindBucket). These nodes use the
+/// `collapsed` set to opt-out of expansion, rather than requiring an explicit
+/// `expanded` entry to opt-in.
+// spec: TUI-11
+pub fn is_auto_expanded(node: &TreeNode) -> bool {
+    matches!(
+        node,
         TreeNode::InstalledGroup
             | TreeNode::AvailableGroup
             | TreeNode::Source(_)
             | TreeNode::KindBucket { .. }
-    );
-    let is_expanded = is_auto_expanded || expanded.contains(&node.id);
+    )
+}
+
+/// Flatten the tree into a displayable list, respecting expansion state.
+/// A group header is always shown. A node's children are shown only if the
+/// node is expanded. Auto-expanded nodes (Source, KindBucket, group headers)
+/// use the `collapsed` set to track user-initiated collapses; non-auto nodes
+/// (InstalledItem, AvailableItem, SuggestedSource children) require explicit
+/// membership in `expanded` to show children.
+// spec: TUI-10 TUI-11
+pub fn flatten_tree(
+    nodes: &[Node],
+    expanded: &HashSet<String>,
+    collapsed: &HashSet<String>,
+) -> Vec<FlatNode> {
+    let mut out = Vec::new();
+    for node in nodes {
+        flatten_node(node, 0, expanded, collapsed, &mut out);
+    }
+    out
+}
+
+fn flatten_node(
+    node: &Node,
+    depth: usize,
+    expanded: &HashSet<String>,
+    collapsed: &HashSet<String>,
+    out: &mut Vec<FlatNode>,
+) {
+    // Auto-expanded nodes (group headers, source nodes, kind-buckets) are
+    // visible by default and collapsed only when their ID is in `collapsed`.
+    // Item-detail nodes (InstalledItem / AvailableItem) require explicit
+    // membership in `expanded` to reveal children.
+    let is_exp = if is_auto_expanded(&node.node) {
+        !collapsed.contains(&node.id)
+    } else {
+        expanded.contains(&node.id)
+    };
     let expandable = !node.children.is_empty();
     out.push(FlatNode {
         id: node.id.clone(),
         label: node.label.clone(),
         depth,
         expandable,
-        expanded: is_expanded,
+        expanded: is_exp,
         node: node.node.clone(),
     });
-    if is_expanded {
+    if is_exp {
         for child in &node.children {
-            flatten_node(child, depth + 1, expanded, out);
+            flatten_node(child, depth + 1, expanded, collapsed, out);
         }
     }
 }
@@ -546,7 +571,7 @@ mod tests {
         );
         let nodes = build_tree(&snap, "", None, None, false, false);
         // Flatten and look for InstalledItem
-        let flat = flatten_tree(&nodes, &HashSet::new());
+        let flat = flatten_tree(&nodes, &HashSet::new(), &HashSet::new());
         // Group headers are always expanded, so items appear even without expansion
         let has_review = flat
             .iter()
@@ -566,7 +591,7 @@ mod tests {
         let also_avail = make_available("skill:review", "review", "src/a", ItemKind::Skill);
         let snap = snap_with(vec![installed], vec![also_avail]);
         let nodes = build_tree(&snap, "", None, None, false, false);
-        let flat = flatten_tree(&nodes, &HashSet::new());
+        let flat = flatten_tree(&nodes, &HashSet::new(), &HashSet::new());
         // Should not appear under Available
         let avail_review = flat
             .iter()
@@ -589,7 +614,7 @@ mod tests {
         );
         // Search for "dev" only
         let nodes = build_tree(&snap, "dev", None, None, false, false);
-        let flat = flatten_tree(&nodes, &HashSet::new());
+        let flat = flatten_tree(&nodes, &HashSet::new(), &HashSet::new());
         let has_dev = flat
             .iter()
             .any(|n| matches!(&n.node, TreeNode::AvailableItem(i) if i.name == "dev"));
@@ -613,7 +638,7 @@ mod tests {
             )],
         );
         let nodes = build_tree(&snap, "review", None, None, false, false);
-        let flat = flatten_tree(&nodes, &HashSet::new());
+        let flat = flatten_tree(&nodes, &HashSet::new(), &HashSet::new());
         let found = flat
             .iter()
             .any(|n| matches!(&n.node, TreeNode::AvailableItem(i) if i.name == "Review"));
@@ -627,7 +652,7 @@ mod tests {
         item.description = Some("automated code formatter".to_string());
         let snap = snap_with(vec![], vec![item]);
         let nodes = build_tree(&snap, "formatter", None, None, false, false);
-        let flat = flatten_tree(&nodes, &HashSet::new());
+        let flat = flatten_tree(&nodes, &HashSet::new(), &HashSet::new());
         let found = flat
             .iter()
             .any(|n| matches!(&n.node, TreeNode::AvailableItem(i) if i.name == "x"));
@@ -645,7 +670,7 @@ mod tests {
             ],
         );
         let nodes = build_tree(&snap, "", Some(ItemKind::Skill), None, false, false);
-        let flat = flatten_tree(&nodes, &HashSet::new());
+        let flat = flatten_tree(&nodes, &HashSet::new(), &HashSet::new());
         let has_skill = flat
             .iter()
             .any(|n| matches!(&n.node, TreeNode::AvailableItem(i) if i.name == "s"));
@@ -672,7 +697,7 @@ mod tests {
             vec![],
         );
         let nodes = build_tree(&snap, "", None, None, false, false);
-        let flat = flatten_tree(&nodes, &HashSet::new());
+        let flat = flatten_tree(&nodes, &HashSet::new(), &HashSet::new());
         let group_visible = flat
             .iter()
             .any(|n| matches!(&n.node, TreeNode::InstalledGroup));
@@ -704,7 +729,7 @@ mod tests {
             ],
         );
         let nodes = build_tree(&snap, "re", Some(ItemKind::Skill), None, false, false);
-        let flat = flatten_tree(&nodes, &HashSet::new());
+        let flat = flatten_tree(&nodes, &HashSet::new(), &HashSet::new());
         let names: Vec<&str> = flat
             .iter()
             .filter_map(|n| match &n.node {
@@ -740,7 +765,7 @@ mod tests {
             ],
         );
         let nodes = build_tree(&snap, "review", None, Some("a/agents"), false, false);
-        let flat = flatten_tree(&nodes, &HashSet::new());
+        let flat = flatten_tree(&nodes, &HashSet::new(), &HashSet::new());
         // Only the a/agents review survives both filters.
         let from_a = flat
             .iter()
@@ -778,9 +803,11 @@ mod tests {
         let filtered = flatten_tree(
             &build_tree(&snap, "review", None, None, false, false),
             &HashSet::new(),
+            &HashSet::new(),
         );
         let restored = flatten_tree(
             &build_tree(&snap, "", None, None, false, false),
+            &HashSet::new(),
             &HashSet::new(),
         );
 
@@ -829,7 +856,7 @@ mod tests {
             false,
             false,
         );
-        let flat = flatten_tree(&nodes, &HashSet::new());
+        let flat = flatten_tree(&nodes, &HashSet::new(), &HashSet::new());
         let has_skill = flat.iter().any(|n| {
             matches!(&n.node, TreeNode::AvailableItem(i)
             if i.name == "fmt" && i.kind == ItemKind::Skill)
@@ -859,7 +886,7 @@ mod tests {
         let from_b = make_available("skill:review", "review", "b/agents", ItemKind::Skill);
         let snap = snap_with(vec![], vec![from_a, from_b]); // nothing installed
         let nodes = build_tree(&snap, "", None, None, false, false);
-        let flat = flatten_tree(&nodes, &HashSet::new());
+        let flat = flatten_tree(&nodes, &HashSet::new(), &HashSet::new());
         let review_count = flat
             .iter()
             .filter(|n| matches!(&n.node, TreeNode::AvailableItem(i) if i.name == "review"))
@@ -888,7 +915,7 @@ mod tests {
         // An empty suggestions list must yield no SuggestedSource nodes.
         let snap = snap_with(vec![], vec![]); // no suggestions
         let nodes = build_tree(&snap, "", None, None, false, false);
-        let flat = flatten_tree(&nodes, &HashSet::new());
+        let flat = flatten_tree(&nodes, &HashSet::new(), &HashSet::new());
         let any_suggested = flat
             .iter()
             .any(|n| matches!(&n.node, TreeNode::SuggestedSource(_)));
@@ -910,7 +937,7 @@ mod tests {
         let snap = snap_with(vec![item, other], vec![]);
         // "formatter" appears only in the first item's description.
         let nodes = build_tree(&snap, "formatter", None, None, false, false);
-        let flat = flatten_tree(&nodes, &HashSet::new());
+        let flat = flatten_tree(&nodes, &HashSet::new(), &HashSet::new());
 
         let has_fmt = flat
             .iter()
@@ -939,7 +966,7 @@ mod tests {
         let also_from_b = make_available("skill:review", "review", "src/b", ItemKind::Skill);
         let snap = snap_with(vec![installed], vec![also_from_b]);
         let nodes = build_tree(&snap, "", None, None, false, false);
-        let flat = flatten_tree(&nodes, &HashSet::new());
+        let flat = flatten_tree(&nodes, &HashSet::new(), &HashSet::new());
         // Same key is deduped regardless of source name
         let avail_count = flat
             .iter()
@@ -948,6 +975,221 @@ mod tests {
         assert_eq!(
             avail_count, 0,
             "same key in available should be deduped vs installed"
+        );
+    }
+
+    // --- TUI-11: collapsed set governs Source/KindBucket visibility ---
+
+    #[test]
+    fn source_id_in_collapsed_hides_its_children() {
+        // spec: TUI-11 - when a Source node's id is in the `collapsed` set, its
+        // children (KindBucket and item nodes) must be absent from the flat output.
+        let snap = snap_with(
+            vec![make_installed(
+                "skill:review",
+                "review",
+                "src/a",
+                ItemKind::Skill,
+            )],
+            vec![],
+        );
+        let nodes = build_tree(&snap, "", None, None, false, false);
+
+        // Find the Source node id.
+        let flat_default = flatten_tree(&nodes, &HashSet::new(), &HashSet::new());
+        let source_id = flat_default
+            .iter()
+            .find(|n| matches!(&n.node, TreeNode::Source(_)))
+            .map(|n| n.id.clone())
+            .expect("a Source node must be present");
+
+        // Children are present when not collapsed.
+        let has_item = flat_default
+            .iter()
+            .any(|n| matches!(&n.node, TreeNode::InstalledItem(_)));
+        assert!(
+            has_item,
+            "item should be visible when source is not collapsed"
+        );
+
+        // Put the source id in collapsed: children must disappear.
+        let mut collapsed = HashSet::new();
+        collapsed.insert(source_id.clone());
+        let flat_collapsed = flatten_tree(&nodes, &HashSet::new(), &collapsed);
+        let has_item_after = flat_collapsed
+            .iter()
+            .any(|n| matches!(&n.node, TreeNode::InstalledItem(_)));
+        let has_bucket_after = flat_collapsed
+            .iter()
+            .any(|n| matches!(&n.node, TreeNode::KindBucket { .. }));
+        assert!(
+            !has_item_after,
+            "item must be absent when source is in the collapsed set"
+        );
+        assert!(
+            !has_bucket_after,
+            "KindBucket must also be absent when source is in the collapsed set"
+        );
+
+        // Source node itself must still be visible.
+        let source_visible = flat_collapsed.iter().any(|n| n.id == source_id);
+        assert!(source_visible, "the Source node itself must remain visible");
+    }
+
+    #[test]
+    fn kind_bucket_id_in_collapsed_hides_its_items() {
+        // spec: TUI-11 - when a KindBucket node's id is in the `collapsed` set,
+        // its item children must be absent while the bucket node itself stays visible.
+        let snap = snap_with(
+            vec![make_installed(
+                "skill:review",
+                "review",
+                "src/a",
+                ItemKind::Skill,
+            )],
+            vec![],
+        );
+        let nodes = build_tree(&snap, "", None, None, false, false);
+
+        let flat_default = flatten_tree(&nodes, &HashSet::new(), &HashSet::new());
+        let bucket_id = flat_default
+            .iter()
+            .find(|n| matches!(&n.node, TreeNode::KindBucket { .. }))
+            .map(|n| n.id.clone())
+            .expect("a KindBucket node must be present");
+
+        // Items visible without collapsed.
+        let has_item = flat_default
+            .iter()
+            .any(|n| matches!(&n.node, TreeNode::InstalledItem(_)));
+        assert!(
+            has_item,
+            "item should be visible when bucket is not collapsed"
+        );
+
+        // Collapse the bucket: items disappear, bucket stays.
+        let mut collapsed = HashSet::new();
+        collapsed.insert(bucket_id.clone());
+        let flat_collapsed = flatten_tree(&nodes, &HashSet::new(), &collapsed);
+        let has_item_after = flat_collapsed
+            .iter()
+            .any(|n| matches!(&n.node, TreeNode::InstalledItem(_)));
+        assert!(
+            !has_item_after,
+            "item must be absent when KindBucket is in the collapsed set"
+        );
+        let bucket_visible = flat_collapsed.iter().any(|n| n.id == bucket_id);
+        assert!(
+            bucket_visible,
+            "the KindBucket node itself must stay visible"
+        );
+    }
+
+    #[test]
+    fn removing_source_from_collapsed_restores_children() {
+        // spec: TUI-11 - removing a Source id from the collapsed set (expand
+        // action) must restore its children in the next flatten call.
+        let snap = snap_with(
+            vec![make_installed(
+                "skill:review",
+                "review",
+                "src/a",
+                ItemKind::Skill,
+            )],
+            vec![],
+        );
+        let nodes = build_tree(&snap, "", None, None, false, false);
+        let flat_default = flatten_tree(&nodes, &HashSet::new(), &HashSet::new());
+        let source_id = flat_default
+            .iter()
+            .find(|n| matches!(&n.node, TreeNode::Source(_)))
+            .map(|n| n.id.clone())
+            .expect("a Source node must be present");
+
+        // Collapse then expand.
+        let mut collapsed = HashSet::new();
+        collapsed.insert(source_id.clone());
+        let flat_collapsed = flatten_tree(&nodes, &HashSet::new(), &collapsed);
+        let hidden = flat_collapsed
+            .iter()
+            .any(|n| matches!(&n.node, TreeNode::InstalledItem(_)));
+        assert!(!hidden, "items hidden after collapse");
+
+        collapsed.remove(&source_id);
+        let flat_restored = flatten_tree(&nodes, &HashSet::new(), &collapsed);
+        let restored = flat_restored
+            .iter()
+            .any(|n| matches!(&n.node, TreeNode::InstalledItem(_)));
+        assert!(
+            restored,
+            "items restored after removing source from collapsed set"
+        );
+    }
+
+    #[test]
+    fn normal_item_node_still_requires_expanded_membership() {
+        // spec: TUI-11 - non-auto-expanded nodes (InstalledItem, AvailableItem)
+        // use the `expanded` set, not `collapsed`. A node with children is only
+        // shown expanded when its id is in `expanded`; the `collapsed` set has
+        // no effect on it.
+        //
+        // Build a synthetic Node tree with a parent InstalledItem that has a
+        // child InstalledItem (not possible from the default snapshot but valid
+        // for exercising flatten_node's branching).
+        let parent = Node {
+            id: "item-parent".to_string(),
+            label: "parent".to_string(),
+            node: TreeNode::InstalledItem(InstalledInfo {
+                key: "skill:parent".to_string(),
+                name: "parent".to_string(),
+                source: "src/a".to_string(),
+                kind: ItemKind::Skill,
+                commit: "abc".to_string(),
+                description: None,
+            }),
+            children: vec![Node {
+                id: "item-child".to_string(),
+                label: "child".to_string(),
+                node: TreeNode::InstalledItem(InstalledInfo {
+                    key: "skill:child".to_string(),
+                    name: "child".to_string(),
+                    source: "src/a".to_string(),
+                    kind: ItemKind::Skill,
+                    commit: "abc".to_string(),
+                    description: None,
+                }),
+                children: vec![],
+            }],
+        };
+
+        let nodes = vec![parent];
+
+        // Neither collapsed nor expanded: child must NOT be visible.
+        let flat_empty = flatten_tree(&nodes, &HashSet::new(), &HashSet::new());
+        let child_visible = flat_empty.iter().any(|n| n.id == "item-child");
+        assert!(
+            !child_visible,
+            "InstalledItem child must be hidden without expanded membership"
+        );
+
+        // Collapsed contains the parent: still hidden (collapsed has no effect on non-auto nodes).
+        let mut collapsed = HashSet::new();
+        collapsed.insert("item-parent".to_string());
+        let flat_only_collapsed = flatten_tree(&nodes, &HashSet::new(), &collapsed);
+        let child_visible2 = flat_only_collapsed.iter().any(|n| n.id == "item-child");
+        assert!(
+            !child_visible2,
+            "collapsed set must not expand non-auto nodes (they need `expanded` membership)"
+        );
+
+        // Expanded contains the parent: child appears.
+        let mut expanded = HashSet::new();
+        expanded.insert("item-parent".to_string());
+        let flat_expanded = flatten_tree(&nodes, &expanded, &HashSet::new());
+        let child_visible3 = flat_expanded.iter().any(|n| n.id == "item-child");
+        assert!(
+            child_visible3,
+            "InstalledItem child must appear when parent is in `expanded`"
         );
     }
 }

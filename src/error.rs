@@ -199,7 +199,7 @@ pub enum MindError {
     #[error(
         "install hook for source '{identity}' failed{}: {}\n  command: {command}",
         status_suffix(*status),
-        if stderr.is_empty() { "<no stderr>" } else { stderr }
+        if stderr.is_empty() { "see the hook's output above" } else { stderr }
     )]
     HookFailed {
         identity: String,

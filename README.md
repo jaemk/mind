@@ -75,13 +75,13 @@ mind learn greet
 |---------|------|
 | `mind meld [<repo>] [--link-only] [--yes] [--as <prefix>] [--root <dir>] [--follow-branch <branch> | --pin-tag <tag> | --pin-ref <commit>] [--install-hook <cmd>] [--dangerously-skip-install-hook-check]` | clone and register a source (default `.`), then prompt to install its items (`--link-only` registers only; `--yes` installs without prompting). Re-melding an already-melded source installs any missing items, else shows each item's install state and commit |
 | `mind init-source [<path>] [--template]` | scaffold `mind.toml` + report references; `--template` rewrites bare refs as `{{ns:}}` (maintainer) |
-| `mind unmeld <name> [--forget]` (alias `detach`) | drop a source (optionally its items) |
+| `mind unmeld <name> [--unlink-only] [--yes] [--uninstall-hook <cmd>] [--dangerously-skip-install-hook-check]` (alias `detach`) | drop a source and forget its items (`--unlink-only` keeps them) |
 | `mind learn [--yes] [--force] <item>` | install a skill/agent/rule (glob installs many); a partial selection also pulls in the source siblings it references. `--force` overwrites a conflicting non-mind link target (without it, a conflict prompts on a TTY) |
 | `mind forget [--yes] <item>` (alias `unlearn`) | remove an installed item (glob removes many; a multi-match glob confirms first, `--yes` skips) |
 | `mind sync [--upgrade] [--dangerously-skip-install-hook-check]` | refresh every source (optionally upgrade after; flag allows unattended hook re-runs) |
 | `mind upgrade [--yes] [--dangerously-skip-install-hook-check] [item]` | upgrade installed items to their latest source version (re-runs install hooks on sources that advance) |
 | `mind evolve [--check] [--yes] [--version <v>]` | update the mind binary itself to the latest release (or --version) |
-| `mind recall [--sources] [item] [--kind K] [--source S] [--json]` | list installed items / sources / details |
+| `mind recall [item] [--sources] [--kind K] [--source S] [--json]` | status: each source with its items, marked installed or available; `--sources` narrows to sources; `<item>` shows one item's details |
 | `mind probe [query] [--kind K] [--source S] [--json] [--no-tui]` | browse and search items (interactive TUI on a terminal) |
 | `mind review <target> [--as <prefix>]` / `mind review --policy <path>` | validate a source for publishing, or validate a managed policy file (read-only) |
 | `mind introspect [--fix] [--json]` | report drift and broken links (optionally repair) |

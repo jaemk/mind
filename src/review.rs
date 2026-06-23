@@ -245,21 +245,57 @@ fn run_checks(_paths: &Paths, source_dir: &Path, alias: Option<String>) -> Resul
         }
     }
 
-    // --- Check 6 (hoisted): declared install hook (advisory) ---
-    // HOOK-40: surface a declared install hook so a consumer sees, before
-    // melding, that the source will ask to run arbitrary code. This is placed
-    // before any early-returning scan checks so it fires on every code path
-    // where the mind.toml parsed successfully and declares an install hook,
+    // --- Check 6 (hoisted): declared hooks advisory ---
+    // spec: HOOK-40, HOOK-58
+    // Surface every declared hook (install + uninstall, required + optional) so
+    // a consumer sees, before melding, that the source will ask to run arbitrary
+    // code. This is placed before any early-returning scan checks so it fires on
+    // every code path where the mind.toml parsed successfully and declares hooks,
     // including paths that encounter version-gate, unknown-kind, or other scan
     // errors later. It must NOT fire when mind.toml itself failed to parse
     // (Check 1's hard-error path returns before reaching here).
-    if let Some(ref mf) = mindfile
-        && let Some(cmd) = mf.source.install.as_deref()
-    {
-        advisory.push(Finding::advisory(
-            "install-hook",
-            format!("source declares an install hook (runs on meld): {cmd}"),
-        ));
+    //
+    // resolved_hooks folds legacy [source].install (HOOK-50 back-compat) as the
+    // first required install hook and appends [[hooks]] entries in declaration
+    // order. An unknown event in [[hooks]] is already a hard mind.toml error
+    // caught by scan later; here we propagate any unexpected Err rather than
+    // double-reporting or silently swallowing it.
+    if let Some(ref mf) = mindfile {
+        let toml_path_for_hooks = source_dir.join("mind.toml");
+        match mf.resolved_hooks(&toml_path_for_hooks) {
+            Ok(hooks) => {
+                for hook in &hooks {
+                    let event_str = match hook.event {
+                        crate::mindfile::HookEvent::Install => "install",
+                        crate::mindfile::HookEvent::Uninstall => "uninstall",
+                    };
+                    let req_str = if hook.optional {
+                        "optional"
+                    } else {
+                        "required"
+                    };
+                    advisory.push(Finding::advisory(
+                        "install-hook",
+                        format!(
+                            "source declares a {} {} hook '{}': {}",
+                            req_str,
+                            event_str,
+                            hook.label(),
+                            hook.run,
+                        ),
+                    ));
+                }
+            }
+            Err(e) => {
+                // A bad event string is a schema error caught as a hard finding
+                // by the catalog scan; propagate here to avoid dropping it.
+                hard.push(Finding::hard(
+                    "toml-parse-error",
+                    format!("mind.toml error: {e}"),
+                ));
+                return Ok(ReviewResult { hard, advisory });
+            }
+        }
     }
 
     // --- Check 3: catalog scan (version gate + unknown kind) ---
@@ -400,6 +436,7 @@ fn build_source(source_dir: &Path, mindfile: &Option<MindToml>, alias: Option<St
         alias,
         pin: crate::source::Pin::default(),
         roots: None,
+        install_hooks: Vec::new(),
         install_hook: None,
         install_hook_commit: None,
     }
@@ -505,6 +542,7 @@ mod tests {
             alias: None,
             pin: Pin::default(),
             roots: None,
+            install_hooks: Vec::new(),
             install_hook: None,
             install_hook_commit: None,
         }
@@ -877,6 +915,226 @@ mod tests {
         assert!(
             result.advisory.iter().all(|f| f.kind != "install-hook"),
             "no install hook declared => no install-hook advisory: {:?}",
+            result.advisory
+        );
+    }
+
+    /// A source whose mind.toml declares multiple [[hooks]] (an install hook and
+    /// an optional uninstall hook) produces one advisory finding per hook,
+    /// each mentioning the hook's label, event, optional/required status, and
+    /// command.
+    /// spec: HOOK-40, HOOK-58
+    #[test]
+    fn multi_hook_declarations_each_produce_advisory() {
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let source_dir = base.join("src");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(
+            source_dir.join("mind.toml"),
+            "[source]\n\
+             [[hooks]]\n\
+             run = \"npm install\"\n\
+             name = \"Install deps\"\n\
+             event = \"install\"\n\
+             [[hooks]]\n\
+             run = \"npm run cleanup\"\n\
+             optional = true\n\
+             event = \"uninstall\"\n",
+        )
+        .unwrap();
+        write_file(
+            &source_dir.join("agents/tool.md"),
+            "---\ndescription: tool agent\n---\n# tool\n",
+        );
+        let paths = paths_for(base);
+
+        let result = run_checks(&paths, &source_dir, None).unwrap();
+        assert!(
+            result.hard.is_empty(),
+            "multi-hook source must not produce hard findings: {:?}",
+            result.hard
+        );
+
+        let hook_findings: Vec<&Finding> = result
+            .advisory
+            .iter()
+            .filter(|f| f.kind == "install-hook")
+            .collect();
+        assert_eq!(
+            hook_findings.len(),
+            2,
+            "expected one advisory per hook: {:?}",
+            result.advisory
+        );
+
+        // First hook: required install, named "Install deps", runs "npm install".
+        let f0 = &hook_findings[0];
+        assert!(
+            f0.message.contains("required"),
+            "first hook must be required: {}",
+            f0.message
+        );
+        assert!(
+            f0.message.contains("install"),
+            "first hook must be an install event: {}",
+            f0.message
+        );
+        assert!(
+            f0.message.contains("Install deps"),
+            "first hook label must appear: {}",
+            f0.message
+        );
+        assert!(
+            f0.message.contains("npm install"),
+            "first hook command must appear: {}",
+            f0.message
+        );
+
+        // Second hook: optional uninstall, label falls back to command.
+        let f1 = &hook_findings[1];
+        assert!(
+            f1.message.contains("optional"),
+            "second hook must be optional: {}",
+            f1.message
+        );
+        assert!(
+            f1.message.contains("uninstall"),
+            "second hook must be an uninstall event: {}",
+            f1.message
+        );
+        assert!(
+            f1.message.contains("npm run cleanup"),
+            "second hook command must appear: {}",
+            f1.message
+        );
+    }
+
+    /// The legacy [source].install field still surfaces as a required install
+    /// hook advisory (HOOK-40 back-compat), now described via resolved_hooks.
+    /// The advisory message must include the command.
+    /// spec: HOOK-40, HOOK-58
+    #[test]
+    fn legacy_install_field_still_surfaces_as_required_install_advisory() {
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let source_dir = base.join("src");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(
+            source_dir.join("mind.toml"),
+            "[source]\ninstall = \"make setup\"\n",
+        )
+        .unwrap();
+        write_file(
+            &source_dir.join("agents/tool.md"),
+            "---\ndescription: tool agent\n---\n# tool\n",
+        );
+        let paths = paths_for(base);
+
+        let result = run_checks(&paths, &source_dir, None).unwrap();
+        assert!(
+            result.hard.is_empty(),
+            "legacy install hook must not be hard: {:?}",
+            result.hard
+        );
+        let hook_findings: Vec<&Finding> = result
+            .advisory
+            .iter()
+            .filter(|f| f.kind == "install-hook")
+            .collect();
+        assert_eq!(
+            hook_findings.len(),
+            1,
+            "expected exactly one advisory for legacy install: {:?}",
+            result.advisory
+        );
+        let msg = &hook_findings[0].message;
+        assert!(
+            msg.contains("required"),
+            "legacy install must be reported as required: {msg}"
+        );
+        assert!(
+            msg.contains("install"),
+            "legacy install must be reported as install event: {msg}"
+        );
+        assert!(
+            msg.contains("make setup"),
+            "legacy install advisory must include the command: {msg}"
+        );
+    }
+
+    /// When mind.toml declares both a legacy [source].install AND [[hooks]]
+    /// entries, resolved_hooks folds them together and review emits one finding
+    /// per resolved hook.
+    /// spec: HOOK-58
+    #[test]
+    fn legacy_and_hooks_table_both_surface() {
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let source_dir = base.join("src");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(
+            source_dir.join("mind.toml"),
+            "[source]\ninstall = \"make legacy\"\n\
+             [[hooks]]\nrun = \"cleanup.sh\"\nevent = \"uninstall\"\noptional = true\n",
+        )
+        .unwrap();
+        write_file(
+            &source_dir.join("agents/tool.md"),
+            "---\ndescription: tool agent\n---\n# tool\n",
+        );
+        let paths = paths_for(base);
+
+        let result = run_checks(&paths, &source_dir, None).unwrap();
+        assert!(
+            result.hard.is_empty(),
+            "no hard findings expected: {:?}",
+            result.hard
+        );
+        let hook_findings: Vec<&Finding> = result
+            .advisory
+            .iter()
+            .filter(|f| f.kind == "install-hook")
+            .collect();
+        assert_eq!(
+            hook_findings.len(),
+            2,
+            "legacy + hooks table must each produce an advisory: {:?}",
+            result.advisory
+        );
+        // First: legacy required install.
+        assert!(hook_findings[0].message.contains("make legacy"));
+        assert!(hook_findings[0].message.contains("required"));
+        // Second: optional uninstall.
+        assert!(hook_findings[1].message.contains("cleanup.sh"));
+        assert!(hook_findings[1].message.contains("optional"));
+        assert!(hook_findings[1].message.contains("uninstall"));
+    }
+
+    /// A source with no hooks (no [source].install, no [[hooks]]) produces no
+    /// hook advisory finding.
+    /// spec: HOOK-58
+    #[test]
+    fn no_hooks_at_all_produces_no_hook_advisory() {
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let source_dir = base.join("src");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(
+            source_dir.join("mind.toml"),
+            "[source]\ndescription = \"clean source\"\n",
+        )
+        .unwrap();
+        write_file(
+            &source_dir.join("agents/tool.md"),
+            "---\ndescription: tool agent\n---\n# tool\n",
+        );
+        let paths = paths_for(base);
+
+        let result = run_checks(&paths, &source_dir, None).unwrap();
+        assert!(
+            result.advisory.iter().all(|f| f.kind != "install-hook"),
+            "no hooks declared => no install-hook advisory: {:?}",
             result.advisory
         );
     }

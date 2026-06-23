@@ -7,12 +7,12 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 | `probe [query] [--no-tui]` | interactive browser (default); catalog listing with `--no-tui`/`--json` |
 | `meld [<repo>] [--link-only] [--yes] [--as <prefix>] [--root <dir>] [--follow-branch\|--pin-tag\|--pin-ref <ref>]` | connect a source (default `.`), then install its items |
 | `init-source [<path>] [--template]` | scaffold `mind.toml` + detect references (maintainer) |
-| `unmeld <name>` (alias: `detach`) | disconnect a source |
+| `unmeld <name> [--unlink-only] [--yes] [--uninstall-hook <cmd>] [--dangerously-skip-install-hook-check]` (alias: `detach`) | disconnect a source and forget its items (`--unlink-only` keeps them) |
 | `learn <item>` | install |
 | `forget <item>` (alias: `unlearn`) | uninstall |
 | `sync` | refresh sources |
 | `upgrade [--yes] [item]` | upgrade installed |
-| `recall [--sources] [item]` | list / info |
+| `recall [item] [--sources] [--kind K] [--source S] [--json]` | status: sources with their items (install state marked); `--sources` narrows to sources |
 | `review [<target>] [--as <prefix>]` (default `.`) / `review --policy <path>` | validate a source / a policy file |
 | `introspect` | diagnose |
 | `evolve [--check] [--yes] [--version <v>]` | update the `mind` binary itself |
@@ -85,7 +85,9 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   or the interactive prompt).
 - `CLI-23` By default, after registering the source, `meld` previews its items
   and prompts to install them all (the interactive form of `learn '<source>#*'`),
-  installing the whole source on a yes. `--link-only` stops at registering the
+  installing the whole source on a yes. The prompt defaults to yes (`[Y/n]`, a
+  bare Enter installs), since reaching it means the user chose to meld the source;
+  it is reversible with `forget`. `--link-only` stops at registering the
   source; its items remain available to `learn` later. `--yes` installs without
   prompting, including in a non-TTY context; without `--yes` a non-TTY `meld`
   registers only and prints how to install later (mirroring the install-hook
@@ -106,6 +108,17 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   (`.`), melding the repo the command is run in. Combined with the default
   install (CLI-23), running `mind meld` inside a source repo (e.g. one with a
   `mind.toml`) registers and installs that source.
+- `CLI-27` A local-path source with no pin in effect is *linked*: `mind` reads it
+  directly from its working tree (the path `meld` was given) rather than cloning
+  it, so the maintainer's in-progress edits -- including an untracked or
+  gitignored `mind.toml` -- are seen live by `meld`, `sync`, `upgrade`, and
+  `recall`. `mind` never deletes a linked source's directory: `unmeld` removes the
+  registry entry (and, by default, its installed items) but leaves the working
+  tree, and a failed `meld` never touches it. `sync` does not fetch or reset a
+  linked source (it only re-reads its HEAD); a deleted working tree is a per-source
+  sync error (CLI-54). A pinned local source (`--follow-branch`/`--pin-tag`/
+  `--pin-ref` or a `[source]` directive) is instead cloned as a snapshot at the
+  pin, so pinning still works.
 
 ## unmeld
 
@@ -113,12 +126,19 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   registry entry. `name` is the full `host/owner/repo` or an unambiguous trailing
   suffix (e.g. `repo` or `owner/repo`); an unknown name is `SourceNotFound` and an
   ambiguous suffix is `AmbiguousSource`.
-- `CLI-21` `unmeld` does not remove items already installed from the source;
-  those are removed with `forget`.
-- `CLI-22` `unmeld --forget` also removes every item installed from the source
-  (each via its file registry, then its manifest entry), so dropping a source
-  cleans up after itself in one step. Without `--forget`, installed items are
-  left in place (CLI-21).
+- `CLI-21` `unmeld <name>` by default uninstalls every item installed from the
+  source (each via its file registry, then its manifest entry), mirroring meld's
+  install-by-default (CLI-23): dropping a source cleans up after itself in one
+  step. It first lists the items it will remove; the multi-item confirmation
+  (CLI-42) applies, and `--yes` skips it.
+- `CLI-22` `unmeld --unlink-only` removes only the source (clone and registry
+  entry) and leaves its installed items in place. It lists those orphaned items
+  and suggests the `forget` command to remove them later. This is the opt-out from
+  the default item removal (CLI-21), mirroring `meld --link-only` (CLI-23).
+- `unmeld` runs the source's uninstall hooks before removal and accepts
+  `--dangerously-skip-install-hook-check` to run them unattended, and
+  `--uninstall-hook <cmd>` to supply or override the uninstall hook (see
+  install-hooks.md, HOOK-54, HOOK-59).
 
 ## learn
 
@@ -205,18 +225,27 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 
 ## recall
 
-- `CLI-70` `recall` lists installed items (effective name, source, short commit,
-  one-line description).
+- `CLI-70` `recall` (no argument) is a status view of everything `mind` manages:
+  each melded source, with its catalog items nested beneath it. It shows both
+  installed and not-yet-installed items, so a single `recall` answers "what is
+  melded, and what is installed". The `--kind` / `--source` filters narrow the
+  items shown (CLI-83).
 - `CLI-71` `recall <item>` shows one installed item's detail: description, source,
   commit, hash, store path, and link path(s). The ref is matched against the
   manifest by effective name, honoring a `kind:` prefix and an `owner/repo#`
   source qualifier; an ambiguous bare name is `AmbiguousItem` and one matching
   none is `NotInstalled`.
-- `CLI-72` `recall --sources` lists melded sources (name, url, short commit,
-  alias, description).
+- `CLI-72` `recall --sources` narrows the status view to the source list only
+  (name, url, short commit, alias, install-hook token, description), without the
+  nested items.
 - `CLI-73` `recall --json` emits the data as JSON on stdout instead of the table:
-  an array of installed items for the listing, the single item for a lookup, or
-  an array of sources with `--sources`. An empty listing is `[]`.
+  the default view emits the sources each with their nested items (carrying the
+  installed flag and, when installed, the commit); a lookup emits the single
+  item; `--sources` emits the source array. An empty registry is `[]`.
+- `CLI-74` In the default status view, each item line marks its install state
+  inline: an installed item shows that it is installed and its short commit; a
+  not-installed item is marked available. Items are grouped under their source, so
+  the source a given item comes from is unambiguous.
 
 ## probe
 

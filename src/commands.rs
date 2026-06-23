@@ -12,6 +12,7 @@ use crate::git;
 use crate::hash::hash_path;
 use crate::install;
 use crate::manifest::Manifest;
+use crate::mindfile::HookEvent;
 use crate::mindfile::MindToml;
 use crate::paths::Paths;
 use crate::policy::Policy;
@@ -115,13 +116,147 @@ fn pin_description(pin: &Pin) -> String {
     }
 }
 
-/// Whether `upgrade` should re-offer a source's install hook (HOOK-11): a hook is
-/// in effect AND the commit it last ran at differs from the source's current
-/// commit. A None `install_hook_commit` (a recorded-but-never-run hook from a
-/// skipped meld) differs from any Some(commit), so it is re-offered too.
+/// Whether `upgrade` should re-offer a source's install hooks (HOOK-11, HOOK-55):
+/// any recorded install hook whose `ran_at` differs from the source's current
+/// commit (never ran, or the source advanced past the run commit).
 fn hook_rerun_warranted(source: &crate::source::Source) -> bool {
-    source.install_hook.is_some()
-        && source.install_hook_commit.as_deref() != source.commit.as_deref()
+    !source
+        .pending_install_hooks(source.commit.as_deref())
+        .is_empty()
+}
+
+/// Whether a recorded install hook has already run at `current` (a real commit).
+fn hook_ran_at(source: &crate::source::Source, command: &str, current: Option<&str>) -> bool {
+    current.is_some()
+        && source
+            .install_hooks
+            .iter()
+            .any(|r| r.command == command && r.ran_at.as_deref() == current)
+}
+
+/// Record (upsert) an install hook's run state on the source.
+fn record_install_hook(source: &mut crate::source::Source, command: &str, ran_at: Option<String>) {
+    if let Some(r) = source
+        .install_hooks
+        .iter_mut()
+        .find(|r| r.command == command)
+    {
+        r.ran_at = ran_at;
+    } else {
+        source.install_hooks.push(crate::source::RecordedHook {
+            command: command.to_string(),
+            ran_at,
+        });
+    }
+}
+
+/// What the caller should do with the source after a hook batch.
+enum HookOutcome {
+    Proceed,
+    Abort,
+}
+
+/// Run a source's install hooks (HOOK-50..60). Offers each install hook unless it
+/// already ran at the source's current commit (offers all when `force_rerun`).
+/// Prompts per the optional (run/skip) vs required (run/skip/abort) model, runs
+/// chosen hooks in `clone_dir` printing a running indication (HOOK-60), and upserts
+/// each into `source.install_hooks`. A required hook's Abort returns `Abort`; any
+/// hook's non-zero exit propagates as `Err` (HOOK-53), leaving cleanup to the
+/// caller (meld removes the clone; re-meld leaves the source). `install_override`
+/// is the consumer `--install-hook` command (meld only).
+fn run_install_hooks(
+    source: &mut crate::source::Source,
+    clone_dir: &std::path::Path,
+    mindfile: &Option<MindToml>,
+    toml_path: &std::path::Path,
+    install_override: Option<&str>,
+    dangerously_skip: bool,
+    force_rerun: bool,
+) -> Result<HookOutcome> {
+    let resolved = mindfile
+        .as_ref()
+        .map(|m| m.resolved_hooks(toml_path))
+        .transpose()?
+        .unwrap_or_default();
+    let (hooks, replaced) = crate::hook::apply_install_override(resolved, install_override);
+
+    let pin_desc = pin_description(&source.pin);
+    let commit = source.commit.clone().unwrap_or_default();
+    let current = source.commit.clone();
+    let clone_path = clone_dir.display().to_string();
+    let name = source.name.clone();
+
+    enum Act {
+        Run,
+        Skip,
+        Abort,
+    }
+
+    for h in hooks.iter().filter(|h| h.event == HookEvent::Install) {
+        // HOOK-60: by default re-offer only hooks not yet run at this commit;
+        // `--force` (force_rerun) re-offers every install hook.
+        if !force_rerun && hook_ran_at(source, &h.run, current.as_deref()) {
+            continue;
+        }
+
+        // HOOK-56: show the loud override note on the hook the override produced.
+        let declared_override: Option<String> = replaced.as_ref().and_then(|cmds| {
+            if install_override.map(str::trim) == Some(h.run.as_str()) {
+                Some(cmds.join("; "))
+            } else {
+                None
+            }
+        });
+        let disclosure = crate::hook::hook_disclosure_text(
+            h.label(),
+            h.optional,
+            &name,
+            &pin_desc,
+            &commit,
+            &clone_path,
+            &h.run,
+            declared_override.as_deref(),
+        );
+
+        let act = if dangerously_skip {
+            Act::Run // HOOK-23
+        } else if !crate::hook::is_tty() {
+            Act::Skip // HOOK-22
+        } else if h.optional {
+            // HOOK-52: optional => two-way (run / skip).
+            match crate::hook::prompt_choice_optional(&disclosure)? {
+                crate::hook::OptionalChoice::Run => Act::Run,
+                crate::hook::OptionalChoice::Skip => Act::Skip,
+            }
+        } else {
+            // HOOK-20: required => three-way (run / skip / abort).
+            match crate::hook::prompt_choice(&disclosure)? {
+                crate::hook::HookChoice::RunAndContinue => Act::Run,
+                crate::hook::HookChoice::SkipAndContinue => Act::Skip,
+                crate::hook::HookChoice::Abort => Act::Abort,
+            }
+        };
+
+        match act {
+            Act::Run => {
+                // HOOK-60: indicate the running hook.
+                println!("running install hook '{}' for {}", h.label(), name);
+                // HOOK-53: a non-zero exit (optional or required) is a hard stop.
+                crate::hook::run_hook(&h.run, clone_dir, &name, h.label())?;
+                record_install_hook(source, &h.run, current.clone());
+            }
+            Act::Skip => {
+                println!(
+                    "note: skipped install hook '{}' for {}; its items may not work until it runs",
+                    h.label(),
+                    name
+                );
+                record_install_hook(source, &h.run, None);
+            }
+            Act::Abort => return Ok(HookOutcome::Abort),
+        }
+    }
+    Ok(HookOutcome::Proceed)
 }
 
 /// Meld one source and then its nested sources. Returns how many sources were
@@ -174,27 +309,33 @@ fn meld_recursive(
         return Ok(0);
     }
 
-    let dir = source.clone_dir(paths);
-    if dir.exists() {
-        std::fs::remove_dir_all(&dir).map_err(|e| MindError::io(&dir, e))?;
-    }
-    if let Some(parent) = dir.parent() {
-        crate::paths::mkdir_p(parent)?;
-    }
-
-    // We need to clone before reading mind.toml (it lives inside the clone).
-    // For the initial clone we use the default branch so we can read the file,
-    // then immediately re-clone at the resolved pin if needed. For local/file://
-    // repos this is cheap; for real remotes the first clone is always needed.
-    //
-    // Optimisation: if the consumer already specified a pin (consumer_pin is
-    // Some), or if after reading the mindfile we get a directive, we re-clone at
-    // the right point. For DefaultBranch the first clone is already correct.
+    // `source.pin` is still the default here, so `clone_dir` resolves a local
+    // source to its working tree. A consumer/directive pin (resolved below) can
+    // still switch a local source to a cloned snapshot.
+    let mut dir = source.clone_dir(paths);
+    let is_local = source.is_local();
 
     println!("melding {} from {}", source.name, source.url);
 
-    // Step 1: clone the default branch to read mind.toml.
-    git::clone(&source.url, &dir)?;
+    // A local source with no pin is read straight from its working tree (CLI-27):
+    // no clone, and `mind` never touches the directory. Any other source is cloned
+    // into the sources tree (default branch first so we can read mind.toml, then
+    // re-cloned at the resolved pin if needed).
+    if is_local {
+        if !dir.is_dir() {
+            return Err(MindError::NotADirectory {
+                path: dir.display().to_string(),
+            });
+        }
+    } else {
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).map_err(|e| MindError::io(&dir, e))?;
+        }
+        if let Some(parent) = dir.parent() {
+            crate::paths::mkdir_p(parent)?;
+        }
+        git::clone(&source.url, &dir)?;
+    }
     let mut mindfile = MindToml::load(&dir)?;
     source.description = mindfile.as_ref().and_then(|m| m.source.description.clone());
 
@@ -217,7 +358,9 @@ fn meld_recursive(
         let allowed = policy.allow_matches(&identity);
         if policy.lock() && !allowed {
             // POL-11: locked allowlist refuses a non-matching source outright.
-            let _ = std::fs::remove_dir_all(&dir);
+            if !is_local {
+                let _ = std::fs::remove_dir_all(&dir);
+            }
             return Err(MindError::SourceNotAllowed { identity });
         }
         if !policy.lock() && !allowed {
@@ -229,34 +372,50 @@ fn meld_recursive(
         if policy.pinned() && matches!(effective_pin, Pin::DefaultBranch | Pin::FollowBranch(_)) {
             // POL-20: pinned policy forbids a floating branch (default branch or
             // --follow-branch); only a tag/ref pin is permitted.
-            let _ = std::fs::remove_dir_all(&dir);
+            if !is_local {
+                let _ = std::fs::remove_dir_all(&dir);
+            }
             return Err(MindError::UnpinnedSourceForbidden { identity });
         }
     }
 
-    // Step 3: if the effective pin is not DefaultBranch, re-clone at that point.
-    // A pin that does not resolve in the remote is a `Git` error and must leave
-    // nothing behind (CLI-18). `clone_at` for a ref clones first and then checks
-    // out the sha, so a bad ref leaves a half-built clone dir; clean it up on any
-    // failure of the re-clone so no orphan is left on disk.
+    // Step 3: if the effective pin is not DefaultBranch, the source is a clone at
+    // that point -- including a *pinned local* source, which is snapshotted into
+    // the sources tree (so pinning still works) WITHOUT touching the working tree.
+    // A pin that does not resolve is a `Git` error that must leave nothing behind
+    // (CLI-18); the clone target is always under the sources tree, never the user's
+    // working tree.
     if effective_pin != Pin::DefaultBranch {
-        std::fs::remove_dir_all(&dir).map_err(|e| MindError::io(&dir, e))?;
-        if let Err(e) = git::clone_at(&source.url, &dir, &effective_pin) {
-            let _ = std::fs::remove_dir_all(&dir);
+        // Setting the pin makes `clone_dir` resolve to the sources-tree path even
+        // for a local source.
+        source.pin = effective_pin.clone();
+        let target = source.clone_dir(paths);
+        if target.exists() {
+            std::fs::remove_dir_all(&target).map_err(|e| MindError::io(&target, e))?;
+        }
+        if let Some(parent) = target.parent() {
+            crate::paths::mkdir_p(parent)?;
+        }
+        if let Err(e) = git::clone_at(&source.url, &target, &effective_pin) {
+            let _ = std::fs::remove_dir_all(&target);
             return Err(e);
         }
-        // The pin may land on a different mind.toml than the default branch.
-        // Reload it so all downstream reads (description, the DSC-52
-        // is_authoritative gate, and the nested [discover].sources loop) see the
-        // pinned content, not the default branch's. The catalog scan below
-        // already re-reads mind.toml from disk, so item discovery was correct;
-        // only these in-memory reads were stale.
+        dir = target;
+        // The pin may land on a different mind.toml than the working tree / default
+        // branch. Reload it so downstream in-memory reads see the pinned content.
         mindfile = MindToml::load(&dir)?;
         source.description = mindfile.as_ref().and_then(|m| m.source.description.clone());
     }
 
     source.pin = effective_pin;
-    source.commit = Some(git::head_commit(&source.url, &dir)?);
+    // A linked (no-pin) local source records its working-tree HEAD (best-effort; a
+    // non-git local dir simply records no commit). Everything else records the
+    // cloned commit.
+    source.commit = if source.is_linked() {
+        git::head_commit(&source.url, &dir).ok()
+    } else {
+        Some(git::head_commit(&source.url, &dir)?)
+    };
 
     // Persist the consumer's --root override (STO-17, DSC-51).
     // DSC-52: if --root is given for an authoritative source, print a note.
@@ -278,7 +437,9 @@ fn meld_recursive(
     let mut items = match catalog::scan(paths, &single(&source)) {
         Ok(items) => items,
         Err(e) => {
-            let _ = std::fs::remove_dir_all(&dir);
+            if !is_local {
+                let _ = std::fs::remove_dir_all(&dir);
+            }
             return Err(e);
         }
     };
@@ -313,7 +474,9 @@ fn meld_recursive(
             items = match catalog::scan(paths, &single(&source)) {
                 Ok(items) => items,
                 Err(e) => {
-                    let _ = std::fs::remove_dir_all(&dir);
+                    if !is_local {
+                        let _ = std::fs::remove_dir_all(&dir);
+                    }
                     return Err(e);
                 }
             };
@@ -323,78 +486,33 @@ fn meld_recursive(
     warn_unguarded_references(&items);
     println!("melded {} ({} item(s))", source.name, items.len());
 
-    // Install hook (HOOK-10): the working tree is now checked out at the resolved
-    // pin, so the hook runs in the right tree. Resolve the effective hook (a
-    // consumer `--install-hook` overrides a declared `[source].install`).
-    {
-        let declared = mindfile.as_ref().and_then(|m| m.source.install.clone());
-        let supplied = install_hook;
-        match crate::hook::resolve_hook(declared.as_deref(), supplied.as_deref()) {
-            None => {
-                // HOOK-3: no hook in effect; proceed unchanged.
+    // Install hooks (HOOK-50..60): the working tree is now checked out at the
+    // resolved pin, so hooks run in the right tree. A fresh meld runs every
+    // (as-yet-unrun) install hook.
+    match run_install_hooks(
+        &mut source,
+        &dir,
+        &mindfile,
+        &toml_path,
+        install_hook.as_deref(),
+        dangerously_skip_hook_check,
+        false,
+    ) {
+        Ok(HookOutcome::Proceed) => {}
+        Ok(HookOutcome::Abort) => {
+            // HOOK-21: aborting installs nothing; the source is not registered.
+            if !is_local {
+                let _ = std::fs::remove_dir_all(&dir);
             }
-            Some((cmd, overrides)) => {
-                let cmd = cmd.to_string();
-                let pin_desc = pin_description(&source.pin);
-                let commit = source.commit.clone().unwrap_or_default();
-                let clone_path = dir.display().to_string();
-
-                // Decide run / skip / abort.
-                let choice = if dangerously_skip_hook_check {
-                    // HOOK-23: run without prompting.
-                    println!(
-                        "note: running install hook for {} without the safety prompt (--dangerously-skip-install-hook-check)",
-                        source.name
-                    );
-                    crate::hook::HookChoice::RunAndContinue
-                } else if !crate::hook::is_tty() {
-                    // HOOK-22: no TTY; never run silently, never abort. Take the
-                    // skip path.
-                    crate::hook::HookChoice::SkipAndContinue
-                } else {
-                    let disclosure = crate::hook::disclosure_text(
-                        &source.name,
-                        &pin_desc,
-                        &commit,
-                        &clone_path,
-                        &cmd,
-                        if overrides { declared.as_deref() } else { None },
-                    );
-                    crate::hook::prompt_choice(&disclosure)?
-                };
-
-                match choice {
-                    crate::hook::HookChoice::RunAndContinue => {
-                        // HOOK-30: a non-zero exit fails the meld; remove the clone
-                        // so the source is not left registered.
-                        if let Err(e) = crate::hook::run_hook(&cmd, &dir, &source.name) {
-                            let _ = std::fs::remove_dir_all(&dir);
-                            return Err(e);
-                        }
-                        // HOOK-31: record the command and the commit it ran at.
-                        source.install_hook = Some(cmd);
-                        source.install_hook_commit = source.commit.clone();
-                    }
-                    crate::hook::HookChoice::SkipAndContinue => {
-                        // HOOK-21 / HOOK-22: install the source and its items, but
-                        // do not build the tooling. Record the hook command so
-                        // `upgrade` can re-offer it, but leave install_hook_commit
-                        // None (the hook has not been run).
-                        println!(
-                            "note: skipped the install hook for {}; its items may not work until the hook is run",
-                            source.name
-                        );
-                        source.install_hook = Some(cmd);
-                    }
-                    crate::hook::HookChoice::Abort => {
-                        // HOOK-21: aborting installs nothing; the source is not
-                        // registered.
-                        let _ = std::fs::remove_dir_all(&dir);
-                        println!("aborted; nothing installed");
-                        return Ok(0);
-                    }
-                }
+            println!("aborted; nothing installed");
+            return Ok(0);
+        }
+        Err(e) => {
+            // HOOK-30/HOOK-53: a hook failure fails the meld; remove the clone.
+            if !is_local {
+                let _ = std::fs::remove_dir_all(&dir);
             }
+            return Err(e);
         }
     }
 
@@ -580,7 +698,27 @@ pub fn init_source(dir: Option<&str>, template: bool) -> Result<()> {
     if toml_path.exists() {
         println!("  mind.toml already exists; left unchanged");
     } else {
-        let scaffold = "[source]\ndescription = \"\"   # what this source offers\n# prefix = \"prefix\"   # namespace items as prefix-<name>\n";
+        let scaffold = concat!(
+            "[source]\n",
+            "description = \"\"   # what this source offers\n",
+            "# prefix = \"prefix\"   # namespace items as prefix-<name>\n",
+            "\n",
+            "# Declare hooks that run when a consumer melds or unmelds this source.\n",
+            "# Remove the leading `# ` to enable a hook.\n",
+            "#\n",
+            "# [[hooks]]\n",
+            "# run = \"make install\"         # shell command to run\n",
+            "# name = \"Build\"               # optional label shown in the prompt\n",
+            "# event = \"install\"             # \"install\" (default) or \"uninstall\"\n",
+            "# optional = false              # false = required (default). optional only lets the\n",
+            "#                               # user decline running it; a failure always aborts.\n",
+            "#\n",
+            "# [[hooks]]\n",
+            "# run = \"make clean\"            # cleanup hook run at unmeld time\n",
+            "# name = \"Cleanup\"\n",
+            "# event = \"uninstall\"\n",
+            "# optional = true               # the user may decline this step (its failure still aborts)\n",
+        );
         std::fs::write(&toml_path, scaffold).map_err(|e| MindError::io(&toml_path, e))?;
         println!("  wrote mind.toml");
     }
@@ -623,10 +761,21 @@ fn read_item_text(item: &CatalogItem) -> String {
     buf
 }
 
-/// `mind unmeld <name> [--forget]` — drop a source. `name` may be the full
-/// `owner/repo` or an unambiguous repo basename. With `--forget`, every item
-/// installed from the source is uninstalled (via its file registry) first.
-pub fn unmeld(paths: &Paths, name: &str, forget: bool) -> Result<()> {
+/// `mind unmeld <name> [--unlink-only] [--yes] [--dangerously-skip-install-hook-check]`
+/// — drop a source. `name` may be the full `owner/repo` or an unambiguous repo
+/// basename. By default every item installed from the source is uninstalled (via
+/// its file registry) before the source is removed (CLI-21); `--unlink-only`
+/// keeps the items and only removes the source (CLI-22). Runs the source's
+/// declared uninstall hooks (HOOK-54) before removal; `dangerously_skip_hook_check`
+/// bypasses the prompt. `yes` skips the multi-item removal confirmation (CLI-42).
+pub fn unmeld(
+    paths: &Paths,
+    name: &str,
+    unlink_only: bool,
+    yes: bool,
+    dangerously_skip_hook_check: bool,
+    uninstall_hook: Option<String>,
+) -> Result<()> {
     let mut registry = Registry::load(paths)?;
     let matched: Vec<usize> = registry
         .sources
@@ -654,44 +803,184 @@ pub fn unmeld(paths: &Paths, name: &str, forget: bool) -> Result<()> {
         }
     };
 
-    let source = registry.sources.remove(idx);
+    // HOOK-54: run uninstall hooks from the source's mind.toml BEFORE removing
+    // anything. Load the mindfile from the clone dir (which still exists at this
+    // point). Run hooks in declaration order. Required hooks get the three-way
+    // prompt; optional ones get the two-way prompt. Non-TTY: skip with a note.
+    // dangerously_skip_hook_check: run all hooks without prompting.
+    {
+        let clone_dir = registry.sources[idx].clone_dir(paths);
+        let source_name = registry.sources[idx].name.clone();
+        let source_pin = registry.sources[idx].pin.clone();
+        let source_commit = registry.sources[idx].commit.clone();
 
-    // With --forget, remove every item installed from this source before the
-    // source itself, each via its recorded file registry, then re-key the manifest.
-    let mut forgotten = 0;
-    if forget {
-        let mut manifest = Manifest::load(paths)?;
-        let keys: Vec<String> = manifest
-            .items
-            .values()
-            .filter(|it| it.source == source.name)
-            .map(|it| it.key())
-            .collect();
-        for key in keys {
-            if let Some(item) = manifest.items.remove(&key) {
-                install::uninstall(paths, &item)?;
-                forgotten += 1;
+        let mindfile = MindToml::load(&clone_dir).unwrap_or_default();
+        let toml_path = clone_dir.join("mind.toml");
+        let resolved = mindfile
+            .as_ref()
+            .map(|m| m.resolved_hooks(&toml_path))
+            .transpose()?
+            .unwrap_or_default();
+
+        // HOOK-59: `--uninstall-hook <cmd>` replaces the source's declared
+        // uninstall hooks with one required uninstall hook, shown loudly.
+        let (resolved, replaced) = crate::hook::apply_hook_override(
+            resolved,
+            uninstall_hook.as_deref(),
+            HookEvent::Uninstall,
+        );
+        let override_cmd = uninstall_hook
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let replaced_note = replaced.map(|cmds| cmds.join("; "));
+
+        let pin_desc = pin_description(&source_pin);
+        let commit = source_commit.clone().unwrap_or_default();
+        let clone_path = clone_dir.display().to_string();
+
+        for h in resolved.iter().filter(|h| h.event == HookEvent::Uninstall) {
+            // Show the loud override note on the hook that replaced declared ones.
+            let declared_override = match (&replaced_note, override_cmd) {
+                (Some(note), Some(cmd)) if h.run == cmd => Some(note.as_str()),
+                _ => None,
+            };
+            let disclosure = crate::hook::hook_disclosure_text(
+                h.label(),
+                h.optional,
+                &source_name,
+                &pin_desc,
+                &commit,
+                &clone_path,
+                &h.run,
+                declared_override,
+            );
+
+            enum Act {
+                Run,
+                Skip,
+                Abort,
+            }
+            let act = if dangerously_skip_hook_check {
+                Act::Run // HOOK-23
+            } else if !crate::hook::is_tty() {
+                Act::Skip // HOOK-22
+            } else if h.optional {
+                // HOOK-52: optional => two-way (run / skip).
+                match crate::hook::prompt_choice_optional(&disclosure)? {
+                    crate::hook::OptionalChoice::Run => Act::Run,
+                    crate::hook::OptionalChoice::Skip => Act::Skip,
+                }
+            } else {
+                // HOOK-20: required => three-way (run / skip / abort).
+                match crate::hook::prompt_choice(&disclosure)? {
+                    crate::hook::HookChoice::RunAndContinue => Act::Run,
+                    crate::hook::HookChoice::SkipAndContinue => Act::Skip,
+                    crate::hook::HookChoice::Abort => Act::Abort,
+                }
+            };
+
+            match act {
+                Act::Run => {
+                    // HOOK-60: indicate the running hook.
+                    println!("running uninstall hook '{}' for {}", h.label(), source_name);
+                    // HOOK-53: any failure (optional or required) is a hard stop;
+                    // the unmeld stops and the source remains.
+                    crate::hook::run_hook(&h.run, &clone_dir, &source_name, h.label())?;
+                }
+                Act::Skip => {
+                    println!(
+                        "note: skipped uninstall hook '{}' for {}",
+                        h.label(),
+                        source_name
+                    );
+                }
+                Act::Abort => {
+                    println!("aborted; source left in place");
+                    return Ok(());
+                }
             }
         }
-        manifest.save(paths)?;
     }
 
+    let source_name = registry.sources[idx].name.clone();
+
+    // The items installed from this source (effective-name keys).
+    let mut manifest = Manifest::load(paths)?;
+    let item_keys: Vec<String> = manifest
+        .items
+        .values()
+        .filter(|it| it.source == source_name)
+        .map(|it| it.key())
+        .collect();
+
+    // CLI-22: `--unlink-only` removes only the source, leaving its items in place,
+    // and lists them with the command to remove them later.
+    if unlink_only {
+        let source = registry.sources.remove(idx);
+        // A local source's directory is the user's working tree -- never delete it.
+        let dir = source.clone_dir(paths);
+        if !source.is_linked() && dir.exists() {
+            std::fs::remove_dir_all(&dir).map_err(|e| MindError::io(&dir, e))?;
+        }
+        registry.save(paths)?;
+        if item_keys.is_empty() {
+            println!("unmelded {source_name}");
+        } else {
+            println!(
+                "unmelded {source_name}; {} item(s) remain installed:",
+                item_keys.len()
+            );
+            for k in &item_keys {
+                println!("  {k}");
+            }
+            println!("run `mind forget '{source_name}#*'` to remove them");
+        }
+        return Ok(());
+    }
+
+    // CLI-21: default — uninstall every item from this source, then remove it. The
+    // multi-item confirmation (CLI-42) applies; `--yes` skips it; a non-TTY run
+    // without `--yes` refuses rather than removing many items silently.
+    if item_keys.len() > 1 && !yes {
+        println!(
+            "unmelding {source_name} will remove {} installed item(s):",
+            item_keys.len()
+        );
+        for k in &item_keys {
+            println!("  {k}");
+        }
+        if !crate::hook::is_tty() {
+            return Err(MindError::ConfirmationRequired {
+                action: format!(
+                    "unmelding {source_name} (removing {} items)",
+                    item_keys.len()
+                ),
+            });
+        }
+        if !confirm("remove these item(s) and unmeld the source?")? {
+            println!("cancelled; nothing removed");
+            return Ok(());
+        }
+    }
+
+    let source = registry.sources.remove(idx);
+    let mut forgotten = 0;
+    for key in &item_keys {
+        if let Some(item) = manifest.items.remove(key) {
+            install::uninstall(paths, &item)?;
+            forgotten += 1;
+        }
+    }
+    manifest.save(paths)?;
+
+    // A local source's directory is the user's working tree -- never delete it.
     let dir = source.clone_dir(paths);
-    if dir.exists() {
+    if !source.is_linked() && dir.exists() {
         std::fs::remove_dir_all(&dir).map_err(|e| MindError::io(&dir, e))?;
     }
     registry.save(paths)?;
-    if forget {
-        println!(
-            "unmelded {} ({forgotten} installed item(s) removed)",
-            source.name
-        );
-    } else {
-        println!(
-            "unmelded {} (installed items left untouched; `mind forget` to remove them)",
-            source.name
-        );
-    }
+    println!("unmelded {source_name} ({forgotten} installed item(s) removed)");
     Ok(())
 }
 
@@ -829,7 +1118,7 @@ pub fn learn(
         if resolution.adds_dependencies() {
             print!("{}", resolution.render_tree(&items));
         }
-        println!("(dry run) would learn {} item(s):", closure.len());
+        println!("would learn {} item(s):", closure.len());
         let rows = closure
             .iter()
             .map(|t| vec![t.key(), t.source.clone()])
@@ -960,7 +1249,7 @@ pub fn install_melded_source(paths: &Paths, repo: &str, yes: bool, clobber: Clob
 
     // Interactive: show the install preview (the dry-run list), then prompt.
     learn(paths, &item_ref, true, false, clobber)?;
-    if confirm(&format!(
+    if confirm_default_yes(&format!(
         "install these {} item(s) now?",
         plan.install_count
     ))? {
@@ -990,6 +1279,7 @@ pub fn remeld(
     link_only: bool,
     yes: bool,
     clobber: Clobber,
+    dangerously_skip_hook_check: bool,
 ) -> Result<()> {
     let source_name = parse_spec(repo)?.name;
     println!("{source_name} is already melded");
@@ -1009,6 +1299,36 @@ pub fn remeld(
                 if renamed == 0 {
                     println!("prefix updated; no installed items to rename");
                 }
+            }
+        }
+    }
+
+    // HOOK-60: re-offer the source's install hooks that have not run at the
+    // current commit (a hook skipped at an earlier meld, or added since); `--force`
+    // re-offers every install hook. Runs in the existing clone before installing.
+    {
+        let mut registry = Registry::load(paths)?;
+        if let Some(idx) = registry.sources.iter().position(|s| s.name == source_name) {
+            let clone_dir = registry.sources[idx].clone_dir(paths);
+            let mindfile = MindToml::load(&clone_dir).unwrap_or_default();
+            let toml_path = clone_dir.join("mind.toml");
+            let force_rerun = clobber == Clobber::Force;
+            match run_install_hooks(
+                &mut registry.sources[idx],
+                &clone_dir,
+                &mindfile,
+                &toml_path,
+                None,
+                dangerously_skip_hook_check,
+                force_rerun,
+            ) {
+                Ok(HookOutcome::Proceed) => registry.save(paths)?,
+                Ok(HookOutcome::Abort) => {
+                    registry.save(paths)?; // persist any hook that did run
+                    println!("aborted; source left in place");
+                    return Ok(());
+                }
+                Err(e) => return Err(e), // a hook failed; leave the source melded
             }
         }
     }
@@ -1247,6 +1567,26 @@ pub fn sync(paths: &Paths, then_upgrade: bool, dangerously_skip_hook_check: bool
         print!("syncing {} ... ", source.name);
         let _ = std::io::stdout().flush();
         let refreshed = (|| -> Result<(String, bool, Option<String>)> {
+            // A linked (no-pin) local source is its live working tree (CLI-27):
+            // there is nothing to fetch and the tree is never touched. Just re-read
+            // its HEAD (best effort) and description. A pinned local source is a
+            // clone and syncs like any other.
+            if source.is_linked() {
+                // The working tree must still exist; a deleted one is a sync error
+                // for this source (CLI-54 reports it and continues with the rest).
+                if !dir.is_dir() {
+                    return Err(MindError::NotADirectory {
+                        path: dir.display().to_string(),
+                    });
+                }
+                let new_commit = git::head_commit(&source.url, &dir)
+                    .ok()
+                    .or_else(|| source.commit.clone())
+                    .unwrap_or_default();
+                let changed = source.commit.as_deref() != Some(new_commit.as_str());
+                let desc = MindToml::load(&dir)?.and_then(|mt| mt.source.description);
+                return Ok((new_commit, changed, desc));
+            }
             // CLI-55: resolve the source against its recorded pin (never change
             // the pin itself, only move HEAD to the pinned point).
             let pin = source.pin.clone();
@@ -1418,10 +1758,10 @@ pub fn upgrade(
     Ok(())
 }
 
-/// HOOK-11: re-run each source's install hook when warranted (the source
-/// advanced past the commit the hook last ran at, or the hook was recorded but
-/// never run). Same trust boundary as `meld`: prompt and disclose, unless the
-/// `--dangerously-skip-install-hook-check` flag is set or there is no TTY. In
+/// HOOK-11, HOOK-55: re-run each source's install hooks when warranted (any
+/// recorded hook whose `ran_at` differs from the source's current commit). Same
+/// trust boundary as `meld`: prompt and disclose, unless
+/// `--dangerously-skip-install-hook-check` is set or there is no TTY. In
 /// `upgrade`, Abort is treated as Skip: the source is already registered, so
 /// declining the re-run just leaves the existing install in place. Persists the
 /// registry only if a hook was run and its recorded commit advanced.
@@ -1457,55 +1797,64 @@ fn rerun_source_hooks(
             );
             continue;
         }
-        // `hook_rerun_warranted` guarantees install_hook is Some.
-        let cmd = source
-            .install_hook
-            .clone()
-            .expect("warranted re-run has a hook command");
+
         let dir = source.clone_dir(paths);
         let pin_desc = pin_description(&source.pin);
         let commit = source.commit.clone().unwrap_or_default();
         let clone_path = dir.display().to_string();
 
-        let run = if dangerously_skip_hook_check {
-            // HOOK-23: re-run without prompting.
-            println!(
-                "note: re-running install hook for {} without the safety prompt (--dangerously-skip-install-hook-check)",
-                source.name
-            );
-            true
-        } else if !crate::hook::is_tty() {
-            // HOOK-22: no TTY; never run silently. Skip the re-run.
-            println!(
-                "note: skipped re-running the install hook for {} (no TTY); its tooling may be out of date until the hook is re-run",
-                source.name
-            );
-            false
-        } else {
-            let disclosure = crate::hook::disclosure_text(
-                &source.name,
-                &pin_desc,
-                &commit,
-                &clone_path,
-                &cmd,
-                None,
-            );
-            // Abort is treated as Skip here (the source is already registered).
-            matches!(
-                crate::hook::prompt_choice(&disclosure)?,
-                crate::hook::HookChoice::RunAndContinue
-            )
-        };
+        // Collect indices of pending hooks so we can mutate by index below.
+        let pending_indices: Vec<usize> = source
+            .install_hooks
+            .iter()
+            .enumerate()
+            .filter(|(_, h)| h.ran_at.as_deref() != source.commit.as_deref())
+            .map(|(i, _)| i)
+            .collect();
 
-        if run {
-            // HOOK-30: a non-zero exit is a hard error. The source stays
-            // registered (it is an existing install), so do not remove anything;
-            // just propagate the failure.
-            crate::hook::run_hook(&cmd, &dir, &source.name)?;
-            // HOOK-31: record the commit the hook ran at.
-            source.install_hook_commit = source.commit.clone();
-            changed = true;
-            println!("re-ran install hook for {}", source.name);
+        for idx in pending_indices {
+            let cmd = source.install_hooks[idx].command.clone();
+
+            let run = if dangerously_skip_hook_check {
+                // HOOK-23: re-run without prompting.
+                println!(
+                    "note: re-running install hook for {} without the safety prompt (--dangerously-skip-install-hook-check)",
+                    source.name
+                );
+                true
+            } else if !crate::hook::is_tty() {
+                // HOOK-22: no TTY; never run silently. Skip the re-run.
+                println!(
+                    "note: skipped re-running the install hook for {} (no TTY); its tooling may be out of date until the hook is re-run",
+                    source.name
+                );
+                false
+            } else {
+                let disclosure = crate::hook::disclosure_text(
+                    &source.name,
+                    &pin_desc,
+                    &commit,
+                    &clone_path,
+                    &cmd,
+                    None,
+                );
+                // Abort is treated as Skip here (the source is already registered,
+                // per the HOOK-11 note).
+                matches!(
+                    crate::hook::prompt_choice(&disclosure)?,
+                    crate::hook::HookChoice::RunAndContinue
+                )
+            };
+
+            if run {
+                // HOOK-30: a non-zero exit is a hard error. The source stays
+                // registered; just propagate the failure.
+                crate::hook::run_hook(&cmd, &dir, &source.name, &cmd)?;
+                // HOOK-55: record the commit the hook ran at.
+                source.install_hooks[idx].ran_at = source.commit.clone();
+                changed = true;
+                println!("re-ran install hook for {}", source.name);
+            }
         }
     }
     if changed {
@@ -1631,11 +1980,12 @@ pub fn recall(
                     Some(a) => format!(" as:{a}"),
                     None => String::new(),
                 };
-                // HOOK-31: surface that a source carries an install hook.
-                let hook = if s.install_hook.is_some() {
-                    " hook"
-                } else {
-                    ""
+                // HOOK-58: surface that a source carries install hooks with a
+                // count-aware token.
+                let hook = match s.install_hooks.len() {
+                    0 => String::new(),
+                    1 => " hook".to_string(),
+                    n => format!(" hooks({n})"),
                 };
                 vec![
                     s.name.clone(),
@@ -1670,37 +2020,140 @@ pub fn recall(
         return Ok(());
     }
 
-    let filtered: Vec<&crate::manifest::InstalledItem> = manifest
-        .items
-        .values()
-        .filter(|it| {
-            kind.is_none_or(|k| it.kind == k)
-                && source.is_none_or(|s| source_matches(&it.source, s))
-        })
-        .collect();
+    // CLI-70/74: the status view -- each melded source with its catalog items
+    // nested beneath it, every item marked installed (with commit) or available.
+    // Items installed but no longer in the source's catalog (removed upstream) are
+    // shown too, marked. `--kind`/`--source` filter what is shown.
+    let registry = Registry::load(paths)?;
+    let catalog = catalog::scan(paths, &registry)?;
+    let filtering = kind.is_some() || source.is_some();
+
+    // The source's catalog items (honoring --kind), sorted by key.
+    let cat_items = |s: &crate::source::Source| -> Vec<&CatalogItem> {
+        let mut v: Vec<&CatalogItem> = catalog
+            .iter()
+            .filter(|it| it.source == s.name && kind.is_none_or(|k| it.kind == k))
+            .collect();
+        v.sort_by_key(|x| x.key());
+        v
+    };
+    // Installed items of a source with no catalog match (drifted / removed upstream).
+    let orphans_of = |s: &crate::source::Source,
+                      cat_keys: &std::collections::HashSet<String>|
+     -> Vec<&crate::manifest::InstalledItem> {
+        let mut v: Vec<&crate::manifest::InstalledItem> = manifest
+            .items
+            .values()
+            .filter(|m| {
+                m.source == s.name
+                    && !cat_keys.contains(&m.key())
+                    && kind.is_none_or(|k| m.kind == k)
+            })
+            .collect();
+        v.sort_by_key(|x| x.key());
+        v
+    };
+    let source_shown =
+        |s: &crate::source::Source| source.is_none_or(|q| source_matches(&s.name, q));
+
     if json {
-        return print_json(&filtered);
+        let out: Vec<serde_json::Value> = registry
+            .sources
+            .iter()
+            .filter(|s| source_shown(s))
+            .map(|s| {
+                let items = cat_items(s);
+                let cat_keys: std::collections::HashSet<String> =
+                    items.iter().map(|it| it.key()).collect();
+                let mut rows: Vec<serde_json::Value> = items
+                    .iter()
+                    .map(|it| {
+                        let inst = manifest.items.get(&it.key());
+                        serde_json::json!({
+                            "key": it.key(),
+                            "installed": inst.is_some(),
+                            "commit": inst.map(|m| m.commit.clone()),
+                        })
+                    })
+                    .collect();
+                for m in orphans_of(s, &cat_keys) {
+                    rows.push(serde_json::json!({
+                        "key": m.key(),
+                        "installed": true,
+                        "commit": m.commit.clone(),
+                        "orphaned": true,
+                    }));
+                }
+                serde_json::json!({
+                    "name": s.name,
+                    "url": s.url,
+                    "commit": s.commit,
+                    "alias": s.alias,
+                    "items": rows,
+                })
+            })
+            .collect();
+        return print_json(&out);
     }
-    if manifest.items.is_empty() {
-        println!("nothing learned yet; `mind probe` to see what's available");
+
+    if registry.sources.is_empty() {
+        println!("no sources melded; `mind meld <repo>` to add one");
         return Ok(());
     }
-    if filtered.is_empty() {
-        println!("no installed items match the filter");
-        return Ok(());
+
+    for s in &registry.sources {
+        if !source_shown(s) {
+            continue;
+        }
+        let items = cat_items(s);
+        let cat_keys: std::collections::HashSet<String> = items.iter().map(|it| it.key()).collect();
+        let orphans = orphans_of(s, &cat_keys);
+        if items.is_empty() && orphans.is_empty() && filtering {
+            continue; // a filter excluded everything this source offers
+        }
+        let commit = s
+            .commit
+            .as_deref()
+            .map(short)
+            .unwrap_or_else(|| "unsynced".into());
+        let ns = match &s.alias {
+            Some(a) => format!(" as:{a}"),
+            None => String::new(),
+        };
+        let hook = match s.install_hooks.len() {
+            0 => String::new(),
+            1 => " hook".to_string(),
+            n => format!(" hooks({n})"),
+        };
+        println!(
+            "{}  [{commit}{ns}{hook}]{}",
+            s.name,
+            s.description
+                .as_deref()
+                .map(|d| format!("  {d}"))
+                .unwrap_or_default()
+        );
+        let width = items
+            .iter()
+            .map(|it| it.key().len())
+            .chain(orphans.iter().map(|m| m.key().len()))
+            .max()
+            .unwrap_or(0);
+        for it in items {
+            let key = it.key();
+            match manifest.items.get(&key) {
+                Some(m) => println!("  {key:<width$}  installed @ {}", short(&m.commit)),
+                None => println!("  {key:<width$}  available"),
+            }
+        }
+        for m in orphans {
+            println!(
+                "  {:<width$}  installed @ {} (removed upstream)",
+                m.key(),
+                short(&m.commit)
+            );
+        }
     }
-    let rows = filtered
-        .iter()
-        .map(|it| {
-            vec![
-                it.key(),
-                it.source.clone(),
-                short(&it.commit),
-                summary(it.description.as_deref(), 60),
-            ]
-        })
-        .collect::<Vec<_>>();
-    print_rows(&rows);
     Ok(())
 }
 
@@ -2162,9 +2615,20 @@ fn prompt_line(prompt: &str) -> Result<String> {
     Ok(line)
 }
 
-/// Prompt `[y/N]` on the terminal; default No.
-pub(crate) fn confirm(prompt: &str) -> Result<bool> {
-    print!("\n{prompt} [y/N] ");
+/// Resolve a yes/no reply. An explicit `y`/`yes` or `n`/`no` (any case, trimmed)
+/// wins; an empty line or any unrecognized reply takes `default_yes`.
+fn parse_confirm(input: &str, default_yes: bool) -> bool {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "y" | "yes" => true,
+        "n" | "no" => false,
+        _ => default_yes,
+    }
+}
+
+/// Print `prompt {hint}`, read one line from stdin, and resolve it against
+/// `default_yes`. EOF (no input) is always No.
+fn read_confirm(prompt: &str, hint: &str, default_yes: bool) -> Result<bool> {
+    print!("\n{prompt} {hint} ");
     let _ = std::io::stdout().flush();
     let mut line = String::new();
     let stdin = std::io::stdin();
@@ -2173,10 +2637,21 @@ pub(crate) fn confirm(prompt: &str) -> Result<bool> {
         .map_err(|e| MindError::io("<stdin>", e))?
         == 0
     {
-        return Ok(false); // EOF -> treat as No
+        return Ok(false); // EOF (no input) -> treat as No
     }
-    let ans = line.trim().to_ascii_lowercase();
-    Ok(ans == "y" || ans == "yes")
+    Ok(parse_confirm(&line, default_yes))
+}
+
+/// Prompt `[y/N]` on the terminal; default No.
+pub(crate) fn confirm(prompt: &str) -> Result<bool> {
+    read_confirm(prompt, "[y/N]", false)
+}
+
+/// Like `confirm` but defaulting to yes (`[Y/n]`): a bare Enter (or any reply that
+/// is not an explicit no) confirms. Used where the affirmative is the expected
+/// path and the action is reversible (the meld install-items prompt, CLI-23).
+pub(crate) fn confirm_default_yes(prompt: &str) -> Result<bool> {
+    read_confirm(prompt, "[Y/n]", true)
 }
 
 #[cfg(test)]
@@ -2189,6 +2664,29 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    #[test]
+    fn parse_confirm_default_no_only_yes_confirms() {
+        // spec: CLI-42 - the default-no guard (e.g. the forget glob confirm):
+        // only an explicit yes confirms; empty and unrecognized are no.
+        assert!(parse_confirm("y", false));
+        assert!(parse_confirm("YES", false));
+        assert!(!parse_confirm("", false));
+        assert!(!parse_confirm("n", false));
+        assert!(!parse_confirm("maybe", false));
+    }
+
+    #[test]
+    fn parse_confirm_default_yes_only_no_declines() {
+        // spec: CLI-23 - the meld install prompt defaults to yes: a bare Enter (or
+        // anything but an explicit no) installs; only n/no declines.
+        assert!(parse_confirm("", true));
+        assert!(parse_confirm("y", true));
+        assert!(parse_confirm(" Y \n", true));
+        assert!(parse_confirm("whatever", true));
+        assert!(!parse_confirm("n", true));
+        assert!(!parse_confirm("NO", true));
+    }
 
     /// Serialize every test that mutates process-global env vars
     /// (`MIND_POLICY_FILE`, `MIND_AGENT_HOMES`). Env is process-wide, so these
@@ -2387,45 +2885,57 @@ mod tests {
 
     /// Build a bare `Source` for the `hook_rerun_warranted` truth table. Uses
     /// `parse_spec` so the identity fields are filled the same way `meld` fills
-    /// them; the test only manipulates the commit and hook fields.
-    fn hook_source(
-        commit: Option<&str>,
-        install_hook: Option<&str>,
-        install_hook_commit: Option<&str>,
-    ) -> crate::source::Source {
+    /// them; the test only manipulates the commit and install_hooks fields.
+    ///
+    /// `hooks` is a list of `(command, ran_at)` pairs to populate
+    /// `Source.install_hooks`.
+    fn hook_source(commit: Option<&str>, hooks: &[(&str, Option<&str>)]) -> crate::source::Source {
+        use crate::source::RecordedHook;
         let mut s = crate::source::parse_spec("acme/tools").expect("spec parses");
         s.commit = commit.map(str::to_string);
-        s.install_hook = install_hook.map(str::to_string);
-        s.install_hook_commit = install_hook_commit.map(str::to_string);
+        s.install_hooks = hooks
+            .iter()
+            .map(|(cmd, ran_at)| RecordedHook {
+                command: cmd.to_string(),
+                ran_at: ran_at.map(str::to_string),
+            })
+            .collect();
         s
     }
 
-    // spec: HOOK-11
+    // spec: HOOK-11 HOOK-55
     #[test]
     fn hook_rerun_warranted_truth_table() {
-        // No hook in effect: never re-run, whatever the commits.
+        // No hooks recorded: never re-run.
         assert!(
-            !hook_rerun_warranted(&hook_source(Some("abc1234"), None, None)),
-            "no install_hook means no re-run"
-        );
-        assert!(
-            !hook_rerun_warranted(&hook_source(Some("abc1234"), None, Some("old0000"))),
-            "no install_hook means no re-run even with a recorded run commit"
+            !hook_rerun_warranted(&hook_source(Some("abc1234"), &[])),
+            "no install_hooks means no re-run"
         );
 
         // Hook already ran at the current commit: nothing to do.
         assert!(
             !hook_rerun_warranted(&hook_source(
                 Some("abc1234"),
-                Some("make install"),
-                Some("abc1234"),
+                &[("make install", Some("abc1234"))],
             )),
-            "install_hook_commit == commit means the hook already ran here"
+            "ran_at == commit means the hook already ran here"
+        );
+
+        // All hooks ran at current commit: nothing to do.
+        assert!(
+            !hook_rerun_warranted(&hook_source(
+                Some("abc1234"),
+                &[
+                    ("make build", Some("abc1234")),
+                    ("make install", Some("abc1234")),
+                ],
+            )),
+            "all hooks ran at current commit means no re-run warranted"
         );
 
         // Hook recorded but never run (skipped meld): re-offer it.
         assert!(
-            hook_rerun_warranted(&hook_source(Some("abc1234"), Some("make install"), None)),
+            hook_rerun_warranted(&hook_source(Some("abc1234"), &[("make install", None)],)),
             "a recorded-but-never-run hook is re-offered"
         );
 
@@ -2433,10 +2943,163 @@ mod tests {
         assert!(
             hook_rerun_warranted(&hook_source(
                 Some("def5678"),
-                Some("make install"),
-                Some("abc1234"),
+                &[("make install", Some("abc1234"))],
             )),
             "an advanced commit warrants a re-run"
+        );
+
+        // Mixed: one hook ran at current commit, one at a stale commit.
+        assert!(
+            hook_rerun_warranted(&hook_source(
+                Some("new0000"),
+                &[
+                    ("make build", Some("new0000")),
+                    ("make install", Some("old0000")),
+                ],
+            )),
+            "at least one stale hook warrants a re-run"
+        );
+    }
+
+    // spec: HOOK-57
+    // The init-source scaffold must include commented [[hooks]] examples for both
+    // install and uninstall events, at least one marked optional = true.
+    #[test]
+    fn init_source_scaffold_includes_hooks_examples() {
+        // Create a temp directory to run init_source in.
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let tmp =
+            std::env::temp_dir().join(format!("mind-cmd-init-hooks-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        struct Rm(std::path::PathBuf);
+        impl Drop for Rm {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _rm = Rm(tmp.clone());
+
+        // init_source should create the scaffold.
+        init_source(Some(tmp.to_str().unwrap()), false).expect("init_source should succeed");
+
+        let toml_path = tmp.join("mind.toml");
+        assert!(toml_path.exists(), "mind.toml must be created");
+        let contents = std::fs::read_to_string(&toml_path).unwrap();
+
+        // HOOK-57: must include [[hooks]] commented examples.
+        assert!(
+            contents.contains("[[hooks]]"),
+            "scaffold must include a commented [[hooks]] example: {contents}"
+        );
+        // Must show an install event.
+        assert!(
+            contents.contains("install"),
+            "scaffold must show event = \"install\": {contents}"
+        );
+        // Must show an uninstall event.
+        assert!(
+            contents.contains("uninstall"),
+            "scaffold must show event = \"uninstall\": {contents}"
+        );
+        // At least one example marked optional = true.
+        assert!(
+            contents.contains("optional = true"),
+            "scaffold must have at least one optional = true example: {contents}"
+        );
+        // All [[hooks]] content is commented out (lines starting with # after trimming).
+        // Check that the literal text "[[hooks]]" is preceded by a #.
+        let has_uncommented_hooks = contents.lines().any(|l| l.trim() == "[[hooks]]");
+        assert!(
+            !has_uncommented_hooks,
+            "[[hooks]] examples must all be commented out: {contents}"
+        );
+
+        // Existing assertions still pass (regression guard).
+        assert!(
+            contents.contains("[source]"),
+            "scaffold must still have [source]"
+        );
+        assert!(
+            contents.contains("# prefix = \"prefix\""),
+            "scaffold must still have commented prefix: {contents}"
+        );
+    }
+
+    // spec: HOOK-58
+    // The recall --sources hook token is count-aware: no token for 0 hooks,
+    // ` hook` for 1, ` hooks(N)` for N > 1.
+    #[test]
+    fn hook_token_is_count_aware() {
+        // 0 hooks -> empty string.
+        let s0 = hook_source(Some("abc"), &[]);
+        let token0 = match s0.install_hooks.len() {
+            0 => String::new(),
+            1 => " hook".to_string(),
+            n => format!(" hooks({n})"),
+        };
+        assert_eq!(token0, "", "no hooks => empty token");
+
+        // 1 hook -> ` hook`.
+        let s1 = hook_source(Some("abc"), &[("make install", Some("abc"))]);
+        let token1 = match s1.install_hooks.len() {
+            0 => String::new(),
+            1 => " hook".to_string(),
+            n => format!(" hooks({n})"),
+        };
+        assert_eq!(token1, " hook", "1 hook => ' hook'");
+
+        // 2 hooks -> ` hooks(2)`.
+        let s2 = hook_source(
+            Some("abc"),
+            &[("make build", Some("abc")), ("make install", Some("abc"))],
+        );
+        let token2 = match s2.install_hooks.len() {
+            0 => String::new(),
+            1 => " hook".to_string(),
+            n => format!(" hooks({n})"),
+        };
+        assert_eq!(token2, " hooks(2)", "2 hooks => ' hooks(2)'");
+    }
+
+    // spec: HOOK-50 HOOK-55
+    // Verifies that `hook_rerun_warranted` uses the new multi-hook model: a source
+    // with multiple install hooks is re-offered when ANY hook is pending, and not
+    // re-offered when ALL hooks have ran_at == commit.
+    #[test]
+    fn hook_rerun_warranted_multi_hook_model() {
+        // All hooks ran at the current commit: not warranted.
+        let all_current = hook_source(
+            Some("fff000"),
+            &[
+                ("make build", Some("fff000")),
+                ("make install", Some("fff000")),
+                ("make test", Some("fff000")),
+            ],
+        );
+        assert!(
+            !hook_rerun_warranted(&all_current),
+            "all hooks current => no re-run warranted"
+        );
+
+        // One hook never ran (ran_at == None): warranted.
+        let one_never_ran = hook_source(
+            Some("fff000"),
+            &[
+                ("make build", Some("fff000")),
+                ("make install", None), // skipped at meld time
+            ],
+        );
+        assert!(
+            hook_rerun_warranted(&one_never_ran),
+            "one hook with ran_at=None => re-run warranted"
+        );
+
+        // Source has no commit yet (None): all pending (ran_at=None matches None but
+        // hooks with a ran_at=Some differ from None).
+        let no_commit = hook_source(None, &[("make install", Some("old"))]);
+        assert!(
+            hook_rerun_warranted(&no_commit),
+            "commit=None and ran_at=Some => they differ => warranted"
         );
     }
 }

@@ -174,7 +174,15 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             // CLI-12: re-melding an already-melded source is not an error; it
             // ensures the items are installed, else reports their status.
             if commands::is_melded(paths, &repo)? {
-                commands::remeld(paths, &repo, alias, link_only, yes, clobber)
+                commands::remeld(
+                    paths,
+                    &repo,
+                    alias,
+                    link_only,
+                    yes,
+                    clobber,
+                    dangerously_skip_install_hook_check,
+                )
             } else {
                 commands::meld(
                     paths,
@@ -197,7 +205,20 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             }
         }
         Command::InitSource { path, template } => commands::init_source(path.as_deref(), template),
-        Command::Unmeld { name, forget } => commands::unmeld(paths, &name, forget),
+        Command::Unmeld {
+            name,
+            unlink_only,
+            yes,
+            uninstall_hook,
+            dangerously_skip_install_hook_check,
+        } => commands::unmeld(
+            paths,
+            &name,
+            unlink_only,
+            yes,
+            dangerously_skip_install_hook_check,
+            uninstall_hook,
+        ),
         Command::Learn {
             item,
             dry_run,

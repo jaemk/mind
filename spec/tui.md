@@ -26,8 +26,12 @@ the lock it takes per action is defined in storage.md (STO-40, STO-41).
 - `TUI-10` The view has two top-level groups: **Installed** and **Available**.
   Each is an independently collapsible tree.
 - `TUI-11` Under each group the hierarchy is source -> kind (skills, agents,
-  rules) -> item -> detail. A node expands and collapses; expanding an item shows
-  its description and frontmatter, and for a skill its file tree. Navigation is
+  rules) -> item -> detail. Every node toggles between expanded and collapsed on
+  Enter; Left/Right arrows also collapse/expand structural nodes (source and kind
+  buckets). Collapse state for structural nodes is tracked in a per-node collapsed
+  set distinct from the item-detail expansion set, so a source's items can be
+  hidden and re-shown independently of item detail. Expanding an item shows its
+  description and frontmatter, and for a skill its file tree. Navigation is
   keyboard-driven (move, expand, collapse, page, jump to search).
 - `TUI-12` **Installed** is the manifest (manifest.json): installed items grouped
   source -> kind -> item, each showing effective name, source, and short commit,
@@ -63,7 +67,9 @@ manifest, and store.
   selection flows through the same closure/confirm path, and already-installed
   items are skipped (DEP-23).
 - `TUI-21` Meld the selected/entered source (`meld`, CLI-10); unmeld a melded
-  source (`unmeld`, CLI-20), offering the `--forget` purge (CLI-22).
+  source (`unmeld`, CLI-20). The TUI's unmeld uninstalls the source's installed
+  items (the `--forget` purge, CLI-22) by default; this is a destructive action
+  and is confirmed before applying (TUI-24).
 - `TUI-22` Sync all or the selected source (`sync`, CLI-50); upgrade pending or the
   selected item(s) (`upgrade`, CLI-60), showing the same deltas and confirming
   before applying (CLI-61).
@@ -83,15 +89,20 @@ manifest, and store.
 
 ## Preview and registry (browsing the not-yet-melded)
 
-- `TUI-30` Entering a repo spec (any form `meld` accepts, CLI-11) shallow-clones
-  it to a temporary preview area and shows its catalog tree under Available
-  without registering it. Confirming meld promotes the preview to a real source
-  (registers it and keeps the clone, CLI-10); declining discards the temp clone.
-  This is the interactive form of `meld`.
+- `TUI-30` Melding a hand-entered repo spec (the `m` action; any form `meld`
+  accepts, CLI-11) runs the interactive `meld` directly: the TUI suspends to the
+  normal terminal (TUI-44) and runs `meld` (CLI-10) so the clone and every prompt
+  -- the namespace prompt (CLI-24), the install-hook disclosure (HOOK-20), the
+  install-items confirmation (CLI-23), and any SSH passphrase or host-key prompt
+  (TUI-45) -- behave exactly as they do from the CLI. No preview is pre-cloned: the
+  source is already named. This is the interactive form of `meld`.
 - `TUI-31` The Available registry of suggested, not-yet-melded sources is the
   union of the `[discover].sources` entries declared by all melded sources
   (DSC-38), de-duplicated by URL and excluding sources already melded. Expanding a
-  registry entry previews it (TUI-30); confirming melds it (TUI-21).
+  registry entry shallow-clones it to a temporary preview area and shows its
+  catalog tree under Available without registering it; confirming promotes the
+  preview to a real meld (the suspended interactive flow, TUI-44/TUI-21) and
+  declining discards the temp clone.
 
 ## Terminal handling
 
@@ -113,3 +124,22 @@ manifest, and store.
   It is intercepted before mode routing, so a `Char('c')` is never entered as
   text. One Ctrl-C arms and shows a hint; a second consecutive Ctrl-C exits, so a
   single accidental Ctrl-C while typing does not quit. Any other key disarms.
+- `TUI-44` An action whose verb prompts interactively (a `meld`, which discloses
+  and confirms an install hook per HOOK-20 and confirms the install per CLI-23)
+  runs with the TUI suspended: `mind` leaves raw mode and the alternate screen,
+  runs the verb on the normal terminal so its prompts read stdin and write stdout
+  exactly as the CLI does (never captured, never blocked behind raw mode), then
+  restores the alternate screen and redraws. After the verb the user presses Enter
+  to return, so the verb's output is readable before the browser redraws. This is
+  why the TUI meld flow is identical to the CLI meld flow. Non-prompting mutations
+  (learn/forget/sync/upgrade/unmeld) instead run with stdout captured (TUI-24) and
+  do not suspend.
+- `TUI-45` While the TUI holds the terminal, every `git` child runs
+  non-interactively (`GIT_TERMINAL_PROMPT=0` and an ssh `BatchMode=yes` wrapper),
+  so an auth-required remote -- a private SSH repo whose key needs a passphrase, or
+  an unknown host key -- fails fast with an error surfaced inline (TUI-24) instead
+  of hanging the UI on a hidden prompt the user cannot see or answer. The suspended
+  interactive meld (TUI-44) restores interactive git for its duration, so that same
+  passphrase or host-key prompt works on the normal terminal. This is why a typed
+  spec (TUI-30) can meld a private SSH source while a background preview, sync, or
+  upgrade of one fails fast rather than freezing.

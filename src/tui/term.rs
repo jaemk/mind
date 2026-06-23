@@ -65,6 +65,11 @@ impl TermGuard {
         *slot = Some(terminal);
         drop(slot);
 
+        // While the TUI owns the terminal, git must never prompt on it (a hidden
+        // passphrase/host-key prompt would hang the UI). Fail fast instead; the
+        // suspended interactive meld (with_suspended) re-enables prompts (TUI-45).
+        crate::git::set_noninteractive(true);
+
         Ok(TermGuard {
             prev_hook: Some(prev_hook),
         })
@@ -77,6 +82,9 @@ impl Drop for TermGuard {
         // the panic hook above handles the panic case.
         // spec: TUI-41
         let _ = restore();
+
+        // Leaving the TUI: restore interactive git for the rest of the process.
+        crate::git::set_noninteractive(false);
 
         // Reinstall the panic hook that was in effect before `enter()`, so the
         // global hook is left exactly as we found it (M6). Done AFTER restore so
@@ -115,6 +123,41 @@ fn restore() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let _ = t.show_cursor();
     }
     Ok(())
+}
+
+/// Run `f` with the TUI suspended: leave raw mode and the alternate screen so the
+/// closure runs on the normal terminal with real stdin/stdout, then restore the
+/// alternate screen + raw mode and force a full redraw. This lets an interactive
+/// verb (a `meld` with a hook prompt and an install confirmation) behave exactly
+/// as it would from the CLI (TUI-44). The restore runs on a `Drop` guard so a
+/// panic in `f` still re-enters the TUI before unwinding past here.
+pub fn with_suspended<R>(f: impl FnOnce() -> R) -> R {
+    struct ResumeGuard;
+    impl Drop for ResumeGuard {
+        fn drop(&mut self) {
+            // Back under the TUI: git must not prompt on the terminal again.
+            crate::git::set_noninteractive(true);
+            let _ = enable_raw_mode();
+            let mut stdout = io::stdout();
+            let _ = execute!(stdout, EnterAlternateScreen);
+            // Clear so the next render redraws the whole screen, not a partial
+            // overlay on top of the suspended verb's output.
+            if let Some(t) = lock_terminal().as_mut() {
+                let _ = t.clear();
+            }
+        }
+    }
+
+    let _ = disable_raw_mode();
+    {
+        let mut stdout = io::stdout();
+        let _ = execute!(stdout, LeaveAlternateScreen, crossterm::cursor::Show);
+    }
+    // On the normal terminal now: let the verb's git prompt for an SSH passphrase
+    // or host-key confirmation exactly as the CLI would (TUI-45).
+    crate::git::set_noninteractive(false);
+    let _resume = ResumeGuard;
+    f()
 }
 
 /// Wrapper giving `DerefMut` access to the global terminal.

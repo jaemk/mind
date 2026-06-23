@@ -7,7 +7,7 @@ use crate::error::ItemKind;
 use crate::tui::data::Snapshot;
 use crate::tui::event::Intent;
 use crate::tui::preview::SourcePreview;
-use crate::tui::tree::{TreeNode, flatten_tree};
+use crate::tui::tree::{TreeNode, flatten_tree, is_auto_expanded};
 
 /// A pending mutating action waiting for confirmation.
 // spec: TUI-24
@@ -86,8 +86,14 @@ pub struct App {
     pub visible: Vec<FlatNode>,
     /// Selected row index into `visible`.
     pub selected: usize,
-    /// Expanded node IDs.
+    /// Expanded node IDs (for non-auto-expanded nodes: InstalledItem,
+    /// AvailableItem, SuggestedSource).
     pub expanded: std::collections::HashSet<String>,
+    /// Collapsed auto-expanded node IDs (for Source and KindBucket nodes).
+    /// Auto-expanded nodes are shown by default; inserting an ID here hides
+    /// their children until explicitly re-expanded.
+    // spec: TUI-11
+    pub collapsed: std::collections::HashSet<String>,
     /// The last snapshot we applied.
     pub last_snapshot: Option<Snapshot>,
 
@@ -168,6 +174,7 @@ impl App {
             visible: Vec::new(),
             selected: 0,
             expanded: std::collections::HashSet::new(),
+            collapsed: std::collections::HashSet::new(),
             last_snapshot: None,
             installed_collapsed: false,
             available_collapsed: false,
@@ -245,7 +252,7 @@ impl App {
             self.installed_collapsed,
             self.available_collapsed,
         );
-        self.visible = flatten_tree(&nodes, &self.expanded);
+        self.visible = flatten_tree(&nodes, &self.expanded, &self.collapsed);
 
         // Restore selection to same ID, or clamp.
         if let Some(id) = selected_id {
@@ -294,6 +301,22 @@ impl App {
                         // spec: TUI-31
                         self.pending_preview_spec = Some(sug.spec.clone());
                         self.set_status(format!("Previewing {}...", sug.name));
+                    } else if is_auto_expanded(&node.node) {
+                        // Source/KindBucket: expand by removing from collapsed set.
+                        // InstalledGroup/AvailableGroup: toggle their boolean.
+                        // spec: TUI-11
+                        match node.node {
+                            TreeNode::InstalledGroup => {
+                                self.installed_collapsed = false;
+                            }
+                            TreeNode::AvailableGroup => {
+                                self.available_collapsed = false;
+                            }
+                            _ => {
+                                self.collapsed.remove(&node.id);
+                            }
+                        }
+                        self.rebuild_tree();
                     } else if node.expandable {
                         self.expanded.insert(node.id.clone());
                         self.rebuild_tree();
@@ -302,10 +325,26 @@ impl App {
             }
             Intent::Collapse => {
                 if let Some(node) = self.visible.get(self.selected).cloned() {
-                    if self.expanded.remove(&node.id) {
+                    if is_auto_expanded(&node.node) {
+                        // Auto-expanded nodes (Source/KindBucket/groups): collapse
+                        // by inserting into collapsed set (or toggling boolean).
+                        // spec: TUI-11
+                        match node.node {
+                            TreeNode::InstalledGroup => {
+                                self.installed_collapsed = true;
+                            }
+                            TreeNode::AvailableGroup => {
+                                self.available_collapsed = true;
+                            }
+                            _ => {
+                                self.collapsed.insert(node.id.clone());
+                            }
+                        }
+                        self.rebuild_tree();
+                    } else if self.expanded.remove(&node.id) {
                         self.rebuild_tree();
                     } else if node.depth > 0 {
-                        // Jump to parent.
+                        // Jump to parent (for non-auto nodes already collapsed).
                         let parent_depth = node.depth - 1;
                         if let Some(idx) = (0..self.selected)
                             .rev()
@@ -323,6 +362,25 @@ impl App {
                         // spec: TUI-31
                         self.pending_preview_spec = Some(sug.spec.clone());
                         self.set_status(format!("Previewing {}...", sug.name));
+                    } else if is_auto_expanded(&node.node) {
+                        // Auto-expanded nodes toggle their respective set/boolean.
+                        // spec: TUI-11
+                        match node.node {
+                            TreeNode::InstalledGroup => {
+                                self.installed_collapsed = !self.installed_collapsed;
+                            }
+                            TreeNode::AvailableGroup => {
+                                self.available_collapsed = !self.available_collapsed;
+                            }
+                            _ => {
+                                if self.collapsed.contains(&node.id) {
+                                    self.collapsed.remove(&node.id);
+                                } else {
+                                    self.collapsed.insert(node.id.clone());
+                                }
+                            }
+                        }
+                        self.rebuild_tree();
                     } else {
                         if self.expanded.contains(&node.id) {
                             self.expanded.remove(&node.id);
@@ -631,11 +689,14 @@ impl App {
             return;
         };
         if let TreeNode::Source(ref src) = node.node {
-            let desc = format!("Unmeld source {}?", src.name);
+            // Destructive unmeld: unlinks the source AND uninstalls its items.
+            // Routed through the confirm modal (TUI-24) before executing.
+            // spec: TUI-21 TUI-24
+            let desc = format!("Unmeld {} and uninstall its items?", src.name);
             self.pending_action = Some(PendingAction::new(
                 ActionKind::Unmeld {
                     name: src.name.clone(),
-                    forget: false,
+                    forget: true,
                 },
                 desc,
             ));
@@ -648,8 +709,31 @@ impl App {
         if self.modal_visible {
             // The event loop will handle ConfirmAction
         } else if let Some(node) = self.visible.get(self.selected).cloned() {
-            // Toggle expand on Enter
-            if node.expandable {
+            // Toggle expand on Enter, routing by node type (spec: TUI-11).
+            if let TreeNode::SuggestedSource(ref sug) = node.node {
+                // Enter on a SuggestedSource triggers a preview (TUI-31).
+                // spec: TUI-31
+                self.pending_preview_spec = Some(sug.spec.clone());
+                self.set_status(format!("Previewing {}...", sug.name));
+            } else if is_auto_expanded(&node.node) {
+                // Auto-expanded nodes toggle their respective set/boolean.
+                match node.node {
+                    TreeNode::InstalledGroup => {
+                        self.installed_collapsed = !self.installed_collapsed;
+                    }
+                    TreeNode::AvailableGroup => {
+                        self.available_collapsed = !self.available_collapsed;
+                    }
+                    _ => {
+                        if self.collapsed.contains(&node.id) {
+                            self.collapsed.remove(&node.id);
+                        } else {
+                            self.collapsed.insert(node.id.clone());
+                        }
+                    }
+                }
+                self.rebuild_tree();
+            } else if node.expandable {
                 if self.expanded.contains(&node.id) {
                     self.expanded.remove(&node.id);
                 } else {
@@ -814,41 +898,68 @@ mod tests {
     }
 
     #[test]
-    fn expand_toggles_expand_set() {
-        // spec: TUI-11
+    fn expand_toggles_correct_set_for_node_type() {
+        // spec: TUI-11 - Expand routes to the correct state set depending on the
+        // node type: auto-expanded nodes (Source, KindBucket) use `collapsed`;
+        // non-auto nodes (InstalledItem children) use `expanded`.
         let mut app = App::new(String::new(), None, None);
         app.apply_snapshot(make_snapshot());
-        // Find an expandable node
-        if let Some(idx) = app.visible.iter().position(|n| n.expandable) {
+
+        // Find a Source or KindBucket node (auto-expanded).
+        if let Some(idx) = app.visible.iter().position(|n| {
+            matches!(
+                &n.node,
+                crate::tui::tree::TreeNode::Source(_)
+                    | crate::tui::tree::TreeNode::KindBucket { .. }
+            ) && n.expandable
+        }) {
             app.selected = idx;
             let id = app.visible[idx].id.clone();
-            app.apply_intent(Intent::Expand);
-            assert!(
-                app.expanded.contains(&id),
-                "expand should add to expanded set"
-            );
+            // First collapse it so Expand has something to do.
+            app.collapsed.insert(id.clone());
+            app.rebuild_tree();
+            if let Some(new_idx) = app.visible.iter().position(|n| n.id == id) {
+                app.selected = new_idx;
+                app.apply_intent(Intent::Expand);
+                assert!(
+                    !app.collapsed.contains(&id),
+                    "Expand on an auto-expanded node must remove it from the collapsed set"
+                );
+                assert!(
+                    !app.expanded.contains(&id),
+                    "Expand on an auto-expanded node must NOT touch the expanded set"
+                );
+            }
         }
     }
 
     #[test]
-    fn collapse_removes_from_expand_set() {
-        // spec: TUI-11
+    fn collapse_adds_to_collapsed_set_for_auto_expanded_nodes() {
+        // spec: TUI-11 - Collapse on an auto-expanded node (Source, KindBucket)
+        // inserts the id into the `collapsed` set, not the `expanded` set. The
+        // children are then hidden on the next flatten.
         let mut app = App::new(String::new(), None, None);
         app.apply_snapshot(make_snapshot());
-        if let Some(idx) = app.visible.iter().position(|n| n.expandable) {
+
+        // Find a Source or KindBucket node.
+        if let Some(idx) = app.visible.iter().position(|n| {
+            matches!(
+                &n.node,
+                crate::tui::tree::TreeNode::Source(_)
+                    | crate::tui::tree::TreeNode::KindBucket { .. }
+            ) && n.expandable
+        }) {
             app.selected = idx;
             let id = app.visible[idx].id.clone();
-            app.expanded.insert(id.clone());
-            app.rebuild_tree();
-            // Find same node
-            if let Some(new_idx) = app.visible.iter().position(|n| n.id == id) {
-                app.selected = new_idx;
-                app.apply_intent(Intent::Collapse);
-                assert!(
-                    !app.expanded.contains(&id),
-                    "collapse should remove from expanded set"
-                );
-            }
+            app.apply_intent(Intent::Collapse);
+            assert!(
+                app.collapsed.contains(&id),
+                "Collapse on an auto-expanded node must add it to the collapsed set"
+            );
+            assert!(
+                !app.expanded.contains(&id),
+                "Collapse on an auto-expanded node must NOT touch the expanded set"
+            );
         }
     }
 
@@ -1436,7 +1547,11 @@ mod tests {
                 false,
                 false,
             );
-            let flat = crate::tui::tree::flatten_tree(&nodes, &std::collections::HashSet::new());
+            let flat = crate::tui::tree::flatten_tree(
+                &nodes,
+                &std::collections::HashSet::new(),
+                &std::collections::HashSet::new(),
+            );
             let has_sug = flat
                 .iter()
                 .any(|n| matches!(&n.node, TreeNode::SuggestedSource(s) if s.name == "some-repo"));
@@ -1464,7 +1579,7 @@ mod tests {
         }];
 
         let nodes = build_tree(&snap, "", None, None, false, false);
-        let flat = flatten_tree(&nodes, &HashSet::new());
+        let flat = flatten_tree(&nodes, &HashSet::new(), &HashSet::new());
 
         let has_sug = flat
             .iter()
@@ -1899,5 +2014,235 @@ mod tests {
             app.pending_action.as_ref().unwrap().dep_tree.is_none(),
             "set_learn_dep_tree(None) must clear the tree so the confirm stays plain"
         );
+    }
+
+    // --- TUI-11: collapsed set used for Source/KindBucket; groups use boolean ---
+
+    /// Helper: build an app with the standard snapshot and return the index of
+    /// the Source node under Installed (id = "installed-source:local/agents").
+    fn app_with_source_node() -> (App, usize) {
+        let mut app = App::new(String::new(), None, None);
+        app.apply_snapshot(make_snapshot());
+        let idx = app
+            .visible
+            .iter()
+            .position(|n| matches!(&n.node, crate::tui::tree::TreeNode::Source(_)))
+            .expect("a Source node should be visible");
+        (app, idx)
+    }
+
+    #[test]
+    fn toggle_expand_on_source_removes_items_from_visible() {
+        // spec: TUI-11 - ToggleExpand on a Source node collapses it, hiding its
+        // descendant items from visible. A second ToggleExpand restores them.
+        let (mut app, idx) = app_with_source_node();
+        app.selected = idx;
+        let source_id = app.visible[idx].id.clone();
+
+        // Initially Source is expanded (auto-expanded): items should be visible.
+        let items_before = app
+            .visible
+            .iter()
+            .any(|n| matches!(&n.node, crate::tui::tree::TreeNode::InstalledItem(_)));
+        assert!(items_before, "items should be visible before toggle");
+
+        // First ToggleExpand: collapses the source.
+        app.apply_intent(Intent::ToggleExpand);
+        assert!(
+            app.collapsed.contains(&source_id),
+            "ToggleExpand on Source must insert id into collapsed set"
+        );
+        let items_after_collapse = app
+            .visible
+            .iter()
+            .any(|n| matches!(&n.node, crate::tui::tree::TreeNode::InstalledItem(_)));
+        assert!(
+            !items_after_collapse,
+            "items must be absent from visible after collapsing the Source"
+        );
+
+        // Second ToggleExpand: restores children.
+        // (selection may have moved; re-locate the source node)
+        if let Some(new_idx) = app.visible.iter().position(|n| n.id == source_id) {
+            app.selected = new_idx;
+        }
+        app.apply_intent(Intent::ToggleExpand);
+        assert!(
+            !app.collapsed.contains(&source_id),
+            "second ToggleExpand must remove Source from collapsed set"
+        );
+        let items_restored = app
+            .visible
+            .iter()
+            .any(|n| matches!(&n.node, crate::tui::tree::TreeNode::InstalledItem(_)));
+        assert!(
+            items_restored,
+            "items must reappear in visible after second ToggleExpand"
+        );
+    }
+
+    #[test]
+    fn collapse_then_expand_on_source_hides_and_restores_items() {
+        // spec: TUI-11 - explicit Collapse/Expand intents on a Source node must
+        // respectively hide and restore its descendant items.
+        let (mut app, idx) = app_with_source_node();
+        app.selected = idx;
+        let source_id = app.visible[idx].id.clone();
+
+        // Collapse.
+        app.apply_intent(Intent::Collapse);
+        assert!(
+            app.collapsed.contains(&source_id),
+            "Collapse must add Source to collapsed set"
+        );
+        let items_hidden = app
+            .visible
+            .iter()
+            .any(|n| matches!(&n.node, crate::tui::tree::TreeNode::InstalledItem(_)));
+        assert!(!items_hidden, "items must be hidden after Collapse");
+
+        // Expand.
+        if let Some(new_idx) = app.visible.iter().position(|n| n.id == source_id) {
+            app.selected = new_idx;
+        }
+        app.apply_intent(Intent::Expand);
+        assert!(
+            !app.collapsed.contains(&source_id),
+            "Expand must remove Source from collapsed set"
+        );
+        let items_restored = app
+            .visible
+            .iter()
+            .any(|n| matches!(&n.node, crate::tui::tree::TreeNode::InstalledItem(_)));
+        assert!(items_restored, "items must reappear after Expand");
+    }
+
+    #[test]
+    fn group_node_toggle_does_not_insert_into_collapsed() {
+        // spec: TUI-11 - toggling an InstalledGroup or AvailableGroup must NOT
+        // insert the group id into `self.collapsed` (that is reserved for
+        // Source/KindBucket). Groups use the `installed_collapsed` /
+        // `available_collapsed` booleans exclusively. Inserting a group id into
+        // `collapsed` would be a double-toggle and break the model.
+        let mut app = App::new(String::new(), None, None);
+        app.apply_snapshot(make_snapshot());
+
+        // Toggle the InstalledGroup.
+        let ig_idx = app
+            .visible
+            .iter()
+            .position(|n| matches!(&n.node, crate::tui::tree::TreeNode::InstalledGroup))
+            .expect("InstalledGroup must be visible");
+        let ig_id = app.visible[ig_idx].id.clone();
+        app.selected = ig_idx;
+        app.apply_intent(Intent::ToggleExpand);
+        assert!(
+            app.installed_collapsed,
+            "ToggleExpand on InstalledGroup must set installed_collapsed=true"
+        );
+        assert!(
+            !app.collapsed.contains(&ig_id),
+            "InstalledGroup id must NOT be inserted into the collapsed set"
+        );
+
+        // Toggle the AvailableGroup.
+        let ag_idx = app
+            .visible
+            .iter()
+            .position(|n| matches!(&n.node, crate::tui::tree::TreeNode::AvailableGroup))
+            .expect("AvailableGroup must be visible");
+        let ag_id = app.visible[ag_idx].id.clone();
+        app.selected = ag_idx;
+        app.apply_intent(Intent::ToggleExpand);
+        assert!(
+            app.available_collapsed,
+            "ToggleExpand on AvailableGroup must set available_collapsed=true"
+        );
+        assert!(
+            !app.collapsed.contains(&ag_id),
+            "AvailableGroup id must NOT be inserted into the collapsed set"
+        );
+    }
+
+    // --- TUI-21 TUI-24: initiate_unmeld produces forget:true ---
+
+    #[test]
+    fn initiate_unmeld_produces_forget_true_and_opens_modal() {
+        // spec: TUI-21 TUI-24 - pressing unmeld on a Source node queues a
+        // destructive Unmeld{forget:true} action and shows the confirm modal.
+        // The action must NOT execute until confirmed (gated by take_pending_action).
+        let mut app = App::new(String::new(), None, None);
+        // Wire a Source node directly into visible (simpler than seeding a full
+        // snapshot since initiate_unmeld only inspects the selected node).
+        app.visible = vec![FlatNode {
+            id: "installed-source:local/agents".into(),
+            label: "local/agents".into(),
+            depth: 1,
+            expandable: false,
+            expanded: true,
+            node: crate::tui::tree::TreeNode::Source(crate::tui::tree::SourceInfo {
+                name: "local/agents".into(),
+                installed: true,
+            }),
+        }];
+        app.selected = 0;
+        app.apply_intent(Intent::ActionUnmeld);
+
+        assert!(
+            app.modal_visible,
+            "unmeld must open the confirm modal (TUI-24 gating)"
+        );
+        let pending = app
+            .pending_action
+            .as_ref()
+            .expect("unmeld must set a pending action");
+        assert!(
+            matches!(
+                &pending.kind,
+                ActionKind::Unmeld { name, forget: true } if name == "local/agents"
+            ),
+            "pending action must be Unmeld{{forget:true}} for the selected source, got: {:?}",
+            pending.kind
+        );
+        assert!(
+            pending.description.contains("local/agents"),
+            "confirm message must mention the source name"
+        );
+        // The action has not executed yet (gated by confirmation).
+        assert!(
+            !app.mutating,
+            "mutating must not be set until take_pending_action is called"
+        );
+    }
+
+    #[test]
+    fn initiate_unmeld_forget_true_survives_confirmation() {
+        // spec: TUI-21 TUI-24 - the forget:true flag must survive through the
+        // confirm modal (take_pending_action). A bug that reset forget to false
+        // or dropped it would leave installed items behind after unmeld.
+        let mut app = App::new(String::new(), None, None);
+        app.visible = vec![FlatNode {
+            id: "installed-source:test-source".into(),
+            label: "test-source".into(),
+            depth: 1,
+            expandable: false,
+            expanded: true,
+            node: crate::tui::tree::TreeNode::Source(crate::tui::tree::SourceInfo {
+                name: "test-source".into(),
+                installed: true,
+            }),
+        }];
+        app.selected = 0;
+        app.apply_intent(Intent::ActionUnmeld);
+
+        let taken = app
+            .take_pending_action()
+            .expect("take_pending_action must yield the action");
+        assert!(
+            matches!(taken.kind, ActionKind::Unmeld { forget: true, .. }),
+            "forget:true must survive take_pending_action: {:?}",
+            taken.kind
+        );
+        assert!(app.mutating, "mutating flag set after take");
     }
 }

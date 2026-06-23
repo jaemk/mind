@@ -306,7 +306,7 @@ fn meld_link_only_registers_without_installing() {
         "the source must be registered"
     );
     assert!(
-        !sb.mind(&["recall"]).stdout.contains("review"),
+        !sb.mind(&["recall"]).stdout.contains("installed @"),
         "--link-only must not install any items"
     );
 }
@@ -324,7 +324,7 @@ fn meld_default_non_tty_registers_only_and_notes_install() {
         "the source must be registered"
     );
     assert!(
-        !sb.mind(&["recall"]).stdout.contains("review"),
+        !sb.mind(&["recall"]).stdout.contains("installed @"),
         "a non-TTY default meld must not install items"
     );
     assert!(
@@ -386,6 +386,43 @@ fn meld_with_no_arg_melds_the_current_directory() {
     assert!(
         sources.contains("agents"),
         "the current directory must be registered as a source: {sources}"
+    );
+}
+
+#[test]
+fn local_source_is_read_from_its_working_tree() {
+    // spec: CLI-27 - a linked local source is read from its working tree, so an
+    // untracked mind.toml is seen; it is never cloned, and unmeld never deletes it.
+    let sb = Sandbox::bare("worktree-src");
+    // Commit an item, then add an UNTRACKED mind.toml (in no commit).
+    sb.write_and_commit("skills/a/SKILL.md", "---\ndescription: a\n---\n# a\n");
+    write(
+        &sb.source.join("mind.toml"),
+        "[source]\ndescription = \"live working tree\"\n",
+    );
+    let spec = sb.source_spec();
+
+    assert!(sb.mind(&["meld", &spec, "--link-only"]).success);
+    // No clone is made under the sources tree; the working tree is the source.
+    assert!(
+        !clone_dir_of(&sb, "worktree-src").exists(),
+        "a linked local source must not be cloned"
+    );
+    // The untracked mind.toml is read live from the working tree.
+    let sources = sb.mind(&["recall", "--sources"]).stdout;
+    assert!(
+        sources.contains("live working tree"),
+        "the untracked mind.toml must be read from the working tree: {sources}"
+    );
+
+    // unmeld leaves the working tree intact.
+    assert!(
+        sb.mind(&["unmeld", "worktree-src", "--unlink-only"])
+            .success
+    );
+    assert!(
+        sb.source.join("skills/a/SKILL.md").exists(),
+        "unmeld must not delete the linked working tree"
     );
 }
 
@@ -913,8 +950,11 @@ fn forget_removes_symlink_and_manifest_entry() {
         "symlink should be gone"
     );
 
-    let list = sb.mind(&["recall"]);
-    assert!(list.stdout.contains("nothing learned"), "{}", list.stdout);
+    // The item is no longer installed (a single-item recall lookup fails).
+    assert!(
+        !sb.mind(&["recall", "review"]).success,
+        "review should no longer be installed"
+    );
 }
 
 #[test]
@@ -957,8 +997,14 @@ fn forget_bare_name_is_ambiguous_across_kinds_and_qualifier_resolves() {
 
     // The kind prefix disambiguates and forgets exactly one.
     assert!(sb.mind(&["forget", "skill:dup"]).success);
-    assert!(sb.mind(&["recall"]).stdout.contains("agent:dup"));
-    assert!(!sb.mind(&["recall"]).stdout.contains("skill:dup"));
+    assert!(
+        sb.mind(&["recall", "agent:dup"]).success,
+        "agent:dup remains installed"
+    );
+    assert!(
+        !sb.mind(&["recall", "skill:dup"]).success,
+        "skill:dup uninstalled"
+    );
 }
 
 #[test]
@@ -978,7 +1024,7 @@ fn learn_refuses_to_clobber_a_user_file() {
     );
     // The user's file is untouched and nothing was recorded.
     assert!(target.join("MINE.md").exists(), "user file was deleted");
-    assert!(sb.mind(&["recall"]).stdout.contains("nothing learned"));
+    assert!(!sb.mind(&["recall"]).stdout.contains("installed @"));
 }
 
 #[test]
@@ -1415,11 +1461,13 @@ fn upgrade_treats_a_prefix_change_as_a_rename() {
 }
 
 #[test]
-fn unmeld_removes_source_but_keeps_installed_items() {
-    // spec: CLI-20, CLI-21
+fn unmeld_unlink_only_keeps_installed_items() {
+    // spec: CLI-20, CLI-22 - `--unlink-only` removes the source but keeps its
+    // installed items, listing them with the forget hint.
     let sb = melded();
     assert!(sb.mind(&["learn", "review"]).success);
-    assert!(sb.mind(&["unmeld", "agents"]).success);
+    let r = sb.mind(&["unmeld", "agents", "--unlink-only"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
 
     // Source is gone.
     assert!(
@@ -1427,9 +1475,34 @@ fn unmeld_removes_source_but_keeps_installed_items() {
             .stdout
             .contains("no sources melded")
     );
-    // The installed item is left in place.
+    // The installed item is left in place and reported with the forget command.
     assert!(std::fs::symlink_metadata(sb.claude_home.join("skills/review")).is_ok());
-    assert!(sb.mind(&["recall"]).stdout.contains("skill:review"));
+    assert!(
+        sb.mind(&["recall", "review"]).success,
+        "the item remains installed"
+    );
+    assert!(
+        r.stdout.contains("remain installed") && r.stdout.contains("mind forget"),
+        "unlink-only must list orphaned items and suggest forget: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn unmeld_forgets_items_by_default() {
+    // spec: CLI-21 - a plain unmeld uninstalls the source's items.
+    let sb = melded();
+    assert!(sb.mind(&["learn", "review"]).success);
+    let r = sb.mind(&["unmeld", "agents"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(
+        std::fs::symlink_metadata(sb.claude_home.join("skills/review")).is_err(),
+        "the item link must be removed by default"
+    );
+    assert!(
+        !sb.mind(&["recall", "review"]).success,
+        "the item must be uninstalled by default"
+    );
 }
 
 #[test]
@@ -1678,9 +1751,14 @@ fn learn_kind_glob_limits_to_kind() {
     // spec: CLI-31
     let sb = melded();
     assert!(sb.mind(&["learn", "skill:*"]).success);
-    let recall = sb.mind(&["recall"]).stdout;
-    assert!(recall.contains("skill:review"), "{recall}");
-    assert!(!recall.contains("agent:dev"), "{recall}");
+    assert!(
+        sb.mind(&["recall", "skill:review"]).success,
+        "skill installed"
+    );
+    assert!(
+        !sb.mind(&["recall", "agent:dev"]).success,
+        "agent not installed by a skill glob"
+    );
 }
 
 #[test]
@@ -1689,14 +1767,14 @@ fn learn_dry_run_installs_nothing() {
     let sb = melded();
     let r = sb.mind(&["learn", "*", "--dry-run"]);
     assert!(r.success, "{}", r.stderr);
-    assert!(r.stdout.contains("dry run"), "{}", r.stdout);
+    assert!(r.stdout.contains("would learn"), "{}", r.stdout);
     assert!(
         r.stdout.contains("skill:review"),
         "plan should list items: {}",
         r.stdout
     );
     // Nothing was actually installed.
-    assert!(sb.mind(&["recall"]).stdout.contains("nothing learned"));
+    assert!(!sb.mind(&["recall"]).stdout.contains("installed @"));
     assert!(std::fs::symlink_metadata(sb.claude_home.join("skills/review")).is_err());
 }
 
@@ -1712,7 +1790,7 @@ fn learn_glob_collision_errors_and_installs_nothing() {
     let r = a.mind(&["learn", "*"]);
     assert!(!r.success);
     assert!(r.stderr.contains("ambiguous"), "{}", r.stderr);
-    assert!(a.mind(&["recall"]).stdout.contains("nothing learned"));
+    assert!(!a.mind(&["recall"]).stdout.contains("installed @"));
 }
 
 #[test]
@@ -1772,9 +1850,14 @@ fn learn_source_and_kind_glob_compose() {
     let sb = melded();
     // All skills of this source: review only (fixture has one skill).
     assert!(sb.mind(&["learn", "agents#skill:*"]).success);
-    let recall = sb.mind(&["recall"]).stdout;
-    assert!(recall.contains("skill:review"), "{recall}");
-    assert!(!recall.contains("agent:dev"), "{recall}");
+    assert!(
+        sb.mind(&["recall", "skill:review"]).success,
+        "skill installed"
+    );
+    assert!(
+        !sb.mind(&["recall", "agent:dev"]).success,
+        "agent not installed by a skill glob"
+    );
 }
 
 #[test]
@@ -1870,7 +1953,7 @@ fn learn_dependency_dry_run_renders_tree_and_installs_nothing() {
     let sb = dep_fixture();
     let r = sb.mind(&["learn", "skill:review", "--dry-run"]);
     assert!(r.success, "{}", r.stderr);
-    assert!(r.stdout.contains("dry run"), "{}", r.stdout);
+    assert!(r.stdout.contains("would learn"), "{}", r.stdout);
     assert!(
         r.stdout.contains("skill:review [selected]"),
         "tree should head with the selected skill: {}",
@@ -1883,7 +1966,7 @@ fn learn_dependency_dry_run_renders_tree_and_installs_nothing() {
     );
 
     // Nothing was installed.
-    assert!(sb.mind(&["recall"]).stdout.contains("nothing learned"));
+    assert!(!sb.mind(&["recall"]).stdout.contains("installed @"));
     assert!(std::fs::symlink_metadata(sb.claude_home.join("agents/reviewer.md")).is_err());
 }
 
@@ -1896,14 +1979,13 @@ fn forget_does_not_remove_a_dependency() {
     assert!(sb.mind(&["learn", "skill:review", "--yes"]).success);
     assert!(sb.mind(&["forget", "skill:review"]).success);
 
-    let recall = sb.mind(&["recall"]).stdout;
     assert!(
-        !recall.contains("skill:review"),
-        "the forgotten skill is gone: {recall}"
+        !sb.mind(&["recall", "skill:review"]).success,
+        "the forgotten skill is gone"
     );
     assert!(
-        recall.contains("agent:reviewer"),
-        "the dependency stays installed: {recall}"
+        sb.mind(&["recall", "agent:reviewer"]).success,
+        "the dependency stays installed"
     );
 }
 
@@ -1962,7 +2044,7 @@ fn learn_dependency_prompt_decline_installs_nothing() {
     );
 
     // Nothing installed: manifest empty, no symlinks for either item.
-    assert!(sb.mind(&["recall"]).stdout.contains("nothing learned"));
+    assert!(!sb.mind(&["recall"]).stdout.contains("installed @"));
     assert!(std::fs::symlink_metadata(sb.claude_home.join("skills/review")).is_err());
     assert!(std::fs::symlink_metadata(sb.claude_home.join("agents/reviewer.md")).is_err());
 }
@@ -1987,7 +2069,7 @@ fn learn_dependency_prompt_defaults_to_no_on_eof() {
     );
 
     // Nothing installed.
-    assert!(sb.mind(&["recall"]).stdout.contains("nothing learned"));
+    assert!(!sb.mind(&["recall"]).stdout.contains("installed @"));
     assert!(std::fs::symlink_metadata(sb.claude_home.join("skills/review")).is_err());
     assert!(std::fs::symlink_metadata(sb.claude_home.join("agents/reviewer.md")).is_err());
 }
@@ -2131,7 +2213,7 @@ fn learn_closure_collision_via_pulled_dependency_aborts() {
         r.stderr
     );
     // Nothing installed.
-    assert!(a.mind(&["recall"]).stdout.contains("nothing learned"));
+    assert!(!a.mind(&["recall"]).stdout.contains("installed @"));
 }
 
 #[test]
@@ -2141,7 +2223,7 @@ fn unlearn_is_an_alias_for_forget() {
     assert!(sb.mind(&["learn", "review"]).success);
     assert!(sb.mind(&["unlearn", "review"]).success);
     assert!(std::fs::symlink_metadata(sb.claude_home.join("skills/review")).is_err());
-    assert!(sb.mind(&["recall"]).stdout.contains("nothing learned"));
+    assert!(!sb.mind(&["recall"]).stdout.contains("installed @"));
 }
 
 #[test]
@@ -2305,14 +2387,19 @@ fn forget_glob_uninstalls_all_matches() {
 
     // A kind glob forgets only that kind.
     assert!(sb.mind(&["forget", "skill:*"]).success);
-    let after = sb.mind(&["recall"]).stdout;
-    assert!(!after.contains("skill:review"), "{after}");
-    assert!(after.contains("agent:dev"), "{after}");
+    assert!(
+        !sb.mind(&["recall", "skill:review"]).success,
+        "skill:review should be uninstalled"
+    );
+    assert!(
+        sb.mind(&["recall", "agent:dev"]).success,
+        "agent:dev should remain installed"
+    );
     assert!(std::fs::symlink_metadata(sb.claude_home.join("skills/review")).is_err());
 
     // A bare `*` forgets everything that is left (multi-match needs --yes, CLI-42).
     assert!(sb.mind(&["forget", "*", "--yes"]).success);
-    assert!(sb.mind(&["recall"]).stdout.contains("nothing learned"));
+    assert!(!sb.mind(&["recall"]).stdout.contains("installed @"));
 
     // A glob matching no installed item is an error.
     let none = sb.mind(&["forget", "zzz*"]);
@@ -2354,14 +2441,30 @@ fn forget_confirms_before_removing_multiple_items() {
 }
 
 #[test]
-fn unmeld_forget_purges_installed_items() {
-    // spec: CLI-22
+fn unmeld_forgets_all_items_with_yes() {
+    // spec: CLI-21, CLI-42 - default unmeld removes the source's items; `--yes`
+    // skips the multi-item confirmation.
     let sb = melded();
     assert!(sb.mind(&["learn", "review"]).success);
     assert!(sb.mind(&["learn", "dev"]).success);
 
-    let r = sb.mind(&["unmeld", "agents", "--forget"]);
-    assert!(r.success, "{}", r.stderr);
+    // Without --yes, a multi-item unmeld refuses in a non-TTY context (CLI-42).
+    let refused = sb.mind(&["unmeld", "agents"]);
+    assert!(
+        !refused.success,
+        "must refuse without --yes: {}",
+        refused.stdout
+    );
+    assert!(
+        refused.stderr.contains("needs confirmation"),
+        "{}",
+        refused.stderr
+    );
+    // The source and items are untouched after the refusal.
+    assert!(sb.mind(&["recall", "review"]).success, "item remains");
+
+    let r = sb.mind(&["unmeld", "agents", "--yes"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
     assert!(r.stdout.contains("removed"), "{}", r.stdout);
 
     // Both the source and every installed item are gone.
@@ -2370,7 +2473,6 @@ fn unmeld_forget_purges_installed_items() {
             .stdout
             .contains("no sources melded")
     );
-    assert!(sb.mind(&["recall"]).stdout.contains("nothing learned"));
     assert!(std::fs::symlink_metadata(sb.claude_home.join("skills/review")).is_err());
     assert!(std::fs::symlink_metadata(sb.claude_home.join("agents/dev.md")).is_err());
 }
@@ -2522,7 +2624,8 @@ fn recall_json_emits_items_and_sources() {
     let sb = melded();
     assert!(sb.mind(&["learn", "review"]).success);
 
-    // Listing is a JSON array of installed items.
+    // The default view is a JSON array of sources, each with nested items that
+    // carry their install state (CLI-73).
     let items = sb.mind(&["recall", "--json"]);
     assert!(items.success, "{}", items.stderr);
     assert!(
@@ -2531,13 +2634,18 @@ fn recall_json_emits_items_and_sources() {
         items.stdout
     );
     assert!(
-        items.stdout.contains("\"kind\": \"skill\""),
+        items.stdout.contains("\"items\""),
+        "sources carry nested items: {}",
+        items.stdout
+    );
+    assert!(
+        items.stdout.contains("\"key\": \"skill:review\""),
         "{}",
         items.stdout
     );
     assert!(
-        items.stdout.contains("\"name\": \"review\""),
-        "{}",
+        items.stdout.contains("\"installed\": true"),
+        "the installed item is flagged: {}",
         items.stdout
     );
 
@@ -2551,10 +2659,13 @@ fn recall_json_emits_items_and_sources() {
     assert!(srcs.trim_start().starts_with('['), "{srcs}");
     assert!(srcs.contains("\"url\""), "{srcs}");
 
-    // An empty listing is `[]`, not a human message.
-    assert!(sb.mind(&["forget", "review"]).success);
-    let empty = sb.mind(&["recall", "--json"]).stdout;
-    assert_eq!(empty.trim(), "[]", "{empty}");
+    // An empty registry is `[]`, not a human message.
+    let fresh = Sandbox::new();
+    assert_eq!(
+        fresh.mind(&["recall", "--json"]).stdout.trim(),
+        "[]",
+        "an empty registry must emit []"
+    );
 }
 
 #[test]
@@ -4919,9 +5030,12 @@ fn learn_skips_disallowed_source_when_locked() {
         r.stdout
     );
     // The item was not installed.
-    let recall = sb.mind_env(&["recall"], &[("MIND_POLICY_FILE", policy.as_str())]);
+    let recall = sb.mind_env(
+        &["recall", "agent:dev"],
+        &[("MIND_POLICY_FILE", policy.as_str())],
+    );
     assert!(
-        !recall.stdout.contains("agent:dev"),
+        !recall.success,
         "the disallowed item must not be installed: {}",
         recall.stdout
     );
@@ -5439,7 +5553,7 @@ fn sandbox_with_declared_hook(name: &str, cmd: &str) -> Sandbox {
 
 #[test]
 fn meld_with_declared_hook_non_tty_skips_but_still_installs() {
-    // spec: HOOK-22, HOOK-21
+    // spec: HOOK-22, HOOK-21, HOOK-55
     // stdin is not a TTY in this harness, so a declared hook takes the skip
     // path (HOOK-22): the source and its items still install (HOOK-21), but the
     // tooling is not built. The clone-dir marker the hook would create must not
@@ -5467,7 +5581,7 @@ fn meld_with_declared_hook_non_tty_skips_but_still_installs() {
     );
 
     // The hook did NOT run: its marker is absent from the clone dir.
-    let marker = clone_dir_of(&sb, "agents").join("hookran");
+    let marker = sb.source.clone().join("hookran");
     assert!(
         !marker.exists(),
         "the install hook must not have run: {} exists",
@@ -5479,8 +5593,8 @@ fn meld_with_declared_hook_non_tty_skips_but_still_installs() {
     // middle is the full `host/owner/repo` identity, so assert the two stable
     // fragments around it. A regression that drops or rewords the note fails
     // here rather than passing on any bare "skipped".
-    let prefix = "note: skipped the install hook for ";
-    let suffix = "; its items may not work until the hook is run";
+    let prefix = "note: skipped install hook ";
+    let suffix = "; its items may not work until it runs";
     let reported = (r.stdout.contains(prefix) && r.stdout.contains(suffix))
         || (r.stderr.contains(prefix) && r.stderr.contains(suffix));
     assert!(
@@ -5489,21 +5603,22 @@ fn meld_with_declared_hook_non_tty_skips_but_still_installs() {
         r.stdout, r.stderr
     );
 
-    // The registry records the hook command but with a null run-commit.
+    // The registry records the hook in `install_hooks` with a null `ran_at`
+    // (skipped, so `upgrade` can re-offer it) per HOOK-55.
     let json = std::fs::read_to_string(sb.mind_home.join("sources.json")).unwrap();
     assert!(
         json.contains("touch hookran"),
         "registry must record the hook command: {json}"
     );
     assert!(
-        json.contains("\"install_hook_commit\": null"),
-        "install_hook_commit must be null after a skipped hook: {json}"
+        json.contains("install_hooks") && json.contains("\"ran_at\": null"),
+        "a skipped hook must record in install_hooks with ran_at = null: {json}"
     );
 }
 
 #[test]
 fn meld_dangerously_skip_runs_hook_and_records_it() {
-    // spec: HOOK-23, HOOK-10, HOOK-31
+    // spec: HOOK-23, HOOK-10, HOOK-31, HOOK-55
     // --dangerously-skip-install-hook-check runs the hook without prompting
     // (HOOK-23). It runs in the clone after checkout (HOOK-10), so its marker
     // lands in the clone dir, and the registry records both the command and the
@@ -5515,26 +5630,23 @@ fn meld_dangerously_skip_runs_hook_and_records_it() {
     assert!(r.success, "meld should succeed: {}", r.stderr);
 
     // HOOK-10: the hook ran in the clone dir.
-    let marker = clone_dir_of(&sb, "agents").join("hookran");
+    let marker = sb.source.clone().join("hookran");
     assert!(
         marker.exists(),
         "the install hook must have run in the clone: {} missing",
         marker.display()
     );
 
-    // HOOK-31: the registry records the command and a non-null run-commit.
+    // HOOK-31/HOOK-55: the registry records the command in `install_hooks` with a
+    // non-null `ran_at` (the commit it ran at).
     let json = std::fs::read_to_string(sb.mind_home.join("sources.json")).unwrap();
     assert!(
         json.contains("touch hookran"),
         "registry must record the hook command: {json}"
     );
     assert!(
-        !json.contains("\"install_hook_commit\": null"),
-        "install_hook_commit must be non-null after the hook ran: {json}"
-    );
-    assert!(
-        json.contains("install_hook_commit"),
-        "registry must carry the install_hook_commit field: {json}"
+        json.contains("install_hooks") && !json.contains("\"ran_at\": null"),
+        "a hook that ran must record a non-null ran_at in install_hooks: {json}"
     );
 }
 
@@ -5574,12 +5686,12 @@ fn meld_hook_nonzero_exit_fails_and_registers_nothing() {
         );
     }
 
-    // The clone dir was removed.
-    let clone = clone_dir_of(&sb, "agents");
+    // The source is a linked local working tree (CLI-19b), so a failed hook must
+    // NOT delete it -- it is the user's directory, not a clone we own.
     assert!(
-        !clone.exists(),
-        "a failed hook must not leave a stray clone dir at {}",
-        clone.display()
+        sb.source.exists(),
+        "a failed hook must not delete a linked source's working tree at {}",
+        sb.source.display()
     );
 }
 
@@ -5601,7 +5713,7 @@ fn meld_install_hook_flag_supplies_hook_without_mind_toml() {
     ]);
     assert!(r.success, "meld should succeed: {}", r.stderr);
 
-    let marker = clone_dir_of(&sb, "agents").join("hookran");
+    let marker = sb.source.clone().join("hookran");
     assert!(
         marker.exists(),
         "the supplied hook must have run: {} missing",
@@ -5656,7 +5768,7 @@ fn upgrade_reruns_hook_after_source_advances() {
         "initial meld should run the hook and record commit C1"
     );
 
-    let marker = clone_dir_of(&sb, "agents").join("hookran");
+    let marker = sb.source.clone().join("hookran");
     assert!(marker.exists(), "the hook should have run on meld");
 
     // Clear the marker so a re-run is observable.
@@ -5705,7 +5817,7 @@ fn sync_upgrade_runs_hook_rerun_only_with_the_skip_check_flag() {
         "initial meld should run the hook and record commit C1"
     );
 
-    let marker = clone_dir_of(&sb, "agents").join("hookran");
+    let marker = sb.source.clone().join("hookran");
     assert!(marker.exists(), "the hook should have run on meld");
     std::fs::remove_file(&marker).unwrap();
 
@@ -5781,7 +5893,7 @@ fn scoped_upgrade_does_not_rerun_unrelated_source_hook() {
     );
 
     // The hook ran on meld; clear its marker so any re-run is observable.
-    let marker = clone_dir_of(&agents, "agents").join("hookran");
+    let marker = agents.source.clone().join("hookran");
     assert!(
         marker.exists(),
         "the hook should have run on the initial meld"
@@ -5843,7 +5955,7 @@ fn upgrade_skips_disallowed_source_hook_when_locked() {
         "initial meld should run the hook and record its commit"
     );
 
-    let marker = clone_dir_of(&sb, "agents").join("hookran");
+    let marker = sb.source.clone().join("hookran");
     assert!(marker.exists(), "the hook should have run on meld");
     std::fs::remove_file(&marker).unwrap();
 
@@ -5960,5 +6072,547 @@ fn help_lists_upgrade_and_evolve_not_self_update() {
         !r.stdout.contains("self-update"),
         "help must NOT contain 'self-update': {}",
         r.stdout
+    );
+}
+
+// ---- lifecycle-hook system tests (HOOK-50..58) --------------------------------
+//
+// These tests cover the extended hook system: multiple named [[hooks]] entries,
+// optional hooks, uninstall hooks at `unmeld`, and the `init-source` scaffold.
+// All tests run non-TTY (stdin piped), so interactive prompts never fire.
+
+#[test]
+fn remeld_reoffers_pending_install_hooks_and_force_reruns() {
+    // spec: HOOK-60
+    let sb = Sandbox::bare("remeld-hook");
+    let marker = sb.base.join("hook-ran");
+    let m = marker.to_str().unwrap().to_owned();
+    sb.write_and_commit(
+        "mind.toml",
+        &format!("[[hooks]]\nrun = \"touch {m}\"\nevent = \"install\"\n"),
+    );
+    let spec = sb.source_spec();
+
+    // A fresh non-TTY meld registers but skips the hook (HOOK-22).
+    assert!(sb.mind(&["meld", &spec, "--link-only"]).success);
+    assert!(!marker.exists(), "hook skipped on the non-TTY meld");
+
+    // Re-melding re-offers the pending (skipped) hook; the dangerous flag runs it.
+    assert!(
+        sb.mind(&[
+            "meld",
+            &spec,
+            "--link-only",
+            "--dangerously-skip-install-hook-check"
+        ])
+        .success
+    );
+    assert!(marker.exists(), "re-meld must run the pending hook");
+
+    // Now recorded as run at this commit: a plain re-meld does not re-run it.
+    std::fs::remove_file(&marker).unwrap();
+    assert!(
+        sb.mind(&[
+            "meld",
+            &spec,
+            "--link-only",
+            "--dangerously-skip-install-hook-check"
+        ])
+        .success
+    );
+    assert!(
+        !marker.exists(),
+        "a hook already run at this commit is not re-offered"
+    );
+
+    // --force re-offers (and re-runs) every hook regardless.
+    assert!(
+        sb.mind(&[
+            "meld",
+            &spec,
+            "--link-only",
+            "--force",
+            "--dangerously-skip-install-hook-check"
+        ])
+        .success
+    );
+    assert!(marker.exists(), "--force must re-run an already-run hook");
+}
+
+#[test]
+fn recall_status_view_marks_install_state() {
+    // spec: CLI-70, CLI-74
+    let sb = melded();
+    assert!(sb.mind(&["learn", "review"]).success);
+    let out = sb.mind(&["recall"]).stdout;
+    // The source header is present, with its items nested and marked.
+    assert!(out.contains("agents"), "source header: {out}");
+    assert!(
+        out.contains("skill:review") && out.contains("installed @"),
+        "an installed item is marked installed with its commit: {out}"
+    );
+    assert!(
+        out.contains("agent:dev") && out.contains("available"),
+        "a not-installed item is marked available: {out}"
+    );
+}
+
+#[test]
+fn install_hook_output_is_mirrored_to_mind_stdout() {
+    // spec: HOOK-30 - a hook's stdout is mirrored to mind's own output under
+    // a labeled separator frame.
+    let sb = Sandbox::bare("hook-output");
+    sb.write_and_commit(
+        "mind.toml",
+        "[[hooks]]\nrun = \"echo HELLO-FROM-HOOK\"\nname = \"build\"\nevent = \"install\"\n",
+    );
+    let spec = sb.source_spec();
+    let r = sb.mind(&[
+        "meld",
+        &spec,
+        "--link-only",
+        "--dangerously-skip-install-hook-check",
+    ]);
+    assert!(r.success, "meld failed: {} {}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("====== (hook-stdout: build) ======"),
+        "the stdout separator frame must appear in mind's output: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("HELLO-FROM-HOOK"),
+        "the hook's stdout must be mirrored to mind's output: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("====== (end hook: build) ======"),
+        "the closing divider must separate the hook output from what follows: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn install_hook_stderr_is_framed_and_mirrored() {
+    // spec: HOOK-30 - a hook's stderr is captured and printed under a labeled
+    // separator frame, visible in mind's output.
+    let sb = Sandbox::bare("hook-stderr");
+    sb.write_and_commit(
+        "mind.toml",
+        "[[hooks]]\nrun = \"echo OOPS 1>&2\"\nname = \"warn\"\nevent = \"install\"\n",
+    );
+    let spec = sb.source_spec();
+    let r = sb.mind(&[
+        "meld",
+        &spec,
+        "--link-only",
+        "--dangerously-skip-install-hook-check",
+    ]);
+    assert!(r.success, "meld failed: {} {}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("====== (hook-stderr: warn) ======"),
+        "the stderr separator frame must appear in mind's output: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("OOPS"),
+        "the hook's stderr must be mirrored to mind's output: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("====== (end hook: warn) ======"),
+        "the closing divider must separate the hook output from what follows: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn meld_runs_multiple_install_hooks_with_dangerous_flag() {
+    // spec: HOOK-50
+    // A source with two [[hooks]] entries (both event = "install") runs both
+    // hooks in declaration order when --dangerously-skip-install-hook-check is
+    // given. Both marker files must exist after the meld succeeds.
+    let sb = Sandbox::bare("multi-hook");
+    let marker1 = sb.base.join("marker1");
+    let marker2 = sb.base.join("marker2");
+    let m1 = marker1.to_str().unwrap().to_owned();
+    let m2 = marker2.to_str().unwrap().to_owned();
+    let toml = format!(
+        "[[hooks]]\nrun = \"touch {m1}\"\nevent = \"install\"\n\n\
+         [[hooks]]\nrun = \"touch {m2}\"\nevent = \"install\"\n"
+    );
+    sb.write_and_commit("mind.toml", &toml);
+    let spec = sb.source_spec();
+
+    let r = sb.mind(&[
+        "meld",
+        &spec,
+        "--dangerously-skip-install-hook-check",
+        "--link-only",
+    ]);
+    assert!(
+        r.success,
+        "meld with two install hooks should succeed: {} {}",
+        r.stdout, r.stderr
+    );
+
+    assert!(
+        marker1.exists(),
+        "first install hook must have run (marker1 missing): {}",
+        marker1.display()
+    );
+    assert!(
+        marker2.exists(),
+        "second install hook must have run (marker2 missing): {}",
+        marker2.display()
+    );
+
+    // Source is registered.
+    let sources = sb.mind(&["recall", "--sources"]).stdout;
+    assert!(
+        sources.contains("multi-hook"),
+        "source must be registered after both hooks ran: {sources}"
+    );
+}
+
+#[test]
+fn meld_non_tty_skips_install_hooks_and_still_registers_source() {
+    // spec: HOOK-22 (preserved with multi-hook)
+    // Without --dangerously-skip-install-hook-check, a non-TTY meld skips all
+    // hooks, prints a skip note, and still registers the source.
+    let sb = Sandbox::bare("multi-hook-skip");
+    let marker1 = sb.base.join("skip-marker1");
+    let marker2 = sb.base.join("skip-marker2");
+    let m1 = marker1.to_str().unwrap().to_owned();
+    let m2 = marker2.to_str().unwrap().to_owned();
+    let toml = format!(
+        "[[hooks]]\nrun = \"touch {m1}\"\nevent = \"install\"\n\n\
+         [[hooks]]\nrun = \"touch {m2}\"\nevent = \"install\"\n"
+    );
+    sb.write_and_commit("mind.toml", &toml);
+    let spec = sb.source_spec();
+
+    // Default meld: non-TTY, no dangerous flag.
+    let r = sb.mind(&["meld", &spec]);
+    assert!(
+        r.success,
+        "meld should still succeed on non-TTY skip: {} {}",
+        r.stdout, r.stderr
+    );
+
+    // Neither hook ran.
+    assert!(
+        !marker1.exists(),
+        "hook must not have run in non-TTY mode (marker1 exists)"
+    );
+    assert!(
+        !marker2.exists(),
+        "hook must not have run in non-TTY mode (marker2 exists)"
+    );
+
+    // Skip note is printed.
+    let combined = format!("{}{}", r.stdout, r.stderr);
+    assert!(
+        combined.contains("skipped the install hook") || combined.contains("skipped"),
+        "non-TTY skip must print a note: {combined}"
+    );
+
+    // Source is still registered (HOOK-22: skip-and-continue registers the source).
+    let sources = sb.mind(&["recall", "--sources"]).stdout;
+    assert!(
+        sources.contains("multi-hook-skip"),
+        "source must be registered even when hooks are skipped: {sources}"
+    );
+}
+
+#[test]
+fn optional_install_hook_failure_aborts_meld() {
+    // spec: HOOK-53
+    // An optional hook's non-zero exit is a hard stop, like a required hook: the
+    // meld fails and the source is not registered. `optional` only governs whether
+    // the user may decline to run it, never whether it may fail.
+    let sb = Sandbox::bare("optional-hook-fail");
+    let toml = "[[hooks]]\nrun = \"exit 1\"\nevent = \"install\"\noptional = true\n";
+    sb.write_and_commit("mind.toml", toml);
+    let spec = sb.source_spec();
+
+    let r = sb.mind(&[
+        "meld",
+        &spec,
+        "--dangerously-skip-install-hook-check",
+        "--link-only",
+    ]);
+    assert!(
+        !r.success,
+        "an optional hook failure must abort the meld: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        !sb.mind(&["recall", "--sources"])
+            .stdout
+            .contains("optional-hook-fail"),
+        "the source must not be registered after a failed optional hook"
+    );
+}
+
+#[test]
+fn required_install_hook_failure_aborts_meld() {
+    // spec: HOOK-53
+    // A required install hook that exits non-zero fails the meld entirely: the
+    // source is NOT registered and the command exits with a non-zero status.
+    let sb = Sandbox::bare("required-fail");
+    let toml = "[[hooks]]\nrun = \"exit 1\"\nevent = \"install\"\n";
+    sb.write_and_commit("mind.toml", toml);
+    let spec = sb.source_spec();
+
+    let r = sb.mind(&["meld", &spec, "--dangerously-skip-install-hook-check"]);
+    assert!(
+        !r.success,
+        "meld must fail when a required install hook exits non-zero: {} {}",
+        r.stdout, r.stderr
+    );
+
+    // Source is NOT registered.
+    let sources = sb.mind(&["recall", "--sources"]).stdout;
+    assert!(
+        !sources.contains("required-fail"),
+        "source must not be registered after a required hook failure: {sources}"
+    );
+}
+
+#[test]
+fn unmeld_runs_uninstall_hook_with_dangerous_flag() {
+    // spec: HOOK-54
+    // A source with an event = "uninstall" hook: after meld, `unmeld --dangerously-skip-install-hook-check`
+    // runs the hook and removes the source from the registry.
+    let sb = Sandbox::bare("uninstall-hook");
+    let uninstall_marker = sb.base.join("uninstall-ran");
+    let m = uninstall_marker.to_str().unwrap().to_owned();
+    let toml = format!("[[hooks]]\nrun = \"touch {m}\"\nevent = \"uninstall\"\n");
+    sb.write_and_commit("mind.toml", &toml);
+    let spec = sb.source_spec();
+
+    // Meld first (no uninstall hooks run at meld time).
+    let meld = sb.mind(&["meld", &spec, "--link-only"]);
+    assert!(
+        meld.success,
+        "meld should succeed: {} {}",
+        meld.stdout, meld.stderr
+    );
+    assert!(
+        !uninstall_marker.exists(),
+        "uninstall hook must not run at meld time"
+    );
+
+    // unmeld with dangerous flag: uninstall hook runs, source removed.
+    let unmeld = sb.mind(&[
+        "unmeld",
+        "uninstall-hook",
+        "--dangerously-skip-install-hook-check",
+    ]);
+    assert!(
+        unmeld.success,
+        "unmeld should succeed: {} {}",
+        unmeld.stdout, unmeld.stderr
+    );
+
+    assert!(
+        uninstall_marker.exists(),
+        "uninstall hook must have run at unmeld: marker missing at {}",
+        uninstall_marker.display()
+    );
+
+    // Source is no longer registered.
+    let sources = sb.mind(&["recall", "--sources"]).stdout;
+    assert!(
+        !sources.contains("uninstall-hook"),
+        "source must be removed after unmeld: {sources}"
+    );
+}
+
+#[test]
+fn unmeld_uninstall_hook_override_replaces_declared() {
+    // spec: HOOK-59
+    // `unmeld --uninstall-hook <cmd>` replaces the source's declared uninstall
+    // hook: the override command runs, the declared one does not.
+    let sb = Sandbox::bare("uninstall-override");
+    let declared_marker = sb.base.join("declared-ran");
+    let override_marker = sb.base.join("override-ran");
+    let dm = declared_marker.to_str().unwrap().to_owned();
+    let om = override_marker.to_str().unwrap().to_owned();
+    let toml = format!("[[hooks]]\nrun = \"touch {dm}\"\nevent = \"uninstall\"\n");
+    sb.write_and_commit("mind.toml", &toml);
+    let spec = sb.source_spec();
+    assert!(sb.mind(&["meld", &spec, "--link-only"]).success, "meld");
+
+    let unmeld = sb.mind(&[
+        "unmeld",
+        "uninstall-override",
+        "--uninstall-hook",
+        &format!("touch {om}"),
+        "--dangerously-skip-install-hook-check",
+    ]);
+    assert!(
+        unmeld.success,
+        "unmeld --uninstall-hook should succeed: {} {}",
+        unmeld.stdout, unmeld.stderr
+    );
+    assert!(
+        override_marker.exists(),
+        "the override uninstall hook must run: {}",
+        override_marker.display()
+    );
+    assert!(
+        !declared_marker.exists(),
+        "the declared uninstall hook must not run when overridden"
+    );
+    assert!(
+        !sb.mind(&["recall", "--sources"])
+            .stdout
+            .contains("uninstall-override"),
+        "source must be removed"
+    );
+}
+
+#[test]
+fn unmeld_non_tty_skips_uninstall_hook_but_still_removes_source() {
+    // spec: HOOK-54 (non-TTY path)
+    // A plain non-TTY `unmeld` (no dangerous flag) skips the uninstall hook
+    // (no marker) but still removes the source from the registry.
+    let sb = Sandbox::bare("uninstall-skip");
+    let uninstall_marker = sb.base.join("uninstall-skip-ran");
+    let m = uninstall_marker.to_str().unwrap().to_owned();
+    let toml = format!("[[hooks]]\nrun = \"touch {m}\"\nevent = \"uninstall\"\n");
+    sb.write_and_commit("mind.toml", &toml);
+    let spec = sb.source_spec();
+
+    let meld = sb.mind(&["meld", &spec, "--link-only"]);
+    assert!(
+        meld.success,
+        "meld should succeed: {} {}",
+        meld.stdout, meld.stderr
+    );
+
+    // Unmeld without the dangerous flag: non-TTY -> skip hook, still remove source.
+    let unmeld = sb.mind(&["unmeld", "uninstall-skip"]);
+    assert!(
+        unmeld.success,
+        "unmeld should succeed even when hook is skipped: {} {}",
+        unmeld.stdout, unmeld.stderr
+    );
+
+    // Hook did NOT run.
+    assert!(
+        !uninstall_marker.exists(),
+        "uninstall hook must not run in non-TTY mode without the dangerous flag"
+    );
+
+    // Source is still removed (skip-and-continue).
+    let sources = sb.mind(&["recall", "--sources"]).stdout;
+    assert!(
+        !sources.contains("uninstall-skip"),
+        "source must be removed even when uninstall hook is skipped: {sources}"
+    );
+}
+
+#[test]
+fn init_source_scaffold_offers_hook_examples() {
+    // spec: HOOK-57
+    // `mind init-source <dir>` on a fresh repo dir writes a mind.toml scaffold
+    // whose content contains commented [[hooks]] examples for both install and
+    // uninstall events, including optional = true.
+    let sb = Sandbox::new();
+    let repo = sb.base.join("new-source");
+    // Write a minimal item so init-source has something to discover.
+    write(
+        &repo.join("skills/greet/SKILL.md"),
+        "---\nname: greet\ndescription: A greeting skill\n---\n# greet\n",
+    );
+    let dir = repo.to_str().unwrap();
+
+    let r = sb.mind(&["init-source", dir]);
+    assert!(
+        r.success,
+        "init-source should succeed: {} {}",
+        r.stdout, r.stderr
+    );
+
+    let scaffold =
+        std::fs::read_to_string(repo.join("mind.toml")).expect("init-source must create mind.toml");
+
+    // The scaffold must contain commented [[hooks]] entries.
+    assert!(
+        scaffold.contains("[[hooks]]"),
+        "scaffold must contain [[hooks]] examples: {scaffold}"
+    );
+
+    // Must have both install and uninstall event examples, on comment lines.
+    let has_install_comment = scaffold
+        .lines()
+        .any(|l| l.trim_start().starts_with('#') && l.contains("event") && l.contains("install"));
+    assert!(
+        has_install_comment,
+        "scaffold must have a commented event = \"install\" line: {scaffold}"
+    );
+
+    let has_uninstall_comment = scaffold
+        .lines()
+        .any(|l| l.trim_start().starts_with('#') && l.contains("event") && l.contains("uninstall"));
+    assert!(
+        has_uninstall_comment,
+        "scaffold must have a commented event = \"uninstall\" line: {scaffold}"
+    );
+
+    // Must have optional = true on a comment line.
+    let has_optional_comment = scaffold
+        .lines()
+        .any(|l| l.trim_start().starts_with('#') && l.contains("optional") && l.contains("true"));
+    assert!(
+        has_optional_comment,
+        "scaffold must have a commented optional = true line: {scaffold}"
+    );
+}
+
+#[test]
+fn recall_sources_marks_multi_hook_source() {
+    // spec: HOOK-58
+    // After a multi-hook meld (with --dangerously-skip-install-hook-check so the
+    // hooks are recorded), `recall --sources` contains a `hook` token indicating
+    // the source has hooks.
+    let sb = Sandbox::bare("hook-report");
+    let marker1 = sb.base.join("report-marker1");
+    let marker2 = sb.base.join("report-marker2");
+    let m1 = marker1.to_str().unwrap().to_owned();
+    let m2 = marker2.to_str().unwrap().to_owned();
+    let toml = format!(
+        "[[hooks]]\nrun = \"touch {m1}\"\nevent = \"install\"\n\n\
+         [[hooks]]\nrun = \"touch {m2}\"\nevent = \"install\"\n"
+    );
+    sb.write_and_commit("mind.toml", &toml);
+    let spec = sb.source_spec();
+
+    assert!(
+        sb.mind(&[
+            "meld",
+            &spec,
+            "--dangerously-skip-install-hook-check",
+            "--link-only"
+        ])
+        .success,
+        "meld should succeed"
+    );
+
+    let sources = sb.mind(&["recall", "--sources"]);
+    assert!(
+        sources.success,
+        "recall --sources failed: {}",
+        sources.stderr
+    );
+
+    // The output must contain the `hook` token (either ` hook]` for 1 hook or
+    // ` hooks(N)` for N > 1) somewhere near the source entry.
+    assert!(
+        sources.stdout.contains("hook"),
+        "recall --sources must mark a multi-hook source with the hook token: {}",
+        sources.stdout
     );
 }

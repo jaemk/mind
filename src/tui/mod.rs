@@ -190,13 +190,17 @@ fn handle_key(paths: &Paths, app: &mut app::App, k: crossterm::event::KeyEvent) 
         match k.code {
             KeyCode::Enter => {
                 let spec = app.spec_input_text.trim().to_string();
+                app.spec_input_active = false;
+                app.spec_input_text.clear();
                 if spec.is_empty() {
                     // Empty input: cancel.
-                    app.spec_input_active = false;
                     app.status = None;
                 } else {
-                    // Submit: run the preview (I/O here, not in App).
-                    run_preview(paths, app, spec);
+                    // Submit: the user named the source, so meld it directly with
+                    // the same interactive flow as the CLI (suspend the TUI). This
+                    // also lets an auth-required (SSH) remote prompt for a key on
+                    // the normal terminal instead of hanging the UI (TUI-30, TUI-45).
+                    run_interactive_meld(paths, app, spec);
                 }
             }
             KeyCode::Esc => {
@@ -259,8 +263,21 @@ fn handle_key(paths: &Paths, app: &mut app::App, k: crossterm::event::KeyEvent) 
                 // action regardless of outcome (TUI-30):
                 //   - On success, meld re-clones into the registry path; temp is redundant.
                 //   - On failure, temp is cleaned up by dropping active_preview (no orphan).
-                // spec: TUI-30 TUI-24 TUI-25
-                let result = action::execute(paths, pending);
+                // spec: TUI-30 TUI-24 TUI-25 TUI-44
+                let is_meld = matches!(pending.kind, crate::tui::app::ActionKind::Meld { .. });
+                let result = if is_meld {
+                    // A meld prompts (hook HOOK-20, install confirm CLI-23). Suspend
+                    // the TUI and run it on the normal terminal so its flow is
+                    // identical to the CLI, then let the user read the output before
+                    // the browser redraws over it (TUI-44).
+                    term::with_suspended(|| {
+                        let r = action::execute_interactive(paths, pending);
+                        pause_for_return();
+                        r
+                    })
+                } else {
+                    action::execute(paths, pending)
+                };
                 // Drop active_preview unconditionally: on success meld owns its clone,
                 // on failure clean up the temp dir (SourcePreview::drop removes it).
                 app.active_preview = None;
@@ -297,6 +314,48 @@ fn handle_key(paths: &Paths, app: &mut app::App, k: crossterm::event::KeyEvent) 
             if let Some(item_ref) = app.pending_learn_ref.take() {
                 run_learn_preview(paths, app, &item_ref);
             }
+        }
+    }
+}
+
+/// After an interactive verb runs with the TUI suspended (TUI-44), hold the
+/// normal terminal so the user can read the verb's output before the browser
+/// redraws over it. A bare Enter (or EOF) returns. Best-effort: any I/O error
+/// just returns immediately.
+fn pause_for_return() {
+    use std::io::Write;
+    print!("\n[press Enter to return to the browser] ");
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    let _ = std::io::stdin().read_line(&mut line);
+}
+
+/// Meld a hand-entered repo spec with the full interactive CLI flow: suspend the
+/// TUI (TUI-44) so the clone, the install-hook prompt, and the install
+/// confirmation all run on the normal terminal -- and so an auth-required (SSH)
+/// remote can prompt for a passphrase or host-key instead of hanging the UI
+/// (TUI-45). On success the snapshot is reloaded; an error is surfaced inline.
+// spec: TUI-30 TUI-44 TUI-45
+fn run_interactive_meld(paths: &Paths, app: &mut app::App, spec: String) {
+    let action = app::PendingAction::new(app::ActionKind::Meld { spec }, String::new());
+    let result = term::with_suspended(|| {
+        let r = action::execute_interactive(paths, action);
+        pause_for_return();
+        r
+    });
+    // Any preview clone is now redundant (a real meld owns its clone) or unwanted.
+    app.active_preview = None;
+    match result {
+        Ok((snapshot, msg)) => {
+            app.apply_snapshot(snapshot);
+            app.set_status(if msg.is_empty() {
+                "Done.".to_string()
+            } else {
+                msg
+            });
+        }
+        Err(e) => {
+            app.set_error(format!("{e}"));
         }
     }
 }

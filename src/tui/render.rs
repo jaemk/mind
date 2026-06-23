@@ -20,7 +20,7 @@ use crate::tui::tree::TreeNode;
 
 /// The bottom key-hint line. Uses a middot separator and wraps on narrow
 /// terminals (TUI-42).
-const HINTS: &str = " j/k move \u{b7} Enter expand \u{b7} i install \u{b7} d delete \u{b7} s sync \u{b7} u upgrade \u{b7} m meld \u{b7} C lobes \u{b7} q quit";
+const HINTS: &str = " j/k move \u{b7} Enter expand/collapse \u{b7} i install \u{b7} d delete \u{b7} s sync \u{b7} u upgrade \u{b7} m meld \u{b7} M unmeld \u{b7} C lobes \u{b7} q quit";
 
 /// Estimate how many terminal rows `text` occupies when wrapped at `width`
 /// columns (greedy word wrap, hard-splitting words longer than the width).
@@ -248,7 +248,8 @@ fn draw_hints(frame: &mut Frame, area: Rect) {
 /// types a repo spec to preview.
 // spec: TUI-30
 fn draw_spec_input(frame: &mut Frame, app: &App, area: Rect) {
-    let hint = "Enter a repo spec (path, host/owner/repo) then press Enter. Esc to cancel.";
+    let hint = "Enter a repo spec then press Enter. Esc to cancel.\n\
+                Examples: /path/to/repo  |  file:///path/to/repo  |  owner/repo  |  https://github.com/owner/repo  |  git@github.com:owner/repo";
     let input = format!("\u{276f} {}", app.spec_input_text);
     draw_input_modal(frame, area, "Meld: enter repo spec", hint, &input);
 }

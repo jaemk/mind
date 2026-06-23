@@ -13,6 +13,45 @@ use serde::Deserialize;
 use crate::error::{MindError, Result};
 use crate::source::Pin;
 
+/// The lifecycle event a hook is bound to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookEvent {
+    Install,
+    Uninstall,
+}
+
+/// One raw `[[hooks]]` entry as deserialized from `mind.toml`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Hook {
+    pub run: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub optional: bool,
+    /// Raw event string; validated by `resolved_hooks` ("install" | "uninstall",
+    /// default "install"). Kept as a string so an unknown value is a clear
+    /// mind.toml schema error rather than an opaque serde failure.
+    #[serde(default)]
+    pub event: Option<String>,
+}
+
+/// A validated, normalized hook ready for execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedHook {
+    pub run: String,
+    pub name: Option<String>,
+    pub optional: bool,
+    pub event: HookEvent,
+}
+
+impl ResolvedHook {
+    /// The label shown in disclosures: the name if set, else the command.
+    pub fn label(&self) -> &str {
+        self.name.as_deref().unwrap_or(&self.run)
+    }
+}
+
 /// The parsed `mind.toml`.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -24,6 +63,9 @@ pub struct MindToml {
     pub items: Vec<ItemDecl>,
     /// Glob-based discovery; authoritative when present.
     pub discover: Option<Discover>,
+    /// Declared hooks in declaration order (HOOK-51).
+    #[serde(default)]
+    pub hooks: Vec<Hook>,
 }
 
 /// Repo-level metadata.
@@ -201,6 +243,55 @@ impl MindToml {
     pub fn is_authoritative(&self) -> bool {
         !self.items.is_empty() || self.discover.as_ref().is_some_and(|d| d.has_item_globs())
     }
+
+    /// Return all hooks in resolved, normalized form.
+    ///
+    /// The legacy `[source].install` (HOOK-50 back-compat) folds in as the
+    /// first required install hook when non-empty after trimming. Then each
+    /// `[[hooks]]` entry is validated and appended in declaration order.
+    /// Entries with an empty/whitespace `run` are silently dropped (HOOK-3).
+    pub fn resolved_hooks(&self, toml_path: &std::path::Path) -> Result<Vec<ResolvedHook>> {
+        let mut out: Vec<ResolvedHook> = Vec::new();
+
+        // HOOK-50: fold legacy [source].install into a required install hook.
+        if let Some(cmd) = &self.source.install {
+            let trimmed = cmd.trim();
+            if !trimmed.is_empty() {
+                out.push(ResolvedHook {
+                    run: trimmed.to_owned(),
+                    name: None,
+                    optional: false,
+                    event: HookEvent::Install,
+                });
+            }
+        }
+
+        // HOOK-51: [[hooks]] entries in declaration order.
+        for hook in &self.hooks {
+            let run = hook.run.trim();
+            if run.is_empty() {
+                continue; // HOOK-3 generalized: skip blank run
+            }
+            let event = match hook.event.as_deref() {
+                None | Some("install") => HookEvent::Install,
+                Some("uninstall") => HookEvent::Uninstall,
+                Some(e) => {
+                    return Err(MindError::MindToml {
+                        path: toml_path.to_path_buf(),
+                        msg: format!("unknown hook event '{e}'; expected 'install' or 'uninstall'"),
+                    });
+                }
+            };
+            out.push(ResolvedHook {
+                run: run.to_owned(),
+                name: hook.name.clone(),
+                optional: hook.optional,
+                event,
+            });
+        }
+
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
@@ -304,5 +395,237 @@ mod tests {
             err_msg.contains("conflicting pin"),
             "expected 'conflicting pin' in: {err_msg}"
         );
+    }
+
+    // ----- HOOK-51: [[hooks]] multi-hook schema -----
+
+    #[test]
+    fn hooks_parse_fields_correctly() {
+        // spec: HOOK-51
+        let toml = r#"
+            [[hooks]]
+            run = "make build"
+            name = "Build step"
+            optional = true
+            event = "install"
+
+            [[hooks]]
+            run = "make clean"
+            event = "uninstall"
+        "#;
+        let parsed: MindToml = toml::from_str(toml).expect("parse");
+        assert_eq!(parsed.hooks.len(), 2);
+
+        let h0 = &parsed.hooks[0];
+        assert_eq!(h0.run, "make build");
+        assert_eq!(h0.name.as_deref(), Some("Build step"));
+        assert!(h0.optional);
+        assert_eq!(h0.event.as_deref(), Some("install"));
+
+        let h1 = &parsed.hooks[1];
+        assert_eq!(h1.run, "make clean");
+        assert_eq!(h1.name, None);
+        assert!(!h1.optional);
+        assert_eq!(h1.event.as_deref(), Some("uninstall"));
+    }
+
+    #[test]
+    fn hooks_preserve_declaration_order() {
+        // spec: HOOK-51
+        let toml = r#"
+            [[hooks]]
+            run = "first"
+
+            [[hooks]]
+            run = "second"
+
+            [[hooks]]
+            run = "third"
+        "#;
+        let parsed: MindToml = toml::from_str(toml).expect("parse");
+        let dummy = Path::new("mind.toml");
+        let resolved = parsed.resolved_hooks(dummy).expect("resolve");
+        assert_eq!(resolved.len(), 3);
+        assert_eq!(resolved[0].run, "first");
+        assert_eq!(resolved[1].run, "second");
+        assert_eq!(resolved[2].run, "third");
+    }
+
+    #[test]
+    fn legacy_install_folds_in_as_first_required_install_hook() {
+        // spec: HOOK-50
+        let toml = r#"
+            [source]
+            install = "make legacy"
+
+            [[hooks]]
+            run = "npm install"
+            event = "install"
+        "#;
+        let parsed: MindToml = toml::from_str(toml).expect("parse");
+        let dummy = Path::new("mind.toml");
+        let resolved = parsed.resolved_hooks(dummy).expect("resolve");
+        assert_eq!(resolved.len(), 2);
+
+        // Legacy hook is first.
+        assert_eq!(resolved[0].run, "make legacy");
+        assert_eq!(resolved[0].event, HookEvent::Install);
+        assert!(!resolved[0].optional);
+        assert_eq!(resolved[0].name, None);
+
+        // Declared hook follows.
+        assert_eq!(resolved[1].run, "npm install");
+        assert_eq!(resolved[1].event, HookEvent::Install);
+    }
+
+    #[test]
+    fn legacy_install_only_no_hooks_table() {
+        // spec: HOOK-50 — install field alone, no [[hooks]] section
+        let toml = r#"
+            [source]
+            install = "make build && make install"
+        "#;
+        let parsed: MindToml = toml::from_str(toml).expect("parse");
+        let dummy = Path::new("mind.toml");
+        let resolved = parsed.resolved_hooks(dummy).expect("resolve");
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].run, "make build && make install");
+        assert_eq!(resolved[0].event, HookEvent::Install);
+        assert!(!resolved[0].optional);
+    }
+
+    #[test]
+    fn default_event_is_install() {
+        // spec: HOOK-51
+        let toml = r#"
+            [[hooks]]
+            run = "setup.sh"
+        "#;
+        let parsed: MindToml = toml::from_str(toml).expect("parse");
+        let dummy = Path::new("mind.toml");
+        let resolved = parsed.resolved_hooks(dummy).expect("resolve");
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].event, HookEvent::Install);
+    }
+
+    #[test]
+    fn explicit_uninstall_event_resolves() {
+        // spec: HOOK-51
+        let toml = r#"
+            [[hooks]]
+            run = "teardown.sh"
+            event = "uninstall"
+        "#;
+        let parsed: MindToml = toml::from_str(toml).expect("parse");
+        let dummy = Path::new("mind.toml");
+        let resolved = parsed.resolved_hooks(dummy).expect("resolve");
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].event, HookEvent::Uninstall);
+    }
+
+    #[test]
+    fn unknown_event_returns_mind_toml_error() {
+        // spec: HOOK-51
+        let toml = r#"
+            [[hooks]]
+            run = "do-something.sh"
+            event = "build"
+        "#;
+        let parsed: MindToml = toml::from_str(toml).expect("parse");
+        let toml_path = Path::new("/repo/mind.toml");
+        let result = parsed.resolved_hooks(toml_path);
+        assert!(result.is_err(), "unknown event must error");
+        let err = result.unwrap_err();
+        // Must be a MindToml variant.
+        match err {
+            MindError::MindToml { path, msg } => {
+                assert_eq!(path, toml_path);
+                assert!(
+                    msg.contains("build"),
+                    "error message should mention the bad value: {msg}"
+                );
+                assert!(
+                    msg.contains("install") && msg.contains("uninstall"),
+                    "error message should mention valid values: {msg}"
+                );
+            }
+            other => panic!("expected MindError::MindToml, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn empty_run_in_hooks_is_dropped() {
+        // spec: HOOK-51 (HOOK-3 generalized): blank run entries are silently skipped
+        let toml = r#"
+            [[hooks]]
+            run = ""
+
+            [[hooks]]
+            run = "   "
+
+            [[hooks]]
+            run = "real-command"
+        "#;
+        let parsed: MindToml = toml::from_str(toml).expect("parse");
+        let dummy = Path::new("mind.toml");
+        let resolved = parsed.resolved_hooks(dummy).expect("resolve");
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].run, "real-command");
+    }
+
+    #[test]
+    fn whitespace_legacy_install_contributes_nothing() {
+        // spec: HOOK-50 — whitespace-only install is ignored
+        let toml = r#"
+            [source]
+            install = "   "
+
+            [[hooks]]
+            run = "npm ci"
+        "#;
+        let parsed: MindToml = toml::from_str(toml).expect("parse");
+        let dummy = Path::new("mind.toml");
+        let resolved = parsed.resolved_hooks(dummy).expect("resolve");
+        // Whitespace install contributes nothing; only the declared hook remains.
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].run, "npm ci");
+    }
+
+    #[test]
+    fn resolved_hook_label_returns_name_when_set() {
+        // spec: HOOK-51
+        let hook = ResolvedHook {
+            run: "make build".into(),
+            name: Some("Build step".into()),
+            optional: false,
+            event: HookEvent::Install,
+        };
+        assert_eq!(hook.label(), "Build step");
+    }
+
+    #[test]
+    fn resolved_hook_label_falls_back_to_command() {
+        // spec: HOOK-51
+        let hook = ResolvedHook {
+            run: "make build".into(),
+            name: None,
+            optional: false,
+            event: HookEvent::Install,
+        };
+        assert_eq!(hook.label(), "make build");
+    }
+
+    #[test]
+    fn hooks_whitespace_run_is_trimmed() {
+        // spec: HOOK-51 — leading/trailing whitespace in run is trimmed
+        let toml = r#"
+            [[hooks]]
+            run = "  npm install  "
+        "#;
+        let parsed: MindToml = toml::from_str(toml).expect("parse");
+        let dummy = Path::new("mind.toml");
+        let resolved = parsed.resolved_hooks(dummy).expect("resolve");
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].run, "npm install");
     }
 }

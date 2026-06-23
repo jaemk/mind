@@ -113,7 +113,7 @@ pub fn key_to_intent(key: KeyEvent) -> Intent {
         (KeyCode::Char('s'), KeyModifiers::NONE) => Intent::ActionSync,
         (KeyCode::Char('u'), KeyModifiers::NONE) => Intent::ActionUpgrade,
         (KeyCode::Char('m'), KeyModifiers::NONE) => Intent::ActionMeld,
-        (KeyCode::Char('U'), KeyModifiers::SHIFT) => Intent::ActionUnmeld,
+        (KeyCode::Char('M'), KeyModifiers::SHIFT) => Intent::ActionUnmeld,
         // Lobe management: `C` opens the lobes modal (TUI-23).
         // spec: TUI-23
         (KeyCode::Char('C'), KeyModifiers::SHIFT) => Intent::ActionLobes,
@@ -270,6 +270,15 @@ mod tests {
     fn m_maps_to_meld() {
         // spec: TUI-21
         assert_eq!(key_to_intent(key(KeyCode::Char('m'))), Intent::ActionMeld);
+    }
+
+    #[test]
+    fn shift_m_maps_to_unmeld() {
+        // spec: TUI-21 - unmeld is `M` (Shift-m), pairing with lowercase `m` meld.
+        assert_eq!(
+            key_to_intent(key_mod(KeyCode::Char('M'), KeyModifiers::SHIFT)),
+            Intent::ActionUnmeld
+        );
     }
 
     #[test]
