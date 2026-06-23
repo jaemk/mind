@@ -67,6 +67,16 @@ const ALLOWLIST: &[&str] = &[
     //   TUI-40 (terminal restore on panic) is now cited: the poison-recovery path
     //   is exercised by a unit test in src/tui/term.rs.
     "TUI-1",
+    // Resource and helper tooling (spec/tooling.md) is cited: the `tool` kind and
+    // discovery (TOOL-1/2/5/7) from src/catalog.rs, the path-token expander
+    // (TOOL-10/11/12/14) from src/namespace.rs, and the end-to-end install
+    // behavior (TOOL-3/4/6/13/15) from tests/cli.rs. Item build hooks: the
+    // declaration (HOOK-70) and the non-TTY skip (HOOK-72) are cited from
+    // src/catalog.rs and src/install.rs. The build RUN path stays allowlisted
+    // because it requires a TTY-approved run and cannot be exercised headlessly:
+    //   HOOK-71: build runs in staging, non-zero exit rolls the install back.
+    //   HOOK-73: a build re-runs when its item is reinstalled/upgraded.
+    "HOOK-71", "HOOK-73",
 ];
 
 #[test]

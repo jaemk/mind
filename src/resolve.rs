@@ -53,6 +53,7 @@ fn split_kind(raw: &str) -> Result<(Option<ItemKind>, String)> {
             "skill" => ItemKind::Skill,
             "agent" => ItemKind::Agent,
             "rule" => ItemKind::Rule,
+            "tool" => ItemKind::Tool,
             _ => return Err(invalid()),
         };
         if name.is_empty() {
@@ -208,6 +209,8 @@ mod tests {
             path: PathBuf::new(),
             description: None,
             link_rel: None,
+            bin: None,
+            build: None,
         }
     }
 

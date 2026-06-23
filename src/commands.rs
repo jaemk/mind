@@ -616,11 +616,14 @@ fn collect_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
 }
 
 /// The set of bare item names belonging to a source, for reference validation.
-fn siblings_of(items: &[CatalogItem], source: &str) -> std::collections::HashSet<String> {
+/// Every catalog item belonging to `source`, used to validate and expand an
+/// item's reference tokens at install (the `{{ns:}}` names plus the `{{self}}` /
+/// `{{tools:}}` / `{{path:}}` path tokens, which need each sibling's kind/bin).
+fn siblings_of(items: &[CatalogItem], source: &str) -> Vec<CatalogItem> {
     items
         .iter()
         .filter(|it| it.source == source)
-        .map(|it| it.name.clone())
+        .cloned()
         .collect()
 }
 

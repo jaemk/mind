@@ -6856,3 +6856,135 @@ fn unmeld_failing_uninstall_hook_leaves_source_melded() {
         "items must remain installed after a failed uninstall hook"
     );
 }
+
+/// A source with two shared tools and a skill (plus a bundled script) that
+/// reference them via path tokens. Committed and ready to meld.
+fn tool_source() -> Sandbox {
+    let sb = Sandbox::bare("agents");
+    // Two shared tools; each entrypoint is the convention default file.
+    write(
+        &sb.source.join("tools/shard/shard"),
+        "#!/bin/sh\necho shard\n",
+    );
+    // detect's helper file references the other tool (tool -> tool).
+    write(
+        &sb.source.join("tools/detect/detect"),
+        "#!/bin/sh\necho detect\n",
+    );
+    write(
+        &sb.source.join("tools/detect/lib.sh"),
+        "exec {{tools:shard}} \"$@\"\n",
+    );
+    // A skill referencing its own file, a tool's entrypoint, and a non-entrypoint
+    // file inside a tool. Its bundled run.sh also calls a tool (script -> tool).
+    write(
+        &sb.source.join("skills/review/SKILL.md"),
+        "---\nname: review\ndescription: review\n---\nrun {{self}}/run.sh\ndetect {{tools:detect}} .\nlib {{path:tool:detect}}/lib.sh\n",
+    );
+    write(
+        &sb.source.join("skills/review/run.sh"),
+        "#!/bin/sh\n{{tools:detect}} run\n",
+    );
+    git(&sb.source, &["add", "-A"]);
+    git(&sb.source, &["commit", "-qm", "tools"]);
+    sb
+}
+
+#[test]
+fn tool_installs_store_only_and_tokens_expand_everywhere() {
+    // spec: TOOL-3 TOOL-13 TOOL-14 TOOL-15
+    let sb = tool_source();
+    let spec = sb.source_spec();
+    let r = sb.mind(&["meld", &spec, "--yes"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+
+    let store = sb.mind_home.join("store");
+    // The tools install to the store...
+    assert!(store.join("tool/detect/detect").is_file());
+    assert!(store.join("tool/shard/shard").is_file());
+    // ...but are store-only: not linked into the agent home.
+    assert!(
+        !sb.claude_home.join("tools").exists(),
+        "a tool must not be linked into an agent home"
+    );
+    assert!(!sb.claude_home.join("skills/detect").exists());
+    // The skill links normally.
+    let link = sb.claude_home.join("skills/review");
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the skill links as usual"
+    );
+
+    // Tokens expanded to store paths in the SKILL.md...
+    let s = store.display().to_string();
+    let skill_md = std::fs::read_to_string(store.join("skill/review/SKILL.md")).unwrap();
+    assert!(
+        skill_md.contains(&format!("run {s}/skill/review/run.sh")),
+        "{skill_md}"
+    );
+    assert!(
+        skill_md.contains(&format!("detect {s}/tool/detect/detect .")),
+        "{skill_md}"
+    );
+    assert!(
+        skill_md.contains(&format!("lib {s}/tool/detect/lib.sh")),
+        "{skill_md}"
+    );
+    // ...in the skill's bundled script (TOOL-14)...
+    let run_sh = std::fs::read_to_string(store.join("skill/review/run.sh")).unwrap();
+    assert!(
+        run_sh.contains(&format!("{s}/tool/detect/detect run")),
+        "{run_sh}"
+    );
+    // ...and tool -> tool, in a tool's own helper file (TOOL-15).
+    let lib_sh = std::fs::read_to_string(store.join("tool/detect/lib.sh")).unwrap();
+    assert!(
+        lib_sh.contains(&format!("exec {s}/tool/shard/shard")),
+        "{lib_sh}"
+    );
+}
+
+#[test]
+fn tool_prefix_applies_to_store_and_tokens() {
+    // spec: TOOL-6
+    let sb = tool_source();
+    let spec = sb.source_spec();
+    let r = sb.mind(&["meld", &spec, "--as", "jk", "--yes"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    let store = sb.mind_home.join("store");
+    // The tool installs under the prefixed effective name.
+    assert!(store.join("tool/jk-detect/detect").is_file());
+    // The same tokens resolve to the prefixed store paths.
+    let skill_md = std::fs::read_to_string(store.join("skill/jk-review/SKILL.md")).unwrap();
+    assert!(
+        skill_md.contains(&format!("{}/tool/jk-detect/detect", store.display())),
+        "{skill_md}"
+    );
+}
+
+#[test]
+fn tool_with_explicit_link_is_surfaced() {
+    // spec: TOOL-4
+    let sb = Sandbox::bare("agents");
+    write(&sb.source.join("tools/detect/detect"), "#!/bin/sh\n");
+    write(
+        &sb.source.join("mind.toml"),
+        "[[items]]\nkind = \"tool\"\nname = \"detect\"\npath = \"tools/detect\"\nlink = \"agents/detect\"\n",
+    );
+    git(&sb.source, &["add", "-A"]);
+    git(&sb.source, &["commit", "-qm", "linked-tool"]);
+    let spec = sb.source_spec();
+    let r = sb.mind(&["meld", &spec, "--yes"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    let link = sb.claude_home.join("agents/detect");
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "an explicit link surfaces the tool in the agent home"
+    );
+}

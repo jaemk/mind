@@ -102,12 +102,15 @@ impl Paths {
         self.tmp_dir().join("backup").join(kind.as_str()).join(name)
     }
 
-    /// The default link target for an item, relative to an agent home.
-    pub fn default_link_rel(&self, kind: ItemKind, name: &str) -> String {
+    /// The default link target for an item, relative to an agent home, or `None`
+    /// for a kind that is store-only by default (a `tool`: it carries no symlink
+    /// and the harness does not discover it; items reach it by path token).
+    pub fn default_link_rel(&self, kind: ItemKind, name: &str) -> Option<String> {
         match kind {
-            ItemKind::Skill => format!("skills/{name}"),
-            ItemKind::Agent => format!("agents/{name}.md"),
-            ItemKind::Rule => format!("rules/{name}.md"),
+            ItemKind::Skill => Some(format!("skills/{name}")),
+            ItemKind::Agent => Some(format!("agents/{name}.md")),
+            ItemKind::Rule => Some(format!("rules/{name}.md")),
+            ItemKind::Tool => None,
         }
     }
 

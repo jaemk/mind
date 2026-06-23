@@ -143,16 +143,22 @@ impl SourceMeta {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ItemDecl {
-    /// `skill`, `agent`, or `rule`.
+    /// `skill`, `agent`, `rule`, or `tool`.
     pub kind: String,
     pub name: String,
-    /// Path to the item, relative to the repo root (a dir for skills).
+    /// Path to the item, relative to the repo root (a dir for skills/tools).
     pub path: String,
     /// Optional override for where to link it under `~/.claude`
     /// (relative to the claude home, e.g. `rules/style.md`).
     pub link: Option<String>,
     /// Optional description override (else taken from frontmatter).
     pub description: Option<String>,
+    /// A tool's entrypoint, relative to its dir (what `{{tools:name}}` resolves
+    /// to). Tool items only; else a `mind.toml` schema error.
+    pub bin: Option<String>,
+    /// A tool's per-item build command, run in staging at install. Tool items
+    /// only; else a `mind.toml` schema error.
+    pub build: Option<String>,
 }
 
 /// Glob-based discovery: per-kind include/exclude, plus nested sources.
@@ -165,6 +171,10 @@ pub struct Discover {
     pub agents: KindGlobs,
     #[serde(default)]
     pub rules: KindGlobs,
+    /// Tool globs match the tool DIRECTORY (e.g. `packages/*/tool`), not an
+    /// anchor file: the matched directory is the tool.
+    #[serde(default)]
+    pub tools: KindGlobs,
     /// Other sources this repo curates. Melding this repo recursively melds each
     /// (see commands::meld), so a `mind.toml` can act as a registry / super-source.
     #[serde(default)]
@@ -201,6 +211,7 @@ impl Discover {
         !self.skills.include.is_empty()
             || !self.agents.include.is_empty()
             || !self.rules.include.is_empty()
+            || !self.tools.include.is_empty()
     }
 }
 

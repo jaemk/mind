@@ -20,6 +20,7 @@ mod kind_serde {
             "skill" => Ok(ItemKind::Skill),
             "agent" => Ok(ItemKind::Agent),
             "rule" => Ok(ItemKind::Rule),
+            "tool" => Ok(ItemKind::Tool),
             other => Err(D::Error::custom(format!("unknown item kind '{other}'"))),
         }
     }

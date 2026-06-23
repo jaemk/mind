@@ -12,8 +12,13 @@ use std::path::Path;
 
 /// Read the top-level `description` from a file's frontmatter, if present.
 pub fn description(file: &Path) -> Option<String> {
+    file_field(file, "description")
+}
+
+/// Read a top-level scalar `key` from a file's frontmatter, if present.
+pub fn file_field(file: &Path, key: &str) -> Option<String> {
     let text = std::fs::read_to_string(file).ok()?;
-    field(&text, "description")
+    field(&text, key)
 }
 
 /// Extract a top-level scalar `key` from the leading frontmatter block.

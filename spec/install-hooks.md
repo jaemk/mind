@@ -191,6 +191,38 @@ shorthand for one required install hook.
   uninstall-event counterpart to `meld --install-hook`, HOOK-56). Declared install
   hooks are unaffected.
 
+## Item build hooks
+
+Source-level hooks (HOOK-50) run once in the clone at `meld`/`unmeld`. Tooling
+that an individual item ships and must build before use (a compiled binary, a
+vendored dependency) instead uses an item-level build hook: a command tied to one
+item that runs when that item is installed, in the item's staging copy, so its
+output is captured into the store transactionally. Build hooks back the `tool`
+kind and `{{tools:name}}` (tooling.md, TOOL-12), but any kind may declare one.
+
+- `HOOK-70` An item declares a build hook with `build`, a shell command:
+  `[[items]].build` in `mind.toml`, or `build:` in a tool's `TOOL.md`
+  frontmatter. It is distinct from a source's install/uninstall hooks (HOOK-50):
+  it is item-scoped and runs per item at install, not once per source at meld. An
+  empty or whitespace-only `build` is treated as absent (HOOK-3).
+- `HOOK-71` A build hook runs in the item's staging directory
+  (`~/.mind/.tmp/staging/<kind>/<name>/`) as the working directory, after
+  reference/token expansion (NS-11, TOOL-13) and before the store swap (LIFE-1),
+  so its output lands in the store atomically on success. A non-zero exit is a
+  hard stop (HOOK-53): the staging copy is discarded and the live install is left
+  untouched (LIFE-4), as for any failed install.
+- `HOOK-72` A build hook is arbitrary code, so it is disclosed before running and
+  its output is framed (HOOK-30). On a TTY it is prompted two-way: run it, or skip
+  it and install the item with its tooling unbuilt (`mind` says so, HOOK-21, and a
+  `{{tools:ref}}` then points at an unbuilt path until the build runs). A non-TTY
+  context skips it (the item installs unbuilt). Skipping is the graceful decline;
+  a build hook offers no abort, so a single item's build never aborts a batch
+  install.
+- `HOOK-73` A build hook re-runs whenever its item is (re)installed or upgraded,
+  since the store copy is rebuilt from staging each time. `learn`/`evolve`/
+  `upgrade` disclose and prompt for it as part of installing the item; nothing
+  beyond the item's content hash is recorded for it.
+
 ## Managed-policy composition (research needed)
 
 Install hooks are arbitrary code execution, which is exactly what an enterprise

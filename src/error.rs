@@ -16,6 +16,10 @@ pub enum ItemKind {
     Skill,
     Agent,
     Rule,
+    /// Helper tooling (scripts or a compiled binary) other items reference. A
+    /// tool installs to the store but is not linked into an agent home by
+    /// default: the harness does not discover it; items reach it by path token.
+    Tool,
 }
 
 impl ItemKind {
@@ -24,6 +28,7 @@ impl ItemKind {
             ItemKind::Skill => "skill",
             ItemKind::Agent => "agent",
             ItemKind::Rule => "rule",
+            ItemKind::Tool => "tool",
         }
     }
 
@@ -33,6 +38,7 @@ impl ItemKind {
             "skill" => Some(ItemKind::Skill),
             "agent" => Some(ItemKind::Agent),
             "rule" => Some(ItemKind::Rule),
+            "tool" => Some(ItemKind::Tool),
             _ => None,
         }
     }
@@ -137,9 +143,10 @@ pub enum MindError {
     )]
     LinkOccupied { path: String },
 
-    #[error("{item}: reference {{ns:{referent}}} does not match any item in source '{in_source}'")]
+    #[error("{item}: reference {referent} does not match any item in source '{in_source}'")]
     BadReference {
         item: String,
+        /// The offending token as written, e.g. `{{ns:foo}}` or `{{tools:bar}}`.
         referent: String,
         in_source: String,
     },

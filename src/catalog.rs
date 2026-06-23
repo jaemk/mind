@@ -43,12 +43,35 @@ pub struct CatalogItem {
     /// Optional link target relative to `~/.claude` (from `mind.toml`); `None`
     /// means use the default location for the kind.
     pub link_rel: Option<String>,
+    /// A tool's entrypoint, relative to the item dir (from `TOOL.md` frontmatter
+    /// or a `mind.toml` override). What `{{tools:name}}` resolves to. Tools only.
+    pub bin: Option<String>,
+    /// A per-item build command run in staging at install (from `TOOL.md`
+    /// frontmatter or a `mind.toml` override). `None` means no build step.
+    pub build: Option<String>,
 }
 
 impl CatalogItem {
     /// The name this item installs under: bare, or `<prefix>-<bare>` if namespaced.
     pub fn effective_name(&self) -> String {
         namespace::apply(&self.name, &self.prefix)
+    }
+
+    /// A tool's entrypoint relative to its dir, for `{{tools:name}}`: the
+    /// declared `bin`, else the convention default `<name>` (a file named after
+    /// the tool at the dir root) when that file is present in the source. `None`
+    /// for non-tools or a tool with no resolvable entrypoint.
+    pub fn resolved_bin(&self) -> Option<String> {
+        if self.kind != ItemKind::Tool {
+            return None;
+        }
+        if let Some(bin) = &self.bin {
+            return Some(bin.clone());
+        }
+        self.path
+            .join(&self.name)
+            .is_file()
+            .then(|| self.name.clone())
     }
 
     /// User-facing key, using the effective (possibly prefixed) name.
@@ -215,11 +238,22 @@ fn from_decl(
         path: root.join("mind.toml"),
         msg: format!("unknown item kind '{}' for '{}'", decl.kind, decl.name),
     })?;
+    // `bin` and `build` describe tooling, so they are valid only on a tool item.
+    if kind != ItemKind::Tool && (decl.bin.is_some() || decl.build.is_some()) {
+        return Err(MindError::MindToml {
+            path: root.join("mind.toml"),
+            msg: format!(
+                "`bin`/`build` are only valid on a tool item, not '{}' ('{}')",
+                decl.kind, decl.name
+            ),
+        });
+    }
     let path = root.join(&decl.path);
+    let meta = meta_file(kind, &path);
     let description = decl
         .description
         .clone()
-        .or_else(|| frontmatter::description(&meta_file(kind, &path)));
+        .or_else(|| frontmatter::description(&meta));
     Ok(CatalogItem {
         kind,
         name: decl.name.clone(),
@@ -228,7 +262,18 @@ fn from_decl(
         path,
         description,
         link_rel: decl.link.clone(),
+        bin: tool_field(kind, decl.bin.clone(), &meta, "bin"),
+        build: tool_field(kind, decl.build.clone(), &meta, "build"),
     })
+}
+
+/// Resolve a tool's `bin`/`build`: an explicit `mind.toml` value wins, else the
+/// `TOOL.md` frontmatter value. Always `None` for a non-tool kind.
+fn tool_field(kind: ItemKind, explicit: Option<String>, meta: &Path, key: &str) -> Option<String> {
+    if kind != ItemKind::Tool {
+        return None;
+    }
+    explicit.or_else(|| frontmatter::file_field(meta, key))
 }
 
 /// Discover items by glob, relative to the repo root. Nested `sources` are
@@ -259,6 +304,12 @@ fn scan_globs(
         for md in resolve_globs(root, globs)? {
             out.push(make_item(source, prefix, kind, md.clone(), &md));
         }
+    }
+    // Tool globs match the tool directory itself; its `TOOL.md` (if any) is the
+    // metadata source.
+    for dir in resolve_globs(root, &discover.tools)? {
+        let meta = dir.join("TOOL.md");
+        out.push(make_item(source, prefix, ItemKind::Tool, dir, &meta));
     }
     Ok(())
 }
@@ -299,6 +350,17 @@ fn scan_convention(
             }
         }
     }
+
+    // Tools: every immediate subdirectory of `tools/` is a tool. Unlike a skill,
+    // a tool needs no anchor file; its directory contents are the tool. An
+    // optional `TOOL.md` carries `description`/`bin`/`build` (read in make_item).
+    let tools_dir = root.join("tools");
+    for entry in read_dir_opt(&tools_dir)? {
+        if entry.is_dir() {
+            let meta = entry.join("TOOL.md");
+            out.push(make_item(source, prefix, ItemKind::Tool, entry, &meta));
+        }
+    }
     Ok(())
 }
 
@@ -312,8 +374,9 @@ fn make_item(
     meta: &Path,
 ) -> CatalogItem {
     let bare = match kind {
-        ItemKind::Skill => file_name(&path),
-        _ => path
+        // Directory-shaped items take the directory name; file items the stem.
+        ItemKind::Skill | ItemKind::Tool => file_name(&path),
+        ItemKind::Agent | ItemKind::Rule => path
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default(),
@@ -326,14 +389,19 @@ fn make_item(
         path,
         description: frontmatter::description(meta),
         link_rel: None,
+        bin: tool_field(kind, None, meta, "bin"),
+        build: tool_field(kind, None, meta, "build"),
     }
 }
 
-/// The file whose frontmatter describes an item (SKILL.md for skills).
+/// The file whose frontmatter describes an item (SKILL.md for a skill, TOOL.md
+/// for a tool, the item file itself for an agent/rule). The file may be absent
+/// for a tool (it is optional), in which case frontmatter reads yield `None`.
 fn meta_file(kind: ItemKind, path: &Path) -> PathBuf {
     match kind {
         ItemKind::Skill => path.join("SKILL.md"),
-        _ => path.to_path_buf(),
+        ItemKind::Tool => path.join("TOOL.md"),
+        ItemKind::Agent | ItemKind::Rule => path.to_path_buf(),
     }
 }
 
@@ -895,7 +963,124 @@ mod tests {
             path: PathBuf::from("/tmp/fake"),
             description: description.map(|s| s.to_string()),
             link_rel: None,
+            bin: None,
+            build: None,
         }
+    }
+
+    #[test]
+    fn convention_discovers_bare_tool_dir_without_anchor() {
+        // spec: TOOL-1 TOOL-5
+        // A `tools/<name>/` directory is a tool with no anchor file; the
+        // convention default entrypoint is a file named after the tool.
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let clone = base.join("sources/local/test/repo");
+        write_file(&clone.join("tools/detect/detect"), "#!/bin/sh\necho hi\n");
+        write_file(&clone.join("tools/detect/lib.sh"), "helper\n");
+
+        let paths = paths_for(base);
+        let source = make_source_for(&clone);
+        let mut items = Vec::new();
+        scan_source(&paths, &source, &mut items).unwrap();
+
+        let tool = items
+            .iter()
+            .find(|i| i.name == "detect")
+            .expect("tool 'detect' discovered");
+        assert_eq!(tool.kind, ItemKind::Tool);
+        assert_eq!(tool.resolved_bin().as_deref(), Some("detect"));
+    }
+
+    #[test]
+    fn tool_metadata_comes_from_optional_tool_md() {
+        // spec: TOOL-2 TOOL-5 HOOK-70
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let clone = base.join("sources/local/test/repo");
+        write_file(
+            &clone.join("tools/shard/TOOL.md"),
+            "---\ndescription: shard a plan\nbin: shard.py\nbuild: make shard\n---\n# shard\n",
+        );
+        write_file(&clone.join("tools/shard/shard.py"), "print('x')\n");
+
+        let paths = paths_for(base);
+        let source = make_source_for(&clone);
+        let mut items = Vec::new();
+        scan_source(&paths, &source, &mut items).unwrap();
+
+        let tool = items.iter().find(|i| i.name == "shard").unwrap();
+        assert_eq!(tool.description.as_deref(), Some("shard a plan"));
+        // An explicit `bin:` wins over the convention default.
+        assert_eq!(tool.resolved_bin().as_deref(), Some("shard.py"));
+        // HOOK-70: the per-item build command is read from TOOL.md frontmatter.
+        assert_eq!(tool.build.as_deref(), Some("make shard"));
+    }
+
+    #[test]
+    fn resolved_bin_convention_default_requires_the_file() {
+        // spec: TOOL-5
+        // With no declared bin and no `tools/<name>/<name>` file present, there is
+        // no resolvable entrypoint.
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let dir = base.join("tools/empty");
+        std::fs::create_dir_all(&dir).unwrap();
+        let item = CatalogItem {
+            kind: ItemKind::Tool,
+            name: "empty".to_string(),
+            source: "s".to_string(),
+            prefix: None,
+            path: dir,
+            description: None,
+            link_rel: None,
+            bin: None,
+            build: None,
+        };
+        assert_eq!(item.resolved_bin(), None);
+    }
+
+    #[test]
+    fn from_decl_rejects_bin_or_build_on_non_tool() {
+        // spec: TOOL-7
+        let tmp = TmpDir::new();
+        let root = tmp.path();
+        write_file(&root.join("skills/x/SKILL.md"), "---\n---\n# x\n");
+        let source = make_source_for(root);
+        let decl = ItemDecl {
+            kind: "skill".to_string(),
+            name: "x".to_string(),
+            path: "skills/x".to_string(),
+            link: None,
+            description: None,
+            bin: Some("x".to_string()),
+            build: None,
+        };
+        let err = from_decl(root, &source, &None, &decl).unwrap_err();
+        assert!(
+            matches!(err, MindError::MindToml { .. }),
+            "bin on a non-tool must be a schema error: {err}"
+        );
+    }
+
+    #[test]
+    fn discover_tools_glob_matches_the_directory() {
+        // spec: TOOL-7
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let clone = base.join("sources/local/test/repo");
+        write_file(&clone.join("pkgs/detect/tool/detect"), "#!/bin/sh\n");
+        write_file(
+            &clone.join("mind.toml"),
+            "[discover]\ntools = { include = [\"pkgs/*/tool\"] }\n",
+        );
+
+        let paths = paths_for(base);
+        let source = make_source_for(&clone);
+        let mut items = Vec::new();
+        scan_source(&paths, &source, &mut items).unwrap();
+        let tool = items.iter().find(|i| i.name == "tool").unwrap();
+        assert_eq!(tool.kind, ItemKind::Tool);
     }
 
     #[test]

@@ -254,6 +254,8 @@ mod tests {
             path: PathBuf::from("/tmp/fake"),
             description: None,
             link_rel: None,
+            bin: None,
+            build: None,
         }
     }
 

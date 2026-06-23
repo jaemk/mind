@@ -145,6 +145,139 @@ pub fn expand(
     Ok(out)
 }
 
+/// A sibling item the path-token expander can resolve a store path for.
+#[derive(Debug, Clone)]
+pub struct PathSibling {
+    pub kind: crate::error::ItemKind,
+    /// Bare name as it appears in the source.
+    pub name: String,
+    /// Entrypoint relative to the item dir, used by `{{tools:name}}`. Only tools
+    /// carry one; `None` when the item is not a tool or declares no entrypoint.
+    pub bin: Option<String>,
+}
+
+/// Everything [`expand_paths`] needs to turn a path token into a store path.
+pub struct PathCtx<'a> {
+    /// `~/.mind/store` (honors `MIND_HOME`).
+    pub store_root: &'a std::path::Path,
+    /// The source's effective prefix, applied to every referent's effective name.
+    pub prefix: &'a Option<String>,
+    /// The installing item's own kind and bare name (for `{{self}}`).
+    pub self_kind: crate::error::ItemKind,
+    pub self_name: &'a str,
+    /// Every item in the same source (including self), for sibling lookups.
+    pub siblings: &'a [PathSibling],
+}
+
+impl PathCtx<'_> {
+    /// The store directory of an item of `kind` with bare name `bare`.
+    fn store_path(&self, kind: crate::error::ItemKind, bare: &str) -> String {
+        self.store_root
+            .join(kind.as_str())
+            .join(apply(bare, self.prefix))
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+/// Outcome of resolving one `{{...}}` token's inner text.
+enum Token {
+    /// A path token that resolved to this store path.
+    Path(String),
+    /// Not a path token (e.g. `{{ns:...}}` or a stray `{{`): leave it verbatim.
+    Passthrough,
+    /// A path token whose referent does not resolve (miss, ambiguous, or a tool
+    /// with no entrypoint).
+    Bad,
+}
+
+/// Expand the path tokens `{{self}}`, `{{tools:name}}`, and `{{path:ref}}` in
+/// `content` to absolute store paths.
+///
+/// `{{ns:...}}` tokens are left untouched (handled by [`expand`]); any other
+/// `{{...}}` span is passed through verbatim. Returns `Err(token)` with the
+/// offending token text when a path token's referent does not resolve, so the
+/// caller can report it. Whitespace inside a token is trimmed; an unterminated
+/// token (no closing `}}`) leaves the remainder verbatim, mirroring [`expand`].
+pub fn expand_paths(content: &str, ctx: &PathCtx) -> Result<String, String> {
+    let mut out = String::with_capacity(content.len());
+    let mut rest = content;
+    while let Some(pos) = rest.find("{{") {
+        out.push_str(&rest[..pos]);
+        let after = &rest[pos + 2..];
+        let Some(end) = after.find("}}") else {
+            // Unterminated token: leave the rest verbatim.
+            out.push_str(&rest[pos..]);
+            return Ok(out);
+        };
+        let inner = after[..end].trim();
+        match resolve_token(inner, ctx) {
+            Token::Path(p) => {
+                out.push_str(&p);
+                rest = &after[end + 2..];
+            }
+            Token::Bad => {
+                // Report the token exactly as written, including the braces.
+                return Err(rest[pos..pos + 2 + end + 2].to_string());
+            }
+            Token::Passthrough => {
+                // Leave the `{{` verbatim and resume scanning just after it, so a
+                // following `{{ns:}}` or another path token is still seen.
+                out.push_str("{{");
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
+/// Resolve one token's trimmed inner text to a store path.
+fn resolve_token(inner: &str, ctx: &PathCtx) -> Token {
+    if inner == "self" {
+        return Token::Path(ctx.store_path(ctx.self_kind, ctx.self_name));
+    }
+    if let Some(name) = inner.strip_prefix("tools:") {
+        let name = name.trim();
+        return match ctx
+            .siblings
+            .iter()
+            .find(|s| s.kind == crate::error::ItemKind::Tool && s.name == name)
+        {
+            Some(tool) => match &tool.bin {
+                Some(bin) => Token::Path(
+                    std::path::Path::new(&ctx.store_path(crate::error::ItemKind::Tool, name))
+                        .join(bin)
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                None => Token::Bad,
+            },
+            None => Token::Bad,
+        };
+    }
+    if let Some(reference) = inner.strip_prefix("path:") {
+        let reference = reference.trim();
+        let (want_kind, name) = match reference.split_once(':') {
+            Some((k, n)) => match crate::error::ItemKind::parse(k) {
+                Some(kind) => (Some(kind), n.trim()),
+                None => return Token::Bad,
+            },
+            None => (None, reference),
+        };
+        let mut hits = ctx
+            .siblings
+            .iter()
+            .filter(|s| s.name == name && want_kind.is_none_or(|k| s.kind == k));
+        return match (hits.next(), hits.next()) {
+            (Some(s), None) => Token::Path(ctx.store_path(s.kind, name)),
+            // No match, or ambiguous across kinds without a qualifier.
+            _ => Token::Bad,
+        };
+    }
+    Token::Passthrough
+}
+
 /// Extract the bare name of every `{{ns:name}}` token in `content`.
 ///
 /// Mirrors [`expand`]'s inline parser: the open delimiter is `{{ns:`, the name
@@ -413,5 +546,181 @@ mod tests {
             referenced_names("{{ns:}}{{ns:dev}}"),
             vec!["dev".to_string()]
         );
+    }
+
+    // ---- path-reference tokens ({{self}}, {{tools:}}, {{path:}}) -------------
+
+    use crate::error::ItemKind;
+    use std::path::Path;
+
+    fn psib(kind: ItemKind, name: &str, bin: Option<&str>) -> PathSibling {
+        PathSibling {
+            kind,
+            name: name.to_string(),
+            bin: bin.map(|s| s.to_string()),
+        }
+    }
+
+    fn ctx<'a>(
+        store: &'a Path,
+        prefix: &'a Option<String>,
+        self_kind: ItemKind,
+        self_name: &'a str,
+        siblings: &'a [PathSibling],
+    ) -> PathCtx<'a> {
+        PathCtx {
+            store_root: store,
+            prefix,
+            self_kind,
+            self_name,
+            siblings,
+        }
+    }
+
+    #[test]
+    fn self_token_resolves_to_own_store_dir() {
+        // spec: TOOL-10
+        let store = Path::new("/m/store");
+        let none = None;
+        let c = ctx(store, &none, ItemKind::Skill, "review", &[]);
+        assert_eq!(
+            expand_paths("run {{self}}/resources/pr.py here", &c).unwrap(),
+            "run /m/store/skill/review/resources/pr.py here"
+        );
+    }
+
+    #[test]
+    fn self_token_is_prefix_aware() {
+        // spec: TOOL-10 TOOL-13
+        let store = Path::new("/m/store");
+        let pfx = Some("jk".to_string());
+        let c = ctx(store, &pfx, ItemKind::Skill, "review", &[]);
+        assert_eq!(
+            expand_paths("{{self}}", &c).unwrap(),
+            "/m/store/skill/jk-review"
+        );
+    }
+
+    #[test]
+    fn tools_token_resolves_to_entrypoint() {
+        // spec: TOOL-12
+        let store = Path::new("/m/store");
+        let none = None;
+        let sibs = vec![psib(ItemKind::Tool, "shard-plan", Some("shard-plan"))];
+        let c = ctx(store, &none, ItemKind::Skill, "review", &sibs);
+        assert_eq!(
+            expand_paths("pipe to {{tools:shard-plan}} --max 5", &c).unwrap(),
+            "pipe to /m/store/tool/shard-plan/shard-plan --max 5"
+        );
+    }
+
+    #[test]
+    fn tools_token_is_prefix_aware() {
+        // spec: TOOL-12 TOOL-13
+        let store = Path::new("/m/store");
+        let pfx = Some("jk".to_string());
+        let sibs = vec![psib(ItemKind::Tool, "shard-plan", Some("shard-plan"))];
+        let c = ctx(store, &pfx, ItemKind::Skill, "review", &sibs);
+        assert_eq!(
+            expand_paths("{{tools:shard-plan}}", &c).unwrap(),
+            "/m/store/tool/jk-shard-plan/shard-plan"
+        );
+    }
+
+    #[test]
+    fn tools_token_errors_on_missing_or_binless_or_non_tool() {
+        // spec: TOOL-12
+        let store = Path::new("/m/store");
+        let none = None;
+        // No such sibling.
+        let c = ctx(store, &none, ItemKind::Skill, "review", &[]);
+        assert_eq!(
+            expand_paths("{{tools:nope}}", &c),
+            Err("{{tools:nope}}".to_string())
+        );
+        // A tool with no resolvable bin.
+        let binless = vec![psib(ItemKind::Tool, "x", None)];
+        let c = ctx(store, &none, ItemKind::Skill, "review", &binless);
+        assert_eq!(
+            expand_paths("{{tools:x}}", &c),
+            Err("{{tools:x}}".to_string())
+        );
+        // A sibling of that name exists but is not a tool.
+        let not_tool = vec![psib(ItemKind::Skill, "x", None)];
+        let c = ctx(store, &none, ItemKind::Skill, "review", &not_tool);
+        assert_eq!(
+            expand_paths("{{tools:x}}", &c),
+            Err("{{tools:x}}".to_string())
+        );
+    }
+
+    #[test]
+    fn path_token_resolves_sibling_dir_qualified_and_bare() {
+        // spec: TOOL-11
+        let store = Path::new("/m/store");
+        let none = None;
+        let sibs = vec![psib(ItemKind::Tool, "detect", Some("detect"))];
+        let c = ctx(store, &none, ItemKind::Skill, "review", &sibs);
+        // Kind-qualified, reaching a non-entrypoint file.
+        assert_eq!(
+            expand_paths("{{path:tool:detect}}/lib/helper.sh", &c).unwrap(),
+            "/m/store/tool/detect/lib/helper.sh"
+        );
+        // Bare name (unambiguous).
+        assert_eq!(
+            expand_paths("{{path:detect}}", &c).unwrap(),
+            "/m/store/tool/detect"
+        );
+    }
+
+    #[test]
+    fn path_token_ambiguity_errors_unless_kind_qualified() {
+        // spec: TOOL-11
+        let store = Path::new("/m/store");
+        let none = None;
+        // A skill and an agent share the bare name `x`.
+        let sibs = vec![
+            psib(ItemKind::Skill, "x", None),
+            psib(ItemKind::Agent, "x", None),
+        ];
+        let c = ctx(store, &none, ItemKind::Skill, "self", &sibs);
+        assert_eq!(
+            expand_paths("{{path:x}}", &c),
+            Err("{{path:x}}".to_string())
+        );
+        // A kind qualifier disambiguates.
+        assert_eq!(
+            expand_paths("{{path:agent:x}}", &c).unwrap(),
+            "/m/store/agent/x"
+        );
+        // A miss is an error.
+        assert_eq!(
+            expand_paths("{{path:none}}", &c),
+            Err("{{path:none}}".to_string())
+        );
+    }
+
+    #[test]
+    fn path_tokens_ignore_ns_and_handle_edges() {
+        // spec: TOOL-14
+        let store = Path::new("/m/store");
+        let none = None;
+        let c = ctx(store, &none, ItemKind::Tool, "t", &[]);
+        // An `{{ns:}}` token is left verbatim; a following path token still resolves.
+        assert_eq!(
+            expand_paths("{{ns:foo}} then {{self}}", &c).unwrap(),
+            "{{ns:foo}} then /m/store/tool/t"
+        );
+        // Inner whitespace is trimmed.
+        assert_eq!(expand_paths("{{ self }}", &c).unwrap(), "/m/store/tool/t");
+        // An unterminated token is left verbatim.
+        assert_eq!(
+            expand_paths("see {{self", &c).unwrap(),
+            "see {{self".to_string()
+        );
+        // Content with no token is unchanged.
+        assert_eq!(expand_paths("plain prose", &c).unwrap(), "plain prose");
+        // A stray `{{` that is not a known token passes through.
+        assert_eq!(expand_paths("a {{x}} b", &c).unwrap(), "a {{x}} b");
     }
 }

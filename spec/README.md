@@ -55,6 +55,9 @@ and verified.
 | README quickstart, mental model, troubleshooting/FAQ | done | [../README.md](../README.md) |
 | Starter source example (plain convention layout) | done | [../examples/](../examples/) |
 | Interactive TUI: `probe` default, Installed/Available tree, full-parity actions, preview + registry meld | done | [tui.md](tui.md) |
+| `tool` item kind: store-only installable, referenced not discovered | done | [tooling.md](tooling.md) (TOOL-1..7) |
+| Path-reference tokens `{{self}}` / `{{tools:name}}` / `{{path:ref}}` | done | [tooling.md](tooling.md) (TOOL-10..15) |
+| Item build hooks: per-item `build`, staging-time, transactional | done | [install-hooks.md](install-hooks.md) (HOOK-70..73) |
 
 ## Documents
 
@@ -71,7 +74,11 @@ and verified.
   admin-controlled file that restricts a client to trusted sources and locks
   related settings.
 - [install-hooks.md](install-hooks.md) - install hooks: a source-declared or
-  user-supplied build command, gated by a safety prompt before it runs.
+  user-supplied build command, gated by a safety prompt before it runs; and
+  item-level build hooks (HOOK-70..73) that build an item's tooling at install.
+- [tooling.md](tooling.md) - resource and helper tooling: the `tool` item kind,
+  path-reference tokens (`{{self}}`, `{{tools:name}}`, `{{path:ref}}`), and how an
+  item references the tooling it ships.
 - [init-source.md](init-source.md) - `init-source`, the maintainer scaffolder:
   generate a `mind.toml`, report the intra-source reference graph, and add
   `{{ns:}}` templating.
