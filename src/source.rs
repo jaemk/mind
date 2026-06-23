@@ -174,7 +174,7 @@ impl Source {
     pub fn pending_install_hooks(&self, current: Option<&str>) -> Vec<&RecordedHook> {
         self.install_hooks
             .iter()
-            .filter(|h| h.ran_at.as_deref() != current)
+            .filter(|h| h.ran_at.is_none() || h.ran_at.as_deref() != current)
             .collect()
     }
 }
@@ -714,8 +714,9 @@ mod tests {
     #[test]
     fn pending_install_hooks_all_pending_when_no_current_commit() {
         // spec: HOOK-55
-        // When current is None (never synced), all hooks with ran_at=Some(_) are
-        // pending, and hooks with ran_at=None are also pending.
+        // When current is None (commitless source), hooks with ran_at=None are
+        // pending (a null run-commit must always be re-offered), and hooks with
+        // ran_at=Some(_) are also pending (they differ from current=None).
         let mut src = parse_spec("acme/tools").unwrap();
         src.install_hooks = vec![
             RecordedHook {
@@ -728,9 +729,10 @@ mod tests {
             },
         ];
         let pending = src.pending_install_hooks(None);
-        // hook-a: ran_at=None == current=None -> NOT pending.
+        // hook-a: ran_at=None -> is_none() -> always pending.
         // hook-b: ran_at=Some("aaa") != current=None -> pending.
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].command, "hook-b");
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0].command, "hook-a");
+        assert_eq!(pending[1].command, "hook-b");
     }
 }

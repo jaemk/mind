@@ -189,7 +189,9 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 ## sync
 
 - `CLI-50` `sync` fetches every source, resets its clone to the remote default
-  branch, and updates the recorded commit and `[source].description`.
+  branch, and updates the recorded commit and `[source].description`. A linked
+  local source (CLI-27) is not fetched or reset: `sync` only re-reads its HEAD
+  and updates the recorded commit from the working tree.
 - `CLI-51` With no sources melded, `sync` reports that and exits successfully.
 - `CLI-52` `sync` does not change consumer aliases.
 - `CLI-53` `sync --upgrade` runs an `upgrade` pass after refreshing sources

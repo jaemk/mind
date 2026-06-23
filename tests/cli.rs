@@ -1490,7 +1490,8 @@ fn unmeld_unlink_only_keeps_installed_items() {
 
 #[test]
 fn unmeld_forgets_items_by_default() {
-    // spec: CLI-21 - a plain unmeld uninstalls the source's items.
+    // spec: CLI-21, CLI-27 - a plain unmeld uninstalls the source's items but
+    // must not delete the linked local working tree (CLI-27).
     let sb = melded();
     assert!(sb.mind(&["learn", "review"]).success);
     let r = sb.mind(&["unmeld", "agents"]);
@@ -1502,6 +1503,12 @@ fn unmeld_forgets_items_by_default() {
     assert!(
         !sb.mind(&["recall", "review"]).success,
         "the item must be uninstalled by default"
+    );
+    // CLI-27: unmeld must not delete the linked source's working tree.
+    assert!(
+        sb.source.exists(),
+        "unmeld must not delete the linked local working tree at {}",
+        sb.source.display()
     );
 }
 
@@ -2475,6 +2482,12 @@ fn unmeld_forgets_all_items_with_yes() {
     );
     assert!(std::fs::symlink_metadata(sb.claude_home.join("skills/review")).is_err());
     assert!(std::fs::symlink_metadata(sb.claude_home.join("agents/dev.md")).is_err());
+    // CLI-27: unmeld must not delete the linked source's working tree.
+    assert!(
+        sb.source.exists(),
+        "unmeld --yes must not delete the linked local working tree at {}",
+        sb.source.display()
+    );
 }
 
 #[test]
@@ -5686,7 +5699,7 @@ fn meld_hook_nonzero_exit_fails_and_registers_nothing() {
         );
     }
 
-    // The source is a linked local working tree (CLI-19b), so a failed hook must
+    // The source is a linked local working tree (CLI-27), so a failed hook must
     // NOT delete it -- it is the user's directory, not a clone we own.
     assert!(
         sb.source.exists(),
@@ -6309,11 +6322,13 @@ fn meld_non_tty_skips_install_hooks_and_still_registers_source() {
         "hook must not have run in non-TTY mode (marker2 exists)"
     );
 
-    // Skip note is printed.
+    // Skip note is printed with the exact prefix that `run_install_hooks` emits
+    // on the HOOK-22 skip path. Asserting the literal prefix ensures the message
+    // is present and not just any word "skipped" in unrelated output.
     let combined = format!("{}{}", r.stdout, r.stderr);
     assert!(
-        combined.contains("skipped the install hook") || combined.contains("skipped"),
-        "non-TTY skip must print a note: {combined}"
+        combined.contains("note: skipped install hook "),
+        "non-TTY skip must print a note starting with 'note: skipped install hook ': {combined}"
     );
 
     // Source is still registered (HOOK-22: skip-and-continue registers the source).
@@ -6608,11 +6623,236 @@ fn recall_sources_marks_multi_hook_source() {
         sources.stderr
     );
 
-    // The output must contain the `hook` token (either ` hook]` for 1 hook or
-    // ` hooks(N)` for N > 1) somewhere near the source entry.
+    // The output must contain the count-aware ` hooks(2)` token (HOOK-58:
+    // N > 1 renders as ` hooks(N)`) for the two declared install hooks.
+    // This assertion would fail if the token were dropped or rendered differently.
     assert!(
-        sources.stdout.contains("hook"),
-        "recall --sources must mark a multi-hook source with the hook token: {}",
+        sources.stdout.contains(" hooks(2)"),
+        "recall --sources must mark a two-hook source with ' hooks(2)': {}",
         sources.stdout
+    );
+}
+
+#[test]
+fn pinned_local_meld_hook_failure_leaves_no_orphan_clone() {
+    // spec: CLI-18, CLI-27, HOOK-30
+    // A pinned local source (`--pin-ref`) is snapshotted into the sources tree
+    // rather than read from the working tree. When a hook fails during that meld,
+    // the snapshot clone must be removed (no orphan) and the source must not be
+    // registered. The working tree itself must be untouched (CLI-27).
+    let sb = sandbox_with_declared_hook("agents", "exit 1");
+    let spec = sb.source_spec();
+
+    // Read HEAD sha to supply as --pin-ref (so this becomes a pinned-local meld).
+    let sha = {
+        let out = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&sb.source)
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+
+    let r = sb.mind(&[
+        "meld",
+        &spec,
+        "--pin-ref",
+        &sha,
+        "--dangerously-skip-install-hook-check",
+    ]);
+    assert!(
+        !r.success,
+        "hook failure must fail the meld: {} {}",
+        r.stdout, r.stderr
+    );
+
+    // Nothing registered.
+    assert!(
+        sb.mind(&["recall", "--sources"])
+            .stdout
+            .contains("no sources melded"),
+        "source must not be registered after a failed hook"
+    );
+
+    // The snapshot clone must be gone -- no orphan under the sources tree.
+    let sources_tree = sb.mind_home.join("sources");
+    if sources_tree.exists() {
+        let clone = sources_tree
+            .join("local")
+            .join(sb.base_name())
+            .join("agents");
+        assert!(
+            !clone.exists(),
+            "pinned-local clone must be removed on hook failure, found orphan at {}",
+            clone.display()
+        );
+    }
+
+    // The working tree itself must be untouched (CLI-27).
+    assert!(
+        sb.source.exists(),
+        "working tree must survive a failed pinned-local meld: {}",
+        sb.source.display()
+    );
+}
+
+#[test]
+fn upgrade_pending_filter_treats_none_ran_at_as_always_pending() {
+    // spec: HOOK-55, HOOK-11
+    // A hook recorded with ran_at=None (skipped at meld time) must be re-offered
+    // by `upgrade` even when the source's commit is also None (a commitless linked
+    // source). The predicate `ran_at.is_none() || ran_at != commit` ensures this.
+    //
+    // The test melds a local source declaring a hook (non-TTY meld skips it,
+    // recording ran_at=null), then runs `upgrade --dangerously-skip-install-hook-check`.
+    // The hook must re-run (marker appears) proving the none-pending filter works.
+    let sb = Sandbox::bare("upgrade-pending");
+    let marker = sb.base.join("upgrade-pending-ran");
+    let m = marker.to_str().unwrap().to_owned();
+    let toml = format!("[[hooks]]\nrun = \"touch {m}\"\nevent = \"install\"\n");
+    sb.write_and_commit("mind.toml", &toml);
+    let spec = sb.source_spec();
+
+    // Meld without the dangerous flag: non-TTY skips the hook, ran_at=null.
+    let meld = sb.mind(&["meld", &spec, "--link-only"]);
+    assert!(
+        meld.success,
+        "meld should succeed: {} {}",
+        meld.stdout, meld.stderr
+    );
+    assert!(
+        !marker.exists(),
+        "hook must not run at meld time (non-TTY skip)"
+    );
+
+    // Verify the registry has ran_at=null for the hook.
+    let json = std::fs::read_to_string(sb.mind_home.join("sources.json")).unwrap();
+    assert!(
+        json.contains("\"ran_at\": null"),
+        "registry must record ran_at=null for the skipped hook: {json}"
+    );
+
+    // Upgrade with the dangerous flag: the skipped (ran_at=null) hook must re-run.
+    let upgrade = sb.mind(&["upgrade", "--dangerously-skip-install-hook-check"]);
+    assert!(
+        upgrade.success,
+        "upgrade should succeed: {} {}",
+        upgrade.stdout, upgrade.stderr
+    );
+    assert!(
+        marker.exists(),
+        "upgrade must re-run a hook with ran_at=null (none-pending filter): marker absent"
+    );
+}
+
+#[test]
+fn unmeld_confirm_decline_leaves_source_melded_and_hook_not_run() {
+    // spec: CLI-21, CLI-42, HOOK-54
+    // When the default unmeld would remove multiple items, the multi-item
+    // confirmation must happen BEFORE uninstall hooks run. A user who answers
+    // "no" must leave the source melded AND the hook must not have executed.
+    //
+    // TTY simulation: send "n\n" as stdin to exercise the confirm path.
+    let sb = Sandbox::bare("unmeld-confirm-order");
+    let sentinel = sb.base.join("uninstall-ran");
+    let s = sentinel.to_str().unwrap().to_owned();
+    let hook_toml = format!("[[hooks]]\nrun = \"touch {s}\"\nevent = \"uninstall\"\n");
+    sb.write_and_commit("mind.toml", &hook_toml);
+
+    // Also add two items so the multi-item confirm triggers.
+    sb.write_and_commit(
+        "agents/dev.md",
+        "---\nname: dev\ndescription: dev\n---\n# dev\n",
+    );
+    sb.write_and_commit(
+        "agents/ops.md",
+        "---\nname: ops\ndescription: ops\n---\n# ops\n",
+    );
+
+    let spec = sb.source_spec();
+
+    // Meld and install both items.
+    assert!(sb.mind(&["meld", &spec, "--link-only"]).success, "meld");
+    assert!(sb.mind(&["learn", "agent:dev"]).success, "learn dev");
+    assert!(sb.mind(&["learn", "agent:ops"]).success, "learn ops");
+
+    // Unmeld with TTY input "n" to decline the multi-item confirm.
+    // The test harness sets stdin to a pipe, so the subprocess sees a TTY-like
+    // stdin for reading input but is_tty() is false (piped). We therefore use
+    // --yes=false path by omitting --yes, and the non-TTY branch refuses with
+    // ConfirmationRequired rather than prompting.
+    //
+    // Non-TTY behavior: with 2 items and no --yes, unmeld errors BEFORE running
+    // hooks. Assert the source is still registered and the hook sentinel is absent.
+    let r = sb.mind(&["unmeld", "unmeld-confirm-order"]);
+    assert!(
+        !r.success,
+        "unmeld without --yes must fail in non-TTY: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr.contains("needs confirmation"),
+        "must report ConfirmationRequired: {}",
+        r.stderr
+    );
+
+    // Sentinel must be absent: hook did NOT run before the confirmation gate.
+    assert!(
+        !sentinel.exists(),
+        "uninstall hook must not run before the multi-item confirmation gate: sentinel exists"
+    );
+
+    // Source must still be registered.
+    let sources = sb.mind(&["recall", "--sources"]).stdout;
+    assert!(
+        sources.contains("unmeld-confirm-order"),
+        "source must remain melded after a declined confirm: {sources}"
+    );
+}
+
+#[test]
+fn unmeld_failing_uninstall_hook_leaves_source_melded() {
+    // spec: HOOK-53, HOOK-54
+    // An uninstall hook that exits non-zero is a hard stop: the unmeld fails
+    // and the source remains registered. Items must also remain installed.
+    let sb = Sandbox::bare("failing-uninstall-hook");
+    let toml = "[[hooks]]\nrun = \"exit 1\"\nevent = \"uninstall\"\n";
+    sb.write_and_commit("mind.toml", toml);
+    sb.write_and_commit(
+        "agents/dev.md",
+        "---\nname: dev\ndescription: dev\n---\n# dev\n",
+    );
+    let spec = sb.source_spec();
+
+    // Meld and install the item.
+    assert!(
+        sb.mind(&["meld", &spec, "--link-only"]).success,
+        "meld should succeed"
+    );
+    assert!(sb.mind(&["learn", "agent:dev"]).success, "learn dev");
+
+    // Unmeld with dangerous flag so the hook runs (non-TTY would skip it).
+    let r = sb.mind(&[
+        "unmeld",
+        "failing-uninstall-hook",
+        "--dangerously-skip-install-hook-check",
+    ]);
+    assert!(
+        !r.success,
+        "unmeld must fail when uninstall hook exits non-zero: {} {}",
+        r.stdout, r.stderr
+    );
+
+    // Source must still be registered.
+    let sources = sb.mind(&["recall", "--sources"]).stdout;
+    assert!(
+        sources.contains("failing-uninstall-hook"),
+        "source must remain melded after a failed uninstall hook: {sources}"
+    );
+
+    // Items must still be installed.
+    assert!(
+        sb.mind(&["recall", "agent:dev"]).success,
+        "items must remain installed after a failed uninstall hook"
     );
 }

@@ -264,12 +264,12 @@ fn handle_key(paths: &Paths, app: &mut app::App, k: crossterm::event::KeyEvent) 
                 //   - On success, meld re-clones into the registry path; temp is redundant.
                 //   - On failure, temp is cleaned up by dropping active_preview (no orphan).
                 // spec: TUI-30 TUI-24 TUI-25 TUI-44
-                let is_meld = matches!(pending.kind, crate::tui::app::ActionKind::Meld { .. });
-                let result = if is_meld {
-                    // A meld prompts (hook HOOK-20, install confirm CLI-23). Suspend
-                    // the TUI and run it on the normal terminal so its flow is
-                    // identical to the CLI, then let the user read the output before
-                    // the browser redraws over it (TUI-44).
+                let result = if action_needs_suspension(&pending.kind) {
+                    // Meld and unmeld may prompt interactively (hook HOOK-20,
+                    // install confirm CLI-23, uninstall hook HOOK-54). Suspend the
+                    // TUI and run on the normal terminal so its flow is identical to
+                    // the CLI, then let the user read the output before the browser
+                    // redraws over it (TUI-44).
                     term::with_suspended(|| {
                         let r = action::execute_interactive(paths, pending);
                         pause_for_return();
@@ -316,6 +316,19 @@ fn handle_key(paths: &Paths, app: &mut app::App, k: crossterm::event::KeyEvent) 
             }
         }
     }
+}
+
+/// Return true if this action kind requires the TUI to suspend (leave raw mode
+/// and the alt-screen) before executing, because the verb may prompt
+/// interactively on stdin/stdout.
+///
+/// Currently: Meld (install-hook disclosure HOOK-20, install confirm CLI-23,
+/// SSH passphrase TUI-45) and Unmeld (uninstall-hook prompt HOOK-54). All other
+/// actions run with stdout captured while the TUI holds the terminal (TUI-24).
+// spec: TUI-44
+pub(crate) fn action_needs_suspension(kind: &crate::tui::app::ActionKind) -> bool {
+    use crate::tui::app::ActionKind;
+    matches!(kind, ActionKind::Meld { .. } | ActionKind::Unmeld { .. })
 }
 
 /// After an interactive verb runs with the TUI suspended (TUI-44), hold the
@@ -841,5 +854,67 @@ mod tests {
             "a preview error must be surfaced inline, got error: {:?}",
             app.error
         );
+    }
+
+    // --- TUI-44: action_needs_suspension routing ---
+
+    #[test]
+    fn meld_needs_suspension() {
+        // spec: TUI-44 - Meld may prompt (install-hook HOOK-20, install confirm
+        // CLI-23, SSH passphrase TUI-45) and must run on the suspended terminal.
+        assert!(
+            action_needs_suspension(&ActionKind::Meld {
+                spec: "git@github.com:foo/bar".to_string()
+            }),
+            "Meld must be classified as requiring suspension"
+        );
+    }
+
+    #[test]
+    fn unmeld_needs_suspension() {
+        // spec: TUI-44 - Unmeld can trigger an uninstall-hook prompt (HOOK-54);
+        // it must run on the suspended terminal, not with stdout captured.
+        assert!(
+            action_needs_suspension(&ActionKind::Unmeld {
+                name: "foo/bar".to_string(),
+                forget: true,
+            }),
+            "Unmeld with forget=true must be classified as requiring suspension"
+        );
+        assert!(
+            action_needs_suspension(&ActionKind::Unmeld {
+                name: "foo/bar".to_string(),
+                forget: false,
+            }),
+            "Unmeld with forget=false must also be classified as requiring suspension"
+        );
+    }
+
+    #[test]
+    fn non_suspending_actions_do_not_need_suspension() {
+        // spec: TUI-44 - learn/forget/sync/upgrade run captured (no suspension).
+        // A regression that added them to the suspension list would break this.
+        for kind in [
+            ActionKind::Learn {
+                item_key: "skill:review".to_string(),
+                source: "src".to_string(),
+            },
+            ActionKind::Forget {
+                item_key: "skill:review".to_string(),
+            },
+            ActionKind::Sync,
+            ActionKind::Upgrade,
+            ActionKind::LobeAdd {
+                path: "/some/path".to_string(),
+            },
+            ActionKind::LobeRemove {
+                path: "/some/path".to_string(),
+            },
+        ] {
+            assert!(
+                !action_needs_suspension(&kind),
+                "{kind:?} must NOT require suspension (runs captured)"
+            );
+        }
     }
 }

@@ -91,10 +91,11 @@ pub enum Command {
 
         /// Supply or override the source's install hook: a shell command run
         /// after checkout to build the tooling its items rely on. Before it runs,
-        /// a prompt offers three choices: run it, skip it but still install the
-        /// source (the default), or abort and install nothing. Overriding a
-        /// declared `[source].install` is shown loudly in that prompt. Use
-        /// `mind review <repo>` to see a source's declared hook before melding.
+        /// a prompt offers three choices: run it (the default, a bare Enter),
+        /// skip it but still install the source, or abort and install nothing.
+        /// Overriding a declared `[source].install` is shown loudly in that
+        /// prompt. Use `mind review <repo>` to see a source's declared hook
+        /// before melding.
         #[arg(long, value_name = "CMD")]
         install_hook: Option<String>,
 

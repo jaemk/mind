@@ -434,10 +434,13 @@ fn meld_recursive(
 
     // Scan before registering. If the source is rejected here (e.g. the
     // version gate, DSC-40), remove the clone so no orphan is left on disk.
+    // Use `!source.is_linked()` (not `!is_local`) so that a pinned-local clone
+    // (which is NOT a linked working tree) is also cleaned up on failure (CLI-18,
+    // CLI-27).
     let mut items = match catalog::scan(paths, &single(&source)) {
         Ok(items) => items,
         Err(e) => {
-            if !is_local {
+            if !source.is_linked() {
                 let _ = std::fs::remove_dir_all(&dir);
             }
             return Err(e);
@@ -474,7 +477,7 @@ fn meld_recursive(
             items = match catalog::scan(paths, &single(&source)) {
                 Ok(items) => items,
                 Err(e) => {
-                    if !is_local {
+                    if !source.is_linked() {
                         let _ = std::fs::remove_dir_all(&dir);
                     }
                     return Err(e);
@@ -501,7 +504,9 @@ fn meld_recursive(
         Ok(HookOutcome::Proceed) => {}
         Ok(HookOutcome::Abort) => {
             // HOOK-21: aborting installs nothing; the source is not registered.
-            if !is_local {
+            // Use `!source.is_linked()` so a pinned-local clone is removed on
+            // abort, while a linked working tree is never touched (CLI-27).
+            if !source.is_linked() {
                 let _ = std::fs::remove_dir_all(&dir);
             }
             println!("aborted; nothing installed");
@@ -509,7 +514,8 @@ fn meld_recursive(
         }
         Err(e) => {
             // HOOK-30/HOOK-53: a hook failure fails the meld; remove the clone.
-            if !is_local {
+            // Same guard: remove a pinned-local clone but not the working tree.
+            if !source.is_linked() {
                 let _ = std::fs::remove_dir_all(&dir);
             }
             return Err(e);
@@ -761,6 +767,110 @@ fn read_item_text(item: &CatalogItem) -> String {
     buf
 }
 
+/// Run the uninstall hooks declared by the source at `idx` in `registry`.
+/// Extracted so both the `--unlink-only` and the default `unmeld` paths can call
+/// it without duplicating the logic.
+///
+/// Returns `Ok(true)` if all hooks were handled (run or skipped) and the caller
+/// should proceed with the unmeld. Returns `Ok(false)` if the user chose Abort
+/// (the source should be left in place). Returns `Err` on a hook failure
+/// (HOOK-53), which also leaves the source in place.
+fn run_uninstall_hooks(
+    paths: &Paths,
+    registry: &Registry,
+    idx: usize,
+    source_name: &str,
+    uninstall_hook: Option<&str>,
+    dangerously_skip_hook_check: bool,
+) -> Result<bool> {
+    let clone_dir = registry.sources[idx].clone_dir(paths);
+    let source_pin = registry.sources[idx].pin.clone();
+    let source_commit = registry.sources[idx].commit.clone();
+
+    let mindfile = MindToml::load(&clone_dir).unwrap_or_default();
+    let toml_path = clone_dir.join("mind.toml");
+    let resolved = mindfile
+        .as_ref()
+        .map(|m| m.resolved_hooks(&toml_path))
+        .transpose()?
+        .unwrap_or_default();
+
+    // HOOK-59: `--uninstall-hook <cmd>` replaces the source's declared
+    // uninstall hooks with one required uninstall hook, shown loudly.
+    let (resolved, replaced) =
+        crate::hook::apply_hook_override(resolved, uninstall_hook, HookEvent::Uninstall);
+    let override_cmd = uninstall_hook.map(str::trim).filter(|s| !s.is_empty());
+    let replaced_note = replaced.map(|cmds| cmds.join("; "));
+
+    let pin_desc = pin_description(&source_pin);
+    let commit = source_commit.unwrap_or_default();
+    let clone_path = clone_dir.display().to_string();
+
+    for h in resolved.iter().filter(|h| h.event == HookEvent::Uninstall) {
+        // Show the loud override note on the hook that replaced declared ones.
+        let declared_override = match (&replaced_note, override_cmd) {
+            (Some(note), Some(cmd)) if h.run == cmd => Some(note.as_str()),
+            _ => None,
+        };
+        let disclosure = crate::hook::hook_disclosure_text(
+            h.label(),
+            h.optional,
+            source_name,
+            &pin_desc,
+            &commit,
+            &clone_path,
+            &h.run,
+            declared_override,
+        );
+
+        enum Act {
+            Run,
+            Skip,
+            Abort,
+        }
+        let act = if dangerously_skip_hook_check {
+            Act::Run // HOOK-23
+        } else if !crate::hook::is_tty() {
+            Act::Skip // HOOK-22
+        } else if h.optional {
+            // HOOK-52: optional => two-way (run / skip).
+            match crate::hook::prompt_choice_optional(&disclosure)? {
+                crate::hook::OptionalChoice::Run => Act::Run,
+                crate::hook::OptionalChoice::Skip => Act::Skip,
+            }
+        } else {
+            // HOOK-20: required => three-way (run / skip / abort).
+            match crate::hook::prompt_choice(&disclosure)? {
+                crate::hook::HookChoice::RunAndContinue => Act::Run,
+                crate::hook::HookChoice::SkipAndContinue => Act::Skip,
+                crate::hook::HookChoice::Abort => Act::Abort,
+            }
+        };
+
+        match act {
+            Act::Run => {
+                // HOOK-60: indicate the running hook.
+                println!("running uninstall hook '{}' for {}", h.label(), source_name);
+                // HOOK-53: any failure (optional or required) is a hard stop;
+                // the unmeld stops and the source remains.
+                crate::hook::run_hook(&h.run, &clone_dir, source_name, h.label())?;
+            }
+            Act::Skip => {
+                println!(
+                    "note: skipped uninstall hook '{}' for {}",
+                    h.label(),
+                    source_name
+                );
+            }
+            Act::Abort => {
+                println!("aborted; source left in place");
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
 /// `mind unmeld <name> [--unlink-only] [--yes] [--dangerously-skip-install-hook-check]`
 /// — drop a source. `name` may be the full `owner/repo` or an unambiguous repo
 /// basename. By default every item installed from the source is uninstalled (via
@@ -803,106 +913,6 @@ pub fn unmeld(
         }
     };
 
-    // HOOK-54: run uninstall hooks from the source's mind.toml BEFORE removing
-    // anything. Load the mindfile from the clone dir (which still exists at this
-    // point). Run hooks in declaration order. Required hooks get the three-way
-    // prompt; optional ones get the two-way prompt. Non-TTY: skip with a note.
-    // dangerously_skip_hook_check: run all hooks without prompting.
-    {
-        let clone_dir = registry.sources[idx].clone_dir(paths);
-        let source_name = registry.sources[idx].name.clone();
-        let source_pin = registry.sources[idx].pin.clone();
-        let source_commit = registry.sources[idx].commit.clone();
-
-        let mindfile = MindToml::load(&clone_dir).unwrap_or_default();
-        let toml_path = clone_dir.join("mind.toml");
-        let resolved = mindfile
-            .as_ref()
-            .map(|m| m.resolved_hooks(&toml_path))
-            .transpose()?
-            .unwrap_or_default();
-
-        // HOOK-59: `--uninstall-hook <cmd>` replaces the source's declared
-        // uninstall hooks with one required uninstall hook, shown loudly.
-        let (resolved, replaced) = crate::hook::apply_hook_override(
-            resolved,
-            uninstall_hook.as_deref(),
-            HookEvent::Uninstall,
-        );
-        let override_cmd = uninstall_hook
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty());
-        let replaced_note = replaced.map(|cmds| cmds.join("; "));
-
-        let pin_desc = pin_description(&source_pin);
-        let commit = source_commit.clone().unwrap_or_default();
-        let clone_path = clone_dir.display().to_string();
-
-        for h in resolved.iter().filter(|h| h.event == HookEvent::Uninstall) {
-            // Show the loud override note on the hook that replaced declared ones.
-            let declared_override = match (&replaced_note, override_cmd) {
-                (Some(note), Some(cmd)) if h.run == cmd => Some(note.as_str()),
-                _ => None,
-            };
-            let disclosure = crate::hook::hook_disclosure_text(
-                h.label(),
-                h.optional,
-                &source_name,
-                &pin_desc,
-                &commit,
-                &clone_path,
-                &h.run,
-                declared_override,
-            );
-
-            enum Act {
-                Run,
-                Skip,
-                Abort,
-            }
-            let act = if dangerously_skip_hook_check {
-                Act::Run // HOOK-23
-            } else if !crate::hook::is_tty() {
-                Act::Skip // HOOK-22
-            } else if h.optional {
-                // HOOK-52: optional => two-way (run / skip).
-                match crate::hook::prompt_choice_optional(&disclosure)? {
-                    crate::hook::OptionalChoice::Run => Act::Run,
-                    crate::hook::OptionalChoice::Skip => Act::Skip,
-                }
-            } else {
-                // HOOK-20: required => three-way (run / skip / abort).
-                match crate::hook::prompt_choice(&disclosure)? {
-                    crate::hook::HookChoice::RunAndContinue => Act::Run,
-                    crate::hook::HookChoice::SkipAndContinue => Act::Skip,
-                    crate::hook::HookChoice::Abort => Act::Abort,
-                }
-            };
-
-            match act {
-                Act::Run => {
-                    // HOOK-60: indicate the running hook.
-                    println!("running uninstall hook '{}' for {}", h.label(), source_name);
-                    // HOOK-53: any failure (optional or required) is a hard stop;
-                    // the unmeld stops and the source remains.
-                    crate::hook::run_hook(&h.run, &clone_dir, &source_name, h.label())?;
-                }
-                Act::Skip => {
-                    println!(
-                        "note: skipped uninstall hook '{}' for {}",
-                        h.label(),
-                        source_name
-                    );
-                }
-                Act::Abort => {
-                    println!("aborted; source left in place");
-                    return Ok(());
-                }
-            }
-        }
-    }
-
     let source_name = registry.sources[idx].name.clone();
 
     // The items installed from this source (effective-name keys).
@@ -915,8 +925,23 @@ pub fn unmeld(
         .collect();
 
     // CLI-22: `--unlink-only` removes only the source, leaving its items in place,
-    // and lists them with the command to remove them later.
+    // and lists them with the command to remove them later. Uninstall hooks still
+    // run on this path (before the source is removed), since the unlink-only path
+    // has no multi-item confirmation to worry about.
     if unlink_only {
+        let proceed = run_uninstall_hooks(
+            paths,
+            &registry,
+            idx,
+            &source_name,
+            uninstall_hook.as_deref(),
+            dangerously_skip_hook_check,
+        )?;
+        if !proceed {
+            // User aborted the unmeld via the hook prompt; source stays.
+            return Ok(());
+        }
+
         let source = registry.sources.remove(idx);
         // A local source's directory is the user's working tree -- never delete it.
         let dir = source.clone_dir(paths);
@@ -939,9 +964,10 @@ pub fn unmeld(
         return Ok(());
     }
 
-    // CLI-21: default — uninstall every item from this source, then remove it. The
-    // multi-item confirmation (CLI-42) applies; `--yes` skips it; a non-TTY run
-    // without `--yes` refuses rather than removing many items silently.
+    // CLI-21: default -- uninstall every item from this source, then remove it.
+    // The multi-item confirmation (CLI-42) happens BEFORE uninstall hooks run, so
+    // a user who declines does not trigger destructive cleanup (HOOK-54).
+    // `--yes` skips the confirmation; a non-TTY run without `--yes` refuses.
     if item_keys.len() > 1 && !yes {
         println!(
             "unmelding {source_name} will remove {} installed item(s):",
@@ -962,6 +988,23 @@ pub fn unmeld(
             println!("cancelled; nothing removed");
             return Ok(());
         }
+    }
+
+    // HOOK-54: run uninstall hooks AFTER the multi-item confirmation (for the
+    // default path) but BEFORE removing anything. The clone still exists at this
+    // point. Non-TTY: skip with a note. dangerously_skip_hook_check: run all
+    // hooks without prompting.
+    let proceed = run_uninstall_hooks(
+        paths,
+        &registry,
+        idx,
+        &source_name,
+        uninstall_hook.as_deref(),
+        dangerously_skip_hook_check,
+    )?;
+    if !proceed {
+        // User aborted the unmeld via the hook prompt; source stays.
+        return Ok(());
     }
 
     let source = registry.sources.remove(idx);
@@ -1804,11 +1847,14 @@ fn rerun_source_hooks(
         let clone_path = dir.display().to_string();
 
         // Collect indices of pending hooks so we can mutate by index below.
+        // A hook is pending when it has never run (ran_at=None) OR its run-commit
+        // differs from the source's current commit. Treating ran_at=None as always
+        // pending ensures hooks skipped on a commitless linked source are re-offered.
         let pending_indices: Vec<usize> = source
             .install_hooks
             .iter()
             .enumerate()
-            .filter(|(_, h)| h.ran_at.as_deref() != source.commit.as_deref())
+            .filter(|(_, h)| h.ran_at.is_none() || h.ran_at.as_deref() != source.commit.as_deref())
             .map(|(i, _)| i)
             .collect();
 

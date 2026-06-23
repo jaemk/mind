@@ -152,18 +152,25 @@ shorthand for one required install hook.
   clobber overwrite, CLI-35).
 - `HOOK-54` Uninstall hooks (`event = "uninstall"`) run at `unmeld`, in the
   source's clone, before the clone and registry entry are removed (so cleanup can
-  use the working tree). They use the same prompt model as install hooks:
-  required = run / skip / abort-the-unmeld; optional = run / skip; a non-TTY
-  `unmeld` skips them and notes it; `mind unmeld
+  use the working tree). On the default unmeld path (CLI-21), the multi-item
+  removal confirmation (CLI-42) runs first; uninstall hooks only run after the
+  user confirms (or `--yes` skips the confirm). A user who declines the confirm
+  does not trigger any hook. On the `--unlink-only` path (CLI-22), which has no
+  multi-item confirm, hooks run before the source is removed, as before. They use
+  the same prompt model as install hooks: required = run / skip / abort-the-unmeld;
+  optional = run / skip; a non-TTY `unmeld` skips them and notes it; `mind unmeld
   --dangerously-skip-install-hook-check` runs them unattended. A required
   uninstall hook that fails or is aborted leaves the source melded.
 - `HOOK-55` Install hooks are recorded as a set on the source's registry entry
   (`install_hooks`: each an effective command plus the commit it last ran at, or
   null when skipped), superseding the single `[source].install`/commit pair
   (HOOK-31), which is migrated into the set when an older `sources.json` is
-  loaded. `upgrade` re-offers each install hook whose recorded run-commit differs
-  from the source's current commit (the source advanced, or the hook was skipped),
-  per HOOK-11. Uninstall hooks are not recorded, since they only fire at `unmeld`.
+  loaded. `upgrade` re-offers each install hook that is pending: a hook is pending
+  when its recorded run-commit is null (never ran or was skipped), or when it
+  differs from the source's current commit (the source advanced). A null run-commit
+  is always treated as pending regardless of whether the source's commit is also
+  null (a commitless linked source). Uninstall hooks are not recorded, since they
+  only fire at `unmeld`.
 - `HOOK-56` `meld --install-hook <cmd>` (HOOK-2) replaces all of a source's
   declared install hooks with one required install hook running `<cmd>`; the loud
   override disclosure (HOOK-2) shows the declared command(s) it replaced. Declared

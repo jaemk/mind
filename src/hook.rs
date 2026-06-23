@@ -54,44 +54,17 @@ pub fn disclosure_text(
     declared_override: Option<&str>,
 ) -> String {
     let mut out = String::new();
-
     out.push_str("====== hook: ");
     out.push_str(identity);
     out.push_str(" ======\n");
-
-    out.push_str("  Source:    ");
-    out.push_str(identity);
-    out.push('\n');
-
-    out.push_str("  Pin:       ");
-    out.push_str(pin_desc);
-    out.push('\n');
-
-    out.push_str("  Commit:    ");
-    out.push_str(commit);
-    out.push('\n');
-
-    out.push_str("  Clone:     ");
-    out.push_str(clone_path);
-    out.push('\n');
-
-    if let Some(declared) = declared_override {
-        out.push_str("  Declared:  ");
-        out.push_str(declared);
-        out.push('\n');
-        out.push_str("  Override:  ");
-        out.push_str(command);
-        out.push('\n');
-        out.push_str("  NOTE: the user-supplied command replaces the source's declared command.\n");
-    } else {
-        out.push_str("  Command:   ");
-        out.push_str(command);
-        out.push('\n');
-    }
-
-    out.push('\n');
-    out.push_str("  WARNING: this executes arbitrary code from the source with your privileges.\n");
-
+    out.push_str(&disclosure_body(
+        identity,
+        pin_desc,
+        commit,
+        clone_path,
+        command,
+        declared_override,
+    ));
     out
 }
 
@@ -677,6 +650,73 @@ mod tests {
         );
     }
 
+    // spec: HOOK-2
+    // disclosure_text must produce the same output as composing the header plus
+    // disclosure_body directly. This guards the L1 DRY refactor: one source of
+    // truth for the field layout.
+    #[test]
+    fn disclosure_text_matches_header_plus_disclosure_body() {
+        let identity = "github.com/acme/tools";
+        let pin_desc = "main";
+        let commit = "abc1234";
+        let clone_path = "/home/user/.mind/sources/github.com/acme/tools";
+        let command = "make install";
+
+        let via_fn = disclosure_text(identity, pin_desc, commit, clone_path, command, None);
+
+        let mut expected = String::new();
+        expected.push_str("====== hook: ");
+        expected.push_str(identity);
+        expected.push_str(" ======\n");
+        expected.push_str(&disclosure_body(
+            identity, pin_desc, commit, clone_path, command, None,
+        ));
+
+        assert_eq!(
+            via_fn, expected,
+            "disclosure_text output must equal header + disclosure_body"
+        );
+    }
+
+    // spec: HOOK-2
+    // Same as above but with a declared_override, to cover the override branch.
+    #[test]
+    fn disclosure_text_matches_header_plus_disclosure_body_with_override() {
+        let identity = "github.com/acme/tools";
+        let pin_desc = "v1.0";
+        let commit = "def5678";
+        let clone_path = "/tmp/clone";
+        let command = "./user-custom.sh";
+        let declared = "make install";
+
+        let via_fn = disclosure_text(
+            identity,
+            pin_desc,
+            commit,
+            clone_path,
+            command,
+            Some(declared),
+        );
+
+        let mut expected = String::new();
+        expected.push_str("====== hook: ");
+        expected.push_str(identity);
+        expected.push_str(" ======\n");
+        expected.push_str(&disclosure_body(
+            identity,
+            pin_desc,
+            commit,
+            clone_path,
+            command,
+            Some(declared),
+        ));
+
+        assert_eq!(
+            via_fn, expected,
+            "disclosure_text with override must equal header + disclosure_body"
+        );
+    }
+
     // ---- hook_disclosure_text ----
 
     // spec: HOOK-52
@@ -949,12 +989,14 @@ mod tests {
         let dir = TempDir::new("fail");
         let result = run_hook("exit 3", dir.path(), "github.com/test/repo", "test-label");
         match result {
-            Err(MindError::HookFailed {
-                ref identity,
-                ref command,
-                status,
-                ..
-            }) => {
+            Err(
+                ref e @ MindError::HookFailed {
+                    ref identity,
+                    ref command,
+                    status,
+                    ref stderr,
+                },
+            ) => {
                 assert_eq!(identity, "github.com/test/repo", "wrong identity");
                 assert_eq!(command, "exit 3", "wrong command");
                 assert!(
@@ -963,6 +1005,22 @@ mod tests {
                 );
                 let code = status.unwrap().code();
                 assert_eq!(code, Some(3), "expected exit code 3, got {code:?}");
+                // A silent hook (no output) must have an empty stderr field and the
+                // rendered message must say "(no output)" rather than pointing at
+                // framed output blocks that were never printed (M5).
+                assert!(
+                    stderr.is_empty(),
+                    "run_hook must set stderr to empty for a process that produced no output"
+                );
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("(no output)"),
+                    "silent hook failure must render '(no output)': {msg}"
+                );
+                assert!(
+                    !msg.contains("see the hook"),
+                    "must not say 'see the hook's output above' when nothing was printed: {msg}"
+                );
             }
             other => panic!("expected HookFailed, got: {other:?}"),
         }

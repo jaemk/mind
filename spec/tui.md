@@ -124,16 +124,16 @@ manifest, and store.
   It is intercepted before mode routing, so a `Char('c')` is never entered as
   text. One Ctrl-C arms and shows a hint; a second consecutive Ctrl-C exits, so a
   single accidental Ctrl-C while typing does not quit. Any other key disarms.
-- `TUI-44` An action whose verb prompts interactively (a `meld`, which discloses
-  and confirms an install hook per HOOK-20 and confirms the install per CLI-23)
-  runs with the TUI suspended: `mind` leaves raw mode and the alternate screen,
-  runs the verb on the normal terminal so its prompts read stdin and write stdout
-  exactly as the CLI does (never captured, never blocked behind raw mode), then
-  restores the alternate screen and redraws. After the verb the user presses Enter
-  to return, so the verb's output is readable before the browser redraws. This is
-  why the TUI meld flow is identical to the CLI meld flow. Non-prompting mutations
-  (learn/forget/sync/upgrade/unmeld) instead run with stdout captured (TUI-24) and
-  do not suspend.
+- `TUI-44` Actions whose verbs may prompt interactively run with the TUI
+  suspended: `mind` leaves raw mode and the alternate screen, runs the verb on the
+  normal terminal so its prompts read stdin and write stdout exactly as the CLI
+  does (never captured, never blocked behind raw mode), then restores the alternate
+  screen and redraws. After the verb the user presses Enter to return, so the
+  verb's output is readable before the browser redraws. The verbs that suspend are
+  `meld` (install-hook disclosure HOOK-20, install confirm CLI-23, SSH passphrase
+  TUI-45) and `unmeld` (uninstall-hook prompt HOOK-54). Non-prompting mutations
+  (learn/forget/sync/upgrade) instead run with stdout captured (TUI-24) and do not
+  suspend.
 - `TUI-45` While the TUI holds the terminal, every `git` child runs
   non-interactively (`GIT_TERMINAL_PROMPT=0` and an ssh `BatchMode=yes` wrapper),
   so an auth-required remote -- a private SSH repo whose key needs a passphrase, or

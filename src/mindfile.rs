@@ -46,9 +46,13 @@ pub struct ResolvedHook {
 }
 
 impl ResolvedHook {
-    /// The label shown in disclosures: the name if set, else the command.
+    /// The label shown in disclosures: the name if non-empty, else the command.
+    /// An empty or whitespace-only name is treated as absent (HOOK-51).
     pub fn label(&self) -> &str {
-        self.name.as_deref().unwrap_or(&self.run)
+        match self.name.as_deref() {
+            Some(n) if !n.trim().is_empty() => n,
+            _ => &self.run,
+        }
     }
 }
 
@@ -613,6 +617,26 @@ mod tests {
             event: HookEvent::Install,
         };
         assert_eq!(hook.label(), "make build");
+    }
+
+    #[test]
+    fn label_treats_empty_and_whitespace_name_as_absent() {
+        // spec: HOOK-51
+        let make_hook = |name: Option<&str>| ResolvedHook {
+            run: "make build".into(),
+            name: name.map(str::to_owned),
+            optional: false,
+            event: HookEvent::Install,
+        };
+
+        // Non-empty name is used as-is.
+        assert_eq!(make_hook(Some("Build")).label(), "Build");
+        // Empty string falls back to run.
+        assert_eq!(make_hook(Some("")).label(), "make build");
+        // Whitespace-only falls back to run.
+        assert_eq!(make_hook(Some("   ")).label(), "make build");
+        // None falls back to run.
+        assert_eq!(make_hook(None).label(), "make build");
     }
 
     #[test]

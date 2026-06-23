@@ -505,6 +505,50 @@ mod tests {
         assert_eq!(msg, "", "interactive execute captures no stdout summary");
     }
 
+    #[test]
+    fn execute_interactive_unmelds_without_capturing_stdout() {
+        // spec: TUI-44 - execute_interactive routes Unmeld through the real terminal
+        // (no stdout capture) and acquires the exclusive lock. In a non-TTY test the
+        // unmeld takes the non-interactive path (no hook prompt shown), so this
+        // exercises the uncaptured code path for Unmeld safely. This is the path
+        // that was broken before the fix: Unmeld went through `execute` (captured)
+        // instead of `execute_interactive`, so an uninstall hook would print to a
+        // captured buffer and block reading stdin in raw mode.
+        let (paths, base) = temp_paths();
+        crate::paths::mkdir_p(&paths.mind_home).unwrap();
+        let src = make_source_repo(&base);
+        let spec = src.to_str().unwrap().to_string();
+        // First meld the source so there is something to unmeld.
+        commands::meld(&paths, &spec, None, vec![], None, None, None, None, false)
+            .expect("meld prerequisite");
+        let source_name = crate::source::Registry::load(&paths).unwrap().sources[0]
+            .name
+            .clone();
+
+        let action = PendingAction {
+            kind: ActionKind::Unmeld {
+                name: source_name.clone(),
+                forget: false,
+            },
+            description: format!("Unmeld {source_name}?"),
+            dep_tree: None,
+        };
+        let result = execute_interactive(&paths, action);
+        assert!(
+            result.is_ok(),
+            "interactive unmeld should succeed: {:?}",
+            result.err()
+        );
+        let (snap, msg) = result.unwrap();
+        assert!(
+            snap.source_names.is_empty(),
+            "source must be absent from snapshot after unmeld: {:?}",
+            snap.source_names
+        );
+        // Uncaptured: there is no captured summary line.
+        assert_eq!(msg, "", "interactive execute captures no stdout summary");
+    }
+
     /// Register a melded source and record one installed item attributed to it,
     /// with an EMPTY file registry so uninstall touches no agent home (keeping the
     /// test hermetic regardless of ambient MIND_AGENT_HOMES). Returns the source

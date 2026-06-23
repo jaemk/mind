@@ -199,7 +199,7 @@ pub enum MindError {
     #[error(
         "install hook for source '{identity}' failed{}: {}\n  command: {command}",
         status_suffix(*status),
-        if stderr.is_empty() { "see the hook's output above" } else { stderr }
+        if stderr.is_empty() { "(no output)" } else { stderr }
     )]
     HookFailed {
         identity: String,
@@ -271,5 +271,49 @@ mod tests {
         assert!(msg.contains("github.com/acme/tools"), "msg: {msg}");
         assert!(msg.contains("make install"), "msg: {msg}");
         assert!(msg.contains("boom"), "msg: {msg}");
+    }
+
+    // spec: HOOK-30
+    // A silent hook failure (no stdout/stderr) must render "(no output)" so the
+    // error message does not point at framed output blocks that were never printed.
+    #[test]
+    fn hook_failed_silent_exit_renders_no_output() {
+        let e = MindError::HookFailed {
+            identity: "github.com/acme/tools".into(),
+            command: "exit 1".into(),
+            status: None,
+            stderr: String::new(),
+        };
+        let msg = e.to_string();
+        assert!(
+            msg.contains("(no output)"),
+            "silent failure must say '(no output)', not 'see the hook's output above': {msg}"
+        );
+        assert!(
+            !msg.contains("see the hook"),
+            "must not point to framed output when nothing was printed: {msg}"
+        );
+    }
+
+    // spec: HOOK-30
+    // A hook failure with stderr content must include that content in the message,
+    // not the "(no output)" fallback.
+    #[test]
+    fn hook_failed_with_stderr_renders_stderr_not_no_output() {
+        let e = MindError::HookFailed {
+            identity: "github.com/acme/tools".into(),
+            command: "make install".into(),
+            status: None,
+            stderr: "some diagnostic".into(),
+        };
+        let msg = e.to_string();
+        assert!(
+            msg.contains("some diagnostic"),
+            "stderr content must appear in the message: {msg}"
+        );
+        assert!(
+            !msg.contains("(no output)"),
+            "must not say '(no output)' when stderr was captured: {msg}"
+        );
     }
 }

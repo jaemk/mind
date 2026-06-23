@@ -30,9 +30,10 @@ and verified.
 | Release pipeline + Homebrew tap (tag-driven) | done | `.github/workflows/release.yml`, `Formula/mind.rb` |
 | `curl \| sh` install script (Linux/macOS-arm) | done | `resources/install.sh` |
 | `forget` glob selection | done | CLI-41 |
-| `unmeld --forget` (purge installed items) | done | CLI-22 |
+| `unmeld` uninstalls source items by default; `--unlink-only` keeps them | done | CLI-21, CLI-22 |
 | `introspect --fix` (re-link missing symlinks) | done | CLI-91 |
 | `sync --upgrade` (refresh then upgrade) | done | CLI-53 |
+| `recall` (no arg): source+item status view, install state per item | done | CLI-70, CLI-74, CLI-83 |
 | `probe`/`recall` `--kind` / `--source` filters | done | CLI-83 |
 | Enforce `min-mind-version` | done | DSC-40 |
 | `sync` per-source resilience (continue + report, exit non-zero) | done | CLI-54 |
@@ -44,7 +45,7 @@ and verified.
 | `evolve` verb: in-place upgrade of the `mind` binary | done | CLI-140, CLI-141, CLI-142, CLI-143 |
 | Managed policy (enterprise): trusted-source allowlist, require-pinned, auto-meld, lobe lock; `mind review --policy` | done | [policy.md](policy.md) |
 | Install hooks: `[source].install` / `meld --install-hook`, safety prompt, `--dangerously-skip-install-hook-check` | done | [install-hooks.md](install-hooks.md) |
-| Lifecycle hooks: multiple named `[[hooks]]`, optional hooks, uninstall hooks at `unmeld`, `init-source` scaffold | done | [install-hooks.md](install-hooks.md) (HOOK-50..58) |
+| Lifecycle hooks: multiple named `[[hooks]]`, optional hooks, uninstall hooks at `unmeld`, `init-source` scaffold | done | [install-hooks.md](install-hooks.md) (HOOK-50..60) |
 | Within-source dependency resolution: a partial `learn` pulls in referenced siblings; dependency-tree display + install order | done | [dependencies.md](dependencies.md) |
 | `meld` installs by default (`--link-only`/`--yes`); no-arg melds `.`; prefix prompt when declared | done (`--link-only`/`--yes`/prefix) | CLI-23, CLI-24 |
 | `meld` with no arg defaults to the current directory | done | CLI-25 |
