@@ -7154,3 +7154,514 @@ fn unprefixed_same_name_second_install_is_a_noop_first_wins() {
         "the first install must remain (no overwrite): {installed}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Output polish: capability gate (CLI-151/154), glyph fallback (CLI-152), and
+// the structured JSON result object for mutating verbs (CLI-153).
+//
+// The integration harness always pipes stdout (non-TTY), so the color/Unicode
+// capability gate (CLI-151) is OFF: output must be plain ASCII with no ANSI
+// escape sequences. The rich (TTY) branch of the gate cannot be exercised
+// without a real PTY and is covered by unit tests in src/render.rs.
+// ---------------------------------------------------------------------------
+
+/// Parse `stdout` as a single JSON value, failing loudly with the raw text.
+fn parse_json(stdout: &str) -> serde_json::Value {
+    serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("stdout is not valid JSON ({e}): {stdout:?}"))
+}
+
+/// True if `s` carries any ANSI escape (ESC, 0x1b).
+fn has_ansi_escape(s: &str) -> bool {
+    s.contains('\u{1b}')
+}
+
+#[test]
+fn json_learn_emits_result_object_and_no_prose() {
+    // spec: CLI-153, CLI-150
+    let sb = melded();
+
+    // --json before the verb.
+    let pre = sb.mind(&["--json", "learn", "skill:review"]);
+    assert!(pre.success, "learn --json failed: {}", pre.stderr);
+    let v = parse_json(&pre.stdout);
+    assert_eq!(v["action"], "learn", "{}", pre.stdout);
+    assert_eq!(v["target"], "skill:review", "{}", pre.stdout);
+    assert_eq!(v["outcome"], "installed", "{}", pre.stdout);
+    // The `installed` array names the effective key actually installed.
+    assert_eq!(
+        v["installed"],
+        serde_json::json!(["skill:review"]),
+        "{}",
+        pre.stdout
+    );
+    // CLI-153: nothing else on stdout. The non-json path prints "learned ...";
+    // that prose must be absent under --json.
+    assert!(
+        !pre.stdout.contains("learned"),
+        "human prose `learned` must not appear under --json: {}",
+        pre.stdout
+    );
+    // The JSON-only stdout has no ANSI escapes (also CLI-151).
+    assert!(!has_ansi_escape(&pre.stdout), "json stdout: {}", pre.stdout);
+
+    // --json AFTER the verb yields an equivalent object (CLI-150: position-free).
+    let sb2 = melded();
+    let post = sb2.mind(&["learn", "skill:review", "--json"]);
+    assert!(
+        post.success,
+        "learn --json (suffix) failed: {}",
+        post.stderr
+    );
+    assert_eq!(
+        parse_json(&post.stdout),
+        v,
+        "flag position must not change the JSON: pre={} post={}",
+        pre.stdout,
+        post.stdout
+    );
+}
+
+#[test]
+fn json_forget_emits_removed_object_and_no_prose() {
+    // spec: CLI-153
+    let sb = melded();
+    assert!(sb.mind(&["learn", "skill:review"]).success);
+
+    let r = sb.mind(&["forget", "skill:review", "--json"]);
+    assert!(r.success, "forget --json failed: {}", r.stderr);
+    let v = parse_json(&r.stdout);
+    assert_eq!(v["action"], "forget", "{}", r.stdout);
+    assert_eq!(v["target"], "skill:review", "{}", r.stdout);
+    assert_eq!(v["outcome"], "removed", "{}", r.stdout);
+    assert_eq!(
+        v["removed"],
+        serde_json::json!(["skill:review"]),
+        "{}",
+        r.stdout
+    );
+    // The non-json path prints "forgot <key>"; that prose must be absent.
+    assert!(
+        !r.stdout.contains("forgot"),
+        "human prose `forgot` must not appear under --json: {}",
+        r.stdout
+    );
+    assert!(!has_ansi_escape(&r.stdout), "json stdout: {}", r.stdout);
+}
+
+#[test]
+fn json_meld_emits_result_object_and_no_prose() {
+    // spec: CLI-153
+    // A default non-TTY meld registers the source (and installs nothing); under
+    // --json it emits a single meld object with outcome "melded".
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    let r = sb.mind(&["--json", "meld", &spec]);
+    assert!(r.success, "meld --json failed: {} {}", r.stdout, r.stderr);
+    let v = parse_json(&r.stdout);
+    assert_eq!(v["action"], "meld", "{}", r.stdout);
+    assert_eq!(v["outcome"], "melded", "{}", r.stdout);
+    assert!(
+        v["target"].is_string() && !v["target"].as_str().unwrap().is_empty(),
+        "meld target must name the source: {}",
+        r.stdout
+    );
+    // The non-json default-meld path prints how to "learn" items later; under
+    // --json that prose is suppressed.
+    assert!(
+        !r.stdout.contains("learn") && !r.stdout.contains("melded source"),
+        "default-meld prose must not appear under --json: {}",
+        r.stdout
+    );
+    assert!(!has_ansi_escape(&r.stdout), "json stdout: {}", r.stdout);
+}
+
+#[test]
+fn json_remeld_already_melded_is_a_single_object() {
+    // spec: CLI-153
+    // Re-melding a fully-installed source under --json emits exactly one JSON
+    // object (outcome "already-melded"), not the human item-status report. The
+    // "already-melded" outcome is only reached when nothing remains to install,
+    // so the source must be installed first (a default non-TTY meld installs
+    // nothing, which would instead route through the install flow).
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    assert!(sb.mind(&["meld", &spec, "--yes"]).success, "meld+install");
+    let r = sb.mind(&["meld", &spec, "--json"]);
+    assert!(r.success, "re-meld --json failed: {}", r.stderr);
+    let v = parse_json(&r.stdout);
+    assert_eq!(v["action"], "meld", "{}", r.stdout);
+    assert_eq!(v["outcome"], "already-melded", "{}", r.stdout);
+    // The non-json re-meld prints "already melded" prose and "to install ...";
+    // none of that may leak onto stdout under --json.
+    assert!(
+        !r.stdout.contains("already melded") && !r.stdout.contains("to install"),
+        "re-meld prose must not appear under --json: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn json_sync_emits_result_object_and_no_prose() {
+    // spec: CLI-153
+    let sb = melded();
+    let r = sb.mind(&["sync", "--json"]);
+    assert!(r.success, "sync --json failed: {}", r.stderr);
+    let v = parse_json(&r.stdout);
+    assert_eq!(v["action"], "sync", "{}", r.stdout);
+    assert_eq!(v["outcome"], "synced", "{}", r.stdout);
+    assert!(v["count"].is_number(), "sync count: {}", r.stdout);
+    // The non-json path prints "syncing <source> ..."; suppressed under --json.
+    assert!(
+        !r.stdout.contains("syncing") && !r.stdout.contains("up to date"),
+        "sync prose must not appear under --json: {}",
+        r.stdout
+    );
+    assert!(!has_ansi_escape(&r.stdout), "json stdout: {}", r.stdout);
+}
+
+#[test]
+fn json_sync_no_op_on_empty_registry() {
+    // spec: CLI-153
+    // With no sources melded, sync changes nothing: the outcome is the explicit
+    // "no-op" value, not a human "no sources melded" message.
+    let sb = Sandbox::new();
+    let r = sb.mind(&["sync", "--json"]);
+    assert!(r.success, "sync --json on empty registry: {}", r.stderr);
+    let v = parse_json(&r.stdout);
+    assert_eq!(v["action"], "sync", "{}", r.stdout);
+    assert_eq!(v["outcome"], "no-op", "{}", r.stdout);
+    assert!(
+        !r.stdout.contains("no sources"),
+        "no-op prose must not appear under --json: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn json_upgrade_up_to_date_is_an_object() {
+    // spec: CLI-153
+    let sb = melded();
+    assert!(sb.mind(&["learn", "skill:review"]).success);
+    let r = sb.mind(&["upgrade", "--json"]);
+    assert!(r.success, "upgrade --json failed: {}", r.stderr);
+    let v = parse_json(&r.stdout);
+    assert_eq!(v["action"], "upgrade", "{}", r.stdout);
+    assert_eq!(v["outcome"], "up-to-date", "{}", r.stdout);
+    assert!(
+        !r.stdout.contains("up to date"),
+        "upgrade prose must not appear under --json: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn json_upgrade_applies_and_reports_upgraded() {
+    // spec: CLI-153
+    // A real delta upgraded under --json emits outcome "upgraded" plus the
+    // installed keys, and no "upgraded skill:review" prose.
+    let sb = melded();
+    assert!(sb.mind(&["learn", "skill:review"]).success);
+    sb.edit_source();
+    assert!(sb.mind(&["sync"]).success);
+
+    let r = sb.mind(&["upgrade", "--yes", "--json"]);
+    assert!(r.success, "upgrade --yes --json failed: {}", r.stderr);
+    let v = parse_json(&r.stdout);
+    assert_eq!(v["action"], "upgrade", "{}", r.stdout);
+    assert_eq!(v["outcome"], "upgraded", "{}", r.stdout);
+    assert_eq!(
+        v["installed"],
+        serde_json::json!(["skill:review"]),
+        "{}",
+        r.stdout
+    );
+    // The "✓ upgraded ..." prose line must be gone.
+    assert!(
+        !r.stdout.contains("upgraded skill"),
+        "upgrade prose must not appear under --json: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn json_unmeld_emits_result_object() {
+    // spec: CLI-153
+    // Unmeld with an installed item removes it and the source; under --json this
+    // is a single object (outcome "removed"), with the item-removal prose absent.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    assert!(sb.mind(&["meld", &spec, "--yes"]).success, "meld+install");
+    let name = "agents"; // the fixture source's directory name
+
+    let r = sb.mind(&["unmeld", name, "--yes", "--json"]);
+    assert!(r.success, "unmeld --json failed: {} {}", r.stdout, r.stderr);
+    let v = parse_json(&r.stdout);
+    assert_eq!(v["action"], "unmeld", "{}", r.stdout);
+    // `target` is the source's canonical identity (e.g. `local/<base>/agents`),
+    // which ends with the source dir name the command was given.
+    assert!(
+        v["target"]
+            .as_str()
+            .is_some_and(|t| t.ends_with(&format!("/{name}")) || t == name),
+        "unmeld target must name the source: {}",
+        r.stdout
+    );
+    assert_eq!(v["outcome"], "removed", "{}", r.stdout);
+    assert!(
+        !r.stdout.contains("unmelded"),
+        "unmeld prose must not appear under --json: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn json_lobe_add_and_remove_emit_objects() {
+    // spec: CLI-153
+    let sb = Sandbox::new();
+    let extra = sb.base.join("extra-lobe");
+    let extra_s = extra.to_string_lossy().into_owned();
+
+    let added = sb.mind(&["config", "lobes", "add", &extra_s, "--json"]);
+    assert!(added.success, "lobe add --json failed: {}", added.stderr);
+    let v = parse_json(&added.stdout);
+    assert_eq!(v["action"], "lobe-add", "{}", added.stdout);
+    assert_eq!(v["outcome"], "added", "{}", added.stdout);
+
+    // Re-adding the same lobe is a no-op outcome, not a human message.
+    let again = sb.mind(&["config", "lobes", "add", &extra_s, "--json"]);
+    assert!(again.success, "{}", again.stderr);
+    assert_eq!(
+        parse_json(&again.stdout)["outcome"],
+        "no-op",
+        "{}",
+        again.stdout
+    );
+
+    let removed = sb.mind(&["config", "lobes", "remove", &extra_s, "--json"]);
+    assert!(
+        removed.success,
+        "lobe remove --json failed: {}",
+        removed.stderr
+    );
+    let rv = parse_json(&removed.stdout);
+    assert_eq!(rv["action"], "lobe-remove", "{}", removed.stdout);
+    assert_eq!(rv["outcome"], "removed", "{}", removed.stdout);
+}
+
+#[test]
+fn json_learn_dry_run_lists_nothing_installed_as_prose() {
+    // spec: CLI-153
+    // A --dry-run under --json reports outcome "dry-run" as an object, and does
+    // not print the "would learn N item(s)" prose.
+    let sb = melded();
+    let r = sb.mind(&["learn", "skill:review", "--dry-run", "--json"]);
+    assert!(r.success, "learn --dry-run --json failed: {}", r.stderr);
+    let v = parse_json(&r.stdout);
+    assert_eq!(v["action"], "learn", "{}", r.stdout);
+    assert_eq!(v["outcome"], "dry-run", "{}", r.stdout);
+    assert!(
+        !r.stdout.contains("would learn"),
+        "dry-run prose must not appear under --json: {}",
+        r.stdout
+    );
+    // A dry-run installs nothing.
+    assert!(
+        !sb.mind(&["recall"]).stdout.contains("installed @"),
+        "dry-run must not install anything"
+    );
+}
+
+#[test]
+fn json_error_goes_to_stderr_and_stdout_stays_clean() {
+    // spec: CLI-153
+    // An error under --json must not corrupt stdout: the failure is reported on
+    // stderr and stdout carries no half-written JSON object.
+    let sb = melded();
+    let r = sb.mind(&["learn", "does-not-exist", "--json"]);
+    assert!(!r.success, "unknown item must fail");
+    assert!(
+        r.stderr.contains("no item matches"),
+        "error must go to stderr: {}",
+        r.stderr
+    );
+    assert!(
+        r.stdout.trim().is_empty(),
+        "no JSON (or prose) must be written to stdout on error: {:?}",
+        r.stdout
+    );
+}
+
+#[test]
+fn non_tty_output_is_plain_ascii_with_no_escapes() {
+    // spec: CLI-151
+    // The harness pipes stdout, so the capability gate is OFF: every ordinary
+    // (non-json) command's stdout must be free of ANSI escape sequences.
+    let sb = melded();
+    assert!(sb.mind(&["learn", "skill:review"]).success);
+
+    for args in [
+        vec!["recall"],
+        vec!["recall", "--sources"],
+        vec!["recall", "skill:review"],
+        vec!["probe"],
+        vec!["introspect"],
+        vec!["upgrade"],
+    ] {
+        let r = sb.mind(&args);
+        assert!(
+            !has_ansi_escape(&r.stdout),
+            "non-TTY stdout for `{args:?}` must contain no ANSI escapes: {:?}",
+            r.stdout
+        );
+    }
+}
+
+#[test]
+fn no_color_env_forces_plain_ascii() {
+    // spec: CLI-154
+    // NO_COLOR set (even though already non-TTY) must keep the gate OFF: no
+    // escapes appear. Passed in the child env so it cannot race other tests.
+    let sb = melded();
+    assert!(sb.mind(&["learn", "skill:review"]).success);
+    let r = sb.mind_env(&["recall"], &[("NO_COLOR", "1")]);
+    assert!(r.success, "recall failed: {}", r.stderr);
+    assert!(
+        !has_ansi_escape(&r.stdout),
+        "NO_COLOR must force plain ASCII: {:?}",
+        r.stdout
+    );
+
+    // An empty NO_COLOR value also counts as "set" and forces the gate OFF.
+    let empty = sb.mind_env(&["recall"], &[("NO_COLOR", "")]);
+    assert!(
+        !has_ansi_escape(&empty.stdout),
+        "empty NO_COLOR must still force plain ASCII: {:?}",
+        empty.stdout
+    );
+}
+
+#[test]
+fn ascii_flag_forces_plain_output() {
+    // spec: CLI-154
+    // --ascii forces the gate OFF regardless of other state; in this non-TTY
+    // harness the result is still escape-free ASCII, and accepted before or
+    // after the verb (CLI-150).
+    let sb = melded();
+    assert!(sb.mind(&["learn", "skill:review"]).success);
+    let pre = sb.mind(&["--ascii", "recall"]);
+    assert!(pre.success, "--ascii recall failed: {}", pre.stderr);
+    assert!(!has_ansi_escape(&pre.stdout), "{:?}", pre.stdout);
+    let post = sb.mind(&["recall", "--ascii"]);
+    assert!(!has_ansi_escape(&post.stdout), "{:?}", post.stdout);
+}
+
+#[test]
+fn ascii_fallback_glyphs_are_present_in_plain_mode() {
+    // spec: CLI-152
+    // With the gate OFF, every glyph uses its ASCII fallback. recall's status
+    // view marks an installed item with `installed @` (the `+` ok glyph) and an
+    // available one with `available` (the `-` glyph); probe marks an installed
+    // row with the `*` ASCII bullet. None of the Unicode glyphs may appear.
+    let sb = melded();
+    assert!(sb.mind(&["learn", "skill:review"]).success);
+
+    let recall = sb.mind(&["recall"]).stdout;
+    assert!(
+        recall.contains("installed @"),
+        "installed marker (ASCII fallback) must show `installed @`: {recall}"
+    );
+    assert!(
+        recall.contains("available"),
+        "available marker (ASCII fallback) must show `available`: {recall}"
+    );
+    // The Unicode status glyphs from src/render.rs must NOT leak into plain mode.
+    for glyph in ['✓', '○', '✗', '●'] {
+        assert!(
+            !recall.contains(glyph),
+            "Unicode glyph {glyph:?} must not appear in plain mode: {recall}"
+        );
+    }
+
+    // probe marks the installed row with the `*` ASCII bullet (not `●`).
+    let probe = sb.mind(&["probe", "review"]).stdout;
+    assert!(
+        probe.contains('*'),
+        "probe must mark the installed item with the `*` ASCII bullet: {probe}"
+    );
+    assert!(
+        !probe.contains('●'),
+        "probe must not emit the Unicode bullet in plain mode: {probe}"
+    );
+}
+
+#[test]
+fn every_reachable_verb_emits_valid_json_under_json_flag() {
+    // spec: CLI-153
+    // Cross-check: each mutating verb the hermetic fixture can drive produces a
+    // single, parseable JSON object under --json (no torn or doubled output).
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+
+    let meld = sb.mind(&["meld", &spec, "--json"]);
+    assert!(meld.success, "{}", meld.stderr);
+    assert!(parse_json(&meld.stdout).is_object(), "{}", meld.stdout);
+
+    let learn = sb.mind(&["learn", "skill:review", "--json"]);
+    assert!(learn.success, "{}", learn.stderr);
+    assert!(parse_json(&learn.stdout).is_object(), "{}", learn.stdout);
+
+    let sync = sb.mind(&["sync", "--json"]);
+    assert!(sync.success, "{}", sync.stderr);
+    assert!(parse_json(&sync.stdout).is_object(), "{}", sync.stdout);
+
+    let upgrade = sb.mind(&["upgrade", "--json"]);
+    assert!(upgrade.success, "{}", upgrade.stderr);
+    assert!(
+        parse_json(&upgrade.stdout).is_object(),
+        "{}",
+        upgrade.stdout
+    );
+
+    let forget = sb.mind(&["forget", "skill:review", "--json"]);
+    assert!(forget.success, "{}", forget.stderr);
+    assert!(parse_json(&forget.stdout).is_object(), "{}", forget.stdout);
+
+    let unmeld = sb.mind(&["unmeld", "agents", "--json"]);
+    assert!(unmeld.success, "{}", unmeld.stderr);
+    assert!(parse_json(&unmeld.stdout).is_object(), "{}", unmeld.stdout);
+}
+
+#[test]
+fn json_sync_upgrade_emits_two_objects_one_per_action() {
+    // spec: CLI-153
+    // `sync --upgrade --json` performs two logical actions (sync, then upgrade)
+    // and emits one JSON object per action. Assert BOTH objects are present and
+    // each parses on its own (concatenated pretty-JSON objects). This documents
+    // the deliberate two-object stream: stdout is NOT a single JSON value here.
+    let sb = melded();
+    assert!(sb.mind(&["learn", "skill:review"]).success);
+    let r = sb.mind(&["sync", "--upgrade", "--json"]);
+    assert!(r.success, "sync --upgrade --json failed: {}", r.stderr);
+
+    // A single-value parse must FAIL (there are two top-level objects), which is
+    // the property we are pinning: this stream is two objects, not one.
+    assert!(
+        serde_json::from_str::<serde_json::Value>(r.stdout.trim()).is_err(),
+        "sync --upgrade --json is expected to emit two objects, not one value: {}",
+        r.stdout
+    );
+    // Both a sync action and an upgrade action must appear in the stream.
+    let actions: Vec<serde_json::Value> = serde_json::Deserializer::from_str(&r.stdout)
+        .into_iter::<serde_json::Value>()
+        .map(|d| d.expect("each chunk must be valid JSON"))
+        .collect();
+    assert_eq!(
+        actions.len(),
+        2,
+        "exactly two JSON objects (one per logical action): {}",
+        r.stdout
+    );
+    assert_eq!(actions[0]["action"], "sync", "{}", r.stdout);
+    assert_eq!(actions[1]["action"], "upgrade", "{}", r.stdout);
+}

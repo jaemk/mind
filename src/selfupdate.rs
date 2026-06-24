@@ -120,19 +120,38 @@ pub fn run(check: bool, yes: bool, version: Option<String>) -> Result<()> {
     };
 
     let decision = decision(current, &target_version);
+    let out = crate::render::ctx();
 
     if check {
         // CLI-141: report and change nothing, without downloading.
-        println!("{}", check_report(current, &target_version, &decision));
+        if out.json {
+            let outcome = match decision {
+                Decision::UpToDate => "up-to-date",
+                Decision::Update => "available",
+            };
+            return print_evolve_json(&target_version, outcome);
+        }
+        let marker = match decision {
+            Decision::UpToDate => out.ok(),
+            Decision::Update => out.warn(),
+        };
+        println!(
+            "{marker} {}",
+            check_report(current, &target_version, &decision)
+        );
         return Ok(());
     }
 
     if decision == Decision::UpToDate {
-        println!("mind {current} is already up to date");
+        if out.json {
+            return print_evolve_json(&target_version, "up-to-date");
+        }
+        println!("{} mind {current} is already up to date", out.ok());
         return Ok(());
     }
 
-    if !yes && !crate::commands::confirm(&format!("update mind to {target_version}?"))? {
+    if !yes && !out.json && !crate::commands::confirm(&format!("update mind to {target_version}?"))?
+    {
         println!("aborted; nothing changed");
         return Ok(());
     }
@@ -141,14 +160,33 @@ pub fn run(check: bool, yes: bool, version: Option<String>) -> Result<()> {
     download_and_swap(&url, current, &target_version)
 }
 
+/// Emit the structured `evolve` result (CLI-153) under `--json`.
+fn print_evolve_json(version: &str, outcome: &str) -> Result<()> {
+    let value = serde_json::json!({
+        "action": "evolve",
+        "target": version,
+        "outcome": outcome,
+    });
+    let s = serde_json::to_string_pretty(&value).map_err(|e| MindError::json("json output", e))?;
+    println!("{s}");
+    Ok(())
+}
+
 /// Download the release archive, extract it, and atomically swap the new binary
 /// for the running executable. Imperative and network-touching; the swap is
 /// atomic so any failure leaves the existing binary intact.
 fn download_and_swap(url: &str, current: &str, target_version: &str) -> Result<()> {
+    let out = crate::render::ctx();
     let tmp = mktemp_dir()?;
     let archive = tmp.join("mind.tar.gz");
 
-    println!("downloading mind {target_version} ({url})");
+    if !out.json {
+        println!(
+            "{} downloading mind {target_version} ({})",
+            out.bullet(),
+            out.dim(url)
+        );
+    }
     fetch_to_file(url, &archive)?;
 
     // Extract the archive into the temp dir.
@@ -178,7 +216,10 @@ fn download_and_swap(url: &str, current: &str, target_version: &str) -> Result<(
     let _ = std::fs::remove_dir_all(&tmp);
     result?;
 
-    println!("updated mind {current} -> {target_version}");
+    if out.json {
+        return print_evolve_json(target_version, "updated");
+    }
+    println!("{} updated mind {current} -> {target_version}", out.ok());
     Ok(())
 }
 

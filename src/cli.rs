@@ -43,6 +43,18 @@ impl KindArg {
     propagate_version = true
 )]
 pub struct Cli {
+    /// Emit machine-readable JSON instead of formatted text.
+    #[arg(long, global = true)]
+    pub json: bool,
+
+    /// Skip confirmation prompts (assume yes).
+    #[arg(short = 'y', long, global = true)]
+    pub yes: bool,
+
+    /// Force plain ASCII output (no color, no Unicode glyphs).
+    #[arg(long, global = true)]
+    pub ascii: bool,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -114,11 +126,6 @@ pub enum Command {
         #[arg(long)]
         link_only: bool,
 
-        /// Install the melded source's items without the confirmation prompt
-        /// (also installs in a non-TTY context). Ignored with `--link-only`.
-        #[arg(short = 'y', long)]
-        yes: bool,
-
         /// When installing, overwrite link targets that already exist and are not
         /// managed by mind. Without it, a conflict prompts on a TTY.
         #[arg(short = 'f', long)]
@@ -152,11 +159,6 @@ pub enum Command {
         #[arg(long)]
         unlink_only: bool,
 
-        /// Remove the source's items without the confirmation prompt shown when
-        /// more than one item would be removed.
-        #[arg(short = 'y', long)]
-        yes: bool,
-
         /// Supply or override the source's uninstall hook: a shell command run
         /// in the clone before the source is removed. Replaces the source's
         /// declared uninstall hook(s); the override is shown loudly in the prompt.
@@ -187,10 +189,6 @@ pub enum Command {
         #[arg(short = 'n', long = "dry-run")]
         dry_run: bool,
 
-        /// Install the dependency closure without the interactive [y/N] prompt.
-        #[arg(short = 'y', long = "yes")]
-        yes: bool,
-
         /// Overwrite a link target that already exists and is not managed by
         /// mind (a user's file/dir/foreign link). Without it, a conflict prompts
         /// on a TTY and otherwise refuses.
@@ -203,11 +201,6 @@ pub enum Command {
     Forget {
         /// The installed item ref or glob: `name`, `skill:name`, `'review*'`, `'*'`.
         item: String,
-
-        /// Remove without the confirmation prompt shown when a glob matches more
-        /// than one item.
-        #[arg(short = 'y', long)]
-        yes: bool,
     },
 
     /// Refresh every melded source's clone and catalog.
@@ -227,10 +220,6 @@ pub enum Command {
     /// By default this only *reports* pending upgrades (hash and commit deltas
     /// plus a compare link per source) and prompts before changing anything.
     Upgrade {
-        /// Apply upgrades without the interactive [y/N] prompt.
-        #[arg(short = 'y', long = "yes")]
-        yes: bool,
-
         /// Only upgrade this item; default is every installed item.
         item: Option<String>,
 
@@ -255,9 +244,6 @@ pub enum Command {
         /// Report whether an update is available, then exit without changing anything.
         #[arg(long)]
         check: bool,
-        /// Replace the binary without the confirmation prompt.
-        #[arg(short = 'y', long)]
-        yes: bool,
         /// Update to this exact version instead of the latest release.
         #[arg(long, value_name = "VERSION")]
         version: Option<String>,
@@ -279,18 +265,14 @@ pub enum Command {
         /// Only list items from a source matching this selector (listing only).
         #[arg(long)]
         source: Option<String>,
-
-        /// Emit JSON instead of the human-readable table.
-        #[arg(long)]
-        json: bool,
     },
 
     /// Search melded catalogs for available items, or launch the interactive TUI.
     ///
     /// With a TTY and no opt-out, `probe` launches the interactive browser.
-    /// Falls back to the catalog listing when `--no-tui`, `--json`, or stdout
-    /// is not a TTY (piped or redirected). The query, `--kind`, and `--source`
-    /// arguments seed the initial search/filter state in both modes.
+    /// Falls back to the catalog listing when `--no-tui`, `--json` (global), or
+    /// stdout is not a TTY (piped or redirected). The query, `--kind`, and
+    /// `--source` arguments seed the initial search/filter state in both modes.
     Probe {
         /// Case-insensitive substring matched against item names and descriptions; empty lists everything.
         query: Option<String>,
@@ -302,10 +284,6 @@ pub enum Command {
         /// Only list items from a source matching this selector.
         #[arg(long)]
         source: Option<String>,
-
-        /// Emit JSON instead of the human-readable table.
-        #[arg(long)]
-        json: bool,
 
         /// Skip the interactive TUI and use the plain catalog listing.
         #[arg(long)]
@@ -352,10 +330,6 @@ pub enum Command {
         /// Repair what is fixable without changing versions (recreate missing links).
         #[arg(long)]
         fix: bool,
-
-        /// Emit JSON instead of the human-readable report.
-        #[arg(long)]
-        json: bool,
     },
 
     /// View and edit configuration (`~/.mind/config.toml`).

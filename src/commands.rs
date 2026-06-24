@@ -50,6 +50,9 @@ pub fn meld(
     let prefer_ssh = Config::load(&paths.mind_home)?.ssh;
     let mut registry = Registry::load(paths)?;
     let mut visited = HashSet::new();
+    let source_name = parse_spec(repo)
+        .map(|s| s.name)
+        .unwrap_or_else(|_| repo.to_string());
     let added = meld_recursive(
         paths,
         &mut registry,
@@ -65,6 +68,12 @@ pub fn meld(
         prefer_ssh,
     )?;
     registry.save(paths)?;
+    let out = crate::render::ctx();
+    if out.json {
+        let mut result = MutationResult::new("meld", &source_name, "melded");
+        result.count = Some(added);
+        return print_json(&result);
+    }
     if added > 1 {
         println!("melded {added} source(s)");
     }
@@ -281,6 +290,7 @@ fn meld_recursive(
     dangerously_skip_hook_check: bool,
     prefer_ssh: bool,
 ) -> Result<usize> {
+    let out = crate::render::ctx();
     let mut source = parse_spec(repo)?;
     source.alias = alias;
     // CLI-19: rewrite an https remote to its SSH form when SSH is preferred, so
@@ -315,7 +325,14 @@ fn meld_recursive(
     let mut dir = source.clone_dir(paths);
     let is_local = source.is_local();
 
-    println!("melding {} from {}", source.name, source.url);
+    if !out.json {
+        println!(
+            "{} melding {} from {}",
+            out.bullet(),
+            source.name,
+            out.dim(&source.url)
+        );
+    }
 
     // A local source with no pin is read straight from its working tree (CLI-27):
     // no clone, and `mind` never touches the directory. Any other source is cloned
@@ -423,10 +440,12 @@ fn meld_recursive(
     if !roots.is_empty() {
         if is_authoritative {
             // spec: DSC-52
-            println!(
-                "note: {} uses an authoritative mind.toml; --root is ignored",
-                source.name
-            );
+            if !out.json {
+                println!(
+                    "note: {} uses an authoritative mind.toml; --root is ignored",
+                    source.name
+                );
+            }
         } else {
             source.roots = Some(roots);
         }
@@ -487,7 +506,14 @@ fn meld_recursive(
     }
 
     warn_unguarded_references(&items);
-    println!("melded {} ({} item(s))", source.name, items.len());
+    if !out.json {
+        println!(
+            "{} melded {} ({} item(s))",
+            out.ok(),
+            source.name,
+            items.len()
+        );
+    }
 
     // Install hooks (HOOK-50..60): the working tree is now checked out at the
     // resolved pin, so hooks run in the right tree. A fresh meld runs every
@@ -894,6 +920,7 @@ pub fn unmeld(
     dangerously_skip_hook_check: bool,
     uninstall_hook: Option<String>,
 ) -> Result<()> {
+    let out = crate::render::ctx();
     let mut registry = Registry::load(paths)?;
     let matched: Vec<usize> = registry
         .sources
@@ -957,15 +984,21 @@ pub fn unmeld(
             std::fs::remove_dir_all(&dir).map_err(|e| MindError::io(&dir, e))?;
         }
         registry.save(paths)?;
+        if out.json {
+            let mut result = MutationResult::new("unmeld", &source_name, "unlinked");
+            result.count = Some(item_keys.len());
+            return print_json(&result);
+        }
         if item_keys.is_empty() {
-            println!("unmelded {source_name}");
+            println!("{} unmelded {source_name}", out.ok());
         } else {
             println!(
-                "unmelded {source_name}; {} item(s) remain installed:",
+                "{} unmelded {source_name}; {} item(s) remain installed:",
+                out.ok(),
                 item_keys.len()
             );
             for k in &item_keys {
-                println!("  {k}");
+                println!("  {} {k}", out.bullet());
             }
             println!("run `mind forget '{source_name}#*'` to remove them");
         }
@@ -977,12 +1010,14 @@ pub fn unmeld(
     // a user who declines does not trigger destructive cleanup (HOOK-54).
     // `--yes` skips the confirmation; a non-TTY run without `--yes` refuses.
     if item_keys.len() > 1 && !yes {
-        println!(
-            "unmelding {source_name} will remove {} installed item(s):",
-            item_keys.len()
-        );
-        for k in &item_keys {
-            println!("  {k}");
+        if !out.json {
+            println!(
+                "unmelding {source_name} will remove {} installed item(s):",
+                item_keys.len()
+            );
+            for k in &item_keys {
+                println!("  {} {k}", out.warn());
+            }
         }
         if !crate::hook::is_tty() {
             return Err(MindError::ConfirmationRequired {
@@ -992,7 +1027,7 @@ pub fn unmeld(
                 ),
             });
         }
-        if !confirm("remove these item(s) and unmeld the source?")? {
+        if !out.json && !confirm("remove these item(s) and unmeld the source?")? {
             println!("cancelled; nothing removed");
             return Ok(());
         }
@@ -1031,7 +1066,15 @@ pub fn unmeld(
         std::fs::remove_dir_all(&dir).map_err(|e| MindError::io(&dir, e))?;
     }
     registry.save(paths)?;
-    println!("unmelded {source_name} ({forgotten} installed item(s) removed)");
+    if out.json {
+        let mut result = MutationResult::new("unmeld", &source_name, "removed");
+        result.count = Some(forgotten);
+        return print_json(&result);
+    }
+    println!(
+        "{} unmelded {source_name} ({forgotten} installed item(s) removed)",
+        out.ok()
+    );
     Ok(())
 }
 
@@ -1146,6 +1189,7 @@ pub fn learn(
 ) -> Result<()> {
     // POL-3: load the managed policy once (fail closed on Err; None = inert).
     let policy = Policy::load()?;
+    let out = crate::render::ctx();
     let (registry, items, resolution) = resolve_learn(paths, item_ref)?;
 
     // The full closure to install, dependency-first (DEP-21, DEP-30), excluding
@@ -1166,6 +1210,11 @@ pub fn learn(
     // DEP-32: --dry-run renders the dependency tree (when deps were added) and
     // lists the full closure, installing nothing.
     if dry_run {
+        if out.json {
+            let mut result = MutationResult::new("learn", item_ref, "dry-run");
+            result.installed = closure.iter().map(|t| t.key()).collect();
+            return print_json(&result);
+        }
         if resolution.adds_dependencies() {
             print!("{}", resolution.render_tree(&items));
         }
@@ -1174,14 +1223,14 @@ pub fn learn(
             .iter()
             .map(|t| vec![t.key(), t.source.clone()])
             .collect::<Vec<_>>();
-        print_rows(&rows);
+        out.print_rows(&rows);
         return Ok(());
     }
 
     // DEP-31: when the closure adds items beyond the explicit selection, show the
     // tree and prompt; proceed only on a yes (or `--yes`). When it adds nothing,
     // install directly with no prompt and no tree (CLI-30 behavior unchanged).
-    if resolution.adds_dependencies() && !yes {
+    if resolution.adds_dependencies() && !yes && !out.json {
         print!("{}", resolution.render_tree(&items));
         if !confirm("install this dependency closure?")? {
             println!("cancelled; nothing installed");
@@ -1194,6 +1243,7 @@ pub fn learn(
     // matches what is on disk.
     let mut manifest = Manifest::load(paths)?;
     let mut failure = None;
+    let mut installed_keys: Vec<String> = Vec::new();
     for target in &closure {
         // POL-12: with the allowlist locked, skip (and report) any item whose
         // source identity is no longer allowed; install from the rest.
@@ -1201,11 +1251,14 @@ pub fn learn(
             && policy.lock()
             && !policy.allow_matches(&target.source)
         {
-            println!(
-                "skipping {} from {}: source not permitted by the managed policy's allowlist",
-                target.key(),
-                target.source
-            );
+            if !out.json {
+                println!(
+                    "{} skipping {} from {}: source not permitted by the managed policy's allowlist",
+                    out.warn(),
+                    target.key(),
+                    target.source
+                );
+            }
             continue;
         }
         let commit = match registry.find(&target.source) {
@@ -1227,6 +1280,7 @@ pub fn learn(
         if let Err(MindError::LinkOccupied { path }) = &result
             && clobber == Clobber::Prompt
             && crate::hook::is_tty()
+            && !out.json
         {
             let path = path.clone();
             result = if confirm(&format!(
@@ -1239,12 +1293,17 @@ pub fn learn(
         }
         match result {
             Ok(installed) => {
-                println!(
-                    "learned {} from {} ({})",
-                    installed.key(),
-                    installed.source,
-                    short(&installed.commit)
-                );
+                installed_keys.push(installed.key());
+                if !out.json {
+                    // Keep the line starting with "learned <key>" (tests assert the
+                    // prefix); the commit is greened (no-op when color is off).
+                    println!(
+                        "learned {} from {} ({})",
+                        installed.key(),
+                        installed.source,
+                        out.green(&short(&installed.commit))
+                    );
+                }
                 manifest.insert(installed);
             }
             Err(e) => {
@@ -1256,7 +1315,14 @@ pub fn learn(
     manifest.save(paths)?;
     match failure {
         Some(e) => Err(e),
-        None => Ok(()),
+        None => {
+            if out.json {
+                let mut result = MutationResult::new("learn", item_ref, "installed");
+                result.installed = installed_keys;
+                return print_json(&result);
+            }
+            Ok(())
+        }
     }
 }
 
@@ -1291,10 +1357,12 @@ pub fn install_melded_source(paths: &Paths, repo: &str, yes: bool, clobber: Clob
         return learn(paths, &item_ref, false, true, clobber);
     }
     if !crate::hook::is_tty() {
-        println!(
-            "note: {source_name} has {} item(s) to install; run `mind learn '{item_ref}'` (or re-meld with --yes)",
-            plan.install_count
-        );
+        if !json_mode() {
+            println!(
+                "note: {source_name} has {} item(s) to install; run `mind learn '{item_ref}'` (or re-meld with --yes)",
+                plan.install_count
+            );
+        }
         return Ok(());
     }
 
@@ -1332,8 +1400,11 @@ pub fn remeld(
     clobber: Clobber,
     dangerously_skip_hook_check: bool,
 ) -> Result<()> {
+    let out = crate::render::ctx();
     let source_name = parse_spec(repo)?.name;
-    println!("{source_name} is already melded");
+    if !out.json {
+        println!("{} {source_name} is already melded", out.bullet());
+    }
 
     // CLI-13: an explicit `--as` on a re-meld changes the source's prefix. Update
     // the recorded alias and rename its installed items to the new effective
@@ -1347,7 +1418,7 @@ pub fn remeld(
                 source.alias = Some(new_alias);
                 registry.save(paths)?;
                 let renamed = reprefix_source(paths, &registry, &source_name)?;
-                if renamed == 0 {
+                if renamed == 0 && !out.json {
                     println!("prefix updated; no installed items to rename");
                 }
             }
@@ -1376,7 +1447,9 @@ pub fn remeld(
                 Ok(HookOutcome::Proceed) => registry.save(paths)?,
                 Ok(HookOutcome::Abort) => {
                     registry.save(paths)?; // persist any hook that did run
-                    println!("aborted; source left in place");
+                    if !out.json {
+                        println!("aborted; source left in place");
+                    }
                     return Ok(());
                 }
                 Err(e) => return Err(e), // a hook failed; leave the source melded
@@ -1395,6 +1468,9 @@ pub fn remeld(
             return install_melded_source(paths, repo, yes, clobber);
         }
     }
+    if out.json {
+        return print_json(&MutationResult::new("meld", &source_name, "already-melded"));
+    }
     source_status(paths, &source_name)
 }
 
@@ -1403,6 +1479,7 @@ pub fn remeld(
 /// (CLI-12). Items are matched to the manifest by stable identity (source, kind,
 /// bare name), so a prefix change does not lose them.
 fn source_status(paths: &Paths, source_name: &str) -> Result<()> {
+    let out = crate::render::ctx();
     let registry = Registry::load(paths)?;
     let Some(source) = registry.find(source_name) else {
         return Err(MindError::SourceNotFound {
@@ -1417,7 +1494,11 @@ fn source_status(paths: &Paths, source_name: &str) -> Result<()> {
         .as_deref()
         .map(short)
         .unwrap_or_else(|| "?".to_string());
-    println!("{source_name}: {} item(s) (source @ {head})", items.len());
+    println!(
+        "{} {source_name}: {} item(s) (source @ {head})",
+        out.bullet(),
+        items.len()
+    );
     for it in &items {
         let installed = manifest
             .items
@@ -1426,15 +1507,23 @@ fn source_status(paths: &Paths, source_name: &str) -> Result<()> {
         match installed {
             Some(m) => {
                 let lag = match source.commit.as_deref() {
-                    Some(c) if c != m.commit => {
-                        format!(" (outdated; source @ {}, run `mind upgrade`)", short(c))
-                    }
+                    Some(c) if c != m.commit => out.yellow(&format!(
+                        " (outdated; source @ {}, run `mind upgrade`)",
+                        short(c)
+                    )),
                     _ => String::new(),
                 };
-                println!("  {}  installed @ {}{}", it.key(), short(&m.commit), lag);
+                println!(
+                    "  {} {}  installed @ {}{}",
+                    out.ok(),
+                    it.key(),
+                    out.green(&short(&m.commit)),
+                    lag
+                );
             }
             None => println!(
-                "  {}  not installed (run `mind learn '{}'`)",
+                "  {} {}  not installed (run `mind learn '{}'`)",
+                out.available(),
                 it.key(),
                 it.key()
             ),
@@ -1473,7 +1562,15 @@ fn reprefix_source(paths: &Paths, registry: &Registry, source_name: &str) -> Res
         let new = install::install(paths, cat, &old.commit, &siblings, false)?;
         install::uninstall(paths, &old)?;
         manifest.items.remove(&old.key());
-        println!("renamed {} -> {}", old.key(), new.key());
+        if !json_mode() {
+            let out = crate::render::ctx();
+            println!(
+                "{} renamed {} -> {}",
+                out.ok(),
+                old.key(),
+                out.green(&new.key())
+            );
+        }
         manifest.insert(new);
         count += 1;
     }
@@ -1493,6 +1590,7 @@ fn colliding_install(targets: &[&CatalogItem]) -> Option<(String, Vec<String>)> 
 
 /// `mind forget <item>` — uninstall one item, or many via a glob.
 pub fn forget(paths: &Paths, item_ref: &str, yes: bool) -> Result<()> {
+    let out = crate::render::ctx();
     let mut manifest = Manifest::load(paths)?;
     let parsed = parse_item_ref(item_ref)?;
 
@@ -1515,27 +1613,38 @@ pub fn forget(paths: &Paths, item_ref: &str, yes: bool) -> Result<()> {
     // broadly than intended) lists the matches and confirms first. `--yes` skips;
     // a non-TTY run without `--yes` refuses rather than removing silently.
     if keys.len() > 1 && !yes {
-        println!("forget would remove {} item(s):", keys.len());
-        for key in &keys {
-            println!("  {key}");
+        if !out.json {
+            println!("forget would remove {} item(s):", keys.len());
+            for key in &keys {
+                println!("  {} {key}", out.warn());
+            }
         }
         if !crate::hook::is_tty() {
             return Err(MindError::ConfirmationRequired {
                 action: format!("removing {} items", keys.len()),
             });
         }
-        if !confirm("remove these item(s)?")? {
+        if !out.json && !confirm("remove these item(s)?")? {
             println!("cancelled; nothing removed");
             return Ok(());
         }
     }
 
+    let mut removed: Vec<String> = Vec::new();
     for key in keys {
         let item = manifest.items.remove(&key).expect("key from manifest");
         install::uninstall(paths, &item)?;
-        println!("forgot {key}");
+        removed.push(key.clone());
+        if !out.json {
+            println!("{} forgot {key}", out.ok());
+        }
     }
     manifest.save(paths)?;
+    if out.json {
+        let mut result = MutationResult::new("forget", item_ref, "removed");
+        result.removed = removed;
+        return print_json(&result);
+    }
     Ok(())
 }
 
@@ -1547,6 +1656,7 @@ pub fn forget(paths: &Paths, item_ref: &str, yes: bool) -> Result<()> {
 /// the `upgrade` pass so install-hook re-runs can run unattended in CI (HOOK-11,
 /// HOOK-23); it is unused when `--upgrade` is absent.
 pub fn sync(paths: &Paths, then_upgrade: bool, dangerously_skip_hook_check: bool) -> Result<()> {
+    let out = crate::render::ctx();
     // POL-3: load the managed policy once (fail closed on Err; None = inert).
     let policy = Policy::load()?;
     // CLI-19: auto-meld honors the user's SSH preference too.
@@ -1593,6 +1703,9 @@ pub fn sync(paths: &Paths, then_upgrade: bool, dangerously_skip_hook_check: bool
     }
 
     if registry.sources.is_empty() {
+        if out.json {
+            return print_json(&MutationResult::new("sync", "", "no-op"));
+        }
         println!("no sources melded; run `mind meld <owner/repo>`");
         return Ok(());
     }
@@ -1601,6 +1714,7 @@ pub fn sync(paths: &Paths, then_upgrade: bool, dangerously_skip_hook_check: bool
     // progress was made, then report the failures and exit non-zero.
     let total = registry.sources.len();
     let mut failures: Vec<String> = Vec::new();
+    let mut synced = 0usize;
     for source in &mut registry.sources {
         // POL-12: with the allowlist locked, do not sync a source whose identity
         // is no longer allowed; report and skip it (the rest still sync).
@@ -1608,15 +1722,20 @@ pub fn sync(paths: &Paths, then_upgrade: bool, dangerously_skip_hook_check: bool
             && policy.lock()
             && !policy.allow_matches(&source.name)
         {
-            println!(
-                "skipping {}: source not permitted by the managed policy's allowlist",
-                source.name
-            );
+            if !out.json {
+                println!(
+                    "{} skipping {}: source not permitted by the managed policy's allowlist",
+                    out.warn(),
+                    source.name
+                );
+            }
             continue;
         }
         let dir = source.clone_dir(paths);
-        print!("syncing {} ... ", source.name);
-        let _ = std::io::stdout().flush();
+        if !out.json {
+            print!("{} syncing {} ... ", out.bullet(), source.name);
+            let _ = std::io::stdout().flush();
+        }
         let refreshed = (|| -> Result<(String, bool, Option<String>)> {
             // A linked (no-pin) local source is its live working tree (CLI-27):
             // there is nothing to fetch and the tree is never touched. Just re-read
@@ -1658,15 +1777,21 @@ pub fn sync(paths: &Paths, then_upgrade: bool, dangerously_skip_hook_check: bool
             Ok((new_commit, changed, desc)) => {
                 source.commit = Some(new_commit.clone());
                 source.description = desc;
-                println!(
-                    "{} ({})",
-                    if changed { "updated" } else { "up to date" },
-                    short(&new_commit)
-                );
+                synced += 1;
+                if !out.json {
+                    let label = if changed {
+                        out.green("updated")
+                    } else {
+                        out.dim("up to date")
+                    };
+                    println!("{} ({})", label, short(&new_commit));
+                }
             }
             Err(e) => {
-                println!("failed");
-                eprintln!("  {}: {e}", source.name);
+                if !out.json {
+                    println!("{}", out.red("failed"));
+                    eprintln!("  {} {}: {e}", out.err(), source.name);
+                }
                 failures.push(source.name.clone());
             }
         }
@@ -1679,6 +1804,11 @@ pub fn sync(paths: &Paths, then_upgrade: bool, dangerously_skip_hook_check: bool
             failed: failures.len(),
             total,
         });
+    }
+    if out.json {
+        let mut result = MutationResult::new("sync", "", "synced");
+        result.count = Some(synced);
+        print_json(&result)?;
     }
     if then_upgrade {
         // spec: HOOK-11, HOOK-23
@@ -1694,6 +1824,7 @@ pub fn upgrade(
     item_ref: Option<&str>,
     dangerously_skip_hook_check: bool,
 ) -> Result<()> {
+    let out = crate::render::ctx();
     // POL-3: load the managed policy once (fail closed on Err; None = inert).
     let policy = Policy::load()?;
     let mut registry = Registry::load(paths)?;
@@ -1739,11 +1870,14 @@ pub fn upgrade(
             // so a scoped upgrade never emits skip lines for out-of-scope sources
             // the user never selected.
             UpgradeDisposition::PolicyBlocked => {
-                println!(
-                    "skipping {} from {}: source not permitted by the managed policy's allowlist",
-                    installed.key(),
-                    installed.source
-                );
+                if !out.json {
+                    println!(
+                        "{} skipping {} from {}: source not permitted by the managed policy's allowlist",
+                        out.warn(),
+                        installed.key(),
+                        installed.source
+                    );
+                }
                 continue;
             }
             UpgradeDisposition::Consider => {}
@@ -1776,19 +1910,28 @@ pub fn upgrade(
         }
     }
 
+    let target = item_ref.unwrap_or("all");
+
     if pending.is_empty() {
+        if out.json {
+            return print_json(&MutationResult::new("upgrade", target, "up-to-date"));
+        }
         println!("everything is up to date");
         return Ok(());
     }
 
-    print_upgrade_report(&registry, &pending);
+    if !out.json {
+        print_upgrade_report(&registry, &pending);
+    }
 
-    if !yes && !confirm("apply these upgrades?")? {
+    if !yes && !out.json && !confirm("apply these upgrades?")? {
         println!("aborted; nothing changed");
         return Ok(());
     }
 
     let mut manifest = manifest;
+    let mut applied: Vec<String> = Vec::new();
+    let mut renamed = false;
     for up in &pending {
         let siblings = siblings_of(&catalog, &up.cat.source);
         // Build the new version first; the old copy is preserved until this
@@ -1799,13 +1942,28 @@ pub fn upgrade(
             // Rename: drop the old item (by its file registry) and re-key.
             install::uninstall(paths, &up.old)?;
             manifest.items.remove(&up.old.key());
-            println!("upgraded {} -> {}", up.old.key(), installed.key());
-        } else {
-            println!("upgraded {}", installed.key());
+            renamed = true;
+            if !out.json {
+                println!(
+                    "{} upgraded {} -> {}",
+                    out.ok(),
+                    up.old.key(),
+                    out.green(&installed.key())
+                );
+            }
+        } else if !out.json {
+            println!("{} upgraded {}", out.ok(), out.green(&installed.key()));
         }
+        applied.push(installed.key());
         manifest.insert(installed);
     }
     manifest.save(paths)?;
+    if out.json {
+        let outcome = if renamed { "renamed" } else { "upgraded" };
+        let mut result = MutationResult::new("upgrade", target, outcome);
+        result.installed = applied;
+        return print_json(&result);
+    }
     Ok(())
 }
 
@@ -1842,10 +2000,12 @@ fn rerun_source_hooks(
             && policy.lock()
             && !policy.allow_matches(&source.name)
         {
-            println!(
-                "skipping install hook for {}: source not permitted by the managed policy's allowlist",
-                source.name
-            );
+            if !json_mode() {
+                println!(
+                    "skipping install hook for {}: source not permitted by the managed policy's allowlist",
+                    source.name
+                );
+            }
             continue;
         }
 
@@ -1871,17 +2031,21 @@ fn rerun_source_hooks(
 
             let run = if dangerously_skip_hook_check {
                 // HOOK-23: re-run without prompting.
-                println!(
-                    "note: re-running install hook for {} without the safety prompt (--dangerously-skip-install-hook-check)",
-                    source.name
-                );
+                if !json_mode() {
+                    println!(
+                        "note: re-running install hook for {} without the safety prompt (--dangerously-skip-install-hook-check)",
+                        source.name
+                    );
+                }
                 true
             } else if !crate::hook::is_tty() {
                 // HOOK-22: no TTY; never run silently. Skip the re-run.
-                println!(
-                    "note: skipped re-running the install hook for {} (no TTY); its tooling may be out of date until the hook is re-run",
-                    source.name
-                );
+                if !json_mode() {
+                    println!(
+                        "note: skipped re-running the install hook for {} (no TTY); its tooling may be out of date until the hook is re-run",
+                        source.name
+                    );
+                }
                 false
             } else {
                 let disclosure = crate::hook::disclosure_text(
@@ -1907,7 +2071,9 @@ fn rerun_source_hooks(
                 // HOOK-55: record the commit the hook ran at.
                 source.install_hooks[idx].ran_at = source.commit.clone();
                 changed = true;
-                println!("re-ran install hook for {}", source.name);
+                if !json_mode() {
+                    println!("re-ran install hook for {}", source.name);
+                }
             }
         }
     }
@@ -1961,23 +2127,36 @@ struct Upgrade {
 }
 
 fn print_upgrade_report(registry: &Registry, pending: &[Upgrade]) {
+    let out = crate::render::ctx();
     println!("{} item(s) have upstream changes:\n", pending.len());
     for up in pending {
         if up.new_name != up.old.name {
             println!(
-                "  {} {} [{}]  rename {} -> {}",
-                up.cat.kind, up.cat.name, up.cat.source, up.old.name, up.new_name
+                "  {} {} {} {}  rename {} -> {}",
+                out.warn(),
+                up.cat.kind,
+                up.cat.name,
+                out.dim(&format!("[{}]", up.cat.source)),
+                up.old.name,
+                out.green(&up.new_name)
             );
         } else {
-            println!("  {} [{}]", up.cat.key(), up.cat.source);
+            println!(
+                "  {} {} {}",
+                out.warn(),
+                up.cat.key(),
+                out.dim(&format!("[{}]", up.cat.source))
+            );
         }
         println!(
-            "    hash    {} -> {}",
+            "    {}    {} -> {}",
+            out.dim("hash"),
             short(&up.old.hash),
             short(&up.new_hash)
         );
         println!(
-            "    commit  {} -> {}",
+            "    {}  {} -> {}",
+            out.dim("commit"),
             short(&up.old.commit),
             short(&up.new_commit)
         );
@@ -1986,7 +2165,7 @@ fn print_upgrade_report(registry: &Registry, pending: &[Upgrade]) {
             && !up.new_commit.is_empty()
             && let Some(url) = src.compare_url(&up.old.commit, &up.new_commit)
         {
-            println!("    diff    {url}");
+            println!("    {}    {url}", out.dim("diff"));
         }
         println!();
     }
@@ -2004,6 +2183,7 @@ pub fn recall(
     source: Option<&str>,
     json: bool,
 ) -> Result<()> {
+    let out = crate::render::ctx();
     // The listing filters are meaningless for --sources or a single-item lookup;
     // say so rather than silently ignoring them.
     if (sources || item.is_some()) && (kind.is_some() || source.is_some()) {
@@ -2042,14 +2222,15 @@ pub fn recall(
                     n => format!(" hooks({n})"),
                 };
                 vec![
+                    out.bullet(),
                     s.name.clone(),
-                    s.url.clone(),
-                    format!("[{commit}{ns}{hook}]"),
+                    out.dim(&s.url),
+                    out.dim(&format!("[{commit}{ns}{hook}]")),
                     s.description.clone().unwrap_or_default(),
                 ]
             })
             .collect::<Vec<_>>();
-        print_rows(&rows);
+        out.print_rows(&rows);
         return Ok(());
     }
 
@@ -2060,16 +2241,20 @@ pub fn recall(
         if json {
             return print_json(found);
         }
-        println!("{}", found.key());
+        println!("{}", out.bold(&found.key()));
         if let Some(d) = &found.description {
-            println!("  desc    {d}");
+            println!("  {}{d}", out.dim("desc    "));
         }
-        println!("  source  {}", found.source);
-        println!("  commit  {}", short(&found.commit));
-        println!("  hash    {}", short(&found.hash));
-        println!("  store   {}", paths.mind_home.join(&found.store).display());
+        println!("  {}{}", out.dim("source  "), found.source);
+        println!("  {}{}", out.dim("commit  "), short(&found.commit));
+        println!("  {}{}", out.dim("hash    "), short(&found.hash));
+        println!(
+            "  {}{}",
+            out.dim("store   "),
+            paths.mind_home.join(&found.store).display()
+        );
         for link in &found.links {
-            println!("  link    {link}");
+            println!("  {}{link}", out.dim("link    "));
         }
         return Ok(());
     }
@@ -2180,33 +2365,45 @@ pub fn recall(
             n => format!(" hooks({n})"),
         };
         println!(
-            "{}  [{commit}{ns}{hook}]{}",
-            s.name,
+            "{} {}  {}{}",
+            out.bullet(),
+            out.bold(&s.name),
+            out.dim(&format!("[{commit}{ns}{hook}]")),
             s.description
                 .as_deref()
                 .map(|d| format!("  {d}"))
                 .unwrap_or_default()
         );
-        let width = items
-            .iter()
-            .map(|it| it.key().len())
-            .chain(orphans.iter().map(|m| m.key().len()))
-            .max()
-            .unwrap_or(0);
+        // Each item is a status-marked row; print_rows aligns the key column even
+        // with the leading glyph (its visible width ignores any ANSI codes).
+        let mut rows: Vec<Vec<String>> = Vec::new();
         for it in items {
             let key = it.key();
             match manifest.items.get(&key) {
-                Some(m) => println!("  {key:<width$}  installed @ {}", short(&m.commit)),
-                None => println!("  {key:<width$}  available"),
+                Some(m) => rows.push(vec![
+                    format!("  {}", out.ok()),
+                    key,
+                    format!("installed @ {}", out.green(&short(&m.commit))),
+                ]),
+                None => rows.push(vec![
+                    format!("  {}", out.available()),
+                    out.dim(&key),
+                    out.dim("available"),
+                ]),
             }
         }
         for m in orphans {
-            println!(
-                "  {:<width$}  installed @ {} (removed upstream)",
+            rows.push(vec![
+                format!("  {}", out.warn()),
                 m.key(),
-                short(&m.commit)
-            );
+                format!(
+                    "installed @ {} {}",
+                    short(&m.commit),
+                    out.yellow("(removed upstream)")
+                ),
+            ]);
         }
+        out.print_rows(&rows);
     }
     Ok(())
 }
@@ -2222,6 +2419,7 @@ pub fn probe(
     source: Option<&str>,
     json: bool,
 ) -> Result<()> {
+    let out = crate::render::ctx();
     let registry = Registry::load(paths)?;
     let items = catalog::scan(paths, &registry)?;
     let manifest = Manifest::load(paths)?;
@@ -2273,20 +2471,24 @@ pub fn probe(
             let hash = hash_path(&it.path)
                 .map(|h| short(&h))
                 .unwrap_or_else(|_| "-".into());
+            // CLI-81: a leading `*` marks an installed item (greened when color is
+            // on). Not-installed rows have an empty marker cell so the row does not
+            // start with `*`.
+            let marker = if installed(it) {
+                out.green("*")
+            } else {
+                String::new()
+            };
             vec![
-                if installed(it) {
-                    "*".into()
-                } else {
-                    String::new()
-                },
+                marker,
                 it.key(),
-                it.source.clone(),
-                hash,
+                out.dim(&it.source),
+                out.dim(&hash),
                 summary(it.description.as_deref(), 60),
             ]
         })
         .collect::<Vec<_>>();
-    print_rows(&rows);
+    out.print_rows(&rows);
     Ok(())
 }
 
@@ -2408,20 +2610,22 @@ pub fn introspect(paths: &Paths, fix: bool, json: bool) -> Result<()> {
         });
     }
 
+    let out = crate::render::ctx();
     for note in &repaired {
-        println!("{note}");
+        println!("{} {note}", out.ok());
     }
     for issue in &issues {
-        println!("{}", issue.message);
+        println!("{} {}", out.warn(), issue.message);
     }
     if issues.is_empty() {
         println!(
-            "all good: {} source(s), {} item(s) installed",
+            "{} all good: {} source(s), {} item(s) installed",
+            out.ok(),
             registry.sources.len(),
             manifest.items.len()
         );
     } else {
-        println!("\n{} issue(s) found", issues.len());
+        println!("\n{} {} issue(s) found", out.err(), issues.len());
     }
     Ok(())
 }
@@ -2438,24 +2642,27 @@ pub fn review(paths: &Paths, target: &str, alias: Option<String>, fix: bool) -> 
     // Print hard then advisory findings in the shared format.
     crate::review::print_findings(&result.hard, &result.advisory);
 
+    let out = crate::render::ctx();
     // Report any files `--fix` rewrote.
     for f in &result.fixed {
-        println!("fixed {f}");
+        println!("{} fixed {f}", out.ok());
     }
 
     if result.hard.is_empty() {
         if result.advisory.is_empty() {
-            println!("review: no issues found");
+            println!("{} review: no issues found", out.ok());
         } else {
             println!(
-                "review: {} advisory finding(s); source is publishable",
+                "{} review: {} advisory finding(s); source is publishable",
+                out.warn(),
                 result.advisory.len()
             );
         }
         Ok(())
     } else {
         println!(
-            "\nreview: {} hard error(s), {} advisory finding(s)",
+            "\n{} review: {} hard error(s), {} advisory finding(s)",
+            out.err(),
             result.hard.len(),
             result.advisory.len()
         );
@@ -2467,16 +2674,33 @@ pub fn review(paths: &Paths, target: &str, alias: Option<String>, fix: bool) -> 
 
 /// `mind config show` — print the config file location and its key/value pairs.
 pub fn config_show(paths: &Paths) -> Result<()> {
+    let out = crate::render::ctx();
     paths.ensure_config()?;
     let file = Config::path(&paths.mind_home);
     let cfg = Config::load(&paths.mind_home)?;
-    println!("config file: {}", file.display());
-    if cfg.lobes.is_empty() {
-        println!("  lobes = []  (default: {})", paths.claude_home.display());
-    } else {
-        println!("  lobes = {:?}", cfg.lobes);
+    if out.json {
+        return print_json(&serde_json::json!({
+            "config_file": file.display().to_string(),
+            "lobes": cfg.lobes,
+            "default_lobe": paths.claude_home.display().to_string(),
+            "ssh": cfg.ssh,
+        }));
     }
-    println!("  ssh = {}  (prefer SSH for melded remotes)", cfg.ssh);
+    println!("{} config file: {}", out.bullet(), file.display());
+    if cfg.lobes.is_empty() {
+        println!(
+            "  {} lobes = []  (default: {})",
+            out.dim("·"),
+            paths.claude_home.display()
+        );
+    } else {
+        println!("  {} lobes = {:?}", out.dim("·"), cfg.lobes);
+    }
+    println!(
+        "  {} ssh = {}  (prefer SSH for melded remotes)",
+        out.dim("·"),
+        cfg.ssh
+    );
     if let Some(env) = std::env::var_os("MIND_AGENT_HOMES") {
         println!(
             "note: MIND_AGENT_HOMES is set and overrides lobes: {}",
@@ -2488,6 +2712,7 @@ pub fn config_show(paths: &Paths) -> Result<()> {
 
 /// `mind config lobes add <path>` — add an agent home.
 pub fn lobe_add(paths: &Paths, path: &str) -> Result<()> {
+    let out = crate::render::ctx();
     // POL-40: a lobe lock pins the effective agent homes; refuse and change
     // nothing. Load the policy first so the refusal precedes any config write.
     if let Some(policy) = Policy::load()?
@@ -2498,19 +2723,34 @@ pub fn lobe_add(paths: &Paths, path: &str) -> Result<()> {
     paths.ensure_config()?;
     let mut cfg = Config::load(&paths.mind_home)?;
     if cfg.lobes.iter().any(|h| h == path) {
-        println!("lobe already configured: {path}");
+        if out.json {
+            return print_json(&MutationResult::new("lobe-add", path, "no-op"));
+        }
+        println!("{} lobe already configured: {path}", out.available());
         return Ok(());
     }
     cfg.lobes.push(path.to_string());
     cfg.save(&paths.mind_home)?;
-    println!("added lobe {path}");
+    if out.json {
+        return print_json(&MutationResult::new("lobe-add", path, "added"));
+    }
+    println!("{} added lobe {path}", out.ok());
     Ok(())
 }
 
 /// `mind config lobes list` — list configured agent homes.
 pub fn lobe_list(paths: &Paths) -> Result<()> {
+    let out = crate::render::ctx();
     paths.ensure_config()?;
     let cfg = Config::load(&paths.mind_home)?;
+    if out.json {
+        let lobes = if cfg.lobes.is_empty() {
+            vec![paths.claude_home.display().to_string()]
+        } else {
+            cfg.lobes.clone()
+        };
+        return print_json(&serde_json::json!({ "lobes": lobes }));
+    }
     if cfg.lobes.is_empty() {
         println!("{}  (default)", paths.claude_home.display());
     } else {
@@ -2538,6 +2778,7 @@ fn show_override_note(env_set: bool, lobes_locked: bool) -> bool {
 
 /// `mind config lobes remove <path>` — drop an agent home.
 pub fn lobe_remove(paths: &Paths, path: &str) -> Result<()> {
+    let out = crate::render::ctx();
     // POL-40: a lobe lock pins the effective agent homes; refuse and change
     // nothing.
     if let Some(policy) = Policy::load()?
@@ -2555,7 +2796,10 @@ pub fn lobe_remove(paths: &Paths, path: &str) -> Result<()> {
         });
     }
     cfg.save(&paths.mind_home)?;
-    println!("removed lobe {path}");
+    if out.json {
+        return print_json(&MutationResult::new("lobe-remove", path, "removed"));
+    }
+    println!("{} removed lobe {path}", out.ok());
     Ok(())
 }
 
@@ -2589,6 +2833,44 @@ fn lobes_locked_error(action: &str) -> MindError {
     }
 }
 
+/// The structured result a mutating verb emits under `--json` (CLI-153). The
+/// `action` is the verb, `target` the item/source ref it acted on, and `outcome`
+/// a stable token (`installed|removed|melded|synced|upgraded|renamed|no-op|...`).
+/// Optional fields are only serialized when a verb genuinely returns more (e.g.
+/// `learn` fills `installed` with its closure keys; `sync` fills `count`).
+#[derive(Serialize, Debug, PartialEq, Eq)]
+struct MutationResult {
+    action: &'static str,
+    target: String,
+    outcome: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    count: Option<usize>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    installed: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    removed: Vec<String>,
+}
+
+impl MutationResult {
+    /// A result with no optional fields populated.
+    fn new(action: &'static str, target: &str, outcome: &'static str) -> Self {
+        Self {
+            action,
+            target: target.to_string(),
+            outcome,
+            count: None,
+            installed: Vec::new(),
+            removed: Vec::new(),
+        }
+    }
+}
+
+/// True when the current output context wants machine JSON. A mutating verb gates
+/// its prose on `!json_mode()` and emits a [`MutationResult`] when it is true.
+fn json_mode() -> bool {
+    crate::render::ctx().json
+}
+
 /// Serialize `value` as pretty JSON to stdout (for the `--json` flags).
 fn print_json<T: Serialize>(value: &T) -> Result<()> {
     let s = serde_json::to_string_pretty(value).map_err(|e| MindError::json("json output", e))?;
@@ -2609,39 +2891,6 @@ fn short(s: &str) -> String {
         "-".to_string()
     } else {
         s.chars().take(8).collect()
-    }
-}
-
-/// Print rows as aligned columns: every column except the last is left-padded to
-/// the widest value in that column; the last column (a description) is left as-is.
-/// Trailing empty cells are trimmed.
-fn print_rows(rows: &[Vec<String>]) {
-    let Some(ncols) = rows.iter().map(Vec::len).max() else {
-        return;
-    };
-    let mut widths = vec![0usize; ncols];
-    for row in rows {
-        for (i, cell) in row.iter().enumerate() {
-            if i + 1 < ncols {
-                widths[i] = widths[i].max(cell.chars().count());
-            }
-        }
-    }
-    for row in rows {
-        let mut line = String::new();
-        for (i, cell) in row.iter().enumerate() {
-            if i > 0 {
-                line.push_str("  ");
-            }
-            if i + 1 < ncols {
-                let pad = widths[i].saturating_sub(cell.chars().count());
-                line.push_str(cell);
-                line.extend(std::iter::repeat_n(' ', pad));
-            } else {
-                line.push_str(cell);
-            }
-        }
-        println!("{}", line.trim_end());
     }
 }
 
@@ -2723,6 +2972,38 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    // CLI-153: the mutating-verb JSON result has the stable
+    // action/target/outcome shape; optional fields appear only when populated.
+    #[test]
+    fn mutation_result_minimal_shape() {
+        let r = MutationResult::new("forget", "skill:review", "removed");
+        let v: serde_json::Value = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["action"], "forget");
+        assert_eq!(v["target"], "skill:review");
+        assert_eq!(v["outcome"], "removed");
+        // Unpopulated optional fields are omitted entirely.
+        assert!(v.get("count").is_none(), "count must be omitted: {v}");
+        assert!(v.get("installed").is_none(), "installed omitted: {v}");
+        assert!(v.get("removed").is_none(), "removed omitted: {v}");
+    }
+
+    #[test]
+    fn mutation_result_populated_optional_fields() {
+        let mut r = MutationResult::new("learn", "skill:review", "installed");
+        r.installed = vec!["agent:reviewer".to_string(), "skill:review".to_string()];
+        r.count = Some(2);
+        let v: serde_json::Value = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["action"], "learn");
+        assert_eq!(v["outcome"], "installed");
+        assert_eq!(v["count"], 2);
+        assert_eq!(
+            v["installed"],
+            serde_json::json!(["agent:reviewer", "skill:review"])
+        );
+        // `removed` is still empty, so it is omitted.
+        assert!(v.get("removed").is_none(), "empty removed omitted: {v}");
+    }
 
     #[test]
     fn parse_confirm_default_no_only_yes_confirms() {

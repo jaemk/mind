@@ -76,7 +76,14 @@ const ALLOWLIST: &[&str] = &[
     // because it requires a TTY-approved run and cannot be exercised headlessly:
     //   HOOK-71: build runs in staging, non-zero exit rolls the install back.
     //   HOOK-73: a build re-runs when its item is reinstalled/upgraded.
-    "HOOK-71", "HOOK-73",
+    "HOOK-71",
+    "HOOK-73",
+    // Polished output: CLI-150 (global flags) is cited from unit tests in
+    // src/main.rs; the capability gate (CLI-151), glyph/color semantics and the
+    // ASCII fallback (CLI-152), the structured JSON result for mutating verbs
+    // (CLI-153), and the NO_COLOR/non-UTF-8/--ascii gate-off conditions (CLI-154)
+    // are now cited from integration tests in tests/cli.rs. The rich (TTY) branch
+    // of the gate is unit-tested in src/render.rs (it needs a real PTY headlessly).
 ];
 
 #[test]

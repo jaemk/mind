@@ -407,6 +407,61 @@ release artifacts as the install script and the Homebrew formula.
 - `CLI-121` `man` writes the roff man page for `mind` to stdout, generated from
   the command tree.
 
+## Output and global flags
+
+- `CLI-150` `--json`, `--yes`, and `--ascii` are global flags accepted before or
+  after the verb. They apply uniformly to every command: the parser resolves them
+  at the top level so no verb needs to declare them individually, and a flag given
+  in any position (e.g. `mind --json recall` or `mind recall --json`) is
+  equivalent.
+
+- `CLI-151` The color/Unicode capability gate is ON when ALL of the following hold:
+  stdout is a TTY; the locale is UTF-8 (the first of `LC_ALL`, `LC_CTYPE`, `LANG`
+  that is set contains the substring `UTF-8` or `utf8`, case-insensitively); the
+  environment variable `NO_COLOR` is unset or empty; the `--json` flag is not in
+  effect; and the `--ascii` flag is not in effect. An unset locale (none of the
+  three variables is set) is treated as non-UTF-8. When the gate is OFF, all output
+  is plain ASCII with no ANSI escape sequences.
+
+- `CLI-152` When the capability gate (CLI-151) is ON, output uses ANSI color and
+  Unicode glyphs with these semantics: green = installed / ok; yellow = warning /
+  drift / removed-upstream; red = error; dim = available / inactive. When the gate
+  is OFF, output uses a plain-ASCII fallback for every glyph and no color escapes.
+  The ASCII fallback replaces each glyph with a visually equivalent ASCII character
+  or short string (e.g. `+` for installed, `!` for warning, `x` for error, `-` for
+  available), so all information is preserved without terminal support.
+
+- `CLI-153` Every mutating verb (`meld`, `learn`, `forget`, `sync`, `upgrade`,
+  `unmeld`, and `config lobes add`/`remove`) emits a structured JSON result object
+  on stdout under `--json` and writes nothing else on stdout. The stable fields of
+  this object are:
+
+  ```json
+  {
+    "action":  "<verb>",
+    "target":  "<item-or-source ref>",
+    "outcome": "<installed|removed|upgraded|synced|renamed|no-op|failed>"
+  }
+  ```
+
+  `action` is the CLI verb (e.g. `"learn"`, `"forget"`, `"meld"`). `target` is the
+  effective name of the item or source the verb acted on (e.g. `"skill:review"`,
+  `"github.com/owner/repo"`). `outcome` is one of the values above; `"no-op"` is
+  used when the verb completed successfully but changed nothing (e.g. re-melding an
+  already-registered source with nothing to install). A verb MAY add extra fields
+  where it genuinely returns more data (for example, `learn` MAY include an
+  `"installed"` array listing the effective names of all items installed in that
+  call, including dependency-closure items). The read-only verbs (`recall`, `probe`,
+  `introspect`) keep their existing JSON shapes (CLI-73, CLI-84, CLI-92) and are
+  not affected by CLI-153.
+
+- `CLI-154` `NO_COLOR` being set (to any value, including empty) forces the
+  capability gate (CLI-151) OFF regardless of TTY or locale. A non-UTF-8 locale or
+  an unset locale also forces the gate OFF even on a TTY. `--ascii` forces the gate
+  OFF regardless of `NO_COLOR`, locale, or TTY state. These conditions are
+  independent: any one of them alone is sufficient to disable color and Unicode
+  glyphs.
+
 ## Exit status
 
 - `CLI-100` A command that completes its work exits 0. Any `MindError` is printed

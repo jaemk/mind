@@ -15,6 +15,7 @@ mod mindfile;
 mod namespace;
 mod paths;
 mod policy;
+mod render;
 mod resolve;
 mod review;
 mod selfupdate;
@@ -65,7 +66,7 @@ enum LockMode {
 /// acquired: the TUI takes the lock per-operation itself (TUI-25). In fallback
 /// mode (non-TTY, `--no-tui`, `--json`), `probe` takes the normal shared lock.
 // spec: STO-41
-fn lock_mode(command: &Command) -> LockMode {
+fn lock_mode(command: &Command, json: bool) -> LockMode {
     match command {
         // No persisted state touched (init-source operates on the repo dir, not
         // the store).
@@ -90,7 +91,7 @@ fn lock_mode(command: &Command) -> LockMode {
         // probe in TUI mode: the TUI manages its own per-op locks (TUI-25).
         // TUI-1 is the launch entry point (requires a real TTY; allowlisted).
         // spec: TUI-25
-        Command::Probe { no_tui, json, .. } if probe_launches_tui(*no_tui, *json) => LockMode::None,
+        Command::Probe { no_tui, .. } if probe_launches_tui(*no_tui, json) => LockMode::None,
 
         // Read-only commands (including probe in fallback/listing mode).
         Command::Recall { .. }
@@ -119,12 +120,17 @@ fn probe_launches_tui(no_tui: bool, json: bool) -> bool {
 }
 
 fn run(cli: Cli) -> Result<()> {
+    // Install the process-wide output context before any dispatch so that
+    // render::ctx() returns real capabilities for all commands (including the
+    // mutating verbs that read it internally). spec: CLI-150 CLI-151 CLI-154
+    crate::render::set_ctx(crate::render::OutputCtx::detect(cli.json, cli.ascii));
+
     let paths = Paths::resolve()?;
 
     // spec: STO-40 STO-41 STO-42
     // Completions and man touch no persisted state: skip the lock. All other
     // commands acquire the lock (shared or exclusive) before reading or writing.
-    match lock_mode(&cli.command) {
+    match lock_mode(&cli.command, cli.json) {
         LockMode::None => dispatch(cli, &paths),
         LockMode::Exclusive => {
             let mut lock = lock::open(&paths)?;
@@ -140,6 +146,9 @@ fn run(cli: Cli) -> Result<()> {
 }
 
 fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
+    // Global flags sourced before the match moves cli.command.
+    let json = cli.json;
+    let yes = cli.yes;
     match cli.command {
         Command::Meld {
             repo,
@@ -151,7 +160,6 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             install_hook,
             dangerously_skip_install_hook_check,
             link_only,
-            yes,
             force,
         } => {
             // CLI-25: no repo argument (or an explicit `.`/`./`) melds the
@@ -208,7 +216,6 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
         Command::Unmeld {
             name,
             unlink_only,
-            yes,
             uninstall_hook,
             dangerously_skip_install_hook_check,
         } => commands::unmeld(
@@ -222,7 +229,6 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
         Command::Learn {
             item,
             dry_run,
-            yes,
             force,
         } => commands::learn(
             paths,
@@ -235,13 +241,12 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
                 commands::Clobber::Prompt
             },
         ),
-        Command::Forget { item, yes } => commands::forget(paths, &item, yes),
+        Command::Forget { item } => commands::forget(paths, &item, yes),
         Command::Sync {
             upgrade,
             dangerously_skip_install_hook_check,
         } => commands::sync(paths, upgrade, dangerously_skip_install_hook_check),
         Command::Upgrade {
-            yes,
             item,
             dangerously_skip_install_hook_check,
         } => commands::upgrade(
@@ -250,17 +255,12 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             item.as_deref(),
             dangerously_skip_install_hook_check,
         ),
-        Command::Evolve {
-            check,
-            yes,
-            version,
-        } => selfupdate::run(check, yes, version),
+        Command::Evolve { check, version } => selfupdate::run(check, yes, version),
         Command::Recall {
             sources,
             item,
             kind,
             source,
-            json,
         } => commands::recall(
             paths,
             sources,
@@ -273,7 +273,6 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             query,
             kind,
             source,
-            json,
             no_tui,
         } => {
             if probe_launches_tui(no_tui, json) {
@@ -319,7 +318,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
                 commands::review(paths, &target, alias, fix)
             }
         }
-        Command::Introspect { fix, json } => commands::introspect(paths, fix, json),
+        Command::Introspect { fix } => commands::introspect(paths, fix, json),
         Command::Config { action } => match action {
             ConfigCmd::Show => commands::config_show(paths),
             ConfigCmd::Lobes { action } => match action {
@@ -344,7 +343,7 @@ mod tests {
     /// Parse a CLI line the way the binary would, then classify its lock mode.
     fn mode_of(args: &[&str]) -> LockMode {
         let cli = Cli::try_parse_from(args).expect("args should parse");
-        lock_mode(&cli.command)
+        lock_mode(&cli.command, cli.json)
     }
 
     #[test]
@@ -530,14 +529,10 @@ mod tests {
     fn evolve_self_update_parses_and_is_exclusive() {
         // Bare evolve parses.
         let cli = Cli::try_parse_from(["mind", "evolve"]).expect("evolve should parse");
+        assert!(!cli.yes, "global --yes should default to false");
         match cli.command {
-            Command::Evolve {
-                check,
-                yes,
-                version,
-            } => {
+            Command::Evolve { check, version } => {
                 assert!(!check);
-                assert!(!yes);
                 assert_eq!(version, None);
             }
             other => panic!("expected Evolve, got {other:?}"),
@@ -568,5 +563,67 @@ mod tests {
             mode_of(&["mind", "evolve", "--version", "1.2.3"]),
             LockMode::Exclusive
         );
+    }
+
+    /// Global --json suppresses the TUI for `probe` regardless of flag position.
+    ///
+    /// `mind probe --json` and `mind --json probe` must both be accepted by clap
+    /// (global flag, CLI-150) and both cause `probe` to take the Shared lock
+    /// (listing mode, not TUI mode).
+    // spec: CLI-150
+    #[test]
+    fn global_json_suppresses_probe_tui_and_takes_shared_lock() {
+        // Post-verb position: `mind probe --json`
+        assert_eq!(
+            mode_of(&["mind", "probe", "--json"]),
+            LockMode::Shared,
+            "probe --json (post-verb) must take the Shared lock (suppresses TUI)"
+        );
+        // Pre-verb position: `mind --json probe`
+        assert_eq!(
+            mode_of(&["mind", "--json", "probe"]),
+            LockMode::Shared,
+            "mind --json probe (pre-verb) must take the Shared lock (suppresses TUI)"
+        );
+        // Both positions parse identically at the Cli level.
+        let post = Cli::try_parse_from(["mind", "probe", "--json"]).expect("probe --json parses");
+        let pre = Cli::try_parse_from(["mind", "--json", "probe"]).expect("--json probe parses");
+        assert!(post.json, "probe --json: cli.json must be true");
+        assert!(pre.json, "--json probe: cli.json must be true");
+    }
+
+    /// Global --yes is accepted before or after any verb (CLI-150).
+    // spec: CLI-150
+    #[test]
+    fn global_yes_is_accepted_before_or_after_verb() {
+        // Post-verb: `mind learn --yes skill:foo`
+        let cli = Cli::try_parse_from(["mind", "learn", "--yes", "skill:foo"])
+            .expect("learn --yes should parse");
+        assert!(cli.yes, "learn --yes: cli.yes must be true");
+
+        // Pre-verb: `mind --yes learn skill:foo`
+        let cli = Cli::try_parse_from(["mind", "--yes", "learn", "skill:foo"])
+            .expect("--yes learn should parse");
+        assert!(cli.yes, "--yes learn: cli.yes must be true");
+
+        // Short form -y: `mind learn -y skill:foo`
+        let cli = Cli::try_parse_from(["mind", "learn", "-y", "skill:foo"])
+            .expect("learn -y should parse");
+        assert!(cli.yes, "learn -y: cli.yes must be true");
+    }
+
+    /// Global --ascii is accepted before or after any verb (CLI-150).
+    // spec: CLI-150
+    #[test]
+    fn global_ascii_is_accepted_before_or_after_verb() {
+        // Post-verb: `mind probe --ascii`
+        let cli =
+            Cli::try_parse_from(["mind", "probe", "--ascii"]).expect("probe --ascii should parse");
+        assert!(cli.ascii, "probe --ascii: cli.ascii must be true");
+
+        // Pre-verb: `mind --ascii probe`
+        let cli =
+            Cli::try_parse_from(["mind", "--ascii", "probe"]).expect("--ascii probe should parse");
+        assert!(cli.ascii, "--ascii probe: cli.ascii must be true");
     }
 }
