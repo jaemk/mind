@@ -223,6 +223,60 @@ kind and `{{tools:name}}` (tooling.md, TOOL-12), but any kind may declare one.
   `upgrade` disclose and prompt for it as part of installing the item; nothing
   beyond the item's content hash is recorded for it.
 
+## Item install and uninstall hooks
+
+Status: planned. A `build` hook (HOOK-70) produces an item's store content in
+staging. Separately, an item may need a side-effect command on the host when it
+is installed (set up a venv, register a helper) and a matching cleanup command
+when it is removed. These are the item-level analog of a source's install and
+uninstall hooks (HOOK-50), scoped to one item and tied to its install/removal
+rather than to `meld`/`unmeld`. They are distinct from `build`: `build` runs in
+staging before the store swap and produces content; an install hook runs after
+the item is in place and is for host side effects.
+
+- `HOOK-80` An item declares lifecycle hooks with `install` and `uninstall` shell
+  commands: `[[items]].install` / `[[items]].uninstall` in `mind.toml`, or
+  `install:` / `uninstall:` in a tool's `TOOL.md` frontmatter. They are valid on
+  any kind and are distinct from `build` (HOOK-70). An empty or whitespace-only
+  value is treated as absent (HOOK-3).
+- `HOOK-81` An item's install hook runs as the final step of installing the item:
+  after its store copy is swapped in and its links are created (LIFE-1), in the
+  installed store directory (`~/.mind/store/<kind>/<name>/`) as the working
+  directory, and after the item's `build` hook (which runs earlier, in staging).
+  It runs at `learn` and re-runs whenever the item is reinstalled or upgraded
+  (`upgrade`), so the side effect tracks the item's content, mirroring the build
+  hook's re-run rule (HOOK-73). A non-zero exit is a `HookFailed` hard stop that
+  rolls back that item's install (its store copy and links are removed, leaving it
+  not installed); host side effects the hook already performed are outside `mind`'s
+  state and are not rolled back (HOOK-30).
+- `HOOK-82` An item's uninstall hook runs when the item is removed: at `forget`,
+  at `unmeld` (which removes the source's items), and for the OLD item when an
+  `upgrade` renames it (a namespace change removes the old item via its registry).
+  It runs in the item's store directory before the store copy and links are
+  removed, so cleanup can use the installed files. It does NOT run on an in-place
+  upgrade (same effective name, content swapped), since the item is not removed,
+  only its install hook re-runs (HOOK-81). A non-zero exit is a hard stop
+  (HOOK-53): the removal stops and the item is left installed, mirroring a failed
+  source uninstall hook leaving the source melded (HOOK-54).
+- `HOOK-83` Item install and uninstall hooks are arbitrary code, so each is
+  disclosed and its output framed exactly as other hooks (HOOK-20, HOOK-30). On a
+  TTY each is prompted two-way (run / skip), like the build hook (HOOK-72): for an
+  install hook, skipping installs the item without the side effect; for an
+  uninstall hook, skipping removes the item without running cleanup. There is no
+  abort, so one item's hook never aborts a multi-item `learn`/`forget`. A non-TTY
+  context skips them, and `--dangerously-skip-install-hook-check` runs them
+  unattended (HOOK-22, HOOK-23).
+- `HOOK-84` Nothing beyond the item's content hash is recorded for an item's
+  install/uninstall hooks (as for `build`, HOOK-73): the install hook re-runs on
+  every (re)install or upgrade of the item, and the uninstall hook fires on every
+  removal. Together with the source-level rule (a source's install hooks re-run
+  when the source advances, HOOK-11/55), an install hook re-runs whenever its
+  source OR its item is upgraded.
+- `HOOK-85` `mind review <target>` lists an item's declared install and uninstall
+  hooks as advisory findings, showing each command and event, so a consumer sees
+  before installing that an item will run code (the item-level counterpart of the
+  source-hook disclosure, HOOK-40/58).
+
 ## Managed-policy composition (research needed)
 
 Install hooks are arbitrary code execution, which is exactly what an enterprise
