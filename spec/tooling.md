@@ -77,9 +77,10 @@ store path. Expansion runs in the same staging pass that expands `{{ns:}}`
 the recorded content hash is of the source (token) form.
 
 - `TOOL-10` `{{self}}` in an item's text expands to that item's own store
-  directory (an absolute path under `~/.mind/store`, honoring `MIND_HOME`). It is
-  available in every kind, so a skill addresses its own bundled resources as
-  `{{self}}/resources/<script>` without hardcoding its installed name.
+  directory (a path under the store root, `~/.mind/store` honoring `MIND_HOME`,
+  rendered with a leading `~` per TOOL-16). It is available in every kind, so a
+  skill addresses its own bundled resources as `{{self}}/resources/<script>`
+  without hardcoding its installed name.
 - `TOOL-11` `{{path:ref}}` expands to a sibling item's store directory, for
   reaching non-entrypoint files in a tool (`{{path:tool:x}}/lib/helper.sh`).
   `ref` is a sibling's bare name, optionally kind-qualified
@@ -106,11 +107,19 @@ the recorded content hash is of the source (token) form.
   `{{ns:}}` does, so tool-to-tool and bundled-script-to-tool references resolve
   when both items ship in the same source. Cross-source tooling references are out
   of scope: ship a tool in the same source as the items that use it.
+- `TOOL-16` A path token renders the store root with a leading `~` when the store
+  lies under the user's home directory (the default `~/.mind/store`): the home
+  prefix is written as a literal `~`, not spelled out absolutely. This keeps the
+  expansion matchable by a Claude `settings.json` permission glob, which uses
+  tilde syntax (`Bash(~/.mind/store/**)`) that an absolute path would not match.
+  When the store root is not under home (a `MIND_HOME` pointing elsewhere) or the
+  home directory cannot be determined, the token expands to the absolute path.
 
 Because every token expands under `~/.mind/store`, an item's invocations of its
 tooling share one stable path prefix regardless of agent home or prefix, so a
-permission allowlist can target that prefix (e.g. a `Bash(~/.mind/store/**)`
-rule) rather than chase per-item installed paths.
+permission allowlist can target that prefix (a `Bash(~/.mind/store/**)` rule,
+matched by the `~` rendering of TOOL-16) rather than chase per-item installed
+paths.
 
 ## Build hooks for compiled tooling
 

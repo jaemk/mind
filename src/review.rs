@@ -466,6 +466,7 @@ fn run_checks(
     for item in &items {
         let ctx = crate::namespace::PathCtx {
             store_root,
+            home: None,
             prefix: &prefix,
             self_kind: item.kind,
             self_name: &item.name,
@@ -568,6 +569,7 @@ fn run_checks(
             for item in &items {
                 let ctx = crate::namespace::PathCtx {
                     store_root,
+                    home: None,
                     prefix: &prefix,
                     self_kind: item.kind,
                     self_name: &item.name,

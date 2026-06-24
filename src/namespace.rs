@@ -216,6 +216,9 @@ pub struct PathSibling {
 pub struct PathCtx<'a> {
     /// `~/.mind/store` (honors `MIND_HOME`).
     pub store_root: &'a std::path::Path,
+    /// The user's home directory. When the store lies under it, a store path is
+    /// rendered with a leading `~` (TOOL-16); `None` renders the absolute path.
+    pub home: Option<&'a std::path::Path>,
     /// The source's effective prefix, applied to every referent's effective name.
     pub prefix: &'a Option<String>,
     /// The installing item's own kind and bare name (for `{{self}}`).
@@ -226,14 +229,31 @@ pub struct PathCtx<'a> {
 }
 
 impl PathCtx<'_> {
-    /// The store directory of an item of `kind` with bare name `bare`.
+    /// The store directory of an item of `kind` with bare name `bare`, rendered
+    /// with a leading `~` when it lies under `home` (TOOL-16).
     fn store_path(&self, kind: crate::error::ItemKind, bare: &str) -> String {
-        self.store_root
+        let abs = self
+            .store_root
             .join(kind.as_str())
-            .join(apply(bare, self.prefix))
-            .to_string_lossy()
-            .into_owned()
+            .join(apply(bare, self.prefix));
+        render_under_home(&abs, self.home)
     }
+}
+
+/// Render `path` with a leading `~` when it lies under `home`, else as the path
+/// itself. This keeps a store-path token matchable by a Claude `settings.json`
+/// permission glob that uses tilde syntax (`Bash(~/.mind/store/**)`), which an
+/// absolute path would not match (TOOL-16).
+fn render_under_home(path: &std::path::Path, home: Option<&std::path::Path>) -> String {
+    if let Some(home) = home
+        && let Ok(rest) = path.strip_prefix(home)
+    {
+        return std::path::Path::new("~")
+            .join(rest)
+            .to_string_lossy()
+            .into_owned();
+    }
+    path.to_string_lossy().into_owned()
 }
 
 /// Outcome of resolving one `{{...}}` token's inner text.
@@ -963,6 +983,7 @@ mod tests {
     ) -> PathCtx<'a> {
         PathCtx {
             store_root: store,
+            home: None,
             prefix,
             self_kind,
             self_name,
@@ -991,6 +1012,63 @@ mod tests {
         assert_eq!(
             expand_paths("{{self}}", &c).unwrap(),
             "/m/store/skill/jk-review"
+        );
+    }
+
+    #[test]
+    fn store_paths_render_with_tilde_when_under_home() {
+        // spec: TOOL-16
+        let home = Path::new("/home/jk");
+        let store = Path::new("/home/jk/.mind/store");
+        let none = None;
+        let sibs = vec![psib(ItemKind::Tool, "shard-plan", Some("shard-plan"))];
+        let c = PathCtx {
+            store_root: store,
+            home: Some(home),
+            prefix: &none,
+            self_kind: ItemKind::Skill,
+            self_name: "review",
+            siblings: &sibs,
+        };
+        // Every token kind keeps the leading `~` instead of spelling out home.
+        assert_eq!(
+            expand_paths("{{self}}/resources/pr.py", &c).unwrap(),
+            "~/.mind/store/skill/review/resources/pr.py"
+        );
+        assert_eq!(
+            expand_paths("{{tools:shard-plan}}", &c).unwrap(),
+            "~/.mind/store/tool/shard-plan/shard-plan"
+        );
+        assert_eq!(
+            expand_paths("{{path:tool:shard-plan}}/lib.sh", &c).unwrap(),
+            "~/.mind/store/tool/shard-plan/lib.sh"
+        );
+    }
+
+    #[test]
+    fn store_paths_stay_absolute_when_store_not_under_home() {
+        // spec: TOOL-16
+        let home = Path::new("/home/jk");
+        // A MIND_HOME pointing outside home (or no home) yields an absolute path.
+        let store = Path::new("/srv/mind/store");
+        let none = None;
+        let c = PathCtx {
+            store_root: store,
+            home: Some(home),
+            prefix: &none,
+            self_kind: ItemKind::Skill,
+            self_name: "review",
+            siblings: &[],
+        };
+        assert_eq!(
+            expand_paths("{{self}}", &c).unwrap(),
+            "/srv/mind/store/skill/review"
+        );
+        // With no home at all, also absolute.
+        let c = PathCtx { home: None, ..c };
+        assert_eq!(
+            expand_paths("{{self}}", &c).unwrap(),
+            "/srv/mind/store/skill/review"
         );
     }
 
