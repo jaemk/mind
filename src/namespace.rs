@@ -362,7 +362,7 @@ fn resolve_token(inner: &str, ctx: &PathCtx) -> Token {
 const HOME_MARKERS: [&str; 5] = ["~/", "$HOME/", "${HOME}/", "/home/", "/Users/"];
 
 /// What a hardcoded install path resolves to at runtime, which sets the
-/// advisory's severity wording (CLI-141).
+/// advisory's severity wording (CLI-145).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HardcodedKind {
     /// The item's own resources (`{{self}}`). Resolves through the symlink mind
@@ -385,7 +385,7 @@ pub struct HardcodedPath {
     /// The token that should replace it, when it maps confidently; else `None`
     /// (the path is still flagged, just without a concrete suggestion).
     pub suggestion: Option<String>,
-    /// What the path resolves to, for the advisory's wording (CLI-141).
+    /// What the path resolves to, for the advisory's wording (CLI-145).
     pub kind: HardcodedKind,
 }
 
@@ -511,7 +511,7 @@ fn token_for_path(path: &str, ctx: &PathCtx) -> Option<String> {
     ))
 }
 
-/// Classify a canonical install path by what it resolves to (CLI-141), returning
+/// Classify a canonical install path by what it resolves to (CLI-145), returning
 /// the class and the token that should replace it (if it maps confidently).
 fn classify_path(canonical: &str, ctx: &PathCtx) -> (HardcodedKind, Option<String>) {
     let suggestion = token_for_path(canonical, ctx);
@@ -1324,7 +1324,7 @@ mod tests {
 
     #[test]
     fn hardcoded_classifies_own_tool_and_other() {
-        // spec: CLI-141
+        // spec: CLI-145
         let store = Path::new("/m/store");
         let none = None;
         let sibs = vec![

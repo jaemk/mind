@@ -330,7 +330,7 @@ only appear at meld or install time. It is read-only and installs nothing.
   `/Users/<user>` path. When the path maps confidently to a token (the item's own
   dir -> `{{self}}`, a sibling tool's entrypoint -> `{{tools:name}}`, another
   sibling -> `{{path:kind:name}}`) the finding names the suggested token. The
-  message reflects what the path resolves to at runtime (CLI-141). Advisory, not
+  message reflects what the path resolves to at runtime (CLI-145). Advisory, not
   hard: `--fix` rewrites the confidently-mapped ones (CLI-138).
 - `CLI-137` `review` reports, as an advisory `bare-tool-reference` finding, a
   sibling tool named in an item's prose without a token. Unlike the unguarded
@@ -353,7 +353,7 @@ only appear at meld or install time. It is read-only and installs nothing.
   `misplaced-reference`: an item must not namespace its own name. This is the dual
   of the unguarded-reference scan (CLI-131): one finds a bare name that should be
   a token, the other a token that should be a bare word.
-- `CLI-140` `review` reports, as an advisory `duplicate-tooling` finding, a
+- `CLI-144` `review` reports, as an advisory `duplicate-tooling` finding, a
   non-markdown helper file whose contents are byte-identical across two or more
   items: a shared script copied into each consumer rather than shipped once as a
   `tool`. The finding names the file and the items that carry it, and points to
@@ -361,7 +361,7 @@ only appear at meld or install time. It is read-only and installs nothing.
   excluded (it is prose, not tooling) and empty files are ignored. Advisory, and
   `--fix` does not touch it: extracting a shared tool is a structural change the
   author must make and re-reference deliberately.
-- `CLI-141` The `hardcoded-path` advisory (CLI-136) classifies the reference by
+- `CLI-145` The `hardcoded-path` advisory (CLI-136) classifies the reference by
   what it resolves to at runtime, because the cases differ in severity. A skill
   that hardcodes its OWN resources (the `{{self}}` case) still resolves through
   the symlink mind links into each agent home, so it works until a prefix renames

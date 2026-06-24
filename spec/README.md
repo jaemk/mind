@@ -44,8 +44,8 @@ and verified.
 | Scan roots: `[source].roots` + `meld --root` (monorepo/subtree sources) | done | DSC-50, DSC-51, DSC-52, DSC-53, STO-17, CLI-16 |
 | Version pinning: `--follow-branch`/`--pin-tag`/`--pin-ref` + `[source]` directive | done | DSC-41, STO-18, CLI-17, CLI-18, CLI-55 |
 | `review` verb: author-side source validation | done | CLI-130, CLI-131, CLI-132, CLI-133 |
-| `review` flags path tokens + hardcoded paths + bare tool refs + misplaced `{{ns:}}`; `--fix` rewrites | done | CLI-135, CLI-136, CLI-137, CLI-138, CLI-139, CLI-141, NS-24 |
-| `review`/`init-source` flag helper scripts duplicated across items (`duplicate-tooling`) | done | CLI-140, INIT-7 |
+| `review` flags path tokens + hardcoded paths + bare tool refs + misplaced `{{ns:}}`; `--fix` rewrites | done | CLI-135, CLI-136, CLI-137, CLI-138, CLI-139, CLI-145, NS-24 |
+| `review`/`init-source` flag helper scripts duplicated across items (`duplicate-tooling`) | done | CLI-144, INIT-7 |
 | `evolve` verb: in-place upgrade of the `mind` binary | done | CLI-140, CLI-141, CLI-142, CLI-143 |
 | Managed policy (enterprise): trusted-source allowlist, require-pinned, auto-meld, lobe lock; `mind review --policy` | done | [policy.md](policy.md) |
 | Install hooks: `[source].install` / `meld --install-hook`, safety prompt, `--dangerously-skip-install-hook-check` | done | [install-hooks.md](install-hooks.md) |

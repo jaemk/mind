@@ -725,7 +725,7 @@ pub fn init_source(dir: Option<&str>, template: bool) -> Result<()> {
     // tooling is structural and not something templating fixes.
     let has_unguarded = findings.iter().any(|f| f.kind == "unguarded-reference");
     // INIT-7: surface the same duplicate-tooling advisories `review` reports
-    // (CLI-140), so the two commands read identically here too.
+    // (CLI-144), so the two commands read identically here too.
     findings.extend(crate::review::duplicate_tooling_findings(&items));
     crate::review::print_findings(&[], &findings);
     if has_unguarded && !template {

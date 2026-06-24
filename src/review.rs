@@ -491,7 +491,7 @@ fn run_checks(
                 ));
             }
             // Check 9: hardcoded install paths that should be tokens (advisory,
-            // CLI-136). The wording reflects what the path resolves to (CLI-141).
+            // CLI-136). The wording reflects what the path resolves to (CLI-145).
             for hp in crate::namespace::detect_hardcoded_paths(&content, &ctx) {
                 let suggestion = match &hp.suggestion {
                     Some(tok) => format!("; use {tok}"),
@@ -568,7 +568,7 @@ fn run_checks(
         }
     }
 
-    // Check 12: helper scripts duplicated across items (advisory, CLI-140).
+    // Check 12: helper scripts duplicated across items (advisory, CLI-144).
     advisory.extend(duplicate_tooling_findings(&items));
 
     // Fix (CLI-138): rewrite the local working copy in place. Local-path target
@@ -671,7 +671,7 @@ fn siblings_of_source(items: &[CatalogItem], source: &str) -> HashSet<String> {
 
 /// Detect helper files duplicated byte-for-byte across two or more items, which
 /// should instead live once under a shared `tools/<name>/` and be referenced by
-/// token (CLI-140 / INIT-7). Only non-markdown files are considered: markdown is
+/// token (CLI-144 / INIT-7). Only non-markdown files are considered: markdown is
 /// prose (the anchor `SKILL.md`, docs), while scripts and data are the helpers a
 /// `tool` exists to share. Empty files are ignored. Returns one advisory
 /// `duplicate-tooling` finding per duplicated file, deterministically ordered.

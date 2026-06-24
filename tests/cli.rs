@@ -7082,7 +7082,7 @@ fn review_flags_tooling_references() {
 
 #[test]
 fn review_hardcoded_path_classifies_and_detects_env_forms() {
-    // spec: CLI-141 CLI-136
+    // spec: CLI-145 CLI-136
     let sb = Sandbox::bare("agents");
     write(&sb.source.join("tools/detect/detect"), "#!/bin/sh\n");
     write(
@@ -7118,7 +7118,7 @@ fn review_hardcoded_path_classifies_and_detects_env_forms() {
 
 #[test]
 fn review_flags_helper_script_duplicated_across_items() {
-    // spec: CLI-140
+    // spec: CLI-144
     let sb = Sandbox::bare("agents");
     // Two skills ship the same helper script verbatim; it should be a tool.
     write(
@@ -7168,7 +7168,7 @@ fn review_flags_helper_script_duplicated_across_items() {
 
 #[test]
 fn review_does_not_flag_duplicated_markdown() {
-    // spec: CLI-140
+    // spec: CLI-144
     // Markdown is prose, not tooling: identical docs across items are not a
     // duplicate-tooling finding.
     let sb = Sandbox::bare("agents");
