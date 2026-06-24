@@ -1612,7 +1612,17 @@ pub fn forget(paths: &Paths, item_ref: &str, yes: bool) -> Result<()> {
         }
         matches.iter().map(|it| it.key()).collect()
     } else {
-        vec![crate::resolve::resolve_installed(&manifest.items, &parsed)?.key()]
+        match crate::resolve::resolve_installed(&manifest.items, &parsed) {
+            Ok(it) => vec![it.key()],
+            // UNM-4: an exact ref that names no managed item may name an
+            // unmanaged lobe item; a glob never sweeps unmanaged entries.
+            Err(MindError::NotInstalled { .. }) => {
+                let unmanaged = crate::unmanaged::scan(paths, &manifest)?;
+                let item = crate::unmanaged::resolve(&unmanaged, &parsed)?;
+                return forget_unmanaged(item, yes);
+            }
+            Err(e) => return Err(e),
+        }
     };
 
     // CLI-42: removing more than one item (typically a glob that matched more
@@ -1651,6 +1661,49 @@ pub fn forget(paths: &Paths, item_ref: &str, yes: bool) -> Result<()> {
         result.removed = removed;
         return print_json(&result);
     }
+    Ok(())
+}
+
+/// `forget` of an unmanaged lobe item (UNM-4/5): remove the lobe entry itself
+/// after a prompt that states it is not managed by mind. There is no store copy
+/// or manifest entry, so the manifest is left untouched.
+fn forget_unmanaged(item: &crate::unmanaged::UnmanagedItem, yes: bool) -> Result<()> {
+    let out = crate::render::ctx();
+    let where_ = item
+        .paths
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    // UNM-5: always state explicitly that the item is not mind-managed and that
+    // removal deletes the user's own file or directory.
+    if !out.json {
+        println!(
+            "{} {} is not managed by mind: it is your own file or directory at {where_}, not a mind install. Removing it deletes it.",
+            out.warn(),
+            item.key()
+        );
+    }
+    if !yes {
+        if !crate::hook::is_tty() {
+            return Err(MindError::ConfirmationRequired {
+                action: format!("removing unmanaged {}", item.key()),
+            });
+        }
+        if !out.json && !confirm("remove this unmanaged item?")? {
+            println!("cancelled; nothing removed");
+            return Ok(());
+        }
+    }
+    for p in &item.paths {
+        crate::install::remove_path(p)?;
+    }
+    if out.json {
+        let mut result = MutationResult::new("forget", &item.key(), "removed");
+        result.removed = vec![item.key()];
+        return print_json(&result);
+    }
+    println!("{} forgot {} (unmanaged)", out.ok(), item.key());
     Ok(())
 }
 
@@ -2343,7 +2396,7 @@ pub fn recall(
 
     if registry.sources.is_empty() {
         println!("no sources melded; `mind meld <repo>` to add one");
-        return Ok(());
+        // Fall through: unmanaged lobe items are still worth showing (UNM-2).
     }
 
     for s in &registry.sources {
@@ -2411,6 +2464,37 @@ pub fn recall(
         }
         out.print_rows(&rows);
     }
+
+    // UNM-2: list unmanaged lobe items after the sources. Human view only;
+    // `recall --json` keeps its sources-only schema (CLI-73). `--source` excludes
+    // them (they have no source); `--kind` filters as it does managed items.
+    if source.is_none() {
+        let unmanaged: Vec<crate::unmanaged::UnmanagedItem> =
+            crate::unmanaged::scan(paths, &manifest)?
+                .into_iter()
+                .filter(|u| kind.is_none_or(|k| u.kind == k))
+                .collect();
+        if !unmanaged.is_empty() {
+            println!(
+                "{} {}",
+                out.bullet(),
+                out.bold("unmanaged: not installed by mind")
+            );
+            let rows: Vec<Vec<String>> = unmanaged
+                .iter()
+                .map(|u| {
+                    let where_ = u
+                        .paths
+                        .iter()
+                        .map(|p| p.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    vec![format!("  {}", out.warn()), u.key(), out.dim(&where_)]
+                })
+                .collect();
+            out.print_rows(&rows);
+        }
+    }
     Ok(())
 }
 
@@ -2447,8 +2531,21 @@ pub fn probe(
             .any(|m| m.source == it.source && m.kind == it.kind && m.bare_name == it.name)
     };
 
+    // UNM-3: unmanaged lobe items, matched by name (CLI-85) and `--kind`. A
+    // `--source` filter excludes them, since they have no source.
+    let mut unmanaged: Vec<crate::unmanaged::UnmanagedItem> = if source.is_none() {
+        let needle = q.to_lowercase();
+        crate::unmanaged::scan(paths, &manifest)?
+            .into_iter()
+            .filter(|u| kind.is_none_or(|k| u.kind == k) && u.name.to_lowercase().contains(&needle))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    unmanaged.sort_by_key(|u| u.key());
+
     if json {
-        let rows: Vec<ProbeRow> = hits
+        let mut rows: Vec<ProbeRow> = hits
             .iter()
             .map(|it| ProbeRow {
                 installed: installed(it),
@@ -2457,12 +2554,24 @@ pub fn probe(
                 source: &it.source,
                 hash: hash_path(&it.path).ok(),
                 description: it.description.as_deref(),
+                unmanaged: false,
             })
             .collect();
+        for u in &unmanaged {
+            rows.push(ProbeRow {
+                installed: false,
+                kind: u.kind.as_str(),
+                name: u.name.clone(),
+                source: "",
+                hash: None,
+                description: None,
+                unmanaged: true,
+            });
+        }
         return print_json(&rows);
     }
 
-    if hits.is_empty() {
+    if hits.is_empty() && unmanaged.is_empty() {
         if registry.sources.is_empty() {
             println!("no sources melded; run `mind meld <owner/repo>`");
         } else {
@@ -2471,7 +2580,7 @@ pub fn probe(
         return Ok(());
     }
 
-    let rows = hits
+    let mut rows = hits
         .iter()
         .map(|it| {
             let hash = hash_path(&it.path)
@@ -2494,11 +2603,30 @@ pub fn probe(
             ]
         })
         .collect::<Vec<_>>();
+    // UNM-3: unmanaged rows are marked in the source column and carry their lobe
+    // path in place of a description.
+    for u in &unmanaged {
+        let where_ = u
+            .paths
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        rows.push(vec![
+            String::new(),
+            u.key(),
+            out.dim("(unmanaged)"),
+            out.dim("-"),
+            out.dim(&where_),
+        ]);
+    }
     out.print_rows(&rows);
     Ok(())
 }
 
-/// One `probe --json` row.
+/// One `probe --json` row. `unmanaged` is omitted for managed (catalog) rows, so
+/// the existing schema is unchanged; an unmanaged row sets it true with no
+/// `hash` and an empty `source`.
 #[derive(Serialize)]
 struct ProbeRow<'a> {
     installed: bool,
@@ -2507,6 +2635,8 @@ struct ProbeRow<'a> {
     source: &'a str,
     hash: Option<String>,
     description: Option<&'a str>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    unmanaged: bool,
 }
 
 /// One diagnostic finding from `introspect`. `kind` is a stable machine tag;

@@ -21,6 +21,7 @@ mod review;
 mod selfupdate;
 mod source;
 mod tui;
+mod unmanaged;
 
 use std::io::IsTerminal;
 

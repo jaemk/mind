@@ -325,7 +325,7 @@ fn rename(from: &Path, to: &Path) -> Result<()> {
 }
 
 /// Best-effort removal of a file, dir, or symlink; "not found" is success.
-fn remove_path(path: &Path) -> Result<()> {
+pub(crate) fn remove_path(path: &Path) -> Result<()> {
     let meta = match std::fs::symlink_metadata(path) {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),

@@ -2748,6 +2748,137 @@ fn probe_json_emits_rows() {
     assert!(r.stdout.contains("true"), "{}", r.stdout);
 }
 
+// --- unmanaged lobe items (spec/unmanaged.md) -------------------------------
+
+/// Place an unmanaged skill (a dir) and agent (a file) directly in the lobe.
+fn seed_unmanaged(sb: &Sandbox) {
+    write(
+        &sb.claude_home.join("skills/handmade/SKILL.md"),
+        "---\ndescription: mine\n---\n# handmade\n",
+    );
+    write(
+        &sb.claude_home.join("agents/custom.md"),
+        "---\nname: custom\n---\n# custom\n",
+    );
+}
+
+#[test]
+fn recall_shows_unmanaged_lobe_items() {
+    // spec: UNM-1 UNM-2
+    let sb = melded();
+    seed_unmanaged(&sb);
+    let r = sb.mind(&["recall"]);
+    assert!(r.success, "{}", r.stderr);
+    assert!(
+        r.stdout.contains("unmanaged: not installed by mind"),
+        "recall must surface an unmanaged group: {}",
+        r.stdout
+    );
+    assert!(r.stdout.contains("skill:handmade"), "{}", r.stdout);
+    assert!(r.stdout.contains("agent:custom"), "{}", r.stdout);
+}
+
+#[test]
+fn recall_excludes_managed_links_from_unmanaged() {
+    // spec: UNM-1
+    let sb = melded();
+    assert!(sb.mind(&["learn", "review"]).success);
+    let r = sb.mind(&["recall"]);
+    assert!(r.success, "{}", r.stderr);
+    assert!(
+        !r.stdout.contains("unmanaged: not installed by mind"),
+        "a mind-installed link must not be reported as unmanaged: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn probe_lists_and_searches_unmanaged_items() {
+    // spec: UNM-3
+    let sb = melded();
+    seed_unmanaged(&sb);
+    // The non-interactive listing includes the unmanaged item, marked.
+    let r = sb.mind(&["probe", "--no-tui"]);
+    assert!(r.success, "{}", r.stderr);
+    assert!(
+        r.stdout.contains("skill:handmade") && r.stdout.contains("(unmanaged)"),
+        "probe listing must mark the unmanaged item: {}",
+        r.stdout
+    );
+    // The substring search matches its name (CLI-85).
+    let s = sb.mind(&["probe", "handmade", "--no-tui"]);
+    assert!(
+        s.stdout.contains("skill:handmade"),
+        "search must find the unmanaged item: {}",
+        s.stdout
+    );
+    // JSON carries the unmanaged flag; managed rows omit it.
+    let j = sb.mind(&["probe", "handmade", "--json"]);
+    assert!(
+        j.stdout.contains("\"unmanaged\": true"),
+        "json must flag the unmanaged row: {}",
+        j.stdout
+    );
+}
+
+#[test]
+fn forget_unmanaged_removes_after_warning() {
+    // spec: UNM-4 UNM-5
+    let sb = melded();
+    let skill = sb.claude_home.join("skills/handmade");
+    write(
+        &skill.join("SKILL.md"),
+        "---\ndescription: mine\n---\n# handmade\n",
+    );
+    assert!(skill.is_dir());
+    let r = sb.mind(&["forget", "skill:handmade", "--yes"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("not managed by mind"),
+        "the removal must state it is unmanaged: {}",
+        r.stdout
+    );
+    assert!(!skill.exists(), "the unmanaged skill dir must be removed");
+}
+
+#[test]
+fn forget_unmanaged_refuses_without_yes_in_non_tty() {
+    // spec: UNM-5
+    let sb = melded();
+    let skill = sb.claude_home.join("skills/handmade");
+    write(
+        &skill.join("SKILL.md"),
+        "---\ndescription: mine\n---\n# handmade\n",
+    );
+    // No --yes, non-TTY: refuse and remove nothing, after stating it is unmanaged.
+    let r = sb.mind(&["forget", "skill:handmade"]);
+    assert!(!r.success, "must refuse without --yes: {}", r.stdout);
+    assert!(
+        r.stdout.contains("not managed by mind"),
+        "must state it is unmanaged: {}",
+        r.stdout
+    );
+    assert!(skill.exists(), "nothing may be removed on refusal");
+}
+
+#[test]
+fn forget_glob_never_sweeps_unmanaged() {
+    // spec: UNM-4
+    let sb = melded();
+    let skill = sb.claude_home.join("skills/handmade");
+    write(
+        &skill.join("SKILL.md"),
+        "---\ndescription: mine\n---\n# handmade\n",
+    );
+    // A glob matches managed items only; with none installed it removes nothing
+    // and must never touch the unmanaged skill.
+    let _ = sb.mind(&["forget", "*", "--yes"]);
+    assert!(
+        skill.exists(),
+        "a glob forget must never delete an unmanaged item"
+    );
+}
+
 // --- TUI-2 fallback tests ---------------------------------------------------
 //
 // TUI-2: `probe` falls back to the non-interactive catalog listing when

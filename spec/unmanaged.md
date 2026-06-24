@@ -29,16 +29,20 @@ manifest and its per-item `links` are defined in [storage.md](storage.md).
   by mind"), one row per item showing its `kind:name` and the lobe path(s) it
   occupies. They are shown by default (no flag needed); `--kind` filters them as
   it filters managed items, and `--source` excludes them (they have no source).
-  `--json` (CLI-73) adds a top-level `unmanaged` array alongside the sources.
+  `recall --json` is unchanged: it lists sources only (CLI-73), so its schema
+  stays stable; unmanaged items are exposed machine-readably by `probe --json`
+  (UNM-3).
 
 ## probe
 
 - `UNM-3` `probe` includes unmanaged items in its listing and its substring
   search (CLI-85 matches their name), in a synthetic group distinct from any
-  source. The non-TUI and `--json` listings mark each row `unmanaged: true`; the
-  interactive TUI (tui.md) shows them under an "unmanaged" group node that is
-  browsable, searchable, and selectable like a source's items. `--kind` filters;
-  `--source` excludes them.
+  source. The human listing marks each unmanaged row, and `--json` carries it with
+  `unmanaged: true` and no `source`/`hash`. `--kind` filters; `--source` excludes
+  them. This is the non-interactive listing; the interactive TUI node is UNM-6.
+- `UNM-6` The interactive TUI (tui.md) shows unmanaged items under an "unmanaged"
+  group node that is browsable, searchable, and selectable like a source's items,
+  with the same forget action (UNM-4/5) available from it.
 
 ## forget
 

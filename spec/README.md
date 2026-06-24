@@ -63,7 +63,8 @@ and verified.
 | Path-reference tokens `{{self}}` / `{{tools:name}}` / `{{path:ref}}` | done | [tooling.md](tooling.md) (TOOL-10..16) |
 | Item build hooks: per-item `build`, staging-time, transactional | done | [install-hooks.md](install-hooks.md) (HOOK-70..73) |
 | Polished output: global `--json`/`--yes`/`--ascii`, color+Unicode gate, structured JSON results | done | CLI-150, CLI-151, CLI-152, CLI-153, CLI-154 |
-| Unmanaged lobe items: surfaced in `recall`/`probe`, removable via `forget` with a distinct warning | planned | [unmanaged.md](unmanaged.md) |
+| Unmanaged lobe items: `recall`/`probe` listing + `forget` with a not-managed-by-mind warning | done | [unmanaged.md](unmanaged.md) (UNM-1..5) |
+| Unmanaged items in the `probe` TUI group node | planned | UNM-6 |
 
 ## Documents
 

@@ -28,10 +28,11 @@ const ALLOWLIST: &[&str] = &[
     // Planned features (see spec/README.md feature status = planned): documented
     // with stable IDs ahead of implementation. Each must move to a citing test
     // when built, at which point it is removed from this allowlist.
-    //   unmanaged lobe items (see spec/unmanaged.md): skills/agents/rules present
-    //   in an agent home that mind did not install, surfaced in recall/probe and
-    //   removable via forget with a not-managed-by-mind warning. Not yet built.
-    "UNM-1", "UNM-2", "UNM-3", "UNM-4", "UNM-5",
+    //   unmanaged lobe items (see spec/unmanaged.md): the scan + recall + probe
+    //   listing + forget (UNM-1..5) are implemented and cited from src/unmanaged.rs
+    //   and tests/cli.rs. Only the interactive TUI group node remains:
+    //     UNM-6: the probe TUI "unmanaged" group node (not yet built).
+    "UNM-6",
     //   version pinning: now implemented; IDs removed from allowlist and cited in tests.
     //   review verb: now implemented; IDs removed from allowlist and cited in tests.
     //   meld no-arg defaults to `.` (CLI-25, cited in tests/cli.rs) and the
