@@ -29,66 +29,122 @@ fn is_word_char(c: char) -> bool {
 }
 
 /// Rewrite bare whole-word sibling mentions in `content` into `{{ns:name}}`
-/// tokens, skipping any text already inside a `{{ns:}}` token (INIT-5). Returns
-/// the new content and the number of replacements made. Heuristic: a sibling
-/// name that is also an ordinary word will be wrapped, so callers (init-source)
-/// keep this opt-in and reviewable.
+/// tokens, returning the new content and the number of replacements. Wrapping is
+/// confined to prose (NS-24): text already inside a `{{ns:}}` token, a fenced
+/// code block, an inline code span, the leading frontmatter, or a path-adjacent
+/// position is left untouched, so a keyword or path component is never wrapped.
+/// Still heuristic in prose (a sibling name can be an ordinary word), so callers
+/// (init-source) keep it opt-in and reviewable, and apply it only to markdown.
 pub fn templatize(content: &str, siblings: &HashSet<String>) -> (String, usize) {
-    const OPEN: &str = "{{ns:";
     let mut out = String::with_capacity(content.len());
     let mut count = 0;
-    let mut rest = content;
-    while let Some(pos) = rest.find(OPEN) {
-        let (rep, n) = wrap_bare_words(&rest[..pos], siblings);
-        out.push_str(&rep);
-        count += n;
-        // Copy the token span verbatim (do not re-wrap inside it).
-        let after = &rest[pos + OPEN.len()..];
-        match after.find("}}") {
-            Some(end) => {
-                let token_end = pos + OPEN.len() + end + 2;
-                out.push_str(&rest[pos..token_end]);
-                rest = &rest[token_end..];
-            }
-            None => {
-                // Unterminated token: copy the remainder verbatim and stop.
-                out.push_str(&rest[pos..]);
-                rest = "";
-                break;
-            }
+    let mut in_fence = false;
+    let mut in_frontmatter = false;
+    for (idx, raw) in content.split_inclusive('\n').enumerate() {
+        let line = raw.strip_suffix('\n').unwrap_or(raw);
+        let nl = &raw[line.len()..];
+        let trimmed = line.trim();
+        if idx == 0 && trimmed == "---" {
+            in_frontmatter = true;
+            out.push_str(raw);
+            continue;
         }
+        if in_frontmatter {
+            if trimmed == "---" {
+                in_frontmatter = false;
+            }
+            out.push_str(raw); // never wrap inside frontmatter
+            continue;
+        }
+        if trimmed.starts_with("```") {
+            in_fence = !in_fence;
+            out.push_str(raw);
+            continue;
+        }
+        if in_fence {
+            out.push_str(raw); // never wrap inside a code block
+            continue;
+        }
+        let (wrapped, n) = wrap_line(line, siblings);
+        out.push_str(&wrapped);
+        out.push_str(nl);
+        count += n;
     }
-    let (rep, n) = wrap_bare_words(rest, siblings);
-    out.push_str(&rep);
-    count += n;
     (out, count)
 }
 
-/// Wrap whole-word sibling names in `prose` (no `{{ns:}}` tokens) with tokens.
-fn wrap_bare_words(prose: &str, siblings: &HashSet<String>) -> (String, usize) {
-    let mut out = String::with_capacity(prose.len());
+/// Wrap bare sibling names in one prose line, skipping existing `{{...}}` tokens,
+/// inline code spans, and path-adjacent positions.
+fn wrap_line(line: &str, siblings: &HashSet<String>) -> (String, usize) {
+    let chars: Vec<char> = line.chars().collect();
+    let mut out = String::with_capacity(line.len());
     let mut count = 0;
     let mut word = String::new();
-    for c in prose.chars() {
+    let mut in_span = false;
+    let mut before: Option<char> = None;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        // Copy an existing `{{...}}` token verbatim (do not re-wrap inside it).
+        if c == '{' && chars.get(i + 1) == Some(&'{') {
+            count += emit_word(&word, siblings, in_span, before, None, &mut out);
+            word.clear();
+            let start = i;
+            i += 2;
+            while i + 1 < chars.len() && !(chars[i] == '}' && chars[i + 1] == '}') {
+                i += 1;
+            }
+            i = if i + 1 < chars.len() {
+                i + 2
+            } else {
+                chars.len()
+            };
+            for &ch in &chars[start..i] {
+                out.push(ch);
+            }
+            before = Some('}');
+            continue;
+        }
+        if c == '`' {
+            count += emit_word(&word, siblings, in_span, before, Some('`'), &mut out);
+            word.clear();
+            in_span = !in_span;
+            out.push(c);
+            before = Some('`');
+            i += 1;
+            continue;
+        }
         if is_word_char(c) {
             word.push(c);
-        } else {
-            count += emit_word(&word, siblings, &mut out);
-            word.clear();
-            out.push(c);
+            i += 1;
+            continue;
         }
+        count += emit_word(&word, siblings, in_span, before, Some(c), &mut out);
+        word.clear();
+        out.push(c);
+        before = Some(c);
+        i += 1;
     }
-    count += emit_word(&word, siblings, &mut out);
+    count += emit_word(&word, siblings, in_span, before, None, &mut out);
     (out, count)
 }
 
-/// Emit one word: wrapped as a token when it is a sibling name, else verbatim.
-/// Returns 1 if it was wrapped.
-fn emit_word(word: &str, siblings: &HashSet<String>, out: &mut String) -> usize {
+/// Emit one word: wrapped as a `{{ns:}}` token when it is a sibling name in a
+/// prose position, else verbatim. Returns 1 if wrapped. A word inside a code
+/// span or abutting a path separator (`/`/`~`) is never wrapped (NS-24).
+fn emit_word(
+    word: &str,
+    siblings: &HashSet<String>,
+    in_span: bool,
+    before: Option<char>,
+    after: Option<char>,
+    out: &mut String,
+) -> usize {
     if word.is_empty() {
         return 0;
     }
-    if siblings.contains(word) {
+    let path_adj = matches!(before, Some('/') | Some('~')) || matches!(after, Some('/'));
+    if !in_span && !path_adj && siblings.contains(word) {
         out.push_str("{{ns:");
         out.push_str(word);
         out.push_str("}}");
@@ -278,6 +334,215 @@ fn resolve_token(inner: &str, ctx: &PathCtx) -> Token {
     Token::Passthrough
 }
 
+/// The install-path prefixes a hardcoded reference can start with: mind's own
+/// store, the default agent home, and the `~/.agents` layout some libraries use.
+const HARDCODED_PREFIXES: [&str; 3] = ["~/.mind/store/", "~/.claude/", "~/.agents/"];
+
+/// One hardcoded install-path occurrence found in an item's text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HardcodedPath {
+    /// The offending path substring as written.
+    pub matched: String,
+    /// The token that should replace it, when it maps confidently; else `None`
+    /// (the path is still flagged, just without a concrete suggestion).
+    pub suggestion: Option<String>,
+}
+
+/// Whether `c` ends a path token in prose (so the scanner knows where the path
+/// substring stops).
+fn is_path_terminator(c: char) -> bool {
+    c.is_whitespace()
+        || matches!(
+            c,
+            '"' | '\'' | '`' | ')' | ']' | '}' | ',' | ';' | '<' | '>'
+        )
+}
+
+/// Parse a hardcoded install path into `(kind, bare_name, rest)`, where `rest`
+/// is the remainder after the item name (no leading slash). Recognizes the
+/// `~/.mind/store/<kind>/...`, `~/.claude/<kinddir>/...`, and `~/.agents/<kinddir>/...`
+/// layouts. Returns `None` for anything that does not name a kind + item.
+fn parse_install_path(path: &str) -> Option<(crate::error::ItemKind, String, String)> {
+    let after_kind = if let Some(rest) = path.strip_prefix("~/.mind/store/") {
+        let mut it = rest.splitn(2, '/');
+        let kind = crate::error::ItemKind::parse(it.next()?)?;
+        (kind, it.next()?.to_string())
+    } else if let Some(rest) = path
+        .strip_prefix("~/.claude/")
+        .or_else(|| path.strip_prefix("~/.agents/"))
+    {
+        let mut it = rest.splitn(2, '/');
+        let kind = match it.next()? {
+            "skills" => crate::error::ItemKind::Skill,
+            "agents" => crate::error::ItemKind::Agent,
+            "rules" => crate::error::ItemKind::Rule,
+            "tools" => crate::error::ItemKind::Tool,
+            _ => return None,
+        };
+        (kind, it.next()?.to_string())
+    } else {
+        return None;
+    };
+    let (kind, tail) = after_kind;
+    let mut seg = tail.splitn(2, '/');
+    let first = seg.next()?;
+    let rest = seg.next().unwrap_or("").to_string();
+    // An agent/rule file is `<name>.md`; the store copies it as a bare `<name>`,
+    // so stripping a `.md` suffix is correct for both layouts and a no-op for the
+    // store form.
+    let name = match kind {
+        crate::error::ItemKind::Agent | crate::error::ItemKind::Rule => {
+            first.strip_suffix(".md").unwrap_or(first).to_string()
+        }
+        _ => first.to_string(),
+    };
+    if name.is_empty() {
+        return None;
+    }
+    Some((kind, name, rest))
+}
+
+/// Join a token with a path remainder: `{{self}}` + `resources/x` -> `{{self}}/resources/x`.
+fn join_token(token: &str, rest: &str) -> String {
+    if rest.is_empty() {
+        token.to_string()
+    } else {
+        format!("{token}/{rest}")
+    }
+}
+
+/// The token that should replace a hardcoded `path`, or `None` when it does not
+/// map confidently (a foreign name, an unrecognized layout like `~/.agents/resources/...`).
+fn token_for_path(path: &str, ctx: &PathCtx) -> Option<String> {
+    let (kind, name, rest) = parse_install_path(path)?;
+    // The item's own directory -> {{self}}.
+    if kind == ctx.self_kind && name == ctx.self_name {
+        return Some(join_token("{{self}}", &rest));
+    }
+    // Otherwise it must name a real sibling of that kind.
+    let sib = ctx
+        .siblings
+        .iter()
+        .find(|s| s.kind == kind && s.name == name)?;
+    if kind == crate::error::ItemKind::Tool {
+        // A tool's entrypoint -> {{tools:name}}; anything else in the tool dir ->
+        // {{path:tool:name}}/rest.
+        if let Some(bin) = &sib.bin
+            && rest == *bin
+        {
+            return Some(format!("{{{{tools:{name}}}}}"));
+        }
+        return Some(join_token(&format!("{{{{path:tool:{name}}}}}"), &rest));
+    }
+    Some(join_token(
+        &format!("{{{{path:{}:{}}}}}", kind.as_str(), name),
+        &rest,
+    ))
+}
+
+/// Find every hardcoded install path in `content`, in order, as
+/// `(start, end, HardcodedPath)` byte spans.
+fn scan_hardcoded(content: &str, ctx: &PathCtx) -> Vec<(usize, usize, HardcodedPath)> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < content.len() {
+        let Some((start, _)) = HARDCODED_PREFIXES
+            .iter()
+            .filter_map(|p| content[i..].find(p).map(|off| (i + off, *p)))
+            .min_by_key(|(pos, _)| *pos)
+        else {
+            break;
+        };
+        // Take the path substring from `start` until a terminator.
+        let mut end = content.len();
+        for (idx, c) in content[start..].char_indices() {
+            if is_path_terminator(c) {
+                end = start + idx;
+                break;
+            }
+        }
+        let matched = content[start..end].to_string();
+        let suggestion = token_for_path(&matched, ctx);
+        out.push((
+            start,
+            end,
+            HardcodedPath {
+                matched,
+                suggestion,
+            },
+        ));
+        i = end.max(start + 1);
+    }
+    out
+}
+
+/// Report every hardcoded install path in `content` that a path token should
+/// replace (CLI-136). Read-only: suggests but does not rewrite.
+pub fn detect_hardcoded_paths(content: &str, ctx: &PathCtx) -> Vec<HardcodedPath> {
+    scan_hardcoded(content, ctx)
+        .into_iter()
+        .map(|(_, _, hp)| hp)
+        .collect()
+}
+
+/// Rewrite the confidently-mapped hardcoded install paths in `content` into their
+/// tokens (CLI-138). Paths with no confident mapping are left untouched. Returns
+/// the new content and the number of rewrites.
+pub fn rewrite_hardcoded_paths(content: &str, ctx: &PathCtx) -> (String, usize) {
+    let mut out = String::with_capacity(content.len());
+    let mut last = 0;
+    let mut count = 0;
+    for (start, end, hp) in scan_hardcoded(content, ctx) {
+        if let Some(token) = hp.suggestion {
+            out.push_str(&content[last..start]);
+            out.push_str(&token);
+            last = end;
+            count += 1;
+        }
+    }
+    out.push_str(&content[last..]);
+    (out, count)
+}
+
+/// Replace every `{{...}}` span with a space, so prose scanning ignores anything
+/// already inside a reference token (any token kind, not just `{{ns:}}`).
+fn strip_braced(content: &str) -> String {
+    let mut out = String::with_capacity(content.len());
+    let mut rest = content;
+    while let Some(pos) = rest.find("{{") {
+        out.push_str(&rest[..pos]);
+        let after = &rest[pos + 2..];
+        match after.find("}}") {
+            Some(end) => {
+                out.push(' ');
+                rest = &after[end + 2..];
+            }
+            None => {
+                rest = "";
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Find sibling TOOL names mentioned in `content`'s prose without a token
+/// (CLI-137). Unlike [`unguarded_refs`], this is prefix-independent: a tool is
+/// reached by a path token, never by name, so a bare tool name is always suspect.
+pub fn bare_tool_refs(content: &str, siblings: &[PathSibling]) -> Vec<String> {
+    let stripped = strip_braced(content);
+    let mut found: Vec<String> = siblings
+        .iter()
+        .filter(|s| s.kind == crate::error::ItemKind::Tool)
+        .map(|s| s.name.clone())
+        .filter(|name| whole_word_present(&stripped, name))
+        .collect();
+    found.sort();
+    found.dedup();
+    found
+}
+
 /// Extract the bare name of every `{{ns:name}}` token in `content`.
 ///
 /// Mirrors [`expand`]'s inline parser: the open delimiter is `{{ns:`, the name
@@ -361,6 +626,134 @@ fn whole_word_present(haystack: &str, needle: &str) -> bool {
 
 fn is_word(c: char) -> bool {
     c.is_alphanumeric() || c == '_' || c == '-'
+}
+
+/// The structural context a `{{ns:}}` token sits in, for flagging misplaced ones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NsContext {
+    /// Natural-language prose: the only place a name reference belongs.
+    Prose,
+    /// Inside a fenced ```` ``` ```` code block.
+    CodeBlock,
+    /// Inside an inline `code span`.
+    CodeSpan,
+    /// Abutting a path separator (`/` or `~`).
+    Path,
+    /// The frontmatter `name:` field (an item namespacing its own name).
+    FrontmatterName,
+}
+
+impl NsContext {
+    /// Whether a name token here is misplaced (anything but prose; NS-24).
+    pub fn is_misplaced(self) -> bool {
+        !matches!(self, NsContext::Prose)
+    }
+}
+
+/// One `{{ns:name}}` token found in `content`, with its context and byte span.
+#[derive(Debug, Clone)]
+pub struct NsRef {
+    pub name: String,
+    pub context: NsContext,
+    pub start: usize,
+    pub end: usize,
+}
+
+/// True when byte position `pos` in `line` is inside an inline code span (an odd
+/// number of backticks precede it on the line).
+fn in_code_span(line: &str, pos: usize) -> bool {
+    line[..pos].bytes().filter(|&b| b == b'`').count() % 2 == 1
+}
+
+/// True when the token spanning `[start, end)` in `line` abuts a path separator.
+fn path_adjacent(line: &str, start: usize, end: usize) -> bool {
+    let before = line[..start].chars().next_back();
+    let after = line[end..].chars().next();
+    matches!(before, Some('/') | Some('~')) || matches!(after, Some('/'))
+}
+
+/// Find every `{{ns:name}}` token in `content`, each with its structural context
+/// (NS-24) and byte span. Tracks fenced code blocks and the leading frontmatter
+/// so a token can be classified as misplaced (in code, a path, or `name:`).
+pub fn scan_ns_refs(content: &str) -> Vec<NsRef> {
+    const OPEN: &str = "{{ns:";
+    let mut out = Vec::new();
+    let mut in_fence = false;
+    let mut in_frontmatter = false;
+    let mut offset = 0usize;
+    for (idx, raw) in content.split_inclusive('\n').enumerate() {
+        let line = raw.strip_suffix('\n').unwrap_or(raw);
+        let trimmed = line.trim();
+        if idx == 0 && trimmed == "---" {
+            in_frontmatter = true;
+            offset += raw.len();
+            continue;
+        }
+        if in_frontmatter {
+            if trimmed == "---" {
+                in_frontmatter = false;
+                offset += raw.len();
+                continue;
+            }
+        } else if trimmed.starts_with("```") {
+            in_fence = !in_fence;
+            offset += raw.len();
+            continue;
+        }
+        let fm_name = in_frontmatter && line.trim_start().starts_with("name:");
+        let mut from = 0;
+        while let Some(rel) = line[from..].find(OPEN) {
+            let tstart = from + rel;
+            let after = &line[tstart + OPEN.len()..];
+            let Some(erel) = after.find("}}") else { break };
+            let tend = tstart + OPEN.len() + erel + 2;
+            let name = after[..erel].trim().to_string();
+            let context = if fm_name {
+                NsContext::FrontmatterName
+            } else if in_frontmatter {
+                NsContext::Prose
+            } else if in_fence {
+                NsContext::CodeBlock
+            } else if in_code_span(line, tstart) {
+                NsContext::CodeSpan
+            } else if path_adjacent(line, tstart, tend) {
+                NsContext::Path
+            } else {
+                NsContext::Prose
+            };
+            if !name.is_empty() {
+                out.push(NsRef {
+                    name,
+                    context,
+                    start: offset + tstart,
+                    end: offset + tend,
+                });
+            }
+            from = tend;
+        }
+        offset += raw.len();
+    }
+    out
+}
+
+/// Un-wrap misplaced `{{ns:name}}` tokens (NS-24) back to the bare `name`. With
+/// `all_code` false, only non-prose tokens are un-wrapped (the markdown case);
+/// with it true, every token is un-wrapped (a non-markdown file, which is all
+/// code, where no `{{ns:}}` belongs). Returns the new content and the count.
+pub fn unwrap_misplaced(content: &str, all_code: bool) -> (String, usize) {
+    let mut out = String::with_capacity(content.len());
+    let mut last = 0;
+    let mut count = 0;
+    for r in scan_ns_refs(content) {
+        if all_code || r.context.is_misplaced() {
+            out.push_str(&content[last..r.start]);
+            out.push_str(&r.name);
+            last = r.end;
+            count += 1;
+        }
+    }
+    out.push_str(&content[last..]);
+    (out, count)
 }
 
 #[cfg(test)]
@@ -701,6 +1094,65 @@ mod tests {
     }
 
     #[test]
+    fn rewrite_maps_hardcoded_paths_to_tokens() {
+        // spec: CLI-138
+        let store = Path::new("/m/store");
+        let none = None;
+        let sibs = vec![
+            psib(ItemKind::Tool, "detect", Some("detect")),
+            psib(ItemKind::Skill, "release", None),
+        ];
+        let c = ctx(store, &none, ItemKind::Skill, "review", &sibs);
+        let input = "self ~/.claude/skills/review/resources/pr.py \
+                     tool ~/.mind/store/tool/detect/detect \
+                     other ~/.mind/store/skill/release/x.sh \
+                     foreign ~/.claude/skills/unknown/y.sh";
+        let (out, n) = rewrite_hardcoded_paths(input, &c);
+        assert_eq!(n, 3, "three confident rewrites: {out}");
+        assert!(out.contains("self {{self}}/resources/pr.py"), "{out}");
+        assert!(out.contains("tool {{tools:detect}}"), "{out}");
+        assert!(out.contains("other {{path:skill:release}}/x.sh"), "{out}");
+        // A path naming no sibling is left untouched (conservative).
+        assert!(
+            out.contains("foreign ~/.claude/skills/unknown/y.sh"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn detect_reports_paths_with_and_without_suggestions() {
+        // spec: CLI-136
+        let store = Path::new("/m/store");
+        let none = None;
+        let sibs = vec![psib(ItemKind::Tool, "detect", Some("detect"))];
+        let c = ctx(store, &none, ItemKind::Skill, "review", &sibs);
+        let found = detect_hardcoded_paths(
+            "a ~/.mind/store/tool/detect/detect b ~/.agents/resources/x.sh",
+            &c,
+        );
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].suggestion.as_deref(), Some("{{tools:detect}}"));
+        // ~/.agents/resources/... maps to no kind/name, so it is flagged without a
+        // concrete suggestion rather than mis-rewritten.
+        assert_eq!(found[1].suggestion, None);
+    }
+
+    #[test]
+    fn bare_tool_refs_finds_tool_names_outside_tokens() {
+        // spec: CLI-137
+        let sibs = vec![
+            psib(ItemKind::Tool, "detect", Some("detect")),
+            psib(ItemKind::Skill, "review", None),
+        ];
+        // `detect` in prose is found; the skill `review` (not a tool) is not; a
+        // `{{tools:detect}}` token is not double-counted.
+        let refs = bare_tool_refs("run detect then review; later {{tools:detect}}", &sibs);
+        assert_eq!(refs, vec!["detect".to_string()]);
+        // Prefix-independence: no prefix here, yet the bare tool ref is reported.
+        assert!(bare_tool_refs("just detect", &sibs).contains(&"detect".to_string()));
+    }
+
+    #[test]
     fn path_tokens_ignore_ns_and_handle_edges() {
         // spec: TOOL-14
         let store = Path::new("/m/store");
@@ -722,5 +1174,60 @@ mod tests {
         assert_eq!(expand_paths("plain prose", &c).unwrap(), "plain prose");
         // A stray `{{` that is not a known token passes through.
         assert_eq!(expand_paths("a {{x}} b", &c).unwrap(), "a {{x}} b");
+    }
+
+    // ---- misplaced {{ns:}} detection / un-wrap / templatize hardening (NS-24) -
+
+    #[test]
+    fn scan_ns_refs_classifies_context() {
+        // spec: NS-24
+        let doc = "---\nname: {{ns:dev}}\ndescription: see {{ns:review}}\n---\n\
+                   prose {{ns:dev}} here\n`{{ns:test}}` span\n~/{{ns:dev}}\n\
+                   ```\n{{ns:do}}\n```\n";
+        let got: Vec<(String, NsContext)> = scan_ns_refs(doc)
+            .into_iter()
+            .map(|r| (r.name, r.context))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("dev".into(), NsContext::FrontmatterName),
+                ("review".into(), NsContext::Prose), // other frontmatter is prose
+                ("dev".into(), NsContext::Prose),
+                ("test".into(), NsContext::CodeSpan),
+                ("dev".into(), NsContext::Path),
+                ("do".into(), NsContext::CodeBlock),
+            ]
+        );
+    }
+
+    #[test]
+    fn templatize_skips_code_paths_and_frontmatter() {
+        // spec: NS-24 INIT-5
+        let s = sibs(&["dev", "do"]);
+        let doc = "---\nname: dev\n---\nuse dev here\n`dev`\n~/dev\n```\nfor x; do\n```\n";
+        let (out, n) = templatize(doc, &s);
+        assert_eq!(n, 1, "only the prose mention is wrapped: {out}");
+        assert!(out.contains("use {{ns:dev}} here"), "{out}");
+        assert!(out.contains("`dev`"), "code span untouched: {out}");
+        assert!(out.contains("~/dev"), "path untouched: {out}");
+        assert!(out.contains("for x; do"), "code block untouched: {out}");
+        assert!(out.contains("name: dev"), "frontmatter untouched: {out}");
+    }
+
+    #[test]
+    fn unwrap_misplaced_restores_words() {
+        // spec: NS-24
+        let doc = "prose {{ns:dev}}\n`{{ns:test}}`\n~/{{ns:dev}}\n";
+        let (out, n) = unwrap_misplaced(doc, false);
+        assert_eq!(
+            n, 2,
+            "code-span and path tokens un-wrapped, prose kept: {out}"
+        );
+        assert_eq!(out, "prose {{ns:dev}}\n`test`\n~/dev\n");
+        // all_code: every token is misplaced.
+        let (all, m) = unwrap_misplaced(doc, true);
+        assert_eq!(m, 3);
+        assert_eq!(all, "prose dev\n`test`\n~/dev\n");
     }
 }

@@ -301,6 +301,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             target,
             alias,
             policy,
+            fix,
         } => {
             if let Some(p) = policy {
                 review::dispatch_policy(&p)
@@ -315,7 +316,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
                         .into_owned(),
                     Some(t) => t.to_string(),
                 };
-                commands::review(paths, &target, alias)
+                commands::review(paths, &target, alias, fix)
             }
         }
         Command::Introspect { fix, json } => commands::introspect(paths, fix, json),

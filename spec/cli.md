@@ -297,9 +297,10 @@ only appear at meld or install time. It is read-only and installs nothing.
   `BadReference` at install), and unguarded prose references to siblings under the
   effective prefix (the meld-time heuristic, CLI-14).
 - `CLI-132` `review`'s exit status: a hard error (malformed `mind.toml`, an unknown
-  item kind, a conflicting `[source]` pin, or an unresolved `{{ns:}}` token) exits
-  non-zero; advisory findings only (unguarded references, missing descriptions)
-  exit zero. It changes nothing on disk in either case.
+  item kind, a conflicting `[source]` pin, or an unresolved `{{ns:}}` / path token)
+  exits non-zero; advisory findings only (unguarded references, missing
+  descriptions, hardcoded paths, bare tool references) exit zero. It changes
+  nothing on disk in either case, except under `--fix` (CLI-138).
 - `CLI-133` `review --as <prefix>` evaluates the source under a prospective
   namespace, so token expansion and the unguarded-reference scan are checked as
   they would install under that prefix. With no flag the effective prefix is the
@@ -307,6 +308,41 @@ only appear at meld or install time. It is read-only and installs nothing.
 - `CLI-134` Supplying both `<target>` and `--policy` to `review` is a usage
   error: clap rejects the combination before any logic runs, exits non-zero, and
   prints a conflict diagnostic to stderr.
+- `CLI-135` `review` validates an item's path-reference tokens the same way it
+  validates `{{ns:}}` (CLI-131): a `{{self}}` / `{{tools:name}}` / `{{path:ref}}`
+  token whose referent does not resolve in this source (a `{{tools:}}` naming a
+  non-tool or a tool with no entrypoint, a `{{path:}}` miss or cross-kind
+  ambiguity) is a hard `bad-reference` finding, which would be a `BadReference` at
+  install (tooling.md, TOOL-11/12). Every bad token is reported, not just the
+  first.
+- `CLI-136` `review` reports, as an advisory `hardcoded-path` finding, an item
+  file that hardcodes an install path (`~/.mind/store/...`, `~/.claude/...`, or
+  `~/.agents/...`) that a path token should replace. When the path maps
+  confidently to a token (the item's own dir -> `{{self}}`, a sibling tool's
+  entrypoint -> `{{tools:name}}`, another sibling -> `{{path:kind:name}}`) the
+  finding names the suggested token. Advisory, not hard: a hardcoded path still
+  installs, it is just fragile under a prefix or across agent homes.
+- `CLI-137` `review` reports, as an advisory `bare-tool-reference` finding, a
+  sibling tool named in an item's prose without a token. Unlike the unguarded
+  sibling-reference scan (CLI-131), which only matters under a prefix, a bare tool
+  reference is flagged regardless of prefix, since a tool is reached by a path
+  token, never by name.
+- `CLI-138` `review --fix` rewrites the source in place and is the sole exception
+  to `review` being read-only (CLI-132). It applies only to a local-path target;
+  a registry selector or a repo spec (whose clone is a discarded temp) refuses
+  `--fix` and changes nothing. For each item file it rewrites confidently
+  recognized hardcoded install paths into the matching token (CLI-136),
+  templatizes bare sibling names into `{{ns:}}` (the `init-source --template`
+  transform, INIT-5), and un-wraps misplaced `{{ns:}}` tokens (CLI-139) back to
+  the bare name, then reports each file it changed.
+- `CLI-139` `review` flags a misplaced `{{ns:}}` token -- one in a non-prose
+  context (NS-24) where name-substitution is wrong. A token inside a fenced code
+  block, an inline code span, or adjacent to a path separator is an advisory
+  `misplaced-reference` (a name token belongs in prose; code and paths use the
+  path tokens, tooling.md). A token in the frontmatter `name:` field is a hard
+  `misplaced-reference`: an item must not namespace its own name. This is the dual
+  of the unguarded-reference scan (CLI-131): one finds a bare name that should be
+  a token, the other a token that should be a bare word.
 
 ## introspect
 

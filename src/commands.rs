@@ -740,6 +740,11 @@ pub fn init_source(dir: Option<&str>, template: bool) -> Result<()> {
             let mut sibs = siblings.clone();
             sibs.remove(&it.name);
             for file in item_files(it) {
+                // {{ns:}} is a prose reference (NS-24); only markdown carries
+                // prose. Never templatize scripts/data, where every word is code.
+                if file.extension().and_then(|e| e.to_str()) != Some("md") {
+                    continue;
+                }
                 let Ok(content) = std::fs::read_to_string(&file) else {
                     continue; // skip non-UTF-8 / unreadable files
                 };
@@ -2427,11 +2432,16 @@ pub fn introspect(paths: &Paths, fix: bool, json: bool) -> Result<()> {
 /// non-zero exit (CLI-132). Installs nothing and changes nothing on disk.
 ///
 /// spec: CLI-130, CLI-131, CLI-132, CLI-133
-pub fn review(paths: &Paths, target: &str, alias: Option<String>) -> Result<()> {
-    let result = crate::review::review(paths, target, alias)?;
+pub fn review(paths: &Paths, target: &str, alias: Option<String>, fix: bool) -> Result<()> {
+    let result = crate::review::review(paths, target, alias, fix)?;
 
     // Print hard then advisory findings in the shared format.
     crate::review::print_findings(&result.hard, &result.advisory);
+
+    // Report any files `--fix` rewrote.
+    for f in &result.fixed {
+        println!("fixed {f}");
+    }
 
     if result.hard.is_empty() {
         if result.advisory.is_empty() {

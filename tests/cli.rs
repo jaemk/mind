@@ -6988,3 +6988,96 @@ fn tool_with_explicit_link_is_surfaced() {
         "an explicit link surfaces the tool in the agent home"
     );
 }
+
+#[test]
+fn review_flags_tooling_references() {
+    // spec: CLI-135 CLI-136 CLI-137
+    let sb = Sandbox::bare("agents");
+    // A shared tool so `detect` is a sibling tool (and {{tools:nope}} stays bad).
+    write(&sb.source.join("tools/detect/detect"), "#!/bin/sh\n");
+    write(
+        &sb.source.join("skills/review/SKILL.md"),
+        "---\nname: review\ndescription: review\n---\n\
+         run {{tools:nope}} .\n\
+         also ~/.claude/skills/review/resources/pr.py\n\
+         mention the detect tool\n",
+    );
+    let target = sb.source_spec();
+    let r = sb.mind(&["review", &target]);
+
+    assert!(
+        !r.success,
+        "an unresolved path token is a hard error: {}",
+        r.stdout
+    );
+    assert!(
+        r.stderr.contains("bad-reference"),
+        "expected a bad-reference hard finding: {}",
+        r.stderr
+    );
+    assert!(
+        r.stdout.contains("hardcoded-path") && r.stdout.contains("{{self}}/resources/pr.py"),
+        "expected a hardcoded-path advisory suggesting the token: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("bare-tool-reference"),
+        "expected a bare-tool-reference advisory: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn review_fix_rewrites_local_copy() {
+    // spec: CLI-138
+    let sb = Sandbox::bare("agents");
+    let skill = sb.source.join("skills/review/SKILL.md");
+    write(
+        &skill,
+        "---\nname: review\ndescription: review\n---\n\
+         run ~/.claude/skills/review/run.sh; hand off to dev\n",
+    );
+    write(
+        &sb.source.join("agents/dev.md"),
+        "---\nname: dev\ndescription: dev\n---\n# dev\n",
+    );
+    let target = sb.source_spec();
+    let r = sb.mind(&["review", &target, "--fix"]);
+    assert!(
+        r.success,
+        "advisory-only fix must exit zero: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stdout.contains("fixed"),
+        "must report the fixed file: {}",
+        r.stdout
+    );
+
+    let rewritten = std::fs::read_to_string(&skill).unwrap();
+    assert!(
+        rewritten.contains("{{self}}/run.sh"),
+        "hardcoded path rewritten to a token: {rewritten}"
+    );
+    assert!(
+        rewritten.contains("{{ns:dev}}"),
+        "bare sibling name templatized: {rewritten}"
+    );
+}
+
+#[test]
+fn review_fix_refuses_a_registry_target() {
+    // spec: CLI-138
+    let sb = melded();
+    let r = sb.mind(&["review", "agents", "--fix"]);
+    assert!(
+        !r.success,
+        "--fix against a melded selector must refuse: {}",
+        r.stdout
+    );
+    assert!(
+        r.stderr.contains("fix-not-local"),
+        "expected a fix-not-local refusal: {}",
+        r.stderr
+    );
+}

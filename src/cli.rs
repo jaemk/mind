@@ -339,6 +339,12 @@ pub enum Command {
         /// Cannot be used with `<target>`; supply exactly one of the two.
         #[arg(long, value_name = "PATH", conflicts_with = "target")]
         policy: Option<std::path::PathBuf>,
+
+        /// Rewrite the source in place: hardcoded install paths become tokens and
+        /// bare sibling names become `{{ns:}}`. Local-path target only; the sole
+        /// `review` mode that writes to disk. Ignored with `--policy`.
+        #[arg(long, conflicts_with = "policy")]
+        fix: bool,
     },
 
     /// Diagnose drift, broken symlinks, and unsynced sources.

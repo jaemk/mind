@@ -74,3 +74,15 @@ at runtime. Prefixing changes installed names, so references must be rewritten.
   not rewrite anything.
 - `NS-23` No warning is emitted when no prefix is in effect, since bare references
   are then correct.
+
+## Prose-only scope
+
+- `NS-24` A `{{ns:name}}` token is a prose name reference: it expands to the
+  referent's effective name (NS-11), which is correct only where an item name
+  belongs. It is *misplaced* in a non-prose context -- inside a fenced code block
+  or an inline code span, adjacent to a path separator (`/` or `~`), or in a
+  frontmatter structured field such as `name:` -- where name-substitution yields
+  broken code, a broken path, or (under a prefix) a wrong identity. Code and paths
+  reference an item by path token instead (`{{self}}`, `{{tools:}}`, `{{path:}}`;
+  tooling.md), never by `{{ns:}}`. `review` detects misplaced tokens (CLI-139) and
+  `init-source --template` does not create them (INIT-5).

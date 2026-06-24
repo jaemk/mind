@@ -59,6 +59,9 @@ pub(crate) fn print_findings(hard: &[Finding], advisory: &[Finding]) {
 pub struct ReviewResult {
     pub hard: Vec<Finding>,
     pub advisory: Vec<Finding>,
+    /// Files rewritten by `--fix` (CLI-138), relative-or-absolute as displayed.
+    /// Always empty unless `--fix` ran against a local target.
+    pub fixed: Vec<String>,
 }
 
 /// `mind review <target> [--as <prefix>]`
@@ -66,10 +69,18 @@ pub struct ReviewResult {
 /// Returns Ok(ReviewResult) where the hard and advisory findings are collected.
 /// The caller decides whether to exit non-zero (any hard findings => non-zero).
 ///
-/// spec: CLI-130, CLI-131, CLI-132, CLI-133
-pub fn review(paths: &Paths, target: &str, alias: Option<String>) -> Result<ReviewResult> {
-    let (source_dir, _temp_guard) = resolve_target(paths, target, &alias)?;
-    run_checks(paths, &source_dir, alias)
+/// `fix` enables the in-place token rewrite (CLI-138); it is honored only for a
+/// local-path target and otherwise produces a hard refusal that changes nothing.
+///
+/// spec: CLI-130, CLI-131, CLI-132, CLI-133, CLI-135, CLI-136, CLI-137, CLI-138
+pub fn review(
+    paths: &Paths,
+    target: &str,
+    alias: Option<String>,
+    fix: bool,
+) -> Result<ReviewResult> {
+    let (source_dir, _temp_guard, is_local) = resolve_target(paths, target, &alias)?;
+    run_checks(paths, &source_dir, alias, fix, is_local)
 }
 
 /// `mind review --policy <path>` — validate a managed policy file.
@@ -109,7 +120,11 @@ pub fn review_policy(path: &Path) -> crate::error::Result<ReviewResult> {
         }
     }
 
-    Ok(ReviewResult { hard, advisory })
+    Ok(ReviewResult {
+        hard,
+        advisory,
+        fixed: Vec::new(),
+    })
 }
 
 /// Print the result of a `review --policy` run and exit non-zero on hard errors.
@@ -149,15 +164,20 @@ pub fn dispatch_policy(path: &Path) -> crate::error::Result<()> {
 ///
 /// Precedence: exact/suffix registry match > local path > remote spec.
 /// spec: CLI-130
+///
+/// The trailing `bool` is `true` only for a local working-tree path: the one
+/// target kind `--fix` (CLI-138) may rewrite. A registry selector resolves to
+/// mind's managed clone and a repo spec to a discarded temp clone, so both are
+/// `false`.
 fn resolve_target(
     paths: &Paths,
     target: &str,
     alias: &Option<String>,
-) -> Result<(PathBuf, Option<TempDirGuard>)> {
+) -> Result<(PathBuf, Option<TempDirGuard>, bool)> {
     // Try registry match first (exact or suffix).
     // This covers both the melded-selector case and the "owner/repo" ambiguity.
     if let Some(dir) = try_registry_match(paths, target)? {
-        return Ok((dir, None));
+        return Ok((dir, None, false));
     }
 
     // Parse as a spec (local path or remote).
@@ -173,7 +193,7 @@ fn resolve_target(
             });
         }
         let _ = alias; // alias is applied at check time, not here
-        return Ok((dir, None));
+        return Ok((dir, None, true));
     }
 
     // Remote spec: shallow-clone to a temp dir, register a drop guard.
@@ -190,7 +210,7 @@ fn resolve_target(
     let guard = TempDirGuard(tmp.clone());
 
     git::clone(&source.url, &tmp)?;
-    Ok((tmp, Some(guard)))
+    Ok((tmp, Some(guard), false))
 }
 
 /// Look up `target` as a registry selector. Returns the clone dir if found.
@@ -217,8 +237,14 @@ fn try_registry_match(paths: &Paths, target: &str) -> Result<Option<PathBuf>> {
 
 /// Run all checks against the source directory. Returns collected findings.
 ///
-/// spec: CLI-131, CLI-132, CLI-133
-fn run_checks(_paths: &Paths, source_dir: &Path, alias: Option<String>) -> Result<ReviewResult> {
+/// spec: CLI-131, CLI-132, CLI-133, CLI-135, CLI-136, CLI-137, CLI-138
+fn run_checks(
+    _paths: &Paths,
+    source_dir: &Path,
+    alias: Option<String>,
+    fix: bool,
+    is_local: bool,
+) -> Result<ReviewResult> {
     let mut hard: Vec<Finding> = Vec::new();
     let mut advisory: Vec<Finding> = Vec::new();
 
@@ -231,7 +257,11 @@ fn run_checks(_paths: &Paths, source_dir: &Path, alias: Option<String>) -> Resul
                 "toml-parse-error",
                 format!("mind.toml error: {e}"),
             ));
-            return Ok(ReviewResult { hard, advisory });
+            return Ok(ReviewResult {
+                hard,
+                advisory,
+                fixed: Vec::new(),
+            });
         }
     };
 
@@ -293,7 +323,11 @@ fn run_checks(_paths: &Paths, source_dir: &Path, alias: Option<String>) -> Resul
                     "toml-parse-error",
                     format!("mind.toml error: {e}"),
                 ));
-                return Ok(ReviewResult { hard, advisory });
+                return Ok(ReviewResult {
+                    hard,
+                    advisory,
+                    fixed: Vec::new(),
+                });
             }
         }
     }
@@ -321,18 +355,30 @@ fn run_checks(_paths: &Paths, source_dir: &Path, alias: Option<String>) -> Resul
                     source_name
                 ),
             ));
-            return Ok(ReviewResult { hard, advisory });
+            return Ok(ReviewResult {
+                hard,
+                advisory,
+                fixed: Vec::new(),
+            });
         }
         Err(MindError::MindToml { ref msg, .. }) if msg.contains("unknown item kind") => {
             hard.push(Finding::hard(
                 "unknown-kind",
                 format!("mind.toml error: {msg}"),
             ));
-            return Ok(ReviewResult { hard, advisory });
+            return Ok(ReviewResult {
+                hard,
+                advisory,
+                fixed: Vec::new(),
+            });
         }
         Err(e) => {
             hard.push(Finding::hard("scan-error", format!("scan error: {e}")));
-            return Ok(ReviewResult { hard, advisory });
+            return Ok(ReviewResult {
+                hard,
+                advisory,
+                fixed: Vec::new(),
+            });
         }
     };
 
@@ -404,7 +450,161 @@ fn run_checks(_paths: &Paths, source_dir: &Path, alias: Option<String>) -> Resul
         }
     }
 
-    Ok(ReviewResult { hard, advisory })
+    // Per-source path-token resolver: every item's (kind, name, entrypoint).
+    // The store_root is a placeholder; review only cares whether a token
+    // resolves (Ok) or not (Err), never the concrete install path.
+    let path_siblings: Vec<crate::namespace::PathSibling> = items
+        .iter()
+        .map(|it| crate::namespace::PathSibling {
+            kind: it.kind,
+            name: it.name.clone(),
+            bin: it.resolved_bin(),
+        })
+        .collect();
+    let store_root = std::path::Path::new("/");
+
+    for item in &items {
+        let ctx = crate::namespace::PathCtx {
+            store_root,
+            prefix: &prefix,
+            self_kind: item.kind,
+            self_name: &item.name,
+            siblings: &path_siblings,
+        };
+        let mut bare_tools: Vec<String> = Vec::new();
+        for file in item_files(item) {
+            let Ok(content) = std::fs::read_to_string(&file) else {
+                continue;
+            };
+            // A non-markdown item file (a script, data) is entirely code: any
+            // `{{ns:}}` in it is misplaced (NS-24).
+            let is_md = file.extension().and_then(|e| e.to_str()) == Some("md");
+            // Check 8: path-reference tokens that do not resolve (hard, CLI-135).
+            if let Err(token) = crate::namespace::expand_paths(&content, &ctx) {
+                hard.push(Finding::hard(
+                    "bad-reference",
+                    format!(
+                        "{}: {token} does not resolve to any sibling in this source",
+                        item.key()
+                    ),
+                ));
+            }
+            // Check 9: hardcoded install paths that should be tokens (advisory, CLI-136).
+            for hp in crate::namespace::detect_hardcoded_paths(&content, &ctx) {
+                let suggestion = match &hp.suggestion {
+                    Some(tok) => format!("; use {tok}"),
+                    None => String::new(),
+                };
+                advisory.push(Finding::advisory(
+                    "hardcoded-path",
+                    format!(
+                        "{}: hardcoded install path '{}'{}",
+                        item.key(),
+                        hp.matched,
+                        suggestion
+                    ),
+                ));
+            }
+            // Check 10: sibling tools named in prose without a token (advisory, CLI-137).
+            for t in crate::namespace::bare_tool_refs(&content, &path_siblings) {
+                if t != item.name && !bare_tools.contains(&t) {
+                    bare_tools.push(t);
+                }
+            }
+            // Check 11: misplaced {{ns:}} tokens (CLI-139). Code/path -> advisory;
+            // the frontmatter `name:` field -> hard (an item must not namespace
+            // its own name).
+            for r in crate::namespace::scan_ns_refs(&content) {
+                // In a non-markdown file the whole text is code, so treat any
+                // token as code-block context.
+                let context = if is_md {
+                    r.context
+                } else {
+                    crate::namespace::NsContext::CodeBlock
+                };
+                let where_ = match context {
+                    crate::namespace::NsContext::Prose => continue,
+                    crate::namespace::NsContext::CodeBlock if !is_md => "a non-markdown file",
+                    crate::namespace::NsContext::CodeBlock => "a code block",
+                    crate::namespace::NsContext::CodeSpan => "a code span",
+                    crate::namespace::NsContext::Path => "a path",
+                    crate::namespace::NsContext::FrontmatterName => "the frontmatter `name:` field",
+                };
+                let msg = format!(
+                    "{}: {{{{ns:{}}}}} in {where_}; a name token belongs in prose (code/paths use {{{{tools:}}}}/{{{{self}}}}/{{{{path:}}}})",
+                    item.key(),
+                    r.name
+                );
+                if context == crate::namespace::NsContext::FrontmatterName {
+                    hard.push(Finding::hard("misplaced-reference", msg));
+                } else {
+                    advisory.push(Finding::advisory("misplaced-reference", msg));
+                }
+            }
+        }
+        if !bare_tools.is_empty() {
+            advisory.push(Finding::advisory(
+                "bare-tool-reference",
+                format!(
+                    "{}: names tool(s) in prose: {}; reference a tool by token (use {{{{tools:name}}}})",
+                    item.key(),
+                    bare_tools.join(", ")
+                ),
+            ));
+        }
+    }
+
+    // Fix (CLI-138): rewrite the local working copy in place. Local-path target
+    // only; a registry selector or repo spec is refused with nothing changed.
+    let mut fixed: Vec<String> = Vec::new();
+    if fix {
+        if !is_local {
+            hard.push(Finding::hard(
+                "fix-not-local",
+                "--fix only rewrites a local-path source; a melded selector or repo spec is \
+                 not the author's working tree, so nothing was changed",
+            ));
+        } else {
+            for item in &items {
+                let ctx = crate::namespace::PathCtx {
+                    store_root,
+                    prefix: &prefix,
+                    self_kind: item.kind,
+                    self_name: &item.name,
+                    siblings: &path_siblings,
+                };
+                for file in item_files(item) {
+                    let Ok(content) = std::fs::read_to_string(&file) else {
+                        continue;
+                    };
+                    let is_md = file.extension().and_then(|e| e.to_str()) == Some("md");
+                    // Hardcoded install paths -> tokens (any file).
+                    let (s1, n1) = crate::namespace::rewrite_hardcoded_paths(&content, &ctx);
+                    // Un-wrap misplaced {{ns:}}; a non-markdown file is all code,
+                    // so every token is misplaced there.
+                    let (s2, n2) = crate::namespace::unwrap_misplaced(&s1, !is_md);
+                    // Templatize bare prose refs -> {{ns:}}, markdown only (a
+                    // script is all code; wrapping a keyword there is the bug
+                    // this whole path exists to avoid).
+                    let (s3, n3) = if is_md {
+                        crate::namespace::templatize(&s2, &siblings)
+                    } else {
+                        (s2, 0)
+                    };
+                    if n1 + n2 + n3 > 0 {
+                        std::fs::write(&file, s3).map_err(|e| MindError::io(&file, e))?;
+                        fixed.push(file.display().to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(ReviewResult {
+        hard,
+        advisory,
+        fixed,
+    })
 }
 
 /// Build a synthetic `Source` for the directory being reviewed.
@@ -614,7 +814,7 @@ mod tests {
         );
         let paths = paths_for(base);
 
-        let result = run_checks(&paths, &source_dir, None).unwrap();
+        let result = run_checks(&paths, &source_dir, None, false, true).unwrap();
         assert!(
             result.hard.is_empty(),
             "expected no hard findings: {:?}",
@@ -640,7 +840,7 @@ mod tests {
         );
         let paths = paths_for(base);
 
-        let result = run_checks(&paths, &source_dir, None).unwrap();
+        let result = run_checks(&paths, &source_dir, None, false, true).unwrap();
         assert!(
             result.hard.is_empty(),
             "missing description must not be hard"
@@ -666,7 +866,7 @@ mod tests {
         std::fs::write(source_dir.join("mind.toml"), "[[[[bad toml").unwrap();
         let paths = paths_for(base);
 
-        let result = run_checks(&paths, &source_dir, None).unwrap();
+        let result = run_checks(&paths, &source_dir, None, false, true).unwrap();
         assert!(
             !result.hard.is_empty(),
             "malformed TOML must produce a hard finding"
@@ -693,7 +893,7 @@ mod tests {
         .unwrap();
         let paths = paths_for(base);
 
-        let result = run_checks(&paths, &source_dir, None).unwrap();
+        let result = run_checks(&paths, &source_dir, None, false, true).unwrap();
         assert!(
             !result.hard.is_empty(),
             "unknown kind must produce a hard finding"
@@ -720,7 +920,7 @@ mod tests {
         .unwrap();
         let paths = paths_for(base);
 
-        let result = run_checks(&paths, &source_dir, None).unwrap();
+        let result = run_checks(&paths, &source_dir, None, false, true).unwrap();
         assert!(
             !result.hard.is_empty(),
             "conflicting pin must produce a hard finding"
@@ -745,7 +945,7 @@ mod tests {
         );
         let paths = paths_for(base);
 
-        let result = run_checks(&paths, &source_dir, None).unwrap();
+        let result = run_checks(&paths, &source_dir, None, false, true).unwrap();
         assert!(
             !result.hard.is_empty(),
             "unresolved ns token must produce a hard finding"
@@ -775,7 +975,7 @@ mod tests {
         let paths = paths_for(base);
 
         // With --as jk: a prefix is in effect, so the unguarded ref is flagged.
-        let result = run_checks(&paths, &source_dir, Some("jk".to_string())).unwrap();
+        let result = run_checks(&paths, &source_dir, Some("jk".to_string()), false, true).unwrap();
         assert!(
             result.hard.is_empty(),
             "unguarded ref must not be hard: {:?}",
@@ -812,7 +1012,7 @@ mod tests {
         );
         let paths = paths_for(base);
 
-        let result = run_checks(&paths, &source_dir, None).unwrap();
+        let result = run_checks(&paths, &source_dir, None, false, true).unwrap();
         assert!(
             result.hard.is_empty(),
             "declared install hook must not be a hard finding: {:?}",
@@ -863,7 +1063,7 @@ mod tests {
         .unwrap();
         let paths = paths_for(base);
 
-        let result = run_checks(&paths, &source_dir, None).unwrap();
+        let result = run_checks(&paths, &source_dir, None, false, true).unwrap();
 
         // The scan must have produced the unknown-kind hard finding.
         assert!(
@@ -911,7 +1111,7 @@ mod tests {
         );
         let paths = paths_for(base);
 
-        let result = run_checks(&paths, &source_dir, None).unwrap();
+        let result = run_checks(&paths, &source_dir, None, false, true).unwrap();
         assert!(
             result.advisory.iter().all(|f| f.kind != "install-hook"),
             "no install hook declared => no install-hook advisory: {:?}",
@@ -949,7 +1149,7 @@ mod tests {
         );
         let paths = paths_for(base);
 
-        let result = run_checks(&paths, &source_dir, None).unwrap();
+        let result = run_checks(&paths, &source_dir, None, false, true).unwrap();
         assert!(
             result.hard.is_empty(),
             "multi-hook source must not produce hard findings: {:?}",
@@ -1031,7 +1231,7 @@ mod tests {
         );
         let paths = paths_for(base);
 
-        let result = run_checks(&paths, &source_dir, None).unwrap();
+        let result = run_checks(&paths, &source_dir, None, false, true).unwrap();
         assert!(
             result.hard.is_empty(),
             "legacy install hook must not be hard: {:?}",
@@ -1085,7 +1285,7 @@ mod tests {
         );
         let paths = paths_for(base);
 
-        let result = run_checks(&paths, &source_dir, None).unwrap();
+        let result = run_checks(&paths, &source_dir, None, false, true).unwrap();
         assert!(
             result.hard.is_empty(),
             "no hard findings expected: {:?}",
@@ -1131,7 +1331,7 @@ mod tests {
         );
         let paths = paths_for(base);
 
-        let result = run_checks(&paths, &source_dir, None).unwrap();
+        let result = run_checks(&paths, &source_dir, None, false, true).unwrap();
         assert!(
             result.advisory.iter().all(|f| f.kind != "install-hook"),
             "no hooks declared => no install-hook advisory: {:?}",
@@ -1157,7 +1357,7 @@ mod tests {
         let paths = paths_for(base);
 
         // No alias: no prefix, unguarded refs irrelevant.
-        let result = run_checks(&paths, &source_dir, None).unwrap();
+        let result = run_checks(&paths, &source_dir, None, false, true).unwrap();
         assert!(result.hard.is_empty());
         assert!(
             result
@@ -1190,7 +1390,7 @@ mod tests {
         let paths = paths_for(base);
 
         // No consumer alias: the source's own prefix should trigger the check.
-        let result = run_checks(&paths, &source_dir, None).unwrap();
+        let result = run_checks(&paths, &source_dir, None, false, true).unwrap();
         assert!(
             result.hard.is_empty(),
             "should be hard-clean: {:?}",
@@ -1223,7 +1423,7 @@ mod tests {
         .unwrap();
         let paths = paths_for(base);
 
-        let result = run_checks(&paths, &source_dir, None).unwrap();
+        let result = run_checks(&paths, &source_dir, None, false, true).unwrap();
         assert!(
             result.hard.iter().any(|f| f.kind == "incompatible-version"),
             "expected incompatible-version hard finding: {:?}",
@@ -1251,7 +1451,7 @@ mod tests {
         );
         let paths = paths_for(base);
 
-        let result = run_checks(&paths, &source_dir, None).unwrap();
+        let result = run_checks(&paths, &source_dir, None, false, true).unwrap();
         let bad: Vec<&Finding> = result
             .hard
             .iter()
@@ -1288,7 +1488,7 @@ mod tests {
         );
         let paths = paths_for(base);
 
-        let result = run_checks(&paths, &source_dir, None).unwrap();
+        let result = run_checks(&paths, &source_dir, None, false, true).unwrap();
         assert!(
             result.hard.iter().any(|f| f.kind == "unknown-kind"),
             "expected unknown-kind to surface: {:?}",
@@ -1322,7 +1522,7 @@ mod tests {
         let paths = paths_for(base);
 
         // dev is a real sibling, so {{ns:dev}} resolves under any prefix.
-        let result = run_checks(&paths, &source_dir, Some("jk".to_string())).unwrap();
+        let result = run_checks(&paths, &source_dir, Some("jk".to_string()), false, true).unwrap();
         assert!(
             result.hard.iter().all(|f| f.kind != "bad-reference"),
             "valid token must resolve under --as prefix: {:?}",
@@ -1435,7 +1635,7 @@ mod tests {
         let guard = TempDirGuard(tmp.clone());
         git::clone(&bare.to_string_lossy(), &tmp).unwrap();
         assert!(tmp.is_dir(), "clone target should exist mid-review");
-        let result = run_checks(paths, &tmp, alias).unwrap();
+        let result = run_checks(paths, &tmp, alias, false, false).unwrap();
         drop(guard);
         assert!(
             !tmp.exists(),
@@ -1792,6 +1992,228 @@ mod tests {
             }
             other => panic!("expected Err(ReviewFailed) from validate failure, got {other:?}"),
         }
+    }
+
+    // --- tooling / path-reference checks + --fix (CLI-135..138) ---
+
+    /// An unresolved path token (`{{tools:nope}}`) is a hard bad-reference, just
+    /// like an unresolved `{{ns:}}`.
+    /// spec: CLI-135
+    #[test]
+    fn bad_path_token_is_hard_error() {
+        let tmp = TmpDir::new();
+        let source_dir = tmp.path().join("src");
+        write_file(
+            &source_dir.join("skills/review/SKILL.md"),
+            "---\ndescription: review\n---\nrun {{tools:nope}} .\n",
+        );
+        let paths = paths_for(tmp.path());
+
+        let result = run_checks(&paths, &source_dir, None, false, true).unwrap();
+        assert!(
+            result.hard.iter().any(|f| f.kind == "bad-reference"),
+            "an unresolved path token must be a hard bad-reference: {:?}",
+            result.hard
+        );
+    }
+
+    /// A hardcoded install path is an advisory that names the suggested token.
+    /// spec: CLI-136
+    #[test]
+    fn hardcoded_path_is_advisory_with_suggestion() {
+        let tmp = TmpDir::new();
+        let source_dir = tmp.path().join("src");
+        write_file(
+            &source_dir.join("skills/review/SKILL.md"),
+            "---\ndescription: review\n---\nrun ~/.claude/skills/review/resources/pr.py here\n",
+        );
+        let paths = paths_for(tmp.path());
+
+        let result = run_checks(&paths, &source_dir, None, false, true).unwrap();
+        assert!(
+            result.hard.is_empty(),
+            "hardcoded path is advisory, not hard"
+        );
+        let f = result
+            .advisory
+            .iter()
+            .find(|f| f.kind == "hardcoded-path")
+            .expect("expected a hardcoded-path advisory");
+        assert!(
+            f.message.contains("{{self}}/resources/pr.py"),
+            "advisory must suggest the token: {}",
+            f.message
+        );
+    }
+
+    /// A sibling tool named in prose without a token is an advisory, even with no
+    /// prefix in effect.
+    /// spec: CLI-137
+    #[test]
+    fn bare_tool_reference_is_advisory() {
+        let tmp = TmpDir::new();
+        let source_dir = tmp.path().join("src");
+        write_file(&source_dir.join("tools/detect/detect"), "#!/bin/sh\n");
+        write_file(
+            &source_dir.join("skills/review/SKILL.md"),
+            "---\ndescription: review\n---\nFirst run the detect helper, then review.\n",
+        );
+        let paths = paths_for(tmp.path());
+
+        // No prefix: the bare-tool advisory still fires (unlike unguarded-reference).
+        let result = run_checks(&paths, &source_dir, None, false, true).unwrap();
+        assert!(
+            result.hard.is_empty(),
+            "must be hard-clean: {:?}",
+            result.hard
+        );
+        let f = result
+            .advisory
+            .iter()
+            .find(|f| f.kind == "bare-tool-reference")
+            .expect("expected a bare-tool-reference advisory");
+        assert!(
+            f.message.contains("detect"),
+            "names the tool: {}",
+            f.message
+        );
+    }
+
+    /// `--fix` on a local source rewrites hardcoded paths into tokens and bare
+    /// sibling names into `{{ns:}}`, reporting the changed file.
+    /// spec: CLI-138
+    #[test]
+    fn fix_rewrites_local_source() {
+        let tmp = TmpDir::new();
+        let source_dir = tmp.path().join("src");
+        let skill = source_dir.join("skills/review/SKILL.md");
+        write_file(
+            &skill,
+            "---\ndescription: review\n---\nrun ~/.claude/skills/review/run.sh; hand off to dev\n",
+        );
+        write_file(
+            &source_dir.join("agents/dev.md"),
+            "---\ndescription: dev\n---\n# dev\n",
+        );
+        let paths = paths_for(tmp.path());
+
+        let result = run_checks(&paths, &source_dir, None, true, true).unwrap();
+        assert!(!result.fixed.is_empty(), "a file should be reported fixed");
+        let rewritten = std::fs::read_to_string(&skill).unwrap();
+        assert!(
+            rewritten.contains("{{self}}/run.sh"),
+            "hardcoded path must become a token: {rewritten}"
+        );
+        assert!(
+            rewritten.contains("{{ns:dev}}"),
+            "bare sibling name must be templatized: {rewritten}"
+        );
+    }
+
+    /// `--fix` against a non-local target refuses and changes nothing.
+    /// spec: CLI-138
+    #[test]
+    fn fix_refuses_non_local_target() {
+        let tmp = TmpDir::new();
+        let source_dir = tmp.path().join("src");
+        let skill = source_dir.join("skills/review/SKILL.md");
+        let original = "---\ndescription: review\n---\nrun ~/.claude/skills/review/run.sh\n";
+        write_file(&skill, original);
+        let paths = paths_for(tmp.path());
+
+        // is_local = false (a registry/remote target): --fix must refuse.
+        let result = run_checks(&paths, &source_dir, None, true, false).unwrap();
+        assert!(
+            result.hard.iter().any(|f| f.kind == "fix-not-local"),
+            "non-local --fix must produce a fix-not-local hard finding: {:?}",
+            result.hard
+        );
+        assert!(result.fixed.is_empty(), "nothing should be reported fixed");
+        assert_eq!(
+            std::fs::read_to_string(&skill).unwrap(),
+            original,
+            "the file must be unchanged"
+        );
+    }
+
+    /// A `{{ns:}}` token in a code block / span / path is an advisory
+    /// misplaced-reference; one in the frontmatter `name:` field is hard.
+    /// spec: CLI-139
+    #[test]
+    fn misplaced_ns_tokens_are_flagged() {
+        let tmp = TmpDir::new();
+        let source_dir = tmp.path().join("src");
+        // `do` and `dev` are siblings, so the tokens resolve (not bad-reference);
+        // they are still misplaced by context.
+        write_file(
+            &source_dir.join("agents/do.md"),
+            "---\nname: do\n---\n# do\n",
+        );
+        write_file(
+            &source_dir.join("agents/dev.md"),
+            "---\nname: dev\n---\n# dev\n",
+        );
+        write_file(
+            &source_dir.join("agents/lead.md"),
+            "---\nname: {{ns:lead}}\n---\nrun `{{ns:do}}` then see ~/{{ns:dev}}\n",
+        );
+        write_file(
+            &source_dir.join("agents/lead2.md"),
+            "---\nname: lead\n---\nx\n",
+        );
+        let paths = paths_for(tmp.path());
+
+        let result = run_checks(&paths, &source_dir, None, false, true).unwrap();
+        // Frontmatter name token -> hard.
+        assert!(
+            result
+                .hard
+                .iter()
+                .any(|f| f.kind == "misplaced-reference" && f.message.contains("name:")),
+            "frontmatter name token must be hard: {:?}",
+            result.hard
+        );
+        // Code-span and path tokens -> advisory.
+        let adv = result
+            .advisory
+            .iter()
+            .filter(|f| f.kind == "misplaced-reference")
+            .count();
+        assert!(
+            adv >= 2,
+            "code-span + path tokens must be advisory: {:?}",
+            result.advisory
+        );
+    }
+
+    /// `--fix` un-wraps misplaced `{{ns:}}` tokens back to bare words.
+    /// spec: CLI-138 CLI-139
+    #[test]
+    fn fix_unwraps_misplaced_ns_tokens() {
+        let tmp = TmpDir::new();
+        let source_dir = tmp.path().join("src");
+        write_file(
+            &source_dir.join("agents/dev.md"),
+            "---\nname: dev\n---\n# dev\n",
+        );
+        let lead = source_dir.join("agents/lead.md");
+        write_file(
+            &lead,
+            "---\nname: {{ns:lead}}\n---\npath ~/{{ns:dev}} and `{{ns:dev}}`\n",
+        );
+        let paths = paths_for(tmp.path());
+
+        let result = run_checks(&paths, &source_dir, None, true, true).unwrap();
+        assert!(!result.fixed.is_empty());
+        let fixed = std::fs::read_to_string(&lead).unwrap();
+        assert!(
+            fixed.contains("name: lead"),
+            "frontmatter name un-wrapped: {fixed}"
+        );
+        assert!(
+            fixed.contains("~/dev") && fixed.contains("`dev`"),
+            "path/span un-wrapped: {fixed}"
+        );
     }
 
     /// Assert no `review-*` scratch dir survives under MIND_HOME/.tmp.
