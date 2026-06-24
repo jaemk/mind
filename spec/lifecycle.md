@@ -5,7 +5,8 @@ preserve the previous version until the new one is proven.
 
 ## Install
 
-`install` materializes one catalog item into the store and links it.
+`install` materializes one catalog item into the store and links it into the
+agent homes (a store-only tool is not linked; tooling.md TOOL-3).
 
 - `LIFE-1` The new copy is built in a staging directory, and its `{{ns:}}`
   references are expanded there, before the live install is touched.

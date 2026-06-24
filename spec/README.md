@@ -1,7 +1,8 @@
 # mind spec
 
 The behavioral spec for `mind`, a manager for agent tooling (skills, agents,
-rules) that melds arbitrary git repos and links installed items into `~/.claude`.
+rules, tools) that melds arbitrary git repos and links installed items into
+`~/.claude` (a tool is store-only and reached by reference, not linked).
 This directory is the reference the implementation and tests verify against.
 
 ## Feature status
@@ -93,7 +94,7 @@ and verified.
   when a defined ID is neither cited by a test nor in its ALLOWLIST. Adding a new
   requirement therefore forces a coverage decision: write a citing test, or
   allowlist it with a reason.
-- "item" means a skill, agent, or rule. "source" means a melded repo. "store"
+- "item" means a skill, agent, rule, or tool. "source" means a melded repo. "store"
   means `~/.mind/store`. "link" means a symlink under `~/.claude`.
 - Statements use present-tense declaratives ("`mind learn` installs ..."). Where
   ordering matters it is stated explicitly.

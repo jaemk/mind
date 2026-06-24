@@ -142,9 +142,11 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 
 ## learn
 
-- `CLI-30` `learn <item>` with an exact ref installs the single matching item
-  into every configured agent home (see lifecycle.md, STO-14), recording it in
-  the manifest; a ref matching none is `ItemNotFound` and one matching several is
+- `CLI-30` `learn <item>` with an exact ref installs the single matching item:
+  it copies the item into the store and links it into every configured agent
+  home (see lifecycle.md, STO-14), except a store-only tool, which installs to
+  the store with no link (tooling.md TOOL-3). It records the item in the
+  manifest; a ref matching none is `ItemNotFound` and one matching several is
   `AmbiguousItem`.
 - `CLI-31` When the ref name is a glob (`*`, `?`, `[`), `learn` installs every
   matching item. The kind prefix, source qualifier, and glob compose: `'*'` is
@@ -331,10 +333,10 @@ only appear at meld or install time. It is read-only and installs nothing.
   to `review` being read-only (CLI-132). It applies only to a local-path target;
   a registry selector or a repo spec (whose clone is a discarded temp) refuses
   `--fix` and changes nothing. For each item file it rewrites confidently
-  recognized hardcoded install paths into the matching token (CLI-136),
-  templatizes bare sibling names into `{{ns:}}` (the `init-source --template`
-  transform, INIT-5), and un-wraps misplaced `{{ns:}}` tokens (CLI-139) back to
-  the bare name, then reports each file it changed.
+  recognized hardcoded install paths into the matching token (CLI-136), un-wraps
+  misplaced `{{ns:}}` tokens (CLI-139) back to the bare name, and templatizes
+  bare sibling names into `{{ns:}}` (the `init-source --template` transform,
+  INIT-5), then reports each file it changed.
 - `CLI-139` `review` flags a misplaced `{{ns:}}` token -- one in a non-prose
   context (NS-24) where name-substitution is wrong. A token inside a fenced code
   block, an inline code span, or adjacent to a path separator is an advisory

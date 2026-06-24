@@ -23,8 +23,9 @@ The on-disk layout and the two persisted JSON files.
   `$CLAUDE_HOME` if set, else `~/.claude`. Both overrides are honored everywhere.
 - `STO-2` The default link target for an item, relative to an agent home, is
   `skills/<name>` (skill), `agents/<name>.md` (agent), or `rules/<name>.md`
-  (rule), where `<name>` is the effective name. A `mind.toml` item may override
-  the link target (applied in every home).
+  (rule), where `<name>` is the effective name. A tool has no default link
+  target: it is store-only (tooling.md TOOL-3). A `mind.toml` item may override
+  the link target (applied in every home), which is how a tool opts into a link.
 - `STO-3` Store and link paths use the effective name, so namespaced items do not
   collide with same-named items from other sources.
 - `STO-14` The agent homes ("lobes") items are linked into are, in order:

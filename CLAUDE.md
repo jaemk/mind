@@ -1,8 +1,9 @@
 # mind
 
-A manager for agent tooling (skills, agents, rules) that melds with arbitrary
-git repos and links installed items into one or more agent homes (default
-`~/.claude`; see `Paths::agent_homes`).
+A manager for agent tooling (skills, agents, rules, tools) that melds with
+arbitrary git repos and links installed items into one or more agent homes
+(default `~/.claude`; see `Paths::agent_homes`). A tool is store-only: it is
+referenced by other items, not linked into an agent home.
 
 The behavioral spec lives in [spec/](spec/) and is the reference to verify
 against. Each statement there has a stable ID (e.g. `LIFE-4`); tests cite the IDs
@@ -56,7 +57,7 @@ maintained by hand.
 - `src/paths.rs` - `~/.mind` and `~/.claude` roots (overridable via `MIND_HOME` /
   `CLAUDE_HOME`, which the tests rely on for isolation).
 - `src/source.rs` - repo-spec parsing + the melded-source registry (`sources.json`).
-- `src/catalog.rs` - scans sources for `skills/<n>/SKILL.md`, `agents/<n>.md`, `rules/<n>.md`.
+- `src/catalog.rs` - scans sources for `skills/<n>/SKILL.md`, `agents/<n>.md`, `rules/<n>.md`, `tools/<n>/`.
 - `src/manifest.rs` - installed-item manifest (`manifest.json`), keyed `kind:name`.
 - `src/resolve.rs` - item-ref parsing (`name`, `skill:name`, `owner/repo#name`) + resolution.
 - `src/frontmatter.rs` - minimal reader for an item's leading `--- ... ---` block (descriptions).
@@ -73,7 +74,8 @@ default** and a manifest is only ever optional enrichment, never a gate.
 Three layers, in precedence order:
 
 1. **Convention** (default, no file). The scanner finds `skills/<n>/SKILL.md`,
-   `agents/<n>.md`, `rules/<n>.md`. Works on any repo, including `~/dev/agents`.
+   `agents/<n>.md`, `rules/<n>.md`, and `tools/<n>/` (a tool dir needs no anchor
+   file). Works on any repo, including `~/dev/agents`.
 2. **Frontmatter** (always read). Each item's description comes from the YAML
    frontmatter it already carries (`description:` in `SKILL.md` / the agent or
    rule `.md`). Metadata lives next to the thing it describes; nothing duplicated.

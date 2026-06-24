@@ -1,6 +1,6 @@
 # mind
 
-A manager for agent tooling (skills, agents, rules) that melds arbitrary git
+A manager for agent tooling (skills, agents, rules, tools) that melds arbitrary git
 repos and links installed items into your agent directories (default
 `~/.claude`). Modeled on Homebrew.
 
@@ -58,8 +58,10 @@ mind learn greet
 ## Mental model
 
 - A *source* is a melded git repo (`mind meld`). It offers *items*: skills,
-  agents, and rules, found by convention (`skills/<n>/SKILL.md`, `agents/<n>.md`,
-  `rules/<n>.md`) or declared in a `mind.toml`.
+  agents, rules, and tools, found by convention (`skills/<n>/SKILL.md`,
+  `agents/<n>.md`, `rules/<n>.md`, `tools/<n>/`) or declared in a `mind.toml`. A
+  tool is store-only helper tooling that other items reference, not linked into a
+  lobe.
 - `mind learn <item>` copies the item into the *store* (`~/.mind/store`) and
   symlinks it into each *lobe* (agent home, default `~/.claude`). `forget`
   reverses it.
@@ -76,7 +78,7 @@ mind learn greet
 | `mind meld [<repo>] [--link-only] [--yes] [--as <prefix>] [--root <dir>] [--follow-branch <branch> | --pin-tag <tag> | --pin-ref <commit>] [--install-hook <cmd>] [--dangerously-skip-install-hook-check]` | clone and register a source (default `.`), then prompt to install its items (`--link-only` registers only; `--yes` installs without prompting). Re-melding an already-melded source installs any missing items, else shows each item's install state and commit |
 | `mind init-source [<path>] [--template]` | scaffold `mind.toml` + report references; `--template` rewrites bare refs as `{{ns:}}` (maintainer) |
 | `mind unmeld <name> [--unlink-only] [--yes] [--uninstall-hook <cmd>] [--dangerously-skip-install-hook-check]` (alias `detach`) | drop a source and forget its items (`--unlink-only` keeps them) |
-| `mind learn [--yes] [--force] <item>` | install a skill/agent/rule (glob installs many); a partial selection also pulls in the source siblings it references. `--force` overwrites a conflicting non-mind link target (without it, a conflict prompts on a TTY) |
+| `mind learn [--yes] [--force] <item>` | install a skill/agent/rule/tool (glob installs many); a partial selection also pulls in the source siblings it references. `--force` overwrites a conflicting non-mind link target (without it, a conflict prompts on a TTY) |
 | `mind forget [--yes] <item>` (alias `unlearn`) | remove an installed item (glob removes many; a multi-match glob confirms first, `--yes` skips) |
 | `mind sync [--upgrade] [--dangerously-skip-install-hook-check]` | refresh every source (optionally upgrade after; flag allows unattended hook re-runs) |
 | `mind upgrade [--yes] [--dangerously-skip-install-hook-check] [item]` | upgrade installed items to their latest source version (re-runs install hooks on sources that advance) |
@@ -88,7 +90,7 @@ mind learn greet
 | `mind completions <shell>` / `mind man` | shell completions / man page |
 
 A source repo exposes items by convention (`skills/<n>/SKILL.md`,
-`agents/<n>.md`, `rules/<n>.md`) or via a `mind.toml`. See
+`agents/<n>.md`, `rules/<n>.md`, `tools/<n>/`) or via a `mind.toml`. See
 [examples/starter/](examples/starter/) for the plain convention layout,
 [examples/namespacing/](examples/namespacing/) for `{{ns:}}` reference tokens
 under a prefix, [examples/policy/](examples/policy/) for an enterprise managed
