@@ -7081,3 +7081,76 @@ fn review_fix_refuses_a_registry_target() {
         r.stderr
     );
 }
+
+#[test]
+fn two_sources_same_names_coexist_under_a_prefix() {
+    // spec: NS-2
+    // Two melded sources both ship `review`/`dev`/`style`. Namespacing the second
+    // gives its items distinct effective names, so both install side by side.
+    let a = Sandbox::new();
+    let b = Sandbox::new();
+    assert!(a.mind(&["meld", &a.source_spec()]).success);
+    assert!(a.mind(&["meld", &b.source_spec(), "--as", "zz"]).success);
+
+    // The prefix makes the effective names distinct, so each installs by its own
+    // name with no ambiguity and no qualifier: `review` from a, `zz-review` from b.
+    let la = a.mind(&["learn", "review"]);
+    assert!(la.success, "learn review: {} {}", la.stdout, la.stderr);
+    let lb = a.mind(&["learn", "zz-review"]);
+    assert!(lb.success, "learn zz-review: {} {}", lb.stdout, lb.stderr);
+
+    // Both coexist: the unprefixed one as `review`, the namespaced one as `zz-review`.
+    let recall = a.mind(&["recall"]).stdout;
+    assert!(recall.contains("skill:review"), "{recall}");
+    assert!(recall.contains("skill:zz-review"), "{recall}");
+    assert!(
+        a.mind_home.join("store/skill/review").is_dir(),
+        "a's store copy"
+    );
+    assert!(
+        a.mind_home.join("store/skill/zz-review").is_dir(),
+        "b's store copy"
+    );
+    for link in ["skills/review", "skills/zz-review"] {
+        assert!(
+            std::fs::symlink_metadata(a.claude_home.join(link))
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "expected a symlink at {link}"
+        );
+    }
+}
+
+#[test]
+fn unprefixed_same_name_second_install_is_a_noop_first_wins() {
+    // spec: NS-2
+    // Without a prefix two same-named items share one install path (`skill:review`),
+    // so they cannot coexist. The first installed wins; a later install of the same
+    // name from the other source is a no-op (the name is already taken), not a
+    // silent overwrite -- and it is not an error.
+    let a = Sandbox::new();
+    let b = Sandbox::new();
+    // Give b's review a distinct description so an overwrite would be observable.
+    b.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\nname: review\ndescription: BRAVO review\n---\n# review b\n",
+    );
+    assert!(a.mind(&["meld", &a.source_spec()]).success);
+    assert!(a.mind(&["meld", &b.source_spec()]).success);
+
+    let a_full = format!("{}/agents", a.base_name());
+    let b_full = format!("{}/agents", b.base_name());
+    assert!(a.mind(&["learn", &format!("{a_full}#review")]).success);
+    // Installing the same name from the other source succeeds but changes nothing.
+    let second = a.mind(&["learn", &format!("{b_full}#review")]);
+    assert!(second.success, "second install: {}", second.stderr);
+
+    // The store still holds a's content: the first install was not replaced.
+    let installed =
+        std::fs::read_to_string(a.mind_home.join("store/skill/review/SKILL.md")).unwrap();
+    assert!(
+        installed.contains("Review the diff for bugs") && !installed.contains("BRAVO review"),
+        "the first install must remain (no overwrite): {installed}"
+    );
+}
