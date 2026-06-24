@@ -1,0 +1,16 @@
+[book]
+title = "mind"
+description = "Manager for agent tooling: skills, agents, rules, and tools melded from git repos and linked into one or more agent homes."
+authors = ["James Kominick"]
+language = "en"
+src = "src"
+
+[output.html]
+default-theme = "navy"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/jaemk/mind"
+edit-url-template = "https://github.com/jaemk/mind/edit/main/docs/{path}"
+
+[output.html.fold]
+enable = true
+level = 1
