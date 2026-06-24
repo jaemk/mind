@@ -28,6 +28,10 @@ const ALLOWLIST: &[&str] = &[
     // Planned features (see spec/README.md feature status = planned): documented
     // with stable IDs ahead of implementation. Each must move to a citing test
     // when built, at which point it is removed from this allowlist.
+    //   unmanaged lobe items (see spec/unmanaged.md): skills/agents/rules present
+    //   in an agent home that mind did not install, surfaced in recall/probe and
+    //   removable via forget with a not-managed-by-mind warning. Not yet built.
+    "UNM-1", "UNM-2", "UNM-3", "UNM-4", "UNM-5",
     //   version pinning: now implemented; IDs removed from allowlist and cited in tests.
     //   review verb: now implemented; IDs removed from allowlist and cited in tests.
     //   meld no-arg defaults to `.` (CLI-25, cited in tests/cli.rs) and the

@@ -63,6 +63,7 @@ and verified.
 | Path-reference tokens `{{self}}` / `{{tools:name}}` / `{{path:ref}}` | done | [tooling.md](tooling.md) (TOOL-10..16) |
 | Item build hooks: per-item `build`, staging-time, transactional | done | [install-hooks.md](install-hooks.md) (HOOK-70..73) |
 | Polished output: global `--json`/`--yes`/`--ascii`, color+Unicode gate, structured JSON results | done | CLI-150, CLI-151, CLI-152, CLI-153, CLI-154 |
+| Unmanaged lobe items: surfaced in `recall`/`probe`, removable via `forget` with a distinct warning | planned | [unmanaged.md](unmanaged.md) |
 
 ## Documents
 
@@ -87,6 +88,9 @@ and verified.
 - [init-source.md](init-source.md) - `init-source`, the maintainer scaffolder:
   generate a `mind.toml`, report the intra-source reference graph, and add
   `{{ns:}}` templating.
+- [unmanaged.md](unmanaged.md) - unmanaged lobe items: skills/agents/rules present
+  in an agent home that `mind` did not install, surfaced in `recall`/`probe` and
+  removable via `forget` with a distinct not-managed-by-mind warning.
 
 ## Conventions
 
