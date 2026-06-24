@@ -1769,6 +1769,34 @@ fn learn_kind_glob_limits_to_kind() {
 }
 
 #[test]
+fn learn_all_flag_installs_whole_source() {
+    // spec: CLI-36
+    // `--all` is sugar for the `<source>#*` selector: every item of the source
+    // installs, equivalent to `learn 'agents#*'`.
+    let sb = melded();
+    let r = sb.mind(&["learn", "agents", "--all"]);
+    assert!(r.success, "{}", r.stderr);
+    let recall = sb.mind(&["recall"]).stdout;
+    assert!(recall.contains("skill:review"), "{recall}");
+    assert!(recall.contains("agent:dev"), "{recall}");
+    assert!(recall.contains("rule:style"), "{recall}");
+}
+
+#[test]
+fn learn_all_flag_rejects_ref_with_hash() {
+    // spec: CLI-36
+    // Combining `--all` with a ref that already names an item is rejected; the
+    // doubled selector is an invalid ref and nothing installs.
+    let sb = melded();
+    let r = sb.mind(&["learn", "agents#review", "--all"]);
+    assert!(!r.success, "expected failure: {}", r.stdout);
+    assert!(
+        !sb.mind(&["recall", "skill:review"]).success,
+        "nothing installed"
+    );
+}
+
+#[test]
 fn learn_dry_run_installs_nothing() {
     // spec: CLI-32
     let sb = melded();

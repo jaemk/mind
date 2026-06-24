@@ -81,6 +81,20 @@ pub fn is_glob(name: &str) -> bool {
     name.contains(['*', '?', '['])
 }
 
+/// Apply the `learn --all` flag (CLI-36): append the `#*` selector so the
+/// positional ref is read as a source qualifier selecting every item of that
+/// source. Errors `InvalidItemRef` when the ref already carries a `#` selector,
+/// since the selector would be doubled.
+pub fn all_selector(item: &str) -> Result<String> {
+    let item = item.trim();
+    if item.contains('#') {
+        return Err(MindError::InvalidItemRef {
+            name: item.to_string(),
+        });
+    }
+    Ok(format!("{item}#*"))
+}
+
 /// Select every catalog item matching `r`: the name as a glob when it contains
 /// glob metacharacters, else by exact effective name, with the kind and source
 /// qualifier filtering as in [`resolve`]. Used for multi-item `learn`.
@@ -373,6 +387,27 @@ mod tests {
             select_installed(&m, &parse_item_ref("review").unwrap()).len(),
             1
         );
+    }
+
+    #[test]
+    fn all_selector_appends_glob_and_rejects_hash() {
+        // spec: CLI-36
+        assert_eq!(
+            all_selector("local/dev/agents").unwrap(),
+            "local/dev/agents#*"
+        );
+        assert_eq!(all_selector("agents").unwrap(), "agents#*");
+        // Whitespace is trimmed before the suffix is appended.
+        assert_eq!(all_selector("  agents  ").unwrap(), "agents#*");
+        // A ref that already names an item (carries `#`) is rejected.
+        assert!(matches!(
+            all_selector("agents#review"),
+            Err(MindError::InvalidItemRef { .. })
+        ));
+        assert!(matches!(
+            all_selector("agents#*"),
+            Err(MindError::InvalidItemRef { .. })
+        ));
     }
 
     #[test]

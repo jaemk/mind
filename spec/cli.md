@@ -169,6 +169,11 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   The forced overwrite stays transactional: it is decided before staging, so a
   refusal changes nothing. `meld --force` applies the same to its default
   install.
+- `CLI-36` `learn <source> --all` is shorthand for `learn '<source>#*'`: it
+  appends the `#*` selector to the positional ref, promoting it from an item name
+  to a source qualifier and installing every item of that source (CLI-31), deps
+  and all. `--all` is rejected with `InvalidItemRef` when the ref already carries
+  a `#` selector, since the selector would be doubled.
 
 ## forget
 

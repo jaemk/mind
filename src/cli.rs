@@ -185,6 +185,11 @@ pub enum Command {
         /// Item ref or glob: `name`, `skill:name`, `owner/repo#name`, `'review*'`, `'*'`.
         item: String,
 
+        /// Install every item of the source named by the ref. Shorthand for the
+        /// `<source>#*` selector; rejected if the ref already has a `#` selector.
+        #[arg(long)]
+        all: bool,
+
         /// Show what would be installed without installing anything.
         #[arg(short = 'n', long = "dry-run")]
         dry_run: bool,

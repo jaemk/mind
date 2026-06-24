@@ -16,6 +16,7 @@ and verified.
 |---------|--------|------|
 | Core verbs (meld, unmeld, learn, forget, sync, upgrade, recall, probe, introspect) | done | [cli.md](cli.md) |
 | `learn` glob selection + `--dry-run`; `probe` install/hash; aligned columns | done | CLI-31, CLI-32, CLI-33, CLI-81, CLI-82 |
+| `learn --all`: install every item of a source (sugar for `<source>#*`) | done | CLI-36 |
 | On-disk layout, source registry, manifest + file registry | done | [storage.md](storage.md) |
 | Multiple agent homes (link into all configured dirs) | done | STO-14, LIFE-40 |
 | `config show` + `config lobes` (manage agent homes) | done | CLI-110, CLI-111, CLI-112, CLI-113 |

@@ -228,19 +228,28 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
         ),
         Command::Learn {
             item,
+            all,
             dry_run,
             force,
-        } => commands::learn(
-            paths,
-            &item,
-            dry_run,
-            yes,
-            if force {
-                commands::Clobber::Force
+        } => {
+            // CLI-36: `--all` rewrites the ref into the `<source>#*` selector.
+            let item = if all {
+                resolve::all_selector(&item)?
             } else {
-                commands::Clobber::Prompt
-            },
-        ),
+                item
+            };
+            commands::learn(
+                paths,
+                &item,
+                dry_run,
+                yes,
+                if force {
+                    commands::Clobber::Force
+                } else {
+                    commands::Clobber::Prompt
+                },
+            )
+        }
         Command::Forget { item } => commands::forget(paths, &item, yes),
         Command::Sync {
             upgrade,
