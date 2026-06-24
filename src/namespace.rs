@@ -354,9 +354,28 @@ fn resolve_token(inner: &str, ctx: &PathCtx) -> Token {
     Token::Passthrough
 }
 
-/// The install-path prefixes a hardcoded reference can start with: mind's own
-/// store, the default agent home, and the `~/.agents` layout some libraries use.
-const HARDCODED_PREFIXES: [&str; 3] = ["~/.mind/store/", "~/.claude/", "~/.agents/"];
+/// The home-root spellings a hardcoded reference can start with. A reference is
+/// only a hardcoded install path once one of the three install layouts
+/// (`.mind/store/`, `.claude/`, `.agents/`) follows the home root, checked in
+/// [`canonical_install_path`]. `~/` covers the literal tilde, `$HOME/` /
+/// `${HOME}/` the env-var spellings, and `/home/` / `/Users/` an absolute home.
+const HOME_MARKERS: [&str; 5] = ["~/", "$HOME/", "${HOME}/", "/home/", "/Users/"];
+
+/// What a hardcoded install path resolves to at runtime, which sets the
+/// advisory's severity wording (CLI-141).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HardcodedKind {
+    /// The item's own resources (`{{self}}`). Resolves through the symlink mind
+    /// links into each agent home, so it works until a prefix renames the item
+    /// or a second home is configured.
+    OwnResource,
+    /// A sibling `tool`. A tool is store-only and never linked into an agent
+    /// home (TOOL-3), so a hardcoded reference to it does not resolve.
+    SharedTool,
+    /// Any other recognized install path (a sibling item, or a foreign/unparsed
+    /// name): reached by a token, not by a literal install path.
+    OtherItem,
+}
 
 /// One hardcoded install-path occurrence found in an item's text.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -366,6 +385,38 @@ pub struct HardcodedPath {
     /// The token that should replace it, when it maps confidently; else `None`
     /// (the path is still flagged, just without a concrete suggestion).
     pub suggestion: Option<String>,
+    /// What the path resolves to, for the advisory's wording (CLI-141).
+    pub kind: HardcodedKind,
+}
+
+/// Reduce a hardcoded path to its canonical `~/<layout>/...` form, or `None` when
+/// it is not a mind install path. Accepts the home root written as `~`, `$HOME`,
+/// `${HOME}`, or an absolute `/home/<user>` / `/Users/<user>` path, and requires
+/// one of the install layouts (`.mind/store/`, `.claude/`, `.agents/`) to follow.
+fn canonical_install_path(path: &str) -> Option<String> {
+    let rest = if let Some(r) = path.strip_prefix("~/") {
+        r
+    } else if let Some(r) = path.strip_prefix("$HOME/") {
+        r
+    } else if let Some(r) = path.strip_prefix("${HOME}/") {
+        r
+    } else if let Some(r) = path
+        .strip_prefix("/home/")
+        .or_else(|| path.strip_prefix("/Users/"))
+    {
+        // Drop the `<user>` segment of an absolute home path.
+        r.split_once('/').map(|(_user, rest)| rest)?
+    } else {
+        return None;
+    };
+    if rest.starts_with(".mind/store/")
+        || rest.starts_with(".claude/")
+        || rest.starts_with(".agents/")
+    {
+        Some(format!("~/{rest}"))
+    } else {
+        None
+    }
 }
 
 /// Whether `c` ends a path token in prose (so the scanner knows where the path
@@ -460,37 +511,66 @@ fn token_for_path(path: &str, ctx: &PathCtx) -> Option<String> {
     ))
 }
 
+/// Classify a canonical install path by what it resolves to (CLI-141), returning
+/// the class and the token that should replace it (if it maps confidently).
+fn classify_path(canonical: &str, ctx: &PathCtx) -> (HardcodedKind, Option<String>) {
+    let suggestion = token_for_path(canonical, ctx);
+    let kind = match parse_install_path(canonical) {
+        Some((k, name, _)) => {
+            if k == ctx.self_kind && name == ctx.self_name {
+                HardcodedKind::OwnResource
+            } else if k == crate::error::ItemKind::Tool
+                && ctx.siblings.iter().any(|s| s.kind == k && s.name == name)
+            {
+                HardcodedKind::SharedTool
+            } else {
+                HardcodedKind::OtherItem
+            }
+        }
+        None => HardcodedKind::OtherItem,
+    };
+    (kind, suggestion)
+}
+
 /// Find every hardcoded install path in `content`, in order, as
-/// `(start, end, HardcodedPath)` byte spans.
+/// `(start, end, HardcodedPath)` byte spans. A candidate is a [`HOME_MARKERS`]
+/// span that reduces to an install layout via [`canonical_install_path`]; other
+/// uses of those markers (an ordinary `/home/<user>/projects/...` path) are
+/// skipped.
 fn scan_hardcoded(content: &str, ctx: &PathCtx) -> Vec<(usize, usize, HardcodedPath)> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < content.len() {
-        let Some((start, _)) = HARDCODED_PREFIXES
+        let Some((start, marker)) = HOME_MARKERS
             .iter()
-            .filter_map(|p| content[i..].find(p).map(|off| (i + off, *p)))
+            .filter_map(|m| content[i..].find(m).map(|off| (i + off, *m)))
             .min_by_key(|(pos, _)| *pos)
         else {
             break;
         };
-        // Take the path substring from `start` until a terminator.
+        // Scan for the path terminator from after the marker, so a `}` inside a
+        // `${HOME}` spelling is not mistaken for the end of the path.
+        let scan_from = start + marker.len();
         let mut end = content.len();
-        for (idx, c) in content[start..].char_indices() {
+        for (idx, c) in content[scan_from..].char_indices() {
             if is_path_terminator(c) {
-                end = start + idx;
+                end = scan_from + idx;
                 break;
             }
         }
         let matched = content[start..end].to_string();
-        let suggestion = token_for_path(&matched, ctx);
-        out.push((
-            start,
-            end,
-            HardcodedPath {
-                matched,
-                suggestion,
-            },
-        ));
+        if let Some(canonical) = canonical_install_path(&matched) {
+            let (kind, suggestion) = classify_path(&canonical, ctx);
+            out.push((
+                start,
+                end,
+                HardcodedPath {
+                    matched,
+                    suggestion,
+                    kind,
+                },
+            ));
+        }
         i = end.max(start + 1);
     }
     out
@@ -1213,6 +1293,59 @@ mod tests {
         // ~/.agents/resources/... maps to no kind/name, so it is flagged without a
         // concrete suggestion rather than mis-rewritten.
         assert_eq!(found[1].suggestion, None);
+    }
+
+    #[test]
+    fn hardcoded_detects_env_and_absolute_home_forms() {
+        // spec: CLI-136
+        let store = Path::new("/m/store");
+        let none = None;
+        let sibs = vec![psib(ItemKind::Tool, "detect", Some("detect"))];
+        let c = ctx(store, &none, ItemKind::Skill, "review", &sibs);
+        // Every home-root spelling reduces to the same tool token.
+        for path in [
+            "$HOME/.mind/store/tool/detect/detect",
+            "${HOME}/.mind/store/tool/detect/detect",
+            "/home/jk/.mind/store/tool/detect/detect",
+            "/Users/jk/.mind/store/tool/detect/detect",
+        ] {
+            let found = detect_hardcoded_paths(&format!("run {path} now"), &c);
+            assert_eq!(found.len(), 1, "{path}");
+            assert_eq!(found[0].matched, path, "matched span is the original form");
+            assert_eq!(
+                found[0].suggestion.as_deref(),
+                Some("{{tools:detect}}"),
+                "{path}"
+            );
+        }
+        // A `/home` path that is not an install layout is not flagged.
+        assert!(detect_hardcoded_paths("see /home/jk/projects/x", &c).is_empty());
+    }
+
+    #[test]
+    fn hardcoded_classifies_own_tool_and_other() {
+        // spec: CLI-141
+        let store = Path::new("/m/store");
+        let none = None;
+        let sibs = vec![
+            psib(ItemKind::Tool, "detect", Some("detect")),
+            psib(ItemKind::Skill, "release", None),
+        ];
+        let c = ctx(store, &none, ItemKind::Skill, "review", &sibs);
+        let found = detect_hardcoded_paths(
+            "own ~/.claude/skills/review/resources/pr.py \
+             tool ~/.mind/store/tool/detect/detect \
+             other ~/.mind/store/skill/release/x.sh \
+             foreign ~/.claude/skills/unknown/y.sh",
+            &c,
+        );
+        assert_eq!(found.len(), 4);
+        assert_eq!(found[0].kind, HardcodedKind::OwnResource);
+        assert_eq!(found[1].kind, HardcodedKind::SharedTool);
+        assert_eq!(found[2].kind, HardcodedKind::OtherItem);
+        // A recognized layout naming no sibling is OtherItem with no suggestion.
+        assert_eq!(found[3].kind, HardcodedKind::OtherItem);
+        assert_eq!(found[3].suggestion, None);
     }
 
     #[test]

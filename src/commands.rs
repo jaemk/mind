@@ -721,8 +721,14 @@ pub fn init_source(dir: Option<&str>, template: bool) -> Result<()> {
             ));
         }
     }
+    // The `--template` hint applies only to bare prose references; duplicate
+    // tooling is structural and not something templating fixes.
+    let has_unguarded = findings.iter().any(|f| f.kind == "unguarded-reference");
+    // INIT-7: surface the same duplicate-tooling advisories `review` reports
+    // (CLI-140), so the two commands read identically here too.
+    findings.extend(crate::review::duplicate_tooling_findings(&items));
     crate::review::print_findings(&[], &findings);
-    if !findings.is_empty() && !template {
+    if has_unguarded && !template {
         println!(
             "run `mind init-source {dir} --template` to wrap the bare references as {{{{ns:name}}}}"
         );

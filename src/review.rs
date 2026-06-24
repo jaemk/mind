@@ -490,21 +490,34 @@ fn run_checks(
                     ),
                 ));
             }
-            // Check 9: hardcoded install paths that should be tokens (advisory, CLI-136).
+            // Check 9: hardcoded install paths that should be tokens (advisory,
+            // CLI-136). The wording reflects what the path resolves to (CLI-141).
             for hp in crate::namespace::detect_hardcoded_paths(&content, &ctx) {
                 let suggestion = match &hp.suggestion {
                     Some(tok) => format!("; use {tok}"),
                     None => String::new(),
                 };
-                advisory.push(Finding::advisory(
-                    "hardcoded-path",
-                    format!(
-                        "{}: hardcoded install path '{}'{}",
+                let msg = match hp.kind {
+                    crate::namespace::HardcodedKind::OwnResource => format!(
+                        "{}: hardcodes its own resource path '{}'; it resolves through the agent-home symlink but breaks under a prefix or with multiple homes{}",
                         item.key(),
                         hp.matched,
                         suggestion
                     ),
-                ));
+                    crate::namespace::HardcodedKind::SharedTool => format!(
+                        "{}: hardcodes a shared tool path '{}'; a tool is store-only and never linked into an agent home, so this will not resolve{}",
+                        item.key(),
+                        hp.matched,
+                        suggestion
+                    ),
+                    crate::namespace::HardcodedKind::OtherItem => format!(
+                        "{}: hardcoded install path '{}'; mind items are reached by a path token, not an install path{}",
+                        item.key(),
+                        hp.matched,
+                        suggestion
+                    ),
+                };
+                advisory.push(Finding::advisory("hardcoded-path", msg));
             }
             // Check 10: sibling tools named in prose without a token (advisory, CLI-137).
             for t in crate::namespace::bare_tool_refs(&content, &path_siblings) {
@@ -554,6 +567,9 @@ fn run_checks(
             ));
         }
     }
+
+    // Check 12: helper scripts duplicated across items (advisory, CLI-140).
+    advisory.extend(duplicate_tooling_findings(&items));
 
     // Fix (CLI-138): rewrite the local working copy in place. Local-path target
     // only; a registry selector or repo spec is refused with nothing changed.
@@ -650,6 +666,58 @@ fn siblings_of_source(items: &[CatalogItem], source: &str) -> HashSet<String> {
         .iter()
         .filter(|it| it.source == source)
         .map(|it| it.name.clone())
+        .collect()
+}
+
+/// Detect helper files duplicated byte-for-byte across two or more items, which
+/// should instead live once under a shared `tools/<name>/` and be referenced by
+/// token (CLI-140 / INIT-7). Only non-markdown files are considered: markdown is
+/// prose (the anchor `SKILL.md`, docs), while scripts and data are the helpers a
+/// `tool` exists to share. Empty files are ignored. Returns one advisory
+/// `duplicate-tooling` finding per duplicated file, deterministically ordered.
+///
+/// Both callers (`review`, `init_source`) scan a single source, so a match is a
+/// genuine within-source duplicate, not a coincidence across unrelated repos.
+pub(crate) fn duplicate_tooling_findings(items: &[CatalogItem]) -> Vec<Finding> {
+    use std::collections::{BTreeMap, BTreeSet};
+    // content hash -> (file basename, the item keys whose dir holds that content)
+    let mut groups: BTreeMap<String, (String, BTreeSet<String>)> = BTreeMap::new();
+    for item in items {
+        for file in item_files(item) {
+            if file.extension().and_then(|e| e.to_str()) == Some("md") {
+                continue;
+            }
+            // Skip empty files: a shared zero-byte placeholder is not tooling.
+            match std::fs::metadata(&file) {
+                Ok(m) if m.len() == 0 => continue,
+                Ok(_) => {}
+                Err(_) => continue,
+            }
+            let Ok(hash) = crate::hash::hash_path(&file) else {
+                continue;
+            };
+            let base = file
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let entry = groups
+                .entry(hash)
+                .or_insert_with(|| (base, BTreeSet::new()));
+            entry.1.insert(item.key());
+        }
+    }
+    groups
+        .into_values()
+        .filter(|(_, owners)| owners.len() >= 2)
+        .map(|(base, owners)| {
+            Finding::advisory(
+                "duplicate-tooling",
+                format!(
+                    "{base} is byte-identical across {}; move the shared copy into a tool (tools/<name>/) and reference it by token ({{{{tools:name}}}} or {{{{path:}}}})",
+                    owners.into_iter().collect::<Vec<_>>().join(", ")
+                ),
+            )
+        })
         .collect()
 }
 

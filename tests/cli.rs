@@ -506,6 +506,31 @@ fn init_source_reports_refs_scaffolds_toml_and_templates() {
 }
 
 #[test]
+fn init_source_flags_helper_script_duplicated_across_items() {
+    // spec: INIT-7
+    let sb = Sandbox::new();
+    let repo = sb.base.join("authoring");
+    write(
+        &repo.join("skills/a/SKILL.md"),
+        "---\ndescription: a\n---\n# a\n",
+    );
+    write(&repo.join("skills/a/helper.sh"), "#!/bin/sh\necho shared\n");
+    write(
+        &repo.join("skills/b/SKILL.md"),
+        "---\ndescription: b\n---\n# b\n",
+    );
+    write(&repo.join("skills/b/helper.sh"), "#!/bin/sh\necho shared\n");
+    let dir = repo.to_str().unwrap();
+    let r = sb.mind(&["init-source", dir]);
+    assert!(r.success, "init-source failed: {} {}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("advisory [duplicate-tooling]") && r.stdout.contains("helper.sh"),
+        "init-source must surface the duplicate-tooling advisory like review: {}",
+        r.stdout
+    );
+}
+
+#[test]
 fn review_with_no_target_reviews_the_current_directory() {
     // spec: CLI-26 - `mind review` with no <target> validates the cwd.
     let sb = Sandbox::new();
@@ -7051,6 +7076,118 @@ fn review_flags_tooling_references() {
     assert!(
         r.stdout.contains("bare-tool-reference"),
         "expected a bare-tool-reference advisory: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn review_hardcoded_path_classifies_and_detects_env_forms() {
+    // spec: CLI-141 CLI-136
+    let sb = Sandbox::bare("agents");
+    write(&sb.source.join("tools/detect/detect"), "#!/bin/sh\n");
+    write(
+        &sb.source.join("skills/review/SKILL.md"),
+        "---\nname: review\ndescription: review\n---\n\
+         own ~/.claude/skills/review/resources/pr.py\n\
+         tool $HOME/.mind/store/tool/detect/detect run\n",
+    );
+    let target = sb.source_spec();
+    let r = sb.mind(&["review", &target]);
+    assert!(
+        r.success,
+        "advisory-only review exits zero: {} {}",
+        r.stdout, r.stderr
+    );
+    // Own-resource reference: symlink wording + {{self}} suggestion.
+    assert!(
+        r.stdout.contains("hardcodes its own resource path")
+            && r.stdout.contains("{{self}}/resources/pr.py"),
+        "own-resource classification: {}",
+        r.stdout
+    );
+    // Shared-tool reference, written with the $HOME spelling: store-only wording
+    // + {{tools:}} suggestion, proving the extended form is detected too.
+    assert!(
+        r.stdout.contains("hardcodes a shared tool path")
+            && r.stdout.contains("will not resolve")
+            && r.stdout.contains("{{tools:detect}}"),
+        "shared-tool classification via $HOME form: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn review_flags_helper_script_duplicated_across_items() {
+    // spec: CLI-140
+    let sb = Sandbox::bare("agents");
+    // Two skills ship the same helper script verbatim; it should be a tool.
+    write(
+        &sb.source.join("skills/a/SKILL.md"),
+        "---\nname: a\ndescription: a\n---\n# a\n",
+    );
+    write(
+        &sb.source.join("skills/a/helper.sh"),
+        "#!/bin/sh\necho shared\n",
+    );
+    write(
+        &sb.source.join("skills/a/only.sh"),
+        "#!/bin/sh\necho unique\n",
+    );
+    write(
+        &sb.source.join("skills/b/SKILL.md"),
+        "---\nname: b\ndescription: b\n---\n# b\n",
+    );
+    write(
+        &sb.source.join("skills/b/helper.sh"),
+        "#!/bin/sh\necho shared\n",
+    );
+    let target = sb.source_spec();
+    let r = sb.mind(&["review", &target]);
+    assert!(
+        r.success,
+        "an advisory-only review exits zero: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stdout.contains("duplicate-tooling") && r.stdout.contains("helper.sh"),
+        "expected a duplicate-tooling advisory naming the file: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("skill:a") && r.stdout.contains("skill:b"),
+        "the finding names both carriers: {}",
+        r.stdout
+    );
+    // A script that lives under only one item is not flagged.
+    assert!(
+        !r.stdout.contains("only.sh"),
+        "a non-duplicated script must not be flagged: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn review_does_not_flag_duplicated_markdown() {
+    // spec: CLI-140
+    // Markdown is prose, not tooling: identical docs across items are not a
+    // duplicate-tooling finding.
+    let sb = Sandbox::bare("agents");
+    write(
+        &sb.source.join("skills/a/SKILL.md"),
+        "---\nname: a\ndescription: a\n---\n# shared heading\n",
+    );
+    write(&sb.source.join("skills/a/NOTES.md"), "same notes\n");
+    write(
+        &sb.source.join("skills/b/SKILL.md"),
+        "---\nname: b\ndescription: b\n---\n# shared heading\n",
+    );
+    write(&sb.source.join("skills/b/NOTES.md"), "same notes\n");
+    let target = sb.source_spec();
+    let r = sb.mind(&["review", &target]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(
+        !r.stdout.contains("duplicate-tooling"),
+        "duplicated markdown must not be flagged: {}",
         r.stdout
     );
 }

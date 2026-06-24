@@ -59,3 +59,9 @@ namespacing.md.
 - `INIT-6` `init-source` makes no network calls and does not read or write the
   store or any agent home; it edits only the target repo. Without `--template` it
   is read-only except for creating an absent `mind.toml` (INIT-3).
+- `INIT-7` `init-source` reports the same `duplicate-tooling` advisories `review`
+  does (CLI-140), in the same finding format: a non-markdown helper file that is
+  byte-identical across two or more items, which should live once under
+  `tools/<name>/` and be referenced by token. `--template` does not rewrite it
+  (the `--template` hint is shown only for bare prose references, INIT-5);
+  extracting a shared tool is a structural change the maintainer makes by hand.
