@@ -1,6 +1,6 @@
 # Common developer tasks. Run `make help` for the list.
 
-.PHONY: help build fmt fmt-check clippy test check ci release clean
+.PHONY: help build fmt fmt-check clippy test check ci release clean docs docs-build
 
 # Package version from Cargo.toml, used to derive the release tag.
 VERSION := $(shell grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')
@@ -17,6 +17,8 @@ help:
 	@echo "  ci         CI gate: fmt-check + clippy + test"
 	@echo "  release    tag v$(VERSION) and push it (triggers the release workflow)"
 	@echo "             override: make release TAG=v1.2.3  (or VERSION=1.2.3)"
+	@echo "  docs       build the docs site and serve it locally with live reload"
+	@echo "  docs-build build the docs site to docs/book"
 	@echo "  clean      cargo clean"
 
 build:
@@ -51,6 +53,18 @@ release:
 	fi
 	git tag -a $(TAG) -m "release $(TAG)"
 	git push origin $(TAG)
+
+# Serve the mdBook docs (docs/) locally with live reload, opening a browser.
+# Same tool the Pages workflow uses; install with `cargo install mdbook` (or grab
+# a prebuilt binary from the mdBook releases).
+docs:
+	@command -v mdbook >/dev/null || { echo "error: mdbook not found; install with 'cargo install mdbook'"; exit 1; }
+	mdbook serve docs --open
+
+# Build the static site to docs/book (what CI deploys to Pages).
+docs-build:
+	@command -v mdbook >/dev/null || { echo "error: mdbook not found; install with 'cargo install mdbook'"; exit 1; }
+	mdbook build docs
 
 clean:
 	cargo clean
