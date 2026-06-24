@@ -1275,6 +1275,58 @@ fn super_source_meld_is_cycle_safe() {
 }
 
 #[test]
+fn super_source_meld_breaks_multi_level_cycle() {
+    // spec: DSC-38
+    // A multi-level chain that loops: aa -> bb -> cc -> aa. Each repo is itself a
+    // super-source, so resolution must follow the chain, detect the cycle back to
+    // aa, and process each source exactly once (no infinite recursion, no dupes).
+    let a = Sandbox::bare("aa");
+    let b = Sandbox::bare("bb");
+    let c = Sandbox::bare("cc");
+    a.write_and_commit(
+        "mind.toml",
+        &format!(
+            "[discover]\nsources = [{{ source = \"{}\" }}]\n",
+            b.source_spec()
+        ),
+    );
+    b.write_and_commit(
+        "mind.toml",
+        &format!(
+            "[discover]\nsources = [{{ source = \"{}\" }}]\n",
+            c.source_spec()
+        ),
+    );
+    c.write_and_commit(
+        "mind.toml",
+        &format!(
+            "[discover]\nsources = [{{ source = \"{}\" }}]\n",
+            a.source_spec()
+        ),
+    );
+    let spec = a.source_spec();
+    let r = a.mind(&["meld", &spec]);
+    assert!(r.success, "a cyclic chain must terminate: {}", r.stderr);
+    // Each source is melded exactly once: the per-source "melding" progress line
+    // appears three times, not more (a missed cycle guard would loop or repeat).
+    assert_eq!(
+        r.stdout.matches("melding").count(),
+        3,
+        "each source melds exactly once: {}",
+        r.stdout
+    );
+    // All three are registered, each exactly once (no duplicate push).
+    let recall = a.mind(&["recall", "--sources", "--json"]).stdout;
+    for name in ["aa", "bb", "cc"] {
+        assert_eq!(
+            recall.matches(&format!("\"repo\": \"{name}\"")).count(),
+            1,
+            "{name} must be registered exactly once: {recall}"
+        );
+    }
+}
+
+#[test]
 fn invalid_mind_toml_errors_clearly() {
     // spec: DSC-31
     let sb = Sandbox::new();

@@ -81,16 +81,11 @@ const ALLOWLIST: &[&str] = &[
     // because it requires a TTY-approved run and cannot be exercised headlessly:
     //   HOOK-71: build runs in staging, non-zero exit rolls the install back.
     //   HOOK-73: a build re-runs when its item is reinstalled/upgraded.
-    "HOOK-71",
-    "HOOK-73",
+    "HOOK-71", "HOOK-73",
     //   per-item install/uninstall hooks (see spec/install-hooks.md, the "Item
     //   install and uninstall hooks" section): host side-effect commands tied to
     //   an item, run at install/removal and re-run on upgrade. Not yet built.
-    "HOOK-80",
-    "HOOK-81",
-    "HOOK-82",
-    "HOOK-83",
-    "HOOK-84",
+    "HOOK-80", "HOOK-81", "HOOK-82", "HOOK-83", "HOOK-84",
     "HOOK-85",
     // Polished output: CLI-150 (global flags) is cited from unit tests in
     // src/main.rs; the capability gate (CLI-151), glyph/color semantics and the

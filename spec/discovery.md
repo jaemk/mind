@@ -79,9 +79,14 @@ sources = [
   matched by an `exclude` glob is dropped from the result.
 - `DSC-38` `[discover].sources` lists other repo specs (each parsed like a `meld`
   argument). Melding a source recursively melds each listed source, skipping any
-  already registered; cycles are guarded by URL so recursion terminates. This
-  lets a `mind.toml` act as a curated registry / super-source. Each curated
-  source is registered independently and tracks its own upstream commit.
+  already registered, so a `mind.toml` can act as a curated registry /
+  super-source. Each curated source is registered independently and tracks its
+  own upstream commit. Recursion always terminates, even when a nested source is
+  itself a super-source and the chain forms a cycle (`A -> B -> C -> A`): a source
+  is registered before its own nested sources are processed, and a source already
+  seen is skipped, matched both by URL within the run and by `host/owner/repo`
+  identity against the registry (so two spellings of the same repo do not slip
+  past). Each source in the transitive set is therefore processed at most once.
 - `DSC-39` A `[discover].sources` entry may set `as = "<prefix>"` to impose a
   namespace on that nested source (equivalent to `meld --as`).
 - `DSC-40` When a source's `[source].min-mind-version` is greater than the
