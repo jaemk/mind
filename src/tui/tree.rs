@@ -391,6 +391,8 @@ fn item_matches_search_installed(item: &crate::tui::data::SnapshotInstalled, sea
         link_rel: None,
         bin: None,
         build: None,
+        install: None,
+        uninstall: None,
     };
     catalog::matches_query(&fake, search)
 }
@@ -415,6 +417,8 @@ fn item_matches_search_available(item: &crate::tui::data::SnapshotAvailable, sea
         link_rel: None,
         bin: None,
         build: None,
+        install: None,
+        uninstall: None,
     };
     catalog::matches_query(&fake, search)
 }

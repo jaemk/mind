@@ -8157,3 +8157,419 @@ fn json_sync_upgrade_emits_two_objects_one_per_action() {
     assert_eq!(actions[0]["action"], "sync", "{}", r.stdout);
     assert_eq!(actions[1]["action"], "upgrade", "{}", r.stdout);
 }
+
+// ===== Per-item install/uninstall hooks (HOOK-80..85) =====
+
+/// A source named `name` (a `bare` repo) with one skill `greet` declared in
+/// `mind.toml` `[[items]]` carrying per-item `install` and `uninstall` hooks.
+/// The commands are arbitrary; markers under `<base>/markers` let a test observe
+/// which fired. The install command also drops a relative `built-here` file so a
+/// test can confirm the hook ran with the store dir as its working directory.
+fn sandbox_with_item_hook_cmds(name: &str, install: &str, uninstall: &str) -> Sandbox {
+    let sb = Sandbox::bare(name);
+    write(
+        &sb.source.join("skills/greet/SKILL.md"),
+        "---\ndescription: greet the user\n---\n# greet\n",
+    );
+    let toml = format!(
+        concat!(
+            "[[items]]\n",
+            "kind = \"skill\"\n",
+            "name = \"greet\"\n",
+            "path = \"skills/greet\"\n",
+            "install = \"{install}\"\n",
+            "uninstall = \"{uninstall}\"\n",
+        ),
+        install = install,
+        uninstall = uninstall,
+    );
+    sb.write_and_commit(
+        "skills/greet/SKILL.md",
+        "---\ndescription: greet the user\n---\n# greet\n",
+    );
+    sb.write_and_commit("mind.toml", &toml);
+    sb
+}
+
+/// The success-marker variant: the install hook drops `built-here` (relative, in
+/// the store dir) plus an absolute `<base>/markers/installed`; the uninstall hook
+/// drops an absolute `<base>/markers/uninstalled`.
+fn sandbox_with_item_hooks(name: &str) -> Sandbox {
+    // Build first so we know the base path, then rewrite the mind.toml commands
+    // with absolute marker paths under that base.
+    let sb = Sandbox::bare(name);
+    let markers = sb.base.join("markers");
+    let m = markers.display();
+    let install = format!("touch built-here && mkdir -p {m} && touch {m}/installed");
+    let uninstall = format!("mkdir -p {m} && touch {m}/uninstalled");
+    write(
+        &sb.source.join("skills/greet/SKILL.md"),
+        "---\ndescription: greet the user\n---\n# greet\n",
+    );
+    let toml = format!(
+        concat!(
+            "[[items]]\n",
+            "kind = \"skill\"\n",
+            "name = \"greet\"\n",
+            "path = \"skills/greet\"\n",
+            "install = \"{install}\"\n",
+            "uninstall = \"{uninstall}\"\n",
+        ),
+        install = install,
+        uninstall = uninstall,
+    );
+    sb.write_and_commit(
+        "skills/greet/SKILL.md",
+        "---\ndescription: greet the user\n---\n# greet\n",
+    );
+    sb.write_and_commit("mind.toml", &toml);
+    sb
+}
+
+#[test]
+fn learn_runs_item_install_hook_in_store_dir() {
+    // spec: HOOK-81, HOOK-83
+    // An item install hook runs as the final install step, in the item's store
+    // directory, when run unattended via --dangerously-skip-install-hook-check.
+    let sb = sandbox_with_item_hooks("agents");
+    let spec = sb.source_spec();
+    // Register without auto-installing (so the install runs under our flag).
+    assert!(sb.mind(&["meld", &spec, "--link-only"]).success);
+
+    let r = sb.mind(&[
+        "learn",
+        "skill:greet",
+        "--dangerously-skip-install-hook-check",
+    ]);
+    assert!(r.success, "learn should succeed: {} {}", r.stdout, r.stderr);
+
+    // The item installed.
+    assert!(
+        sb.mind_home.join("store/skill/greet/SKILL.md").exists(),
+        "the skill must be installed"
+    );
+    // HOOK-81: the install hook ran with the store dir as cwd (relative marker).
+    assert!(
+        sb.mind_home.join("store/skill/greet/built-here").exists(),
+        "install hook must run in the item's store directory"
+    );
+    // And its absolute side effect happened.
+    assert!(
+        sb.base.join("markers/installed").exists(),
+        "the install hook's side effect must have run"
+    );
+}
+
+#[test]
+fn learn_without_flag_skips_item_install_hook_in_non_tty() {
+    // spec: HOOK-83
+    // A non-TTY learn with no flag skips the item install hook: the item still
+    // installs, but the side effect does not run, and a note says so.
+    let sb = sandbox_with_item_hooks("agents");
+    let spec = sb.source_spec();
+    assert!(sb.mind(&["meld", &spec, "--link-only"]).success);
+
+    let r = sb.mind(&["learn", "skill:greet"]);
+    assert!(
+        r.success,
+        "learn should still succeed: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        sb.mind_home.join("store/skill/greet/SKILL.md").exists(),
+        "the item must install even though the hook is skipped"
+    );
+    assert!(
+        !sb.base.join("markers/installed").exists(),
+        "a non-TTY learn must skip the install hook"
+    );
+    assert!(
+        r.stdout.contains("skipped install hook"),
+        "the skip must be reported: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn learn_item_install_hook_failure_rolls_back_the_install() {
+    // spec: HOOK-81
+    // A non-zero install-hook exit rolls the item's install back: its store copy
+    // and link are removed and it is left not installed.
+    let sb = sandbox_with_item_hook_cmds("agents", "exit 1", "true");
+    let spec = sb.source_spec();
+    assert!(sb.mind(&["meld", &spec, "--link-only"]).success);
+
+    let r = sb.mind(&[
+        "learn",
+        "skill:greet",
+        "--dangerously-skip-install-hook-check",
+    ]);
+    assert!(
+        !r.success,
+        "a failing install hook must fail learn: {}",
+        r.stdout
+    );
+    assert!(
+        !sb.mind_home.join("store/skill/greet").exists(),
+        "the store copy must be removed on rollback"
+    );
+    assert!(
+        !sb.claude_home.join("skills/greet").exists(),
+        "the link must be removed on rollback"
+    );
+    let manifest = std::fs::read_to_string(sb.mind_home.join("manifest.json")).unwrap_or_default();
+    assert!(
+        !manifest.contains("greet"),
+        "a rolled-back item must not be recorded in the manifest: {manifest}"
+    );
+}
+
+#[test]
+fn forget_runs_item_uninstall_hook() {
+    // spec: HOOK-82
+    // forget runs the item's uninstall hook (in its store dir) before removing it.
+    let sb = sandbox_with_item_hooks("agents");
+    let spec = sb.source_spec();
+    assert!(sb.mind(&["meld", &spec, "--link-only"]).success);
+    assert!(
+        sb.mind(&[
+            "learn",
+            "skill:greet",
+            "--dangerously-skip-install-hook-check"
+        ])
+        .success
+    );
+
+    let r = sb.mind(&[
+        "forget",
+        "skill:greet",
+        "--dangerously-skip-install-hook-check",
+    ]);
+    assert!(
+        r.success,
+        "forget should succeed: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        sb.base.join("markers/uninstalled").exists(),
+        "the uninstall hook must run at forget"
+    );
+    assert!(
+        !sb.mind_home.join("store/skill/greet").exists(),
+        "the item must be removed after its uninstall hook"
+    );
+}
+
+#[test]
+fn forget_without_flag_skips_item_uninstall_hook_in_non_tty() {
+    // spec: HOOK-83
+    // A non-TTY forget with no flag skips the uninstall hook but still removes the
+    // item (cleanup is the graceful decline).
+    let sb = sandbox_with_item_hooks("agents");
+    let spec = sb.source_spec();
+    assert!(sb.mind(&["meld", &spec, "--link-only"]).success);
+    assert!(
+        sb.mind(&[
+            "learn",
+            "skill:greet",
+            "--dangerously-skip-install-hook-check"
+        ])
+        .success
+    );
+
+    let r = sb.mind(&["forget", "skill:greet"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(
+        !sb.base.join("markers/uninstalled").exists(),
+        "a non-TTY forget must skip the uninstall hook"
+    );
+    assert!(
+        !sb.mind_home.join("store/skill/greet").exists(),
+        "the item is still removed when the hook is skipped"
+    );
+    assert!(
+        r.stdout.contains("skipped uninstall hook"),
+        "the skip must be reported: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn forget_item_uninstall_hook_failure_leaves_item_installed() {
+    // spec: HOOK-82
+    // A non-zero uninstall-hook exit is a hard stop: the removal stops and the
+    // item is left installed.
+    let sb = sandbox_with_item_hook_cmds("agents", "true", "exit 1");
+    let spec = sb.source_spec();
+    assert!(sb.mind(&["meld", &spec, "--link-only"]).success);
+    assert!(
+        sb.mind(&[
+            "learn",
+            "skill:greet",
+            "--dangerously-skip-install-hook-check"
+        ])
+        .success
+    );
+
+    let r = sb.mind(&[
+        "forget",
+        "skill:greet",
+        "--dangerously-skip-install-hook-check",
+    ]);
+    assert!(
+        !r.success,
+        "a failing uninstall hook must fail forget: {}",
+        r.stdout
+    );
+    assert!(
+        sb.mind_home.join("store/skill/greet/SKILL.md").exists(),
+        "the item must remain installed when its uninstall hook fails"
+    );
+}
+
+#[test]
+fn unmeld_runs_item_uninstall_hook() {
+    // spec: HOOK-82
+    // unmeld removes the source's items, running each item's uninstall hook first.
+    let sb = sandbox_with_item_hooks("agents");
+    let spec = sb.source_spec();
+    assert!(sb.mind(&["meld", &spec, "--link-only"]).success);
+    assert!(
+        sb.mind(&[
+            "learn",
+            "skill:greet",
+            "--dangerously-skip-install-hook-check"
+        ])
+        .success
+    );
+
+    let r = sb.mind(&[
+        "unmeld",
+        "agents",
+        "-y",
+        "--dangerously-skip-install-hook-check",
+    ]);
+    assert!(
+        r.success,
+        "unmeld should succeed: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        sb.base.join("markers/uninstalled").exists(),
+        "the item uninstall hook must run at unmeld"
+    );
+    assert!(
+        !sb.mind_home.join("store/skill/greet").exists(),
+        "the item must be removed at unmeld"
+    );
+}
+
+#[test]
+fn item_install_hook_reruns_on_reinstall() {
+    // spec: HOOK-84
+    // Nothing is recorded for the hook: it fires on every removal and re-runs on
+    // every reinstall. learn -> forget -> learn fires install, uninstall, install.
+    let sb = sandbox_with_item_hooks("agents");
+    let spec = sb.source_spec();
+    assert!(sb.mind(&["meld", &spec, "--link-only"]).success);
+    assert!(
+        sb.mind(&[
+            "learn",
+            "skill:greet",
+            "--dangerously-skip-install-hook-check"
+        ])
+        .success
+    );
+    assert!(sb.base.join("markers/installed").exists());
+
+    // Clear the markers, then remove and reinstall.
+    std::fs::remove_dir_all(sb.base.join("markers")).unwrap();
+    assert!(
+        sb.mind(&[
+            "forget",
+            "skill:greet",
+            "--dangerously-skip-install-hook-check"
+        ])
+        .success
+    );
+    assert!(
+        sb.base.join("markers/uninstalled").exists(),
+        "uninstall hook fires on removal"
+    );
+
+    let r = sb.mind(&[
+        "learn",
+        "skill:greet",
+        "--dangerously-skip-install-hook-check",
+    ]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(
+        sb.base.join("markers/installed").exists(),
+        "the install hook must re-run on reinstall (HOOK-84)"
+    );
+}
+
+#[test]
+fn in_place_upgrade_reruns_install_hook_but_not_uninstall_hook() {
+    // spec: HOOK-82, HOOK-81
+    // An in-place upgrade (same effective name, content swapped) re-runs the item
+    // install hook (HOOK-81) but does NOT run the uninstall hook, since the item
+    // is not removed (HOOK-82).
+    let sb = sandbox_with_item_hooks("agents");
+    let spec = sb.source_spec();
+    assert!(sb.mind(&["meld", &spec, "--link-only"]).success);
+    assert!(
+        sb.mind(&[
+            "learn",
+            "skill:greet",
+            "--dangerously-skip-install-hook-check"
+        ])
+        .success
+    );
+    std::fs::remove_dir_all(sb.base.join("markers")).unwrap();
+
+    // Change the skill upstream so upgrade swaps its content in place.
+    sb.write_and_commit(
+        "skills/greet/SKILL.md",
+        "---\ndescription: greet the user\n---\n# greet v2\n",
+    );
+    assert!(sb.mind(&["sync"]).success);
+    let r = sb.mind(&["upgrade", "-y", "--dangerously-skip-install-hook-check"]);
+    assert!(
+        r.success,
+        "upgrade should succeed: {} {}",
+        r.stdout, r.stderr
+    );
+
+    assert!(
+        sb.base.join("markers/installed").exists(),
+        "the install hook must re-run on an in-place upgrade (HOOK-81)"
+    );
+    assert!(
+        !sb.base.join("markers/uninstalled").exists(),
+        "an in-place upgrade must NOT run the uninstall hook (HOOK-82)"
+    );
+}
+
+#[test]
+fn review_lists_item_install_and_uninstall_hooks() {
+    // spec: HOOK-85
+    // `mind review` surfaces an item's declared install/uninstall hooks as
+    // advisory findings so a consumer sees, before installing, that the item runs
+    // code on the host.
+    let sb = sandbox_with_item_hooks("agents");
+    let r = sb.mind(&["review", &sb.source_spec()]);
+    let all = format!("{}{}", r.stdout, r.stderr);
+    assert!(
+        all.contains("item-hook"),
+        "review must emit item-hook advisories: {all}"
+    );
+    assert!(
+        all.contains("declares an install hook"),
+        "review must list the install hook: {all}"
+    );
+    assert!(
+        all.contains("declares an uninstall hook"),
+        "review must list the uninstall hook: {all}"
+    );
+}

@@ -306,6 +306,114 @@ fn run_build_hook(item: &CatalogItem, build: &str, staging: &Path, commit: &str)
     Ok(())
 }
 
+/// The working directory for an item lifecycle hook: the item's store path when
+/// it is a directory (a skill or tool), else its parent (an agent/rule store is a
+/// single file, so the kind directory is the working dir).
+fn hook_cwd(store: &Path) -> std::path::PathBuf {
+    if store.is_dir() {
+        store.to_path_buf()
+    } else {
+        store
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| store.to_path_buf())
+    }
+}
+
+/// Run an item's install hook (HOOK-81) in its store directory, the final step
+/// of installing the item. Disclosed and prompted two-way (run / skip) on a TTY;
+/// a non-TTY context skips it (the item installs without the side effect);
+/// `dangerously_skip` runs it unattended (HOOK-83). A non-zero exit is a
+/// `HookFailed` hard stop the caller rolls back (HOOK-81).
+pub fn run_item_install_hook(
+    item: &CatalogItem,
+    cmd: &str,
+    store: &Path,
+    commit: &str,
+    dangerously_skip: bool,
+) -> Result<()> {
+    let cwd = hook_cwd(store);
+    let run = if dangerously_skip {
+        true
+    } else if !crate::hook::is_tty() {
+        println!(
+            "note: skipped install hook for {} in a non-interactive context; its side effect is not applied",
+            item.key()
+        );
+        false
+    } else {
+        let disclosure = crate::hook::disclosure_text(
+            &item.source,
+            "(per-item install)",
+            commit,
+            &cwd.to_string_lossy(),
+            cmd,
+            None,
+        );
+        matches!(
+            crate::hook::prompt_choice_optional(&disclosure)?,
+            crate::hook::OptionalChoice::Run
+        )
+    };
+    if run {
+        println!("running install hook for {}", item.key());
+        crate::hook::run_hook(cmd, &cwd, &item.source, "install")?;
+    } else if crate::hook::is_tty() && !dangerously_skip {
+        println!(
+            "note: skipped install hook for {}; its side effect is not applied",
+            item.key()
+        );
+    }
+    Ok(())
+}
+
+/// Run an item's uninstall hook (HOOK-82) in its store directory, before the
+/// store copy and links are removed. Disclosed and prompted two-way (run / skip)
+/// on a TTY; a non-TTY context skips it (the item is removed without cleanup);
+/// `dangerously_skip` runs it unattended. A non-zero exit is a `HookFailed` hard
+/// stop: the caller leaves the item installed (HOOK-82).
+pub fn run_item_uninstall_hook(
+    item: &InstalledItem,
+    cmd: &str,
+    store: &Path,
+    commit: &str,
+    dangerously_skip: bool,
+) -> Result<()> {
+    let cwd = hook_cwd(store);
+    let run = if dangerously_skip {
+        true
+    } else if !crate::hook::is_tty() {
+        println!(
+            "note: skipped uninstall hook for {} in a non-interactive context; its cleanup is not run",
+            item.key()
+        );
+        false
+    } else {
+        let disclosure = crate::hook::disclosure_text(
+            &item.source,
+            "(per-item uninstall)",
+            commit,
+            &cwd.to_string_lossy(),
+            cmd,
+            None,
+        );
+        matches!(
+            crate::hook::prompt_choice_optional(&disclosure)?,
+            crate::hook::OptionalChoice::Run
+        )
+    };
+    if run {
+        println!("running uninstall hook for {}", item.key());
+        crate::hook::run_hook(cmd, &cwd, &item.source, "uninstall")?;
+    } else if crate::hook::is_tty() && !dangerously_skip {
+        println!(
+            "note: skipped uninstall hook for {}; its cleanup is not run",
+            item.key()
+        );
+    }
+    Ok(())
+}
+
 fn collect_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> Result<()> {
     let rd = std::fs::read_dir(dir).map_err(|e| MindError::io(dir, e))?;
     for entry in rd {
@@ -392,6 +500,8 @@ mod tests {
             link_rel: None,
             bin: None,
             build: Some(build.to_string()),
+            install: None,
+            uninstall: None,
         }
     }
 

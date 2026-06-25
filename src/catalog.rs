@@ -49,6 +49,14 @@ pub struct CatalogItem {
     /// A per-item build command run in staging at install (from `TOOL.md`
     /// frontmatter or a `mind.toml` override). `None` means no build step.
     pub build: Option<String>,
+    /// An item install hook (HOOK-80): a host side-effect command run as the
+    /// final install step (from a `mind.toml` `[[items]].install` on any kind,
+    /// or a tool's `TOOL.md` `install:` frontmatter). `None` means none.
+    pub install: Option<String>,
+    /// An item uninstall hook (HOOK-80): a host cleanup command run when the item
+    /// is removed (from a `mind.toml` `[[items]].uninstall` on any kind, or a
+    /// tool's `TOOL.md` `uninstall:` frontmatter). `None` means none.
+    pub uninstall: Option<String>,
 }
 
 impl CatalogItem {
@@ -264,7 +272,29 @@ fn from_decl(
         link_rel: decl.link.clone(),
         bin: tool_field(kind, decl.bin.clone(), &meta, "bin"),
         build: tool_field(kind, decl.build.clone(), &meta, "build"),
+        // HOOK-80: a `mind.toml` install/uninstall is valid on any kind; a
+        // tool's TOOL.md may also carry one in frontmatter.
+        install: nonempty(decl.install.clone())
+            .or_else(|| lifecycle_frontmatter(kind, &meta, "install")),
+        uninstall: nonempty(decl.uninstall.clone())
+            .or_else(|| lifecycle_frontmatter(kind, &meta, "uninstall")),
     })
+}
+
+/// Read a lifecycle hook (`install`/`uninstall`, HOOK-80) from an item's meta
+/// file frontmatter, but only for a tool (a `TOOL.md`). Other kinds declare
+/// these only via `mind.toml` `[[items]]`, so frontmatter is not consulted.
+/// An empty or whitespace-only value is treated as absent (HOOK-3).
+fn lifecycle_frontmatter(kind: ItemKind, meta: &Path, key: &str) -> Option<String> {
+    if kind != ItemKind::Tool {
+        return None;
+    }
+    nonempty(frontmatter::file_field(meta, key))
+}
+
+/// Trim a value and treat an empty/whitespace-only string as absent (HOOK-3).
+fn nonempty(v: Option<String>) -> Option<String> {
+    v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
 /// Resolve a tool's `bin`/`build`: an explicit `mind.toml` value wins, else the
@@ -391,6 +421,138 @@ fn make_item(
         link_rel: None,
         bin: tool_field(kind, None, meta, "bin"),
         build: tool_field(kind, None, meta, "build"),
+        // HOOK-80: convention discovery reads install/uninstall only from a
+        // tool's TOOL.md frontmatter; other kinds declare them via mind.toml.
+        install: lifecycle_frontmatter(kind, meta, "install"),
+        uninstall: lifecycle_frontmatter(kind, meta, "uninstall"),
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static N: AtomicU32 = AtomicU32::new(0);
+
+    fn tmp() -> PathBuf {
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let p = std::env::temp_dir().join(format!("mind-lifecycle-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    fn write(path: &Path, contents: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+
+    fn source_for(clone: &Path) -> Source {
+        use crate::source::Pin;
+        Source {
+            name: "local/test/repo".to_string(),
+            url: clone.to_string_lossy().into_owned(),
+            host: "local".to_string(),
+            owner: "test".to_string(),
+            repo: "repo".to_string(),
+            commit: None,
+            description: None,
+            alias: None,
+            pin: Pin::default(),
+            roots: None,
+            install_hooks: Vec::new(),
+            install_hook: None,
+            install_hook_commit: None,
+        }
+    }
+
+    #[test]
+    fn item_install_uninstall_hooks_from_mind_toml_on_any_kind() {
+        // spec: HOOK-80
+        // A `mind.toml` [[items]].install/.uninstall is valid on a non-tool kind
+        // (here a rule), unlike `bin`/`build` which are tool-only.
+        let base = tmp();
+        let clone = base.join("sources/local/test/repo");
+        write(
+            &clone.join("guidelines/style.md"),
+            "---\ndescription: style\n---\n# style\n",
+        );
+        write(
+            &clone.join("mind.toml"),
+            concat!(
+                "[[items]]\n",
+                "kind = \"rule\"\n",
+                "name = \"style\"\n",
+                "path = \"guidelines/style.md\"\n",
+                "install = \"echo set-up\"\n",
+                "uninstall = \"echo tear-down\"\n",
+            ),
+        );
+        let paths = Paths {
+            mind_home: base.clone(),
+            claude_home: base.join("claude"),
+        };
+        let mut items = Vec::new();
+        scan_source(&paths, &source_for(&clone), &mut items).unwrap();
+        let rule = items.iter().find(|i| i.name == "style").unwrap();
+        assert_eq!(rule.install.as_deref(), Some("echo set-up"));
+        assert_eq!(rule.uninstall.as_deref(), Some("echo tear-down"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn item_hooks_from_tool_md_frontmatter() {
+        // spec: HOOK-80
+        // A tool's TOOL.md may carry install:/uninstall: in frontmatter.
+        let base = tmp();
+        let clone = base.join("sources/local/test/repo");
+        write(
+            &clone.join("tools/helper/TOOL.md"),
+            "---\ndescription: helper\ninstall: make setup\nuninstall: make cleanup\n---\n# helper\n",
+        );
+        write(&clone.join("tools/helper/helper"), "#!/bin/sh\n");
+        let paths = Paths {
+            mind_home: base.clone(),
+            claude_home: base.join("claude"),
+        };
+        let mut items = Vec::new();
+        scan_source(&paths, &source_for(&clone), &mut items).unwrap();
+        let tool = items.iter().find(|i| i.name == "helper").unwrap();
+        assert_eq!(tool.install.as_deref(), Some("make setup"));
+        assert_eq!(tool.uninstall.as_deref(), Some("make cleanup"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn empty_item_hook_is_treated_as_absent() {
+        // spec: HOOK-80
+        // An empty/whitespace install or uninstall is absent (HOOK-3).
+        let base = tmp();
+        let clone = base.join("sources/local/test/repo");
+        write(
+            &clone.join("guidelines/style.md"),
+            "---\ndescription: style\n---\n# style\n",
+        );
+        write(
+            &clone.join("mind.toml"),
+            concat!(
+                "[[items]]\n",
+                "kind = \"rule\"\n",
+                "name = \"style\"\n",
+                "path = \"guidelines/style.md\"\n",
+                "install = \"   \"\n",
+            ),
+        );
+        let paths = Paths {
+            mind_home: base.clone(),
+            claude_home: base.join("claude"),
+        };
+        let mut items = Vec::new();
+        scan_source(&paths, &source_for(&clone), &mut items).unwrap();
+        let rule = items.iter().find(|i| i.name == "style").unwrap();
+        assert_eq!(rule.install, None, "whitespace install must be absent");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
 
@@ -965,6 +1127,8 @@ mod tests {
             link_rel: None,
             bin: None,
             build: None,
+            install: None,
+            uninstall: None,
         }
     }
 
@@ -1036,6 +1200,8 @@ mod tests {
             link_rel: None,
             bin: None,
             build: None,
+            install: None,
+            uninstall: None,
         };
         assert_eq!(item.resolved_bin(), None);
     }
@@ -1055,6 +1221,8 @@ mod tests {
             description: None,
             bin: Some("x".to_string()),
             build: None,
+            install: None,
+            uninstall: None,
         };
         let err = from_decl(root, &source, &None, &decl).unwrap_err();
         assert!(

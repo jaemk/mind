@@ -225,7 +225,7 @@ kind and `{{tools:name}}` (tooling.md, TOOL-12), but any kind may declare one.
 
 ## Item install and uninstall hooks
 
-Status: planned. A `build` hook (HOOK-70) produces an item's store content in
+Status: done. A `build` hook (HOOK-70) produces an item's store content in
 staging. Separately, an item may need a side-effect command on the host when it
 is installed (set up a venv, register a helper) and a matching cleanup command
 when it is removed. These are the item-level analog of a source's install and

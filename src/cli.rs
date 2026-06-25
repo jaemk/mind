@@ -205,6 +205,12 @@ pub enum Command {
         /// on a TTY and otherwise refuses.
         #[arg(short = 'f', long)]
         force: bool,
+
+        /// Run an item's install hook without the safety prompt. This executes
+        /// arbitrary code from the source; only use it for a source you trust.
+        /// Without this flag, a non-TTY run skips the hook and prints a note.
+        #[arg(long)]
+        dangerously_skip_install_hook_check: bool,
     },
 
     /// Remove an installed item, or many via a glob.
@@ -212,6 +218,12 @@ pub enum Command {
     Forget {
         /// The installed item ref or glob: `name`, `skill:name`, `'review*'`, `'*'`.
         item: String,
+
+        /// Run an item's uninstall hook without the safety prompt. This executes
+        /// arbitrary code from the source; only use it for a source you trust.
+        /// Without this flag, a non-TTY run skips the hook and prints a note.
+        #[arg(long)]
+        dangerously_skip_install_hook_check: bool,
     },
 
     /// Refresh every melded source's clone and catalog.

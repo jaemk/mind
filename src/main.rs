@@ -209,7 +209,13 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
                 // CLI-23: by default, offer to install the melded source's items
                 // right away (preview + prompt). `--link-only` stops at registering.
                 if !link_only {
-                    commands::install_melded_source(paths, &repo, yes, clobber)?;
+                    commands::install_melded_source(
+                        paths,
+                        &repo,
+                        yes,
+                        clobber,
+                        dangerously_skip_install_hook_check,
+                    )?;
                     // DSC-55: `--install-super-sources` extends the install flow to
                     // each newly registered nested source (DSC-54 installs only the
                     // top-level source by default).
@@ -217,7 +223,13 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
                         let top = crate::source::parse_spec(&repo).ok().map(|s| s.name);
                         for name in &newly {
                             if top.as_deref() != Some(name.as_str()) {
-                                commands::install_source_items(paths, name, yes, clobber)?;
+                                commands::install_source_items(
+                                    paths,
+                                    name,
+                                    yes,
+                                    clobber,
+                                    dangerously_skip_install_hook_check,
+                                )?;
                             }
                         }
                     }
@@ -245,6 +257,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             all,
             dry_run,
             force,
+            dangerously_skip_install_hook_check,
         } => {
             // CLI-36: `--all` rewrites the ref into the `<source>#*` selector.
             let item = if all {
@@ -262,9 +275,13 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
                 } else {
                     commands::Clobber::Prompt
                 },
+                dangerously_skip_install_hook_check,
             )
         }
-        Command::Forget { item } => commands::forget(paths, &item, yes),
+        Command::Forget {
+            item,
+            dangerously_skip_install_hook_check,
+        } => commands::forget(paths, &item, yes, dangerously_skip_install_hook_check),
         Command::Sync {
             upgrade,
             dangerously_skip_install_hook_check,

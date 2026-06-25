@@ -93,12 +93,19 @@ fn dispatch(paths: &Paths, kind: ActionKind) -> Result<()> {
             // lands in the TUI shard); never block on the CLI's stdin [y/N]
             // prompt from inside raw mode. `Clobber::Error` surfaces a clobber as
             // an error in the UI rather than reading a terminal prompt.
-            commands::learn(paths, &item_ref, false, true, commands::Clobber::Error)?;
+            commands::learn(
+                paths,
+                &item_ref,
+                false,
+                true,
+                commands::Clobber::Error,
+                false,
+            )?;
         }
         // spec: TUI-20
         // `yes = true`: the TUI confirms destructive actions in its own UI
         // (TUI-24) and acts on a single resolved item, so never read a CLI prompt.
-        ActionKind::Forget { item_key } => commands::forget(paths, &item_key, true)?,
+        ActionKind::Forget { item_key } => commands::forget(paths, &item_key, true, false)?,
         // spec: TUI-21
         ActionKind::Meld { spec } => {
             commands::meld(paths, &spec, None, vec![], None, None, None, None, false)?;

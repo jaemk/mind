@@ -225,6 +225,8 @@ mod tests {
             link_rel: None,
             bin: None,
             build: None,
+            install: None,
+            uninstall: None,
         }
     }
 

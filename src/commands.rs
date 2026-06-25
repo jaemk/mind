@@ -1093,10 +1093,31 @@ pub fn unmeld(
     }
 
     let source = registry.sources.remove(idx);
+    // HOOK-82: each removed item's uninstall hook (when declared) runs before its
+    // files are removed. The clone still exists here, so its catalog supplies the
+    // commands; the source-level uninstall hooks (HOOK-54) already ran above.
+    let mut item_catalog: Vec<CatalogItem> = Vec::new();
+    let _ = catalog::scan_source(paths, &source, &mut item_catalog);
+    let commit = source.commit.clone().unwrap_or_default();
     let mut forgotten = 0;
     for key in &item_keys {
         if let Some(item) = manifest.items.remove(key) {
-            install::uninstall(paths, &item)?;
+            let uninstall_cmd = item_uninstall_cmd(&item_catalog, &item);
+            if let Err(e) = uninstall_item(
+                paths,
+                &item,
+                uninstall_cmd.as_deref(),
+                &commit,
+                dangerously_skip_hook_check,
+            ) {
+                // A hook failed: persist what was removed and the surviving item,
+                // and stop (the source itself stays melded, mirroring HOOK-54).
+                manifest.items.insert(key.clone(), item);
+                manifest.save(paths)?;
+                registry.sources.insert(idx, source);
+                registry.save(paths)?;
+                return Err(e);
+            }
             forgotten += 1;
         }
     }
@@ -1228,6 +1249,7 @@ pub fn learn(
     dry_run: bool,
     yes: bool,
     clobber: Clobber,
+    dangerously_skip: bool,
 ) -> Result<()> {
     // POL-3: load the managed policy once (fail closed on Err; None = inert).
     let policy = Policy::load()?;
@@ -1314,7 +1336,7 @@ pub fn learn(
         };
         let siblings = siblings_of(&items, &target.source);
         let force = clobber == Clobber::Force;
-        let mut result = install::install(paths, target, &commit, &siblings, force);
+        let mut result = install_item(paths, target, &commit, &siblings, force, dangerously_skip);
         // CLI-34: a conflicting (non-mind) target refuses by default. With
         // `Prompt` (the default `learn`), offer to overwrite it on a TTY; on a
         // yes, retry forced. `install` aborts before touching anything on a
@@ -1328,7 +1350,7 @@ pub fn learn(
             result = if confirm(&format!(
                 "{path} exists and is not managed by mind; overwrite it?"
             ))? {
-                install::install(paths, target, &commit, &siblings, true)
+                install_item(paths, target, &commit, &siblings, true, dangerously_skip)
             } else {
                 Err(MindError::LinkOccupied { path })
             };
@@ -1379,8 +1401,20 @@ pub fn learn(
 /// later, mirroring the install-hook non-TTY behavior (HOOK-22): a scripted meld
 /// stays register-only unless `--yes` is given.
 // spec: CLI-23
-pub fn install_melded_source(paths: &Paths, repo: &str, yes: bool, clobber: Clobber) -> Result<()> {
-    install_source_items(paths, &parse_spec(repo)?.name, yes, clobber)
+pub fn install_melded_source(
+    paths: &Paths,
+    repo: &str,
+    yes: bool,
+    clobber: Clobber,
+    dangerously_skip: bool,
+) -> Result<()> {
+    install_source_items(
+        paths,
+        &parse_spec(repo)?.name,
+        yes,
+        clobber,
+        dangerously_skip,
+    )
 }
 
 /// Run the post-meld auto-install flow (CLI-23) for one registered source by its
@@ -1392,6 +1426,7 @@ pub fn install_source_items(
     source_name: &str,
     yes: bool,
     clobber: Clobber,
+    dangerously_skip: bool,
 ) -> Result<()> {
     let item_ref = format!("{source_name}#*");
 
@@ -1408,7 +1443,7 @@ pub fn install_source_items(
     }
 
     if yes {
-        return learn(paths, &item_ref, false, true, clobber);
+        return learn(paths, &item_ref, false, true, clobber, dangerously_skip);
     }
     if !crate::hook::is_tty() {
         if !json_mode() {
@@ -1421,12 +1456,12 @@ pub fn install_source_items(
     }
 
     // Interactive: show the install preview (the dry-run list), then prompt.
-    learn(paths, &item_ref, true, false, clobber)?;
+    learn(paths, &item_ref, true, false, clobber, dangerously_skip)?;
     if confirm_default_yes(&format!(
         "install these {} item(s) now?",
         plan.install_count
     ))? {
-        learn(paths, &item_ref, false, true, clobber)
+        learn(paths, &item_ref, false, true, clobber, dangerously_skip)
     } else {
         println!("skipped; run `mind learn '{item_ref}'` to install later");
         Ok(())
@@ -1521,17 +1556,29 @@ pub fn remeld(
             Err(e) => return Err(e),
         };
         if to_install > 0 {
-            install_melded_source(paths, repo, yes, clobber)?;
+            install_melded_source(paths, repo, yes, clobber, dangerously_skip_hook_check)?;
             // DSC-55: a re-meld with --install-super-sources also installs the
             // curated chain (the nested sources are already registered).
             if install_super_sources {
-                install_curated_sources(paths, &source_name, yes, clobber)?;
+                install_curated_sources(
+                    paths,
+                    &source_name,
+                    yes,
+                    clobber,
+                    dangerously_skip_hook_check,
+                )?;
             }
             return Ok(());
         }
         // A pure super-source has no own items; with the flag, install the chain.
         if install_super_sources {
-            install_curated_sources(paths, &source_name, yes, clobber)?;
+            install_curated_sources(
+                paths,
+                &source_name,
+                yes,
+                clobber,
+                dangerously_skip_hook_check,
+            )?;
             return Ok(());
         }
     }
@@ -1550,6 +1597,7 @@ fn install_curated_sources(
     super_name: &str,
     yes: bool,
     clobber: Clobber,
+    dangerously_skip: bool,
 ) -> Result<()> {
     let registry = Registry::load(paths)?;
     let mut visited: HashSet<String> = HashSet::from([super_name.to_string()]);
@@ -1570,7 +1618,7 @@ fn install_curated_sources(
                 continue; // already seen (cycle guard / diamond dedup)
             }
             if registry.find(&spec.name).is_some() {
-                install_source_items(paths, &spec.name, yes, clobber)?;
+                install_source_items(paths, &spec.name, yes, clobber, dangerously_skip)?;
                 queue.push(spec.name);
             }
         }
@@ -1663,8 +1711,11 @@ fn reprefix_source(paths: &Paths, registry: &Registry, source_name: &str) -> Res
             continue; // prefix unchanged for this item
         }
         let siblings = siblings_of(&catalog, &old.source);
-        let new = install::install(paths, cat, &old.commit, &siblings, false)?;
-        install::uninstall(paths, &old)?;
+        // HOOK-81/82: the prefix change reinstalls under the new name and removes
+        // the old item, so both lifecycle hooks fire (run/skip via the same TTY
+        // prompt; no dangerous-skip flag on this interactive path).
+        let new = install_item(paths, cat, &old.commit, &siblings, false, false)?;
+        uninstall_item(paths, &old, cat.uninstall.as_deref(), &old.commit, false)?;
         manifest.items.remove(&old.key());
         if !json_mode() {
             let out = crate::render::ctx();
@@ -1692,8 +1743,66 @@ fn colliding_install(targets: &[&CatalogItem]) -> Option<(String, Vec<String>)> 
     by_key.into_iter().find(|(_, sources)| sources.len() > 1)
 }
 
+/// Install one item, then run its install hook (HOOK-81) as the final step. On a
+/// hook failure, roll the just-installed item back (remove its links and store
+/// copy via the file registry) so it is left not installed, then propagate the
+/// error. `dangerously_skip` runs the hook unattended (HOOK-83).
+fn install_item(
+    paths: &Paths,
+    item: &CatalogItem,
+    commit: &str,
+    siblings: &[CatalogItem],
+    force: bool,
+    dangerously_skip: bool,
+) -> Result<crate::manifest::InstalledItem> {
+    let installed = install::install(paths, item, commit, siblings, force)?;
+    if let Some(cmd) = item.install.as_deref() {
+        let store = paths.mind_home.join(&installed.store);
+        if let Err(e) = install::run_item_install_hook(item, cmd, &store, commit, dangerously_skip)
+        {
+            let _ = install::uninstall(paths, &installed);
+            return Err(e);
+        }
+    }
+    Ok(installed)
+}
+
+/// Run an item's uninstall hook (HOOK-82) if one is declared, then remove the
+/// item via its file registry. `uninstall_cmd` comes from the live source catalog
+/// (nothing is recorded for it, HOOK-84) and is `None` when the source or item is
+/// no longer available, in which case removal proceeds with no hook. A hook
+/// failure propagates BEFORE removal, leaving the item installed.
+fn uninstall_item(
+    paths: &Paths,
+    item: &crate::manifest::InstalledItem,
+    uninstall_cmd: Option<&str>,
+    commit: &str,
+    dangerously_skip: bool,
+) -> Result<()> {
+    if let Some(cmd) = uninstall_cmd {
+        let store = paths.mind_home.join(&item.store);
+        if store.exists() {
+            install::run_item_uninstall_hook(item, cmd, &store, commit, dangerously_skip)?;
+        }
+    }
+    install::uninstall(paths, item)
+}
+
+/// The uninstall hook command declared for an installed item, located by stable
+/// identity (source, kind, bare name) in `catalog` (HOOK-82). `None` when the
+/// item is gone from the catalog or declares no uninstall hook.
+fn item_uninstall_cmd(
+    catalog: &[CatalogItem],
+    item: &crate::manifest::InstalledItem,
+) -> Option<String> {
+    catalog
+        .iter()
+        .find(|c| c.kind == item.kind && c.name == item.bare_name && c.source == item.source)
+        .and_then(|c| c.uninstall.clone())
+}
+
 /// `mind forget <item>` — uninstall one item, or many via a glob.
-pub fn forget(paths: &Paths, item_ref: &str, yes: bool) -> Result<()> {
+pub fn forget(paths: &Paths, item_ref: &str, yes: bool, dangerously_skip: bool) -> Result<()> {
     let out = crate::render::ctx();
     let mut manifest = Manifest::load(paths)?;
     let parsed = parse_item_ref(item_ref)?;
@@ -1744,10 +1853,34 @@ pub fn forget(paths: &Paths, item_ref: &str, yes: bool) -> Result<()> {
         }
     }
 
+    // HOOK-82: an item's uninstall hook (when declared) runs before its files are
+    // removed. The command is read from the live source catalog (nothing is
+    // recorded for it, HOOK-84); a source no longer registered or an item gone
+    // from its catalog yields no hook, and removal proceeds.
+    let registry = Registry::load(paths)?;
+    let catalog = catalog::scan(paths, &registry).unwrap_or_default();
+
     let mut removed: Vec<String> = Vec::new();
     for key in keys {
         let item = manifest.items.remove(&key).expect("key from manifest");
-        install::uninstall(paths, &item)?;
+        let uninstall_cmd = item_uninstall_cmd(&catalog, &item);
+        let commit = registry
+            .find(&item.source)
+            .and_then(|s| s.commit.clone())
+            .unwrap_or_default();
+        // A hook failure stops here, leaving this item (and the rest) installed;
+        // the manifest is saved with what remains.
+        if let Err(e) = uninstall_item(
+            paths,
+            &item,
+            uninstall_cmd.as_deref(),
+            &commit,
+            dangerously_skip,
+        ) {
+            manifest.items.insert(key.clone(), item);
+            manifest.save(paths)?;
+            return Err(e);
+        }
         removed.push(key.clone());
         if !out.json {
             println!("{} forgot {key}", out.ok());
@@ -2144,10 +2277,25 @@ pub fn upgrade(
         // Build the new version first; the old copy is preserved until this
         // succeeds (transactional install). An upgrade never force-overwrites a
         // foreign target; that is for an explicit `learn --force`.
-        let installed = install::install(paths, &up.cat, &up.new_commit, &siblings, false)?;
+        let installed = install_item(
+            paths,
+            &up.cat,
+            &up.new_commit,
+            &siblings,
+            false,
+            dangerously_skip_hook_check,
+        )?;
         if up.new_name != up.old.name {
-            // Rename: drop the old item (by its file registry) and re-key.
-            install::uninstall(paths, &up.old)?;
+            // Rename: drop the old item (by its file registry) and re-key. The OLD
+            // item is removed, so its uninstall hook fires (HOOK-82); the new
+            // item's install hook already ran in install_item above.
+            uninstall_item(
+                paths,
+                &up.old,
+                up.cat.uninstall.as_deref(),
+                &up.old.commit,
+                dangerously_skip_hook_check,
+            )?;
             manifest.items.remove(&up.old.key());
             renamed = true;
             if !out.json {

@@ -159,6 +159,15 @@ pub struct ItemDecl {
     /// A tool's per-item build command, run in staging at install. Tool items
     /// only; else a `mind.toml` schema error.
     pub build: Option<String>,
+    /// An item install hook (HOOK-80): a shell command run on the host as the
+    /// final step of installing this item (after the store swap and links), for
+    /// side effects (set up a venv, register a helper). Valid on any kind. `None`
+    /// means no install hook.
+    pub install: Option<String>,
+    /// An item uninstall hook (HOOK-80): a shell command run when this item is
+    /// removed (at `forget`/`unmeld`/rename-on-upgrade), before its store copy
+    /// and links are removed. Valid on any kind. `None` means no uninstall hook.
+    pub uninstall: Option<String>,
 }
 
 /// Glob-based discovery: per-kind include/exclude, plus nested sources.

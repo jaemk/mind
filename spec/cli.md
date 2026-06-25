@@ -8,8 +8,8 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 | `meld [<repo>] [--link-only] [--yes] [--as <prefix>] [--root <dir>] [--follow-branch\|--pin-tag\|--pin-ref <ref>]` | connect a source (default `.`), then install its items |
 | `init-source [<path>] [--template]` | scaffold `mind.toml` + detect references (maintainer) |
 | `unmeld <name> [--unlink-only] [--yes] [--uninstall-hook <cmd>] [--dangerously-skip-install-hook-check]` (alias: `detach`) | disconnect a source and forget its items (`--unlink-only` keeps them) |
-| `learn <item>` | install |
-| `forget <item>` (alias: `unlearn`) | uninstall |
+| `learn <item> [--dangerously-skip-install-hook-check]` | install |
+| `forget <item> [--dangerously-skip-install-hook-check]` (alias: `unlearn`) | uninstall |
 | `sync` | refresh sources |
 | `upgrade [--yes] [item]` | upgrade installed |
 | `recall [item] [--sources] [--kind K] [--source S] [--json]` | status: sources with their items (install state marked); `--sources` narrows to sources |

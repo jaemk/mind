@@ -393,6 +393,25 @@ fn run_checks(
         }
     }
 
+    // --- Check 8: per-item install/uninstall hooks (advisory) ---
+    // spec: HOOK-85
+    // Surface each item that declares an install or uninstall hook so a consumer
+    // sees, before installing, that the item will run code on the host (the
+    // item-level counterpart of the source-hook disclosure, HOOK-40/58).
+    for item in &items {
+        for (event, cmd) in [
+            ("install", item.install.as_deref()),
+            ("uninstall", item.uninstall.as_deref()),
+        ] {
+            if let Some(cmd) = cmd {
+                advisory.push(Finding::advisory(
+                    "item-hook",
+                    format!("{}: declares an {event} hook '{cmd}'", item.key()),
+                ));
+            }
+        }
+    }
+
     // --- Check 5: {{ns:}} token resolution (hard error) ---
     // An unresolved {{ns:}} token would be a BadReference at install time.
     // spec: CLI-132
