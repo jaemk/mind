@@ -57,7 +57,10 @@ normatively. Source identity is `host/owner/repo` (see storage.md).
 - `POL-2` The policy path is not relocatable by `MIND_HOME` or other user
   environment. `$MIND_POLICY_FILE`, if set, is honored only when no file exists
   at the system path (for tests and non-managed use); when the system file
-  exists it is authoritative and `$MIND_POLICY_FILE` is ignored.
+  exists it is authoritative and `$MIND_POLICY_FILE` is ignored. The env path is
+  honored only when the file it names exists; a set-but-missing `$MIND_POLICY_FILE`
+  is treated as no policy (POL-4 inert), not a hard error, mirroring the
+  system-path existence check.
 - `POL-3` When a policy is in effect it is authoritative over user configuration
   (`~/.mind/config.toml`) and the user's registry: a user cannot widen what the
   policy restricts.

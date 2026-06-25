@@ -167,13 +167,8 @@ impl Policy {
     /// when no system file exists (POL-1, POL-2). A parse error, unknown key, or
     /// failed [`validate`](Policy::validate) is `Err` (POL-5 fail closed).
     pub fn load() -> Result<Option<Policy>> {
-        let system = system_path();
         let env = std::env::var_os(ENV_VAR).map(PathBuf::from);
-        let system_present = system.exists();
-        match locate_with(
-            if system_present { Some(&system) } else { None },
-            env.as_deref(),
-        ) {
+        match locate_existing(&system_path(), env.as_deref()) {
             Some(path) => Ok(Some(load_file(&path)?)),
             None => Ok(None),
         }
@@ -292,6 +287,16 @@ fn locate_with(system: Option<&Path>, env: Option<&Path>) -> Option<PathBuf> {
         return Some(s.to_path_buf());
     }
     env.map(|e| e.to_path_buf())
+}
+
+/// Resolve the effective policy path, honoring only files that exist on disk: the
+/// system path when present (POL-1), else `$MIND_POLICY_FILE` when present (POL-2).
+/// A set-but-missing env path is treated as no policy (POL-4 inert), not a hard
+/// error, mirroring the system-path existence check. Pure over its arguments.
+fn locate_existing(system: &Path, env: Option<&Path>) -> Option<PathBuf> {
+    let system = system.exists().then(|| system.to_path_buf());
+    let env = env.filter(|p| p.exists());
+    locate_with(system.as_deref(), env)
 }
 
 /// Parse + validate a policy file at an explicit path WITHOUT consulting the
@@ -692,6 +697,39 @@ repo = "acme/baseline"
             locate_with(Some(system), Some(env)),
             Some(system.to_path_buf())
         );
+    }
+
+    // POL-2/POL-4: `locate_existing` honors only files that exist. A set-but-missing
+    // `$MIND_POLICY_FILE` resolves to no policy (inert), not a hard error, so a stale
+    // env path never fails a command (and never makes concurrent tests flaky).
+    // Pure over real temp files; touches no process env or system path.
+    // spec: POL-2
+    // spec: POL-4
+    #[test]
+    fn locate_existing_ignores_missing_files() {
+        let dir = std::env::temp_dir();
+        let present = dir.join(format!("mind-policy-present-{}.toml", std::process::id()));
+        std::fs::write(&present, "").unwrap();
+        let missing = dir.join(format!("mind-policy-missing-{}.toml", std::process::id()));
+        let _ = std::fs::remove_file(&missing);
+        let absent_system = dir.join(format!("mind-policy-no-system-{}.toml", std::process::id()));
+        let _ = std::fs::remove_file(&absent_system);
+
+        // A set-but-missing env path with no system file => no policy.
+        assert_eq!(locate_existing(&absent_system, Some(&missing)), None);
+        // An existing env path (no system file) => that path.
+        assert_eq!(
+            locate_existing(&absent_system, Some(&present)),
+            Some(present.clone())
+        );
+        // An existing system path wins over the env path (POL-1/POL-2 precedence).
+        assert_eq!(
+            locate_existing(&present, Some(&present)),
+            Some(present.clone())
+        );
+        // No env set, no system file => no policy.
+        assert_eq!(locate_existing(&absent_system, None), None);
+        std::fs::remove_file(&present).ok();
     }
 
     // POL-10: `glob_match` directly, asserting `*` never crosses a `/` and that
