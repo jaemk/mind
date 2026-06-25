@@ -7,7 +7,7 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 | `probe [query] [--no-tui]` | interactive browser (default); catalog listing with `--no-tui`/`--json` |
 | `meld [<repo>] [--link-only] [--yes] [--as <prefix>] [--root <dir>] [--follow-branch\|--pin-tag\|--pin-ref <ref>]` | connect a source (default `.`), then install its items |
 | `init-source [<path>] [--template]` | scaffold `mind.toml` + detect references (maintainer) |
-| `unmeld <name> [--unlink-only] [--yes] [--uninstall-hook <cmd>] [--dangerously-skip-install-hook-check]` (alias: `detach`) | disconnect a source and forget its items (`--unlink-only` keeps them) |
+| `unmeld <name\|glob> [--unlink-only] [--yes] [--uninstall-hook <cmd>] [--dangerously-skip-install-hook-check]` (alias: `detach`) | disconnect a source (or all sources matching a glob) and forget its items (`--unlink-only` keeps them) |
 | `learn <item> [--dangerously-skip-install-hook-check]` | install |
 | `forget <item> [--dangerously-skip-install-hook-check]` (alias: `unlearn`) | uninstall |
 | `sync` | refresh sources |
@@ -139,6 +139,19 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   `--dangerously-skip-install-hook-check` to run them unattended, and
   `--uninstall-hook <cmd>` to supply or override the uninstall hook (see
   install-hooks.md, HOOK-54, HOOK-59).
+- `CLI-28` `unmeld <pattern>` accepts a glob (`*`, `?`, `[`) in place of an exact
+  name or suffix (CLI-20), matched against each melded source's `host/owner/repo`
+  identity and its trailing-suffix forms, mirroring `learn`/`forget` glob selection
+  (CLI-31, CLI-41). The pattern is matched against the identity as a plain string,
+  so `*` spans any run including `/`: `mind unmeld '*agents'` removes
+  `github.com/jaemk/agents`. Every matching source is unmelded, each per its normal
+  path (CLI-21 by default, or CLI-22 under `--unlink-only`). A glob is what permits
+  a multi-source match: a plain name or suffix that resolves to several sources is
+  still `AmbiguousSource` (CLI-20), but a glob removes all it matches. A glob
+  matching no source is `SourceNotFound`. When a glob matches more than one source,
+  `unmeld` lists the matched sources and confirms before removing them (the
+  multi-item confirmation of CLI-42, applied at source granularity); `--yes` skips
+  the confirmation.
 
 ## learn
 

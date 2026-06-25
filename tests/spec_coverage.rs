@@ -42,6 +42,10 @@ const ALLOWLIST: &[&str] = &[
     // (HOOK-86), and the nested lifecycle ordering that reverses teardown so item
     // uninstall hooks run before the source's (HOOK-87). Cited by tests when built.
     "HOOK-86", "HOOK-87",
+    // Planned: `unmeld <glob>` selects sources by glob/partial name (multi-source,
+    // mirroring learn/forget item globs), with a multi-source confirmation (CLI-28).
+    // Cited by a test when built.
+    "CLI-28",
     // Planned: `init-source` gates its bare-sibling unguarded-reference advisory on
     // an effective prefix (INIT-9), matching meld/review; and the `hardcoded-path`
     // / `bare-tool-reference` advisory messages note that an install-hook-populated

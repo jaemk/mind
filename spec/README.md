@@ -38,6 +38,7 @@ and verified.
 | `curl \| sh` install script (Linux/macOS-arm) | done | `resources/install.sh` |
 | `forget` glob selection | done | CLI-41 |
 | `unmeld` uninstalls source items by default; `--unlink-only` keeps them | done | CLI-21, CLI-22 |
+| `unmeld` glob/partial source selection (multi-source, mirrors `learn`/`forget` globs) | planned | CLI-28 |
 | `introspect --fix` (re-link missing symlinks) | done | CLI-91 |
 | `sync --upgrade` (refresh then upgrade) | done | CLI-53 |
 | `recall` (no arg): source+item status view, install state per item | done | CLI-70, CLI-74, CLI-83 |
