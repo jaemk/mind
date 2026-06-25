@@ -36,7 +36,7 @@ pub fn meld(
     pin_ref: Option<String>,
     install_hook: Option<String>,
     dangerously_skip_install_hook_check: bool,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     // Resolve the consumer-supplied pin flags into a single Pin. The flags are
     // independent at the clap layer, so more than one surfaces here as the
     // structured `ConflictingPin` error (CLI-17) rather than a clap usage string.
@@ -53,6 +53,9 @@ pub fn meld(
     let source_name = parse_spec(repo)
         .map(|s| s.name)
         .unwrap_or_else(|_| repo.to_string());
+    // Source names registered before this meld, to diff out the newly added ones
+    // (the top-level source plus any nested chain) for DSC-55.
+    let before: HashSet<String> = registry.sources.iter().map(|s| s.name.clone()).collect();
     let added = meld_recursive(
         paths,
         &mut registry,
@@ -67,15 +70,48 @@ pub fn meld(
         dangerously_skip_install_hook_check,
         prefer_ssh,
     )?;
+    let newly: Vec<String> = registry
+        .sources
+        .iter()
+        .map(|s| s.name.clone())
+        .filter(|n| !before.contains(n))
+        .collect();
     registry.save(paths)?;
     let out = crate::render::ctx();
     if out.json {
         let mut result = MutationResult::new("meld", &source_name, "melded");
         result.count = Some(added);
-        return print_json(&result);
+        print_json(&result)?;
+        return Ok(newly);
     }
     if added > 1 {
         println!("melded {added} source(s)");
+    }
+    Ok(newly)
+}
+
+/// DSC-56: after melding a source that curates other sources (`[discover].sources`),
+/// point the user at `mind probe` to browse what is now available. No-op for a
+/// source with no nested sources, and silent under `--json`.
+pub fn maybe_probe_hint(paths: &Paths, repo: &str) -> Result<()> {
+    let out = crate::render::ctx();
+    if out.json {
+        return Ok(());
+    }
+    let Ok(name) = parse_spec(repo).map(|s| s.name) else {
+        return Ok(());
+    };
+    let registry = Registry::load(paths)?;
+    let Some(source) = registry.find(&name) else {
+        return Ok(());
+    };
+    let curates = MindToml::load(&source.clone_dir(paths))?
+        .and_then(|m| m.discover)
+        .is_some_and(|d| !d.sources.is_empty());
+    if curates {
+        println!(
+            "note: this source curates other sources; run `mind probe` to browse and search what is available"
+        );
     }
     Ok(())
 }
@@ -1344,7 +1380,19 @@ pub fn learn(
 /// stays register-only unless `--yes` is given.
 // spec: CLI-23
 pub fn install_melded_source(paths: &Paths, repo: &str, yes: bool, clobber: Clobber) -> Result<()> {
-    let source_name = parse_spec(repo)?.name;
+    install_source_items(paths, &parse_spec(repo)?.name, yes, clobber)
+}
+
+/// Run the post-meld auto-install flow (CLI-23) for one registered source by its
+/// name: preview and prompt to install its items (`<source>#*`), or install
+/// directly under `--yes`. Used for the top-level source and, with
+/// `--install-super-sources` (DSC-55), for each nested curated source.
+pub fn install_source_items(
+    paths: &Paths,
+    source_name: &str,
+    yes: bool,
+    clobber: Clobber,
+) -> Result<()> {
     let item_ref = format!("{source_name}#*");
 
     // Resolve what would install (excludes already-installed items, DEP-23). A
@@ -1858,6 +1906,56 @@ pub fn sync(paths: &Paths, then_upgrade: bool, dangerously_skip_hook_check: bool
     // Save the progress made before reporting any failure, so the recorded
     // commits stay consistent with what is on disk.
     registry.save(paths)?;
+
+    // DSC-57: re-walk each registered source's refreshed `[discover].sources` and
+    // meld any newly-listed nested source not already registered. Register-only
+    // (the DSC-54 default; nested items are not installed) and cycle-safe by the
+    // DSC-38 guards. Only adds; a nested source dropped upstream stays registered.
+    {
+        // Collect the nested specs now, before mutably borrowing the registry.
+        let nested: Vec<(String, Option<String>)> = registry
+            .sources
+            .iter()
+            .filter_map(|s| {
+                MindToml::load(&s.clone_dir(paths))
+                    .ok()
+                    .flatten()
+                    .and_then(|m| m.discover)
+                    .map(|d| d.sources)
+            })
+            .flatten()
+            .map(|ns| (ns.source, ns.alias))
+            .collect();
+        // Seed the cycle guard with every registered URL so an existing source is
+        // skipped without a clone attempt.
+        let mut visited: HashSet<String> = registry.sources.iter().map(|s| s.url.clone()).collect();
+        let mut discovered = 0usize;
+        for (spec, alias) in nested {
+            if let Ok(s) = parse_spec(&spec)
+                && registry.find(&s.name).is_some()
+            {
+                continue;
+            }
+            discovered += meld_recursive(
+                paths,
+                &mut registry,
+                &spec,
+                alias,
+                vec![],
+                None,
+                false,
+                &mut visited,
+                policy.as_ref(),
+                None,  // a re-walked nested source supplies no install hook
+                false, // sync is non-TTY: its hooks take the HOOK-22 skip path
+                prefer_ssh,
+            )?;
+        }
+        if discovered > 0 {
+            registry.save(paths)?;
+        }
+    }
+
     if !failures.is_empty() {
         return Err(MindError::SyncFailed {
             failed: failures.len(),

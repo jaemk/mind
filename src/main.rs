@@ -161,6 +161,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             install_hook,
             dangerously_skip_install_hook_check,
             link_only,
+            install_super_sources,
             force,
         } => {
             // CLI-25: no repo argument (or an explicit `.`/`./`) melds the
@@ -191,9 +192,9 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
                     yes,
                     clobber,
                     dangerously_skip_install_hook_check,
-                )
+                )?;
             } else {
-                commands::meld(
+                let newly = commands::meld(
                     paths,
                     &repo,
                     alias,
@@ -206,12 +207,23 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
                 )?;
                 // CLI-23: by default, offer to install the melded source's items
                 // right away (preview + prompt). `--link-only` stops at registering.
-                if link_only {
-                    Ok(())
-                } else {
-                    commands::install_melded_source(paths, &repo, yes, clobber)
+                if !link_only {
+                    commands::install_melded_source(paths, &repo, yes, clobber)?;
+                    // DSC-55: `--install-super-sources` extends the install flow to
+                    // each newly registered nested source (DSC-54 installs only the
+                    // top-level source by default).
+                    if install_super_sources {
+                        let top = crate::source::parse_spec(&repo).ok().map(|s| s.name);
+                        for name in &newly {
+                            if top.as_deref() != Some(name.as_str()) {
+                                commands::install_source_items(paths, name, yes, clobber)?;
+                            }
+                        }
+                    }
                 }
             }
+            // DSC-56: suggest `mind probe` after melding a curated super-source.
+            commands::maybe_probe_hint(paths, &repo)
         }
         Command::InitSource { path, template } => commands::init_source(path.as_deref(), template),
         Command::Unmeld {

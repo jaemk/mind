@@ -101,7 +101,7 @@ fn dispatch(paths: &Paths, kind: ActionKind) -> Result<()> {
         ActionKind::Forget { item_key } => commands::forget(paths, &item_key, true)?,
         // spec: TUI-21
         ActionKind::Meld { spec } => {
-            commands::meld(paths, &spec, None, vec![], None, None, None, None, false)?
+            commands::meld(paths, &spec, None, vec![], None, None, None, None, false)?;
         }
         // spec: TUI-21
         // The TUI's `forget` toggle maps to the inverted `--unlink-only`; `yes =

@@ -126,6 +126,12 @@ pub enum Command {
         #[arg(long)]
         link_only: bool,
 
+        /// Also offer to install the items of the nested sources a super-source
+        /// curates (`[discover].sources`). By default melding a super-source
+        /// registers the chain but installs only the super-source's own items.
+        #[arg(long)]
+        install_super_sources: bool,
+
         /// When installing, overwrite link targets that already exist and are not
         /// managed by mind. Without it, a conflict prompts on a TTY.
         #[arg(short = 'f', long)]

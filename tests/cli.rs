@@ -1357,6 +1357,94 @@ fn super_source_meld_does_not_auto_install_nested_items() {
 }
 
 #[test]
+fn meld_install_super_sources_installs_nested_items() {
+    // spec: DSC-55
+    let tools = Sandbox::named("tools"); // a normal source with items
+    let registry = Sandbox::bare("registry"); // curates `tools`, no items of its own
+    registry.write_and_commit(
+        "mind.toml",
+        &format!(
+            "[discover]\nsources = [{{ source = \"{}\" }}]\n",
+            tools.source_spec()
+        ),
+    );
+    let spec = registry.source_spec();
+    // With the flag (and --yes to skip prompts), the nested chain's items install.
+    let r = registry.mind(&["meld", &spec, "--install-super-sources", "--yes"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(
+        registry.claude_home.join("skills/review").exists(),
+        "the nested source's items must install with --install-super-sources"
+    );
+}
+
+#[test]
+fn meld_super_source_suggests_probe() {
+    // spec: DSC-56
+    let tools = Sandbox::named("tools");
+    let registry = Sandbox::bare("registry");
+    registry.write_and_commit(
+        "mind.toml",
+        &format!(
+            "[discover]\nsources = [{{ source = \"{}\" }}]\n",
+            tools.source_spec()
+        ),
+    );
+    let r = registry.mind(&["meld", &registry.source_spec()]);
+    assert!(r.success, "{}", r.stderr);
+    assert!(
+        r.stdout.contains("mind probe"),
+        "melding a curated super-source should suggest probe: {}",
+        r.stdout
+    );
+    // A plain source (no [discover].sources) does not get the hint.
+    let plain = Sandbox::named("plain");
+    let r2 = plain.mind(&["meld", &plain.source_spec()]);
+    assert!(
+        !r2.stdout.contains("mind probe"),
+        "a normal source must not get the probe hint: {}",
+        r2.stdout
+    );
+}
+
+#[test]
+fn sync_rewalks_super_source_for_new_nested_sources() {
+    // spec: DSC-57
+    let a = Sandbox::bare("aa"); // the curated super-source
+    let b = Sandbox::named("bb"); // initially curated
+    let c = Sandbox::named("cc"); // added to the list later
+    a.write_and_commit(
+        "mind.toml",
+        &format!(
+            "[discover]\nsources = [{{ source = \"{}\" }}]\n",
+            b.source_spec()
+        ),
+    );
+    let spec = a.source_spec();
+    assert!(a.mind(&["meld", &spec]).success);
+    let before = a.mind(&["recall", "--sources"]).stdout;
+    assert!(before.contains("bb"), "{before}");
+    assert!(!before.contains("cc"), "cc not yet listed: {before}");
+
+    // Add cc to aa's discover list.
+    a.write_and_commit(
+        "mind.toml",
+        &format!(
+            "[discover]\nsources = [{{ source = \"{}\" }}, {{ source = \"{}\" }}]\n",
+            b.source_spec(),
+            c.source_spec()
+        ),
+    );
+    // sync re-walks aa's [discover].sources and registers the newly listed cc.
+    let r = a.mind(&["sync"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(
+        a.mind(&["recall", "--sources"]).stdout.contains("cc"),
+        "sync must register the newly-listed nested source"
+    );
+}
+
+#[test]
 fn invalid_mind_toml_errors_clearly() {
     // spec: DSC-31
     let sb = Sandbox::new();
