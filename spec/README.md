@@ -23,6 +23,7 @@ and verified.
 | Source identity = `host/owner/repo` (collision fix, suffix selectors) | done | STO-13, CLI-5, CLI-20 |
 | Convention discovery + frontmatter descriptions | done | [discovery.md](discovery.md) |
 | Frontmatter reader interprets folded/literal block scalars (`>-`, `\|-`) | planned | DSC-22 |
+| `recall`/`probe` mark an item out of date on source-content hash drift (local dirs, manual edits) | planned | CLI-75 |
 | `mind.toml`: `[source]`, `[[items]]`, `[discover]` item globs | done | [discovery.md](discovery.md) |
 | Discover `include`/`exclude` per kind | done | DSC-37 |
 | Curated super-source (`[discover].sources`, nested `as`) | done | DSC-38, DSC-39 |

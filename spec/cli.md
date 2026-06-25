@@ -258,6 +258,15 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   inline: an installed item shows that it is installed and its short commit; a
   not-installed item is marked available. Items are grouped under their source, so
   the source a given item comes from is unambiguous.
+- `CLI-75` (planned) The status view marks an installed item out of date when its
+  current source-content hash differs from the hash recorded at install (LIFE-11,
+  LIFE-15), independent of the commit. This surfaces drift for a melded local
+  directory (no upstream commit to advance) and for a real checkout whose source
+  files were edited in place (commit unchanged, content not). The marker reads as
+  outdated and points to `mind upgrade`, matching `introspect`'s `drifted` finding
+  (CLI-90) and `upgrade`'s pending condition (LIFE-11); a commit difference still
+  marks it out of date too. It applies to `recall` (the default status view and a
+  single-item lookup, CLI-70/71/74) and the `probe` listing/TUI.
 
 ## probe
 
