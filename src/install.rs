@@ -314,11 +314,57 @@ fn hook_cwd(store: &Path) -> std::path::PathBuf {
     }
 }
 
-/// Run an item's install hook (HOOK-81) in its store directory, the final step
-/// of installing the item. Disclosed and prompted two-way (run / skip) on a TTY;
-/// a non-TTY context skips it (the item installs without the side effect);
-/// `dangerously_skip` runs it unattended (HOOK-83). A non-zero exit is a
-/// `HookFailed` hard stop the caller rolls back (HOOK-81).
+/// Run a per-item lifecycle hook (`event` is "install", HOOK-81, or "uninstall",
+/// HOOK-82) in the item's store directory: the final step of an install, or the
+/// step before a removal. Disclosed and prompted two-way (run / skip) on a TTY; a
+/// non-TTY context skips it; `dangerously_skip` runs it unattended (HOOK-83). A
+/// non-zero exit is a `HookFailed` hard stop the caller acts on (install rolls
+/// back; uninstall leaves the item installed).
+fn run_item_hook(
+    event: &str,
+    key: &str,
+    source: &str,
+    cmd: &str,
+    store: &Path,
+    commit: &str,
+    dangerously_skip: bool,
+) -> Result<()> {
+    // The noun for the side effect the hook applies, per event.
+    let effect = if event == "install" {
+        "its side effect is not applied"
+    } else {
+        "its cleanup is not run"
+    };
+    let cwd = hook_cwd(store);
+    let run = if dangerously_skip {
+        true
+    } else if !crate::hook::is_tty() {
+        println!("note: skipped {event} hook for {key} in a non-interactive context; {effect}");
+        false
+    } else {
+        let disclosure = crate::hook::disclosure_text(
+            source,
+            &format!("(per-item {event})"),
+            commit,
+            &cwd.to_string_lossy(),
+            cmd,
+            None,
+        );
+        matches!(
+            crate::hook::prompt_choice_optional(&disclosure)?,
+            crate::hook::OptionalChoice::Run
+        )
+    };
+    if run {
+        println!("running {event} hook for {key}");
+        crate::hook::run_hook(cmd, &cwd, source, event)?;
+    } else if crate::hook::is_tty() && !dangerously_skip {
+        println!("note: skipped {event} hook for {key}; {effect}");
+    }
+    Ok(())
+}
+
+/// Run an item's install hook (HOOK-81) as the final step of installing it.
 pub fn run_item_install_hook(
     item: &CatalogItem,
     cmd: &str,
@@ -326,46 +372,18 @@ pub fn run_item_install_hook(
     commit: &str,
     dangerously_skip: bool,
 ) -> Result<()> {
-    let cwd = hook_cwd(store);
-    let run = if dangerously_skip {
-        true
-    } else if !crate::hook::is_tty() {
-        println!(
-            "note: skipped install hook for {} in a non-interactive context; its side effect is not applied",
-            item.key()
-        );
-        false
-    } else {
-        let disclosure = crate::hook::disclosure_text(
-            &item.source,
-            "(per-item install)",
-            commit,
-            &cwd.to_string_lossy(),
-            cmd,
-            None,
-        );
-        matches!(
-            crate::hook::prompt_choice_optional(&disclosure)?,
-            crate::hook::OptionalChoice::Run
-        )
-    };
-    if run {
-        println!("running install hook for {}", item.key());
-        crate::hook::run_hook(cmd, &cwd, &item.source, "install")?;
-    } else if crate::hook::is_tty() && !dangerously_skip {
-        println!(
-            "note: skipped install hook for {}; its side effect is not applied",
-            item.key()
-        );
-    }
-    Ok(())
+    run_item_hook(
+        "install",
+        &item.key(),
+        &item.source,
+        cmd,
+        store,
+        commit,
+        dangerously_skip,
+    )
 }
 
-/// Run an item's uninstall hook (HOOK-82) in its store directory, before the
-/// store copy and links are removed. Disclosed and prompted two-way (run / skip)
-/// on a TTY; a non-TTY context skips it (the item is removed without cleanup);
-/// `dangerously_skip` runs it unattended. A non-zero exit is a `HookFailed` hard
-/// stop: the caller leaves the item installed (HOOK-82).
+/// Run an item's uninstall hook (HOOK-82) before its store copy and links go.
 pub fn run_item_uninstall_hook(
     item: &InstalledItem,
     cmd: &str,
@@ -373,39 +391,15 @@ pub fn run_item_uninstall_hook(
     commit: &str,
     dangerously_skip: bool,
 ) -> Result<()> {
-    let cwd = hook_cwd(store);
-    let run = if dangerously_skip {
-        true
-    } else if !crate::hook::is_tty() {
-        println!(
-            "note: skipped uninstall hook for {} in a non-interactive context; its cleanup is not run",
-            item.key()
-        );
-        false
-    } else {
-        let disclosure = crate::hook::disclosure_text(
-            &item.source,
-            "(per-item uninstall)",
-            commit,
-            &cwd.to_string_lossy(),
-            cmd,
-            None,
-        );
-        matches!(
-            crate::hook::prompt_choice_optional(&disclosure)?,
-            crate::hook::OptionalChoice::Run
-        )
-    };
-    if run {
-        println!("running uninstall hook for {}", item.key());
-        crate::hook::run_hook(cmd, &cwd, &item.source, "uninstall")?;
-    } else if crate::hook::is_tty() && !dangerously_skip {
-        println!(
-            "note: skipped uninstall hook for {}; its cleanup is not run",
-            item.key()
-        );
-    }
-    Ok(())
+    run_item_hook(
+        "uninstall",
+        &item.key(),
+        &item.source,
+        cmd,
+        store,
+        commit,
+        dangerously_skip,
+    )
 }
 
 fn collect_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> Result<()> {

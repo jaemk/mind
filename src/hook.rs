@@ -136,6 +136,39 @@ pub fn prompt_choice_optional(disclosure: &str) -> Result<OptionalChoice> {
     read_optional_choice(std::io::stdin().lock())
 }
 
+/// The action chosen for a hook: the decision ladder shared by every source-hook
+/// site. `Abort` is reached only by a required hook the user declines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookAct {
+    Run,
+    Skip,
+    Abort,
+}
+
+/// Resolve whether to run a hook from its disclosure and flags: a
+/// `--dangerously-skip` run is unattended (HOOK-23), a non-TTY skips (HOOK-22),
+/// an optional hook prompts two-way (run/skip, HOOK-52), and a required hook
+/// prompts three-way (run/skip/abort, HOOK-20). An optional hook never aborts.
+pub fn decide(disclosure: &str, optional: bool, dangerously_skip: bool) -> Result<HookAct> {
+    if dangerously_skip {
+        return Ok(HookAct::Run);
+    }
+    if !is_tty() {
+        return Ok(HookAct::Skip);
+    }
+    if optional {
+        return Ok(match prompt_choice_optional(disclosure)? {
+            OptionalChoice::Run => HookAct::Run,
+            OptionalChoice::Skip => HookAct::Skip,
+        });
+    }
+    Ok(match prompt_choice(disclosure)? {
+        HookChoice::RunAndContinue => HookAct::Run,
+        HookChoice::SkipAndContinue => HookAct::Skip,
+        HookChoice::Abort => HookAct::Abort,
+    })
+}
+
 /// Like `disclosure_text` but prefixed with the hook's label and whether it is
 /// required or optional, for the multi-hook disclosures (HOOK-52). Prepends a
 /// `====== hook: {label} ======` header so the block is visually distinct.
@@ -354,6 +387,22 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    /// `decide` runs unattended under `--dangerously-skip` (HOOK-23) and skips in
+    /// a non-TTY context (HOOK-22) without prompting, for both optional and
+    /// required hooks. (The interactive run/skip/abort branches need a TTY and are
+    /// covered by the prompt-parsing tests.)
+    // spec: HOOK-22, HOOK-23
+    #[test]
+    fn decide_dangerously_skip_runs_and_non_tty_skips() {
+        // dangerously_skip => Run regardless of optionality (no prompt).
+        assert_eq!(decide("d", false, true).unwrap(), HookAct::Run);
+        assert_eq!(decide("d", true, true).unwrap(), HookAct::Run);
+        // Test runs with no TTY on stdout, so a non-skip decision is Skip, never
+        // Abort or Run (HOOK-22: never run silently).
+        assert_eq!(decide("d", false, false).unwrap(), HookAct::Skip);
+        assert_eq!(decide("d", true, false).unwrap(), HookAct::Skip);
+    }
 
     /// RAII guard that removes a temp directory when dropped.
     /// Uses process id + atomic counter to avoid collisions between parallel or

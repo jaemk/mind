@@ -231,12 +231,6 @@ fn run_install_hooks(
     let clone_path = clone_dir.display().to_string();
     let name = source.name.clone();
 
-    enum Act {
-        Run,
-        Skip,
-        Abort,
-    }
-
     for h in hooks.iter().filter(|h| h.event == HookEvent::Install) {
         // HOOK-60: by default re-offer only hooks not yet run at this commit;
         // `--force` (force_rerun) re-offers every install hook.
@@ -263,34 +257,15 @@ fn run_install_hooks(
             declared_override.as_deref(),
         );
 
-        let act = if dangerously_skip {
-            Act::Run // HOOK-23
-        } else if !crate::hook::is_tty() {
-            Act::Skip // HOOK-22
-        } else if h.optional {
-            // HOOK-52: optional => two-way (run / skip).
-            match crate::hook::prompt_choice_optional(&disclosure)? {
-                crate::hook::OptionalChoice::Run => Act::Run,
-                crate::hook::OptionalChoice::Skip => Act::Skip,
-            }
-        } else {
-            // HOOK-20: required => three-way (run / skip / abort).
-            match crate::hook::prompt_choice(&disclosure)? {
-                crate::hook::HookChoice::RunAndContinue => Act::Run,
-                crate::hook::HookChoice::SkipAndContinue => Act::Skip,
-                crate::hook::HookChoice::Abort => Act::Abort,
-            }
-        };
-
-        match act {
-            Act::Run => {
+        match crate::hook::decide(&disclosure, h.optional, dangerously_skip)? {
+            crate::hook::HookAct::Run => {
                 // HOOK-60: indicate the running hook.
                 println!("running install hook '{}' for {}", h.label(), name);
                 // HOOK-53: a non-zero exit (optional or required) is a hard stop.
                 crate::hook::run_hook(&h.run, clone_dir, &name, h.label())?;
                 record_install_hook(source, &h.run, current.clone());
             }
-            Act::Skip => {
+            crate::hook::HookAct::Skip => {
                 println!(
                     "note: skipped install hook '{}' for {}; its items may not work until it runs",
                     h.label(),
@@ -298,7 +273,7 @@ fn run_install_hooks(
                 );
                 record_install_hook(source, &h.run, None);
             }
-            Act::Abort => return Ok(HookOutcome::Abort),
+            crate::hook::HookAct::Abort => return Ok(HookOutcome::Abort),
         }
     }
     Ok(HookOutcome::Proceed)
@@ -870,46 +845,22 @@ fn run_uninstall_hooks(
             declared_override,
         );
 
-        enum Act {
-            Run,
-            Skip,
-            Abort,
-        }
-        let act = if dangerously_skip_hook_check {
-            Act::Run // HOOK-23
-        } else if !crate::hook::is_tty() {
-            Act::Skip // HOOK-22
-        } else if h.optional {
-            // HOOK-52: optional => two-way (run / skip).
-            match crate::hook::prompt_choice_optional(&disclosure)? {
-                crate::hook::OptionalChoice::Run => Act::Run,
-                crate::hook::OptionalChoice::Skip => Act::Skip,
-            }
-        } else {
-            // HOOK-20: required => three-way (run / skip / abort).
-            match crate::hook::prompt_choice(&disclosure)? {
-                crate::hook::HookChoice::RunAndContinue => Act::Run,
-                crate::hook::HookChoice::SkipAndContinue => Act::Skip,
-                crate::hook::HookChoice::Abort => Act::Abort,
-            }
-        };
-
-        match act {
-            Act::Run => {
+        match crate::hook::decide(&disclosure, h.optional, dangerously_skip_hook_check)? {
+            crate::hook::HookAct::Run => {
                 // HOOK-60: indicate the running hook.
                 println!("running uninstall hook '{}' for {}", h.label(), source_name);
                 // HOOK-53: any failure (optional or required) is a hard stop;
                 // the unmeld stops and the source remains.
                 crate::hook::run_hook(&h.run, &clone_dir, source_name, h.label())?;
             }
-            Act::Skip => {
+            crate::hook::HookAct::Skip => {
                 println!(
                     "note: skipped uninstall hook '{}' for {}",
                     h.label(),
                     source_name
                 );
             }
-            Act::Abort => {
+            crate::hook::HookAct::Abort => {
                 println!("aborted; source left in place");
                 return Ok(false);
             }
