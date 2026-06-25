@@ -4,6 +4,55 @@ All notable changes to `mind` are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims to
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.4.1] - 2026-06-25
+
+### Added
+
+- `tool` item kind: a store-only installable that other items reference instead of
+  linking into an agent home, with path-reference tokens (`{{self}}`,
+  `{{tools:name}}`, `{{path:ref}}`) expanded at install like `{{ns:}}`, and an
+  optional per-item `build` hook for compiled tooling. Path tokens render the store
+  root with a leading `~` when it lies under the home directory.
+- Per-item install/uninstall hooks: an item declares `install`/`uninstall` shell
+  commands (in `mind.toml` `[[items]]` or a tool's `TOOL.md`) that run on install
+  and removal, gated by a disclosed safety prompt;
+  `--dangerously-skip-install-hook-check` runs them unattended.
+- Lifecycle hooks: multiple named `[[hooks]]`, optional hooks, and uninstall hooks
+  that run at `unmeld`. Local source repos can be melded by filesystem path.
+- Unmanaged lobe items: skills, agents, and rules present in an agent home that
+  mind did not install are listed in `recall`/`probe` and removable via `forget`
+  with a distinct not-managed-by-mind warning, including an "Unmanaged" group in
+  the interactive browser.
+- Curated super-sources: a source's `[discover].sources` registers a chain of
+  other sources; `meld --install-super-sources` installs their items, a post-meld
+  hint points to `probe`, and `sync` re-walks the chain to pick up newly listed
+  nested sources.
+- `review` flags path-token and tooling issues (unresolved tokens, hardcoded
+  install paths, bare tool references, misplaced `{{ns:}}`, and helpers duplicated
+  across items), and `--fix` rewrites the confidently-mappable ones; `init-source`
+  reports the duplicate-tooling advisories too.
+- `learn --all` installs every item of a source (sugar for `<source>#*`).
+- Global `--json`, `--yes`, and `--ascii` flags, with color and Unicode glyph
+  output gated on terminal capability and an ASCII fallback.
+- `status` as an alias for `recall`.
+- An mdBook documentation site (`make docs` builds and serves it locally).
+- A multi-item `forget` confirms before removing.
+
+### Changed
+
+- `recall` with no argument is a status view of every melded source with its items
+  and per-item install state; `recall --sources` narrows to the source list.
+- `unmeld` uninstalls the source's installed items by default; `--unlink-only`
+  keeps them.
+- The `upgrade` "apply these upgrades?" prompt defaults to yes (a bare Enter
+  applies; EOF still declines).
+- `review`'s duplicate-tooling and own-resource advisories are non-prescriptive:
+  sharing a helper as a `tool` and keeping the per-item copy are presented as
+  equally valid, and a hardcoded own-resource path is noted to work but assume a
+  fixed install location.
+
 ## [0.3.1] - 2026-06-22
 
 ### Fixed
@@ -114,6 +163,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovery, frontmatter descriptions, transactional install/upgrade/uninstall
   with a file registry, and a tag-driven release pipeline with a Homebrew tap.
 
+[Unreleased]: https://github.com/jaemk/mind/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/jaemk/mind/compare/v0.3.1...v0.4.1
 [0.3.1]: https://github.com/jaemk/mind/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/jaemk/mind/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jaemk/mind/compare/v0.1.0...v0.2.0
