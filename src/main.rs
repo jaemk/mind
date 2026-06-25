@@ -192,6 +192,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
                     yes,
                     clobber,
                     dangerously_skip_install_hook_check,
+                    install_super_sources,
                 )?;
             } else {
                 let newly = commands::meld(

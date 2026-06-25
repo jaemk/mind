@@ -1379,6 +1379,32 @@ fn meld_install_super_sources_installs_nested_items() {
 }
 
 #[test]
+fn remeld_install_super_sources_installs_nested_chain() {
+    // spec: DSC-55
+    let tools = Sandbox::named("tools");
+    let registry = Sandbox::bare("registry");
+    registry.write_and_commit(
+        "mind.toml",
+        &format!(
+            "[discover]\nsources = [{{ source = \"{}\" }}]\n",
+            tools.source_spec()
+        ),
+    );
+    let spec = registry.source_spec();
+    // First meld without the flag: chain registered, nested items not installed.
+    assert!(registry.mind(&["meld", &spec]).success);
+    assert!(!registry.claude_home.join("skills/review").exists());
+    // Re-melding the already-registered super-source with the flag installs the
+    // curated chain's items (nothing is re-registered).
+    let r = registry.mind(&["meld", &spec, "--install-super-sources", "--yes"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(
+        registry.claude_home.join("skills/review").exists(),
+        "a re-meld must honor --install-super-sources"
+    );
+}
+
+#[test]
 fn meld_super_source_suggests_probe() {
     // spec: DSC-56
     let tools = Sandbox::named("tools");

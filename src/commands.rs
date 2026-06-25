@@ -1445,6 +1445,7 @@ pub fn is_melded(paths: &Paths, repo: &str) -> Result<bool> {
 /// `--link-only`) prints a status of the source's items and the commit each is
 /// installed at.
 // spec: CLI-12
+#[allow(clippy::too_many_arguments)]
 pub fn remeld(
     paths: &Paths,
     repo: &str,
@@ -1453,6 +1454,7 @@ pub fn remeld(
     yes: bool,
     clobber: Clobber,
     dangerously_skip_hook_check: bool,
+    install_super_sources: bool,
 ) -> Result<()> {
     let out = crate::render::ctx();
     let source_name = parse_spec(repo)?.name;
@@ -1519,13 +1521,61 @@ pub fn remeld(
             Err(e) => return Err(e),
         };
         if to_install > 0 {
-            return install_melded_source(paths, repo, yes, clobber);
+            install_melded_source(paths, repo, yes, clobber)?;
+            // DSC-55: a re-meld with --install-super-sources also installs the
+            // curated chain (the nested sources are already registered).
+            if install_super_sources {
+                install_curated_sources(paths, &source_name, yes, clobber)?;
+            }
+            return Ok(());
+        }
+        // A pure super-source has no own items; with the flag, install the chain.
+        if install_super_sources {
+            install_curated_sources(paths, &source_name, yes, clobber)?;
+            return Ok(());
         }
     }
     if out.json {
         return print_json(&MutationResult::new("meld", &source_name, "already-melded"));
     }
     source_status(paths, &source_name)
+}
+
+/// Install the items of every registered source a super-source curates via its
+/// transitive `[discover].sources` chain (DSC-55 on a re-meld, where the nested
+/// sources are already registered). Reads each source's clone `mind.toml`;
+/// cycle-safe via a visited set; only touches sources that are registered.
+fn install_curated_sources(
+    paths: &Paths,
+    super_name: &str,
+    yes: bool,
+    clobber: Clobber,
+) -> Result<()> {
+    let registry = Registry::load(paths)?;
+    let mut visited: HashSet<String> = HashSet::from([super_name.to_string()]);
+    let mut queue: Vec<String> = vec![super_name.to_string()];
+    while let Some(name) = queue.pop() {
+        let Some(source) = registry.find(&name) else {
+            continue;
+        };
+        let nested = MindToml::load(&source.clone_dir(paths))?
+            .and_then(|m| m.discover)
+            .map(|d| d.sources)
+            .unwrap_or_default();
+        for ns in nested {
+            let Ok(spec) = parse_spec(&ns.source) else {
+                continue;
+            };
+            if !visited.insert(spec.name.clone()) {
+                continue; // already seen (cycle guard / diamond dedup)
+            }
+            if registry.find(&spec.name).is_some() {
+                install_source_items(paths, &spec.name, yes, clobber)?;
+                queue.push(spec.name);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Print every item the source offers with its install state and the source

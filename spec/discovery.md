@@ -96,12 +96,14 @@ sources = [
   installed. A super-source that ships its own items still offers them for install
   like any source; a purely curated registry installs nothing by default.
 - `DSC-55` `meld --install-super-sources` extends the auto-install flow to the
-  nested discovered sources: after the chain is registered, each newly registered
-  nested source's items are offered for install via the same preview-and-prompt as
-  the top-level source (honoring `--yes`). Without the flag only the top-level
-  source's items are offered (DSC-54). `--link-only` (register, install nothing)
-  takes precedence: combined with `--install-super-sources` it still installs
-  nothing.
+  nested discovered sources: each source in the curated chain has its items
+  offered for install via the same preview-and-prompt as the top-level source
+  (honoring `--yes`). It applies both on a fresh meld and on a re-meld of an
+  already-registered super-source: on a re-meld the chain is already registered,
+  so its items are installed without re-registering. Without the flag only the
+  top-level source's items are offered (DSC-54). `--link-only` (register, install
+  nothing) takes precedence: combined with `--install-super-sources` it still
+  installs nothing.
 - `DSC-56` After a successful `meld` of a source that declares `[discover].sources`,
   `mind` prints a one-time advisory note pointing the user to `mind probe` to
   browse and search what the newly registered sources offer, so a curated registry
