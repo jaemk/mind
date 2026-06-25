@@ -33,6 +33,11 @@ const ALLOWLIST: &[&str] = &[
     // the `mind.toml` it generates, nudging shared tooling toward an install hook.
     // Cited by a test when built.
     "INIT-8",
+    // Planned: `init-source` gates its bare-sibling unguarded-reference advisory on
+    // an effective prefix (INIT-9), matching meld/review; and the `hardcoded-path`
+    // / `bare-tool-reference` advisory messages note that an install-hook-populated
+    // location is safe (CLI-146). Cited by tests when built.
+    "INIT-9", "CLI-146",
     // Planned features (see spec/README.md feature status = planned): documented
     // with stable IDs ahead of implementation. Each must move to a citing test
     // when built, at which point it is removed from this allowlist.

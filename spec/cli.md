@@ -349,7 +349,8 @@ only appear at meld or install time. It is read-only and installs nothing.
   non-prescriptive about resources an item bundles: keeping a helper in the item's
   own directory, or having an install hook place it at a fixed location and
   referencing it there, are equally valid; the advisory points out only that a
-  literal mind install path is fragile, not that tokens are required.
+  literal mind install path is fragile, not that tokens are required. (CLI-146,
+  planned, adds the install-hook-safe note to the message.)
 - `CLI-137` `review` reports, as an advisory `bare-tool-reference` finding, a
   sibling tool named in an item's prose without a token. Unlike the unguarded
   sibling-reference scan (CLI-131), which only matters under a prefix, a bare tool
@@ -358,7 +359,7 @@ only appear at meld or install time. It is read-only and installs nothing.
   at all. Bundling the helper with the item, or installing it to a well-known
   location via an install hook and calling it there, are equally valid; the
   advisory only flags a `tool` item named by bare name where a token would be
-  needed.
+  needed. (CLI-146, planned, adds the install-hook-safe note to the message.)
 - `CLI-138` `review --fix` rewrites the source in place and is the sole exception
   to `review` being read-only (CLI-132). It applies only to a local-path target;
   a registry selector or a repo spec (whose clone is a discarded temp) refuses
@@ -397,6 +398,15 @@ only appear at meld or install time. It is read-only and installs nothing.
   into an agent home (tooling.md TOOL-3), so the hardcoded location does not
   exist. Any other hardcoded item path is reached by a token, not an install
   path. The advisory's message states which of the three cases it is.
+- `CLI-146` The `hardcoded-path` (CLI-136) and `bare-tool-reference` (CLI-137)
+  advisory messages note that a location the source's own install hook populates
+  is safe: when a `[source].install` or `[[hooks]]` step installs the resource or
+  tool to that path, referencing it there is intentional, not a defect. The
+  findings stay advisory and are still emitted regardless of prefix (CLI-137), so
+  the maintainer keeps the visibility, but the message no longer reads as a flaw
+  for a source that deliberately installs to a fixed location. The `{{self}}`
+  self-resource case (CLI-145), which a hook does not populate, keeps its
+  fragile-not-broken wording.
 
 ## introspect
 

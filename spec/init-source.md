@@ -46,7 +46,8 @@ namespacing.md.
   NS-21). The bare mentions are emitted as `unguarded-reference` advisory
   findings in the same `advisory [kind]: message` format `review` uses (CLI-131),
   so the two commands' findings read identically; they break under a prefix
-  unless tokenized.
+  unless tokenized. (INIT-9, planned, narrows this to fire only under an effective
+  prefix.)
 - `INIT-5` With `--template`, `init-source` rewrites each bare whole-word sibling
   mention in an item's text to its `{{ns:name}}` token (NS-10), writes the changed
   files, and reports each rewrite. Text already inside a `{{ns:}}` token is left
@@ -74,3 +75,11 @@ namespacing.md.
   and `duplicate-tooling` advisories give (CLI-136, CLI-144). It is inert until
   the maintainer uncomments and fills it; an existing `mind.toml` is still never
   overwritten (INIT-3).
+- `INIT-9` `init-source` emits the `unguarded-reference` advisory (INIT-4) only
+  when an effective prefix is in force (the repo's `[source].prefix`). With no
+  prefix it does not flag a sibling named in bare prose, since an unprefixed
+  source's bare references resolve as written and the absence of a prefix is taken
+  as the maintainer not intending to namespace. This matches `meld` (NS-23) and
+  `review` (CLI-133), neither of which flags a bare sibling reference absent a
+  prefix. The `{{ns:}}`-token edges (INIT-4) and the `--template` rewrite (INIT-5)
+  are unaffected; only the bare-prose advisory is gated.
