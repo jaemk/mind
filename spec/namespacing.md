@@ -25,10 +25,18 @@ copy during the transactional install, so a bad reference fails before the live
 install is touched. The recorded content hash is of the source (token) form, not
 the expanded copy, so drift detection compares source with source.
 
+In practice most sources give their items unique, descriptive names and are never
+prefixed, so the token machinery below does not come up: an unprefixed source's
+references resolve as written. Tokens matter only when a source is namespaced (to
+avoid a collision) and its items reference each other by name. They are a tool for
+that case, not a general requirement: a source with no intra-source references, or
+one that is never prefixed, needs none.
+
 A source whose items reference siblings in bare prose (no token) breaks under a
 prefix. mind does not guess and rewrite prose, since sibling names are often
 common words; instead `meld` warns when it sees a likely unguarded reference and
-leaves the fix to the author.
+leaves the fix to the author. The warning is advisory and only fires under a
+prefix.
 
 The rest of this document states these rules normatively.
 

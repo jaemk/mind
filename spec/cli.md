@@ -345,12 +345,20 @@ only appear at meld or install time. It is read-only and installs nothing.
   dir -> `{{self}}`, a sibling tool's entrypoint -> `{{tools:name}}`, another
   sibling -> `{{path:kind:name}}`) the finding names the suggested token. The
   message reflects what the path resolves to at runtime (CLI-145). Advisory, not
-  hard: `--fix` rewrites the confidently-mapped ones (CLI-138).
+  hard: `--fix` rewrites the confidently-mapped ones (CLI-138). It is
+  non-prescriptive about resources an item bundles: keeping a helper in the item's
+  own directory, or having an install hook place it at a fixed location and
+  referencing it there, are equally valid; the advisory points out only that a
+  literal mind install path is fragile, not that tokens are required.
 - `CLI-137` `review` reports, as an advisory `bare-tool-reference` finding, a
   sibling tool named in an item's prose without a token. Unlike the unguarded
   sibling-reference scan (CLI-131), which only matters under a prefix, a bare tool
-  reference is flagged regardless of prefix, since a tool is reached by a path
-  token, never by name.
+  reference is flagged regardless of prefix, since a tool item is reached by a path
+  token, never by name. Non-prescriptive: a source need not adopt the `tool` kind
+  at all. Bundling the helper with the item, or installing it to a well-known
+  location via an install hook and calling it there, are equally valid; the
+  advisory only flags a `tool` item named by bare name where a token would be
+  needed.
 - `CLI-138` `review --fix` rewrites the source in place and is the sole exception
   to `review` being read-only (CLI-132). It applies only to a local-path target;
   a registry selector or a repo spec (whose clone is a discarded temp) refuses

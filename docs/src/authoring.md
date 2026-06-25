@@ -45,18 +45,40 @@ tokens, misplaced `{{ns:}}` tokens are un-wrapped, and bare sibling names are
 templatized. Structural advisories like `duplicate-tooling` are left for you to
 resolve by hand.
 
+## Resources and tooling
+
+Most sources keep an item's resources next to the item and never think about any
+of this. Two patterns cover nearly everything:
+
+- **Bundle with the item.** A script a single skill uses lives in that skill's
+  own directory and is addressed with `{{self}}` (e.g. `{{self}}/resources/pr.py`).
+  It ships and installs with the skill; nothing else is needed.
+- **Install to a known location.** Tooling shared across items, or anything with a
+  build step, is best handled by an install hook: declare `[source].install` (or
+  `[[hooks]]`) to run your install script, which puts the tooling wherever you
+  like (a fixed path under the user's home, a venv, a PATH entry), and have your
+  items call it there. The source "onboards" its build once and the items just use
+  it.
+
+The `tool` item kind and the `{{tools:name}}` / `{{path:ref}}` tokens are a third
+option for sharing a helper through `mind`'s store, but they are not required:
+`review`'s `duplicate-tooling`, `bare-tool-reference`, and `hardcoded-path`
+findings are advisory, and bundling or an install hook are equally valid.
+
 ## Namespacing
 
-Two sources can both ship a `review`; they would collide. A *prefix* namespaces a
-source so every item installs as `<prefix>-<name>`. The effective prefix is, in
-order: the consumer's `meld --as <prefix>`, the repo's `[source].prefix`, else
-none.
+Most sources give their items unique, descriptive names and are never prefixed, so
+this does not come up. A *prefix* exists only for the collision case: two sources
+that both ship a `review` would land at the same path, so a prefix namespaces one
+(`<prefix>-<name>`). The effective prefix is, in order: the consumer's
+`meld --as <prefix>`, the repo's `[source].prefix`, else none.
 
-A prefix renames items, so intra-source references must be tokens, not bare
-names. Write them as `{{ns:name}}` (prose) and the path tokens
-(`{{self}}` / `{{tools:name}}` / `{{path:ref}}`) for code and paths; `mind`
-expands each to the effective name at install. `review` and `init-source` warn
-when a source references a sibling in bare prose that a prefix would break.
+A prefix renames items, so if a prefixed source's items reference each other by
+name, those references must be tokens: `{{ns:name}}` in prose, and the path tokens
+(`{{self}}` / `{{tools:name}}` / `{{path:ref}}`) for code and paths. `mind`
+expands each at install. `review` and `init-source` warn (advisory) when a source
+that is being prefixed references a sibling in bare prose. An unprefixed source,
+or one with no intra-source references, needs none of this.
 
 See the [spec](https://github.com/jaemk/mind/tree/main/spec) for the normative
 rules and [examples/namespacing](https://github.com/jaemk/mind/tree/main/examples/namespacing)

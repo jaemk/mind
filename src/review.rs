@@ -524,7 +524,7 @@ fn run_checks(
                         suggestion
                     ),
                     crate::namespace::HardcodedKind::OtherItem => format!(
-                        "{}: hardcoded install path '{}'; mind items are reached by a path token, not an install path{}",
+                        "{}: hardcoded install path '{}'; a literal mind install path is fragile (a path token tracks it, or install the resource to a fixed location via an install hook){}",
                         item.key(),
                         hp.matched,
                         suggestion
@@ -573,7 +573,7 @@ fn run_checks(
             advisory.push(Finding::advisory(
                 "bare-tool-reference",
                 format!(
-                    "{}: names tool(s) in prose: {}; reference a tool by token (use {{{{tools:name}}}})",
+                    "{}: names tool item(s) in prose: {}; a tool item is reached by a token ({{{{tools:name}}}}), or install the helper to a known location via an install hook and call it there",
                     item.key(),
                     bare_tools.join(", ")
                 ),

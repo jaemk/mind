@@ -37,10 +37,15 @@ skills/review/
   resources/pr.py
 ```
 
-A helper used by more than one item is a **tool**. Put it once under
-`tools/<name>/` and reference it by token. Do not copy the same script into each
-skill: `mind review` and `mind init-source` flag a byte-identical helper carried
-by two or more items as a `duplicate-tooling` advisory.
+A helper used by more than one item has two good homes. Either:
+
+- **An install hook puts it in a known location.** Declare `[source].install` (or
+  `[[hooks]]`) to run your install script, which installs the shared tooling
+  wherever you want, and have your items call it there. This suits anything with a
+  build step or a dependency to fetch, and a source onboards its build once.
+- **A `tool` item shares it through the store.** Put it once under `tools/<name>/`
+  and reference it by token (`{{tools:name}}`). `mind` carries it in the store and
+  expands the token at install.
 
 ```
 tools/detect/detect          # the shared script, shipped once
@@ -48,11 +53,16 @@ skills/a/SKILL.md            # ... {{tools:detect}} ...
 skills/b/SKILL.md            # ... {{tools:detect}} ...
 ```
 
-## Reference items by token, not by path
+Copying a byte-identical helper into several items works too; `mind review` and
+`mind init-source` note it as a `duplicate-tooling` advisory (informational, not a
+defect) in case you would rather share it once.
 
-Items reference each other with tokens that `mind` expands at install. Tokens
-survive a namespace prefix and resolve to the right location regardless of how
-many agent homes are configured.
+## Referencing items and resources
+
+When you do reference one item from another, `mind` provides tokens it expands at
+install. They are useful mainly under a namespace prefix (which renames items) or
+across multiple agent homes; an unprefixed single-home source can often just use
+the name or a bundled path.
 
 | token | expands to |
 |-------|-----------|
@@ -64,29 +74,32 @@ many agent homes are configured.
 References resolve within the same source only: ship a tool in the same source as
 the items that use it.
 
-## Why hardcoded paths break
+## Hardcoded paths
 
 `mind learn` copies an item into the store (`~/.mind/store/<kind>/<name>`) and
 symlinks it into each agent home (`~/.claude/skills/<name>`, `agents/<name>.md`,
 `rules/<name>.md`). A tool is the exception: it is store-only and never linked
 into an agent home.
 
-So a hardcoded path behaves differently depending on what it points at, and `mind
-review` classifies each case (the `hardcoded-path` advisory):
+A path you control is fine: pointing at a location your install hook populates
+works as long as your hook and your items agree on it. What is fragile is
+hardcoding `mind`'s OWN install layout, since that layout shifts under you. `mind
+review` classifies those as the advisory `hardcoded-path` finding:
 
 - A skill referencing its **own resources** by an agent-home path
   (`~/.claude/skills/<self>/resources/x`) resolves through the skill's symlink
   today, but breaks the moment a prefix renames the item (`<prefix>-<self>`) or a
-  second agent home is configured. Fragile, not yet broken.
-- A reference to a **tool** by an agent-home path never resolves: a tool is not
-  linked there. Broken regardless of prefix.
+  second agent home is configured. `{{self}}` generalizes it. Fragile, not broken.
+- A reference to a **tool** item by an agent-home path never resolves: a tool is
+  not linked there. Use `{{tools:name}}` (or install it elsewhere via a hook).
 - Any reference under a **prefix** points at the wrong effective name, since a
   literal path does not track the rename.
 
-Use a token instead. It expands to the correct store path and keeps a leading `~`
-when the store is under your home, so a Claude `settings.json` permission glob
-such as `Bash(~/.mind/store/**)` matches the expansion.
+A token keeps a leading `~` when the store is under your home, so a Claude
+`settings.json` permission glob such as `Bash(~/.mind/store/**)` matches the
+expansion.
 
-`mind review` recognizes hardcoded paths written with `~`, `$HOME`, `${HOME}`, or
-an absolute `/home/<user>` / `/Users/<user>` root, and `mind review --fix`
-rewrites the ones that map confidently to a token.
+`mind review` recognizes these install paths written with `~`, `$HOME`, `${HOME}`,
+or an absolute `/home/<user>` / `/Users/<user>` root, and `mind review --fix`
+rewrites the ones that map confidently to a token. The finding is advisory, so a
+deliberate fixed-location-via-install-hook layout is your call.
