@@ -6,6 +6,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-06-25
+
+### Fixed
+
+- A `$MIND_POLICY_FILE` naming a file that does not exist no longer hard-errors
+  every command with a not-found error; a missing env-pointed policy file is now
+  treated as no policy (unmanaged), mirroring the system-path existence check.
+
 ## [0.5.0] - 2026-06-25
 
 ### Added
@@ -184,7 +192,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovery, frontmatter descriptions, transactional install/upgrade/uninstall
   with a file registry, and a tag-driven release pipeline with a Homebrew tap.
 
-[Unreleased]: https://github.com/jaemk/mind/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/jaemk/mind/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/jaemk/mind/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/jaemk/mind/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/jaemk/mind/compare/v0.3.1...v0.4.1
 [0.3.1]: https://github.com/jaemk/mind/compare/v0.3.0...v0.3.1

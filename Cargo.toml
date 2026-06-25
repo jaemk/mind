@@ -1,6 +1,6 @@
 [package]
 name = "mind"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 license = "MIT"
 description = "A manager for agent tooling: skills, agents, and rules from arbitrary git repos."
