@@ -43,6 +43,7 @@ and verified.
 | `sync --upgrade` (refresh then upgrade) | done | CLI-53 |
 | `recall` (no arg): source+item status view, install state per item | done | CLI-70, CLI-74, CLI-83 |
 | `probe`/`recall` `--kind` / `--source` filters | done | CLI-83 |
+| `probe`/`recall` `--source` accepts a source glob (mirrors `unmeld` glob) | planned | CLI-86 |
 | Enforce `min-mind-version` | done | DSC-40 |
 | `sync` per-source resilience (continue + report, exit non-zero) | done | CLI-54 |
 | `--json` output (recall, probe, introspect) | done | CLI-73, CLI-84, CLI-92 |

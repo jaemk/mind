@@ -310,6 +310,15 @@ define the non-interactive catalog listing, which `probe` prints instead when
   contains the query, case-insensitively. This supersedes the name-only matching
   of CLI-80 so an item is found by what it does, not only by its name. The
   `--kind` / `--source` filters (CLI-83) still compose with the query.
+- `CLI-86` The `probe` / `recall` `--source <selector>` filter (CLI-83) accepts a
+  glob (`*`, `?`, `[`), matched against each source's `host/owner/repo` identity
+  and its trailing-suffix forms as a plain string (so `*` spans `/`), mirroring
+  `unmeld`'s source glob (CLI-28). `--source '*agents'` narrows the listing to
+  items from every source whose identity matches. A non-glob value keeps the
+  exact/unambiguous-suffix match. Unlike `unmeld`, a multi-source match is the
+  normal, non-error case for a filter: every matching source's items are shown,
+  with no confirmation. A glob matching no source yields an empty listing, as any
+  fully-excluding filter does.
 
 ## review
 
