@@ -350,7 +350,8 @@ fn build_item(
         // HOOK-80: a `mind.toml` install/uninstall is valid on any kind; a tool's
         // TOOL.md may also carry one in frontmatter. An empty value is absent.
         install: nonempty(ov.install).or_else(|| lifecycle_frontmatter(kind, meta, "install")),
-        uninstall: nonempty(ov.uninstall).or_else(|| lifecycle_frontmatter(kind, meta, "uninstall")),
+        uninstall: nonempty(ov.uninstall)
+            .or_else(|| lifecycle_frontmatter(kind, meta, "uninstall")),
     }
 }
 
@@ -461,7 +462,15 @@ fn make_item(
     };
     // Convention discovery carries no overrides: every field falls back to the
     // item's frontmatter (HOOK-80: install/uninstall only from a tool's TOOL.md).
-    build_item(source, prefix, kind, bare, path, meta, ItemOverrides::default())
+    build_item(
+        source,
+        prefix,
+        kind,
+        bare,
+        path,
+        meta,
+        ItemOverrides::default(),
+    )
 }
 
 #[cfg(test)]
