@@ -54,11 +54,10 @@ of this. Two patterns cover nearly everything:
   own directory and is addressed with `{{self}}` (e.g. `{{self}}/resources/pr.py`).
   It ships and installs with the skill; nothing else is needed.
 - **Install to a known location.** Tooling shared across items, or anything with a
-  build step, is best handled by an install hook: declare `[source].install` (or
-  `[[hooks]]`) to run your install script, which puts the tooling wherever you
-  like (a fixed path under the user's home, a venv, a PATH entry), and have your
-  items call it there. The source "onboards" its build once and the items just use
-  it.
+  build step, is best handled by an install hook: declare a `[[hooks]]` install
+  entry to run your install script, which puts the tooling wherever you like (a
+  fixed path under the user's home, a venv, a PATH entry), and have your items call
+  it there. The source "onboards" its build once and the items just use it.
 
 The `tool` item kind and the `{{tools:name}}` / `{{path:ref}}` tokens are a third
 option for sharing a helper through `mind`'s store, but they are not required:

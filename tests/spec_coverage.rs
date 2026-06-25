@@ -29,9 +29,14 @@ const ALLOWLIST: &[&str] = &[
     // supplying its `follow-branch`/`roots`/`[[hooks]]`, applied only when the
     // nested source has no `mind.toml`. Cited by tests when built.
     "DSC-59", "DSC-60", "DSC-61",
-    // Planned: `init-source` scaffolds a commented-out `[source].install` stub in
-    // the `mind.toml` it generates, nudging shared tooling toward an install hook.
-    // Cited by a test when built.
+    // Planned: deprecate `[source].install` in favor of `[[hooks]]`. The field
+    // stays parsed (HOOK-50); `review` adds a `deprecated-field` advisory and
+    // `init-source` scaffolds only `[[hooks]]`. Cited by a test when built.
+    "HOOK-90",
+    // Retired (never implemented): INIT-8 proposed an `init-source` scaffold of a
+    // `[source].install` stub; dropped when that field was deprecated (HOOK-90).
+    // The statement is kept (marked removed) so the number is not reused; it has
+    // no behavior and so no citing test.
     "INIT-8",
     // Planned: `init-source` gates its bare-sibling unguarded-reference advisory on
     // an effective prefix (INIT-9), matching meld/review; and the `hardcoded-path`

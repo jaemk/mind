@@ -59,7 +59,7 @@ and verified.
 | `meld` installs by default (`--link-only`/`--yes`); no-arg melds `.`; prefix prompt when declared | done (`--link-only`/`--yes`/prefix) | CLI-23, CLI-24 |
 | `meld` with no arg defaults to the current directory | done | CLI-25 |
 | `init-source`: scaffold `mind.toml`, detect references, `{{ns:}}` templating (maintainer) | done | [init-source.md](init-source.md) |
-| `init-source` scaffolds a commented `[source].install` stub to nudge shared tooling toward an install hook | planned | INIT-8 |
+| Deprecate `[source].install` (still parsed); `review` advises the `[[hooks]]` form, `init-source` scaffolds only `[[hooks]]` | planned | HOOK-90 |
 | `init-source` flags bare sibling references only under a prefix; `hardcoded-path`/`bare-tool` messages note install-hook-populated locations are safe | planned | INIT-9, CLI-146 |
 | Concurrency: global advisory lock + atomic registry writes (via `fd-lock`) | done | STO-40, STO-41, STO-42, STO-43 |
 | `probe` matches description text, not just name | done | CLI-85 |

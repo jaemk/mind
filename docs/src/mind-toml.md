@@ -49,10 +49,11 @@ roots = ["packages"]                     # scan under these dirs, not the repo r
 - **`prefix`**: every item installs as `<prefix>-<name>` (identity, store path,
   symlink, and ref). A consumer's `meld --as <prefix>` overrides it; `meld --as ''`
   removes it. See [namespacing](https://github.com/jaemk/mind/blob/main/spec/namespacing.md).
-- **`install`**: a shell command run once on `meld`, after checkout, to build or
-  install the tooling the source's items rely on. It is disclosed and prompted
-  before it runs (`--dangerously-skip-install-hook-check` runs it unattended).
-  For more than one command, or an uninstall hook, use `[[hooks]]` below.
+- **`install`** (deprecated): a shell command run once on `meld`, after checkout,
+  to build or install the tooling the source's items rely on. It is disclosed and
+  prompted before it runs (`--dangerously-skip-install-hook-check` runs it
+  unattended). Deprecated in favor of a `[[hooks]]` install entry below; still
+  parsed, but new sources should use `[[hooks]]`.
 - **`follow-branch` / `pin-tag` / `pin-ref`**: how `sync` tracks upstream. Declare
   at most one; two is an error. A consumer `meld --follow-branch|--pin-tag|--pin-ref`
   overrides it.
@@ -78,8 +79,8 @@ event = "uninstall"
 optional = true
 ```
 
-A single `[source].install` is shorthand for one required install hook; use
-`[[hooks]]` when you need several, an uninstall hook, or the optional form.
+`[[hooks]]` is the canonical form. The legacy `[source].install` is a deprecated
+shorthand for one required install hook (still parsed); use `[[hooks]]` instead.
 
 ## `[[items]]` — explicit inventory (authoritative)
 
@@ -109,7 +110,7 @@ uninstall = "./teardown.sh"      # any kind: host cleanup run before removal
   a schema error.
 - **`install`** / **`uninstall`** are per-item lifecycle hooks (valid on any kind),
   distinct from `build` (which produces the item's content) and from the
-  source-level `[source].install` / `[[hooks]]`.
+  source-level `[[hooks]]`.
 
 ## `[discover]` — glob-based discovery
 

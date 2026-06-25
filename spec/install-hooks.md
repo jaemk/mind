@@ -34,7 +34,8 @@ CLI-17).
 
 - `HOOK-1` `[source].install` in a repo's `mind.toml` is a shell command string
   that declares the source's install hook (run to build or install the tooling
-  the source's items rely on).
+  the source's items rely on). Deprecated in favor of a `[[hooks]]` install entry
+  (HOOK-90); still parsed and folded into the hook set (HOOK-50) for back-compat.
 - `HOOK-2` `mind meld <repo> --install-hook <cmd>` supplies an install hook, both
   for a repo with no `mind.toml` and to override one a source declares. When it
   overrides a declared `[source].install`, the override is loud and obvious: the
@@ -113,8 +114,9 @@ CLI-17).
 
 A source may declare more than one hook, for two lifecycle events (install at
 `meld`, uninstall at `unmeld`), and mark a hook optional so the user can skip
-that step. The single `[source].install` string (HOOK-1) remains valid as the
-shorthand for one required install hook.
+that step. `[[hooks]]` is the canonical form; the single `[source].install`
+string (HOOK-1) is a deprecated shorthand for one required install hook (HOOK-90),
+still parsed and folded in (HOOK-50).
 
 - `HOOK-50` A source declares hooks via a `[[hooks]]` array-of-tables in
   `mind.toml`. Each hook runs, in declaration order, in the source's clone
@@ -190,6 +192,18 @@ shorthand for one required install hook.
   required uninstall hook running `<cmd>`, shown loudly in the disclosure (the
   uninstall-event counterpart to `meld --install-hook`, HOOK-56). Declared install
   hooks are unaffected.
+
+## Deprecating `[source].install`
+
+- `HOOK-90` `[source].install` (HOOK-1) is deprecated in favor of a `[[hooks]]`
+  install entry (HOOK-50/51), which is strictly more expressive (it can be named,
+  optional, an uninstall hook, or one of several). The field stays parsed and
+  folded into the hook set (HOOK-50), so existing sources keep working unchanged;
+  only new authoring is steered away. `mind review <target>` reports a source that
+  declares `[source].install` as an advisory `deprecated-field` finding, naming the
+  equivalent `[[hooks]]` entry (`run = <cmd>`, `event = "install"`), in addition to
+  disclosing the hook itself (HOOK-40). `init-source` never writes `[source].install`:
+  its scaffold offers only commented `[[hooks]]` examples (HOOK-57).
 
 ## Item build hooks
 

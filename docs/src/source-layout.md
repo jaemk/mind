@@ -39,10 +39,10 @@ skills/review/
 
 A helper used by more than one item has two good homes. Either:
 
-- **An install hook puts it in a known location.** Declare `[source].install` (or
-  `[[hooks]]`) to run your install script, which installs the shared tooling
-  wherever you want, and have your items call it there. This suits anything with a
-  build step or a dependency to fetch, and a source onboards its build once.
+- **An install hook puts it in a known location.** Declare a `[[hooks]]` install
+  entry to run your install script, which installs the shared tooling wherever you
+  want, and have your items call it there. This suits anything with a build step or
+  a dependency to fetch, and a source onboards its build once.
 - **A `tool` item shares it through the store.** Put it once under `tools/<name>/`
   and reference it by token (`{{tools:name}}`). `mind` carries it in the store and
   expands the token at install.
