@@ -195,20 +195,22 @@ fn flat_node_to_list_item(node: &FlatNode) -> ListItem<'_> {
     // A geometric marker per node kind: filled = present/installed, hollow =
     // available; group headers carry no marker (the bold label leads).
     let icon = match &node.node {
-        TreeNode::InstalledGroup | TreeNode::AvailableGroup => "",
+        TreeNode::InstalledGroup | TreeNode::AvailableGroup | TreeNode::UnmanagedGroup => "",
         TreeNode::Source(_) => "\u{25c6} ", // filled diamond
         TreeNode::KindBucket { .. } => "\u{25aa} ", // small square
         TreeNode::InstalledItem(_) => "\u{25cf} ", // filled circle
         TreeNode::AvailableItem(_) => "\u{25cb} ", // hollow circle
+        TreeNode::UnmanagedItem(_) => "\u{25cb} ", // hollow circle (not mind-managed)
         TreeNode::SuggestedSource(_) => "\u{25c7} ", // hollow diamond
     };
 
     let style = match &node.node {
-        TreeNode::InstalledGroup | TreeNode::AvailableGroup => {
+        TreeNode::InstalledGroup | TreeNode::AvailableGroup | TreeNode::UnmanagedGroup => {
             Style::default().add_modifier(Modifier::BOLD)
         }
         TreeNode::InstalledItem(_) => Style::default().fg(Color::Green),
         TreeNode::AvailableItem(_) => Style::default(),
+        TreeNode::UnmanagedItem(_) => Style::default().fg(Color::Yellow),
         TreeNode::Source(_) => Style::default().fg(Color::Cyan),
         TreeNode::KindBucket { .. } => Style::default().fg(Color::Blue),
         TreeNode::SuggestedSource(_) => Style::default().fg(Color::Magenta),

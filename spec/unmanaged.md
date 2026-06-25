@@ -1,6 +1,6 @@
 # Unmanaged lobe items
 
-Status: planned. An agent home (lobe) often holds skills, agents, and rules that
+Status: done. An agent home (lobe) often holds skills, agents, and rules that
 `mind` did not install: files a user wrote by hand, or items installed by other
 means. `mind` surfaces these *unmanaged* items in `recall` and `probe` so the
 listing reflects everything the agent actually sees, and lets `forget` remove one

@@ -33,6 +33,11 @@ pub enum TreeNode {
     /// A not-yet-melded source suggested by the registry (TUI-31).
     /// Expanding this node triggers a preview (TUI-30).
     SuggestedSource(SuggestedSourceInfo),
+    /// The synthetic "unmanaged" group header (UNM-6): lobe items mind did not
+    /// install, distinct from any source.
+    UnmanagedGroup,
+    /// A single unmanaged lobe item under the unmanaged group (UNM-6).
+    UnmanagedItem(UnmanagedInfo),
 }
 
 #[derive(Debug, Clone)]
@@ -62,6 +67,18 @@ pub struct AvailableInfo {
     pub kind: ItemKind,
     pub description: Option<String>,
     pub path: PathBuf,
+}
+
+/// Info about a single unmanaged lobe item (UNM-6). `key` is the `kind:name`
+/// form so the forget action resolves it via the same ref path as a managed
+/// item (UNM-4).
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct UnmanagedInfo {
+    pub key: String,
+    pub name: String,
+    pub kind: ItemKind,
+    pub paths: Vec<PathBuf>,
 }
 
 /// Info about a not-yet-melded suggested source (TUI-31).
@@ -142,6 +159,21 @@ pub fn build_tree(
         node: TreeNode::AvailableGroup,
     });
 
+    // --- Unmanaged group (UNM-6) ---
+    // Built only when there are unmanaged items to show after filtering, so the
+    // group is absent (not an empty header) on the common all-managed home. It
+    // is auto-expanded and collapses via the `collapsed` set like a Source node.
+    // spec: UNM-6
+    let unmanaged_children = build_unmanaged_children(snap, search, kind_filter, source_filter);
+    if !unmanaged_children.is_empty() {
+        roots.push(Node {
+            id: "group:unmanaged".to_string(),
+            label: format!("Unmanaged ({})", unmanaged_children.len()),
+            node: TreeNode::UnmanagedGroup,
+            children: unmanaged_children,
+        });
+    }
+
     roots
 }
 
@@ -149,7 +181,9 @@ fn count_items(children: &[Node]) -> usize {
     let mut n = 0;
     for c in children {
         match &c.node {
-            TreeNode::InstalledItem(_) | TreeNode::AvailableItem(_) => n += 1,
+            TreeNode::InstalledItem(_)
+            | TreeNode::AvailableItem(_)
+            | TreeNode::UnmanagedItem(_) => n += 1,
             _ => n += count_items(&c.children),
         }
     }
@@ -369,6 +403,41 @@ fn build_available_group(
     }
 }
 
+/// Build the leaf nodes under the unmanaged group (UNM-6): one row per
+/// unmanaged lobe item, sorted by `(kind, name)` as the snapshot already is.
+/// `--kind` filters; a `--source` filter excludes every unmanaged item (they
+/// have no source, per UNM-3); search matches the item name (CLI-85: unmanaged
+/// items carry no description, so name is all there is to match).
+// spec: UNM-6
+fn build_unmanaged_children(
+    snap: &Snapshot,
+    search: &str,
+    kind_filter: Option<ItemKind>,
+    source_filter: Option<&str>,
+) -> Vec<Node> {
+    // A source filter excludes unmanaged items entirely (UNM-3).
+    if source_filter.is_some() {
+        return Vec::new();
+    }
+    let needle = search.to_lowercase();
+    snap.unmanaged
+        .iter()
+        .filter(|it| kind_filter.is_none_or(|kf| it.kind == kf))
+        .filter(|it| needle.is_empty() || it.name.to_lowercase().contains(&needle))
+        .map(|it| Node {
+            id: format!("unmanaged:{}", it.key),
+            label: format!("{} [{}] (unmanaged)", it.name, it.kind.as_str()),
+            node: TreeNode::UnmanagedItem(UnmanagedInfo {
+                key: it.key.clone(),
+                name: it.name.clone(),
+                kind: it.kind,
+                paths: it.paths.clone(),
+            }),
+            children: vec![],
+        })
+        .collect()
+}
+
 /// True if an installed item matches the search query.
 /// Delegates to `catalog::matches_query` (CLI-85 / TUI-14) so both installed
 /// and available search share one source of truth.
@@ -433,6 +502,7 @@ pub fn is_auto_expanded(node: &TreeNode) -> bool {
         node,
         TreeNode::InstalledGroup
             | TreeNode::AvailableGroup
+            | TreeNode::UnmanagedGroup
             | TreeNode::Source(_)
             | TreeNode::KindBucket { .. }
     )
@@ -541,9 +611,19 @@ mod tests {
             generation: 1,
             installed,
             available,
+            unmanaged: vec![],
             source_names: vec!["src/a".to_string()],
             suggestions: vec![],
             lobes: vec![],
+        }
+    }
+
+    fn make_unmanaged(name: &str, kind: ItemKind) -> crate::tui::data::SnapshotUnmanaged {
+        crate::tui::data::SnapshotUnmanaged {
+            key: format!("{}:{}", kind.as_str(), name),
+            name: name.to_string(),
+            kind,
+            paths: vec![std::path::PathBuf::from(format!("/lobe/{name}"))],
         }
     }
 
@@ -1198,6 +1278,289 @@ mod tests {
         assert!(
             child_visible3,
             "InstalledItem child must appear when parent is in `expanded`"
+        );
+    }
+
+    // --- UNM-6: the unmanaged group node ---
+
+    fn snap_with_unmanaged(unmanaged: Vec<crate::tui::data::SnapshotUnmanaged>) -> Snapshot {
+        let mut snap = snap_with(vec![], vec![]);
+        snap.unmanaged = unmanaged;
+        snap
+    }
+
+    #[test]
+    fn unmanaged_group_appears_with_items() {
+        // spec: UNM-6 - unmanaged items appear under a dedicated group node,
+        // distinct from any source, browsable (auto-expanded) like a source.
+        let snap = snap_with_unmanaged(vec![
+            make_unmanaged("hand-written", ItemKind::Skill),
+            make_unmanaged("foreign", ItemKind::Agent),
+        ]);
+        let nodes = build_tree(&snap, "", None, None, false, false);
+        // A third root group beyond Installed/Available.
+        let group = nodes
+            .iter()
+            .find(|n| matches!(n.node, TreeNode::UnmanagedGroup))
+            .expect("an unmanaged group node must be present");
+        assert_eq!(group.label, "Unmanaged (2)");
+        // Items are visible by default (the group auto-expands).
+        let flat = flatten_tree(&nodes, &HashSet::new(), &HashSet::new());
+        let names: Vec<&str> = flat
+            .iter()
+            .filter_map(|n| match &n.node {
+                TreeNode::UnmanagedItem(i) => Some(i.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(names.contains(&"hand-written") && names.contains(&"foreign"));
+    }
+
+    #[test]
+    fn no_unmanaged_group_when_none() {
+        // spec: UNM-6 - with no unmanaged items the group is absent entirely (not
+        // an empty header), keeping the common all-managed home uncluttered.
+        let snap = snap_with_unmanaged(vec![]);
+        let nodes = build_tree(&snap, "", None, None, false, false);
+        assert!(
+            !nodes
+                .iter()
+                .any(|n| matches!(n.node, TreeNode::UnmanagedGroup)),
+            "no unmanaged items -> no unmanaged group"
+        );
+    }
+
+    #[test]
+    fn unmanaged_search_filters_by_name() {
+        // spec: UNM-6 - the unmanaged group is searchable like a source's items.
+        let snap = snap_with_unmanaged(vec![
+            make_unmanaged("review", ItemKind::Skill),
+            make_unmanaged("deploy", ItemKind::Skill),
+        ]);
+        let nodes = build_tree(&snap, "rev", None, None, false, false);
+        let flat = flatten_tree(&nodes, &HashSet::new(), &HashSet::new());
+        let names: Vec<&str> = flat
+            .iter()
+            .filter_map(|n| match &n.node {
+                TreeNode::UnmanagedItem(i) => Some(i.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, vec!["review"], "search 'rev' keeps only review");
+    }
+
+    #[test]
+    fn unmanaged_kind_filter_applies() {
+        // spec: UNM-6 - `--kind` filters unmanaged items as it does managed ones.
+        let snap = snap_with_unmanaged(vec![
+            make_unmanaged("s", ItemKind::Skill),
+            make_unmanaged("a", ItemKind::Agent),
+        ]);
+        let nodes = build_tree(&snap, "", Some(ItemKind::Skill), None, false, false);
+        let flat = flatten_tree(&nodes, &HashSet::new(), &HashSet::new());
+        let kinds: Vec<ItemKind> = flat
+            .iter()
+            .filter_map(|n| match &n.node {
+                TreeNode::UnmanagedItem(i) => Some(i.kind),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(kinds, vec![ItemKind::Skill], "kind=Skill drops the agent");
+    }
+
+    #[test]
+    fn unmanaged_source_filter_excludes_them() {
+        // spec: UNM-6 - a `--source` filter excludes unmanaged items (they have no
+        // source, per UNM-3), so the group is absent under any source filter.
+        let snap = snap_with_unmanaged(vec![make_unmanaged("x", ItemKind::Skill)]);
+        let nodes = build_tree(&snap, "", None, Some("some/source"), false, false);
+        assert!(
+            !nodes
+                .iter()
+                .any(|n| matches!(n.node, TreeNode::UnmanagedGroup)),
+            "a source filter must exclude the unmanaged group"
+        );
+    }
+
+    #[test]
+    fn unmanaged_group_label_count_reflects_filtered_visible_items() {
+        // spec: UNM-6 - the "Unmanaged (N)" label must report the number of items
+        // VISIBLE after filtering, not the raw snapshot size. With three items and
+        // a kind filter that keeps one, the label must read "Unmanaged (1)" and
+        // exactly one item node must be present (count and contents agree).
+        let snap = snap_with_unmanaged(vec![
+            make_unmanaged("a", ItemKind::Skill),
+            make_unmanaged("b", ItemKind::Agent),
+            make_unmanaged("c", ItemKind::Agent),
+        ]);
+        let nodes = build_tree(&snap, "", Some(ItemKind::Skill), None, false, false);
+        let group = nodes
+            .iter()
+            .find(|n| matches!(n.node, TreeNode::UnmanagedGroup))
+            .expect("an unmanaged group node must be present");
+        assert_eq!(
+            group.label, "Unmanaged (1)",
+            "label count must reflect items surviving the kind filter"
+        );
+        let item_count = group
+            .children
+            .iter()
+            .filter(|n| matches!(&n.node, TreeNode::UnmanagedItem(_)))
+            .count();
+        assert_eq!(
+            item_count, 1,
+            "the visible item count must equal the label count"
+        );
+    }
+
+    #[test]
+    fn unmanaged_search_composes_with_kind_filter() {
+        // spec: UNM-6 - a search query and a kind filter applied at the same time
+        // must BOTH constrain the unmanaged items (composition, not either/or),
+        // mirroring how the managed axes compose.
+        let snap = snap_with_unmanaged(vec![
+            // matches search "re" AND kind=Skill -> survives
+            make_unmanaged("review", ItemKind::Skill),
+            // matches kind=Skill but NOT search "re" -> dropped by search
+            make_unmanaged("build", ItemKind::Skill),
+            // matches search "re" but NOT kind=Skill -> dropped by kind
+            make_unmanaged("render", ItemKind::Agent),
+        ]);
+        let nodes = build_tree(&snap, "re", Some(ItemKind::Skill), None, false, false);
+        let flat = flatten_tree(&nodes, &HashSet::new(), &HashSet::new());
+        let names: Vec<&str> = flat
+            .iter()
+            .filter_map(|n| match &n.node {
+                TreeNode::UnmanagedItem(i) => Some(i.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            names,
+            vec!["review"],
+            "only the item matching BOTH search and kind survives: {names:?}"
+        );
+    }
+
+    #[test]
+    fn unmanaged_items_preserve_snapshot_kind_name_order() {
+        // spec: UNM-6 - the unmanaged children are emitted in the snapshot's order
+        // (the scanner sorts by (kind, name), UNM-1), with no reordering by
+        // build_unmanaged_children. Feed an already-sorted snapshot and assert the
+        // emitted node order matches it exactly.
+        let snap = snap_with_unmanaged(vec![
+            make_unmanaged("alpha", ItemKind::Skill),
+            make_unmanaged("zeta", ItemKind::Skill),
+            make_unmanaged("beta", ItemKind::Agent),
+        ]);
+        let nodes = build_tree(&snap, "", None, None, false, false);
+        let group = nodes
+            .iter()
+            .find(|n| matches!(n.node, TreeNode::UnmanagedGroup))
+            .expect("an unmanaged group node must be present");
+        let order: Vec<&str> = group
+            .children
+            .iter()
+            .filter_map(|n| match &n.node {
+                TreeNode::UnmanagedItem(i) => Some(i.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            order,
+            vec!["alpha", "zeta", "beta"],
+            "node order must follow the snapshot order verbatim"
+        );
+    }
+
+    #[test]
+    fn unmanaged_group_sorts_after_installed_and_available() {
+        // spec: UNM-6 - the synthetic unmanaged group is appended after the
+        // Installed and Available group roots, so it is the last top-level group.
+        let mut snap = snap_with(
+            vec![make_installed(
+                "skill:review",
+                "review",
+                "src/a",
+                ItemKind::Skill,
+            )],
+            vec![make_available("agent:dev", "dev", "src/a", ItemKind::Agent)],
+        );
+        snap.unmanaged = vec![make_unmanaged("x", ItemKind::Skill)];
+        let nodes = build_tree(&snap, "", None, None, false, false);
+        assert!(matches!(nodes[0].node, TreeNode::InstalledGroup));
+        assert!(matches!(nodes[1].node, TreeNode::AvailableGroup));
+        assert!(
+            matches!(nodes[2].node, TreeNode::UnmanagedGroup),
+            "unmanaged group must be the last root group"
+        );
+        assert_eq!(nodes.len(), 3);
+    }
+
+    #[test]
+    fn unmanaged_item_distinct_node_id_from_managed_same_name() {
+        // spec: UNM-6 - an unmanaged item whose kind:name collides with a managed
+        // installed item must still produce a DISTINCT tree node (its own id under
+        // "unmanaged:") so the two are independently selectable. The unmanaged
+        // item's key remains its kind:name, matching the managed key by value but
+        // carried on a separate node (UNM-4 ambiguity is resolved at forget time).
+        let mut snap = snap_with(
+            vec![make_installed(
+                "skill:review",
+                "review",
+                "src/a",
+                ItemKind::Skill,
+            )],
+            vec![],
+        );
+        snap.unmanaged = vec![make_unmanaged("review", ItemKind::Skill)];
+        let nodes = build_tree(&snap, "", None, None, false, false);
+        let flat = flatten_tree(&nodes, &HashSet::new(), &HashSet::new());
+
+        let installed_id = flat
+            .iter()
+            .find(|n| matches!(&n.node, TreeNode::InstalledItem(i) if i.name == "review"))
+            .map(|n| n.id.clone())
+            .expect("managed review must be present");
+        let unmanaged_node = flat
+            .iter()
+            .find(|n| matches!(&n.node, TreeNode::UnmanagedItem(i) if i.name == "review"))
+            .expect("unmanaged review must be present");
+        assert_ne!(
+            installed_id, unmanaged_node.id,
+            "the colliding-name items must have distinct node ids"
+        );
+        assert_eq!(
+            unmanaged_node.id, "unmanaged:skill:review",
+            "the unmanaged node id is namespaced under 'unmanaged:'"
+        );
+        // Both keys equal kind:name by value, but the nodes are independent.
+        if let TreeNode::UnmanagedItem(i) = &unmanaged_node.node {
+            assert_eq!(i.key, "skill:review");
+        } else {
+            unreachable!();
+        }
+    }
+
+    #[test]
+    fn unmanaged_group_collapse_hides_items() {
+        // spec: UNM-6 - the group is collapsible: with its id in `collapsed`, its
+        // items disappear while the group header itself stays visible.
+        let snap = snap_with_unmanaged(vec![make_unmanaged("x", ItemKind::Skill)]);
+        let nodes = build_tree(&snap, "", None, None, false, false);
+        let mut collapsed = HashSet::new();
+        collapsed.insert("group:unmanaged".to_string());
+        let flat = flatten_tree(&nodes, &HashSet::new(), &collapsed);
+        let item_visible = flat
+            .iter()
+            .any(|n| matches!(&n.node, TreeNode::UnmanagedItem(_)));
+        let group_visible = flat
+            .iter()
+            .any(|n| matches!(&n.node, TreeNode::UnmanagedGroup));
+        assert!(!item_visible, "collapsed group hides its items");
+        assert!(
+            group_visible,
+            "the group header stays visible when collapsed"
         );
     }
 }

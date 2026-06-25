@@ -629,15 +629,36 @@ impl App {
         let Some(node) = self.visible.get(self.selected) else {
             return;
         };
-        if let TreeNode::InstalledItem(ref item) = node.node {
-            let desc = format!("Forget (uninstall) {}?", item.key);
-            self.pending_action = Some(PendingAction::new(
-                ActionKind::Forget {
-                    item_key: item.key.clone(),
-                },
-                desc,
-            ));
-            self.modal_visible = true;
+        match &node.node {
+            TreeNode::InstalledItem(item) => {
+                let desc = format!("Forget (uninstall) {}?", item.key);
+                self.pending_action = Some(PendingAction::new(
+                    ActionKind::Forget {
+                        item_key: item.key.clone(),
+                    },
+                    desc,
+                ));
+                self.modal_visible = true;
+            }
+            // Forget on an unmanaged item removes the user's own lobe entry
+            // (UNM-4/5). The key is the `kind:name` ref that commands::forget
+            // resolves to the unmanaged item; the warning that it is not
+            // mind-managed is printed by the executor.
+            // spec: UNM-6
+            TreeNode::UnmanagedItem(item) => {
+                let desc = format!(
+                    "Forget {} (NOT managed by mind: deletes your own file)?",
+                    item.key
+                );
+                self.pending_action = Some(PendingAction::new(
+                    ActionKind::Forget {
+                        item_key: item.key.clone(),
+                    },
+                    desc,
+                ));
+                self.modal_visible = true;
+            }
+            _ => {}
         }
     }
 
@@ -803,6 +824,7 @@ mod tests {
                 description: Some("Dev agent".to_string()),
                 path: std::path::PathBuf::from("/fake/path"),
             }],
+            unmanaged: vec![],
             source_names: vec!["local/agents".to_string()],
             suggestions: vec![],
             lobes: vec![],
@@ -1198,6 +1220,109 @@ mod tests {
             "decline clears the pending forget"
         );
         assert!(!app.modal_visible);
+    }
+
+    #[test]
+    fn forget_on_unmanaged_item_sets_confirm_gated_forget() {
+        // spec: UNM-6 - the forget action is available from the unmanaged group:
+        // selecting an unmanaged item and forgetting it opens a confirm modal with
+        // a Forget action keyed by `kind:name` (the ref commands::forget resolves
+        // to the unmanaged item per UNM-4), so nothing mutates without confirmation.
+        let mut app = App::new(String::new(), None, None);
+        let mut snap = make_snapshot();
+        snap.unmanaged = vec![crate::tui::data::SnapshotUnmanaged {
+            key: "skill:hand-written".to_string(),
+            name: "hand-written".to_string(),
+            kind: ItemKind::Skill,
+            paths: vec![std::path::PathBuf::from("/lobe/skills/hand-written")],
+        }];
+        app.apply_snapshot(snap);
+        let idx = app
+            .visible
+            .iter()
+            .position(|n| matches!(&n.node, crate::tui::tree::TreeNode::UnmanagedItem(_)))
+            .expect("unmanaged item should be visible");
+        app.selected = idx;
+        app.apply_intent(Intent::ActionForget);
+        assert!(app.modal_visible, "forget must open a confirm modal");
+        let pending = app
+            .pending_action
+            .as_ref()
+            .expect("forget must set a pending action");
+        assert!(
+            matches!(&pending.kind, ActionKind::Forget { item_key } if item_key == "skill:hand-written"),
+            "pending action should be Forget keyed by the unmanaged item's kind:name"
+        );
+        assert!(
+            pending.description.contains("NOT managed by mind"),
+            "the confirm prompt must warn the item is not mind-managed: {:?}",
+            pending.description
+        );
+    }
+
+    #[test]
+    fn forget_on_unmanaged_collision_keys_unmanaged_node_with_warning() {
+        // spec: UNM-6 - when an unmanaged item shares its kind:name with a managed
+        // installed item, selecting the UNMANAGED node and forgetting must build a
+        // Forget keyed by that kind:name AND carry the not-mind-managed warning
+        // (the unmanaged branch), proving the action is driven by the selected
+        // node, not by a name lookup that could hit the managed item first.
+        let mut app = App::new(String::new(), None, None);
+        let mut snap = make_snapshot(); // installs managed skill:review
+        snap.unmanaged = vec![crate::tui::data::SnapshotUnmanaged {
+            key: "skill:review".to_string(),
+            name: "review".to_string(),
+            kind: ItemKind::Skill,
+            paths: vec![std::path::PathBuf::from("/lobe/skills/review")],
+        }];
+        app.apply_snapshot(snap);
+        // Select the UNMANAGED review (not the managed one of the same key).
+        let idx = app
+            .visible
+            .iter()
+            .position(|n| matches!(&n.node, crate::tui::tree::TreeNode::UnmanagedItem(_)))
+            .expect("unmanaged item should be visible");
+        app.selected = idx;
+        app.apply_intent(Intent::ActionForget);
+        let pending = app
+            .pending_action
+            .as_ref()
+            .expect("forget must set a pending action");
+        assert!(
+            matches!(&pending.kind, ActionKind::Forget { item_key } if item_key == "skill:review"),
+            "Forget must be keyed by the unmanaged item's kind:name"
+        );
+        assert!(
+            pending.description.contains("NOT managed by mind"),
+            "the unmanaged branch must warn it is not mind-managed even when a \
+             managed item shares the key: {:?}",
+            pending.description
+        );
+    }
+
+    #[test]
+    fn forget_on_managed_item_omits_unmanaged_warning() {
+        // spec: UNM-6 - control for the collision test: forgetting a MANAGED item
+        // uses the uninstall prompt and must NOT carry the unmanaged warning, so
+        // the two branches are distinguishable by their prompt text.
+        let mut app = App::new(String::new(), None, None);
+        app.apply_snapshot(make_snapshot());
+        let idx = app
+            .visible
+            .iter()
+            .position(|n| matches!(&n.node, crate::tui::tree::TreeNode::InstalledItem(_)))
+            .expect("installed item should be visible");
+        app.selected = idx;
+        app.apply_intent(Intent::ActionForget);
+        let pending = app
+            .pending_action
+            .as_ref()
+            .expect("forget must set a pending action");
+        assert!(
+            !pending.description.contains("NOT managed by mind"),
+            "the managed forget prompt must not claim the item is unmanaged: {:?}",
+            pending.description
+        );
     }
 
     #[test]

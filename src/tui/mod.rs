@@ -472,6 +472,7 @@ mod tests {
                 description: Some("Dev agent".to_string()),
                 path: std::path::PathBuf::from("/fake/path"),
             }],
+            unmanaged: vec![],
             source_names: vec!["local/agents".to_string()],
             suggestions: vec![],
             lobes: vec![],

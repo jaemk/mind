@@ -24,7 +24,8 @@ the lock it takes per action is defined in storage.md (STO-40, STO-41).
 ## Browse tree
 
 - `TUI-10` The view has two top-level groups: **Installed** and **Available**.
-  Each is an independently collapsible tree.
+  Each is an independently collapsible tree. A third **Unmanaged** group appears
+  below them when the agent home holds items mind did not install (UNM-6).
 - `TUI-11` Under each group the hierarchy is source -> kind (skills, agents,
   rules) -> item -> detail. Every node toggles between expanded and collapsed on
   Enter; Left/Right arrows also collapse/expand structural nodes (source and kind

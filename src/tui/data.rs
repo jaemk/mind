@@ -26,6 +26,10 @@ pub struct Snapshot {
     pub generation: u64,
     pub installed: Vec<SnapshotInstalled>,
     pub available: Vec<SnapshotAvailable>,
+    /// Unmanaged lobe items: skills/agents/rules present in a configured agent
+    /// home that `mind` did not install (UNM-6).
+    // spec: UNM-6
+    pub unmanaged: Vec<SnapshotUnmanaged>,
     /// Names of all melded sources (for change detection in future: TUI-15).
     #[allow(dead_code)]
     pub source_names: Vec<String>,
@@ -56,6 +60,17 @@ pub struct SnapshotAvailable {
     pub kind: ItemKind,
     pub description: Option<String>,
     pub path: PathBuf,
+}
+
+/// One unmanaged lobe item in the snapshot (UNM-6). Its `key` is the
+/// `kind:name` form so the `forget` action resolves it like a managed ref.
+// spec: UNM-6
+#[derive(Debug, Clone)]
+pub struct SnapshotUnmanaged {
+    pub key: String,
+    pub name: String,
+    pub kind: ItemKind,
+    pub paths: Vec<PathBuf>,
 }
 
 /// Global generation counter, incremented when data changes are detected.
@@ -120,6 +135,21 @@ fn load_inner(paths: &Paths) -> Result<Snapshot> {
         })
         .collect();
 
+    // Unmanaged lobe items (UNM-6): kind-dir entries in a configured agent home
+    // that mind did not install. A scan failure is non-fatal: the rest of the
+    // TUI stays usable, the unmanaged group is simply empty.
+    // spec: UNM-6
+    let unmanaged: Vec<SnapshotUnmanaged> = crate::unmanaged::scan(paths, &manifest)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|u| SnapshotUnmanaged {
+            key: u.key(),
+            name: u.name,
+            kind: u.kind,
+            paths: u.paths,
+        })
+        .collect();
+
     // Build the suggested registry (TUI-31). Failures are silently ignored
     // so a bad mind.toml in a melded source does not break the whole TUI.
     let suggestions = crate::tui::preview::suggested_registry(paths).unwrap_or_default();
@@ -134,6 +164,7 @@ fn load_inner(paths: &Paths) -> Result<Snapshot> {
         generation: next_generation(),
         installed,
         available,
+        unmanaged,
         source_names,
         suggestions,
         lobes,
@@ -170,6 +201,7 @@ mod tests {
         let snap = load(&paths).expect("load should succeed on fresh home");
         assert!(snap.installed.is_empty(), "fresh home: no installed items");
         assert!(snap.available.is_empty(), "fresh home: no available items");
+        assert!(snap.unmanaged.is_empty(), "fresh home: no unmanaged items");
         assert!(snap.source_names.is_empty(), "fresh home: no sources");
         cleanup(&base);
     }
