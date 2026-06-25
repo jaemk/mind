@@ -162,7 +162,9 @@ still parsed and folded in (HOOK-50).
   the same prompt model as install hooks: required = run / skip / abort-the-unmeld;
   optional = run / skip; a non-TTY `unmeld` skips them and notes it; `mind unmeld
   --dangerously-skip-install-hook-check` runs them unattended. A required
-  uninstall hook that fails or is aborted leaves the source melded.
+  uninstall hook that fails or is aborted leaves the source melded. (HOOK-87,
+  planned, reorders this so a source's uninstall hooks run AFTER the items'
+  uninstall hooks, not before, making teardown the reverse of install.)
 - `HOOK-55` Install hooks are recorded as a set on the source's registry entry
   (`install_hooks`: each an effective command plus the commit it last ran at, or
   null when skipped), superseding the single `[source].install`/commit pair
@@ -252,7 +254,9 @@ the item is in place and is for host side effects.
   commands: `[[items]].install` / `[[items]].uninstall` in `mind.toml`, or
   `install:` / `uninstall:` in a tool's `TOOL.md` frontmatter. They are valid on
   any kind and are distinct from `build` (HOOK-70). An empty or whitespace-only
-  value is treated as absent (HOOK-3).
+  value is treated as absent (HOOK-3). (HOOK-86, planned, adds a `[[items.hooks]]`
+  array form for multiple/named/optional item hooks; these scalars are then its
+  shorthand.)
 - `HOOK-81` An item's install hook runs as the final step of installing the item:
   after its store copy is swapped in and its links are created (LIFE-1), in the
   installed store directory (`~/.mind/store/<kind>/<name>/`) as the working
@@ -290,6 +294,30 @@ the item is in place and is for host side effects.
   hooks as advisory findings, showing each command and event, so a consumer sees
   before installing that an item will run code (the item-level counterpart of the
   source-hook disclosure, HOOK-40/58).
+- `HOOK-86` An item may declare lifecycle hooks as an array, `[[items.hooks]]` in
+  `mind.toml`, with the same fields and semantics as a source's `[[hooks]]`
+  (HOOK-51): `run`, `name`, `optional`, and `event` (`"install"` | `"uninstall"`),
+  run in declaration order at the item's install/removal. This is the per-item
+  analog of the source `[[hooks]]` array (HOOK-50), giving items full parity:
+  multiple, named, and optional hooks per event. The scalar `[[items]].install` /
+  `[[items]].uninstall` (HOOK-80) remain as a shorthand for one required hook of
+  each event, folded in ahead of any `[[items.hooks]]` entries (the item-level
+  mirror of HOOK-50's fold-in of `[source].install`). In a tool's `TOOL.md`
+  frontmatter the scalar `install:` / `uninstall:` keys stay the only form, since
+  the frontmatter reader is scalar-only (DSC-21); the array form requires
+  `mind.toml`. Each `[[items.hooks]]` entry is disclosed, prompted, recorded, and
+  fails exactly as the scalar item hooks do (HOOK-81..84).
+- `HOOK-87` Install and uninstall hooks nest: a source is the outer scope, its
+  items the inner. Setup runs outer-to-inner and teardown inner-to-outer. On a
+  `meld` that installs, the source's install hooks (HOOK-50) run first, then each
+  item installs with its `build` (HOOK-71) and install hooks (HOOK-81). On
+  teardown the order reverses: each item's uninstall hooks (HOOK-82/86) run before
+  the source's uninstall hooks (HOOK-54). This reorders the current `unmeld`
+  behavior, where the source's uninstall hooks run before the items'; under
+  HOOK-87 the source's uninstall hooks run last, in the clone, after every item
+  has been removed and before the clone and registry entry are dropped (the
+  multi-item confirmation, CLI-42, still gates all of it). The end-to-end flow is
+  `source.install -> item.install* ... item.uninstall* -> source.uninstall`.
 
 ## Managed-policy composition (research needed)
 

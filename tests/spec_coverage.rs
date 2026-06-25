@@ -38,6 +38,10 @@ const ALLOWLIST: &[&str] = &[
     // The statement is kept (marked removed) so the number is not reused; it has
     // no behavior and so no citing test.
     "INIT-8",
+    // Planned: item `[[items.hooks]]` array parity with the source `[[hooks]]`
+    // (HOOK-86), and the nested lifecycle ordering that reverses teardown so item
+    // uninstall hooks run before the source's (HOOK-87). Cited by tests when built.
+    "HOOK-86", "HOOK-87",
     // Planned: `init-source` gates its bare-sibling unguarded-reference advisory on
     // an effective prefix (INIT-9), matching meld/review; and the `hardcoded-path`
     // / `bare-tool-reference` advisory messages note that an install-hook-populated
