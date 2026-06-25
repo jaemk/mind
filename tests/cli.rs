@@ -936,6 +936,44 @@ fn upgrade_reports_delta_and_declining_changes_nothing() {
 }
 
 #[test]
+fn upgrade_prompt_defaults_to_yes_on_bare_enter() {
+    // spec: CLI-60 - the apply prompt defaults to Yes, so a bare Enter applies the
+    // upgrade. (EOF is still No: see the empty-input branch.)
+    let sb = melded();
+    sb.mind(&["learn", "review"]);
+    let before = sb.mind(&["recall", "skill:review"]).stdout;
+    sb.edit_source();
+    sb.mind(&["sync"]);
+
+    // A bare Enter (newline, not EOF) confirms.
+    let applied = sb.mind_with_input(&["upgrade"], Some("\n"));
+    assert!(applied.success, "{}", applied.stderr);
+    assert!(
+        applied.stdout.contains("upgraded skill:review"),
+        "a bare Enter must apply the upgrade: {}",
+        applied.stdout
+    );
+    assert_ne!(
+        before,
+        sb.mind(&["recall", "skill:review"]).stdout,
+        "the installed commit should have advanced"
+    );
+
+    // EOF (no input at all) still declines.
+    sb.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\nname: review\ndescription: Review the diff for bugs\n---\n# review skill\nedited again\n",
+    );
+    sb.mind(&["sync"]);
+    let eof = sb.mind_with_input(&["upgrade"], Some(""));
+    assert!(
+        eof.stdout.contains("aborted"),
+        "EOF must decline: {}",
+        eof.stdout
+    );
+}
+
+#[test]
 fn upgrade_yes_applies_and_is_then_idempotent() {
     // spec: CLI-62, LIFE-13
     let sb = melded();

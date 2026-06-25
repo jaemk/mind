@@ -2264,7 +2264,7 @@ pub fn upgrade(
         print_upgrade_report(&registry, &pending);
     }
 
-    if !yes && !out.json && !confirm("apply these upgrades?")? {
+    if !yes && !out.json && !confirm_default_yes("apply these upgrades?")? {
         println!("aborted; nothing changed");
         return Ok(());
     }

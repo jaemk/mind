@@ -222,7 +222,10 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 ## upgrade
 
 - `CLI-60` `upgrade` reports pending upgrades and, unless `--yes` is given, prompts
-  `[y/N]` (default No; EOF counts as No) before applying anything.
+  `[Y/n]` (default Yes, a bare Enter applies; EOF counts as No) before applying
+  anything. The affirmative is the default because reaching the prompt means the
+  user asked to upgrade, and an upgrade is reversible (re-pin and `sync`/`upgrade`,
+  or `forget`).
 - `CLI-61` The report lists, per item, the hash and commit deltas, and a compare
   URL when the source host supports one. A namespace change is shown as a rename.
 - `CLI-62` `--yes` applies upgrades without prompting.
