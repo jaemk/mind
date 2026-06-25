@@ -54,6 +54,14 @@ the lock it takes per action is defined in storage.md (STO-40, STO-41).
   and search state, and is skipped while a mutating action holds the lock. Catalog
   contents are re-scanned when the melded source set changes or after a sync, not
   on every tick.
+- `TUI-16` (planned) The list keeps the highlighted row within the middle
+  two-thirds of the visible area: as the selection moves, the view scrolls to
+  maintain a margin of about one-sixth of the visible height above and below the
+  highlight, so the highlight does not reach the top or bottom edge while there are
+  more rows to scroll in that direction. Near the start or end of the list the
+  highlight may sit at the edge, since there is nothing further to scroll. The
+  margin is derived from the current viewport height, so it adapts to terminal size
+  (TUI-42).
 
 ## Actions (CLI parity)
 
@@ -87,6 +95,19 @@ manifest, and store.
   loading or refreshing state, an exclusive lock for each mutating action
   (STO-40, STO-41), releasing it immediately after. A running TUI therefore never
   blocks another `mind` invocation for longer than one operation.
+- `TUI-26` (planned) Pressing Enter on the focused node opens a details dialog: a
+  centered overlay (TUI-42) that describes the node and lists the actions valid for
+  it as selectable choices, each run through the normal confirm-and-execute path
+  (TUI-24). For an item it shows the item's kind, source, description, commit/hash,
+  and store/link paths as `recall <item>` reports (CLI-71), and offers Install when
+  the item is not installed, else Forget. For a source it shows the source's url,
+  commit, alias, and installed/available item counts as `recall --sources` reports
+  (CLI-72), and offers Install all available items, Uninstall all installed items,
+  Unmeld, and Sync. Esc dismisses the dialog without acting. The dialog is an
+  additional entry point and does not remove the direct action keys (TUI-20..22).
+  It supersedes the Enter expand-toggle of TUI-11: once built, structural nodes
+  expand and collapse only via Left/Right (and Space), and an item's detail is
+  shown in this dialog rather than an inline expansion.
 
 ## Preview and registry (browsing the not-yet-melded)
 

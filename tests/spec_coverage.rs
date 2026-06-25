@@ -76,6 +76,12 @@ const ALLOWLIST: &[&str] = &[
     //   TUI-40 (terminal restore on panic) is now cited: the poison-recovery path
     //   is exercised by a unit test in src/tui/term.rs.
     "TUI-1",
+    // Planned TUI improvements (spec/README.md = planned), documented ahead of
+    // implementation; each moves to a citing test when built:
+    //   TUI-16: keep the highlighted row within the middle two-thirds (scroll margin).
+    //   TUI-26: Enter opens a details dialog listing the node's valid actions.
+    "TUI-16",
+    "TUI-26",
     // Resource and helper tooling (spec/tooling.md) is cited: the `tool` kind and
     // discovery (TOOL-1/2/5/7) from src/catalog.rs, the path-token expander
     // (TOOL-10/11/12/14) from src/namespace.rs, and the end-to-end install
