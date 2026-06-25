@@ -65,3 +65,12 @@ namespacing.md.
   `tools/<name>/` and be referenced by token. `--template` does not rewrite it
   (the `--template` hint is shown only for bare prose references, INIT-5);
   extracting a shared tool is a structural change the maintainer makes by hand.
+- `INIT-8` The `mind.toml` that `init-source` scaffolds (INIT-3) includes a
+  commented-out `install` directive in `[source]`, alongside the commented
+  `prefix`, with a short comment noting it runs at meld to build or fetch tooling
+  shared across the source's items (install-hooks.md). The stub nudges a
+  maintainer toward an install hook for shared resources rather than hardcoded
+  paths or duplicated helpers, matching the guidance `review`'s `hardcoded-path`
+  and `duplicate-tooling` advisories give (CLI-136, CLI-144). It is inert until
+  the maintainer uncomments and fills it; an existing `mind.toml` is still never
+  overwritten (INIT-3).

@@ -29,6 +29,10 @@ const ALLOWLIST: &[&str] = &[
     // supplying its `follow-branch`/`roots`/`[[hooks]]`, applied only when the
     // nested source has no `mind.toml`. Cited by tests when built.
     "DSC-59", "DSC-60", "DSC-61",
+    // Planned: `init-source` scaffolds a commented-out `[source].install` stub in
+    // the `mind.toml` it generates, nudging shared tooling toward an install hook.
+    // Cited by a test when built.
+    "INIT-8",
     // Planned features (see spec/README.md feature status = planned): documented
     // with stable IDs ahead of implementation. Each must move to a citing test
     // when built, at which point it is removed from this allowlist.
