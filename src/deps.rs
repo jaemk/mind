@@ -11,10 +11,6 @@
 //! This module is pure: it reads each item's text through an injected closure so
 //! it can be unit-tested with synthetic content (no filesystem).
 //!
-//! The public API here is consumed by the `learn` CLI path and the interactive
-//! TUI (DEP-30..41), which land in sibling changes; until those wire it up the
-//! resolver is exercised only by this module's tests.
-#![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet};
 

@@ -86,6 +86,17 @@ impl CatalogItem {
     pub fn key(&self) -> String {
         format!("{}:{}", self.kind.as_str(), self.effective_name())
     }
+
+    /// This item as a path-token resolution sibling (namespace.rs), carrying its
+    /// kind, bare name, and resolved `bin`. `PathSibling` exists so `namespace`
+    /// need not depend on `catalog`; this is the one place the mapping lives.
+    pub fn as_path_sibling(&self) -> namespace::PathSibling {
+        namespace::PathSibling {
+            kind: self.kind,
+            name: self.name.clone(),
+            bin: self.resolved_bin(),
+        }
+    }
 }
 
 /// True when `query` matches the item by effective name or description,
@@ -364,7 +375,7 @@ fn scan_convention(
     prefix: &Option<String>,
     out: &mut Vec<CatalogItem>,
 ) -> Result<()> {
-    let skills_dir = root.join("skills");
+    let skills_dir = root.join(ItemKind::Skill.dir());
     for entry in read_dir_opt(&skills_dir)? {
         let skill_md = entry.join("SKILL.md");
         if entry.is_dir() && skill_md.is_file() {
@@ -372,8 +383,8 @@ fn scan_convention(
         }
     }
 
-    for (kind, dir) in [(ItemKind::Agent, "agents"), (ItemKind::Rule, "rules")] {
-        let kind_dir = root.join(dir);
+    for kind in [ItemKind::Agent, ItemKind::Rule] {
+        let kind_dir = root.join(kind.dir());
         for entry in read_dir_opt(&kind_dir)? {
             if entry.is_file() && entry.extension().is_some_and(|e| e == "md") {
                 out.push(make_item(source, prefix, kind, entry.clone(), &entry));
@@ -384,7 +395,7 @@ fn scan_convention(
     // Tools: every immediate subdirectory of `tools/` is a tool. Unlike a skill,
     // a tool needs no anchor file; its directory contents are the tool. An
     // optional `TOOL.md` carries `description`/`bin`/`build` (read in make_item).
-    let tools_dir = root.join("tools");
+    let tools_dir = root.join(ItemKind::Tool.dir());
     for entry in read_dir_opt(&tools_dir)? {
         if entry.is_dir() {
             let meta = entry.join("TOOL.md");

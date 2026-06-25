@@ -223,14 +223,8 @@ fn expand_references(
 ) -> Result<()> {
     let names: std::collections::HashSet<String> =
         siblings.iter().map(|s| s.name.clone()).collect();
-    let path_siblings: Vec<namespace::PathSibling> = siblings
-        .iter()
-        .map(|s| namespace::PathSibling {
-            kind: s.kind,
-            name: s.name.clone(),
-            bin: s.resolved_bin(),
-        })
-        .collect();
+    let path_siblings: Vec<namespace::PathSibling> =
+        siblings.iter().map(CatalogItem::as_path_sibling).collect();
     // TOOL-16: render store paths with a leading `~` when the store is under
     // home, so a token expands to a value a Claude permission glob can match.
     let home = dirs::home_dir();

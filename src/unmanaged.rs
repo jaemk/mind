@@ -28,14 +28,6 @@ impl UnmanagedItem {
     }
 }
 
-/// The (kind, lobe subdir) layout that holds linkable items. Tools are never
-/// linked into an agent home (tooling.md TOOL-3), so they are not scanned.
-const KIND_DIRS: [(ItemKind, &str); 3] = [
-    (ItemKind::Skill, "skills"),
-    (ItemKind::Agent, "agents"),
-    (ItemKind::Rule, "rules"),
-];
-
 /// Scan every configured agent home for unmanaged items (UNM-1): kind-dir entries
 /// whose path is not a managed link recorded in the manifest. Deduplicated by
 /// `(kind, name)` across lobes, each recording the lobe paths it occupies, sorted
@@ -53,9 +45,11 @@ pub fn scan(paths: &Paths, manifest: &Manifest) -> Result<Vec<UnmanagedItem>> {
 
     let mut found: BTreeMap<(ItemKind, String), Vec<PathBuf>> = BTreeMap::new();
     for home in paths.agent_homes()? {
-        for (kind, sub) in KIND_DIRS {
+        // Tools are never linked into an agent home (tooling.md TOOL-3), so only
+        // the linkable kinds are scanned.
+        for kind in ItemKind::LINKABLE {
             // A missing kind dir simply has no items.
-            let Ok(rd) = std::fs::read_dir(home.join(sub)) else {
+            let Ok(rd) = std::fs::read_dir(home.join(kind.dir())) else {
                 continue;
             };
             for entry in rd.flatten() {

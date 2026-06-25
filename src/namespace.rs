@@ -443,13 +443,7 @@ fn parse_install_path(path: &str) -> Option<(crate::error::ItemKind, String, Str
         .or_else(|| path.strip_prefix("~/.agents/"))
     {
         let mut it = rest.splitn(2, '/');
-        let kind = match it.next()? {
-            "skills" => crate::error::ItemKind::Skill,
-            "agents" => crate::error::ItemKind::Agent,
-            "rules" => crate::error::ItemKind::Rule,
-            "tools" => crate::error::ItemKind::Tool,
-            _ => return None,
-        };
+        let kind = crate::error::ItemKind::from_dir(it.next()?)?;
         (kind, it.next()?.to_string())
     } else {
         return None;

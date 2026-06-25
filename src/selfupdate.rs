@@ -162,14 +162,11 @@ pub fn run(check: bool, yes: bool, version: Option<String>) -> Result<()> {
 
 /// Emit the structured `evolve` result (CLI-153) under `--json`.
 fn print_evolve_json(version: &str, outcome: &str) -> Result<()> {
-    let value = serde_json::json!({
+    crate::render::print_json(&serde_json::json!({
         "action": "evolve",
         "target": version,
         "outcome": outcome,
-    });
-    let s = serde_json::to_string_pretty(&value).map_err(|e| MindError::json("json output", e))?;
-    println!("{s}");
-    Ok(())
+    }))
 }
 
 /// Download the release archive, extract it, and atomically swap the new binary

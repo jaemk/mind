@@ -16,13 +16,7 @@ mod kind_serde {
 
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<ItemKind, D::Error> {
         let raw = String::deserialize(d)?;
-        match raw.as_str() {
-            "skill" => Ok(ItemKind::Skill),
-            "agent" => Ok(ItemKind::Agent),
-            "rule" => Ok(ItemKind::Rule),
-            "tool" => Ok(ItemKind::Tool),
-            other => Err(D::Error::custom(format!("unknown item kind '{other}'"))),
-        }
+        ItemKind::parse(&raw).ok_or_else(|| D::Error::custom(format!("unknown item kind '{raw}'")))
     }
 }
 

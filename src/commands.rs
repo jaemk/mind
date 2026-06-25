@@ -627,7 +627,7 @@ fn warn_unguarded_references(items: &[CatalogItem]) {
         items.iter().map(|it| it.name.clone()).collect();
     for item in items {
         let mut refs: Vec<String> = Vec::new();
-        for file in item_files(item) {
+        for file in crate::review::item_files(item) {
             let Ok(content) = std::fs::read_to_string(&file) else {
                 continue; // skip non-UTF-8 / unreadable files
             };
@@ -644,35 +644,6 @@ fn warn_unguarded_references(items: &[CatalogItem]) {
                 item.key(),
                 refs.join(", ")
             );
-        }
-    }
-}
-
-/// Every text file belonging to an item: all files under a skill directory, or
-/// the single agent/rule `.md` file. Sorted for deterministic warning output.
-fn item_files(item: &CatalogItem) -> Vec<std::path::PathBuf> {
-    if item.path.is_dir() {
-        let mut files = Vec::new();
-        collect_files(&item.path, &mut files);
-        files.sort();
-        files
-    } else {
-        vec![item.path.clone()]
-    }
-}
-
-/// Recursively collect every file under `dir` (best-effort; unreadable dirs are
-/// skipped, since this only feeds the advisory warning).
-fn collect_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in rd.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_files(&path, out);
-        } else {
-            out.push(path);
         }
     }
 }
@@ -807,7 +778,7 @@ pub fn init_source(dir: Option<&str>, template: bool) -> Result<()> {
             // Exclude the item's own name so a self-mention is not wrapped.
             let mut sibs = siblings.clone();
             sibs.remove(&it.name);
-            for file in item_files(it) {
+            for file in crate::review::item_files(it) {
                 // {{ns:}} is a prose reference (NS-24); only markdown carries
                 // prose. Never templatize scripts/data, where every word is code.
                 if file.extension().and_then(|e| e.to_str()) != Some("md") {
@@ -834,7 +805,7 @@ pub fn init_source(dir: Option<&str>, template: bool) -> Result<()> {
 /// Read all of an item's text files into one buffer, for reference detection.
 fn read_item_text(item: &CatalogItem) -> String {
     let mut buf = String::new();
-    for file in item_files(item) {
+    for file in crate::review::item_files(item) {
         if let Ok(content) = std::fs::read_to_string(&file) {
             buf.push_str(&content);
             buf.push('\n');
@@ -1202,7 +1173,7 @@ fn resolve_learn(
     // resolver so it can scan for `{{ns:}}` tokens (DEP-1).
     let read = |item: &CatalogItem| -> String {
         let mut parts: Vec<String> = Vec::new();
-        for file in item_files(item) {
+        for file in crate::review::item_files(item) {
             if let Ok(content) = std::fs::read_to_string(&file) {
                 parts.push(content);
             }
@@ -3314,12 +3285,7 @@ fn json_mode() -> bool {
     crate::render::ctx().json
 }
 
-/// Serialize `value` as pretty JSON to stdout (for the `--json` flags).
-fn print_json<T: Serialize>(value: &T) -> Result<()> {
-    let s = serde_json::to_string_pretty(value).map_err(|e| MindError::json("json output", e))?;
-    println!("{s}");
-    Ok(())
-}
+use crate::render::print_json;
 
 /// A throwaway registry holding just one source, for catalog scans during meld.
 fn single(source: &crate::source::Source) -> Registry {

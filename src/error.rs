@@ -42,6 +42,34 @@ impl ItemKind {
             _ => None,
         }
     }
+
+    /// The plural directory name for this kind, used by the source-repo
+    /// convention layout, the `~/.claude` link layout, and `~/.mind/store`
+    /// (`skills`/`agents`/`rules`/`tools`). The single source of truth for the
+    /// kind-to-directory mapping; `from_dir` is its inverse.
+    pub fn dir(self) -> &'static str {
+        match self {
+            ItemKind::Skill => "skills",
+            ItemKind::Agent => "agents",
+            ItemKind::Rule => "rules",
+            ItemKind::Tool => "tools",
+        }
+    }
+
+    /// The kind for a plural directory name, the inverse of [`dir`](Self::dir).
+    pub fn from_dir(s: &str) -> Option<Self> {
+        match s {
+            "skills" => Some(ItemKind::Skill),
+            "agents" => Some(ItemKind::Agent),
+            "rules" => Some(ItemKind::Rule),
+            "tools" => Some(ItemKind::Tool),
+            _ => None,
+        }
+    }
+
+    /// The kinds linked into an agent home: every kind except `Tool`, which is
+    /// store-only and reached by reference (tooling.md TOOL-3).
+    pub const LINKABLE: [ItemKind; 3] = [ItemKind::Skill, ItemKind::Agent, ItemKind::Rule];
 }
 
 impl std::fmt::Display for ItemKind {

@@ -472,14 +472,8 @@ fn run_checks(
     // Per-source path-token resolver: every item's (kind, name, entrypoint).
     // The store_root is a placeholder; review only cares whether a token
     // resolves (Ok) or not (Err), never the concrete install path.
-    let path_siblings: Vec<crate::namespace::PathSibling> = items
-        .iter()
-        .map(|it| crate::namespace::PathSibling {
-            kind: it.kind,
-            name: it.name.clone(),
-            bin: it.resolved_bin(),
-        })
-        .collect();
+    let path_siblings: Vec<crate::namespace::PathSibling> =
+        items.iter().map(CatalogItem::as_path_sibling).collect();
     let store_root = std::path::Path::new("/");
 
     for item in &items {

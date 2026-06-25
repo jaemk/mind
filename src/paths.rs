@@ -106,10 +106,10 @@ impl Paths {
     /// for a kind that is store-only by default (a `tool`: it carries no symlink
     /// and the harness does not discover it; items reach it by path token).
     pub fn default_link_rel(&self, kind: ItemKind, name: &str) -> Option<String> {
+        let dir = kind.dir();
         match kind {
-            ItemKind::Skill => Some(format!("skills/{name}")),
-            ItemKind::Agent => Some(format!("agents/{name}.md")),
-            ItemKind::Rule => Some(format!("rules/{name}.md")),
+            ItemKind::Skill => Some(format!("{dir}/{name}")),
+            ItemKind::Agent | ItemKind::Rule => Some(format!("{dir}/{name}.md")),
             ItemKind::Tool => None,
         }
     }

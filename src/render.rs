@@ -1,11 +1,20 @@
-// Dead-code warnings are expected: shard C/D will wire these into commands.rs.
-// The lint fires because the API is defined here but not yet called from outside
-// this module. Suppress it so clippy stays clean during the incremental build.
-#![allow(dead_code)]
+//! Terminal output context: color, Unicode glyphs, and the `--json` emitter.
 
 use std::sync::OnceLock;
 
+use serde::Serialize;
+
+use crate::error::{MindError, Result};
+
 static CTX: OnceLock<OutputCtx> = OnceLock::new();
+
+/// Serialize `value` as pretty JSON to stdout (for the `--json` flags). Shared by
+/// every verb that emits structured output and by `evolve` (selfupdate.rs).
+pub(crate) fn print_json<T: Serialize>(value: &T) -> Result<()> {
+    let s = serde_json::to_string_pretty(value).map_err(|e| MindError::json("json output", e))?;
+    println!("{s}");
+    Ok(())
+}
 
 /// Install the process-wide output context. Call once, early in `main`, after
 /// parsing the global flags. A second call is ignored.
