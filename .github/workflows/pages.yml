@@ -1,14 +1,13 @@
 name: docs
 
-# Disabled until GitHub Pages is set up for this repo: the push trigger is
-# parked so it does not run (and fail) on every docs change. Restore the
-# `push:` block below to re-enable. `workflow_dispatch` allows a manual run.
+# Pages source is set to GitHub Actions for this repo. Builds the mdBook and
+# deploys it on docs changes. `workflow_dispatch` allows a manual run.
 on:
-  # push:
-  #   branches: [main]
-  #   paths:
-  #     - 'docs/**'
-  #     - '.github/workflows/pages.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - '.github/workflows/pages.yml'
   workflow_dispatch:
 
 permissions:
