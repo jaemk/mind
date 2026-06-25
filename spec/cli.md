@@ -355,17 +355,22 @@ only appear at meld or install time. It is read-only and installs nothing.
   a token, the other a token that should be a bare word.
 - `CLI-144` `review` reports, as an advisory `duplicate-tooling` finding, a
   non-markdown helper file whose contents are byte-identical across two or more
-  items: a shared script copied into each consumer rather than shipped once as a
-  `tool`. The finding names the file and the items that carry it, and points to
-  `tools/<name>/` + a path token (`{{tools:name}}` / `{{path:}}`). Markdown is
-  excluded (it is prose, not tooling) and empty files are ignored. Advisory, and
-  `--fix` does not touch it: extracting a shared tool is a structural change the
-  author must make and re-reference deliberately.
+  items. The finding names the file and the items that carry it and notes the
+  duplicate COULD be shared once as a `tool` referenced by a path token
+  (`{{tools:name}}` / `{{path:}}`), while stating that keeping the per-item copies
+  is equally valid: a source that namespaces its items and deliberately silos each
+  helper with the skill that uses it is not doing anything wrong, and adopting a
+  tool means buying into mind's token references. The message is non-prescriptive
+  (it presents both as acceptable), not a defect to fix. Markdown is excluded (it
+  is prose, not tooling) and empty files are ignored. Advisory only, and `--fix`
+  never touches it: adopting a shared tool is an opt-in structural change the
+  author re-references deliberately.
 - `CLI-145` The `hardcoded-path` advisory (CLI-136) classifies the reference by
   what it resolves to at runtime, because the cases differ in severity. A skill
-  that hardcodes its OWN resources (the `{{self}}` case) still resolves through
-  the symlink mind links into each agent home, so it works until a prefix renames
-  the item or a second home is configured (fragile, not broken). A reference to a
+  that hardcodes its OWN resources (the `{{self}}` case) works as written but
+  assumes every install lands at that exact agent-home path; it breaks once a
+  prefix renames the item or a second home is configured, and `{{self}}`
+  generalizes it (fragile, not broken). A reference to a
   `tool` is broken regardless of prefix: a tool is store-only and never linked
   into an agent home (tooling.md TOOL-3), so the hardcoded location does not
   exist. Any other hardcoded item path is reached by a token, not an install

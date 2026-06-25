@@ -7425,9 +7425,11 @@ fn review_hardcoded_path_classifies_and_detects_env_forms() {
         "advisory-only review exits zero: {} {}",
         r.stdout, r.stderr
     );
-    // Own-resource reference: symlink wording + {{self}} suggestion.
+    // Own-resource reference: "works but assumes install location" wording + the
+    // {{self}} suggestion that generalizes it (CLI-145).
     assert!(
         r.stdout.contains("hardcodes its own resource path")
+            && r.stdout.contains("this works but assumes")
             && r.stdout.contains("{{self}}/resources/pr.py"),
         "own-resource classification: {}",
         r.stdout
@@ -7483,6 +7485,13 @@ fn review_flags_helper_script_duplicated_across_items() {
     assert!(
         r.stdout.contains("skill:a") && r.stdout.contains("skill:b"),
         "the finding names both carriers: {}",
+        r.stdout
+    );
+    // CLI-144: the message is non-prescriptive - keeping the per-item copies is a
+    // valid choice (siloing a helper with its skill), not a defect to fix.
+    assert!(
+        r.stdout.contains("both are valid"),
+        "duplicate-tooling must frame the copy as an optional, valid choice: {}",
         r.stdout
     );
     // A script that lives under only one item is not flagged.

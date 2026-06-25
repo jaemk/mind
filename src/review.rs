@@ -518,7 +518,7 @@ fn run_checks(
                 };
                 let msg = match hp.kind {
                     crate::namespace::HardcodedKind::OwnResource => format!(
-                        "{}: hardcodes its own resource path '{}'; it resolves through the agent-home symlink but breaks under a prefix or with multiple homes{}",
+                        "{}: hardcodes its own resource path '{}'; this works but assumes every install lands at that exact agent-home path, so it breaks under a prefix or a second home{}",
                         item.key(),
                         hp.matched,
                         suggestion
@@ -689,8 +689,9 @@ fn siblings_of_source(items: &[CatalogItem], source: &str) -> HashSet<String> {
 }
 
 /// Detect helper files duplicated byte-for-byte across two or more items, which
-/// should instead live once under a shared `tools/<name>/` and be referenced by
-/// token (CLI-144 / INIT-7). Only non-markdown files are considered: markdown is
+/// COULD live once under a shared `tools/<name>/` and be referenced by token, or
+/// stay siloed per item (both valid; CLI-144 / INIT-7). Only non-markdown files
+/// are considered: markdown is
 /// prose (the anchor `SKILL.md`, docs), while scripts and data are the helpers a
 /// `tool` exists to share. Empty files are ignored. Returns one advisory
 /// `duplicate-tooling` finding per duplicated file, deterministically ordered.
@@ -732,7 +733,7 @@ pub(crate) fn duplicate_tooling_findings(items: &[CatalogItem]) -> Vec<Finding> 
             Finding::advisory(
                 "duplicate-tooling",
                 format!(
-                    "{base} is byte-identical across {}; move the shared copy into a tool (tools/<name>/) and reference it by token ({{{{tools:name}}}} or {{{{path:}}}})",
+                    "{base} is byte-identical across {}; it could be shared once as a tool (tools/<name>/) referenced by a token ({{{{tools:name}}}} or {{{{path:}}}}), or kept as-is if each item should bundle its own helper (both are valid)",
                     owners.into_iter().collect::<Vec<_>>().join(", ")
                 ),
             )

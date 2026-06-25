@@ -134,10 +134,15 @@ that wants its own isolated, rollback-safe build instead declares a per-item
 
 ## Relationship to existing mechanisms
 
-- A skill's bundled `resources/` continue to install as part of the skill
-  directory (no `tool` kind needed); `{{self}}` is what makes them addressable
-  under a prefix. The `tool` kind is for tooling shared across items or shipped
-  on its own.
+- A skill's bundled helpers install as part of the skill directory: the whole
+  directory is the item, copied and linked into each agent home as one symlink, so
+  every file under it comes along. They may live anywhere within it (`resources/`
+  is a convention, not a requirement); `{{self}}` is what makes them addressable
+  under a prefix. Siloing a helper with the single skill that uses it is a
+  supported choice, distinct from the `tool` kind, which is for tooling
+  deliberately shared across items or shipped on its own. `review` may note a
+  helper duplicated across items as a `tool` candidate, but treats keeping the
+  per-item copy as equally valid (CLI-144).
 - The executable bit on scripts is preserved by the copy into the store (the
   install copies file permissions), so a `+x` helper stays executable without a
   hook.
