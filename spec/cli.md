@@ -12,7 +12,7 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 | `forget <item> [--dangerously-skip-install-hook-check]` (alias: `unlearn`) | uninstall |
 | `sync` | refresh sources |
 | `upgrade [--yes] [item]` | upgrade installed |
-| `recall [item] [--sources] [--kind K] [--source S] [--json]` | status: sources with their items (install state marked); `--sources` narrows to sources |
+| `recall [item] [--sources] [--kind K] [--source S] [--json]` (alias: `status`) | status: sources with their items (install state marked); `--sources` narrows to sources |
 | `review [<target>] [--as <prefix>]` (default `.`) / `review --policy <path>` | validate a source / a policy file |
 | `introspect` | diagnose |
 | `evolve [--check] [--yes] [--version <v>]` | update the `mind` binary itself |
@@ -234,7 +234,7 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 
 ## recall
 
-- `CLI-70` `recall` (no argument) is a status view of everything `mind` manages:
+- `CLI-70` `recall` (no argument, alias: `status`) is a status view of everything `mind` manages:
   each melded source, with its catalog items nested beneath it. It shows both
   installed and not-yet-installed items, so a single `recall` answers "what is
   melded, and what is installed". The `--kind` / `--source` filters narrow the

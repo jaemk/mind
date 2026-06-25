@@ -273,6 +273,7 @@ pub enum Command {
     },
 
     /// List installed items, or show one item's details.
+    #[command(visible_alias = "status")]
     Recall {
         /// Show melded sources instead of installed items.
         #[arg(long)]

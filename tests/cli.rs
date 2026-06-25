@@ -2483,6 +2483,22 @@ fn unlearn_is_an_alias_for_forget() {
 }
 
 #[test]
+fn status_is_an_alias_for_recall() {
+    // spec: CLI-70
+    let sb = melded();
+    assert!(sb.mind(&["learn", "review"]).success);
+    let recall = sb.mind(&["recall"]);
+    let status = sb.mind(&["status"]);
+    assert!(status.success, "status alias runs: {}", status.stderr);
+    assert_eq!(
+        status.stdout, recall.stdout,
+        "`status` must produce the same output as `recall`"
+    );
+    // The alias accepts recall's arguments too.
+    assert!(sb.mind(&["status", "--sources"]).success);
+}
+
+#[test]
 fn detach_is_an_alias_for_unmeld() {
     // spec: CLI-20
     let sb = melded();
