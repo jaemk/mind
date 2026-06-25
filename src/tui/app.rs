@@ -2557,6 +2557,117 @@ mod tests {
     }
 
     #[test]
+    fn collapse_on_deep_already_collapsed_leaf_jumps_to_parent() {
+        // spec: TUI-11 - the parent-jump fallback. After the set_expanded
+        // consolidation, Collapse on a non-auto leaf that is ALREADY collapsed
+        // (not in `expanded`) and sits at depth>0 must move the selection up to
+        // its parent row, not no-op. The fallback fires precisely when
+        // set_expanded returns false (nothing removed) AND the node is a non-auto
+        // leaf already collapsed AND depth>0; this pins all three guards at once.
+        let mut app = App::new(String::new(), None, None);
+        // A Source parent (auto-expanded, depth 0) followed by an InstalledItem
+        // child (non-auto, depth 1) that is NOT in `expanded` (already collapsed).
+        app.visible = vec![
+            FlatNode {
+                id: "installed-source:local/agents".into(),
+                label: "local/agents".into(),
+                depth: 0,
+                expandable: true,
+                expanded: true,
+                node: TreeNode::Source(crate::tui::tree::SourceInfo {
+                    name: "local/agents".into(),
+                    installed: true,
+                }),
+            },
+            FlatNode {
+                id: "installed-item:skill:review".into(),
+                label: "review".into(),
+                depth: 1,
+                expandable: true,
+                expanded: false,
+                node: TreeNode::InstalledItem(crate::tui::tree::InstalledInfo {
+                    key: "skill:review".into(),
+                    name: "review".into(),
+                    source: "local/agents".into(),
+                    kind: ItemKind::Skill,
+                    commit: "abc12345".into(),
+                    description: None,
+                }),
+            },
+        ];
+        // Select the deep, already-collapsed leaf.
+        app.selected = 1;
+        assert!(
+            !app.expanded.contains("installed-item:skill:review"),
+            "precondition: the leaf is already collapsed (not in expanded)"
+        );
+        app.apply_intent(Intent::Collapse);
+        assert_eq!(
+            app.selected, 0,
+            "Collapse on a deep already-collapsed non-auto leaf must jump to the parent row"
+        );
+        // The fallback must NOT have spuriously touched the expansion sets.
+        assert!(
+            app.expanded.is_empty(),
+            "the parent-jump fallback must not insert into the expanded set"
+        );
+        assert!(
+            app.collapsed.is_empty(),
+            "the parent-jump fallback must not insert into the collapsed set"
+        );
+    }
+
+    #[test]
+    fn collapse_on_expanded_leaf_collapses_in_place_without_parent_jump() {
+        // spec: TUI-11 - the contrast to the parent-jump: when the non-auto leaf
+        // IS expanded, Collapse removes it from `expanded` (set_expanded returns
+        // true) and must NOT jump to the parent. This distinguishes the
+        // "first collapse" from the "already collapsed -> jump" behavior, proving
+        // the fallback is gated on set_expanded having returned false.
+        let mut app = App::new(String::new(), None, None);
+        app.visible = vec![
+            FlatNode {
+                id: "installed-source:local/agents".into(),
+                label: "local/agents".into(),
+                depth: 0,
+                expandable: true,
+                expanded: true,
+                node: TreeNode::Source(crate::tui::tree::SourceInfo {
+                    name: "local/agents".into(),
+                    installed: true,
+                }),
+            },
+            FlatNode {
+                id: "installed-item:skill:review".into(),
+                label: "review".into(),
+                depth: 1,
+                expandable: true,
+                expanded: true,
+                node: TreeNode::InstalledItem(crate::tui::tree::InstalledInfo {
+                    key: "skill:review".into(),
+                    name: "review".into(),
+                    source: "local/agents".into(),
+                    kind: ItemKind::Skill,
+                    commit: "abc12345".into(),
+                    description: None,
+                }),
+            },
+        ];
+        // Mark the leaf as currently expanded.
+        app.expanded.insert("installed-item:skill:review".into());
+        app.selected = 1;
+        app.apply_intent(Intent::Collapse);
+        assert!(
+            !app.expanded.contains("installed-item:skill:review"),
+            "Collapse on an expanded leaf must remove it from the expanded set"
+        );
+        assert_eq!(
+            app.selected, 1,
+            "the first Collapse (in-place) must NOT jump to the parent"
+        );
+    }
+
+    #[test]
     fn group_node_toggle_does_not_insert_into_collapsed() {
         // spec: TUI-11 - toggling an InstalledGroup or AvailableGroup must NOT
         // insert the group id into `self.collapsed` (that is reserved for
@@ -2889,6 +3000,138 @@ mod tests {
         assert!(
             d.actions[0].learn_ref.is_none(),
             "a Forget action carries no learn-ref"
+        );
+    }
+
+    #[test]
+    fn direct_install_key_and_dialog_install_produce_identical_action() {
+        // spec: TUI-20 TUI-26 DEP-40 - both the direct `i` key (initiate_learn ->
+        // node_actions) and the Enter dialog Install (open_dialog -> node_actions ->
+        // activate_dialog) now build from the single node_actions source. For the
+        // SAME selected AvailableItem they MUST queue an identical pending action:
+        // same ActionKind, same confirm description string, and same learn_ref.
+        // A divergence (e.g. one path qualifying the ref differently) regresses the
+        // consolidation the refactor promised.
+        let avail_idx = |app: &App| {
+            app.visible
+                .iter()
+                .position(|n| matches!(&n.node, TreeNode::AvailableItem(_)))
+                .expect("an available item should be visible")
+        };
+
+        // Direct `i` key path.
+        let mut a1 = App::new(String::new(), None, None);
+        a1.apply_snapshot(make_snapshot());
+        a1.selected = avail_idx(&a1);
+        a1.apply_intent(Intent::ActionLearn);
+        let p1 = a1.pending_action.clone().expect("direct path pending");
+        let ref1 = a1.pending_learn_ref.clone();
+
+        // Dialog (Enter -> activate) path.
+        let mut a2 = App::new(String::new(), None, None);
+        a2.apply_snapshot(make_snapshot());
+        a2.selected = avail_idx(&a2);
+        a2.apply_intent(Intent::OpenDialog);
+        a2.activate_dialog();
+        let p2 = a2.pending_action.clone().expect("dialog path pending");
+        let ref2 = a2.pending_learn_ref.clone();
+
+        assert_eq!(
+            p1.kind, p2.kind,
+            "direct and dialog Install must produce the same ActionKind"
+        );
+        assert_eq!(
+            p1.description, p2.description,
+            "direct and dialog Install must produce the same confirm description"
+        );
+        assert_eq!(
+            ref1, ref2,
+            "direct and dialog Install must arm the same learn_ref for the closure preview"
+        );
+        // And the shared values are the expected ones for the fixture's `agent:dev`.
+        assert!(matches!(
+            &p1.kind,
+            ActionKind::Learn { item_key, source }
+                if item_key == "agent:dev" && source == "local/agents"
+        ));
+        assert_eq!(ref1.as_deref(), Some("local/agents#agent:dev"));
+    }
+
+    #[test]
+    fn direct_forget_key_and_dialog_forget_produce_identical_action() {
+        // spec: TUI-20 TUI-26 - the Forget mirror of the install identity test: the
+        // direct `d` key (initiate_forget) and the Enter dialog Forget must yield the
+        // same ActionKind and description (including, for an installed item, the
+        // non-unmanaged prompt). Both flow through node_actions.
+        let inst_idx = |app: &App| {
+            app.visible
+                .iter()
+                .position(|n| matches!(&n.node, TreeNode::InstalledItem(_)))
+                .expect("an installed item should be visible")
+        };
+
+        let mut a1 = App::new(String::new(), None, None);
+        a1.apply_snapshot(make_snapshot());
+        a1.selected = inst_idx(&a1);
+        a1.apply_intent(Intent::ActionForget);
+        let p1 = a1.pending_action.clone().expect("direct forget pending");
+
+        let mut a2 = App::new(String::new(), None, None);
+        a2.apply_snapshot(make_snapshot());
+        a2.selected = inst_idx(&a2);
+        a2.apply_intent(Intent::OpenDialog);
+        a2.activate_dialog();
+        let p2 = a2.pending_action.clone().expect("dialog forget pending");
+
+        assert_eq!(
+            p1.kind, p2.kind,
+            "Forget ActionKind must match across paths"
+        );
+        assert_eq!(
+            p1.description, p2.description,
+            "Forget description must match across paths"
+        );
+        // Neither path arms a learn preview for a Forget.
+        assert!(a1.pending_learn_ref.is_none() && a2.pending_learn_ref.is_none());
+    }
+
+    #[test]
+    fn toggle_expand_on_non_expandable_non_auto_node_rebuilds_without_panic() {
+        // spec: TUI-11 - the dev agent flagged the ToggleExpand
+        // `else if !is_auto_expanded` branch: when the selected node is a non-auto
+        // node that is NOT expandable (no children), set_expanded returns false but
+        // the old code still called rebuild_tree(). The consolidated branch must
+        // preserve that: a ToggleExpand here must rebuild (not panic, not corrupt
+        // selection) and must NOT touch the expanded/collapsed sets.
+        let mut app = App::new(String::new(), None, None);
+        app.apply_snapshot(make_snapshot());
+        // A leaf AvailableItem with no children is non-auto and non-expandable.
+        app.visible = vec![FlatNode {
+            id: "available-item:agent:dev".into(),
+            label: "dev".into(),
+            depth: 2,
+            expandable: false,
+            expanded: false,
+            node: TreeNode::AvailableItem(crate::tui::tree::AvailableInfo {
+                key: "agent:dev".into(),
+                name: "dev".into(),
+                source: "local/agents".into(),
+                kind: ItemKind::Agent,
+                description: None,
+                path: std::path::PathBuf::from("/fake"),
+            }),
+        }];
+        app.selected = 0;
+        // Snapshot is still present, so rebuild_tree will rebuild from it; the key
+        // assertion is that the call is reached and does not panic or mutate sets.
+        app.apply_intent(Intent::ToggleExpand);
+        assert!(
+            !app.expanded.contains("available-item:agent:dev"),
+            "toggling a non-expandable non-auto node must not insert into expanded"
+        );
+        assert!(
+            app.collapsed.is_empty(),
+            "toggling a non-expandable non-auto node must not touch the collapsed set"
         );
     }
 
