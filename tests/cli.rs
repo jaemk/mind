@@ -1327,6 +1327,36 @@ fn super_source_meld_breaks_multi_level_cycle() {
 }
 
 #[test]
+fn super_source_meld_does_not_auto_install_nested_items() {
+    // spec: DSC-54
+    let tools = Sandbox::named("tools"); // a normal source with items
+    let registry = Sandbox::bare("registry"); // curates `tools`, no items of its own
+    registry.write_and_commit(
+        "mind.toml",
+        &format!(
+            "[discover]\nsources = [{{ source = \"{}\" }}]\n",
+            tools.source_spec()
+        ),
+    );
+    let spec = registry.source_spec();
+    let r = registry.mind(&["meld", &spec]);
+    assert!(r.success, "{}", r.stderr);
+    // The nested source is registered and its items are available...
+    assert!(
+        registry.mind(&["probe"]).stdout.contains("skill:review"),
+        "the curated source's items must be available"
+    );
+    // ...but NOT auto-installed: no link is created for a nested item by default.
+    assert!(
+        !registry.claude_home.join("skills/review").exists(),
+        "a curated super-source must not auto-install the nested chain's items"
+    );
+    // The user can still install it explicitly.
+    assert!(registry.mind(&["learn", "review"]).success);
+    assert!(registry.claude_home.join("skills/review").exists());
+}
+
+#[test]
 fn invalid_mind_toml_errors_clearly() {
     // spec: DSC-31
     let sb = Sandbox::new();

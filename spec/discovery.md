@@ -89,6 +89,29 @@ sources = [
   past). Each source in the transitive set is therefore processed at most once.
 - `DSC-39` A `[discover].sources` entry may set `as = "<prefix>"` to impose a
   namespace on that nested source (equivalent to `meld --as`).
+- `DSC-54` Melding a super-source (one whose `mind.toml` lists `[discover].sources`)
+  registers the whole nested chain (DSC-38), but the post-meld auto-install flow
+  (CLI-23) runs only over the super-source's OWN items (`<source>#*`): the nested
+  discovered sources are registered and their items are left available, not
+  installed. A super-source that ships its own items still offers them for install
+  like any source; a purely curated registry installs nothing by default.
+- `DSC-55` `meld --install-super-sources` extends the auto-install flow to the
+  nested discovered sources: after the chain is registered, each newly registered
+  nested source's items are offered for install via the same preview-and-prompt as
+  the top-level source (honoring `--yes`). Without the flag only the top-level
+  source's items are offered (DSC-54). `--link-only` (register, install nothing)
+  takes precedence: combined with `--install-super-sources` it still installs
+  nothing.
+- `DSC-56` After a successful `meld` of a source that declares `[discover].sources`,
+  `mind` prints a one-time advisory note pointing the user to `mind probe` to
+  browse and search what the newly registered sources offer, so a curated registry
+  is discoverable right after melding. The note prints after the install step.
+- `DSC-57` `sync` re-walks each registered source's `[discover].sources` from its
+  refreshed `mind.toml` and melds any newly-listed nested source not already
+  registered, register-only (the DSC-54 default, never auto-installing nested
+  items) and cycle-safe by the DSC-38 guards, so a curated registry picks up
+  sources added upstream without a re-meld. A nested source removed from the list
+  is left registered (removal stays an explicit `unmeld`): `sync` only adds.
 - `DSC-40` When a source's `[source].min-mind-version` is greater than the
   running `mind` version, melding or scanning that source is an error
   (`IncompatibleVersion`) rather than proceeding against a format it predates.

@@ -33,6 +33,14 @@ const ALLOWLIST: &[&str] = &[
     //   and tests/cli.rs. Only the interactive TUI group node remains:
     //     UNM-6: the probe TUI "unmanaged" group node (not yet built).
     "UNM-6",
+    //   super-source install gating + discovery (see spec/discovery.md): the
+    //   default (DSC-54, register the chain, auto-install only own items) is
+    //   implemented and cited. The opt-in flag, the post-meld probe hint, and the
+    //   `sync` re-walk of the discover chain are not yet built:
+    //     DSC-55: `meld --install-super-sources` installs the nested chain's items.
+    //     DSC-56: post-meld note pointing to `mind probe`.
+    //     DSC-57: `sync` re-walks `[discover].sources` to add new nested sources.
+    "DSC-55", "DSC-56", "DSC-57",
     //   version pinning: now implemented; IDs removed from allowlist and cited in tests.
     //   review verb: now implemented; IDs removed from allowlist and cited in tests.
     //   meld no-arg defaults to `.` (CLI-25, cited in tests/cli.rs) and the
