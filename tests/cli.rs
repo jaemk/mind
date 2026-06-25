@@ -1486,9 +1486,12 @@ fn sync_rewalks_super_source_for_new_nested_sources() {
     );
     let spec = a.source_spec();
     assert!(a.mind(&["meld", &spec]).success);
+    // Match the `/bb` path segment, not a bare `bb`: a short commit hash is hex,
+    // so the two-letter source names (all valid hex) can appear inside it and
+    // false-match a bare `contains` (a flaky failure when a hash holds "cc").
     let before = a.mind(&["recall", "--sources"]).stdout;
-    assert!(before.contains("bb"), "{before}");
-    assert!(!before.contains("cc"), "cc not yet listed: {before}");
+    assert!(before.contains("/bb"), "{before}");
+    assert!(!before.contains("/cc"), "cc not yet listed: {before}");
 
     // Add cc to aa's discover list.
     a.write_and_commit(
@@ -1503,7 +1506,7 @@ fn sync_rewalks_super_source_for_new_nested_sources() {
     let r = a.mind(&["sync"]);
     assert!(r.success, "{} {}", r.stdout, r.stderr);
     assert!(
-        a.mind(&["recall", "--sources"]).stdout.contains("cc"),
+        a.mind(&["recall", "--sources"]).stdout.contains("/cc"),
         "sync must register the newly-listed nested source"
     );
 }
