@@ -6,18 +6,26 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-25
+
 ### Added
 
 - A `[discover].sources` entry in a super-source's `mind.toml` may set
   `install = true` to recommend a nested source for install: melding the
   super-source offers that source's items for install (the same preview-and-prompt
   as the top-level source), instead of leaving them only registered and available.
+- The interactive browser keeps the highlighted row within the middle two-thirds
+  of the list, scrolling before it reaches the top or bottom edge.
 
 ### Changed
 
 - `meld --install-super-sources` is renamed `meld --recursive` (`-r`). It installs
   every nested source in the curated chain, now beyond the per-source
   `install = true` defaults.
+- In the interactive browser, Enter opens a details dialog for the focused source
+  or item listing its valid actions (Install/Forget, or install-all/uninstall-all/
+  unmeld for a source) instead of toggling expansion; expansion moves to Space and
+  the Left/Right arrows.
 
 ## [0.4.1] - 2026-06-25
 
@@ -176,7 +184,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovery, frontmatter descriptions, transactional install/upgrade/uninstall
   with a file registry, and a tag-driven release pipeline with a Homebrew tap.
 
-[Unreleased]: https://github.com/jaemk/mind/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/jaemk/mind/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/jaemk/mind/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/jaemk/mind/compare/v0.3.1...v0.4.1
 [0.3.1]: https://github.com/jaemk/mind/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/jaemk/mind/compare/v0.2.0...v0.3.0
