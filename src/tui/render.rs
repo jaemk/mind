@@ -167,6 +167,24 @@ fn titled_block(title: &str) -> Block<'_> {
         .border_type(BorderType::Rounded)
 }
 
+/// Center a `w x h` overlay inside `area` (clamping to fit), render a
+/// `Clear` to erase what was under it, render a yellow titled border block,
+/// and return the inner `Rect` (the usable content area inside the border).
+/// Used by all four modal draw functions so the centering and Clear logic
+/// live in one place (TUI-42).
+fn overlay(frame: &mut Frame, area: Rect, title: &str, w: u16, h: u16) -> Rect {
+    let w = w.min(area.width.max(1));
+    let h = h.min(area.height.max(1));
+    let x = (area.width.saturating_sub(w)) / 2;
+    let y = (area.height.saturating_sub(h)) / 2;
+    let modal_area = Rect::new(x, y, w, h);
+    let block = titled_block(title).style(ratatui::style::Style::default().fg(Color::Yellow));
+    let inner = block.inner(modal_area);
+    frame.render_widget(ratatui::widgets::Clear, modal_area);
+    frame.render_widget(block, modal_area);
+    inner
+}
+
 fn draw_search_bar(frame: &mut Frame, app: &App, area: Rect) {
     let title = if app.search_focused {
         "Search (ESC to clear)"
@@ -301,9 +319,7 @@ fn draw_lobes_modal(frame: &mut Frame, app: &App, area: Rect) {
     let h = (app.lobes.len() as u16 + 8)
         .min(area.height.saturating_sub(4).max(1))
         .max(8.min(area.height.max(1)));
-    let x = (area.width.saturating_sub(w)) / 2;
-    let y = (area.height.saturating_sub(h)) / 2;
-    let modal_area = Rect::new(x, y, w, h);
+    let inner = overlay(frame, area, "Agent Homes (Lobes)", w, h);
 
     // Build lobe list items.
     let items: Vec<ListItem> = if app.lobes.is_empty() {
@@ -329,13 +345,8 @@ fn draw_lobes_modal(frame: &mut Frame, app: &App, area: Rect) {
     };
 
     let hint_line = "  [a] add lobe    [D] remove selected    [Esc/q] close";
-    let block = titled_block("Agent Homes (Lobes)").style(Style::default().fg(Color::Yellow));
 
     // Split modal area: list at top, hint at bottom.
-    let inner = block.inner(modal_area);
-    frame.render_widget(ratatui::widgets::Clear, modal_area);
-    frame.render_widget(block, modal_area);
-
     let hint_h = 1u16;
     let list_h = inner.height.saturating_sub(hint_h);
     let splits = Layout::default()
@@ -371,14 +382,7 @@ fn draw_dialog(frame: &mut Frame, dialog: &crate::tui::app::Dialog, area: Rect) 
     let h = content_h
         .saturating_add(2)
         .clamp(6.min(area.height.max(1)), area.height.max(1));
-    let x = (area.width.saturating_sub(w)) / 2;
-    let y = (area.height.saturating_sub(h)) / 2;
-    let modal_area = Rect::new(x, y, w, h);
-
-    let block = titled_block(&dialog.title).style(Style::default().fg(Color::Yellow));
-    let inner = block.inner(modal_area);
-    frame.render_widget(ratatui::widgets::Clear, modal_area);
-    frame.render_widget(block, modal_area);
+    let inner = overlay(frame, area, &dialog.title, w, h);
 
     let splits = Layout::default()
         .direction(Direction::Vertical)
@@ -449,15 +453,10 @@ fn draw_input_modal(frame: &mut Frame, area: Rect, title: &str, hint: &str, inpu
     let h = content_h
         .saturating_add(2)
         .clamp(5.min(area.height.max(1)), area.height.max(1));
-    let x = (area.width.saturating_sub(w)) / 2;
-    let y = (area.height.saturating_sub(h)) / 2;
-    let modal_area = Rect::new(x, y, w, h);
-
-    let widget = Paragraph::new(body)
-        .block(titled_block(title).style(Style::default().fg(Color::Yellow)))
-        .wrap(Wrap { trim: false });
-    frame.render_widget(ratatui::widgets::Clear, modal_area);
-    frame.render_widget(widget, modal_area);
+    // overlay() clears and draws the border; render the body paragraph on top.
+    let inner = overlay(frame, area, title, w, h);
+    let widget = Paragraph::new(body).wrap(Wrap { trim: false });
+    frame.render_widget(widget, inner);
 }
 
 /// Build the confirm-modal body text. When the (Learn) action carries a
@@ -503,15 +502,10 @@ fn draw_modal(frame: &mut Frame, app: &App, area: Rect) {
     let h = wrapped_rows(&text, inner_w)
         .saturating_add(2)
         .clamp(5.min(area.height.max(1)), area.height.max(1));
-    let x = (area.width.saturating_sub(w)) / 2;
-    let y = (area.height.saturating_sub(h)) / 2;
-    let modal_area = Rect::new(x, y, w, h);
-
-    let widget = Paragraph::new(text)
-        .block(titled_block("Confirm").style(Style::default().fg(Color::Yellow)))
-        .wrap(Wrap { trim: false });
-    frame.render_widget(ratatui::widgets::Clear, modal_area);
-    frame.render_widget(widget, modal_area);
+    // overlay() clears and draws the border; render the body paragraph on top.
+    let inner = overlay(frame, area, "Confirm", w, h);
+    let widget = Paragraph::new(text).wrap(Wrap { trim: false });
+    frame.render_widget(widget, inner);
 }
 
 #[cfg(test)]

@@ -84,11 +84,7 @@ fn dispatch(paths: &Paths, kind: ActionKind) -> Result<()> {
             // sources expose the same bare name.  Fall back to the bare key when
             // no source was recorded (e.g. item is unique across all sources).
             // spec: TUI-20
-            let item_ref = if source.is_empty() {
-                item_key
-            } else {
-                format!("{source}#{item_key}")
-            };
+            let item_ref = crate::tui::app::learn_ref(&item_key, &source);
             // `yes = true`: the TUI confirms in its own UI (the closure prompt
             // lands in the TUI shard); never block on the CLI's stdin [y/N]
             // prompt from inside raw mode. `Clobber::Error` surfaces a clobber as

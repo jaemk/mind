@@ -110,7 +110,20 @@ pub struct Dialog {
     pub selected: usize,
 }
 
-/// One selectable action in a details dialog (TUI-26).
+/// An action that can be executed for a given node: the kind, description, and
+/// (for Learn) the dependency-closure preview ref.  Constructed by
+/// `App::node_actions`; the single place where prompt strings and learn-ref
+/// qualification live.
+#[derive(Debug, Clone)]
+pub struct ItemAction {
+    pub kind: ActionKind,
+    pub description: String,
+    /// Source-qualified ref for the closure preview (DEP-40); None except for Learn.
+    pub learn_ref: Option<String>,
+}
+
+/// One selectable action in a details dialog (TUI-26).  Wraps an `ItemAction`
+/// (which owns the kind/description/learn_ref) plus a menu label.
 #[derive(Debug, Clone)]
 pub struct DialogAction {
     /// Menu label shown to the user.
@@ -122,6 +135,17 @@ pub struct DialogAction {
     /// For an Install action, the learn-ref whose dependency closure the event
     /// loop previews (DEP-40); None for every other action.
     pub learn_ref: Option<String>,
+}
+
+impl DialogAction {
+    fn from_item_action(label: String, a: ItemAction) -> Self {
+        DialogAction {
+            label,
+            kind: a.kind,
+            description: a.description,
+            learn_ref: a.learn_ref,
+        }
+    }
 }
 
 /// The complete UI state.
@@ -362,50 +386,21 @@ impl App {
                         // spec: TUI-31
                         self.pending_preview_spec = Some(sug.spec.clone());
                         self.set_status(format!("Previewing {}...", sug.name));
-                    } else if is_auto_expanded(&node.node) {
-                        // Source/KindBucket: expand by removing from collapsed set.
-                        // InstalledGroup/AvailableGroup: toggle their boolean.
-                        // spec: TUI-11
-                        match node.node {
-                            TreeNode::InstalledGroup => {
-                                self.installed_collapsed = false;
-                            }
-                            TreeNode::AvailableGroup => {
-                                self.available_collapsed = false;
-                            }
-                            _ => {
-                                self.collapsed.remove(&node.id);
-                            }
-                        }
-                        self.rebuild_tree();
-                    } else if node.expandable {
-                        self.expanded.insert(node.id.clone());
+                    } else if self.set_expanded(&node, Some(true)) {
                         self.rebuild_tree();
                     }
                 }
             }
             Intent::Collapse => {
                 if let Some(node) = self.visible.get(self.selected).cloned() {
-                    if is_auto_expanded(&node.node) {
-                        // Auto-expanded nodes (Source/KindBucket/groups): collapse
-                        // by inserting into collapsed set (or toggling boolean).
+                    if self.set_expanded(&node, Some(false)) {
+                        self.rebuild_tree();
+                    } else if node.depth > 0
+                        && !is_auto_expanded(&node.node)
+                        && !self.expanded.contains(&node.id)
+                    {
+                        // Jump to parent for already-collapsed non-auto leaves.
                         // spec: TUI-11
-                        match node.node {
-                            TreeNode::InstalledGroup => {
-                                self.installed_collapsed = true;
-                            }
-                            TreeNode::AvailableGroup => {
-                                self.available_collapsed = true;
-                            }
-                            _ => {
-                                self.collapsed.insert(node.id.clone());
-                            }
-                        }
-                        self.rebuild_tree();
-                    } else if self.expanded.remove(&node.id) {
-                        self.rebuild_tree();
-                    } else if node.depth > 0 {
-                        // Jump to parent (for non-auto nodes already collapsed).
                         let parent_depth = node.depth - 1;
                         if let Some(idx) = (0..self.selected)
                             .rev()
@@ -423,31 +418,11 @@ impl App {
                         // spec: TUI-31
                         self.pending_preview_spec = Some(sug.spec.clone());
                         self.set_status(format!("Previewing {}...", sug.name));
-                    } else if is_auto_expanded(&node.node) {
-                        // Auto-expanded nodes toggle their respective set/boolean.
-                        // spec: TUI-11
-                        match node.node {
-                            TreeNode::InstalledGroup => {
-                                self.installed_collapsed = !self.installed_collapsed;
-                            }
-                            TreeNode::AvailableGroup => {
-                                self.available_collapsed = !self.available_collapsed;
-                            }
-                            _ => {
-                                if self.collapsed.contains(&node.id) {
-                                    self.collapsed.remove(&node.id);
-                                } else {
-                                    self.collapsed.insert(node.id.clone());
-                                }
-                            }
-                        }
+                    } else if self.set_expanded(&node, None) {
                         self.rebuild_tree();
-                    } else {
-                        if self.expanded.contains(&node.id) {
-                            self.expanded.remove(&node.id);
-                        } else if node.expandable {
-                            self.expanded.insert(node.id.clone());
-                        }
+                    } else if !is_auto_expanded(&node.node) {
+                        // Non-expandable non-auto node: still rebuild so the tree
+                        // reflects any state changes (no-op in practice).
                         self.rebuild_tree();
                     }
                 }
@@ -626,6 +601,168 @@ impl App {
         h.saturating_sub(6).max(1)
     }
 
+    /// Set the expansion state for `node`.  `want = None` toggles;
+    /// `Some(true)` expands; `Some(false)` collapses.  Returns `true` when
+    /// `rebuild_tree` should be called afterward.
+    ///
+    /// Does NOT handle the SuggestedSource preview trigger (side effect kept in
+    /// the caller) or the Collapse parent-jump fallback (position-sensitive,
+    /// kept in the Collapse intent arm).
+    // spec: TUI-11
+    fn set_expanded(&mut self, node: &FlatNode, want: Option<bool>) -> bool {
+        if is_auto_expanded(&node.node) {
+            match node.node {
+                TreeNode::InstalledGroup => {
+                    let expand = want.unwrap_or(self.installed_collapsed);
+                    self.installed_collapsed = !expand;
+                }
+                TreeNode::AvailableGroup => {
+                    let expand = want.unwrap_or(self.available_collapsed);
+                    self.available_collapsed = !expand;
+                }
+                _ => {
+                    let currently = !self.collapsed.contains(&node.id);
+                    let expand = want.unwrap_or(!currently);
+                    if expand {
+                        self.collapsed.remove(&node.id);
+                    } else {
+                        self.collapsed.insert(node.id.clone());
+                    }
+                }
+            }
+            true
+        } else {
+            let currently = self.expanded.contains(&node.id);
+            let expand = want.unwrap_or(!currently);
+            if expand {
+                if !currently && node.expandable {
+                    self.expanded.insert(node.id.clone());
+                    true
+                } else {
+                    false
+                }
+            } else if self.expanded.remove(&node.id) {
+                true
+            } else {
+                false // was already collapsed; Collapse arm handles parent-jump
+            }
+        }
+    }
+
+    /// Return the actions available for `node`.  This is the single source of
+    /// truth for prompt strings and learn-ref qualification; both the direct
+    /// key-action paths (`initiate_*`) and the dialog builder (`open_dialog`,
+    /// `source_dialog`) derive their actions from here.
+    ///
+    /// Returns an empty Vec for node types that carry no executable action
+    /// (group headers, kind buckets, suggested sources, and installed groups).
+    // spec: TUI-20 TUI-21 TUI-26
+    fn node_actions(&self, node: &TreeNode) -> Vec<ItemAction> {
+        match node {
+            TreeNode::AvailableItem(item) => {
+                let lr = learn_ref(&item.key, &item.source);
+                vec![ItemAction {
+                    kind: ActionKind::Learn {
+                        item_key: item.key.clone(),
+                        source: item.source.clone(),
+                    },
+                    description: format!("Install {} from {}?", item.key, item.source),
+                    learn_ref: Some(lr),
+                }]
+            }
+            TreeNode::InstalledItem(item) => vec![ItemAction {
+                kind: ActionKind::Forget {
+                    item_key: item.key.clone(),
+                },
+                description: format!("Forget (uninstall) {}?", item.key),
+                learn_ref: None,
+            }],
+            TreeNode::UnmanagedItem(item) => vec![ItemAction {
+                kind: ActionKind::Forget {
+                    item_key: item.key.clone(),
+                },
+                description: format!(
+                    "Forget {} (NOT managed by mind: deletes your own file)?",
+                    item.key
+                ),
+                learn_ref: None,
+            }],
+            TreeNode::Source(src) => {
+                // All three Source actions are always returned (ungated); the
+                // `source_dialog` builder applies the "omit when nothing to do"
+                // gates for the dialog UX, while direct key-actions (`i`, `M`)
+                // always queue a glob learn or unmeld regardless of current counts.
+                let (installed, _available) = self.source_counts(&src.name);
+                let mut actions = vec![ItemAction {
+                    kind: ActionKind::Learn {
+                        item_key: "*".to_string(),
+                        source: src.name.clone(),
+                    },
+                    description: format!("Install all available items from {}?", src.name),
+                    learn_ref: Some(learn_ref("*", &src.name)),
+                }];
+                if installed > 0 {
+                    actions.push(ItemAction {
+                        kind: ActionKind::Forget {
+                            item_key: format!("{}#*", src.name),
+                        },
+                        description: format!(
+                            "Uninstall all {installed} item(s) from {}?",
+                            src.name
+                        ),
+                        learn_ref: None,
+                    });
+                }
+                actions.push(ItemAction {
+                    kind: ActionKind::Unmeld {
+                        name: src.name.clone(),
+                        forget: true,
+                    },
+                    description: format!("Unmeld {} and uninstall its items?", src.name),
+                    learn_ref: None,
+                });
+                actions
+            }
+            // KindBucket: bulk install of one kind from one source.
+            TreeNode::KindBucket { source, kind } => {
+                let item_key = format!("{kind}:*");
+                let lr = learn_ref(&item_key, source);
+                vec![ItemAction {
+                    kind: ActionKind::Learn {
+                        item_key,
+                        source: source.clone(),
+                    },
+                    description: format!("Install all {kind} items from {source}?"),
+                    learn_ref: Some(lr),
+                }]
+            }
+            TreeNode::AvailableGroup => {
+                let lr = learn_ref("*", "");
+                vec![ItemAction {
+                    kind: ActionKind::Learn {
+                        item_key: "*".to_string(),
+                        source: String::new(),
+                    },
+                    description: "Install all available items?".to_string(),
+                    learn_ref: Some(lr),
+                }]
+            }
+            // InstalledGroup, UnmanagedGroup, SuggestedSource have no direct action.
+            _ => vec![],
+        }
+    }
+
+    /// Set `pending_action`, `pending_learn_ref`, and `modal_visible` from an
+    /// `ItemAction`.  The single place that arms a confirm modal from an action.
+    // spec: TUI-24 DEP-40
+    fn arm(&mut self, a: ItemAction) {
+        if let Some(ref lr) = a.learn_ref {
+            self.pending_learn_ref = Some(lr.clone());
+        }
+        self.pending_action = Some(PendingAction::new(a.kind, a.description));
+        self.modal_visible = true;
+    }
+
     /// Initiate an install action for the selected node. On a single available
     /// item it installs that item; on a Source it installs every available item
     /// from that source (`<source>#*`); on a kind bucket every item of that kind
@@ -635,45 +772,19 @@ impl App {
     /// of `learn '<source>#*'` (TUI-20).
     // spec: TUI-20
     fn initiate_learn(&mut self) {
-        let Some(node) = self.visible.get(self.selected) else {
+        let Some(node) = self.visible.get(self.selected).cloned() else {
             return;
         };
-        // Map the selected node to a learn selection: (item_key, source, prompt).
-        let (item_key, source, desc) = match &node.node {
-            TreeNode::AvailableItem(item) => (
-                item.key.clone(),
-                item.source.clone(),
-                format!("Install {} from {}?", item.key, item.source),
-            ),
-            TreeNode::Source(src) => (
-                "*".to_string(),
-                src.name.clone(),
-                format!("Install all available items from {}?", src.name),
-            ),
-            TreeNode::KindBucket { source, kind } => (
-                format!("{kind}:*"),
-                source.clone(),
-                format!("Install all {kind} items from {source}?"),
-            ),
-            TreeNode::AvailableGroup => (
-                "*".to_string(),
-                String::new(),
-                "Install all available items?".to_string(),
-            ),
-            // Nothing to install for installed items/groups or a suggested source.
-            _ => return,
-        };
-        // Queue the dependency-tree preview (DEP-40): the event loop in mod.rs
-        // consumes `pending_learn_ref`, calls `commands::learn_preview` (I/O, kept
-        // out of this pure model), and stashes the tree onto this pending action
-        // via `set_learn_dep_tree` before the modal is drawn.
-        // spec: DEP-40
-        self.pending_learn_ref = Some(learn_ref(&item_key, &source));
-        self.pending_action = Some(PendingAction::new(
-            ActionKind::Learn { item_key, source },
-            desc,
-        ));
-        self.modal_visible = true;
+        // Pick the first Learn action for this node.  node_actions is the single
+        // source of truth for prompt strings and learn-ref qualification (DEP-40).
+        // spec: TUI-20 DEP-40
+        let action = self
+            .node_actions(&node.node)
+            .into_iter()
+            .find(|a| matches!(a.kind, ActionKind::Learn { .. }));
+        if let Some(a) = action {
+            self.arm(a);
+        }
     }
 
     /// Stash the dependency tree (computed by the I/O layer via
@@ -690,39 +801,20 @@ impl App {
 
     /// Initiate an uninstall action for the currently selected installed item.
     fn initiate_forget(&mut self) {
-        let Some(node) = self.visible.get(self.selected) else {
+        let Some(node) = self.visible.get(self.selected).cloned() else {
             return;
         };
-        match &node.node {
-            TreeNode::InstalledItem(item) => {
-                let desc = format!("Forget (uninstall) {}?", item.key);
-                self.pending_action = Some(PendingAction::new(
-                    ActionKind::Forget {
-                        item_key: item.key.clone(),
-                    },
-                    desc,
-                ));
-                self.modal_visible = true;
-            }
-            // Forget on an unmanaged item removes the user's own lobe entry
-            // (UNM-4/5). The key is the `kind:name` ref that commands::forget
-            // resolves to the unmanaged item; the warning that it is not
-            // mind-managed is printed by the executor.
-            // spec: UNM-6
-            TreeNode::UnmanagedItem(item) => {
-                let desc = format!(
-                    "Forget {} (NOT managed by mind: deletes your own file)?",
-                    item.key
-                );
-                self.pending_action = Some(PendingAction::new(
-                    ActionKind::Forget {
-                        item_key: item.key.clone(),
-                    },
-                    desc,
-                ));
-                self.modal_visible = true;
-            }
-            _ => {}
+        // Pick the first Forget action for the selected node.  node_actions is the
+        // single source of truth for the prompt string (including the unmanaged
+        // warning); the action is keyed by the selected node so a collision between
+        // a managed and unmanaged item of the same key resolves to the selected one.
+        // spec: TUI-20 UNM-6
+        let action = self
+            .node_actions(&node.node)
+            .into_iter()
+            .find(|a| matches!(a.kind, ActionKind::Forget { .. }));
+        if let Some(a) = action {
+            self.arm(a);
         }
     }
 
@@ -770,22 +862,18 @@ impl App {
     }
 
     fn initiate_unmeld(&mut self) {
-        let Some(node) = self.visible.get(self.selected) else {
+        let Some(node) = self.visible.get(self.selected).cloned() else {
             return;
         };
-        if let TreeNode::Source(ref src) = node.node {
-            // Destructive unmeld: unlinks the source AND uninstalls its items.
-            // Routed through the confirm modal (TUI-24) before executing.
-            // spec: TUI-21 TUI-24
-            let desc = format!("Unmeld {} and uninstall its items?", src.name);
-            self.pending_action = Some(PendingAction::new(
-                ActionKind::Unmeld {
-                    name: src.name.clone(),
-                    forget: true,
-                },
-                desc,
-            ));
-            self.modal_visible = true;
+        // Pick the Unmeld action for the selected Source node.  node_actions is the
+        // single source of truth for the prompt string.
+        // spec: TUI-21 TUI-24
+        let action = self
+            .node_actions(&node.node)
+            .into_iter()
+            .find(|a| matches!(a.kind, ActionKind::Unmeld { .. }));
+        if let Some(a) = action {
+            self.arm(a);
         }
     }
 
@@ -801,57 +889,54 @@ impl App {
         self.error = None;
         self.status = None;
         let dialog = match &node.node {
-            TreeNode::AvailableItem(it) => Some(Dialog {
-                title: it.name.clone(),
-                detail: item_detail(it.kind, &it.source, None, it.description.as_deref()),
-                actions: vec![DialogAction {
-                    label: "Install".to_string(),
-                    kind: ActionKind::Learn {
-                        item_key: it.key.clone(),
-                        source: it.source.clone(),
-                    },
-                    description: format!("Install {} from {}?", it.key, it.source),
-                    learn_ref: Some(learn_ref(&it.key, &it.source)),
-                }],
-                selected: 0,
-            }),
-            TreeNode::InstalledItem(it) => Some(Dialog {
-                title: it.name.clone(),
-                detail: item_detail(
-                    it.kind,
-                    &it.source,
-                    Some(&it.commit),
-                    it.description.as_deref(),
-                ),
-                actions: vec![DialogAction {
-                    label: "Forget".to_string(),
-                    kind: ActionKind::Forget {
-                        item_key: it.key.clone(),
-                    },
-                    description: format!("Forget (uninstall) {}?", it.key),
-                    learn_ref: None,
-                }],
-                selected: 0,
-            }),
-            TreeNode::UnmanagedItem(it) => Some(Dialog {
-                title: it.name.clone(),
-                detail: vec![
-                    format!("kind:   {}", it.kind.as_str()),
-                    "not managed by mind".to_string(),
-                ],
-                actions: vec![DialogAction {
-                    label: "Forget".to_string(),
-                    kind: ActionKind::Forget {
-                        item_key: it.key.clone(),
-                    },
-                    description: format!(
-                        "Forget {} (NOT managed by mind: deletes your own file)?",
-                        it.key
+            TreeNode::AvailableItem(it) => {
+                // node_actions is the single source for the Install action/description.
+                let actions = self
+                    .node_actions(&node.node)
+                    .into_iter()
+                    .map(|a| DialogAction::from_item_action("Install".to_string(), a))
+                    .collect();
+                Some(Dialog {
+                    title: it.name.clone(),
+                    detail: item_detail(it.kind, &it.source, None, it.description.as_deref()),
+                    actions,
+                    selected: 0,
+                })
+            }
+            TreeNode::InstalledItem(it) => {
+                let actions = self
+                    .node_actions(&node.node)
+                    .into_iter()
+                    .map(|a| DialogAction::from_item_action("Forget".to_string(), a))
+                    .collect();
+                Some(Dialog {
+                    title: it.name.clone(),
+                    detail: item_detail(
+                        it.kind,
+                        &it.source,
+                        Some(&it.commit),
+                        it.description.as_deref(),
                     ),
-                    learn_ref: None,
-                }],
-                selected: 0,
-            }),
+                    actions,
+                    selected: 0,
+                })
+            }
+            TreeNode::UnmanagedItem(it) => {
+                let actions = self
+                    .node_actions(&node.node)
+                    .into_iter()
+                    .map(|a| DialogAction::from_item_action("Forget".to_string(), a))
+                    .collect();
+                Some(Dialog {
+                    title: it.name.clone(),
+                    detail: vec![
+                        format!("kind:   {}", it.kind.as_str()),
+                        "not managed by mind".to_string(),
+                    ],
+                    actions,
+                    selected: 0,
+                })
+            }
             TreeNode::Source(src) => Some(self.source_dialog(&src.name)),
             // Group headers, kind buckets, and suggested sources have no details
             // dialog: keep the existing toggle/preview on Enter.
@@ -866,39 +951,45 @@ impl App {
     /// Build the source dialog: detail plus the actions valid for a source
     /// (install all available, uninstall all installed, unmeld), gated on whether
     /// there is anything to install/uninstall (TUI-26).
+    ///
+    /// Actions are sourced from `node_actions` (single source of truth for prompt
+    /// strings); labels are added here because they carry the count.  The dialog
+    /// gates Install on `available > 0` and Uninstall on `installed > 0`
+    /// ("omit when it would do nothing"), while the direct key-action paths leave
+    /// those always available.
     fn source_dialog(&self, name: &str) -> Dialog {
         let (installed, available) = self.source_counts(name);
-        let mut actions = Vec::new();
-        if available > 0 {
-            actions.push(DialogAction {
-                label: format!("Install all available ({available})"),
-                kind: ActionKind::Learn {
-                    item_key: "*".to_string(),
-                    source: name.to_string(),
-                },
-                description: format!("Install all available items from {name}?"),
-                learn_ref: Some(learn_ref("*", name)),
-            });
-        }
-        if installed > 0 {
-            actions.push(DialogAction {
-                label: format!("Uninstall all installed ({installed})"),
-                kind: ActionKind::Forget {
-                    item_key: format!("{name}#*"),
-                },
-                description: format!("Uninstall all {installed} item(s) from {name}?"),
-                learn_ref: None,
-            });
-        }
-        actions.push(DialogAction {
-            label: "Unmeld".to_string(),
-            kind: ActionKind::Unmeld {
+        let actions: Vec<DialogAction> = self
+            .node_actions(&TreeNode::Source(crate::tui::tree::SourceInfo {
                 name: name.to_string(),
-                forget: true,
-            },
-            description: format!("Unmeld {name} and uninstall its items?"),
-            learn_ref: None,
-        });
+                installed: installed > 0,
+            }))
+            .into_iter()
+            .filter_map(|a| {
+                // Apply dialog-specific gates: omit Learn when nothing is
+                // available, omit Forget when nothing is installed.
+                let include = match &a.kind {
+                    ActionKind::Learn { .. } => available > 0,
+                    ActionKind::Forget { .. } => installed > 0,
+                    ActionKind::Unmeld { .. } => true,
+                    _ => false,
+                };
+                if !include {
+                    return None;
+                }
+                let label = match &a.kind {
+                    ActionKind::Learn { .. } => {
+                        format!("Install all available ({available})")
+                    }
+                    ActionKind::Forget { .. } => {
+                        format!("Uninstall all installed ({installed})")
+                    }
+                    ActionKind::Unmeld { .. } => "Unmeld".to_string(),
+                    _ => String::new(),
+                };
+                Some(DialogAction::from_item_action(label, a))
+            })
+            .collect();
         Dialog {
             title: name.to_string(),
             detail: vec![
@@ -982,30 +1073,7 @@ impl App {
                 // spec: TUI-31
                 self.pending_preview_spec = Some(sug.spec.clone());
                 self.set_status(format!("Previewing {}...", sug.name));
-            } else if is_auto_expanded(&node.node) {
-                // Auto-expanded nodes toggle their respective set/boolean.
-                match node.node {
-                    TreeNode::InstalledGroup => {
-                        self.installed_collapsed = !self.installed_collapsed;
-                    }
-                    TreeNode::AvailableGroup => {
-                        self.available_collapsed = !self.available_collapsed;
-                    }
-                    _ => {
-                        if self.collapsed.contains(&node.id) {
-                            self.collapsed.remove(&node.id);
-                        } else {
-                            self.collapsed.insert(node.id.clone());
-                        }
-                    }
-                }
-                self.rebuild_tree();
-            } else if node.expandable {
-                if self.expanded.contains(&node.id) {
-                    self.expanded.remove(&node.id);
-                } else {
-                    self.expanded.insert(node.id.clone());
-                }
+            } else if self.set_expanded(&node, None) {
                 self.rebuild_tree();
             }
         }
