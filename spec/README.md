@@ -68,8 +68,8 @@ and verified.
 | Polished output: global `--json`/`--yes`/`--ascii`, color+Unicode gate, structured JSON results | done | CLI-150, CLI-151, CLI-152, CLI-153, CLI-154 |
 | Unmanaged lobe items: `recall`/`probe` listing + `forget` with a not-managed-by-mind warning | done | [unmanaged.md](unmanaged.md) (UNM-1..5) |
 | Unmanaged items in the `probe` TUI group node | done | UNM-6 |
-| TUI: keep the highlighted row in the middle two-thirds (scroll margin) | planned | TUI-16 |
-| TUI: Enter opens a details dialog with the node's valid actions | planned | TUI-26 |
+| TUI: keep the highlighted row in the middle two-thirds (scroll margin) | done | TUI-16 |
+| TUI: Enter opens a details dialog with the node's valid actions | done | TUI-26 |
 
 ## Documents
 

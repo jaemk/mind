@@ -27,9 +27,10 @@ the lock it takes per action is defined in storage.md (STO-40, STO-41).
   Each is an independently collapsible tree. A third **Unmanaged** group appears
   below them when the agent home holds items mind did not install (UNM-6).
 - `TUI-11` Under each group the hierarchy is source -> kind (skills, agents,
-  rules) -> item -> detail. Every node toggles between expanded and collapsed on
-  Enter; Left/Right arrows also collapse/expand structural nodes (source and kind
-  buckets). Collapse state for structural nodes is tracked in a per-node collapsed
+  rules) -> item -> detail. Left/Right (and Space) collapse/expand structural nodes
+  (source and kind buckets); Enter opens the details dialog on a source or item
+  (TUI-26) and toggles a group header or kind bucket. Collapse state for structural
+  nodes is tracked in a per-node collapsed
   set distinct from the item-detail expansion set, so a source's items can be
   hidden and re-shown independently of item detail. Expanding an item shows its
   description and frontmatter, and for a skill its file tree. Navigation is
@@ -54,7 +55,7 @@ the lock it takes per action is defined in storage.md (STO-40, STO-41).
   and search state, and is skipped while a mutating action holds the lock. Catalog
   contents are re-scanned when the melded source set changes or after a sync, not
   on every tick.
-- `TUI-16` (planned) The list keeps the highlighted row within the middle
+- `TUI-16` The list keeps the highlighted row within the middle
   two-thirds of the visible area: as the selection moves, the view scrolls to
   maintain a margin of about one-sixth of the visible height above and below the
   highlight, so the highlight does not reach the top or bottom edge while there are
@@ -95,19 +96,21 @@ manifest, and store.
   loading or refreshing state, an exclusive lock for each mutating action
   (STO-40, STO-41), releasing it immediately after. A running TUI therefore never
   blocks another `mind` invocation for longer than one operation.
-- `TUI-26` (planned) Pressing Enter on the focused node opens a details dialog: a
-  centered overlay (TUI-42) that describes the node and lists the actions valid for
-  it as selectable choices, each run through the normal confirm-and-execute path
-  (TUI-24). For an item it shows the item's kind, source, description, commit/hash,
-  and store/link paths as `recall <item>` reports (CLI-71), and offers Install when
-  the item is not installed, else Forget. For a source it shows the source's url,
-  commit, alias, and installed/available item counts as `recall --sources` reports
-  (CLI-72), and offers Install all available items, Uninstall all installed items,
-  Unmeld, and Sync. Esc dismisses the dialog without acting. The dialog is an
-  additional entry point and does not remove the direct action keys (TUI-20..22).
-  It supersedes the Enter expand-toggle of TUI-11: once built, structural nodes
-  expand and collapse only via Left/Right (and Space), and an item's detail is
-  shown in this dialog rather than an inline expansion.
+- `TUI-26` Pressing Enter on a source or item opens a details dialog: a centered
+  overlay (TUI-42) describing the node and listing the actions valid for it as a
+  selectable list, each run through the normal confirm-and-execute path (TUI-24).
+  For an item it shows its kind, source, the commit when installed, and the
+  description, and offers Install when the item is not installed, else Forget (an
+  unmanaged item offers Forget with the not-managed warning, UNM-5). For a source
+  it shows its name and installed/available item counts, and offers Install all
+  available items, Uninstall all installed items, and Unmeld; an action is omitted
+  when it would do nothing (no Install-all with nothing available, no Uninstall-all
+  with nothing installed). j/k move the highlight, Enter or y runs the highlighted
+  action, and Esc, q, or n dismisses without acting. An Install action arms the
+  same dependency-closure preview as the direct `i` action (DEP-40). The dialog is
+  an additional entry point and does not remove the direct action keys (TUI-20..22).
+  On a group header, kind bucket, or suggested source there is no dialog, so Enter
+  keeps its TUI-11 toggle/preview; expansion is also on Space and Left/Right.
 
 ## Preview and registry (browsing the not-yet-melded)
 

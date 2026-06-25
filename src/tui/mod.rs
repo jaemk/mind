@@ -243,6 +243,29 @@ fn handle_key(paths: &Paths, app: &mut app::App, k: crossterm::event::KeyEvent) 
         return;
     }
 
+    // --- Details dialog (TUI-26): navigate the action list, run or dismiss. ---
+    // The dialog owns the keyboard while open, ahead of the confirm modal (which
+    // it opens on activation). Esc/q/n dismiss; Up/Down move; Enter/y run.
+    // spec: TUI-26
+    if app.dialog.is_some() {
+        match k.code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('n') => app.close_dialog(),
+            KeyCode::Up | KeyCode::Char('k') => app.dialog_up(),
+            KeyCode::Down | KeyCode::Char('j') => app.dialog_down(),
+            KeyCode::Enter | KeyCode::Char('y') => {
+                app.activate_dialog();
+                // An Install action arms a dependency-closure preview (DEP-40),
+                // computed here (I/O) before the confirm modal is drawn, exactly
+                // as the direct `i` action does in normal mode.
+                if let Some(item_ref) = app.pending_learn_ref.take() {
+                    run_learn_preview(paths, app, &item_ref);
+                }
+            }
+            _ => {}
+        }
+        return;
+    }
+
     // Normal mode.
     // Esc while a confirm modal is up must cancel the action, not wipe the
     // search filter (key_to_intent maps Esc -> SearchClear unconditionally).

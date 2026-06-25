@@ -24,6 +24,8 @@ pub enum Intent {
     Collapse,
     /// Toggle expand/collapse on the selected node.
     ToggleExpand,
+    /// Open the details-and-actions dialog for the focused node (TUI-26).
+    OpenDialog,
     /// Jump to the search box.
     JumpToSearch,
     /// Append a character to the search string.
@@ -99,7 +101,10 @@ pub fn key_to_intent(key: KeyEvent) -> Intent {
         (KeyCode::PageDown, _) | (KeyCode::Char('d'), KeyModifiers::CONTROL) => Intent::PageDown,
         (KeyCode::Right, _) | (KeyCode::Char('l'), KeyModifiers::NONE) => Intent::Expand,
         (KeyCode::Left, _) | (KeyCode::Char('h'), KeyModifiers::NONE) => Intent::Collapse,
-        (KeyCode::Enter, _) => Intent::ToggleExpand,
+        // Enter opens the details/action dialog (TUI-26); Space toggles expansion,
+        // since Enter no longer does on a source or item.
+        (KeyCode::Enter, _) => Intent::OpenDialog,
+        (KeyCode::Char(' '), KeyModifiers::NONE) => Intent::ToggleExpand,
 
         // Search
         (KeyCode::Char('/'), KeyModifiers::NONE) => Intent::JumpToSearch,
@@ -198,9 +203,30 @@ mod tests {
     }
 
     #[test]
-    fn enter_maps_to_toggle_expand() {
-        // spec: TUI-11
-        assert_eq!(key_to_intent(key(KeyCode::Enter)), Intent::ToggleExpand);
+    fn enter_maps_to_open_dialog() {
+        // spec: TUI-26 - Enter opens the details/action dialog (not expand-toggle).
+        assert_eq!(key_to_intent(key(KeyCode::Enter)), Intent::OpenDialog);
+    }
+
+    #[test]
+    fn enter_with_any_modifier_still_opens_dialog() {
+        // spec: TUI-26 - Enter maps with a wildcard modifier, so a modified Enter
+        // (e.g. Shift+Enter from some terminals) still opens the dialog rather than
+        // falling through to the printable-char/search arm.
+        assert_eq!(
+            key_to_intent(key_mod(KeyCode::Enter, KeyModifiers::SHIFT)),
+            Intent::OpenDialog
+        );
+        assert_eq!(
+            key_to_intent(key_mod(KeyCode::Enter, KeyModifiers::CONTROL)),
+            Intent::OpenDialog
+        );
+    }
+
+    #[test]
+    fn space_maps_to_toggle_expand() {
+        // spec: TUI-11 - Space toggles expansion now that Enter opens the dialog.
+        assert_eq!(key_to_intent(key(KeyCode::Char(' '))), Intent::ToggleExpand);
     }
 
     #[test]

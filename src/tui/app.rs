@@ -49,6 +49,28 @@ pub fn learn_ref(item_key: &str, source: &str) -> String {
     }
 }
 
+/// Detail lines for an item dialog (TUI-26): kind and source always, the commit
+/// when installed, and the description (if any) after a blank separator line.
+fn item_detail(
+    kind: ItemKind,
+    source: &str,
+    commit: Option<&str>,
+    description: Option<&str>,
+) -> Vec<String> {
+    let mut d = vec![
+        format!("kind:   {}", kind.as_str()),
+        format!("source: {source}"),
+    ];
+    if let Some(c) = commit {
+        d.push(format!("commit: {}", c.chars().take(8).collect::<String>()));
+    }
+    if let Some(s) = description {
+        d.push(String::new());
+        d.push(s.to_string());
+    }
+    d
+}
+
 /// What kind of action is being confirmed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)] // Meld is used by the interactive meld flow (TUI-30/31)
@@ -71,6 +93,35 @@ pub enum ActionKind {
     /// Remove an agent home (lobe) via `config lobes remove` (TUI-23, CLI-113).
     // spec: TUI-23
     LobeRemove { path: String },
+}
+
+/// A details-and-actions dialog, opened with Enter on a source or item (TUI-26).
+/// It describes the focused node and offers the actions valid for it; choosing
+/// one runs it through the normal confirm-and-execute path (TUI-24).
+#[derive(Debug, Clone)]
+pub struct Dialog {
+    /// The node being acted on (its name).
+    pub title: String,
+    /// Detail lines describing the node.
+    pub detail: Vec<String>,
+    /// Offered actions, in order.
+    pub actions: Vec<DialogAction>,
+    /// Index of the highlighted action.
+    pub selected: usize,
+}
+
+/// One selectable action in a details dialog (TUI-26).
+#[derive(Debug, Clone)]
+pub struct DialogAction {
+    /// Menu label shown to the user.
+    pub label: String,
+    /// The action run when chosen.
+    pub kind: ActionKind,
+    /// The confirm-modal description for the chosen action.
+    pub description: String,
+    /// For an Install action, the learn-ref whose dependency closure the event
+    /// loop previews (DEP-40); None for every other action.
+    pub learn_ref: Option<String>,
 }
 
 /// The complete UI state.
@@ -104,6 +155,14 @@ pub struct App {
     // --- modal state ---
     pub pending_action: Option<PendingAction>,
     pub modal_visible: bool,
+    /// The open details-and-actions dialog (Enter on a source/item, TUI-26).
+    // spec: TUI-26
+    pub dialog: Option<Dialog>,
+    /// Cached first-visible-row offset for the tree list, kept so the highlight
+    /// stays within the middle two-thirds of the viewport (TUI-16). Updated by
+    /// the render pass, which knows the actual viewport height.
+    // spec: TUI-16
+    pub scroll: std::cell::Cell<usize>,
 
     // --- status ---
     pub status: Option<String>,
@@ -180,6 +239,8 @@ impl App {
             available_collapsed: false,
             pending_action: None,
             modal_visible: false,
+            dialog: None,
+            scroll: std::cell::Cell::new(0),
             status: None,
             error: None,
             spec_input_active: false,
@@ -390,6 +451,9 @@ impl App {
                         self.rebuild_tree();
                     }
                 }
+            }
+            Intent::OpenDialog => {
+                self.open_dialog();
             }
             Intent::JumpToSearch => {
                 self.search_focused = true;
@@ -723,6 +787,188 @@ impl App {
             ));
             self.modal_visible = true;
         }
+    }
+
+    /// Open the details-and-actions dialog for the focused node (TUI-26). On a
+    /// source or item it builds a dialog; on a group header, kind bucket, or
+    /// suggested source there is no dialog, so Enter falls back to the existing
+    /// toggle/preview behavior (TUI-11/TUI-31).
+    // spec: TUI-26
+    fn open_dialog(&mut self) {
+        let Some(node) = self.visible.get(self.selected).cloned() else {
+            return;
+        };
+        self.error = None;
+        self.status = None;
+        let dialog = match &node.node {
+            TreeNode::AvailableItem(it) => Some(Dialog {
+                title: it.name.clone(),
+                detail: item_detail(it.kind, &it.source, None, it.description.as_deref()),
+                actions: vec![DialogAction {
+                    label: "Install".to_string(),
+                    kind: ActionKind::Learn {
+                        item_key: it.key.clone(),
+                        source: it.source.clone(),
+                    },
+                    description: format!("Install {} from {}?", it.key, it.source),
+                    learn_ref: Some(learn_ref(&it.key, &it.source)),
+                }],
+                selected: 0,
+            }),
+            TreeNode::InstalledItem(it) => Some(Dialog {
+                title: it.name.clone(),
+                detail: item_detail(
+                    it.kind,
+                    &it.source,
+                    Some(&it.commit),
+                    it.description.as_deref(),
+                ),
+                actions: vec![DialogAction {
+                    label: "Forget".to_string(),
+                    kind: ActionKind::Forget {
+                        item_key: it.key.clone(),
+                    },
+                    description: format!("Forget (uninstall) {}?", it.key),
+                    learn_ref: None,
+                }],
+                selected: 0,
+            }),
+            TreeNode::UnmanagedItem(it) => Some(Dialog {
+                title: it.name.clone(),
+                detail: vec![
+                    format!("kind:   {}", it.kind.as_str()),
+                    "not managed by mind".to_string(),
+                ],
+                actions: vec![DialogAction {
+                    label: "Forget".to_string(),
+                    kind: ActionKind::Forget {
+                        item_key: it.key.clone(),
+                    },
+                    description: format!(
+                        "Forget {} (NOT managed by mind: deletes your own file)?",
+                        it.key
+                    ),
+                    learn_ref: None,
+                }],
+                selected: 0,
+            }),
+            TreeNode::Source(src) => Some(self.source_dialog(&src.name)),
+            // Group headers, kind buckets, and suggested sources have no details
+            // dialog: keep the existing toggle/preview on Enter.
+            _ => None,
+        };
+        match dialog {
+            Some(d) => self.dialog = Some(d),
+            None => self.apply_intent(Intent::ToggleExpand),
+        }
+    }
+
+    /// Build the source dialog: detail plus the actions valid for a source
+    /// (install all available, uninstall all installed, unmeld), gated on whether
+    /// there is anything to install/uninstall (TUI-26).
+    fn source_dialog(&self, name: &str) -> Dialog {
+        let (installed, available) = self.source_counts(name);
+        let mut actions = Vec::new();
+        if available > 0 {
+            actions.push(DialogAction {
+                label: format!("Install all available ({available})"),
+                kind: ActionKind::Learn {
+                    item_key: "*".to_string(),
+                    source: name.to_string(),
+                },
+                description: format!("Install all available items from {name}?"),
+                learn_ref: Some(learn_ref("*", name)),
+            });
+        }
+        if installed > 0 {
+            actions.push(DialogAction {
+                label: format!("Uninstall all installed ({installed})"),
+                kind: ActionKind::Forget {
+                    item_key: format!("{name}#*"),
+                },
+                description: format!("Uninstall all {installed} item(s) from {name}?"),
+                learn_ref: None,
+            });
+        }
+        actions.push(DialogAction {
+            label: "Unmeld".to_string(),
+            kind: ActionKind::Unmeld {
+                name: name.to_string(),
+                forget: true,
+            },
+            description: format!("Unmeld {name} and uninstall its items?"),
+            learn_ref: None,
+        });
+        Dialog {
+            title: name.to_string(),
+            detail: vec![
+                format!("source:    {name}"),
+                format!("installed: {installed}"),
+                format!("available: {available}"),
+            ],
+            actions,
+            selected: 0,
+        }
+    }
+
+    /// Count a source's installed items and its not-yet-installed available items
+    /// from the last snapshot (TUI-26).
+    fn source_counts(&self, name: &str) -> (usize, usize) {
+        let Some(snap) = &self.last_snapshot else {
+            return (0, 0);
+        };
+        let installed = snap.installed.iter().filter(|i| i.source == name).count();
+        let installed_keys: std::collections::HashSet<&String> =
+            snap.installed.iter().map(|i| &i.key).collect();
+        let available = snap
+            .available
+            .iter()
+            .filter(|a| a.source == name && !installed_keys.contains(&a.key))
+            .count();
+        (installed, available)
+    }
+
+    /// Move the dialog's action highlight up (TUI-26). No-op when no dialog is open.
+    pub fn dialog_up(&mut self) {
+        if let Some(d) = self.dialog.as_mut()
+            && d.selected > 0
+        {
+            d.selected -= 1;
+        }
+    }
+
+    /// Move the dialog's action highlight down (TUI-26).
+    pub fn dialog_down(&mut self) {
+        if let Some(d) = self.dialog.as_mut()
+            && d.selected + 1 < d.actions.len()
+        {
+            d.selected += 1;
+        }
+    }
+
+    /// Dismiss the dialog without acting (TUI-26).
+    pub fn close_dialog(&mut self) {
+        self.dialog = None;
+    }
+
+    /// Run the highlighted dialog action: stash it as the pending action behind
+    /// the confirm modal (TUI-24) and close the dialog. For an Install it also
+    /// arms the dependency-closure preview (DEP-40) by setting `pending_learn_ref`,
+    /// which the event loop consumes exactly as it does for the direct `i` action.
+    // spec: TUI-26
+    pub fn activate_dialog(&mut self) {
+        let Some(d) = self.dialog.take() else {
+            return;
+        };
+        let sel = d.selected;
+        let Some(action) = d.actions.into_iter().nth(sel) else {
+            return;
+        };
+        if let Some(lr) = &action.learn_ref {
+            self.pending_learn_ref = Some(lr.clone());
+        }
+        self.pending_action = Some(PendingAction::new(action.kind, action.description));
+        self.modal_visible = true;
     }
 
     /// User pressed Enter/Return to confirm the pending action.
@@ -2369,5 +2615,366 @@ mod tests {
             taken.kind
         );
         assert!(app.mutating, "mutating flag set after take");
+    }
+
+    // --- TUI-26: the Enter details-and-actions dialog ---
+
+    fn select_node(app: &mut App, pred: impl Fn(&TreeNode) -> bool) {
+        let idx = app
+            .visible
+            .iter()
+            .position(|n| pred(&n.node))
+            .expect("a matching node must be visible");
+        app.selected = idx;
+    }
+
+    #[test]
+    fn enter_on_available_item_opens_install_dialog() {
+        // spec: TUI-26 - Enter on an available item opens a dialog whose action is
+        // Install for that item (not an expand-toggle).
+        let mut app = App::new(String::new(), None, None);
+        app.apply_snapshot(make_snapshot());
+        select_node(&mut app, |n| matches!(n, TreeNode::AvailableItem(_)));
+        app.apply_intent(Intent::OpenDialog);
+        let d = app.dialog.as_ref().expect("a dialog must open");
+        assert_eq!(d.actions.len(), 1);
+        assert_eq!(d.actions[0].label, "Install");
+        assert!(matches!(
+            &d.actions[0].kind,
+            ActionKind::Learn { item_key, .. } if item_key == "agent:dev"
+        ));
+        // An Install action carries the learn-ref so the closure preview fires.
+        assert!(d.actions[0].learn_ref.is_some());
+    }
+
+    #[test]
+    fn enter_on_installed_item_opens_forget_dialog() {
+        // spec: TUI-26 - Enter on an installed item offers Forget.
+        let mut app = App::new(String::new(), None, None);
+        app.apply_snapshot(make_snapshot());
+        select_node(&mut app, |n| matches!(n, TreeNode::InstalledItem(_)));
+        app.apply_intent(Intent::OpenDialog);
+        let d = app.dialog.as_ref().expect("a dialog must open");
+        assert_eq!(d.actions[0].label, "Forget");
+        assert!(matches!(
+            &d.actions[0].kind,
+            ActionKind::Forget { item_key } if item_key == "skill:review"
+        ));
+    }
+
+    #[test]
+    fn enter_on_source_offers_bulk_actions_and_unmeld() {
+        // spec: TUI-26 - a source dialog offers install-all, uninstall-all, and
+        // unmeld. make_snapshot has one available and one installed item under
+        // `local/agents`, so all three are present.
+        let mut app = App::new(String::new(), None, None);
+        app.apply_snapshot(make_snapshot());
+        select_node(&mut app, |n| matches!(n, TreeNode::Source(_)));
+        app.apply_intent(Intent::OpenDialog);
+        let d = app.dialog.as_ref().expect("a source dialog must open");
+        let kinds: Vec<&ActionKind> = d.actions.iter().map(|a| &a.kind).collect();
+        assert!(
+            kinds
+                .iter()
+                .any(|k| matches!(k, ActionKind::Learn { item_key, .. } if item_key == "*")),
+            "install-all action present: {kinds:?}"
+        );
+        assert!(
+            kinds.iter().any(
+                |k| matches!(k, ActionKind::Forget { item_key } if item_key == "local/agents#*")
+            ),
+            "uninstall-all action present: {kinds:?}"
+        );
+        assert!(
+            kinds
+                .iter()
+                .any(|k| matches!(k, ActionKind::Unmeld { forget: true, .. })),
+            "unmeld action present: {kinds:?}"
+        );
+    }
+
+    #[test]
+    fn enter_on_group_header_has_no_dialog_and_toggles() {
+        // spec: TUI-26 - a group header has no details dialog; Enter falls back to
+        // the toggle behavior (TUI-11), so no dialog opens and the group collapses.
+        let mut app = App::new(String::new(), None, None);
+        app.apply_snapshot(make_snapshot());
+        select_node(&mut app, |n| matches!(n, TreeNode::InstalledGroup));
+        assert!(!app.installed_collapsed);
+        app.apply_intent(Intent::OpenDialog);
+        assert!(app.dialog.is_none(), "no dialog for a group header");
+        assert!(app.installed_collapsed, "Enter toggled the group instead");
+    }
+
+    #[test]
+    fn activate_dialog_sets_confirm_gated_pending_action() {
+        // spec: TUI-26 - choosing a dialog action stashes it as the pending action
+        // behind the confirm modal and closes the dialog; nothing runs yet.
+        let mut app = App::new(String::new(), None, None);
+        app.apply_snapshot(make_snapshot());
+        select_node(&mut app, |n| matches!(n, TreeNode::InstalledItem(_)));
+        app.apply_intent(Intent::OpenDialog);
+        app.activate_dialog();
+        assert!(app.dialog.is_none(), "dialog closes on activate");
+        assert!(app.modal_visible, "confirm modal opens");
+        let pending = app.pending_action.as_ref().expect("a pending action");
+        assert!(matches!(
+            &pending.kind,
+            ActionKind::Forget { item_key } if item_key == "skill:review"
+        ));
+    }
+
+    #[test]
+    fn activate_install_dialog_arms_learn_preview() {
+        // spec: TUI-26 DEP-40 - activating an Install action arms the dependency
+        // closure preview (pending_learn_ref) the event loop consumes.
+        let mut app = App::new(String::new(), None, None);
+        app.apply_snapshot(make_snapshot());
+        select_node(&mut app, |n| matches!(n, TreeNode::AvailableItem(_)));
+        app.apply_intent(Intent::OpenDialog);
+        app.activate_dialog();
+        assert_eq!(
+            app.pending_learn_ref.as_deref(),
+            Some("local/agents#agent:dev"),
+            "install must arm the closure preview"
+        );
+    }
+
+    /// A snapshot with a source that has ONLY an installed item (nothing
+    /// available): the source dialog must omit install-all.
+    fn snapshot_installed_only() -> Snapshot {
+        Snapshot {
+            generation: 1,
+            installed: vec![SnapshotInstalled {
+                key: "skill:review".to_string(),
+                name: "review".to_string(),
+                source: "local/agents".to_string(),
+                kind: ItemKind::Skill,
+                commit: "abc12345".to_string(),
+                description: Some("Review skill".to_string()),
+            }],
+            available: vec![],
+            unmanaged: vec![],
+            source_names: vec!["local/agents".to_string()],
+            suggestions: vec![],
+            lobes: vec![],
+        }
+    }
+
+    /// A snapshot with a source that has ONLY an available item (nothing
+    /// installed): the source dialog must omit uninstall-all.
+    fn snapshot_available_only() -> Snapshot {
+        Snapshot {
+            generation: 1,
+            installed: vec![],
+            available: vec![SnapshotAvailable {
+                key: "agent:dev".to_string(),
+                name: "dev".to_string(),
+                source: "local/agents".to_string(),
+                kind: ItemKind::Agent,
+                description: Some("Dev agent".to_string()),
+                path: std::path::PathBuf::from("/fake/path"),
+            }],
+            unmanaged: vec![],
+            source_names: vec!["local/agents".to_string()],
+            suggestions: vec![],
+            lobes: vec![],
+        }
+    }
+
+    #[test]
+    fn enter_on_unmanaged_item_opens_forget_dialog_with_warning() {
+        // spec: TUI-26 UNM-5 - Enter on an unmanaged item opens a dialog whose only
+        // action is Forget, keyed by the item's kind:name and carrying the
+        // not-mind-managed warning in its confirm description (so the dialog path,
+        // not just the direct `d` key, surfaces the warning).
+        let mut app = App::new(String::new(), None, None);
+        let mut snap = make_snapshot();
+        snap.unmanaged = vec![crate::tui::data::SnapshotUnmanaged {
+            key: "skill:hand-written".to_string(),
+            name: "hand-written".to_string(),
+            kind: ItemKind::Skill,
+            paths: vec![std::path::PathBuf::from("/lobe/skills/hand-written")],
+        }];
+        app.apply_snapshot(snap);
+        select_node(&mut app, |n| matches!(n, TreeNode::UnmanagedItem(_)));
+        app.apply_intent(Intent::OpenDialog);
+        let d = app.dialog.as_ref().expect("a dialog must open");
+        assert_eq!(d.actions.len(), 1, "an unmanaged item offers only Forget");
+        assert_eq!(d.actions[0].label, "Forget");
+        assert!(matches!(
+            &d.actions[0].kind,
+            ActionKind::Forget { item_key } if item_key == "skill:hand-written"
+        ));
+        assert!(
+            d.actions[0].description.contains("NOT managed by mind"),
+            "the dialog's Forget must carry the not-mind-managed warning: {:?}",
+            d.actions[0].description
+        );
+        // The detail block also marks the item as not mind-managed.
+        assert!(
+            d.detail.iter().any(|l| l.contains("not managed by mind")),
+            "detail must note the item is not mind-managed: {:?}",
+            d.detail
+        );
+        // An unmanaged Forget is not an install, so no closure preview is armed.
+        assert!(
+            d.actions[0].learn_ref.is_none(),
+            "a Forget action carries no learn-ref"
+        );
+    }
+
+    #[test]
+    fn source_dialog_omits_install_all_when_nothing_available() {
+        // spec: TUI-26 - "an action is omitted when it would do nothing": a source
+        // with only installed items (nothing available) must NOT offer install-all,
+        // but must still offer uninstall-all and unmeld.
+        let mut app = App::new(String::new(), None, None);
+        app.apply_snapshot(snapshot_installed_only());
+        select_node(&mut app, |n| matches!(n, TreeNode::Source(_)));
+        app.apply_intent(Intent::OpenDialog);
+        let d = app.dialog.as_ref().expect("a source dialog must open");
+        let kinds: Vec<&ActionKind> = d.actions.iter().map(|a| &a.kind).collect();
+        assert!(
+            !kinds
+                .iter()
+                .any(|k| matches!(k, ActionKind::Learn { item_key, .. } if item_key == "*")),
+            "install-all must be omitted with nothing available: {kinds:?}"
+        );
+        assert!(
+            kinds.iter().any(
+                |k| matches!(k, ActionKind::Forget { item_key } if item_key == "local/agents#*")
+            ),
+            "uninstall-all must still be present: {kinds:?}"
+        );
+        assert!(
+            kinds.iter().any(|k| matches!(k, ActionKind::Unmeld { .. })),
+            "unmeld is always present: {kinds:?}"
+        );
+    }
+
+    #[test]
+    fn source_dialog_omits_uninstall_all_when_nothing_installed() {
+        // spec: TUI-26 - the mirror case: a source with only available items
+        // (nothing installed) must NOT offer uninstall-all, but must still offer
+        // install-all and unmeld.
+        let mut app = App::new(String::new(), None, None);
+        app.apply_snapshot(snapshot_available_only());
+        select_node(&mut app, |n| matches!(n, TreeNode::Source(_)));
+        app.apply_intent(Intent::OpenDialog);
+        let d = app.dialog.as_ref().expect("a source dialog must open");
+        let kinds: Vec<&ActionKind> = d.actions.iter().map(|a| &a.kind).collect();
+        assert!(
+            !kinds.iter().any(|k| matches!(k, ActionKind::Forget { .. })),
+            "uninstall-all must be omitted with nothing installed: {kinds:?}"
+        );
+        assert!(
+            kinds
+                .iter()
+                .any(|k| matches!(k, ActionKind::Learn { item_key, .. } if item_key == "*")),
+            "install-all must still be present: {kinds:?}"
+        );
+        assert!(
+            kinds.iter().any(|k| matches!(k, ActionKind::Unmeld { .. })),
+            "unmeld is always present: {kinds:?}"
+        );
+    }
+
+    #[test]
+    fn open_dialog_does_not_mutate_pending_action_or_modal() {
+        // spec: TUI-26 - opening the dialog is non-committal: it must NOT set a
+        // pending action, show the confirm modal, or arm a learn preview. Only
+        // activate_dialog does that. A regression that armed the action on open
+        // would mutate without the user choosing anything.
+        let mut app = App::new(String::new(), None, None);
+        app.apply_snapshot(make_snapshot());
+        select_node(&mut app, |n| matches!(n, TreeNode::AvailableItem(_)));
+        app.apply_intent(Intent::OpenDialog);
+        assert!(app.dialog.is_some(), "the dialog opened");
+        assert!(
+            app.pending_action.is_none(),
+            "opening a dialog must not set a pending action"
+        );
+        assert!(
+            !app.modal_visible,
+            "opening a dialog must not show the confirm modal"
+        );
+        assert!(
+            app.pending_learn_ref.is_none(),
+            "opening a dialog must not arm the closure preview (only activate does)"
+        );
+    }
+
+    #[test]
+    fn close_dialog_clears_dialog_without_arming_an_action() {
+        // spec: TUI-26 - Esc/q/n dismisses the dialog without acting: the dialog is
+        // cleared and no pending action / confirm modal is left behind.
+        let mut app = App::new(String::new(), None, None);
+        app.apply_snapshot(make_snapshot());
+        select_node(&mut app, |n| matches!(n, TreeNode::AvailableItem(_)));
+        app.apply_intent(Intent::OpenDialog);
+        assert!(app.dialog.is_some(), "dialog open before close");
+        app.close_dialog();
+        assert!(app.dialog.is_none(), "close_dialog clears the dialog");
+        assert!(
+            app.pending_action.is_none(),
+            "dismissing must not set a pending action"
+        );
+        assert!(
+            !app.modal_visible,
+            "dismissing must not show the confirm modal"
+        );
+        assert!(
+            app.pending_learn_ref.is_none(),
+            "dismissing must not arm a learn preview"
+        );
+    }
+
+    #[test]
+    fn enter_on_kind_bucket_has_no_dialog_and_toggles_bucket() {
+        // spec: TUI-26 - the fallback case for a kind bucket (not a group header):
+        // Enter opens no dialog and instead toggles that bucket's collapsed state,
+        // mirroring TUI-11. Distinguishes the kind-bucket branch from the group
+        // branch already covered by enter_on_group_header_*.
+        let mut app = App::new(String::new(), None, None);
+        app.apply_snapshot(make_snapshot());
+        let idx = app
+            .visible
+            .iter()
+            .position(|n| matches!(&n.node, TreeNode::KindBucket { .. }))
+            .expect("a kind bucket must be visible");
+        app.selected = idx;
+        let id = app.visible[idx].id.clone();
+        assert!(
+            !app.collapsed.contains(&id),
+            "kind bucket starts expanded (not in collapsed set)"
+        );
+        app.apply_intent(Intent::OpenDialog);
+        assert!(app.dialog.is_none(), "no dialog for a kind bucket");
+        assert!(
+            app.collapsed.contains(&id),
+            "Enter on a kind bucket toggled it into the collapsed set"
+        );
+    }
+
+    #[test]
+    fn dialog_navigation_clamps_to_action_list() {
+        // spec: TUI-26 - up/down move the highlighted action and clamp at the ends.
+        let mut app = App::new(String::new(), None, None);
+        app.apply_snapshot(make_snapshot());
+        select_node(&mut app, |n| matches!(n, TreeNode::Source(_)));
+        app.apply_intent(Intent::OpenDialog);
+        let n = app.dialog.as_ref().unwrap().actions.len();
+        assert!(n >= 2, "source dialog has multiple actions");
+        app.dialog_up(); // already at top: no-op
+        assert_eq!(app.dialog.as_ref().unwrap().selected, 0);
+        for _ in 0..n + 2 {
+            app.dialog_down();
+        }
+        assert_eq!(
+            app.dialog.as_ref().unwrap().selected,
+            n - 1,
+            "down clamps at the last action"
+        );
     }
 }

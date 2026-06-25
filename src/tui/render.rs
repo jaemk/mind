@@ -1,8 +1,10 @@
 //! Ratatui draw functions for the TUI.
 //!
-//! Pure render of `&App`; no state mutation, no lock. The TUI is free to use
-//! Unicode (box drawing, geometric markers) for presentation; the ASCII-only
-//! rule is for written prose, not the interface.
+//! Pure render of `&App`; no domain-state mutation, no lock (the one exception is
+//! the `App::scroll` offset cache, updated here because the viewport height is
+//! known only at draw time, TUI-16). The TUI is free to use Unicode (box drawing,
+//! geometric markers) for presentation; the ASCII-only rule is for written prose,
+//! not the interface.
 //!
 //! Rendering is responsive (TUI-42): long text wraps to the terminal width and
 //! overlays are clamped to the terminal size, so nothing is cut off on a narrow
@@ -20,7 +22,7 @@ use crate::tui::tree::TreeNode;
 
 /// The bottom key-hint line. Uses a middot separator and wraps on narrow
 /// terminals (TUI-42).
-const HINTS: &str = " j/k move \u{b7} Enter expand/collapse \u{b7} i install \u{b7} d delete \u{b7} s sync \u{b7} u upgrade \u{b7} m meld \u{b7} M unmeld \u{b7} C lobes \u{b7} q quit";
+const HINTS: &str = " j/k move \u{b7} Enter details \u{b7} Space expand \u{b7} i install \u{b7} d delete \u{b7} s sync \u{b7} u upgrade \u{b7} m meld \u{b7} M unmeld \u{b7} C lobes \u{b7} q quit";
 
 /// Estimate how many terminal rows `text` occupies when wrapped at `width`
 /// columns (greedy word wrap, hard-splitting words longer than the width).
@@ -70,6 +72,26 @@ fn line_rows(line: &str, w: usize) -> u16 {
 /// overlay off screen (TUI-42).
 fn modal_width(desired: u16, min: u16, avail: u16) -> u16 {
     desired.max(min).min(avail.max(1))
+}
+
+/// First-visible-row offset that keeps the `selected` row within the middle
+/// two-thirds of a `rows`-high viewport (TUI-16). The offset moves only enough to
+/// hold a ~1/6 margin above and below the selection, so the highlight does not
+/// reach the top or bottom edge while there are more rows to scroll. `prev` is the
+/// previous offset, kept stable while the selection stays inside the band. Near
+/// the list ends the highlight may sit at the edge (nothing more to scroll); when
+/// everything fits, the offset is 0.
+fn scroll_offset(prev: usize, selected: usize, len: usize, rows: usize) -> usize {
+    if rows == 0 || len <= rows {
+        return 0;
+    }
+    let max_off = len - rows;
+    let margin = rows / 6;
+    // The selection must stay within [off + margin, off + rows - 1 - margin].
+    let lo = (selected + margin + 1).saturating_sub(rows); // off >= this
+    let hi = selected.saturating_sub(margin).min(max_off); // off <= this
+    let lo = lo.min(hi); // tiny-viewport safety: never invert the bounds
+    prev.clamp(lo, hi)
 }
 
 /// Draw the full TUI to the given frame.
@@ -130,6 +152,11 @@ fn draw_frame(frame: &mut Frame, app: &App) {
     if app.lobe_input_active {
         draw_lobe_input(frame, app, size);
     }
+
+    // If the details dialog is open, overlay it (TUI-26).
+    if let Some(dialog) = &app.dialog {
+        draw_dialog(frame, dialog, size);
+    }
 }
 
 /// A rounded-border block with a title, the common frame for panes and modals.
@@ -164,8 +191,18 @@ fn draw_tree(frame: &mut Frame, app: &App, area: Rect) {
         .map(|node| flat_node_to_list_item(node))
         .collect();
 
+    // Keep the highlighted row within the middle two-thirds of the visible area
+    // (TUI-16): compute the first-visible-row offset from the cached previous
+    // offset and the real viewport height (area minus the two border rows), then
+    // store it back so the scroll position is stable as the selection moves within
+    // the band.
+    let rows = area.height.saturating_sub(2) as usize;
+    let offset = scroll_offset(app.scroll.get(), app.selected, app.visible.len(), rows);
+    app.scroll.set(offset);
+
     let mut state = ListState::default();
     state.select(Some(app.selected));
+    *state.offset_mut() = offset;
 
     let list = List::new(items)
         .block(titled_block("Items"))
@@ -319,6 +356,76 @@ fn draw_lobes_modal(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(hint, splits[1]);
 }
 
+/// Draw the details-and-actions dialog opened with Enter on a source or item
+/// (TUI-26): the node's detail at the top, its valid actions as a selectable
+/// list, and a key hint. Centered and clamped to the terminal (TUI-42).
+// spec: TUI-26
+fn draw_dialog(frame: &mut Frame, dialog: &crate::tui::app::Dialog, area: Rect) {
+    let w = modal_width(area.width * 2 / 3, 40, area.width);
+    let detail_h = dialog.detail.len() as u16;
+    let actions_h = (dialog.actions.len() as u16).max(1);
+    let content_h = detail_h
+        .saturating_add(1)
+        .saturating_add(actions_h)
+        .saturating_add(1);
+    let h = content_h
+        .saturating_add(2)
+        .clamp(6.min(area.height.max(1)), area.height.max(1));
+    let x = (area.width.saturating_sub(w)) / 2;
+    let y = (area.height.saturating_sub(h)) / 2;
+    let modal_area = Rect::new(x, y, w, h);
+
+    let block = titled_block(&dialog.title).style(Style::default().fg(Color::Yellow));
+    let inner = block.inner(modal_area);
+    frame.render_widget(ratatui::widgets::Clear, modal_area);
+    frame.render_widget(block, modal_area);
+
+    let splits = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(detail_h),
+            Constraint::Length(1), // blank separator
+            Constraint::Min(actions_h),
+            Constraint::Length(1), // hint
+        ])
+        .split(inner);
+
+    let detail = Paragraph::new(dialog.detail.join("\n"))
+        .style(Style::default().fg(Color::Gray))
+        .wrap(Wrap { trim: false });
+    frame.render_widget(detail, splits[0]);
+
+    let items: Vec<ListItem> = dialog
+        .actions
+        .iter()
+        .enumerate()
+        .map(|(i, a)| {
+            let marker = if i == dialog.selected {
+                "\u{276f} "
+            } else {
+                "  "
+            };
+            let style = if i == dialog.selected {
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            ListItem::new(Line::from(vec![Span::styled(
+                format!("{marker}{}", a.label),
+                style,
+            )]))
+        })
+        .collect();
+    frame.render_widget(List::new(items), splits[2]);
+
+    let hint = Paragraph::new("  [j/k] move   [Enter/y] run   [Esc/n] close")
+        .style(Style::default().fg(Color::DarkGray))
+        .wrap(Wrap { trim: false });
+    frame.render_widget(hint, splits[3]);
+}
+
 /// Draw the lobe-path input box (TUI-23): where the user types the path for a
 /// new agent home to add via `config lobes add` (CLI-112).
 // spec: TUI-23 CLI-112
@@ -409,8 +516,119 @@ fn draw_modal(frame: &mut Frame, app: &App, area: Rect) {
 
 #[cfg(test)]
 mod tests {
-    use super::{confirm_modal_text, modal_width, wrapped_rows};
+    use super::{confirm_modal_text, modal_width, scroll_offset, wrapped_rows};
     use crate::tui::app::{ActionKind, PendingAction};
+
+    #[test]
+    fn scroll_offset_keeps_selection_in_middle_band() {
+        // spec: TUI-16 - the highlight stays within the middle two-thirds: with a
+        // 12-row viewport the margin is 12/6 = 2, so the selection is held between
+        // row 2 and row 9 of the band.
+        let rows = 12;
+        let len = 100;
+        // Everything fits -> no scrolling.
+        assert_eq!(scroll_offset(0, 5, 8, 12), 0, "list shorter than viewport");
+        // At the very top the selection sits at the edge (nothing above to show).
+        assert_eq!(scroll_offset(0, 0, len, rows), 0);
+        // Moving down within the top band does not scroll yet (selection < rows-1-margin = 9).
+        assert_eq!(scroll_offset(0, 9, len, rows), 0, "still inside the band");
+        // One past the bottom margin: the view scrolls so the selection stays in the band.
+        let off = scroll_offset(0, 10, len, rows);
+        assert!(
+            off >= 1,
+            "must scroll once selection passes the bottom margin: {off}"
+        );
+        assert!(
+            (off..off + rows).contains(&10),
+            "selection stays visible after scroll"
+        );
+        let margin = rows / 6;
+        assert!(
+            10 >= off + margin && 10 <= off + rows - 1 - margin,
+            "selection stays within the middle band [{}, {}], off={off}",
+            off + margin,
+            off + rows - 1 - margin
+        );
+    }
+
+    #[test]
+    fn scroll_offset_clamps_at_list_end() {
+        // spec: TUI-16 - near the end there is nothing further to scroll, so the
+        // offset clamps to len-rows and the highlight may reach the bottom edge.
+        let rows = 10;
+        let len = 30;
+        let off = scroll_offset(0, len - 1, len, rows);
+        assert_eq!(off, len - rows, "offset clamps to the last full page");
+        // The last row is selectable and visible.
+        assert!((off..off + rows).contains(&(len - 1)));
+    }
+
+    #[test]
+    fn scroll_offset_zero_rows_returns_zero_without_panic() {
+        // spec: TUI-16 - a zero-height viewport (rows == 0) must not panic on the
+        // `len - rows` / margin arithmetic. The `len <= rows` short-circuit does
+        // NOT cover this when len > 0 (0 < len is false-leaning), so the explicit
+        // `rows == 0` guard is exercised here: it returns 0.
+        assert_eq!(scroll_offset(0, 0, 0, 0), 0, "empty list, zero rows");
+        assert_eq!(scroll_offset(5, 50, 100, 0), 0, "nonempty list, zero rows");
+    }
+
+    #[test]
+    fn scroll_offset_tiny_viewport_margin_zero_never_inverts_bounds() {
+        // spec: TUI-16 - on a viewport smaller than 6 rows the margin (rows/6) is 0,
+        // so the band collapses to the full viewport. The offset must still keep the
+        // selection visible and clamp into [0, len-rows] without the lo/hi bounds
+        // inverting (the `lo.min(hi)` safety). Regression target: a panic or an
+        // off-screen selection on a very short terminal.
+        let len = 20;
+        for rows in 1..=5usize {
+            let margin = rows / 6;
+            assert_eq!(margin, 0, "margin is 0 below 6 rows");
+            for selected in 0..len {
+                let off = scroll_offset(0, selected, len, rows);
+                assert!(off <= len - rows, "offset within page range, rows={rows}");
+                assert!(
+                    (off..off + rows).contains(&selected),
+                    "selection {selected} must stay visible on a {rows}-row viewport, off={off}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn scroll_offset_scrolls_up_when_selection_rises_above_the_band() {
+        // spec: TUI-16 - the symmetric case to the scroll-down test: starting from a
+        // scrolled-down offset, moving the selection up past the TOP margin must
+        // scroll the view up so the highlight does not sit at the very top edge while
+        // there are rows above to show. The existing tests only cover downward
+        // motion; this pins the upper-bound branch (lo) of the clamp.
+        let rows = 12;
+        let len = 100;
+        let margin = rows / 6; // 2
+        // Start scrolled down with the selection near the bottom of the band.
+        let prev = 50;
+        // Selection moves up to just above the top margin of that band.
+        let selected = prev + margin - 1; // 51, inside [prev+margin=52? no] -> above top margin
+        let off = scroll_offset(prev, selected, len, rows);
+        assert!(off < prev, "view must scroll up: off={off} prev={prev}");
+        assert!(
+            selected >= off + margin && selected <= off + rows - 1 - margin,
+            "selection stays within the middle band [{}, {}] after scrolling up, off={off}",
+            off + margin,
+            off + rows - 1 - margin
+        );
+    }
+
+    #[test]
+    fn scroll_offset_is_stable_within_the_band() {
+        // spec: TUI-16 - a previous offset is preserved while the selection stays
+        // inside the band (the list does not jump on every keystroke).
+        let rows = 12;
+        let len = 100;
+        // Selection at row 40 with a prior offset of 35: 40 is within [37, 44], so
+        // the offset is left unchanged.
+        assert_eq!(scroll_offset(35, 40, len, rows), 35);
+    }
 
     #[test]
     fn wrapped_rows_counts_word_wrap_and_hard_splits() {
