@@ -269,27 +269,22 @@ fn from_decl(
     }
     let path = root.join(&decl.path);
     let meta = meta_file(kind, &path);
-    let description = decl
-        .description
-        .clone()
-        .or_else(|| frontmatter::description(&meta));
-    Ok(CatalogItem {
+    Ok(build_item(
+        source,
+        prefix,
         kind,
-        name: decl.name.clone(),
-        source: source.name.clone(),
-        prefix: prefix.clone(),
+        decl.name.clone(),
         path,
-        description,
-        link_rel: decl.link.clone(),
-        bin: tool_field(kind, decl.bin.clone(), &meta, "bin"),
-        build: tool_field(kind, decl.build.clone(), &meta, "build"),
-        // HOOK-80: a `mind.toml` install/uninstall is valid on any kind; a
-        // tool's TOOL.md may also carry one in frontmatter.
-        install: nonempty(decl.install.clone())
-            .or_else(|| lifecycle_frontmatter(kind, &meta, "install")),
-        uninstall: nonempty(decl.uninstall.clone())
-            .or_else(|| lifecycle_frontmatter(kind, &meta, "uninstall")),
-    })
+        &meta,
+        ItemOverrides {
+            description: decl.description.clone(),
+            link: decl.link.clone(),
+            bin: decl.bin.clone(),
+            build: decl.build.clone(),
+            install: decl.install.clone(),
+            uninstall: decl.uninstall.clone(),
+        },
+    ))
 }
 
 /// Read a lifecycle hook (`install`/`uninstall`, HOOK-80) from an item's meta
@@ -315,6 +310,48 @@ fn tool_field(kind: ItemKind, explicit: Option<String>, meta: &Path, key: &str) 
         return None;
     }
     explicit.or_else(|| frontmatter::file_field(meta, key))
+}
+
+/// Field overrides from a `[[items]]` declaration. Every field is empty for
+/// convention discovery (`make_item`); a `mind.toml` item supplies the ones it
+/// declares (`from_decl`). Each takes precedence over the frontmatter fallback.
+#[derive(Default)]
+struct ItemOverrides {
+    description: Option<String>,
+    link: Option<String>,
+    bin: Option<String>,
+    build: Option<String>,
+    install: Option<String>,
+    uninstall: Option<String>,
+}
+
+/// The single `CatalogItem` constructor: it applies the override-then-frontmatter
+/// fallback policy once, so convention discovery and `[[items]]` declarations
+/// share one definition of how each field is resolved.
+fn build_item(
+    source: &Source,
+    prefix: &Option<String>,
+    kind: ItemKind,
+    name: String,
+    path: PathBuf,
+    meta: &Path,
+    ov: ItemOverrides,
+) -> CatalogItem {
+    CatalogItem {
+        kind,
+        name,
+        source: source.name.clone(),
+        prefix: prefix.clone(),
+        path,
+        description: ov.description.or_else(|| frontmatter::description(meta)),
+        link_rel: ov.link,
+        bin: tool_field(kind, ov.bin, meta, "bin"),
+        build: tool_field(kind, ov.build, meta, "build"),
+        // HOOK-80: a `mind.toml` install/uninstall is valid on any kind; a tool's
+        // TOOL.md may also carry one in frontmatter. An empty value is absent.
+        install: nonempty(ov.install).or_else(|| lifecycle_frontmatter(kind, meta, "install")),
+        uninstall: nonempty(ov.uninstall).or_else(|| lifecycle_frontmatter(kind, meta, "uninstall")),
+    }
 }
 
 /// Discover items by glob, relative to the repo root. Nested `sources` are
@@ -422,21 +459,9 @@ fn make_item(
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default(),
     };
-    CatalogItem {
-        kind,
-        name: bare,
-        source: source.name.clone(),
-        prefix: prefix.clone(),
-        path,
-        description: frontmatter::description(meta),
-        link_rel: None,
-        bin: tool_field(kind, None, meta, "bin"),
-        build: tool_field(kind, None, meta, "build"),
-        // HOOK-80: convention discovery reads install/uninstall only from a
-        // tool's TOOL.md frontmatter; other kinds declare them via mind.toml.
-        install: lifecycle_frontmatter(kind, meta, "install"),
-        uninstall: lifecycle_frontmatter(kind, meta, "uninstall"),
-    }
+    // Convention discovery carries no overrides: every field falls back to the
+    // item's frontmatter (HOOK-80: install/uninstall only from a tool's TOOL.md).
+    build_item(source, prefix, kind, bare, path, meta, ItemOverrides::default())
 }
 
 #[cfg(test)]
