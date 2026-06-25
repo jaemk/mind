@@ -25,12 +25,6 @@ const ALLOWLIST: &[&str] = &[
     // definitional, exercised by the expansion tests.
     "NS-3", "NS-10", // Discovery edge: missing directories yield no items.
     "DSC-13",
-    // Planned: the frontmatter reader interpreting folded/literal block scalars
-    // (`>-`, `|-`) for an item's description. Moves to a citing test when built.
-    "DSC-22",
-    // Planned: recall/probe mark an item out of date on source-content hash drift
-    // (local dirs, manual edits), not just a commit difference. Cited when built.
-    "CLI-75",
     // Planned features (see spec/README.md feature status = planned): documented
     // with stable IDs ahead of implementation. Each must move to a citing test
     // when built, at which point it is removed from this allowlist.

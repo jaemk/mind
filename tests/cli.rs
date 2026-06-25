@@ -5742,15 +5742,26 @@ fn upgrade_skips_disallowed_source_when_locked() {
     );
 
     // The installed item is unchanged: its recorded commit/hash did not advance.
+    // Extract the commit line from each output and compare only that, because the
+    // "out of date" status line legitimately differs (the source has drifted but
+    // the upgrade was blocked; the displayed outdated marker is expected).
     let after = sb
         .mind_env(
             &["recall", "skill:review"],
             &[("MIND_POLICY_FILE", policy.as_str())],
         )
         .stdout;
+    let commit_before = before.lines().find(|l| l.contains("commit")).unwrap_or("");
+    let commit_after = after.lines().find(|l| l.contains("commit")).unwrap_or("");
     assert_eq!(
-        before, after,
-        "the skipped item must stay at its old version: before={before} after={after}"
+        commit_before, commit_after,
+        "the skipped item's recorded commit must not advance: before={before} after={after}"
+    );
+    let hash_before = before.lines().find(|l| l.contains("hash")).unwrap_or("");
+    let hash_after = after.lines().find(|l| l.contains("hash")).unwrap_or("");
+    assert_eq!(
+        hash_before, hash_after,
+        "the skipped item's recorded hash must not advance: before={before} after={after}"
     );
 }
 
@@ -8734,5 +8745,98 @@ fn review_lists_item_install_and_uninstall_hooks() {
     assert!(
         all.contains("declares an uninstall hook"),
         "review must list the uninstall hook: {all}"
+    );
+}
+
+// ---- CLI-75: hash-based outdated detection ----------------------------------
+
+/// Meld a local directory source, learn an item, edit the item source file in
+/// place (no commit), then check that `mind recall` marks the item outdated.
+/// A local linked source is read live from its working tree, so a content
+/// change changes the hash while the commit is unchanged.
+// spec: CLI-75
+#[test]
+fn recall_marks_item_outdated_after_in_place_content_edit() {
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+
+    let r = sb.mind(&["meld", &spec, "--yes"]);
+    assert!(r.success, "meld failed: {} {}", r.stdout, r.stderr);
+
+    // Verify the item is initially NOT marked outdated.
+    let r = sb.mind(&["recall"]);
+    assert!(r.success, "recall failed: {} {}", r.stdout, r.stderr);
+    assert!(
+        !r.stdout.contains("outdated"),
+        "freshly installed item must not be outdated: {}",
+        r.stdout
+    );
+
+    // Edit the item source file in place without committing. For a linked local
+    // source this changes the content hash while the commit is unchanged.
+    write(
+        &sb.source.join("skills/review/SKILL.md"),
+        "---\nname: review\ndescription: Review the diff for bugs\n---\n# review skill\nmodified content\n",
+    );
+
+    // Now `mind recall` must mark skill:review as outdated.
+    let r = sb.mind(&["recall"]);
+    assert!(r.success, "recall failed: {} {}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("outdated"),
+        "recall must mark the item outdated after an in-place content edit: {}",
+        r.stdout
+    );
+}
+
+/// After an in-place content edit, `mind recall <item>` must show an out-of-date
+/// note in the single-item detail view.
+#[test]
+fn recall_item_detail_shows_out_of_date_after_content_edit() {
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+
+    let r = sb.mind(&["meld", &spec, "--yes"]);
+    assert!(r.success, "meld failed: {} {}", r.stdout, r.stderr);
+
+    // Edit source file in place without committing.
+    write(
+        &sb.source.join("skills/review/SKILL.md"),
+        "---\nname: review\ndescription: Review the diff for bugs\n---\n# review skill\nmodified content\n",
+    );
+
+    let r = sb.mind(&["recall", "skill:review"]);
+    assert!(r.success, "recall failed: {} {}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("out of date"),
+        "recall <item> must show out-of-date note after content edit: {}",
+        r.stdout
+    );
+}
+
+/// Control case: an item whose source file has not been edited must NOT be
+/// marked outdated by `mind recall`.
+#[test]
+fn recall_does_not_mark_unedited_item_outdated() {
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+
+    let r = sb.mind(&["meld", &spec, "--yes"]);
+    assert!(r.success, "meld failed: {} {}", r.stdout, r.stderr);
+
+    let r = sb.mind(&["recall"]);
+    assert!(r.success, "recall failed: {} {}", r.stdout, r.stderr);
+    assert!(
+        !r.stdout.contains("outdated"),
+        "unedited item must not be marked outdated: {}",
+        r.stdout
+    );
+
+    let r = sb.mind(&["recall", "skill:review"]);
+    assert!(r.success, "recall failed: {} {}", r.stdout, r.stderr);
+    assert!(
+        !r.stdout.contains("out of date"),
+        "recall <item> must not show out-of-date for unedited item: {}",
+        r.stdout
     );
 }

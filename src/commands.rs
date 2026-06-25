@@ -1569,12 +1569,16 @@ fn source_status(paths: &Paths, source_name: &str) -> Result<()> {
             .find(|m| m.source == it.source && m.kind == it.kind && m.bare_name == it.name);
         match installed {
             Some(m) => {
-                let lag = match source.commit.as_deref() {
-                    Some(c) if c != m.commit => out.yellow(&format!(
-                        " (outdated; source @ {}, run `mind upgrade`)",
-                        short(c)
-                    )),
-                    _ => String::new(),
+                // An item is outdated when the source commit advanced past the
+                // recorded commit, OR when the source content hash differs from
+                // the hash recorded at install (e.g. a local source edited in
+                // place without a new commit).
+                let commit_lag = source.commit.as_deref().is_some_and(|c| c != m.commit);
+                let hash_lag = hash_path(&it.path).ok().is_some_and(|h| h != m.hash);
+                let lag = if commit_lag || hash_lag {
+                    out.yellow(" (outdated; run `mind upgrade`)")
+                } else {
+                    String::new()
                 };
                 println!(
                     "  {} {}  installed @ {}{}",
@@ -2522,6 +2526,28 @@ pub fn recall(
         for link in &found.links {
             println!("  {}{link}", out.dim("link    "));
         }
+        // Report out of date when the current source content hash or source
+        // commit differs from what was recorded at install.
+        {
+            let registry = Registry::load(paths)?;
+            let catalog = catalog::scan(paths, &registry)?;
+            if let Some(cat) = catalog.iter().find(|c| {
+                c.kind == found.kind && c.name == found.bare_name && c.source == found.source
+            }) {
+                let commit_lag = registry
+                    .find(&found.source)
+                    .and_then(|s| s.commit.as_deref())
+                    .is_some_and(|c| c != found.commit);
+                let hash_lag = hash_path(&cat.path).ok().is_some_and(|h| h != found.hash);
+                if commit_lag || hash_lag {
+                    println!(
+                        "  {}{}",
+                        out.dim("status  "),
+                        out.yellow("out of date; run `mind upgrade`")
+                    );
+                }
+            }
+        }
         return Ok(());
     }
 
@@ -2646,11 +2672,23 @@ pub fn recall(
         for it in items {
             let key = it.key();
             match manifest.items.get(&key) {
-                Some(m) => rows.push(vec![
-                    format!("  {}", out.ok()),
-                    key,
-                    format!("installed @ {}", out.green(&short(&m.commit))),
-                ]),
+                Some(m) => {
+                    // Mark out of date when the commit advanced past the recorded
+                    // one, OR when the source content hash differs (handles local
+                    // sources edited in place without a new commit).
+                    let commit_lag = s.commit.as_deref().is_some_and(|c| c != m.commit);
+                    let hash_lag = hash_path(&it.path).ok().is_some_and(|h| h != m.hash);
+                    let outdated = if commit_lag || hash_lag {
+                        format!("  {}", out.yellow("(outdated; run mind upgrade)"))
+                    } else {
+                        String::new()
+                    };
+                    rows.push(vec![
+                        format!("  {}", out.ok()),
+                        key,
+                        format!("installed @ {}{}", out.green(&short(&m.commit)), outdated),
+                    ]);
+                }
                 None => rows.push(vec![
                     format!("  {}", out.available()),
                     out.dim(&key),
@@ -2790,24 +2828,38 @@ pub fn probe(
     let mut rows = hits
         .iter()
         .map(|it| {
-            let hash = hash_path(&it.path)
-                .map(|h| short(&h))
-                .unwrap_or_else(|_| "-".into());
+            let cur = hash_path(&it.path).ok();
+            let hash = cur.as_deref().map(short).unwrap_or_else(|| "-".into());
+            // The matched installed item, if any, for the install marker and the
+            // out-of-date check (CLI-75).
+            let m = manifest
+                .items
+                .values()
+                .find(|m| m.source == it.source && m.kind == it.kind && m.bare_name == it.name);
+            // CLI-75: an installed item is out of date when its current
+            // source-content hash differs from the recorded hash, or its source
+            // commit advanced past the installed one.
+            let outdated = m.is_some_and(|m| {
+                let hash_drift = cur.as_deref().is_some_and(|h| h != m.hash);
+                let commit_drift = registry
+                    .find(&it.source)
+                    .and_then(|s| s.commit.as_deref())
+                    .is_some_and(|c| c != m.commit);
+                hash_drift || commit_drift
+            });
             // CLI-81: a leading `*` marks an installed item (greened when color is
             // on). Not-installed rows have an empty marker cell so the row does not
             // start with `*`.
-            let marker = if installed(it) {
+            let marker = if m.is_some() {
                 out.green("*")
             } else {
                 String::new()
             };
-            vec![
-                marker,
-                it.key(),
-                out.dim(&it.source),
-                out.dim(&hash),
-                summary(it.description.as_deref(), 60),
-            ]
+            let mut desc = summary(it.description.as_deref(), 60);
+            if outdated {
+                desc = format!("{desc} {}", out.yellow("(outdated; run `mind upgrade`)"));
+            }
+            vec![marker, it.key(), out.dim(&it.source), out.dim(&hash), desc]
         })
         .collect::<Vec<_>>();
     // UNM-3: unmanaged rows are marked in the source column and carry their lobe

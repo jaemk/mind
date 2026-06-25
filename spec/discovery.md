@@ -31,19 +31,18 @@ Three layers, in order:
 - `DSC-20` An item's description is the top-level `description` from the YAML
   frontmatter of its `SKILL.md` (skill) or its `.md` (agent, rule).
 - `DSC-21` The frontmatter reader handles a leading `--- ... ---` block with
-  top-level scalar keys and surrounding quotes. Block scalars and nested
-  structures are not interpreted. No frontmatter yields no description.
-- `DSC-22` (planned) The frontmatter reader also interprets a top-level block
-  scalar value: a folded scalar (`>`, `>-`, `>+`) or a literal scalar (`|`, `|-`,
-  `|+`) introduced by the indicator after the colon. The value is the run of
-  more-indented lines that follow, ending at the first line that dedents to or
-  below the key's indentation or at the closing `---`. A folded scalar joins its
-  lines with single spaces (a blank line is a paragraph break); a literal scalar
-  preserves its line breaks; the chomping indicator (`-` strip, `+` keep, none
-  clip) governs trailing newlines. The result is trimmed for display in
-  `recall`/`probe`. This extends DSC-21 (single-line scalars); other nested
-  structures and flow collections remain uninterpreted. When built, DSC-21's
-  "block scalars are not interpreted" no longer holds.
+  top-level scalar keys and surrounding quotes, including block scalars (DSC-22).
+  Flow collections and nested mappings are not interpreted. No frontmatter yields
+  no description.
+- `DSC-22` The frontmatter reader interprets a top-level block scalar value: a
+  folded scalar (`>`, `>-`, `>+`) or a literal scalar (`|`, `|-`, `|+`) introduced
+  by the indicator after the colon. The value is the run of more-indented lines
+  that follow, ending at the first line that dedents to or below the key's
+  indentation or at the closing `---`. A folded scalar joins its lines with single
+  spaces (a blank line is a paragraph break); a literal scalar preserves its line
+  breaks; the chomping indicator (`-` strip, `+` keep, none clip) governs trailing
+  newlines. The result is trimmed for display in `recall`/`probe`. Other nested
+  structures and flow collections remain uninterpreted.
 
 ## mind.toml
 
