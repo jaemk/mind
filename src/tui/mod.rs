@@ -653,7 +653,7 @@ mod tests {
             lobes: vec![paths.claude_home.to_str().unwrap().to_string()],
             ..Default::default()
         }
-        .save(&paths.mind_home)
+        .save(&paths)
         .unwrap();
 
         // Build a source: skill `review` references agent `dev` via {{ns:dev}}.
@@ -755,7 +755,7 @@ mod tests {
             lobes: vec![paths.claude_home.to_str().unwrap().to_string()],
             ..Default::default()
         }
-        .save(&paths.mind_home)
+        .save(&paths)
         .unwrap();
 
         // Source with a single self-contained skill: no `{{ns:}}` tokens at all.
@@ -849,7 +849,7 @@ mod tests {
             lobes: vec![paths.claude_home.to_str().unwrap().to_string()],
             ..Default::default()
         }
-        .save(&paths.mind_home)
+        .save(&paths)
         .unwrap();
         // No source melded: any learn ref is unresolvable.
 

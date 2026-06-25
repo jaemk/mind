@@ -93,9 +93,11 @@ fn dispatch(paths: &Paths, kind: ActionKind) -> Result<()> {
                 paths,
                 &item_ref,
                 false,
-                true,
-                commands::Clobber::Error,
-                false,
+                commands::InstallFlow {
+                    yes: true,
+                    clobber: commands::Clobber::Error,
+                    dangerously_skip: false,
+                },
             )?;
         }
         // spec: TUI-20
@@ -707,7 +709,7 @@ mod tests {
         assert!(result.is_ok(), "LobeAdd should succeed: {:?}", result.err());
 
         // Verify the lobe was persisted to config.
-        let cfg = crate::config::Config::load(&paths.mind_home).unwrap();
+        let cfg = crate::config::Config::load(&paths).unwrap();
         assert!(
             cfg.lobes.contains(&lobe_path),
             "lobe must appear in config after LobeAdd: {:?}",
@@ -748,7 +750,7 @@ mod tests {
             result.err()
         );
 
-        let cfg = crate::config::Config::load(&paths.mind_home).unwrap();
+        let cfg = crate::config::Config::load(&paths).unwrap();
         assert!(
             !cfg.lobes.contains(&lobe_path),
             "lobe must be absent from config after LobeRemove: {:?}",
@@ -802,7 +804,7 @@ mod tests {
             execute(&paths, action).expect("LobeAdd must succeed");
         }
 
-        let cfg = crate::config::Config::load(&paths.mind_home).unwrap();
+        let cfg = crate::config::Config::load(&paths).unwrap();
         let count = cfg.lobes.iter().filter(|l| *l == &lobe_path).count();
         assert_eq!(
             count, 1,
@@ -910,7 +912,7 @@ mod tests {
             lobes: vec![paths.claude_home.to_str().unwrap().to_string()],
             ..Default::default()
         }
-        .save(&paths.mind_home)
+        .save(&paths)
         .unwrap();
 
         let src = make_dep_source_repo(&base);
@@ -1033,7 +1035,7 @@ mod tests {
             lobes: vec![paths.claude_home.to_str().unwrap().to_string()],
             ..Default::default()
         }
-        .save(&paths.mind_home)
+        .save(&paths)
         .unwrap();
 
         let src = make_chain_source_repo(&base);
@@ -1109,7 +1111,7 @@ mod tests {
             lobes: vec![paths.claude_home.to_str().unwrap().to_string()],
             ..Default::default()
         }
-        .save(&paths.mind_home)
+        .save(&paths)
         .unwrap();
 
         let src = make_dep_source_repo(&base); // skill:review -> agent:dev
@@ -1229,7 +1231,7 @@ mod tests {
             lobes: vec![paths.claude_home.to_str().unwrap().to_string()],
             ..Default::default()
         }
-        .save(&paths.mind_home)
+        .save(&paths)
         .unwrap();
 
         // Two source repos that both ship "skill:review".

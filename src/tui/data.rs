@@ -156,9 +156,7 @@ fn load_inner(paths: &Paths) -> Result<Snapshot> {
 
     // Load configured lobes for TUI-23. Falls back to empty (default lobe used).
     // spec: TUI-23
-    let lobes = Config::load(&paths.mind_home)
-        .map(|c| c.lobes)
-        .unwrap_or_default();
+    let lobes = Config::load(paths).map(|c| c.lobes).unwrap_or_default();
 
     Ok(Snapshot {
         generation: next_generation(),

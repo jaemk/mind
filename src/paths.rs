@@ -63,6 +63,11 @@ impl Paths {
         self.mind_home.join("manifest.json")
     }
 
+    /// The user config file (`config.toml`) under the mind home.
+    pub fn config_file(&self) -> PathBuf {
+        self.mind_home.join("config.toml")
+    }
+
     /// Root under which melded repos are cloned.
     pub fn sources_dir(&self) -> PathBuf {
         self.mind_home.join("sources")
@@ -144,7 +149,7 @@ impl Paths {
                 }
             }
             if h.is_empty() {
-                let configured = Config::load(&self.mind_home)?.lobes;
+                let configured = Config::load(self)?.lobes;
                 if !configured.is_empty() {
                     h = configured
                         .iter()
@@ -208,12 +213,12 @@ impl Paths {
 
     /// Create `config.toml` with default values if it does not exist yet.
     pub fn ensure_config(&self) -> Result<()> {
-        if !Config::path(&self.mind_home).exists() {
+        if !self.config_file().exists() {
             Config {
                 lobes: vec![self.default_lobe()],
                 ..Default::default()
             }
-            .save(&self.mind_home)?;
+            .save(self)?;
         }
         Ok(())
     }

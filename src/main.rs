@@ -181,19 +181,15 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             } else {
                 commands::Clobber::Prompt
             };
+            let flow = commands::InstallFlow {
+                yes,
+                clobber,
+                dangerously_skip: dangerously_skip_install_hook_check,
+            };
             // CLI-12: re-melding an already-melded source is not an error; it
             // ensures the items are installed, else reports their status.
             if commands::is_melded(paths, &repo)? {
-                commands::remeld(
-                    paths,
-                    &repo,
-                    alias,
-                    link_only,
-                    yes,
-                    clobber,
-                    dangerously_skip_install_hook_check,
-                    recursive,
-                )?;
+                commands::remeld(paths, &repo, alias, link_only, flow, recursive)?;
             } else {
                 commands::meld(
                     paths,
@@ -209,26 +205,13 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
                 // CLI-23: by default, offer to install the melded source's items
                 // right away (preview + prompt). `--link-only` stops at registering.
                 if !link_only {
-                    commands::install_melded_source(
-                        paths,
-                        &repo,
-                        yes,
-                        clobber,
-                        dangerously_skip_install_hook_check,
-                    )?;
+                    commands::install_melded_source(paths, &repo, flow)?;
                     // DSC-54 installs only the top-level source by default. Walk the
                     // curated chain and install each nested source the curator
                     // flagged `install = true` (DSC-58), or every nested source with
                     // `--recursive` (DSC-55).
                     if let Ok(top) = crate::source::parse_spec(&repo) {
-                        commands::install_curated_sources(
-                            paths,
-                            &top.name,
-                            recursive,
-                            yes,
-                            clobber,
-                            dangerously_skip_install_hook_check,
-                        )?;
+                        commands::install_curated_sources(paths, &top.name, recursive, flow)?;
                     }
                 }
             }
@@ -266,13 +249,15 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
                 paths,
                 &item,
                 dry_run,
-                yes,
-                if force {
-                    commands::Clobber::Force
-                } else {
-                    commands::Clobber::Prompt
+                commands::InstallFlow {
+                    yes,
+                    clobber: if force {
+                        commands::Clobber::Force
+                    } else {
+                        commands::Clobber::Prompt
+                    },
+                    dangerously_skip: dangerously_skip_install_hook_check,
                 },
-                dangerously_skip_install_hook_check,
             )
         }
         Command::Forget {

@@ -1,7 +1,5 @@
 //! User configuration for `mind`, stored at `~/.mind/config.toml`.
 
-use std::path::{Path, PathBuf};
-
 use serde::{Deserialize, Serialize};
 
 use crate::error::{MindError, Result};
@@ -28,14 +26,9 @@ pub struct Config {
 }
 
 impl Config {
-    /// The config file path under a mind home.
-    pub fn path(mind_home: &Path) -> PathBuf {
-        mind_home.join("config.toml")
-    }
-
     /// Load `config.toml` from the mind home, returning defaults if absent.
-    pub fn load(mind_home: &Path) -> Result<Config> {
-        let file = Self::path(mind_home);
+    pub fn load(paths: &Paths) -> Result<Config> {
+        let file = paths.config_file();
         match std::fs::read_to_string(&file) {
             Ok(text) => toml::from_str(&text).map_err(|e| MindError::Toml {
                 path: file.clone(),
@@ -47,9 +40,10 @@ impl Config {
     }
 
     /// Write the config back to `config.toml`, creating the mind home if needed.
-    pub fn save(&self, mind_home: &Path) -> Result<()> {
-        std::fs::create_dir_all(mind_home).map_err(|e| MindError::io(mind_home, e))?;
-        let file = Self::path(mind_home);
+    pub fn save(&self, paths: &Paths) -> Result<()> {
+        std::fs::create_dir_all(&paths.mind_home)
+            .map_err(|e| MindError::io(&paths.mind_home, e))?;
+        let file = paths.config_file();
         let text = toml::to_string(self).map_err(|e| MindError::TomlWrite {
             path: file.clone(),
             source: e,

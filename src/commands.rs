@@ -47,7 +47,7 @@ pub fn meld(
     // (Err = invalid policy, fail closed via `?`; None = unmanaged, inert).
     let policy = Policy::load()?;
     // CLI-19: prefer SSH for remotes when the user's config asks for it.
-    let prefer_ssh = Config::load(&paths.mind_home)?.ssh;
+    let prefer_ssh = Config::load(paths)?.ssh;
     let mut registry = Registry::load(paths)?;
     let mut visited = HashSet::new();
     let source_name = parse_spec(repo)
@@ -1165,14 +1165,22 @@ pub enum Clobber {
     Force,
 }
 
-pub fn learn(
-    paths: &Paths,
-    item_ref: &str,
-    dry_run: bool,
-    yes: bool,
-    clobber: Clobber,
-    dangerously_skip: bool,
-) -> Result<()> {
+/// The install-time options that travel together through the learn/meld chain:
+/// whether to skip confirmation (`yes`), how to treat an occupied link target
+/// (`clobber`), and whether to run install hooks unattended (`dangerously_skip`).
+#[derive(Clone, Copy)]
+pub struct InstallFlow {
+    pub yes: bool,
+    pub clobber: Clobber,
+    pub dangerously_skip: bool,
+}
+
+pub fn learn(paths: &Paths, item_ref: &str, dry_run: bool, flow: InstallFlow) -> Result<()> {
+    let InstallFlow {
+        yes,
+        clobber,
+        dangerously_skip,
+    } = flow;
     // POL-3: load the managed policy once (fail closed on Err; None = inert).
     let policy = Policy::load()?;
     let out = crate::render::ctx();
@@ -1323,20 +1331,8 @@ pub fn learn(
 /// later, mirroring the install-hook non-TTY behavior (HOOK-22): a scripted meld
 /// stays register-only unless `--yes` is given.
 // spec: CLI-23
-pub fn install_melded_source(
-    paths: &Paths,
-    repo: &str,
-    yes: bool,
-    clobber: Clobber,
-    dangerously_skip: bool,
-) -> Result<()> {
-    install_source_items(
-        paths,
-        &parse_spec(repo)?.name,
-        yes,
-        clobber,
-        dangerously_skip,
-    )
+pub fn install_melded_source(paths: &Paths, repo: &str, flow: InstallFlow) -> Result<()> {
+    install_source_items(paths, &parse_spec(repo)?.name, flow)
 }
 
 /// Run the post-meld auto-install flow (CLI-23) for one registered source by its
@@ -1344,13 +1340,7 @@ pub fn install_melded_source(
 /// directly under `--yes`. Used for the top-level source and, via
 /// `install_curated_sources`, for nested sources installed with `--recursive`
 /// (DSC-55) or a curator `install = true` (DSC-58).
-pub fn install_source_items(
-    paths: &Paths,
-    source_name: &str,
-    yes: bool,
-    clobber: Clobber,
-    dangerously_skip: bool,
-) -> Result<()> {
+pub fn install_source_items(paths: &Paths, source_name: &str, flow: InstallFlow) -> Result<()> {
     let item_ref = format!("{source_name}#*");
 
     // Resolve what would install (excludes already-installed items, DEP-23). A
@@ -1365,8 +1355,8 @@ pub fn install_source_items(
         return Ok(());
     }
 
-    if yes {
-        return learn(paths, &item_ref, false, true, clobber, dangerously_skip);
+    if flow.yes {
+        return learn(paths, &item_ref, false, flow);
     }
     if !crate::hook::is_tty() {
         if !json_mode() {
@@ -1379,12 +1369,12 @@ pub fn install_source_items(
     }
 
     // Interactive: show the install preview (the dry-run list), then prompt.
-    learn(paths, &item_ref, true, false, clobber, dangerously_skip)?;
+    learn(paths, &item_ref, true, flow)?;
     if confirm_default_yes(&format!(
         "install these {} item(s) now?",
         plan.install_count
     ))? {
-        learn(paths, &item_ref, false, true, clobber, dangerously_skip)
+        learn(paths, &item_ref, false, InstallFlow { yes: true, ..flow })
     } else {
         println!("skipped; run `mind learn '{item_ref}'` to install later");
         Ok(())
@@ -1403,17 +1393,21 @@ pub fn is_melded(paths: &Paths, repo: &str) -> Result<bool> {
 /// `--link-only`) prints a status of the source's items and the commit each is
 /// installed at.
 // spec: CLI-12
-#[allow(clippy::too_many_arguments)]
 pub fn remeld(
     paths: &Paths,
     repo: &str,
     alias: Option<String>,
     link_only: bool,
-    yes: bool,
-    clobber: Clobber,
-    dangerously_skip_hook_check: bool,
+    flow: InstallFlow,
     recursive: bool,
 ) -> Result<()> {
+    // `yes` rides inside `flow` for the install calls; remeld itself only needs
+    // the clobber (hook force-rerun) and the dangerously-skip flag.
+    let InstallFlow {
+        clobber,
+        dangerously_skip: dangerously_skip_hook_check,
+        ..
+    } = flow;
     let out = crate::render::ctx();
     let source_name = parse_spec(repo)?.name;
     if !out.json {
@@ -1479,30 +1473,16 @@ pub fn remeld(
             Err(e) => return Err(e),
         };
         if to_install > 0 {
-            install_melded_source(paths, repo, yes, clobber, dangerously_skip_hook_check)?;
+            install_melded_source(paths, repo, flow)?;
             // Install the curated chain: every nested source with `--recursive`
             // (DSC-55), or just the curator's `install = true` entries (DSC-58).
             // The nested sources are already registered, so nothing re-registers.
-            install_curated_sources(
-                paths,
-                &source_name,
-                recursive,
-                yes,
-                clobber,
-                dangerously_skip_hook_check,
-            )?;
+            install_curated_sources(paths, &source_name, recursive, flow)?;
             return Ok(());
         }
         // A pure super-source has no own items; still install the curated chain
         // (all of it with --recursive, else the `install = true` entries).
-        install_curated_sources(
-            paths,
-            &source_name,
-            recursive,
-            yes,
-            clobber,
-            dangerously_skip_hook_check,
-        )?;
+        install_curated_sources(paths, &source_name, recursive, flow)?;
         if recursive {
             return Ok(());
         }
@@ -1524,9 +1504,7 @@ pub fn install_curated_sources(
     paths: &Paths,
     super_name: &str,
     all: bool,
-    yes: bool,
-    clobber: Clobber,
-    dangerously_skip: bool,
+    flow: InstallFlow,
 ) -> Result<()> {
     let registry = Registry::load(paths)?;
     let mut visited: HashSet<String> = HashSet::from([super_name.to_string()]);
@@ -1550,7 +1528,7 @@ pub fn install_curated_sources(
                 // Traverse every nested source, but install only when the meld is
                 // recursive or the curator flagged this entry (DSC-58).
                 if all || ns.install {
-                    install_source_items(paths, &spec.name, yes, clobber, dangerously_skip)?;
+                    install_source_items(paths, &spec.name, flow)?;
                 }
                 queue.push(spec.name);
             }
@@ -1883,7 +1861,7 @@ pub fn sync(paths: &Paths, then_upgrade: bool, dangerously_skip_hook_check: bool
     // POL-3: load the managed policy once (fail closed on Err; None = inert).
     let policy = Policy::load()?;
     // CLI-19: auto-meld honors the user's SSH preference too.
-    let prefer_ssh = Config::load(&paths.mind_home)?.ssh;
+    let prefer_ssh = Config::load(paths)?.ssh;
     let mut registry = Registry::load(paths)?;
 
     // POL-32: provision the policy's auto-meld base set before syncing. Each entry
@@ -3041,8 +3019,8 @@ pub fn review(paths: &Paths, target: &str, alias: Option<String>, fix: bool) -> 
 pub fn config_show(paths: &Paths) -> Result<()> {
     let out = crate::render::ctx();
     paths.ensure_config()?;
-    let file = Config::path(&paths.mind_home);
-    let cfg = Config::load(&paths.mind_home)?;
+    let file = paths.config_file();
+    let cfg = Config::load(paths)?;
     if out.json {
         return print_json(&serde_json::json!({
             "config_file": file.display().to_string(),
@@ -3086,7 +3064,7 @@ pub fn lobe_add(paths: &Paths, path: &str) -> Result<()> {
         return Err(lobes_locked_error("add"));
     }
     paths.ensure_config()?;
-    let mut cfg = Config::load(&paths.mind_home)?;
+    let mut cfg = Config::load(paths)?;
     if cfg.lobes.iter().any(|h| h == path) {
         if out.json {
             return print_json(&MutationResult::new("lobe-add", path, "no-op"));
@@ -3095,7 +3073,7 @@ pub fn lobe_add(paths: &Paths, path: &str) -> Result<()> {
         return Ok(());
     }
     cfg.lobes.push(path.to_string());
-    cfg.save(&paths.mind_home)?;
+    cfg.save(paths)?;
     if out.json {
         return print_json(&MutationResult::new("lobe-add", path, "added"));
     }
@@ -3107,7 +3085,7 @@ pub fn lobe_add(paths: &Paths, path: &str) -> Result<()> {
 pub fn lobe_list(paths: &Paths) -> Result<()> {
     let out = crate::render::ctx();
     paths.ensure_config()?;
-    let cfg = Config::load(&paths.mind_home)?;
+    let cfg = Config::load(paths)?;
     if out.json {
         let lobes = if cfg.lobes.is_empty() {
             vec![paths.claude_home.display().to_string()]
@@ -3152,7 +3130,7 @@ pub fn lobe_remove(paths: &Paths, path: &str) -> Result<()> {
         return Err(lobes_locked_error("remove"));
     }
     paths.ensure_config()?;
-    let mut cfg = Config::load(&paths.mind_home)?;
+    let mut cfg = Config::load(paths)?;
     let before = cfg.lobes.len();
     cfg.lobes.retain(|h| h != path);
     if cfg.lobes.len() == before {
@@ -3160,7 +3138,7 @@ pub fn lobe_remove(paths: &Paths, path: &str) -> Result<()> {
             path: path.to_string(),
         });
     }
-    cfg.save(&paths.mind_home)?;
+    cfg.save(paths)?;
     if out.json {
         return print_json(&MutationResult::new("lobe-remove", path, "removed"));
     }
