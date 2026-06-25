@@ -6,6 +6,21 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-06-25
+
+### Added
+
+- The frontmatter reader interprets folded (`>`, `>-`, `>+`) and literal (`|`,
+  `|-`, `|+`) block scalars, so a multi-line `description:` renders in
+  `recall`/`probe` instead of being dropped.
+
+### Changed
+
+- `recall` and the `probe` listing mark an installed item out of date when its
+  current source content differs from the installed copy, not only when the
+  source commit advanced. This surfaces drift for a melded local directory and a
+  source checkout edited in place.
+
 ## [0.5.1] - 2026-06-25
 
 ### Fixed
@@ -192,7 +207,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovery, frontmatter descriptions, transactional install/upgrade/uninstall
   with a file registry, and a tag-driven release pipeline with a Homebrew tap.
 
-[Unreleased]: https://github.com/jaemk/mind/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/jaemk/mind/compare/v0.5.2...HEAD
+[0.5.2]: https://github.com/jaemk/mind/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/jaemk/mind/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/jaemk/mind/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/jaemk/mind/compare/v0.3.1...v0.4.1
