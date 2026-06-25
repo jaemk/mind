@@ -6,6 +6,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- A `[discover].sources` entry in a super-source's `mind.toml` may set
+  `install = true` to recommend a nested source for install: melding the
+  super-source offers that source's items for install (the same preview-and-prompt
+  as the top-level source), instead of leaving them only registered and available.
+
+### Changed
+
+- `meld --install-super-sources` is renamed `meld --recursive` (`-r`). It installs
+  every nested source in the curated chain, now beyond the per-source
+  `install = true` defaults.
+
 ## [0.4.1] - 2026-06-25
 
 ### Added

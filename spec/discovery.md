@@ -59,7 +59,8 @@ rules  = { include = ["rules/*.md"] }
 # A curated super-source: list other repos to meld recursively.
 sources = [
   { source = "owner/repo" },
-  { source = "github:foo/bar", as = "fb" },   # impose a namespace on the nested source
+  { source = "github:foo/bar", as = "fb" },        # impose a namespace on the nested source
+  { source = "owner/recommended", install = true } # offer this one for install on meld
 ]
 ```
 
@@ -89,21 +90,33 @@ sources = [
   past). Each source in the transitive set is therefore processed at most once.
 - `DSC-39` A `[discover].sources` entry may set `as = "<prefix>"` to impose a
   namespace on that nested source (equivalent to `meld --as`).
+- `DSC-58` A `[discover].sources` entry may set `install = true` (default false)
+  to recommend that nested source for install: melding the super-source offers its
+  items via the same preview-and-prompt as the top-level source (CLI-23, honoring
+  `--yes` and skipped under `--link-only`), rather than leaving them only
+  registered and available (DSC-54). The flag is per entry, so a curator chooses
+  which nested sources install by default and which stay available. It applies on
+  a fresh meld and a re-meld, and the whole chain is still traversed so a deeper
+  `install = true` is reached even under an unflagged parent. `meld --recursive`
+  (DSC-55) is the superset: it installs every nested source regardless of the flag.
 - `DSC-54` Melding a super-source (one whose `mind.toml` lists `[discover].sources`)
   registers the whole nested chain (DSC-38), but the post-meld auto-install flow
-  (CLI-23) runs only over the super-source's OWN items (`<source>#*`): the nested
+  (CLI-23) runs only over the super-source's OWN items (`<source>#*`) plus any
+  nested source the curator marked `install = true` (DSC-58): the remaining nested
   discovered sources are registered and their items are left available, not
   installed. A super-source that ships its own items still offers them for install
-  like any source; a purely curated registry installs nothing by default.
-- `DSC-55` `meld --install-super-sources` extends the auto-install flow to the
-  nested discovered sources: each source in the curated chain has its items
-  offered for install via the same preview-and-prompt as the top-level source
-  (honoring `--yes`). It applies both on a fresh meld and on a re-meld of an
-  already-registered super-source: on a re-meld the chain is already registered,
-  so its items are installed without re-registering. Without the flag only the
-  top-level source's items are offered (DSC-54). `--link-only` (register, install
-  nothing) takes precedence: combined with `--install-super-sources` it still
-  installs nothing.
+  like any source; a purely curated registry installs nothing by default unless it
+  flags an entry `install = true`.
+- `DSC-55` `meld --recursive` (`-r`) extends the auto-install flow to EVERY nested
+  discovered source, beyond the curator's `install = true` defaults: each source in
+  the curated chain has its items offered for install via the same
+  preview-and-prompt as the top-level source (honoring `--yes`). It applies both on
+  a fresh meld and on a re-meld of an already-registered super-source: on a re-meld
+  the chain is already registered, so its items are installed without
+  re-registering. Without the flag only the top-level source's items and the
+  `install = true` entries are offered (DSC-54, DSC-58). `--link-only` (register,
+  install nothing) takes precedence: combined with `--recursive` it still installs
+  nothing.
 - `DSC-56` After a successful `meld` of a source that declares `[discover].sources`,
   `mind` prints a one-time advisory note pointing the user to `mind probe` to
   browse and search what the newly registered sources offer, so a curated registry

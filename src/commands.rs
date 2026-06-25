@@ -1419,8 +1419,9 @@ pub fn install_melded_source(
 
 /// Run the post-meld auto-install flow (CLI-23) for one registered source by its
 /// name: preview and prompt to install its items (`<source>#*`), or install
-/// directly under `--yes`. Used for the top-level source and, with
-/// `--install-super-sources` (DSC-55), for each nested curated source.
+/// directly under `--yes`. Used for the top-level source and, via
+/// `install_curated_sources`, for nested sources installed with `--recursive`
+/// (DSC-55) or a curator `install = true` (DSC-58).
 pub fn install_source_items(
     paths: &Paths,
     source_name: &str,
@@ -1489,7 +1490,7 @@ pub fn remeld(
     yes: bool,
     clobber: Clobber,
     dangerously_skip_hook_check: bool,
-    install_super_sources: bool,
+    recursive: bool,
 ) -> Result<()> {
     let out = crate::render::ctx();
     let source_name = parse_spec(repo)?.name;
@@ -1557,28 +1558,30 @@ pub fn remeld(
         };
         if to_install > 0 {
             install_melded_source(paths, repo, yes, clobber, dangerously_skip_hook_check)?;
-            // DSC-55: a re-meld with --install-super-sources also installs the
-            // curated chain (the nested sources are already registered).
-            if install_super_sources {
-                install_curated_sources(
-                    paths,
-                    &source_name,
-                    yes,
-                    clobber,
-                    dangerously_skip_hook_check,
-                )?;
-            }
-            return Ok(());
-        }
-        // A pure super-source has no own items; with the flag, install the chain.
-        if install_super_sources {
+            // Install the curated chain: every nested source with `--recursive`
+            // (DSC-55), or just the curator's `install = true` entries (DSC-58).
+            // The nested sources are already registered, so nothing re-registers.
             install_curated_sources(
                 paths,
                 &source_name,
+                recursive,
                 yes,
                 clobber,
                 dangerously_skip_hook_check,
             )?;
+            return Ok(());
+        }
+        // A pure super-source has no own items; still install the curated chain
+        // (all of it with --recursive, else the `install = true` entries).
+        install_curated_sources(
+            paths,
+            &source_name,
+            recursive,
+            yes,
+            clobber,
+            dangerously_skip_hook_check,
+        )?;
+        if recursive {
             return Ok(());
         }
     }
@@ -1588,13 +1591,17 @@ pub fn remeld(
     source_status(paths, &source_name)
 }
 
-/// Install the items of every registered source a super-source curates via its
-/// transitive `[discover].sources` chain (DSC-55 on a re-meld, where the nested
-/// sources are already registered). Reads each source's clone `mind.toml`;
-/// cycle-safe via a visited set; only touches sources that are registered.
-fn install_curated_sources(
+/// Install the items of the registered sources a super-source curates, walking
+/// its transitive `[discover].sources` chain. The whole chain is always traversed
+/// (so a deeper `install = true` is reached), but a given nested source's items
+/// are offered for install only when `all` is set (`meld --recursive`, DSC-55) or
+/// the curator marked that entry `install = true` (DSC-58). Reads each source's
+/// clone `mind.toml`; cycle-safe via a visited set; only touches registered
+/// sources.
+pub fn install_curated_sources(
     paths: &Paths,
     super_name: &str,
+    all: bool,
     yes: bool,
     clobber: Clobber,
     dangerously_skip: bool,
@@ -1618,7 +1625,11 @@ fn install_curated_sources(
                 continue; // already seen (cycle guard / diamond dedup)
             }
             if registry.find(&spec.name).is_some() {
-                install_source_items(paths, &spec.name, yes, clobber, dangerously_skip)?;
+                // Traverse every nested source, but install only when the meld is
+                // recursive or the curator flagged this entry (DSC-58).
+                if all || ns.install {
+                    install_source_items(paths, &spec.name, yes, clobber, dangerously_skip)?;
+                }
                 queue.push(spec.name);
             }
         }

@@ -1395,7 +1395,7 @@ fn super_source_meld_does_not_auto_install_nested_items() {
 }
 
 #[test]
-fn meld_install_super_sources_installs_nested_items() {
+fn meld_recursive_installs_nested_items() {
     // spec: DSC-55
     let tools = Sandbox::named("tools"); // a normal source with items
     let registry = Sandbox::bare("registry"); // curates `tools`, no items of its own
@@ -1407,17 +1407,38 @@ fn meld_install_super_sources_installs_nested_items() {
         ),
     );
     let spec = registry.source_spec();
-    // With the flag (and --yes to skip prompts), the nested chain's items install.
-    let r = registry.mind(&["meld", &spec, "--install-super-sources", "--yes"]);
+    // With --recursive (and --yes to skip prompts), the nested chain's items install.
+    let r = registry.mind(&["meld", &spec, "--recursive", "--yes"]);
     assert!(r.success, "{} {}", r.stdout, r.stderr);
     assert!(
         registry.claude_home.join("skills/review").exists(),
-        "the nested source's items must install with --install-super-sources"
+        "the nested source's items must install with --recursive"
     );
 }
 
 #[test]
-fn remeld_install_super_sources_installs_nested_chain() {
+fn meld_recursive_short_flag_installs_nested_items() {
+    // spec: DSC-55 - the `-r` short form is equivalent to `--recursive`.
+    let tools = Sandbox::named("tools");
+    let registry = Sandbox::bare("registry");
+    registry.write_and_commit(
+        "mind.toml",
+        &format!(
+            "[discover]\nsources = [{{ source = \"{}\" }}]\n",
+            tools.source_spec()
+        ),
+    );
+    let spec = registry.source_spec();
+    let r = registry.mind(&["meld", &spec, "-r", "--yes"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(
+        registry.claude_home.join("skills/review").exists(),
+        "-r must install the nested source's items"
+    );
+}
+
+#[test]
+fn remeld_recursive_installs_nested_chain() {
     // spec: DSC-55
     let tools = Sandbox::named("tools");
     let registry = Sandbox::bare("registry");
@@ -1434,11 +1455,87 @@ fn remeld_install_super_sources_installs_nested_chain() {
     assert!(!registry.claude_home.join("skills/review").exists());
     // Re-melding the already-registered super-source with the flag installs the
     // curated chain's items (nothing is re-registered).
-    let r = registry.mind(&["meld", &spec, "--install-super-sources", "--yes"]);
+    let r = registry.mind(&["meld", &spec, "--recursive", "--yes"]);
     assert!(r.success, "{} {}", r.stdout, r.stderr);
     assert!(
         registry.claude_home.join("skills/review").exists(),
-        "a re-meld must honor --install-super-sources"
+        "a re-meld must honor --recursive"
+    );
+}
+
+#[test]
+fn meld_installs_curator_flagged_nested_source_without_recursive() {
+    // spec: DSC-58 - a `[discover].sources` entry marked `install = true` has its
+    // items offered for install on a plain meld (no --recursive). A sibling entry
+    // without the flag is registered but its items are left available.
+    let want = Sandbox::bare("want"); // curator recommends installing this one
+    want.write_and_commit(
+        "skills/want-skill/SKILL.md",
+        "---\nname: want-skill\ndescription: wanted\n---\n# want\n",
+    );
+    let skip = Sandbox::bare("skip"); // registered only, not installed
+    skip.write_and_commit(
+        "skills/skip-skill/SKILL.md",
+        "---\nname: skip-skill\ndescription: skipped\n---\n# skip\n",
+    );
+    let registry = Sandbox::bare("registry");
+    registry.write_and_commit(
+        "mind.toml",
+        &format!(
+            "[discover]\nsources = [{{ source = \"{}\", install = true }}, {{ source = \"{}\" }}]\n",
+            want.source_spec(),
+            skip.source_spec()
+        ),
+    );
+    // Plain meld, no --recursive. --yes auto-confirms the flagged source's prompt.
+    let r = registry.mind(&["meld", &registry.source_spec(), "--yes"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    // Both nested sources are registered.
+    let sources = registry.mind(&["recall", "--sources"]).stdout;
+    assert!(
+        sources.contains("/want") && sources.contains("/skip"),
+        "both nested sources should be registered: {sources}"
+    );
+    // The flagged source's item installed; the unflagged source's item did not.
+    assert!(
+        registry.claude_home.join("skills/want-skill").exists(),
+        "the install=true nested source's item must be installed"
+    );
+    assert!(
+        !registry.claude_home.join("skills/skip-skill").exists(),
+        "the unflagged nested source's item must not be auto-installed"
+    );
+}
+
+#[test]
+fn meld_recursive_installs_even_unflagged_nested_sources() {
+    // spec: DSC-55 DSC-58 - --recursive is the superset: it installs every nested
+    // source, including ones the curator did not mark `install = true`.
+    let want = Sandbox::bare("want");
+    want.write_and_commit(
+        "skills/want-skill/SKILL.md",
+        "---\nname: want-skill\ndescription: wanted\n---\n# want\n",
+    );
+    let skip = Sandbox::bare("skip");
+    skip.write_and_commit(
+        "skills/skip-skill/SKILL.md",
+        "---\nname: skip-skill\ndescription: skipped\n---\n# skip\n",
+    );
+    let registry = Sandbox::bare("registry");
+    registry.write_and_commit(
+        "mind.toml",
+        &format!(
+            "[discover]\nsources = [{{ source = \"{}\", install = true }}, {{ source = \"{}\" }}]\n",
+            want.source_spec(),
+            skip.source_spec()
+        ),
+    );
+    let r = registry.mind(&["meld", &registry.source_spec(), "--recursive", "--yes"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(
+        registry.claude_home.join("skills/want-skill").exists()
+            && registry.claude_home.join("skills/skip-skill").exists(),
+        "--recursive installs every nested source regardless of the install flag"
     );
 }
 

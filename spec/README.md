@@ -26,7 +26,7 @@ and verified.
 | Discover `include`/`exclude` per kind | done | DSC-37 |
 | Curated super-source (`[discover].sources`, nested `as`) | done | DSC-38, DSC-39 |
 | Super-source meld registers the chain but auto-installs only its own items | done | DSC-54 |
-| Super-source: `--install-super-sources`, post-meld `probe` hint, `sync` re-walks the discover chain | done | DSC-55, DSC-56, DSC-57 |
+| Super-source: `--recursive`, per-source `install = true`, post-meld `probe` hint, `sync` re-walks the discover chain | done | DSC-55, DSC-56, DSC-57, DSC-58 |
 | Namespacing: prefix, `{{ns:}}` tokens, unguarded-ref warning | done | [namespacing.md](namespacing.md) |
 | Transactional install, upgrade, rename, uninstall, drift | done | [lifecycle.md](lifecycle.md) |
 | `forget`/`recall`/`upgrade` honor kind + source qualifier, error on ambiguity | done | CLI-40, CLI-63, CLI-71 |

@@ -161,7 +161,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             install_hook,
             dangerously_skip_install_hook_check,
             link_only,
-            install_super_sources,
+            recursive,
             force,
         } => {
             // CLI-25: no repo argument (or an explicit `.`/`./`) melds the
@@ -192,10 +192,10 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
                     yes,
                     clobber,
                     dangerously_skip_install_hook_check,
-                    install_super_sources,
+                    recursive,
                 )?;
             } else {
-                let newly = commands::meld(
+                commands::meld(
                     paths,
                     &repo,
                     alias,
@@ -216,22 +216,19 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
                         clobber,
                         dangerously_skip_install_hook_check,
                     )?;
-                    // DSC-55: `--install-super-sources` extends the install flow to
-                    // each newly registered nested source (DSC-54 installs only the
-                    // top-level source by default).
-                    if install_super_sources {
-                        let top = crate::source::parse_spec(&repo).ok().map(|s| s.name);
-                        for name in &newly {
-                            if top.as_deref() != Some(name.as_str()) {
-                                commands::install_source_items(
-                                    paths,
-                                    name,
-                                    yes,
-                                    clobber,
-                                    dangerously_skip_install_hook_check,
-                                )?;
-                            }
-                        }
+                    // DSC-54 installs only the top-level source by default. Walk the
+                    // curated chain and install each nested source the curator
+                    // flagged `install = true` (DSC-58), or every nested source with
+                    // `--recursive` (DSC-55).
+                    if let Ok(top) = crate::source::parse_spec(&repo) {
+                        commands::install_curated_sources(
+                            paths,
+                            &top.name,
+                            recursive,
+                            yes,
+                            clobber,
+                            dangerously_skip_install_hook_check,
+                        )?;
                     }
                 }
             }

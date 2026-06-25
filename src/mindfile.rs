@@ -210,6 +210,11 @@ pub struct NestedSource {
     /// Optional namespace to impose on the nested source (like `meld --as`).
     #[serde(rename = "as", default)]
     pub alias: Option<String>,
+    /// When true, melding the super-source offers this nested source's items for
+    /// install (the curator recommends installing it), instead of leaving them
+    /// only registered and available. Default false (DSC-58).
+    #[serde(default)]
+    pub install: bool,
 }
 
 impl Discover {
