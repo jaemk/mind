@@ -403,4 +403,117 @@ mod tests {
     fn indicator_rejects_extra_chars() {
         assert!(parse_block_indicator(">- extra").is_none());
     }
+
+    // --- Adversarial edge cases (DSC-22 gap closure) ---
+
+    // A folded block whose FIRST content line is blank: the leading blank must
+    // not crash and must be trimmed off the final value.
+    #[test]
+    fn folded_first_content_line_blank() {
+        let t = "---\ndescription: >-\n\n  real text here\n---\n";
+        let result = field(t, "description").unwrap();
+        assert_eq!(result, "real text here");
+    }
+
+    // A literal block whose first content line is blank: same tolerance.
+    #[test]
+    fn literal_first_content_line_blank() {
+        let t = "---\ndescription: |-\n\n  kept line\n---\n";
+        let result = field(t, "description").unwrap();
+        assert_eq!(result, "kept line");
+    }
+
+    // A block containing ONLY blank lines must trim to the empty string, not
+    // panic on the empty min-indent computation.
+    #[test]
+    fn block_of_only_blank_lines_trims_to_empty() {
+        let t = "---\ndescription: >-\n\n   \n\nauthor: Bob\n---\n";
+        let result = field(t, "description").unwrap();
+        assert_eq!(result, "");
+        // The following key must still be reachable past the empty block.
+        assert_eq!(field(t, "author").as_deref(), Some("Bob"));
+    }
+
+    #[test]
+    fn literal_block_of_only_blank_lines_trims_to_empty() {
+        let t = "---\ndescription: |\n\n\n---\n";
+        let result = field(t, "description").unwrap();
+        assert_eq!(result, "");
+    }
+
+    // Mixed indentation: dedent strips the MINIMUM indent, so a deeper-indented
+    // line keeps its extra indentation after dedent (literal preserves it).
+    #[test]
+    fn literal_mixed_indentation_preserves_extra_after_dedent() {
+        // Base indent 2; second line indented 4 -> keeps 2 leading spaces after
+        // dedenting the minimum (2). The deeper line is NOT flattened.
+        let t = "---\ndescription: |-\n  top\n    nested\n  back\n---\n";
+        let result = field(t, "description").unwrap();
+        assert_eq!(result, "top\n  nested\nback");
+    }
+
+    // An indicator followed by a trailing comment is still a valid block scalar.
+    #[test]
+    fn folded_indicator_with_trailing_comment() {
+        let t = "---\ndescription: >-  # a note\n  hello there\n---\n";
+        let result = field(t, "description").unwrap();
+        assert_eq!(result, "hello there");
+    }
+
+    #[test]
+    fn literal_indicator_with_trailing_comment() {
+        let t = "---\ndescription: |  # keep literal\n  one\n  two\n---\n";
+        let result = field(t, "description").unwrap();
+        assert_eq!(result, "one\ntwo");
+    }
+
+    // A folded block that is the LAST key before `---` with no trailing blank
+    // line: the closing delimiter ends the block and is not consumed as content.
+    #[test]
+    fn folded_block_is_last_key_before_closing_delimiter() {
+        let t = "---\nname: x\ndescription: >-\n  final folded value\n---\n";
+        let result = field(t, "description").unwrap();
+        assert_eq!(result, "final folded value");
+    }
+
+    // CRLF line endings: std's `lines()` strips the trailing `\r`, so a CRLF
+    // file yields the same folded value as an LF one.
+    #[test]
+    fn folded_block_tolerates_crlf() {
+        let t = "---\r\ndescription: >-\r\n  alpha\r\n  beta\r\n---\r\n";
+        let result = field(t, "description").unwrap();
+        assert_eq!(result, "alpha beta");
+    }
+
+    // Trailing spaces on content lines do not leak into a folded value's
+    // interior joins (folding joins on a single space) and are trimmed at ends.
+    #[test]
+    fn folded_block_tolerates_trailing_spaces() {
+        let t = "---\ndescription: >-\n  alpha  \n  beta  \n---\n";
+        let result = field(t, "description").unwrap();
+        // Folding keeps the in-line trailing spaces before the join space, but
+        // the overall value is trimmed at its ends.
+        assert_eq!(result, "alpha   beta");
+    }
+
+    // A malformed indicator (`>x`) is NOT a block scalar: it falls back to a
+    // plain scalar (the literal text) without panicking.
+    #[test]
+    fn malformed_indicator_falls_back_to_plain_scalar() {
+        let t = "---\ndescription: >x\n  not part of a block\n---\n";
+        let result = field(t, "description").unwrap();
+        assert_eq!(result, ">x");
+        assert!(parse_block_indicator(">x").is_none());
+    }
+
+    // `> extra` (indicator with non-comment trailing text) is also rejected as
+    // an indicator and read as a plain scalar.
+    #[test]
+    fn indicator_with_extra_text_reads_as_plain_scalar() {
+        let t = "---\ndescription: > extra words\n---\n";
+        let result = field(t, "description").unwrap();
+        assert_eq!(result, "> extra words");
+        assert!(parse_block_indicator("> extra words").is_none());
+        assert!(parse_block_indicator(">x").is_none());
+    }
 }

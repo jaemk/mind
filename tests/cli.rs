@@ -8840,3 +8840,159 @@ fn recall_does_not_mark_unedited_item_outdated() {
         r.stdout
     );
 }
+
+/// The `probe` non-interactive listing must mark a drifted installed item out of
+/// date, and must NOT mark a clean installed item. No other test exercises the
+/// probe surface for CLI-75.
+// spec: CLI-75
+#[test]
+fn probe_marks_installed_item_outdated_after_in_place_content_edit() {
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+
+    let r = sb.mind(&["meld", &spec, "--yes"]);
+    assert!(r.success, "meld failed: {} {}", r.stdout, r.stderr);
+
+    // Clean: probe must not flag any item out of date.
+    let r = sb.mind(&["probe", "--no-tui"]);
+    assert!(r.success, "probe failed: {} {}", r.stdout, r.stderr);
+    assert!(
+        !r.stdout.contains("outdated"),
+        "freshly installed items must not be outdated in probe: {}",
+        r.stdout
+    );
+
+    // Edit one item's source file in place (no commit) -> hash drift only.
+    write(
+        &sb.source.join("skills/review/SKILL.md"),
+        "---\nname: review\ndescription: Review the diff for bugs\n---\n# review skill\nchanged\n",
+    );
+
+    let r = sb.mind(&["probe", "--no-tui"]);
+    assert!(r.success, "probe failed: {} {}", r.stdout, r.stderr);
+    let review = r
+        .stdout
+        .lines()
+        .find(|l| l.contains("skill:review"))
+        .unwrap_or_else(|| panic!("no review row in probe: {}", r.stdout));
+    assert!(
+        review.contains("outdated"),
+        "probe must mark the drifted item outdated: {review:?}\n{}",
+        r.stdout
+    );
+    // The untouched agent row must remain clean.
+    let dev = r
+        .stdout
+        .lines()
+        .find(|l| l.contains("agent:dev"))
+        .unwrap_or_else(|| panic!("no dev row in probe: {}", r.stdout));
+    assert!(
+        !dev.contains("outdated"),
+        "an unedited item must not be marked outdated in probe: {dev:?}"
+    );
+}
+
+/// Re-melding an already-melded local source whose working tree was edited in
+/// place reaches the `source_status` view, which must mark the drifted item out
+/// of date.
+// spec: CLI-75
+#[test]
+fn remeld_source_status_marks_item_outdated_after_in_place_content_edit() {
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+
+    let r = sb.mind(&["meld", &spec, "--yes"]);
+    assert!(r.success, "meld failed: {} {}", r.stdout, r.stderr);
+
+    // In-place edit (no commit) so only the content hash drifts.
+    write(
+        &sb.source.join("skills/review/SKILL.md"),
+        "---\nname: review\ndescription: Review the diff for bugs\n---\n# review skill\nremeld-edit\n",
+    );
+
+    // Re-meld the already-melded source: all items already installed, so this
+    // falls through to source_status.
+    let r = sb.mind(&["meld", &spec]);
+    assert!(r.success, "re-meld failed: {} {}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("already melded"),
+        "expected the already-melded status view: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("outdated"),
+        "source_status via re-meld must mark the drifted item outdated: {}",
+        r.stdout
+    );
+}
+
+/// A commit advance (the source moves to a new commit past the installed one)
+/// must mark the item out of date in `recall`, even without a hash check
+/// mismatch path that differs from content drift.
+// spec: CLI-75
+#[test]
+fn recall_marks_item_outdated_after_commit_advance() {
+    let sb = melded();
+    assert!(sb.mind(&["learn", "review"]).success);
+
+    // Clean install: not outdated.
+    let r = sb.mind(&["recall"]);
+    assert!(
+        !r.stdout.contains("outdated"),
+        "freshly installed item must not be outdated: {}",
+        r.stdout
+    );
+
+    // Advance the source by committing an edit, then sync so the recorded source
+    // commit moves past the installed item's commit.
+    sb.edit_source();
+    assert!(sb.mind(&["sync"]).success);
+
+    let r = sb.mind(&["recall"]);
+    assert!(r.success, "recall failed: {} {}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("outdated"),
+        "recall must mark the item outdated after a commit advance: {}",
+        r.stdout
+    );
+}
+
+/// The marker is a human-view affordance only: `recall --json` output must be
+/// byte-identical before and after a content edit drifts the item.
+// spec: CLI-75
+#[test]
+fn recall_json_is_unchanged_by_drift() {
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+
+    let r = sb.mind(&["meld", &spec, "--yes"]);
+    assert!(r.success, "meld failed: {} {}", r.stdout, r.stderr);
+
+    let before_status = sb.mind(&["recall", "--json"]);
+    let before_detail = sb.mind(&["recall", "skill:review", "--json"]);
+    assert!(before_status.success && before_detail.success);
+
+    // Drift the item in place.
+    write(
+        &sb.source.join("skills/review/SKILL.md"),
+        "---\nname: review\ndescription: Review the diff for bugs\n---\n# review skill\njson-drift\n",
+    );
+
+    let after_status = sb.mind(&["recall", "--json"]);
+    let after_detail = sb.mind(&["recall", "skill:review", "--json"]);
+    assert!(after_status.success && after_detail.success);
+
+    assert_eq!(
+        before_status.stdout, after_status.stdout,
+        "recall --json status output must not change with drift"
+    );
+    assert_eq!(
+        before_detail.stdout, after_detail.stdout,
+        "recall <item> --json output must not change with drift"
+    );
+    assert!(
+        !after_status.stdout.contains("outdated") && !after_status.stdout.contains("out of date"),
+        "JSON must carry no human out-of-date marker: {}",
+        after_status.stdout
+    );
+}
