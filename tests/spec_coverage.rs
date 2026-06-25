@@ -25,6 +25,10 @@ const ALLOWLIST: &[&str] = &[
     // definitional, exercised by the expansion tests.
     "NS-3", "NS-10", // Discovery edge: missing directories yield no items.
     "DSC-13",
+    // Planned: a curated super-source adopts an un-onboarded nested source by
+    // supplying its `follow-branch`/`roots`/`[[hooks]]`, applied only when the
+    // nested source has no `mind.toml`. Cited by tests when built.
+    "DSC-59", "DSC-60", "DSC-61",
     // Planned features (see spec/README.md feature status = planned): documented
     // with stable IDs ahead of implementation. Each must move to a citing test
     // when built, at which point it is removed from this allowlist.
