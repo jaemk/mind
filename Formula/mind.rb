@@ -3,24 +3,24 @@
 class Mind < Formula
   desc "Manager for agent tooling: skills, agents, and rules"
   homepage "https://github.com/jaemk/mind"
-  version "0.6.0"
+  version "0.6.1"
   license "MIT"
 
   on_macos do
     on_arm do
-      url "https://github.com/jaemk/mind/releases/download/v0.6.0/mind-0.6.0-aarch64-apple-darwin.tar.gz"
-      sha256 "fe7e87310ef96242cb80649dd7cdb4faaec63429ac1ede0efd2d6cbcd0384bd4"
+      url "https://github.com/jaemk/mind/releases/download/v0.6.1/mind-0.6.1-aarch64-apple-darwin.tar.gz"
+      sha256 "5f3b8a561993f6d05de86abf19afbfd1d8d119431701bee3ed40c1b70d26cbc0"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/jaemk/mind/releases/download/v0.6.0/mind-0.6.0-aarch64-unknown-linux-gnu.tar.gz"
-      sha256 "651624ed1c71605108503545f3dac6817e5ab8dab94fdbd77c7408c0098ef7b1"
+      url "https://github.com/jaemk/mind/releases/download/v0.6.1/mind-0.6.1-aarch64-unknown-linux-gnu.tar.gz"
+      sha256 "2017e736fa6c836c9d541941f0826ca6e6a3e3a13c0e905ffd831e97abc65c94"
     end
     on_intel do
-      url "https://github.com/jaemk/mind/releases/download/v0.6.0/mind-0.6.0-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "8000baa792e47f752ae020f2b9d657ad80889107f128d73cc54940c40d54e3c3"
+      url "https://github.com/jaemk/mind/releases/download/v0.6.1/mind-0.6.1-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "090d8ec5d3a4cb0f49ad18871995d03ccaa8576135b3c8807967aa3f3fc166e0"
     end
   end
 
