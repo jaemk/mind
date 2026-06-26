@@ -13,12 +13,8 @@ arbitrary git repos and links the items they offer into one or more agent homes
   `mind review` and `mind init-source` validate and scaffold a source for
   publishing.
 
-These pages cover how to lay out a source repo and author one. The normative
-behavior is the [spec](https://github.com/jaemk/mind/tree/main/spec); the
-[README](https://github.com/jaemk/mind#readme) covers install and the full verb
-list.
-
-- [Source layout](source-layout.md): the expected repo structure and where shared
-  tooling belongs.
-- [Authoring a source](authoring.md): `init-source`, `review`, namespacing, and
-  references that survive a prefix.
+This site is the reference for installing, using, and authoring `mind`. Start
+with [Install](install.md) and the [Quickstart](quickstart.md); [Commands](commands.md)
+is the full verb reference. For authoring a source, see [Source layout](source-layout.md)
+and [Authoring a source](authoring.md). The normative behavior is the
+[spec](https://github.com/jaemk/mind/tree/main/spec).
