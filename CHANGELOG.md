@@ -6,6 +6,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-06-25
+
+### Changed
+
+- Release tooling only: the GitHub release is created with the GitHub CLI and its
+  notes are taken from this changelog. No change to the `mind` binary.
+
 ## [0.6.0] - 2026-06-25
 
 ### Added
@@ -242,7 +249,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovery, frontmatter descriptions, transactional install/upgrade/uninstall
   with a file registry, and a tag-driven release pipeline with a Homebrew tap.
 
-[Unreleased]: https://github.com/jaemk/mind/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/jaemk/mind/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/jaemk/mind/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/jaemk/mind/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/jaemk/mind/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/jaemk/mind/compare/v0.5.0...v0.5.1
