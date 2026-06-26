@@ -37,12 +37,12 @@ jobs:
         run: cargo build --release --locked --bin mind --target ${{ matrix.target }}
       - name: package
         run: |
+          cargo package --locked --target ${{ matrix.target }}
           version="${GITHUB_REF_NAME#v}"
           dist="mind-${version}-${{ matrix.target }}"
           mkdir "$dist"
           cp "target/${{ matrix.target }}/release/mind" "$dist/"
           tar -czf "${dist}.tar.gz" -C "$dist" mind
-          cargo package --locked --target ${{ matrix.target }}
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.target }}
