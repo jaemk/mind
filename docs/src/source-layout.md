@@ -59,7 +59,7 @@ defect) in case you would rather share it once.
 
 ## Referencing items and resources
 
-When you do reference one item from another, `mind` provides tokens it expands at
+To reference one item from another, `mind` provides tokens it expands at
 install. They are useful mainly under a namespace prefix (which renames items) or
 across multiple agent homes; an unprefixed single-home source can often just use
 the name or a bundled path.

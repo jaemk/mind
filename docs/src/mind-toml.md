@@ -30,7 +30,7 @@ other repos) does **not** turn off convention scanning, so a repo can ship its
 own items by convention and curate others at the same time (see
 [Regular plus super-source](#regular-plus-super-source)).
 
-## `[source]` — repo metadata
+## `[source]` - repo metadata
 
 All keys are optional.
 
@@ -39,7 +39,6 @@ All keys are optional.
 description = "James's agent library"   # shown in recall/probe
 prefix = "jk"                            # namespace: items install as jk-<name>
 min-mind-version = "0.5"                 # refuse to scan under an older mind
-install = "make build"                   # a source-level install hook (see below)
 follow-branch = "main"                   # pin: track a branch ...
 # pin-tag = "v2"                          # ... or fix to a tag ...
 # pin-ref = "a1b2c3d"                     # ... or to an exact commit (pick one)
@@ -61,7 +60,7 @@ roots = ["packages"]                     # scan under these dirs, not the repo r
   the repo root, for a monorepo or subtree layout. Ignored when the file is
   authoritative (`[[items]]`/`[discover]` paths are always repo-root-relative).
 
-## `[[hooks]]` — lifecycle hooks
+## `[[hooks]]` - lifecycle hooks
 
 Zero or more named hooks the maintainer declares. Each runs on the host (gated by
 a disclosure prompt) at the bound lifecycle event.
@@ -82,7 +81,7 @@ optional = true
 `[[hooks]]` is the canonical form. The legacy `[source].install` is a deprecated
 shorthand for one required install hook (still parsed); use `[[hooks]]` instead.
 
-## `[[items]]` — explicit inventory (authoritative)
+## `[[items]]` - explicit inventory (authoritative)
 
 List items explicitly when convention does not fit (a non-standard layout, export
 control, custom link targets). Declaring any `[[items]]` turns off convention
@@ -112,7 +111,7 @@ uninstall = "./teardown.sh"      # any kind: host cleanup run before removal
   distinct from `build` (which produces the item's content) and from the
   source-level `[[hooks]]`.
 
-## `[discover]` — glob-based discovery
+## `[discover]` - glob-based discovery
 
 For odd or monorepo layouts where the items exist but not at the convention paths.
 Declaring any kind globs makes the file authoritative.
@@ -129,7 +128,7 @@ Within a kind, `include` globs are matched first, then anything also matched by 
 `exclude` glob is dropped. Tool globs match the tool directory (its `TOOL.md`, if
 present, supplies metadata), not an anchor file.
 
-## `[discover].sources` — curated super-source
+## `[discover].sources` - curated super-source
 
 A repo can list other repos to meld, acting as a curated registry. Melding it
 recursively melds each listed source (skipping any already registered; cycles
