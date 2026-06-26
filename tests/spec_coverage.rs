@@ -29,19 +29,11 @@ const ALLOWLIST: &[&str] = &[
     // supplying its `follow-branch`/`roots`/`[[hooks]]`, applied only when the
     // nested source has no `mind.toml`. Cited by tests when built.
     "DSC-59", "DSC-60", "DSC-61",
-    // Planned: deprecate `[source].install` in favor of `[[hooks]]`. The field
-    // stays parsed (HOOK-50); `review` adds a `deprecated-field` advisory and
-    // `init-source` scaffolds only `[[hooks]]`. Cited by a test when built.
-    "HOOK-90",
     // Retired (never implemented): INIT-8 proposed an `init-source` scaffold of a
     // `[source].install` stub; dropped when that field was deprecated (HOOK-90).
     // The statement is kept (marked removed) so the number is not reused; it has
     // no behavior and so no citing test.
     "INIT-8",
-    // Planned: item `[[items.hooks]]` array parity with the source `[[hooks]]`
-    // (HOOK-86), and the nested lifecycle ordering that reverses teardown so item
-    // uninstall hooks run before the source's (HOOK-87). Cited by tests when built.
-    "HOOK-86", "HOOK-87",
     // Planned: `unmeld <glob>` selects sources by glob/partial name (multi-source,
     // mirroring learn/forget item globs), with a multi-source confirmation (CLI-28);
     // and the `probe`/`recall` `--source` filter accepts the same source glob
@@ -49,11 +41,6 @@ const ALLOWLIST: &[&str] = &[
     "CLI-28", "CLI-86",
     // Planned: `-n` short form of `probe --no-tui` (TUI-3). Cited by a test when built.
     "TUI-3",
-    // Planned: `init-source` gates its bare-sibling unguarded-reference advisory on
-    // an effective prefix (INIT-9), matching meld/review; and the `hardcoded-path`
-    // / `bare-tool-reference` advisory messages note that an install-hook-populated
-    // location is safe (CLI-146). Cited by tests when built.
-    "INIT-9", "CLI-146",
     // Planned features (see spec/README.md feature status = planned): documented
     // with stable IDs ahead of implementation. Each must move to a citing test
     // when built, at which point it is removed from this allowlist.

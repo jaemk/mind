@@ -364,42 +364,53 @@ fn run_item_hook(
     Ok(())
 }
 
-/// Run an item's install hook (HOOK-81) as the final step of installing it.
-pub fn run_item_install_hook(
+/// Run an item's install hooks (HOOK-81, HOOK-86) as the final step of installing
+/// it, in declaration order. Each entry is disclosed, prompted, and fails exactly
+/// as the scalar shorthand does (HOOK-86): a non-zero exit aborts the loop and the
+/// caller rolls the install back. An empty list is a no-op.
+pub fn run_item_install_hooks(
     item: &CatalogItem,
-    cmd: &str,
+    hooks: &[&crate::mindfile::ResolvedHook],
     store: &Path,
     commit: &str,
     dangerously_skip: bool,
 ) -> Result<()> {
-    run_item_hook(
-        "install",
-        &item.key(),
-        &item.source,
-        cmd,
-        store,
-        commit,
-        dangerously_skip,
-    )
+    for hook in hooks {
+        run_item_hook(
+            "install",
+            &item.key(),
+            &item.source,
+            &hook.run,
+            store,
+            commit,
+            dangerously_skip,
+        )?;
+    }
+    Ok(())
 }
 
-/// Run an item's uninstall hook (HOOK-82) before its store copy and links go.
-pub fn run_item_uninstall_hook(
+/// Run an item's uninstall hooks (HOOK-82, HOOK-86) before its store copy and
+/// links go, in declaration order. A non-zero exit aborts the loop and the caller
+/// leaves the item installed. An empty list is a no-op.
+pub fn run_item_uninstall_hooks(
     item: &InstalledItem,
-    cmd: &str,
+    hooks: &[&crate::mindfile::ResolvedHook],
     store: &Path,
     commit: &str,
     dangerously_skip: bool,
 ) -> Result<()> {
-    run_item_hook(
-        "uninstall",
-        &item.key(),
-        &item.source,
-        cmd,
-        store,
-        commit,
-        dangerously_skip,
-    )
+    for hook in hooks {
+        run_item_hook(
+            "uninstall",
+            &item.key(),
+            &item.source,
+            &hook.run,
+            store,
+            commit,
+            dangerously_skip,
+        )?;
+    }
+    Ok(())
 }
 
 fn collect_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> Result<()> {
@@ -490,6 +501,7 @@ mod tests {
             build: Some(build.to_string()),
             install: None,
             uninstall: None,
+            hooks: Vec::new(),
         }
     }
 

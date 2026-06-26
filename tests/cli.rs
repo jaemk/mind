@@ -455,10 +455,12 @@ fn init_source_reports_refs_scaffolds_toml_and_templates() {
         "items and references must be reported: {}",
         r.stdout
     );
+    // INIT-9: this fixture declares no prefix, so the bare `dev` mention is NOT
+    // flagged (an unprefixed source's bare references resolve as written). The
+    // prefix-gated advisory is covered in tests/item_lifecycle.rs.
     assert!(
-        r.stdout.contains("advisory [unguarded-reference]"),
-        "the bare `dev` mention must be flagged as an unguarded-reference advisory, \
-         in the same format as `review`: {}",
+        !r.stdout.contains("advisory [unguarded-reference]"),
+        "no prefix => no unguarded-reference advisory (INIT-9): {}",
         r.stdout
     );
     // INIT-3: a mind.toml is scaffolded when absent, with a `[source]` table and
@@ -7357,9 +7359,11 @@ fn unmeld_confirm_decline_leaves_source_melded_and_hook_not_run() {
 
 #[test]
 fn unmeld_failing_uninstall_hook_leaves_source_melded() {
-    // spec: HOOK-53, HOOK-54
-    // An uninstall hook that exits non-zero is a hard stop: the unmeld fails
-    // and the source remains registered. Items must also remain installed.
+    // spec: HOOK-53, HOOK-54, HOOK-87
+    // A source uninstall hook that exits non-zero is a hard stop: the unmeld
+    // fails and the source remains registered. Under HOOK-87 the source hook runs
+    // AFTER the items are torn down, so the item is already removed when the
+    // source hook fails; the source itself stays melded.
     let sb = Sandbox::bare("failing-uninstall-hook");
     let toml = "[[hooks]]\nrun = \"exit 1\"\nevent = \"uninstall\"\n";
     sb.write_and_commit("mind.toml", toml);
@@ -7395,10 +7399,11 @@ fn unmeld_failing_uninstall_hook_leaves_source_melded() {
         "source must remain melded after a failed uninstall hook: {sources}"
     );
 
-    // Items must still be installed.
+    // HOOK-87: teardown reverses install, so the item is removed BEFORE the
+    // source uninstall hook runs; by the time that hook fails the item is gone.
     assert!(
-        sb.mind(&["recall", "agent:dev"]).success,
-        "items must remain installed after a failed uninstall hook"
+        !sb.mind(&["recall", "agent:dev"]).success,
+        "the item is torn down before the source uninstall hook fires (HOOK-87)"
     );
 }
 

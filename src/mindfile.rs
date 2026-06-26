@@ -168,6 +168,86 @@ pub struct ItemDecl {
     /// removed (at `forget`/`unmeld`/rename-on-upgrade), before its store copy
     /// and links are removed. Valid on any kind. `None` means no uninstall hook.
     pub uninstall: Option<String>,
+    /// Item lifecycle hooks declared as an array (HOOK-86), the per-item analog
+    /// of the source `[[hooks]]` array (HOOK-50): the field is `[[items.hooks]]`
+    /// in `mind.toml`. Same fields/semantics as a source hook. The scalar
+    /// `install`/`uninstall` above are folded in ahead of these (see
+    /// [`ItemDecl::resolved_item_hooks`]).
+    #[serde(default)]
+    pub hooks: Vec<Hook>,
+}
+
+impl ItemDecl {
+    /// Resolve this item's lifecycle hooks (HOOK-86) in execution order.
+    ///
+    /// Mirrors [`MindToml::resolved_hooks`]: the scalar `install` folds in as the
+    /// first required install hook and the scalar `uninstall` as the first
+    /// required uninstall hook (HOOK-80 shorthand), both ahead of the
+    /// `[[items.hooks]]` entries, which are then validated and appended in
+    /// declaration order. An empty/whitespace `run` is dropped (HOOK-3) and an
+    /// unknown `event` is a `mind.toml` schema error.
+    pub fn resolved_item_hooks(&self, toml_path: &std::path::Path) -> Result<Vec<ResolvedHook>> {
+        let mut out: Vec<ResolvedHook> = Vec::new();
+
+        // HOOK-86: fold the scalar install/uninstall shorthand in first, each as
+        // a required hook of its event.
+        for (scalar, event) in [
+            (&self.install, HookEvent::Install),
+            (&self.uninstall, HookEvent::Uninstall),
+        ] {
+            if let Some(cmd) = scalar {
+                let trimmed = cmd.trim();
+                if !trimmed.is_empty() {
+                    out.push(ResolvedHook {
+                        run: trimmed.to_owned(),
+                        name: None,
+                        optional: false,
+                        event,
+                    });
+                }
+            }
+        }
+
+        // HOOK-86: [[items.hooks]] entries in declaration order, validated the
+        // same way as a source's [[hooks]].
+        out.extend(self.resolved_item_array_hooks(toml_path)?);
+
+        Ok(out)
+    }
+
+    /// Resolve just the `[[items.hooks]]` ARRAY entries (HOOK-86), validated in
+    /// declaration order, WITHOUT the scalar install/uninstall fold-in. The
+    /// catalog builder folds the (possibly frontmatter-sourced) scalars itself,
+    /// so it appends only these array entries.
+    pub fn resolved_item_array_hooks(
+        &self,
+        toml_path: &std::path::Path,
+    ) -> Result<Vec<ResolvedHook>> {
+        let mut out: Vec<ResolvedHook> = Vec::new();
+        for hook in &self.hooks {
+            let run = hook.run.trim();
+            if run.is_empty() {
+                continue; // HOOK-3 generalized: skip blank run
+            }
+            let event = match hook.event.as_deref() {
+                None | Some("install") => HookEvent::Install,
+                Some("uninstall") => HookEvent::Uninstall,
+                Some(e) => {
+                    return Err(MindError::MindToml {
+                        path: toml_path.to_path_buf(),
+                        msg: format!("unknown hook event '{e}'; expected 'install' or 'uninstall'"),
+                    });
+                }
+            };
+            out.push(ResolvedHook {
+                run: run.to_owned(),
+                name: hook.name.clone(),
+                optional: hook.optional,
+                event,
+            });
+        }
+        Ok(out)
+    }
 }
 
 /// Glob-based discovery: per-kind include/exclude, plus nested sources.
@@ -676,5 +756,172 @@ mod tests {
         let resolved = parsed.resolved_hooks(dummy).expect("resolve");
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].run, "npm install");
+    }
+
+    // ----- HOOK-86: [[items.hooks]] item-level array -----
+
+    /// Parse a `mind.toml` and return its first item's resolved hooks.
+    fn first_item_hooks(toml: &str) -> Result<Vec<ResolvedHook>> {
+        let parsed: MindToml = toml::from_str(toml).expect("parse");
+        let item = &parsed.items[0];
+        item.resolved_item_hooks(Path::new("/repo/mind.toml"))
+    }
+
+    #[test]
+    fn item_hooks_array_parses_and_preserves_order() {
+        // spec: HOOK-86
+        let toml = r#"
+            [[items]]
+            kind = "tool"
+            name = "helper"
+            path = "tools/helper"
+
+            [[items.hooks]]
+            run = "first"
+            name = "Step one"
+
+            [[items.hooks]]
+            run = "second"
+            optional = true
+            event = "install"
+
+            [[items.hooks]]
+            run = "teardown"
+            event = "uninstall"
+        "#;
+        let resolved = first_item_hooks(toml).expect("resolve");
+        assert_eq!(resolved.len(), 3);
+        assert_eq!(resolved[0].run, "first");
+        assert_eq!(resolved[0].name.as_deref(), Some("Step one"));
+        assert!(!resolved[0].optional);
+        assert_eq!(resolved[0].event, HookEvent::Install);
+        assert_eq!(resolved[1].run, "second");
+        assert!(resolved[1].optional);
+        assert_eq!(resolved[1].event, HookEvent::Install);
+        assert_eq!(resolved[2].run, "teardown");
+        assert_eq!(resolved[2].event, HookEvent::Uninstall);
+    }
+
+    #[test]
+    fn item_scalar_install_uninstall_fold_in_ahead_of_array() {
+        // spec: HOOK-86 — scalar install/uninstall are the one-required-hook
+        // shorthand, folded in ahead of any [[items.hooks]] entries.
+        let toml = r#"
+            [[items]]
+            kind = "tool"
+            name = "helper"
+            path = "tools/helper"
+            install = "scalar-install"
+            uninstall = "scalar-uninstall"
+
+            [[items.hooks]]
+            run = "array-install"
+            event = "install"
+
+            [[items.hooks]]
+            run = "array-uninstall"
+            event = "uninstall"
+        "#;
+        let resolved = first_item_hooks(toml).expect("resolve");
+        assert_eq!(resolved.len(), 4);
+        // Scalar install first, then scalar uninstall, then the array entries.
+        assert_eq!(resolved[0].run, "scalar-install");
+        assert_eq!(resolved[0].event, HookEvent::Install);
+        assert!(!resolved[0].optional);
+        assert_eq!(resolved[0].name, None);
+        assert_eq!(resolved[1].run, "scalar-uninstall");
+        assert_eq!(resolved[1].event, HookEvent::Uninstall);
+        assert!(!resolved[1].optional);
+        assert_eq!(resolved[2].run, "array-install");
+        assert_eq!(resolved[3].run, "array-uninstall");
+    }
+
+    #[test]
+    fn item_scalar_only_yields_one_required_hook_each() {
+        // spec: HOOK-86 — with no array, the scalars alone resolve to one
+        // required hook of each event.
+        let toml = r#"
+            [[items]]
+            kind = "rule"
+            name = "style"
+            path = "guidelines/style.md"
+            install = "set-up"
+            uninstall = "tear-down"
+        "#;
+        let resolved = first_item_hooks(toml).expect("resolve");
+        assert_eq!(resolved.len(), 2);
+        assert_eq!(resolved[0].run, "set-up");
+        assert_eq!(resolved[0].event, HookEvent::Install);
+        assert_eq!(resolved[1].run, "tear-down");
+        assert_eq!(resolved[1].event, HookEvent::Uninstall);
+    }
+
+    #[test]
+    fn item_hooks_unknown_event_is_mind_toml_error() {
+        // spec: HOOK-86 — same validation as a source [[hooks]] (HOOK-51).
+        let toml = r#"
+            [[items]]
+            kind = "tool"
+            name = "helper"
+            path = "tools/helper"
+
+            [[items.hooks]]
+            run = "do-something"
+            event = "build"
+        "#;
+        let err = first_item_hooks(toml).unwrap_err();
+        match err {
+            MindError::MindToml { path, msg } => {
+                assert_eq!(path, Path::new("/repo/mind.toml"));
+                assert!(msg.contains("build"), "names the bad value: {msg}");
+                assert!(
+                    msg.contains("install") && msg.contains("uninstall"),
+                    "names the legal set: {msg}"
+                );
+            }
+            other => panic!("expected MindError::MindToml, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn item_hooks_empty_run_is_dropped() {
+        // spec: HOOK-86 — empty/whitespace run entries are silently dropped
+        // (HOOK-3), as for a source hook.
+        let toml = r#"
+            [[items]]
+            kind = "tool"
+            name = "helper"
+            path = "tools/helper"
+
+            [[items.hooks]]
+            run = ""
+
+            [[items.hooks]]
+            run = "   "
+
+            [[items.hooks]]
+            run = "real-command"
+        "#;
+        let resolved = first_item_hooks(toml).expect("resolve");
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].run, "real-command");
+    }
+
+    #[test]
+    fn item_scalar_whitespace_contributes_nothing() {
+        // spec: HOOK-86 — a whitespace-only scalar install folds in nothing.
+        let toml = r#"
+            [[items]]
+            kind = "tool"
+            name = "helper"
+            path = "tools/helper"
+            install = "   "
+
+            [[items.hooks]]
+            run = "array-install"
+        "#;
+        let resolved = first_item_hooks(toml).expect("resolve");
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].run, "array-install");
     }
 }

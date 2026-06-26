@@ -315,6 +315,21 @@ fn run_checks(
                         ),
                     ));
                 }
+                // spec: HOOK-90 -- [source].install is deprecated in favor of
+                // [[hooks]] with event = "install". Emit an advisory when the
+                // legacy field is present so maintainers can migrate.
+                if let Some(cmd) = &mf.source.install
+                    && !cmd.trim().is_empty()
+                {
+                    advisory.push(Finding::advisory(
+                        "deprecated-field",
+                        format!(
+                            "[source].install is deprecated; use a [[hooks]] entry instead: \
+                             run = \"{}\", event = \"install\"",
+                            cmd.trim()
+                        ),
+                    ));
+                }
             }
             Err(e) => {
                 // A bad event string is a schema error caught as a hard finding
@@ -524,7 +539,7 @@ fn run_checks(
                         suggestion
                     ),
                     crate::namespace::HardcodedKind::OtherItem => format!(
-                        "{}: hardcoded install path '{}'; a literal mind install path is fragile (a path token tracks it, or install the resource to a fixed location via an install hook){}",
+                        "{}: hardcoded install path '{}'; a literal mind install path is fragile - use a path token to track it dynamically, or if a [source].install / [[hooks]] step places the resource at that path the reference is intentional and safe{}",
                         item.key(),
                         hp.matched,
                         suggestion
@@ -573,7 +588,7 @@ fn run_checks(
             advisory.push(Finding::advisory(
                 "bare-tool-reference",
                 format!(
-                    "{}: names tool item(s) in prose: {}; a tool item is reached by a token ({{{{tools:name}}}}), or install the helper to a known location via an install hook and call it there",
+                    "{}: names tool item(s) in prose: {}; a tool item is reached by a token ({{{{tools:name}}}}), or if a [source].install / [[hooks]] step places the helper at a known location calling it there is intentional and safe",
                     item.key(),
                     bare_tools.join(", ")
                 ),
@@ -2297,6 +2312,238 @@ mod tests {
         assert!(
             fixed.contains("~/dev") && fixed.contains("`dev`"),
             "path/span un-wrapped: {fixed}"
+        );
+    }
+
+    // --- HOOK-90: deprecated-field advisory for [source].install ---
+
+    /// A source whose mind.toml declares [source].install yields a
+    /// `deprecated-field` advisory naming the [[hooks]] equivalent.
+    /// spec: HOOK-90
+    #[test]
+    fn deprecated_field_advisory_when_source_install_declared() {
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let source_dir = base.join("src");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(
+            source_dir.join("mind.toml"),
+            "[source]\ninstall = \"make build && make install\"\n",
+        )
+        .unwrap();
+        write_file(
+            &source_dir.join("agents/tool.md"),
+            "---\ndescription: tool agent\n---\n# tool\n",
+        );
+        let paths = paths_for(base);
+
+        let result = run_checks(&paths, &source_dir, None, false, true).unwrap();
+        assert!(
+            result.hard.is_empty(),
+            "deprecated-field must not be a hard finding: {:?}",
+            result.hard
+        );
+        let dep_findings: Vec<&Finding> = result
+            .advisory
+            .iter()
+            .filter(|f| f.kind == "deprecated-field")
+            .collect();
+        assert_eq!(
+            dep_findings.len(),
+            1,
+            "expected exactly one deprecated-field advisory: {:?}",
+            result.advisory
+        );
+        let msg = &dep_findings[0].message;
+        // Must name the [[hooks]] equivalent form.
+        assert!(
+            msg.contains("[[hooks]]"),
+            "deprecated-field advisory must name the [[hooks]] form: {msg}"
+        );
+        assert!(
+            msg.contains("event = \"install\""),
+            "deprecated-field advisory must name the event: {msg}"
+        );
+        assert!(
+            msg.contains("make build && make install"),
+            "deprecated-field advisory must echo the declared command: {msg}"
+        );
+    }
+
+    /// A source with no [source].install declared yields no deprecated-field advisory.
+    /// spec: HOOK-90
+    #[test]
+    fn no_deprecated_field_advisory_when_source_install_absent() {
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let source_dir = base.join("src");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        // Uses [[hooks]] directly - no legacy [source].install field.
+        std::fs::write(
+            source_dir.join("mind.toml"),
+            "[[hooks]]\nrun = \"npm install\"\nevent = \"install\"\n",
+        )
+        .unwrap();
+        write_file(
+            &source_dir.join("agents/tool.md"),
+            "---\ndescription: tool agent\n---\n# tool\n",
+        );
+        let paths = paths_for(base);
+
+        let result = run_checks(&paths, &source_dir, None, false, true).unwrap();
+        assert!(
+            result.advisory.iter().all(|f| f.kind != "deprecated-field"),
+            "no [source].install => no deprecated-field advisory: {:?}",
+            result.advisory
+        );
+    }
+
+    /// The deprecated-field advisory is emitted ALONGSIDE the install-hook
+    /// advisory (not instead of it): HOOK-90 says "in addition to disclosing
+    /// the hook itself (HOOK-40)".
+    /// spec: HOOK-90
+    #[test]
+    fn deprecated_field_and_install_hook_both_present() {
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let source_dir = base.join("src");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(
+            source_dir.join("mind.toml"),
+            "[source]\ninstall = \"make setup\"\n",
+        )
+        .unwrap();
+        write_file(
+            &source_dir.join("agents/tool.md"),
+            "---\ndescription: tool agent\n---\n# tool\n",
+        );
+        let paths = paths_for(base);
+
+        let result = run_checks(&paths, &source_dir, None, false, true).unwrap();
+        assert!(
+            result.advisory.iter().any(|f| f.kind == "install-hook"),
+            "install-hook advisory must still be emitted: {:?}",
+            result.advisory
+        );
+        assert!(
+            result.advisory.iter().any(|f| f.kind == "deprecated-field"),
+            "deprecated-field advisory must also be emitted: {:?}",
+            result.advisory
+        );
+    }
+
+    // --- CLI-146: install-hook-safe wording in hardcoded-path (OtherItem) and bare-tool-reference ---
+
+    /// The hardcoded-path OtherItem advisory message notes that a path an
+    /// install hook populates is safe / intentional.
+    /// spec: CLI-146
+    #[test]
+    fn hardcoded_path_other_item_message_notes_install_hook_safe() {
+        let tmp = TmpDir::new();
+        let source_dir = tmp.path().join("src");
+        // A sibling agent at ~/.claude/agents/dev.md is an OtherItem hardcoded
+        // path for the skill (it's a sibling, not the item's own resource).
+        write_file(
+            &source_dir.join("agents/dev.md"),
+            "---\ndescription: dev\n---\n# dev\n",
+        );
+        write_file(
+            &source_dir.join("skills/review/SKILL.md"),
+            "---\ndescription: review\n---\nuse ~/.claude/agents/dev.md here\n",
+        );
+        let paths = paths_for(tmp.path());
+
+        let result = run_checks(&paths, &source_dir, None, false, true).unwrap();
+        let f = result
+            .advisory
+            .iter()
+            .find(|f| f.kind == "hardcoded-path")
+            .expect("expected a hardcoded-path advisory");
+        // Must mention the install-hook-safe note (CLI-146).
+        assert!(
+            f.message.contains("install")
+                && (f.message.contains("intentional") || f.message.contains("safe")),
+            "OtherItem hardcoded-path advisory must note install-hook-safe case: {}",
+            f.message
+        );
+        // Must still note the literal path is fragile.
+        assert!(
+            f.message.contains("fragile"),
+            "OtherItem advisory must still say fragile: {}",
+            f.message
+        );
+    }
+
+    /// The {{self}} OwnResource arm of hardcoded-path keeps its existing
+    /// fragile-not-broken wording (does NOT mention install-hook-safe).
+    /// spec: CLI-145 (unchanged), CLI-146 (OwnResource carve-out)
+    #[test]
+    fn hardcoded_path_own_resource_arm_unchanged() {
+        let tmp = TmpDir::new();
+        let source_dir = tmp.path().join("src");
+        write_file(
+            &source_dir.join("skills/review/SKILL.md"),
+            "---\ndescription: review\n---\nrun ~/.claude/skills/review/resources/pr.py here\n",
+        );
+        let paths = paths_for(tmp.path());
+
+        let result = run_checks(&paths, &source_dir, None, false, true).unwrap();
+        let f = result
+            .advisory
+            .iter()
+            .find(|f| f.kind == "hardcoded-path")
+            .expect("expected a hardcoded-path advisory");
+        // Must contain the existing fragile-not-broken wording (CLI-145).
+        assert!(
+            f.message.contains("hardcodes its own resource path"),
+            "OwnResource arm must keep hardcodes-its-own-resource-path wording: {}",
+            f.message
+        );
+        assert!(
+            f.message.contains("this works but assumes"),
+            "OwnResource arm must keep works-but-assumes wording: {}",
+            f.message
+        );
+        // Must still suggest the token.
+        assert!(
+            f.message.contains("{{self}}/resources/pr.py"),
+            "OwnResource arm must suggest the token: {}",
+            f.message
+        );
+    }
+
+    /// The bare-tool-reference advisory message notes that a known-location
+    /// install-hook path is intentional and safe.
+    /// spec: CLI-146
+    #[test]
+    fn bare_tool_reference_message_notes_install_hook_safe() {
+        let tmp = TmpDir::new();
+        let source_dir = tmp.path().join("src");
+        write_file(&source_dir.join("tools/detect/detect"), "#!/bin/sh\n");
+        write_file(
+            &source_dir.join("skills/review/SKILL.md"),
+            "---\ndescription: review\n---\nFirst run the detect helper, then review.\n",
+        );
+        let paths = paths_for(tmp.path());
+
+        let result = run_checks(&paths, &source_dir, None, false, true).unwrap();
+        let f = result
+            .advisory
+            .iter()
+            .find(|f| f.kind == "bare-tool-reference")
+            .expect("expected a bare-tool-reference advisory");
+        // Must name the tool.
+        assert!(
+            f.message.contains("detect"),
+            "names the tool: {}",
+            f.message
+        );
+        // Must note the install-hook-safe case (CLI-146).
+        assert!(
+            f.message.contains("install")
+                && (f.message.contains("intentional") || f.message.contains("safe")),
+            "bare-tool-reference advisory must note install-hook-safe case: {}",
+            f.message
         );
     }
 

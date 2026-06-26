@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{ItemKind, MindError, Result};
 use crate::frontmatter;
-use crate::mindfile::{Discover, ItemDecl, KindGlobs, MindToml};
+use crate::mindfile::{Discover, HookEvent, ItemDecl, KindGlobs, MindToml, ResolvedHook};
 use crate::namespace;
 use crate::paths::Paths;
 use crate::source::{Registry, Source};
@@ -57,6 +57,13 @@ pub struct CatalogItem {
     /// is removed (from a `mind.toml` `[[items]].uninstall` on any kind, or a
     /// tool's `TOOL.md` `uninstall:` frontmatter). `None` means none.
     pub uninstall: Option<String>,
+    /// The item's full resolved lifecycle hooks (HOOK-86), in execution order:
+    /// the scalar `install`/`uninstall` shorthand folded in ahead of any
+    /// `[[items.hooks]]` array entries. The scalar fields above stay populated
+    /// alongside this list (HOOK-85 disclosure reads them); this list is what the
+    /// install/uninstall execution iterates. A `TOOL.md`-frontmatter item has
+    /// only its scalars folded in (DSC-21: the array form requires `mind.toml`).
+    pub hooks: Vec<ResolvedHook>,
 }
 
 impl CatalogItem {
@@ -80,6 +87,22 @@ impl CatalogItem {
             .join(&self.name)
             .is_file()
             .then(|| self.name.clone())
+    }
+
+    /// This item's resolved install hooks (HOOK-86), in execution order.
+    pub fn install_hooks(&self) -> Vec<&ResolvedHook> {
+        self.hooks
+            .iter()
+            .filter(|h| h.event == HookEvent::Install)
+            .collect()
+    }
+
+    /// This item's resolved uninstall hooks (HOOK-86), in execution order.
+    pub fn uninstall_hooks(&self) -> Vec<&ResolvedHook> {
+        self.hooks
+            .iter()
+            .filter(|h| h.event == HookEvent::Uninstall)
+            .collect()
     }
 
     /// User-facing key, using the effective (possibly prefixed) name.
@@ -269,6 +292,11 @@ fn from_decl(
     }
     let path = root.join(&decl.path);
     let meta = meta_file(kind, &path);
+    // HOOK-86: resolve the item's full lifecycle hook list (scalar shorthand
+    // folded ahead of the `[[items.hooks]]` array, validated). This is the
+    // authoritative list for the `mind.toml` path; the scalar fields below stay
+    // populated for the HOOK-85 disclosure.
+    let hooks = decl.resolved_item_hooks(&root.join("mind.toml"))?;
     Ok(build_item(
         source,
         prefix,
@@ -283,6 +311,7 @@ fn from_decl(
             build: decl.build.clone(),
             install: decl.install.clone(),
             uninstall: decl.uninstall.clone(),
+            hooks: Some(hooks),
         },
     ))
 }
@@ -323,6 +352,12 @@ struct ItemOverrides {
     build: Option<String>,
     install: Option<String>,
     uninstall: Option<String>,
+    /// The item's fully resolved lifecycle hooks (HOOK-86) in execution order:
+    /// the scalar install/uninstall shorthand folded in ahead of any
+    /// `[[items.hooks]]` array entries. `None` lets `build_item` derive the list
+    /// from the resolved scalar fields alone (the convention/TOOL.md path, where
+    /// there is no array form, DSC-21).
+    hooks: Option<Vec<ResolvedHook>>,
 }
 
 /// The single `CatalogItem` constructor: it applies the override-then-frontmatter
@@ -337,6 +372,35 @@ fn build_item(
     meta: &Path,
     ov: ItemOverrides,
 ) -> CatalogItem {
+    // HOOK-80: a `mind.toml` install/uninstall is valid on any kind; a tool's
+    // TOOL.md may also carry one in frontmatter. An empty value is absent. These
+    // scalar fields stay populated for the HOOK-85 disclosure, alongside `hooks`.
+    let install = nonempty(ov.install).or_else(|| lifecycle_frontmatter(kind, meta, "install"));
+    let uninstall =
+        nonempty(ov.uninstall).or_else(|| lifecycle_frontmatter(kind, meta, "uninstall"));
+    // HOOK-86: the full resolved hook list in execution order. On the `mind.toml`
+    // path the caller supplies it via `ItemDecl::resolved_item_hooks` (scalar
+    // shorthand folded ahead of the `[[items.hooks]]` array). On the
+    // convention/TOOL.md path there is no array (DSC-21), so derive it from the
+    // resolved scalar install/uninstall (which may come from TOOL.md frontmatter),
+    // each as one required hook of its event.
+    let hooks = ov.hooks.unwrap_or_else(|| {
+        let mut out: Vec<ResolvedHook> = Vec::new();
+        for (cmd, event) in [
+            (&install, HookEvent::Install),
+            (&uninstall, HookEvent::Uninstall),
+        ] {
+            if let Some(c) = cmd {
+                out.push(ResolvedHook {
+                    run: c.clone(),
+                    name: None,
+                    optional: false,
+                    event,
+                });
+            }
+        }
+        out
+    });
     CatalogItem {
         kind,
         name,
@@ -347,11 +411,9 @@ fn build_item(
         link_rel: ov.link,
         bin: tool_field(kind, ov.bin, meta, "bin"),
         build: tool_field(kind, ov.build, meta, "build"),
-        // HOOK-80: a `mind.toml` install/uninstall is valid on any kind; a tool's
-        // TOOL.md may also carry one in frontmatter. An empty value is absent.
-        install: nonempty(ov.install).or_else(|| lifecycle_frontmatter(kind, meta, "install")),
-        uninstall: nonempty(ov.uninstall)
-            .or_else(|| lifecycle_frontmatter(kind, meta, "uninstall")),
+        install,
+        uninstall,
+        hooks,
     }
 }
 
@@ -597,6 +659,162 @@ mod lifecycle_tests {
         scan_source(&paths, &source_for(&clone), &mut items).unwrap();
         let rule = items.iter().find(|i| i.name == "style").unwrap();
         assert_eq!(rule.install, None, "whitespace install must be absent");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn scalar_item_hooks_populate_both_the_scalar_fields_and_the_list() {
+        // spec: HOOK-86
+        // COORDINATION: the scalar install/uninstall fields stay populated (the
+        // HOOK-85 disclosure reads them) AND the resolved hook list is populated.
+        let base = tmp();
+        let clone = base.join("sources/local/test/repo");
+        write(
+            &clone.join("guidelines/style.md"),
+            "---\ndescription: style\n---\n# style\n",
+        );
+        write(
+            &clone.join("mind.toml"),
+            concat!(
+                "[[items]]\n",
+                "kind = \"rule\"\n",
+                "name = \"style\"\n",
+                "path = \"guidelines/style.md\"\n",
+                "install = \"echo set-up\"\n",
+                "uninstall = \"echo tear-down\"\n",
+            ),
+        );
+        let paths = Paths {
+            mind_home: base.clone(),
+            claude_home: base.join("claude"),
+        };
+        let mut items = Vec::new();
+        scan_source(&paths, &source_for(&clone), &mut items).unwrap();
+        let rule = items.iter().find(|i| i.name == "style").unwrap();
+        // Scalar fields still populated.
+        assert_eq!(rule.install.as_deref(), Some("echo set-up"));
+        assert_eq!(rule.uninstall.as_deref(), Some("echo tear-down"));
+        // The resolved list mirrors them: one required install, one required
+        // uninstall, in fold-in order.
+        assert_eq!(rule.hooks.len(), 2);
+        let ih = rule.install_hooks();
+        assert_eq!(ih.len(), 1);
+        assert_eq!(ih[0].run, "echo set-up");
+        let uh = rule.uninstall_hooks();
+        assert_eq!(uh.len(), 1);
+        assert_eq!(uh[0].run, "echo tear-down");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn array_item_hooks_resolve_in_order_with_scalar_folded_ahead() {
+        // spec: HOOK-86
+        // A `[[items.hooks]]` array plus a scalar install: the scalar folds in as
+        // the first install hook, then the array entries in declaration order.
+        let base = tmp();
+        let clone = base.join("sources/local/test/repo");
+        write(&clone.join("tools/helper/helper"), "#!/bin/sh\n");
+        write(
+            &clone.join("mind.toml"),
+            concat!(
+                "[[items]]\n",
+                "kind = \"tool\"\n",
+                "name = \"helper\"\n",
+                "path = \"tools/helper\"\n",
+                "install = \"scalar-install\"\n",
+                "\n",
+                "[[items.hooks]]\n",
+                "run = \"array-install\"\n",
+                "name = \"Second step\"\n",
+                "\n",
+                "[[items.hooks]]\n",
+                "run = \"array-uninstall\"\n",
+                "event = \"uninstall\"\n",
+            ),
+        );
+        let paths = Paths {
+            mind_home: base.clone(),
+            claude_home: base.join("claude"),
+        };
+        let mut items = Vec::new();
+        scan_source(&paths, &source_for(&clone), &mut items).unwrap();
+        let tool = items.iter().find(|i| i.name == "helper").unwrap();
+        // Scalar field still set.
+        assert_eq!(tool.install.as_deref(), Some("scalar-install"));
+        // Full list: scalar install, then the two array entries.
+        assert_eq!(tool.hooks.len(), 3);
+        let ih = tool.install_hooks();
+        assert_eq!(ih.len(), 2);
+        assert_eq!(ih[0].run, "scalar-install");
+        assert_eq!(ih[1].run, "array-install");
+        assert_eq!(ih[1].name.as_deref(), Some("Second step"));
+        let uh = tool.uninstall_hooks();
+        assert_eq!(uh.len(), 1);
+        assert_eq!(uh[0].run, "array-uninstall");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn tool_md_scalar_hooks_fold_into_the_list() {
+        // spec: HOOK-86
+        // For a convention-discovered tool, the TOOL.md install:/uninstall:
+        // frontmatter scalars (DSC-21: the only form there) fold into the hook
+        // list AND populate the scalar fields.
+        let base = tmp();
+        let clone = base.join("sources/local/test/repo");
+        write(
+            &clone.join("tools/helper/TOOL.md"),
+            "---\ndescription: helper\ninstall: make setup\nuninstall: make cleanup\n---\n# helper\n",
+        );
+        write(&clone.join("tools/helper/helper"), "#!/bin/sh\n");
+        let paths = Paths {
+            mind_home: base.clone(),
+            claude_home: base.join("claude"),
+        };
+        let mut items = Vec::new();
+        scan_source(&paths, &source_for(&clone), &mut items).unwrap();
+        let tool = items.iter().find(|i| i.name == "helper").unwrap();
+        assert_eq!(tool.install.as_deref(), Some("make setup"));
+        assert_eq!(tool.uninstall.as_deref(), Some("make cleanup"));
+        // Folded into the list as one required hook each.
+        assert_eq!(tool.hooks.len(), 2);
+        assert_eq!(tool.install_hooks()[0].run, "make setup");
+        assert!(!tool.install_hooks()[0].optional);
+        assert_eq!(tool.uninstall_hooks()[0].run, "make cleanup");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn item_array_hooks_unknown_event_is_a_scan_error() {
+        // spec: HOOK-86
+        // An unknown event in a `[[items.hooks]]` entry surfaces as a mind.toml
+        // schema error from the scan (via from_decl).
+        let base = tmp();
+        let clone = base.join("sources/local/test/repo");
+        write(&clone.join("tools/helper/helper"), "#!/bin/sh\n");
+        write(
+            &clone.join("mind.toml"),
+            concat!(
+                "[[items]]\n",
+                "kind = \"tool\"\n",
+                "name = \"helper\"\n",
+                "path = \"tools/helper\"\n",
+                "\n",
+                "[[items.hooks]]\n",
+                "run = \"do-it\"\n",
+                "event = \"build\"\n",
+            ),
+        );
+        let paths = Paths {
+            mind_home: base.clone(),
+            claude_home: base.join("claude"),
+        };
+        let mut items = Vec::new();
+        let err = scan_source(&paths, &source_for(&clone), &mut items).unwrap_err();
+        assert!(
+            matches!(err, MindError::MindToml { .. }),
+            "unknown item hook event must be a schema error: {err}"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 }
@@ -1174,6 +1392,7 @@ mod tests {
             build: None,
             install: None,
             uninstall: None,
+            hooks: Vec::new(),
         }
     }
 
@@ -1247,6 +1466,7 @@ mod tests {
             build: None,
             install: None,
             uninstall: None,
+            hooks: Vec::new(),
         };
         assert_eq!(item.resolved_bin(), None);
     }
@@ -1268,6 +1488,7 @@ mod tests {
             build: None,
             install: None,
             uninstall: None,
+            hooks: Vec::new(),
         };
         let err = from_decl(root, &source, &None, &decl).unwrap_err();
         assert!(

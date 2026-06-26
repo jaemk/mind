@@ -227,6 +227,7 @@ mod tests {
             build: None,
             install: None,
             uninstall: None,
+            hooks: Vec::new(),
         }
     }
 

@@ -640,7 +640,7 @@ fn siblings_of(items: &[CatalogItem], source: &str) -> Vec<CatalogItem> {
 /// if absent, and (with `--template`) rewrites bare sibling references into
 /// `{{ns:}}` tokens. Operates only on the target directory: no store, no agent
 /// home, no network (INIT-6).
-// spec: INIT-1 INIT-2 INIT-3 INIT-4 INIT-6
+// spec: INIT-1 INIT-2 INIT-3 INIT-4 INIT-6 INIT-9
 pub fn init_source(dir: Option<&str>, template: bool) -> Result<()> {
     let dir = dir.unwrap_or(".");
     let path = std::path::Path::new(dir);
@@ -673,6 +673,11 @@ pub fn init_source(dir: Option<&str>, template: bool) -> Result<()> {
     // `review` (CLI-131), so review and init-source read identically.
     let siblings: std::collections::HashSet<String> =
         items.iter().map(|it| it.name.clone()).collect();
+    // INIT-9: the bare-prose `unguarded-reference` advisory fires only when an
+    // effective prefix is in force (matching `meld` NS-23 and `review` CLI-133):
+    // absent a prefix, bare references resolve as written. The `{{ns:}}`-token
+    // graph and the `--template` rewrite below are unaffected by this gate.
+    let prefix_in_force = items.iter().any(|it| it.prefix.is_some());
     let mut findings: Vec<crate::review::Finding> = Vec::new();
     for it in &items {
         let content = read_item_text(it);
@@ -692,7 +697,7 @@ pub fn init_source(dir: Option<&str>, template: bool) -> Result<()> {
                 tokens.join(", ")
             );
         }
-        if !bare.is_empty() {
+        if prefix_in_force && !bare.is_empty() {
             findings.push(crate::review::Finding::advisory(
                 "unguarded-reference",
                 format!(
@@ -997,10 +1002,49 @@ pub fn unmeld(
         }
     }
 
-    // HOOK-54: run uninstall hooks AFTER the multi-item confirmation (for the
-    // default path) but BEFORE removing anything. The clone still exists at this
-    // point. Non-TTY: skip with a note. dangerously_skip_hook_check: run all
-    // hooks without prompting.
+    // HOOK-87: teardown reverses install -- each item's uninstall hooks run
+    // BEFORE the source's uninstall hooks. The end-to-end order is
+    //   confirm (CLI-42, above) -> item.uninstall* -> source.uninstall -> remove.
+    // The source stays in the registry through both hook phases so the clone
+    // (and its catalog) remain available; it is removed only after both succeed.
+    //
+    // HOOK-82: each removed item's uninstall hooks (when declared) run before its
+    // files are removed. The clone still exists here, so its catalog supplies the
+    // commands. A hook failure leaves the source melded (mirroring HOOK-54).
+    let source_ref = &registry.sources[idx];
+    let mut item_catalog: Vec<CatalogItem> = Vec::new();
+    let _ = catalog::scan_source(paths, source_ref, &mut item_catalog);
+    let commit = source_ref.commit.clone().unwrap_or_default();
+    let mut forgotten = 0;
+    for key in &item_keys {
+        if let Some(item) = manifest.items.remove(key) {
+            let uninstall_hooks: Vec<&crate::mindfile::ResolvedHook> =
+                item_catalog_match(&item_catalog, &item)
+                    .map(|c| c.uninstall_hooks())
+                    .unwrap_or_default();
+            if let Err(e) = uninstall_item(
+                paths,
+                &item,
+                &uninstall_hooks,
+                &commit,
+                dangerously_skip_hook_check,
+            ) {
+                // A hook failed: persist what was removed and the surviving item,
+                // and stop (the source itself stays melded, mirroring HOOK-54).
+                manifest.items.insert(key.clone(), item);
+                manifest.save(paths)?;
+                registry.save(paths)?;
+                return Err(e);
+            }
+            forgotten += 1;
+        }
+    }
+    manifest.save(paths)?;
+
+    // HOOK-54/87: the source's uninstall hooks run AFTER every item has been
+    // removed, still in the clone, before the clone and registry entry are
+    // dropped. Non-TTY: skip with a note; dangerously_skip_hook_check runs them
+    // unattended. An abort or required-hook failure leaves the source melded.
     let proceed = run_uninstall_hooks(
         paths,
         &registry,
@@ -1010,41 +1054,13 @@ pub fn unmeld(
         dangerously_skip_hook_check,
     )?;
     if !proceed {
-        // User aborted the unmeld via the hook prompt; source stays.
+        // User aborted the source uninstall hook; source stays (items already
+        // removed are kept removed, mirroring a partial teardown).
+        registry.save(paths)?;
         return Ok(());
     }
 
     let source = registry.sources.remove(idx);
-    // HOOK-82: each removed item's uninstall hook (when declared) runs before its
-    // files are removed. The clone still exists here, so its catalog supplies the
-    // commands; the source-level uninstall hooks (HOOK-54) already ran above.
-    let mut item_catalog: Vec<CatalogItem> = Vec::new();
-    let _ = catalog::scan_source(paths, &source, &mut item_catalog);
-    let commit = source.commit.clone().unwrap_or_default();
-    let mut forgotten = 0;
-    for key in &item_keys {
-        if let Some(item) = manifest.items.remove(key) {
-            let uninstall_cmd = item_uninstall_cmd(&item_catalog, &item);
-            if let Err(e) = uninstall_item(
-                paths,
-                &item,
-                uninstall_cmd.as_deref(),
-                &commit,
-                dangerously_skip_hook_check,
-            ) {
-                // A hook failed: persist what was removed and the surviving item,
-                // and stop (the source itself stays melded, mirroring HOOK-54).
-                manifest.items.insert(key.clone(), item);
-                manifest.save(paths)?;
-                registry.sources.insert(idx, source);
-                registry.save(paths)?;
-                return Err(e);
-            }
-            forgotten += 1;
-        }
-    }
-    manifest.save(paths)?;
-
     // A local source's directory is the user's working tree -- never delete it.
     let dir = source.clone_dir(paths);
     if !source.is_linked() && dir.exists() {
@@ -1630,7 +1646,7 @@ fn reprefix_source(paths: &Paths, registry: &Registry, source_name: &str) -> Res
         // the old item, so both lifecycle hooks fire (run/skip via the same TTY
         // prompt; no dangerous-skip flag on this interactive path).
         let new = install_item(paths, cat, &old.commit, &siblings, false, false)?;
-        uninstall_item(paths, &old, cat.uninstall.as_deref(), &old.commit, false)?;
+        uninstall_item(paths, &old, &cat.uninstall_hooks(), &old.commit, false)?;
         manifest.items.remove(&old.key());
         if !json_mode() {
             let out = crate::render::ctx();
@@ -1671,9 +1687,14 @@ fn install_item(
     dangerously_skip: bool,
 ) -> Result<crate::manifest::InstalledItem> {
     let installed = install::install(paths, item, commit, siblings, force)?;
-    if let Some(cmd) = item.install.as_deref() {
+    // HOOK-86: run every resolved install hook in declaration order (the scalar
+    // shorthand is folded in as the first required hook). On a hook failure, roll
+    // the just-installed item back.
+    let install_hooks = item.install_hooks();
+    if !install_hooks.is_empty() {
         let store = paths.mind_home.join(&installed.store);
-        if let Err(e) = install::run_item_install_hook(item, cmd, &store, commit, dangerously_skip)
+        if let Err(e) =
+            install::run_item_install_hooks(item, &install_hooks, &store, commit, dangerously_skip)
         {
             let _ = install::uninstall(paths, &installed);
             return Err(e);
@@ -1682,38 +1703,44 @@ fn install_item(
     Ok(installed)
 }
 
-/// Run an item's uninstall hook (HOOK-82) if one is declared, then remove the
-/// item via its file registry. `uninstall_cmd` comes from the live source catalog
-/// (nothing is recorded for it, HOOK-84) and is `None` when the source or item is
-/// no longer available, in which case removal proceeds with no hook. A hook
-/// failure propagates BEFORE removal, leaving the item installed.
+/// Run an item's uninstall hooks (HOOK-82, HOOK-86) in declaration order if any
+/// are declared, then remove the item via its file registry. `uninstall_hooks`
+/// come from the live source catalog (nothing is recorded for them, HOOK-84) and
+/// are empty when the source or item is no longer available, in which case removal
+/// proceeds with no hook. A hook failure propagates BEFORE removal, leaving the
+/// item installed.
 fn uninstall_item(
     paths: &Paths,
     item: &crate::manifest::InstalledItem,
-    uninstall_cmd: Option<&str>,
+    uninstall_hooks: &[&crate::mindfile::ResolvedHook],
     commit: &str,
     dangerously_skip: bool,
 ) -> Result<()> {
-    if let Some(cmd) = uninstall_cmd {
+    if !uninstall_hooks.is_empty() {
         let store = paths.mind_home.join(&item.store);
         if store.exists() {
-            install::run_item_uninstall_hook(item, cmd, &store, commit, dangerously_skip)?;
+            install::run_item_uninstall_hooks(
+                item,
+                uninstall_hooks,
+                &store,
+                commit,
+                dangerously_skip,
+            )?;
         }
     }
     install::uninstall(paths, item)
 }
 
-/// The uninstall hook command declared for an installed item, located by stable
-/// identity (source, kind, bare name) in `catalog` (HOOK-82). `None` when the
-/// item is gone from the catalog or declares no uninstall hook.
-fn item_uninstall_cmd(
-    catalog: &[CatalogItem],
+/// The catalog item matching an installed item by stable identity (source, kind,
+/// bare name), used to read its live uninstall hooks (HOOK-82/86; nothing is
+/// recorded for them, HOOK-84). `None` when the item is gone from the catalog.
+fn item_catalog_match<'a>(
+    catalog: &'a [CatalogItem],
     item: &crate::manifest::InstalledItem,
-) -> Option<String> {
+) -> Option<&'a CatalogItem> {
     catalog
         .iter()
         .find(|c| c.kind == item.kind && c.name == item.bare_name && c.source == item.source)
-        .and_then(|c| c.uninstall.clone())
 }
 
 /// `mind forget <item>` — uninstall one item, or many via a glob.
@@ -1768,30 +1795,28 @@ pub fn forget(paths: &Paths, item_ref: &str, yes: bool, dangerously_skip: bool) 
         }
     }
 
-    // HOOK-82: an item's uninstall hook (when declared) runs before its files are
-    // removed. The command is read from the live source catalog (nothing is
-    // recorded for it, HOOK-84); a source no longer registered or an item gone
-    // from its catalog yields no hook, and removal proceeds.
+    // HOOK-82/86: an item's uninstall hooks (when declared) run before its files
+    // are removed, in declaration order. They are read from the live source
+    // catalog (nothing is recorded for them, HOOK-84); a source no longer
+    // registered or an item gone from its catalog yields no hook, and removal
+    // proceeds.
     let registry = Registry::load(paths)?;
     let catalog = catalog::scan(paths, &registry).unwrap_or_default();
 
     let mut removed: Vec<String> = Vec::new();
     for key in keys {
         let item = manifest.items.remove(&key).expect("key from manifest");
-        let uninstall_cmd = item_uninstall_cmd(&catalog, &item);
+        let uninstall_hooks: Vec<&crate::mindfile::ResolvedHook> =
+            item_catalog_match(&catalog, &item)
+                .map(|c| c.uninstall_hooks())
+                .unwrap_or_default();
         let commit = registry
             .find(&item.source)
             .and_then(|s| s.commit.clone())
             .unwrap_or_default();
         // A hook failure stops here, leaving this item (and the rest) installed;
         // the manifest is saved with what remains.
-        if let Err(e) = uninstall_item(
-            paths,
-            &item,
-            uninstall_cmd.as_deref(),
-            &commit,
-            dangerously_skip,
-        ) {
+        if let Err(e) = uninstall_item(paths, &item, &uninstall_hooks, &commit, dangerously_skip) {
             manifest.items.insert(key.clone(), item);
             manifest.save(paths)?;
             return Err(e);
@@ -2207,7 +2232,7 @@ pub fn upgrade(
             uninstall_item(
                 paths,
                 &up.old,
-                up.cat.uninstall.as_deref(),
+                &up.cat.uninstall_hooks(),
                 &up.old.commit,
                 dangerously_skip_hook_check,
             )?;
