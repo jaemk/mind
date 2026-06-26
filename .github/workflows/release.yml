@@ -26,7 +26,7 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -42,7 +42,7 @@ jobs:
           mkdir "$dist"
           cp "target/${{ matrix.target }}/release/mind" "$dist/"
           tar -czf "${dist}.tar.gz" -C "$dist" mind
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.target }}
           path: mind-*.tar.gz
@@ -51,7 +51,7 @@ jobs:
     needs: build
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
@@ -65,10 +65,10 @@ jobs:
     needs: release
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: main
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
