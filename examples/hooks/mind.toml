@@ -1,0 +1,24 @@
+[source]
+description = "Worked example of source-level lifecycle hooks (see README.md)."
+
+# Required install hook: runs on meld. The user is shown a disclosure and must
+# approve (run/skip/abort) before the command runs. It builds the tooling the
+# shipped skill relies on.
+[[hooks]]
+name = "build helper tooling"
+run = "bash ./bin/build.sh"
+event = "install"
+
+# Optional install hook: also runs on meld, but the prompt offers only run/skip
+# (no abort), so declining it never blocks the meld.
+[[hooks]]
+name = "warm an optional cache"
+run = "bash ./bin/build.sh --cache"
+optional = true
+event = "install"
+
+# Uninstall hook: runs on unmeld to tear down what the install hooks built.
+[[hooks]]
+name = "remove helper tooling"
+run = "bash ./bin/clean.sh"
+event = "uninstall"

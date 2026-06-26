@@ -1,0 +1,3 @@
+[source]
+description = "Worked example of monorepo subtree discovery via [source].roots (see README.md)."
+roots = ["packages/web", "packages/cli"]

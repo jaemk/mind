@@ -1,0 +1,24 @@
+[source]
+description = "Worked example of a curated super-source: a repo that ships its own items AND registers a chain of other sources (see README.md)."
+prefix = "team"
+
+# A bare [discover].sources list (no [[items]] and no [discover] kind globs) is
+# NOT authoritative, so convention scanning stays on and this repo's own
+# skills/ items still ship alongside the curated chain.
+[discover]
+sources = [
+    # Plain entry: melded and left available, its items not auto-offered.
+    { source = "acme/agent-lib" },
+    # Imposes a namespace prefix on the nested source (like meld --as).
+    { source = "github:acme/review-pack", as = "rev" },
+    # Recommended: offered for install when this super-source is melded.
+    { source = "acme/recommended-rules", install = true },
+]
+
+# The inline array above and the table-array form below are equivalent. Either
+# style works; pick whichever reads better for your list. Shown commented out so
+# the two forms do not declare the same nested source twice:
+#
+# [[discover.sources]]
+# source = "acme/recommended-rules"
+# install = true

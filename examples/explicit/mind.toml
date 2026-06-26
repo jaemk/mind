@@ -1,0 +1,27 @@
+[source]
+description = "Worked example of an authoritative [[items]] inventory (see README.md)."
+
+# Declaring any [[items]] makes this file AUTHORITATIVE: convention scanning is
+# turned off and only the entries below are offered. A file that is shipped but
+# not listed here (guidelines/internal.md) is therefore not part of the catalog.
+
+# A rule at a non-conventional path. Convention would expect rules/<name>.md;
+# here the content lives under guidelines/ and is named explicitly. A custom
+# `link` installs the symlink under a different name in the agent home.
+[[items]]
+kind = "rule"
+name = "style"
+path = "guidelines/style.md"
+link = "rules/house-style.md"
+description = "House style for generated output."
+
+# A skill whose directory sits outside the conventional skills/ tree. Per-item
+# install/uninstall hooks run host side effects: `install` after the store swap
+# and links, `uninstall` before the item's paths are removed. These are distinct
+# from source-level [[hooks]] (which run on meld/unmeld for the whole source).
+[[items]]
+kind = "skill"
+name = "scan"
+path = "components/scan"
+install = "bash ./hooks/post.sh"
+uninstall = "bash ./hooks/pre.sh"

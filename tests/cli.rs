@@ -4114,6 +4114,119 @@ fn example_policy_validates() {
 }
 
 #[test]
+fn example_tooling_expands_path_tokens() {
+    // spec: TOOL-3, TOOL-10, TOOL-11, TOOL-12
+    // The tooling example ships a `tool` plus a skill that references it through
+    // path tokens. Learning the skill pulls in the tool it depends on, and the
+    // tokens expand to store paths.
+    let sb = Sandbox::from_example("tooling");
+    let meld = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(meld.success, "{}", meld.stderr);
+
+    // The `detect` tool is referenced by path tokens, not {{ns:}}, so it is not
+    // an install dependency; learn it explicitly alongside the skill.
+    assert!(sb.mind(&["learn", "detect"]).success);
+    assert!(sb.mind(&["learn", "scan"]).success);
+    let skill = std::fs::read_to_string(sb.mind_home.join("store/skill/scan/SKILL.md")).unwrap();
+    assert!(
+        skill.contains("store/tool/detect/detect.sh"),
+        "{{tools:detect}} expands to the tool entrypoint: {skill}"
+    );
+    assert!(
+        skill.contains("store/tool/detect/lib.sh"),
+        "{{path:tool:detect}} reaches a non-entrypoint file: {skill}"
+    );
+    assert!(
+        skill.contains("store/skill/scan"),
+        "{{self}} expands to the skill's own store dir: {skill}"
+    );
+    assert!(
+        !skill.contains("{{tools:") && !skill.contains("{{self") && !skill.contains("{{path:"),
+        "tokens should be gone: {skill}"
+    );
+
+    // The tool is store-only: it lands in the store, linked into no agent home.
+    assert!(
+        sb.mind_home.join("store/tool/detect/detect.sh").exists(),
+        "the detect tool should be copied into the store"
+    );
+}
+
+#[test]
+fn example_hooks_lists_declared_hooks() {
+    // spec: HOOK-50, HOOK-54
+    // The hooks example declares source install and uninstall hooks; `review`
+    // discloses each one, so a consumer sees the source will run code.
+    let sb = Sandbox::new();
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/hooks");
+    let r = sb.mind(&["review", dir.to_str().unwrap()]);
+    assert!(r.success, "stdout: {}\nstderr: {}", r.stdout, r.stderr);
+    let out = format!("{}{}", r.stdout, r.stderr);
+    assert!(
+        out.contains("install hook"),
+        "discloses an install hook: {out}"
+    );
+    assert!(
+        out.contains("uninstall hook"),
+        "discloses the uninstall hook: {out}"
+    );
+}
+
+#[test]
+fn example_monorepo_roots_discovery() {
+    // spec: DSC-50, DSC-53
+    // The monorepo example sets [source].roots, so convention discovery scans the
+    // per-package subtrees and unions the results.
+    let sb = Sandbox::from_example("monorepo");
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    let probe = sb.mind(&["probe"]);
+    assert!(probe.success, "{}", probe.stderr);
+    assert!(
+        probe.stdout.contains("skill:deploy"),
+        "found under packages/web: {}",
+        probe.stdout
+    );
+    assert!(
+        probe.stdout.contains("agent:release"),
+        "found under packages/cli: {}",
+        probe.stdout
+    );
+}
+
+#[test]
+fn example_explicit_inventory_offers_only_listed() {
+    // spec: DSC-3
+    // The explicit example declares a [[items]] inventory, which is authoritative:
+    // convention is off and a shipped-but-unlisted file is not offered.
+    let sb = Sandbox::from_example("explicit");
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    let probe = sb.mind(&["probe"]);
+    assert!(probe.success, "{}", probe.stderr);
+    assert!(probe.stdout.contains("rule:style"), "{}", probe.stdout);
+    assert!(probe.stdout.contains("skill:scan"), "{}", probe.stdout);
+    assert!(
+        !probe.stdout.contains("internal"),
+        "an unlisted file is not offered: {}",
+        probe.stdout
+    );
+}
+
+#[test]
+fn example_super_source_validates() {
+    // spec: DSC-38, DSC-39
+    // The super-source example declares a [discover].sources registry. It
+    // validates clean structurally (review does not clone the nested chain).
+    let sb = Sandbox::new();
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/super-source");
+    let r = sb.mind(&["review", dir.to_str().unwrap()]);
+    assert!(
+        r.success,
+        "super-source example must validate clean:\nstdout: {}\nstderr: {}",
+        r.stdout, r.stderr
+    );
+}
+
+#[test]
 fn man_page_renders_roff() {
     // spec: CLI-121
     let sb = Sandbox::new();
