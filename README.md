@@ -1,6 +1,7 @@
 # mind
 
 [![docs](https://img.shields.io/badge/docs-jaemk.github.io%2Fmind-blue)](https://jaemk.github.io/mind/)
+[![release](https://img.shields.io/github/v/release/jaemk/mind)](https://github.com/jaemk/mind/releases/latest)
 
 A manager for agent tooling (skills, agents, rules, tools) that melds arbitrary git
 repos and links installed items into your agent directories (default
