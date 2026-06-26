@@ -9443,12 +9443,15 @@ fn remeld_source_status_marks_item_outdated_after_in_place_content_edit() {
     );
 }
 
-/// A commit advance (the source moves to a new commit past the installed one)
-/// must mark the item out of date in `recall`, even without a hash check
-/// mismatch path that differs from content drift.
+/// Regression: a commit that advances the source WITHOUT changing a given item's
+/// content must NOT mark that item outdated in `recall`. The outdated marker must
+/// match `upgrade`'s pending condition (LIFE-11): hash drift OR rename, not
+/// commit advance. Before the fix the commit-only advance produced a permanent
+/// false-positive marker that `mind upgrade` would then report as "up to date".
 // spec: CLI-75
+// spec: LIFE-11
 #[test]
-fn recall_marks_item_outdated_after_commit_advance() {
+fn recall_does_not_mark_item_outdated_after_commit_only_advance() {
     let sb = melded();
     assert!(sb.mind(&["learn", "review"]).success);
 
@@ -9460,16 +9463,27 @@ fn recall_marks_item_outdated_after_commit_advance() {
         r.stdout
     );
 
-    // Advance the source by committing an edit, then sync so the recorded source
-    // commit moves past the installed item's commit.
-    sb.edit_source();
+    // Advance the source commit by touching an UNRELATED file, so the source
+    // commit moves past the installed item's commit but the item content is
+    // unchanged. sync updates the recorded source commit.
+    sb.write_and_commit("CHANGES.md", "unrelated change\n");
     assert!(sb.mind(&["sync"]).success);
 
+    // recall must NOT mark the unchanged item outdated.
     let r = sb.mind(&["recall"]);
     assert!(r.success, "recall failed: {} {}", r.stdout, r.stderr);
     assert!(
-        r.stdout.contains("outdated"),
-        "recall must mark the item outdated after a commit advance: {}",
+        !r.stdout.contains("outdated"),
+        "recall must NOT mark the item outdated after a commit-only advance (content unchanged): {}",
+        r.stdout
+    );
+
+    // upgrade must agree: nothing pending for this item.
+    let r = sb.mind(&["upgrade", "--yes"]);
+    assert!(r.success, "upgrade failed: {} {}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("everything is up to date"),
+        "upgrade must report everything up to date after a commit-only advance: {}",
         r.stdout
     );
 }
@@ -9511,5 +9525,90 @@ fn recall_json_is_unchanged_by_drift() {
         !after_status.stdout.contains("outdated") && !after_status.stdout.contains("out of date"),
         "JSON must carry no human out-of-date marker: {}",
         after_status.stdout
+    );
+}
+
+/// Regression: `probe --no-tui` must not mark an installed item outdated when
+/// the source commit advanced without changing that item's content. Both `recall`
+/// and `probe` must agree with `upgrade` on what is pending (CLI-75 / LIFE-11).
+// spec: CLI-75
+// spec: LIFE-11
+#[test]
+fn probe_does_not_mark_item_outdated_after_commit_only_advance() {
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+
+    let r = sb.mind(&["meld", &spec, "--yes"]);
+    assert!(r.success, "meld failed: {} {}", r.stdout, r.stderr);
+
+    // Clean: probe must not flag any item out of date.
+    let r = sb.mind(&["probe", "--no-tui"]);
+    assert!(r.success, "probe failed: {} {}", r.stdout, r.stderr);
+    assert!(
+        !r.stdout.contains("outdated"),
+        "freshly installed items must not be outdated in probe: {}",
+        r.stdout
+    );
+
+    // Advance the source by committing an unrelated file; review content unchanged.
+    sb.write_and_commit("NOTES.md", "unrelated\n");
+    assert!(sb.mind(&["sync"]).success);
+
+    // probe must still not flag the unchanged item.
+    let r = sb.mind(&["probe", "--no-tui"]);
+    assert!(r.success, "probe failed: {} {}", r.stdout, r.stderr);
+    assert!(
+        !r.stdout.contains("outdated"),
+        "probe must NOT mark item outdated after commit-only advance: {}",
+        r.stdout
+    );
+
+    // recall must also not flag it.
+    let r = sb.mind(&["recall"]);
+    assert!(r.success, "recall failed: {} {}", r.stdout, r.stderr);
+    assert!(
+        !r.stdout.contains("outdated"),
+        "recall must NOT mark item outdated after commit-only advance: {}",
+        r.stdout
+    );
+
+    // upgrade confirms: nothing pending.
+    let r = sb.mind(&["upgrade", "--yes"]);
+    assert!(r.success, "upgrade failed: {} {}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("everything is up to date"),
+        "upgrade must report everything up to date after commit-only advance: {}",
+        r.stdout
+    );
+}
+
+/// After a commit that also changes item content, recall and probe must still
+/// mark the item outdated (hash drift triggers the marker regardless of commit).
+/// This ensures the commit-only fix did not regress content-drift detection.
+// spec: CLI-75
+#[test]
+fn recall_still_marks_item_outdated_after_commit_with_content_change() {
+    let sb = melded();
+    assert!(sb.mind(&["learn", "review"]).success);
+
+    // Clean install: not outdated.
+    let r = sb.mind(&["recall"]);
+    assert!(
+        !r.stdout.contains("outdated"),
+        "freshly installed item must not be outdated: {}",
+        r.stdout
+    );
+
+    // edit_source changes the review skill content AND commits.
+    sb.edit_source();
+    assert!(sb.mind(&["sync"]).success);
+
+    // recall must mark the item outdated because content (hash) changed.
+    let r = sb.mind(&["recall"]);
+    assert!(r.success, "recall failed: {} {}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("outdated"),
+        "recall must mark item outdated when commit also changed content: {}",
+        r.stdout
     );
 }

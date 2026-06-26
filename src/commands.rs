@@ -1679,13 +1679,14 @@ fn source_status(paths: &Paths, source_name: &str) -> Result<()> {
             .find(|m| m.source == it.source && m.kind == it.kind && m.bare_name == it.name);
         match installed {
             Some(m) => {
-                // An item is outdated when the source commit advanced past the
-                // recorded commit, OR when the source content hash differs from
-                // the hash recorded at install (e.g. a local source edited in
-                // place without a new commit).
-                let commit_lag = source.commit.as_deref().is_some_and(|c| c != m.commit);
+                // CLI-75 / LIFE-11: an item is outdated exactly when `upgrade`
+                // would act on it -- its source-content hash changed, or its
+                // effective name changed (a namespace/prefix rename). A commit
+                // advance that did not touch the item's content or name does NOT
+                // mark it outdated; `upgrade` would report nothing pending for it.
                 let hash_lag = hash_path(&it.path).ok().is_some_and(|h| h != m.hash);
-                let lag = if commit_lag || hash_lag {
+                let rename_lag = it.effective_name() != m.name;
+                let lag = if hash_lag || rename_lag {
                     out.yellow(" (outdated; run `mind upgrade`)")
                 } else {
                     String::new()
@@ -2645,20 +2646,17 @@ pub fn recall(
         for link in &found.links {
             println!("  {}{link}", out.dim("link    "));
         }
-        // Report out of date when the current source content hash or source
-        // commit differs from what was recorded at install.
+        // CLI-75 / LIFE-11: mark out of date exactly when `upgrade` would act --
+        // source-content hash changed, or effective name changed (rename).
         {
             let registry = Registry::load(paths)?;
             let catalog = catalog::scan(paths, &registry)?;
             if let Some(cat) = catalog.iter().find(|c| {
                 c.kind == found.kind && c.name == found.bare_name && c.source == found.source
             }) {
-                let commit_lag = registry
-                    .find(&found.source)
-                    .and_then(|s| s.commit.as_deref())
-                    .is_some_and(|c| c != found.commit);
                 let hash_lag = hash_path(&cat.path).ok().is_some_and(|h| h != found.hash);
-                if commit_lag || hash_lag {
+                let rename_lag = cat.effective_name() != found.name;
+                if hash_lag || rename_lag {
                     println!(
                         "  {}{}",
                         out.dim("status  "),
@@ -2794,12 +2792,12 @@ pub fn recall(
             let key = it.key();
             match manifest.items.get(&key) {
                 Some(m) => {
-                    // Mark out of date when the commit advanced past the recorded
-                    // one, OR when the source content hash differs (handles local
-                    // sources edited in place without a new commit).
-                    let commit_lag = s.commit.as_deref().is_some_and(|c| c != m.commit);
+                    // CLI-75 / LIFE-11: mark out of date exactly when `upgrade`
+                    // would act -- source-content hash changed, or effective name
+                    // changed (rename). Commit advance alone does not trigger this.
                     let hash_lag = hash_path(&it.path).ok().is_some_and(|h| h != m.hash);
-                    let outdated = if commit_lag || hash_lag {
+                    let rename_lag = it.effective_name() != m.name;
+                    let outdated = if hash_lag || rename_lag {
                         format!("  {}", out.yellow("(outdated; run mind upgrade)"))
                     } else {
                         String::new()
@@ -2958,16 +2956,13 @@ pub fn probe(
                 .items
                 .values()
                 .find(|m| m.source == it.source && m.kind == it.kind && m.bare_name == it.name);
-            // CLI-75: an installed item is out of date when its current
-            // source-content hash differs from the recorded hash, or its source
-            // commit advanced past the installed one.
+            // CLI-75 / LIFE-11: mark out of date exactly when `upgrade` would
+            // act -- source-content hash changed, or effective name changed
+            // (rename). Commit advance alone does not trigger this.
             let outdated = m.is_some_and(|m| {
                 let hash_drift = cur.as_deref().is_some_and(|h| h != m.hash);
-                let commit_drift = registry
-                    .find(&it.source)
-                    .and_then(|s| s.commit.as_deref())
-                    .is_some_and(|c| c != m.commit);
-                hash_drift || commit_drift
+                let rename_drift = it.effective_name() != m.name;
+                hash_drift || rename_drift
             });
             // CLI-81: a leading `*` marks an installed item (greened when color is
             // on). Not-installed rows have an empty marker cell so the row does not
