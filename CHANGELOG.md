@@ -6,6 +6,26 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-06-26
+
+### Added
+
+- A published documentation site at <https://jaemk.github.io/mind/>, with a guide
+  (install, quickstart, commands, configuration, install hooks, troubleshooting),
+  authoring docs, and an examples page mapping each consumer and maintainer use
+  case to a runnable example.
+- Example sources for the `tool` kind and path tokens, source lifecycle hooks,
+  `[source].roots` subtree discovery, an authoritative `[[items]]` inventory, and
+  a `[discover].sources` super-source, each verified by a test.
+- The crate publishes to crates.io on release (`cargo install mind-cli` installs
+  the `mind` binary), and carries `repository`, `homepage`, and `documentation`
+  metadata.
+
+### Changed
+
+- The README is a concise landing page; the documentation site is the primary
+  reference.
+
 ## [0.6.1] - 2026-06-25
 
 ### Changed
@@ -249,7 +269,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovery, frontmatter descriptions, transactional install/upgrade/uninstall
   with a file registry, and a tag-driven release pipeline with a Homebrew tap.
 
-[Unreleased]: https://github.com/jaemk/mind/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/jaemk/mind/compare/v0.6.2...HEAD
+[0.6.2]: https://github.com/jaemk/mind/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/jaemk/mind/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/jaemk/mind/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/jaemk/mind/compare/v0.5.1...v0.5.2
