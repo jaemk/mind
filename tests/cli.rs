@@ -864,6 +864,86 @@ fn probe_source_glob_composes_with_json() {
 }
 
 #[test]
+fn probe_source_glob_composes_with_kind_and_query() {
+    // spec: CLI-86, CLI-85, CLI-83 - the glob `--source` filter ANDs with `--kind`
+    // and the positional substring query simultaneously. Add a non-skill item and a
+    // non-matching skill to the agents source so each filter is load-bearing: only
+    // the row that satisfies all three (source `*agents`, kind `skill`, query
+    // `review`) survives.
+    let (sb, _tools) = melded_two_sources();
+
+    let r = sb.mind(&[
+        "probe", "--no-tui", "--source", "*agents", "--kind", "skill", "review",
+    ]);
+    assert!(r.success, "{}", r.stderr);
+    // Satisfies all three filters.
+    assert!(
+        r.stdout.contains("skill:review"),
+        "the item matching source+kind+query must be shown: {}",
+        r.stdout
+    );
+    // Excluded by --kind (same source, matches neither kind nor query).
+    assert!(
+        !r.stdout.contains("rule:style"),
+        "--kind must exclude the rule: {}",
+        r.stdout
+    );
+    // Excluded by --kind (an agent in the same source).
+    assert!(
+        !r.stdout.contains("agent:dev"),
+        "--kind must exclude the agent: {}",
+        r.stdout
+    );
+    // Excluded by --source (the tools source's skill, which would pass --kind).
+    assert!(
+        !r.stdout.contains("skill:deploy"),
+        "--source must exclude the other source's skill: {}",
+        r.stdout
+    );
+
+    // A query that matches no item in the selected source+kind yields nothing.
+    let none = sb.mind(&[
+        "probe", "--no-tui", "--source", "*agents", "--kind", "skill", "deploy",
+    ]);
+    assert!(none.success, "{}", none.stderr);
+    assert!(
+        !none.stdout.contains("skill:"),
+        "the query must still exclude non-matching items in the selected source/kind: {}",
+        none.stdout
+    );
+}
+
+#[test]
+fn recall_sources_ignores_source_filter_glob() {
+    // spec: CLI-83, CLI-86 - the `--source` filter (glob or not) applies to the
+    // installed-items listing, NOT to the `--sources` view. Per CLI-83, passing
+    // `--source` with `--sources` lists ALL sources and prints a note that the
+    // filter is ignored; it does not narrow the source list.
+    let (sb, _tools) = melded_two_sources();
+    let agents_full = format!("{}/agents", sb.base_name());
+
+    let r = sb.mind(&["recall", "--sources", "--source", "*agents"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    // Both sources are still listed: the filter does not narrow `--sources`.
+    assert!(
+        r.stdout.contains(&agents_full),
+        "the agents source must be listed: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("/tools"),
+        "the non-matching tools source must STILL be listed (filter ignored): {}",
+        r.stdout
+    );
+    // The ignored-filter note is printed (CLI-83).
+    assert!(
+        r.stderr.contains("ignored with --sources"),
+        "a note that the filter is ignored must be printed: {}",
+        r.stderr
+    );
+}
+
+#[test]
 fn probe_n_is_short_for_no_tui() {
     // spec: TUI-3 - `-n` is the subcommand-scoped short form of `--no-tui`; it
     // prints the same non-interactive catalog listing as `--no-tui`.
@@ -2149,6 +2229,214 @@ fn unmeld_plain_ambiguous_suffix_still_errors() {
     let amb = a.mind(&["unmeld", "agents"]);
     assert!(!amb.success);
     assert!(amb.stderr.contains("multiple sources"), "{}", amb.stderr);
+}
+
+#[test]
+fn unmeld_glob_unlink_only_over_several_keeps_items() {
+    // spec: CLI-28, CLI-22 - a glob matching more than one source goes through the
+    // source-granularity multi-source confirmation (skipped here with `--yes`), and
+    // `--unlink-only` applies to each matched source: every matched source is
+    // unmelded but its installed items are KEPT, with the orphaned-items note shown
+    // for each. Two distinct sources, each with one installed item.
+    let a = Sandbox::named("agents");
+    let b = Sandbox::named("agents");
+    assert!(a.mind(&["meld", &a.source_spec()]).success);
+    assert!(a.mind(&["meld", &b.source_spec()]).success);
+    let a_full = format!("{}/agents", a.base_name());
+    let b_full = format!("{}/agents", b.base_name());
+
+    // Install one item from each source by its fully-qualified ref so both
+    // sources have an installed item to orphan. They share the bare name `review`,
+    // so install one prefixed via `--as` to avoid a link collision is unnecessary
+    // here: the second install of the same name would collide, so install a
+    // different item from the second source.
+    assert!(
+        a.mind(&["learn", &format!("{a_full}#skill:review")])
+            .success,
+        "install review from the first source"
+    );
+    assert!(
+        a.mind(&["learn", &format!("{b_full}#agent:dev")]).success,
+        "install dev from the second source"
+    );
+
+    // `*agents` matches both sources. `--yes` clears the multi-source confirmation;
+    // `--unlink-only` keeps every matched source's items.
+    let r = a.mind(&["unmeld", "*agents", "--unlink-only", "--yes"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+
+    // Both sources are unmelded.
+    let sources = a.mind(&["recall", "--sources"]).stdout;
+    assert!(
+        sources.contains("no sources melded"),
+        "every matched source must be unmelded: {sources}"
+    );
+
+    // CLI-22: the items are KEPT (links survive) and the orphaned-items note is
+    // shown for each unmelded source.
+    assert!(
+        std::fs::symlink_metadata(a.claude_home.join("skills/review")).is_ok(),
+        "the first source's item link must be kept under --unlink-only"
+    );
+    assert!(
+        std::fs::symlink_metadata(a.claude_home.join("agents/dev.md")).is_ok(),
+        "the second source's item link must be kept under --unlink-only"
+    );
+    assert!(
+        r.stdout.matches("item(s) remain installed").count() >= 2,
+        "the orphaned-items note must appear for each unmelded source: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("mind forget"),
+        "the forget suggestion must be shown: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn unmeld_glob_single_match_honors_item_count_confirmation() {
+    // spec: CLI-28, CLI-21 - a glob matching exactly ONE source does not trigger
+    // the source-granularity multi-source confirmation, but it DOES honor that
+    // single source's per-source item-count confirmation (CLI-21/CLI-42): a non-TTY
+    // run refuses without `--yes`, and `--yes` removes all of the source's items.
+    let sb = melded();
+    assert!(sb.mind(&["learn", "review"]).success);
+    assert!(sb.mind(&["learn", "dev"]).success);
+
+    // A glob that matches the single melded `agents` source. Without `--yes`, the
+    // item-count confirmation refuses in this non-TTY harness, listing the items.
+    let refused = sb.mind(&["unmeld", "*agents"]);
+    assert!(
+        !refused.success,
+        "a single-match glob must still honor the item-count confirmation: {}",
+        refused.stdout
+    );
+    assert!(
+        refused.stderr.contains("needs confirmation"),
+        "{}",
+        refused.stderr
+    );
+    // It must NOT have prompted at source granularity (only one source matched).
+    assert!(
+        !refused.stdout.contains("would remove 1 source"),
+        "a single match must not show the multi-source listing: {}",
+        refused.stdout
+    );
+    // Nothing removed by the refusal.
+    assert!(sb.mind(&["recall", "review"]).success, "item remains");
+    assert!(
+        sb.mind(&["recall", "--sources"]).stdout.contains("agents"),
+        "the source survives a refused single-match glob"
+    );
+
+    // `--yes` removes the source and every one of its items.
+    let r = sb.mind(&["unmeld", "*agents", "--yes"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(
+        sb.mind(&["recall", "--sources"])
+            .stdout
+            .contains("no sources melded"),
+        "the matched source must be unmelded"
+    );
+    assert!(std::fs::symlink_metadata(sb.claude_home.join("skills/review")).is_err());
+    assert!(std::fs::symlink_metadata(sb.claude_home.join("agents/dev.md")).is_err());
+}
+
+#[test]
+fn unmeld_glob_aborts_remaining_sources_when_one_item_hook_fails() {
+    // spec: CLI-28, HOOK-53, HOOK-54, HOOK-82 - CLI-28 says every matching source
+    // is unmelded "each per its normal path"; the normal path includes the
+    // hard-stop on a required (item) uninstall-hook failure (HOOK-53/82). So when a
+    // matched source's item uninstall hook exits non-zero mid-iteration, the whole
+    // `unmeld` aborts: that source stays melded with its item kept, and any
+    // not-yet-processed matched source is left untouched (still melded).
+    //
+    // The failing source is melded FIRST so it is the first processed; an abort
+    // therefore leaves the second, good source entirely unprocessed.
+    let fail = Sandbox::bare("glob-abort");
+    fail.write_and_commit(
+        "skills/greet/SKILL.md",
+        "---\ndescription: greet the user\n---\n# greet\n",
+    );
+    // Per-item uninstall hook that exits non-zero (a hard stop, HOOK-82/53).
+    fail.write_and_commit(
+        "mind.toml",
+        "[[items]]\nkind = \"skill\"\nname = \"greet\"\npath = \"skills/greet\"\nuninstall = \"exit 1\"\n",
+    );
+    let good = Sandbox::bare("glob-abort");
+    good.write_and_commit(
+        "skills/other/SKILL.md",
+        "---\ndescription: another skill\n---\n# other\n",
+    );
+
+    // Meld the failing source first, the good source second (iteration order is
+    // meld order).
+    assert!(
+        fail.mind(&["meld", &fail.source_spec(), "--link-only"])
+            .success
+    );
+    assert!(
+        fail.mind(&["meld", &good.source_spec(), "--link-only"])
+            .success
+    );
+    assert!(
+        fail.mind(&[
+            "learn",
+            "skill:greet",
+            "--dangerously-skip-install-hook-check"
+        ])
+        .success,
+        "install greet (with its uninstall hook)"
+    );
+    assert!(
+        fail.mind(&[
+            "learn",
+            "skill:other",
+            "--dangerously-skip-install-hook-check"
+        ])
+        .success,
+        "install other from the good source"
+    );
+
+    let fail_full = format!("{}/glob-abort", fail.base_name());
+    let good_full = format!("{}/glob-abort", good.base_name());
+
+    // `*glob-abort` matches both; `--yes` clears the multi-source confirmation,
+    // `--dangerously-skip-install-hook-check` runs the hooks unattended.
+    let r = fail.mind(&[
+        "unmeld",
+        "*glob-abort",
+        "--yes",
+        "--dangerously-skip-install-hook-check",
+    ]);
+    assert!(
+        !r.success,
+        "a required item uninstall-hook failure must fail the whole unmeld: {} {}",
+        r.stdout, r.stderr
+    );
+
+    // The failing source stays melded (its item is kept, mirroring HOOK-54).
+    let sources = fail.mind(&["recall", "--sources"]).stdout;
+    assert!(
+        sources.contains(&fail_full),
+        "the source whose item uninstall hook failed must stay melded: {sources}"
+    );
+    assert!(
+        fail.mind(&["recall", "skill:greet"]).success,
+        "the item is kept when its required uninstall hook fails"
+    );
+
+    // The remaining (good) source was processed AFTER the failing one, so the abort
+    // leaves it untouched and still melded.
+    assert!(
+        sources.contains(&good_full),
+        "a matched source after the failing one must be left unprocessed (still melded): {sources}"
+    );
+    assert!(
+        fail.mind(&["recall", "skill:other"]).success,
+        "the unprocessed source's item must still be installed"
+    );
 }
 
 #[test]

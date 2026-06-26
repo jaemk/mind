@@ -38,12 +38,12 @@ and verified.
 | `curl \| sh` install script (Linux/macOS-arm) | done | `resources/install.sh` |
 | `forget` glob selection | done | CLI-41 |
 | `unmeld` uninstalls source items by default; `--unlink-only` keeps them | done | CLI-21, CLI-22 |
-| `unmeld` glob/partial source selection (multi-source, mirrors `learn`/`forget` globs) | planned | CLI-28 |
+| `unmeld` glob/partial source selection (multi-source, mirrors `learn`/`forget` globs) | done | CLI-28 |
 | `introspect --fix` (re-link missing symlinks) | done | CLI-91 |
 | `sync --upgrade` (refresh then upgrade) | done | CLI-53 |
 | `recall` (no arg): source+item status view, install state per item | done | CLI-70, CLI-74, CLI-83 |
 | `probe`/`recall` `--kind` / `--source` filters | done | CLI-83 |
-| `probe`/`recall` `--source` accepts a source glob (mirrors `unmeld` glob) | planned | CLI-86 |
+| `probe`/`recall` `--source` accepts a source glob (mirrors `unmeld` glob) | done | CLI-86 |
 | Enforce `min-mind-version` | done | DSC-40 |
 | `sync` per-source resilience (continue + report, exit non-zero) | done | CLI-54 |
 | `--json` output (recall, probe, introspect) | done | CLI-73, CLI-84, CLI-92 |
@@ -69,7 +69,7 @@ and verified.
 | README quickstart, mental model, troubleshooting/FAQ | done | [../README.md](../README.md) |
 | Starter source example (plain convention layout) | done | [../examples/](../examples/) |
 | Interactive TUI: `probe` default, Installed/Available tree, full-parity actions, preview + registry meld | done | [tui.md](tui.md) |
-| `probe -n` short form of `--no-tui` | planned | TUI-3 |
+| `probe -n` short form of `--no-tui` | done | TUI-3 |
 | `tool` item kind: store-only installable, referenced not discovered | done | [tooling.md](tooling.md) (TOOL-1..7) |
 | Path-reference tokens `{{self}}` / `{{tools:name}}` / `{{path:ref}}` | done | [tooling.md](tooling.md) (TOOL-10..16) |
 | Item build hooks: per-item `build`, staging-time, transactional | done | [install-hooks.md](install-hooks.md) (HOOK-70..73) |
