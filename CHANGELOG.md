@@ -6,6 +6,41 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-06-25
+
+### Added
+
+- Item-level lifecycle hooks: an item may declare `[[items.hooks]]` (with `run`,
+  `name`, `optional`, and `event` = `install`/`uninstall`), the same shape as a
+  source's `[[hooks]]`. The scalar `install`/`uninstall` fields remain as
+  shorthand. Item install hooks run after the source install hook and item
+  uninstall hooks run before the source uninstall hook, so teardown is the
+  reverse of install.
+- `unmeld` accepts a glob or partial source name and removes every matching
+  source, mirroring the glob selection in `learn`/`forget` (e.g.
+  `unmeld '*agents'`).
+- `probe` and `recall` accept a glob for `--source`.
+- `-n` as a short form of `probe --no-tui`.
+
+### Changed
+
+- `recall` and the `probe` listing mark an installed item out of date exactly
+  when `mind upgrade` would act on it: its source content changed, or its
+  effective (namespaced) name changed. A source commit that advances without
+  changing an item's content or name no longer marks it, and a hash failure now
+  flags the item rather than reporting it up to date. The recall status view
+  shows a renamed item as out of date instead of as removed upstream.
+- `[source].install` is deprecated in favor of `[[hooks]]`. `mind review`
+  reports the deprecated field and `init-source` scaffolds only `[[hooks]]`.
+- `init-source` flags a bare sibling reference only when an effective prefix is
+  in force; `review`'s hardcoded-path and bare-tool advisories note that a
+  location populated by an install hook is safe.
+- A malformed glob selector reports an invalid-pattern error instead of a
+  no-source-found error.
+- Renamed the crate package to `mind-cli`; the installed binary stays `mind`.
+  Updated dependencies (`toml` 1, `ratatui` 0.30, `crossterm` 0.29, `dirs` 6,
+  `clap_mangen` 0.3).
+
 ## [0.5.2] - 2026-06-25
 
 ### Added
@@ -207,7 +242,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovery, frontmatter descriptions, transactional install/upgrade/uninstall
   with a file registry, and a tag-driven release pipeline with a Homebrew tap.
 
-[Unreleased]: https://github.com/jaemk/mind/compare/v0.5.2...HEAD
+[Unreleased]: https://github.com/jaemk/mind/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/jaemk/mind/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/jaemk/mind/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/jaemk/mind/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/jaemk/mind/compare/v0.4.1...v0.5.0
