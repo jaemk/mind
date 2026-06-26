@@ -51,6 +51,7 @@ jobs:
     needs: build
     runs-on: ubuntu-24.04
     steps:
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
           path: dist
@@ -58,7 +59,10 @@ jobs:
       - name: create release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/*.tar.gz --title "$GITHUB_REF_NAME" --generate-notes
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          bash resources/changelog-section.sh "$version" > notes.md
+          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz --title "$GITHUB_REF_NAME" --notes-file notes.md
 
   formula:
     needs: release
