@@ -4,6 +4,8 @@ A manager for agent tooling (skills, agents, rules, tools) that melds arbitrary 
 repos and links installed items into your agent directories (default
 `~/.claude`). Modeled on Homebrew.
 
+Documentation: https://jaemk.github.io/mind/
+
 ## Install
 
 ### Linux (install script)
