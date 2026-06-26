@@ -1,10 +1,10 @@
 # mind
 
+[![docs](https://img.shields.io/badge/docs-jaemk.github.io%2Fmind-blue)](https://jaemk.github.io/mind/)
+
 A manager for agent tooling (skills, agents, rules, tools) that melds arbitrary git
 repos and links installed items into your agent directories (default
 `~/.claude`). Modeled on Homebrew.
-
-Documentation: https://jaemk.github.io/mind/
 
 ## Install
 
