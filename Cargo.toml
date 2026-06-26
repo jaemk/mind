@@ -7,6 +7,7 @@ description = "A manager for agent tooling (skills, agents, rules, tools) that m
 repository = "https://github.com/jaemk/mind"
 homepage = "https://jaemk.github.io/mind/"
 documentation = "https://jaemk.github.io/mind/"
+exclude = [".github"]
 
 [[bin]]
 name = "mind"
