@@ -348,6 +348,388 @@ fn unmeld_runs_item_uninstall_hooks_before_source_uninstall_hooks() {
     );
 }
 
+#[test]
+fn unmeld_non_tty_skips_hooks_but_still_removes_source_and_items() {
+    // spec: HOOK-87
+    // A non-TTY `unmeld` WITHOUT --dangerously-skip-install-hook-check takes the
+    // HOOK-22 skip path for every hook (item AND source uninstall), yet the source
+    // is still removed and the item is still torn down. No hook side effect lands.
+    let sb = Sandbox::new("ntty");
+    let log = sb.base.join("skip.log");
+    let lg = log.display();
+    write(
+        &sb.source.join("skills/greet/SKILL.md"),
+        "---\ndescription: greet\n---\n# greet\n",
+    );
+    let toml = format!(
+        concat!(
+            "[[hooks]]\n",
+            "run = \"echo SOURCE-UNINSTALL >> {lg}\"\n",
+            "event = \"uninstall\"\n",
+            "\n",
+            "[[items]]\n",
+            "kind = \"skill\"\n",
+            "name = \"greet\"\n",
+            "path = \"skills/greet\"\n",
+            "uninstall = \"echo ITEM-UNINSTALL >> {lg}\"\n",
+        ),
+        lg = lg,
+    );
+    sb.write_and_commit(
+        "skills/greet/SKILL.md",
+        "---\ndescription: greet\n---\n# greet\n",
+    );
+    sb.write_and_commit("mind.toml", &toml);
+    let spec = sb.source_spec();
+
+    assert!(sb.mind(&["meld", &spec, "--link-only"]).success);
+    assert!(
+        sb.mind(&[
+            "learn",
+            "skill:greet",
+            "--dangerously-skip-install-hook-check"
+        ])
+        .success
+    );
+    assert!(
+        sb.mind_home.join("store/skill/greet").exists(),
+        "item installed before unmeld"
+    );
+
+    // No --dangerously-skip flag: non-TTY (stdin is /dev/null) skips every hook.
+    let unmeld = sb.mind(&["unmeld", "ntty"]);
+    assert!(
+        unmeld.success,
+        "non-TTY unmeld still succeeds: {} {}",
+        unmeld.stdout, unmeld.stderr
+    );
+    // HOOK-22: every hook was skipped, so NOTHING was appended to the log.
+    assert!(
+        read_log(&log).is_empty(),
+        "non-TTY must skip both item and source uninstall hooks: {:?}",
+        read_log(&log)
+    );
+    // But the teardown still happened: item removed, source gone.
+    assert!(
+        !sb.mind_home.join("store/skill/greet").exists(),
+        "item must still be removed even though its uninstall hook was skipped"
+    );
+    let sources = sb.mind(&["recall", "--sources"]).stdout;
+    assert!(
+        !sources.contains("ntty"),
+        "source must still be removed: {sources}"
+    );
+}
+
+#[test]
+fn unmeld_yes_runs_item_uninstall_hooks_for_multiple_items_before_source() {
+    // spec: HOOK-87
+    // A multi-item `unmeld --yes` (bypassing the CLI-42 confirm) runs EACH item's
+    // uninstall hooks before the source's uninstall hook. Two items each append a
+    // tagged line; both must precede the source line.
+    let sb = Sandbox::new("multi");
+    let log = sb.base.join("multi.log");
+    let lg = log.display();
+    write(
+        &sb.source.join("skills/alpha/SKILL.md"),
+        "---\ndescription: alpha\n---\n# alpha\n",
+    );
+    write(
+        &sb.source.join("skills/beta/SKILL.md"),
+        "---\ndescription: beta\n---\n# beta\n",
+    );
+    let toml = format!(
+        concat!(
+            "[[hooks]]\n",
+            "run = \"echo SOURCE-UNINSTALL >> {lg}\"\n",
+            "event = \"uninstall\"\n",
+            "\n",
+            "[[items]]\n",
+            "kind = \"skill\"\n",
+            "name = \"alpha\"\n",
+            "path = \"skills/alpha\"\n",
+            "uninstall = \"echo ITEM-ALPHA >> {lg}\"\n",
+            "\n",
+            "[[items]]\n",
+            "kind = \"skill\"\n",
+            "name = \"beta\"\n",
+            "path = \"skills/beta\"\n",
+            "uninstall = \"echo ITEM-BETA >> {lg}\"\n",
+        ),
+        lg = lg,
+    );
+    sb.write_and_commit("mind.toml", &toml);
+    let spec = sb.source_spec();
+
+    assert!(sb.mind(&["meld", &spec, "--link-only"]).success);
+    assert!(
+        sb.mind(&[
+            "learn",
+            "skill:alpha",
+            "--dangerously-skip-install-hook-check"
+        ])
+        .success
+    );
+    assert!(
+        sb.mind(&[
+            "learn",
+            "skill:beta",
+            "--dangerously-skip-install-hook-check"
+        ])
+        .success
+    );
+
+    // --yes bypasses the multi-item CLI-42 confirm; --dangerously-skip runs hooks.
+    let unmeld = sb.mind(&[
+        "unmeld",
+        "multi",
+        "--yes",
+        "--dangerously-skip-install-hook-check",
+    ]);
+    assert!(
+        unmeld.success,
+        "multi-item unmeld --yes should succeed: {} {}",
+        unmeld.stdout, unmeld.stderr
+    );
+    let lines = read_log(&log);
+    // Both item hooks must run before the source hook (HOOK-87 inner-to-outer).
+    let src_pos = lines
+        .iter()
+        .position(|l| l == "SOURCE-UNINSTALL")
+        .expect("source uninstall hook must run");
+    let alpha_pos = lines
+        .iter()
+        .position(|l| l == "ITEM-ALPHA")
+        .expect("alpha uninstall hook must run");
+    let beta_pos = lines
+        .iter()
+        .position(|l| l == "ITEM-BETA")
+        .expect("beta uninstall hook must run");
+    assert!(
+        alpha_pos < src_pos && beta_pos < src_pos,
+        "both item uninstall hooks must precede the source uninstall hook: {lines:?}"
+    );
+    assert!(
+        !sb.mind_home.join("store/skill/alpha").exists()
+            && !sb.mind_home.join("store/skill/beta").exists(),
+        "both items removed after unmeld"
+    );
+}
+
+#[test]
+fn unmeld_item_uninstall_hook_failure_leaves_source_melded() {
+    // spec: HOOK-87
+    // A non-zero exit from an item's uninstall hook is a hard stop (HOOK-53/82):
+    // the unmeld stops, the failing item stays installed, and the source stays
+    // melded. The source's own uninstall hook (which runs LAST) must NOT have run.
+    let sb = Sandbox::new("failun");
+    let log = sb.base.join("fail.log");
+    let lg = log.display();
+    write(
+        &sb.source.join("skills/greet/SKILL.md"),
+        "---\ndescription: greet\n---\n# greet\n",
+    );
+    // Item uninstall hook exits non-zero; the source uninstall hook would append
+    // a line we assert never appears (it runs only after items succeed).
+    let toml = format!(
+        concat!(
+            "[[hooks]]\n",
+            "run = \"echo SOURCE-UNINSTALL >> {lg}\"\n",
+            "event = \"uninstall\"\n",
+            "\n",
+            "[[items]]\n",
+            "kind = \"skill\"\n",
+            "name = \"greet\"\n",
+            "path = \"skills/greet\"\n",
+            "uninstall = \"exit 7\"\n",
+        ),
+        lg = lg,
+    );
+    sb.write_and_commit(
+        "skills/greet/SKILL.md",
+        "---\ndescription: greet\n---\n# greet\n",
+    );
+    sb.write_and_commit("mind.toml", &toml);
+    let spec = sb.source_spec();
+
+    assert!(sb.mind(&["meld", &spec, "--link-only"]).success);
+    assert!(
+        sb.mind(&[
+            "learn",
+            "skill:greet",
+            "--dangerously-skip-install-hook-check"
+        ])
+        .success
+    );
+
+    let unmeld = sb.mind(&["unmeld", "failun", "--dangerously-skip-install-hook-check"]);
+    assert!(
+        !unmeld.success,
+        "an item uninstall-hook failure must fail the unmeld: {} {}",
+        unmeld.stdout, unmeld.stderr
+    );
+    // HOOK-82: the failing item is left installed.
+    assert!(
+        sb.mind_home.join("store/skill/greet").exists(),
+        "item must remain installed after its uninstall hook failed"
+    );
+    // The source's uninstall hook (runs last) must not have fired.
+    assert!(
+        !read_log(&log).contains(&"SOURCE-UNINSTALL".to_string()),
+        "source uninstall hook must NOT run when an item uninstall hook failed: {:?}",
+        read_log(&log)
+    );
+    // HOOK-53: the source remains melded.
+    let sources = sb.mind(&["recall", "--sources"]).stdout;
+    assert!(
+        sources.contains("failun"),
+        "source must remain melded after a failed item uninstall hook: {sources}"
+    );
+}
+
+#[test]
+fn item_install_hook_failure_rolls_back_the_item_install() {
+    // spec: HOOK-81
+    // A non-zero exit from an item's install hook is a hard stop that rolls back
+    // that item's install: its store copy and links are removed, leaving it not
+    // installed. With TWO install hooks, a failure of the SECOND must still roll
+    // back the whole item (the first hook's host side effect is not undone, but
+    // the item itself is gone).
+    let sb = Sandbox::new("failin");
+    let log = sb.base.join("failin.log");
+    let lg = log.display();
+    write(
+        &sb.source.join("skills/greet/SKILL.md"),
+        "---\ndescription: greet\n---\n# greet\n",
+    );
+    let toml = format!(
+        concat!(
+            "[[items]]\n",
+            "kind = \"skill\"\n",
+            "name = \"greet\"\n",
+            "path = \"skills/greet\"\n",
+            "\n",
+            "[[items.hooks]]\n",
+            "run = \"echo FIRST-RAN >> {lg}\"\n",
+            "event = \"install\"\n",
+            "\n",
+            "[[items.hooks]]\n",
+            "run = \"exit 3\"\n",
+            "event = \"install\"\n",
+        ),
+        lg = lg,
+    );
+    sb.write_and_commit(
+        "skills/greet/SKILL.md",
+        "---\ndescription: greet\n---\n# greet\n",
+    );
+    sb.write_and_commit("mind.toml", &toml);
+    let spec = sb.source_spec();
+
+    assert!(sb.mind(&["meld", &spec, "--link-only"]).success);
+    let learn = sb.mind(&[
+        "learn",
+        "skill:greet",
+        "--dangerously-skip-install-hook-check",
+    ]);
+    assert!(
+        !learn.success,
+        "a failing item install hook must fail the learn: {} {}",
+        learn.stdout, learn.stderr
+    );
+    // The first hook ran (declaration order), proving the second one is what failed.
+    assert_eq!(
+        read_log(&log),
+        vec!["FIRST-RAN"],
+        "install hooks run in order; the first ran before the second failed"
+    );
+    // HOOK-81 rollback: the item's store copy is gone (not installed).
+    assert!(
+        !sb.mind_home.join("store/skill/greet").exists(),
+        "the failed item install must be rolled back (store copy removed)"
+    );
+    // It is not recorded in the installed manifest (keyed `kind:name`).
+    let manifest = std::fs::read_to_string(sb.mind_home.join("manifest.json")).unwrap_or_default();
+    assert!(
+        !manifest.contains("skill:greet"),
+        "the rolled-back item must not be recorded in the manifest: {manifest}"
+    );
+}
+
+#[test]
+fn optional_item_hook_parses_and_runs_two_way_without_abort() {
+    // spec: HOOK-86
+    // Per HOOK-83, item hooks are always two-way (run/skip) regardless of
+    // `optional`. Confirm `optional = true` parses and the hook runs unattended
+    // under --dangerously-skip-install-hook-check (which runs optional and
+    // required alike), and that a non-TTY install simply SKIPS it (no abort, the
+    // item still installs).
+    let sb = Sandbox::new("opt");
+    let log = sb.base.join("opt.log");
+    let lg = log.display();
+    write(
+        &sb.source.join("skills/greet/SKILL.md"),
+        "---\ndescription: greet\n---\n# greet\n",
+    );
+    let toml = format!(
+        concat!(
+            "[[items]]\n",
+            "kind = \"skill\"\n",
+            "name = \"greet\"\n",
+            "path = \"skills/greet\"\n",
+            "\n",
+            "[[items.hooks]]\n",
+            "run = \"echo OPT-RAN >> {lg}\"\n",
+            "optional = true\n",
+            "event = \"install\"\n",
+        ),
+        lg = lg,
+    );
+    sb.write_and_commit(
+        "skills/greet/SKILL.md",
+        "---\ndescription: greet\n---\n# greet\n",
+    );
+    sb.write_and_commit("mind.toml", &toml);
+    let spec = sb.source_spec();
+
+    assert!(sb.mind(&["meld", &spec, "--link-only"]).success);
+
+    // Non-TTY without the flag: the optional hook is SKIPPED, item still installs.
+    let learn_skip = sb.mind(&["learn", "skill:greet"]);
+    assert!(
+        learn_skip.success,
+        "non-TTY install with an optional hook still installs the item: {} {}",
+        learn_skip.stdout, learn_skip.stderr
+    );
+    assert!(
+        sb.mind_home.join("store/skill/greet").exists(),
+        "item installs even though its optional hook was skipped"
+    );
+    assert!(
+        read_log(&log).is_empty(),
+        "non-TTY skip: the optional hook must not have run: {:?}",
+        read_log(&log)
+    );
+
+    // Forget it, then re-learn with the dangerous flag: the optional hook runs.
+    assert!(sb.mind(&["forget", "skill:greet"]).success);
+    let learn_run = sb.mind(&[
+        "learn",
+        "skill:greet",
+        "--dangerously-skip-install-hook-check",
+    ]);
+    assert!(
+        learn_run.success,
+        "optional hook runs unattended under the dangerous flag: {} {}",
+        learn_run.stdout, learn_run.stderr
+    );
+    assert_eq!(
+        read_log(&log),
+        vec!["OPT-RAN"],
+        "the optional install hook ran unattended"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // INIT-9: prefix-gated unguarded-reference advisory
 // ---------------------------------------------------------------------------

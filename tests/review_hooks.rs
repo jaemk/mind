@@ -187,6 +187,38 @@ fn review_hooks_table_only_no_deprecated_field() {
     );
 }
 
+/// A whitespace-only [source].install is treated as absent (HOOK-3), so it
+/// yields NO deprecated-field advisory (and runs no hook).
+/// spec: HOOK-90
+#[test]
+fn review_whitespace_source_install_emits_no_deprecated_field() {
+    let sb = Sandbox::new("agents");
+    write(
+        &sb.source.join("mind.toml"),
+        "[source]\ninstall = \"   \"\n",
+    );
+    write(
+        &sb.source.join("agents/dev.md"),
+        "---\ndescription: dev agent\n---\n# dev\n",
+    );
+
+    let target = sb.source_spec();
+    let r = sb.mind(&["review", &target]);
+
+    assert!(r.success, "advisory-only review exits 0: {}", r.stdout);
+    assert!(
+        !r.stdout.contains("deprecated-field"),
+        "whitespace-only [source].install must not emit deprecated-field: {}",
+        r.stdout
+    );
+    // It is also treated as absent, so no install-hook advisory either.
+    assert!(
+        !r.stdout.contains("install-hook"),
+        "whitespace-only install is absent, so no install-hook advisory: {}",
+        r.stdout
+    );
+}
+
 // ---------------------------------------------------------------------------
 // CLI-146: install-hook-safe wording in advisory messages
 // ---------------------------------------------------------------------------
@@ -227,6 +259,44 @@ fn review_hardcoded_path_other_item_carries_install_hook_safe_note() {
     assert!(
         r.stdout.contains("fragile"),
         "hardcoded-path OtherItem advisory must still say fragile: {}",
+        r.stdout
+    );
+}
+
+/// The hardcoded-path OtherItem advisory carries the install-hook-safe note
+/// EVEN WHEN no token suggestion is available (the path names a non-sibling, so
+/// `token_for_path` yields no suggestion). The safe note must still be present.
+/// spec: CLI-146
+#[test]
+fn review_hardcoded_path_other_item_no_suggestion_still_install_hook_safe() {
+    let sb = Sandbox::new("agents");
+    // The skill references an agent install path whose item is NOT a sibling of
+    // this source (no `ghost` agent exists), so it is an OtherItem with no token
+    // suggestion. The install-hook-safe wording must still appear.
+    write(
+        &sb.source.join("skills/review/SKILL.md"),
+        "---\ndescription: review\n---\nload ~/.claude/agents/ghost.md for context\n",
+    );
+
+    let target = sb.source_spec();
+    let r = sb.mind(&["review", &target]);
+
+    assert!(r.success, "advisory-only: {}", r.stdout);
+    assert!(
+        r.stdout.contains("hardcoded-path"),
+        "expected hardcoded-path advisory: {}",
+        r.stdout
+    );
+    // CLI-146: the install-hook-safe note is present even with no `; use <tok>`.
+    assert!(
+        r.stdout.contains("intentional") || r.stdout.contains("safe"),
+        "no-suggestion OtherItem advisory must still note install-hook-safe: {}",
+        r.stdout
+    );
+    // There must be no token suggestion clause for a non-sibling.
+    assert!(
+        !r.stdout.contains("; use {{"),
+        "a non-sibling OtherItem path should carry no token suggestion: {}",
         r.stdout
     );
 }
