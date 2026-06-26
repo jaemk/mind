@@ -63,10 +63,10 @@ of this. Two patterns cover nearly everything:
   skills/github/resources/pr.py   # referenced as {{self}}/resources/pr.py
   ```
 - The `tool` item kind and the `{{tools:name}}` / `{{path:ref}}` tokens are a third
-  option for sharing a helper through `mind`'s store. This method installs shared tools
-  in your repo's `tools/` directory to a centralized location managed by `mind`.
+  option for sharing a helper through `mind`'s store. This method centralizes a shared
+  tool from your repo's `tools/` directory into mind's store.
   These tools are expected to each live in their own directory, e.g.
-  - `tools/my-tools/my-tool.sh`
+  - `tools/my-tool/my-tool.sh`
   - `tools/my-tool/TOOL.md`
     ```
     ---

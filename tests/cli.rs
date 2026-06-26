@@ -2246,10 +2246,9 @@ fn unmeld_glob_unlink_only_over_several_keeps_items() {
     let b_full = format!("{}/agents", b.base_name());
 
     // Install one item from each source by its fully-qualified ref so both
-    // sources have an installed item to orphan. They share the bare name `review`,
-    // so install one prefixed via `--as` to avoid a link collision is unnecessary
-    // here: the second install of the same name would collide, so install a
-    // different item from the second source.
+    // sources have an installed item to orphan. Both sources carry a skill named
+    // `review`; installing it from both would collide, so a different item (`dev`
+    // agent) is installed from the second source to avoid a link conflict.
     assert!(
         a.mind(&["learn", &format!("{a_full}#skill:review")])
             .success,
@@ -8891,8 +8890,8 @@ fn sandbox_with_item_hooks(name: &str) -> Sandbox {
     let sb = Sandbox::bare(name);
     let markers = sb.base.join("markers");
     let m = markers.display();
-    let install = format!("touch built-here && mkdir -p {m} && touch {m}/installed");
-    let uninstall = format!("mkdir -p {m} && touch {m}/uninstalled");
+    let install = format!("touch built-here && mkdir -p '{m}' && touch '{m}/installed'");
+    let uninstall = format!("mkdir -p '{m}' && touch '{m}/uninstalled'");
     write(
         &sb.source.join("skills/greet/SKILL.md"),
         "---\ndescription: greet the user\n---\n# greet\n",
@@ -9881,11 +9880,14 @@ fn recall_status_renamed_item_appears_exactly_once_no_orphan_dup() {
     let recall = sb.mind(&["recall"]);
     assert!(recall.success, "recall failed: {}", recall.stderr);
 
-    // Exactly one line refers to the review skill, and it is the outdated row.
+    // Exactly one line carries the review-skill key (either the installed name
+    // `skill:review` or the catalog's new effective name `skill:jk-review`).
+    // The `skill:` prefix anchors to an item row and avoids spurious matches
+    // on output chrome that merely contains the word "review".
     let review_lines: Vec<&str> = recall
         .stdout
         .lines()
-        .filter(|l| l.contains("review"))
+        .filter(|l| l.contains("skill:review") || l.contains("skill:jk-review"))
         .collect();
     assert_eq!(
         review_lines.len(),

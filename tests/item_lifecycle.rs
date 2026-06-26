@@ -516,6 +516,92 @@ fn unmeld_yes_runs_item_uninstall_hooks_for_multiple_items_before_source() {
     );
 }
 
+// spec: HOOK-87
+// Install half of the nested order: source install hook runs BEFORE item
+// install hooks. At `meld` (without --link-only), the source's `[[hooks]]`
+// install entry runs first (in meld_recursive), and item install hooks run
+// later (in install_melded_source -> learn). Both happen in a single
+// `mind meld --yes --dangerously-skip-install-hook-check` invocation.
+// The log therefore records SOURCE-INSTALL first, then ITEM-INSTALL.
+#[test]
+fn meld_runs_source_install_hook_before_item_install_hooks() {
+    // spec: HOOK-87
+    let sb = Sandbox::new("instord");
+    let log = sb.base.join("install_order.log");
+    let lg = log.display();
+    write(
+        &sb.source.join("skills/greet/SKILL.md"),
+        "---\ndescription: greet\n---\n# greet\n",
+    );
+    // Source-level install hook (appends SOURCE-INSTALL) plus an item-level
+    // install hook (appends ITEM-INSTALL). Under HOOK-87 the source hook must
+    // appear before the item hook.
+    let toml = format!(
+        concat!(
+            "[[hooks]]\n",
+            "run = \"echo SOURCE-INSTALL >> {lg}\"\n",
+            "event = \"install\"\n",
+            "\n",
+            "[[items]]\n",
+            "kind = \"skill\"\n",
+            "name = \"greet\"\n",
+            "path = \"skills/greet\"\n",
+            "install = \"echo ITEM-INSTALL >> {lg}\"\n",
+        ),
+        lg = lg,
+    );
+    sb.write_and_commit(
+        "skills/greet/SKILL.md",
+        "---\ndescription: greet\n---\n# greet\n",
+    );
+    sb.write_and_commit("mind.toml", &toml);
+    let spec = sb.source_spec();
+
+    // --yes: install items immediately after meld (no interactive prompt).
+    // --dangerously-skip-install-hook-check: run all hooks unattended (HOOK-23).
+    // Without --link-only so both the source and item install hooks fire.
+    let meld = sb.mind(&[
+        "meld",
+        &spec,
+        "--yes",
+        "--dangerously-skip-install-hook-check",
+    ]);
+    assert!(
+        meld.success,
+        "meld --yes --dangerously-skip should succeed: {} {}",
+        meld.stdout, meld.stderr
+    );
+
+    let lines = read_log(&log);
+    // Both hooks must have run.
+    assert!(
+        lines.contains(&"SOURCE-INSTALL".to_string()),
+        "source install hook must run: {lines:?}"
+    );
+    assert!(
+        lines.contains(&"ITEM-INSTALL".to_string()),
+        "item install hook must run: {lines:?}"
+    );
+    // HOOK-87: source install runs BEFORE item install (outer-to-inner).
+    let src_pos = lines
+        .iter()
+        .position(|l| l == "SOURCE-INSTALL")
+        .expect("SOURCE-INSTALL must appear in the log");
+    let item_pos = lines
+        .iter()
+        .position(|l| l == "ITEM-INSTALL")
+        .expect("ITEM-INSTALL must appear in the log");
+    assert!(
+        src_pos < item_pos,
+        "source install hook (pos {src_pos}) must precede item install hook (pos {item_pos}): {lines:?}"
+    );
+    // Confirm the item was actually installed.
+    assert!(
+        sb.mind_home.join("store/skill/greet").exists(),
+        "item must be in the store after a successful meld --yes"
+    );
+}
+
 #[test]
 fn unmeld_item_uninstall_hook_failure_leaves_source_melded() {
     // spec: HOOK-87
@@ -584,6 +670,25 @@ fn unmeld_item_uninstall_hook_failure_leaves_source_melded() {
     assert!(
         sources.contains("failun"),
         "source must remain melded after a failed item uninstall hook: {sources}"
+    );
+
+    // M3: tie the abort to the FAILING item uninstall hook.
+    // The unmeld must have exited non-zero (already asserted above) AND its
+    // output must surface the hook failure: either the "running uninstall hook
+    // for skill:greet" indication (stdout) or the "failed (exit 7)" error text
+    // (stderr, via MindError::HookFailed). Both together give the clearest
+    // signal, but either suffices -- what matters is that the exit code came
+    // from THIS hook, not from something else.
+    let combined = format!("{}{}", unmeld.stdout, unmeld.stderr);
+    assert!(
+        combined.contains("greet"),
+        "the failure output must reference the failing item 'greet': {combined}"
+    );
+    assert!(
+        combined.contains("exit 7")
+            || combined.contains("HookFailed")
+            || combined.contains("failed"),
+        "the failure output must surface the hook exit code or error: {combined}"
     );
 }
 
@@ -792,9 +897,24 @@ fn init_source_with_prefix_emits_the_unguarded_reference_advisory() {
         combined.contains("unguarded-reference"),
         "a prefix in force must flag the bare reference: {combined}"
     );
-    // The advisory names the referencing item and the sibling it mentions.
+    // The advisory names the referencing item AND the sibling it mentions,
+    // both on the same line that carries the "unguarded-reference" kind token.
+    // Format (from print_findings): "advisory [unguarded-reference]: agent:dev:
+    // references sibling(s) in prose: review; ..."
+    // Anchoring on the kind token plus the sibling name on a single line prevents
+    // a spurious match if "review" appears in unrelated output chrome.
+    let advisory_line = combined.lines().find(|l| l.contains("unguarded-reference"));
     assert!(
-        combined.contains("review"),
-        "the advisory should name the mentioned sibling: {combined}"
+        advisory_line.is_some(),
+        "must have a line containing 'unguarded-reference': {combined}"
+    );
+    let advisory_line = advisory_line.unwrap();
+    assert!(
+        advisory_line.contains("review"),
+        "the unguarded-reference advisory line must name the sibling 'review': {advisory_line}"
+    );
+    assert!(
+        advisory_line.contains("dev"),
+        "the unguarded-reference advisory line must name the referencing item 'dev': {advisory_line}"
     );
 }

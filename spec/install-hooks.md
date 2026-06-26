@@ -158,13 +158,13 @@ still parsed and folded in (HOOK-50).
   removal confirmation (CLI-42) runs first; uninstall hooks only run after the
   user confirms (or `--yes` skips the confirm). A user who declines the confirm
   does not trigger any hook. On the `--unlink-only` path (CLI-22), which has no
-  multi-item confirm, hooks run before the source is removed, as before. They use
+  multi-item confirm, hooks run before the source is removed. They use
   the same prompt model as install hooks: required = run / skip / abort-the-unmeld;
   optional = run / skip; a non-TTY `unmeld` skips them and notes it; `mind unmeld
   --dangerously-skip-install-hook-check` runs them unattended. A required
-  uninstall hook that fails or is aborted leaves the source melded. (HOOK-87,
-  planned, reorders this so a source's uninstall hooks run AFTER the items'
-  uninstall hooks, not before, making teardown the reverse of install.)
+  uninstall hook that fails or is aborted leaves the source melded. Item uninstall
+  hooks run before source uninstall hooks, making teardown the reverse of install
+  (HOOK-87).
 - `HOOK-55` Install hooks are recorded as a set on the source's registry entry
   (`install_hooks`: each an effective command plus the commit it last ran at, or
   null when skipped), superseding the single `[source].install`/commit pair
@@ -254,7 +254,7 @@ the item is in place and is for host side effects.
   commands: `[[items]].install` / `[[items]].uninstall` in `mind.toml`, or
   `install:` / `uninstall:` in a tool's `TOOL.md` frontmatter. They are valid on
   any kind and are distinct from `build` (HOOK-70). An empty or whitespace-only
-  value is treated as absent (HOOK-3). (HOOK-86, planned, adds a `[[items.hooks]]`
+  value is treated as absent (HOOK-3). (HOOK-86 adds a `[[items.hooks]]`
   array form for multiple/named/optional item hooks; these scalars are then its
   shorthand.)
 - `HOOK-81` An item's install hook runs as the final step of installing the item:

@@ -374,8 +374,8 @@ only appear at meld or install time. It is read-only and installs nothing.
   non-prescriptive about resources an item bundles: keeping a helper in the item's
   own directory, or having an install hook place it at a fixed location and
   referencing it there, are equally valid; the advisory points out only that a
-  literal mind install path is fragile, not that tokens are required. (CLI-146,
-  planned, adds the install-hook-safe note to the message.)
+  literal mind install path is fragile, not that tokens are required. (CLI-146
+  adds the install-hook-safe note to the message.)
 - `CLI-137` `review` reports, as an advisory `bare-tool-reference` finding, a
   sibling tool named in an item's prose without a token. Unlike the unguarded
   sibling-reference scan (CLI-131), which only matters under a prefix, a bare tool
@@ -384,7 +384,7 @@ only appear at meld or install time. It is read-only and installs nothing.
   at all. Bundling the helper with the item, or installing it to a well-known
   location via an install hook and calling it there, are equally valid; the
   advisory only flags a `tool` item named by bare name where a token would be
-  needed. (CLI-146, planned, adds the install-hook-safe note to the message.)
+  needed. (CLI-146 adds the install-hook-safe note to the message.)
 - `CLI-138` `review --fix` rewrites the source in place and is the sole exception
   to `review` being read-only (CLI-132). It applies only to a local-path target;
   a registry selector or a repo spec (whose clone is a discarded temp) refuses

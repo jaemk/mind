@@ -215,14 +215,12 @@ impl ItemDecl {
         Ok(out)
     }
 
-    /// Resolve just the `[[items.hooks]]` ARRAY entries (HOOK-86), validated in
-    /// declaration order, WITHOUT the scalar install/uninstall fold-in. The
-    /// catalog builder folds the (possibly frontmatter-sourced) scalars itself,
-    /// so it appends only these array entries.
-    pub fn resolved_item_array_hooks(
-        &self,
-        toml_path: &std::path::Path,
-    ) -> Result<Vec<ResolvedHook>> {
+    /// Resolve the `[[items.hooks]]` array entries (HOOK-86), validated in
+    /// declaration order. Returns only the array-declared hooks; the scalar
+    /// `install`/`uninstall` fold-in is handled by the caller
+    /// (`resolved_item_hooks`), which prepends those scalars ahead of this
+    /// result.
+    fn resolved_item_array_hooks(&self, toml_path: &std::path::Path) -> Result<Vec<ResolvedHook>> {
         let mut out: Vec<ResolvedHook> = Vec::new();
         for hook in &self.hooks {
             let run = hook.run.trim();

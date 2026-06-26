@@ -134,6 +134,13 @@ pub enum MindError {
     #[error("no source named '{name}' is melded")]
     SourceNotFound { name: String },
 
+    #[error("'{pattern}' is not a valid glob selector: {source}")]
+    InvalidPattern {
+        pattern: String,
+        #[source]
+        source: glob::PatternError,
+    },
+
     #[error("'{query}' matches multiple sources: {}; use the full owner/repo", candidates.join(", "))]
     AmbiguousSource {
         query: String,

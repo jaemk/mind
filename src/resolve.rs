@@ -109,6 +109,21 @@ pub fn source_matches_glob(full_name: &str, selector: &str) -> bool {
     }
 }
 
+/// Validate a source selector that may carry glob metacharacters (CLI-28). When
+/// `selector` is a glob, compile it once and surface a malformed pattern as
+/// [`MindError::InvalidPattern`] so a typo like `[bad` reports a clear
+/// invalid-pattern error rather than silently matching nothing (which would
+/// surface downstream as `SourceNotFound`). A non-glob selector is always valid.
+pub fn validate_source_selector(selector: &str) -> Result<()> {
+    if is_glob(selector) {
+        glob::Pattern::new(selector).map_err(|source| MindError::InvalidPattern {
+            pattern: selector.to_string(),
+            source,
+        })?;
+    }
+    Ok(())
+}
+
 /// Whether a ref name is a glob pattern (selects many) rather than an exact name.
 pub fn is_glob(name: &str) -> bool {
     name.contains(['*', '?', '['])
@@ -334,6 +349,44 @@ mod tests {
         // A non-component-boundary substring still does not match without a glob.
         assert!(!source_matches_glob(full, "jaemk"));
         assert!(!source_matches_glob(full, "ts"));
+    }
+
+    // spec: CLI-28, CLI-86
+    #[test]
+    fn validate_source_selector_accepts_valid_glob() {
+        // A well-formed glob compiles, so validation passes.
+        assert!(validate_source_selector("*agents").is_ok());
+        assert!(validate_source_selector("github.com/*/agents").is_ok());
+        assert!(validate_source_selector("[ab]gents").is_ok());
+        assert!(validate_source_selector("agent?").is_ok());
+    }
+
+    // spec: CLI-28, CLI-86
+    #[test]
+    fn validate_source_selector_rejects_malformed_glob() {
+        // `[bad` opens a character class that is never closed -- glob compilation
+        // fails, and validation must surface InvalidPattern (not silently pass and
+        // later read as SourceNotFound).
+        let err = validate_source_selector("[bad").unwrap_err();
+        assert!(
+            matches!(err, MindError::InvalidPattern { ref pattern, .. } if pattern == "[bad"),
+            "expected InvalidPattern carrying the offending pattern, got {err:?}"
+        );
+        // The user-facing message names the failure mode.
+        assert!(
+            err.to_string().contains("not a valid glob selector"),
+            "message should explain the invalid glob: {err}"
+        );
+    }
+
+    // spec: CLI-86
+    #[test]
+    fn validate_source_selector_passes_non_glob() {
+        // No glob metacharacters: nothing to compile, always Ok even for a name
+        // that would carry an unbalanced bracket meaning only as a literal.
+        assert!(validate_source_selector("agents").is_ok());
+        assert!(validate_source_selector("github.com/jaemk/agents").is_ok());
+        assert!(validate_source_selector("").is_ok());
     }
 
     #[test]

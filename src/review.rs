@@ -318,17 +318,17 @@ fn run_checks(
                 // spec: HOOK-90 -- [source].install is deprecated in favor of
                 // [[hooks]] with event = "install". Emit an advisory when the
                 // legacy field is present so maintainers can migrate.
-                if let Some(cmd) = &mf.source.install
-                    && !cmd.trim().is_empty()
-                {
-                    advisory.push(Finding::advisory(
-                        "deprecated-field",
-                        format!(
-                            "[source].install is deprecated; use a [[hooks]] entry instead: \
-                             run = \"{}\", event = \"install\"",
-                            cmd.trim()
-                        ),
-                    ));
+                if let Some(raw) = &mf.source.install {
+                    let cmd = raw.trim();
+                    if !cmd.is_empty() {
+                        advisory.push(Finding::advisory(
+                            "deprecated-field",
+                            format!(
+                                "[source].install is deprecated; use a [[hooks]] entry instead: \
+                                 run = \"{cmd}\", event = \"install\""
+                            ),
+                        ));
+                    }
                 }
             }
             Err(e) => {

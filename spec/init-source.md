@@ -45,9 +45,9 @@ namespacing.md.
   edges) and the siblings it mentions in bare prose (the unguarded references,
   NS-21). The bare mentions are emitted as `unguarded-reference` advisory
   findings in the same `advisory [kind]: message` format `review` uses (CLI-131),
-  so the two commands' findings read identically; they break under a prefix
-  unless tokenized. (INIT-9, planned, narrows this to fire only under an effective
-  prefix.)
+  so the two commands' findings read identically. The advisory fires only when an
+  effective prefix is in force, since bare mentions only break at runtime under a
+  prefix (INIT-9).
 - `INIT-5` With `--template`, `init-source` rewrites each bare whole-word sibling
   mention in an item's text to its `{{ns:name}}` token (NS-10), writes the changed
   files, and reports each rewrite. Text already inside a `{{ns:}}` token is left

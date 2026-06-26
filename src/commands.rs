@@ -899,7 +899,10 @@ pub fn unmeld(
 
     // CLI-28: a glob selector permits a multi-source match; every matching source
     // is unmelded. A non-glob selector keeps the exact/unambiguous-suffix
-    // semantics of CLI-20 (an ambiguous suffix is still `AmbiguousSource`).
+    // semantics of CLI-20 (an ambiguous suffix is still `AmbiguousSource`). A
+    // malformed glob (`[bad`) reports `InvalidPattern` here rather than silently
+    // matching nothing and surfacing as `SourceNotFound`.
+    crate::resolve::validate_source_selector(name)?;
     let matched: Vec<usize> = if is_glob(name) {
         registry
             .sources
@@ -946,6 +949,12 @@ pub fn unmeld(
     // at source granularity). `--yes` skips it; a non-TTY run without `--yes`
     // refuses rather than removing silently.
     if matched.len() > 1 && !yes {
+        // `--json` is treated as non-interactive: both the human-readable listing
+        // and the `confirm(...)` prompt below are gated on `!out.json`, so a JSON
+        // run never blocks on a prompt. A non-TTY JSON run without `--yes` still
+        // returns ConfirmationRequired (the is_tty check below applies regardless
+        // of json), so nothing is removed without an explicit `--yes`; the prompt
+        // is intentionally skipped only when an interactive terminal is also JSON.
         if !out.json {
             println!("unmeld would remove {} source(s):", matched.len());
             for i in &matched {
@@ -1684,7 +1693,15 @@ fn source_status(paths: &Paths, source_name: &str) -> Result<()> {
                 // effective name changed (a namespace/prefix rename). A commit
                 // advance that did not touch the item's content or name does NOT
                 // mark it outdated; `upgrade` would report nothing pending for it.
-                let hash_lag = hash_path(&it.path).ok().is_some_and(|h| h != m.hash);
+                //
+                // CLI-75: `upgrade` aborts the whole run via `?` when it cannot
+                // hash the source content. This best-effort listing marker cannot
+                // abort -- it must still print the other rows -- so it errs toward
+                // flagging: a hash-computation error counts as drift (outdated)
+                // rather than being silently read as "up to date". The same
+                // hash-error-counts-as-lag rule is applied at all four marker
+                // sites for consistency.
+                let hash_lag = hash_path(&it.path).map_or(true, |h| h != m.hash);
                 let rename_lag = it.effective_name() != m.name;
                 let lag = if hash_lag || rename_lag {
                     out.yellow(" (outdated; run `mind upgrade`)")
@@ -2581,6 +2598,11 @@ pub fn recall(
             "note: --kind/--source filter the item listing; ignored with --sources or a single item"
         );
     }
+    // CLI-86: the `--source` glob filter shares `source_matches_glob`; reject a
+    // malformed pattern up front rather than silently matching nothing.
+    if let Some(s) = source {
+        crate::resolve::validate_source_selector(s)?;
+    }
 
     if sources {
         let registry = Registry::load(paths)?;
@@ -2654,7 +2676,9 @@ pub fn recall(
             if let Some(cat) = catalog.iter().find(|c| {
                 c.kind == found.kind && c.name == found.bare_name && c.source == found.source
             }) {
-                let hash_lag = hash_path(&cat.path).ok().is_some_and(|h| h != found.hash);
+                // CLI-75: a hash error counts as drift (see the recall listing
+                // site); the marker errs toward flagging rather than hiding it.
+                let hash_lag = hash_path(&cat.path).map_or(true, |h| h != found.hash);
                 let rename_lag = cat.effective_name() != found.name;
                 if hash_lag || rename_lag {
                     println!(
@@ -2809,7 +2833,9 @@ pub fn recall(
                     // CLI-75 / LIFE-11: mark out of date exactly when `upgrade`
                     // would act -- source-content hash changed, or effective name
                     // changed (rename). Commit advance alone does not trigger this.
-                    let hash_lag = hash_path(&it.path).ok().is_some_and(|h| h != m.hash);
+                    // CLI-75: a hash error counts as drift (see the recall listing
+                    // site); the marker errs toward flagging rather than hiding it.
+                    let hash_lag = hash_path(&it.path).map_or(true, |h| h != m.hash);
                     let rename_lag = it.effective_name() != m.name;
                     let outdated = if hash_lag || rename_lag {
                         format!("  {}", out.yellow("(outdated; run mind upgrade)"))
@@ -2888,6 +2914,11 @@ pub fn probe(
     json: bool,
 ) -> Result<()> {
     let out = crate::render::ctx();
+    // CLI-86: the `--source` glob filter shares `source_matches_glob`; reject a
+    // malformed pattern up front rather than silently matching nothing.
+    if let Some(s) = source {
+        crate::resolve::validate_source_selector(s)?;
+    }
     let registry = Registry::load(paths)?;
     let items = catalog::scan(paths, &registry)?;
     let manifest = Manifest::load(paths)?;
@@ -2974,7 +3005,10 @@ pub fn probe(
             // act -- source-content hash changed, or effective name changed
             // (rename). Commit advance alone does not trigger this.
             let outdated = m.is_some_and(|m| {
-                let hash_drift = cur.as_deref().is_some_and(|h| h != m.hash);
+                // CLI-75: a hash error (cur == None) counts as drift; the marker
+                // errs toward flagging rather than reading "cannot hash" as up to
+                // date, consistent with the other three marker sites.
+                let hash_drift = cur.as_deref().is_none_or(|h| h != m.hash);
                 let rename_drift = it.effective_name() != m.name;
                 hash_drift || rename_drift
             });

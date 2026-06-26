@@ -363,3 +363,63 @@ fn review_hardcoded_path_own_resource_wording_unchanged() {
         r.stdout
     );
 }
+
+// ---------------------------------------------------------------------------
+// CLI-145: SharedTool wording is distinct from OtherItem / install-hook-safe
+// ---------------------------------------------------------------------------
+
+/// The hardcoded-path SharedTool advisory fires when a skill references a
+/// store-only tool path (`~/.mind/store/tool/<name>/...`) that names a real
+/// sibling tool. Its message states the tool is store-only and never linked
+/// into an agent home. It does NOT carry the install-hook-safe note that
+/// OtherItem advisories carry, because no install hook can place a file at an
+/// agent-home path for a tool that is never linked there.
+///
+/// NOTE: the same skill also triggers a bare-tool-reference advisory (the tool
+/// name "detect" appears in prose), which DOES carry "intentional"/"safe"
+/// wording (CLI-146). We assert only on the hardcoded-path line to isolate the
+/// SharedTool arm from the bare-tool-reference arm.
+// spec: CLI-145, CLI-146
+#[test]
+fn review_hardcoded_path_shared_tool_wording_distinct_from_other_item() {
+    let sb = Sandbox::new("agents");
+    // A sibling tool `detect` alongside a skill that hardcodes its store path.
+    // The skill references the tool via its mind-store absolute path, which
+    // classify_path sees as SharedTool (a real sibling tool, store-only).
+    write(&sb.source.join("tools/detect/detect"), "#!/bin/sh\n");
+    write(
+        &sb.source.join("skills/review/SKILL.md"),
+        "---\ndescription: review\n---\nrun ~/.mind/store/tool/detect/detect to analyze\n",
+    );
+
+    let target = sb.source_spec();
+    let r = sb.mind(&["review", &target]);
+
+    assert!(r.success, "advisory-only: {}", r.stdout);
+
+    // Isolate the hardcoded-path advisory line to check SharedTool wording only.
+    // (Other lines, e.g. bare-tool-reference, may legitimately carry "safe".)
+    let hardcoded_line = r
+        .stdout
+        .lines()
+        .find(|l| l.contains("hardcoded-path"))
+        .unwrap_or_else(|| panic!("expected hardcoded-path advisory: {}", r.stdout));
+
+    // CLI-145: SharedTool message must state the tool is store-only / never linked.
+    assert!(
+        hardcoded_line.contains("store-only"),
+        "SharedTool hardcoded-path advisory must say store-only: {hardcoded_line}"
+    );
+    assert!(
+        hardcoded_line.contains("never linked"),
+        "SharedTool hardcoded-path advisory must say never linked: {hardcoded_line}"
+    );
+    // CLI-146: the hardcoded-path SharedTool line must NOT carry the
+    // install-hook-safe note. A tool is store-only regardless of install hooks,
+    // so the safe-location note does not apply to this arm.
+    assert!(
+        !hardcoded_line.contains("intentional") && !hardcoded_line.contains("safe"),
+        "SharedTool hardcoded-path advisory must not carry the install-hook-safe note: \
+         {hardcoded_line}"
+    );
+}
