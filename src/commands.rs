@@ -16,7 +16,9 @@ use crate::mindfile::HookEvent;
 use crate::mindfile::MindToml;
 use crate::paths::Paths;
 use crate::policy::Policy;
-use crate::resolve::{is_glob, parse_item_ref, resolve, select, select_installed, source_matches};
+use crate::resolve::{
+    is_glob, parse_item_ref, resolve, select, select_installed, source_matches, source_matches_glob,
+};
 use crate::source::{Pin, Registry, parse_spec};
 
 /// `mind meld <repo> [--as <prefix>] [--root <dir>] [--follow-branch|--pin-tag|--pin-ref]`
@@ -875,12 +877,15 @@ fn run_uninstall_hooks(
 }
 
 /// `mind unmeld <name> [--unlink-only] [--yes] [--dangerously-skip-install-hook-check]`
-/// — drop a source. `name` may be the full `owner/repo` or an unambiguous repo
-/// basename. By default every item installed from the source is uninstalled (via
-/// its file registry) before the source is removed (CLI-21); `--unlink-only`
-/// keeps the items and only removes the source (CLI-22). Runs the source's
-/// declared uninstall hooks (HOOK-54) before removal; `dangerously_skip_hook_check`
-/// bypasses the prompt. `yes` skips the multi-item removal confirmation (CLI-42).
+/// — drop a source. `name` may be the full `owner/repo`, an unambiguous repo
+/// basename, or a glob (`*`, `?`, `[`) matched against each source's identity and
+/// its trailing-suffix forms (CLI-28); a glob removes every source it matches,
+/// listing them and confirming first when it matches more than one. By default
+/// every item installed from a matched source is uninstalled (via its file
+/// registry) before the source is removed (CLI-21); `--unlink-only` keeps the
+/// items and only removes the source (CLI-22). Runs the source's declared
+/// uninstall hooks (HOOK-54) before removal; `dangerously_skip_hook_check`
+/// bypasses the prompt. `yes` skips the removal confirmations (CLI-42).
 pub fn unmeld(
     paths: &Paths,
     name: &str,
@@ -890,34 +895,123 @@ pub fn unmeld(
     uninstall_hook: Option<String>,
 ) -> Result<()> {
     let out = crate::render::ctx();
-    let mut registry = Registry::load(paths)?;
-    let matched: Vec<usize> = registry
-        .sources
-        .iter()
-        .enumerate()
-        .filter(|(_, s)| source_matches(&s.name, name))
-        .map(|(i, _)| i)
-        .collect();
+    let registry = Registry::load(paths)?;
 
-    let idx = match matched.as_slice() {
-        [] => {
-            return Err(MindError::SourceNotFound {
-                name: name.to_string(),
-            });
-        }
-        [only] => *only,
-        many => {
-            return Err(MindError::AmbiguousSource {
-                query: name.to_string(),
-                candidates: many
-                    .iter()
-                    .map(|i| registry.sources[*i].name.clone())
-                    .collect(),
-            });
+    // CLI-28: a glob selector permits a multi-source match; every matching source
+    // is unmelded. A non-glob selector keeps the exact/unambiguous-suffix
+    // semantics of CLI-20 (an ambiguous suffix is still `AmbiguousSource`).
+    let matched: Vec<usize> = if is_glob(name) {
+        registry
+            .sources
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| source_matches_glob(&s.name, name))
+            .map(|(i, _)| i)
+            .collect()
+    } else {
+        let exact: Vec<usize> = registry
+            .sources
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| source_matches(&s.name, name))
+            .map(|(i, _)| i)
+            .collect();
+        match exact.as_slice() {
+            [] => {
+                return Err(MindError::SourceNotFound {
+                    name: name.to_string(),
+                });
+            }
+            [only] => vec![*only],
+            many => {
+                return Err(MindError::AmbiguousSource {
+                    query: name.to_string(),
+                    candidates: many
+                        .iter()
+                        .map(|i| registry.sources[*i].name.clone())
+                        .collect(),
+                });
+            }
         }
     };
 
-    let source_name = registry.sources[idx].name.clone();
+    if matched.is_empty() {
+        return Err(MindError::SourceNotFound {
+            name: name.to_string(),
+        });
+    }
+
+    // CLI-28: when a glob matches more than one source, list the matched sources
+    // and confirm before removing them (CLI-42's multi-item confirmation, applied
+    // at source granularity). `--yes` skips it; a non-TTY run without `--yes`
+    // refuses rather than removing silently.
+    if matched.len() > 1 && !yes {
+        if !out.json {
+            println!("unmeld would remove {} source(s):", matched.len());
+            for i in &matched {
+                println!("  {} {}", out.warn(), registry.sources[*i].name);
+            }
+        }
+        if !crate::hook::is_tty() {
+            return Err(MindError::ConfirmationRequired {
+                action: format!("unmelding {} sources", matched.len()),
+            });
+        }
+        if !out.json && !confirm("remove these source(s)?")? {
+            println!("cancelled; nothing removed");
+            return Ok(());
+        }
+    }
+
+    // Removing a source mutates `registry.sources` indices, so resolve each
+    // matched source by its name up front and unmeld them one at a time. When the
+    // glob matched several sources we already confirmed above at source
+    // granularity, so the per-source item-count confirmation is suppressed (`yes`);
+    // a single match still gets its own item-count confirmation (CLI-21).
+    let multi = matched.len() > 1;
+    let names: Vec<String> = matched
+        .iter()
+        .map(|i| registry.sources[*i].name.clone())
+        .collect();
+    drop(registry);
+    for source_name in names {
+        unmeld_one(
+            paths,
+            &source_name,
+            unlink_only,
+            yes || multi,
+            dangerously_skip_hook_check,
+            uninstall_hook.as_deref(),
+        )?;
+    }
+    Ok(())
+}
+
+/// Tear down a single melded source by its full identity, the per-source body
+/// shared by `unmeld` (CLI-21/CLI-22). It removes the source's installed items
+/// (each via its file registry) before the source itself, preserving the HOOK-87
+/// order (item uninstall hooks before the source's). The multi-source/multi-item
+/// confirmation (CLI-42) is the caller's responsibility; this body does not
+/// re-prompt for the item count.
+fn unmeld_one(
+    paths: &Paths,
+    source_name: &str,
+    unlink_only: bool,
+    yes: bool,
+    dangerously_skip_hook_check: bool,
+    uninstall_hook: Option<&str>,
+) -> Result<()> {
+    let out = crate::render::ctx();
+    let mut registry = Registry::load(paths)?;
+    let idx = match registry.sources.iter().position(|s| s.name == source_name) {
+        Some(i) => i,
+        None => {
+            return Err(MindError::SourceNotFound {
+                name: source_name.to_string(),
+            });
+        }
+    };
+    let source_name = source_name.to_string();
 
     // The items installed from this source (effective-name keys).
     let mut manifest = Manifest::load(paths)?;
@@ -938,7 +1032,7 @@ pub fn unmeld(
             &registry,
             idx,
             &source_name,
-            uninstall_hook.as_deref(),
+            uninstall_hook,
             dangerously_skip_hook_check,
         )?;
         if !proceed {
@@ -1050,7 +1144,7 @@ pub fn unmeld(
         &registry,
         idx,
         &source_name,
-        uninstall_hook.as_deref(),
+        uninstall_hook,
         dangerously_skip_hook_check,
     )?;
     if !proceed {
@@ -2609,8 +2703,10 @@ pub fn recall(
         v.sort_by_key(|x| x.key());
         v
     };
+    // CLI-86: the `--source` filter accepts a glob, matched against each source's
+    // identity and trailing-suffix forms; a multi-source match is the normal case.
     let source_shown =
-        |s: &crate::source::Source| source.is_none_or(|q| source_matches(&s.name, q));
+        |s: &crate::source::Source| source.is_none_or(|q| source_matches_glob(&s.name, q));
 
     if json {
         let out: Vec<serde_json::Value> = registry
@@ -2789,7 +2885,8 @@ pub fn probe(
         .filter(|it| {
             catalog::matches_query(it, q) // spec: CLI-85
                 && kind.is_none_or(|k| it.kind == k)
-                && source.is_none_or(|s| source_matches(&it.source, s))
+                // CLI-86: `--source` accepts a glob over source identities.
+                && source.is_none_or(|s| source_matches_glob(&it.source, s))
         })
         .collect();
     hits.sort_by_key(|a| a.key());

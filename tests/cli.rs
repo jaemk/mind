@@ -754,6 +754,133 @@ fn probe_description_query_composes_with_source_filter() {
     );
 }
 
+/// Meld a default `agents` source plus a second `tools` source carrying a
+/// uniquely-named skill, so a `--source` filter can be checked for exclusion.
+/// Both sandboxes are returned so the caller keeps the linked source dirs alive
+/// (a local source is linked by path, not copied, so its dir must survive).
+fn melded_two_sources() -> (Sandbox, Sandbox) {
+    let agents = melded();
+    // A bare source (no standard fixture) carrying only a uniquely-named skill,
+    // so its items never overlap the agents source.
+    let tools = Sandbox::bare("tools");
+    tools.write_and_commit(
+        "skills/deploy/SKILL.md",
+        "---\nname: deploy\ndescription: Ship the build\n---\n# deploy skill\n",
+    );
+    assert!(
+        agents.mind(&["meld", &tools.source_spec()]).success,
+        "meld of second source failed"
+    );
+    (agents, tools)
+}
+
+#[test]
+fn probe_source_glob_narrows_to_matching_sources() {
+    // spec: CLI-86 - the `--source` filter accepts a glob matched against source
+    // identities; `*agents` shows only the agents source's items and excludes a
+    // second `tools` source.
+    let (sb, _tools) = melded_two_sources();
+
+    let only_agents = sb.mind(&["probe", "--no-tui", "--source", "*agents"]);
+    assert!(only_agents.success, "{}", only_agents.stderr);
+    assert!(
+        only_agents.stdout.contains("skill:review"),
+        "expected the agents source's item: {}",
+        only_agents.stdout
+    );
+    assert!(
+        !only_agents.stdout.contains("skill:deploy"),
+        "the tools source's item must be excluded: {}",
+        only_agents.stdout
+    );
+
+    // The complementary glob shows only the tools source's item.
+    let only_tools = sb.mind(&["probe", "--no-tui", "--source", "*tools"]);
+    assert!(only_tools.success, "{}", only_tools.stderr);
+    assert!(
+        only_tools.stdout.contains("skill:deploy"),
+        "expected the tools source's item: {}",
+        only_tools.stdout
+    );
+    assert!(
+        !only_tools.stdout.contains("skill:review"),
+        "the agents source's item must be excluded: {}",
+        only_tools.stdout
+    );
+}
+
+#[test]
+fn recall_source_glob_narrows_to_matching_sources() {
+    // spec: CLI-86 - the `recall` listing `--source` filter accepts a glob the
+    // same way as probe.
+    let (sb, _tools) = melded_two_sources();
+
+    let only_agents = sb.mind(&["recall", "--source", "*agents"]);
+    assert!(only_agents.success, "{}", only_agents.stderr);
+    assert!(
+        only_agents.stdout.contains("review"),
+        "expected the agents source's item: {}",
+        only_agents.stdout
+    );
+    assert!(
+        !only_agents.stdout.contains("deploy"),
+        "the tools source's item must be excluded: {}",
+        only_agents.stdout
+    );
+}
+
+#[test]
+fn probe_source_glob_matching_nothing_is_empty() {
+    // spec: CLI-86 - a glob that matches no source yields an empty listing (no
+    // error), as any fully-excluding filter does.
+    let (sb, _tools) = melded_two_sources();
+    let r = sb.mind(&["probe", "--no-tui", "--source", "*nope"]);
+    assert!(r.success, "{}", r.stderr);
+    assert!(
+        !r.stdout.contains("skill:review") && !r.stdout.contains("skill:deploy"),
+        "no items should be listed: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn probe_source_glob_composes_with_json() {
+    // spec: CLI-86, CLI-84 - the glob `--source` filter composes with `--json`.
+    let (sb, _tools) = melded_two_sources();
+    let r = sb.mind(&["probe", "--no-tui", "--source", "*agents", "--json"]);
+    assert!(r.success, "{}", r.stderr);
+    let rows: serde_json::Value = serde_json::from_str(&r.stdout).expect("probe --json array");
+    let rows = rows.as_array().expect("array");
+    assert!(
+        rows.iter().any(|row| row["name"] == "review"),
+        "agents item present in json: {}",
+        r.stdout
+    );
+    assert!(
+        !rows.iter().any(|row| row["name"] == "deploy"),
+        "tools item excluded from json: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn probe_n_is_short_for_no_tui() {
+    // spec: TUI-3 - `-n` is the subcommand-scoped short form of `--no-tui`; it
+    // prints the same non-interactive catalog listing as `--no-tui`.
+    let sb = melded();
+    let short = sb.mind(&["probe", "-n"]);
+    let long = sb.mind(&["probe", "--no-tui"]);
+    assert!(short.success, "{}", short.stderr);
+    assert_eq!(
+        short.stdout, long.stdout,
+        "`-n` must match `--no-tui` output"
+    );
+    // Parity with the existing listing assertion (probe_lists_all_three_kinds).
+    assert!(short.stdout.contains("skill:review"), "{}", short.stdout);
+    assert!(short.stdout.contains("agent:dev"), "{}", short.stdout);
+    assert!(short.stdout.contains("rule:style"), "{}", short.stdout);
+}
+
 #[test]
 fn probe_query_matches_name_in_one_item_and_description_in_another() {
     // spec: CLI-85
@@ -1925,6 +2052,103 @@ fn unmeld_full_name_resolves_basename_collision() {
             .success
     );
     assert!(a.mind(&["unmeld", "agents"]).success);
+}
+
+#[test]
+fn unmeld_glob_removes_only_the_matching_source() {
+    // spec: CLI-28 - a glob removes the source(s) it matches and leaves the rest.
+    // Meld two sources (`foo` and `agents`); `*agents` matches only `agents`.
+    let a = Sandbox::named("foo");
+    let agents = Sandbox::named("agents");
+    assert!(a.mind(&["meld", &a.source_spec()]).success);
+    assert!(a.mind(&["meld", &agents.source_spec()]).success);
+    // Install an item from the agents source so its teardown is exercised.
+    assert!(
+        a.mind(&["learn", &format!("{}/agents#review", agents.base_name())])
+            .success
+    );
+
+    let r = a.mind(&["unmeld", "*agents"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+
+    // Only the agents source (and its item) is gone; foo survives.
+    let sources = a.mind(&["recall", "--sources"]).stdout;
+    assert!(sources.contains("foo"), "foo must remain melded: {sources}");
+    assert!(
+        !sources.contains(&format!("{}/agents", agents.base_name())),
+        "the agents source must be unmelded: {sources}"
+    );
+    assert!(
+        std::fs::symlink_metadata(a.claude_home.join("skills/review")).is_err(),
+        "the agents source's item link must be removed"
+    );
+}
+
+#[test]
+fn unmeld_glob_matching_several_lists_and_removes_with_yes() {
+    // spec: CLI-28, CLI-42 - a glob may match more than one source; it lists the
+    // matched sources and the multi-source confirmation applies. `--yes` skips it
+    // and removes every match.
+    let a = Sandbox::named("agents");
+    let b = Sandbox::named("agents");
+    assert!(a.mind(&["meld", &a.source_spec()]).success);
+    assert!(a.mind(&["meld", &b.source_spec()]).success);
+    let a_full = format!("{}/agents", a.base_name());
+    let b_full = format!("{}/agents", b.base_name());
+
+    // Without --yes a multi-source glob refuses in a non-TTY context, listing the
+    // matched sources first.
+    let refused = a.mind(&["unmeld", "*agents"]);
+    assert!(!refused.success, "must refuse: {}", refused.stdout);
+    assert!(
+        refused.stderr.contains("needs confirmation"),
+        "{}",
+        refused.stderr
+    );
+    assert!(
+        refused.stdout.contains(&a_full) && refused.stdout.contains(&b_full),
+        "both matched sources must be listed: {}",
+        refused.stdout
+    );
+    // Nothing removed by the refusal.
+    let still = a.mind(&["recall", "--sources"]).stdout;
+    assert!(
+        still.contains(&a_full) && still.contains(&b_full),
+        "both sources must survive a refused unmeld: {still}"
+    );
+
+    // `--yes` removes both matched sources.
+    let r = a.mind(&["unmeld", "*agents", "--yes"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(
+        a.mind(&["recall", "--sources"])
+            .stdout
+            .contains("no sources melded"),
+        "every matching source must be unmelded"
+    );
+}
+
+#[test]
+fn unmeld_glob_matching_no_source_errors() {
+    // spec: CLI-28 - a glob that matches nothing is SourceNotFound.
+    let sb = melded();
+    let r = sb.mind(&["unmeld", "*nope"]);
+    assert!(!r.success);
+    assert!(r.stderr.contains("no source named"), "{}", r.stderr);
+}
+
+#[test]
+fn unmeld_plain_ambiguous_suffix_still_errors() {
+    // spec: CLI-28, CLI-20 - a plain (non-glob) ambiguous suffix is still
+    // AmbiguousSource; only a glob is allowed to remove several sources.
+    let a = Sandbox::named("agents");
+    let b = Sandbox::named("agents");
+    assert!(a.mind(&["meld", &a.source_spec()]).success);
+    assert!(a.mind(&["meld", &b.source_spec()]).success);
+
+    let amb = a.mind(&["unmeld", "agents"]);
+    assert!(!amb.success);
+    assert!(amb.stderr.contains("multiple sources"), "{}", amb.stderr);
 }
 
 #[test]

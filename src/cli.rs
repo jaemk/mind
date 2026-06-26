@@ -310,7 +310,9 @@ pub enum Command {
         source: Option<String>,
 
         /// Skip the interactive TUI and use the plain catalog listing.
-        #[arg(long)]
+        // TUI-3: `-n` is the subcommand-scoped short for `--no-tui`; it does not
+        // clash with `learn`'s `-n` (`--dry-run`) since clap shorts are local.
+        #[arg(long, short = 'n')]
         no_tui: bool,
     },
 

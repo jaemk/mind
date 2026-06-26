@@ -50,18 +50,33 @@ resolve by hand.
 Most sources keep an item's resources next to the item and never think about any
 of this. Two patterns cover nearly everything:
 
-- **Bundle with the item.** A script a single skill uses lives in that skill's
-  own directory and is addressed with `{{self}}` (e.g. `{{self}}/resources/pr.py`).
-  It ships and installs with the skill; nothing else is needed.
 - **Install to a known location.** Tooling shared across items, or anything with a
   build step, is best handled by an install hook: declare a `[[hooks]]` install
   entry to run your install script, which puts the tooling wherever you like (a
   fixed path under the user's home, a venv, a PATH entry), and have your items call
   it there. The source "onboards" its build once and the items just use it.
+- **Bundle with the item.** A script a single skill uses lives in that skill's
+  own directory and is addressed with `{{self}}` (e.g. `{{self}}/resources/pr.py`).
+  It ships and installs with the skill; nothing else is needed.
+  ```bash
+  skills/github/SKILL.md
+  skills/github/resources/pr.py   # referenced as {{self}}/resources/pr.py
+  ```
+- The `tool` item kind and the `{{tools:name}}` / `{{path:ref}}` tokens are a third
+  option for sharing a helper through `mind`'s store. This method installs shared tools
+  in your repo's `tools/` directory to a centralized location managed by `mind`.
+  These tools are expected to each live in their own directory, e.g.
+  - `tools/my-tools/my-tool.sh`
+  - `tools/my-tool/TOOL.md`
+    ```
+    ---
+    description: My tool
+    bin: my-tool.sh
+    ---
+    Shared project tool. Skills and agents invoke it via {{tools:my-tool}}
+    ```
 
-The `tool` item kind and the `{{tools:name}}` / `{{path:ref}}` tokens are a third
-option for sharing a helper through `mind`'s store, but they are not required:
-`review`'s `duplicate-tooling`, `bare-tool-reference`, and `hardcoded-path`
+`mind review`'s `duplicate-tooling`, `bare-tool-reference`, and `hardcoded-path`
 findings are advisory, and bundling or an install hook are equally valid.
 
 ## Namespacing

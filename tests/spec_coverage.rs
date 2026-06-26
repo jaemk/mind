@@ -34,13 +34,6 @@ const ALLOWLIST: &[&str] = &[
     // The statement is kept (marked removed) so the number is not reused; it has
     // no behavior and so no citing test.
     "INIT-8",
-    // Planned: `unmeld <glob>` selects sources by glob/partial name (multi-source,
-    // mirroring learn/forget item globs), with a multi-source confirmation (CLI-28);
-    // and the `probe`/`recall` `--source` filter accepts the same source glob
-    // (CLI-86). Cited by tests when built.
-    "CLI-28", "CLI-86",
-    // Planned: `-n` short form of `probe --no-tui` (TUI-3). Cited by a test when built.
-    "TUI-3",
     // Planned features (see spec/README.md feature status = planned): documented
     // with stable IDs ahead of implementation. Each must move to a citing test
     // when built, at which point it is removed from this allowlist.

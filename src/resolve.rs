@@ -76,6 +76,39 @@ pub fn source_matches(full_name: &str, selector: &str) -> bool {
     full_name == selector || full_name.ends_with(&format!("/{selector}"))
 }
 
+/// The full source identity plus each of its trailing-suffix forms at a component
+/// boundary (e.g. `host/owner/repo`, `owner/repo`, `repo`). The candidates a
+/// selector is matched against in both [`source_matches`] and
+/// [`source_matches_glob`].
+fn source_suffix_forms(full_name: &str) -> Vec<&str> {
+    let mut forms = vec![full_name];
+    let mut rest = full_name;
+    while let Some(idx) = rest.find('/') {
+        rest = &rest[idx + 1..];
+        forms.push(rest);
+    }
+    forms
+}
+
+/// Whether a source selector matches a full `host/owner/repo` source name,
+/// permitting a glob. When `selector` carries glob metacharacters (CLI-28,
+/// CLI-86), it is compiled as a [`glob::Pattern`] and matched as a plain string
+/// against the full identity or any trailing-suffix form, so `*` spans any run
+/// including `/` (`*agents` matches `github.com/jaemk/agents`). Otherwise it
+/// falls back to the exact/unambiguous-suffix semantics of [`source_matches`].
+pub fn source_matches_glob(full_name: &str, selector: &str) -> bool {
+    if is_glob(selector) {
+        match glob::Pattern::new(selector) {
+            Ok(pattern) => source_suffix_forms(full_name)
+                .iter()
+                .any(|form| pattern.matches(form)),
+            Err(_) => false,
+        }
+    } else {
+        source_matches(full_name, selector)
+    }
+}
+
 /// Whether a ref name is a glob pattern (selects many) rather than an exact name.
 pub fn is_glob(name: &str) -> bool {
     name.contains(['*', '?', '['])
@@ -264,6 +297,43 @@ mod tests {
         assert!(!source_matches(full, "james"));
         assert!(!source_matches(full, "ts"));
         assert!(!source_matches(full, "bob/agents"));
+    }
+
+    // spec: CLI-28, CLI-86
+    #[test]
+    fn source_glob_matches_full_id_and_suffix_forms() {
+        let full = "github.com/jaemk/agents";
+        // `*` spans `/`, matching against the full identity as a plain string.
+        assert!(source_matches_glob(full, "*agents"));
+        assert!(source_matches_glob(full, "github.com/*/agents"));
+        assert!(source_matches_glob(full, "*"));
+        // Matched against a trailing-suffix form (`agents`).
+        assert!(source_matches_glob(full, "ag*"));
+        assert!(source_matches_glob(full, "jaemk/*"));
+        // `?` and `[..]` metacharacters are honored.
+        assert!(source_matches_glob(full, "agent?"));
+        assert!(source_matches_glob(full, "[ab]gents"));
+    }
+
+    // spec: CLI-28, CLI-86
+    #[test]
+    fn source_glob_matching_nothing_is_false() {
+        let full = "github.com/jaemk/agents";
+        assert!(!source_matches_glob(full, "*foo"));
+        assert!(!source_matches_glob(full, "skills*"));
+    }
+
+    // spec: CLI-28, CLI-86
+    #[test]
+    fn source_glob_non_glob_falls_back_to_exact_or_suffix() {
+        let full = "github.com/jaemk/agents";
+        // No glob metacharacters: exact/suffix semantics of `source_matches`.
+        assert!(source_matches_glob(full, "agents"));
+        assert!(source_matches_glob(full, "jaemk/agents"));
+        assert!(source_matches_glob(full, "github.com/jaemk/agents"));
+        // A non-component-boundary substring still does not match without a glob.
+        assert!(!source_matches_glob(full, "jaemk"));
+        assert!(!source_matches_glob(full, "ts"));
     }
 
     #[test]
