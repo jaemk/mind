@@ -3,7 +3,10 @@ name = "mind-cli"
 version = "0.6.1"
 edition = "2024"
 license = "MIT"
-description = "A manager for agent tooling: skills, agents, and rules from arbitrary git repos."
+description = "A manager for agent tooling (skills, agents, rules, tools) that melds arbitrary git repos and links items into your agent directories."
+repository = "https://github.com/jaemk/mind"
+homepage = "https://jaemk.github.io/mind/"
+documentation = "https://jaemk.github.io/mind/"
 
 [[bin]]
 name = "mind"
