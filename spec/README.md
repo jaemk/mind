@@ -69,6 +69,7 @@ and verified.
 | README quickstart, mental model, troubleshooting/FAQ | done | [../README.md](../README.md) |
 | Starter source example (plain convention layout) | done | [../examples/](../examples/) |
 | Interactive TUI: `probe` default, Installed/Available tree, full-parity actions, preview + registry meld | done | [tui.md](tui.md) |
+| `probe -n` short form of `--no-tui` | planned | TUI-3 |
 | `tool` item kind: store-only installable, referenced not discovered | done | [tooling.md](tooling.md) (TOOL-1..7) |
 | Path-reference tokens `{{self}}` / `{{tools:name}}` / `{{path:ref}}` | done | [tooling.md](tooling.md) (TOOL-10..16) |
 | Item build hooks: per-item `build`, staging-time, transactional | done | [install-hooks.md](install-hooks.md) (HOOK-70..73) |

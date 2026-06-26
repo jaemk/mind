@@ -47,6 +47,8 @@ const ALLOWLIST: &[&str] = &[
     // and the `probe`/`recall` `--source` filter accepts the same source glob
     // (CLI-86). Cited by tests when built.
     "CLI-28", "CLI-86",
+    // Planned: `-n` short form of `probe --no-tui` (TUI-3). Cited by a test when built.
+    "TUI-3",
     // Planned: `init-source` gates its bare-sibling unguarded-reference advisory on
     // an effective prefix (INIT-9), matching meld/review; and the `hardcoded-path`
     // / `bare-tool-reference` advisory messages note that an install-hook-populated

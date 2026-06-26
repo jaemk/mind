@@ -20,6 +20,10 @@ the lock it takes per action is defined in storage.md (STO-40, STO-41).
   apply in both modes: in the listing they filter it (CLI-80, CLI-83); in the TUI
   they seed the initial search and filter state. Bare `mind` (no subcommand) is
   unchanged and does not launch the TUI.
+- `TUI-3` `-n` is the short form of `--no-tui` on `probe` (TUI-2): `mind probe -n`
+  prints the non-interactive catalog listing. The short is subcommand-scoped, so it
+  does not clash with `learn`'s `-n` (`--dry-run`, CLI-32); each is local to its own
+  command.
 
 ## Browse tree
 

@@ -4,7 +4,7 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 
 | command | role |
 |---------|------|
-| `probe [query] [--no-tui]` | interactive browser (default); catalog listing with `--no-tui`/`--json` |
+| `probe [query] [-n\|--no-tui]` | interactive browser (default); catalog listing with `-n`/`--no-tui`/`--json` |
 | `meld [<repo>] [--link-only] [--yes] [--as <prefix>] [--root <dir>] [--follow-branch\|--pin-tag\|--pin-ref <ref>]` | connect a source (default `.`), then install its items |
 | `init-source [<path>] [--template]` | scaffold `mind.toml` + detect references (maintainer) |
 | `unmeld <name\|glob> [--unlink-only] [--yes] [--uninstall-hook <cmd>] [--dangerously-skip-install-hook-check]` (alias: `detach`) | disconnect a source (or all sources matching a glob) and forget its items (`--unlink-only` keeps them) |
