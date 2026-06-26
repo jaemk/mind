@@ -12,8 +12,19 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  ci:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: make ci
+
   build:
     name: build ${{ matrix.target }}
+    needs: ci
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
