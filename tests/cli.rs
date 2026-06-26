@@ -9612,3 +9612,577 @@ fn recall_still_marks_item_outdated_after_commit_with_content_change() {
         r.stdout
     );
 }
+
+/// PRIMARY GAP: the `rename_lag` half of the fix. An item whose effective NAME
+/// changed (a namespace/prefix rename) but whose content hash did NOT must be
+/// marked outdated by `recall` (status view) and `probe --no-tui`, and `upgrade`
+/// must report it pending as a rename. The drift is created without re-melding
+/// `--as` (which would apply the rename immediately): the source declares a
+/// `[source].prefix` in `mind.toml` after install, so the catalog's effective
+/// name (`jk-review`) diverges from the still-recorded manifest name (`review`)
+/// with the item's SKILL.md content byte-identical (the hash is of the item
+/// content, not mind.toml -- LIFE-15). The four surfaces must agree with upgrade.
+// spec: CLI-75
+// spec: LIFE-11
+#[test]
+fn recall_and_probe_mark_item_outdated_on_rename_without_content_change() {
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    let r = sb.mind(&["meld", &spec, "--yes"]);
+    assert!(r.success, "meld failed: {} {}", r.stdout, r.stderr);
+
+    // Sanity: freshly installed, unprefixed, nothing outdated anywhere.
+    let recall = sb.mind(&["recall"]);
+    assert!(
+        !recall.stdout.contains("outdated"),
+        "fresh install must not be outdated in recall: {}",
+        recall.stdout
+    );
+    let probe = sb.mind(&["probe", "--no-tui"]);
+    assert!(
+        !probe.stdout.contains("outdated"),
+        "fresh install must not be outdated in probe: {}",
+        probe.stdout
+    );
+    let detail = sb.mind(&["recall", "skill:review"]);
+    assert!(
+        !detail.stdout.contains("out of date"),
+        "fresh install single-item must not be out of date: {}",
+        detail.stdout
+    );
+
+    // Introduce a namespace prefix via mind.toml WITHOUT re-melding. After sync,
+    // the catalog computes effective name `jk-review` while the manifest still
+    // records `review`; the SKILL.md content is unchanged so the hash matches.
+    sb.write_and_commit("mind.toml", "[source]\nprefix = \"jk\"\n");
+    assert!(sb.mind(&["sync"]).success, "sync failed");
+
+    // probe --no-tui listing: must mark the renamed item outdated.
+    let probe = sb.mind(&["probe", "--no-tui"]);
+    assert!(probe.success, "probe failed: {}", probe.stderr);
+    assert!(
+        probe.stdout.contains("outdated"),
+        "probe must mark a renamed item outdated: {}",
+        probe.stdout
+    );
+
+    // recall single-item detail: looked up by the OLD installed name, still
+    // present (matched by stable identity); must report out of date.
+    let detail = sb.mind(&["recall", "skill:review"]);
+    assert!(detail.success, "recall detail failed: {}", detail.stderr);
+    assert!(
+        detail.stdout.contains("out of date"),
+        "recall single-item detail must report a renamed item out of date: {}",
+        detail.stdout
+    );
+
+    // upgrade must agree: the item is pending as a rename, not "up to date".
+    let up = sb.mind(&["upgrade", "--yes"]);
+    assert!(up.success, "upgrade failed: {} {}", up.stdout, up.stderr);
+    assert!(
+        !up.stdout.contains("everything is up to date"),
+        "upgrade must NOT report up to date when an effective name changed: {}",
+        up.stdout
+    );
+    assert!(
+        up.stdout.contains("rename")
+            && up.stdout.contains("review -> ")
+            && up.stdout.contains("jk-review"),
+        "upgrade must report the rename review -> jk-review: {}",
+        up.stdout
+    );
+}
+
+/// CLI-75 applies the rename marker to the default `recall` status view too. The
+/// status view matches catalog items to the manifest by stable identity
+/// `(source, kind, bare_name)`, so a renamed item (effective name `skill:jk-review`
+/// vs the manifest's `skill:review`) still lands in the matched arm and `rename_lag`
+/// marks it outdated, rather than being misreported as `available` + an orphan
+/// `(removed upstream)`. The status view agrees with `probe`, the single-item
+/// detail, and `upgrade`.
+// spec: CLI-75
+// spec: LIFE-11
+#[test]
+fn recall_status_view_marks_renamed_item_outdated() {
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    let r = sb.mind(&["meld", &spec, "--yes"]);
+    assert!(r.success, "meld failed: {} {}", r.stdout, r.stderr);
+
+    sb.write_and_commit("mind.toml", "[source]\nprefix = \"jk\"\n");
+    assert!(sb.mind(&["sync"]).success, "sync failed");
+
+    let recall = sb.mind(&["recall"]);
+    assert!(recall.success, "recall failed: {}", recall.stderr);
+    // The renamed item must be marked outdated, not shown as removed-upstream.
+    assert!(
+        recall.stdout.contains("outdated"),
+        "recall status view must mark a renamed (effective-name-changed) item \
+         outdated to agree with probe/detail/upgrade: {}",
+        recall.stdout
+    );
+    assert!(
+        !recall.stdout.contains("removed upstream"),
+        "a pure namespace rename must not be reported as removed upstream: {}",
+        recall.stdout
+    );
+}
+
+/// FOUR-SURFACE CONSISTENCY (hash-drift case): for one in-place content edit
+/// (no new commit, no rename), `recall` status, `recall <item>` detail,
+/// `probe --no-tui`, and `upgrade` must all agree the item is changed. None may
+/// call it current that upgrade would change, and `upgrade` applying it must
+/// clear the marker on all surfaces afterwards.
+// spec: CLI-75
+// spec: LIFE-11
+#[test]
+fn all_four_surfaces_agree_on_hash_drift() {
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    let r = sb.mind(&["meld", &spec, "--yes"]);
+    assert!(r.success, "meld failed: {} {}", r.stdout, r.stderr);
+
+    // Edit the item content in place WITHOUT a new commit (local-source drift).
+    write(
+        &sb.source.join("skills/review/SKILL.md"),
+        "---\nname: review\ndescription: Review the diff for bugs\n---\n# review skill\nfour-surface-drift\n",
+    );
+
+    // All three human views must flag it, matching what upgrade will do.
+    let recall = sb.mind(&["recall"]);
+    assert!(
+        recall.stdout.contains("outdated"),
+        "recall status must flag hash drift: {}",
+        recall.stdout
+    );
+    let detail = sb.mind(&["recall", "skill:review"]);
+    assert!(
+        detail.stdout.contains("out of date"),
+        "recall single-item detail must flag hash drift: {}",
+        detail.stdout
+    );
+    let probe = sb.mind(&["probe", "--no-tui"]);
+    assert!(
+        probe.stdout.contains("outdated"),
+        "probe must flag hash drift: {}",
+        probe.stdout
+    );
+
+    // upgrade is the source of truth: it must find this item pending and apply it.
+    let up = sb.mind(&["upgrade", "--yes"]);
+    assert!(up.success, "upgrade failed: {} {}", up.stdout, up.stderr);
+    assert!(
+        !up.stdout.contains("everything is up to date"),
+        "upgrade must act on the drifted item: {}",
+        up.stdout
+    );
+
+    // After upgrade, every surface must agree the item is now current.
+    let recall = sb.mind(&["recall"]);
+    assert!(
+        !recall.stdout.contains("outdated"),
+        "recall must be clean after upgrade: {}",
+        recall.stdout
+    );
+    let detail = sb.mind(&["recall", "skill:review"]);
+    assert!(
+        !detail.stdout.contains("out of date"),
+        "recall detail must be clean after upgrade: {}",
+        detail.stdout
+    );
+    let probe = sb.mind(&["probe", "--no-tui"]);
+    assert!(
+        !probe.stdout.contains("outdated"),
+        "probe must be clean after upgrade: {}",
+        probe.stdout
+    );
+}
+
+/// The "outdated; run mind upgrade" marker is a HUMAN-view concern only (CLI-75):
+/// the JSON outputs must never carry it. This complements
+/// `recall_json_is_unchanged_by_drift` (hash-drift case) by covering the rename
+/// case across `recall --json`, `recall <item> --json`, and `probe --json`.
+///
+/// Note: the JSON bytes DO legitimately change under a rename drift -- the synced
+/// commit advances and the catalog's effective keys are now prefixed -- so this
+/// asserts the real invariant (no human marker string leaks) rather than byte
+/// equality, which holds only for an in-place edit with no commit/key change.
+// spec: CLI-75
+// spec: CLI-73
+// spec: CLI-84
+#[test]
+fn json_outputs_carry_no_outdated_marker_under_rename_drift() {
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    let r = sb.mind(&["meld", &spec, "--yes"]);
+    assert!(r.success, "meld failed: {} {}", r.stdout, r.stderr);
+
+    // Rename drift via mind.toml prefix (item content unchanged), then sync.
+    sb.write_and_commit("mind.toml", "[source]\nprefix = \"jk\"\n");
+    assert!(sb.mind(&["sync"]).success, "sync failed");
+
+    let recall = sb.mind(&["recall", "--json"]);
+    let detail = sb.mind(&["recall", "skill:review", "--json"]);
+    let probe = sb.mind(&["probe", "--json"]);
+    assert!(recall.success && detail.success && probe.success);
+
+    for (label, body) in [
+        ("recall --json", &recall.stdout),
+        ("recall detail --json", &detail.stdout),
+        ("probe --json", &probe.stdout),
+    ] {
+        // The JSON must parse and must carry no human out-of-date marker text.
+        let _: serde_json::Value =
+            serde_json::from_str(body).unwrap_or_else(|e| panic!("{label} not valid JSON: {e}"));
+        assert!(
+            !body.contains("outdated") && !body.contains("out of date"),
+            "{label} must carry no human out-of-date marker: {body}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Certification of the orphan-classification rework (recall status view matches
+// catalog<->manifest by stable identity (source, kind, bare_name); orphans_of
+// flags removed-upstream only when NO catalog item shares that identity).
+//
+// The dev shard covered the rename half (the item must be marked outdated on the
+// four surfaces). These add the adversarial edges that were not covered:
+//  - a renamed item must appear EXACTLY ONCE (no double-listing as both an
+//    outdated row and an orphan/removed-upstream row), in human view and JSON;
+//  - a genuine removal must STILL show (removed upstream) in the human recall
+//    view and as installed-but-no-catalog-match (orphaned) in recall --json;
+//  - identity is (source, kind, bare_name): a same-named item in another source
+//    must not cross-match, so removing/renaming in one source never mislabels the
+//    other's item;
+//  - the unmanaged-item accounting is unaffected by the orphan change.
+// ---------------------------------------------------------------------------
+
+/// EDGE 1 (no double-listing under rename): after a pure prefix rename (effective
+/// name changed, content unchanged), the item appears EXACTLY ONCE in the human
+/// `recall` status view -- as the installed `(outdated; run mind upgrade)` row --
+/// and is NOT ALSO emitted as a `(removed upstream)` orphan. The dev test asserts
+/// the markers are present/absent; this one asserts the stronger structural
+/// property by COUNTING the rows that mention the item, so a regression that
+/// reintroduced both an outdated row and an orphan row would be caught.
+// spec: CLI-75
+#[test]
+fn recall_status_renamed_item_appears_exactly_once_no_orphan_dup() {
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    assert!(sb.mind(&["meld", &spec, "--yes"]).success, "meld failed");
+
+    // Rename drift: declare a prefix after install, then sync so the catalog's
+    // effective name (`jk-review`) diverges from the recorded manifest name
+    // (`review`) with the SKILL.md content byte-identical.
+    sb.write_and_commit("mind.toml", "[source]\nprefix = \"jk\"\n");
+    assert!(sb.mind(&["sync"]).success, "sync failed");
+
+    let recall = sb.mind(&["recall"]);
+    assert!(recall.success, "recall failed: {}", recall.stderr);
+
+    // Exactly one line refers to the review skill, and it is the outdated row.
+    let review_lines: Vec<&str> = recall
+        .stdout
+        .lines()
+        .filter(|l| l.contains("review"))
+        .collect();
+    assert_eq!(
+        review_lines.len(),
+        1,
+        "the renamed item must appear on exactly one row (no orphan dup), got: {:#?}",
+        review_lines
+    );
+    assert!(
+        review_lines[0].contains("outdated"),
+        "the single review row must be the outdated row: {}",
+        review_lines[0]
+    );
+    assert!(
+        !recall.stdout.contains("removed upstream"),
+        "a pure rename must not be flagged removed upstream: {}",
+        recall.stdout
+    );
+}
+
+/// EDGE 5 (JSON under rename): in `recall --json` the renamed item resolves to its
+/// manifest entry by stable identity -- `installed:true` with the correct commit
+/// -- and is emitted EXACTLY ONCE, never duplicated as a separate `orphaned:true`
+/// row. The single-item `recall <item> --json`, looked up by the OLD installed
+/// name, also resolves correctly.
+// spec: CLI-73
+// spec: CLI-75
+#[test]
+fn recall_json_renamed_item_installed_once_not_orphaned() {
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    assert!(sb.mind(&["meld", &spec, "--yes"]).success, "meld failed");
+
+    // Record the install commit so we can assert the JSON carries it.
+    let before = parse_json(&sb.mind(&["recall", "--json"]).stdout);
+    let source_commit = before[0]["commit"].as_str().unwrap().to_string();
+
+    sb.write_and_commit("mind.toml", "[source]\nprefix = \"jk\"\n");
+    assert!(sb.mind(&["sync"]).success, "sync failed");
+
+    let j = parse_json(&sb.mind(&["recall", "--json"]).stdout);
+    let items = j[0]["items"].as_array().expect("items array");
+
+    // The skill must appear under its NEW effective key, installed, with the
+    // commit it was installed at, and must not be duplicated as an orphan.
+    let review_rows: Vec<&serde_json::Value> = items
+        .iter()
+        .filter(|r| {
+            let k = r["key"].as_str().unwrap_or("");
+            k == "skill:review" || k == "skill:jk-review"
+        })
+        .collect();
+    assert_eq!(
+        review_rows.len(),
+        1,
+        "the renamed skill must be emitted exactly once in recall --json: {items:#?}"
+    );
+    let row = review_rows[0];
+    assert_eq!(
+        row["key"].as_str(),
+        Some("skill:jk-review"),
+        "the renamed item must carry its new effective key: {row}"
+    );
+    assert_eq!(
+        row["installed"].as_bool(),
+        Some(true),
+        "the renamed item must resolve installed by stable identity: {row}"
+    );
+    assert_eq!(
+        row["commit"].as_str(),
+        Some(source_commit.as_str()),
+        "the renamed item must carry its install commit: {row}"
+    );
+    assert!(
+        row.get("orphaned").is_none(),
+        "the renamed item must not be flagged orphaned: {row}"
+    );
+    // No item in this source's JSON should be orphaned at all.
+    assert!(
+        !items.iter().any(|r| r.get("orphaned").is_some()),
+        "no catalog-matched item may be reported orphaned under a pure rename: {items:#?}"
+    );
+
+    // The single-item lookup by the OLD installed name still resolves.
+    let detail = sb.mind(&["recall", "skill:review", "--json"]);
+    assert!(
+        detail.success,
+        "recall detail --json failed: {}",
+        detail.stderr
+    );
+    let d = parse_json(&detail.stdout);
+    assert_eq!(
+        d["name"].as_str(),
+        Some("review"),
+        "the single-item lookup resolves by the recorded (old) name: {d}"
+    );
+}
+
+/// EDGE 2 (genuine removal still works): an item actually deleted from the source
+/// (file removed, then sync) has NO catalog item sharing its identity, so it is a
+/// real orphan. It must still show `(removed upstream)` in the human `recall` view
+/// AND appear as installed-but-no-catalog-match (orphaned, installed:true) in
+/// `recall --json`. The orphan rework must not have regressed this.
+// spec: CLI-73
+// spec: CLI-75
+#[test]
+fn removed_upstream_still_flagged_in_recall_human_and_json() {
+    let sb = melded();
+    assert!(sb.mind(&["learn", "dev"]).success, "learn dev failed");
+
+    // The agent disappears upstream, then sync drops it from the catalog.
+    sb.remove_and_commit("agents/dev.md");
+    assert!(sb.mind(&["sync"]).success, "sync failed");
+
+    // Human view: the installed-but-removed item is flagged removed upstream.
+    let recall = sb.mind(&["recall"]);
+    assert!(recall.success, "recall failed: {}", recall.stderr);
+    assert!(
+        recall.stdout.contains("agent:dev"),
+        "the removed item must still be listed: {}",
+        recall.stdout
+    );
+    assert!(
+        recall.stdout.contains("removed upstream"),
+        "a genuinely removed item must be flagged removed upstream: {}",
+        recall.stdout
+    );
+
+    // JSON: the removed item appears as installed:true with orphaned:true (no
+    // catalog match). The review skill (still in the catalog) is not orphaned.
+    let j = parse_json(&sb.mind(&["recall", "--json"]).stdout);
+    let items = j[0]["items"].as_array().expect("items array");
+    let dev = items
+        .iter()
+        .find(|r| r["key"].as_str() == Some("agent:dev"))
+        .expect("the removed agent must be present in recall --json");
+    assert_eq!(
+        dev["installed"].as_bool(),
+        Some(true),
+        "the removed-upstream item is still installed: {dev}"
+    );
+    assert_eq!(
+        dev["orphaned"].as_bool(),
+        Some(true),
+        "the removed-upstream item must be flagged orphaned in JSON: {dev}"
+    );
+    assert!(
+        !items
+            .iter()
+            .any(|r| r["key"].as_str() == Some("skill:review") && r.get("orphaned").is_some()),
+        "a still-cataloged item must not be orphaned: {items:#?}"
+    );
+}
+
+/// EDGE 3 (same bare name across two sources does not cross-match): identity is
+/// (source, kind, bare_name). Two melded sources each ship a `review` skill (the
+/// second namespaced so both can install). Removing `review` from source A must
+/// flag ONLY A's item as removed upstream and must NOT mislabel B's `zz-review`,
+/// which is unchanged. This is the isolation the rework depends on: A's orphan
+/// scan must not match B's manifest entry by bare name, and B's catalog must not
+/// rescue A's removed item.
+// spec: CLI-75
+#[test]
+fn same_bare_name_across_sources_does_not_cross_match_on_removal() {
+    let a = Sandbox::new();
+    let b = Sandbox::new();
+    assert!(a.mind(&["meld", &a.source_spec()]).success, "meld a");
+    assert!(
+        a.mind(&["meld", &b.source_spec(), "--as", "zz"]).success,
+        "meld b as zz"
+    );
+
+    // Both review skills install side by side under distinct effective names.
+    assert!(a.mind(&["learn", "review"]).success, "learn review (a)");
+    assert!(
+        a.mind(&["learn", "zz-review"]).success,
+        "learn zz-review (b)"
+    );
+
+    // Remove review from source A only, then sync.
+    a.remove_and_commit("skills/review/SKILL.md");
+    assert!(a.mind(&["sync"]).success, "sync failed");
+
+    let recall = a.mind(&["recall"]);
+    assert!(recall.success, "recall failed: {}", recall.stderr);
+
+    // A's review is removed upstream; B's zz-review is untouched (not flagged).
+    let removed_lines: Vec<&str> = recall
+        .stdout
+        .lines()
+        .filter(|l| l.contains("removed upstream"))
+        .collect();
+    assert_eq!(
+        removed_lines.len(),
+        1,
+        "exactly one item (A's review) must be removed upstream: {:#?}",
+        removed_lines
+    );
+    assert!(
+        removed_lines[0].contains("skill:review") && !removed_lines[0].contains("zz-review"),
+        "the removed-upstream row must be A's review, not B's zz-review: {}",
+        removed_lines[0]
+    );
+
+    // JSON confirms the cross-match isolation: A's review orphaned, B's
+    // zz-review installed and NOT orphaned.
+    let jj = parse_json(&a.mind(&["recall", "--json"]).stdout);
+    let sources = jj.as_array().expect("sources array");
+    let mut saw_review_orphan = false;
+    let mut saw_zz_review_ok = false;
+    for s in sources {
+        for r in s["items"].as_array().unwrap() {
+            match r["key"].as_str() {
+                Some("skill:review") => {
+                    assert_eq!(
+                        r["orphaned"].as_bool(),
+                        Some(true),
+                        "A's review must be orphaned: {r}"
+                    );
+                    saw_review_orphan = true;
+                }
+                Some("skill:zz-review") => {
+                    assert!(
+                        r.get("orphaned").is_none(),
+                        "B's zz-review must not be orphaned: {r}"
+                    );
+                    assert_eq!(
+                        r["installed"].as_bool(),
+                        Some(true),
+                        "B's zz-review must stay installed: {r}"
+                    );
+                    saw_zz_review_ok = true;
+                }
+                _ => {}
+            }
+        }
+    }
+    assert!(
+        saw_review_orphan && saw_zz_review_ok,
+        "both A's orphaned review and B's intact zz-review must be present: {jj:#?}"
+    );
+}
+
+/// EDGE 4 (unmanaged accounting unaffected by the orphan rework): an agent-home
+/// item mind did not install still lists as unmanaged, AND a genuinely
+/// removed-upstream mind-installed item is still flagged removed upstream in the
+/// same `recall` run. The two classifications are independent: the orphan change
+/// must not swallow an unmanaged item, and unmanaged scanning must not suppress a
+/// removed-upstream flag.
+// spec: UNM-2
+// spec: CLI-75
+#[test]
+fn unmanaged_listing_unaffected_by_orphan_detection() {
+    let sb = melded();
+    assert!(sb.mind(&["learn", "dev"]).success, "learn dev failed");
+
+    // Seed an unmanaged skill directly in the lobe (mind did not install it).
+    write(
+        &sb.claude_home.join("skills/handmade/SKILL.md"),
+        "---\nname: handmade\ndescription: hand written\n---\n# handmade\n",
+    );
+
+    // Genuinely remove the installed agent upstream.
+    sb.remove_and_commit("agents/dev.md");
+    assert!(sb.mind(&["sync"]).success, "sync failed");
+
+    let recall = sb.mind(&["recall"]);
+    assert!(recall.success, "recall failed: {}", recall.stderr);
+
+    // The unmanaged group and item are present, unchanged by the orphan rework.
+    assert!(
+        recall.stdout.contains("unmanaged: not installed by mind"),
+        "the unmanaged group must still be shown: {}",
+        recall.stdout
+    );
+    assert!(
+        recall.stdout.contains("skill:handmade"),
+        "the unmanaged item must still be listed: {}",
+        recall.stdout
+    );
+    // The removed-upstream mind item is still flagged, in the same run.
+    assert!(
+        recall.stdout.contains("agent:dev") && recall.stdout.contains("removed upstream"),
+        "the removed-upstream mind item must still be flagged alongside unmanaged: {}",
+        recall.stdout
+    );
+    // The unmanaged item must NOT be misreported as a source orphan.
+    assert!(
+        !recall.stdout.contains("handmade") || !recall_handmade_is_in_a_source(&recall.stdout),
+        "the unmanaged item must not be classified as a source's removed-upstream item: {}",
+        recall.stdout
+    );
+}
+
+/// True if a `handmade` mention appears on a `removed upstream` line, which would
+/// mean the unmanaged item was misclassified as a source orphan.
+fn recall_handmade_is_in_a_source(stdout: &str) -> bool {
+    stdout
+        .lines()
+        .any(|l| l.contains("handmade") && l.contains("removed upstream"))
+}

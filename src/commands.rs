@@ -2685,17 +2685,21 @@ pub fn recall(
         v.sort_by_key(|x| x.key());
         v
     };
-    // Installed items of a source with no catalog match (drifted / removed upstream).
-    let orphans_of = |s: &crate::source::Source,
-                      cat_keys: &std::collections::HashSet<String>|
-     -> Vec<&crate::manifest::InstalledItem> {
+    // Installed items of a source with no catalog match (removed upstream). An
+    // item is an orphan only when NO catalog item shares its stable identity
+    // (source, kind, bare_name). A pure namespace/prefix rename keeps the same
+    // bare identity, so it is NOT an orphan -- it is matched in the status loop
+    // and marked outdated. A genuinely removed-upstream item has no such match.
+    let orphans_of = |s: &crate::source::Source| -> Vec<&crate::manifest::InstalledItem> {
         let mut v: Vec<&crate::manifest::InstalledItem> = manifest
             .items
             .values()
             .filter(|m| {
                 m.source == s.name
-                    && !cat_keys.contains(&m.key())
                     && kind.is_none_or(|k| m.kind == k)
+                    && !catalog.iter().any(|it| {
+                        it.source == m.source && it.kind == m.kind && it.name == m.bare_name
+                    })
             })
             .collect();
         v.sort_by_key(|x| x.key());
@@ -2713,12 +2717,14 @@ pub fn recall(
             .filter(|s| source_shown(s))
             .map(|s| {
                 let items = cat_items(s);
-                let cat_keys: std::collections::HashSet<String> =
-                    items.iter().map(|it| it.key()).collect();
                 let mut rows: Vec<serde_json::Value> = items
                     .iter()
                     .map(|it| {
-                        let inst = manifest.items.get(&it.key());
+                        // Match by stable identity (source, kind, bare_name) so a
+                        // renamed item still resolves to its manifest entry.
+                        let inst = manifest.items.values().find(|m| {
+                            m.source == it.source && m.kind == it.kind && m.bare_name == it.name
+                        });
                         serde_json::json!({
                             "key": it.key(),
                             "installed": inst.is_some(),
@@ -2726,7 +2732,7 @@ pub fn recall(
                         })
                     })
                     .collect();
-                for m in orphans_of(s, &cat_keys) {
+                for m in orphans_of(s) {
                     rows.push(serde_json::json!({
                         "key": m.key(),
                         "installed": true,
@@ -2756,8 +2762,7 @@ pub fn recall(
             continue;
         }
         let items = cat_items(s);
-        let cat_keys: std::collections::HashSet<String> = items.iter().map(|it| it.key()).collect();
-        let orphans = orphans_of(s, &cat_keys);
+        let orphans = orphans_of(s);
         if items.is_empty() && orphans.is_empty() && filtering {
             continue; // a filter excluded everything this source offers
         }
@@ -2790,7 +2795,16 @@ pub fn recall(
         let mut rows: Vec<Vec<String>> = Vec::new();
         for it in items {
             let key = it.key();
-            match manifest.items.get(&key) {
+            // Match by stable identity (source, kind, bare_name), as source_status,
+            // the single-item detail, and probe do, so a pure namespace/prefix
+            // rename (effective name changed, bare identity unchanged) still
+            // resolves to its manifest entry and is marked outdated rather than
+            // misclassified as available + removed-upstream.
+            let installed = manifest
+                .items
+                .values()
+                .find(|m| m.source == it.source && m.kind == it.kind && m.bare_name == it.name);
+            match installed {
                 Some(m) => {
                     // CLI-75 / LIFE-11: mark out of date exactly when `upgrade`
                     // would act -- source-content hash changed, or effective name
