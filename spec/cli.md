@@ -271,17 +271,20 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   inline: an installed item shows that it is installed and its short commit; a
   not-installed item is marked available. Items are grouped under their source, so
   the source a given item comes from is unambiguous.
-- `CLI-75` The status view marks an installed item out of date when its current
-  source-content hash differs from the hash recorded at install (LIFE-11,
-  LIFE-15), independent of the commit. This surfaces drift for a melded local
-  directory (no upstream commit to advance) and for a real checkout whose source
-  files were edited in place (commit unchanged, content not). The marker reads as
-  outdated and points to `mind upgrade`, matching `introspect`'s `drifted` finding
-  (CLI-90) and `upgrade`'s pending condition (LIFE-11); a commit difference still
-  marks it out of date too. It applies to `recall` (the default status view and a
-  single-item lookup, CLI-70/71/74) and the `probe` non-interactive listing
-  (CLI-80, CLI-81). The marker is a human-view concern; the JSON outputs are
-  unchanged.
+- `CLI-75` The status view marks an installed item out of date exactly when
+  `upgrade` would act on it (LIFE-11): its current source-content hash differs from
+  the hash recorded at install (LIFE-15), or its effective name changed (a
+  namespace change). The marker is independent of the source commit: a commit that
+  advanced without changing an item's content or effective name does NOT mark that
+  item, because `upgrade` would report it up to date and the marker must stay
+  actionable -- it appears only when `mind upgrade` will change the item. This still
+  surfaces drift for a melded local directory (no upstream commit to advance) and
+  for a real checkout whose source files were edited in place (commit unchanged,
+  content not). The marker points to `mind upgrade` and matches `introspect`'s
+  `drifted` finding (CLI-90) and `upgrade`'s pending condition (LIFE-11). It applies
+  to `recall` (the default status view and a single-item lookup, CLI-70/71/74) and
+  the `probe` non-interactive listing (CLI-80, CLI-81). The marker is a human-view
+  concern; the JSON outputs are unchanged.
 
 ## probe
 
