@@ -58,6 +58,9 @@ and verified.
 | Install hooks: `[source].install` / `meld --install-hook`, safety prompt, `--dangerously-skip-install-hook-check` | done | [install-hooks.md](install-hooks.md) |
 | Lifecycle hooks: multiple named `[[hooks]]`, optional hooks, uninstall hooks at `unmeld`, `init-source` scaffold | done | [install-hooks.md](install-hooks.md) (HOOK-50..60) |
 | Within-source dependency resolution: a partial `learn` pulls in referenced siblings; dependency-tree display + install order | done | [dependencies.md](dependencies.md) |
+| Explicit item dependencies: optional `requires:` frontmatter key, unioned with the `{{ns:}}`-derived edges | planned | DEP-4, DEP-5, DEP-6 |
+| Dependency-graph operations: `forget` warns about dependents, `recall --tree`, non-interactive `probe` tree + `--json` edges | planned | DEP-60, DEP-61, DEP-62 |
+| TUI dependency navigation: expand an item to its dependency subtree, Enter on a dependency jumps to its item | planned | TUI-50, TUI-51 |
 | `meld` installs by default (`--link-only`/`--yes`); no-arg melds `.`; prefix prompt when declared | done (`--link-only`/`--yes`/prefix) | CLI-23, CLI-24 |
 | `meld` with no arg defaults to the current directory | done | CLI-25 |
 | `init-source`: scaffold `mind.toml`, detect references, `{{ns:}}` templating (maintainer) | done | [init-source.md](init-source.md) |
@@ -78,6 +81,9 @@ and verified.
 | Unmanaged lobe items: `recall`/`probe` listing + `forget` with a not-managed-by-mind warning | done | [unmanaged.md](unmanaged.md) (UNM-1..5) |
 | Unmanaged items in the `probe` TUI group node | done | UNM-6 |
 | `forget --unmanaged [glob]`: bulk-remove unmanaged lobe items (the default glob stays managed-only) | done | UNM-7, UNM-8 |
+| `absorb`: claim an unmanaged lobe item into a version-controlled source, then install it managed | planned | [absorb.md](absorb.md) |
+| `dump`: generate a pinned super-source `mind.toml` from the installed set (`--whole-sources`) | planned | [dump.md](dump.md) |
+| `[discover].sources` `install_items`: install only a named subset of a nested source | planned | DSC-62, DSC-63, DSC-64 |
 | TUI: keep the highlighted row in the middle two-thirds (scroll margin) | done | TUI-16 |
 | TUI: Enter opens a details dialog with the node's valid actions | done | TUI-26 |
 
@@ -104,6 +110,10 @@ and verified.
 - [init-source.md](init-source.md) - `init-source`, the maintainer scaffolder:
   generate a `mind.toml`, report the intra-source reference graph, and add
   `{{ns:}}` templating.
+- [absorb.md](absorb.md) - `absorb`: claim an unmanaged lobe item into a
+  version-controlled source the user owns, then install it through the managed path.
+- [dump.md](dump.md) - `dump`: generate a pinned super-source `mind.toml` from the
+  melded and installed state, to reproduce or share an agent home.
 - [unmanaged.md](unmanaged.md) - unmanaged lobe items: skills/agents/rules present
   in an agent home that `mind` did not install, surfaced in `recall`/`probe` and
   removable via `forget` with a distinct not-managed-by-mind warning.

@@ -115,6 +115,21 @@ manifest, and store.
   an additional entry point and does not remove the direct action keys (TUI-20..22).
   On a group header, kind bucket, or suggested source there is no dialog, so Enter
   keeps its TUI-11 toggle/preview; expansion is also on Space and Left/Right.
+- `TUI-50` An item node is expandable to show its dependencies. Space (and
+  Left/Right) on an item node toggles a dependency subtree: its direct
+  dependencies (DEP-4, the union of `{{ns:}}` and `requires` edges) appear as child
+  nodes, each itself expandable, so the user walks the graph in place. It is
+  cycle-safe: a dependency that would revisit an ancestor on the current path is
+  shown as a marked back-edge and not expanded again (DEP-22). This extends the
+  TUI-11 expansion (which toggled only source and kind buckets) to item nodes. The
+  dependency children are a view of the graph, distinct from each item's own
+  canonical line under its source -> kind bucket.
+- `TUI-51` Pressing Enter on a dependency child node (TUI-50) moves the cursor to
+  that dependency's canonical item line (its node under its source -> kind bucket),
+  expanding any collapsed ancestors needed to reveal it, rather than opening the
+  details dialog. Enter on a normal item line keeps the TUI-26 details dialog. So
+  Enter on a dependency navigates to the real item, where its own actions and
+  dependency subtree are then available.
 
 ## Preview and registry (browsing the not-yet-melded)
 

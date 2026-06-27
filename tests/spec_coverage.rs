@@ -42,6 +42,24 @@ const ALLOWLIST: &[&str] = &[
     //   and cited from src/tui/tree.rs and src/tui/app.rs. Bulk-forget of unmanaged
     //   items via `forget --unmanaged [glob]` (UNM-7/UNM-8) is now implemented and
     //   cited from src/unmanaged.rs and tests/cli.rs; removed from the allowlist.
+    //   absorb (see spec/absorb.md): claim an unmanaged lobe item into a
+    //   version-controlled source and install it managed. dump (see spec/dump.md):
+    //   generate a pinned super-source mind.toml from the installed set. The
+    //   nested-source `install_items` subset directive (DSC-62/63/64, discovery.md)
+    //   that dump emits and the install flow honors. All three are planned, not yet
+    //   built, so their IDs stay allowlisted until citing tests land.
+    "ABS-1", "ABS-2", "ABS-3", "ABS-4", "ABS-5", "ABS-6", "ABS-7", "ABS-8", "ABS-9", "ABS-10",
+    "DUMP-1", "DUMP-2", "DUMP-3", "DUMP-4", "DUMP-5", "DUMP-6", "DUMP-7", "DUMP-8", "DSC-62",
+    "DSC-63", "DSC-64",
+    //   explicit item dependencies (see spec/dependencies.md): an optional
+    //   `requires:` frontmatter key unioned with the `{{ns:}}`-derived edges
+    //   (DEP-4/5/6). Dependency-graph operations across the verbs (DEP-60/61/62):
+    //   `forget` warns about installed dependents, `recall --tree`, and a
+    //   non-interactive `probe` dependency tree with `--json` edges. TUI dependency
+    //   navigation (TUI-50/51): expand an item to its dependency subtree and Enter
+    //   on a dependency jumps to its canonical item line. All planned, not yet
+    //   built, so the IDs stay allowlisted until citing tests land.
+    "DEP-4", "DEP-5", "DEP-6", "DEP-60", "DEP-61", "DEP-62", "TUI-50", "TUI-51",
     //   super-source install gating + discovery (DSC-54..57, see spec/discovery.md)
     //   is implemented and cited from tests/cli.rs: the default gating (DSC-54),
     //   `meld --install-super-sources` (DSC-55), the post-meld probe hint (DSC-56),
