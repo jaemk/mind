@@ -39,8 +39,10 @@ const ALLOWLIST: &[&str] = &[
     //   unmanaged lobe items (see spec/unmanaged.md): the scan + recall + probe
     //   listing + forget (UNM-1..5) are implemented and cited from src/unmanaged.rs
     //   and tests/cli.rs; the interactive TUI group node (UNM-6) is implemented
-    //   and cited from src/tui/tree.rs and src/tui/app.rs. No UNM IDs remain
-    //   allowlisted.
+    //   and cited from src/tui/tree.rs and src/tui/app.rs. Bulk-forget of unmanaged
+    //   items via `forget --unmanaged [glob]` (UNM-7/UNM-8) is planned, not yet
+    //   built, so it stays allowlisted until a citing test lands.
+    "UNM-7", "UNM-8",
     //   super-source install gating + discovery (DSC-54..57, see spec/discovery.md)
     //   is implemented and cited from tests/cli.rs: the default gating (DSC-54),
     //   `meld --install-super-sources` (DSC-55), the post-meld probe hint (DSC-56),

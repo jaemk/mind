@@ -59,3 +59,18 @@ manifest and its per-item `links` are defined in [storage.md](storage.md).
   proceeds after that statement; a non-TTY run without `--yes` refuses with
   `ConfirmationRequired` and removes nothing. The clobber/`--force` flags
   (LIFE-41) do not apply, since nothing is being overwritten.
+- `UNM-7` (planned) `forget --unmanaged [<ref>]` scopes the removal to unmanaged
+  items only (UNM-1): the deliberate opt-in inverse of the default (UNM-4), where
+  a glob matches managed items only. With a glob `<ref>` it removes every matching
+  unmanaged item; with an exact `kind:name` it removes that one; with no `<ref>` it
+  removes every unmanaged item across the configured lobes (STO-14). A kind prefix
+  composes with the glob (`--unmanaged 'skill:*'`). Managed items are never matched
+  in this mode, so it cannot delete a `mind`-installed link or store copy. A
+  `<ref>` (or the no-ref form) that matches no unmanaged item is `NotInstalled`.
+- `UNM-8` (planned) A removal under `--unmanaged` keeps the UNM-5 safety contract
+  for every matched item: it lists the matched items and confirms once before
+  removing any, stating they are not managed by `mind` and that removal deletes the
+  user's own files or directories (not symlinks). `--yes` (`-y`) skips the prompt; a
+  non-TTY run without `--yes` refuses with `ConfirmationRequired` and removes
+  nothing. The manifest is left unchanged (UNM-4) and the clobber/`--force` flags
+  do not apply.
