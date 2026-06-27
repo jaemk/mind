@@ -11,6 +11,9 @@ Full documentation: https://jaemk.github.io/mind/
 
 ## Install
 
+`mind` shells out to `git` to clone and sync sources, so `git` must be on your
+`PATH`. The methods below install the `mind` binary itself, not git.
+
 Linux and Apple Silicon macOS:
 
 ```

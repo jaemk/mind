@@ -1,5 +1,12 @@
 # Install
 
+## Requirements
+
+`mind` runs `git` to clone and sync sources, so `git` must be installed and on
+your `PATH`. The methods below fetch the `mind` binary itself; they do not install
+git. Without git, `meld` and `sync` fail with a clear "git executable not found"
+error.
+
 ## Linux (install script)
 
 ```
