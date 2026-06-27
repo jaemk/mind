@@ -456,6 +456,66 @@ fn run_checks(
         }
     }
 
+    // --- Check 5b: `requires` frontmatter entry resolution (hard error) ---
+    // An unresolved `requires` entry is a BadReference at install time (DEP-6).
+    // spec: DEP-6 CLI-131 CLI-132
+    let source_items: Vec<&CatalogItem> =
+        items.iter().filter(|it| it.source == source_name).collect();
+    for item in &items {
+        for entry in &item.requires {
+            let r = match crate::resolve::parse_item_ref(entry) {
+                Ok(r) => r,
+                Err(_) => {
+                    hard.push(Finding::hard(
+                        "bad-reference",
+                        format!(
+                            "{}: requires: {} is not a valid item ref",
+                            item.key(),
+                            entry
+                        ),
+                    ));
+                    continue;
+                }
+            };
+            // Source-qualified refs cross sources, forbidden (DEP-5).
+            if r.source.is_some() {
+                hard.push(Finding::hard(
+                    "bad-reference",
+                    format!(
+                        "{}: requires: {} crosses sources; `requires` is intra-source only",
+                        item.key(),
+                        entry
+                    ),
+                ));
+                continue;
+            }
+            let matches: Vec<&&CatalogItem> = source_items
+                .iter()
+                .filter(|s| s.name == r.name && r.kind.is_none_or(|k| s.kind == k))
+                .collect();
+            if matches.is_empty() {
+                hard.push(Finding::hard(
+                    "bad-reference",
+                    format!(
+                        "{}: requires: {} does not resolve to any sibling in this source",
+                        item.key(),
+                        entry
+                    ),
+                ));
+            } else if matches.len() > 1 && r.kind.is_none() {
+                hard.push(Finding::hard(
+                    "bad-reference",
+                    format!(
+                        "{}: requires: {} is ambiguous (matches {} siblings); use kind:name to narrow",
+                        item.key(),
+                        entry,
+                        matches.len()
+                    ),
+                ));
+            }
+        }
+    }
+
     // --- Check 7: unguarded prose references (advisory, only when prefix in effect) ---
     // CLI-132: advisory; CLI-133: only when a prefix applies.
     if prefix.is_some() {
@@ -2561,5 +2621,138 @@ mod tests {
                 entry.path()
             );
         }
+    }
+
+    // ---- DEP-6: `requires` validation in review ----------------------------
+
+    #[test]
+    fn unresolved_requires_entry_is_hard_finding() {
+        // spec: DEP-6 CLI-131 CLI-132
+        // A `requires:` entry naming a non-existent sibling is a hard
+        // bad-reference finding from `review`.
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let source_dir = base.join("src");
+        write_file(
+            &source_dir.join("skills/review/SKILL.md"),
+            "---\ndescription: review\nrequires: agent:nonexistent\n---\n# review\n",
+        );
+        let paths = paths_for(base);
+
+        let result = run_checks(&paths, &source_dir, None, false, true).unwrap();
+        let bad_refs: Vec<&Finding> = result
+            .hard
+            .iter()
+            .filter(|f| f.kind == "bad-reference")
+            .collect();
+        assert!(
+            !bad_refs.is_empty(),
+            "unresolved requires entry must be a hard bad-reference finding: {:?}",
+            result.hard
+        );
+        assert!(
+            bad_refs.iter().any(|f| f.message.contains("nonexistent")),
+            "bad-reference message must name the offending entry: {:?}",
+            bad_refs
+        );
+    }
+
+    #[test]
+    fn source_qualified_requires_entry_is_hard_finding() {
+        // spec: DEP-5 DEP-6 CLI-131
+        // A source-qualified `owner/repo#name` entry in `requires` crosses
+        // sources and is always a hard bad-reference finding.
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let source_dir = base.join("src");
+        write_file(
+            &source_dir.join("skills/review/SKILL.md"),
+            "---\ndescription: review\nrequires: owner/repo#agent:test\n---\n# review\n",
+        );
+        // Add the agent so the only issue is the source-qualification.
+        write_file(
+            &source_dir.join("agents/test.md"),
+            "---\ndescription: test\n---\n# test\n",
+        );
+        let paths = paths_for(base);
+
+        let result = run_checks(&paths, &source_dir, None, false, true).unwrap();
+        let bad_refs: Vec<&Finding> = result
+            .hard
+            .iter()
+            .filter(|f| f.kind == "bad-reference")
+            .collect();
+        assert!(
+            !bad_refs.is_empty(),
+            "source-qualified requires entry must be a hard bad-reference finding: {:?}",
+            result.hard
+        );
+    }
+
+    #[test]
+    fn valid_requires_entry_produces_no_hard_finding() {
+        // spec: DEP-6
+        // A `requires:` entry that resolves to an existing sibling produces no
+        // bad-reference finding.
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let source_dir = base.join("src");
+        write_file(
+            &source_dir.join("skills/review/SKILL.md"),
+            "---\ndescription: review\nrequires: agent:test\n---\n# review\n",
+        );
+        write_file(
+            &source_dir.join("agents/test.md"),
+            "---\ndescription: test\n---\n# test\n",
+        );
+        let paths = paths_for(base);
+
+        let result = run_checks(&paths, &source_dir, None, false, true).unwrap();
+        let bad_refs: Vec<&Finding> = result
+            .hard
+            .iter()
+            .filter(|f| f.kind == "bad-reference")
+            .collect();
+        assert!(
+            bad_refs.is_empty(),
+            "valid requires entry must not produce bad-reference: {:?}",
+            bad_refs
+        );
+    }
+
+    #[test]
+    fn ambiguous_bare_requires_entry_is_hard_finding() {
+        // spec: DEP-6
+        // A bare `name` in `requires` that matches siblings of two different
+        // kinds is ambiguous and must surface as a hard bad-reference.
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let source_dir = base.join("src");
+        write_file(
+            &source_dir.join("skills/root/SKILL.md"),
+            "---\ndescription: root\nrequires: shared\n---\n# root\n",
+        );
+        // Two siblings with the same bare name "shared" under different kinds.
+        write_file(
+            &source_dir.join("agents/shared.md"),
+            "---\ndescription: agent shared\n---\n# shared\n",
+        );
+        write_file(
+            &source_dir.join("rules/shared.md"),
+            "---\ndescription: rule shared\n---\n# shared\n",
+        );
+        let paths = paths_for(base);
+
+        let result = run_checks(&paths, &source_dir, None, false, true).unwrap();
+        let bad_refs: Vec<&Finding> = result
+            .hard
+            .iter()
+            .filter(|f| f.kind == "bad-reference")
+            .collect();
+        assert!(
+            !bad_refs.is_empty(),
+            "ambiguous bare-name requires entry must be a hard bad-reference: {:?}",
+            result.hard
+        );
     }
 }

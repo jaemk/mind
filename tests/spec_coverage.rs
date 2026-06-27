@@ -53,13 +53,14 @@ const ALLOWLIST: &[&str] = &[
     "DSC-63", "DSC-64",
     //   explicit item dependencies (see spec/dependencies.md): an optional
     //   `requires:` frontmatter key unioned with the `{{ns:}}`-derived edges
-    //   (DEP-4/5/6). Dependency-graph operations across the verbs (DEP-60/61/62):
-    //   `forget` warns about installed dependents, `recall --tree`, and a
-    //   non-interactive `probe` dependency tree with `--json` edges. TUI dependency
-    //   navigation (TUI-50/51): expand an item to its dependency subtree and Enter
-    //   on a dependency jumps to its canonical item line. All planned, not yet
-    //   built, so the IDs stay allowlisted until citing tests land.
-    "DEP-4", "DEP-5", "DEP-6", "DEP-60", "DEP-61", "DEP-62", "TUI-50", "TUI-51",
+    //   (DEP-4/5/6) are now implemented and cited from src/catalog.rs, src/deps.rs,
+    //   src/install.rs, src/review.rs, and tests/cli.rs. Dependency-graph operations
+    //   across the verbs (DEP-60/61/62): `forget` warns about installed dependents,
+    //   `recall --tree`, and a non-interactive `probe` dependency tree with `--json`
+    //   edges. TUI dependency navigation (TUI-50/51): expand an item to its
+    //   dependency subtree and Enter on a dependency jumps to its canonical item
+    //   line. All planned, not yet built, so the IDs stay allowlisted.
+    "DEP-60", "DEP-61", "DEP-62", "TUI-50", "TUI-51",
     //   super-source install gating + discovery (DSC-54..57, see spec/discovery.md)
     //   is implemented and cited from tests/cli.rs: the default gating (DSC-54),
     //   `meld --install-super-sources` (DSC-55), the post-meld probe hint (DSC-56),

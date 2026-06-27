@@ -88,11 +88,41 @@ pub fn resolve(
         let item = &items[node];
         let mut out: Vec<usize> = Vec::new();
         if *expand_source.get(item.source.as_str()).unwrap_or(&true) {
+            // DEP-1: edges from {{ns:name}} tokens in the item's text.
             for name in namespace::referenced_names(&read(item)) {
                 if let Some(matches) = by_name.get(&(item.source.as_str(), name.as_str())) {
                     for &m in matches {
                         // DEP-2: intra-source guaranteed by the (source, name) key.
                         // Skip a self-reference so it never forms a trivial loop.
+                        if m != node && !out.contains(&m) {
+                            out.push(m);
+                        }
+                    }
+                }
+            }
+            // DEP-4: union with explicit `requires` frontmatter entries. Source-
+            // qualified entries (`owner/repo#name`) are skipped here; they are
+            // rejected at install/review (DEP-5/6) but do not contribute edges in
+            // the pure resolver.
+            for entry in &item.requires {
+                // Parse; skip anything we cannot make sense of (unparseable or
+                // source-qualified). Validation is install.rs/review.rs's job.
+                let Ok(r) = crate::resolve::parse_item_ref(entry) else {
+                    continue;
+                };
+                if r.source.is_some() {
+                    // Source-qualified: reject per DEP-5 (no cross-source edges).
+                    continue;
+                }
+                // Resolve against siblings in the same source, narrowing by kind
+                // when a kind prefix was supplied (DEP-5).
+                if let Some(matches) = by_name.get(&(item.source.as_str(), r.name.as_str())) {
+                    for &m in matches {
+                        let candidate = &items[m];
+                        // Narrow by kind if the ref specifies one (DEP-5).
+                        if r.kind.is_some_and(|k| candidate.kind != k) {
+                            continue;
+                        }
                         if m != node && !out.contains(&m) {
                             out.push(m);
                         }
@@ -254,6 +284,7 @@ mod tests {
             build: None,
             install: None,
             uninstall: None,
+            requires: Vec::new(),
             hooks: Vec::new(),
         }
     }
@@ -686,6 +717,118 @@ mod tests {
         assert_eq!(r.render_tree(&items), "- skill:solo [selected]\n");
     }
 
+    // ---- DEP-4: `requires` entries union with {{ns:}} edges ----------------
+
+    #[test]
+    fn requires_entry_adds_a_dependency_edge() {
+        // spec: DEP-4
+        // A `requires:` entry on a skill adds its dependency to the resolution
+        // graph exactly like a {{ns:}} token does, placing the dep before the
+        // dependent in the install order.
+        let mut skill = item(ItemKind::Skill, "review", "s");
+        skill.requires = vec!["agent:test".to_string()];
+        let items = vec![skill, item(ItemKind::Agent, "test", "s")];
+
+        // No {{ns:}} tokens in the text; the edge comes purely from `requires`.
+        let r = resolve(&items, &[0], &no_installed(), reader(HashMap::new()));
+
+        assert_eq!(
+            r.install_order(),
+            &[1, 0],
+            "dep (1) must precede the skill (0)"
+        );
+        assert!(r.adds_dependencies());
+    }
+
+    #[test]
+    fn requires_and_token_same_dep_deduped_to_one_edge() {
+        // spec: DEP-4
+        // An item that both declares `requires: agent:test` AND has a {{ns:test}}
+        // token must yield only one dependency edge (the union is deduped).
+        let mut skill = item(ItemKind::Skill, "review", "s");
+        skill.requires = vec!["agent:test".to_string()];
+        let items = vec![skill, item(ItemKind::Agent, "test", "s")];
+        let mut content = HashMap::new();
+        content.insert("skill:review".into(), "{{ns:test}}".into());
+
+        let r = resolve(&items, &[0], &no_installed(), reader(content));
+
+        let order = r.install_order().to_vec();
+        // agent:test (1) appears exactly once.
+        assert_eq!(
+            order.iter().filter(|&&n| n == 1).count(),
+            1,
+            "dep must appear once"
+        );
+        assert_eq!(order, vec![1, 0]);
+    }
+
+    #[test]
+    fn requires_bare_name_resolves_across_all_kinds() {
+        // spec: DEP-4 DEP-5
+        // A bare `name` in `requires` (no kind prefix) resolves to every sibling
+        // sharing that name, across all kinds, the same way {{ns:name}} does.
+        let mut skill = item(ItemKind::Skill, "root", "s");
+        skill.requires = vec!["shared".to_string()];
+        let items = vec![
+            skill,
+            item(ItemKind::Agent, "shared", "s"),
+            item(ItemKind::Rule, "shared", "s"),
+        ];
+
+        let r = resolve(&items, &[0], &no_installed(), reader(HashMap::new()));
+
+        let order = r.install_order().to_vec();
+        // Both `shared` kinds must precede the root.
+        assert!(
+            order.contains(&1) && order.contains(&2),
+            "both shared siblings pulled: {order:?}"
+        );
+        assert_eq!(*order.last().unwrap(), 0, "root is last: {order:?}");
+    }
+
+    #[test]
+    fn requires_kind_prefix_narrows_to_that_kind() {
+        // spec: DEP-5
+        // A `kind:name` ref in `requires` narrows to that kind only; sibling of
+        // a different kind with the same name is not pulled.
+        let mut skill = item(ItemKind::Skill, "root", "s");
+        skill.requires = vec!["agent:shared".to_string()];
+        let items = vec![
+            skill,
+            item(ItemKind::Agent, "shared", "s"), // should be pulled
+            item(ItemKind::Rule, "shared", "s"),  // same bare name, different kind: not pulled
+        ];
+
+        let r = resolve(&items, &[0], &no_installed(), reader(HashMap::new()));
+
+        let order = r.install_order().to_vec();
+        assert!(order.contains(&1), "agent:shared must be pulled: {order:?}");
+        assert!(
+            !order.contains(&2),
+            "rule:shared must NOT be pulled: {order:?}"
+        );
+    }
+
+    #[test]
+    fn requires_source_qualified_entry_contributes_no_edge() {
+        // spec: DEP-5
+        // A source-qualified `owner/repo#name` entry in `requires` must be
+        // skipped by the resolver (validation catches it at install/review).
+        let mut skill = item(ItemKind::Skill, "root", "s");
+        skill.requires = vec!["owner/repo#agent:test".to_string()];
+        let items = vec![skill, item(ItemKind::Agent, "test", "s")];
+
+        let r = resolve(&items, &[0], &no_installed(), reader(HashMap::new()));
+
+        assert_eq!(
+            r.install_order(),
+            &[0],
+            "source-qualified entry must not pull the dep"
+        );
+        assert!(!r.adds_dependencies());
+    }
+
     #[test]
     fn same_bare_name_different_kind_is_a_distinct_dependency() {
         // spec: DEP-3
@@ -712,5 +855,110 @@ mod tests {
         let tree = r.render_tree(&items);
         assert!(tree.contains("  - agent:test [dep]\n"), "{tree}");
         assert!(tree.contains("  - rule:test [dep]\n"), "{tree}");
+    }
+
+    #[test]
+    fn requires_chain_resolves_transitively_dependency_first() {
+        // spec: DEP-4 DEP-11
+        // A transitive `requires` chain a -> b -> c (each edge declared purely via
+        // `requires`, no {{ns:}} tokens) must install c before b before a, exactly
+        // like a token chain. Pins that the closure walk follows `requires` edges
+        // transitively, not just the first hop.
+        let mut a = item(ItemKind::Skill, "a", "s");
+        a.requires = vec!["skill:b".to_string()];
+        let mut b = item(ItemKind::Skill, "b", "s");
+        b.requires = vec!["skill:c".to_string()];
+        let c = item(ItemKind::Skill, "c", "s");
+        let items = vec![a, b, c];
+
+        let r = resolve(&items, &[0], &no_installed(), reader(HashMap::new()));
+        assert_eq!(
+            r.install_order(),
+            &[2, 1, 0],
+            "transitive requires chain must order c before b before a"
+        );
+        assert!(r.adds_dependencies());
+    }
+
+    #[test]
+    fn empty_requires_yields_no_edge() {
+        // spec: DEP-4
+        // An item with an empty `requires` vec (the catalog representation of an
+        // absent or whitespace-only `requires:` scalar) contributes no edge and no
+        // error: the selection installs alone.
+        let items = vec![
+            item(ItemKind::Skill, "review", "s"),
+            item(ItemKind::Agent, "test", "s"),
+        ];
+        // requires stays empty (the default); no {{ns:}} tokens either.
+        let r = resolve(&items, &[0], &no_installed(), reader(HashMap::new()));
+        assert_eq!(r.install_order(), &[0]);
+        assert!(!r.adds_dependencies());
+    }
+
+    #[test]
+    fn requires_edge_is_a_noop_when_whole_source_selected() {
+        // spec: DEP-4 DEP-10
+        // When the selection already covers every item of the source, a `requires`
+        // edge adds nothing (the same no-op DEP-10 grants a {{ns:}} edge): every
+        // referent is installed regardless, so adds_dependencies() is false.
+        let mut a = item(ItemKind::Skill, "a", "s");
+        a.requires = vec!["agent:b".to_string()];
+        let items = vec![a, item(ItemKind::Agent, "b", "s")];
+
+        // Both items selected -> full coverage of source "s".
+        let r = resolve(&items, &[0, 1], &no_installed(), reader(HashMap::new()));
+        assert!(
+            !r.adds_dependencies(),
+            "a requires edge must be a no-op under full-source selection"
+        );
+        let mut order = r.install_order().to_vec();
+        order.sort_unstable();
+        assert_eq!(order, vec![0, 1]);
+    }
+
+    #[test]
+    fn requires_self_reference_forms_no_edge() {
+        // spec: DEP-4 DEP-22
+        // An item whose `requires` names its own identity must form no edge (the
+        // resolver skips m == node), so it never becomes a trivial self-cycle and
+        // installs exactly once with no pulled dependency.
+        let mut solo = item(ItemKind::Skill, "solo", "s");
+        solo.requires = vec!["skill:solo".to_string()];
+        let items = vec![solo];
+
+        let r = resolve(&items, &[0], &no_installed(), reader(HashMap::new()));
+        assert_eq!(r.install_order(), &[0]);
+        assert!(!r.adds_dependencies());
+        assert_eq!(r.render_tree(&items), "- skill:solo [selected]\n");
+    }
+
+    #[test]
+    fn requires_already_installed_dep_excluded_but_still_pulled() {
+        // spec: DEP-4 DEP-23
+        // A `requires`-only edge to a dep that is already installed: the dep is
+        // shown but not reinstalled (excluded from the order), yet still pulled
+        // into the closure so adds_dependencies() is true and `learn` prompts.
+        let mut review = item(ItemKind::Skill, "review", "s");
+        review.requires = vec!["agent:test".to_string()];
+        let items = vec![review, item(ItemKind::Agent, "test", "s")];
+        let mut installed = HashSet::new();
+        installed.insert("agent:test".to_string());
+
+        let r = resolve(&items, &[0], &installed, reader(HashMap::new()));
+        assert_eq!(
+            r.install_order(),
+            &[0],
+            "an already-installed requires dep must not be reinstalled"
+        );
+        assert!(
+            r.adds_dependencies(),
+            "the pulled-in (installed) requires dep still counts as adding deps"
+        );
+        let tree = r.render_tree(&items);
+        assert!(
+            tree.contains("agent:test [installed]"),
+            "installed requires dep must be shown marked: {tree}"
+        );
     }
 }

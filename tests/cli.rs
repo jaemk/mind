@@ -11181,3 +11181,225 @@ fn sync_rewalk_applies_curator_follow_branch_to_new_nested() {
         probe.stdout
     );
 }
+
+// ---- DEP-4, DEP-5, DEP-6: `requires:` frontmatter dependency key ----------
+
+#[test]
+fn learn_requires_frontmatter_pulls_dependency_closure() {
+    // spec: DEP-4 DEP-5
+    // A `requires: agent:reviewer` entry in SKILL.md (no {{ns:}} token in the
+    // text) still pulls the referenced agent into the dependency closure when
+    // `learn` selects the skill alone. The agent installs before the skill
+    // (dependency-first order, DEP-21).
+    let sb = Sandbox::bare("req-closure");
+    sb.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\nname: review\ndescription: Review\nrequires: agent:reviewer\n---\n# review skill\n",
+    );
+    sb.write_and_commit(
+        "agents/reviewer.md",
+        "---\nname: reviewer\ndescription: Reviewer agent\n---\n# reviewer\n",
+    );
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+
+    let r = sb.mind(&["learn", "skill:review", "--yes"]);
+    assert!(r.success, "learn must succeed: {}", r.stderr);
+
+    let recall = sb.mind(&["recall"]).stdout;
+    assert!(
+        recall.contains("skill:review"),
+        "selected skill must be installed: {recall}"
+    );
+    assert!(
+        recall.contains("agent:reviewer"),
+        "requires entry must pull the dependency into the closure: {recall}"
+    );
+
+    // Dependency-first: the reviewer learned line must precede the review line.
+    let dep_line = r
+        .stdout
+        .lines()
+        .position(|l| l.starts_with("learned agent:reviewer "));
+    let dep_line = dep_line.unwrap_or_else(|| panic!("no reviewer learned line: {}", r.stdout));
+    let skill_line = r
+        .stdout
+        .lines()
+        .position(|l| l.starts_with("learned skill:review "));
+    let skill_line = skill_line.unwrap_or_else(|| panic!("no review learned line: {}", r.stdout));
+    assert!(
+        dep_line < skill_line,
+        "requires dep must install before its dependent: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn learn_requires_union_with_token_dep_deduped() {
+    // spec: DEP-4
+    // When the item both declares `requires: agent:reviewer` AND has a
+    // {{ns:reviewer}} token in the text, only one dep edge exists: the agent
+    // installs exactly once. Regression guard for the dedup invariant.
+    let sb = Sandbox::bare("req-dedup");
+    sb.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\nname: review\ndescription: Review\nrequires: agent:reviewer\n---\n# review\nhandoff to {{ns:reviewer}}\n",
+    );
+    sb.write_and_commit(
+        "agents/reviewer.md",
+        "---\nname: reviewer\ndescription: Reviewer\n---\n# reviewer\n",
+    );
+    // Add a third item so the source is a proper subset on `learn skill:review`.
+    sb.write_and_commit("rules/style.md", "---\ndescription: style\n---\n# style\n");
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+
+    let r = sb.mind(&["learn", "skill:review", "--yes"]);
+    assert!(r.success, "{}", r.stderr);
+
+    // agent:reviewer appears in the learned output exactly once.
+    let reviewer_count = r
+        .stdout
+        .lines()
+        .filter(|l| l.contains("agent:reviewer"))
+        .count();
+    assert_eq!(
+        reviewer_count, 1,
+        "dedup: agent:reviewer must appear once in the install output: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn learn_requires_typo_is_bad_reference_error() {
+    // spec: DEP-6
+    // A `requires:` entry naming a non-existent sibling is a BadReference at
+    // install time: `learn` must fail with a non-zero exit and a message
+    // referencing the bad entry.
+    let sb = Sandbox::bare("req-typo");
+    sb.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\nname: review\ndescription: Review\nrequires: agent:nonexistent\n---\n# review skill\n",
+    );
+    // Add another item so learn sees a proper subset (triggers full validation).
+    sb.write_and_commit(
+        "agents/helper.md",
+        "---\ndescription: helper\n---\n# helper\n",
+    );
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+
+    let r = sb.mind(&["learn", "skill:review", "--yes"]);
+    assert!(
+        !r.success,
+        "learn with unresolved requires must fail: {} {}",
+        r.stdout, r.stderr
+    );
+    let combined = format!("{} {}", r.stdout, r.stderr);
+    assert!(
+        combined.contains("nonexistent")
+            || combined.contains("bad")
+            || combined.contains("reference"),
+        "error output must mention the bad entry: {combined}"
+    );
+}
+
+#[test]
+fn learn_requires_resolves_against_own_source_not_a_sibling_source() {
+    // spec: DEP-5 DEP-6
+    // A `requires` entry is intra-source (DEP-5): it must resolve against the
+    // referencing item's OWN source, never another melded source's items. Two
+    // sources are melded; source A's skill requires `agent:helper` and that agent
+    // exists ONLY in source B (not in A). If validation/resolution leaked across
+    // sources, the entry would wrongly resolve and `learn` would succeed. It must
+    // instead fail as a BadReference, because A has no `helper` of its own.
+    let a = Sandbox::bare("alpha");
+    a.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\nname: review\ndescription: Review\nrequires: agent:helper\n---\n# review\n",
+    );
+    // A has no `helper`; it has only an unrelated sibling so the source is a
+    // proper subset on `learn skill:review` (full closure validation runs).
+    a.write_and_commit("rules/style.md", "---\ndescription: style\n---\n# style\n");
+    // Source B is where a `helper` agent actually lives.
+    let b = Sandbox::bare("beta");
+    b.write_and_commit(
+        "agents/helper.md",
+        "---\nname: helper\ndescription: Helper\n---\n# helper\n",
+    );
+    assert!(a.mind(&["meld", &a.source_spec()]).success, "meld A failed");
+    assert!(a.mind(&["meld", &b.source_spec()]).success, "meld B failed");
+
+    let r = a.mind(&["learn", "skill:review", "--yes"]);
+    assert!(
+        !r.success,
+        "a requires entry must not resolve against another source's agent: {} {}",
+        r.stdout, r.stderr
+    );
+    let combined = format!("{} {}", r.stdout, r.stderr);
+    assert!(
+        combined.contains("helper") || combined.contains("bad") || combined.contains("reference"),
+        "error must name the unresolved cross-source entry: {combined}"
+    );
+}
+
+#[test]
+fn review_requires_resolves_per_source_in_a_multi_source_registry() {
+    // spec: DEP-5 DEP-6 CLI-131
+    // Reviewing a melded source resolves each item's `requires` against that
+    // source's own siblings only. Source B is melded and carries `agent:helper`;
+    // source A's skill requires `agent:helper` but A has no such agent. Reviewing
+    // A (by registry selector) must report the unresolved entry as a hard
+    // finding -- B's `helper` must NOT satisfy A's requirement.
+    let a = Sandbox::bare("alpha");
+    a.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\nname: review\ndescription: Review\nrequires: agent:helper\n---\n# review\n",
+    );
+    let b = Sandbox::bare("beta");
+    b.write_and_commit(
+        "agents/helper.md",
+        "---\nname: helper\ndescription: Helper\n---\n# helper\n",
+    );
+    assert!(a.mind(&["meld", &a.source_spec()]).success, "meld A failed");
+    assert!(a.mind(&["meld", &b.source_spec()]).success, "meld B failed");
+
+    // Review the alpha source by its registry selector.
+    let r = a.mind(&["review", "alpha"]);
+    assert!(
+        !r.success,
+        "review of alpha must fail: its requires must not resolve against beta: {} {}",
+        r.stdout, r.stderr
+    );
+    let combined = format!("{} {}", r.stdout, r.stderr);
+    assert!(
+        combined.contains("bad-reference") && combined.contains("helper"),
+        "must report alpha's unresolved cross-source requires: {combined}"
+    );
+}
+
+#[test]
+fn review_requires_typo_is_hard_finding() {
+    // spec: DEP-6 CLI-131
+    // `review` surfaces an unresolved `requires:` entry as a hard bad-reference
+    // finding, identical in severity to an unresolved {{ns:}} token.
+    let sb = Sandbox::bare("review-req-typo");
+    sb.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\nname: review\ndescription: Review\nrequires: agent:nonexistent\n---\n# review skill\n",
+    );
+    // No `agent:nonexistent` item exists in the source.
+
+    let r = sb.mind(&["review", &sb.source_spec()]);
+    assert!(
+        !r.success,
+        "review with unresolved requires must exit non-zero: {} {}",
+        r.stdout, r.stderr
+    );
+    let combined = format!("{} {}", r.stdout, r.stderr);
+    assert!(
+        combined.contains("bad-reference"),
+        "must report a bad-reference finding: {combined}"
+    );
+    assert!(
+        combined.contains("nonexistent"),
+        "bad-reference message must name the offending entry: {combined}"
+    );
+}

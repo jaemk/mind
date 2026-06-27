@@ -215,6 +215,8 @@ fn ensure_link(store: &Path, link: &Path) -> Result<()> {
 /// `{{ns:name}}` name tokens, then the `{{self}}` / `{{tools:name}}` /
 /// `{{path:ref}}` path tokens. Both resolve against `siblings` (every item in the
 /// same source) and a bad reference in either pass aborts the staged install.
+/// Also validates the `requires` frontmatter entries (DEP-6): each must resolve
+/// to exactly one sibling (not source-qualified, not ambiguous, not missing).
 fn expand_references(
     root: &Path,
     item: &CatalogItem,
@@ -237,6 +239,32 @@ fn expand_references(
         siblings: &path_siblings,
     };
 
+    // DEP-6: validate every `requires` entry before touching any file. A bad
+    // entry here aborts the staged install (the live copy is still untouched).
+    let bad_ref = |referent: String| MindError::BadReference {
+        item: item.key(),
+        referent,
+        in_source: item.source.clone(),
+    };
+    for entry in &item.requires {
+        // spec: DEP-6
+        let r = crate::resolve::parse_item_ref(entry)
+            .map_err(|_| bad_ref(format!("requires: {entry}")))?;
+        // Source-qualified entries cross sources, which is forbidden (DEP-5).
+        if r.source.is_some() {
+            return Err(bad_ref(format!("requires: {entry}")));
+        }
+        // Resolve against siblings by bare name, narrowing by kind (DEP-5).
+        let matches: Vec<&CatalogItem> = siblings
+            .iter()
+            .filter(|s| s.name == r.name && r.kind.is_none_or(|k| s.kind == k))
+            .collect();
+        if matches.is_empty() || matches.len() > 1 && r.kind.is_none() {
+            // Zero matches (typo/unknown) or ambiguous bare name (DEP-6).
+            return Err(bad_ref(format!("requires: {entry}")));
+        }
+    }
+
     let mut files = Vec::new();
     if root.is_dir() {
         collect_files(root, &mut files)?;
@@ -251,14 +279,9 @@ fn expand_references(
         if !content.contains("{{") {
             continue;
         }
-        let bad_ref = |referent: String| MindError::BadReference {
-            item: item.key(),
-            referent,
-            in_source: item.source.clone(),
-        };
         let expanded = namespace::expand(&content, &item.prefix, &names)
             .map_err(|name| bad_ref(format!("{{{{ns:{name}}}}}")))?;
-        let expanded = namespace::expand_paths(&expanded, &ctx).map_err(bad_ref)?;
+        let expanded = namespace::expand_paths(&expanded, &ctx).map_err(&bad_ref)?;
         std::fs::write(&file, expanded).map_err(|e| MindError::io(&file, e))?;
     }
     Ok(())
@@ -501,6 +524,7 @@ mod tests {
             build: Some(build.to_string()),
             install: None,
             uninstall: None,
+            requires: Vec::new(),
             hooks: Vec::new(),
         }
     }
@@ -525,6 +549,283 @@ mod tests {
         assert!(
             !marker.exists(),
             "a non-TTY context must skip the build hook (HOOK-72)"
+        );
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+
+    // ---- DEP-6: `requires` validation in expand_references -----------------
+
+    /// Build a minimal skill CatalogItem pointing at the given staging dir.
+    fn skill_item_at(name: &str, path: std::path::PathBuf, requires: Vec<String>) -> CatalogItem {
+        CatalogItem {
+            kind: ItemKind::Skill,
+            name: name.to_string(),
+            source: "local/test/repo".to_string(),
+            prefix: None,
+            path,
+            description: None,
+            link_rel: None,
+            bin: None,
+            build: None,
+            install: None,
+            uninstall: None,
+            requires,
+            hooks: Vec::new(),
+        }
+    }
+
+    fn agent_item_at(name: &str, path: std::path::PathBuf) -> CatalogItem {
+        CatalogItem {
+            kind: ItemKind::Agent,
+            name: name.to_string(),
+            source: "local/test/repo".to_string(),
+            prefix: None,
+            path,
+            description: None,
+            link_rel: None,
+            bin: None,
+            build: None,
+            install: None,
+            uninstall: None,
+            requires: Vec::new(),
+            hooks: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn requires_valid_entry_passes_validation() {
+        // spec: DEP-6
+        // A `requires: agent:test` entry that resolves to an existing sibling
+        // must pass validation and allow expand_references to proceed.
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let staging = std::env::temp_dir().join(format!("mind-req-ok-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&staging);
+        std::fs::create_dir_all(&staging).unwrap();
+        // A text file without any {{ so expand_references reaches the requires check
+        // but skips file expansion.
+        std::fs::write(staging.join("SKILL.md"), "# hello\n").unwrap();
+
+        let item = skill_item_at(
+            "review",
+            std::path::PathBuf::from("/src/skills/review"),
+            vec!["agent:test".to_string()],
+        );
+        let test_agent = agent_item_at("test", std::path::PathBuf::from("/src/agents/test.md"));
+        let siblings = vec![item.clone(), test_agent];
+
+        let result = expand_references(&staging, &item, &siblings, std::path::Path::new("/store"));
+        assert!(
+            result.is_ok(),
+            "valid requires entry must not error: {result:?}"
+        );
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+
+    #[test]
+    fn requires_typo_entry_is_bad_reference() {
+        // spec: DEP-6
+        // A `requires` entry naming a non-existent sibling is a BadReference.
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let staging =
+            std::env::temp_dir().join(format!("mind-req-typo-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&staging);
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("SKILL.md"), "# hello\n").unwrap();
+
+        let item = skill_item_at(
+            "review",
+            std::path::PathBuf::from("/src/skills/review"),
+            vec!["agent:nonexistent".to_string()],
+        );
+        let siblings = vec![item.clone()]; // no "nonexistent" sibling
+
+        let err = expand_references(&staging, &item, &siblings, std::path::Path::new("/store"))
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::error::MindError::BadReference { ref referent, .. }
+                if referent.contains("agent:nonexistent")),
+            "typo requires entry must be BadReference: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+
+    #[test]
+    fn requires_source_qualified_entry_is_bad_reference() {
+        // spec: DEP-6
+        // A source-qualified `owner/repo#name` entry in `requires` is rejected as
+        // a BadReference because `requires` is intra-source only (DEP-5).
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let staging =
+            std::env::temp_dir().join(format!("mind-req-cross-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&staging);
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("SKILL.md"), "# hello\n").unwrap();
+
+        let item = skill_item_at(
+            "review",
+            std::path::PathBuf::from("/src/skills/review"),
+            vec!["owner/repo#agent:test".to_string()],
+        );
+        let test_agent = agent_item_at("test", std::path::PathBuf::from("/src/agents/test.md"));
+        let siblings = vec![item.clone(), test_agent];
+
+        let err = expand_references(&staging, &item, &siblings, std::path::Path::new("/store"))
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::error::MindError::BadReference { .. }),
+            "source-qualified requires entry must be BadReference: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+
+    #[test]
+    fn requires_ambiguous_bare_name_is_bad_reference() {
+        // spec: DEP-6
+        // A bare `name` that matches siblings of two different kinds and no kind
+        // qualifier is supplied is ambiguous and must be a BadReference.
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let staging =
+            std::env::temp_dir().join(format!("mind-req-ambig-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&staging);
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("SKILL.md"), "# hello\n").unwrap();
+
+        let item = skill_item_at(
+            "review",
+            std::path::PathBuf::from("/src/skills/review"),
+            vec!["shared".to_string()], // bare name matches agent:shared AND rule:shared
+        );
+        let agent = CatalogItem {
+            kind: ItemKind::Agent,
+            name: "shared".to_string(),
+            source: "local/test/repo".to_string(),
+            prefix: None,
+            path: std::path::PathBuf::from("/src/agents/shared.md"),
+            description: None,
+            link_rel: None,
+            bin: None,
+            build: None,
+            install: None,
+            uninstall: None,
+            requires: Vec::new(),
+            hooks: Vec::new(),
+        };
+        let rule = CatalogItem {
+            kind: ItemKind::Rule,
+            name: "shared".to_string(),
+            source: "local/test/repo".to_string(),
+            prefix: None,
+            path: std::path::PathBuf::from("/src/rules/shared.md"),
+            description: None,
+            link_rel: None,
+            bin: None,
+            build: None,
+            install: None,
+            uninstall: None,
+            requires: Vec::new(),
+            hooks: Vec::new(),
+        };
+        let siblings = vec![item.clone(), agent, rule];
+
+        let err = expand_references(&staging, &item, &siblings, std::path::Path::new("/store"))
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::error::MindError::BadReference { ref referent, .. }
+                if referent.contains("shared")),
+            "ambiguous bare-name requires entry must be BadReference: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+
+    #[test]
+    fn requires_kind_qualified_among_two_same_name_siblings_is_accepted() {
+        // spec: DEP-5 DEP-6
+        // The other side of the ambiguity boundary: when two siblings share a
+        // bare name across kinds, a `kind:name` qualifier resolves to exactly one
+        // and MUST pass validation (it is not falsely flagged ambiguous). This
+        // pins that the `matches.len() > 1 && r.kind.is_none()` guard does NOT
+        // fire once the kind narrows the candidate set to one.
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let staging =
+            std::env::temp_dir().join(format!("mind-req-kindok-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&staging);
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("SKILL.md"), "# hello\n").unwrap();
+
+        // `agent:shared` uniquely picks the agent, even though a rule:shared also
+        // exists; the bare name alone would be ambiguous.
+        let item = skill_item_at(
+            "review",
+            std::path::PathBuf::from("/src/skills/review"),
+            vec!["agent:shared".to_string()],
+        );
+        let agent = CatalogItem {
+            kind: ItemKind::Agent,
+            name: "shared".to_string(),
+            source: "local/test/repo".to_string(),
+            prefix: None,
+            path: std::path::PathBuf::from("/src/agents/shared.md"),
+            description: None,
+            link_rel: None,
+            bin: None,
+            build: None,
+            install: None,
+            uninstall: None,
+            requires: Vec::new(),
+            hooks: Vec::new(),
+        };
+        let rule = CatalogItem {
+            kind: ItemKind::Rule,
+            name: "shared".to_string(),
+            source: "local/test/repo".to_string(),
+            prefix: None,
+            path: std::path::PathBuf::from("/src/rules/shared.md"),
+            description: None,
+            link_rel: None,
+            bin: None,
+            build: None,
+            install: None,
+            uninstall: None,
+            requires: Vec::new(),
+            hooks: Vec::new(),
+        };
+        let siblings = vec![item.clone(), agent, rule];
+
+        let result = expand_references(&staging, &item, &siblings, std::path::Path::new("/store"));
+        assert!(
+            result.is_ok(),
+            "a kind-qualified ref that uniquely matches one of two same-name \
+             siblings must pass validation, not be flagged ambiguous: {result:?}"
+        );
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+
+    #[test]
+    fn requires_self_reference_resolves_and_is_accepted() {
+        // spec: DEP-6
+        // An item whose `requires` names its own bare name resolves to itself (it
+        // is a sibling of itself in the passed list) and must NOT error: the
+        // validation only rejects zero matches or an ambiguous bare name, and a
+        // self-reference is a single, unambiguous match. (The pure resolver in
+        // deps.rs separately drops the trivial self-edge.)
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let staging =
+            std::env::temp_dir().join(format!("mind-req-self-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&staging);
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("SKILL.md"), "# hello\n").unwrap();
+
+        let item = skill_item_at(
+            "solo",
+            std::path::PathBuf::from("/src/skills/solo"),
+            vec!["skill:solo".to_string()],
+        );
+        let siblings = vec![item.clone()];
+
+        let result = expand_references(&staging, &item, &siblings, std::path::Path::new("/store"));
+        assert!(
+            result.is_ok(),
+            "a self-requires must resolve to the item itself and not error: {result:?}"
         );
         let _ = std::fs::remove_dir_all(&staging);
     }

@@ -57,6 +57,10 @@ pub struct CatalogItem {
     /// is removed (from a `mind.toml` `[[items]].uninstall` on any kind, or a
     /// tool's `TOOL.md` `uninstall:` frontmatter). `None` means none.
     pub uninstall: Option<String>,
+    /// Explicit intra-source dependency refs declared in the item's frontmatter
+    /// `requires:` key (DEP-4). Whitespace-split raw strings as written, e.g.
+    /// `["skill:x", "agent:y"]`. Empty when absent.
+    pub requires: Vec<String>,
     /// The item's full resolved lifecycle hooks (HOOK-86), in execution order:
     /// the scalar `install`/`uninstall` shorthand folded in ahead of any
     /// `[[items.hooks]]` array entries. The scalar fields above stay populated
@@ -401,6 +405,11 @@ fn build_item(
         }
         out
     });
+    // DEP-4: read the `requires:` frontmatter scalar and split on whitespace.
+    // This is always read from `meta` regardless of kind; absent or empty -> empty Vec.
+    let requires: Vec<String> = frontmatter::file_field(meta, "requires")
+        .map(|s| s.split_whitespace().map(str::to_owned).collect())
+        .unwrap_or_default();
     CatalogItem {
         kind,
         name,
@@ -413,6 +422,7 @@ fn build_item(
         build: tool_field(kind, ov.build, meta, "build"),
         install,
         uninstall,
+        requires,
         hooks,
     }
 }
@@ -814,6 +824,107 @@ mod lifecycle_tests {
         assert!(
             matches!(err, MindError::MindToml { .. }),
             "unknown item hook event must be a schema error: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn requires_populated_on_authoritative_mind_toml_item() {
+        // spec: DEP-4
+        // An authoritative `[[items]]` declaration routes through `from_decl` ->
+        // `build_item`, the same constructor as convention discovery. So an item
+        // declared in mind.toml whose META FILE frontmatter carries `requires:`
+        // must still have that field populated (it is read from the meta file, not
+        // from the `[[items]]` table). Pins the otherwise-untested mind.toml route.
+        let base = tmp();
+        let clone = base.join("sources/local/test/repo");
+        write(
+            &clone.join("guidelines/style.md"),
+            "---\ndescription: style\nrequires: agent:linter\n---\n# style\n",
+        );
+        write(
+            &clone.join("agents/linter.md"),
+            "---\ndescription: linter\n---\n# linter\n",
+        );
+        write(
+            &clone.join("mind.toml"),
+            concat!(
+                "[[items]]\n",
+                "kind = \"rule\"\n",
+                "name = \"style\"\n",
+                "path = \"guidelines/style.md\"\n",
+                "[[items]]\n",
+                "kind = \"agent\"\n",
+                "name = \"linter\"\n",
+                "path = \"agents/linter.md\"\n",
+            ),
+        );
+        let paths = Paths {
+            mind_home: base.clone(),
+            claude_home: base.join("claude"),
+        };
+        let mut items = Vec::new();
+        scan_source(&paths, &source_for(&clone), &mut items).unwrap();
+        let rule = items.iter().find(|i| i.name == "style").unwrap();
+        assert_eq!(
+            rule.requires,
+            vec!["agent:linter".to_string()],
+            "requires from the meta-file frontmatter must populate on the authoritative mind.toml path"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn requires_splits_on_arbitrary_whitespace() {
+        // spec: DEP-4
+        // The `requires:` scalar is split on whitespace, not a YAML sequence:
+        // multiple internal spaces and leading/trailing whitespace collapse to a
+        // clean list of entries (DEP-4: "a single string split on whitespace").
+        let base = tmp();
+        let clone = base.join("sources/local/test/repo");
+        write(
+            &clone.join("skills/review/SKILL.md"),
+            "---\ndescription: review\nrequires:   agent:a    rule:b  \n---\n# review\n",
+        );
+        let paths = Paths {
+            mind_home: base.clone(),
+            claude_home: base.join("claude"),
+        };
+        let mut items = Vec::new();
+        scan_source(&paths, &source_for(&clone), &mut items).unwrap();
+        let skill = items.iter().find(|i| i.name == "review").unwrap();
+        assert_eq!(
+            skill.requires,
+            vec!["agent:a".to_string(), "rule:b".to_string()],
+            "extra/leading/trailing whitespace must split into exactly two entries"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn empty_requires_scalar_yields_no_entries() {
+        // spec: DEP-4
+        // An empty (or whitespace-only) `requires:` value yields an empty entry
+        // list and no error: `"".split_whitespace()` produces zero items. Pins
+        // that an author writing `requires:` with no value is a benign no-op, not
+        // a spurious edge or a bad-reference at scan time.
+        let base = tmp();
+        let clone = base.join("sources/local/test/repo");
+        write(
+            &clone.join("skills/review/SKILL.md"),
+            "---\ndescription: review\nrequires:    \n---\n# review\n",
+        );
+        let paths = Paths {
+            mind_home: base.clone(),
+            claude_home: base.join("claude"),
+        };
+        let mut items = Vec::new();
+        scan_source(&paths, &source_for(&clone), &mut items).unwrap();
+        let skill = items.iter().find(|i| i.name == "review").unwrap();
+        assert!(
+            skill.requires.is_empty(),
+            "a whitespace-only requires value must yield no entries: {:?}",
+            skill.requires
         );
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -1392,6 +1503,7 @@ mod tests {
             build: None,
             install: None,
             uninstall: None,
+            requires: Vec::new(),
             hooks: Vec::new(),
         }
     }
@@ -1466,6 +1578,7 @@ mod tests {
             build: None,
             install: None,
             uninstall: None,
+            requires: Vec::new(),
             hooks: Vec::new(),
         };
         assert_eq!(item.resolved_bin(), None);
@@ -1615,5 +1728,77 @@ mod tests {
         assert!(matches_query(&item, "jk"));
         // "review" is a substring of "jk-review", so it also matches
         assert!(matches_query(&item, "review"));
+    }
+
+    // ---- DEP-4: `requires:` frontmatter field populated from scan ----------
+
+    #[test]
+    fn requires_field_parsed_from_skill_frontmatter() {
+        // spec: DEP-4
+        // A `requires:` key in SKILL.md is read as a whitespace-split Vec.
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let clone = base.join("sources/local/test/repo");
+        write_file(
+            &clone.join("skills/review/SKILL.md"),
+            "---\ndescription: review\nrequires: skill:plan agent:test\n---\n# review\n",
+        );
+
+        let paths = paths_for(base);
+        let source = make_source_for(&clone);
+        let mut items = Vec::new();
+        scan_source(&paths, &source, &mut items).unwrap();
+
+        let skill = items.iter().find(|i| i.name == "review").unwrap();
+        assert_eq!(
+            skill.requires,
+            vec!["skill:plan".to_string(), "agent:test".to_string()],
+            "requires must be whitespace-split from the frontmatter scalar"
+        );
+    }
+
+    #[test]
+    fn requires_field_absent_is_empty_vec() {
+        // spec: DEP-4
+        // When `requires:` is not present, the field is an empty Vec.
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let clone = base.join("sources/local/test/repo");
+        write_file(
+            &clone.join("skills/review/SKILL.md"),
+            "---\ndescription: review\n---\n# review\n",
+        );
+
+        let paths = paths_for(base);
+        let source = make_source_for(&clone);
+        let mut items = Vec::new();
+        scan_source(&paths, &source, &mut items).unwrap();
+
+        let skill = items.iter().find(|i| i.name == "review").unwrap();
+        assert!(
+            skill.requires.is_empty(),
+            "absent requires must yield empty Vec"
+        );
+    }
+
+    #[test]
+    fn requires_field_parsed_from_agent_frontmatter() {
+        // spec: DEP-4
+        // `requires:` works on an agent file, not just skills.
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let clone = base.join("sources/local/test/repo");
+        write_file(
+            &clone.join("agents/dev.md"),
+            "---\ndescription: dev\nrequires: rule:style\n---\n# dev\n",
+        );
+
+        let paths = paths_for(base);
+        let source = make_source_for(&clone);
+        let mut items = Vec::new();
+        scan_source(&paths, &source, &mut items).unwrap();
+
+        let agent = items.iter().find(|i| i.name == "dev").unwrap();
+        assert_eq!(agent.requires, vec!["rule:style".to_string()],);
     }
 }
