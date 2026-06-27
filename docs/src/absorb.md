@@ -23,8 +23,8 @@ The ref must resolve to exactly one unmanaged item. A glob ref is an error;
 bulk absorb is not supported. A kind prefix disambiguates when the same name
 appears in more than one kind.
 
-Tools are never absorbed: they are never linked into a lobe, so they are never
-unmanaged (spec ABS-1).
+Tools are never absorbed: they are store-only and never appear as unmanaged lobe
+items (spec ABS-1).
 
 ## Choosing the destination
 
@@ -45,8 +45,10 @@ future invocations skip the prompt (spec ABS-3, ABS-4).
 A non-interactive (non-TTY) run with no destination configured is an error
 (`ConfirmationRequired`) and changes nothing (spec ABS-3).
 
-When `--yes` is given and no destination is configured, `absorb` automatically
-uses (and persists) `~/.mind/personal`.
+When `--yes` is given on a TTY and no destination is configured, `absorb`
+automatically uses (and persists) `~/.mind/personal`. On a non-TTY this does not
+apply: with no destination configured the run errors regardless of `--yes` (see
+[Running unattended](#running-unattended) below).
 
 ## Flags
 

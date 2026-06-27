@@ -5,8 +5,8 @@ install: files written by hand or placed by another tool. `mind` surfaces these
 as *unmanaged* items so the listing reflects everything the agent actually sees,
 and lets `forget` remove one after a distinct confirmation.
 
-Tools are never linked into a lobe, so unmanaged detection covers skills, agents,
-and rules only (spec UNM-1).
+Tools are store-only (not linked into a lobe by default), so unmanaged detection
+covers skills, agents, and rules only (spec UNM-1).
 
 ## What counts as unmanaged
 

@@ -6,7 +6,7 @@
   agents, rules, and tools, found by convention (`skills/<n>/SKILL.md`,
   `agents/<n>.md`, `rules/<n>.md`, `tools/<n>/`) or declared in a `mind.toml`. A
   tool is store-only helper tooling that other items reference, not linked into a
-  lobe.
+  lobe by default.
 - `mind learn <item>` copies the item into the *store* (`~/.mind/store`) and
   symlinks it into each *lobe* (agent home, default `~/.claude`). `forget`
   reverses it.
@@ -28,11 +28,11 @@
 | `mind sync [--upgrade] [--dangerously-skip-install-hook-check]` | refresh every source (optionally upgrade after; flag allows unattended hook re-runs) |
 | `mind upgrade [--yes] [--dangerously-skip-install-hook-check] [item]` | upgrade installed items to their latest source version (re-runs install hooks on sources that advance) |
 | `mind evolve [--check] [--yes] [--version <v>]` | update the mind binary itself to the latest release (or --version) |
-| `mind recall [item] [--sources] [--kind K] [--source S] [--tree] [--json]` | status: each source with its items, marked installed or available; `--sources` narrows to sources; `<item>` shows one item's details; `--tree` renders installed items as a dependency forest (with an item ref, scopes to that item's subtree) |
+| `mind recall [item] [--sources] [--kind K] [--source S] [--tree] [--json]` (alias `status`) | status: each source with its items, marked installed or available; `--sources` narrows to sources; `<item>` shows one item's details; `--tree` renders installed items as a dependency forest (with an item ref, scopes to that item's subtree) |
 | `mind probe [query] [--kind K] [--source S] [--json] [--no-tui]` | browse and search items (interactive TUI on a terminal) |
 | `mind review <target> [--as <prefix>]` / `mind review --policy <path>` | validate a source for publishing, or validate a managed policy file (read-only) |
 | `mind introspect [--fix] [--json]` | report drift and broken links (optionally repair) |
-| `mind config show` / `mind config lobes add\|list\|remove <path>` | view config and manage agent homes (lobes); see [Configuration](configuration.md) for what lobes are |
+| `mind config show` / `mind config lobes add\|list\|remove <path>` (alias `config target`) | view config and manage agent homes (lobes); see [Configuration](configuration.md) for what lobes are |
 | `mind dump [--output <path>] [--whole-sources]` | write a super-source `mind.toml` reproducing the current melded and installed state (to stdout or `--output <path>`); each source is pinned to its recorded commit; item-filtered by default (`--whole-sources` emits `install = true` for every source regardless of install count) |
 | `mind absorb <ref> [--to <path>] [-f\|--force]` | claim a single unmanaged lobe item into a version-controlled source and install it as a managed item; `--to` sets the destination (see [absorb](absorb.md) for full destination precedence); `--force` overwrites a `kind:name` collision at the destination |
 | `mind completions <shell>` / `mind man` | shell completions / man page |

@@ -14,8 +14,9 @@ for a complete source you can browse.
 ## The `tool` kind (TOOL-1..7)
 
 A `tool` is a fourth item kind alongside skill, agent, and rule. Its purpose is
-to be referenced by other items; unlike a skill, it is never linked into an agent
-home and the Claude harness does not discover it directly (TOOL-3).
+to be referenced by other items; unlike a skill, by default it is not linked into
+an agent home and the Claude harness does not discover it directly (TOOL-3). A
+tool can opt in to a link with an explicit `link` field (TOOL-4, below).
 
 **Convention discovery** (TOOL-1): every immediate subdirectory of a `tools/`
 directory under a scan root is a tool. The whole directory is the item; no anchor

@@ -37,6 +37,7 @@ The repo is not named `homebrew-mind`, so the tap needs its clone URL.
 
 ## Updating
 
-`mind evolve` updates the binary itself to the latest release (`--check` reports
-without changing anything, `--version <v>` pins a target). It uses the same
-download path as the install script.
+`mind evolve` updates the binary itself to the latest release. It reports the
+target version and prompts before downloading, unless `--yes` is given (`--check`
+reports without changing anything, `--version <v>` pins a target). It uses the
+same download path as the install script.

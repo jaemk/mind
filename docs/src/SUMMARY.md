@@ -1,19 +1,19 @@
 # Summary
 
 - [Introduction](introduction.md)
-- [Examples](examples.md)
 
 # Guide
 
 - [Install](install.md)
 - [Quickstart](quickstart.md)
+- [Examples](examples.md)
 - [Commands](commands.md)
 - [Interactive TUI](tui.md)
 - [Configuration](configuration.md)
-- [Managed policy](policy.md)
 - [Unmanaged items](unmanaged.md)
-- [absorb](absorb.md)
+- [Absorb unmanaged items](absorb.md)
 - [Install hooks](install-hooks.md)
+- [Managed policy](policy.md)
 - [Troubleshooting](troubleshooting.md)
 
 # Authoring
@@ -24,4 +24,4 @@
 - [Namespacing](namespacing.md)
 - [Tooling](tooling.md)
 - [Dependencies](dependencies.md)
-- [init-source](init-source.md)
+- [The init-source command](init-source.md)

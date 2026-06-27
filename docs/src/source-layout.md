@@ -19,7 +19,8 @@ The kinds:
   dir, scripts) ship with it.
 - **agent** / **rule**: a single markdown file.
 - **tool**: a directory of helper scripts or a compiled binary. A tool is
-  store-only: other items reference it, but it is never linked into an agent home.
+  store-only: other items reference it, and by default it is not linked into an
+  agent home (a tool can opt in with an explicit `link`, see [Tooling](tooling.md)).
 
 A `mind.toml` is optional enrichment, never a gate. It carries source metadata, a
 namespace `prefix`, and (when you need it) explicit `[[items]]` or `[discover]`
@@ -78,8 +79,8 @@ the items that use it.
 
 `mind learn` copies an item into the store (`~/.mind/store/<kind>/<name>`) and
 symlinks it into each agent home (`~/.claude/skills/<name>`, `agents/<name>.md`,
-`rules/<name>.md`). A tool is the exception: it is store-only and never linked
-into an agent home.
+`rules/<name>.md`). A tool is the exception: it is store-only and, by default,
+not linked into an agent home.
 
 A path you control is fine: pointing at a location your install hook populates
 works as long as your hook and your items agree on it. What is fragile is

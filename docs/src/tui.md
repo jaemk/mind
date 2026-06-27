@@ -42,11 +42,9 @@ a skill its file tree.
 - `Enter`: open the details dialog on a source or item; on a group header or kind
   bucket it toggles instead.
 
-The highlighted row stays within the middle two-thirds of the visible area: as
-the selection moves, the view scrolls to keep a margin of about one-sixth of the
-height above and below the highlight, so it does not reach the top or bottom edge
-while there are more rows to scroll. Near the start or end of the list the
-highlight may sit at the edge.
+As the selection moves, the view scrolls to keep the highlighted row away from
+the top and bottom edges while there are more rows to scroll. Near the start or
+end of the list the highlight may sit at the edge.
 
 ## Search
 

@@ -8,10 +8,11 @@ arbitrary git repos and links the items they offer into one or more agent homes
   agents, rules, and tools, found by convention or declared in a `mind.toml`.
 - `mind learn <item>` copies an item into the *store* (`~/.mind/store`) and
   symlinks it into each *lobe* (agent home). A *tool* is the exception: store-only
-  helper tooling reached by reference, never linked into a lobe.
+  helper tooling reached by reference, not linked into a lobe by default.
 - `mind recall` and `mind probe` inspect what is installed and what is available;
-  `mind review` and `mind init-source` validate and scaffold a source for
-  publishing.
+  `mind sync` and `mind upgrade` keep sources and installed items current.
+- For authoring, `mind init-source` and `mind review` scaffold and validate a
+  source for publishing.
 
 This site is the reference for installing, using, and authoring `mind`. Start
 with [Install](install.md) and the [Quickstart](quickstart.md); [Commands](commands.md)
