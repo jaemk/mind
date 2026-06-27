@@ -1,5 +1,5 @@
 //! Within-source dependency resolution (DEP-1..50) and installed-item
-//! dependency graph (DEP-60/61/62).
+//! dependency graph (DEP-60/61/62/63).
 //!
 //! An item's dependencies are the siblings it names with `{{ns:name}}` tokens
 //! (DEP-1, via [`crate::namespace::referenced_names`]). For a *partial* selection
@@ -11,15 +11,19 @@
 //!
 //! [`InstalledGraph`] provides the graph over **installed** items only (no
 //! DEP-10 gating): it powers `forget`'s dependent-warning (DEP-60), `recall
-//! --tree` (DEP-61), and `probe --json`'s adjacency field (DEP-62). Build it
-//! with [`installed_graph`] and query it via [`InstalledGraph::dependents`],
-//! [`InstalledGraph::render_forest`], and [`InstalledGraph::render_subtree`].
+//! --tree` (DEP-61), `probe --json`'s adjacency field (DEP-62), and `recall
+//! --tree --json` structured output (DEP-63). Build it with [`installed_graph`]
+//! and query it via [`InstalledGraph::dependents`], [`InstalledGraph::render_forest`],
+//! [`InstalledGraph::render_subtree`], [`InstalledGraph::forest_nodes`], and
+//! [`InstalledGraph::subtree_node`].
 //!
 //! This module is pure: it reads each item's text through an injected closure so
 //! it can be unit-tested with synthetic content (no filesystem).
 //!
 
 use std::collections::{HashMap, HashSet};
+
+use serde::Serialize;
 
 use crate::catalog::CatalogItem;
 use crate::namespace;
@@ -346,7 +350,59 @@ impl Resolution {
 }
 
 // ---------------------------------------------------------------------------
-// InstalledGraph -- dependency graph over the installed set (DEP-60/61/62)
+// DepNode -- structured tree node for JSON output (DEP-63)
+// ---------------------------------------------------------------------------
+
+/// A single node in the structured dependency tree returned by
+/// [`InstalledGraph::forest_nodes`] and [`InstalledGraph::subtree_node`].
+///
+/// Serializes as:
+/// - Normal node: `{"key": "kind:name", "dependencies": [...]}`
+///   (`cycle` field absent, `dependencies` present, possibly empty)
+/// - Cycle back-edge: `{"key": "kind:name", "cycle": true}`
+///   (`dependencies` field absent, `cycle` present and `true`)
+///
+/// This is the machine-readable counterpart of the human `- key (cycle)` /
+/// `- key` lines produced by `render_forest` / `render_subtree` (DEP-63).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DepNode {
+    /// The `kind:effective_name` key for this node, identical to the key used
+    /// in the human rendering and the manifest.
+    pub key: String,
+
+    /// Present and `true` only for a cycle back-edge (a reference back to an
+    /// item already on the current ancestor path, DEP-22). Omitted for normal
+    /// nodes. When `true`, `dependencies` is `None`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub cycle: bool,
+
+    /// The child nodes (transitive installed dependencies) of this node.
+    /// `None` only for a cycle leaf (to keep the field absent in JSON).
+    /// Present (possibly empty) for every normal node.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dependencies: Option<Vec<DepNode>>,
+}
+
+impl DepNode {
+    pub fn normal(key: String, dependencies: Vec<DepNode>) -> Self {
+        Self {
+            key,
+            cycle: false,
+            dependencies: Some(dependencies),
+        }
+    }
+
+    fn cycle_leaf(key: String) -> Self {
+        Self {
+            key,
+            cycle: true,
+            dependencies: None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// InstalledGraph -- dependency graph over the installed set (DEP-60/61/62/63)
 // ---------------------------------------------------------------------------
 
 /// A dependency graph whose nodes are installed items and whose edges are each
@@ -617,6 +673,78 @@ impl InstalledGraph {
             self.render_installed_node(child, depth + 1, path, out);
         }
         path.pop();
+    }
+
+    /// Return the installed dependency forest as a vec of structured root
+    /// nodes (DEP-63). Produces the same roots and cycle-component promotion
+    /// as [`render_forest`], but as [`DepNode`] data rather than a string.
+    ///
+    /// A normal node carries `{"key": ..., "dependencies": [...]}`.
+    /// A cycle back-edge carries `{"key": ..., "cycle": true}` (no
+    /// `dependencies` field) and is not expanded further (DEP-22).
+    pub fn forest_nodes(&self) -> Vec<DepNode> {
+        // spec: DEP-63
+        let mut in_degree = vec![0usize; self.nodes.len()];
+        for dep_list in &self.edges {
+            for &dep_idx in dep_list {
+                in_degree[dep_idx] += 1;
+            }
+        }
+
+        let mut emitted: HashSet<usize> = HashSet::new();
+        let mut roots: Vec<DepNode> = Vec::new();
+
+        // Pass 1: natural roots (in-degree == 0).
+        for (i, &deg) in in_degree.iter().enumerate() {
+            if deg == 0 {
+                self.mark_reachable(i, &mut emitted);
+                let mut path = Vec::new();
+                roots.push(self.build_node(i, &mut path));
+            }
+        }
+
+        // Pass 2: promote lowest-index unvisited node of each all-cycle
+        // component so every installed item appears (mirrors render_forest).
+        for i in 0..self.nodes.len() {
+            if !emitted.contains(&i) {
+                self.mark_reachable(i, &mut emitted);
+                let mut path = Vec::new();
+                roots.push(self.build_node(i, &mut path));
+            }
+        }
+
+        roots
+    }
+
+    /// Return the subtree rooted at `root_key` as a single structured
+    /// [`DepNode`] (DEP-63 scoped variant for `recall <item> --tree --json`).
+    /// Returns `None` when `root_key` is not a node in this graph (not installed).
+    pub fn subtree_node(&self, root_key: &str) -> Option<DepNode> {
+        // spec: DEP-63
+        let &root_idx = self.key_to_idx.get(root_key)?;
+        let mut path = Vec::new();
+        Some(self.build_node(root_idx, &mut path))
+    }
+
+    /// Recursive (path-tracked) builder for one structured [`DepNode`].
+    /// Mirrors the traversal of [`render_installed_node`] exactly:
+    /// same path-based cycle detection (DEP-22), same child expansion.
+    fn build_node(&self, node: usize, path: &mut Vec<usize>) -> DepNode {
+        let key = self.nodes[node].key();
+
+        if path.contains(&node) {
+            // Back-edge: cycle leaf, not expanded (DEP-22).
+            return DepNode::cycle_leaf(key);
+        }
+
+        path.push(node);
+        let children: Vec<DepNode> = self.edges[node]
+            .iter()
+            .map(|&child| self.build_node(child, path))
+            .collect();
+        path.pop();
+
+        DepNode::normal(key, children)
     }
 }
 
@@ -2090,6 +2218,447 @@ mod tests {
         assert!(
             forest.contains("- skill:b\n"),
             "b must be a root: {forest:?}"
+        );
+    }
+
+    // ---- InstalledGraph: forest_nodes / subtree_node (DEP-63) -------------
+
+    #[test]
+    fn forest_nodes_simple_chain_structured() {
+        // spec: DEP-63
+        // a -> b: forest_nodes() returns one root DepNode for "skill:a" whose
+        // `dependencies` list contains one child DepNode for "skill:b" with an
+        // empty `dependencies` list.  No cycle field on either node.
+        let items = vec![
+            item(ItemKind::Skill, "a", "s"),
+            item(ItemKind::Skill, "b", "s"),
+        ];
+        let mut content = HashMap::new();
+        content.insert("skill:a".into(), "{{ns:b}}".into());
+        let mut installed_keys = HashSet::new();
+        installed_keys.insert("skill:a".to_string());
+        installed_keys.insert("skill:b".to_string());
+
+        let g = installed_graph(&items, &installed_keys, reader(content));
+        let nodes = g.forest_nodes();
+
+        // Exactly one root: skill:a (in-degree 0).
+        assert_eq!(nodes.len(), 1, "expected 1 root: {nodes:?}");
+        let root = &nodes[0];
+        assert_eq!(root.key, "skill:a");
+        assert!(!root.cycle, "root must not be a cycle leaf");
+        let children = root
+            .dependencies
+            .as_ref()
+            .expect("root must have dependencies");
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].key, "skill:b");
+        assert!(!children[0].cycle);
+        let leaf_deps = children[0]
+            .dependencies
+            .as_ref()
+            .expect("leaf must have dependencies");
+        assert!(
+            leaf_deps.is_empty(),
+            "leaf must have empty dependencies: {leaf_deps:?}"
+        );
+    }
+
+    #[test]
+    fn forest_nodes_cycle_yields_cycle_leaf() {
+        // spec: DEP-63
+        // a -> b -> a: forest_nodes promotes a as the root.  b is a child of a,
+        // and the back-edge from b back to a is a cycle leaf: {key: "skill:a",
+        // cycle: true} with no `dependencies` field.
+        let items = vec![
+            item(ItemKind::Skill, "a", "s"),
+            item(ItemKind::Skill, "b", "s"),
+        ];
+        let mut content = HashMap::new();
+        content.insert("skill:a".into(), "{{ns:b}}".into());
+        content.insert("skill:b".into(), "{{ns:a}}".into());
+        let mut installed_keys = HashSet::new();
+        installed_keys.insert("skill:a".to_string());
+        installed_keys.insert("skill:b".to_string());
+
+        let g = installed_graph(&items, &installed_keys, reader(content));
+        let nodes = g.forest_nodes();
+
+        // One root (promoted all-cycle component).
+        assert_eq!(nodes.len(), 1);
+        let root = &nodes[0];
+        assert_eq!(root.key, "skill:a");
+        assert!(!root.cycle);
+        let children = root.dependencies.as_ref().unwrap();
+        assert_eq!(children.len(), 1);
+        let b_node = &children[0];
+        assert_eq!(b_node.key, "skill:b");
+        assert!(!b_node.cycle);
+        let b_children = b_node.dependencies.as_ref().unwrap();
+        assert_eq!(b_children.len(), 1);
+        let cycle_leaf = &b_children[0];
+        assert_eq!(cycle_leaf.key, "skill:a");
+        assert!(cycle_leaf.cycle, "back-edge to a must be a cycle leaf");
+        assert!(
+            cycle_leaf.dependencies.is_none(),
+            "cycle leaf must have no dependencies field"
+        );
+    }
+
+    #[test]
+    fn subtree_node_returns_scoped_node() {
+        // spec: DEP-63
+        // subtree_node("skill:a") returns the root DepNode for a's subtree;
+        // subtree_node on a non-installed key returns None.
+        let items = vec![
+            item(ItemKind::Skill, "a", "s"),
+            item(ItemKind::Skill, "b", "s"),
+        ];
+        let mut content = HashMap::new();
+        content.insert("skill:a".into(), "{{ns:b}}".into());
+        let mut installed_keys = HashSet::new();
+        installed_keys.insert("skill:a".to_string());
+        installed_keys.insert("skill:b".to_string());
+
+        let g = installed_graph(&items, &installed_keys, reader(content));
+
+        let node = g.subtree_node("skill:a").expect("skill:a must be a node");
+        assert_eq!(node.key, "skill:a");
+        let children = node.dependencies.as_ref().unwrap();
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].key, "skill:b");
+
+        // Non-installed key returns None.
+        assert!(g.subtree_node("skill:ghost").is_none());
+    }
+
+    #[test]
+    fn subtree_node_leaf_has_empty_dependencies() {
+        // spec: DEP-63
+        // A leaf node (no outgoing edges) has `dependencies: []`, not absent.
+        let items = vec![item(ItemKind::Skill, "leaf", "s")];
+        let mut installed_keys = HashSet::new();
+        installed_keys.insert("skill:leaf".to_string());
+
+        let g = installed_graph(&items, &installed_keys, reader(HashMap::new()));
+        let node = g.subtree_node("skill:leaf").expect("leaf must be a node");
+        assert_eq!(node.key, "skill:leaf");
+        assert!(!node.cycle);
+        let deps = node
+            .dependencies
+            .as_ref()
+            .expect("leaf must have dependencies field");
+        assert!(deps.is_empty(), "leaf must have empty dependencies");
+    }
+
+    #[test]
+    fn forest_nodes_covers_same_items_as_render_forest() {
+        // spec: DEP-63
+        // forest_nodes() and render_forest() must cover exactly the same set of
+        // keys.  Extract all keys from the DepNode tree and compare with the keys
+        // found in the human forest string.  Verified over a graph that has a
+        // natural root, a promoted all-cycle component, and shared dependencies.
+        let items = vec![
+            item(ItemKind::Skill, "a", "s"), // 0: pure cycle with b
+            item(ItemKind::Skill, "b", "s"), // 1: pure cycle with a
+            item(ItemKind::Skill, "c", "s"), // 2: natural root, depends on d
+            item(ItemKind::Skill, "d", "s"), // 3: dependency only
+        ];
+        let mut content = HashMap::new();
+        content.insert("skill:a".into(), "{{ns:b}}".into());
+        content.insert("skill:b".into(), "{{ns:a}}".into());
+        content.insert("skill:c".into(), "{{ns:d}}".into());
+        let mut installed_keys = HashSet::new();
+        installed_keys.insert("skill:a".to_string());
+        installed_keys.insert("skill:b".to_string());
+        installed_keys.insert("skill:c".to_string());
+        installed_keys.insert("skill:d".to_string());
+
+        let g = installed_graph(&items, &installed_keys, reader(content));
+
+        // Collect all unique keys in the DepNode forest (non-cycle entries are
+        // the installed set; cycle leaves duplicate their ancestor's key, which
+        // is fine but we de-dup for the coverage check).
+        fn collect_keys(nodes: &[DepNode], out: &mut HashSet<String>) {
+            for n in nodes {
+                out.insert(n.key.clone());
+                if let Some(children) = &n.dependencies {
+                    collect_keys(children, out);
+                }
+            }
+        }
+        let nodes = g.forest_nodes();
+        let mut node_keys: HashSet<String> = HashSet::new();
+        collect_keys(&nodes, &mut node_keys);
+
+        // The forest string covers exactly the installed keys (every item
+        // appears at least once, counting cycle annotations too).
+        for key in &installed_keys {
+            assert!(
+                node_keys.contains(key),
+                "forest_nodes must include installed key {key}: {nodes:?}"
+            );
+        }
+
+        // The render_forest output contains exactly the same installed keys.
+        let forest = g.render_forest();
+        for key in &installed_keys {
+            assert!(
+                forest.contains(key.as_str()),
+                "render_forest must contain key {key}: {forest:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn forest_nodes_json_serialization_shape() {
+        // spec: DEP-63
+        // Serialize forest_nodes() with serde_json and assert the exact JSON
+        // shape: a normal node has "key" and "dependencies" but no "cycle"
+        // field; a cycle leaf has "key" and "cycle":true but no "dependencies".
+        let items = vec![
+            item(ItemKind::Skill, "a", "s"),
+            item(ItemKind::Skill, "b", "s"),
+        ];
+        let mut content = HashMap::new();
+        content.insert("skill:a".into(), "{{ns:b}}".into());
+        content.insert("skill:b".into(), "{{ns:a}}".into());
+        let mut installed_keys = HashSet::new();
+        installed_keys.insert("skill:a".to_string());
+        installed_keys.insert("skill:b".to_string());
+
+        let g = installed_graph(&items, &installed_keys, reader(content));
+        let nodes = g.forest_nodes();
+        let json_str = serde_json::to_string(&nodes).expect("must serialize");
+        let v: serde_json::Value = serde_json::from_str(&json_str).expect("must parse");
+
+        // Top-level is an array with one root.
+        assert!(v.is_array());
+        let arr = v.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        let root = &arr[0];
+
+        // Root has "key" and "dependencies", no "cycle".
+        assert_eq!(root["key"], "skill:a");
+        assert!(
+            root.get("dependencies").is_some(),
+            "normal node must have dependencies"
+        );
+        assert!(
+            root.get("cycle").is_none(),
+            "normal node must not have cycle field"
+        );
+
+        // b is the one child.
+        let b_node = &root["dependencies"][0];
+        assert_eq!(b_node["key"], "skill:b");
+        assert!(b_node.get("cycle").is_none());
+        assert!(b_node.get("dependencies").is_some());
+
+        // The cycle leaf (back-edge to a) has "cycle":true and no "dependencies".
+        let cycle_leaf = &b_node["dependencies"][0];
+        assert_eq!(cycle_leaf["key"], "skill:a");
+        assert_eq!(cycle_leaf["cycle"], true);
+        assert!(
+            cycle_leaf.get("dependencies").is_none(),
+            "cycle leaf must not have dependencies field"
+        );
+    }
+
+    #[test]
+    fn forest_nodes_prefixed_items_use_effective_keys() {
+        // spec: DEP-63
+        // When items carry a prefix, forest_nodes() must use the effective
+        // (prefixed) keys, matching what render_forest() emits.
+        let mut a = item(ItemKind::Skill, "a", "s");
+        a.prefix = Some("jk".to_string());
+        let mut b = item(ItemKind::Skill, "b", "s");
+        b.prefix = Some("jk".to_string());
+        let items = vec![a, b];
+        let mut content = HashMap::new();
+        content.insert("skill:a".into(), "{{ns:b}}".into());
+        let mut installed_keys = HashSet::new();
+        installed_keys.insert("skill:jk-a".to_string());
+        installed_keys.insert("skill:jk-b".to_string());
+
+        let g = installed_graph(&items, &installed_keys, reader(content));
+        let nodes = g.forest_nodes();
+
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].key, "skill:jk-a");
+        let children = nodes[0].dependencies.as_ref().unwrap();
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].key, "skill:jk-b");
+    }
+
+    #[test]
+    fn forest_nodes_diamond_nests_shared_dep_under_both_dependents() {
+        // spec: DEP-63
+        // PARITY (load-bearing): the structured forest must mirror the human
+        // render_forest STRUCTURE, not just cover the same key set. Diamond
+        // a->b, a->c, b->d, c->d: `a` is the sole root (in-degree 0), and `d`
+        // must be nested under BOTH `b` and `c` -- emitted twice -- exactly as
+        // render_forest renders d twice (see
+        // installed_graph_diamond_forest_nests_shared_dep_under_both_dependents).
+        // This is the JSON counterpart of render_tree_exact_nested_format_is_locked.
+        let items = vec![
+            item(ItemKind::Skill, "a", "s"),
+            item(ItemKind::Skill, "b", "s"),
+            item(ItemKind::Skill, "c", "s"),
+            item(ItemKind::Skill, "d", "s"),
+        ];
+        let mut content = HashMap::new();
+        content.insert("skill:a".into(), "{{ns:b}} {{ns:c}}".into());
+        content.insert("skill:b".into(), "{{ns:d}}".into());
+        content.insert("skill:c".into(), "{{ns:d}}".into());
+        let mut installed_keys = HashSet::new();
+        installed_keys.insert("skill:a".to_string());
+        installed_keys.insert("skill:b".to_string());
+        installed_keys.insert("skill:c".to_string());
+        installed_keys.insert("skill:d".to_string());
+
+        let g = installed_graph(&items, &installed_keys, reader(content));
+        let nodes = g.forest_nodes();
+
+        // `a` is the sole root.
+        assert_eq!(nodes.len(), 1, "a must be the only root: {nodes:?}");
+        let a = &nodes[0];
+        assert_eq!(a.key, "skill:a");
+        assert!(!a.cycle);
+
+        // a's children are b then c (stable discovery order from the token text).
+        let a_children = a.dependencies.as_ref().expect("a has deps");
+        assert_eq!(
+            a_children
+                .iter()
+                .map(|n| n.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["skill:b", "skill:c"],
+            "a's children must be b then c in discovery order"
+        );
+
+        // d nests under BOTH b and c, as a distinct (non-cycle) leaf each time.
+        for (i, parent) in ["skill:b", "skill:c"].iter().enumerate() {
+            let p = &a_children[i];
+            assert_eq!(&p.key, parent);
+            assert!(!p.cycle, "{parent} must not be a cycle leaf");
+            let p_children = p.dependencies.as_ref().expect("parent has deps");
+            assert_eq!(p_children.len(), 1, "{parent} must have exactly one child");
+            let d = &p_children[0];
+            assert_eq!(d.key, "skill:d", "{parent}'s child must be d");
+            assert!(
+                !d.cycle,
+                "d under {parent} must be a normal node, not a cycle"
+            );
+            assert!(
+                d.dependencies.as_ref().is_some_and(|v| v.is_empty()),
+                "d is a leaf: empty dependencies, not absent or a cycle"
+            );
+        }
+
+        // Serialized shape parity: d appears as a nested object under both b and c.
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&nodes).unwrap()).unwrap();
+        assert_eq!(v[0]["key"], "skill:a");
+        assert_eq!(v[0]["dependencies"][0]["key"], "skill:b");
+        assert_eq!(v[0]["dependencies"][0]["dependencies"][0]["key"], "skill:d");
+        assert_eq!(v[0]["dependencies"][1]["key"], "skill:c");
+        assert_eq!(v[0]["dependencies"][1]["dependencies"][0]["key"], "skill:d");
+
+        // Cross-check against the human renderer: same nodes, same structure.
+        // The human forest renders d twice (once per path); the structured form
+        // must too. Counting "skill:d" occurrences pins the duplication parity.
+        let forest = g.render_forest();
+        assert_eq!(
+            forest.matches("- skill:d").count(),
+            2,
+            "human forest renders d twice (under b and under c): {forest:?}"
+        );
+    }
+
+    #[test]
+    fn forest_nodes_independent_root_plus_cycle_component_all_items_present() {
+        // spec: DEP-63
+        // Mixed graph: an independent root `c` (in-degree 0) plus an a<->b pure
+        // cycle (no in-degree-0 member). The structured forest must, like
+        // render_forest (forest_all_cycle_component_promoted_alongside_independent_root),
+        // emit `c` first, then promote `a` (lowest index) as a secondary root,
+        // so EVERY installed item appears -- the cycle-visibility fix carried
+        // into JSON. The back-edge from b to a is a cycle leaf and there is no
+        // infinite nesting.
+        let items = vec![
+            item(ItemKind::Skill, "a", "s"),
+            item(ItemKind::Skill, "b", "s"),
+            item(ItemKind::Skill, "c", "s"),
+        ];
+        let mut content = HashMap::new();
+        content.insert("skill:a".into(), "{{ns:b}}".into());
+        content.insert("skill:b".into(), "{{ns:a}}".into());
+        let mut installed_keys = HashSet::new();
+        installed_keys.insert("skill:a".to_string());
+        installed_keys.insert("skill:b".to_string());
+        installed_keys.insert("skill:c".to_string());
+
+        let g = installed_graph(&items, &installed_keys, reader(content));
+        let nodes = g.forest_nodes();
+
+        // Two roots: the natural root c, then the promoted cycle root a.
+        assert_eq!(
+            nodes.iter().map(|n| n.key.as_str()).collect::<Vec<_>>(),
+            vec!["skill:c", "skill:a"],
+            "natural root c first, then promoted cycle root a: {nodes:?}"
+        );
+
+        // c is a leaf.
+        assert!(nodes[0].dependencies.as_ref().is_some_and(|v| v.is_empty()));
+
+        // a -> b -> (cycle back to a). No infinite nesting.
+        let a = &nodes[1];
+        let b = &a.dependencies.as_ref().unwrap()[0];
+        assert_eq!(b.key, "skill:b");
+        assert!(!b.cycle);
+        let back = &b.dependencies.as_ref().unwrap()[0];
+        assert_eq!(back.key, "skill:a");
+        assert!(back.cycle, "the b->a back-edge must be a cycle leaf");
+        assert!(
+            back.dependencies.is_none(),
+            "cycle leaf has no dependencies"
+        );
+
+        // Every installed item appears as a node somewhere in the structured forest.
+        fn collect(nodes: &[DepNode], out: &mut HashSet<String>) {
+            for n in nodes {
+                out.insert(n.key.clone());
+                if let Some(c) = &n.dependencies {
+                    collect(c, out);
+                }
+            }
+        }
+        let mut seen = HashSet::new();
+        collect(&nodes, &mut seen);
+        for k in &installed_keys {
+            assert!(
+                seen.contains(k),
+                "every installed item must appear: missing {k}"
+            );
+        }
+    }
+
+    #[test]
+    fn forest_nodes_empty_graph_is_empty_array() {
+        // spec: DEP-63
+        // Nothing installed: forest_nodes() is an empty vec, which serializes to
+        // the JSON empty array `[]` (not null, not an error). This is the data
+        // behind `recall --tree --json` over an empty manifest.
+        let items: Vec<CatalogItem> = vec![];
+        let installed_keys: HashSet<String> = HashSet::new();
+        let g = installed_graph(&items, &installed_keys, reader(HashMap::new()));
+        let nodes = g.forest_nodes();
+        assert!(nodes.is_empty(), "empty graph yields no roots: {nodes:?}");
+        assert_eq!(
+            serde_json::to_string(&nodes).unwrap(),
+            "[]",
+            "empty forest must serialize to a JSON empty array"
         );
     }
 }

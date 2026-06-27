@@ -2835,7 +2835,7 @@ pub fn recall(
         eprintln!("note: --tree shows the dependency forest; ignored with --sources");
     }
 
-    // DEP-61: --tree renders the installed dependency forest.
+    // DEP-61 / DEP-63: --tree renders the installed dependency forest.
     if tree && !sources {
         // spec: DEP-61
         let manifest = Manifest::load(paths)?;
@@ -2843,6 +2843,27 @@ pub fn recall(
         let catalog = catalog::scan(paths, &registry).unwrap_or_default();
         let installed_keys: HashSet<String> = manifest.items.keys().cloned().collect();
         let graph = crate::deps::installed_graph(&catalog, &installed_keys, read_item_text);
+
+        if json {
+            // spec: DEP-63 -- structured JSON output instead of the human rendering.
+            if let Some(item_ref) = item {
+                // Scoped to one item's subtree: emit a single JSON object.
+                let parsed = parse_item_ref(item_ref)?;
+                let found = crate::resolve::resolve_installed(&manifest.items, &parsed)?;
+                let key = found.key();
+                // subtree_node returns None when the item is installed but has
+                // no catalog entry (and thus no node in the graph); fall back
+                // to a no-dependency node so the caller always gets valid JSON.
+                let node = graph
+                    .subtree_node(&key)
+                    .unwrap_or_else(|| crate::deps::DepNode::normal(key, vec![]));
+                return print_json(&node);
+            } else {
+                // Full forest: emit a JSON array of root nodes.
+                return print_json(&graph.forest_nodes());
+            }
+        }
+
         if let Some(item_ref) = item {
             // Scoped to one item's subtree.
             let parsed = parse_item_ref(item_ref)?;

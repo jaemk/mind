@@ -143,6 +143,21 @@ identified by stable identity `(source, kind, bare_name)` (see namespacing.md).
   `kind:name`), so a consumer can reconstruct the graph and detect cycles itself;
   the JSON stays flat adjacency rather than a nested tree.
 
+## recall --tree --json
+
+- `DEP-63` `recall --tree --json` emits the installed dependency forest (DEP-61)
+  as structured JSON instead of the human rendering. The output is a JSON array of
+  root nodes (the DEP-61 roots: installed items no other installed item depends
+  on, including the promoted representative of any all-cycle component, so every
+  installed item appears). Each node is an object
+  `{"key": "<kind:effective_name>", "dependencies": [<node>, ...]}` whose
+  `dependencies` are its child nodes, nested to full depth. A reference back to an
+  item already on the current path (a cycle, DEP-22) is emitted as a leaf
+  `{"key": "...", "cycle": true}` and not expanded again. `recall <item> --tree
+  --json` emits the single subtree node for that item (an object, not an array).
+  This is the nested-tree counterpart of the human `recall --tree` (DEP-61); the
+  flat-adjacency form stays `probe --json` (DEP-62).
+
 ## Non-goals
 
 - `DEP-50` `forget` does not automatically remove an item's dependencies: a

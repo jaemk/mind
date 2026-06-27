@@ -12078,36 +12078,178 @@ fn probe_json_resolves_dependency_to_prefixed_effective_key() {
     );
 }
 
+// DEP-63: recall --tree --json structured output
+// ---------------------------------------------------------------------------
+
 #[test]
-fn recall_tree_with_json_flag_does_not_crash_and_pins_current_behavior() {
-    // spec: DEP-61
-    // ROUGH EDGE (reported to the orchestrator): `--tree` takes precedence over
-    // the global `--json` flag and is not specially JSON-handled, so
-    // `recall --tree --json` emits the HUMAN dependency forest on stdout even
-    // though the user asked for JSON. This test pins that it does not crash and
-    // documents the actual behavior; it deliberately does NOT assert the output
-    // is valid JSON, because it is not. If the tree branch ever learns to honor
-    // --json, update this test to assert JSON instead.
+fn recall_tree_json_emits_json_array_with_dependency_nested() {
+    // spec: DEP-63
+    // `recall --tree --json` emits a JSON array of root nodes.
+    // Fixture: skill:review -> agent:reviewer.
+    // skill:review has in-degree 0 (it is the root); agent:reviewer is its
+    // dependency.  The root node must have "key": "skill:review" and its
+    // "dependencies" must contain one entry "agent:reviewer".
     let sb = dep61_fixture(); // skill:review -> agent:reviewer
 
     let r = sb.mind(&["recall", "--tree", "--json"]);
     assert!(
         r.success,
-        "recall --tree --json must not crash: {} {}",
+        "recall --tree --json must succeed: {} {}",
         r.stdout, r.stderr
     );
-    // Current behavior: the human forest (bullet lines), not JSON.
+
+    // Output must be valid JSON.
+    let v: serde_json::Value = serde_json::from_str(r.stdout.trim())
+        .unwrap_or_else(|e| panic!("output must be valid JSON: {e}\n{}", r.stdout));
+
+    // Top-level is a JSON array (the forest roots).
+    assert!(v.is_array(), "output must be a JSON array: {v}");
+    let arr = v.as_array().unwrap();
+
+    // Exactly one root: skill:review.
+    let root = arr
+        .iter()
+        .find(|n| n["key"] == "skill:review")
+        .unwrap_or_else(|| panic!("must have skill:review as root: {arr:?}"));
+
+    // Normal node: has "dependencies", no "cycle".
     assert!(
-        r.stdout.lines().any(|l| l.starts_with("- skill:review")),
-        "current behavior emits the human forest, not JSON: {}",
-        r.stdout
+        root.get("dependencies").is_some(),
+        "root node must have dependencies field: {root}"
     );
-    // Confirm it is NOT JSON (documents the rough edge): the human forest does
-    // not parse as a JSON value.
     assert!(
-        serde_json::from_str::<serde_json::Value>(r.stdout.trim()).is_err(),
-        "documenting the rough edge: --tree --json output is human text, not JSON: {}",
-        r.stdout
+        root.get("cycle").is_none(),
+        "root node must not have cycle field: {root}"
+    );
+
+    // agent:reviewer is nested under skill:review.
+    let deps = root["dependencies"].as_array().unwrap();
+    let reviewer = deps
+        .iter()
+        .find(|n| n["key"] == "agent:reviewer")
+        .unwrap_or_else(|| panic!("agent:reviewer must be in dependencies: {deps:?}"));
+    assert!(
+        reviewer.get("cycle").is_none(),
+        "reviewer node must not be a cycle: {reviewer}"
+    );
+    let reviewer_deps = reviewer["dependencies"]
+        .as_array()
+        .expect("reviewer must have dependencies field");
+    assert!(
+        reviewer_deps.is_empty(),
+        "reviewer is a leaf, so dependencies must be empty: {reviewer_deps:?}"
+    );
+}
+
+#[test]
+fn recall_tree_json_item_emits_single_object_not_array() {
+    // spec: DEP-63
+    // `recall <item> --tree --json` emits a single JSON object (not an array)
+    // for that item's subtree.
+    let sb = dep61_fixture(); // skill:review -> agent:reviewer
+
+    let r = sb.mind(&["recall", "skill:review", "--tree", "--json"]);
+    assert!(
+        r.success,
+        "recall <item> --tree --json must succeed: {} {}",
+        r.stdout, r.stderr
+    );
+
+    let v: serde_json::Value = serde_json::from_str(r.stdout.trim())
+        .unwrap_or_else(|e| panic!("output must be valid JSON: {e}\n{}", r.stdout));
+
+    // Must be an object, not an array.
+    assert!(
+        v.is_object(),
+        "scoped recall --tree --json must emit an object: {v}"
+    );
+    assert_eq!(
+        v["key"], "skill:review",
+        "object key must be skill:review: {v}"
+    );
+    let deps = v["dependencies"]
+        .as_array()
+        .expect("root object must have dependencies");
+    assert_eq!(deps.len(), 1, "skill:review has one dependency: {deps:?}");
+    assert_eq!(deps[0]["key"], "agent:reviewer");
+}
+
+#[test]
+fn recall_tree_json_leaf_item_has_empty_dependencies() {
+    // spec: DEP-63
+    // `recall agent:reviewer --tree --json` for a leaf node emits a single
+    // object with an empty `dependencies` array (not absent).
+    let sb = dep61_fixture(); // skill:review -> agent:reviewer
+
+    let r = sb.mind(&["recall", "agent:reviewer", "--tree", "--json"]);
+    assert!(
+        r.success,
+        "recall <leaf> --tree --json must succeed: {} {}",
+        r.stdout, r.stderr
+    );
+
+    let v: serde_json::Value = serde_json::from_str(r.stdout.trim())
+        .unwrap_or_else(|e| panic!("output must be valid JSON: {e}\n{}", r.stdout));
+
+    assert!(v.is_object(), "must be an object: {v}");
+    assert_eq!(v["key"], "agent:reviewer");
+    let deps = v["dependencies"]
+        .as_array()
+        .expect("leaf object must have dependencies field (not absent)");
+    assert!(
+        deps.is_empty(),
+        "leaf must have empty dependencies array: {deps:?}"
+    );
+}
+
+#[test]
+fn recall_tree_json_with_prefix_uses_effective_keys() {
+    // spec: DEP-63
+    // When items are installed under a prefix, the JSON keys must use the
+    // effective (prefixed) name, matching what recall --tree (human) emits.
+    let sb = Sandbox::bare("dep63-prefix");
+    sb.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\nname: review\ndescription: Review\nrequires: agent:reviewer\n---\n# review\n",
+    );
+    sb.write_and_commit(
+        "agents/reviewer.md",
+        "---\nname: reviewer\ndescription: Reviewer\n---\n# reviewer\n",
+    );
+    // Meld with a prefix so items install as "pfx-review" / "pfx-reviewer".
+    assert!(
+        sb.mind(&["meld", "--as", "pfx", &sb.source_spec()]).success,
+        "meld with prefix must succeed"
+    );
+    // Under a prefix, the effective name is "pfx-review" -- use that to learn.
+    assert!(
+        sb.mind(&["learn", "pfx-review", "--yes"]).success,
+        "learn with prefix must succeed"
+    );
+
+    let r = sb.mind(&["recall", "--tree", "--json"]);
+    assert!(
+        r.success,
+        "recall --tree --json with prefix must succeed: {} {}",
+        r.stdout, r.stderr
+    );
+
+    let v: serde_json::Value = serde_json::from_str(r.stdout.trim())
+        .unwrap_or_else(|e| panic!("must be valid JSON: {e}\n{}", r.stdout));
+    assert!(v.is_array());
+    let arr = v.as_array().unwrap();
+
+    // Root key must use the effective prefixed name.
+    let root = arr
+        .iter()
+        .find(|n| n["key"] == "skill:pfx-review")
+        .unwrap_or_else(|| panic!("root must be skill:pfx-review: {arr:?}"));
+
+    let deps = root["dependencies"].as_array().unwrap();
+    assert_eq!(deps.len(), 1, "one dep: {deps:?}");
+    assert_eq!(
+        deps[0]["key"], "agent:pfx-reviewer",
+        "dep must use effective prefixed key: {deps:?}"
     );
 }
 
@@ -12146,5 +12288,243 @@ fn recall_tree_with_sources_resolves_to_sources_path_with_note() {
             .any(|l| l.starts_with("  - agent:reviewer")),
         "must not render the dependency forest under --sources: {}",
         r.stdout
+    );
+}
+
+#[test]
+fn recall_tree_json_not_installed_item_errors_like_non_json() {
+    // spec: DEP-63
+    // `recall <item> --tree --json` for an item that is NOT installed at all must
+    // error the same way the non-json `recall <item> --tree` does (NotInstalled
+    // via resolve_installed), NOT emit a null/empty object. The DepNode::normal
+    // fallback in commands.rs is only reached AFTER resolve_installed succeeds
+    // (item present in the manifest), so an absent item never reaches it.
+    let sb = dep61_fixture(); // skill:review and agent:reviewer installed
+
+    // A skill that exists in the source but was never learned is not installed.
+    let json = sb.mind(&["recall", "skill:nope", "--tree", "--json"]);
+    assert!(
+        !json.success,
+        "recall <uninstalled> --tree --json must fail, not emit JSON: {} {}",
+        json.stdout, json.stderr
+    );
+    assert!(
+        json.stderr.contains("not installed"),
+        "must report NotInstalled: {}",
+        json.stderr
+    );
+    // It must NOT have printed a stray JSON null/object/array to stdout.
+    assert!(
+        json.stdout.trim().is_empty(),
+        "no JSON should be emitted for an uninstalled item: {:?}",
+        json.stdout
+    );
+
+    // Parity: the non-json form fails the same way.
+    let human = sb.mind(&["recall", "skill:nope", "--tree"]);
+    assert!(
+        !human.success,
+        "non-json recall <uninstalled> --tree must also fail: {} {}",
+        human.stdout, human.stderr
+    );
+    assert!(
+        human.stderr.contains("not installed"),
+        "non-json form must also report NotInstalled: {}",
+        human.stderr
+    );
+}
+
+#[test]
+fn recall_tree_json_installed_but_orphaned_item_falls_back_to_normal_node() {
+    // spec: DEP-63
+    // The `DepNode::normal(key, [])` fallback in commands.rs: an item that IS in
+    // the manifest (resolve_installed succeeds) but is NOT a node in the graph
+    // (it was removed upstream, so the catalog no longer carries it, and
+    // subtree_node returns None). The scoped `recall <item> --tree --json` must
+    // still emit a valid single object {"key": ..., "dependencies": []}, not
+    // null and not an error.
+    let sb = melded();
+    assert!(sb.mind(&["learn", "dev"]).success, "learn dev failed");
+    // The agent disappears upstream; sync drops it from the catalog while it
+    // stays installed in the manifest.
+    sb.remove_and_commit("agents/dev.md");
+    assert!(sb.mind(&["sync"]).success, "sync failed");
+
+    let r = sb.mind(&["recall", "agent:dev", "--tree", "--json"]);
+    assert!(
+        r.success,
+        "recall <orphaned> --tree --json must succeed via the fallback: {} {}",
+        r.stdout, r.stderr
+    );
+    let v: serde_json::Value = serde_json::from_str(r.stdout.trim())
+        .unwrap_or_else(|e| panic!("output must be valid JSON: {e}\n{:?}", r.stdout));
+    assert!(
+        v.is_object(),
+        "fallback must emit a single object, not an array: {v}"
+    );
+    assert_eq!(
+        v["key"], "agent:dev",
+        "fallback node key must be the item key: {v}"
+    );
+    let deps = v["dependencies"]
+        .as_array()
+        .expect("fallback node must carry an (empty) dependencies array");
+    assert!(
+        deps.is_empty(),
+        "an orphaned item has no graph edges, so dependencies must be empty: {deps:?}"
+    );
+    assert!(
+        v.get("cycle").is_none(),
+        "the fallback node must not be a cycle leaf: {v}"
+    );
+}
+
+#[test]
+fn recall_tree_json_empty_manifest_emits_empty_array() {
+    // spec: DEP-63
+    // `recall --tree --json` with nothing installed must emit a valid JSON empty
+    // array `[]`, not an error, not an empty string, not the human "no installed
+    // items" line.
+    // A melded-but-not-learned source has an empty manifest.
+    let sb = dep61_fixture_unlearned();
+
+    let r = sb.mind(&["recall", "--tree", "--json"]);
+    assert!(
+        r.success,
+        "recall --tree --json over an empty manifest must succeed: {} {}",
+        r.stdout, r.stderr
+    );
+    let v: serde_json::Value = serde_json::from_str(r.stdout.trim())
+        .unwrap_or_else(|e| panic!("output must be valid JSON: {e}\n{:?}", r.stdout));
+    assert!(
+        v.as_array().is_some_and(|a| a.is_empty()),
+        "empty manifest must yield an empty JSON array: {v}"
+    );
+}
+
+/// Like `dep61_fixture` but the source is melded and NOT learned, so the
+/// manifest stays empty (for the empty-forest case).
+fn dep61_fixture_unlearned() -> Sandbox {
+    let sb = Sandbox::bare("dep63-empty");
+    sb.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\nname: review\ndescription: Review\nrequires: agent:reviewer\n---\n# review\n",
+    );
+    sb.write_and_commit(
+        "agents/reviewer.md",
+        "---\nname: reviewer\ndescription: Reviewer\n---\n# reviewer\n",
+    );
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    sb
+}
+
+#[test]
+fn recall_tree_json_cyclic_pair_every_item_present_with_cycle_leaf() {
+    // spec: DEP-63 DEP-22
+    // A pure cycle among installed items, driven through the real binary: the
+    // structured forest must still contain EVERY installed item (the cycle
+    // promotes a secondary root), the back-edge is a {"cycle": true} leaf with
+    // no "dependencies" field, and there is no infinite nesting (bounded output).
+    let sb = dep_cycle_fixture(); // skill:loop-a <-> skill:loop-b, both installed
+
+    let r = sb.mind(&["recall", "--tree", "--json"]);
+    assert!(
+        r.success,
+        "recall --tree --json over a cycle must succeed: {} {}",
+        r.stdout, r.stderr
+    );
+    let v: serde_json::Value = serde_json::from_str(r.stdout.trim())
+        .unwrap_or_else(|e| panic!("output must be valid JSON: {e}\n{:?}", r.stdout));
+    let arr = v.as_array().expect("forest must be a JSON array");
+
+    // Collect every key that appears anywhere in the structured forest.
+    fn collect(node: &serde_json::Value, out: &mut std::collections::HashSet<String>) {
+        if let Some(k) = node["key"].as_str() {
+            out.insert(k.to_string());
+        }
+        if let Some(children) = node["dependencies"].as_array() {
+            for c in children {
+                collect(c, out);
+            }
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    for root in arr {
+        collect(root, &mut seen);
+    }
+    assert!(
+        seen.contains("skill:loop-a") && seen.contains("skill:loop-b"),
+        "every installed cycle member must appear in the JSON forest: {seen:?}"
+    );
+
+    // Find at least one cycle leaf: {"cycle": true} with no "dependencies".
+    fn has_cycle_leaf(node: &serde_json::Value) -> bool {
+        if node["cycle"] == serde_json::Value::Bool(true) {
+            assert!(
+                node.get("dependencies").is_none(),
+                "a cycle leaf must omit dependencies: {node}"
+            );
+            return true;
+        }
+        node["dependencies"]
+            .as_array()
+            .is_some_and(|cs| cs.iter().any(has_cycle_leaf))
+    }
+    assert!(
+        arr.iter().any(has_cycle_leaf),
+        "the cycle must surface as a {{cycle:true}} leaf, not infinite nesting: {v}"
+    );
+}
+
+#[test]
+fn recall_tree_json_and_probe_json_agree_on_direct_dependencies() {
+    // spec: DEP-63 DEP-62
+    // Cross-form consistency: `recall --tree --json` (nested tree, DEP-63) and
+    // `probe --json` (flat adjacency, DEP-62) must describe the SAME direct edges
+    // for the same item. For skill:review, both must report agent:reviewer as its
+    // single direct dependency.
+    let sb = dep61_fixture(); // skill:review -> agent:reviewer
+
+    // Nested tree form: skill:review's direct children.
+    let tree = sb.mind(&["recall", "skill:review", "--tree", "--json"]);
+    assert!(
+        tree.success,
+        "recall --tree --json must succeed: {}",
+        tree.stderr
+    );
+    let tv: serde_json::Value = serde_json::from_str(tree.stdout.trim())
+        .unwrap_or_else(|e| panic!("recall tree JSON invalid: {e}\n{:?}", tree.stdout));
+    let mut tree_deps: Vec<String> = tv["dependencies"]
+        .as_array()
+        .expect("subtree object must have dependencies")
+        .iter()
+        .map(|n| n["key"].as_str().unwrap().to_string())
+        .collect();
+    tree_deps.sort();
+
+    // Flat adjacency form: skill:review's `dependencies` field.
+    let probe = sb.mind(&["probe", "--json", "review"]);
+    assert!(probe.success, "probe --json must succeed: {}", probe.stderr);
+    let rows: Vec<serde_json::Value> =
+        serde_json::from_str(&probe.stdout).expect("probe JSON invalid");
+    let review_row = rows
+        .iter()
+        .find(|row| row["name"] == "review")
+        .expect("skill:review must be a probe row");
+    let mut probe_deps: Vec<String> = review_row
+        .get("dependencies")
+        .and_then(|d| d.as_array())
+        .map(|a| a.iter().map(|d| d.as_str().unwrap().to_string()).collect())
+        .unwrap_or_default();
+    probe_deps.sort();
+
+    assert_eq!(
+        tree_deps, probe_deps,
+        "recall --tree --json and probe --json must agree on skill:review's direct deps"
+    );
+    assert_eq!(
+        tree_deps,
+        vec!["agent:reviewer".to_string()],
+        "both forms must report exactly agent:reviewer: {tree_deps:?}"
     );
 }
