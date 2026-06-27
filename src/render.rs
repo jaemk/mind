@@ -82,6 +82,18 @@ impl OutputCtx {
         }
     }
 
+    /// Installed-but-stale marker.  An installed item whose source has moved
+    /// ahead -- between [`ok`](Self::ok) (installed and current) and
+    /// [`available`](Self::available) (not installed). Unicode "↑" (yellow,
+    /// signalling an upgrade is available) or ASCII "^".
+    pub fn stale(&self) -> String {
+        if self.unicode {
+            self.yellow("↑")
+        } else {
+            "^".to_string()
+        }
+    }
+
     /// Available / inactive marker.  Unicode "○" (dim) or ASCII "-".
     pub fn available(&self) -> String {
         if self.unicode {
@@ -354,6 +366,31 @@ mod tests {
         let s = plain().ok();
         assert_eq!(s, "+", "ok() ascii should be '+', got {s:?}");
         assert!(!s.contains('\x1b'), "ok() ascii must not contain ANSI code");
+    }
+
+    #[test]
+    fn stale_unicode_contains_uparrow_and_ansi() {
+        // spec: CLI-155
+        let s = rich().stale();
+        assert!(
+            s.contains('↑'),
+            "stale() unicode should contain ↑, got {s:?}"
+        );
+        assert!(
+            s.contains('\x1b'),
+            "stale() unicode should contain ANSI code, got {s:?}"
+        );
+    }
+
+    #[test]
+    fn stale_ascii_is_caret_no_ansi() {
+        // spec: CLI-155
+        let s = plain().stale();
+        assert_eq!(s, "^", "stale() ascii should be '^', got {s:?}");
+        assert!(
+            !s.contains('\x1b'),
+            "stale() ascii must not contain ANSI code"
+        );
     }
 
     #[test]

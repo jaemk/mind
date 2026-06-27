@@ -24,6 +24,7 @@ and verified.
 | Convention discovery + frontmatter descriptions | done | [discovery.md](discovery.md) |
 | Frontmatter reader interprets folded/literal block scalars (`>-`, `\|-`) | done | DSC-22 |
 | `recall`/`probe` mark an item out of date on source-content hash drift (local dirs, manual edits) | done | CLI-75 |
+| `recall` uses a distinct left-edge marker (stale `^`/`↑`) for an installed-but-out-of-date item | done | CLI-155 |
 | `mind.toml`: `[source]`, `[[items]]`, `[discover]` item globs | done | [discovery.md](discovery.md) |
 | Discover `include`/`exclude` per kind | done | DSC-37 |
 | Curated super-source (`[discover].sources`, nested `as`) | done | DSC-38, DSC-39 |

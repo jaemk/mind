@@ -1957,14 +1957,17 @@ fn source_status(paths: &Paths, source_name: &str) -> Result<()> {
                 // sites for consistency.
                 let hash_lag = hash_path(&it.path).map_or(true, |h| h != m.hash);
                 let rename_lag = it.effective_name() != m.name;
-                let lag = if hash_lag || rename_lag {
+                let stale = hash_lag || rename_lag;
+                let lag = if stale {
                     out.yellow(" (outdated; run `mind upgrade`)")
                 } else {
                     String::new()
                 };
+                // Stale installs use the ↑ marker, distinct from ✓ for current.
+                let marker = if stale { out.stale() } else { out.ok() };
                 println!(
                     "  {} {}  installed @ {}{}",
-                    out.ok(),
+                    marker,
                     it.key(),
                     out.green(&short(&m.commit)),
                     lag
@@ -3765,13 +3768,17 @@ pub fn recall(
                     // site); the marker errs toward flagging rather than hiding it.
                     let hash_lag = hash_path(&it.path).map_or(true, |h| h != m.hash);
                     let rename_lag = it.effective_name() != m.name;
-                    let outdated = if hash_lag || rename_lag {
+                    let lag = hash_lag || rename_lag;
+                    let outdated = if lag {
                         format!("  {}", out.yellow("(outdated; run mind upgrade)"))
                     } else {
                         String::new()
                     };
+                    // A stale install gets its own marker (↑), distinct from a
+                    // current install (✓): installed but not up to date.
+                    let marker = if lag { out.stale() } else { out.ok() };
                     rows.push(vec![
-                        format!("  {}", out.ok()),
+                        format!("  {marker}"),
                         key,
                         format!("installed @ {}{}", out.green(&short(&m.commit)), outdated),
                     ]);

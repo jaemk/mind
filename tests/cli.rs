@@ -9754,6 +9754,89 @@ fn recall_marks_item_outdated_after_in_place_content_edit() {
     );
 }
 
+/// CLI-155: the `recall` status view uses a distinct left-edge marker for an
+/// installed-but-stale item. With the capability gate OFF (captured stdout), a
+/// current install shows the ASCII installed glyph `+`; an out-of-date install
+/// shows the stale glyph `^` instead. Assert on the per-item line so the marker,
+/// not just the trailing `(outdated)` text, carries the state.
+// spec: CLI-155
+#[test]
+fn recall_status_view_uses_stale_marker_for_outdated_item() {
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+
+    let r = sb.mind(&["meld", &spec, "--yes"]);
+    assert!(r.success, "meld failed: {} {}", r.stdout, r.stderr);
+
+    // Fresh install: the review line carries the `+` installed marker, not `^`.
+    let r = sb.mind(&["recall"]);
+    assert!(r.success, "recall failed: {} {}", r.stdout, r.stderr);
+    let line = r
+        .stdout
+        .lines()
+        .find(|l| l.contains("skill:review"))
+        .unwrap_or_else(|| panic!("no review line in recall output: {}", r.stdout));
+    assert_eq!(
+        line.trim_start().chars().next(),
+        Some('+'),
+        "a current install must lead with the `+` marker: {line:?}"
+    );
+
+    // Edit the item source in place (hash drift, commit unchanged).
+    write(
+        &sb.source.join("skills/review/SKILL.md"),
+        "---\nname: review\ndescription: Review the diff for bugs\n---\n# review skill\nmodified content\n",
+    );
+
+    // Now the review line must lead with the `^` stale marker, not `+`.
+    let r = sb.mind(&["recall"]);
+    assert!(r.success, "recall failed: {} {}", r.stdout, r.stderr);
+    let line = r
+        .stdout
+        .lines()
+        .find(|l| l.contains("skill:review"))
+        .unwrap_or_else(|| panic!("no review line in recall output: {}", r.stdout));
+    assert_eq!(
+        line.trim_start().chars().next(),
+        Some('^'),
+        "an outdated install must lead with the `^` stale marker: {line:?}"
+    );
+}
+
+/// CLI-155: the `source_status` view (reached by re-melding an already-melded
+/// source) also uses the stale marker `^` for an out-of-date item rather than the
+/// installed `+`.
+// spec: CLI-155
+#[test]
+fn source_status_uses_stale_marker_for_outdated_item() {
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+
+    let r = sb.mind(&["meld", &spec, "--yes"]);
+    assert!(r.success, "meld failed: {} {}", r.stdout, r.stderr);
+
+    // In-place edit (no commit) so only the content hash drifts.
+    write(
+        &sb.source.join("skills/review/SKILL.md"),
+        "---\nname: review\ndescription: Review the diff for bugs\n---\n# review skill\nmodified content\n",
+    );
+
+    // Re-meld the already-melded source: all items installed, so this falls
+    // through to source_status.
+    let r = sb.mind(&["meld", &spec]);
+    assert!(r.success, "re-meld failed: {} {}", r.stdout, r.stderr);
+    let line = r
+        .stdout
+        .lines()
+        .find(|l| l.contains("skill:review"))
+        .unwrap_or_else(|| panic!("no review line in source_status output: {}", r.stdout));
+    assert_eq!(
+        line.trim_start().chars().next(),
+        Some('^'),
+        "an outdated install must lead with the `^` stale marker: {line:?}"
+    );
+}
+
 /// After an in-place content edit, `mind recall <item>` must show an out-of-date
 /// note in the single-item detail view.
 #[test]

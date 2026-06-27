@@ -512,11 +512,13 @@ release artifacts as the install script and the Homebrew formula.
 
 - `CLI-152` When the capability gate (CLI-151) is ON, output uses ANSI color and
   Unicode glyphs with these semantics: green = installed / ok; yellow = warning /
-  drift / removed-upstream; red = error; dim = available / inactive. When the gate
+  drift / removed-upstream / installed-but-stale; red = error; dim = available /
+  inactive. When the gate
   is OFF, output uses a plain-ASCII fallback for every glyph and no color escapes.
   The ASCII fallback replaces each glyph with a visually equivalent ASCII character
-  or short string (e.g. `+` for installed, `!` for warning, `x` for error, `-` for
-  available), so all information is preserved without terminal support.
+  or short string (e.g. `+` for installed, `^` for installed-but-stale, `!` for
+  warning, `x` for error, `-` for available), so all information is preserved
+  without terminal support.
 
 - `CLI-153` Every mutating verb (`meld`, `learn`, `forget`, `sync`, `upgrade`,
   `unmeld`, and `config lobes add`/`remove`) emits a structured JSON result object
@@ -548,6 +550,14 @@ release artifacts as the install script and the Homebrew formula.
   OFF regardless of `NO_COLOR`, locale, or TTY state. These conditions are
   independent: any one of them alone is sufficient to disable color and Unicode
   glyphs.
+
+- `CLI-155` In the `recall` status views (the default forest and `recall <source>`),
+  an installed-but-out-of-date item (CLI-75) uses a distinct left-edge marker from a
+  current install: the stale glyph (Unicode `↑` in yellow, ASCII `^`) rather than the
+  installed glyph (Unicode `✓` in green, ASCII `+`). This marks a third state
+  between installed-and-current and not-installed, so the out-of-date condition is
+  visible from the marker alone and not only from the trailing `(outdated)` text.
+  The marker is a human-view concern; the JSON output is unchanged.
 
 ## Exit status
 
