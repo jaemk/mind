@@ -41,13 +41,18 @@ cd /tmp/ns-demo && git init -q && git add -A && git commit -qm init
 
 # Unprefixed: tokens expand to the bare names.
 mind meld /tmp/ns-demo
-mind learn lead
+mind learn lead --yes      # --yes confirms the dep-closure prompt
 cat ~/.mind/store/agent/lead        # "the dev agent", "the review skill", ...
 
 # Prefixed: tokens expand to jk-<name>.
+# Re-melding an already-registered source with --as updates its prefix in place
+# (CLI-12, CLI-13) and renames any already-installed items; no unmeld needed.
 mind meld /tmp/ns-demo --as jk
-mind learn jk-lead
+mind learn jk-lead --yes
 cat ~/.mind/store/agent/jk-lead     # "the jk-dev agent", "the jk-review skill", ...
+
+# Browse items non-interactively.
+mind probe --no-tui
 ```
 
 Because every sibling reference here is a token, prefixing produces no
@@ -55,7 +60,25 @@ unguarded-reference warnings. Change one token to bare prose (e.g. write `dev`
 instead of `{{ns:dev}}`) and re-meld with `--as` to see the warning that flags
 references prefixing would break.
 
+## Teardown
+
+Re-melding with `--as jk` renames the previously installed `lead` to `jk-lead`
+(CLI-13), and learning `jk-lead` pulls in its sibling dependencies. Run in
+inverse order:
+
+```
+mind forget jk-lead
+mind unmeld ns-demo
+rm -rf /tmp/ns-demo
+```
+
 ## Verified
 
 `tests/cli.rs::example_namespacing_expands_references` melds this directory and
 asserts the expansion, so the example stays correct as the code changes.
+
+## See also
+
+`../../spec/namespacing.md` - normative spec for prefix namespacing (NS-1, NS-2),
+`{{ns:}}` reference tokens (NS-10, NS-11), and the unguarded-reference warning
+(NS-20).

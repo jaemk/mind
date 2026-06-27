@@ -16,29 +16,36 @@ prefix = "team"
 # carries nested [[discover.sources.hooks]]; the inline-array form cannot express
 # that. Both forms are otherwise equivalent for plain entries.
 
-# Plain entry: melded and left available, its items not auto-offered.
+# Plain entry: registered and left available, its items not auto-offered.
 [[discover.sources]]
 source = "../explicit"
 
-# Imposes a namespace prefix on the nested source (like meld --as).
+# Prefix plus install = true: every item of this source is offered for install
+# when the super-source is melded, namespaced to `rev-` (like meld --as).
 [[discover.sources]]
 source = "../namespacing"
 as = "rev"
-
-# Recommended: offered for install when this super-source is melded.
-[[discover.sources]]
-source = "../tooling"
 install = true
 
+# install-items: offer only the named items of this source; its other items stay
+# registered and available (DSC-62/63). `skill:scan` is a real item ../tooling
+# offers. install-items and install = true are mutually exclusive (DSC-64).
+[[discover.sources]]
+source = "../tooling"
+install-items = ["skill:scan"]
+
 # Adopt an un-onboarded source: ../starter ships no mind.toml of its own, so the
-# follow-branch, roots, and hooks below are applied as if it had declared them
-# itself (DSC-59/60/61). If it ever gains a mind.toml, that file takes over and
-# these fields are ignored (a warning is emitted). The values below are
-# illustrative of the shape, not tied to ../starter's actual layout.
+# roots and hooks below are applied as if it had declared them itself
+# (DSC-59/60/61). roots and hooks are fallback-only: if the source ever gains a
+# mind.toml, that file takes over and they are ignored (a warning is emitted).
+# The pin directive (follow-branch here) is NOT gated: it is authoritative and
+# overrides the source's own [source] pin whether or not it ships a mind.toml
+# (DSC-65). The roots value below is illustrative of the shape, not tied to
+# ../starter's actual layout.
 [[discover.sources]]
 source = "../starter"
-follow-branch = "main"             # track this branch on sync (DSC-41)
-roots = ["packages/agents"]        # scan under this subdir, not the repo root (DSC-50)
+follow-branch = "main"             # authoritative pin for the nested source (DSC-65)
+roots = ["packages/agents"]        # fallback scan root, applied only if no mind.toml (DSC-50/60)
 
 [[discover.sources.hooks]]         # build hook, same shape as [[hooks]] (HOOK-50)
 run = "make build"

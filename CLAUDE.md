@@ -42,11 +42,14 @@ maintained by hand.
 | `unmeld <name>` | drop a source |
 | `learn <item>` | copy item to the store, symlink into each agent home (lobe) |
 | `forget <item>` | remove symlink + store copy |
-| `sync` | fetch every source, refresh recorded commit |
-| `evolve [--yes] [item]` | report hash/commit deltas, then (on `--yes` or a `[y/N]` yes) re-link |
-| `recall [--sources] [item]` | what's installed / source list / item details |
+| `sync [--upgrade]` | fetch every source, refresh recorded commit (`--upgrade` then runs an upgrade pass) |
+| `upgrade [item]` | report each installed item's hash/commit delta, prompt, then re-link the changed ones |
+| `evolve [--check] [--version V]` | update the `mind` binary itself to the latest release (or a pinned version) |
+| `recall [--sources] [item]` | what's installed / source list / item details (marks out-of-date items) |
 | `probe [query]` | search melded catalogs |
-| `introspect` | report drift, broken symlinks, unsynced sources |
+| `introspect [--fix]` | report drift, broken symlinks, unsynced sources (`--fix` recreates missing links) |
+| `absorb <item> [--to PATH]` | claim an unmanaged lobe item into a managed source, then install it |
+| `dump [--whole-sources]` | write a super-source `mind.toml` reproducing the melded + installed state |
 | `config show` / `config lobes ...` | view config / manage agent homes (lobes) |
 | `completions <shell>` / `man` | shell completion script / roff man page |
 
@@ -189,5 +192,14 @@ automation, say so explicitly and explain why.
   binary (`env!("CARGO_BIN_EXE_mind")`) against a hermetic fixture: a local git
   repo melded by filesystem path, with `MIND_HOME`/`CLAUDE_HOME` pointed at a
   temp dir. No network. Add new CLI assertions here next to the existing ones.
+  `Sandbox::from_example(<name>)` drives a shipped `examples/<name>` the same way.
 
 Run everything with `cargo test`.
+
+To capture real CLI output for docs without a permission prompt, this repo ships
+a gitignored `scripts/probe.sh` (recreated from the `hermetic-verify` skill) that
+melds a shipped example in a throwaway isolated home, e.g.
+`bash scripts/probe.sh drift -- recall -- upgrade --yes`. Probing is for
+capture/exploration only; promote anything worth keeping into a `from_example`
+test. The verify-by-test-first discipline and the global runner permission live
+in the merged `~/.claude/CLAUDE.md`.

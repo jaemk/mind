@@ -50,6 +50,32 @@ mind review --policy examples/policy/policy.toml
 It rejects unknown keys, an `auto_meld` entry left unpinned while `pinned = true`,
 and an `auto_meld` source outside `allow` while `lock = true`.
 
+### Make it fail
+
+To see a rejection, remove the `tag` field from the first `auto_meld` entry so
+it has no pin:
+
+```toml
+[[sources.auto_meld]]
+repo = "acme/agent-baseline"
+# tag = "v1.4.0"   <- removed
+```
+
+Re-run validate:
+
+```
+mind review --policy examples/policy/policy.toml
+```
+
+Expected output (exit non-zero):
+
+```
+error: auto_meld entry "acme/agent-baseline" has no pin (tag or ref) but pinned = true
+```
+
+Restore `tag = "v1.4.0"` before committing; `tests/cli.rs::example_policy_validates`
+asserts the file validates clean.
+
 ## Verified
 
 `tests/cli.rs::example_policy_validates` runs `mind review --policy` against this

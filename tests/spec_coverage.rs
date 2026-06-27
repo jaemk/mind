@@ -19,8 +19,9 @@ const ALLOWLIST: &[&str] = &[
     "STO-1", "STO-3", "STO-10", "STO-11", "STO-12", "STO-20", "STO-21", "STO-22", "STO-23",
     "STO-30", "STO-31",
     // Lifecycle invariants covered indirectly: swap mechanics, idempotent
-    // reinstall, source-hash basis, removing an absent path.
-    "LIFE-3", "LIFE-6", "LIFE-15", "LIFE-21",
+    // reinstall, removing an absent path. (LIFE-15, the source-content hash
+    // basis, is now cited by example_drift_upgrade.)
+    "LIFE-3", "LIFE-6", "LIFE-21",
     // Namespacing: install-time application and the token's written form are
     // definitional, exercised by the expansion tests.
     "NS-3", "NS-10", // Discovery edge: missing directories yield no items.

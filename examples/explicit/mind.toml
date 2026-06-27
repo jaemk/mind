@@ -19,6 +19,9 @@ description = "House style for generated output."
 # install/uninstall hooks run host side effects: `install` after the store swap
 # and links, `uninstall` before the item's paths are removed. These are distinct
 # from source-level [[hooks]] (which run on meld/unmeld for the whole source).
+# The hook scripts live under components/scan/hooks/ so they ship inside the
+# skill's store copy and resolve from the hook working directory
+# (~/.mind/store/skill/scan/).
 [[items]]
 kind = "skill"
 name = "scan"

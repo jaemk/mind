@@ -4548,6 +4548,70 @@ fn example_explicit_inventory_offers_only_listed() {
 }
 
 #[test]
+fn example_explicit_item_hooks_fire() {
+    // spec: HOOK-81, HOOK-82
+    // The explicit example's `scan` skill declares per-item install/uninstall
+    // hooks whose scripts ship under components/scan/hooks/. On a non-TTY they
+    // are skipped unless `--dangerously-skip-install-hook-check` is passed, which
+    // runs them. The install hook fires at learn (HOOK-81) and the uninstall hook
+    // fires at forget (HOOK-82); each prints a recognizable line.
+    let sb = Sandbox::from_example("explicit");
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+
+    let learn = sb.mind(&["learn", "scan", "--dangerously-skip-install-hook-check"]);
+    assert!(learn.success, "{} {}", learn.stdout, learn.stderr);
+    assert!(
+        learn.stdout.contains("explicit-example: scan installed"),
+        "the install hook must fire at learn (HOOK-81): {}",
+        learn.stdout
+    );
+
+    let forget = sb.mind(&["forget", "scan", "--dangerously-skip-install-hook-check"]);
+    assert!(forget.success, "{} {}", forget.stdout, forget.stderr);
+    assert!(
+        forget.stdout.contains("explicit-example: scan removed"),
+        "the uninstall hook must fire at forget (HOOK-82): {}",
+        forget.stdout
+    );
+}
+
+#[test]
+fn example_discover_kind_globs() {
+    // spec: DSC-33, DSC-37
+    // The discover example declares an authoritative [discover] with per-kind
+    // include/exclude globs. A skill glob ends at SKILL.md (item = parent dir)
+    // and an agent glob matches the .md (item = stem) (DSC-33); an exclude glob
+    // drops a matched path (DSC-37). Convention scanning is off, so only the two
+    // glob-matched items are offered.
+    let sb = Sandbox::from_example("discover");
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    let probe = sb.mind(&["probe"]);
+    assert!(probe.success, "{}", probe.stderr);
+    assert!(
+        probe.stdout.contains("skill:alpha"),
+        "skill glob matches packages/a/skills/alpha/SKILL.md, item = parent dir (DSC-33): {}",
+        probe.stdout
+    );
+    assert!(
+        probe.stdout.contains("agent:beta"),
+        "agent glob matches packages/b/agents/beta.md, item = stem (DSC-33): {}",
+        probe.stdout
+    );
+    assert!(
+        !probe.stdout.contains("secret"),
+        "internal/skills/secret/SKILL.md is dropped by the exclude glob (DSC-37): {}",
+        probe.stdout
+    );
+    // Exactly the two glob-matched items: convention scanning stays off.
+    assert_eq!(
+        probe.stdout.matches("skill:").count() + probe.stdout.matches("agent:").count(),
+        2,
+        "only the two glob-matched items are discovered: {}",
+        probe.stdout
+    );
+}
+
+#[test]
 fn example_super_source_validates() {
     // spec: DSC-38, DSC-39
     // The super-source example declares a [discover].sources registry. It
@@ -4559,6 +4623,267 @@ fn example_super_source_validates() {
         r.success,
         "super-source example must validate clean:\nstdout: {}\nstderr: {}",
         r.stdout, r.stderr
+    );
+}
+
+#[test]
+fn example_drift_upgrade() {
+    // spec: CLI-75, CLI-155, CLI-90, LIFE-11, LIFE-13, LIFE-15, LIFE-33
+    // The drift example installs skill:audit, edits the source body and syncs so
+    // the recorded commit advances while the installed copy's source-content hash
+    // lags (LIFE-15: hash is of source content, so detection compares source with
+    // source). `recall` then marks the item stale with the `^` left-edge marker
+    // (CLI-155) and the trailing `(outdated; run mind upgrade)` text (CLI-75);
+    // `introspect` reports the drift (CLI-90, LIFE-33); and `mind upgrade --yes`
+    // reports the hash/commit deltas and reinstalls under the same name
+    // (LIFE-11 pending on hash change, LIFE-13 content-only reinstall), after
+    // which `recall` shows the item current again.
+    let sb = Sandbox::from_example("drift");
+    let meld = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(meld.success, "{}", meld.stderr);
+    assert!(sb.mind(&["learn", "audit"]).success);
+
+    // Fresh install: not outdated, leads with the `+` marker.
+    let fresh = sb.mind(&["--ascii", "recall"]);
+    assert!(fresh.success, "{}", fresh.stderr);
+    assert!(
+        !fresh.stdout.contains("outdated"),
+        "freshly installed audit must not be outdated: {}",
+        fresh.stdout
+    );
+
+    // Simulate an upstream change: edit the source body, commit, then sync to
+    // advance the recorded commit (mirrors the README walkthrough).
+    write(
+        &sb.source.join("skills/audit/SKILL.md"),
+        "---\nname: audit\ndescription: Audit the change\n---\n# audit skill\nedited body\n",
+    );
+    git(&sb.source, &["commit", "-aqm", "edit audit"]);
+    assert!(sb.mind(&["sync"]).success);
+
+    // recall (CLI-75, CLI-155): the audit line leads with the `^` stale marker
+    // and carries the `(outdated` text.
+    let stale = sb.mind(&["--ascii", "recall"]);
+    assert!(stale.success, "{}", stale.stderr);
+    let line = stale
+        .stdout
+        .lines()
+        .find(|l| l.contains("skill:audit"))
+        .unwrap_or_else(|| panic!("no audit line in recall output: {}", stale.stdout));
+    assert_eq!(
+        line.trim_start().chars().next(),
+        Some('^'),
+        "an outdated install must lead with the `^` stale marker: {line:?}"
+    );
+    assert!(
+        line.contains("(outdated"),
+        "the stale line must carry the (outdated; run mind upgrade) text: {line:?}"
+    );
+
+    // introspect (CLI-90, LIFE-33): reports the drift and a nonzero issue count.
+    let ins = sb.mind(&["--ascii", "introspect"]);
+    assert!(
+        ins.stdout.contains("skill:audit") && ins.stdout.contains("upstream changed"),
+        "introspect must report audit's upstream change: {}",
+        ins.stdout
+    );
+    assert!(
+        ins.stdout.contains("issue(s) found") && !ins.stdout.contains("0 issue(s) found"),
+        "introspect must report a nonzero issue count: {}",
+        ins.stdout
+    );
+
+    // upgrade --yes (LIFE-11, LIFE-13): reports the hash and commit `->` deltas
+    // and reinstalls under the same name. Assert on shape, not literal hex.
+    let up = sb.mind(&["--ascii", "upgrade", "--yes"]);
+    assert!(up.success, "{} {}", up.stdout, up.stderr);
+    assert!(
+        up.stdout.contains("hash") && up.stdout.contains("->"),
+        "upgrade must report the hash delta with an arrow: {}",
+        up.stdout
+    );
+    assert!(
+        up.stdout.contains("commit"),
+        "upgrade must report the commit delta: {}",
+        up.stdout
+    );
+    assert!(
+        up.stdout.contains("upgraded skill:audit"),
+        "upgrade must apply audit under the same name: {}",
+        up.stdout
+    );
+
+    // After upgrade: recall shows audit current (marker back to `+`, no outdated).
+    let after = sb.mind(&["--ascii", "recall"]);
+    assert!(after.success, "{}", after.stderr);
+    let line = after
+        .stdout
+        .lines()
+        .find(|l| l.contains("skill:audit"))
+        .unwrap_or_else(|| panic!("no audit line in recall output: {}", after.stdout));
+    assert_eq!(
+        line.trim_start().chars().next(),
+        Some('+'),
+        "a current install must lead with the `+` marker after upgrade: {line:?}"
+    );
+    assert!(
+        !line.contains("(outdated"),
+        "the line must not carry the outdated text after upgrade: {line:?}"
+    );
+}
+
+#[test]
+fn example_multi_lobe_links_into_all_homes() {
+    // spec: STO-14, LIFE-40
+    // With two lobes configured (STO-14), a single `learn` links the item into
+    // every configured agent home, and `forget` removes the link from all of
+    // them (LIFE-40).
+    let sb = Sandbox::from_example("multi-lobe");
+    let lobe_a = sb.base.join("lobe-a");
+    let lobe_b = sb.base.join("lobe-b");
+    write(
+        &sb.mind_home.join("config.toml"),
+        &format!(
+            "lobes = [\"{}\", \"{}\"]\n",
+            lobe_a.display(),
+            lobe_b.display()
+        ),
+    );
+
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    let learn = sb.mind(&["learn", "recap"]);
+    assert!(learn.success, "{} {}", learn.stdout, learn.stderr);
+
+    // The skill is symlinked into BOTH lobes.
+    let link_a = lobe_a.join("skills/recap");
+    let link_b = lobe_b.join("skills/recap");
+    assert!(
+        std::fs::symlink_metadata(&link_a).is_ok(),
+        "recap must be linked into lobe A"
+    );
+    assert!(
+        std::fs::symlink_metadata(&link_b).is_ok(),
+        "recap must be linked into lobe B"
+    );
+    // Each link points at the one store copy.
+    let store = sb.mind_home.join("store/skill/recap");
+    assert_eq!(
+        std::fs::canonicalize(&link_a).unwrap(),
+        std::fs::canonicalize(&store).unwrap(),
+        "lobe A link must point at the store copy"
+    );
+    assert_eq!(
+        std::fs::canonicalize(&link_b).unwrap(),
+        std::fs::canonicalize(&store).unwrap(),
+        "lobe B link must point at the store copy"
+    );
+
+    // forget removes the link from BOTH lobes (LIFE-40).
+    let forget = sb.mind(&["forget", "recap"]);
+    assert!(forget.success, "{} {}", forget.stdout, forget.stderr);
+    assert!(
+        std::fs::symlink_metadata(&link_a).is_err(),
+        "forget must remove the link from lobe A"
+    );
+    assert!(
+        std::fs::symlink_metadata(&link_b).is_err(),
+        "forget must remove the link from lobe B"
+    );
+}
+
+#[test]
+fn example_absorb_claims_unmanaged_item() {
+    // spec: ABS-1, ABS-8, UNM-1
+    // The absorb example is a README-only walkthrough, so build the scenario
+    // directly: an unmanaged lobe skill (UNM-1) plus a throwaway git target.
+    // `absorb --yes` moves the item to the target's convention path, commits,
+    // melds, and learns it (ABS-1); afterward it is an ordinary managed item
+    // (ABS-8): a managed lobe symlink and a version-controlled file in the target.
+    let sb = Sandbox::new();
+
+    // Seed an unmanaged skill placed directly in the lobe (the seed_unmanaged
+    // pattern), with the example's `notes` name and frontmatter.
+    write(
+        &sb.claude_home.join("skills/notes/SKILL.md"),
+        "---\ndescription: my personal notes skill\n---\n# notes\n",
+    );
+
+    // recall (before): notes is surfaced as unmanaged (UNM-1).
+    let before = sb.mind(&["--ascii", "recall"]);
+    assert!(before.success, "{}", before.stderr);
+    assert!(
+        before.stdout.contains("unmanaged: not installed by mind"),
+        "recall must surface the unmanaged group before absorb: {}",
+        before.stdout
+    );
+    assert!(
+        before.stdout.contains("skill:notes"),
+        "recall must list notes as unmanaged before absorb: {}",
+        before.stdout
+    );
+
+    // A throwaway git target the user owns.
+    let target = sb.base.join("absorb-target");
+    std::fs::create_dir_all(&target).unwrap();
+    git(&target, &["-c", "init.defaultBranch=main", "init", "-q"]);
+    git(&target, &["config", "user.email", "t@t"]);
+    git(&target, &["config", "user.name", "t"]);
+    git(&target, &["commit", "-q", "--allow-empty", "-m", "init"]);
+    let target_spec = target.to_string_lossy().into_owned();
+
+    // absorb --yes: move, commit, meld, learn (ABS-1).
+    let absorb = sb.mind(&[
+        "--ascii",
+        "absorb",
+        "skill:notes",
+        "--to",
+        &target_spec,
+        "--yes",
+    ]);
+    assert!(absorb.success, "{} {}", absorb.stdout, absorb.stderr);
+    assert!(
+        absorb
+            .stdout
+            .contains("absorbed skill:notes -> managed as skill:notes"),
+        "absorb must report the managed result: {}",
+        absorb.stdout
+    );
+
+    // The file now lives in the target repo at the convention path.
+    assert!(
+        target.join("skills/notes/SKILL.md").exists(),
+        "the absorbed file must live in the target at skills/notes/SKILL.md"
+    );
+
+    // The lobe path is now a managed symlink into the store (ABS-8).
+    let lobe_path = sb.claude_home.join("skills/notes");
+    let meta = std::fs::symlink_metadata(&lobe_path).expect("lobe path must exist after absorb");
+    assert!(
+        meta.file_type().is_symlink(),
+        "the lobe path must be a managed symlink after absorb"
+    );
+    assert_eq!(
+        std::fs::canonicalize(&lobe_path).unwrap(),
+        std::fs::canonicalize(sb.mind_home.join("store/skill/notes")).unwrap(),
+        "the lobe link must point into the store"
+    );
+
+    // recall (after): notes is now a managed installed item, not unmanaged (ABS-8).
+    let after = sb.mind(&["--ascii", "recall"]);
+    assert!(after.success, "{}", after.stderr);
+    let line = after
+        .stdout
+        .lines()
+        .find(|l| l.contains("skill:notes"))
+        .unwrap_or_else(|| panic!("no notes line in recall output: {}", after.stdout));
+    assert!(
+        line.contains("installed @"),
+        "notes must be a managed installed item after absorb: {line:?}"
+    );
+    assert!(
+        !after.stdout.contains("unmanaged: not installed by mind"),
+        "notes must no longer be reported as unmanaged after absorb: {}",
+        after.stdout
     );
 }
 

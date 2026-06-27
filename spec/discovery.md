@@ -117,23 +117,23 @@ run = "make build"
   a fresh meld and a re-meld, and the whole chain is still traversed so a deeper
   `install = true` is reached even under an unflagged parent. `meld --recursive`
   (DSC-55) is the superset: it installs every nested source regardless of the flag.
-- `DSC-62` A `[discover].sources` entry may set `install_items = ["skill:name",
+- `DSC-62` A `[discover].sources` entry may set `install-items = ["skill:name",
   ...]`, a list of bare `kind:name` refs that scopes install to exactly those of
   the nested source's items, instead of `install = true` (offer all, DSC-58) or
   `install = false` (offer none). When the super-source is melded and the entry is
   reached by the install flow (DSC-54, DSC-55), only the listed items are offered
   via the same preview-and-prompt as the top-level source (CLI-23, honoring
   `--yes`, skipped under `--link-only`); the source's other items are registered
-  and left available. `install_items = []` is equivalent to `install = false`.
-  When `install_items` is present it governs the entry's install behavior; when it
+  and left available. `install-items = []` is equivalent to `install = false`.
+  When `install-items` is present it governs the entry's install behavior; when it
   is absent the `install` boolean governs as before (DSC-58).
-- `DSC-63` Refs in `install_items` (DSC-62) are bare `kind:name` in source truth;
+- `DSC-63` Refs in `install-items` (DSC-62) are bare `kind:name` in source truth;
   a prefix in effect for the entry (`as`, DSC-39) is applied at install. A ref
   naming an item the nested source does not offer is an error (`BadReference`) at
   meld, not a silent skip.
-- `DSC-64` Setting `install = true` together with a non-empty `install_items` on
+- `DSC-64` Setting `install = true` together with a non-empty `install-items` on
   the same entry is a `MindToml` error: offering all and offering a named subset
-  are mutually exclusive. The subset form is expressed by `install_items` alone
+  are mutually exclusive. The subset form is expressed by `install-items` alone
   (with `install` left unset or false).
 - `DSC-59` A `[discover].sources` entry may carry configuration for the
   nested source that the source itself would normally declare in its own

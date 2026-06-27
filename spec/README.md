@@ -85,7 +85,7 @@ and verified.
 | `forget --unmanaged [glob]`: bulk-remove unmanaged lobe items (the default glob stays managed-only) | done | UNM-7, UNM-8 |
 | `absorb`: claim an unmanaged lobe item into a version-controlled source, then install it managed | done | [absorb.md](absorb.md) |
 | `dump`: generate a pinned super-source `mind.toml` from the installed set (`--whole-sources`) | done | [dump.md](dump.md) |
-| `[discover].sources` `install_items`: install only a named subset of a nested source | done | DSC-62, DSC-63, DSC-64 |
+| `[discover].sources` `install-items`: install only a named subset of a nested source | done | DSC-62, DSC-63, DSC-64 |
 | Pin/ref value validation at parse time + `--` terminator in git subcommands | done | DSC-66 |
 | TUI: keep the highlighted row in the middle two-thirds (scroll margin) | done | TUI-16 |
 | TUI: Enter opens a details dialog with the node's valid actions | done | TUI-26 |

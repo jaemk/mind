@@ -1,3 +1,6 @@
 /target
 /.idea
 /docs/book
+# Local hermetic probe runner, recreated from the hermetic-verify skill. The
+# committed contract is the allowlist entry and the CLAUDE.md note, not the body.
+/scripts/probe.sh

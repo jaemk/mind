@@ -1,0 +1,14 @@
+[source]
+description = "Worked example of [discover] kind globs with include/exclude (see README.md)."
+
+# Declaring [discover] item globs makes this file AUTHORITATIVE: convention
+# scanning is turned off and only what these globs match is offered.
+#
+# Each kind is a table with an `include` glob list and an optional `exclude` glob
+# list, relative to the repo root (DSC-33). A skill glob ends at SKILL.md and the
+# item is its parent directory; agent and rule globs match the .md directly.
+# Include globs match first, then any path also matched by an exclude glob is
+# dropped (DSC-37), so internal/skills/secret/SKILL.md is not offered.
+[discover]
+skills = { include = ["packages/*/skills/*/SKILL.md"], exclude = ["internal/**"] }
+agents = { include = ["packages/*/agents/*.md"] }
