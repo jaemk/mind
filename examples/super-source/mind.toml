@@ -3,7 +3,7 @@ description = "Worked example of a curated super-source: a repo that ships its o
 prefix = "team"
 
 # The nested sources below are LOCAL paths to the sibling example repos in this
-# tree (../starter, ../namespacing, and so on), not remote `owner/repo` specs.
+# tree (../explicit, ../namespacing, ../tooling, ../starter), not remote `owner/repo` specs.
 # That keeps this example self-contained and safe to read or copy: melding it
 # never reaches a network remote. A real super-source lists remote specs
 # (`owner/repo`, `git@host:owner/repo`, a URL) in exactly the same positions.

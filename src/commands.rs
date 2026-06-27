@@ -124,6 +124,10 @@ pub fn maybe_probe_hint(paths: &Paths, repo: &str) -> Result<()> {
 /// More than one set flag is a `ConflictingPin` error (CLI-17). The flags are
 /// kept independent at the clap layer so this structured error is what the user
 /// sees, rather than a clap usage string.
+///
+/// Each supplied value is validated with [`crate::git::validate_ref_value`] so
+/// a leading-dash value like `--pin-tag=-x` is rejected with `InvalidRef`
+/// before it can reach any git subprocess (DSC-66).
 fn resolve_pin_flags(
     follow_branch: Option<String>,
     pin_tag: Option<String>,
@@ -131,9 +135,18 @@ fn resolve_pin_flags(
 ) -> Result<Option<Pin>> {
     match (follow_branch, pin_tag, pin_ref) {
         (None, None, None) => Ok(None),
-        (Some(b), None, None) => Ok(Some(Pin::FollowBranch(b))),
-        (None, Some(t), None) => Ok(Some(Pin::Tag(t))),
-        (None, None, Some(r)) => Ok(Some(Pin::Ref(r))),
+        (Some(b), None, None) => {
+            crate::git::validate_ref_value(&b)?;
+            Ok(Some(Pin::FollowBranch(b)))
+        }
+        (None, Some(t), None) => {
+            crate::git::validate_ref_value(&t)?;
+            Ok(Some(Pin::Tag(t)))
+        }
+        (None, None, Some(r)) => {
+            crate::git::validate_ref_value(&r)?;
+            Ok(Some(Pin::Ref(r)))
+        }
         (b, t, r) => {
             // More than one is set; name the first two for the error.
             let mut names = Vec::new();
@@ -2119,7 +2132,13 @@ fn convention_path_in_root(
 /// Mirrors catalog.rs ~:208-219 (DSC-50): `[source].roots` in `mind.toml`, or the
 /// repo root if unset. Consumer `--root` overrides are not relevant here since
 /// the destination may not be melded yet; we use the repo's own declaration.
-fn first_scan_root(dest_path: &std::path::Path) -> std::path::PathBuf {
+///
+/// The resolved root is checked for containment within `dest_path`. A roots entry
+/// like `../../x` that escapes the repo is rejected with [`MindError::InvalidRoot`].
+/// The check uses `canonicalize` when both paths exist, and a `..`-folding
+/// normalizer otherwise (so the check catches escapes even for a not-yet-created
+/// scan root directory).
+fn first_scan_root(dest_path: &std::path::Path) -> Result<std::path::PathBuf> {
     let mindfile = crate::mindfile::MindToml::load(dest_path).unwrap_or_default();
     let root_rel = mindfile
         .as_ref()
@@ -2127,7 +2146,51 @@ fn first_scan_root(dest_path: &std::path::Path) -> std::path::PathBuf {
         .and_then(|r| r.first())
         .map(String::as_str)
         .unwrap_or(".");
-    dest_path.join(root_rel)
+    let candidate = dest_path.join(root_rel);
+
+    // Use canonicalize when both paths exist (resolves symlinks + `..`). When the
+    // candidate does not yet exist on disk, fold `..` components logically via
+    // `normalize_path` so we still catch escaping roots.
+    let canon_dest = std::fs::canonicalize(dest_path).unwrap_or_else(|_| dest_path.to_path_buf());
+    let canon_root =
+        std::fs::canonicalize(&candidate).unwrap_or_else(|_| normalize_path(&candidate));
+
+    if !canon_root.starts_with(&canon_dest) {
+        return Err(MindError::InvalidRoot {
+            source_name: dest_path.to_string_lossy().into_owned(),
+            root: root_rel.to_string(),
+        });
+    }
+    Ok(candidate)
+}
+
+/// Normalize an absolute path by folding `..` components without requiring the
+/// path to exist on disk. Used as a fallback when `canonicalize` fails (e.g.
+/// the target does not yet exist). Only handles absolute paths; relative paths
+/// are returned unchanged.
+fn normalize_path(path: &std::path::Path) -> std::path::PathBuf {
+    use std::path::Component;
+    let mut components: Vec<&std::ffi::OsStr> = Vec::new();
+    for comp in path.components() {
+        match comp {
+            Component::ParentDir => {
+                // Pop the last non-root component, if any.
+                if components
+                    .last()
+                    .is_some_and(|c| *c != std::ffi::OsStr::new("/"))
+                {
+                    components.pop();
+                }
+            }
+            Component::CurDir => {
+                // Skip `.` components.
+            }
+            _ => {
+                components.push(comp.as_os_str());
+            }
+        }
+    }
+    components.iter().collect()
 }
 
 /// Resolve the destination prefix from the source's `mind.toml [source].prefix`
@@ -2201,8 +2264,9 @@ pub fn absorb(
         offer_save_absorb_to(paths, &dest_path, yes)?;
     }
 
-    // Compute the convention path relative to the destination's first scan root.
-    let scan_root = first_scan_root(&dest_path);
+    // C5: Compute and validate the convention path relative to the destination's
+    // first scan root. first_scan_root now canonicalizes and checks containment.
+    let scan_root = first_scan_root(&dest_path)?;
     let dest_item_path = convention_path_in_root(&scan_root, item.kind, &item.name);
 
     // ABS-6: check for a collision at the destination convention path.
@@ -2238,47 +2302,62 @@ pub fn absorb(
                 println!("  delete (stray copy) {}", stray.display());
             }
         }
-        if !crate::hook::is_tty() {
+        // C3 / ABS-7: json mode is non-interactive; treat it like non-TTY for
+        // the destructive confirmation. A missing --yes refuses with
+        // ConfirmationRequired regardless of whether a real TTY is attached.
+        if !crate::hook::is_tty() || out.json {
             return Err(MindError::ConfirmationRequired {
                 action: format!("absorbing {}", item.key()),
             });
         }
-        if !out.json && !confirm("proceed with absorb?")? {
+        if !confirm("proceed with absorb?")? {
             println!("cancelled; nothing changed");
             return Ok(());
         }
     }
 
-    // --- ABS-10: destructive operations begin here ---
+    // --- ABS-10: transactional destructive operations begin here ---
+    //
+    // The invariant: if anything fails before learn completes, the original
+    // lobe entry must be restored exactly as it was and the manifest left
+    // unchanged. We mirror the staging/backup pattern from src/install.rs:
+    //
+    //  1. Copy the lobe item into the destination convention path (do NOT
+    //     remove the original yet; the original is still in the lobe).
+    //  2. git add_all + commit in dest.
+    //  3. meld dest if not yet registered.
+    //  4. Stash a backup copy of the lobe item so we can restore it.
+    //  5. Remove the original lobe entry (making room for learn's symlink).
+    //  6. learn the item. On failure, restore the backup to source_lobe_path.
+    //  7. On success, drop the backup; stray copies in other lobes were
+    //     replaced by learn's managed symlinks (Clobber::Force).
 
-    // Move source lobe path to destination convention path.
+    // 1. Copy lobe item to dest convention path.
     if let Some(parent) = dest_item_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| MindError::io(parent, e))?;
     }
-    // If --force and destination exists, remove it first.
     if dest_item_path.exists() {
+        // --force: remove existing dest content first so copy is clean.
         crate::install::remove_path(&dest_item_path)?;
     }
-    // Move (rename) the item. If cross-device, fall back to copy+remove.
-    move_path(&source_lobe_path, &dest_item_path)?;
+    copy_path_recursive(&source_lobe_path, &dest_item_path)?;
 
-    // Remove stray copies so the managed link can take their place.
-    for stray in &stray_paths {
-        crate::install::remove_path(stray)?;
+    // 2. ABS-5: stage and commit in the destination repo.
+    let git_err = (|| {
+        crate::git::add_all(&dest_path)?;
+        let commit_msg = format!("absorb {}:{}", item.kind.as_str(), item.name);
+        crate::git::commit(&dest_path, &commit_msg)
+    })();
+    if let Err(e) = git_err {
+        // Restore: remove the dest copy we just made; source lobe is still intact.
+        let _ = crate::install::remove_path(&dest_item_path);
+        return Err(e);
     }
 
-    // ABS-5: stage and commit in the destination repo.
-    // On git failure, the file is already at dest; leave it for the user to recover.
-    crate::git::add_all(&dest_path)?;
-    let commit_msg = format!("absorb {}:{}", item.kind.as_str(), item.name);
-    crate::git::commit(&dest_path, &commit_msg)?;
-
-    // ABS-1: meld the destination if not yet registered.
+    // 3. ABS-1: meld the destination if not yet registered.
     let dest_spec = dest_path.to_string_lossy().into_owned();
     if !is_melded(paths, &dest_spec)? {
-        // Use link_only so we don't prompt to install everything in the personal
-        // repo; we will learn the specific item below.
-        meld(
+        let meld_err = meld(
             paths,
             &dest_spec,
             None,
@@ -2288,34 +2367,70 @@ pub fn absorb(
             None,
             None,
             false,
-        )?;
+        );
+        if let Err(e) = meld_err {
+            // Restore: source lobe still intact; clean up dest copy.
+            let _ = crate::install::remove_path(&dest_item_path);
+            return Err(e);
+        }
     }
 
-    // Derive the effective name for reporting (destination prefix).
+    // 4. Backup the source lobe item before removing it.
+    //    Use a tmp path under MIND_HOME so it survives an in-repo rename.
+    let backup = paths
+        .tmp_dir()
+        .join("absorb-backup")
+        .join(item.kind.as_str())
+        .join(&item.name);
+    let _ = crate::install::remove_path(&backup);
+    if let Some(p) = backup.parent() {
+        std::fs::create_dir_all(p).map_err(|e| MindError::io(p, e))?;
+    }
+    copy_path_recursive(&source_lobe_path, &backup)?;
+
+    // 5. Remove the original lobe entry so learn can place its symlink there.
+    if let Err(e) = crate::install::remove_path(&source_lobe_path) {
+        // Couldn't clear path; restore is a no-op since lobe is still there.
+        let _ = crate::install::remove_path(&backup);
+        return Err(e);
+    }
+
+    // 6. Derive the effective name for reporting (destination prefix).
     let registry_for_prefix = Registry::load(paths)?;
     let effective_prefix = dest_source_prefix(&dest_path, &registry_for_prefix);
     let effective_name = crate::namespace::apply(&item.name, &effective_prefix);
     let effective_key = format!("{}:{}", item.kind.as_str(), effective_name);
 
     // ABS-1 / ABS-8: learn the item under the destination source.
-    // Determine the source name for the item ref so learn can resolve it.
     let dest_source_name = parse_spec(&dest_spec)
         .map(|s| s.name)
         .unwrap_or_else(|_| dest_spec.clone());
-    // resolve() matches by effective_name() (bare name with prefix applied), so
-    // use the effective name in the learn ref.
     let learn_ref = format!("{}:{}", item.kind.as_str(), effective_name);
     let qualified_ref = format!("{dest_source_name}#{learn_ref}");
-    learn(
+    let learn_err = learn(
         paths,
         &qualified_ref,
         false,
         InstallFlow {
             yes: true,               // already confirmed above
-            clobber: Clobber::Force, // lobe path was just freed
+            clobber: Clobber::Force, // stray lobe copies handled by Force
             dangerously_skip: false,
         },
-    )?;
+    );
+
+    if let Err(e) = learn_err {
+        // Restore the original lobe entry from backup.
+        // Best-effort: if restore fails we still return the original error.
+        if let Some(parent) = source_lobe_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = copy_path_recursive(&backup, &source_lobe_path);
+        let _ = crate::install::remove_path(&backup);
+        return Err(e);
+    }
+
+    // 7. Success: drop the backup.
+    let _ = crate::install::remove_path(&backup);
 
     if !out.json {
         println!(
@@ -2437,23 +2552,6 @@ fn offer_save_absorb_to(paths: &Paths, dest: &std::path::Path, yes: bool) -> Res
 /// Thin output-ctx accessor for code that cannot use the `out` binding directly.
 fn out_ctx() -> crate::render::OutputCtx {
     crate::render::ctx()
-}
-
-/// Move `src` to `dst`. If they are on different devices (rename fails with
-/// EXDEV), fall back to a recursive copy followed by removal of the source.
-fn move_path(src: &std::path::Path, dst: &std::path::Path) -> Result<()> {
-    if let Some(parent) = dst.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| MindError::io(parent, e))?;
-    }
-    match std::fs::rename(src, dst) {
-        Ok(()) => Ok(()),
-        Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
-            copy_path_recursive(src, dst)?;
-            crate::install::remove_path(src)?;
-            Ok(())
-        }
-        Err(e) => Err(MindError::io(src, e)),
-    }
 }
 
 /// Recursively copy `src` to `dst` (file or directory).
@@ -2581,7 +2679,10 @@ pub fn forget(
                     println!("  {dep}");
                 }
             }
-            if !crate::hook::is_tty() {
+            // C3 / DEP-60: json mode is non-interactive; treat it like non-TTY
+            // for this destructive confirmation. A missing --yes/--force refuses
+            // with ConfirmationRequired regardless of whether a real TTY is attached.
+            if !crate::hook::is_tty() || out.json {
                 return Err(MindError::ConfirmationRequired {
                     action: format!(
                         "removing {removed_key} (has {} dependent(s))",
@@ -2589,7 +2690,7 @@ pub fn forget(
                     ),
                 });
             }
-            if !out.json && !confirm("remove anyway?")? {
+            if !confirm("remove anyway?")? {
                 println!("cancelled; nothing removed");
                 return Ok(());
             }
@@ -4930,7 +5031,7 @@ mod tests {
             std::env::temp_dir().join(format!("mind-abs-scanroot-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         // No mind.toml: first_scan_root should return the directory itself.
-        let root = first_scan_root(&dir);
+        let root = first_scan_root(&dir).unwrap();
         assert_eq!(
             root,
             dir.join("."),
@@ -4953,13 +5054,102 @@ mod tests {
             "[source]\nroots = [\"packages/agents\"]\n",
         )
         .unwrap();
-        let root = first_scan_root(&dir);
+        // The subdirectory must exist for canonicalize-based containment check.
+        std::fs::create_dir_all(dir.join("packages/agents")).unwrap();
+        let root = first_scan_root(&dir).unwrap();
         assert_eq!(
             root,
             dir.join("packages/agents"),
             "first_scan_root must use first entry of [source].roots"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// first_scan_root rejects a roots entry that escapes the repo via `..`.
+    // spec: ABS-10
+    #[test]
+    fn first_scan_root_rejects_escaping_root() {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "mind-abs-scanroot-escape-{}-{n}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Write a mind.toml whose roots entry uses `..` to escape the repo.
+        std::fs::write(
+            dir.join("mind.toml"),
+            "[source]\nroots = [\"../../outside\"]\n",
+        )
+        .unwrap();
+        // The escaped path does exist on the filesystem (the parent dirs do),
+        // so canonicalize will work and detect the escape.
+        let err = first_scan_root(&dir).unwrap_err();
+        assert!(
+            matches!(err, crate::error::MindError::InvalidRoot { .. }),
+            "an escaping roots entry must be InvalidRoot: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// normalize_path folds `..` and `.` components logically without touching
+    /// the filesystem, so it can detect escapes for not-yet-created roots.
+    // spec: ABS-10
+    #[test]
+    fn normalize_path_folds_parent_and_current_components() {
+        use std::path::PathBuf;
+        // `.` is dropped.
+        assert_eq!(
+            normalize_path(&PathBuf::from("/repo/./skills")),
+            PathBuf::from("/repo/skills"),
+            "a `.` component must be dropped"
+        );
+        // `..` pops the previous component.
+        assert_eq!(
+            normalize_path(&PathBuf::from("/repo/sub/../skills")),
+            PathBuf::from("/repo/skills"),
+            "a `..` must pop the previous component"
+        );
+        // `..` that climbs above the root yields a path that no longer starts
+        // with the repo root (so the containment check rejects it).
+        let escaped = normalize_path(&PathBuf::from("/repo/../../outside"));
+        assert!(
+            !escaped.starts_with("/repo"),
+            "a climbing `..` chain must escape the repo root: {escaped:?}"
+        );
+        assert_eq!(
+            escaped,
+            PathBuf::from("/outside"),
+            "folding /repo/../../outside yields /outside"
+        );
+    }
+
+    /// first_scan_root takes the canonicalize branch (root exists on disk) and
+    /// still rejects an escaping root. Distinct from the normalize_path fallback,
+    /// this forces the candidate to exist so std::fs::canonicalize succeeds.
+    // spec: ABS-10
+    #[test]
+    fn first_scan_root_rejects_existing_escaping_root_via_canonicalize() {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let base = std::env::temp_dir().join(format!(
+            "mind-abs-scanroot-canon-{}-{n}",
+            std::process::id()
+        ));
+        let dest = base.join("repo");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&dest).unwrap();
+        // The escape target exists, so canonicalize resolves it to a real path.
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(
+            dest.join("mind.toml"),
+            "[source]\nroots = [\"../outside\"]\n",
+        )
+        .unwrap();
+        let err = first_scan_root(&dest).unwrap_err();
+        assert!(
+            matches!(err, crate::error::MindError::InvalidRoot { .. }),
+            "an existing escaping root (canonicalize branch) must be InvalidRoot: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// dest_source_prefix with no melded source and no mind.toml yields None

@@ -12677,3 +12677,172 @@ fn recall_tree_json_and_probe_json_agree_on_direct_dependencies() {
         "both forms must report exactly agent:reviewer: {tree_deps:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// C3: forget --json without --yes when dependents exist => ConfirmationRequired
+// ---------------------------------------------------------------------------
+
+/// Under `--json` without `--yes` or `--force`, forgetting an item that has
+/// installed dependents must return ConfirmationRequired and remove nothing.
+/// json mode is non-interactive; it must not silently proceed through a
+/// destructive confirmation (DEP-60).
+#[test]
+fn forget_json_without_yes_when_dependents_exist_is_confirmation_required() {
+    // spec: DEP-60
+    let sb = dep60_fixture(); // skill:review depends on agent:reviewer
+
+    // --json but no --yes and no --force.
+    let r = sb.mind(&["--json", "forget", "agent:reviewer"]);
+    assert!(
+        !r.success,
+        "forget --json without --yes must refuse when dependents exist: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr.contains("needs confirmation") || r.stderr.contains("ConfirmationRequired"),
+        "must return ConfirmationRequired: stderr={}",
+        r.stderr
+    );
+    // The item must still be installed.
+    assert!(
+        sb.mind(&["recall", "agent:reviewer"]).success,
+        "agent:reviewer must remain installed after json refusal"
+    );
+}
+
+/// `--json --yes` must still proceed (yes overrides the confirmation gate).
+#[test]
+fn forget_json_with_yes_when_dependents_exist_proceeds() {
+    // spec: DEP-60
+    let sb = dep60_fixture();
+
+    let r = sb.mind(&["--json", "--yes", "forget", "agent:reviewer"]);
+    assert!(
+        r.success,
+        "forget --json --yes must proceed: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        !sb.mind(&["recall", "agent:reviewer"]).success,
+        "agent:reviewer must be removed after forget --json --yes"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Consumer pin-flag injection: leading-dash values rejected (DSC-66)
+// ---------------------------------------------------------------------------
+
+/// A consumer `--pin-tag` value that starts with `-` (e.g. `--pin-tag=-x`) must
+/// be rejected with `InvalidRef` before any git call. No source must be registered.
+/// The `=` form (--pin-tag=-x) passes the value through clap as a string; our
+/// `resolve_pin_flags` then validates it before any git subprocess is spawned.
+#[test]
+fn meld_pin_tag_leading_dash_is_invalid_ref() {
+    // spec: DSC-66
+    let sb = Sandbox::bare("pin-inject-tag");
+    let spec = sb.source_spec();
+
+    // Use the `--flag=value` form so clap passes the leading-dash value through
+    // to our validate_ref_value call rather than treating it as a flag itself.
+    let r = sb.mind(&["meld", &spec, "--pin-tag=-x"]);
+    assert!(
+        !r.success,
+        "--pin-tag=-x must fail: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+    // The error must mention the invalid ref, not a git error.
+    assert!(
+        r.stderr.contains("invalid ref") || r.stderr.contains("InvalidRef"),
+        "must report InvalidRef: stderr={}",
+        r.stderr
+    );
+    // No source registered.
+    let sources = sb.mind(&["recall", "--sources"]);
+    assert!(
+        sources.stdout.contains("no sources melded"),
+        "no source must be registered after invalid pin: {}",
+        sources.stdout
+    );
+}
+
+/// A consumer `--pin-ref` value that starts with `-` must be rejected.
+#[test]
+fn meld_pin_ref_leading_dash_is_invalid_ref() {
+    // spec: DSC-66
+    let sb = Sandbox::bare("pin-inject-ref");
+    let spec = sb.source_spec();
+
+    let r = sb.mind(&["meld", &spec, "--pin-ref=--upload-pack=evil"]);
+    assert!(
+        !r.success,
+        "--pin-ref=--upload-pack=evil must fail: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr.contains("invalid ref") || r.stderr.contains("InvalidRef"),
+        "must report InvalidRef: stderr={}",
+        r.stderr
+    );
+    let sources = sb.mind(&["recall", "--sources"]);
+    assert!(
+        sources.stdout.contains("no sources melded"),
+        "no source must be registered: {}",
+        sources.stdout
+    );
+}
+
+/// A consumer `--follow-branch` value that starts with `-` must be rejected.
+#[test]
+fn meld_follow_branch_leading_dash_is_invalid_ref() {
+    // spec: DSC-66
+    let sb = Sandbox::bare("pin-inject-branch");
+    let spec = sb.source_spec();
+
+    let r = sb.mind(&["meld", &spec, "--follow-branch=-evil"]);
+    assert!(
+        !r.success,
+        "--follow-branch=-evil must fail: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr.contains("invalid ref") || r.stderr.contains("InvalidRef"),
+        "must report InvalidRef: stderr={}",
+        r.stderr
+    );
+    let sources = sb.mind(&["recall", "--sources"]);
+    assert!(
+        sources.stdout.contains("no sources melded"),
+        "no source must be registered: {}",
+        sources.stdout
+    );
+}
+
+/// The space-separated form `--pin-tag -x` (leading-dash value) is rejected at
+/// the clap layer (no `allow_hyphen_values`), so clap treats `-x` as a flag and
+/// errors before `resolve_pin_flags`. This is the complement of the `=` form
+/// (`--pin-tag=-x`), which clap passes through to `validate_ref_value`. Either
+/// surface must end with no source registered and no git fetch having run: a
+/// leading-dash injection cannot reach a git subprocess by either path.
+#[test]
+fn meld_pin_tag_space_separated_leading_dash_is_rejected_before_git() {
+    // spec: DSC-66
+    let sb = Sandbox::bare("pin-inject-space");
+    let spec = sb.source_spec();
+
+    // Space-separated leading-dash value: clap rejects this as an unknown flag /
+    // missing value rather than accepting `-x` as the tag's value.
+    let r = sb.mind(&["meld", &spec, "--pin-tag", "-x"]);
+    assert!(
+        !r.success,
+        "--pin-tag -x (space form) must fail: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+    // No source registered and no fetch ran (the failure is before any git call,
+    // whether at the clap layer or via validate_ref_value).
+    let sources = sb.mind(&["recall", "--sources"]);
+    assert!(
+        sources.stdout.contains("no sources melded"),
+        "no source must be registered after a rejected space-form pin: {}",
+        sources.stdout
+    );
+}

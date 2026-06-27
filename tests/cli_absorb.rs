@@ -1152,3 +1152,517 @@ fn is_repo_distinguishes_repo_from_plain_dir() {
     let _ = std::fs::remove_dir_all(&plain);
     let _ = std::fs::remove_dir_all(&repo);
 }
+
+// ---- ABS-10: post-copy failure (commit failure) leaves lobe intact ----------
+
+/// When git commit fails AFTER the item has been copied to the destination,
+/// the original lobe entry must be restored and the manifest left unchanged.
+/// We use a bare git repository as the destination: `is_repo` returns true
+/// (git rev-parse --git-dir works), but `git add -A` fails because a bare repo
+/// has no working tree. This deterministically triggers the commit-failure path
+/// inside absorb after the copy to dest has already happened.
+// spec: ABS-10
+#[test]
+fn abs10_commit_failure_after_copy_restores_lobe_entry() {
+    let sb = Sandbox::new();
+    let lobe_path = sb.place_unmanaged_agent("myagent");
+
+    // Create a bare git repo as the destination.
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let bare_repo = sb
+        .base
+        .join(format!("bare-dest-{}-{n}", std::process::id()));
+    std::fs::create_dir_all(&bare_repo).unwrap();
+    // git init --bare: has no working tree, so git add -A fails.
+    let status = std::process::Command::new("git")
+        .args(["init", "--bare", "-q"])
+        .current_dir(&bare_repo)
+        .status()
+        .expect("git init --bare");
+    assert!(status.success(), "git init --bare must succeed");
+
+    let bare_str = bare_repo.to_string_lossy().into_owned();
+    let r = sb.mind(&["absorb", "agent:myagent", "--to", &bare_str, "--yes"]);
+    assert!(
+        !r.success,
+        "absorb into a bare repo must fail (git add fails): stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+
+    // ABS-10: the original lobe entry must be intact (not deleted, not a symlink).
+    assert!(
+        lobe_path.exists(),
+        "lobe entry must still exist after commit failure: {lobe_path:?}"
+    );
+    assert!(
+        !is_symlink(&lobe_path),
+        "lobe entry must be the original file, not a managed symlink: {lobe_path:?}"
+    );
+
+    // The manifest must not have an entry for agent:myagent.
+    let recall = sb.mind(&["recall", "agent:myagent"]);
+    assert!(
+        !recall.success,
+        "agent:myagent must not be in manifest after failed absorb: stdout={} stderr={}",
+        recall.stdout, recall.stderr
+    );
+}
+
+// ---- ABS-10: meld failure after copy leaves lobe + strays intact -----------
+
+/// A meld failure that occurs AFTER the item has been copied to the destination
+/// and committed (but BEFORE the original lobe entry is removed) must leave the
+/// original lobe entry intact and the manifest unchanged. We induce the meld
+/// failure with a malformed `mind.toml` in the destination: `first_scan_root`
+/// tolerates it (`unwrap_or_default`), the copy and commit succeed, then `meld`
+/// parses the same `mind.toml` and fails with a Toml error. This exercises the
+/// step-3 (meld) restore branch, distinct from the step-2 (commit) branch the
+/// bare-repo test covers.
+// spec: ABS-10
+#[test]
+fn abs10_meld_failure_after_copy_leaves_lobe_intact() {
+    let sb = Sandbox::new();
+    let lobe_path = sb.place_unmanaged_rule("meldfail");
+    let dest = sb.dest_spec();
+
+    // A syntactically invalid mind.toml: `meld` reads it and errors, but
+    // first_scan_root swallows the parse error via unwrap_or_default.
+    write_file(
+        &sb.dest.join("mind.toml"),
+        "[source]\nthis is = = not valid toml ===\n",
+    );
+    git(&sb.dest, &["add", "-A"]);
+    git(&sb.dest, &["commit", "-qm", "add bad mind.toml"]);
+
+    let r = sb.mind(&["absorb", "rule:meldfail", "--to", &dest, "--yes"]);
+    assert!(
+        !r.success,
+        "absorb must fail when meld rejects the dest mind.toml: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+
+    // ABS-10: the original lobe entry must be intact (commit happened, but the
+    // meld failure occurs before the original is removed).
+    assert!(
+        lobe_path.exists() && !is_symlink(&lobe_path),
+        "lobe entry must be intact after a meld failure: {lobe_path:?}"
+    );
+
+    // The manifest must not have a rule:meldfail entry.
+    let recall = sb.mind(&["recall", "rule:meldfail"]);
+    assert!(
+        !recall.success,
+        "rule:meldfail must not be in manifest after a failed absorb"
+    );
+}
+
+/// ABS-10 + ABS-7 stray survival: a mid-absorb failure (here a meld failure
+/// after copy) must NOT delete the stray copies in the OTHER lobes. The strays
+/// are only ever removed by `learn`'s relink, which never runs on a failed
+/// absorb. So every original lobe copy must survive byte-for-byte.
+// spec: ABS-10
+#[test]
+fn abs10_failure_does_not_delete_stray_copies_in_other_lobes() {
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let base = std::env::temp_dir().join(format!("mind-abs-strays-{}-{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let dest = base.join("personal");
+    let mind_home = base.join("mind");
+    let lobe1 = base.join("lobe1");
+    let lobe2 = base.join("lobe2");
+
+    git_init(&dest);
+
+    // The same unmanaged skill in two lobes; lobe2 holds the stray copy.
+    let skill1 = lobe1.join("skills").join("mystray");
+    write_file(&skill1.join("SKILL.md"), "# mystray primary\n");
+    let skill2 = lobe2.join("skills").join("mystray");
+    write_file(&skill2.join("SKILL.md"), "# mystray stray\n");
+
+    std::fs::create_dir_all(&mind_home).unwrap();
+    let lobe1_str = lobe1.to_string_lossy();
+    let lobe2_str = lobe2.to_string_lossy();
+    std::fs::write(
+        mind_home.join("config.toml"),
+        format!("lobes = [\"{lobe1_str}\", \"{lobe2_str}\"]\n"),
+    )
+    .unwrap();
+
+    // Induce a meld failure after the copy via a malformed mind.toml.
+    write_file(
+        &dest.join("mind.toml"),
+        "[source]\n= = invalid = toml = =\n",
+    );
+    git(&dest, &["add", "-A"]);
+    git(&dest, &["commit", "-qm", "bad toml"]);
+
+    let dest_str = dest.to_string_lossy().into_owned();
+    let out = Command::new(env!("CARGO_BIN_EXE_mind"))
+        .args(["absorb", "skill:mystray", "--to", &dest_str, "--yes"])
+        .env("MIND_HOME", &mind_home)
+        .env("CLAUDE_HOME", &lobe1)
+        .env_remove("MIND_ABSORB_TO")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::piped())
+        .output()
+        .expect("run mind");
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        !out.status.success(),
+        "absorb must fail on the malformed dest mind.toml: stdout={stdout} stderr={stderr}"
+    );
+
+    // Both lobe copies must survive as original files (no stray deletion on failure).
+    assert!(
+        skill1.exists() && !is_symlink(&skill1),
+        "primary lobe copy must survive a failed absorb"
+    );
+    assert!(
+        skill2.exists() && !is_symlink(&skill2),
+        "stray lobe copy must NOT be deleted by a failed absorb"
+    );
+    // And byte-for-byte: the stray's distinct content is preserved.
+    let stray_content = std::fs::read_to_string(skill2.join("SKILL.md")).unwrap();
+    assert!(
+        stray_content.contains("mystray stray"),
+        "stray copy content must be untouched: {stray_content}"
+    );
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+// ---- ABS-10: learn failure AFTER original removed restores backup ----------
+
+/// The subtlest restore branch: a `learn` failure that occurs AFTER the original
+/// lobe entry has already been removed (absorb step 5) must restore the backup
+/// to the lobe path byte-for-byte. We induce the learn failure with an unresolved
+/// `{{ns:}}` reference token in the item: copy, commit, and meld all succeed, but
+/// `learn`'s reference expansion raises `BadReference` for the dangling token,
+/// hitting the post-removal restore path. The lobe file must reappear with its
+/// original content and the manifest must stay empty.
+// spec: ABS-10
+#[test]
+fn abs10_learn_failure_after_removal_restores_backup() {
+    let sb = Sandbox::new();
+    // A skill whose body references a sibling that does not exist. learn's
+    // {{ns:}} expansion will reject it with BadReference -- after the original
+    // lobe entry has already been removed in step 5.
+    let lobe_path = sb.claude_home.join("skills").join("badref");
+    let original = "# badref skill\n\nhand off to {{ns:nonexistent}}\n";
+    write_file(&lobe_path.join("SKILL.md"), original);
+    let dest = sb.dest_spec();
+
+    let r = sb.mind(&["absorb", "skill:badref", "--to", &dest, "--yes"]);
+    assert!(
+        !r.success,
+        "absorb must fail when learn cannot resolve a dangling reference: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+
+    // ABS-10: the lobe entry must be restored from the backup -- it must exist,
+    // be the original file (not a symlink), and have the exact original content.
+    assert!(
+        lobe_path.exists(),
+        "lobe entry must be restored after a post-removal learn failure: {lobe_path:?}"
+    );
+    assert!(
+        !is_symlink(&lobe_path),
+        "restored lobe entry must be the original file, not a managed symlink"
+    );
+    let restored = std::fs::read_to_string(lobe_path.join("SKILL.md")).unwrap();
+    assert_eq!(
+        restored, original,
+        "restored lobe content must be byte-for-byte the original"
+    );
+
+    // The manifest must not have a skill:badref entry (learn never completed).
+    let recall = sb.mind(&["recall", "skill:badref"]);
+    assert!(
+        !recall.success,
+        "skill:badref must not be in manifest after a failed absorb"
+    );
+
+    // No leftover backup in the mind tmp dir (success or failure drops it).
+    let backup = sb
+        .mind_home
+        .join(".tmp")
+        .join("absorb-backup")
+        .join("skill")
+        .join("badref");
+    assert!(
+        !backup.exists(),
+        "the absorb backup must be cleaned up after a failed absorb: {backup:?}"
+    );
+}
+
+// ---- C3 / ABS-7: json mode WITH --yes proceeds -----------------------------
+
+/// `--json --yes` must bypass the ABS-7 destructive-confirm gate and complete
+/// the absorb. The json refusal is only for the missing-confirmation case; an
+/// explicit `--yes` is the documented bypass and must still work under json.
+// spec: ABS-7
+#[test]
+fn abs7_json_mode_with_yes_proceeds() {
+    let sb = Sandbox::new();
+    let lobe_path = sb.place_unmanaged_skill("jsonyes");
+    let dest = sb.dest_spec();
+
+    let r = sb.mind(&["--json", "--yes", "absorb", "skill:jsonyes", "--to", &dest]);
+    assert!(
+        r.success,
+        "absorb --json --yes must proceed: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+    // The lobe path is now a managed symlink (absorb completed).
+    assert!(
+        is_symlink(&lobe_path),
+        "lobe must be a managed symlink after absorb --json --yes"
+    );
+    // The item is in the manifest.
+    let recall = sb.mind(&["recall", "skill:jsonyes"]);
+    assert!(
+        recall.success,
+        "skill:jsonyes must be installed after absorb --json --yes: {}",
+        recall.stdout
+    );
+}
+
+// ---- C5: legitimate nested scan root works ---------------------------------
+
+/// A destination whose `mind.toml` declares a legitimate nested scan root
+/// (`roots = ["sub"]`, fully contained in the repo) must NOT be rejected: the
+/// containment check is only meant to reject escapes. The item lands under the
+/// nested root's convention path and absorb completes.
+// spec: ABS-10
+#[test]
+fn c5_legitimate_nested_root_is_accepted() {
+    let sb = Sandbox::new();
+    let lobe_path = sb.place_unmanaged_rule("nestedok");
+    let dest = sb.dest_spec();
+
+    // Declare a nested scan root that exists within the repo.
+    std::fs::create_dir_all(sb.dest.join("sub")).unwrap();
+    write_file(&sb.dest.join("mind.toml"), "[source]\nroots = [\"sub\"]\n");
+    git(&sb.dest, &["add", "-A"]);
+    git(&sb.dest, &["commit", "-qm", "add nested root"]);
+
+    let r = sb.mind(&["absorb", "rule:nestedok", "--to", &dest, "--yes"]);
+    assert!(
+        r.success,
+        "absorb into a legitimate nested root must succeed: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+    // The item file landed under the nested root's rules dir.
+    let landed = sb.dest.join("sub").join("rules").join("nestedok.md");
+    assert!(
+        landed.exists(),
+        "item must land under the nested scan root: {landed:?}"
+    );
+    // The lobe is now a managed symlink.
+    assert!(
+        is_symlink(&lobe_path),
+        "lobe must be a managed symlink after absorb into a nested root"
+    );
+}
+
+// ---- C5: escaping scan root that EXISTS on disk (canonicalize path) ---------
+
+/// The containment check has two code paths: `canonicalize` when the candidate
+/// root exists on disk, and a logical `normalize_path` fallback when it does not.
+/// The `../../outside` test covers the non-existent (normalize_path) path. This
+/// test covers the EXISTING-on-disk (canonicalize) path: the escaping root
+/// directory is created before absorb runs, so `canonicalize` resolves it to a
+/// real path outside the repo and the containment check must still reject it.
+// spec: ABS-10
+#[test]
+fn c5_escaping_root_that_exists_on_disk_is_rejected() {
+    let sb = Sandbox::new();
+    let lobe_path = sb.place_unmanaged_rule("escapereal");
+    let dest = sb.dest_spec();
+
+    // Create the escape-target directory OUTSIDE the repo so canonicalize succeeds.
+    let outside = sb.base.join("outside-real");
+    std::fs::create_dir_all(&outside).unwrap();
+
+    // Point roots at it via a relative path that climbs out of the repo. Because
+    // the target exists, first_scan_root takes the canonicalize branch.
+    write_file(
+        &sb.dest.join("mind.toml"),
+        "[source]\nroots = [\"../outside-real\"]\n",
+    );
+    git(&sb.dest, &["add", "-A"]);
+    git(&sb.dest, &["commit", "-qm", "add existing escaping root"]);
+
+    let r = sb.mind(&["absorb", "rule:escapereal", "--to", &dest, "--yes"]);
+    assert!(
+        !r.success,
+        "an existing escaping root (canonicalize branch) must be rejected: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+
+    // The lobe entry must be untouched (rejection happens before any move).
+    assert!(
+        lobe_path.exists() && !is_symlink(&lobe_path),
+        "lobe entry must be unchanged after escaping-root rejection: {lobe_path:?}"
+    );
+    // Nothing must have been written into the escape target.
+    let leaked = outside.join("rules").join("escapereal.md");
+    assert!(
+        !leaked.exists(),
+        "nothing must be written outside the repo: {leaked:?}"
+    );
+    // The manifest must not have a rule:escapereal entry.
+    let recall = sb.mind(&["recall", "rule:escapereal"]);
+    assert!(
+        !recall.success,
+        "rule:escapereal must not be in manifest after rejection"
+    );
+}
+
+// ---- C3 / ABS-7: json mode without --yes is ConfirmationRequired -----------
+
+/// Under --json without --yes, when stray copies exist (multi-lobe), absorb must
+/// return ConfirmationRequired rather than silently proceeding. json mode is
+/// treated as non-interactive for destructive confirmations.
+///
+/// The test fixture uses a non-TTY process (piped stdin/stdout), which is the
+/// same non-interactive context CI and automation use. The json flag must refuse
+/// regardless of TTY status.
+// spec: ABS-7
+#[test]
+fn abs7_json_mode_without_yes_when_stray_copies_is_confirmation_required() {
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let base = std::env::temp_dir().join(format!("mind-abs-json-c3-{}-{n}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let dest = base.join("personal");
+    let mind_home = base.join("mind");
+    let lobe1 = base.join("lobe1");
+    let lobe2 = base.join("lobe2");
+
+    git_init(&dest);
+
+    // Place the same unmanaged skill in both lobes (so there are stray copies
+    // to trigger the ABS-7 destructive-confirm path).
+    let skill1 = lobe1.join("skills").join("myjson");
+    write_file(&skill1.join("SKILL.md"), "# myjson\n");
+    let skill2 = lobe2.join("skills").join("myjson");
+    write_file(&skill2.join("SKILL.md"), "# myjson\n");
+
+    std::fs::create_dir_all(&mind_home).unwrap();
+    let lobe1_str = lobe1.to_string_lossy();
+    let lobe2_str = lobe2.to_string_lossy();
+    std::fs::write(
+        mind_home.join("config.toml"),
+        format!("lobes = [\"{lobe1_str}\", \"{lobe2_str}\"]\n"),
+    )
+    .unwrap();
+
+    let dest_str = dest.to_string_lossy().into_owned();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_mind"))
+        // --json flag but no --yes: destructive action must refuse.
+        .args(["--json", "absorb", "skill:myjson", "--to", &dest_str])
+        .env("MIND_HOME", &mind_home)
+        .env("CLAUDE_HOME", &lobe1)
+        .env_remove("MIND_ABSORB_TO")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::piped())
+        .output()
+        .expect("run mind");
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+
+    assert!(
+        !out.status.success(),
+        "absorb --json without --yes must fail when stray copies exist: stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("needs confirmation") || stderr.contains("ConfirmationRequired"),
+        "must return ConfirmationRequired: stderr={stderr}"
+    );
+
+    // Nothing must have been moved: both lobe entries must be original files.
+    assert!(
+        skill1.exists() && !is_symlink(&skill1),
+        "lobe1 skill must be unchanged"
+    );
+    assert!(
+        skill2.exists() && !is_symlink(&skill2),
+        "lobe2 skill must be unchanged"
+    );
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+// ---- C3 / ABS-7: single-lobe json mode without --yes is also guarded -------
+
+/// Even in the single-lobe case (no stray copies), --json without --yes must
+/// still refuse with ConfirmationRequired, because json is always non-interactive.
+// spec: ABS-7
+#[test]
+fn abs7_json_mode_single_lobe_without_yes_is_confirmation_required() {
+    let sb = Sandbox::new();
+    let lobe_path = sb.place_unmanaged_skill("solo");
+    let dest = sb.dest_spec();
+
+    // Single lobe: no stray copies. Still json mode must refuse without --yes.
+    let r = sb.mind(&["--json", "absorb", "skill:solo", "--to", &dest]);
+    assert!(
+        !r.success,
+        "--json without --yes must fail even with single lobe: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr.contains("needs confirmation") || r.stderr.contains("ConfirmationRequired"),
+        "must return ConfirmationRequired: stderr={}",
+        r.stderr
+    );
+    // Lobe must be unchanged.
+    assert!(
+        lobe_path.exists() && !is_symlink(&lobe_path),
+        "lobe must be unchanged after json refusal"
+    );
+}
+
+// ---- C5: dest mind.toml roots escaping the repo => error --------------------
+
+/// When the destination's mind.toml declares a `roots` entry that escapes the
+/// repo directory (e.g. `../../outside`), absorb must error before any filesystem
+/// mutation. Nothing must be moved and the lobe entry must be intact.
+// spec: ABS-10
+#[test]
+fn c5_dest_roots_escaping_repo_is_error_nothing_moved() {
+    let sb = Sandbox::new();
+    let lobe_path = sb.place_unmanaged_rule("escaperule");
+    let dest = sb.dest_spec();
+
+    // Write a mind.toml whose roots entry escapes the repo.
+    write_file(
+        &sb.dest.join("mind.toml"),
+        "[source]\nroots = [\"../../outside\"]\n",
+    );
+    git(&sb.dest, &["add", "-A"]);
+    git(&sb.dest, &["commit", "-qm", "add escaping roots"]);
+
+    let r = sb.mind(&["absorb", "rule:escaperule", "--to", &dest, "--yes"]);
+    assert!(
+        !r.success,
+        "a dest with escaping roots must fail: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+
+    // The lobe entry must be intact (nothing was moved).
+    assert!(
+        lobe_path.exists() && !is_symlink(&lobe_path),
+        "lobe entry must be unchanged after escaping-roots error: {lobe_path:?}"
+    );
+
+    // The manifest must not have a rule:escaperule entry.
+    let recall = sb.mind(&["recall", "rule:escaperule"]);
+    assert!(
+        !recall.success,
+        "rule:escaperule must not be in manifest after failed absorb"
+    );
+}

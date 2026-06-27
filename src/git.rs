@@ -7,6 +7,56 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::error::{MindError, Result};
 use crate::source::Pin;
 
+/// Reject a pin/ref value that starts with `-` or is otherwise unsafe to pass
+/// as a positional git argument (DSC-66).
+///
+/// Rules (conservative, safe subset):
+/// - Must not be empty.
+/// - Must not begin with `-` (would be interpreted as a git option).
+/// - Must not contain ASCII whitespace (shells/git split on whitespace; no ref
+///   name contains internal spaces by git convention).
+/// - Must not contain `..` (git range syntax, would be interpreted as a range
+///   rather than a single ref).
+/// - Must not contain NUL or other ASCII control characters.
+///
+/// These rules are not exhaustive of every invalid git ref name (see
+/// `git-check-ref-format(1)`), but they catch the injection-relevant cases while
+/// accepting every branch name, tag, and full SHA a legitimate caller would supply.
+pub fn validate_ref_value(value: &str) -> Result<()> {
+    // spec: DSC-66
+    if value.is_empty() {
+        return Err(MindError::InvalidRef {
+            value: value.to_string(),
+            reason: "ref value must not be empty".to_string(),
+        });
+    }
+    if value.starts_with('-') {
+        return Err(MindError::InvalidRef {
+            value: value.to_string(),
+            reason: "ref value must not begin with '-' (looks like a git option)".to_string(),
+        });
+    }
+    if value.chars().any(|c| c.is_ascii_control()) {
+        return Err(MindError::InvalidRef {
+            value: value.to_string(),
+            reason: "ref value must not contain control characters".to_string(),
+        });
+    }
+    if value.chars().any(|c| c.is_ascii_whitespace()) {
+        return Err(MindError::InvalidRef {
+            value: value.to_string(),
+            reason: "ref value must not contain whitespace".to_string(),
+        });
+    }
+    if value.contains("..") {
+        return Err(MindError::InvalidRef {
+            value: value.to_string(),
+            reason: "ref value must not contain '..' (ambiguous git range syntax)".to_string(),
+        });
+    }
+    Ok(())
+}
+
 /// When set, every `git` child runs non-interactively: it never prompts on the
 /// controlling terminal for credentials, an SSH passphrase, or a host-key
 /// confirmation. The TUI turns this on while it owns the terminal so an
@@ -95,6 +145,9 @@ pub fn clone_at(url: &str, dest: &Path, pin: &Pin) -> Result<()> {
             run(url, None, &["clone", "--depth", "1", url, &dest_str])?;
         }
         Pin::FollowBranch(branch) => {
+            // --branch consumes its next argument as a value, not a positional,
+            // so it is already safe.  Validate anyway (DSC-66) so a bad value
+            // is caught at parse time before reaching any subprocess.
             run(
                 url,
                 None,
@@ -102,7 +155,8 @@ pub fn clone_at(url: &str, dest: &Path, pin: &Pin) -> Result<()> {
             )?;
         }
         Pin::Tag(tag) => {
-            // git clone accepts a tag name as the --branch argument.
+            // git clone accepts a tag name as the --branch argument (value, not
+            // positional).  Validate (DSC-66) for the same reason as above.
             run(
                 url,
                 None,
@@ -116,6 +170,11 @@ pub fn clone_at(url: &str, dest: &Path, pin: &Pin) -> Result<()> {
             // For file:// and local repos this always works. For real network
             // remotes this costs more bandwidth but is unavoidable unless the
             // server supports `uploadpack.allowReachableSHA1InWant`.
+            //
+            // `git checkout <commit>` does not accept `--` before the commit
+            // argument (that form means "path operands follow"). Injection
+            // safety is provided by `validate_ref_value` at parse time (DSC-66),
+            // which rejects any value starting with `-` before it reaches here.
             run(url, None, &["clone", url, &dest_str])?;
             run(url, Some(dest), &["checkout", sha])?;
         }
@@ -148,14 +207,29 @@ pub fn sync_to_pin(url: &str, dir: &Path, pin: &Pin) -> Result<()> {
                 // Some remotes don't advertise origin/HEAD after a shallow fetch.
                 run(url, Some(dir), &["rev-parse", "FETCH_HEAD"])
             })?;
+            // `head` is the output of rev-parse (a full SHA), not user input.
+            // `git reset --hard` does not accept `--` before the commit argument
+            // (that form switches to path mode); injection safety here relies on
+            // the value being a raw hex SHA from rev-parse, not user-supplied.
             run(url, Some(dir), &["reset", "--hard", &head])?;
         }
         Pin::FollowBranch(branch) => {
-            run(url, Some(dir), &["fetch", "--depth", "1", "origin", branch])?;
+            // Insert `--` after `origin` so the branch name is always treated as
+            // a refspec operand, never as an option (DSC-66). This is the correct
+            // end-of-options form for `git fetch`.
+            run(
+                url,
+                Some(dir),
+                &["fetch", "--depth", "1", "origin", "--", branch],
+            )?;
+            // FETCH_HEAD is an internal git ref, not user-supplied.
             run(url, Some(dir), &["reset", "--hard", "FETCH_HEAD"])?;
         }
         Pin::Tag(tag) => {
             // Force-fetch tags so a re-pointed tag moves the local ref.
+            // The refspec `+refs/tags/{tag}:refs/tags/{tag}` already encodes the
+            // tag name inside a fixed-prefix string; the `--` before the refspec
+            // guards the positional argument position (DSC-66).
             run(
                 url,
                 Some(dir),
@@ -163,15 +237,22 @@ pub fn sync_to_pin(url: &str, dir: &Path, pin: &Pin) -> Result<()> {
                     "fetch",
                     "--force",
                     "origin",
+                    "--",
                     &format!("+refs/tags/{tag}:refs/tags/{tag}"),
                 ],
             )?;
+            // `git reset --hard <tree-ish>`: the commit argument is positional
+            // and NOT preceded by `--` because that form means "paths follow",
+            // not "end of options". Injection safety is from `validate_ref_value`
+            // at parse time (DSC-66), which rejects any value starting with `-`.
             run(url, Some(dir), &["reset", "--hard", tag])?;
         }
         Pin::Ref(sha) => {
             // Fetch all to ensure the pinned sha is present (it may be missing
             // if the original clone was shallow).
             run(url, Some(dir), &["fetch", "origin"])?;
+            // Same as Tag: no `--` before the commit; injection safety comes
+            // from `validate_ref_value` at parse time (DSC-66).
             run(url, Some(dir), &["reset", "--hard", sha])?;
         }
     }
@@ -237,6 +318,268 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    // ---- DSC-66: validate_ref_value ----------------------------------------
+
+    #[test]
+    fn validate_ref_value_accepts_normal_refs() {
+        // spec: DSC-66 - well-formed branch names, tags, and SHAs pass validation.
+        for good in [
+            "main",
+            "develop",
+            "release/2.0",
+            "v1.0",
+            "v1.0.0-rc1",
+            "feature/abc-123",
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+            "abc1234",
+        ] {
+            assert!(validate_ref_value(good).is_ok(), "expected ok for {good:?}");
+        }
+    }
+
+    #[test]
+    fn validate_ref_value_boundary_dash_and_colon_and_refspec() {
+        // spec: DSC-66 - boundary cases the happy-path accept list does not pin.
+        //
+        // 1. A value that is *exactly* "-" is rejected (it is the leading-dash
+        //    class with nothing after it; git would read it as an option/stdin).
+        let err = validate_ref_value("-").unwrap_err();
+        assert!(
+            matches!(err, crate::error::MindError::InvalidRef { .. }),
+            "a bare '-' must be rejected, got: {err}"
+        );
+
+        // 2. A dash that is NOT leading must be ACCEPTED: the rule targets only
+        //    git-option-looking values, not legitimate refs containing '-'.
+        for good in ["x-y", "abc-", "feature-1", "a-b-c"] {
+            assert!(
+                validate_ref_value(good).is_ok(),
+                "non-leading dash must be allowed: {good:?}"
+            );
+        }
+
+        // 3. A full refspec-looking ref like refs/tags/v1 is a legitimate ref and
+        //    must be ACCEPTED (slashes are fine).
+        for good in [
+            "refs/tags/v1",
+            "refs/heads/main",
+            "refs/remotes/origin/main",
+        ] {
+            assert!(
+                validate_ref_value(good).is_ok(),
+                "refspec-looking ref must be allowed: {good:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_ref_value_accepts_colon_documenting_current_contract() {
+        // spec: DSC-66 - DSC-66 enumerates the rejected classes (empty,
+        // leading '-', whitespace, control chars, '..'). ':' is deliberately
+        // NOT in that set, so a colon-containing value is ACCEPTED. This is
+        // safe: every git call site either passes the value after a '--'
+        // end-of-options terminator (fetch) or as a positional tree-ish to
+        // checkout/reset where a ':' cannot form an option (the parse-time
+        // leading-dash check is the option barrier). A ':' could only corrupt a
+        // refspec into a src:dst form, which git rejects as an unknown ref - a
+        // correctness error surfaced by git, not an injection. This test pins
+        // the current contract so any future change (rejecting ':' or, worse,
+        // silently mangling it) is caught and forces a spec decision.
+        for accepted in ["a:b", "refs/tags/v1:refs/tags/v1", "feature/x:y"] {
+            assert!(
+                validate_ref_value(accepted).is_ok(),
+                "':' is not in the DSC-66 rejected set; {accepted:?} must pass"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_ref_value_rejects_empty() {
+        // spec: DSC-66 - empty value is always rejected.
+        let err = validate_ref_value("").unwrap_err();
+        assert!(
+            err.to_string().contains("empty"),
+            "error should mention 'empty': {err}"
+        );
+    }
+
+    #[test]
+    fn validate_ref_value_rejects_leading_dash() {
+        // spec: DSC-66 - a leading `-` looks like a git option and is rejected.
+        for bad in [
+            "--upload-pack=touch /tmp/pwned",
+            "-x",
+            "--no-tags",
+            "--depth=1",
+        ] {
+            let err = validate_ref_value(bad).unwrap_err();
+            assert!(
+                matches!(err, crate::error::MindError::InvalidRef { .. }),
+                "expected InvalidRef for {bad:?}, got: {err}"
+            );
+            assert!(
+                err.to_string().contains("'-'"),
+                "error should mention '-': {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_ref_value_rejects_whitespace() {
+        // spec: DSC-66 - whitespace in a ref value is rejected (spaces and tabs).
+        // Space is ASCII whitespace but not a control character; a value with a
+        // space is caught by the whitespace check and the error message says
+        // "whitespace".  Tab is an ASCII control character so it is caught
+        // earlier (the control-char check) and the message says "control
+        // characters".  Both must produce an InvalidRef error.
+        for bad in ["main branch", "v1.0 stable", "a b"] {
+            let err = validate_ref_value(bad).unwrap_err();
+            assert!(
+                matches!(err, crate::error::MindError::InvalidRef { .. }),
+                "expected InvalidRef for {bad:?}"
+            );
+            assert!(
+                err.to_string().contains("whitespace"),
+                "error should mention 'whitespace': {err}"
+            );
+        }
+        // Tab is caught by the control-char check (runs first).
+        let err = validate_ref_value("ref\twith\ttabs").unwrap_err();
+        assert!(
+            matches!(err, crate::error::MindError::InvalidRef { .. }),
+            "expected InvalidRef for tab-containing value"
+        );
+    }
+
+    #[test]
+    fn validate_ref_value_rejects_dotdot() {
+        // spec: DSC-66 - '..' is git range syntax and is rejected.
+        for bad in ["main..HEAD", "v1.0..v2.0", "a..b", "..HEAD"] {
+            let err = validate_ref_value(bad).unwrap_err();
+            assert!(
+                matches!(err, crate::error::MindError::InvalidRef { .. }),
+                "expected InvalidRef for {bad:?}"
+            );
+            assert!(
+                err.to_string().contains(".."),
+                "error should mention '..': {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_ref_value_rejects_control_chars() {
+        // spec: DSC-66 - ASCII control characters are rejected.
+        let nul = "\x00ref";
+        let err = validate_ref_value(nul).unwrap_err();
+        assert!(
+            matches!(err, crate::error::MindError::InvalidRef { .. }),
+            "expected InvalidRef for NUL-containing value"
+        );
+    }
+
+    #[test]
+    fn clone_at_ref_pin_succeeds_with_validated_sha() {
+        // spec: DSC-66 - `clone_at` with a Pin::Ref succeeds for a valid SHA
+        // against a local fixture repo.  Injection safety relies on
+        // `validate_ref_value` at parse time (no `--` in `git checkout <sha>`
+        // because that form would switch to path mode).
+        let base = tmpdir("dsc66-checkout");
+        let (remote, _a, sha_b, _c) = make_remote(&base);
+        let url = format!("file://{}", remote.display());
+
+        let dest = base.join("clone");
+        clone_at(&url, &dest, &Pin::Ref(sha_b.clone()))
+            .expect("clone_at Pin::Ref must succeed for a valid sha");
+
+        let got = read_head(&dest);
+        assert_eq!(got, sha_b, "clone_at must land on the pinned sha");
+
+        cleanup(&base);
+    }
+
+    #[test]
+    fn sync_to_pin_follow_branch_with_fetch_double_dash_succeeds() {
+        // spec: DSC-66 - the `--` inserted between `origin` and the branch name
+        // in `fetch --depth 1 origin -- <branch>` does not break the fetch.
+        // This is the one git subcommand where `--` correctly ends options
+        // before the refspec operand.
+        let base = tmpdir("dsc66-fetch-branch");
+        let (remote, sha_a, _b, sha_c) = make_remote(&base);
+        let url = format!("file://{}", remote.display());
+
+        let dest = base.join("clone");
+        clone_at(&url, &dest, &Pin::FollowBranch("stable".into())).unwrap();
+        assert_eq!(read_head(&dest), sha_a);
+
+        git(&remote, &["branch", "-f", "stable", &sha_c]);
+
+        sync_to_pin(&url, &dest, &Pin::FollowBranch("stable".into()))
+            .expect("fetch with -- terminator must succeed");
+        assert_eq!(
+            read_head(&dest),
+            sha_c,
+            "-- before the branch name must not disturb the fetch"
+        );
+
+        cleanup(&base);
+    }
+
+    #[test]
+    fn sync_to_pin_ref_succeeds_with_validated_sha() {
+        // spec: DSC-66 - `sync_to_pin` with Pin::Ref succeeds for a valid SHA.
+        // Injection safety relies on `validate_ref_value` at parse time; there
+        // is no `--` before the sha in `git reset --hard <sha>` because that
+        // form switches reset to path mode.
+        let base = tmpdir("dsc66-reset-ref");
+        let (remote, _a, sha_b, _c) = make_remote(&base);
+        let url = format!("file://{}", remote.display());
+
+        let dest = base.join("clone");
+        clone_at(&url, &dest, &Pin::Ref(sha_b.clone())).unwrap();
+        assert_eq!(read_head(&dest), sha_b);
+
+        // Add a new commit so the remote has advanced.
+        fs::write(remote.join("file.txt"), "version D").unwrap();
+        git(&remote, &["commit", "-aqm", "commit D"]);
+
+        sync_to_pin(&url, &dest, &Pin::Ref(sha_b.clone()))
+            .expect("sync_to_pin Pin::Ref must succeed for a valid sha");
+        assert_eq!(
+            read_head(&dest),
+            sha_b,
+            "sync_to_pin must stay on the pinned sha"
+        );
+
+        cleanup(&base);
+    }
+
+    #[test]
+    fn sync_to_pin_tag_with_fetch_double_dash_succeeds() {
+        // spec: DSC-66 - `sync_to_pin` with Pin::Tag succeeds.  The tag refspec
+        // is passed after `--` in the `git fetch` call (correct form); the
+        // `git reset --hard <tag>` call does NOT use `--` (that would switch to
+        // path mode).  Injection safety for the reset comes from
+        // `validate_ref_value` at parse time.
+        let base = tmpdir("dsc66-reset-tag");
+        let (remote, sha_a, _b, _c) = make_remote(&base);
+        let url = format!("file://{}", remote.display());
+
+        let dest = base.join("clone");
+        clone_at(&url, &dest, &Pin::Tag("v1.0".into())).unwrap();
+        assert_eq!(read_head(&dest), sha_a);
+
+        sync_to_pin(&url, &dest, &Pin::Tag("v1.0".into()))
+            .expect("tag sync with -- in fetch must succeed");
+        assert_eq!(
+            read_head(&dest),
+            sha_a,
+            "sync_to_pin must stay on the pinned tag"
+        );
+
+        cleanup(&base);
+    }
 
     #[test]
     fn noninteractive_env_disables_git_and_ssh_prompts() {

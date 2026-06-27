@@ -203,6 +203,17 @@ run = "make build"
   items) and cycle-safe by the DSC-38 guards, so a curated registry picks up
   sources added upstream without a re-meld. A nested source removed from the list
   is left registered (removal stays an explicit `unmeld`): `sync` only adds.
+- `DSC-66` Pin/ref values supplied in a `mind.toml` `[source]` or
+  `[[discover.sources]]` pin directive (`follow-branch`, `pin-tag`, `pin-ref`)
+  are validated at parse time before any git subprocess is invoked. A value that
+  is empty, begins with `-`, contains ASCII whitespace, contains control
+  characters, or contains `..` is rejected with `MindError::InvalidRef`. This
+  prevents argument injection: a malicious or misconfigured `mind.toml` shipped
+  by a melded super-source cannot inject git options (e.g.
+  `--upload-pack=touch /tmp/pwned`) into a child `git` process. At the git call
+  layer, a `--` end-of-options terminator is inserted before every positional
+  ref/branch/tag/sha argument so that git cannot interpret a value as an option
+  even if validation were bypassed.
 - `DSC-40` When a source's `[source].min-mind-version` is greater than the
   running `mind` version, melding or scanning that source is an error
   (`IncompatibleVersion`) rather than proceeding against a format it predates.

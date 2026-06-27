@@ -21,6 +21,35 @@ Use `mind config lobes add <path>` and `mind config lobes remove <path>` to
 manage lobes without hand-editing the file; see [Commands](commands.md) for the
 full verb list.
 
+## Absorb destination
+
+`mind absorb` moves an unmanaged item into a version-controlled source you own.
+The destination source is resolved from three places, in order -- the first one
+set wins:
+
+1. `--to <path>` flag on the command line.
+2. `MIND_ABSORB_TO` environment variable.
+3. `absorb_to` key in `~/.mind/config.toml`.
+
+When none of the three is set and the run is interactive, `absorb` prompts and
+offers `~/.mind/personal` as the default. That directory is created and
+`git init`-ed on demand if it does not exist. After an interactive resolution,
+`absorb` offers to save the chosen path as `absorb_to` in `config.toml` so
+future runs skip the prompt. A `--to` flag, `MIND_ABSORB_TO`, or an existing
+`absorb_to` value is used as-is and never triggers a save.
+
+A non-TTY run with no destination configured (none of the three sources set) is
+an error; there is no silent default to assume.
+
+Set the persistent default in `~/.mind/config.toml`:
+
+```toml
+absorb_to = "~/dev/my-agent-library"
+```
+
+`~` is expanded at use. The destination must be a git repository; a path that is
+not a git repo is an error.
+
 ## SSH cloning
 
 To authenticate with an SSH key instead of an https username/password, meld the
@@ -30,22 +59,24 @@ credential helper) as git normally does.
 
 ## Config example
 
-A single `~/.mind/config.toml` may contain both `lobes` and `ssh` together:
+A single `~/.mind/config.toml` may contain any combination of the keys:
 
 ```toml
 lobes = ["~/.claude", "~/.config/some-other-agent"]
 ssh = true
+absorb_to = "~/dev/my-agent-library"
 ```
 
 ## Paths
 
 ```
 ~/.mind/
-  config.toml                   persistent settings (lobes, ssh)
+  config.toml                   persistent settings (lobes, ssh, absorb_to)
   sources.json                  source registry (melded repos)
   manifest.json                 installed-item manifest and file registry
   sources/<host>/<owner>/<repo> clone of each melded repo
   store/<kind>/<name>/          installed copy of each item (name is effective)
+  personal/                     built-in absorb destination, created on demand
   .tmp/staging/                 scratch for new copies during transactional installs
   .tmp/backup/                  previous copy held during a swap, for rollback
   .lock                         global advisory lock

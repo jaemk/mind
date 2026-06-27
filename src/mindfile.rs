@@ -11,6 +11,7 @@ use std::path::Path;
 use serde::Deserialize;
 
 use crate::error::{MindError, Result};
+use crate::git::validate_ref_value;
 use crate::source::Pin;
 
 /// The lifecycle event a hook is bound to.
@@ -114,12 +115,15 @@ impl SourceMeta {
         // a useful error message naming both conflicting keys.
         let mut set: Vec<(&str, Pin)> = Vec::new();
         if let Some(b) = &self.follow_branch {
+            validate_ref_value(b)?;
             set.push(("follow-branch", Pin::FollowBranch(b.clone())));
         }
         if let Some(t) = &self.pin_tag {
+            validate_ref_value(t)?;
             set.push(("pin-tag", Pin::Tag(t.clone())));
         }
         if let Some(r) = &self.pin_ref {
+            validate_ref_value(r)?;
             set.push(("pin-ref", Pin::Ref(r.clone())));
         }
         match set.len() {
@@ -364,15 +368,18 @@ impl NestedSource {
     /// Accepts any of `follow-branch`, `pin-tag`, or `pin-ref` (DSC-59,
     /// DSC-41 one-of rule). Declaring more than one is a `MindToml` error.
     pub fn pin_directive(&self, toml_path: &Path) -> Result<Option<Pin>> {
-        // spec: DSC-59 DSC-65
+        // spec: DSC-59 DSC-65 DSC-66
         let mut set: Vec<(&str, Pin)> = Vec::new();
         if let Some(b) = &self.follow_branch {
+            validate_ref_value(b)?;
             set.push(("follow-branch", Pin::FollowBranch(b.clone())));
         }
         if let Some(t) = &self.pin_tag {
+            validate_ref_value(t)?;
             set.push(("pin-tag", Pin::Tag(t.clone())));
         }
         if let Some(r) = &self.pin_ref {
+            validate_ref_value(r)?;
             set.push(("pin-ref", Pin::Ref(r.clone())));
         }
         match set.len() {
@@ -1613,6 +1620,321 @@ mod tests {
         let ns = &parsed.discover.as_ref().unwrap().sources[0];
         let result = ns.pin_directive(Path::new("/super/mind.toml"));
         assert!(result.is_err(), "three pin directives must error");
+    }
+
+    // ----- DSC-66: pin value validation in SourceMeta -----
+
+    #[test]
+    fn source_meta_pin_rejects_leading_dash_in_follow_branch() {
+        // spec: DSC-66 — a [source] follow-branch value beginning with `-` is
+        // rejected at parse time to prevent git argument injection.
+        let meta = SourceMeta {
+            follow_branch: Some("--upload-pack=touch /tmp/pwned".into()),
+            ..Default::default()
+        };
+        let err = meta.pin_directive(Path::new("mind.toml")).unwrap_err();
+        assert!(
+            matches!(err, crate::error::MindError::InvalidRef { .. }),
+            "expected InvalidRef, got: {err}"
+        );
+    }
+
+    #[test]
+    fn source_meta_pin_rejects_leading_dash_in_pin_tag() {
+        // spec: DSC-66
+        let meta = SourceMeta {
+            pin_tag: Some("-malicious".into()),
+            ..Default::default()
+        };
+        let err = meta.pin_directive(Path::new("mind.toml")).unwrap_err();
+        assert!(
+            matches!(err, crate::error::MindError::InvalidRef { .. }),
+            "expected InvalidRef, got: {err}"
+        );
+    }
+
+    #[test]
+    fn source_meta_pin_rejects_leading_dash_in_pin_ref() {
+        // spec: DSC-66
+        let meta = SourceMeta {
+            pin_ref: Some("--no-tags".into()),
+            ..Default::default()
+        };
+        let err = meta.pin_directive(Path::new("mind.toml")).unwrap_err();
+        assert!(
+            matches!(err, crate::error::MindError::InvalidRef { .. }),
+            "expected InvalidRef, got: {err}"
+        );
+    }
+
+    #[test]
+    fn source_meta_pin_rejects_empty_follow_branch() {
+        // spec: DSC-66 — empty string is invalid.
+        let meta = SourceMeta {
+            follow_branch: Some("".into()),
+            ..Default::default()
+        };
+        let err = meta.pin_directive(Path::new("mind.toml")).unwrap_err();
+        assert!(
+            matches!(err, crate::error::MindError::InvalidRef { .. }),
+            "expected InvalidRef, got: {err}"
+        );
+    }
+
+    #[test]
+    fn source_meta_pin_accepts_valid_values() {
+        // spec: DSC-66 — well-formed values pass validation.
+        for (field, pin) in [
+            ("follow-branch", "main"),
+            ("pin-tag", "v2.0"),
+            ("pin-ref", "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"),
+        ] {
+            let meta = match field {
+                "follow-branch" => SourceMeta {
+                    follow_branch: Some(pin.into()),
+                    ..Default::default()
+                },
+                "pin-tag" => SourceMeta {
+                    pin_tag: Some(pin.into()),
+                    ..Default::default()
+                },
+                _ => SourceMeta {
+                    pin_ref: Some(pin.into()),
+                    ..Default::default()
+                },
+            };
+            assert!(
+                meta.pin_directive(Path::new("mind.toml")).is_ok(),
+                "expected ok for {field}={pin:?}"
+            );
+        }
+    }
+
+    // ----- DSC-66: pin value validation in NestedSource -----
+
+    #[test]
+    fn nested_source_pin_rejects_leading_dash_in_follow_branch() {
+        // spec: DSC-66 — a nested-source follow-branch beginning with `-` is
+        // rejected at parse time to prevent git argument injection.
+        let ns = NestedSource {
+            source: "x".into(),
+            alias: None,
+            install: false,
+            install_items: None,
+            follow_branch: Some("--upload-pack=touch /tmp/pwned".into()),
+            pin_tag: None,
+            pin_ref: None,
+            roots: None,
+            hooks: vec![],
+        };
+        let err = ns.pin_directive(Path::new("mind.toml")).unwrap_err();
+        assert!(
+            matches!(err, crate::error::MindError::InvalidRef { .. }),
+            "expected InvalidRef, got: {err}"
+        );
+    }
+
+    #[test]
+    fn nested_source_pin_rejects_leading_dash_in_pin_tag() {
+        // spec: DSC-66
+        let ns = NestedSource {
+            source: "x".into(),
+            alias: None,
+            install: false,
+            install_items: None,
+            follow_branch: None,
+            pin_tag: Some("-evil".into()),
+            pin_ref: None,
+            roots: None,
+            hooks: vec![],
+        };
+        let err = ns.pin_directive(Path::new("mind.toml")).unwrap_err();
+        assert!(
+            matches!(err, crate::error::MindError::InvalidRef { .. }),
+            "expected InvalidRef, got: {err}"
+        );
+    }
+
+    #[test]
+    fn nested_source_pin_rejects_leading_dash_in_pin_ref() {
+        // spec: DSC-66
+        let ns = NestedSource {
+            source: "x".into(),
+            alias: None,
+            install: false,
+            install_items: None,
+            follow_branch: None,
+            pin_tag: None,
+            pin_ref: Some("--depth=1".into()),
+            roots: None,
+            hooks: vec![],
+        };
+        let err = ns.pin_directive(Path::new("mind.toml")).unwrap_err();
+        assert!(
+            matches!(err, crate::error::MindError::InvalidRef { .. }),
+            "expected InvalidRef, got: {err}"
+        );
+    }
+
+    #[test]
+    fn nested_source_pin_rejects_whitespace_in_ref() {
+        // spec: DSC-66 — whitespace in a pin value is rejected.
+        let ns = NestedSource {
+            source: "x".into(),
+            alias: None,
+            install: false,
+            install_items: None,
+            follow_branch: Some("main branch".into()),
+            pin_tag: None,
+            pin_ref: None,
+            roots: None,
+            hooks: vec![],
+        };
+        let err = ns.pin_directive(Path::new("mind.toml")).unwrap_err();
+        assert!(
+            matches!(err, crate::error::MindError::InvalidRef { .. }),
+            "expected InvalidRef for whitespace in branch name, got: {err}"
+        );
+    }
+
+    #[test]
+    fn nested_source_pin_rejects_dotdot_in_ref() {
+        // spec: DSC-66 — '..' in a pin value (git range syntax) is rejected.
+        let ns = NestedSource {
+            source: "x".into(),
+            alias: None,
+            install: false,
+            install_items: None,
+            follow_branch: None,
+            pin_tag: None,
+            pin_ref: Some("main..HEAD".into()),
+            roots: None,
+            hooks: vec![],
+        };
+        let err = ns.pin_directive(Path::new("mind.toml")).unwrap_err();
+        assert!(
+            matches!(err, crate::error::MindError::InvalidRef { .. }),
+            "expected InvalidRef for '..' in ref, got: {err}"
+        );
+    }
+
+    #[test]
+    fn nested_source_pin_accepts_valid_values() {
+        // spec: DSC-66 — well-formed values pass.
+        let ns = NestedSource {
+            source: "x".into(),
+            alias: None,
+            install: false,
+            install_items: None,
+            follow_branch: None,
+            pin_tag: None,
+            pin_ref: Some("cafebabecafebabecafebabecafebabecafebabe".into()),
+            roots: None,
+            hooks: vec![],
+        };
+        assert!(
+            ns.pin_directive(Path::new("mind.toml")).is_ok(),
+            "valid SHA must pass pin validation"
+        );
+    }
+
+    // ----- DSC-66: end-to-end rejection from an on-disk untrusted mind.toml -----
+
+    /// Write `text` as `mind.toml` in a fresh temp dir and return the dir.
+    fn write_mind_toml(text: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("mind-dsc66-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("mind.toml"), text).unwrap();
+        dir
+    }
+
+    #[test]
+    fn untrusted_source_mind_toml_pin_is_rejected_before_any_git_call() {
+        // spec: DSC-66 - end-to-end: a malicious `[source]` pin shipped in a
+        // real on-disk mind.toml is rejected at parse time (load + pin_directive)
+        // with InvalidRef, BEFORE any git subprocess could run. This exercises
+        // the actual file-load entry point (MindToml::load), not a hand-built
+        // struct, so it proves the injection barrier sits ahead of the git layer.
+        for (field, payload) in [
+            ("follow-branch", "--upload-pack=touch /tmp/pwned"),
+            ("pin-tag", "--upload-pack=touch /tmp/pwned"),
+            ("pin-ref", "--upload-pack=touch /tmp/pwned"),
+        ] {
+            let dir = write_mind_toml(&format!("[source]\n{field} = \"{payload}\"\n"));
+            let parsed = MindToml::load(&dir)
+                .expect("load ok")
+                .expect("mind.toml present");
+            let err = parsed
+                .source
+                .pin_directive(&dir.join("mind.toml"))
+                .expect_err("malicious pin must be rejected");
+            assert!(
+                matches!(err, MindError::InvalidRef { .. }),
+                "expected InvalidRef for {field}={payload:?}, got: {err}"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn untrusted_nested_source_mind_toml_pin_is_rejected_before_any_git_call() {
+        // spec: DSC-66 - end-to-end for a curated super-source: a malicious pin on
+        // a `[[discover.sources]]` entry of a real on-disk mind.toml is rejected at
+        // parse time with InvalidRef before any git subprocess. A super-source's
+        // mind.toml is attacker-controlled content, so this is the headline threat.
+        for (field, payload) in [
+            ("follow-branch", "--upload-pack=touch /tmp/pwned"),
+            ("pin-tag", "-x"),
+            ("pin-ref", "main..HEAD"),
+        ] {
+            let dir = write_mind_toml(&format!(
+                "[[discover.sources]]\nsource = \"github:owner/repo\"\n{field} = \"{payload}\"\n"
+            ));
+            let parsed = MindToml::load(&dir)
+                .expect("load ok")
+                .expect("mind.toml present");
+            let ns = &parsed.discover.as_ref().unwrap().sources[0];
+            let err = ns
+                .pin_directive(&dir.join("mind.toml"))
+                .expect_err("malicious nested pin must be rejected");
+            assert!(
+                matches!(err, MindError::InvalidRef { .. }),
+                "expected InvalidRef for nested {field}={payload:?}, got: {err}"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn untrusted_mind_toml_with_legitimate_pin_loads_and_resolves() {
+        // spec: DSC-66 - the validation barrier must not over-reject: a real
+        // on-disk mind.toml carrying a legitimate pin (branch with a slash, a
+        // dotted tag, a 40-hex sha) loads and resolves to the expected Pin.
+        let cases = [
+            (
+                "follow-branch = \"release/2.0\"",
+                Pin::FollowBranch("release/2.0".into()),
+            ),
+            ("pin-tag = \"v1.2.3\"", Pin::Tag("v1.2.3".into())),
+            (
+                "pin-ref = \"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\"",
+                Pin::Ref("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef".into()),
+            ),
+        ];
+        for (line, expect) in cases {
+            let dir = write_mind_toml(&format!("[source]\n{line}\n"));
+            let parsed = MindToml::load(&dir).unwrap().unwrap();
+            let pin = parsed
+                .source
+                .pin_directive(&dir.join("mind.toml"))
+                .expect("legitimate pin must resolve");
+            assert_eq!(pin, Some(expect), "for line {line:?}");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 
     #[test]

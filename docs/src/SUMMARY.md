@@ -12,6 +12,7 @@
 - [Configuration](configuration.md)
 - [Managed policy](policy.md)
 - [Unmanaged items](unmanaged.md)
+- [absorb](absorb.md)
 - [Install hooks](install-hooks.md)
 - [Troubleshooting](troubleshooting.md)
 

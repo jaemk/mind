@@ -47,7 +47,7 @@ roots = ["packages"]                     # scan under these dirs, not the repo r
 
 - **`prefix`**: every item installs as `<prefix>-<name>` (identity, store path,
   symlink, and ref). A consumer's `meld --as <prefix>` overrides it; `meld --as ''`
-  removes it. See [namespacing](https://github.com/jaemk/mind/blob/main/spec/namespacing.md).
+  removes it. See [namespacing](namespacing.md).
 - **`install`** (deprecated): a shell command run once on `meld`, after checkout,
   to build or install the tooling the source's items rely on. It is disclosed and
   prompted before it runs (`--dangerously-skip-install-hook-check` runs it
@@ -133,7 +133,9 @@ present, supplies metadata), not an anchor file.
 A repo can list other repos to meld, acting as a curated registry. Melding it
 recursively melds each listed source (skipping any already registered; cycles
 terminate). Each nested source is registered independently and tracks its own
-upstream commit.
+upstream commit. `mind dump` generates exactly this shape of `mind.toml` from
+your installed state, so you can author a super-source automatically rather than
+by hand (see [dump](commands.md#dump)).
 
 ```toml
 [discover]
@@ -158,20 +160,27 @@ install = true
 - **`install`** (default `false`): when `true`, melding the super-source offers
   that nested source's items for install (the same preview-and-prompt as the
   top-level source), instead of leaving them registered but not installed.
+- **`install-items`**: a list of bare `kind:name` refs selecting only a subset of
+  the nested source's items to offer for install, e.g.
+  `install-items = ["skill:review", "agent:dev"]`. `install = true` and a
+  non-empty `install-items` are mutually exclusive (declaring both is an error).
+  The empty-list form (`install-items = []`) is never used in practice; that case
+  is `install = false`.
 
 By default a melded super-source registers the whole chain but installs only its
-own items plus the `install = true` entries. `meld --recursive` (`-r`) offers
-every nested source for install.
+own items plus the `install = true` (or `install-items`) entries.
+`meld --recursive` (`-r`) offers every nested source for install.
 
 ### Adopting un-onboarded sources (DSC-59/60/61)
 
 A `[[discover.sources]]` entry may supply configuration for a nested source that
 has no `mind.toml` of its own:
 
-- **`follow-branch`**: track a branch as that source's pin directive. `sync`
-  follows it, the same as if the source had declared `follow-branch` in its own
-  `[source]` table (DSC-41). A consumer's explicit `meld --follow-branch` (or
-  other pin flag) still overrides this.
+- **`follow-branch`** / **`pin-tag`** / **`pin-ref`**: curator-supplied pin
+  directive for the nested source. Declare at most one; two is an error. `sync`
+  uses whichever is set, the same as if the source had declared it in its own
+  `[source]` table (DSC-41). A consumer's explicit `meld --follow-branch`,
+  `--pin-tag`, or `--pin-ref` still overrides this.
 - **`roots`**: convention scan roots for the nested source, for a monorepo or
   subtree layout (DSC-50).
 - **`[[discover.sources.hooks]]`**: one or more hooks to run for the nested
@@ -180,7 +189,7 @@ has no `mind.toml` of its own:
   run under the same disclosure and safety prompt as the source's own hooks
   (including the non-TTY skip and `--dangerously-skip-install-hook-check`).
 
-These three fields apply ONLY when the nested source ships no `mind.toml`. If the
+These fields apply ONLY when the nested source ships no `mind.toml`. If the
 nested source has a `mind.toml`, that file is authoritative for its pin, roots,
 and hooks, and the curator-supplied values are ignored (a warning is emitted). The
 gate is whole-file: a nested `mind.toml`, even one that does not declare a
@@ -230,12 +239,12 @@ description = "Curated agent registry"
 
 [discover]
 sources = [
-  { source = "jaemk/agents" },
+  { source = "acme/agents" },
   { source = "acme/skills", as = "acme", install = true },
 ]
 ```
 
-Melding it registers `jaemk/agents` and `acme/skills` (the latter namespaced
+Melding it registers `acme/agents` and `acme/skills` (the latter namespaced
 `acme-` and offered for install). It has no items of its own, so without
 `install = true` (or `meld --recursive`) nothing installs; `mind probe` browses
 what the chain offers.

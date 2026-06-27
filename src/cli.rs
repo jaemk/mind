@@ -428,14 +428,16 @@ pub enum Command {
     /// installs it via `learn`. After absorb the item is an ordinary managed item.
     ///
     /// The destination source is resolved from, in precedence order:
-    ///   1. `--to <path>` (this flag)
+    ///   1. `--to <path>` (this flag) takes precedence over all others
     ///   2. `MIND_ABSORB_TO` environment variable
     ///   3. `absorb_to` key in `~/.mind/config.toml`
     ///
     /// If none of these is set and the run is interactive, `absorb` prompts for
     /// a destination and offers `~/.mind/personal` as the built-in default,
-    /// creating and `git init`-ing it on demand. In a non-interactive (non-TTY)
-    /// run with no destination configured, `absorb` refuses with an error.
+    /// creating and `git init`-ing it on demand. Passing `--yes` with no configured
+    /// destination automatically uses (and persists) `~/.mind/personal` without
+    /// prompting. In a non-interactive (non-TTY) run with no destination configured,
+    /// `absorb` refuses with an error.
     Absorb {
         /// The unmanaged item ref: `name`, `skill:name`, `agent:name`, or
         /// `rule:name`. A kind prefix disambiguates when the same name exists

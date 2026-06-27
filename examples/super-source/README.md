@@ -77,6 +77,10 @@ mind meld <path-or-repo>      # registers this repo and the whole chain
 mind probe                    # browse what the chain offers
 ```
 
+`mind dump` generates a `mind.toml` of exactly this shape from an existing
+installed setup, so you can produce a super-source automatically rather than
+hand-authoring one.
+
 ## Verified
 
 `tests/cli.rs::example_super_source_validates` runs `review` on this directory

@@ -69,7 +69,31 @@ When a bare name matches both a managed and an unmanaged item, add a kind prefix
 to disambiguate (for example `skill:review` vs `agent:review`). See
 [Commands](commands.md) for the full `forget` verb reference.
 
-## Planned
+## Bulk removal of unmanaged items
 
-`forget --unmanaged [glob]` for bulk removal of unmanaged items is planned but
-not yet available (spec UNM-7, UNM-8).
+```
+mind forget --unmanaged [<ref>]
+```
+
+`--unmanaged` scopes removal to unmanaged lobe items only -- the deliberate
+opt-in inverse of the default, where a glob matches managed items only.
+Managed (`mind`-installed) items are never matched in this mode; it cannot
+delete a `mind`-installed link or store copy.
+
+**Ref forms.**
+
+- With a glob `<ref>` (e.g. `'skill:*'`), every matching unmanaged item is
+  removed. A kind prefix composes with the glob.
+- With an exact `kind:name`, that single item is removed.
+- With no `<ref>`, every unmanaged item across all configured lobes is removed.
+
+A `<ref>` that matches no unmanaged item is an error.
+
+**Confirmation.** Before removing anything, `mind` lists all matched items and
+asks once to confirm, making clear these are not managed by `mind` and that
+removal deletes the user's own files or directories (not symlinks). `--yes`
+(`-y`) skips the prompt. A non-TTY run without `--yes` refuses with
+`ConfirmationRequired` and removes nothing.
+
+The manifest is not touched; these items were never in it. The `--force` /
+clobber flags do not apply.

@@ -276,6 +276,11 @@ pub enum MindError {
     )]
     DestinationNotRepo { path: String },
 
+    /// DSC-66: a pin/ref value that would be misinterpreted as a git option was
+    /// rejected at parse time before it could reach a git subprocess.
+    #[error("invalid ref value '{value}': {reason}")]
+    InvalidRef { value: String, reason: String },
+
     /// ABS-6: the destination already contains an item at the convention path.
     #[error("destination already has {kind}:{name} at {dest_path}; use --force to overwrite")]
     AbsorbCollision {

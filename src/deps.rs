@@ -81,6 +81,14 @@ fn item_edges(
     // qualified entries (`owner/repo#name`) are skipped here; they are
     // rejected at install/review (DEP-5/6) but do not contribute edges in
     // the pure resolver.
+    //
+    // DEP-6: a bare `requires` name that matches more than one kind is
+    // ambiguous and is rejected as `BadReference` at install time (see
+    // install.rs `matches.len() > 1 && r.kind.is_none()`). The resolver
+    // must not fan out to all matching kinds for requires entries: an
+    // ambiguous bare name emits NO edge here, consistent with the install
+    // guard that prevents such an item from ever reaching the installed
+    // graph. Only `{{ns:name}}` tokens legitimately match all kinds (DEP-3).
     for entry in &item.requires {
         let Ok(r) = crate::resolve::parse_item_ref(entry) else {
             continue;
@@ -92,6 +100,14 @@ fn item_edges(
         // Resolve against siblings in the same source, narrowing by kind
         // when a kind prefix was supplied (DEP-5).
         if let Some(matches) = by_name.get(&(item.source.as_str(), r.name.as_str())) {
+            // DEP-6: a bare name (no kind prefix) matching more than one
+            // sibling is ambiguous -- skip it entirely. Install would have
+            // already rejected such an item, so this branch is dead for
+            // any item that actually reached the installed graph; emitting
+            // phantom multi-kind edges here would be incorrect.
+            if r.kind.is_none() && matches.len() > 1 {
+                continue;
+            }
             for &m in matches {
                 let candidate = &items[m];
                 // Narrow by kind if the ref specifies one (DEP-5).
@@ -471,6 +487,9 @@ pub fn installed_graph(
         .collect();
 
     // Build key -> index for the installed node set.
+    // Used both for InstalledGraph::key_to_idx lookups and to translate
+    // full-catalog dep indices to installed-node indices (was previously two
+    // byte-identical maps; now one map serves both purposes).
     let key_to_idx: HashMap<String, usize> = nodes
         .iter()
         .enumerate()
@@ -484,14 +503,7 @@ pub fn installed_graph(
     // For each installed node, compute its direct dependency edges, then keep
     // only those that are also installed.
     let mut edges: Vec<Vec<usize>> = vec![Vec::new(); nodes.len()];
-    // Build a parallel index map: full-catalog index -> installed-node index.
-    let full_key_to_installed: HashMap<String, usize> = nodes
-        .iter()
-        .enumerate()
-        .map(|(installed_i, it)| (it.key(), installed_i))
-        .collect();
 
-    // We need to call item_edges using the full catalog indices, then translate.
     // Build a map from installed node key -> full catalog index.
     let installed_to_full: HashMap<String, usize> = items
         .iter()
@@ -510,7 +522,7 @@ pub fn installed_graph(
 
         for dep_full_idx in dep_full_indices {
             let dep_key = items[dep_full_idx].key();
-            if let Some(&dep_installed_i) = full_key_to_installed.get(&dep_key)
+            if let Some(&dep_installed_i) = key_to_idx.get(&dep_key)
                 && dep_installed_i != installed_i
                 && !edges[installed_i].contains(&dep_installed_i)
             {
@@ -1253,10 +1265,16 @@ mod tests {
     }
 
     #[test]
-    fn requires_bare_name_resolves_across_all_kinds() {
-        // spec: DEP-4 DEP-5
-        // A bare `name` in `requires` (no kind prefix) resolves to every sibling
-        // sharing that name, across all kinds, the same way {{ns:name}} does.
+    fn requires_ambiguous_bare_name_emits_no_edge() {
+        // spec: DEP-5 DEP-6
+        // A bare `name` in `requires` that matches MORE THAN ONE kind is
+        // ambiguous. DEP-6 mandates this is a BadReference at install time
+        // (install.rs: `matches.len() > 1 && r.kind.is_none()`). The resolver
+        // must NOT silently fan out to all matching kinds for requires entries;
+        // it skips the ambiguous entry and emits NO edge. Only {{ns:name}} tokens
+        // legitimately match all kinds (DEP-3). An item with such an ambiguous
+        // bare requires can never reach the installed graph (install refuses it),
+        // so the resolver's skip keeps it consistent with that guard.
         let mut skill = item(ItemKind::Skill, "root", "s");
         skill.requires = vec!["shared".to_string()];
         let items = vec![
@@ -1268,10 +1286,70 @@ mod tests {
         let r = resolve(&items, &[0], &no_installed(), reader(HashMap::new()));
 
         let order = r.install_order().to_vec();
-        // Both `shared` kinds must precede the root.
+        // The ambiguous bare requires entry must produce NO edges: neither
+        // shared sibling is pulled in.
+        assert!(
+            !order.contains(&1) && !order.contains(&2),
+            "ambiguous bare requires must not fan out to all kinds: {order:?}"
+        );
+        assert_eq!(
+            order,
+            vec![0],
+            "only root installs when requires is ambiguous: {order:?}"
+        );
+        assert!(!r.adds_dependencies());
+    }
+
+    #[test]
+    fn requires_bare_name_unique_match_resolves_to_single_edge() {
+        // spec: DEP-5 DEP-6
+        // A bare `name` in `requires` that matches exactly ONE sibling (unique,
+        // not ambiguous) resolves to that single edge. DEP-6 only prohibits the
+        // ambiguous case; a unique bare name is valid and pulls the one match.
+        let mut skill = item(ItemKind::Skill, "root", "s");
+        skill.requires = vec!["only".to_string()];
+        let items = vec![
+            skill,
+            item(ItemKind::Agent, "only", "s"), // only one sibling named "only"
+            item(ItemKind::Agent, "other", "s"),
+        ];
+
+        let r = resolve(&items, &[0], &no_installed(), reader(HashMap::new()));
+
+        let order = r.install_order().to_vec();
+        assert!(
+            order.contains(&1),
+            "unique bare requires must pull the match: {order:?}"
+        );
+        assert!(
+            !order.contains(&2),
+            "unrelated sibling must not be pulled: {order:?}"
+        );
+        assert_eq!(order, vec![1, 0], "dep (1) before root (0): {order:?}");
+        assert!(r.adds_dependencies());
+    }
+
+    #[test]
+    fn token_ambiguous_bare_name_still_matches_all_kinds() {
+        // spec: DEP-3
+        // A {{ns:name}} token with a name shared by two kinds must still resolve
+        // to BOTH siblings (multi-kind matching is correct for tokens, per DEP-3).
+        // This test proves that the DEP-6 ambiguity fix for requires entries did
+        // NOT regress token behavior.
+        let items = vec![
+            item(ItemKind::Skill, "root", "s"),
+            item(ItemKind::Agent, "shared", "s"),
+            item(ItemKind::Rule, "shared", "s"),
+        ];
+        let mut content = HashMap::new();
+        content.insert("skill:root".into(), "{{ns:shared}}".into());
+
+        let r = resolve(&items, &[0], &no_installed(), reader(content));
+
+        let order = r.install_order().to_vec();
         assert!(
             order.contains(&1) && order.contains(&2),
-            "both shared siblings pulled: {order:?}"
+            "{{{{ns:shared}}}} token must match BOTH kinds (DEP-3): {order:?}"
         );
         assert_eq!(*order.last().unwrap(), 0, "root is last: {order:?}");
     }
@@ -2642,6 +2720,223 @@ mod tests {
                 "every installed item must appear: missing {k}"
             );
         }
+    }
+
+    // ---- DEP-6 ambiguity fix: certified at EVERY consumer of item_edges -----
+
+    #[test]
+    fn direct_dependency_keys_ambiguous_bare_requires_emits_no_key() {
+        // spec: DEP-5 DEP-6
+        // The DEP-6 ambiguity skip must hold at the `direct_dependency_keys`
+        // consumer (the DEP-62 probe --json adjacency primitive), not only inside
+        // resolve(). A bare `requires` name matching >1 kind is ambiguous and must
+        // yield NO key: neither same-named sibling is reported as a dependency.
+        // (install.rs makes this a hard BadReference, so it can never actually
+        // install; the adjacency view must agree by emitting nothing.)
+        let mut skill = item(ItemKind::Skill, "root", "s");
+        skill.requires = vec!["shared".to_string()];
+        let items = vec![
+            skill,
+            item(ItemKind::Agent, "shared", "s"),
+            item(ItemKind::Rule, "shared", "s"),
+        ];
+        let read = reader(HashMap::new());
+        let keys = direct_dependency_keys(&items[0], &items, &read);
+        assert!(
+            keys.is_empty(),
+            "ambiguous bare requires must yield no adjacency key: {keys:?}"
+        );
+    }
+
+    #[test]
+    fn direct_dependency_keys_unique_bare_requires_emits_single_key() {
+        // spec: DEP-5 DEP-6
+        // The non-ambiguous companion: a bare `requires` name that matches exactly
+        // ONE sibling resolves to that one key at the adjacency consumer. This pins
+        // that the DEP-6 skip is scoped to the >1-match case and does not over-fire
+        // on a unique bare name.
+        let mut skill = item(ItemKind::Skill, "root", "s");
+        skill.requires = vec!["only".to_string()];
+        let items = vec![
+            skill,
+            item(ItemKind::Agent, "only", "s"),
+            item(ItemKind::Agent, "other", "s"),
+        ];
+        let read = reader(HashMap::new());
+        let keys = direct_dependency_keys(&items[0], &items, &read);
+        assert_eq!(
+            keys,
+            vec!["agent:only".to_string()],
+            "unique bare requires must resolve to exactly one key: {keys:?}"
+        );
+    }
+
+    #[test]
+    fn direct_dependency_keys_kind_qualified_requires_beats_same_named_other_kind() {
+        // spec: DEP-5
+        // A `kind:name` requires entry resolves to that specific kind even when a
+        // same-named item of ANOTHER kind exists (which would make a bare name
+        // ambiguous). The kind prefix disambiguates, so exactly the named-kind key
+        // is reported and the other kind is not.
+        let mut skill = item(ItemKind::Skill, "root", "s");
+        skill.requires = vec!["rule:shared".to_string()];
+        let items = vec![
+            skill,
+            item(ItemKind::Agent, "shared", "s"),
+            item(ItemKind::Rule, "shared", "s"),
+        ];
+        let read = reader(HashMap::new());
+        let keys = direct_dependency_keys(&items[0], &items, &read);
+        assert_eq!(
+            keys,
+            vec!["rule:shared".to_string()],
+            "kind-qualified requires must pick exactly that kind: {keys:?}"
+        );
+    }
+
+    #[test]
+    fn installed_graph_ambiguous_bare_requires_yields_no_edge() {
+        // spec: DEP-5 DEP-6
+        // The DEP-6 ambiguity skip must hold inside installed_graph too: an
+        // installed item whose bare `requires` name matches >1 installed kind must
+        // contribute NO edge to the installed graph. Both same-named siblings are
+        // installed (so the full-catalog match count is >1), yet neither becomes a
+        // dependency edge. dependents() of each shared sibling is empty, and the
+        // root nests nothing.
+        let mut root = item(ItemKind::Skill, "root", "s");
+        root.requires = vec!["shared".to_string()];
+        let items = vec![
+            root,
+            item(ItemKind::Agent, "shared", "s"),
+            item(ItemKind::Rule, "shared", "s"),
+        ];
+        let mut installed_keys = HashSet::new();
+        installed_keys.insert("skill:root".to_string());
+        installed_keys.insert("agent:shared".to_string());
+        installed_keys.insert("rule:shared".to_string());
+
+        let g = installed_graph(&items, &installed_keys, reader(HashMap::new()));
+        // No edge means neither shared sibling has `root` as a dependent.
+        assert!(
+            g.dependents("agent:shared").is_empty(),
+            "ambiguous bare requires must not edge to agent:shared: {:?}",
+            g.dependents("agent:shared")
+        );
+        assert!(
+            g.dependents("rule:shared").is_empty(),
+            "ambiguous bare requires must not edge to rule:shared: {:?}",
+            g.dependents("rule:shared")
+        );
+        // With no edges at all, every node is its own in-degree-0 root: root and
+        // both shared siblings appear as bare top-level lines, none nested.
+        let forest = g.render_forest();
+        assert_eq!(
+            forest, "- skill:root\n- agent:shared\n- rule:shared\n",
+            "ambiguous bare requires produces a flat forest (no edges): {forest:?}"
+        );
+    }
+
+    #[test]
+    fn installed_graph_unique_bare_requires_yields_one_edge() {
+        // spec: DEP-5 DEP-6
+        // The non-ambiguous companion at the installed_graph consumer: a bare
+        // `requires` name matching exactly one installed sibling forms one edge.
+        let mut root = item(ItemKind::Skill, "root", "s");
+        root.requires = vec!["only".to_string()];
+        let items = vec![root, item(ItemKind::Agent, "only", "s")];
+        let mut installed_keys = HashSet::new();
+        installed_keys.insert("skill:root".to_string());
+        installed_keys.insert("agent:only".to_string());
+
+        let g = installed_graph(&items, &installed_keys, reader(HashMap::new()));
+        assert_eq!(
+            g.dependents("agent:only"),
+            vec!["skill:root".to_string()],
+            "unique bare requires must form one edge in the installed graph"
+        );
+        assert_eq!(
+            g.render_forest(),
+            "- skill:root\n  - agent:only\n",
+            "unique bare requires nests the single dep under root"
+        );
+    }
+
+    #[test]
+    fn token_and_requires_ambiguity_split_proven_in_one_scenario() {
+        // spec: DEP-3 DEP-5 DEP-6
+        // The split is load-bearing: in the SAME catalog (a skill with both a
+        // {{ns:shared}} token AND a bare `requires: shared`, where `shared` names
+        // both an agent and a rule), the token must fan out to BOTH kinds (DEP-3)
+        // while the bare requires must contribute NOTHING (DEP-6). The deduped
+        // union is therefore exactly the two token-matched siblings -- the requires
+        // entry adds no third behavior and does not suppress the token edges.
+        // Proving both halves against one item pins that token vs requires diverge.
+        let mut skill = item(ItemKind::Skill, "root", "s");
+        skill.requires = vec!["shared".to_string()];
+        let items = vec![
+            skill,
+            item(ItemKind::Agent, "shared", "s"),
+            item(ItemKind::Rule, "shared", "s"),
+        ];
+        let mut content = HashMap::new();
+        content.insert("skill:root".into(), "{{ns:shared}}".into());
+
+        // Adjacency view: exactly the two token-matched kinds, in discovery order.
+        let read = reader(content.clone());
+        let mut keys = direct_dependency_keys(&items[0], &items, &read);
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec!["agent:shared".to_string(), "rule:shared".to_string()],
+            "token fans out to both kinds; ambiguous requires adds nothing: {keys:?}"
+        );
+
+        // Resolution view: both siblings pulled, root last, no third edge.
+        let r = resolve(&items, &[0], &no_installed(), reader(content));
+        let order = r.install_order().to_vec();
+        assert_eq!(
+            order.len(),
+            3,
+            "only the two token deps plus root: {order:?}"
+        );
+        assert!(
+            order.contains(&1) && order.contains(&2),
+            "token must pull both kinds (DEP-3): {order:?}"
+        );
+        assert_eq!(*order.last().unwrap(), 0, "root installs last: {order:?}");
+    }
+
+    #[test]
+    fn installed_graph_prefixed_ambiguous_bare_requires_yields_no_edge() {
+        // spec: DEP-5 DEP-6
+        // The DEP-6 skip and the prefixed effective-key edge translation interact
+        // correctly: a PREFIXED installed item with a bare `requires` matching >1
+        // prefixed kind still emits no edge. This guards the map-dedupe path in
+        // installed_graph (effective-key lookup) against accidentally resurrecting
+        // an ambiguous edge once names are prefixed.
+        let mut root = item(ItemKind::Skill, "root", "s");
+        root.prefix = Some("jk".to_string());
+        root.requires = vec!["shared".to_string()];
+        let mut a = item(ItemKind::Agent, "shared", "s");
+        a.prefix = Some("jk".to_string());
+        let mut ru = item(ItemKind::Rule, "shared", "s");
+        ru.prefix = Some("jk".to_string());
+        let items = vec![root, a, ru];
+        let mut installed_keys = HashSet::new();
+        installed_keys.insert("skill:jk-root".to_string());
+        installed_keys.insert("agent:jk-shared".to_string());
+        installed_keys.insert("rule:jk-shared".to_string());
+
+        let g = installed_graph(&items, &installed_keys, reader(HashMap::new()));
+        assert!(
+            g.dependents("agent:jk-shared").is_empty() && g.dependents("rule:jk-shared").is_empty(),
+            "ambiguous bare requires must emit no edge even when prefixed"
+        );
+        assert_eq!(
+            g.render_forest(),
+            "- skill:jk-root\n- agent:jk-shared\n- rule:jk-shared\n",
+            "prefixed ambiguous requires yields a flat (edgeless) forest"
+        );
     }
 
     #[test]

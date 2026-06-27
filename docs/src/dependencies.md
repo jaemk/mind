@@ -8,10 +8,39 @@ one.
 
 ## What counts as a dependency
 
-A dependency is an intra-source reference: each sibling named by a `{{ns:name}}`
-token in the item's text files (the whole skill directory, or the agent/rule
-file). Dependencies never cross sources; `{{ns:}}` is always resolved within the
-one source (DEP-1, DEP-2).
+A dependency is an intra-source reference. There are two ways to declare one,
+and the closure that `learn` installs is their union.
+
+**`{{ns:name}}` tokens** -- a token appearing in the item's text files (the whole
+skill directory, or the agent/rule file) names a sibling as a dependency. This is
+the inline form: the reference lives in the prose and is also rewritten to the
+effective name on install. See [Namespacing](namespacing.md) for token expansion
+rules.
+
+**`requires:` frontmatter key** -- a top-level scalar in the item's frontmatter
+(`SKILL.md` for a skill, the `.md` for an agent or rule), listing
+whitespace-separated intra-source refs:
+
+```yaml
+---
+description: My skill
+requires: skill:plan agent:test
+---
+```
+
+This is the pure-metadata form: it adds a dependency edge without any prose
+reference. Use it when an item needs a sibling at runtime but does not mention it
+in its text.
+
+Each entry is either a qualified ref (`kind:name`, e.g. `skill:plan`) or a bare
+name. A bare name matches across kinds; if more than one sibling shares that bare
+name across different kinds, the ref is ambiguous and must be qualified. A
+source-qualified ref (`owner/repo#name`) is rejected -- `requires` is
+intra-source only. An entry that resolves to no sibling (typo, unknown item,
+ambiguous bare name, or source-qualified ref) is a hard error at install.
+
+Dependencies never cross sources; both `{{ns:}}` tokens and `requires:` entries
+are always resolved within the one source.
 
 ## Partial `learn` pulls in the closure
 

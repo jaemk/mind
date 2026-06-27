@@ -24,15 +24,17 @@
 | `mind init-source [<path>] [--template]` | scaffold `mind.toml` + report references; `--template` rewrites bare refs as `{{ns:}}` (maintainer) |
 | `mind unmeld <name> [--unlink-only] [--yes] [--uninstall-hook <cmd>] [--dangerously-skip-install-hook-check]` (alias `detach`) | drop a source and forget its items (`--unlink-only` keeps them) |
 | `mind learn [--yes] [-f\|--force] [-n\|--dry-run] [--all] <item>` | install a skill/agent/rule/tool (glob installs many); a partial selection also pulls in the source siblings it references. `--force` overwrites a conflicting non-mind link target (without it, a conflict prompts on a TTY); `--all` installs every item of the named source (shorthand for `<source>#*`); `-n`/`--dry-run` previews the dependency closure without installing anything |
-| `mind forget [--yes] <item>` (alias `unlearn`) | remove an installed item (glob removes many; a multi-match glob confirms first, `--yes` skips) |
+| `mind forget [--yes] [-f\|--force] [--unmanaged] [--dangerously-skip-install-hook-check] [<item>]` (alias `unlearn`) | remove an installed item (glob removes many; a multi-match glob confirms first, `--yes` skips). `--unmanaged` scopes removal to unmanaged lobe items only; with no `<item>`, removes every unmanaged item across all lobes. `-f`/`--force` skips the dependents confirmation when the item being removed has dependents. `--dangerously-skip-install-hook-check` runs uninstall hooks without the safety prompt |
 | `mind sync [--upgrade] [--dangerously-skip-install-hook-check]` | refresh every source (optionally upgrade after; flag allows unattended hook re-runs) |
 | `mind upgrade [--yes] [--dangerously-skip-install-hook-check] [item]` | upgrade installed items to their latest source version (re-runs install hooks on sources that advance) |
 | `mind evolve [--check] [--yes] [--version <v>]` | update the mind binary itself to the latest release (or --version) |
-| `mind recall [item] [--sources] [--kind K] [--source S] [--json]` | status: each source with its items, marked installed or available; `--sources` narrows to sources; `<item>` shows one item's details |
+| `mind recall [item] [--sources] [--kind K] [--source S] [--tree] [--json]` | status: each source with its items, marked installed or available; `--sources` narrows to sources; `<item>` shows one item's details; `--tree` renders installed items as a dependency forest (with an item ref, scopes to that item's subtree) |
 | `mind probe [query] [--kind K] [--source S] [--json] [--no-tui]` | browse and search items (interactive TUI on a terminal) |
 | `mind review <target> [--as <prefix>]` / `mind review --policy <path>` | validate a source for publishing, or validate a managed policy file (read-only) |
 | `mind introspect [--fix] [--json]` | report drift and broken links (optionally repair) |
 | `mind config show` / `mind config lobes add\|list\|remove <path>` | view config and manage agent homes (lobes); see [Configuration](configuration.md) for what lobes are |
+| `mind dump [--output <path>] [--whole-sources]` | write a super-source `mind.toml` reproducing the current melded and installed state (to stdout or `--output <path>`); each source is pinned to its recorded commit; item-filtered by default (`--whole-sources` emits `install = true` for every source regardless of install count) |
+| `mind absorb <ref> [--to <path>] [-f\|--force]` | claim a single unmanaged lobe item into a version-controlled source and install it as a managed item; `--to` sets the destination (see [absorb](absorb.md) for full destination precedence); `--force` overwrites a `kind:name` collision at the destination |
 | `mind completions <shell>` / `mind man` | shell completions / man page |
 
 A source repo exposes items by convention (`skills/<n>/SKILL.md`,
@@ -138,3 +140,34 @@ Install and uninstall hooks are skipped in non-TTY contexts and a note is
 printed. To run them unattended, pass `--dangerously-skip-install-hook-check`.
 This executes arbitrary code from the source; only use it for sources you trust
 (HOOK-22).
+
+## dump
+
+`mind dump` writes a super-source `mind.toml` to stdout (or `--output <path>`)
+that reproduces the current melded and installed state. Melding the output
+recreates the same source set at the same revisions. It is the inverse of
+melding a curated super-source.
+
+```
+mind dump                        # write to stdout
+mind dump --output snapshot.toml # write to a file
+mind dump --whole-sources        # include all items, not just installed ones
+```
+
+Each entry in the emitted `[discover].sources` references a melded source and
+pins it to its currently recorded commit as a `pin-ref`, overriding any pin the
+source itself declares (DUMP-1). The meld-time settings are carried through:
+prefix (`as`), scan `roots`, and the resolved commit pin (DUMP-4).
+
+**Item filtering.** By default each source entry is stamped with the install
+directive that reproduces exactly which items are installed (DUMP-2):
+
+- Every offered item installed: `install = true`
+- No items installed: `install = false`
+- A subset installed: `install_items = [...]` listing those items by `kind:name`
+
+`--whole-sources` disables this filtering and emits `install = true` for every
+source, offering the full catalog instead of the recorded subset (DUMP-3).
+
+With no melded sources, `dump` emits a valid super-source with an empty
+`[discover].sources` and exits 0 (DUMP-8).
