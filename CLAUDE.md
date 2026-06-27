@@ -92,7 +92,7 @@ Three layers, in precedence order:
 [source]
 description = "James's agent library"
 prefix = "jk"               # namespace: every item installs as jk-<name> (see below)
-min-mind-version = "0.2"    # reserved (version gate): parsed, not yet enforced
+min-mind-version = "0.2"    # version gate: meld refuses a source the binary is too old for (DSC-40)
 
 # Explicit inventory (authoritative). Omit [[items]] and [discover] to keep
 # convention scanning while still supplying [source] metadata.

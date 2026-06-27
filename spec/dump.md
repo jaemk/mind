@@ -1,6 +1,6 @@
 # Dump
 
-Status: planned. `dump` generates a super-source `mind.toml` from the current
+`dump` generates a super-source `mind.toml` from the current
 melded and installed state, so an agent home can be reproduced or shared by
 melding the output. It references and pins each melded source rather than
 inlining its inventory: the reproduced meld reads each source's own `mind.toml`.
