@@ -82,7 +82,7 @@ and verified.
 | Unmanaged lobe items: `recall`/`probe` listing + `forget` with a not-managed-by-mind warning | done | [unmanaged.md](unmanaged.md) (UNM-1..5) |
 | Unmanaged items in the `probe` TUI group node | done | UNM-6 |
 | `forget --unmanaged [glob]`: bulk-remove unmanaged lobe items (the default glob stays managed-only) | done | UNM-7, UNM-8 |
-| `absorb`: claim an unmanaged lobe item into a version-controlled source, then install it managed | planned | [absorb.md](absorb.md) |
+| `absorb`: claim an unmanaged lobe item into a version-controlled source, then install it managed | done | [absorb.md](absorb.md) |
 | `dump`: generate a pinned super-source `mind.toml` from the installed set (`--whole-sources`) | done | [dump.md](dump.md) |
 | `[discover].sources` `install_items`: install only a named subset of a nested source | done | DSC-62, DSC-63, DSC-64 |
 | TUI: keep the highlighted row in the middle two-thirds (scroll margin) | done | TUI-16 |

@@ -417,6 +417,41 @@ pub enum Command {
         #[arg(long = "whole-sources")]
         whole_sources: bool,
     },
+
+    /// Claim an unmanaged lobe item into a version-controlled source and install
+    /// it as a managed item (the constructive inverse of `forget --unmanaged`).
+    ///
+    /// Resolves <ref> to a single unmanaged item (an exact `kind:name`; a kind
+    /// prefix disambiguates across kinds). Moves the item to the destination source
+    /// at the convention path for its kind (`skills/<name>/`, `agents/<name>.md`,
+    /// `rules/<name>.md`), commits it, melds the source if not yet registered, and
+    /// installs it via `learn`. After absorb the item is an ordinary managed item.
+    ///
+    /// The destination source is resolved from, in precedence order:
+    ///   1. `--to <path>` (this flag)
+    ///   2. `MIND_ABSORB_TO` environment variable
+    ///   3. `absorb_to` key in `~/.mind/config.toml`
+    ///
+    /// If none of these is set and the run is interactive, `absorb` prompts for
+    /// a destination and offers `~/.mind/personal` as the built-in default,
+    /// creating and `git init`-ing it on demand. In a non-interactive (non-TTY)
+    /// run with no destination configured, `absorb` refuses with an error.
+    Absorb {
+        /// The unmanaged item ref: `name`, `skill:name`, `agent:name`, or
+        /// `rule:name`. A kind prefix disambiguates when the same name exists
+        /// across kinds. Glob refs are rejected (absorb claims exactly one item).
+        item_ref: String,
+
+        /// Destination source directory. Takes precedence over `MIND_ABSORB_TO`
+        /// and the `absorb_to` key in `config.toml`.
+        #[arg(long, value_name = "PATH")]
+        to: Option<String>,
+
+        /// Overwrite the destination convention path if it already exists
+        /// (a `kind:name` collision). Without `--force`, a collision is an error.
+        #[arg(short = 'f', long)]
+        force: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]

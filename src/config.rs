@@ -23,6 +23,13 @@ pub struct Config {
     /// are unaffected. Default false (https).
     #[serde(default)]
     pub ssh: bool,
+
+    /// Default destination source for `absorb` (ABS-2). When set, `absorb` uses
+    /// this path as the destination unless `--to` or `MIND_ABSORB_TO` is given.
+    /// Saved interactively when the user chooses a destination via the ABS-3 prompt
+    /// and confirms saving (ABS-4). `~` is expanded at use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub absorb_to: Option<String>,
 }
 
 impl Config {

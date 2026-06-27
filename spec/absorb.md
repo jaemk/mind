@@ -1,6 +1,6 @@
 # Absorb
 
-Status: planned. An agent home often holds skills, agents, and rules that `mind`
+Status: done. An agent home often holds skills, agents, and rules that `mind`
 did not install: files a user wrote by hand, or items another installer dropped
 in (unmanaged.md UNM-1). `forget --unmanaged` (UNM-7) deletes them; `absorb` is
 the constructive inverse. It claims one unmanaged item into a version-controlled

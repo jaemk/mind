@@ -2096,6 +2096,395 @@ fn item_catalog_match<'a>(
         .find(|c| c.kind == item.kind && c.name == item.bare_name && c.source == item.source)
 }
 
+/// Derive the convention path for a `(kind, name)` pair within a source root,
+/// relative to that root. Used by `absorb` to know where to move an item.
+///
+/// - skill  -> `skills/<name>/`  (returns a directory path)
+/// - agent  -> `agents/<name>.md`
+/// - rule   -> `rules/<name>.md`
+fn convention_path_in_root(
+    root: &std::path::Path,
+    kind: ItemKind,
+    name: &str,
+) -> std::path::PathBuf {
+    match kind {
+        ItemKind::Skill => root.join("skills").join(name),
+        ItemKind::Agent => root.join("agents").join(format!("{name}.md")),
+        ItemKind::Rule => root.join("rules").join(format!("{name}.md")),
+        ItemKind::Tool => panic!("tools are never unmanaged; absorb should not reach this"),
+    }
+}
+
+/// Resolve the FIRST effective scan root for a source at `dest_path`.
+/// Mirrors catalog.rs ~:208-219 (DSC-50): `[source].roots` in `mind.toml`, or the
+/// repo root if unset. Consumer `--root` overrides are not relevant here since
+/// the destination may not be melded yet; we use the repo's own declaration.
+fn first_scan_root(dest_path: &std::path::Path) -> std::path::PathBuf {
+    let mindfile = crate::mindfile::MindToml::load(dest_path).unwrap_or_default();
+    let root_rel = mindfile
+        .as_ref()
+        .and_then(|m| m.source.roots.as_ref())
+        .and_then(|r| r.first())
+        .map(String::as_str)
+        .unwrap_or(".");
+    dest_path.join(root_rel)
+}
+
+/// Resolve the destination prefix from the source's `mind.toml [source].prefix`
+/// (alias/--as is not relevant for absorb since we are looking at the destination
+/// source's declared prefix, which determines the effective name after learn).
+fn dest_source_prefix(dest_path: &std::path::Path, registry: &Registry) -> Option<String> {
+    // If the destination is already melded, use its recorded alias (consumer override)
+    // first, then the toml prefix.
+    if let Ok(spec) = parse_spec(&dest_path.to_string_lossy())
+        && let Some(src) = registry.find(&spec.name)
+        && let Some(alias) = src.alias.as_deref().filter(|a| !a.is_empty())
+    {
+        return Some(alias.to_string());
+    }
+    let mindfile = crate::mindfile::MindToml::load(dest_path).unwrap_or_default();
+    mindfile
+        .as_ref()
+        .and_then(|m| m.source.prefix.clone())
+        .filter(|p| !p.is_empty())
+}
+
+/// `mind absorb <ref> [--to <path>] [--force]` — claim a single unmanaged lobe
+/// item into a version-controlled source and install it as a managed item.
+///
+/// This is the constructive inverse of `forget --unmanaged` (UNM-7).
+// spec: ABS-1 ABS-2 ABS-3 ABS-4 ABS-5 ABS-6 ABS-7 ABS-8 ABS-9 ABS-10
+pub fn absorb(
+    paths: &Paths,
+    item_ref_str: &str,
+    to: Option<String>,
+    force: bool,
+    yes: bool,
+) -> Result<()> {
+    let out = crate::render::ctx();
+
+    // ABS-1: reject glob refs before calling resolve (a glob treats the * literally
+    // and would fall through to NotInstalled; we want the exact InvalidItemRef error).
+    let parsed = parse_item_ref(item_ref_str)?;
+    if is_glob(&parsed.name) {
+        return Err(MindError::InvalidItemRef {
+            name: item_ref_str.to_string(),
+        });
+    }
+
+    // ABS-1: resolve to a single unmanaged item.
+    let manifest = Manifest::load(paths)?;
+    let unmanaged_items = crate::unmanaged::scan(paths, &manifest)?;
+    let item = crate::unmanaged::resolve(&unmanaged_items, &parsed)?;
+
+    // ABS-1: tools are never unmanaged, but guard anyway.
+    if item.kind == ItemKind::Tool {
+        return Err(MindError::InvalidItemRef {
+            name: item_ref_str.to_string(),
+        });
+    }
+
+    // ABS-2: resolve destination: --to > MIND_ABSORB_TO > config.absorb_to.
+    // ABS-3: if none set, prompt on TTY; non-TTY => ConfirmationRequired.
+    let (dest_path, interactive_dest) = resolve_absorb_dest(paths, to, yes)?;
+
+    // ABS-5: destination must be a git repo (or built-in personal that was just
+    // created). After resolve_absorb_dest, the personal dir is already git-init'd.
+    if !crate::git::is_repo(&dest_path) {
+        return Err(MindError::DestinationNotRepo {
+            path: dest_path.to_string_lossy().into_owned(),
+        });
+    }
+
+    // ABS-4: offer to save absorb_to when the destination was resolved interactively.
+    if interactive_dest {
+        offer_save_absorb_to(paths, &dest_path, yes)?;
+    }
+
+    // Compute the convention path relative to the destination's first scan root.
+    let scan_root = first_scan_root(&dest_path);
+    let dest_item_path = convention_path_in_root(&scan_root, item.kind, &item.name);
+
+    // ABS-6: check for a collision at the destination convention path.
+    if dest_item_path.exists() && !force {
+        return Err(MindError::AbsorbCollision {
+            kind: item.kind.as_str().to_string(),
+            name: item.name.clone(),
+            dest_path: dest_item_path.to_string_lossy().into_owned(),
+        });
+    }
+
+    // --- ABS-7 prompt (BEFORE moving/deleting anything) ---
+    // One item may occupy multiple lobes. We absorb from the FIRST recorded path.
+    // The remaining paths are "stray copies" that will be replaced by the managed
+    // link after learn. We must remove them first (so learn can place the link).
+    let source_lobe_path = item
+        .paths
+        .first()
+        .ok_or_else(|| MindError::NotInstalled { name: item.key() })?
+        .clone();
+    let stray_paths: Vec<&std::path::PathBuf> = item.paths.iter().skip(1).collect();
+
+    if !yes {
+        // Print what we will do.
+        if !out.json {
+            println!("absorb will:");
+            println!(
+                "  move  {} -> {}",
+                source_lobe_path.display(),
+                dest_item_path.display()
+            );
+            for stray in &stray_paths {
+                println!("  delete (stray copy) {}", stray.display());
+            }
+        }
+        if !crate::hook::is_tty() {
+            return Err(MindError::ConfirmationRequired {
+                action: format!("absorbing {}", item.key()),
+            });
+        }
+        if !out.json && !confirm("proceed with absorb?")? {
+            println!("cancelled; nothing changed");
+            return Ok(());
+        }
+    }
+
+    // --- ABS-10: destructive operations begin here ---
+
+    // Move source lobe path to destination convention path.
+    if let Some(parent) = dest_item_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| MindError::io(parent, e))?;
+    }
+    // If --force and destination exists, remove it first.
+    if dest_item_path.exists() {
+        crate::install::remove_path(&dest_item_path)?;
+    }
+    // Move (rename) the item. If cross-device, fall back to copy+remove.
+    move_path(&source_lobe_path, &dest_item_path)?;
+
+    // Remove stray copies so the managed link can take their place.
+    for stray in &stray_paths {
+        crate::install::remove_path(stray)?;
+    }
+
+    // ABS-5: stage and commit in the destination repo.
+    // On git failure, the file is already at dest; leave it for the user to recover.
+    crate::git::add_all(&dest_path)?;
+    let commit_msg = format!("absorb {}:{}", item.kind.as_str(), item.name);
+    crate::git::commit(&dest_path, &commit_msg)?;
+
+    // ABS-1: meld the destination if not yet registered.
+    let dest_spec = dest_path.to_string_lossy().into_owned();
+    if !is_melded(paths, &dest_spec)? {
+        // Use link_only so we don't prompt to install everything in the personal
+        // repo; we will learn the specific item below.
+        meld(
+            paths,
+            &dest_spec,
+            None,
+            vec![],
+            None,
+            None,
+            None,
+            None,
+            false,
+        )?;
+    }
+
+    // Derive the effective name for reporting (destination prefix).
+    let registry_for_prefix = Registry::load(paths)?;
+    let effective_prefix = dest_source_prefix(&dest_path, &registry_for_prefix);
+    let effective_name = crate::namespace::apply(&item.name, &effective_prefix);
+    let effective_key = format!("{}:{}", item.kind.as_str(), effective_name);
+
+    // ABS-1 / ABS-8: learn the item under the destination source.
+    // Determine the source name for the item ref so learn can resolve it.
+    let dest_source_name = parse_spec(&dest_spec)
+        .map(|s| s.name)
+        .unwrap_or_else(|_| dest_spec.clone());
+    // resolve() matches by effective_name() (bare name with prefix applied), so
+    // use the effective name in the learn ref.
+    let learn_ref = format!("{}:{}", item.kind.as_str(), effective_name);
+    let qualified_ref = format!("{dest_source_name}#{learn_ref}");
+    learn(
+        paths,
+        &qualified_ref,
+        false,
+        InstallFlow {
+            yes: true,               // already confirmed above
+            clobber: Clobber::Force, // lobe path was just freed
+            dangerously_skip: false,
+        },
+    )?;
+
+    if !out.json {
+        println!(
+            "{} absorbed {} -> managed as {effective_key}",
+            out.ok(),
+            item.key()
+        );
+    }
+    Ok(())
+}
+
+/// Resolve the destination for `absorb` (ABS-2 / ABS-3).
+///
+/// Returns `(dest_path, interactive_dest)` where `interactive_dest` is true only
+/// when the destination was obtained interactively (ABS-3), which triggers the
+/// ABS-4 save offer.
+fn resolve_absorb_dest(
+    paths: &Paths,
+    to_flag: Option<String>,
+    yes: bool,
+) -> Result<(std::path::PathBuf, bool)> {
+    // ABS-2: --to flag takes precedence.
+    if let Some(p) = to_flag {
+        let path = expand_tilde(&p);
+        return Ok((path, false));
+    }
+
+    // ABS-2: MIND_ABSORB_TO env var is next.
+    if let Some(p) = std::env::var_os("MIND_ABSORB_TO") {
+        let path = expand_tilde(&p.to_string_lossy());
+        return Ok((path, false));
+    }
+
+    // ABS-2: absorb_to in config.toml.
+    let config = Config::load(paths)?;
+    if let Some(p) = config.absorb_to {
+        let path = expand_tilde(&p);
+        return Ok((path, false));
+    }
+
+    // ABS-3: none set and non-TTY (or --yes with no destination).
+    if !crate::hook::is_tty() {
+        return Err(MindError::ConfirmationRequired {
+            action: "absorb (no destination configured; re-run with --to <path>)".to_string(),
+        });
+    }
+
+    // Interactive: prompt, offering the built-in personal repo.
+    let personal = paths.mind_home.join("personal");
+    let personal_str = personal.to_string_lossy();
+    let chosen = if yes {
+        // With --yes, default to the built-in personal dir without prompting.
+        personal.clone()
+    } else {
+        println!("No absorb destination configured.");
+        println!("Enter a path, or press Enter to use the built-in: {personal_str}");
+        print!("> ");
+        let _ = std::io::stdout().flush();
+        let mut line = String::new();
+        std::io::stdin()
+            .read_line(&mut line)
+            .map_err(|e| MindError::io("<stdin>", e))?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            personal.clone()
+        } else {
+            expand_tilde(trimmed)
+        }
+    };
+
+    // ABS-3: create and git-init the built-in personal repo on demand.
+    if chosen == personal && !personal.exists() {
+        if !out_ctx().json {
+            println!(
+                "Creating {} and initializing git repository",
+                personal.display()
+            );
+        }
+        crate::git::git_init(&personal)?;
+    }
+
+    Ok((chosen, true))
+}
+
+/// Offer to save the chosen absorb destination as `absorb_to` in config.toml (ABS-4).
+/// Only called when the destination was resolved interactively.
+fn offer_save_absorb_to(paths: &Paths, dest: &std::path::Path, yes: bool) -> Result<()> {
+    if yes {
+        // --yes skips the prompt; save automatically.
+        let mut config = Config::load(paths)?;
+        config.absorb_to = Some(dest.to_string_lossy().into_owned());
+        paths.ensure_layout()?;
+        config.save(paths)?;
+        return Ok(());
+    }
+    if !crate::hook::is_tty() {
+        // Non-TTY without --yes: skip (the destination was already used this run).
+        return Ok(());
+    }
+    print!(
+        "\nSave '{}' as absorb_to in config.toml? [y/N] ",
+        dest.display()
+    );
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .map_err(|e| MindError::io("<stdin>", e))?;
+    if parse_confirm(&line, false) {
+        let mut config = Config::load(paths)?;
+        config.absorb_to = Some(dest.to_string_lossy().into_owned());
+        paths.ensure_layout()?;
+        config.save(paths)?;
+        println!("Saved absorb_to = '{}'", dest.display());
+    }
+    Ok(())
+}
+
+/// Thin output-ctx accessor for code that cannot use the `out` binding directly.
+fn out_ctx() -> crate::render::OutputCtx {
+    crate::render::ctx()
+}
+
+/// Move `src` to `dst`. If they are on different devices (rename fails with
+/// EXDEV), fall back to a recursive copy followed by removal of the source.
+fn move_path(src: &std::path::Path, dst: &std::path::Path) -> Result<()> {
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| MindError::io(parent, e))?;
+    }
+    match std::fs::rename(src, dst) {
+        Ok(()) => Ok(()),
+        Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
+            copy_path_recursive(src, dst)?;
+            crate::install::remove_path(src)?;
+            Ok(())
+        }
+        Err(e) => Err(MindError::io(src, e)),
+    }
+}
+
+/// Recursively copy `src` to `dst` (file or directory).
+fn copy_path_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<()> {
+    if src.is_dir() {
+        std::fs::create_dir_all(dst).map_err(|e| MindError::io(dst, e))?;
+        let rd = std::fs::read_dir(src).map_err(|e| MindError::io(src, e))?;
+        for entry in rd.flatten() {
+            let from = entry.path();
+            let to = dst.join(entry.file_name());
+            copy_path_recursive(&from, &to)?;
+        }
+    } else {
+        std::fs::copy(src, dst).map_err(|e| MindError::io(src, e))?;
+    }
+    Ok(())
+}
+
+/// Expand a leading `~` in `path` to the home directory.
+fn expand_tilde(path: &str) -> std::path::PathBuf {
+    if path == "~" {
+        return dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("~"));
+    }
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(rest);
+    }
+    std::path::PathBuf::from(path)
+}
+
 /// `mind forget <item>` — uninstall one item, or many via a glob.
 ///
 /// When `unmanaged` is true, removal is scoped to unmanaged lobe items only
@@ -4475,5 +4864,214 @@ mod tests {
             hook_rerun_warranted(&no_commit),
             "commit=None and ran_at=Some => they differ => warranted"
         );
+    }
+
+    // ---- absorb helper unit tests ----
+
+    /// convention_path_in_root derives the correct convention path for each kind.
+    // spec: ABS-1
+    #[test]
+    fn convention_path_in_root_derives_correct_paths() {
+        let root = std::path::Path::new("/repo");
+        assert_eq!(
+            convention_path_in_root(root, ItemKind::Skill, "review"),
+            PathBuf::from("/repo/skills/review"),
+            "skill convention path is skills/<name>/"
+        );
+        assert_eq!(
+            convention_path_in_root(root, ItemKind::Agent, "dev"),
+            PathBuf::from("/repo/agents/dev.md"),
+            "agent convention path is agents/<name>.md"
+        );
+        assert_eq!(
+            convention_path_in_root(root, ItemKind::Rule, "style"),
+            PathBuf::from("/repo/rules/style.md"),
+            "rule convention path is rules/<name>.md"
+        );
+    }
+
+    /// expand_tilde expands a leading `~` to the home directory.
+    // spec: ABS-2 ABS-3
+    #[test]
+    fn expand_tilde_handles_home_prefix() {
+        let home = dirs::home_dir().expect("home dir");
+        // Bare `~` expands to home.
+        let expanded = expand_tilde("~");
+        assert_eq!(expanded, home, "bare ~ must expand to home directory");
+        // `~/foo` expands to home/foo.
+        let expanded2 = expand_tilde("~/foo");
+        assert_eq!(
+            expanded2,
+            home.join("foo"),
+            "~/foo must expand to <home>/foo"
+        );
+        // An absolute path passes through unchanged.
+        let abs = expand_tilde("/tmp/mydir");
+        assert_eq!(
+            abs,
+            PathBuf::from("/tmp/mydir"),
+            "absolute path must be unchanged"
+        );
+        // A relative path (no tilde) passes through unchanged.
+        let rel = expand_tilde("relpath/dir");
+        assert_eq!(
+            rel,
+            PathBuf::from("relpath/dir"),
+            "relative path must be unchanged"
+        );
+    }
+
+    /// first_scan_root returns the destination directory when no mind.toml is present.
+    // spec: ABS-1
+    #[test]
+    fn first_scan_root_defaults_to_dest_dir() {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir =
+            std::env::temp_dir().join(format!("mind-abs-scanroot-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // No mind.toml: first_scan_root should return the directory itself.
+        let root = first_scan_root(&dir);
+        assert_eq!(
+            root,
+            dir.join("."),
+            "first_scan_root with no mind.toml must be dest/."
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// first_scan_root uses the first entry in [source].roots when mind.toml declares it.
+    // spec: ABS-1
+    #[test]
+    fn first_scan_root_uses_minds_toml_roots() {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir =
+            std::env::temp_dir().join(format!("mind-abs-scanroot2-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Write a mind.toml with roots = ["packages/agents"]
+        std::fs::write(
+            dir.join("mind.toml"),
+            "[source]\nroots = [\"packages/agents\"]\n",
+        )
+        .unwrap();
+        let root = first_scan_root(&dir);
+        assert_eq!(
+            root,
+            dir.join("packages/agents"),
+            "first_scan_root must use first entry of [source].roots"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// dest_source_prefix with no melded source and no mind.toml yields None
+    /// (unprefixed install).
+    // spec: ABS-8
+    #[test]
+    fn dest_source_prefix_none_when_unset() {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir =
+            std::env::temp_dir().join(format!("mind-abs-pfx-none-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let registry = crate::source::Registry::default();
+        assert_eq!(
+            dest_source_prefix(&dir, &registry),
+            None,
+            "no alias and no mind.toml prefix means no effective prefix"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// dest_source_prefix reads `[source].prefix` from the destination mind.toml
+    /// when the source is not yet melded (no alias to consult).
+    // spec: ABS-8
+    #[test]
+    fn dest_source_prefix_reads_mindfile_prefix() {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir =
+            std::env::temp_dir().join(format!("mind-abs-pfx-toml-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("mind.toml"), "[source]\nprefix = \"tomlpfx\"\n").unwrap();
+        let registry = crate::source::Registry::default();
+        assert_eq!(
+            dest_source_prefix(&dir, &registry),
+            Some("tomlpfx".to_string()),
+            "an unmelded destination uses its mind.toml [source].prefix"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// When the destination is already melded with a recorded alias (`meld --as`),
+    /// the alias wins over the repo's own `[source].prefix` (namespacing.md).
+    // spec: ABS-8
+    #[test]
+    fn dest_source_prefix_alias_beats_mindfile_prefix() {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir =
+            std::env::temp_dir().join(format!("mind-abs-pfx-alias-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // The repo declares prefix = "tomlpfx" ...
+        std::fs::write(dir.join("mind.toml"), "[source]\nprefix = \"tomlpfx\"\n").unwrap();
+        // ... but the melded source records alias = "aliaspfx" (the consumer's --as).
+        let mut src = crate::source::parse_spec(&dir.to_string_lossy()).unwrap();
+        src.alias = Some("aliaspfx".to_string());
+        let registry = crate::source::Registry { sources: vec![src] };
+        assert_eq!(
+            dest_source_prefix(&dir, &registry),
+            Some("aliaspfx".to_string()),
+            "the recorded alias must win over the repo's [source].prefix"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An empty alias on a melded source is ignored and the mind.toml prefix is
+    /// used (an empty alias is not a meaningful namespace).
+    // spec: ABS-8
+    #[test]
+    fn dest_source_prefix_empty_alias_falls_through_to_mindfile() {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir =
+            std::env::temp_dir().join(format!("mind-abs-pfx-empty-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("mind.toml"), "[source]\nprefix = \"tomlpfx\"\n").unwrap();
+        let mut src = crate::source::parse_spec(&dir.to_string_lossy()).unwrap();
+        src.alias = Some(String::new()); // empty alias
+        let registry = crate::source::Registry { sources: vec![src] };
+        assert_eq!(
+            dest_source_prefix(&dir, &registry),
+            Some("tomlpfx".to_string()),
+            "an empty alias must not suppress the mind.toml prefix"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `offer_save_absorb_to(yes=true)` writes `absorb_to` into config.toml,
+    /// creating the config when absent (the ABS-4 save path, reachable headlessly
+    /// only via the --yes branch). This is the side of ABS-4 that does NOT need a
+    /// TTY; the interactive [y/N] save prompt is TTY-gated (see certification).
+    // spec: ABS-4
+    #[test]
+    fn offer_save_absorb_to_yes_writes_config() {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let base = std::env::temp_dir().join(format!("mind-abs-save-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let paths = Paths {
+            mind_home: base.join("mind"),
+            claude_home: base.join("claude"),
+        };
+        // No config exists yet.
+        assert!(
+            !paths.config_file().exists(),
+            "sanity: config.toml must not pre-exist"
+        );
+        let dest = base.join("personal");
+        offer_save_absorb_to(&paths, &dest, true).expect("offer_save_absorb_to");
+
+        // Config now exists and records absorb_to = the chosen dest.
+        let cfg = Config::load(&paths).expect("load config");
+        assert_eq!(
+            cfg.absorb_to.as_deref(),
+            Some(dest.to_string_lossy().as_ref()),
+            "the chosen destination must be saved as absorb_to"
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

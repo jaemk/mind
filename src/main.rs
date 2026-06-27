@@ -82,6 +82,7 @@ fn lock_mode(command: &Command, json: bool) -> LockMode {
         | Command::Sync { .. }
         | Command::Upgrade { .. }
         | Command::Evolve { .. }
+        | Command::Absorb { .. }
         | Command::Introspect { fix: true, .. }
         | Command::Config {
             action:
@@ -362,6 +363,11 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
                 LobesCmd::Remove { path } => commands::lobe_remove(paths, &path),
             },
         },
+        Command::Absorb {
+            item_ref,
+            to,
+            force,
+        } => commands::absorb(paths, &item_ref, to, force, yes),
         Command::Dump {
             output,
             whole_sources,
@@ -424,6 +430,20 @@ mod tests {
             mode_of(&["mind", "config", "lobes", "remove", "/some/home"]),
             LockMode::Exclusive,
             "config lobes remove mutates config and must take the exclusive lock"
+        );
+        // absorb mutates the manifest, the lobe, and optionally the config.
+        assert_eq!(
+            mode_of(&["mind", "absorb", "skill:review"]),
+            LockMode::Exclusive,
+            "absorb mutates state and must take the exclusive lock"
+        );
+        assert_eq!(
+            mode_of(&["mind", "absorb", "skill:review", "--to", "/tmp/dest"]),
+            LockMode::Exclusive
+        );
+        assert_eq!(
+            mode_of(&["mind", "absorb", "--force", "agent:dev"]),
+            LockMode::Exclusive
         );
     }
 

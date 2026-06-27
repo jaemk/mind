@@ -183,6 +183,51 @@ pub fn head_commit(url: &str, dir: &Path) -> Result<String> {
     run(url, Some(dir), &["rev-parse", "HEAD"])
 }
 
+/// Initialize a new git repository at `dir`, creating the directory if absent.
+pub fn git_init(dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(dir).map_err(|e| crate::error::MindError::io(dir, e))?;
+    run(&dir.to_string_lossy(), Some(dir), &["init", "-q"])?;
+    // Set minimal identity so commits work without a global git config.
+    run(
+        &dir.to_string_lossy(),
+        Some(dir),
+        &["config", "user.email", "mind@local"],
+    )?;
+    run(
+        &dir.to_string_lossy(),
+        Some(dir),
+        &["config", "user.name", "mind"],
+    )?;
+    Ok(())
+}
+
+/// Return `true` when `dir` is inside a git repository (i.e. `git rev-parse
+/// --git-dir` succeeds). Used to validate absorb destinations (ABS-5).
+pub fn is_repo(dir: &Path) -> bool {
+    run(
+        &dir.to_string_lossy(),
+        Some(dir),
+        &["rev-parse", "--git-dir"],
+    )
+    .is_ok()
+}
+
+/// Stage all changes under `dir` (`git add -A`).
+pub fn add_all(dir: &Path) -> Result<()> {
+    run(&dir.to_string_lossy(), Some(dir), &["add", "-A"])?;
+    Ok(())
+}
+
+/// Create a commit in `dir` with `message`. Errors if there is nothing staged.
+pub fn commit(dir: &Path, message: &str) -> Result<()> {
+    run(
+        &dir.to_string_lossy(),
+        Some(dir),
+        &["commit", "-m", message],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -469,5 +514,117 @@ mod tests {
         );
 
         cleanup(&base);
+    }
+
+    // ---- absorb git helpers (ABS-5) -----------------------------------------
+    // These exercise the actual `crate::git` functions, not the git CLI used to
+    // build fixtures. The integration suite only reaches these via the absorb
+    // command; here we pin their contract directly.
+
+    /// `git_init` creates the dir if absent, initializes a repo (`is_repo` true),
+    /// and sets a usable identity so a later `commit` works with no global config.
+    // spec: ABS-5
+    #[test]
+    fn git_init_creates_repo_with_identity() {
+        let base = tmpdir("ginit");
+        let repo = base.join("nested").join("repo");
+        // The directory does not exist yet; git_init must create it.
+        assert!(!repo.exists(), "sanity: repo dir must not pre-exist");
+
+        git_init(&repo).expect("git_init");
+        assert!(repo.exists(), "git_init must create the directory");
+        assert!(is_repo(&repo), "git_init must produce a git repo");
+
+        cleanup(&base);
+    }
+
+    /// `is_repo` is false for a plain directory and true after `git_init`.
+    // spec: ABS-5
+    #[test]
+    fn is_repo_false_for_plain_dir_true_after_init() {
+        let base = tmpdir("isrepo");
+        let plain = base.join("plain");
+        fs::create_dir_all(&plain).unwrap();
+        assert!(!is_repo(&plain), "a plain dir is not a git repo");
+
+        git_init(&plain).unwrap();
+        assert!(is_repo(&plain), "after git_init the dir is a git repo");
+
+        cleanup(&base);
+    }
+
+    /// `is_repo` is false for a path that does not exist at all.
+    // spec: ABS-5
+    #[test]
+    fn is_repo_false_for_missing_path() {
+        let base = tmpdir("isrepo-missing");
+        let missing = base.join("does-not-exist");
+        assert!(
+            !is_repo(&missing),
+            "a non-existent path must not report as a git repo"
+        );
+        cleanup(&base);
+    }
+
+    /// `add_all` then `commit` records a commit with the given message, and a
+    /// fresh `git_init`'d repo can commit a newly written file (the absorb flow:
+    /// move file in, add_all, commit "absorb kind:name").
+    // spec: ABS-5
+    #[test]
+    fn add_all_and_commit_records_message() {
+        let base = tmpdir("commit");
+        let repo = base.join("repo");
+        git_init(&repo).unwrap();
+
+        // Write a file (as absorb does after the move) then stage + commit.
+        fs::write(repo.join("skill.md"), "# absorbed\n").unwrap();
+        add_all(&repo).expect("add_all");
+        commit(&repo, "absorb skill:review").expect("commit");
+
+        let msg = read_head_subject(&repo);
+        assert_eq!(
+            msg, "absorb skill:review",
+            "commit message must be the absorb default message"
+        );
+        // The committed tree contains the staged file.
+        let tracked = Command::new("git")
+            .args(["ls-files"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        let tracked = String::from_utf8(tracked.stdout).unwrap();
+        assert!(
+            tracked.contains("skill.md"),
+            "the committed file must be tracked: {tracked}"
+        );
+
+        cleanup(&base);
+    }
+
+    /// `commit` with nothing staged is an error: the absorb flow never commits an
+    /// empty change, and a misuse surfaces as a failure rather than a silent no-op.
+    // spec: ABS-5
+    #[test]
+    fn commit_with_nothing_staged_errors() {
+        let base = tmpdir("commit-empty");
+        let repo = base.join("repo");
+        git_init(&repo).unwrap();
+        // Nothing written/staged after init.
+        let result = commit(&repo, "absorb skill:nothing");
+        assert!(
+            result.is_err(),
+            "commit with an empty index must error, not produce an empty commit"
+        );
+        cleanup(&base);
+    }
+
+    /// Read the subject (`%s`) of HEAD in `dir`.
+    fn read_head_subject(dir: &Path) -> String {
+        let out = Command::new("git")
+            .args(["log", "-1", "--pretty=format:%s"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
     }
 }

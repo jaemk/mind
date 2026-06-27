@@ -269,6 +269,20 @@ pub enum MindError {
 
     #[error("{action} needs confirmation; re-run with --yes (or in an interactive terminal)")]
     ConfirmationRequired { action: String },
+
+    /// ABS-5: the destination path exists but is not a git repository.
+    #[error(
+        "'{path}' is not a git repository; absorb requires a git destination (use --to to choose one)"
+    )]
+    DestinationNotRepo { path: String },
+
+    /// ABS-6: the destination already contains an item at the convention path.
+    #[error("destination already has {kind}:{name} at {dest_path}; use --force to overwrite")]
+    AbsorbCollision {
+        kind: String,
+        name: String,
+        dest_path: String,
+    },
 }
 
 fn status_suffix(status: Option<ExitStatus>) -> String {
