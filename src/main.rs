@@ -3,6 +3,7 @@ mod cli;
 mod commands;
 mod config;
 mod deps;
+mod dump;
 mod error;
 mod frontmatter;
 mod git;
@@ -99,6 +100,7 @@ fn lock_mode(command: &Command, json: bool) -> LockMode {
         | Command::Probe { .. }
         | Command::Review { .. }
         | Command::Introspect { fix: false, .. }
+        | Command::Dump { .. }
         | Command::Config {
             action:
                 ConfigCmd::Show
@@ -360,6 +362,10 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
                 LobesCmd::Remove { path } => commands::lobe_remove(paths, &path),
             },
         },
+        Command::Dump {
+            output,
+            whole_sources,
+        } => dump::run(paths, output, whole_sources),
         Command::Completions { shell } => {
             commands::completions(shell);
             Ok(())
@@ -428,6 +434,13 @@ mod tests {
         // spec: STO-41
         assert_eq!(mode_of(&["mind", "recall"]), LockMode::Shared);
         assert_eq!(mode_of(&["mind", "recall", "--sources"]), LockMode::Shared);
+        // dump is read-only: registry + manifest + catalog only.
+        // spec: DUMP-1
+        assert_eq!(mode_of(&["mind", "dump"]), LockMode::Shared);
+        assert_eq!(
+            mode_of(&["mind", "dump", "--whole-sources"]),
+            LockMode::Shared
+        );
         assert_eq!(mode_of(&["mind", "probe"]), LockMode::Shared);
         assert_eq!(mode_of(&["mind", "probe", "rev"]), LockMode::Shared);
         // review is read-only: it installs nothing and changes no disk state.

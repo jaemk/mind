@@ -17,8 +17,9 @@ and the manifest are defined in [storage.md](storage.md).
 - `DUMP-1` `mind dump` writes a super-source `mind.toml` to stdout by default, or
   to `--output <path>`. Its `[discover].sources` lists every melded source (the
   registry, storage.md), each referenced by its spec and pinned to its currently
-  recorded commit as a `pin-ref` (DSC-41), so melding the output reproduces the
-  same source set at the same revisions.
+  recorded commit as a `pin-ref` (DSC-41). The per-entry pin is authoritative
+  (DSC-65), overriding each source's own `[source]` pin, so melding the output
+  reproduces the same source set at the same revisions.
 - `DUMP-4` Each emitted entry carries the meld-time settings in effect for its
   source so the reproduction matches: the prefix (`as`, from the consumer alias or
   the source's `[source].prefix`, namespacing.md), the scan `roots` (STO-17), and

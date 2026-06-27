@@ -196,6 +196,33 @@ pub fn resolve<'a>(
     }
 }
 
+/// Filter a catalog slice to the items named by a set of bare `kind:name` refs
+/// (DSC-62). Each ref must carry an explicit kind prefix; a ref that parses
+/// without a kind (bare name only) is not matched here. Items are matched by
+/// their bare `name` (not effective/prefixed name) and kind.
+///
+/// Returns the matching subset in catalog order. Does NOT error on unknown refs:
+/// the caller (`install_source_items_subset`) is responsible for DSC-63
+/// validation before calling this.
+pub fn select_by_bare_refs<'a>(
+    items: &'a [CatalogItem],
+    bare_refs: &[String],
+) -> Vec<&'a CatalogItem> {
+    // Parse each ref into (kind, bare_name); skip unparseable entries.
+    let pairs: Vec<(crate::error::ItemKind, String)> = bare_refs
+        .iter()
+        .filter_map(|r| {
+            let (kind, name) = split_kind(r).ok()?;
+            kind.map(|k| (k, name))
+        })
+        .collect();
+
+    items
+        .iter()
+        .filter(|it| pairs.iter().any(|(k, n)| it.kind == *k && it.name == *n))
+        .collect()
+}
+
 /// Whether an installed item matches a parsed ref: its kind (when the ref names
 /// one), its effective installed name, and the source qualifier (when given).
 /// Used by `forget`, `recall <item>`, and `upgrade [item]`, which match against
@@ -543,6 +570,155 @@ mod tests {
         assert!(is_glob("review*"));
         assert!(is_glob("skill:*"));
         assert!(!is_glob("review"));
+    }
+
+    // ----- DSC-62 / DSC-63: select_by_bare_refs subset filtering -----
+
+    #[test]
+    fn select_by_bare_refs_matches_kind_and_bare_name() {
+        // spec: DSC-62 — a bare kind:name ref selects exactly the item of that
+        // kind and bare name; an unlisted item is excluded.
+        let items = vec![
+            cat(ItemKind::Skill, "review", "a"),
+            cat(ItemKind::Agent, "dev", "a"),
+            cat(ItemKind::Rule, "style", "a"),
+        ];
+        let refs = vec!["skill:review".to_string(), "agent:dev".to_string()];
+        let picked = select_by_bare_refs(&items, &refs);
+        assert_eq!(picked.len(), 2);
+        assert!(
+            picked
+                .iter()
+                .any(|it| it.kind == ItemKind::Skill && it.name == "review")
+        );
+        assert!(
+            picked
+                .iter()
+                .any(|it| it.kind == ItemKind::Agent && it.name == "dev")
+        );
+        assert!(
+            !picked.iter().any(|it| it.name == "style"),
+            "an unlisted item must not be selected"
+        );
+    }
+
+    #[test]
+    fn select_by_bare_refs_distinguishes_kind_for_same_bare_name() {
+        // spec: DSC-63 — refs carry an explicit kind, so two items sharing a bare
+        // name across kinds are not conflated: skill:x selects only the skill.
+        let items = vec![
+            cat(ItemKind::Skill, "x", "a"),
+            cat(ItemKind::Agent, "x", "a"),
+        ];
+        let only_skill = select_by_bare_refs(&items, &["skill:x".to_string()]);
+        assert_eq!(only_skill.len(), 1);
+        assert_eq!(only_skill[0].kind, ItemKind::Skill);
+
+        let only_agent = select_by_bare_refs(&items, &["agent:x".to_string()]);
+        assert_eq!(only_agent.len(), 1);
+        assert_eq!(only_agent[0].kind, ItemKind::Agent);
+
+        // Both refs select both items.
+        let both = select_by_bare_refs(&items, &["skill:x".to_string(), "agent:x".to_string()]);
+        assert_eq!(both.len(), 2);
+    }
+
+    #[test]
+    fn select_by_bare_refs_matches_by_bare_not_effective_name() {
+        // spec: DSC-63 — matching is against the BARE name, so a prefixed item is
+        // still selected by its bare ref (the prefix is an install-time transform).
+        let mut item = cat(ItemKind::Skill, "review", "a");
+        item.prefix = Some("pfx".to_string());
+        assert_eq!(item.effective_name(), "pfx-review");
+        let items = vec![item];
+
+        // The bare ref selects it.
+        let by_bare = select_by_bare_refs(&items, &["skill:review".to_string()]);
+        assert_eq!(by_bare.len(), 1, "bare ref must select the prefixed item");
+
+        // A ref written with the prefix does NOT match (refs are bare in source truth).
+        let by_prefixed = select_by_bare_refs(&items, &["skill:pfx-review".to_string()]);
+        assert!(
+            by_prefixed.is_empty(),
+            "a prefixed-name ref must not match; refs are bare names"
+        );
+    }
+
+    #[test]
+    fn select_by_bare_refs_skips_kindless_and_malformed_refs() {
+        // spec: DSC-62 — a ref with no explicit kind (bare name only) is not
+        // matched here, and a malformed ref is skipped rather than panicking.
+        let items = vec![
+            cat(ItemKind::Skill, "review", "a"),
+            cat(ItemKind::Agent, "dev", "a"),
+        ];
+        // Bare name (no kind) matches nothing.
+        assert!(
+            select_by_bare_refs(&items, &["review".to_string()]).is_empty(),
+            "a kindless ref must not select anything"
+        );
+        // Unknown kind / empty name are malformed -> skipped.
+        assert!(select_by_bare_refs(&items, &["bogus:review".to_string()]).is_empty());
+        assert!(select_by_bare_refs(&items, &["skill:".to_string()]).is_empty());
+        assert!(select_by_bare_refs(&items, &["".to_string()]).is_empty());
+    }
+
+    #[test]
+    fn select_by_bare_refs_ref_matching_nothing_yields_empty() {
+        // spec: DSC-62 — a well-formed ref naming an item that is not present
+        // selects nothing (validation of unknown refs is the caller's job).
+        let items = vec![cat(ItemKind::Skill, "review", "a")];
+        assert!(
+            select_by_bare_refs(&items, &["skill:absent".to_string()]).is_empty(),
+            "a ref matching no item yields an empty subset"
+        );
+        // An empty ref list selects nothing.
+        assert!(select_by_bare_refs(&items, &[]).is_empty());
+    }
+
+    #[test]
+    fn select_by_bare_refs_duplicate_refs_do_not_duplicate_items() {
+        // spec: DSC-62 — the result is the matching subset in catalog order; a
+        // duplicate ref does not yield the same item twice (iteration is over the
+        // catalog, filtered by the ref set).
+        let items = vec![
+            cat(ItemKind::Skill, "review", "a"),
+            cat(ItemKind::Agent, "dev", "a"),
+        ];
+        let refs = vec![
+            "skill:review".to_string(),
+            "skill:review".to_string(),
+            "skill:review".to_string(),
+        ];
+        let picked = select_by_bare_refs(&items, &refs);
+        assert_eq!(
+            picked.len(),
+            1,
+            "a duplicated ref must not duplicate the item"
+        );
+        assert_eq!(picked[0].name, "review");
+    }
+
+    #[test]
+    fn select_by_bare_refs_preserves_catalog_order() {
+        // spec: DSC-62 — the subset is returned in catalog order, independent of
+        // the order refs are listed in install-items.
+        let items = vec![
+            cat(ItemKind::Skill, "review", "a"),
+            cat(ItemKind::Agent, "dev", "a"),
+            cat(ItemKind::Rule, "style", "a"),
+        ];
+        // Refs in reverse order; result follows catalog order.
+        let refs = vec![
+            "rule:style".to_string(),
+            "agent:dev".to_string(),
+            "skill:review".to_string(),
+        ];
+        let picked = select_by_bare_refs(&items, &refs);
+        assert_eq!(picked.len(), 3);
+        assert_eq!(picked[0].name, "review");
+        assert_eq!(picked[1].name, "dev");
+        assert_eq!(picked[2].name, "style");
     }
 
     #[test]

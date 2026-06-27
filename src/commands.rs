@@ -17,7 +17,8 @@ use crate::mindfile::MindToml;
 use crate::paths::Paths;
 use crate::policy::Policy;
 use crate::resolve::{
-    is_glob, parse_item_ref, resolve, select, select_installed, source_matches, source_matches_glob,
+    is_glob, parse_item_ref, resolve, select, select_by_bare_refs, select_installed,
+    source_matches, source_matches_glob,
 };
 use crate::source::{Pin, Registry, parse_spec};
 
@@ -289,21 +290,28 @@ fn run_install_hooks(
 
 /// Curator-supplied configuration for a nested source, lifted from a parent
 /// super-source's `[discover].sources` entry (DSC-59). Resolved by the parent
-/// before recursing; gated and applied inside `meld_recursive` (DSC-60/DSC-61).
+/// before recursing; the pin is always applied (DSC-65, authoritative); roots
+/// and hooks are gated (DSC-60) and applied only when the nested source has no
+/// `mind.toml` of its own.
 struct CuratedConfig {
-    /// The curator `follow-branch` as a pin directive, if set.
-    follow_pin: Option<Pin>,
+    /// The curator pin directive (follow-branch, pin-tag, or pin-ref), if set.
+    /// Authoritative: applied whether or not the nested source has a mind.toml
+    /// (DSC-65). NOT included in the DSC-60 gating/warning.
+    pin: Option<Pin>,
     /// The curator `roots`, if set (an explicit empty list is preserved).
+    /// Gated by DSC-60: only applied when the nested source has no mind.toml.
     roots: Option<Vec<String>>,
     /// The curator `[[discover.sources.hooks]]`, resolved in declaration order.
+    /// Gated by DSC-60: only applied when the nested source has no mind.toml.
     hooks: Vec<crate::mindfile::ResolvedHook>,
 }
 
 impl CuratedConfig {
-    /// Whether any of the three gated values is present, so a DSC-60 warning is
-    /// warranted when the nested source turns out to have its own `mind.toml`.
-    fn has_any(&self) -> bool {
-        self.follow_pin.is_some() || self.roots.is_some() || !self.hooks.is_empty()
+    /// Whether any DSC-60-GATED values (roots or hooks) are present, so the
+    /// "ignored" warning is warranted when the nested source has its own
+    /// `mind.toml`. The pin is NOT gated (DSC-65) and does NOT participate.
+    fn has_gated_values(&self) -> bool {
+        self.roots.is_some() || !self.hooks.is_empty()
     }
 }
 
@@ -403,41 +411,38 @@ fn meld_recursive(
     let mut mindfile = MindToml::load(&dir)?;
     source.description = mindfile.as_ref().and_then(|m| m.source.description.clone());
 
-    // DSC-60: the curator-supplied follow-branch/roots/hooks apply only when the
-    // nested source ships NO mind.toml of its own. The gate is whole-file: any
-    // nested mind.toml (even one declaring none of the three) suppresses all of
-    // them, since the source has onboarded and its own file is authoritative.
-    // `as` (DSC-39) and `install` (DSC-58) are not gated and were handled by the
-    // caller. Decided against the source's own default-branch checkout here,
-    // before any pin re-clone, so a curator pin cannot mask onboarding.
+    // DSC-60: the curator-supplied roots and hooks apply only when the nested
+    // source ships NO mind.toml of its own. The gate is whole-file: any nested
+    // mind.toml (even one declaring none of the gated fields) suppresses roots
+    // and hooks, since the source has onboarded. `as` (DSC-39) and `install`
+    // (DSC-58) are not gated. DSC-65: the curator's pin directive is NOT gated
+    // -- it is authoritative regardless of whether the nested source has a
+    // mind.toml of its own.
     let curated = curated.unwrap_or(CuratedConfig {
-        follow_pin: None,
+        pin: None,
         roots: None,
         hooks: Vec::new(),
     });
     let apply_curated = mindfile.is_none();
-    if !apply_curated && curated.has_any() {
-        // spec: DSC-60
+    // The curator pin is always extracted (DSC-65: authoritative, not gated).
+    let curated_pin = curated.pin.clone();
+    if !apply_curated && curated.has_gated_values() {
+        // spec: DSC-60 — warn only when gated fields (roots/hooks) are present
+        // and suppressed. A pin-only entry must NOT trigger this warning.
         eprintln!(
-            "warning: {} ships its own mind.toml; curator-supplied follow-branch/roots/hooks are ignored",
+            "warning: {} ships its own mind.toml; curator-supplied roots/hooks are ignored",
             source.name
         );
     }
-    let curated_follow_pin = if apply_curated {
-        curated.follow_pin.clone()
-    } else {
-        None
-    };
     let curated_hooks = if apply_curated {
         curated.hooks.clone()
     } else {
         Vec::new()
     };
 
-    // Step 2: resolve the effective pin (CLI-17, DSC-41):
-    //   consumer flag > curator follow-branch (DSC-61) > [source] directive >
-    //   DefaultBranch. A consumer pin flag still wins over a curator follow-branch
-    //   (DSC-41 precedence); a gated source has no [source] directive of its own.
+    // Step 2: resolve the effective pin (CLI-17, DSC-41, DSC-65):
+    //   consumer flag > curator pin (DSC-65, authoritative) >
+    //   [source] directive > DefaultBranch.
     let toml_path = dir.join("mind.toml");
     let directive_pin = mindfile
         .as_ref()
@@ -445,7 +450,7 @@ fn meld_recursive(
         .transpose()?
         .flatten();
     let effective_pin = consumer_pin
-        .or(curated_follow_pin)
+        .or(curated_pin)
         .or(directive_pin)
         .unwrap_or(Pin::DefaultBranch);
 
@@ -639,6 +644,9 @@ fn meld_recursive(
         }
     }
 
+    // Capture the super-source name before moving `source` into the registry,
+    // so DSC-63 error messages can reference it.
+    let super_source_name = source.name.clone();
     registry.sources.push(source);
 
     let mut added = 1;
@@ -648,12 +656,16 @@ fn meld_recursive(
         .map(|d| &d.sources)
     {
         for entry in nested {
-            // DSC-59: lift this entry's curator-supplied configuration. The hooks
-            // are resolved here (against the super-source's mind.toml path for
-            // error reporting); the gate that decides whether they apply lives in
-            // the recursive call (DSC-60).
+            // DSC-64: install = true and a non-empty install-items list are
+            // mutually exclusive; error before we register anything.
+            entry.validate(&toml_path)?;
+
+            // DSC-59 DSC-65: lift this entry's curator-supplied configuration.
+            // The pin directive is authoritative (DSC-65). Hooks and roots are
+            // gated (DSC-60). All are resolved here against the super-source's
+            // mind.toml path; the gate lives in the recursive call.
             let curated = CuratedConfig {
-                follow_pin: entry.follow_branch_pin(),
+                pin: entry.pin_directive(&toml_path)?,
                 roots: entry.roots.clone(),
                 hooks: entry.resolved_hooks(&toml_path)?,
             };
@@ -674,6 +686,39 @@ fn meld_recursive(
                 prefer_ssh, // nested sources inherit the SSH preference
                 Some(curated),
             )?;
+
+            // DSC-63: validate each install_items ref against the nested source's
+            // offered bare names. A ref that names a non-existent item is an error
+            // at meld, not a silent skip.
+            if let Some(refs) = &entry.install_items
+                && !refs.is_empty()
+                && let Ok(spec) = parse_spec(&entry.source)
+                && let Some(nested_src) = registry.find(&spec.name)
+            {
+                let nested_items = catalog::scan(paths, &single(nested_src))?;
+                for item_ref in refs {
+                    // Each ref must be a bare kind:name (DSC-63).
+                    let parsed = crate::resolve::parse_item_ref(item_ref).map_err(|_| {
+                        MindError::BadReference {
+                            item: format!("install-items in '{super_source_name}'"),
+                            referent: item_ref.clone(),
+                            in_source: spec.name.clone(),
+                        }
+                    })?;
+                    // The ref must name an item the nested source offers
+                    // (by bare name, not effective/prefixed name).
+                    let found = nested_items.iter().any(|it| {
+                        parsed.kind.is_none_or(|k| it.kind == k) && it.name == parsed.name
+                    });
+                    if !found {
+                        return Err(MindError::BadReference {
+                            item: format!("install-items in '{super_source_name}'"),
+                            referent: item_ref.clone(),
+                            in_source: spec.name.clone(),
+                        });
+                    }
+                }
+            }
         }
     }
     Ok(added)
@@ -1588,6 +1633,98 @@ pub fn install_source_items(paths: &Paths, source_name: &str, flow: InstallFlow)
     }
 }
 
+/// Run the post-meld install flow (CLI-23) for a named subset of a registered
+/// source's items (DSC-62). Only the items named by `bare_refs` (bare `kind:name`
+/// strings in source truth) are offered; the source's other items remain
+/// registered and available. The same preview-and-prompt path as
+/// `install_source_items` is used, so `--yes` and `--link-only` behave
+/// identically (CLI-23). An empty `bare_refs` slice installs nothing.
+pub fn install_source_items_subset(
+    paths: &Paths,
+    source_name: &str,
+    bare_refs: &[String],
+    flow: InstallFlow,
+) -> Result<()> {
+    if bare_refs.is_empty() {
+        return Ok(());
+    }
+
+    // Scan only the named source to get its items.
+    let registry = Registry::load(paths)?;
+    let Some(source) = registry.find(source_name) else {
+        return Ok(());
+    };
+    let source_items = catalog::scan(paths, &single(source))?;
+
+    // Filter to only the listed bare refs.
+    let subset: Vec<&CatalogItem> = select_by_bare_refs(&source_items, bare_refs);
+    if subset.is_empty() {
+        return Ok(());
+    }
+
+    // Build a manifest of already-installed keys to exclude them (DEP-23).
+    let manifest = crate::manifest::Manifest::load(paths)?;
+    let installed_keys: std::collections::HashSet<String> =
+        manifest.items.keys().cloned().collect();
+
+    // Filter to not-yet-installed items only.
+    let to_install: Vec<&CatalogItem> = subset
+        .into_iter()
+        .filter(|it| !installed_keys.contains(&it.key()))
+        .collect();
+
+    if to_install.is_empty() {
+        return Ok(());
+    }
+
+    // Build a ref string that installs exactly the subset. We install each
+    // item individually using the source-qualified effective name, reusing the
+    // same preview-and-prompt gate that `install_source_items` uses.
+    //
+    // Collect effective names so the prompt message is accurate.
+    let count = to_install.len();
+    let refs: Vec<String> = to_install
+        .iter()
+        .map(|it| format!("{source_name}#{}", it.key()))
+        .collect();
+
+    if flow.yes {
+        for item_ref in &refs {
+            learn(paths, item_ref, false, flow)?;
+        }
+        return Ok(());
+    }
+
+    if !crate::hook::is_tty() {
+        let ref_list = refs.join(", ");
+        if !json_mode() {
+            println!(
+                "note: {source_name} has {count} item(s) to install; run `mind learn '{}'` (or re-meld with --yes)",
+                if refs.len() == 1 {
+                    refs[0].clone()
+                } else {
+                    format!("{source_name}#*")
+                }
+            );
+            let _ = ref_list; // suppress unused warning
+        }
+        return Ok(());
+    }
+
+    // Interactive: preview, then prompt.
+    for item_ref in &refs {
+        learn(paths, item_ref, true, flow)?;
+    }
+    if confirm_default_yes(&format!("install these {count} item(s) now?"))? {
+        for item_ref in &refs {
+            learn(paths, item_ref, false, InstallFlow { yes: true, ..flow })?;
+        }
+    } else {
+        println!("skipped; run `mind learn '{source_name}#*'` to install later");
+    }
+    Ok(())
+}
+
 /// True when the repo spec resolves to an already-registered source.
 pub fn is_melded(paths: &Paths, repo: &str) -> Result<bool> {
     let name = parse_spec(repo)?.name;
@@ -1703,11 +1840,16 @@ pub fn remeld(
 
 /// Install the items of the registered sources a super-source curates, walking
 /// its transitive `[discover].sources` chain. The whole chain is always traversed
-/// (so a deeper `install = true` is reached), but a given nested source's items
-/// are offered for install only when `all` is set (`meld --recursive`, DSC-55) or
-/// the curator marked that entry `install = true` (DSC-58). Reads each source's
-/// clone `mind.toml`; cycle-safe via a visited set; only touches registered
-/// sources.
+/// (so a deeper `install = true` or `install-items` is reached), but a given
+/// nested source's items are offered for install only when:
+///
+/// - `all` is set (`meld --recursive`, DSC-55): install everything, or
+/// - the entry has `install-items = [...]` (DSC-62): install exactly that subset, or
+/// - the entry has `install = true` (DSC-58): install all of the nested source.
+///
+/// When `install-items` is present it governs; when absent `install` governs.
+/// Reads each source's clone `mind.toml`; cycle-safe via a visited set; only
+/// touches registered sources.
 pub fn install_curated_sources(
     paths: &Paths,
     super_name: &str,
@@ -1733,9 +1875,19 @@ pub fn install_curated_sources(
                 continue; // already seen (cycle guard / diamond dedup)
             }
             if registry.find(&spec.name).is_some() {
-                // Traverse every nested source, but install only when the meld is
-                // recursive or the curator flagged this entry (DSC-58).
-                if all || ns.install {
+                // Traverse every nested source, but install according to the
+                // directive in effect (DSC-55 > DSC-62 > DSC-58):
+                // - `all` (--recursive): install everything
+                // - `install_items` Some(list): install exactly that subset
+                //   (empty list = install nothing, like install = false)
+                // - `install = true`: install all of the nested source
+                if all {
+                    install_source_items(paths, &spec.name, flow)?;
+                } else if let Some(refs) = &ns.install_items {
+                    // DSC-62: install_items governs; refs is the subset to offer.
+                    install_source_items_subset(paths, &spec.name, refs, flow)?;
+                } else if ns.install {
+                    // DSC-58: install all of this nested source.
                     install_source_items(paths, &spec.name, flow)?;
                 }
                 queue.push(spec.name);
@@ -2379,7 +2531,7 @@ pub fn sync(paths: &Paths, then_upgrade: bool, dangerously_skip_hook_check: bool
             };
             for ns in discover.sources {
                 let curated = CuratedConfig {
-                    follow_pin: ns.follow_branch_pin(),
+                    pin: ns.pin_directive(&toml_path)?,
                     roots: ns.roots.clone(),
                     hooks: ns.resolved_hooks(&toml_path)?,
                 };

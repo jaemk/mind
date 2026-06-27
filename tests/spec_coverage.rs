@@ -43,14 +43,15 @@ const ALLOWLIST: &[&str] = &[
     //   items via `forget --unmanaged [glob]` (UNM-7/UNM-8) is now implemented and
     //   cited from src/unmanaged.rs and tests/cli.rs; removed from the allowlist.
     //   absorb (see spec/absorb.md): claim an unmanaged lobe item into a
-    //   version-controlled source and install it managed. dump (see spec/dump.md):
-    //   generate a pinned super-source mind.toml from the installed set. The
-    //   nested-source `install_items` subset directive (DSC-62/63/64, discovery.md)
-    //   that dump emits and the install flow honors. All three are planned, not yet
-    //   built, so their IDs stay allowlisted until citing tests land.
+    //   version-controlled source and install it managed. Planned, not yet built,
+    //   so its IDs stay allowlisted until citing tests land. `dump` (spec/dump.md,
+    //   DUMP-1..8), the nested-source `install_items` subset directive
+    //   (DSC-62/63/64, discovery.md) that dump emits and the install flow honors,
+    //   and the authoritative nested-entry pin (DSC-65) dump relies on are now
+    //   implemented and cited from src/dump.rs, src/mindfile.rs, src/commands.rs,
+    //   tests/cli_install_items.rs, tests/cli_dump.rs, and tests/cli.rs; no longer
+    //   allowlisted.
     "ABS-1", "ABS-2", "ABS-3", "ABS-4", "ABS-5", "ABS-6", "ABS-7", "ABS-8", "ABS-9", "ABS-10",
-    "DUMP-1", "DUMP-2", "DUMP-3", "DUMP-4", "DUMP-5", "DUMP-6", "DUMP-7", "DUMP-8", "DSC-62",
-    "DSC-63", "DSC-64",
     //   explicit item dependencies (see spec/dependencies.md): an optional
     //   `requires:` frontmatter key unioned with the `{{ns:}}`-derived edges
     //   (DEP-4/5/6) are now implemented and cited from src/catalog.rs, src/deps.rs,

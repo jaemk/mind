@@ -10728,16 +10728,16 @@ fn curator_applies_follow_branch_roots_and_hook_when_nested_has_no_mind_toml() {
 
 #[test]
 fn curator_values_ignored_with_warning_when_nested_has_mind_toml() {
-    // spec: DSC-59 DSC-60
-    // When the nested source ships its own mind.toml (even a metadata-only one
-    // that declares none of the three), the curator-supplied follow-branch/roots/
-    // hooks are all ignored and a warning is emitted. The gate is whole-file.
+    // spec: DSC-59 DSC-60 DSC-65
+    // DSC-65: the curator's pin directive is AUTHORITATIVE and applies even when
+    // the nested source ships its own mind.toml. DSC-60: the gated fields (roots
+    // and hooks) are still suppressed when the source has a mind.toml, and the
+    // warning fires only because those gated fields are present.
     let nested = make_unonboarded_nested("onboarded");
     // The nested source onboards with a metadata-only mind.toml (no pin/roots/
     // hooks). It still ships the pkg-only item, which a root scan won't find.
     nested.write_and_commit("mind.toml", "[source]\ndescription = \"onboarded\"\n");
-    // Re-point stable at the onboarded commit so a (suppressed) follow-branch
-    // would still resolve if it were wrongly applied.
+    // Point stable at the onboarded commit so the curator follow-branch can apply.
     git(&nested.source, &["branch", "-f", "stable"]);
 
     let registry = Sandbox::bare("registry");
@@ -10757,7 +10757,9 @@ fn curator_values_ignored_with_warning_when_nested_has_mind_toml() {
     let r = registry.mind(&["meld", &spec, "--dangerously-skip-install-hook-check"]);
     assert!(r.success, "meld should succeed: {} {}", r.stdout, r.stderr);
 
-    // DSC-60: a warning announces the curator values were ignored.
+    // DSC-60: a warning fires because roots/hooks are gated and suppressed.
+    // The warning must mention the source name and "ignored"; it need NOT mention
+    // the pin (DSC-65 exempts the pin from the warning).
     assert!(
         r.stderr.contains("ships its own mind.toml")
             && r.stderr.contains("ignored")
@@ -10766,23 +10768,22 @@ fn curator_values_ignored_with_warning_when_nested_has_mind_toml() {
         r.stderr
     );
 
-    // The suppressed follow-branch: the nested source's pin is NOT follow-branch
-    // (it falls back to the default branch, since its own mind.toml declares no
-    // pin). No `follow-branch` pin appears anywhere in sources.json.
     let json = read_sources_json(&registry);
+    // DSC-65: the curator follow-branch IS now applied (authoritative). The nested
+    // source's recorded pin must be follow-branch=stable, NOT the default branch.
     assert!(
-        !json.contains("follow-branch"),
-        "the curator follow-branch must be suppressed (no follow-branch pin): {json}"
+        json.contains("follow-branch") && json.contains("stable"),
+        "the curator follow-branch must apply (authoritative DSC-65), recorded as follow-branch=stable: {json}"
     );
     // The suppressed roots: the pkg-only item is not discovered (a root scan of
-    // the onboarded source finds nothing under the repo root).
+    // the onboarded source finds nothing under the repo root). Roots are gated.
     let probe = registry.mind(&["probe"]);
     assert!(
         !probe.stdout.contains("skill:widget"),
         "the curator roots must be suppressed: the pkg-only item must not appear: {}",
         probe.stdout
     );
-    // The suppressed hook: it never ran and is not recorded.
+    // The suppressed hook: it never ran and is not recorded. Hooks are gated.
     let nested_clone = registry
         .mind_home
         .join("sources/local")
@@ -10950,19 +10951,14 @@ fn curator_hooks_do_not_leak_across_nested_entries() {
 
 #[test]
 fn curator_values_suppressed_when_nested_declares_own_pin_roots_hooks() {
-    // spec: DSC-59 DSC-60
-    // DSC-60 gate with a nested mind.toml that DECLARES its OWN pin/roots/hooks
-    // (the sibling test uses a metadata-only mind.toml). The source's own values
-    // win: its declared pin/roots/hooks are authoritative and the curator's are
-    // suppressed with the warning. Concretely, the source declares its own item
-    // layout via [source].roots and its own (no-op) hook; the curator's
-    // follow-branch/roots/hook must not take effect.
+    // spec: DSC-59 DSC-60 DSC-65
+    // DSC-60 gate with a nested mind.toml that DECLARES its OWN pin/roots/hooks.
+    // Under DSC-65: the CURATOR pin now wins over the source's own pin. Roots and
+    // hooks remain gated: the source's own roots/hooks still govern (the curator's
+    // roots/hooks are suppressed). The warning fires because gated values are present.
     let nested = make_unonboarded_nested("selfdeclared");
     // The nested source onboards declaring its OWN pin (follow-branch = own), its
-    // own roots (pkg, where its item lives), and its own hook. Because it declares
-    // a follow-branch, its effective pin is a real follow-branch pin -- and the
-    // recorded branch ("own") tells us whose pin won. A `own` branch is created at
-    // the onboarded content.
+    // own roots (pkg, where its item lives), and its own hook.
     nested.write_and_commit(
         "mind.toml",
         "[source]\n\
@@ -10977,8 +10973,8 @@ fn curator_values_suppressed_when_nested_declares_own_pin_roots_hooks() {
 
     let registry = Sandbox::bare("registry");
     // The curator supplies a DIFFERENT follow-branch (stable), bogus roots, and a
-    // curator hook -- all of which must be suppressed in favor of the source's own
-    // declarations.
+    // curator hook. Under DSC-65: curator pin (stable) overrides source pin (own).
+    // Roots and hooks are still gated: source's own roots/hooks govern.
     registry.write_and_commit(
         "mind.toml",
         &format!(
@@ -10995,7 +10991,7 @@ fn curator_values_suppressed_when_nested_declares_own_pin_roots_hooks() {
     let r = registry.mind(&["meld", &spec, "--dangerously-skip-install-hook-check"]);
     assert!(r.success, "meld should succeed: {} {}", r.stdout, r.stderr);
 
-    // DSC-60: the warning fires because the nested source ships its own mind.toml.
+    // DSC-60: the warning fires because roots/hooks are present and gated.
     assert!(
         r.stderr.contains("ships its own mind.toml")
             && r.stderr.contains("ignored")
@@ -11005,26 +11001,24 @@ fn curator_values_suppressed_when_nested_declares_own_pin_roots_hooks() {
     );
 
     let json = read_sources_json(&registry);
-    // The source's OWN roots win: its pkg item is discovered (the curator's bogus
-    // `nonexistent` roots were suppressed -- had they applied, the scan would have
-    // errored on the missing dir or found nothing).
+    // The source's OWN roots win (roots are gated): its pkg item is discovered.
     let probe = registry.mind(&["probe"]);
     assert!(
         probe.stdout.contains("skill:widget"),
         "the source's own roots = [pkg] must govern, finding its item: {}",
         probe.stdout
     );
-    // The source's OWN follow-branch wins: the recorded pin is follow-branch=own,
-    // NOT the curator's suppressed follow-branch=stable.
+    // DSC-65: the CURATOR follow-branch=stable now wins over the source's own
+    // follow-branch=own. The recorded pin must be stable, NOT own.
     assert!(
-        json.contains("follow-branch") && json.contains("\"own\""),
-        "the source's own follow-branch=own must be recorded: {json}"
+        json.contains("follow-branch") && json.contains("\"stable\""),
+        "the curator follow-branch=stable must win (DSC-65 authoritative): {json}"
     );
     assert!(
-        !json.contains("\"stable\""),
-        "the curator follow-branch=stable must be suppressed: {json}"
+        !json.contains("\"own\""),
+        "the source's own follow-branch=own must be overridden by the curator pin: {json}"
     );
-    // The source's own hook ran; the curator's did not.
+    // The source's own hook ran; the curator's did not. Hooks are gated.
     let nested_clone = registry
         .mind_home
         .join("sources/local")
@@ -11041,6 +11035,71 @@ fn curator_values_suppressed_when_nested_declares_own_pin_roots_hooks() {
     assert!(
         json.contains("touch source-own-hook") && !json.contains("touch curator-hook"),
         "only the source's own hook command is recorded: {json}"
+    );
+}
+
+#[test]
+fn curator_pin_ref_authoritative_overrides_source_own_pin() {
+    // spec: DSC-59 DSC-65
+    // A curator entry with `pin-ref = <sha>` on a nested source that has its own
+    // mind.toml (with its own `follow-branch = "own"`) must record the curator's
+    // pin-ref as the nested source's effective pin (DSC-65: curator pin is
+    // authoritative, regardless of the source's own mind.toml). Roots and hooks
+    // from the curator are absent here so no DSC-60 warning fires.
+    let nested = make_unonboarded_nested("pinref-target");
+    // The nested source onboards with its own follow-branch pin pointing to "own".
+    nested.write_and_commit(
+        "mind.toml",
+        "[source]\ndescription = \"onboarded\"\nfollow-branch = \"own\"\n",
+    );
+    git(&nested.source, &["branch", "own"]);
+
+    // Capture the nested source's HEAD commit sha (the onboarded content commit).
+    let sha_output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&nested.source)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("git rev-parse HEAD");
+    let sha = String::from_utf8_lossy(&sha_output.stdout)
+        .trim()
+        .to_string();
+    assert!(!sha.is_empty(), "could not capture HEAD commit sha");
+
+    // The curator supplies pin-ref pointing at the onboarded commit.
+    let registry = Sandbox::bare("pinref-registry");
+    registry.write_and_commit(
+        "mind.toml",
+        &format!(
+            "[[discover.sources]]\n\
+             source = \"{}\"\n\
+             pin-ref = \"{sha}\"\n",
+            nested.source_spec()
+        ),
+    );
+    let spec = registry.source_spec();
+    let r = registry.mind(&["meld", &spec]);
+    assert!(r.success, "meld should succeed: {} {}", r.stdout, r.stderr);
+
+    // DSC-65: the curator pin-ref must apply even though the source has its own
+    // mind.toml with its own follow-branch=own. No warning fires: no gated
+    // fields (roots/hooks) are present.
+    assert!(
+        !r.stderr.contains("ignored"),
+        "no DSC-60 warning should fire for a pin-only curator entry (no gated fields): {}",
+        r.stderr
+    );
+
+    let json = read_sources_json(&registry);
+    // The recorded pin must be the ref variant with the curator-supplied sha.
+    assert!(
+        json.contains("\"kind\": \"ref\"") && json.contains(&sha),
+        "the curator pin-ref must be recorded as the ref pin: {json}"
+    );
+    assert!(
+        !json.contains("follow-branch"),
+        "the source's own follow-branch must be overridden by the curator pin-ref: {json}"
     );
 }
 
@@ -11179,6 +11238,96 @@ fn sync_rewalk_applies_curator_follow_branch_to_new_nested() {
         probe.stdout.contains("skill:widget"),
         "curator roots must govern discovery for a sync-discovered nested source: {}",
         probe.stdout
+    );
+}
+
+#[test]
+fn curator_pin_tag_authoritative_overrides_source_own_pin() {
+    // spec: DSC-59 DSC-65
+    // A curator entry with `pin-tag = <tag>` on a nested source that ships its
+    // own mind.toml (with its own `follow-branch = "own"`) must record the
+    // curator's tag pin as the nested source's effective pin (DSC-65: curator pin
+    // is authoritative regardless of the source's own mind.toml). This covers the
+    // pin-tag kind, complementing the pin-ref and follow-branch cases. No gated
+    // fields (roots/hooks) are present, so no DSC-60 warning fires.
+    let nested = make_unonboarded_nested("pintag-target");
+    // The nested source onboards with its own follow-branch pin pointing to "own".
+    nested.write_and_commit(
+        "mind.toml",
+        "[source]\ndescription = \"onboarded\"\nfollow-branch = \"own\"\n",
+    );
+    git(&nested.source, &["branch", "own"]);
+    // A tag at the onboarded commit, which the curator pins to.
+    git(&nested.source, &["tag", "rel-1"]);
+
+    let registry = Sandbox::bare("pintag-registry");
+    registry.write_and_commit(
+        "mind.toml",
+        &format!(
+            "[[discover.sources]]\n\
+             source = \"{}\"\n\
+             pin-tag = \"rel-1\"\n",
+            nested.source_spec()
+        ),
+    );
+    let spec = registry.source_spec();
+    let r = registry.mind(&["meld", &spec]);
+    assert!(r.success, "meld should succeed: {} {}", r.stdout, r.stderr);
+
+    // No DSC-60 warning: a pin-only curator entry has no gated fields.
+    assert!(
+        !r.stderr.contains("ignored"),
+        "no DSC-60 warning should fire for a pin-only (pin-tag) curator entry: {}",
+        r.stderr
+    );
+
+    let json = read_sources_json(&registry);
+    // The recorded pin must be the tag variant with the curator-supplied tag.
+    assert!(
+        json.contains("\"kind\": \"tag\"") && json.contains("rel-1"),
+        "the curator pin-tag must be recorded as the tag pin: {json}"
+    );
+    assert!(
+        !json.contains("follow-branch"),
+        "the source's own follow-branch must be overridden by the curator pin-tag: {json}"
+    );
+}
+
+#[test]
+fn curator_conflicting_pin_directives_is_meld_error() {
+    // spec: DSC-59
+    // A `[discover.sources]` entry that declares more than one pin directive
+    // (here follow-branch AND pin-ref) is a MindToml one-of error. The error must
+    // surface at meld (not only as a unit test), and nothing must be registered.
+    let nested = make_unonboarded_nested("conflict-target");
+    let registry = Sandbox::bare("conflict-registry");
+    registry.write_and_commit(
+        "mind.toml",
+        &format!(
+            "[[discover.sources]]\n\
+             source = \"{}\"\n\
+             follow-branch = \"stable\"\n\
+             pin-ref = \"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\"\n",
+            nested.source_spec()
+        ),
+    );
+    let spec = registry.source_spec();
+    let r = registry.mind(&["meld", &spec]);
+    assert!(
+        !r.success,
+        "a nested entry with two pin directives must fail at meld: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr.contains("conflicting pin"),
+        "the meld error must mention conflicting pin directives: {}",
+        r.stderr
+    );
+    // The conflicting nested source must NOT be registered.
+    let recall = registry.mind(&["recall", "--sources"]).stdout;
+    assert!(
+        !recall.contains("/conflict-target"),
+        "the conflicting nested source must not be registered: {recall}"
     );
 }
 

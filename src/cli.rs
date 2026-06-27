@@ -399,6 +399,24 @@ pub enum Command {
 
     /// Print the mind man page (roff) to stdout.
     Man,
+
+    /// Write a super-source `mind.toml` reproducing the current melded and
+    /// installed state so melding the output recreates the same source set.
+    ///
+    /// By default, `dump` filters each source to the items actually installed
+    /// and stamps the per-entry install directive accordingly. Pass
+    /// `--whole-sources` to emit `install = true` for every source regardless
+    /// of how many items are installed.
+    Dump {
+        /// Write to this file instead of stdout.
+        #[arg(long, value_name = "PATH")]
+        output: Option<std::path::PathBuf>,
+
+        /// Emit `install = true` for every melded source, ignoring how many
+        /// of its items are currently installed.
+        #[arg(long = "whole-sources")]
+        whole_sources: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]

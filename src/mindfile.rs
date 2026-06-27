@@ -304,10 +304,24 @@ pub struct NestedSource {
     /// only registered and available. Default false (DSC-58).
     #[serde(default)]
     pub install: bool,
-    /// Curator-supplied pin: track a named branch. Only follow-branch is
-    /// supported for a nested entry (not pin-tag/pin-ref). DSC-59.
+    /// A subset of the nested source's items to offer for install (DSC-62).
+    /// Bare `kind:name` refs in source truth; a prefix in effect for the entry
+    /// is applied at install time. `None` means this field is absent (fall back
+    /// to the `install` boolean). `Some([])` is equivalent to `install = false`
+    /// (offer nothing). Setting this alongside `install = true` is an error
+    /// (DSC-64).
+    #[serde(rename = "install-items", default)]
+    pub install_items: Option<Vec<String>>,
+    /// Curator-supplied pin: track a named branch (DSC-59, DSC-41 one-of).
     #[serde(rename = "follow-branch", default)]
     pub follow_branch: Option<String>,
+    /// Curator-supplied pin: fix to a named tag (DSC-59, DSC-41 one-of).
+    #[serde(rename = "pin-tag", default)]
+    pub pin_tag: Option<String>,
+    /// Curator-supplied pin: fix to a specific commit sha (DSC-59, DSC-41
+    /// one-of). Also emitted by `mind dump` (DUMP-1, DUMP-4, DSC-65).
+    #[serde(rename = "pin-ref", default)]
+    pub pin_ref: Option<String>,
     /// Curator-supplied convention scan roots (DSC-59 / DSC-50 shape): when
     /// set, convention discovery scans under each listed directory instead of
     /// the repo root.
@@ -321,11 +335,61 @@ pub struct NestedSource {
 }
 
 impl NestedSource {
-    /// Return the curator-supplied pin, or `None` when not set.
-    pub fn follow_branch_pin(&self) -> Option<Pin> {
-        self.follow_branch
-            .as_deref()
-            .map(|b| Pin::FollowBranch(b.to_owned()))
+    /// Validate this entry for mutual-exclusion constraints (DSC-64).
+    ///
+    /// `install = true` together with a non-empty `install_items` list is a
+    /// `MindToml` error: offering all and offering a named subset are mutually
+    /// exclusive.
+    pub fn validate(&self, toml_path: &Path) -> Result<()> {
+        if self.install
+            && self
+                .install_items
+                .as_ref()
+                .is_some_and(|items| !items.is_empty())
+        {
+            return Err(MindError::MindToml {
+                path: toml_path.to_path_buf(),
+                msg: format!(
+                    "nested source '{}': install = true and install-items are mutually exclusive; \
+                     use install-items alone to offer a subset, or install = true to offer all",
+                    self.source
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    /// Return the curator-supplied pin directive, or `None` when not set.
+    ///
+    /// Accepts any of `follow-branch`, `pin-tag`, or `pin-ref` (DSC-59,
+    /// DSC-41 one-of rule). Declaring more than one is a `MindToml` error.
+    pub fn pin_directive(&self, toml_path: &Path) -> Result<Option<Pin>> {
+        // spec: DSC-59 DSC-65
+        let mut set: Vec<(&str, Pin)> = Vec::new();
+        if let Some(b) = &self.follow_branch {
+            set.push(("follow-branch", Pin::FollowBranch(b.clone())));
+        }
+        if let Some(t) = &self.pin_tag {
+            set.push(("pin-tag", Pin::Tag(t.clone())));
+        }
+        if let Some(r) = &self.pin_ref {
+            set.push(("pin-ref", Pin::Ref(r.clone())));
+        }
+        match set.len() {
+            0 => Ok(None),
+            1 => Ok(Some(set.remove(0).1)),
+            _ => {
+                let names: Vec<&str> = set.iter().map(|(k, _)| *k).collect();
+                Err(MindError::MindToml {
+                    path: toml_path.to_path_buf(),
+                    msg: format!(
+                        "nested source '{}': conflicting pin directives: {}; declare at most one of follow-branch, pin-tag, pin-ref",
+                        self.source,
+                        names.join(", ")
+                    ),
+                })
+            }
+        }
     }
 
     /// Resolve this nested source's curator-supplied lifecycle hooks in
@@ -1025,32 +1089,44 @@ mod tests {
     }
 
     #[test]
-    fn nested_source_follow_branch_pin_returns_pin() {
+    fn nested_source_pin_directive_returns_follow_branch_pin() {
+        // spec: DSC-59 — pin_directive returns Pin::FollowBranch for follow-branch entries.
         let ns = NestedSource {
             source: "x".into(),
             alias: None,
             install: false,
+            install_items: None,
             follow_branch: Some("develop".into()),
+            pin_tag: None,
+            pin_ref: None,
             roots: None,
             hooks: vec![],
         };
         assert_eq!(
-            ns.follow_branch_pin(),
+            ns.pin_directive(Path::new("mind.toml")).expect("no error"),
             Some(Pin::FollowBranch("develop".into()))
         );
     }
 
     #[test]
-    fn nested_source_follow_branch_pin_none_when_unset() {
+    fn nested_source_pin_directive_none_when_unset() {
+        // spec: DSC-59 — no pin fields => None.
         let ns = NestedSource {
             source: "x".into(),
             alias: None,
             install: false,
+            install_items: None,
             follow_branch: None,
+            pin_tag: None,
+            pin_ref: None,
             roots: None,
             hooks: vec![],
         };
-        assert!(ns.follow_branch_pin().is_none());
+        assert!(
+            ns.pin_directive(Path::new("mind.toml"))
+                .expect("no error")
+                .is_none()
+        );
     }
 
     #[test]
@@ -1183,7 +1259,10 @@ mod tests {
             source: "x".into(),
             alias: None,
             install: false,
+            install_items: None,
             follow_branch: None,
+            pin_tag: None,
+            pin_ref: None,
             roots: None,
             hooks: vec![Hook {
                 run: "array-only".into(),
@@ -1198,27 +1277,25 @@ mod tests {
     }
 
     #[test]
-    fn nested_source_follow_branch_pin_is_always_follow_branch_variant() {
+    fn nested_source_follow_branch_pin_directive_is_always_follow_branch_variant() {
         // spec: DSC-59
-        // A curator can only inject a follow-branch pin: the nested entry exposes
-        // no pin-tag / pin-ref keys, so `follow_branch_pin` is structurally
-        // incapable of producing a Tag or Ref pin. Whatever string the curator
-        // supplies, the resulting Pin is the FollowBranch variant carrying that
-        // exact string -- never a tag or ref.
+        // When follow_branch is set and pin_tag/pin_ref are not, pin_directive
+        // always returns a FollowBranch variant carrying the exact branch string.
         for branch in ["main", "develop", "v1", "release/2.0", "abc123"] {
             let ns = NestedSource {
                 source: "x".into(),
                 alias: None,
                 install: false,
+                install_items: None,
                 follow_branch: Some(branch.into()),
+                pin_tag: None,
+                pin_ref: None,
                 roots: None,
                 hooks: vec![],
             };
-            match ns.follow_branch_pin() {
+            match ns.pin_directive(Path::new("mind.toml")).expect("no error") {
                 Some(Pin::FollowBranch(b)) => assert_eq!(b, branch),
-                other => panic!(
-                    "curator pin must be FollowBranch({branch:?}), never a tag/ref; got {other:?}"
-                ),
+                other => panic!("expected Pin::FollowBranch({branch:?}); got {other:?}"),
             }
         }
     }
@@ -1296,6 +1373,269 @@ mod tests {
         assert!(
             ns.roots.is_none(),
             "unset roots must be None, distinct from the empty list"
+        );
+    }
+
+    // ----- DSC-62 / DSC-63 / DSC-64: install_items subset directive -----
+
+    #[test]
+    fn install_items_absent_parses_to_none() {
+        // spec: DSC-62 — when install-items is absent, the field is None and
+        // the install bool governs as before (DSC-58).
+        let toml = r#"
+            [[discover.sources]]
+            source = "github:owner/repo"
+            install = true
+        "#;
+        let parsed: MindToml = toml::from_str(toml).expect("parse");
+        let ns = &parsed.discover.as_ref().unwrap().sources[0];
+        assert!(
+            ns.install_items.is_none(),
+            "absent install-items must be None"
+        );
+        assert!(ns.install, "install = true must still parse");
+    }
+
+    #[test]
+    fn install_items_empty_list_parses_to_some_empty() {
+        // spec: DSC-62 — install-items = [] is distinct from absent and
+        // equivalent to install = false (offer nothing).
+        let toml = r#"
+            [[discover.sources]]
+            source = "github:owner/repo"
+            install-items = []
+        "#;
+        let parsed: MindToml = toml::from_str(toml).expect("parse");
+        let ns = &parsed.discover.as_ref().unwrap().sources[0];
+        assert_eq!(
+            ns.install_items.as_deref(),
+            Some(&[][..]),
+            "install-items = [] must be Some(empty)"
+        );
+    }
+
+    #[test]
+    fn install_items_non_empty_list_parses_correctly() {
+        // spec: DSC-62 / DSC-63 — install-items carries bare kind:name refs.
+        let toml = r#"
+            [[discover.sources]]
+            source = "github:owner/repo"
+            install-items = ["skill:review", "agent:dev"]
+        "#;
+        let parsed: MindToml = toml::from_str(toml).expect("parse");
+        let ns = &parsed.discover.as_ref().unwrap().sources[0];
+        let items = ns.install_items.as_deref().expect("must be Some");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0], "skill:review");
+        assert_eq!(items[1], "agent:dev");
+    }
+
+    #[test]
+    fn install_items_three_way_distinction() {
+        // spec: DSC-62 — None (absent) vs Some([]) (empty) vs Some([..]) (non-empty)
+        // are three distinct states with different install semantics.
+        let absent: MindToml = toml::from_str("[[discover.sources]]\nsource = \"x\"\n").unwrap();
+        let empty: MindToml =
+            toml::from_str("[[discover.sources]]\nsource = \"x\"\ninstall-items = []\n").unwrap();
+        let nonempty: MindToml = toml::from_str(
+            "[[discover.sources]]\nsource = \"x\"\ninstall-items = [\"skill:foo\"]\n",
+        )
+        .unwrap();
+
+        let ns_absent = &absent.discover.as_ref().unwrap().sources[0];
+        let ns_empty = &empty.discover.as_ref().unwrap().sources[0];
+        let ns_nonempty = &nonempty.discover.as_ref().unwrap().sources[0];
+
+        assert!(ns_absent.install_items.is_none(), "absent => None");
+        assert_eq!(
+            ns_empty.install_items.as_deref(),
+            Some(&[][..]),
+            "empty => Some([])"
+        );
+        assert_eq!(
+            ns_nonempty.install_items.as_deref().unwrap().len(),
+            1,
+            "non-empty => Some([..])"
+        );
+    }
+
+    #[test]
+    fn install_true_with_nonempty_install_items_is_mind_toml_error() {
+        // spec: DSC-64 — install = true and a non-empty install-items on the same
+        // entry is a MindToml error (mutually exclusive).
+        let ns = NestedSource {
+            source: "github:owner/repo".into(),
+            alias: None,
+            install: true,
+            install_items: Some(vec!["skill:review".into()]),
+            follow_branch: None,
+            pin_tag: None,
+            pin_ref: None,
+            roots: None,
+            hooks: vec![],
+        };
+        let toml_path = Path::new("/super/mind.toml");
+        let err = ns.validate(toml_path).unwrap_err();
+        match err {
+            MindError::MindToml { path, msg } => {
+                assert_eq!(path, toml_path);
+                assert!(
+                    msg.contains("mutually exclusive"),
+                    "error must say mutually exclusive: {msg}"
+                );
+                assert!(
+                    msg.contains("github:owner/repo"),
+                    "error must name the source: {msg}"
+                );
+            }
+            other => panic!("expected MindError::MindToml, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn install_true_with_empty_install_items_is_ok() {
+        // spec: DSC-64 — install = true and install-items = [] is NOT an error:
+        // the empty list is equivalent to install = false and overrides the boolean,
+        // so there is no contradiction. Only a non-empty list conflicts.
+        let ns = NestedSource {
+            source: "github:owner/repo".into(),
+            alias: None,
+            install: true,
+            install_items: Some(vec![]), // empty is fine
+            follow_branch: None,
+            pin_tag: None,
+            pin_ref: None,
+            roots: None,
+            hooks: vec![],
+        };
+        assert!(
+            ns.validate(Path::new("mind.toml")).is_ok(),
+            "install = true + install-items = [] must not error (both say 'install nothing')"
+        );
+    }
+
+    #[test]
+    fn install_false_with_nonempty_install_items_is_ok() {
+        // spec: DSC-62 — the normal subset form: install-items alone (install
+        // left false/unset). Must not error from validate().
+        let ns = NestedSource {
+            source: "github:owner/repo".into(),
+            alias: None,
+            install: false,
+            install_items: Some(vec!["skill:review".into(), "agent:dev".into()]),
+            follow_branch: None,
+            pin_tag: None,
+            pin_ref: None,
+            roots: None,
+            hooks: vec![],
+        };
+        assert!(
+            ns.validate(Path::new("mind.toml")).is_ok(),
+            "install-items alone (install = false) must not error"
+        );
+    }
+
+    // ----- DSC-59 / DSC-65: NestedSource pin_directive (all three forms) -----
+
+    #[test]
+    fn nested_pin_directive_none_when_no_pin_set() {
+        // spec: DSC-59
+        let toml = "[[discover.sources]]\nsource = \"github:owner/repo\"\n";
+        let parsed: MindToml = toml::from_str(toml).expect("parse");
+        let ns = &parsed.discover.as_ref().unwrap().sources[0];
+        let pin = ns
+            .pin_directive(Path::new("mind.toml"))
+            .expect("no conflict");
+        assert!(pin.is_none(), "no pin set => None");
+    }
+
+    #[test]
+    fn nested_pin_directive_follow_branch() {
+        // spec: DSC-59
+        let toml =
+            "[[discover.sources]]\nsource = \"github:owner/repo\"\nfollow-branch = \"main\"\n";
+        let parsed: MindToml = toml::from_str(toml).expect("parse");
+        let ns = &parsed.discover.as_ref().unwrap().sources[0];
+        let pin = ns
+            .pin_directive(Path::new("mind.toml"))
+            .expect("no conflict");
+        assert_eq!(pin, Some(Pin::FollowBranch("main".into())));
+    }
+
+    #[test]
+    fn nested_pin_directive_pin_tag_parses_and_resolves() {
+        // spec: DSC-59 — pin-tag is now accepted on a nested entry.
+        let toml = "[[discover.sources]]\nsource = \"github:owner/repo\"\npin-tag = \"v2.0\"\n";
+        let parsed: MindToml = toml::from_str(toml).expect("parse");
+        let ns = &parsed.discover.as_ref().unwrap().sources[0];
+        let pin = ns
+            .pin_directive(Path::new("mind.toml"))
+            .expect("no conflict");
+        assert_eq!(pin, Some(Pin::Tag("v2.0".into())));
+    }
+
+    #[test]
+    fn nested_pin_directive_pin_ref_parses_and_resolves() {
+        // spec: DSC-59 DSC-65 — pin-ref is accepted on a nested entry and is
+        // the form emitted by `mind dump` for exact-revision reproduction.
+        let sha = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+        let toml =
+            format!("[[discover.sources]]\nsource = \"github:owner/repo\"\npin-ref = \"{sha}\"\n");
+        let parsed: MindToml = toml::from_str(&toml).expect("parse");
+        let ns = &parsed.discover.as_ref().unwrap().sources[0];
+        let pin = ns
+            .pin_directive(Path::new("mind.toml"))
+            .expect("no conflict");
+        assert_eq!(pin, Some(Pin::Ref(sha.into())));
+    }
+
+    #[test]
+    fn nested_pin_directive_conflict_follow_branch_and_pin_tag_is_error() {
+        // spec: DSC-59 — more than one pin directive on a nested entry is a
+        // MindToml error (the same one-of rule as DSC-41 on [source]).
+        let toml = "[[discover.sources]]\nsource = \"github:owner/repo\"\nfollow-branch = \"main\"\npin-tag = \"v1\"\n";
+        let parsed: MindToml = toml::from_str(toml).expect("parse");
+        let ns = &parsed.discover.as_ref().unwrap().sources[0];
+        let result = ns.pin_directive(Path::new("/super/mind.toml"));
+        assert!(result.is_err(), "conflicting pin directives must error");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("conflicting pin"),
+            "error must mention 'conflicting pin': {err_msg}"
+        );
+    }
+
+    #[test]
+    fn nested_pin_directive_conflict_all_three_is_error() {
+        // spec: DSC-59 — all three directives at once is also a conflict error.
+        let toml = "[[discover.sources]]\nsource = \"github:owner/repo\"\nfollow-branch = \"main\"\npin-tag = \"v1\"\npin-ref = \"abc123\"\n";
+        let parsed: MindToml = toml::from_str(toml).expect("parse");
+        let ns = &parsed.discover.as_ref().unwrap().sources[0];
+        let result = ns.pin_directive(Path::new("/super/mind.toml"));
+        assert!(result.is_err(), "three pin directives must error");
+    }
+
+    #[test]
+    fn nested_pin_directive_pin_ref_parses_back_from_dump_output() {
+        // spec: DSC-65 DUMP-1 — `mind dump` emits `pin-ref = <sha>`; when the
+        // output is melded the nested entry's pin_directive returns Pin::Ref.
+        // Verify the round-trip: serialise a DumpEntry-style string manually
+        // and parse it back as a MindToml nested source.
+        let sha = "cafebabecafebabecafebabecafebabecafebabe";
+        // Simulate what dump emits (after our dump.rs change):
+        let toml_text = format!(
+            "[source]\ndescription = \"Generated by mind dump.\"\n\
+             [[discover.sources]]\nsource = \"/path/to/repo\"\npin-ref = \"{sha}\"\ninstall = false\n"
+        );
+        let parsed: MindToml = toml::from_str(&toml_text).expect("parse");
+        let ns = &parsed.discover.as_ref().unwrap().sources[0];
+        let pin = ns
+            .pin_directive(Path::new("mind.toml"))
+            .expect("no conflict");
+        assert_eq!(
+            pin,
+            Some(Pin::Ref(sha.into())),
+            "pin-ref from dump output must round-trip as Pin::Ref"
         );
     }
 }
