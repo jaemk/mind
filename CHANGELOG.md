@@ -6,6 +6,70 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-06-27
+
+### Added
+
+- `absorb <ref>` claims an unmanaged lobe item (a hand-written skill/agent/rule)
+  into a version-controlled source: it moves the item out of the lobe, commits
+  it, melds the source if needed, and learns it as a managed item. The
+  destination resolves from `--to`, then `MIND_ABSORB_TO`, then the `absorb_to`
+  config key, and falls back to a built-in `~/.mind/personal` (git-init on
+  demand). The inverse of `forget --unmanaged`.
+- `dump` writes a super-source `mind.toml` reproducing the current melded and
+  installed state: each source is referenced by spec, pinned to its recorded
+  commit, and stamped with an install directive (`install = true`/`false` or
+  `install_items = [...]` for a subset). `--whole-sources` emits every source as
+  `install = true`.
+- `forget --unmanaged` scopes `forget` to unmanaged lobe items: a glob removes
+  every match, an exact `kind:name` removes one, and no ref removes all
+  unmanaged across lobes. Managed items are never matched.
+- `requires:` frontmatter key declares explicit intra-source dependencies
+  (whitespace-separated `kind:name`/bare names), unioned with the `{{ns:}}`
+  derived edges. Unlike a token, it is metadata and is not rewritten into the
+  item body.
+- A dependency graph over installed items, surfaced across the verbs: `forget`
+  warns when removal breaks a dependent's reference (no cascade); `recall --tree`
+  renders the installed items as a dependency forest and `recall <item> --tree`
+  scopes to one subtree; the non-interactive `probe` listing nests each item's
+  transitive dependencies, with `probe --json` adding a flat `dependencies`
+  adjacency field; the TUI expands an item to its dependency subtree and jumps to
+  a dependency's canonical line on Enter.
+- `recall --tree --json` emits the installed dependency forest as nested JSON
+  (`{"key": ..., "dependencies": [...]}`, cycle back-edges as `{"key": ...,
+  "cycle": true}`).
+- A `[discover].sources` entry may set `install_items = ["kind:name", ...]` to
+  install only a named subset of a nested source's items.
+- A `[discover].sources` entry may carry `follow-branch`, `roots`, and
+  `[[discover.sources.hooks]]` to support an un-onboarded nested source without
+  forking it. The curator-supplied values apply only when the nested source
+  ships no `mind.toml` of its own.
+- Documentation pages for the interactive TUI, managed policy, tooling (the
+  `tool` kind and path tokens), namespacing, dependencies, unmanaged items, and
+  `init-source`, plus the global flags, the color/Unicode gate, exit-status
+  semantics, the on-disk layout, and troubleshooting.
+
+### Changed
+
+- `recall` marks an installed-but-out-of-date item with a distinct left-edge
+  marker (`↑` in yellow, ASCII `^`) instead of the installed `✓`/`+`, so the
+  stale state is visible from the marker alone.
+- A nested `[discover].sources` pin directive (`follow-branch`, `pin-tag`, or
+  `pin-ref`) is authoritative: it overrides the nested source's own `[source]`
+  pin, ranking just below a consumer meld flag.
+- `absorb` is transactional: a commit, meld, or learn failure restores the
+  original lobe entry and leaves the manifest unchanged. `absorb` and `forget`
+  refuse a destructive confirmation in `--json` mode without `--yes` rather than
+  proceeding silently.
+
+### Security
+
+- Pin and ref values are validated at parse time: a value beginning with `-` (or
+  containing whitespace, `..`, or control characters) is rejected, and `git
+  fetch` invocations use a `--` terminator. This prevents an untrusted cloned
+  `mind.toml` pin or a `--follow-branch`/`--pin-tag`/`--pin-ref` flag from
+  injecting git options.
+
 ## [0.6.2] - 2026-06-26
 
 ### Added
