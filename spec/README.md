@@ -77,7 +77,7 @@ and verified.
 | Polished output: global `--json`/`--yes`/`--ascii`, color+Unicode gate, structured JSON results | done | CLI-150, CLI-151, CLI-152, CLI-153, CLI-154 |
 | Unmanaged lobe items: `recall`/`probe` listing + `forget` with a not-managed-by-mind warning | done | [unmanaged.md](unmanaged.md) (UNM-1..5) |
 | Unmanaged items in the `probe` TUI group node | done | UNM-6 |
-| `forget --unmanaged [glob]`: bulk-remove unmanaged lobe items (the default glob stays managed-only) | pending | UNM-7, UNM-8 |
+| `forget --unmanaged [glob]`: bulk-remove unmanaged lobe items (the default glob stays managed-only) | done | UNM-7, UNM-8 |
 | TUI: keep the highlighted row in the middle two-thirds (scroll margin) | done | TUI-16 |
 | TUI: Enter opens a details dialog with the node's valid actions | done | TUI-26 |
 

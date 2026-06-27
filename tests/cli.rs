@@ -3742,6 +3742,342 @@ fn forget_glob_never_sweeps_unmanaged() {
     );
 }
 
+// --- UNM-7/UNM-8: forget --unmanaged bulk removal ---------------------------
+
+/// `forget --unmanaged 'skill:*' --yes` removes every unmanaged skill.
+// spec: UNM-7 UNM-8
+#[test]
+fn forget_unmanaged_bulk_kind_glob_removes_matching() {
+    let sb = melded();
+    let skill = sb.claude_home.join("skills/handmade");
+    write(
+        &skill.join("SKILL.md"),
+        "---\ndescription: mine\n---\n# handmade\n",
+    );
+    let agent = sb.claude_home.join("agents/custom.md");
+    write(&agent, "---\nname: custom\n---\n# custom\n");
+    // skill:* removes the skill, not the agent.
+    let r = sb.mind(&["forget", "--unmanaged", "skill:*", "--yes"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.to_lowercase().contains("not managed by mind"),
+        "must state items are not managed: {}",
+        r.stdout
+    );
+    assert!(!skill.exists(), "the unmanaged skill dir must be removed");
+    assert!(agent.exists(), "the unmanaged agent must be untouched");
+}
+
+/// `forget --unmanaged --yes` (no ref) removes ALL unmanaged items.
+// spec: UNM-7 UNM-8
+#[test]
+fn forget_unmanaged_bulk_no_ref_removes_all() {
+    let sb = melded();
+    let skill = sb.claude_home.join("skills/handmade");
+    write(
+        &skill.join("SKILL.md"),
+        "---\ndescription: mine\n---\n# handmade\n",
+    );
+    let agent = sb.claude_home.join("agents/custom.md");
+    write(&agent, "---\nname: custom\n---\n# custom\n");
+    let r = sb.mind(&["forget", "--unmanaged", "--yes"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(!skill.exists(), "handmade skill must be removed");
+    assert!(!agent.exists(), "custom agent must be removed");
+}
+
+/// A MANAGED installed item is never matched by `forget --unmanaged '*' --yes`.
+// spec: UNM-7
+#[test]
+fn forget_unmanaged_bulk_never_removes_managed_items() {
+    let sb = melded();
+    // Install a managed item.
+    assert!(sb.mind(&["learn", "skill:review"]).success);
+    let managed_link = sb.claude_home.join("skills/review");
+    assert!(managed_link.exists(), "managed link must exist after learn");
+
+    // Also place an unmanaged skill.
+    let unmanaged_skill = sb.claude_home.join("skills/handmade");
+    write(
+        &unmanaged_skill.join("SKILL.md"),
+        "---\ndescription: mine\n---\n# handmade\n",
+    );
+
+    // A broad --unmanaged '*' must remove only the unmanaged item.
+    let r = sb.mind(&["forget", "--unmanaged", "*", "--yes"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(!unmanaged_skill.exists(), "unmanaged skill must be removed");
+    assert!(
+        managed_link.exists(),
+        "managed link must survive --unmanaged removal"
+    );
+}
+
+/// Non-TTY without `--yes` exits ConfirmationRequired and removes nothing.
+// spec: UNM-8
+#[test]
+fn forget_unmanaged_bulk_refuses_non_tty_without_yes() {
+    let sb = melded();
+    let skill = sb.claude_home.join("skills/handmade");
+    write(
+        &skill.join("SKILL.md"),
+        "---\ndescription: mine\n---\n# handmade\n",
+    );
+    // No --yes, piped (non-TTY): must fail and leave the item in place.
+    let r = sb.mind(&["forget", "--unmanaged", "skill:*"]);
+    assert!(
+        !r.success,
+        "must refuse without --yes in non-TTY: {}",
+        r.stderr
+    );
+    assert!(skill.exists(), "nothing must be removed on refusal");
+}
+
+/// A ref that matches no unmanaged item exits NotInstalled.
+// spec: UNM-7
+#[test]
+fn forget_unmanaged_bulk_no_match_is_not_installed() {
+    let sb = melded();
+    let r = sb.mind(&["forget", "--unmanaged", "nope*", "--yes"]);
+    assert!(!r.success, "must fail when no match: {}", r.stderr);
+    assert!(
+        r.stderr.contains("not installed") || r.stderr.contains("nope"),
+        "error must name the unmatched ref: {}",
+        r.stderr
+    );
+}
+
+/// `--json --yes --unmanaged <glob>` emits one MutationResult object whose
+/// `removed` array carries the `kind:name` keys of every removed unmanaged item,
+/// with no human prose, and removes the matched files.
+// spec: UNM-7 UNM-8
+#[test]
+fn forget_unmanaged_bulk_json_lists_removed_keys() {
+    let sb = melded();
+    let skill = sb.claude_home.join("skills/handmade");
+    write(
+        &skill.join("SKILL.md"),
+        "---\ndescription: mine\n---\n# handmade\n",
+    );
+    let agent = sb.claude_home.join("agents/custom.md");
+    write(&agent, "---\nname: custom\n---\n# custom\n");
+
+    let r = sb.mind(&["forget", "--unmanaged", "*", "--yes", "--json"]);
+    assert!(r.success, "forget --unmanaged --json failed: {}", r.stderr);
+    let v = parse_json(&r.stdout);
+    assert_eq!(v["action"], "forget", "{}", r.stdout);
+    assert_eq!(v["target"], "*", "{}", r.stdout);
+    assert_eq!(v["outcome"], "removed", "{}", r.stdout);
+    // The removed array carries both keys, in scan order (BTreeMap by
+    // (ItemKind, name); ItemKind declares Skill before Agent).
+    assert_eq!(
+        v["removed"],
+        serde_json::json!(["skill:handmade", "agent:custom"]),
+        "removed keys must list every removed unmanaged item: {}",
+        r.stdout
+    );
+    // No human prose under --json.
+    assert!(
+        !r.stdout.contains("forgot") && !r.stdout.contains("not managed by mind"),
+        "human prose must be absent under --json: {}",
+        r.stdout
+    );
+    assert!(!has_ansi_escape(&r.stdout), "json stdout: {}", r.stdout);
+    assert!(!skill.exists() && !agent.exists(), "both must be removed");
+}
+
+/// The `-y` short form skips the prompt for `--unmanaged` just like `--yes`.
+// spec: UNM-8
+#[test]
+fn forget_unmanaged_bulk_short_y_skips_prompt() {
+    let sb = melded();
+    let skill = sb.claude_home.join("skills/handmade");
+    write(
+        &skill.join("SKILL.md"),
+        "---\ndescription: mine\n---\n# handmade\n",
+    );
+    let r = sb.mind(&["forget", "--unmanaged", "skill:*", "-y"]);
+    assert!(
+        r.success,
+        "-y must skip the prompt: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        !skill.exists(),
+        "the unmanaged skill must be removed with -y"
+    );
+}
+
+/// The `unlearn` visible alias works with `--unmanaged`.
+// spec: UNM-7 UNM-8
+#[test]
+fn forget_unmanaged_bulk_via_unlearn_alias() {
+    let sb = melded();
+    let skill = sb.claude_home.join("skills/handmade");
+    write(
+        &skill.join("SKILL.md"),
+        "---\ndescription: mine\n---\n# handmade\n",
+    );
+    let r = sb.mind(&["unlearn", "--unmanaged", "--yes"]);
+    assert!(
+        r.success,
+        "unlearn alias must accept --unmanaged: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        !skill.exists(),
+        "the unmanaged skill must be removed via unlearn"
+    );
+}
+
+/// A kind-qualified EXACT name (not a glob) removes exactly that one unmanaged
+/// item and leaves a same-name item of a different kind alone.
+// spec: UNM-7 UNM-8
+#[test]
+fn forget_unmanaged_bulk_kind_exact_name_removes_one() {
+    let sb = melded();
+    // A skill and an agent that share the name `shared`.
+    let skill = sb.claude_home.join("skills/shared");
+    write(
+        &skill.join("SKILL.md"),
+        "---\ndescription: mine\n---\n# shared\n",
+    );
+    let agent = sb.claude_home.join("agents/shared.md");
+    write(&agent, "---\nname: shared\n---\n# shared\n");
+
+    let r = sb.mind(&["forget", "--unmanaged", "agent:shared", "--yes"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(!agent.exists(), "the agent:shared must be removed");
+    assert!(
+        skill.exists(),
+        "the same-named skill must be untouched by an exact agent: ref"
+    );
+}
+
+/// A BARE exact name shared across kinds (skill+agent both named `shared`)
+/// removes BOTH through the list-and-confirm path. Unlike the single-item UNM-4
+/// `resolve` path (which errors AmbiguousItem), the bulk `select` path treats a
+/// bare name uniformly: every kind with that name matches and is removed.
+// spec: UNM-7 UNM-8
+#[test]
+fn forget_unmanaged_bulk_bare_name_removes_all_kinds() {
+    let sb = melded();
+    let skill = sb.claude_home.join("skills/shared");
+    write(
+        &skill.join("SKILL.md"),
+        "---\ndescription: mine\n---\n# shared\n",
+    );
+    let agent = sb.claude_home.join("agents/shared.md");
+    write(&agent, "---\nname: shared\n---\n# shared\n");
+
+    let r = sb.mind(&["forget", "--unmanaged", "shared", "--yes"]);
+    assert!(
+        r.success,
+        "a bare shared name must not error under --unmanaged: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        !skill.exists() && !agent.exists(),
+        "both same-named unmanaged items must be removed"
+    );
+}
+
+/// A source-qualified ref never matches an unmanaged item, so it is NotInstalled
+/// and removes nothing.
+// spec: UNM-7
+#[test]
+fn forget_unmanaged_bulk_source_qualified_is_not_installed() {
+    let sb = melded();
+    let skill = sb.claude_home.join("skills/handmade");
+    write(
+        &skill.join("SKILL.md"),
+        "---\ndescription: mine\n---\n# handmade\n",
+    );
+    let r = sb.mind(&[
+        "forget",
+        "--unmanaged",
+        "owner/repo#skill:handmade",
+        "--yes",
+    ]);
+    assert!(
+        !r.success,
+        "a source-qualified ref must not match an unmanaged item: {}",
+        r.stdout
+    );
+    assert!(
+        skill.exists(),
+        "nothing must be removed when the ref is source-qualified"
+    );
+}
+
+/// An unmanaged item present in TWO configured lobes is one logical item; a bulk
+/// `--unmanaged` removal deletes every occupied lobe path (STO-14, UNM-1).
+// spec: UNM-7 UNM-8
+#[test]
+fn forget_unmanaged_bulk_removes_from_all_lobes() {
+    let sb = Sandbox::new();
+    let home_a = sb.base.join("homeA");
+    let home_b = sb.base.join("homeB");
+    write(
+        &sb.mind_home.join("config.toml"),
+        &format!(
+            "lobes = [\"{}\", \"{}\"]\n",
+            home_a.display(),
+            home_b.display()
+        ),
+    );
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+
+    // The same unmanaged skill `dup` placed by hand in both lobes.
+    let skill_a = home_a.join("skills/dup");
+    let skill_b = home_b.join("skills/dup");
+    write(
+        &skill_a.join("SKILL.md"),
+        "---\ndescription: mine\n---\n# dup\n",
+    );
+    write(
+        &skill_b.join("SKILL.md"),
+        "---\ndescription: mine\n---\n# dup\n",
+    );
+
+    let r = sb.mind(&["forget", "--unmanaged", "skill:dup", "--yes"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(!skill_a.exists(), "lobe A copy must be removed");
+    assert!(!skill_b.exists(), "lobe B copy must be removed");
+}
+
+/// `--unmanaged` never touches the manifest: a managed item installed alongside
+/// unmanaged ones survives in the manifest after a broad `--unmanaged '*'`.
+// spec: UNM-8
+#[test]
+fn forget_unmanaged_bulk_leaves_manifest_unchanged() {
+    let sb = melded();
+    assert!(sb.mind(&["learn", "skill:review"]).success);
+    let manifest = sb.mind_home.join("manifest.json");
+    let before = std::fs::read_to_string(&manifest).unwrap();
+
+    // Place an unmanaged item and sweep all unmanaged.
+    let unmanaged = sb.claude_home.join("skills/handmade");
+    write(
+        &unmanaged.join("SKILL.md"),
+        "---\ndescription: mine\n---\n# handmade\n",
+    );
+    let r = sb.mind(&["forget", "--unmanaged", "*", "--yes"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(!unmanaged.exists(), "unmanaged item removed");
+
+    let after = std::fs::read_to_string(&manifest).unwrap();
+    assert_eq!(
+        before, after,
+        "the manifest must be byte-identical after --unmanaged removal"
+    );
+    // The managed item's link survives.
+    assert!(
+        std::fs::symlink_metadata(sb.claude_home.join("skills/review")).is_ok(),
+        "the managed review link must survive"
+    );
+}
+
 // --- TUI-2 fallback tests ---------------------------------------------------
 //
 // TUI-2: `probe` falls back to the non-interactive catalog listing when

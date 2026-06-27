@@ -1945,7 +1945,24 @@ fn item_catalog_match<'a>(
 }
 
 /// `mind forget <item>` — uninstall one item, or many via a glob.
-pub fn forget(paths: &Paths, item_ref: &str, yes: bool, dangerously_skip: bool) -> Result<()> {
+///
+/// When `unmanaged` is true, removal is scoped to unmanaged lobe items only
+/// (UNM-7/UNM-8). `item_ref` may be `None` to remove every unmanaged item.
+/// When `unmanaged` is false, behavior is unchanged: `item_ref` is required.
+pub fn forget(
+    paths: &Paths,
+    item_ref: Option<&str>,
+    unmanaged: bool,
+    yes: bool,
+    dangerously_skip: bool,
+) -> Result<()> {
+    if unmanaged {
+        return forget_unmanaged_bulk(paths, item_ref, yes);
+    }
+
+    // `unmanaged` is false: clap guarantees `item_ref` is Some (required_unless_present).
+    let item_ref = item_ref.expect("item_ref required when --unmanaged is not set");
+
     let out = crate::render::ctx();
     let mut manifest = Manifest::load(paths)?;
     let parsed = parse_item_ref(item_ref)?;
@@ -1967,9 +1984,9 @@ pub fn forget(paths: &Paths, item_ref: &str, yes: bool, dangerously_skip: bool) 
             // UNM-4: an exact ref that names no managed item may name an
             // unmanaged lobe item; a glob never sweeps unmanaged entries.
             Err(MindError::NotInstalled { .. }) => {
-                let unmanaged = crate::unmanaged::scan(paths, &manifest)?;
-                let item = crate::unmanaged::resolve(&unmanaged, &parsed)?;
-                return forget_unmanaged(item, yes);
+                let unmanaged_items = crate::unmanaged::scan(paths, &manifest)?;
+                let item = crate::unmanaged::resolve(&unmanaged_items, &parsed)?;
+                return forget_unmanaged_single(item, yes);
             }
             Err(e) => return Err(e),
         }
@@ -2036,10 +2053,10 @@ pub fn forget(paths: &Paths, item_ref: &str, yes: bool, dangerously_skip: bool) 
     Ok(())
 }
 
-/// `forget` of an unmanaged lobe item (UNM-4/5): remove the lobe entry itself
-/// after a prompt that states it is not managed by mind. There is no store copy
-/// or manifest entry, so the manifest is left untouched.
-fn forget_unmanaged(item: &crate::unmanaged::UnmanagedItem, yes: bool) -> Result<()> {
+/// `forget` of a single unmanaged lobe item (UNM-4/5): remove the lobe entry
+/// itself after a prompt that states it is not managed by mind. There is no
+/// store copy or manifest entry, so the manifest is left untouched.
+fn forget_unmanaged_single(item: &crate::unmanaged::UnmanagedItem, yes: bool) -> Result<()> {
     let out = crate::render::ctx();
     let where_ = item
         .paths
@@ -2076,6 +2093,76 @@ fn forget_unmanaged(item: &crate::unmanaged::UnmanagedItem, yes: bool) -> Result
         return print_json(&result);
     }
     println!("{} forgot {} (unmanaged)", out.ok(), item.key());
+    Ok(())
+}
+
+/// `forget --unmanaged [<ref>]` — bulk removal of unmanaged lobe items (UNM-7/8).
+///
+/// Selects every unmanaged item matching the optional `item_ref` (`None` = all),
+/// lists them, confirms once (stating they are not managed and deletion is real),
+/// then removes each. The manifest is never mutated (UNM-4).
+// spec: UNM-7 UNM-8
+fn forget_unmanaged_bulk(paths: &Paths, item_ref: Option<&str>, yes: bool) -> Result<()> {
+    let out = crate::render::ctx();
+    let manifest = Manifest::load(paths)?;
+    let scanned = crate::unmanaged::scan(paths, &manifest)?;
+
+    // Parse the ref (if given) and select matching items.
+    let parsed = item_ref.map(parse_item_ref).transpose()?;
+    let matched = crate::unmanaged::select(&scanned, parsed.as_ref());
+
+    let sentinel = item_ref.unwrap_or("*");
+    if matched.is_empty() {
+        return Err(MindError::NotInstalled {
+            name: sentinel.to_string(),
+        });
+    }
+
+    // UNM-8: list the matched items, then a SINGLE confirm stating they are not
+    // managed by mind and that removal deletes the user's own files/directories.
+    if !out.json {
+        println!(
+            "{} forget --unmanaged would remove {} unmanaged item(s):",
+            out.warn(),
+            matched.len()
+        );
+        for item in &matched {
+            println!("  {} {}", out.warn(), item.key());
+        }
+        println!(
+            "{} these items are NOT managed by mind: removing them deletes your own files or directories, not symlinks.",
+            out.warn()
+        );
+    }
+    if !yes {
+        if !crate::hook::is_tty() {
+            return Err(MindError::ConfirmationRequired {
+                action: format!("removing {} unmanaged items", matched.len()),
+            });
+        }
+        if !out.json && !confirm("remove these unmanaged items?")? {
+            println!("cancelled; nothing removed");
+            return Ok(());
+        }
+    }
+
+    // Remove each matched item's paths. The manifest is NOT mutated (UNM-4).
+    let mut removed: Vec<String> = Vec::new();
+    for item in &matched {
+        for p in &item.paths {
+            crate::install::remove_path(p)?;
+        }
+        removed.push(item.key());
+        if !out.json {
+            println!("{} forgot {} (unmanaged)", out.ok(), item.key());
+        }
+    }
+
+    if out.json {
+        let mut result = MutationResult::new("forget", sentinel, "removed");
+        result.removed = removed;
+        return print_json(&result);
+    }
     Ok(())
 }
 

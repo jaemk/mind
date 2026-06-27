@@ -262,8 +262,15 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
         }
         Command::Forget {
             item,
+            unmanaged,
             dangerously_skip_install_hook_check,
-        } => commands::forget(paths, &item, yes, dangerously_skip_install_hook_check),
+        } => commands::forget(
+            paths,
+            item.as_deref(),
+            unmanaged,
+            yes,
+            dangerously_skip_install_hook_check,
+        ),
         Command::Sync {
             upgrade,
             dangerously_skip_install_hook_check,

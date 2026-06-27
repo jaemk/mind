@@ -214,10 +214,24 @@ pub enum Command {
     },
 
     /// Remove an installed item, or many via a glob.
+    ///
+    /// With `--unmanaged`, the removal is scoped to unmanaged lobe items only
+    /// (the deliberate inverse of the default, which matches managed items only).
+    /// With no `<item>` and `--unmanaged`, every unmanaged item across all
+    /// configured lobes is removed.
     #[command(visible_alias = "unlearn")]
     Forget {
         /// The installed item ref or glob: `name`, `skill:name`, `'review*'`, `'*'`.
-        item: String,
+        /// With `--unmanaged`: the ref or glob scopes removal to unmanaged items only;
+        /// omit to remove every unmanaged item across all lobes.
+        #[arg(required_unless_present = "unmanaged")]
+        item: Option<String>,
+
+        /// Scope removal to unmanaged lobe items only (the deliberate inverse of the
+        /// default, which matches managed items only). With no ref it removes every
+        /// unmanaged item across all configured lobes.
+        #[arg(long)]
+        unmanaged: bool,
 
         /// Run an item's uninstall hook without the safety prompt. This executes
         /// arbitrary code from the source; only use it for a source you trust.
