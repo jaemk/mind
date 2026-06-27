@@ -117,7 +117,7 @@ run = "make build"
   a fresh meld and a re-meld, and the whole chain is still traversed so a deeper
   `install = true` is reached even under an unflagged parent. `meld --recursive`
   (DSC-55) is the superset: it installs every nested source regardless of the flag.
-- `DSC-59` (planned) A `[discover].sources` entry may carry configuration for the
+- `DSC-59` A `[discover].sources` entry may carry configuration for the
   nested source that the source itself would normally declare in its own
   `mind.toml`: `follow-branch = "<branch>"` (a pin directive, DSC-41), `roots =
   [...]` (convention scan roots, DSC-50), and one or more hooks as a
@@ -125,7 +125,7 @@ run = "make build"
   This lets a curator add support for a source that has not onboarded itself
   (no `mind.toml`), including one with custom build requirements or a monorepo
   layout, without forking it.
-- `DSC-60` (planned) The curator-supplied `follow-branch`, `roots`, and `hooks`
+- `DSC-60` The curator-supplied `follow-branch`, `roots`, and `hooks`
   (DSC-59) apply only when the nested source ships no `mind.toml` of its own. When
   the nested source has a `mind.toml`, that file is authoritative for its pin,
   roots, and hooks and the curator-supplied values are ignored (a warning is
@@ -133,7 +133,7 @@ run = "make build"
   `mind.toml`, even one that does not declare a pin/roots/hooks, suppresses all
   three. `as` (DSC-39) and `install` (DSC-58) are registry/consumer concerns and
   are unaffected by this gate; they always apply.
-- `DSC-61` (planned) When applied (DSC-60), a curator-supplied entry behaves as if
+- `DSC-61` When applied (DSC-60), a curator-supplied entry behaves as if
   the source had declared the same in its own `mind.toml`: `follow-branch`
   resolves and is recorded as the source's pin directive (DSC-41), so `sync`
   tracks that branch; `roots` governs convention discovery (DSC-50); and the

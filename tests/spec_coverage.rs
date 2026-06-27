@@ -25,10 +25,9 @@ const ALLOWLIST: &[&str] = &[
     // definitional, exercised by the expansion tests.
     "NS-3", "NS-10", // Discovery edge: missing directories yield no items.
     "DSC-13",
-    // Planned: a curated super-source adopts an un-onboarded nested source by
-    // supplying its `follow-branch`/`roots`/`[[hooks]]`, applied only when the
-    // nested source has no `mind.toml`. Cited by tests when built.
-    "DSC-59", "DSC-60", "DSC-61",
+    // A curated super-source adopting an un-onboarded nested source (DSC-59/60/61)
+    // is implemented and cited from tests/cli.rs (the apply, gate-with-warning,
+    // and consumer-pin-override tests); no longer allowlisted.
     // Retired (never implemented): INIT-8 proposed an `init-source` scaffold of a
     // `[source].install` stub; dropped when that field was deprecated (HOOK-90).
     // The statement is kept (marked removed) so the number is not reused; it has

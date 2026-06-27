@@ -71,6 +71,7 @@ pub fn meld(
         install_hook,
         dangerously_skip_install_hook_check,
         prefer_ssh,
+        None, // a top-level meld has no curator-supplied configuration
     )?;
     let newly: Vec<String> = registry
         .sources
@@ -211,6 +212,7 @@ enum HookOutcome {
 /// hook's non-zero exit propagates as `Err` (HOOK-53), leaving cleanup to the
 /// caller (meld removes the clone; re-meld leaves the source). `install_override`
 /// is the consumer `--install-hook` command (meld only).
+#[allow(clippy::too_many_arguments)]
 fn run_install_hooks(
     source: &mut crate::source::Source,
     clone_dir: &std::path::Path,
@@ -219,12 +221,16 @@ fn run_install_hooks(
     install_override: Option<&str>,
     dangerously_skip: bool,
     force_rerun: bool,
+    extra_hooks: Vec<crate::mindfile::ResolvedHook>,
 ) -> Result<HookOutcome> {
-    let resolved = mindfile
+    let mut resolved = mindfile
         .as_ref()
         .map(|m| m.resolved_hooks(toml_path))
         .transpose()?
         .unwrap_or_default();
+    // DSC-61: curator-supplied hooks (when applied) run after the source's own,
+    // through the exact same override/disclosure/decide/run path below.
+    resolved.extend(extra_hooks);
     let (hooks, replaced) = crate::hook::apply_install_override(resolved, install_override);
 
     let pin_desc = pin_description(&source.pin);
@@ -281,6 +287,26 @@ fn run_install_hooks(
     Ok(HookOutcome::Proceed)
 }
 
+/// Curator-supplied configuration for a nested source, lifted from a parent
+/// super-source's `[discover].sources` entry (DSC-59). Resolved by the parent
+/// before recursing; gated and applied inside `meld_recursive` (DSC-60/DSC-61).
+struct CuratedConfig {
+    /// The curator `follow-branch` as a pin directive, if set.
+    follow_pin: Option<Pin>,
+    /// The curator `roots`, if set (an explicit empty list is preserved).
+    roots: Option<Vec<String>>,
+    /// The curator `[[discover.sources.hooks]]`, resolved in declaration order.
+    hooks: Vec<crate::mindfile::ResolvedHook>,
+}
+
+impl CuratedConfig {
+    /// Whether any of the three gated values is present, so a DSC-60 warning is
+    /// warranted when the nested source turns out to have its own `mind.toml`.
+    fn has_any(&self) -> bool {
+        self.follow_pin.is_some() || self.roots.is_some() || !self.hooks.is_empty()
+    }
+}
+
 /// Meld one source and then its nested sources. Returns how many sources were
 /// newly added to the registry. `top_level` distinguishes the user's own meld
 /// (errors on a duplicate) from a curated nested meld (skips a duplicate).
@@ -288,6 +314,13 @@ fn run_install_hooks(
 /// `consumer_pin` is the caller-supplied pin (CLI flags or None for a nested
 /// source that inherits no pin override).
 /// `roots` is the consumer `--root` override (empty => no override).
+///
+/// `curated` carries the curator-supplied configuration from a parent
+/// super-source's `[discover].sources` entry (DSC-59): a follow-branch pin,
+/// scan roots, and lifecycle hooks. These apply only when the nested source
+/// ships no `mind.toml` of its own (DSC-60); when it does, they are ignored with
+/// a warning. `None` for a top-level meld or a nested source with no curator
+/// configuration.
 #[allow(clippy::too_many_arguments)]
 fn meld_recursive(
     paths: &Paths,
@@ -302,6 +335,7 @@ fn meld_recursive(
     install_hook: Option<String>,
     dangerously_skip_hook_check: bool,
     prefer_ssh: bool,
+    curated: Option<CuratedConfig>,
 ) -> Result<usize> {
     let out = crate::render::ctx();
     let mut source = parse_spec(repo)?;
@@ -369,15 +403,51 @@ fn meld_recursive(
     let mut mindfile = MindToml::load(&dir)?;
     source.description = mindfile.as_ref().and_then(|m| m.source.description.clone());
 
+    // DSC-60: the curator-supplied follow-branch/roots/hooks apply only when the
+    // nested source ships NO mind.toml of its own. The gate is whole-file: any
+    // nested mind.toml (even one declaring none of the three) suppresses all of
+    // them, since the source has onboarded and its own file is authoritative.
+    // `as` (DSC-39) and `install` (DSC-58) are not gated and were handled by the
+    // caller. Decided against the source's own default-branch checkout here,
+    // before any pin re-clone, so a curator pin cannot mask onboarding.
+    let curated = curated.unwrap_or(CuratedConfig {
+        follow_pin: None,
+        roots: None,
+        hooks: Vec::new(),
+    });
+    let apply_curated = mindfile.is_none();
+    if !apply_curated && curated.has_any() {
+        // spec: DSC-60
+        eprintln!(
+            "warning: {} ships its own mind.toml; curator-supplied follow-branch/roots/hooks are ignored",
+            source.name
+        );
+    }
+    let curated_follow_pin = if apply_curated {
+        curated.follow_pin.clone()
+    } else {
+        None
+    };
+    let curated_hooks = if apply_curated {
+        curated.hooks.clone()
+    } else {
+        Vec::new()
+    };
+
     // Step 2: resolve the effective pin (CLI-17, DSC-41):
-    //   consumer flag > [source] directive > DefaultBranch.
+    //   consumer flag > curator follow-branch (DSC-61) > [source] directive >
+    //   DefaultBranch. A consumer pin flag still wins over a curator follow-branch
+    //   (DSC-41 precedence); a gated source has no [source] directive of its own.
     let toml_path = dir.join("mind.toml");
     let directive_pin = mindfile
         .as_ref()
         .map(|m| m.source.pin_directive(&toml_path))
         .transpose()?
         .flatten();
-    let effective_pin = consumer_pin.or(directive_pin).unwrap_or(Pin::DefaultBranch);
+    let effective_pin = consumer_pin
+        .or(curated_follow_pin)
+        .or(directive_pin)
+        .unwrap_or(Pin::DefaultBranch);
 
     // Managed-policy enforcement (POL-3 authoritative). The identity is known and
     // the effective pin is resolved, but nothing is registered yet and the only
@@ -462,6 +532,11 @@ fn meld_recursive(
         } else {
             source.roots = Some(roots);
         }
+    } else if apply_curated && curated.roots.is_some() {
+        // DSC-61: with no consumer --root override, curator-supplied roots govern
+        // convention discovery just like a source's own [source].roots (DSC-50).
+        // A gated source has no mind.toml, so it cannot be authoritative.
+        source.roots = curated.roots.clone();
     }
 
     // Scan before registering. If the source is rejected here (e.g. the
@@ -539,6 +614,9 @@ fn meld_recursive(
         install_hook.as_deref(),
         dangerously_skip_hook_check,
         false,
+        // DSC-61: curator-supplied hooks (when applied) run through the same
+        // disclosure/safety-prompt/non-TTY-skip path as a source's own hooks.
+        curated_hooks,
     ) {
         Ok(HookOutcome::Proceed) => {}
         Ok(HookOutcome::Abort) => {
@@ -570,8 +648,17 @@ fn meld_recursive(
         .map(|d| &d.sources)
     {
         for entry in nested {
-            // Nested sources from a curated super-source get no pin override;
-            // they read their own [source] directive or default to DefaultBranch.
+            // DSC-59: lift this entry's curator-supplied configuration. The hooks
+            // are resolved here (against the super-source's mind.toml path for
+            // error reporting); the gate that decides whether they apply lives in
+            // the recursive call (DSC-60).
+            let curated = CuratedConfig {
+                follow_pin: entry.follow_branch_pin(),
+                roots: entry.roots.clone(),
+                hooks: entry.resolved_hooks(&toml_path)?,
+            };
+            // Nested sources from a curated super-source get no consumer pin or
+            // root override; the curator config (when applied) supplies them.
             added += meld_recursive(
                 paths,
                 registry,
@@ -585,6 +672,7 @@ fn meld_recursive(
                 None, // no consumer install hook for nested sources
                 dangerously_skip_hook_check,
                 prefer_ssh, // nested sources inherit the SSH preference
+                Some(curated),
             )?;
         }
     }
@@ -1570,6 +1658,7 @@ pub fn remeld(
                 None,
                 dangerously_skip_hook_check,
                 force_rerun,
+                Vec::new(),
             ) {
                 Ok(HookOutcome::Proceed) => registry.save(paths)?,
                 Ok(HookOutcome::Abort) => {
@@ -2037,6 +2126,7 @@ pub fn sync(paths: &Paths, then_upgrade: bool, dangerously_skip_hook_check: bool
                 None,  // auto-meld supplies no install hook
                 false, // auto-meld is non-TTY, so its hooks take the HOOK-22 skip path
                 prefer_ssh,
+                None, // auto-meld has no curator-supplied configuration
             )?;
         }
         if provisioned > 0 {
@@ -2148,25 +2238,43 @@ pub fn sync(paths: &Paths, then_upgrade: bool, dangerously_skip_hook_check: bool
     // DSC-38 guards. Only adds; a nested source dropped upstream stays registered.
     {
         // Collect the nested specs now, before mutably borrowing the registry.
-        let nested: Vec<(String, Option<String>)> = registry
-            .sources
-            .iter()
-            .filter_map(|s| {
-                MindToml::load(&s.clone_dir(paths))
-                    .ok()
-                    .flatten()
-                    .and_then(|m| m.discover)
-                    .map(|d| d.sources)
-            })
-            .flatten()
-            .map(|ns| (ns.source, ns.alias))
-            .collect();
+        // DSC-61: carry each entry's curator-supplied configuration so a newly
+        // discovered nested source is melded with the same gate/apply behavior as
+        // a fresh meld. Hooks resolve against the super-source's mind.toml path.
+        struct NestedTodo {
+            spec: String,
+            alias: Option<String>,
+            curated: CuratedConfig,
+        }
+        let mut nested: Vec<NestedTodo> = Vec::new();
+        for s in &registry.sources {
+            let clone_dir = s.clone_dir(paths);
+            let toml_path = clone_dir.join("mind.toml");
+            let Some(mt) = MindToml::load(&clone_dir).ok().flatten() else {
+                continue;
+            };
+            let Some(discover) = mt.discover else {
+                continue;
+            };
+            for ns in discover.sources {
+                let curated = CuratedConfig {
+                    follow_pin: ns.follow_branch_pin(),
+                    roots: ns.roots.clone(),
+                    hooks: ns.resolved_hooks(&toml_path)?,
+                };
+                nested.push(NestedTodo {
+                    spec: ns.source,
+                    alias: ns.alias,
+                    curated,
+                });
+            }
+        }
         // Seed the cycle guard with every registered URL so an existing source is
         // skipped without a clone attempt.
         let mut visited: HashSet<String> = registry.sources.iter().map(|s| s.url.clone()).collect();
         let mut discovered = 0usize;
-        for (spec, alias) in nested {
-            if let Ok(s) = parse_spec(&spec)
+        for todo in nested {
+            if let Ok(s) = parse_spec(&todo.spec)
                 && registry.find(&s.name).is_some()
             {
                 continue;
@@ -2174,8 +2282,8 @@ pub fn sync(paths: &Paths, then_upgrade: bool, dangerously_skip_hook_check: bool
             discovered += meld_recursive(
                 paths,
                 &mut registry,
-                &spec,
-                alias,
+                &todo.spec,
+                todo.alias,
                 vec![],
                 None,
                 false,
@@ -2184,6 +2292,7 @@ pub fn sync(paths: &Paths, then_upgrade: bool, dangerously_skip_hook_check: bool
                 None,  // a re-walked nested source supplies no install hook
                 false, // sync is non-TTY: its hooks take the HOOK-22 skip path
                 prefer_ssh,
+                Some(todo.curated),
             )?;
         }
         if discovered > 0 {

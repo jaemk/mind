@@ -221,31 +221,42 @@ impl ItemDecl {
     /// (`resolved_item_hooks`), which prepends those scalars ahead of this
     /// result.
     fn resolved_item_array_hooks(&self, toml_path: &std::path::Path) -> Result<Vec<ResolvedHook>> {
-        let mut out: Vec<ResolvedHook> = Vec::new();
-        for hook in &self.hooks {
-            let run = hook.run.trim();
-            if run.is_empty() {
-                continue; // HOOK-3 generalized: skip blank run
-            }
-            let event = match hook.event.as_deref() {
-                None | Some("install") => HookEvent::Install,
-                Some("uninstall") => HookEvent::Uninstall,
-                Some(e) => {
-                    return Err(MindError::MindToml {
-                        path: toml_path.to_path_buf(),
-                        msg: format!("unknown hook event '{e}'; expected 'install' or 'uninstall'"),
-                    });
-                }
-            };
-            out.push(ResolvedHook {
-                run: run.to_owned(),
-                name: hook.name.clone(),
-                optional: hook.optional,
-                event,
-            });
-        }
-        Ok(out)
+        resolve_hook_array(&self.hooks, toml_path)
     }
+}
+
+/// Validate and normalize a slice of raw `Hook` entries into `ResolvedHook`s
+/// in declaration order. Used by `MindToml::resolved_hooks`,
+/// `ItemDecl::resolved_item_array_hooks`, and `NestedSource::resolved_hooks`.
+///
+/// Rules: default event is Install; "uninstall" maps to Uninstall; any other
+/// event string is a `MindToml` error. Empty/whitespace `run` entries are
+/// silently dropped (HOOK-3). `run` is trimmed before storing.
+fn resolve_hook_array(hooks: &[Hook], toml_path: &std::path::Path) -> Result<Vec<ResolvedHook>> {
+    let mut out: Vec<ResolvedHook> = Vec::new();
+    for hook in hooks {
+        let run = hook.run.trim();
+        if run.is_empty() {
+            continue; // HOOK-3 generalized: skip blank run
+        }
+        let event = match hook.event.as_deref() {
+            None | Some("install") => HookEvent::Install,
+            Some("uninstall") => HookEvent::Uninstall,
+            Some(e) => {
+                return Err(MindError::MindToml {
+                    path: toml_path.to_path_buf(),
+                    msg: format!("unknown hook event '{e}'; expected 'install' or 'uninstall'"),
+                });
+            }
+        };
+        out.push(ResolvedHook {
+            run: run.to_owned(),
+            name: hook.name.clone(),
+            optional: hook.optional,
+            event,
+        });
+    }
+    Ok(out)
 }
 
 /// Glob-based discovery: per-kind include/exclude, plus nested sources.
@@ -293,6 +304,42 @@ pub struct NestedSource {
     /// only registered and available. Default false (DSC-58).
     #[serde(default)]
     pub install: bool,
+    /// Curator-supplied pin: track a named branch. Only follow-branch is
+    /// supported for a nested entry (not pin-tag/pin-ref). DSC-59.
+    #[serde(rename = "follow-branch", default)]
+    pub follow_branch: Option<String>,
+    /// Curator-supplied convention scan roots (DSC-59 / DSC-50 shape): when
+    /// set, convention discovery scans under each listed directory instead of
+    /// the repo root.
+    #[serde(default)]
+    pub roots: Option<Vec<String>>,
+    /// Curator-supplied lifecycle hooks (DSC-59). Addressed in mind.toml as
+    /// `[[discover.sources.hooks]]` entries; validated the same way as a
+    /// source-level `[[hooks]]` array.
+    #[serde(default)]
+    pub hooks: Vec<Hook>,
+}
+
+impl NestedSource {
+    /// Return the curator-supplied pin, or `None` when not set.
+    pub fn follow_branch_pin(&self) -> Option<Pin> {
+        self.follow_branch
+            .as_deref()
+            .map(|b| Pin::FollowBranch(b.to_owned()))
+    }
+
+    /// Resolve this nested source's curator-supplied lifecycle hooks in
+    /// declaration order.
+    ///
+    /// Validation rules mirror the source-level `[[hooks]]` (see
+    /// `MindToml::resolved_hooks`): the default event is Install, explicit
+    /// "uninstall" maps to Uninstall, any other event string is a `MindToml`
+    /// error naming the bad value and the legal set. Empty/whitespace `run`
+    /// entries are silently dropped (HOOK-3). There is no legacy
+    /// `[source].install` fold-in here; that is a MindToml-only concern.
+    pub fn resolved_hooks(&self, toml_path: &std::path::Path) -> Result<Vec<ResolvedHook>> {
+        resolve_hook_array(&self.hooks, toml_path)
+    }
 }
 
 impl Discover {
@@ -374,28 +421,7 @@ impl MindToml {
         }
 
         // HOOK-51: [[hooks]] entries in declaration order.
-        for hook in &self.hooks {
-            let run = hook.run.trim();
-            if run.is_empty() {
-                continue; // HOOK-3 generalized: skip blank run
-            }
-            let event = match hook.event.as_deref() {
-                None | Some("install") => HookEvent::Install,
-                Some("uninstall") => HookEvent::Uninstall,
-                Some(e) => {
-                    return Err(MindError::MindToml {
-                        path: toml_path.to_path_buf(),
-                        msg: format!("unknown hook event '{e}'; expected 'install' or 'uninstall'"),
-                    });
-                }
-            };
-            out.push(ResolvedHook {
-                run: run.to_owned(),
-                name: hook.name.clone(),
-                optional: hook.optional,
-                event,
-            });
-        }
+        out.extend(resolve_hook_array(&self.hooks, toml_path)?);
 
         Ok(out)
     }
@@ -921,5 +947,355 @@ mod tests {
         let resolved = first_item_hooks(toml).expect("resolve");
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].run, "array-install");
+    }
+
+    // ----- DSC-59: NestedSource curator-supplied fields -----
+
+    #[test]
+    fn nested_source_parses_all_curator_fields() {
+        // Parses follow-branch, roots, and [[discover.sources.hooks]] in a
+        // full MindToml round-trip.
+        let toml = r#"
+            [[discover.sources]]
+            source = "github:owner/repo"
+            as = "or"
+            install = true
+            follow-branch = "main"
+            roots = ["packages", "tools"]
+
+            [[discover.sources.hooks]]
+            run = "make setup"
+            name = "Setup"
+            optional = true
+            event = "install"
+
+            [[discover.sources.hooks]]
+            run = "make teardown"
+            event = "uninstall"
+        "#;
+        let parsed: MindToml = toml::from_str(toml).expect("parse");
+        let ns = &parsed.discover.as_ref().unwrap().sources[0];
+
+        assert_eq!(ns.source, "github:owner/repo");
+        assert_eq!(ns.alias.as_deref(), Some("or"));
+        assert!(ns.install);
+        assert_eq!(ns.follow_branch.as_deref(), Some("main"));
+        assert_eq!(
+            ns.roots.as_deref(),
+            Some(&["packages".to_owned(), "tools".to_owned()][..])
+        );
+        assert_eq!(ns.hooks.len(), 2);
+
+        let h0 = &ns.hooks[0];
+        assert_eq!(h0.run, "make setup");
+        assert_eq!(h0.name.as_deref(), Some("Setup"));
+        assert!(h0.optional);
+        assert_eq!(h0.event.as_deref(), Some("install"));
+
+        let h1 = &ns.hooks[1];
+        assert_eq!(h1.run, "make teardown");
+        assert_eq!(h1.event.as_deref(), Some("uninstall"));
+    }
+
+    #[test]
+    fn nested_source_deny_unknown_fields_still_rejects_typo() {
+        // deny_unknown_fields must still reject a misspelled key.
+        let toml = r#"
+            [[discover.sources]]
+            source = "github:owner/repo"
+            follow_branch = "main"
+        "#;
+        let result: std::result::Result<MindToml, _> = toml::from_str(toml);
+        assert!(
+            result.is_err(),
+            "underscore variant of follow-branch must be rejected"
+        );
+    }
+
+    #[test]
+    fn nested_source_unknown_top_level_key_rejected() {
+        // A completely unknown key at the nested-source level is an error.
+        let toml = r#"
+            [[discover.sources]]
+            source = "github:owner/repo"
+            typo-key = "value"
+        "#;
+        let result: std::result::Result<MindToml, _> = toml::from_str(toml);
+        assert!(result.is_err(), "unknown keys must be rejected");
+    }
+
+    #[test]
+    fn nested_source_follow_branch_pin_returns_pin() {
+        let ns = NestedSource {
+            source: "x".into(),
+            alias: None,
+            install: false,
+            follow_branch: Some("develop".into()),
+            roots: None,
+            hooks: vec![],
+        };
+        assert_eq!(
+            ns.follow_branch_pin(),
+            Some(Pin::FollowBranch("develop".into()))
+        );
+    }
+
+    #[test]
+    fn nested_source_follow_branch_pin_none_when_unset() {
+        let ns = NestedSource {
+            source: "x".into(),
+            alias: None,
+            install: false,
+            follow_branch: None,
+            roots: None,
+            hooks: vec![],
+        };
+        assert!(ns.follow_branch_pin().is_none());
+    }
+
+    #[test]
+    fn nested_source_resolved_hooks_order_preserved() {
+        let toml = r#"
+            [[discover.sources]]
+            source = "github:owner/repo"
+
+            [[discover.sources.hooks]]
+            run = "first"
+
+            [[discover.sources.hooks]]
+            run = "second"
+
+            [[discover.sources.hooks]]
+            run = "third"
+        "#;
+        let parsed: MindToml = toml::from_str(toml).expect("parse");
+        let ns = &parsed.discover.as_ref().unwrap().sources[0];
+        let resolved = ns.resolved_hooks(Path::new("mind.toml")).expect("resolve");
+        assert_eq!(resolved.len(), 3);
+        assert_eq!(resolved[0].run, "first");
+        assert_eq!(resolved[1].run, "second");
+        assert_eq!(resolved[2].run, "third");
+    }
+
+    #[test]
+    fn nested_source_resolved_hooks_default_event_is_install() {
+        let toml = r#"
+            [[discover.sources]]
+            source = "github:owner/repo"
+
+            [[discover.sources.hooks]]
+            run = "setup.sh"
+        "#;
+        let parsed: MindToml = toml::from_str(toml).expect("parse");
+        let ns = &parsed.discover.as_ref().unwrap().sources[0];
+        let resolved = ns.resolved_hooks(Path::new("mind.toml")).expect("resolve");
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].event, HookEvent::Install);
+    }
+
+    #[test]
+    fn nested_source_resolved_hooks_explicit_uninstall() {
+        let toml = r#"
+            [[discover.sources]]
+            source = "github:owner/repo"
+
+            [[discover.sources.hooks]]
+            run = "teardown.sh"
+            event = "uninstall"
+        "#;
+        let parsed: MindToml = toml::from_str(toml).expect("parse");
+        let ns = &parsed.discover.as_ref().unwrap().sources[0];
+        let resolved = ns.resolved_hooks(Path::new("mind.toml")).expect("resolve");
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].event, HookEvent::Uninstall);
+    }
+
+    #[test]
+    fn nested_source_resolved_hooks_unknown_event_is_mind_toml_error() {
+        let toml = r#"
+            [[discover.sources]]
+            source = "github:owner/repo"
+
+            [[discover.sources.hooks]]
+            run = "do-something"
+            event = "build"
+        "#;
+        let parsed: MindToml = toml::from_str(toml).expect("parse");
+        let ns = &parsed.discover.as_ref().unwrap().sources[0];
+        let toml_path = Path::new("/repo/mind.toml");
+        let err = ns.resolved_hooks(toml_path).unwrap_err();
+        match err {
+            MindError::MindToml { path, msg } => {
+                assert_eq!(path, toml_path);
+                assert!(msg.contains("build"), "names the bad value: {msg}");
+                assert!(
+                    msg.contains("install") && msg.contains("uninstall"),
+                    "names the legal set: {msg}"
+                );
+            }
+            other => panic!("expected MindError::MindToml, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nested_source_resolved_hooks_blank_run_dropped() {
+        let toml = r#"
+            [[discover.sources]]
+            source = "github:owner/repo"
+
+            [[discover.sources.hooks]]
+            run = ""
+
+            [[discover.sources.hooks]]
+            run = "   "
+
+            [[discover.sources.hooks]]
+            run = "real-command"
+        "#;
+        let parsed: MindToml = toml::from_str(toml).expect("parse");
+        let ns = &parsed.discover.as_ref().unwrap().sources[0];
+        let resolved = ns.resolved_hooks(Path::new("mind.toml")).expect("resolve");
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].run, "real-command");
+    }
+
+    #[test]
+    fn nested_source_resolved_hooks_run_trimmed() {
+        let toml = r#"
+            [[discover.sources]]
+            source = "github:owner/repo"
+
+            [[discover.sources.hooks]]
+            run = "  npm install  "
+        "#;
+        let parsed: MindToml = toml::from_str(toml).expect("parse");
+        let ns = &parsed.discover.as_ref().unwrap().sources[0];
+        let resolved = ns.resolved_hooks(Path::new("mind.toml")).expect("resolve");
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].run, "npm install");
+    }
+
+    #[test]
+    fn nested_source_no_legacy_install_fold_in() {
+        // NestedSource::resolved_hooks has NO [source].install fold-in; only
+        // the [[discover.sources.hooks]] array is considered.
+        let ns = NestedSource {
+            source: "x".into(),
+            alias: None,
+            install: false,
+            follow_branch: None,
+            roots: None,
+            hooks: vec![Hook {
+                run: "array-only".into(),
+                name: None,
+                optional: false,
+                event: None,
+            }],
+        };
+        let resolved = ns.resolved_hooks(Path::new("mind.toml")).expect("resolve");
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].run, "array-only");
+    }
+
+    #[test]
+    fn nested_source_follow_branch_pin_is_always_follow_branch_variant() {
+        // spec: DSC-59
+        // A curator can only inject a follow-branch pin: the nested entry exposes
+        // no pin-tag / pin-ref keys, so `follow_branch_pin` is structurally
+        // incapable of producing a Tag or Ref pin. Whatever string the curator
+        // supplies, the resulting Pin is the FollowBranch variant carrying that
+        // exact string -- never a tag or ref.
+        for branch in ["main", "develop", "v1", "release/2.0", "abc123"] {
+            let ns = NestedSource {
+                source: "x".into(),
+                alias: None,
+                install: false,
+                follow_branch: Some(branch.into()),
+                roots: None,
+                hooks: vec![],
+            };
+            match ns.follow_branch_pin() {
+                Some(Pin::FollowBranch(b)) => assert_eq!(b, branch),
+                other => panic!(
+                    "curator pin must be FollowBranch({branch:?}), never a tag/ref; got {other:?}"
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn multiple_nested_sources_keep_independent_hook_arrays() {
+        // spec: DSC-59
+        // Each `[[discover.sources]]` entry owns its own
+        // `[[discover.sources.hooks]]` array; one entry's hooks must not leak into
+        // another's. Two entries with distinct hooks must resolve to disjoint hook
+        // lists, so the per-entry CuratedConfig the caller builds stays isolated.
+        let toml = r#"
+            [[discover.sources]]
+            source = "github:owner/first"
+
+            [[discover.sources.hooks]]
+            run = "first-hook"
+
+            [[discover.sources]]
+            source = "github:owner/second"
+
+            [[discover.sources.hooks]]
+            run = "second-hook"
+        "#;
+        let parsed: MindToml = toml::from_str(toml).expect("parse");
+        let sources = &parsed.discover.as_ref().unwrap().sources;
+        assert_eq!(sources.len(), 2);
+
+        let dummy = Path::new("mind.toml");
+        let first = sources[0].resolved_hooks(dummy).expect("resolve");
+        let second = sources[1].resolved_hooks(dummy).expect("resolve");
+
+        assert_eq!(first.len(), 1, "first entry sees only its own hook");
+        assert_eq!(first[0].run, "first-hook");
+        assert_eq!(second.len(), 1, "second entry sees only its own hook");
+        assert_eq!(second[0].run, "second-hook");
+        // No cross-contamination: neither entry carries the other's hook command.
+        assert!(
+            first.iter().all(|h| h.run != "second-hook"),
+            "second entry's hook leaked into the first"
+        );
+        assert!(
+            second.iter().all(|h| h.run != "first-hook"),
+            "first entry's hook leaked into the second"
+        );
+    }
+
+    #[test]
+    fn nested_source_explicit_empty_roots_is_some_empty_not_none() {
+        // spec: DSC-59
+        // A curator `roots = []` (explicit empty list) parses to Some(empty),
+        // distinct from an unset `roots` (None). The catalog scan mirrors source
+        // roots: Some(empty) scans zero roots (discovers nothing) while None falls
+        // back to the repo root. Preserving the distinction at the parse layer is
+        // what lets the apply path honor "scan nothing".
+        let explicit = r#"
+            [[discover.sources]]
+            source = "github:owner/repo"
+            roots = []
+        "#;
+        let parsed: MindToml = toml::from_str(explicit).expect("parse");
+        let ns = &parsed.discover.as_ref().unwrap().sources[0];
+        assert_eq!(
+            ns.roots.as_deref(),
+            Some(&[][..]),
+            "explicit roots = [] must be Some(empty), not None"
+        );
+
+        let unset = r#"
+            [[discover.sources]]
+            source = "github:owner/repo"
+        "#;
+        let parsed: MindToml = toml::from_str(unset).expect("parse");
+        let ns = &parsed.discover.as_ref().unwrap().sources[0];
+        assert!(
+            ns.roots.is_none(),
+            "unset roots must be None, distinct from the empty list"
+        );
     }
 }

@@ -10301,3 +10301,547 @@ fn recall_handmade_is_in_a_source(stdout: &str) -> bool {
         .lines()
         .any(|l| l.contains("handmade") && l.contains("removed upstream"))
 }
+
+// ---- DSC-59/60/61: curator adoption of an un-onboarded nested source --------
+
+/// Read the whole `sources.json` for a sandbox.
+fn read_sources_json(sb: &Sandbox) -> String {
+    std::fs::read_to_string(sb.mind_home.join("sources.json")).expect("sources.json")
+}
+
+/// Build an un-onboarded nested source (no mind.toml) whose items live under a
+/// `pkg/` subdir, so default convention discovery (repo root) finds nothing but a
+/// curator-supplied `roots = ["pkg"]` does. It carries a `stable` branch (for a
+/// curator follow-branch pin) holding the same content. Returns the sandbox.
+fn make_unonboarded_nested(name: &str) -> Sandbox {
+    let sb = Sandbox::bare(name);
+    // An item under pkg/ only: the repo root holds no skills/agents/rules dir, so
+    // a root-only scan discovers nothing.
+    write(
+        &sb.source.join("pkg/skills/widget/SKILL.md"),
+        "---\nname: widget\ndescription: A curated widget skill\n---\n# widget\n",
+    );
+    git(&sb.source, &["add", "-A"]);
+    git(&sb.source, &["commit", "-qm", "pkg layout"]);
+    // A stable branch at this same content, so a follow-branch pin resolves.
+    git(&sb.source, &["branch", "stable"]);
+    sb
+}
+
+#[test]
+fn curator_applies_follow_branch_roots_and_hook_when_nested_has_no_mind_toml() {
+    // spec: DSC-59 DSC-60 DSC-61
+    // A super-source curates an un-onboarded nested source (no mind.toml of its
+    // own), supplying follow-branch, roots, and a hook. All three apply: the
+    // nested source's pin is recorded as follow-branch, roots govern discovery
+    // (the pkg-only item is found), and the hook runs.
+    let nested = make_unonboarded_nested("widgets");
+    let registry = Sandbox::bare("registry");
+    registry.write_and_commit(
+        "mind.toml",
+        &format!(
+            "[[discover.sources]]\n\
+             source = \"{}\"\n\
+             follow-branch = \"stable\"\n\
+             roots = [\"pkg\"]\n\n\
+             [[discover.sources.hooks]]\n\
+             run = \"touch curated-hookran\"\n",
+            nested.source_spec()
+        ),
+    );
+    let spec = registry.source_spec();
+    let r = registry.mind(&["meld", &spec, "--dangerously-skip-install-hook-check"]);
+    assert!(r.success, "meld should succeed: {} {}", r.stdout, r.stderr);
+
+    // DSC-61: roots applied -> the pkg-only item is discovered.
+    let probe = registry.mind(&["probe"]);
+    assert!(
+        probe.stdout.contains("skill:widget"),
+        "curator roots must govern discovery so the pkg-only item is found: {}",
+        probe.stdout
+    );
+
+    // DSC-61: follow-branch applied -> the nested source's recorded pin is
+    // follow-branch=stable. (The registry super-source itself has no pin
+    // directive, so a follow-branch/stable pin can only be the nested source's.)
+    let json = read_sources_json(&registry);
+    assert!(
+        json.contains("follow-branch") && json.contains("stable"),
+        "the nested source's pin must be recorded as follow-branch=stable: {json}"
+    );
+
+    // DSC-61: the hook ran in the nested source's clone (a follow-branch pin
+    // snapshots a local source under the sources tree).
+    let nested_clone = registry
+        .mind_home
+        .join("sources/local")
+        .join(nested.base_name())
+        .join("widgets");
+    let marker = nested_clone.join("curated-hookran");
+    assert!(
+        marker.exists(),
+        "the curator-supplied hook must have run in the nested clone: {} missing",
+        marker.display()
+    );
+    // The hook command is recorded against the nested source.
+    assert!(
+        json.contains("touch curated-hookran"),
+        "the curator hook command must be recorded on the nested source: {json}"
+    );
+}
+
+#[test]
+fn curator_values_ignored_with_warning_when_nested_has_mind_toml() {
+    // spec: DSC-59 DSC-60
+    // When the nested source ships its own mind.toml (even a metadata-only one
+    // that declares none of the three), the curator-supplied follow-branch/roots/
+    // hooks are all ignored and a warning is emitted. The gate is whole-file.
+    let nested = make_unonboarded_nested("onboarded");
+    // The nested source onboards with a metadata-only mind.toml (no pin/roots/
+    // hooks). It still ships the pkg-only item, which a root scan won't find.
+    nested.write_and_commit("mind.toml", "[source]\ndescription = \"onboarded\"\n");
+    // Re-point stable at the onboarded commit so a (suppressed) follow-branch
+    // would still resolve if it were wrongly applied.
+    git(&nested.source, &["branch", "-f", "stable"]);
+
+    let registry = Sandbox::bare("registry");
+    registry.write_and_commit(
+        "mind.toml",
+        &format!(
+            "[[discover.sources]]\n\
+             source = \"{}\"\n\
+             follow-branch = \"stable\"\n\
+             roots = [\"pkg\"]\n\n\
+             [[discover.sources.hooks]]\n\
+             run = \"touch curated-hookran\"\n",
+            nested.source_spec()
+        ),
+    );
+    let spec = registry.source_spec();
+    let r = registry.mind(&["meld", &spec, "--dangerously-skip-install-hook-check"]);
+    assert!(r.success, "meld should succeed: {} {}", r.stdout, r.stderr);
+
+    // DSC-60: a warning announces the curator values were ignored.
+    assert!(
+        r.stderr.contains("ships its own mind.toml")
+            && r.stderr.contains("ignored")
+            && r.stderr.contains("onboarded"),
+        "a DSC-60 warning must be emitted naming the onboarded source: {}",
+        r.stderr
+    );
+
+    // The suppressed follow-branch: the nested source's pin is NOT follow-branch
+    // (it falls back to the default branch, since its own mind.toml declares no
+    // pin). No `follow-branch` pin appears anywhere in sources.json.
+    let json = read_sources_json(&registry);
+    assert!(
+        !json.contains("follow-branch"),
+        "the curator follow-branch must be suppressed (no follow-branch pin): {json}"
+    );
+    // The suppressed roots: the pkg-only item is not discovered (a root scan of
+    // the onboarded source finds nothing under the repo root).
+    let probe = registry.mind(&["probe"]);
+    assert!(
+        !probe.stdout.contains("skill:widget"),
+        "the curator roots must be suppressed: the pkg-only item must not appear: {}",
+        probe.stdout
+    );
+    // The suppressed hook: it never ran and is not recorded.
+    let nested_clone = registry
+        .mind_home
+        .join("sources/local")
+        .join(nested.base_name())
+        .join("onboarded");
+    assert!(
+        !nested_clone.join("curated-hookran").exists(),
+        "the curator hook must be suppressed (no marker)"
+    );
+    assert!(
+        !json.contains("touch curated-hookran"),
+        "the curator hook command must not be recorded when suppressed: {json}"
+    );
+}
+
+#[test]
+fn consumer_pin_flag_overrides_curator_follow_branch() {
+    // spec: DSC-61
+    // DSC-41 precedence: a consumer `meld` pin flag still wins over a curator
+    // follow-branch. The effective pin is `consumer_pin.or(curator_follow_pin)`,
+    // so a consumer flag on a direct meld of the (otherwise curator-adopted)
+    // un-onboarded source must record the consumer pin, not the curator branch.
+    //
+    // The un-onboarded source carries a `stable` branch (what a curator would
+    // pin via follow-branch) and a `v1` tag (the consumer's explicit choice).
+    // Melding it directly with --pin-tag v1 must record the tag pin: the consumer
+    // flag wins. (A nested meld passes no consumer pin, so the curator branch is
+    // what applies there; the apply test covers that positive path.)
+    let nested = make_unonboarded_nested("pinned");
+    git(&nested.source, &["tag", "v1"]);
+    let spec = nested.source_spec();
+
+    let r = nested.mind(&["meld", &spec, "--pin-tag", "v1"]);
+    assert!(r.success, "meld --pin-tag should succeed: {}", r.stderr);
+    let json = read_sources_json(&nested);
+    assert!(
+        json.contains("\"kind\": \"tag\"") && json.contains("v1"),
+        "a consumer pin flag must win and record a tag pin: {json}"
+    );
+    assert!(
+        !json.contains("follow-branch"),
+        "a consumer pin flag must override any follow-branch (no follow-branch pin recorded): {json}"
+    );
+}
+
+#[test]
+fn curator_empty_roots_list_discovers_nothing() {
+    // spec: DSC-59 DSC-61
+    // A curator `roots = []` (explicit empty list) is distinct from unset roots:
+    // it scans zero roots, mirroring the source-level DSC-50/DSC-53 semantics.
+    // The un-onboarded nested source's only item lives under pkg/, so with an
+    // empty roots list nothing is discovered -- and crucially this differs from
+    // omitting roots entirely (which would fall back to the repo root and still
+    // find nothing here, so to make the empty-list behavior load-bearing we put
+    // an item at the REPO ROOT too: an unset/repo-root scan would find it, while
+    // an explicit empty list must scan nothing and find neither.)
+    let nested = make_unonboarded_nested("emptyroots");
+    // Add a root-level item. A repo-root scan (unset roots) would find this; an
+    // explicit empty roots list must not.
+    nested.write_and_commit(
+        "skills/toplevel/SKILL.md",
+        "---\nname: toplevel\ndescription: A root-level skill\n---\n# toplevel\n",
+    );
+
+    let registry = Sandbox::bare("registry");
+    registry.write_and_commit(
+        "mind.toml",
+        &format!(
+            "[[discover.sources]]\n\
+             source = \"{}\"\n\
+             roots = []\n",
+            nested.source_spec()
+        ),
+    );
+    let spec = registry.source_spec();
+    let r = registry.mind(&["meld", &spec]);
+    assert!(r.success, "meld should succeed: {} {}", r.stdout, r.stderr);
+
+    // An explicit empty roots list scans nothing: neither the pkg item nor the
+    // root-level item is discovered.
+    let probe = registry.mind(&["probe"]);
+    assert!(
+        !probe.stdout.contains("skill:widget"),
+        "empty curator roots must scan nothing (pkg item must not appear): {}",
+        probe.stdout
+    );
+    assert!(
+        !probe.stdout.contains("skill:toplevel"),
+        "empty curator roots must scan nothing, not even the repo root (toplevel must not appear): {}",
+        probe.stdout
+    );
+}
+
+#[test]
+fn curator_hooks_do_not_leak_across_nested_entries() {
+    // spec: DSC-59 DSC-61
+    // Two un-onboarded nested sources, each with its own
+    // `[[discover.sources.hooks]]`. Each entry's CuratedConfig is independent, so
+    // a given nested source must run ONLY its own hook -- never the sibling
+    // entry's. A leak would run both hooks in one clone.
+    let first = make_unonboarded_nested("alpha");
+    let second = make_unonboarded_nested("beta");
+
+    let registry = Sandbox::bare("registry");
+    registry.write_and_commit(
+        "mind.toml",
+        &format!(
+            "[[discover.sources]]\n\
+             source = \"{}\"\n\
+             follow-branch = \"stable\"\n\
+             roots = [\"pkg\"]\n\n\
+             [[discover.sources.hooks]]\n\
+             run = \"touch alpha-marker\"\n\n\
+             [[discover.sources]]\n\
+             source = \"{}\"\n\
+             follow-branch = \"stable\"\n\
+             roots = [\"pkg\"]\n\n\
+             [[discover.sources.hooks]]\n\
+             run = \"touch beta-marker\"\n",
+            first.source_spec(),
+            second.source_spec()
+        ),
+    );
+    let spec = registry.source_spec();
+    let r = registry.mind(&["meld", &spec, "--dangerously-skip-install-hook-check"]);
+    assert!(r.success, "meld should succeed: {} {}", r.stdout, r.stderr);
+
+    let alpha_clone = registry
+        .mind_home
+        .join("sources/local")
+        .join(first.base_name())
+        .join("alpha");
+    let beta_clone = registry
+        .mind_home
+        .join("sources/local")
+        .join(second.base_name())
+        .join("beta");
+
+    // Each entry ran exactly its own hook in its own clone.
+    assert!(
+        alpha_clone.join("alpha-marker").exists(),
+        "alpha's own hook must run in alpha's clone"
+    );
+    assert!(
+        beta_clone.join("beta-marker").exists(),
+        "beta's own hook must run in beta's clone"
+    );
+    // No leak: a sibling entry's hook must not have run in the other's clone.
+    assert!(
+        !alpha_clone.join("beta-marker").exists(),
+        "beta's hook leaked into alpha's clone"
+    );
+    assert!(
+        !beta_clone.join("alpha-marker").exists(),
+        "alpha's hook leaked into beta's clone"
+    );
+
+    // And the recorded hook on each nested source is only its own command.
+    let json = read_sources_json(&registry);
+    assert!(
+        json.contains("touch alpha-marker") && json.contains("touch beta-marker"),
+        "each nested source records its own hook command: {json}"
+    );
+}
+
+#[test]
+fn curator_values_suppressed_when_nested_declares_own_pin_roots_hooks() {
+    // spec: DSC-59 DSC-60
+    // DSC-60 gate with a nested mind.toml that DECLARES its OWN pin/roots/hooks
+    // (the sibling test uses a metadata-only mind.toml). The source's own values
+    // win: its declared pin/roots/hooks are authoritative and the curator's are
+    // suppressed with the warning. Concretely, the source declares its own item
+    // layout via [source].roots and its own (no-op) hook; the curator's
+    // follow-branch/roots/hook must not take effect.
+    let nested = make_unonboarded_nested("selfdeclared");
+    // The nested source onboards declaring its OWN pin (follow-branch = own), its
+    // own roots (pkg, where its item lives), and its own hook. Because it declares
+    // a follow-branch, its effective pin is a real follow-branch pin -- and the
+    // recorded branch ("own") tells us whose pin won. A `own` branch is created at
+    // the onboarded content.
+    nested.write_and_commit(
+        "mind.toml",
+        "[source]\n\
+         description = \"self-declared\"\n\
+         follow-branch = \"own\"\n\
+         roots = [\"pkg\"]\n\n\
+         [[hooks]]\n\
+         run = \"touch source-own-hook\"\n",
+    );
+    git(&nested.source, &["branch", "own"]);
+    git(&nested.source, &["branch", "-f", "stable"]);
+
+    let registry = Sandbox::bare("registry");
+    // The curator supplies a DIFFERENT follow-branch (stable), bogus roots, and a
+    // curator hook -- all of which must be suppressed in favor of the source's own
+    // declarations.
+    registry.write_and_commit(
+        "mind.toml",
+        &format!(
+            "[[discover.sources]]\n\
+             source = \"{}\"\n\
+             follow-branch = \"stable\"\n\
+             roots = [\"nonexistent\"]\n\n\
+             [[discover.sources.hooks]]\n\
+             run = \"touch curator-hook\"\n",
+            nested.source_spec()
+        ),
+    );
+    let spec = registry.source_spec();
+    let r = registry.mind(&["meld", &spec, "--dangerously-skip-install-hook-check"]);
+    assert!(r.success, "meld should succeed: {} {}", r.stdout, r.stderr);
+
+    // DSC-60: the warning fires because the nested source ships its own mind.toml.
+    assert!(
+        r.stderr.contains("ships its own mind.toml")
+            && r.stderr.contains("ignored")
+            && r.stderr.contains("selfdeclared"),
+        "a DSC-60 warning must name the onboarded source: {}",
+        r.stderr
+    );
+
+    let json = read_sources_json(&registry);
+    // The source's OWN roots win: its pkg item is discovered (the curator's bogus
+    // `nonexistent` roots were suppressed -- had they applied, the scan would have
+    // errored on the missing dir or found nothing).
+    let probe = registry.mind(&["probe"]);
+    assert!(
+        probe.stdout.contains("skill:widget"),
+        "the source's own roots = [pkg] must govern, finding its item: {}",
+        probe.stdout
+    );
+    // The source's OWN follow-branch wins: the recorded pin is follow-branch=own,
+    // NOT the curator's suppressed follow-branch=stable.
+    assert!(
+        json.contains("follow-branch") && json.contains("\"own\""),
+        "the source's own follow-branch=own must be recorded: {json}"
+    );
+    assert!(
+        !json.contains("\"stable\""),
+        "the curator follow-branch=stable must be suppressed: {json}"
+    );
+    // The source's own hook ran; the curator's did not.
+    let nested_clone = registry
+        .mind_home
+        .join("sources/local")
+        .join(nested.base_name())
+        .join("selfdeclared");
+    assert!(
+        nested_clone.join("source-own-hook").exists(),
+        "the source's own declared hook must run"
+    );
+    assert!(
+        !nested_clone.join("curator-hook").exists(),
+        "the curator hook must be suppressed"
+    );
+    assert!(
+        json.contains("touch source-own-hook") && !json.contains("touch curator-hook"),
+        "only the source's own hook command is recorded: {json}"
+    );
+}
+
+#[test]
+fn curator_hook_skipped_under_non_tty_without_skip_flag() {
+    // spec: DSC-61
+    // The curator hook runs through the same disclosure/safety path as a source's
+    // own hooks, INCLUDING the non-TTY skip (HOOK-22). The integration harness is
+    // non-TTY (piped stdin), so a meld WITHOUT
+    // `--dangerously-skip-install-hook-check` must SKIP the curator hook (its
+    // marker is never created) rather than run it silently, while the meld itself
+    // still succeeds and the source is registered.
+    let nested = make_unonboarded_nested("skiphook");
+    let registry = Sandbox::bare("registry");
+    registry.write_and_commit(
+        "mind.toml",
+        &format!(
+            "[[discover.sources]]\n\
+             source = \"{}\"\n\
+             follow-branch = \"stable\"\n\
+             roots = [\"pkg\"]\n\n\
+             [[discover.sources.hooks]]\n\
+             run = \"touch curated-hookran\"\n",
+            nested.source_spec()
+        ),
+    );
+    let spec = registry.source_spec();
+    // No --dangerously-skip-install-hook-check: non-TTY must take the skip path.
+    let r = registry.mind(&["meld", &spec]);
+    assert!(
+        r.success,
+        "meld should still succeed: {} {}",
+        r.stdout, r.stderr
+    );
+
+    // The hook was skipped, not run: no marker.
+    let nested_clone = registry
+        .mind_home
+        .join("sources/local")
+        .join(nested.base_name())
+        .join("skiphook");
+    assert!(
+        !nested_clone.join("curated-hookran").exists(),
+        "a non-TTY meld without the skip flag must NOT run the curator hook"
+    );
+    // The skip is announced (HOOK-22 disclosure path), not silent.
+    assert!(
+        r.stdout.contains("skipped install hook") || r.stderr.contains("skipped install hook"),
+        "the skip must be announced: {} {}",
+        r.stdout,
+        r.stderr
+    );
+    // The source is still registered (skip != abort), and the follow-branch pin
+    // still applies (the gate is about hook execution, not pin/roots).
+    let json = read_sources_json(&registry);
+    assert!(
+        json.contains("follow-branch") && json.contains("stable"),
+        "roots/follow-branch still apply even when the hook is skipped: {json}"
+    );
+}
+
+#[test]
+fn sync_rewalk_applies_curator_follow_branch_to_new_nested() {
+    // spec: DSC-59 DSC-61
+    // The DSC-57 sync re-walk threads CuratedConfig: a nested source newly added
+    // to a super-source's [discover].sources, carrying a curator follow-branch,
+    // is melded by `sync` with the same gate/apply behavior as a fresh meld. Its
+    // recorded pin must be follow-branch=stable.
+    let registry = Sandbox::bare("registry");
+    let first = make_unonboarded_nested("present"); // listed from the start
+    let later = make_unonboarded_nested("arriving"); // added before sync
+
+    // Initially the super-source curates only `first`.
+    registry.write_and_commit(
+        "mind.toml",
+        &format!(
+            "[[discover.sources]]\n\
+             source = \"{}\"\n\
+             roots = [\"pkg\"]\n",
+            first.source_spec()
+        ),
+    );
+    let spec = registry.source_spec();
+    let r = registry.mind(&["meld", &spec]);
+    assert!(
+        r.success,
+        "initial meld should succeed: {} {}",
+        r.stdout, r.stderr
+    );
+
+    // `arriving` is not yet registered.
+    let before = registry.mind(&["recall", "--sources"]).stdout;
+    assert!(
+        !before.contains("/arriving"),
+        "the new nested source must not be registered before sync: {before}"
+    );
+
+    // Add `arriving` with a curator follow-branch to the super-source's list.
+    registry.write_and_commit(
+        "mind.toml",
+        &format!(
+            "[[discover.sources]]\n\
+             source = \"{}\"\n\
+             roots = [\"pkg\"]\n\n\
+             [[discover.sources]]\n\
+             source = \"{}\"\n\
+             follow-branch = \"stable\"\n\
+             roots = [\"pkg\"]\n",
+            first.source_spec(),
+            later.source_spec()
+        ),
+    );
+
+    // sync re-walks and melds `arriving`, applying the curator follow-branch.
+    let r = registry.mind(&["sync"]);
+    assert!(r.success, "sync should succeed: {} {}", r.stdout, r.stderr);
+    assert!(
+        registry
+            .mind(&["recall", "--sources"])
+            .stdout
+            .contains("/arriving"),
+        "sync must register the newly-listed nested source"
+    );
+
+    // DSC-61 end-to-end through sync: the curator follow-branch is recorded as the
+    // newly discovered source's pin. The registry super-source declares no pin and
+    // `first` has none, so a follow-branch=stable pin can only be `arriving`'s.
+    let json = read_sources_json(&registry);
+    assert!(
+        json.contains("arriving") && json.contains("follow-branch") && json.contains("stable"),
+        "sync's re-walk must apply the curator follow-branch to the new nested source: {json}"
+    );
+    // Curator roots also applied through sync: the pkg-only item is discovered.
+    let probe = registry.mind(&["probe"]);
+    assert!(
+        probe.stdout.contains("skill:widget"),
+        "curator roots must govern discovery for a sync-discovered nested source: {}",
+        probe.stdout
+    );
+}

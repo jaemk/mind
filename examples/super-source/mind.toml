@@ -5,20 +5,35 @@ prefix = "team"
 # A bare [discover].sources list (no [[items]] and no [discover] kind globs) is
 # NOT authoritative, so convention scanning stays on and this repo's own
 # skills/ items still ship alongside the curated chain.
-[discover]
-sources = [
-    # Plain entry: melded and left available, its items not auto-offered.
-    { source = "acme/agent-lib" },
-    # Imposes a namespace prefix on the nested source (like meld --as).
-    { source = "github:acme/review-pack", as = "rev" },
-    # Recommended: offered for install when this super-source is melded.
-    { source = "acme/recommended-rules", install = true },
-]
-
-# The inline array above and the table-array form below are equivalent. Either
-# style works; pick whichever reads better for your list. Shown commented out so
-# the two forms do not declare the same nested source twice:
 #
-# [[discover.sources]]
-# source = "acme/recommended-rules"
-# install = true
+# The table-array form ([[discover.sources]]) is required here because one entry
+# carries nested [[discover.sources.hooks]]; the inline-array form cannot express
+# that. Both forms are otherwise equivalent for plain entries.
+
+# Plain entry: melded and left available, its items not auto-offered.
+[[discover.sources]]
+source = "acme/agent-lib"
+
+# Imposes a namespace prefix on the nested source (like meld --as).
+[[discover.sources]]
+source = "github:acme/review-pack"
+as = "rev"
+
+# Recommended: offered for install when this super-source is melded.
+[[discover.sources]]
+source = "acme/recommended-rules"
+install = true
+
+# Adopt an un-onboarded source: it ships no mind.toml of its own, so the
+# follow-branch, roots, and hooks below are applied as if it had declared them
+# itself (DSC-59/60/61). If it ever gains a mind.toml, that file takes over and
+# these fields are ignored (a warning is emitted).
+[[discover.sources]]
+source = "acme/legacy-tools"
+follow-branch = "main"             # track this branch on sync (DSC-41)
+roots = ["packages/agents"]        # scan under this subdir, not the repo root (DSC-50)
+
+[[discover.sources.hooks]]         # build hook, same shape as [[hooks]] (HOOK-50)
+run = "make build"
+name = "build legacy tooling"
+event = "install"

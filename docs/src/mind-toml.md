@@ -163,6 +163,45 @@ By default a melded super-source registers the whole chain but installs only its
 own items plus the `install = true` entries. `meld --recursive` (`-r`) offers
 every nested source for install.
 
+### Adopting un-onboarded sources (DSC-59/60/61)
+
+A `[[discover.sources]]` entry may supply configuration for a nested source that
+has no `mind.toml` of its own:
+
+- **`follow-branch`**: track a branch as that source's pin directive. `sync`
+  follows it, the same as if the source had declared `follow-branch` in its own
+  `[source]` table (DSC-41). A consumer's explicit `meld --follow-branch` (or
+  other pin flag) still overrides this.
+- **`roots`**: convention scan roots for the nested source, for a monorepo or
+  subtree layout (DSC-50).
+- **`[[discover.sources.hooks]]`**: one or more hooks to run for the nested
+  source. Each entry has the same shape as a source's own `[[hooks]]` entry: a
+  required `run` field, and optional `name`, `optional`, and `event` fields. They
+  run under the same disclosure and safety prompt as the source's own hooks
+  (including the non-TTY skip and `--dangerously-skip-install-hook-check`).
+
+These three fields apply ONLY when the nested source ships no `mind.toml`. If the
+nested source has a `mind.toml`, that file is authoritative for its pin, roots,
+and hooks, and the curator-supplied values are ignored (a warning is emitted). The
+gate is whole-file: a nested `mind.toml`, even one that does not declare a
+pin/roots/hooks, suppresses all three. `as` and `install` are unaffected; they
+always apply.
+
+```toml
+# Adopt a source that has no mind.toml: supply config it lacks.
+# follow-branch, roots, and [[discover.sources.hooks]] apply only because
+# this source ships no mind.toml of its own (DSC-60).
+[[discover.sources]]
+source = "owner/unonboarded"
+follow-branch = "main"           # track this branch (DSC-41)
+roots = ["packages/agents"]      # scan under this subdir, not the repo root (DSC-50)
+
+[[discover.sources.hooks]]       # build hook, same shape as [[hooks]] (HOOK-50)
+run = "make build"
+name = "build tooling"
+event = "install"
+```
+
 ## Scenarios
 
 ### A regular source
