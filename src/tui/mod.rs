@@ -486,6 +486,7 @@ mod tests {
                 kind: ItemKind::Skill,
                 commit: "abc12345".to_string(),
                 description: Some("Review skill".to_string()),
+                deps: vec![],
             }],
             available: vec![SnapshotAvailable {
                 key: "agent:dev".to_string(),
@@ -494,6 +495,7 @@ mod tests {
                 kind: ItemKind::Agent,
                 description: Some("Dev agent".to_string()),
                 path: std::path::PathBuf::from("/fake/path"),
+                deps: vec![],
             }],
             unmanaged: vec![],
             source_names: vec!["local/agents".to_string()],

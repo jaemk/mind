@@ -11403,3 +11403,748 @@ fn review_requires_typo_is_hard_finding() {
         "bad-reference message must name the offending entry: {combined}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// DEP-60: forget warns about installed dependents
+// ---------------------------------------------------------------------------
+
+/// Build a sandbox where `skill:review` depends on `agent:reviewer` (via
+/// `requires:`) and both are installed. Returns the sandbox and the source
+/// identity string used for meld.
+fn dep60_fixture() -> Sandbox {
+    let sb = Sandbox::bare("dep60-agents");
+    sb.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\nname: review\ndescription: Review\nrequires: agent:reviewer\n---\n# review skill\n",
+    );
+    sb.write_and_commit(
+        "agents/reviewer.md",
+        "---\nname: reviewer\ndescription: Reviewer agent\n---\n# reviewer\n",
+    );
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    // Install both items (--yes bypasses the dependency prompt).
+    assert!(
+        sb.mind(&["learn", "skill:review", "--yes"]).success,
+        "fixture: learn should succeed"
+    );
+    sb
+}
+
+#[test]
+fn forget_single_item_with_dependents_refuses_non_tty_without_force() {
+    // spec: DEP-60
+    // Forgetting an item that another installed item depends on: in a non-TTY
+    // run without --force or --yes, the command must refuse (ConfirmationRequired)
+    // and leave the item installed.
+    let sb = dep60_fixture();
+
+    let r = sb.mind(&["forget", "agent:reviewer"]);
+    assert!(
+        !r.success,
+        "forget of a depended-on item must refuse in non-TTY: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr.contains("needs confirmation"),
+        "must report ConfirmationRequired: {}",
+        r.stderr
+    );
+    // The item was NOT removed.
+    assert!(
+        sb.mind(&["recall", "agent:reviewer"]).success,
+        "the item must still be installed after refused forget"
+    );
+}
+
+#[test]
+fn forget_single_item_with_dependents_lists_them() {
+    // spec: DEP-60
+    // The refusal output must list which installed item(s) depend on the target.
+    let sb = dep60_fixture();
+
+    let r = sb.mind(&["forget", "agent:reviewer"]);
+    assert!(!r.success);
+    assert!(
+        r.stdout.contains("skill:review"),
+        "output must name the dependent: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn forget_single_item_with_dependents_proceeds_with_yes() {
+    // spec: DEP-60
+    // `--yes` (global bypass) lets the removal proceed even when dependents exist.
+    let sb = dep60_fixture();
+
+    let r = sb.mind(&["forget", "--yes", "agent:reviewer"]);
+    assert!(
+        r.success,
+        "forget --yes must proceed: {} {}",
+        r.stdout, r.stderr
+    );
+    // The item is now removed.
+    assert!(
+        !sb.mind(&["recall", "agent:reviewer"]).success,
+        "item must be removed after forget --yes"
+    );
+    // DEP-50: the dependent is NOT removed (no cascade).
+    assert!(
+        sb.mind(&["recall", "skill:review"]).success,
+        "dependent must remain installed (DEP-50)"
+    );
+}
+
+#[test]
+fn forget_single_item_with_dependents_proceeds_with_force() {
+    // spec: DEP-60
+    // `--force` also bypasses the dependents gate; the item is removed.
+    let sb = dep60_fixture();
+
+    let r = sb.mind(&["forget", "--force", "agent:reviewer"]);
+    assert!(
+        r.success,
+        "forget --force must proceed: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        !sb.mind(&["recall", "agent:reviewer"]).success,
+        "item must be removed after forget --force"
+    );
+    // DEP-50: the dependent is NOT removed.
+    assert!(
+        sb.mind(&["recall", "skill:review"]).success,
+        "dependent must remain installed (DEP-50)"
+    );
+}
+
+#[test]
+fn forget_single_item_no_dependents_removes_without_extra_prompt() {
+    // spec: DEP-60
+    // An item with no installed dependents removes immediately with no extra
+    // confirmation (CLI-40 behavior unchanged).
+    let sb = dep60_fixture();
+
+    // Forget the skill (the dependent, not the dependency) -- no dependents of skill:review.
+    let r = sb.mind(&["forget", "skill:review"]);
+    assert!(
+        r.success,
+        "forget with no dependents must not prompt: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        !sb.mind(&["recall", "skill:review"]).success,
+        "skill must be removed"
+    );
+    // agent:reviewer is still installed.
+    assert!(
+        sb.mind(&["recall", "agent:reviewer"]).success,
+        "reviewer must remain installed"
+    );
+}
+
+#[test]
+fn forget_glob_path_uses_existing_cli42_confirmation_not_dep60() {
+    // spec: DEP-60 CLI-42
+    // The glob path (keys.len() > 1) keeps the CLI-42 confirmation unchanged;
+    // the DEP-60 dependents gate is single-item only.
+    let sb = dep60_fixture();
+
+    // forget '*' hits both items. In a non-TTY without --yes it should refuse
+    // with the existing CLI-42 message (count-based), not a DEP-60 dependents
+    // warning. We check that it refuses and mentions the count.
+    let r = sb.mind(&["forget", "*"]);
+    assert!(!r.success, "multi-item forget must refuse: {}", r.stderr);
+    assert!(
+        r.stderr.contains("needs confirmation"),
+        "must report ConfirmationRequired: {}",
+        r.stderr
+    );
+    assert!(
+        r.stdout.contains("would remove"),
+        "must show CLI-42 count message: {}",
+        r.stdout
+    );
+    // Both items must still be installed.
+    assert!(
+        sb.mind(&["recall", "agent:reviewer"]).success,
+        "reviewer still installed"
+    );
+    assert!(
+        sb.mind(&["recall", "skill:review"]).success,
+        "review still installed"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// DEP-61: recall --tree
+// ---------------------------------------------------------------------------
+
+/// Fixture for tree tests: a chain `skill:review -> agent:reviewer`.
+fn dep61_fixture() -> Sandbox {
+    let sb = Sandbox::bare("dep61-agents");
+    sb.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\nname: review\ndescription: Review\nrequires: agent:reviewer\n---\n# review skill\n",
+    );
+    sb.write_and_commit(
+        "agents/reviewer.md",
+        "---\nname: reviewer\ndescription: Reviewer agent\n---\n# reviewer\n",
+    );
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    assert!(
+        sb.mind(&["learn", "skill:review", "--yes"]).success,
+        "fixture: learn should succeed"
+    );
+    sb
+}
+
+#[test]
+fn recall_tree_renders_dependency_forest() {
+    // spec: DEP-61
+    // `recall --tree` with no item should render the full installed forest.
+    // `skill:review` (no incoming installed edge) is a root; `agent:reviewer`
+    // is its dependency, nested beneath it.
+    let sb = dep61_fixture();
+
+    let r = sb.mind(&["recall", "--tree"]);
+    assert!(
+        r.success,
+        "recall --tree must succeed: {} {}",
+        r.stdout, r.stderr
+    );
+    let out = &r.stdout;
+    assert!(
+        out.contains("skill:review"),
+        "forest must include skill:review: {out}"
+    );
+    assert!(
+        out.contains("agent:reviewer"),
+        "forest must include agent:reviewer: {out}"
+    );
+    // skill:review is a root (at the start of a line after "- ").
+    assert!(
+        out.lines().any(|l| l.starts_with("- skill:review")),
+        "skill:review must be a root: {out}"
+    );
+    // agent:reviewer is indented (not a primary root since skill:review depends on it).
+    assert!(
+        out.lines().any(|l| l.starts_with("  - agent:reviewer")),
+        "agent:reviewer must be nested under skill:review: {out}"
+    );
+}
+
+#[test]
+fn recall_tree_item_scopes_to_subtree() {
+    // spec: DEP-61
+    // `recall <item> --tree` scopes the output to one item's subtree.
+    let sb = dep61_fixture();
+
+    let r = sb.mind(&["recall", "skill:review", "--tree"]);
+    assert!(
+        r.success,
+        "recall <item> --tree must succeed: {} {}",
+        r.stdout, r.stderr
+    );
+    let out = &r.stdout;
+    // The root of the subtree is the requested item.
+    assert!(
+        out.lines().any(|l| l.starts_with("- skill:review")),
+        "subtree root must be skill:review: {out}"
+    );
+    // Its dependency appears nested beneath it.
+    assert!(
+        out.contains("agent:reviewer"),
+        "subtree must include the dependency: {out}"
+    );
+}
+
+#[test]
+fn recall_tree_dependency_only_item_is_not_a_root() {
+    // spec: DEP-61
+    // An item reachable only as a dependency of another installed item must NOT
+    // appear as a primary root in the forest; it appears only nested under its
+    // dependent.
+    let sb = dep61_fixture();
+
+    let r = sb.mind(&["recall", "--tree"]);
+    assert!(r.success, "recall --tree must succeed");
+    let out = &r.stdout;
+    // agent:reviewer must not appear as a top-level root line.
+    assert!(
+        !out.lines().any(|l| l.starts_with("- agent:reviewer")),
+        "agent:reviewer must not be a primary root: {out}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// DEP-62: non-interactive probe shows the tree
+// ---------------------------------------------------------------------------
+
+/// Fixture for probe tree tests: same `skill:review -> agent:reviewer` chain.
+fn dep62_fixture() -> Sandbox {
+    let sb = Sandbox::bare("dep62-agents");
+    sb.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\nname: review\ndescription: Review\nrequires: agent:reviewer\n---\n# review skill\n",
+    );
+    sb.write_and_commit(
+        "agents/reviewer.md",
+        "---\nname: reviewer\ndescription: Reviewer agent\n---\n# reviewer\n",
+    );
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    sb
+}
+
+#[test]
+fn probe_non_interactive_nests_dependency_under_dependent() {
+    // spec: DEP-62
+    // Non-interactive `probe -n` (no TUI) nests each hit's transitive
+    // dependencies beneath it in the human listing. For the dep62 fixture,
+    // `skill:review` depends on `agent:reviewer`, so the reviewer line must
+    // appear indented as a child of the review hit row.
+    // We query "skill:" to match only skill:review (not agent:reviewer), so
+    // agent:reviewer appears only as a nested dependency, not as its own hit.
+    let sb = dep62_fixture();
+
+    let r = sb.mind(&["probe", "-n", "--kind", "skill", "review"]);
+    assert!(
+        r.success,
+        "probe -n --kind skill must succeed: {} {}",
+        r.stdout, r.stderr
+    );
+    let out = &r.stdout;
+    assert!(
+        out.contains("skill:review"),
+        "skill:review must appear in output: {out}"
+    );
+    // The dependency agent:reviewer must appear nested (indented) after skill:review.
+    let review_pos = out.lines().position(|l| l.contains("skill:review"));
+    let reviewer_pos = out.lines().position(|l| l.contains("agent:reviewer"));
+    assert!(review_pos.is_some(), "skill:review must appear: {out}");
+    assert!(
+        reviewer_pos.is_some(),
+        "agent:reviewer dependency must appear in output: {out}"
+    );
+    assert!(
+        reviewer_pos.unwrap() > review_pos.unwrap(),
+        "agent:reviewer (dependency) must come after skill:review: {out}"
+    );
+    // The dependency line must be indented (nested under the hit).
+    let reviewer_line = out.lines().find(|l| l.contains("agent:reviewer")).unwrap();
+    assert!(
+        reviewer_line.starts_with("  "),
+        "dependency line must be indented: {reviewer_line:?}"
+    );
+}
+
+#[test]
+fn probe_json_includes_dependencies_field() {
+    // spec: DEP-62
+    // `probe --json` adds a `dependencies` field to each row with the direct
+    // dependency keys. For `skill:review` that depends on `agent:reviewer`, the
+    // field must contain `"agent:reviewer"`.
+    let sb = dep62_fixture();
+
+    let r = sb.mind(&["probe", "--json", "review"]);
+    assert!(
+        r.success,
+        "probe --json must succeed: {} {}",
+        r.stdout, r.stderr
+    );
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&r.stdout).expect("must be valid JSON");
+    let review_row = rows
+        .iter()
+        .find(|row| row["name"] == "review")
+        .expect("skill:review must be in JSON output");
+    let deps = review_row["dependencies"]
+        .as_array()
+        .expect("dependencies must be an array");
+    assert!(
+        deps.iter().any(|d| d == "agent:reviewer"),
+        "dependencies must include agent:reviewer: {deps:?}"
+    );
+}
+
+#[test]
+fn probe_json_item_with_no_deps_omits_dependencies_field() {
+    // spec: DEP-62
+    // An item with no dependencies should have the `dependencies` field absent
+    // (or empty) from its JSON row, since the field is skip_serializing_if empty.
+    let sb = dep62_fixture();
+
+    let r = sb.mind(&["probe", "--json", "reviewer"]);
+    assert!(
+        r.success,
+        "probe --json must succeed: {} {}",
+        r.stdout, r.stderr
+    );
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&r.stdout).expect("must be valid JSON");
+    let reviewer_row = rows
+        .iter()
+        .find(|row| row["name"] == "reviewer")
+        .expect("agent:reviewer must be in JSON output");
+    // Field must be absent (omitted when empty) or present but empty.
+    let deps = reviewer_row.get("dependencies");
+    assert!(
+        deps.is_none() || deps.unwrap().as_array().is_some_and(|a| a.is_empty()),
+        "dependencies field must be absent or empty for an item with no deps: {reviewer_row}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// DEP-60/61/62: additional adversarial / edge coverage (certification shard)
+// ---------------------------------------------------------------------------
+
+/// Fixture: a transitive chain `skill:a -> agent:b -> rule:c`, all installed.
+/// Each edge is declared with `requires:`. The whole source is melded and
+/// installed via a full-coverage glob so resolution is a no-op (DEP-10) and all
+/// three land in the manifest regardless of prompting.
+fn dep_chain_fixture() -> Sandbox {
+    let sb = Sandbox::bare("dep-chain");
+    sb.write_and_commit(
+        "skills/a/SKILL.md",
+        "---\nname: a\ndescription: A\nrequires: agent:b\n---\n# a skill\n",
+    );
+    sb.write_and_commit(
+        "agents/b.md",
+        "---\nname: b\ndescription: B\nrequires: rule:c\n---\n# b agent\n",
+    );
+    sb.write_and_commit(
+        "rules/c.md",
+        "---\nname: c\ndescription: C\n---\n# c rule\n",
+    );
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    // Full-coverage glob installs all three (DEP-10 no-op, no prompt).
+    assert!(
+        sb.mind(&["learn", "dep-chain#*"]).success,
+        "fixture: whole-source learn should install all three"
+    );
+    sb
+}
+
+#[test]
+fn forget_transitive_lists_only_direct_dependent_and_no_cascade() {
+    // spec: DEP-60 DEP-50
+    // Chain a -> b -> c. Forgetting the middle item b: only its DIRECT dependent
+    // (a) is listed (c is b's dependency, not a dependent, so it is not listed),
+    // the non-TTY run refuses without --yes/--force, and with --yes b is removed
+    // while BOTH a (the dependent, no cascade up) and c (b's own dependency, no
+    // cascade down, DEP-50) remain installed.
+    let sb = dep_chain_fixture();
+
+    // Non-TTY without confirmation: refuse, list only the direct dependent a.
+    let refused = sb.mind(&["forget", "agent:b"]);
+    assert!(
+        !refused.success,
+        "forget of a depended-on middle item must refuse: {} {}",
+        refused.stdout, refused.stderr
+    );
+    assert!(
+        refused.stderr.contains("needs confirmation"),
+        "must report ConfirmationRequired: {}",
+        refused.stderr
+    );
+    // The dependent a is listed.
+    assert!(
+        refused.stdout.contains("skill:a"),
+        "the direct dependent skill:a must be listed: {}",
+        refused.stdout
+    );
+    // c is b's dependency, NOT a dependent: it must not appear in the warning's
+    // dependent list. (The warning only enumerates dependents.)
+    assert!(
+        !refused.stdout.lines().any(|l| l.trim() == "rule:c"),
+        "rule:c (a dependency of b, not a dependent) must not be listed as a dependent: {}",
+        refused.stdout
+    );
+    // Nothing removed on refusal.
+    assert!(sb.mind(&["recall", "agent:b"]).success, "b still installed");
+
+    // With --yes: b is removed; a and c both remain (no cascade either way).
+    let done = sb.mind(&["forget", "--yes", "agent:b"]);
+    assert!(done.success, "forget --yes must proceed: {}", done.stderr);
+    assert!(
+        !sb.mind(&["recall", "agent:b"]).success,
+        "b must be removed"
+    );
+    assert!(
+        sb.mind(&["recall", "skill:a"]).success,
+        "dependent a must remain (no upward cascade)"
+    );
+    assert!(
+        sb.mind(&["recall", "rule:c"]).success,
+        "dependency c must remain (no downward cascade, DEP-50)"
+    );
+}
+
+#[test]
+fn forget_dependent_warning_fires_on_union_of_requires_and_token_edges() {
+    // spec: DEP-60 DEP-4
+    // Two distinct installed items depend on agent:target: one via a `requires:`
+    // entry, the other via a `{{ns:}}` token in its body. Forgetting the target
+    // must list BOTH dependents -- the dependent set is the union of requires and
+    // token edges, not just one source of edge.
+    let sb = Sandbox::bare("dep-union");
+    sb.write_and_commit(
+        "agents/target.md",
+        "---\nname: target\ndescription: Target\n---\n# target\n",
+    );
+    // Dependent via requires:.
+    sb.write_and_commit(
+        "skills/via-requires/SKILL.md",
+        "---\nname: via-requires\ndescription: R\nrequires: agent:target\n---\n# via-requires\n",
+    );
+    // Dependent via a {{ns:}} token in the body.
+    sb.write_and_commit(
+        "skills/via-token/SKILL.md",
+        "---\nname: via-token\ndescription: T\n---\n# via-token\nhand off to {{ns:target}}\n",
+    );
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    assert!(
+        sb.mind(&["learn", "dep-union#*"]).success,
+        "fixture: whole-source learn should install all three"
+    );
+
+    let r = sb.mind(&["forget", "agent:target"]);
+    assert!(
+        !r.success,
+        "forget of the doubly-depended item must refuse: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stdout.contains("skill:via-requires"),
+        "the requires-edge dependent must be listed: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("skill:via-token"),
+        "the token-edge dependent must be listed: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn forget_force_does_not_bypass_cli42_multi_item_confirmation() {
+    // spec: DEP-60 CLI-42
+    // `--force` bypasses only the DEP-60 single-item dependents gate. A glob that
+    // matches 2+ items still routes through the CLI-42 multi-item confirmation,
+    // which only `--yes` bypasses. So a non-TTY `forget --force '*'` over 2+
+    // matches must STILL refuse (ConfirmationRequired) and remove nothing.
+    let sb = dep60_fixture(); // two installed items: skill:review, agent:reviewer
+
+    let r = sb.mind(&["forget", "--force", "*"]);
+    assert!(
+        !r.success,
+        "forget --force over a multi-match glob must still refuse: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr.contains("needs confirmation"),
+        "must report ConfirmationRequired (CLI-42, not bypassed by --force): {}",
+        r.stderr
+    );
+    assert!(
+        r.stdout.contains("would remove"),
+        "must show the CLI-42 count message: {}",
+        r.stdout
+    );
+    // Both items remain.
+    assert!(
+        sb.mind(&["recall", "agent:reviewer"]).success,
+        "reviewer must remain installed"
+    );
+    assert!(
+        sb.mind(&["recall", "skill:review"]).success,
+        "review must remain installed"
+    );
+}
+
+#[test]
+fn recall_tree_item_with_no_dependencies_prints_just_that_item() {
+    // spec: DEP-61
+    // `recall <item> --tree` for an item that has no dependencies prints exactly
+    // that one item as the subtree root, with no nested children.
+    let sb = dep61_fixture(); // skill:review -> agent:reviewer
+
+    // agent:reviewer is a leaf (it depends on nothing).
+    let r = sb.mind(&["recall", "agent:reviewer", "--tree"]);
+    assert!(
+        r.success,
+        "recall <leaf> --tree must succeed: {} {}",
+        r.stdout, r.stderr
+    );
+    let lines: Vec<&str> = r.stdout.lines().filter(|l| !l.is_empty()).collect();
+    assert_eq!(
+        lines,
+        vec!["- agent:reviewer"],
+        "a dependency-free item's subtree must be just that item: {:?}",
+        r.stdout
+    );
+}
+
+/// Fixture: a 2-cycle among installed items. `skill:loop-a` and `skill:loop-b`
+/// each `requires:` the other; the whole source is installed so both land.
+fn dep_cycle_fixture() -> Sandbox {
+    let sb = Sandbox::bare("dep-cycle");
+    sb.write_and_commit(
+        "skills/loop-a/SKILL.md",
+        "---\nname: loop-a\ndescription: A\nrequires: skill:loop-b\n---\n# loop-a\n",
+    );
+    sb.write_and_commit(
+        "skills/loop-b/SKILL.md",
+        "---\nname: loop-b\ndescription: B\nrequires: skill:loop-a\n---\n# loop-b\n",
+    );
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    assert!(
+        sb.mind(&["learn", "dep-cycle#*"]).success,
+        "fixture: whole-source learn should install both cycle members"
+    );
+    sb
+}
+
+#[test]
+fn recall_tree_cyclic_installed_pair_renders_every_item() {
+    // spec: DEP-61 DEP-22
+    // A pure cycle among installed items (every node has in-degree >= 1, so no
+    // natural root exists) must still render EVERY installed item in the forest:
+    // a secondary root is promoted and the back-edge is marked (cycle). No
+    // installed item may be missing from `recall --tree` output.
+    let sb = dep_cycle_fixture();
+
+    let r = sb.mind(&["recall", "--tree"]);
+    assert!(
+        r.success,
+        "recall --tree over a cycle must succeed: {} {}",
+        r.stdout, r.stderr
+    );
+    let out = &r.stdout;
+    assert!(
+        out.contains("skill:loop-a"),
+        "loop-a must appear in the forest: {out}"
+    );
+    assert!(
+        out.contains("skill:loop-b"),
+        "loop-b must appear in the forest: {out}"
+    );
+    // The cycle must be broken with a marked back-edge, not expanded forever.
+    assert!(
+        out.contains("(cycle)"),
+        "the cycle must be rendered as a marked back-edge: {out}"
+    );
+}
+
+#[test]
+fn probe_json_resolves_dependency_to_prefixed_effective_key() {
+    // spec: DEP-62
+    // When a source is melded under a prefix, an item's dependency key in the
+    // `probe --json` adjacency field must be the EFFECTIVE (prefixed) key, so a
+    // consumer reconstructs the graph by the same identities the items install
+    // under. `skill:jk-review` must depend on `agent:jk-reviewer`, not the bare
+    // `agent:reviewer`.
+    let sb = Sandbox::bare("dep-prefix");
+    sb.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\nname: review\ndescription: Review\nrequires: agent:reviewer\n---\n# review\n",
+    );
+    sb.write_and_commit(
+        "agents/reviewer.md",
+        "---\nname: reviewer\ndescription: Reviewer\n---\n# reviewer\n",
+    );
+    assert!(sb.mind(&["meld", &sb.source_spec(), "--as", "jk"]).success);
+
+    let r = sb.mind(&["probe", "--json", "review"]);
+    assert!(
+        r.success,
+        "probe --json must succeed: {} {}",
+        r.stdout, r.stderr
+    );
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&r.stdout).expect("must be valid JSON");
+    // The effective name carries the prefix.
+    let review_row = rows
+        .iter()
+        .find(|row| row["name"] == "jk-review")
+        .expect("skill:jk-review must be in JSON output (prefixed effective name)");
+    let deps = review_row["dependencies"]
+        .as_array()
+        .expect("dependencies must be an array");
+    assert!(
+        deps.iter().any(|d| d == "agent:jk-reviewer"),
+        "dependency key must be the prefixed effective key agent:jk-reviewer, not bare: {deps:?}"
+    );
+    assert!(
+        !deps.iter().any(|d| d == "agent:reviewer"),
+        "the bare (unprefixed) dependency key must NOT appear: {deps:?}"
+    );
+}
+
+#[test]
+fn recall_tree_with_json_flag_does_not_crash_and_pins_current_behavior() {
+    // spec: DEP-61
+    // ROUGH EDGE (reported to the orchestrator): `--tree` takes precedence over
+    // the global `--json` flag and is not specially JSON-handled, so
+    // `recall --tree --json` emits the HUMAN dependency forest on stdout even
+    // though the user asked for JSON. This test pins that it does not crash and
+    // documents the actual behavior; it deliberately does NOT assert the output
+    // is valid JSON, because it is not. If the tree branch ever learns to honor
+    // --json, update this test to assert JSON instead.
+    let sb = dep61_fixture(); // skill:review -> agent:reviewer
+
+    let r = sb.mind(&["recall", "--tree", "--json"]);
+    assert!(
+        r.success,
+        "recall --tree --json must not crash: {} {}",
+        r.stdout, r.stderr
+    );
+    // Current behavior: the human forest (bullet lines), not JSON.
+    assert!(
+        r.stdout.lines().any(|l| l.starts_with("- skill:review")),
+        "current behavior emits the human forest, not JSON: {}",
+        r.stdout
+    );
+    // Confirm it is NOT JSON (documents the rough edge): the human forest does
+    // not parse as a JSON value.
+    assert!(
+        serde_json::from_str::<serde_json::Value>(r.stdout.trim()).is_err(),
+        "documenting the rough edge: --tree --json output is human text, not JSON: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn recall_tree_with_sources_resolves_to_sources_path_with_note() {
+    // spec: DEP-61
+    // Precedence pin: `recall --tree --sources` is NOT the tree path. The code
+    // notes that --tree is ignored with --sources and runs the sources listing.
+    // This pins the resolved precedence so it cannot silently change: a note is
+    // emitted on stderr AND the output is the sources listing (showing the melded
+    // source), not a dependency forest of installed items.
+    let sb = dep61_fixture(); // one melded source "dep61-agents", items installed
+
+    let r = sb.mind(&["recall", "--tree", "--sources"]);
+    assert!(
+        r.success,
+        "recall --tree --sources must succeed: {} {}",
+        r.stdout, r.stderr
+    );
+    // The note about --tree being ignored with --sources is emitted.
+    assert!(
+        r.stderr.contains("--tree") && r.stderr.contains("ignored with --sources"),
+        "a note that --tree is ignored with --sources must be emitted: {}",
+        r.stderr
+    );
+    // The sources path ran: the melded source appears in the listing.
+    assert!(
+        r.stdout.contains("dep61-agents"),
+        "the sources listing (not a dependency forest) must be shown: {}",
+        r.stdout
+    );
+    // It is NOT a dependency forest: no nested "- agent:reviewer" tree line.
+    assert!(
+        !r.stdout
+            .lines()
+            .any(|l| l.starts_with("  - agent:reviewer")),
+        "must not render the dependency forest under --sources: {}",
+        r.stdout
+    );
+}

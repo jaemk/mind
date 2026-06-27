@@ -38,6 +38,24 @@ pub enum TreeNode {
     UnmanagedGroup,
     /// A single unmanaged lobe item under the unmanaged group (UNM-6).
     UnmanagedItem(UnmanagedInfo),
+    /// A dependency child node shown under an expanded item node (TUI-50).
+    /// This is a VIEW of the graph, not the item's canonical line.
+    // spec: TUI-50
+    DepChild(DepChildInfo),
+}
+
+/// Info for a dependency child node under an expanded item node (TUI-50).
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct DepChildInfo {
+    /// The `kind:name` key of the dependency.
+    pub key: String,
+    /// Human-readable name of the dependency.
+    pub name: String,
+    /// True if this dependency would revisit an ancestor on the current path
+    /// (DEP-22 cycle safety): shown with a marker and not expanded again.
+    // spec: DEP-22
+    pub is_cycle: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -56,6 +74,9 @@ pub struct InstalledInfo {
     pub kind: ItemKind,
     pub commit: String,
     pub description: Option<String>,
+    /// Direct dependency keys for TUI-50 dependency subtree expansion.
+    // spec: TUI-50
+    pub deps: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -67,6 +88,9 @@ pub struct AvailableInfo {
     pub kind: ItemKind,
     pub description: Option<String>,
     pub path: PathBuf,
+    /// Direct dependency keys for TUI-50 dependency subtree expansion.
+    // spec: TUI-50
+    pub deps: Vec<String>,
 }
 
 /// Info about a single unmanaged lobe item (UNM-6). `key` is the `kind:name`
@@ -102,6 +126,66 @@ pub struct Node {
     pub children: Vec<Node>,
 }
 
+/// Build the dependency subtree children for an item node (TUI-50).
+///
+/// `item_key` is the `kind:name` key of the item whose children we build.
+/// `dep_keys` is the item's list of direct dependency keys.
+/// `all_deps` maps every known item key to its direct dep keys (from the snapshot).
+/// `ancestors` is the set of keys on the current path from the tree root to this
+/// item, used for DEP-22 cycle detection: a dep that appears in `ancestors` is
+/// shown as a back-edge marker (`(cycle)`) and not expanded again.
+///
+/// Returns a Vec of child Nodes representing the dependency subtree view.
+// spec: TUI-50 DEP-22
+fn build_dep_children(
+    item_key: &str,
+    dep_keys: &[String],
+    all_deps: &std::collections::HashMap<String, Vec<String>>,
+    ancestors: &mut Vec<String>,
+) -> Vec<Node> {
+    ancestors.push(item_key.to_string());
+    let mut children = Vec::new();
+    for dep_key in dep_keys {
+        let is_cycle = ancestors.contains(dep_key);
+        let name = dep_key
+            .split_once(':')
+            .map(|(_, n)| n)
+            .unwrap_or(dep_key.as_str())
+            .to_string();
+        let label = if is_cycle {
+            format!("{} (cycle)", dep_key)
+        } else {
+            dep_key.clone()
+        };
+        // The node id encodes the path so sibling items with a shared dep each
+        // get their own independently expandable node in the view.
+        let node_id = format!("dep:{}:{}", item_key, dep_key);
+        // Build grandchildren only for non-cycle deps that have their own deps.
+        let grandchildren = if is_cycle {
+            Vec::new()
+        } else {
+            let grandchild_deps: Vec<String> = all_deps.get(dep_key).cloned().unwrap_or_default();
+            if grandchild_deps.is_empty() {
+                Vec::new()
+            } else {
+                build_dep_children(dep_key, &grandchild_deps, all_deps, ancestors)
+            }
+        };
+        children.push(Node {
+            id: node_id,
+            label,
+            node: TreeNode::DepChild(DepChildInfo {
+                key: dep_key.clone(),
+                name,
+                is_cycle,
+            }),
+            children: grandchildren,
+        });
+    }
+    ancestors.pop();
+    children
+}
+
 /// Build the full tree from a snapshot, applying kind/source filters and the
 /// installed_collapsed / available_collapsed state.
 ///
@@ -117,11 +201,29 @@ pub fn build_tree(
     installed_collapsed: bool,
     available_collapsed: bool,
 ) -> Vec<Node> {
+    // Build a combined dep-key map from all installed and available items so
+    // dep children can recursively expand regardless of which group they live in.
+    // spec: TUI-50
+    let mut all_deps: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for it in &snap.installed {
+        all_deps
+            .entry(it.key.clone())
+            .or_default()
+            .extend(it.deps.iter().cloned());
+    }
+    for it in &snap.available {
+        all_deps
+            .entry(it.key.clone())
+            .or_default()
+            .extend(it.deps.iter().cloned());
+    }
+
     let mut roots = Vec::new();
 
     // --- Installed group ---
     // spec: TUI-10 TUI-12
-    let installed_node = build_installed_group(snap, search, kind_filter, source_filter);
+    let installed_node = build_installed_group(snap, search, kind_filter, source_filter, &all_deps);
     let installed_count = count_items(&installed_node.children);
     let installed_label = if installed_collapsed {
         "Installed (collapsed)".to_string()
@@ -141,7 +243,7 @@ pub fn build_tree(
 
     // --- Available group ---
     // spec: TUI-10 TUI-13
-    let available_node = build_available_group(snap, search, kind_filter, source_filter);
+    let available_node = build_available_group(snap, search, kind_filter, source_filter, &all_deps);
     let available_count = count_items(&available_node.children);
     let available_label = if available_collapsed {
         "Available (collapsed)".to_string()
@@ -197,6 +299,7 @@ fn build_installed_group(
     search: &str,
     kind_filter: Option<ItemKind>,
     source_filter: Option<&str>,
+    all_deps: &std::collections::HashMap<String, Vec<String>>,
 ) -> Node {
     // Group installed items by source -> kind.
     let mut by_source: std::collections::BTreeMap<
@@ -230,26 +333,37 @@ fn build_installed_group(
         for (kind, kind_items) in &kind_map {
             let item_nodes: Vec<Node> = kind_items
                 .iter()
-                .map(|it| Node {
-                    id: format!("installed:{}:{}", src_name, it.key),
-                    label: format!(
-                        "{} [{}]{}",
-                        it.name,
-                        short_commit(&it.commit),
-                        it.description
-                            .as_deref()
-                            .map(|d| format!(" - {}", truncate(d, 50)))
-                            .unwrap_or_default()
-                    ),
-                    node: TreeNode::InstalledItem(InstalledInfo {
-                        key: it.key.clone(),
-                        name: it.name.clone(),
-                        source: it.source.clone(),
-                        kind: it.kind,
-                        commit: it.commit.clone(),
-                        description: it.description.clone(),
-                    }),
-                    children: vec![],
+                .map(|it| {
+                    // Build dep children for TUI-50 (cycle-safe via ancestors path).
+                    // spec: TUI-50
+                    let dep_children = if it.deps.is_empty() {
+                        Vec::new()
+                    } else {
+                        let mut ancestors = Vec::new();
+                        build_dep_children(&it.key, &it.deps, all_deps, &mut ancestors)
+                    };
+                    Node {
+                        id: format!("installed:{}:{}", src_name, it.key),
+                        label: format!(
+                            "{} [{}]{}",
+                            it.name,
+                            short_commit(&it.commit),
+                            it.description
+                                .as_deref()
+                                .map(|d| format!(" - {}", truncate(d, 50)))
+                                .unwrap_or_default()
+                        ),
+                        node: TreeNode::InstalledItem(InstalledInfo {
+                            key: it.key.clone(),
+                            name: it.name.clone(),
+                            source: it.source.clone(),
+                            kind: it.kind,
+                            commit: it.commit.clone(),
+                            description: it.description.clone(),
+                            deps: it.deps.clone(),
+                        }),
+                        children: dep_children,
+                    }
                 })
                 .collect();
             kind_nodes.push(Node {
@@ -290,6 +404,7 @@ fn build_available_group(
     search: &str,
     kind_filter: Option<ItemKind>,
     source_filter: Option<&str>,
+    all_deps: &std::collections::HashMap<String, Vec<String>>,
 ) -> Node {
     // Installed item keys (for de-dup).
     let installed_keys: HashSet<String> = snap.installed.iter().map(|i| i.key.clone()).collect();
@@ -331,25 +446,36 @@ fn build_available_group(
         for (kind, kind_items) in &kind_map {
             let item_nodes: Vec<Node> = kind_items
                 .iter()
-                .map(|it| Node {
-                    id: format!("available:{}:{}", src_name, it.key),
-                    label: format!(
-                        "{}{}",
-                        it.name,
-                        it.description
-                            .as_deref()
-                            .map(|d| format!(" - {}", truncate(d, 50)))
-                            .unwrap_or_default()
-                    ),
-                    node: TreeNode::AvailableItem(AvailableInfo {
-                        key: it.key.clone(),
-                        name: it.name.clone(),
-                        source: it.source.clone(),
-                        kind: it.kind,
-                        description: it.description.clone(),
-                        path: it.path.clone(),
-                    }),
-                    children: vec![],
+                .map(|it| {
+                    // Build dep children for TUI-50.
+                    // spec: TUI-50
+                    let dep_children = if it.deps.is_empty() {
+                        Vec::new()
+                    } else {
+                        let mut ancestors = Vec::new();
+                        build_dep_children(&it.key, &it.deps, all_deps, &mut ancestors)
+                    };
+                    Node {
+                        id: format!("available:{}:{}", src_name, it.key),
+                        label: format!(
+                            "{}{}",
+                            it.name,
+                            it.description
+                                .as_deref()
+                                .map(|d| format!(" - {}", truncate(d, 50)))
+                                .unwrap_or_default()
+                        ),
+                        node: TreeNode::AvailableItem(AvailableInfo {
+                            key: it.key.clone(),
+                            name: it.name.clone(),
+                            source: it.source.clone(),
+                            kind: it.kind,
+                            description: it.description.clone(),
+                            path: it.path.clone(),
+                            deps: it.deps.clone(),
+                        }),
+                        children: dep_children,
+                    }
                 })
                 .collect();
             kind_nodes.push(Node {
@@ -596,6 +722,7 @@ mod tests {
             kind,
             commit: "abc12345".to_string(),
             description: Some(format!("{name} description")),
+            deps: vec![],
         }
     }
 
@@ -607,6 +734,7 @@ mod tests {
             kind,
             description: Some(format!("{name} description")),
             path: std::path::PathBuf::from(format!("/fake/{name}")),
+            deps: vec![],
         }
     }
 
@@ -1238,6 +1366,7 @@ mod tests {
                 kind: ItemKind::Skill,
                 commit: "abc".to_string(),
                 description: None,
+                deps: vec![],
             }),
             children: vec![Node {
                 id: "item-child".to_string(),
@@ -1249,6 +1378,7 @@ mod tests {
                     kind: ItemKind::Skill,
                     commit: "abc".to_string(),
                     description: None,
+                    deps: vec![],
                 }),
                 children: vec![],
             }],
@@ -1565,6 +1695,546 @@ mod tests {
         assert!(
             group_visible,
             "the group header stays visible when collapsed"
+        );
+    }
+
+    // --- TUI-50: item node expands to its dependency subtree ---
+
+    /// Make an installed item with known direct dep keys.
+    fn make_installed_with_deps(
+        key: &str,
+        name: &str,
+        source: &str,
+        kind: ItemKind,
+        deps: Vec<&str>,
+    ) -> SnapshotInstalled {
+        SnapshotInstalled {
+            key: key.to_string(),
+            name: name.to_string(),
+            source: source.to_string(),
+            kind,
+            commit: "abc12345".to_string(),
+            description: None,
+            deps: deps.into_iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn item_node_with_deps_has_dep_children_in_tree() {
+        // spec: TUI-50 - an item that has dependencies gets DepChild nodes as
+        // children in the built tree. The children are the dep subtree VIEW, not
+        // canonical item lines.
+        let review = make_installed_with_deps(
+            "skill:review",
+            "review",
+            "src/a",
+            ItemKind::Skill,
+            vec!["agent:dev"],
+        );
+        let dev = make_installed("agent:dev", "dev", "src/a", ItemKind::Agent);
+        let snap = snap_with(vec![review, dev], vec![]);
+        let nodes = build_tree(&snap, "", None, None, false, false);
+
+        // Find the InstalledItem node for "review".
+        let flat = flatten_tree(&nodes, &HashSet::new(), &HashSet::new());
+        let review_node = flat
+            .iter()
+            .find(|n| matches!(&n.node, TreeNode::InstalledItem(i) if i.name == "review"))
+            .expect("review item must be in the flat tree");
+
+        // The review node must be marked expandable (it has dep children).
+        assert!(
+            review_node.expandable,
+            "an item with dependencies must be marked expandable: {:?}",
+            review_node
+        );
+
+        // When expanded, its dep child must appear.
+        let mut expanded = HashSet::new();
+        expanded.insert(review_node.id.clone());
+        let flat_exp = flatten_tree(&nodes, &expanded, &HashSet::new());
+        let dep_child = flat_exp
+            .iter()
+            .find(|n| matches!(&n.node, TreeNode::DepChild(d) if d.key == "agent:dev"));
+        assert!(
+            dep_child.is_some(),
+            "expanding review must show agent:dev as a DepChild: {:?}",
+            flat_exp.iter().map(|n| &n.label).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn dep_child_is_itself_expandable_for_transitive_deps() {
+        // spec: TUI-50 - a dependency child is itself expandable so the user can
+        // walk the graph transitively. When the dep child node is in the `expanded`
+        // set, its own deps appear as grandchild DepChild nodes.
+        // Chain: skill:review -> agent:dev -> skill:build
+        let review = make_installed_with_deps(
+            "skill:review",
+            "review",
+            "src/a",
+            ItemKind::Skill,
+            vec!["agent:dev"],
+        );
+        let dev = make_installed_with_deps(
+            "agent:dev",
+            "dev",
+            "src/a",
+            ItemKind::Agent,
+            vec!["skill:build"],
+        );
+        let build = make_installed("skill:build", "build", "src/a", ItemKind::Skill);
+        let snap = snap_with(vec![review, dev, build], vec![]);
+        let nodes = build_tree(&snap, "", None, None, false, false);
+
+        // Expand review to see agent:dev dep child.
+        let flat = flatten_tree(&nodes, &HashSet::new(), &HashSet::new());
+        let review_id = flat
+            .iter()
+            .find(|n| matches!(&n.node, TreeNode::InstalledItem(i) if i.name == "review"))
+            .map(|n| n.id.clone())
+            .expect("review must be in the tree");
+
+        let mut expanded = HashSet::new();
+        expanded.insert(review_id.clone());
+        let flat_one = flatten_tree(&nodes, &expanded, &HashSet::new());
+
+        let dev_child_id = flat_one
+            .iter()
+            .find(|n| matches!(&n.node, TreeNode::DepChild(d) if d.key == "agent:dev"))
+            .map(|n| n.id.clone())
+            .expect("agent:dev dep child must appear when review is expanded");
+
+        // The dep child for agent:dev must be expandable (it has its own dep).
+        let dev_child_node = flat_one
+            .iter()
+            .find(|n| n.id == dev_child_id)
+            .expect("dep child must be in flat tree");
+        assert!(
+            dev_child_node.expandable,
+            "agent:dev dep child must be expandable (it has skill:build as a dep)"
+        );
+
+        // Expand the dep child for agent:dev to see skill:build as grandchild.
+        expanded.insert(dev_child_id.clone());
+        let flat_two = flatten_tree(&nodes, &expanded, &HashSet::new());
+        let build_grandchild = flat_two
+            .iter()
+            .find(|n| matches!(&n.node, TreeNode::DepChild(d) if d.key == "skill:build"));
+        assert!(
+            build_grandchild.is_some(),
+            "expanding agent:dev dep child must show skill:build as grandchild: {:?}",
+            flat_two.iter().map(|n| &n.label).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn dep_child_cycle_is_marked_and_not_expanded() {
+        // spec: TUI-50 DEP-22 - a dependency that would revisit an ancestor on
+        // the current path is shown as a marked back-edge (`is_cycle = true`) and
+        // does NOT expand infinitely (no grandchildren for the cycle node).
+        // Cycle: skill:a -> skill:b -> skill:a (self-referential through b).
+        let item_a =
+            make_installed_with_deps("skill:a", "a", "src/a", ItemKind::Skill, vec!["skill:b"]);
+        let item_b =
+            make_installed_with_deps("skill:b", "b", "src/a", ItemKind::Skill, vec!["skill:a"]);
+        let snap = snap_with(vec![item_a, item_b], vec![]);
+        let nodes = build_tree(&snap, "", None, None, false, false);
+
+        // Expand item_a.
+        let flat = flatten_tree(&nodes, &HashSet::new(), &HashSet::new());
+        let a_id = flat
+            .iter()
+            .find(|n| matches!(&n.node, TreeNode::InstalledItem(i) if i.name == "a"))
+            .map(|n| n.id.clone())
+            .expect("skill:a must be in the tree");
+
+        let mut expanded = HashSet::new();
+        expanded.insert(a_id.clone());
+        let flat_one = flatten_tree(&nodes, &expanded, &HashSet::new());
+
+        // skill:b appears as a dep child of skill:a.
+        let b_child_id = flat_one
+            .iter()
+            .find(|n| matches!(&n.node, TreeNode::DepChild(d) if d.key == "skill:b" && !d.is_cycle))
+            .map(|n| n.id.clone())
+            .expect("skill:b must appear as a non-cycle dep child under skill:a");
+
+        // Expand skill:b dep child: skill:a would be its dep, but skill:a is an
+        // ancestor -> it must appear as a CYCLE back-edge, not a normal child.
+        expanded.insert(b_child_id.clone());
+        let flat_two = flatten_tree(&nodes, &expanded, &HashSet::new());
+
+        let cycle_node = flat_two
+            .iter()
+            .find(|n| matches!(&n.node, TreeNode::DepChild(d) if d.key == "skill:a"));
+        assert!(
+            cycle_node.is_some(),
+            "skill:a must appear under skill:b's dep children: {:?}",
+            flat_two.iter().map(|n| &n.label).collect::<Vec<_>>()
+        );
+        let cycle_node = cycle_node.unwrap();
+        assert!(
+            matches!(&cycle_node.node, TreeNode::DepChild(d) if d.is_cycle),
+            "skill:a dep under skill:b must be marked as a cycle: {:?}",
+            cycle_node.node
+        );
+        assert!(
+            cycle_node.label.contains("cycle"),
+            "cycle dep label must contain '(cycle)': {:?}",
+            cycle_node.label
+        );
+        // The cycle node must NOT be expandable (no grandchildren).
+        assert!(
+            !cycle_node.expandable,
+            "cycle dep child must not be expandable (prevents infinite expansion): {:?}",
+            cycle_node
+        );
+    }
+
+    #[test]
+    fn dep_child_is_distinct_from_canonical_item_line() {
+        // spec: TUI-50 - a DepChild node is a VIEW of the graph, distinct from the
+        // canonical InstalledItem/AvailableItem line of the same item. Both must
+        // appear in the flat tree when the parent is expanded: the canonical line
+        // under its own source->kind bucket, and the dep child under its parent.
+        let review = make_installed_with_deps(
+            "skill:review",
+            "review",
+            "src/a",
+            ItemKind::Skill,
+            vec!["agent:dev"],
+        );
+        let dev = make_installed("agent:dev", "dev", "src/a", ItemKind::Agent);
+        let snap = snap_with(vec![review, dev], vec![]);
+        let nodes = build_tree(&snap, "", None, None, false, false);
+
+        let flat = flatten_tree(&nodes, &HashSet::new(), &HashSet::new());
+        // Canonical agent:dev InstalledItem must be present.
+        let canonical_dev = flat
+            .iter()
+            .find(|n| matches!(&n.node, TreeNode::InstalledItem(i) if i.name == "dev"))
+            .expect("canonical dev InstalledItem must be present in the flat tree");
+
+        // Expand review so its dep child becomes visible.
+        let review_id = flat
+            .iter()
+            .find(|n| matches!(&n.node, TreeNode::InstalledItem(i) if i.name == "review"))
+            .map(|n| n.id.clone())
+            .expect("review item must be in the tree");
+        let mut expanded = HashSet::new();
+        expanded.insert(review_id);
+        let flat_exp = flatten_tree(&nodes, &expanded, &HashSet::new());
+
+        // The canonical line is still an InstalledItem (not DepChild).
+        assert!(
+            matches!(&canonical_dev.node, TreeNode::InstalledItem(_)),
+            "canonical dev node must be InstalledItem, not DepChild"
+        );
+
+        // The dep child under review is a DepChild with the same key.
+        let dep_child_dev = flat_exp
+            .iter()
+            .find(|n| matches!(&n.node, TreeNode::DepChild(d) if d.key == "agent:dev"))
+            .expect("dep child for agent:dev must appear under review when expanded");
+        assert!(
+            matches!(&dep_child_dev.node, TreeNode::DepChild(_)),
+            "the dep child must be a DepChild node, not InstalledItem"
+        );
+        // Their node IDs must differ (they are distinct tree nodes).
+        let canonical_dev_id = flat_exp
+            .iter()
+            .find(|n| matches!(&n.node, TreeNode::InstalledItem(i) if i.name == "dev"))
+            .map(|n| n.id.clone())
+            .expect("canonical dev InstalledItem must still be present after expand");
+        assert_ne!(
+            canonical_dev_id, dep_child_dev.id,
+            "canonical InstalledItem and DepChild must have distinct node IDs"
+        );
+    }
+
+    #[test]
+    fn item_without_deps_has_no_dep_children_and_is_not_expandable_for_deps() {
+        // spec: TUI-50 - an item with no dependencies has no DepChild nodes and
+        // must not be marked expandable in the flat tree from deps (though the
+        // expanded set has no effect if children is empty).
+        let solo = make_installed("skill:solo", "solo", "src/a", ItemKind::Skill);
+        let snap = snap_with(vec![solo], vec![]);
+        let nodes = build_tree(&snap, "", None, None, false, false);
+        let flat = flatten_tree(&nodes, &HashSet::new(), &HashSet::new());
+
+        let solo_node = flat
+            .iter()
+            .find(|n| matches!(&n.node, TreeNode::InstalledItem(i) if i.name == "solo"))
+            .expect("solo item must be in the flat tree");
+        assert!(
+            !solo_node.expandable,
+            "an item with no deps must not be expandable: {:?}",
+            solo_node
+        );
+        // No DepChild nodes in the whole flat tree.
+        assert!(
+            !flat
+                .iter()
+                .any(|n| matches!(&n.node, TreeNode::DepChild(_))),
+            "no DepChild nodes should appear when no item has deps"
+        );
+    }
+
+    /// Make an available item with known direct dep keys.
+    fn make_available_with_deps(
+        key: &str,
+        name: &str,
+        source: &str,
+        kind: ItemKind,
+        deps: Vec<&str>,
+    ) -> SnapshotAvailable {
+        SnapshotAvailable {
+            key: key.to_string(),
+            name: name.to_string(),
+            source: source.to_string(),
+            kind,
+            description: None,
+            path: std::path::PathBuf::from(format!("/fake/{name}")),
+            deps: deps.into_iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn available_item_with_deps_has_dep_children_in_tree() {
+        // spec: TUI-50 - the dep-subtree view is built for AVAILABLE items too,
+        // not just installed ones: an available item with deps is expandable and
+        // shows its dependency as a DepChild when expanded.
+        let review = make_available_with_deps(
+            "skill:review",
+            "review",
+            "src/a",
+            ItemKind::Skill,
+            vec!["agent:dev"],
+        );
+        let dev = make_available("agent:dev", "dev", "src/a", ItemKind::Agent);
+        let snap = snap_with(vec![], vec![review, dev]);
+        let nodes = build_tree(&snap, "", None, None, false, false);
+
+        let flat = flatten_tree(&nodes, &HashSet::new(), &HashSet::new());
+        let review_node = flat
+            .iter()
+            .find(|n| matches!(&n.node, TreeNode::AvailableItem(i) if i.name == "review"))
+            .expect("available review item must be in the flat tree");
+        assert!(
+            review_node.expandable,
+            "an available item with deps must be marked expandable: {:?}",
+            review_node
+        );
+
+        let mut expanded = HashSet::new();
+        expanded.insert(review_node.id.clone());
+        let flat_exp = flatten_tree(&nodes, &expanded, &HashSet::new());
+        let dep_child = flat_exp
+            .iter()
+            .find(|n| matches!(&n.node, TreeNode::DepChild(d) if d.key == "agent:dev"));
+        assert!(
+            dep_child.is_some(),
+            "expanding an available item must show its dep as a DepChild: {:?}",
+            flat_exp.iter().map(|n| &n.label).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn available_item_dep_child_id_distinct_from_installed_parent_dep_child() {
+        // spec: TUI-50 - the dep child node id encodes the parent path, so the
+        // same dependency reached from an installed parent and from an available
+        // parent gets two independently-expandable nodes (no id collision that
+        // would let one parent's expansion leak into the other).
+        let installed_parent = make_installed_with_deps(
+            "skill:a",
+            "a",
+            "src/a",
+            ItemKind::Skill,
+            vec!["agent:shared"],
+        );
+        let available_parent = make_available_with_deps(
+            "skill:b",
+            "b",
+            "src/a",
+            ItemKind::Skill,
+            vec!["agent:shared"],
+        );
+        // The shared dep itself is installed; both parents reference it.
+        let shared = make_installed("agent:shared", "shared", "src/a", ItemKind::Agent);
+        let snap = snap_with(vec![installed_parent, shared], vec![available_parent]);
+        let nodes = build_tree(&snap, "", None, None, false, false);
+
+        let flat = flatten_tree(&nodes, &HashSet::new(), &HashSet::new());
+        let installed_a_id = flat
+            .iter()
+            .find(|n| matches!(&n.node, TreeNode::InstalledItem(i) if i.name == "a"))
+            .map(|n| n.id.clone())
+            .expect("installed parent a must be present");
+        let available_b_id = flat
+            .iter()
+            .find(|n| matches!(&n.node, TreeNode::AvailableItem(i) if i.name == "b"))
+            .map(|n| n.id.clone())
+            .expect("available parent b must be present");
+
+        // Expand BOTH parents.
+        let mut expanded = HashSet::new();
+        expanded.insert(installed_a_id);
+        expanded.insert(available_b_id);
+        let flat_exp = flatten_tree(&nodes, &expanded, &HashSet::new());
+
+        let dep_child_ids: Vec<String> = flat_exp
+            .iter()
+            .filter(|n| matches!(&n.node, TreeNode::DepChild(d) if d.key == "agent:shared"))
+            .map(|n| n.id.clone())
+            .collect();
+        assert_eq!(
+            dep_child_ids.len(),
+            2,
+            "the shared dep must appear once under each parent: {:?}",
+            flat_exp.iter().map(|n| &n.label).collect::<Vec<_>>()
+        );
+        assert_ne!(
+            dep_child_ids[0], dep_child_ids[1],
+            "dep child ids must differ per parent so expansion does not leak between them"
+        );
+    }
+
+    #[test]
+    fn three_node_cycle_terminates_and_marks_only_the_back_edge() {
+        // spec: TUI-50 DEP-22 - a 3-node cycle a -> b -> c -> a terminates with a
+        // single (cycle) back-edge at the node that revisits an ancestor, and the
+        // forward edges (a->b, b->c) are NOT marked as cycles. No infinite flatten.
+        let a = make_installed_with_deps("skill:a", "a", "src/a", ItemKind::Skill, vec!["skill:b"]);
+        let b = make_installed_with_deps("skill:b", "b", "src/a", ItemKind::Skill, vec!["skill:c"]);
+        let c = make_installed_with_deps("skill:c", "c", "src/a", ItemKind::Skill, vec!["skill:a"]);
+        let snap = snap_with(vec![a, b, c], vec![]);
+        let nodes = build_tree(&snap, "", None, None, false, false);
+
+        // Walk a -> b -> c by expanding each non-cycle dep child in turn.
+        let flat0 = flatten_tree(&nodes, &HashSet::new(), &HashSet::new());
+        let a_id = flat0
+            .iter()
+            .find(|n| matches!(&n.node, TreeNode::InstalledItem(i) if i.name == "a"))
+            .map(|n| n.id.clone())
+            .expect("skill:a must be in the tree");
+
+        let mut expanded = HashSet::new();
+        expanded.insert(a_id);
+        let flat1 = flatten_tree(&nodes, &expanded, &HashSet::new());
+        let b_child_id = flat1
+            .iter()
+            .find(|n| matches!(&n.node, TreeNode::DepChild(d) if d.key == "skill:b" && !d.is_cycle))
+            .map(|n| n.id.clone())
+            .expect("skill:b non-cycle dep child under a");
+        expanded.insert(b_child_id);
+
+        let flat2 = flatten_tree(&nodes, &expanded, &HashSet::new());
+        let c_child_id = flat2
+            .iter()
+            .find(|n| matches!(&n.node, TreeNode::DepChild(d) if d.key == "skill:c" && !d.is_cycle))
+            .map(|n| n.id.clone())
+            .expect("skill:c non-cycle dep child under b");
+        expanded.insert(c_child_id);
+
+        let flat3 = flatten_tree(&nodes, &expanded, &HashSet::new());
+        // The back-edge: skill:a under c must be the only cycle-marked DepChild.
+        let cycle_nodes: Vec<&FlatNode> = flat3
+            .iter()
+            .filter(|n| matches!(&n.node, TreeNode::DepChild(d) if d.is_cycle))
+            .collect();
+        assert_eq!(
+            cycle_nodes.len(),
+            1,
+            "exactly one back-edge must be cycle-marked in a 3-node cycle: {:?}",
+            flat3.iter().map(|n| &n.label).collect::<Vec<_>>()
+        );
+        assert!(
+            matches!(&cycle_nodes[0].node, TreeNode::DepChild(d) if d.key == "skill:a"),
+            "the back-edge must be skill:a (the ancestor revisited): {:?}",
+            cycle_nodes[0].node
+        );
+        assert!(
+            !cycle_nodes[0].expandable,
+            "the cycle back-edge must not be expandable (no infinite flatten)"
+        );
+        // The forward edges must NOT be cycle-marked.
+        for key in ["skill:b", "skill:c"] {
+            let forward = flat3
+                .iter()
+                .find(|n| matches!(&n.node, TreeNode::DepChild(d) if d.key == key))
+                .expect("forward dep child must exist");
+            assert!(
+                matches!(&forward.node, TreeNode::DepChild(d) if !d.is_cycle),
+                "forward edge {key} must not be marked as a cycle"
+            );
+        }
+    }
+
+    #[test]
+    fn item_dep_expansion_does_not_clobber_structural_collapse() {
+        // spec: TUI-50 TUI-11 - the dep-subtree expansion (tracked in `expanded`)
+        // and structural collapse of buckets (tracked in `collapsed`) are
+        // independent sets and must not interfere: an item's dep child can be
+        // shown while a sibling source/kind bucket is collapsed, each honoring its
+        // own state.
+        let review = make_installed_with_deps(
+            "skill:review",
+            "review",
+            "src/a",
+            ItemKind::Skill,
+            vec!["agent:dev"],
+        );
+        let dev = make_installed("agent:dev", "dev", "src/a", ItemKind::Agent);
+        // A second, unrelated installed item in its own kind bucket to collapse.
+        let other = make_installed("rule:style", "style", "src/a", ItemKind::Rule);
+        let snap = snap_with(vec![review, dev, other], vec![]);
+        let nodes = build_tree(&snap, "", None, None, false, false);
+
+        let flat = flatten_tree(&nodes, &HashSet::new(), &HashSet::new());
+        let review_id = flat
+            .iter()
+            .find(|n| matches!(&n.node, TreeNode::InstalledItem(i) if i.name == "review"))
+            .map(|n| n.id.clone())
+            .expect("review must be present");
+        // Identify the rules kind bucket id to collapse it structurally.
+        let rules_bucket_id = flat
+            .iter()
+            .find(
+                |n| matches!(&n.node, TreeNode::KindBucket { kind, .. } if *kind == ItemKind::Rule),
+            )
+            .map(|n| n.id.clone())
+            .expect("rules bucket must be present");
+
+        let mut expanded = HashSet::new();
+        expanded.insert(review_id); // dep-subtree expansion
+        let mut collapsed = HashSet::new();
+        collapsed.insert(rules_bucket_id); // structural collapse
+
+        let flat_both = flatten_tree(&nodes, &expanded, &collapsed);
+
+        // The dep child appears (expanded honored).
+        assert!(
+            flat_both
+                .iter()
+                .any(|n| matches!(&n.node, TreeNode::DepChild(d) if d.key == "agent:dev")),
+            "dep child must show even while another bucket is collapsed: {:?}",
+            flat_both.iter().map(|n| &n.label).collect::<Vec<_>>()
+        );
+        // The collapsed rules bucket hides its item (collapsed honored).
+        assert!(
+            !flat_both
+                .iter()
+                .any(|n| matches!(&n.node, TreeNode::InstalledItem(i) if i.name == "style")),
+            "collapsed rules bucket must hide rule:style: {:?}",
+            flat_both.iter().map(|n| &n.label).collect::<Vec<_>>()
+        );
+        // The rules bucket header itself stays visible.
+        assert!(
+            flat_both.iter().any(
+                |n| matches!(&n.node, TreeNode::KindBucket { kind, .. } if *kind == ItemKind::Rule)
+            ),
+            "the collapsed bucket header must remain visible"
         );
     }
 }

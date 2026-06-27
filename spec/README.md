@@ -59,8 +59,8 @@ and verified.
 | Lifecycle hooks: multiple named `[[hooks]]`, optional hooks, uninstall hooks at `unmeld`, `init-source` scaffold | done | [install-hooks.md](install-hooks.md) (HOOK-50..60) |
 | Within-source dependency resolution: a partial `learn` pulls in referenced siblings; dependency-tree display + install order | done | [dependencies.md](dependencies.md) |
 | Explicit item dependencies: optional `requires:` frontmatter key, unioned with the `{{ns:}}`-derived edges | done | DEP-4, DEP-5, DEP-6 |
-| Dependency-graph operations: `forget` warns about dependents, `recall --tree`, non-interactive `probe` tree + `--json` edges | planned | DEP-60, DEP-61, DEP-62 |
-| TUI dependency navigation: expand an item to its dependency subtree, Enter on a dependency jumps to its item | planned | TUI-50, TUI-51 |
+| Dependency-graph operations: `forget` warns about dependents, `recall --tree`, non-interactive `probe` tree + `--json` edges | done | DEP-60, DEP-61, DEP-62 |
+| TUI dependency navigation: expand an item to its dependency subtree, Enter on a dependency jumps to its item | done | TUI-50, TUI-51 |
 | `meld` installs by default (`--link-only`/`--yes`); no-arg melds `.`; prefix prompt when declared | done (`--link-only`/`--yes`/prefix) | CLI-23, CLI-24 |
 | `meld` with no arg defaults to the current directory | done | CLI-25 |
 | `init-source`: scaffold `mind.toml`, detect references, `{{ns:}}` templating (maintainer) | done | [init-source.md](init-source.md) |

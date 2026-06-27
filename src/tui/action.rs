@@ -104,7 +104,7 @@ fn dispatch(paths: &Paths, kind: ActionKind) -> Result<()> {
         // `yes = true`: the TUI confirms destructive actions in its own UI
         // (TUI-24) and acts on a single resolved item, so never read a CLI prompt.
         ActionKind::Forget { item_key } => {
-            commands::forget(paths, Some(&item_key), false, true, false)?
+            commands::forget(paths, Some(&item_key), false, true, true, false)?
         }
         // spec: TUI-21
         ActionKind::Meld { spec } => {

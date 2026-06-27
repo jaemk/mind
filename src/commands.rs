@@ -1954,6 +1954,7 @@ pub fn forget(
     item_ref: Option<&str>,
     unmanaged: bool,
     yes: bool,
+    force: bool,
     dangerously_skip: bool,
 ) -> Result<()> {
     if unmanaged {
@@ -2020,6 +2021,39 @@ pub fn forget(
     // proceeds.
     let registry = Registry::load(paths)?;
     let catalog = catalog::scan(paths, &registry).unwrap_or_default();
+
+    // DEP-60: for a single-item forget, warn about installed items that depend on
+    // the item being removed. The check only applies to the single-item path
+    // (keys.len() == 1); the glob path already handled its CLI-42 confirmation.
+    if keys.len() == 1 {
+        let removed_key = &keys[0];
+        let installed_keys: HashSet<String> = manifest.items.keys().cloned().collect();
+        let graph = crate::deps::installed_graph(&catalog, &installed_keys, read_item_text);
+        let dependents = graph.dependents(removed_key);
+        if !dependents.is_empty() && !yes && !force {
+            if !out.json {
+                println!(
+                    "{} removing {removed_key} will break the following installed items that depend on it:",
+                    out.warn()
+                );
+                for dep in &dependents {
+                    println!("  {dep}");
+                }
+            }
+            if !crate::hook::is_tty() {
+                return Err(MindError::ConfirmationRequired {
+                    action: format!(
+                        "removing {removed_key} (has {} dependent(s))",
+                        dependents.len()
+                    ),
+                });
+            }
+            if !out.json && !confirm("remove anyway?")? {
+                println!("cancelled; nothing removed");
+                return Ok(());
+            }
+        }
+    }
 
     let mut removed: Vec<String> = Vec::new();
     for key in keys {
@@ -2774,10 +2808,11 @@ fn print_upgrade_report(registry: &Registry, pending: &[Upgrade]) {
     }
 }
 
-/// `mind recall [--sources] [item] [--kind K] [--source S] [--json]`. The
+/// `mind recall [--sources] [item] [--kind K] [--source S] [--json] [--tree]`. The
 /// `--kind` and `--source` filters narrow the installed-items listing; they do
 /// not apply to `--sources` or to a single-item lookup (use a `kind:`/
 /// `owner/repo#` ref there). `--json` emits the data as JSON on stdout.
+/// `--tree` renders the installed dependency forest (DEP-61).
 pub fn recall(
     paths: &Paths,
     sources: bool,
@@ -2785,6 +2820,7 @@ pub fn recall(
     kind: Option<ItemKind>,
     source: Option<&str>,
     json: bool,
+    tree: bool,
 ) -> Result<()> {
     let out = crate::render::ctx();
     // The listing filters are meaningless for --sources or a single-item lookup;
@@ -2793,6 +2829,39 @@ pub fn recall(
         eprintln!(
             "note: --kind/--source filter the item listing; ignored with --sources or a single item"
         );
+    }
+    // --tree is meaningless with --sources; note and ignore.
+    if tree && sources {
+        eprintln!("note: --tree shows the dependency forest; ignored with --sources");
+    }
+
+    // DEP-61: --tree renders the installed dependency forest.
+    if tree && !sources {
+        // spec: DEP-61
+        let manifest = Manifest::load(paths)?;
+        let registry = Registry::load(paths)?;
+        let catalog = catalog::scan(paths, &registry).unwrap_or_default();
+        let installed_keys: HashSet<String> = manifest.items.keys().cloned().collect();
+        let graph = crate::deps::installed_graph(&catalog, &installed_keys, read_item_text);
+        if let Some(item_ref) = item {
+            // Scoped to one item's subtree.
+            let parsed = parse_item_ref(item_ref)?;
+            let found = crate::resolve::resolve_installed(&manifest.items, &parsed)?;
+            let key = found.key();
+            match graph.render_subtree(&key) {
+                Some(subtree) => print!("{subtree}"),
+                None => println!("{key}"),
+            }
+        } else {
+            // Full forest.
+            let forest = graph.render_forest();
+            if forest.is_empty() {
+                println!("no installed items");
+            } else {
+                print!("{forest}");
+            }
+        }
+        return Ok(());
     }
     // CLI-86: the `--source` glob filter shares `source_matches_glob`; reject a
     // malformed pattern up front rather than silently matching nothing.
@@ -3151,16 +3220,22 @@ pub fn probe(
     unmanaged.sort_by_key(|u| u.key());
 
     if json {
+        // spec: DEP-62
         let mut rows: Vec<ProbeRow> = hits
             .iter()
-            .map(|it| ProbeRow {
-                installed: installed(it),
-                kind: it.kind.as_str(),
-                name: it.effective_name(),
-                source: &it.source,
-                hash: hash_path(&it.path).ok(),
-                description: it.description.as_deref(),
-                unmanaged: false,
+            .map(|it| {
+                // DEP-62: add direct dependency keys to each catalog row.
+                let dependencies = crate::deps::direct_dependency_keys(it, &items, &read_item_text);
+                ProbeRow {
+                    installed: installed(it),
+                    kind: it.kind.as_str(),
+                    name: it.effective_name(),
+                    source: &it.source,
+                    hash: hash_path(&it.path).ok(),
+                    description: it.description.as_deref(),
+                    unmanaged: false,
+                    dependencies,
+                }
             })
             .collect();
         for u in &unmanaged {
@@ -3172,6 +3247,7 @@ pub fn probe(
                 hash: None,
                 description: None,
                 unmanaged: true,
+                dependencies: Vec::new(),
             });
         }
         return print_json(&rows);
@@ -3186,45 +3262,74 @@ pub fn probe(
         return Ok(());
     }
 
-    let mut rows = hits
-        .iter()
-        .map(|it| {
-            let cur = hash_path(&it.path).ok();
-            let hash = cur.as_deref().map(short).unwrap_or_else(|| "-".into());
-            // The matched installed item, if any, for the install marker and the
-            // out-of-date check (CLI-75).
-            let m = manifest
-                .items
-                .values()
-                .find(|m| m.source == it.source && m.kind == it.kind && m.bare_name == it.name);
-            // CLI-75 / LIFE-11: mark out of date exactly when `upgrade` would
-            // act -- source-content hash changed, or effective name changed
-            // (rename). Commit advance alone does not trigger this.
-            let outdated = m.is_some_and(|m| {
-                // CLI-75: a hash error (cur == None) counts as drift; the marker
-                // errs toward flagging rather than reading "cannot hash" as up to
-                // date, consistent with the other three marker sites.
-                let hash_drift = cur.as_deref().is_none_or(|h| h != m.hash);
-                let rename_drift = it.effective_name() != m.name;
-                hash_drift || rename_drift
-            });
-            // CLI-81: a leading `*` marks an installed item (greened when color is
-            // on). Not-installed rows have an empty marker cell so the row does not
-            // start with `*`.
-            let marker = if m.is_some() {
-                out.green("*")
-            } else {
-                String::new()
-            };
-            let mut desc = summary(it.description.as_deref(), 60);
-            if outdated {
-                desc = format!("{desc} {}", out.yellow("(outdated; run `mind upgrade`)"));
+    // spec: DEP-62
+    // Human listing: nest each hit's transitive dependencies beneath it. Build a
+    // graph over all catalog items (passing every catalog key as the "installed"
+    // set makes every item a node), then render_subtree for each hit.
+    let all_catalog_keys: HashSet<String> = items.iter().map(|it| it.key()).collect();
+    let catalog_graph = crate::deps::installed_graph(&items, &all_catalog_keys, read_item_text);
+
+    let mut rows = Vec::new();
+    for it in &hits {
+        let cur = hash_path(&it.path).ok();
+        let hash = cur.as_deref().map(short).unwrap_or_else(|| "-".into());
+        // The matched installed item, if any, for the install marker and the
+        // out-of-date check (CLI-75).
+        let m = manifest
+            .items
+            .values()
+            .find(|m| m.source == it.source && m.kind == it.kind && m.bare_name == it.name);
+        // CLI-75 / LIFE-11: mark out of date exactly when `upgrade` would
+        // act -- source-content hash changed, or effective name changed
+        // (rename). Commit advance alone does not trigger this.
+        let outdated = m.is_some_and(|m| {
+            // CLI-75: a hash error (cur == None) counts as drift; the marker
+            // errs toward flagging rather than reading "cannot hash" as up to
+            // date, consistent with the other three marker sites.
+            let hash_drift = cur.as_deref().is_none_or(|h| h != m.hash);
+            let rename_drift = it.effective_name() != m.name;
+            hash_drift || rename_drift
+        });
+        // CLI-81: a leading `*` marks an installed item (greened when color is
+        // on). Not-installed rows have an empty marker cell so the row does not
+        // start with `*`.
+        let marker = if m.is_some() {
+            out.green("*")
+        } else {
+            String::new()
+        };
+        let mut desc = summary(it.description.as_deref(), 60);
+        if outdated {
+            desc = format!("{desc} {}", out.yellow("(outdated; run `mind upgrade`)"));
+        }
+        rows.push(vec![
+            marker,
+            it.key(),
+            out.dim(&it.source),
+            out.dim(&hash),
+            desc,
+        ]);
+
+        // DEP-62: nest transitive dependencies beneath each hit. Use the
+        // catalog graph to render a subtree; each dependency line is indented
+        // with two leading spaces so it reads as a child of the hit above.
+        // Cycle back-edges are marked (cycle) by render_subtree/render_forest.
+        if let Some(subtree) = catalog_graph.render_subtree(&it.key()) {
+            // The subtree includes the root (it.key()) at depth 0; skip it
+            // and emit only the nested child lines (depth >= 1).
+            for line in subtree.lines().skip(1) {
+                rows.push(vec![
+                    String::new(),
+                    line.to_string(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                ]);
             }
-            vec![marker, it.key(), out.dim(&it.source), out.dim(&hash), desc]
-        })
-        .collect::<Vec<_>>();
+        }
+    }
     // UNM-3: unmanaged rows are marked in the source column and carry their lobe
-    // path in place of a description.
+    // path in place of a description. No dependency nesting for unmanaged items.
     for u in &unmanaged {
         let where_ = u
             .paths
@@ -3246,7 +3351,8 @@ pub fn probe(
 
 /// One `probe --json` row. `unmanaged` is omitted for managed (catalog) rows, so
 /// the existing schema is unchanged; an unmanaged row sets it true with no
-/// `hash` and an empty `source`.
+/// `hash` and an empty `source`. `dependencies` lists the direct dependency keys
+/// for catalog (managed) rows (DEP-62); empty for unmanaged rows.
 #[derive(Serialize)]
 struct ProbeRow<'a> {
     installed: bool,
@@ -3257,6 +3363,10 @@ struct ProbeRow<'a> {
     description: Option<&'a str>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     unmanaged: bool,
+    /// Direct dependency keys (DEP-62). Empty for unmanaged rows. Omitted when
+    /// the vec is empty so existing consumers that do not need deps see no change.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    dependencies: Vec<String>,
 }
 
 /// One diagnostic finding from `introspect`. `kind` is a stable machine tag;

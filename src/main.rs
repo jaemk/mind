@@ -263,12 +263,14 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
         Command::Forget {
             item,
             unmanaged,
+            force,
             dangerously_skip_install_hook_check,
         } => commands::forget(
             paths,
             item.as_deref(),
             unmanaged,
             yes,
+            force,
             dangerously_skip_install_hook_check,
         ),
         Command::Sync {
@@ -290,6 +292,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             item,
             kind,
             source,
+            tree,
         } => commands::recall(
             paths,
             sources,
@@ -297,6 +300,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             kind.map(|k| k.to_kind()),
             source.as_deref(),
             json,
+            tree,
         ),
         Command::Probe {
             query,

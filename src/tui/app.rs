@@ -877,17 +877,75 @@ impl App {
         }
     }
 
+    /// Jump the cursor to the canonical item line for `target_key` (TUI-51).
+    ///
+    /// Searches the visible tree for a non-DepChild node (InstalledItem or
+    /// AvailableItem) whose key equals `target_key`. If found, moves the cursor
+    /// to it. If the node is not currently visible (its ancestors are collapsed),
+    /// the method expands ancestors in the `collapsed` set so the node becomes
+    /// visible, rebuilds the tree, and then sets the cursor.
+    ///
+    /// Returns true if the target was found and the cursor was moved.
+    // spec: TUI-51
+    fn jump_to_canonical_item(&mut self, target_key: &str) -> bool {
+        // First try to find the node already visible.
+        if let Some(idx) = self.visible.iter().position(|n| match &n.node {
+            TreeNode::InstalledItem(it) => it.key == target_key,
+            TreeNode::AvailableItem(it) => it.key == target_key,
+            _ => false,
+        }) {
+            self.selected = idx;
+            return true;
+        }
+        // The node is not currently visible: remove its ancestors from the
+        // `collapsed` set to reveal it. Ancestors are Source and KindBucket nodes
+        // that might be hiding the target item. We speculatively expand all
+        // collapsed nodes and rebuild, then search again.
+        // spec: TUI-51
+        if !self.collapsed.is_empty() {
+            self.collapsed.clear();
+            self.rebuild_tree();
+            if let Some(idx) = self.visible.iter().position(|n| match &n.node {
+                TreeNode::InstalledItem(it) => it.key == target_key,
+                TreeNode::AvailableItem(it) => it.key == target_key,
+                _ => false,
+            }) {
+                self.selected = idx;
+                return true;
+            }
+        }
+        false
+    }
+
     /// Open the details-and-actions dialog for the focused node (TUI-26). On a
     /// source or item it builds a dialog; on a group header, kind bucket, or
     /// suggested source there is no dialog, so Enter falls back to the existing
-    /// toggle/preview behavior (TUI-11/TUI-31).
-    // spec: TUI-26
+    /// toggle/preview behavior (TUI-11/TUI-31). On a dependency child (TUI-50),
+    /// Enter jumps to that dependency's canonical item line (TUI-51).
+    // spec: TUI-26 TUI-51
     fn open_dialog(&mut self) {
         let Some(node) = self.visible.get(self.selected).cloned() else {
             return;
         };
         self.error = None;
         self.status = None;
+
+        // TUI-51: Enter on a DepChild jumps to the canonical item line rather
+        // than opening a dialog.
+        // spec: TUI-51
+        if let TreeNode::DepChild(dep) = &node.node {
+            if dep.is_cycle {
+                // Cycle back-edges cannot be jumped to meaningfully via a cycle
+                // marker; treat as no-op (the item line is elsewhere).
+                return;
+            }
+            let key = dep.key.clone();
+            if !self.jump_to_canonical_item(&key) {
+                self.set_error(format!("Could not locate canonical line for {key}"));
+            }
+            return;
+        }
+
         let dialog = match &node.node {
             TreeNode::AvailableItem(it) => {
                 // node_actions is the single source for the Install action/description.
@@ -1129,6 +1187,7 @@ mod tests {
                 kind: ItemKind::Skill,
                 commit: "abc12345".to_string(),
                 description: Some("Review skill".to_string()),
+                deps: vec![],
             }],
             available: vec![SnapshotAvailable {
                 key: "agent:dev".to_string(),
@@ -1137,6 +1196,7 @@ mod tests {
                 kind: ItemKind::Agent,
                 description: Some("Dev agent".to_string()),
                 path: std::path::PathBuf::from("/fake/path"),
+                deps: vec![],
             }],
             unmanaged: vec![],
             source_names: vec!["local/agents".to_string()],
@@ -2592,6 +2652,7 @@ mod tests {
                     kind: ItemKind::Skill,
                     commit: "abc12345".into(),
                     description: None,
+                    deps: vec![],
                 }),
             },
         ];
@@ -2650,6 +2711,7 @@ mod tests {
                     kind: ItemKind::Skill,
                     commit: "abc12345".into(),
                     description: None,
+                    deps: vec![],
                 }),
             },
         ];
@@ -2931,6 +2993,7 @@ mod tests {
                 kind: ItemKind::Skill,
                 commit: "abc12345".to_string(),
                 description: Some("Review skill".to_string()),
+                deps: vec![],
             }],
             available: vec![],
             unmanaged: vec![],
@@ -2953,6 +3016,7 @@ mod tests {
                 kind: ItemKind::Agent,
                 description: Some("Dev agent".to_string()),
                 path: std::path::PathBuf::from("/fake/path"),
+                deps: vec![],
             }],
             unmanaged: vec![],
             source_names: vec!["local/agents".to_string()],
@@ -3119,6 +3183,7 @@ mod tests {
                 kind: ItemKind::Agent,
                 description: None,
                 path: std::path::PathBuf::from("/fake"),
+                deps: vec![],
             }),
         }];
         app.selected = 0;
@@ -3286,6 +3351,472 @@ mod tests {
             app.dialog.as_ref().unwrap().selected,
             n - 1,
             "down clamps at the last action"
+        );
+    }
+
+    // --- TUI-51: Enter on a DepChild jumps to the canonical item line ---
+
+    /// Build a snapshot where `skill:review` depends on `agent:dev`, and both are
+    /// installed. Returns the snapshot and the dep key ("agent:dev").
+    fn make_dep_snapshot() -> Snapshot {
+        Snapshot {
+            generation: 1,
+            installed: vec![
+                SnapshotInstalled {
+                    key: "skill:review".to_string(),
+                    name: "review".to_string(),
+                    source: "local/agents".to_string(),
+                    kind: ItemKind::Skill,
+                    commit: "abc12345".to_string(),
+                    description: None,
+                    deps: vec!["agent:dev".to_string()],
+                },
+                SnapshotInstalled {
+                    key: "agent:dev".to_string(),
+                    name: "dev".to_string(),
+                    source: "local/agents".to_string(),
+                    kind: ItemKind::Agent,
+                    commit: "def67890".to_string(),
+                    description: None,
+                    deps: vec![],
+                },
+            ],
+            available: vec![],
+            unmanaged: vec![],
+            source_names: vec!["local/agents".to_string()],
+            suggestions: vec![],
+            lobes: vec![],
+        }
+    }
+
+    #[test]
+    fn enter_on_dep_child_jumps_to_canonical_item_line() {
+        // spec: TUI-51 - pressing Enter (OpenDialog) on a DepChild node moves the
+        // cursor to the canonical InstalledItem line for that dependency, not the
+        // dialog. The selected index must point at an InstalledItem with the dep key.
+        let mut app = App::new(String::new(), None, None);
+        app.apply_snapshot(make_dep_snapshot());
+
+        // Expand the review item to show its dep child.
+        let review_idx = app
+            .visible
+            .iter()
+            .position(|n| matches!(&n.node, TreeNode::InstalledItem(i) if i.name == "review"))
+            .expect("review must be in the visible tree");
+        app.selected = review_idx;
+        app.apply_intent(Intent::ToggleExpand); // expand review -> shows DepChild
+
+        // Find the DepChild node for agent:dev.
+        let dep_idx = app
+            .visible
+            .iter()
+            .position(|n| matches!(&n.node, TreeNode::DepChild(d) if d.key == "agent:dev"))
+            .expect("agent:dev dep child must be visible after expanding review");
+        app.selected = dep_idx;
+
+        // Press Enter (OpenDialog) on the dep child: must jump to canonical line.
+        // spec: TUI-51 TUI-26
+        app.apply_intent(Intent::OpenDialog);
+
+        // No dialog should be open (it's a jump, not a dialog).
+        assert!(
+            app.dialog.is_none(),
+            "Enter on a DepChild must NOT open a dialog (TUI-51)"
+        );
+
+        // The selected node must now be the canonical InstalledItem for agent:dev.
+        let sel = &app.visible[app.selected];
+        assert!(
+            matches!(&sel.node, TreeNode::InstalledItem(i) if i.key == "agent:dev"),
+            "cursor must land on the canonical InstalledItem for agent:dev: {:?}",
+            sel.node
+        );
+    }
+
+    #[test]
+    fn enter_on_normal_installed_item_still_opens_dialog() {
+        // spec: TUI-51 TUI-26 - Enter on a NORMAL item line (not a DepChild) must
+        // still open the TUI-26 details dialog. This is the unchanged behavior that
+        // TUI-51 must not break.
+        let mut app = App::new(String::new(), None, None);
+        app.apply_snapshot(make_snapshot());
+
+        let item_idx = app
+            .visible
+            .iter()
+            .position(|n| matches!(&n.node, TreeNode::InstalledItem(_)))
+            .expect("installed item must be visible");
+        app.selected = item_idx;
+        app.apply_intent(Intent::OpenDialog);
+
+        assert!(
+            app.dialog.is_some(),
+            "Enter on a normal InstalledItem must open the TUI-26 dialog"
+        );
+    }
+
+    #[test]
+    fn enter_on_dep_child_expands_collapsed_ancestors_to_reveal_target() {
+        // spec: TUI-51 - when the canonical item line is hidden because its source
+        // or kind bucket is in the `collapsed` set, Enter on a DepChild must expand
+        // those ancestors (clear them from `collapsed`) so the target becomes visible.
+        let mut app = App::new(String::new(), None, None);
+        app.apply_snapshot(make_dep_snapshot());
+
+        // Expand review to see the dep child.
+        let review_idx = app
+            .visible
+            .iter()
+            .position(|n| matches!(&n.node, TreeNode::InstalledItem(i) if i.name == "review"))
+            .expect("review must be visible");
+        app.selected = review_idx;
+        app.apply_intent(Intent::ToggleExpand);
+
+        // Now collapse the agents kind-bucket (which contains agent:dev's canonical line).
+        let agents_bucket_id = app
+            .visible
+            .iter()
+            .find(|n| matches!(&n.node, TreeNode::KindBucket { kind, .. } if *kind == ItemKind::Agent))
+            .map(|n| n.id.clone());
+        if let Some(bucket_id) = agents_bucket_id {
+            app.collapsed.insert(bucket_id);
+            app.rebuild_tree();
+        }
+
+        // agent:dev's canonical line is now hidden; verify that.
+        let canonical_hidden = !app
+            .visible
+            .iter()
+            .any(|n| matches!(&n.node, TreeNode::InstalledItem(i) if i.key == "agent:dev"));
+        assert!(
+            canonical_hidden,
+            "agent:dev canonical line must be hidden while agents bucket is collapsed"
+        );
+
+        // Find the dep child for agent:dev (still visible under review).
+        let dep_idx = app
+            .visible
+            .iter()
+            .position(|n| matches!(&n.node, TreeNode::DepChild(d) if d.key == "agent:dev"))
+            .expect("agent:dev dep child must still be visible");
+        app.selected = dep_idx;
+
+        // Enter on dep child: must reveal the canonical line by expanding ancestors.
+        // spec: TUI-51
+        app.apply_intent(Intent::OpenDialog);
+
+        assert!(
+            app.dialog.is_none(),
+            "Enter on DepChild must not open a dialog"
+        );
+        // The canonical line must now be visible and selected.
+        let sel = &app.visible[app.selected];
+        assert!(
+            matches!(&sel.node, TreeNode::InstalledItem(i) if i.key == "agent:dev"),
+            "cursor must land on the canonical agent:dev InstalledItem after ancestor expansion: {:?}",
+            sel.node
+        );
+    }
+
+    /// Snapshot where an AVAILABLE skill depends on an INSTALLED agent. Used to
+    /// exercise a cross-group jump (TUI-51): the dep child lives under Available,
+    /// its canonical line under Installed.
+    fn make_cross_group_dep_snapshot() -> Snapshot {
+        Snapshot {
+            generation: 1,
+            installed: vec![SnapshotInstalled {
+                key: "agent:dev".to_string(),
+                name: "dev".to_string(),
+                source: "local/agents".to_string(),
+                kind: ItemKind::Agent,
+                commit: "def67890".to_string(),
+                description: None,
+                deps: vec![],
+            }],
+            available: vec![SnapshotAvailable {
+                key: "skill:review".to_string(),
+                name: "review".to_string(),
+                source: "local/agents".to_string(),
+                kind: ItemKind::Skill,
+                description: None,
+                path: std::path::PathBuf::from("/fake/review"),
+                deps: vec!["agent:dev".to_string()],
+            }],
+            unmanaged: vec![],
+            source_names: vec!["local/agents".to_string()],
+            suggestions: vec![],
+            lobes: vec![],
+        }
+    }
+
+    #[test]
+    fn node_actions_empty_for_dep_child() {
+        // spec: TUI-50 TUI-51 - a DepChild is a graph view, not the item's
+        // canonical line; it carries no install/forget action of its own (those
+        // live on the canonical line the dep child jumps to). node_actions must
+        // return an empty vec for it.
+        let app = App::new(String::new(), None, None);
+        let dep_node = TreeNode::DepChild(crate::tui::tree::DepChildInfo {
+            key: "agent:dev".to_string(),
+            name: "dev".to_string(),
+            is_cycle: false,
+        });
+        assert!(
+            app.node_actions(&dep_node).is_empty(),
+            "a DepChild node must expose no actions of its own"
+        );
+        // A cycle dep child likewise has no actions.
+        let cycle_node = TreeNode::DepChild(crate::tui::tree::DepChildInfo {
+            key: "agent:dev".to_string(),
+            name: "dev".to_string(),
+            is_cycle: true,
+        });
+        assert!(
+            app.node_actions(&cycle_node).is_empty(),
+            "a cycle DepChild node must expose no actions of its own"
+        );
+    }
+
+    /// Build a 3-deep installed chain review -> dev -> build, for exercising
+    /// transitive dep-subtree expansion via the Expand/Collapse intents.
+    fn make_transitive_dep_snapshot() -> Snapshot {
+        Snapshot {
+            generation: 1,
+            installed: vec![
+                SnapshotInstalled {
+                    key: "skill:review".to_string(),
+                    name: "review".to_string(),
+                    source: "local/agents".to_string(),
+                    kind: ItemKind::Skill,
+                    commit: "aaaaaaaa".to_string(),
+                    description: None,
+                    deps: vec!["agent:dev".to_string()],
+                },
+                SnapshotInstalled {
+                    key: "agent:dev".to_string(),
+                    name: "dev".to_string(),
+                    source: "local/agents".to_string(),
+                    kind: ItemKind::Agent,
+                    commit: "bbbbbbbb".to_string(),
+                    description: None,
+                    deps: vec!["skill:build".to_string()],
+                },
+                SnapshotInstalled {
+                    key: "skill:build".to_string(),
+                    name: "build".to_string(),
+                    source: "local/agents".to_string(),
+                    kind: ItemKind::Skill,
+                    commit: "cccccccc".to_string(),
+                    description: None,
+                    deps: vec![],
+                },
+            ],
+            available: vec![],
+            unmanaged: vec![],
+            source_names: vec!["local/agents".to_string()],
+            suggestions: vec![],
+            lobes: vec![],
+        }
+    }
+
+    #[test]
+    fn expand_intent_on_dep_child_reveals_transitive_child() {
+        // spec: TUI-50 TUI-11 - TUI-50 says expansion is on Space AND Left/Right.
+        // The Right-arrow route is Intent::Expand. Applying Expand to a DepChild
+        // node must reveal its own (transitive) dependency child, not just the
+        // OpenDialog/Enter route.
+        let mut app = App::new(String::new(), None, None);
+        app.apply_snapshot(make_transitive_dep_snapshot());
+
+        // Expand the review item via Expand intent (Right arrow).
+        let review_idx = app
+            .visible
+            .iter()
+            .position(|n| matches!(&n.node, TreeNode::InstalledItem(i) if i.name == "review"))
+            .expect("review must be visible");
+        app.selected = review_idx;
+        app.apply_intent(Intent::Expand);
+
+        // agent:dev dep child must now be visible.
+        let dev_idx = app
+            .visible
+            .iter()
+            .position(|n| matches!(&n.node, TreeNode::DepChild(d) if d.key == "agent:dev"))
+            .expect("agent:dev dep child must appear after Expand on review");
+
+        // Expand the dep child itself via Expand intent: its transitive dep
+        // skill:build must appear.
+        app.selected = dev_idx;
+        app.apply_intent(Intent::Expand);
+        assert!(
+            app.visible
+                .iter()
+                .any(|n| matches!(&n.node, TreeNode::DepChild(d) if d.key == "skill:build")),
+            "Expand on the agent:dev dep child must reveal its transitive dep skill:build: {:?}",
+            app.visible.iter().map(|n| &n.label).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn collapse_intent_on_dep_child_hides_transitive_children() {
+        // spec: TUI-50 TUI-11 - the Left-arrow route is Intent::Collapse. After a
+        // dep child has been expanded to show its transitive children, Collapse on
+        // it must hide them again (the dep-subtree honors the Left/Right routes,
+        // not only Space/Enter).
+        let mut app = App::new(String::new(), None, None);
+        app.apply_snapshot(make_transitive_dep_snapshot());
+
+        let review_idx = app
+            .visible
+            .iter()
+            .position(|n| matches!(&n.node, TreeNode::InstalledItem(i) if i.name == "review"))
+            .expect("review must be visible");
+        app.selected = review_idx;
+        app.apply_intent(Intent::ToggleExpand); // Space: expand review
+
+        let dev_idx = app
+            .visible
+            .iter()
+            .position(|n| matches!(&n.node, TreeNode::DepChild(d) if d.key == "agent:dev"))
+            .expect("agent:dev dep child must appear");
+        app.selected = dev_idx;
+        app.apply_intent(Intent::ToggleExpand); // Space: expand dep child
+
+        assert!(
+            app.visible
+                .iter()
+                .any(|n| matches!(&n.node, TreeNode::DepChild(d) if d.key == "skill:build")),
+            "precondition: skill:build must be visible before collapse"
+        );
+
+        // Re-find the dev dep child (indices may shift) and Collapse it.
+        let dev_idx = app
+            .visible
+            .iter()
+            .position(|n| matches!(&n.node, TreeNode::DepChild(d) if d.key == "agent:dev"))
+            .expect("agent:dev dep child must still be visible");
+        app.selected = dev_idx;
+        app.apply_intent(Intent::Collapse);
+
+        assert!(
+            !app.visible
+                .iter()
+                .any(|n| matches!(&n.node, TreeNode::DepChild(d) if d.key == "skill:build")),
+            "Collapse on the agent:dev dep child must hide its transitive dep skill:build: {:?}",
+            app.visible.iter().map(|n| &n.label).collect::<Vec<_>>()
+        );
+        // The dep child itself remains visible (only its subtree was hidden).
+        assert!(
+            app.visible
+                .iter()
+                .any(|n| matches!(&n.node, TreeNode::DepChild(d) if d.key == "agent:dev")),
+            "the dep child node itself must remain after collapsing its subtree"
+        );
+    }
+
+    #[test]
+    fn enter_on_dep_child_jumps_across_groups_to_installed_canonical() {
+        // spec: TUI-51 - the dep child lives under an AVAILABLE item but its
+        // canonical line is an INSTALLED item in a different top-level group. Enter
+        // must still land the cursor on that canonical Installed line, no dialog.
+        let mut app = App::new(String::new(), None, None);
+        app.apply_snapshot(make_cross_group_dep_snapshot());
+
+        // Expand the available review item to reveal its dep child.
+        let review_idx = app
+            .visible
+            .iter()
+            .position(|n| matches!(&n.node, TreeNode::AvailableItem(i) if i.name == "review"))
+            .expect("available review must be visible");
+        app.selected = review_idx;
+        app.apply_intent(Intent::ToggleExpand);
+
+        let dep_idx = app
+            .visible
+            .iter()
+            .position(|n| matches!(&n.node, TreeNode::DepChild(d) if d.key == "agent:dev"))
+            .expect("agent:dev dep child must be visible under the available item");
+        app.selected = dep_idx;
+        app.apply_intent(Intent::OpenDialog);
+
+        assert!(
+            app.dialog.is_none(),
+            "Enter on a DepChild must not open a dialog (cross-group jump)"
+        );
+        let sel = &app.visible[app.selected];
+        assert!(
+            matches!(&sel.node, TreeNode::InstalledItem(i) if i.key == "agent:dev"),
+            "cursor must land on the canonical INSTALLED agent:dev across groups: {:?}",
+            sel.node
+        );
+    }
+
+    #[test]
+    fn jump_to_canonical_that_is_itself_expanded_keeps_list_consistent() {
+        // spec: TUI-51 TUI-50 - jumping to a dependency whose canonical line is
+        // itself currently expanded-with-dep-children must land on that canonical
+        // line without duplicating or corrupting the flattened list (each visible
+        // id stays unique and the selection indexes a real row).
+        // Chain: review -> dev -> build. Expand dev's canonical line first so it
+        // shows its own dep child (build), then jump to dev from review's subtree.
+        let mut app = App::new(String::new(), None, None);
+        app.apply_snapshot(make_transitive_dep_snapshot());
+
+        // Expand the canonical agent:dev line so it has a visible dep child.
+        let dev_canon_idx = app
+            .visible
+            .iter()
+            .position(|n| matches!(&n.node, TreeNode::InstalledItem(i) if i.key == "agent:dev"))
+            .expect("canonical agent:dev must be visible");
+        app.selected = dev_canon_idx;
+        app.apply_intent(Intent::ToggleExpand);
+        assert!(
+            app.visible
+                .iter()
+                .any(|n| matches!(&n.node, TreeNode::DepChild(d) if d.key == "skill:build")),
+            "precondition: canonical dev expanded shows its dep child skill:build"
+        );
+
+        // Now expand review and jump from its agent:dev dep child.
+        let review_idx = app
+            .visible
+            .iter()
+            .position(|n| matches!(&n.node, TreeNode::InstalledItem(i) if i.name == "review"))
+            .expect("review must be visible");
+        app.selected = review_idx;
+        app.apply_intent(Intent::ToggleExpand);
+
+        let dep_idx = app
+            .visible
+            .iter()
+            .position(|n| matches!(&n.node, TreeNode::DepChild(d) if d.key == "agent:dev"))
+            .expect("agent:dev dep child under review must be visible");
+        app.selected = dep_idx;
+        app.apply_intent(Intent::OpenDialog);
+
+        // Landed on the canonical dev line, no dialog.
+        assert!(app.dialog.is_none(), "jump must not open a dialog");
+        let sel = &app.visible[app.selected];
+        assert!(
+            matches!(&sel.node, TreeNode::InstalledItem(i) if i.key == "agent:dev"),
+            "cursor must land on canonical agent:dev: {:?}",
+            sel.node
+        );
+
+        // The flattened list must remain well-formed: every id is unique and the
+        // selection is in range.
+        assert!(
+            app.selected < app.visible.len(),
+            "selection must index a real visible row"
+        );
+        let mut ids: Vec<&String> = app.visible.iter().map(|n| &n.id).collect();
+        let total = ids.len();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(
+            ids.len(),
+            total,
+            "no duplicate node ids in the flattened list after the jump"
         );
     }
 }

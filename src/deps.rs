@@ -1,4 +1,5 @@
-//! Within-source dependency resolution (DEP-1..50).
+//! Within-source dependency resolution (DEP-1..50) and installed-item
+//! dependency graph (DEP-60/61/62).
 //!
 //! An item's dependencies are the siblings it names with `{{ns:name}}` tokens
 //! (DEP-1, via [`crate::namespace::referenced_names`]). For a *partial* selection
@@ -8,6 +9,12 @@
 //! ([`Resolution::render_tree`]) and a dependency-first install order
 //! ([`Resolution::install_order`]).
 //!
+//! [`InstalledGraph`] provides the graph over **installed** items only (no
+//! DEP-10 gating): it powers `forget`'s dependent-warning (DEP-60), `recall
+//! --tree` (DEP-61), and `probe --json`'s adjacency field (DEP-62). Build it
+//! with [`installed_graph`] and query it via [`InstalledGraph::dependents`],
+//! [`InstalledGraph::render_forest`], and [`InstalledGraph::render_subtree`].
+//!
 //! This module is pure: it reads each item's text through an injected closure so
 //! it can be unit-tested with synthetic content (no filesystem).
 //!
@@ -16,6 +23,126 @@ use std::collections::{HashMap, HashSet};
 
 use crate::catalog::CatalogItem;
 use crate::namespace;
+
+// ---------------------------------------------------------------------------
+// Shared edge primitive
+// ---------------------------------------------------------------------------
+
+/// Build a `(source, bare_name) -> [indices]` lookup over `items`.
+fn make_by_name(items: &[CatalogItem]) -> HashMap<(&str, &str), Vec<usize>> {
+    let mut by_name: HashMap<(&str, &str), Vec<usize>> = HashMap::new();
+    for (i, item) in items.iter().enumerate() {
+        by_name
+            .entry((item.source.as_str(), item.name.as_str()))
+            .or_default()
+            .push(i);
+    }
+    by_name
+}
+
+/// Compute the direct dependency node indices of `items[node]` within its own
+/// source. The result is the union of:
+///
+/// - indices referenced by `{{ns:name}}` tokens in `text` (DEP-1),
+/// - indices from the item's `requires` frontmatter entries (DEP-4), with
+///   source-qualified entries skipped and kind narrowed when specified (DEP-5).
+///
+/// Self-edges are always skipped. The returned slice is in stable discovery
+/// order, deduped.
+///
+/// `by_name` must have been built by [`make_by_name`] over the same `items`.
+fn item_edges(
+    node: usize,
+    items: &[CatalogItem],
+    by_name: &HashMap<(&str, &str), Vec<usize>>,
+    text: &str,
+) -> Vec<usize> {
+    let item = &items[node];
+    let mut out: Vec<usize> = Vec::new();
+
+    // DEP-1: edges from {{ns:name}} tokens in the item's text.
+    for name in namespace::referenced_names(text) {
+        if let Some(matches) = by_name.get(&(item.source.as_str(), name.as_str())) {
+            for &m in matches {
+                // DEP-2: intra-source guaranteed by the (source, name) key.
+                // Skip self-reference so it never forms a trivial loop.
+                if m != node && !out.contains(&m) {
+                    out.push(m);
+                }
+            }
+        }
+    }
+
+    // DEP-4: union with explicit `requires` frontmatter entries. Source-
+    // qualified entries (`owner/repo#name`) are skipped here; they are
+    // rejected at install/review (DEP-5/6) but do not contribute edges in
+    // the pure resolver.
+    for entry in &item.requires {
+        let Ok(r) = crate::resolve::parse_item_ref(entry) else {
+            continue;
+        };
+        if r.source.is_some() {
+            // Source-qualified: reject per DEP-5 (no cross-source edges).
+            continue;
+        }
+        // Resolve against siblings in the same source, narrowing by kind
+        // when a kind prefix was supplied (DEP-5).
+        if let Some(matches) = by_name.get(&(item.source.as_str(), r.name.as_str())) {
+            for &m in matches {
+                let candidate = &items[m];
+                // Narrow by kind if the ref specifies one (DEP-5).
+                if r.kind.is_some_and(|k| candidate.kind != k) {
+                    continue;
+                }
+                if m != node && !out.contains(&m) {
+                    out.push(m);
+                }
+            }
+        }
+    }
+
+    out
+}
+
+/// Return the `kind:effective_name` keys of `item`'s direct dependencies
+/// (within its own source), in stable discovery order, deduped.
+///
+/// The dependency set is the union of `{{ns:name}}` token references (DEP-1)
+/// and `requires` frontmatter entries (DEP-4), with source-qualified entries
+/// skipped and kind narrowed when the entry is `kind:name` (DEP-5).
+///
+/// `items` is the full catalog slice (for index-based sibling lookup).
+/// `read` is injected so callers and tests can supply synthetic content.
+///
+/// This is the primitive the DEP-62 `probe --json` adjacency field uses and
+/// TUI-50 uses to list an item's children.
+// Consuming shards (commands.rs probe/recall/forget) will call this; allow
+// dead_code until those shards land.
+#[allow(dead_code)]
+pub fn direct_dependency_keys(
+    item: &CatalogItem,
+    items: &[CatalogItem],
+    read: &impl Fn(&CatalogItem) -> String,
+) -> Vec<String> {
+    let by_name = make_by_name(items);
+    // Find this item's index.
+    let node = items
+        .iter()
+        .position(|it| std::ptr::eq(it, item))
+        .unwrap_or(usize::MAX);
+    if node == usize::MAX {
+        return Vec::new();
+    }
+    let text = read(item);
+    item_edges(node, items, &by_name, &text)
+        .into_iter()
+        .map(|i| items[i].key())
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// resolve() -- unchanged in behavior; routes through item_edges
+// ---------------------------------------------------------------------------
 
 /// The computed dependency graph for one selection, stored so that both the
 /// display tree and the install order come from it without re-analyzing
@@ -69,14 +196,7 @@ pub fn resolve(
     }
 
     // Index sibling lookup by (source, bare_name) -> node indices (DEP-2, DEP-3).
-    // Normally one match; possibly several across kinds.
-    let mut by_name: HashMap<(&str, &str), Vec<usize>> = HashMap::new();
-    for (i, item) in items.iter().enumerate() {
-        by_name
-            .entry((item.source.as_str(), item.name.as_str()))
-            .or_default()
-            .push(i);
-    }
+    let by_name = make_by_name(items);
 
     // Resolve and cache each expanded node's dependency edges, in discovery
     // order. Memoized so the closure walk visits each node's refs once (DEP-22).
@@ -86,52 +206,14 @@ pub fn resolve(
             return d.clone();
         }
         let item = &items[node];
-        let mut out: Vec<usize> = Vec::new();
-        if *expand_source.get(item.source.as_str()).unwrap_or(&true) {
-            // DEP-1: edges from {{ns:name}} tokens in the item's text.
-            for name in namespace::referenced_names(&read(item)) {
-                if let Some(matches) = by_name.get(&(item.source.as_str(), name.as_str())) {
-                    for &m in matches {
-                        // DEP-2: intra-source guaranteed by the (source, name) key.
-                        // Skip a self-reference so it never forms a trivial loop.
-                        if m != node && !out.contains(&m) {
-                            out.push(m);
-                        }
-                    }
-                }
-            }
-            // DEP-4: union with explicit `requires` frontmatter entries. Source-
-            // qualified entries (`owner/repo#name`) are skipped here; they are
-            // rejected at install/review (DEP-5/6) but do not contribute edges in
-            // the pure resolver.
-            for entry in &item.requires {
-                // Parse; skip anything we cannot make sense of (unparseable or
-                // source-qualified). Validation is install.rs/review.rs's job.
-                let Ok(r) = crate::resolve::parse_item_ref(entry) else {
-                    continue;
-                };
-                if r.source.is_some() {
-                    // Source-qualified: reject per DEP-5 (no cross-source edges).
-                    continue;
-                }
-                // Resolve against siblings in the same source, narrowing by kind
-                // when a kind prefix was supplied (DEP-5).
-                if let Some(matches) = by_name.get(&(item.source.as_str(), r.name.as_str())) {
-                    for &m in matches {
-                        let candidate = &items[m];
-                        // Narrow by kind if the ref specifies one (DEP-5).
-                        if r.kind.is_some_and(|k| candidate.kind != k) {
-                            continue;
-                        }
-                        if m != node && !out.contains(&m) {
-                            out.push(m);
-                        }
-                    }
-                }
-            }
-        }
-        deps.insert(node, out.clone());
-        out
+        let edges = if *expand_source.get(item.source.as_str()).unwrap_or(&true) {
+            let text = read(item);
+            item_edges(node, items, &by_name, &text)
+        } else {
+            Vec::new()
+        };
+        deps.insert(node, edges.clone());
+        edges
     };
 
     // DFS from each root in input order. `visited` makes every node's edges
@@ -262,6 +344,285 @@ impl Resolution {
         path.pop();
     }
 }
+
+// ---------------------------------------------------------------------------
+// InstalledGraph -- dependency graph over the installed set (DEP-60/61/62)
+// ---------------------------------------------------------------------------
+
+/// A dependency graph whose nodes are installed items and whose edges are each
+/// installed item's direct dependencies restricted to other installed items.
+///
+/// Build with [`installed_graph`]; query with [`InstalledGraph::dependents`],
+/// [`InstalledGraph::render_forest`], and [`InstalledGraph::render_subtree`].
+///
+/// # Forest format (`render_forest` / `render_subtree`)
+///
+/// Lines follow the same two-space-indent, `- <key>` bullet form as
+/// [`Resolution::render_tree`]:
+///
+/// ```text
+/// - skill:a
+///   - skill:b
+///     - skill:c
+///   - skill:b (cycle)
+/// ```
+///
+/// Primary roots are installed items with no incoming edge from another
+/// installed item. Each root's transitive installed dependencies are nested
+/// beneath it (DEP-21). A reference back to an item already on the current
+/// path is rendered as `- <key> (cycle)` and not expanded further (DEP-22).
+/// An item reachable only as a dependency does not appear as a primary root.
+///
+/// Connected components that are pure cycles (all members have in-degree >= 1)
+/// are still fully rendered: the lowest-index member of each unvisited cycle
+/// component is promoted as a secondary root after all primary roots, so every
+/// installed item appears in the forest. Cycle back-edges are marked `(cycle)`.
+///
+/// No role tag (`[selected]` / `[dep]`) is added: every node is installed.
+// Consuming shards wire up the callers; allow dead_code until they land.
+#[allow(dead_code)]
+pub struct InstalledGraph {
+    /// The installed catalog items that are nodes in this graph, in stable
+    /// index order (index == position in this vec).
+    nodes: Vec<CatalogItem>,
+    /// Adjacency list: `edges[i]` = indices of the direct installed dependencies
+    /// of `nodes[i]`, in discovery order.
+    edges: Vec<Vec<usize>>,
+    /// Key -> node index, for lookup.
+    key_to_idx: HashMap<String, usize>,
+}
+
+/// Build an [`InstalledGraph`] from a catalog and the set of installed keys.
+///
+/// - `items`: the full catalog (scanned from all melded sources).
+/// - `installed_keys`: the `kind:effective_name` keys present in the manifest.
+/// - `read`: item text reader, same contract as [`resolve`].
+///
+/// Edges are each installed item's direct dependency set restricted to other
+/// installed items (non-installed dependencies are silently omitted from the
+/// graph edges, though they may be warned about separately at `forget` time).
+#[allow(dead_code)]
+pub fn installed_graph(
+    items: &[CatalogItem],
+    installed_keys: &HashSet<String>,
+    read: impl Fn(&CatalogItem) -> String,
+) -> InstalledGraph {
+    // Filter catalog to installed items only.
+    let nodes: Vec<CatalogItem> = items
+        .iter()
+        .filter(|it| installed_keys.contains(&it.key()))
+        .cloned()
+        .collect();
+
+    // Build key -> index for the installed node set.
+    let key_to_idx: HashMap<String, usize> = nodes
+        .iter()
+        .enumerate()
+        .map(|(i, it)| (it.key(), i))
+        .collect();
+
+    // Build the full catalog by_name lookup (edges_of uses the full catalog for
+    // resolution; then we restrict targets to installed nodes).
+    let by_name = make_by_name(items);
+
+    // For each installed node, compute its direct dependency edges, then keep
+    // only those that are also installed.
+    let mut edges: Vec<Vec<usize>> = vec![Vec::new(); nodes.len()];
+    // Build a parallel index map: full-catalog index -> installed-node index.
+    let full_key_to_installed: HashMap<String, usize> = nodes
+        .iter()
+        .enumerate()
+        .map(|(installed_i, it)| (it.key(), installed_i))
+        .collect();
+
+    // We need to call item_edges using the full catalog indices, then translate.
+    // Build a map from installed node key -> full catalog index.
+    let installed_to_full: HashMap<String, usize> = items
+        .iter()
+        .enumerate()
+        .filter(|(_, it)| installed_keys.contains(&it.key()))
+        .map(|(full_i, it)| (it.key(), full_i))
+        .collect();
+
+    for (installed_i, node_item) in nodes.iter().enumerate() {
+        let full_i = match installed_to_full.get(&node_item.key()) {
+            Some(&idx) => idx,
+            None => continue,
+        };
+        let text = read(node_item);
+        let dep_full_indices = item_edges(full_i, items, &by_name, &text);
+
+        for dep_full_idx in dep_full_indices {
+            let dep_key = items[dep_full_idx].key();
+            if let Some(&dep_installed_i) = full_key_to_installed.get(&dep_key)
+                && dep_installed_i != installed_i
+                && !edges[installed_i].contains(&dep_installed_i)
+            {
+                edges[installed_i].push(dep_installed_i);
+            }
+        }
+    }
+
+    InstalledGraph {
+        nodes,
+        edges,
+        key_to_idx,
+    }
+}
+
+// Consuming shards wire up the callers; allow dead_code until they land.
+#[allow(dead_code)]
+impl InstalledGraph {
+    /// Return the `kind:effective_name` keys of installed items that directly
+    /// depend on `target_key` (i.e. items whose dependency set includes the
+    /// target). This is the "who would break if I remove this?" query for
+    /// `forget` (DEP-60).
+    ///
+    /// Returns an empty vec when nothing installed depends on `target_key`, or
+    /// when `target_key` is not a node in this graph.
+    /// Result is in stable index order, deduped.
+    pub fn dependents(&self, target_key: &str) -> Vec<String> {
+        let Some(&target_idx) = self.key_to_idx.get(target_key) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for (i, dep_list) in self.edges.iter().enumerate() {
+            if dep_list.contains(&target_idx) {
+                let key = self.nodes[i].key();
+                if !out.contains(&key) {
+                    out.push(key);
+                }
+            }
+        }
+        out
+    }
+
+    /// Render installed items as a dependency forest (DEP-61).
+    ///
+    /// Primary roots are installed items with no incoming edge from another
+    /// installed item. Each root's transitive installed dependencies are nested
+    /// beneath it using two-space indentation per depth level, with `- <key>`
+    /// bullets. A reference back to a node already on the current path is
+    /// rendered as `- <key> (cycle)` and not expanded again (DEP-22).
+    ///
+    /// An item reachable only as a dependency of another installed item is NOT
+    /// shown as its own primary root; it appears only nested under its
+    /// dependents.
+    ///
+    /// Connected components that are pure cycles (all members have positive
+    /// in-degree within the installed set, so no natural root exists) are
+    /// still fully rendered. After all primary roots are rendered, any node
+    /// not yet visited is promoted to a secondary root in stable index order
+    /// and its subtree rendered with cycle back-edges as usual. This
+    /// guarantees every installed item appears in the forest output.
+    ///
+    /// See the [`InstalledGraph`] doc comment for the exact line format.
+    pub fn render_forest(&self) -> String {
+        // Compute in-degree (number of installed items that depend on each node).
+        let mut in_degree = vec![0usize; self.nodes.len()];
+        for dep_list in &self.edges {
+            for &dep_idx in dep_list {
+                in_degree[dep_idx] += 1;
+            }
+        }
+
+        let mut out = String::new();
+        // Track which node indices have been emitted (as a root or as a
+        // descendant of one). A node is "emitted" once render_installed_node
+        // starts on it at depth 0; descendants are reached recursively but we
+        // only need to avoid re-promoting them as secondary roots.
+        let mut emitted: HashSet<usize> = HashSet::new();
+
+        // Pass 1: natural roots (in-degree == 0).
+        for (i, &deg) in in_degree.iter().enumerate() {
+            if deg == 0 {
+                // Mark all nodes reachable from this root as emitted via a
+                // pre-pass DFS so that cycle-component members reachable from
+                // a real root are not re-promoted.
+                self.mark_reachable(i, &mut emitted);
+                let mut path = Vec::new();
+                self.render_installed_node(i, 0, &mut path, &mut out);
+            }
+        }
+
+        // Pass 2: promote the lowest-index unvisited node of each all-cycle
+        // component as a secondary root, in stable index order.
+        for i in 0..self.nodes.len() {
+            if !emitted.contains(&i) {
+                self.mark_reachable(i, &mut emitted);
+                let mut path = Vec::new();
+                self.render_installed_node(i, 0, &mut path, &mut out);
+            }
+        }
+
+        out
+    }
+
+    /// DFS to mark all nodes reachable from `start` as emitted. Used by
+    /// [`render_forest`] to track which nodes have been covered before
+    /// promoting cycle-component stragglers.
+    fn mark_reachable(&self, start: usize, emitted: &mut HashSet<usize>) {
+        let mut stack = vec![start];
+        while let Some(node) = stack.pop() {
+            if emitted.insert(node) {
+                for &child in &self.edges[node] {
+                    if !emitted.contains(&child) {
+                        stack.push(child);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Render the subtree rooted at `root_key` (DEP-61 scoped variant for
+    /// `recall <item> --tree`). Returns `None` when `root_key` is not a node
+    /// in this graph (not installed).
+    ///
+    /// The format is identical to a single root's portion of [`render_forest`]:
+    /// the root item at depth 0, its transitive installed dependencies nested
+    /// beneath it, cycles marked `(cycle)`.
+    pub fn render_subtree(&self, root_key: &str) -> Option<String> {
+        let &root_idx = self.key_to_idx.get(root_key)?;
+        let mut out = String::new();
+        let mut path = Vec::new();
+        self.render_installed_node(root_idx, 0, &mut path, &mut out);
+        Some(out)
+    }
+
+    /// Recursive (path-tracked) renderer for one installed node, reused by
+    /// both [`render_forest`] and [`render_subtree`].
+    fn render_installed_node(
+        &self,
+        node: usize,
+        depth: usize,
+        path: &mut Vec<usize>,
+        out: &mut String,
+    ) {
+        for _ in 0..depth {
+            out.push_str("  ");
+        }
+        out.push_str("- ");
+        out.push_str(&self.nodes[node].key());
+
+        if path.contains(&node) {
+            // Back-edge: do not expand again (DEP-22).
+            out.push_str(" (cycle)\n");
+            return;
+        }
+
+        out.push('\n');
+
+        path.push(node);
+        for &child in &self.edges[node] {
+            self.render_installed_node(child, depth + 1, path, out);
+        }
+        path.pop();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -959,6 +1320,776 @@ mod tests {
         assert!(
             tree.contains("agent:test [installed]"),
             "installed requires dep must be shown marked: {tree}"
+        );
+    }
+
+    // ---- direct_dependency_keys --------------------------------------------
+
+    #[test]
+    fn direct_dependency_keys_ns_token_edge() {
+        // spec: DEP-1
+        // A {{ns:name}} token in the item's text yields the sibling's key.
+        let items = vec![
+            item(ItemKind::Skill, "review", "s"),
+            item(ItemKind::Agent, "test", "s"),
+        ];
+        let mut content = HashMap::new();
+        content.insert("skill:review".into(), "hand off to {{ns:test}}".into());
+        let read = reader(content);
+        let keys = direct_dependency_keys(&items[0], &items, &read);
+        assert_eq!(keys, vec!["agent:test".to_string()]);
+    }
+
+    #[test]
+    fn direct_dependency_keys_requires_edge() {
+        // spec: DEP-4
+        // A `requires` entry on the item yields the sibling's key even without a
+        // token in the text.
+        let mut skill = item(ItemKind::Skill, "review", "s");
+        skill.requires = vec!["agent:test".to_string()];
+        let items = vec![skill, item(ItemKind::Agent, "test", "s")];
+        let read = reader(HashMap::new());
+        let keys = direct_dependency_keys(&items[0], &items, &read);
+        assert_eq!(keys, vec!["agent:test".to_string()]);
+    }
+
+    #[test]
+    fn direct_dependency_keys_union_deduped() {
+        // spec: DEP-4
+        // When both a token and a requires entry name the same sibling, the key
+        // appears exactly once (deduped union).
+        let mut skill = item(ItemKind::Skill, "review", "s");
+        skill.requires = vec!["agent:test".to_string()];
+        let items = vec![skill, item(ItemKind::Agent, "test", "s")];
+        let mut content = HashMap::new();
+        content.insert("skill:review".into(), "{{ns:test}}".into());
+        let read = reader(content);
+        let keys = direct_dependency_keys(&items[0], &items, &read);
+        assert_eq!(keys, vec!["agent:test".to_string()]);
+        assert_eq!(keys.len(), 1, "must be deduped to one key");
+    }
+
+    #[test]
+    fn direct_dependency_keys_kind_narrowing() {
+        // spec: DEP-4 DEP-5
+        // A `kind:name` requires entry narrows to that kind; a same-named sibling
+        // of a different kind is not included.
+        let mut skill = item(ItemKind::Skill, "root", "s");
+        skill.requires = vec!["agent:shared".to_string()];
+        let items = vec![
+            skill,
+            item(ItemKind::Agent, "shared", "s"),
+            item(ItemKind::Rule, "shared", "s"),
+        ];
+        let read = reader(HashMap::new());
+        let keys = direct_dependency_keys(&items[0], &items, &read);
+        assert_eq!(keys, vec!["agent:shared".to_string()]);
+        assert!(
+            !keys.contains(&"rule:shared".to_string()),
+            "rule:shared must not be included with kind-narrowed requires"
+        );
+    }
+
+    #[test]
+    fn direct_dependency_keys_within_source_only() {
+        // spec: DEP-2
+        // A token referring to a same-named item in a different source yields no key.
+        let items = vec![
+            item(ItemKind::Skill, "review", "a"),
+            item(ItemKind::Agent, "test", "b"), // different source
+        ];
+        let mut content = HashMap::new();
+        content.insert("skill:review".into(), "{{ns:test}}".into());
+        let read = reader(content);
+        let keys = direct_dependency_keys(&items[0], &items, &read);
+        assert!(
+            keys.is_empty(),
+            "cross-source token must yield no dependency key"
+        );
+    }
+
+    // ---- InstalledGraph: dependents ----------------------------------------
+
+    #[test]
+    fn installed_dependents_direct_dep_reported() {
+        // spec: DEP-1
+        // a depends on b (via token): dependents("...b") returns ["skill:a"].
+        let items = vec![
+            item(ItemKind::Skill, "a", "s"),
+            item(ItemKind::Skill, "b", "s"),
+        ];
+        let mut content = HashMap::new();
+        content.insert("skill:a".into(), "{{ns:b}}".into());
+        let mut installed_keys = HashSet::new();
+        installed_keys.insert("skill:a".to_string());
+        installed_keys.insert("skill:b".to_string());
+
+        let g = installed_graph(&items, &installed_keys, reader(content));
+        let deps = g.dependents("skill:b");
+        assert_eq!(deps, vec!["skill:a".to_string()]);
+    }
+
+    #[test]
+    fn installed_dependents_non_depended_item_returns_empty() {
+        // spec: DEP-1
+        // An installed item that nothing depends on has an empty dependents list.
+        let items = vec![
+            item(ItemKind::Skill, "a", "s"),
+            item(ItemKind::Skill, "b", "s"),
+        ];
+        let mut content = HashMap::new();
+        content.insert("skill:a".into(), "{{ns:b}}".into());
+        let mut installed_keys = HashSet::new();
+        installed_keys.insert("skill:a".to_string());
+        installed_keys.insert("skill:b".to_string());
+
+        let g = installed_graph(&items, &installed_keys, reader(content));
+        // Nothing depends on "a"; a is the dependent, not the dependency.
+        let deps = g.dependents("skill:a");
+        assert!(
+            deps.is_empty(),
+            "nothing depends on a, so dependents must be empty: {deps:?}"
+        );
+    }
+
+    #[test]
+    fn installed_dependents_non_installed_edge_not_shown() {
+        // spec: DEP-1
+        // a -> b, but b is NOT installed. The graph restricts edges to installed
+        // nodes only, so dependents("skill:b") returns empty (b is not a node).
+        let items = vec![
+            item(ItemKind::Skill, "a", "s"),
+            item(ItemKind::Skill, "b", "s"),
+        ];
+        let mut content = HashMap::new();
+        content.insert("skill:a".into(), "{{ns:b}}".into());
+        let mut installed_keys = HashSet::new();
+        installed_keys.insert("skill:a".to_string());
+        // b is NOT installed
+
+        let g = installed_graph(&items, &installed_keys, reader(content));
+        // b is not a node, so asking for its dependents returns empty.
+        let deps = g.dependents("skill:b");
+        assert!(
+            deps.is_empty(),
+            "non-installed item is not a graph node: {deps:?}"
+        );
+    }
+
+    #[test]
+    fn installed_dependents_reverse_direction_only() {
+        // spec: DEP-1
+        // a -> b (a depends on b). b is NOT a dependent of a; only a is a
+        // dependent of b.
+        let items = vec![
+            item(ItemKind::Skill, "a", "s"),
+            item(ItemKind::Skill, "b", "s"),
+        ];
+        let mut content = HashMap::new();
+        content.insert("skill:a".into(), "{{ns:b}}".into());
+        let mut installed_keys = HashSet::new();
+        installed_keys.insert("skill:a".to_string());
+        installed_keys.insert("skill:b".to_string());
+
+        let g = installed_graph(&items, &installed_keys, reader(content));
+        // b is not a dependent of a (b has no edge to a).
+        assert!(
+            !g.dependents("skill:a").contains(&"skill:b".to_string()),
+            "b must not appear as a dependent of a"
+        );
+    }
+
+    #[test]
+    fn installed_dependents_requires_edge() {
+        // spec: DEP-4
+        // a requires b: dependents("skill:b") includes "skill:a".
+        let mut a = item(ItemKind::Skill, "a", "s");
+        a.requires = vec!["skill:b".to_string()];
+        let items = vec![a, item(ItemKind::Skill, "b", "s")];
+        let mut installed_keys = HashSet::new();
+        installed_keys.insert("skill:a".to_string());
+        installed_keys.insert("skill:b".to_string());
+
+        let g = installed_graph(&items, &installed_keys, reader(HashMap::new()));
+        let deps = g.dependents("skill:b");
+        assert_eq!(deps, vec!["skill:a".to_string()]);
+    }
+
+    // ---- InstalledGraph: render_forest -------------------------------------
+
+    #[test]
+    fn forest_roots_are_items_with_no_incoming_edge() {
+        // spec: DEP-21
+        // a -> b: a is a root (nothing depends on it); b is not a root (a
+        // depends on b), so it appears only nested under a.
+        let items = vec![
+            item(ItemKind::Skill, "a", "s"),
+            item(ItemKind::Skill, "b", "s"),
+        ];
+        let mut content = HashMap::new();
+        content.insert("skill:a".into(), "{{ns:b}}".into());
+        let mut installed_keys = HashSet::new();
+        installed_keys.insert("skill:a".to_string());
+        installed_keys.insert("skill:b".to_string());
+
+        let g = installed_graph(&items, &installed_keys, reader(content));
+        let forest = g.render_forest();
+        // a is the root; b is nested under it, not a separate root.
+        assert!(
+            forest.starts_with("- skill:a\n"),
+            "a must be the root line: {forest:?}"
+        );
+        assert!(
+            forest.contains("  - skill:b\n"),
+            "b must be nested under a: {forest:?}"
+        );
+        // b must NOT appear as its own root (no line starting with "- skill:b").
+        let root_b = forest.lines().any(|l| l == "- skill:b");
+        assert!(!root_b, "b must not be its own root line: {forest:?}");
+    }
+
+    #[test]
+    fn forest_transitive_nesting() {
+        // spec: DEP-21
+        // a -> b -> c: the forest nests c under b under a.
+        let items = vec![
+            item(ItemKind::Skill, "a", "s"),
+            item(ItemKind::Skill, "b", "s"),
+            item(ItemKind::Skill, "c", "s"),
+        ];
+        let mut content = HashMap::new();
+        content.insert("skill:a".into(), "{{ns:b}}".into());
+        content.insert("skill:b".into(), "{{ns:c}}".into());
+        let mut installed_keys = HashSet::new();
+        installed_keys.insert("skill:a".to_string());
+        installed_keys.insert("skill:b".to_string());
+        installed_keys.insert("skill:c".to_string());
+
+        let g = installed_graph(&items, &installed_keys, reader(content));
+        let expected = "- skill:a\n  - skill:b\n    - skill:c\n";
+        assert_eq!(g.render_forest(), expected);
+    }
+
+    #[test]
+    fn forest_cycle_marks_back_edge() {
+        // spec: DEP-21 DEP-22
+        // a -> b -> a: a pure 2-cycle. The lowest-index node (a) is promoted as
+        // a secondary root. The forest must contain a (cycle) back-edge and must
+        // terminate (finite output). Both render_forest and render_subtree mark
+        // the back-edge.
+        let items = vec![
+            item(ItemKind::Skill, "a", "s"),
+            item(ItemKind::Skill, "b", "s"),
+        ];
+        let mut content = HashMap::new();
+        content.insert("skill:a".into(), "{{ns:b}}".into());
+        content.insert("skill:b".into(), "{{ns:a}}".into());
+        let mut installed_keys = HashSet::new();
+        installed_keys.insert("skill:a".to_string());
+        installed_keys.insert("skill:b".to_string());
+
+        let g = installed_graph(&items, &installed_keys, reader(content));
+        // render_forest promotes a and marks the cycle.
+        let forest = g.render_forest();
+        assert!(
+            forest.contains("(cycle)"),
+            "render_forest must mark a back-edge as (cycle): {forest:?}"
+        );
+        assert!(!forest.is_empty());
+        // render_subtree also marks the cycle.
+        let sub = g.render_subtree("skill:a").expect("skill:a must be a node");
+        assert!(
+            sub.contains("(cycle)"),
+            "render_subtree must mark a back-edge as (cycle): {sub:?}"
+        );
+    }
+
+    #[test]
+    fn forest_render_subtree_scopes_to_one_root() {
+        // spec: DEP-21
+        // render_subtree("skill:a") returns just a's subtree, not the full forest.
+        let items = vec![
+            item(ItemKind::Skill, "a", "s"),
+            item(ItemKind::Skill, "b", "s"),
+            item(ItemKind::Skill, "c", "s"),
+        ];
+        let mut content = HashMap::new();
+        content.insert("skill:a".into(), "{{ns:b}}".into());
+        content.insert("skill:b".into(), "{{ns:c}}".into());
+        let mut installed_keys = HashSet::new();
+        installed_keys.insert("skill:a".to_string());
+        installed_keys.insert("skill:b".to_string());
+        installed_keys.insert("skill:c".to_string());
+
+        let g = installed_graph(&items, &installed_keys, reader(content));
+        let sub = g.render_subtree("skill:a").expect("skill:a must be a node");
+        let expected = "- skill:a\n  - skill:b\n    - skill:c\n";
+        assert_eq!(sub, expected);
+    }
+
+    #[test]
+    fn forest_render_subtree_none_for_non_node() {
+        // spec: DEP-21
+        // render_subtree returns None for a key not in the installed graph.
+        let items = vec![item(ItemKind::Skill, "a", "s")];
+        let mut installed_keys = HashSet::new();
+        installed_keys.insert("skill:a".to_string());
+
+        let g = installed_graph(&items, &installed_keys, reader(HashMap::new()));
+        assert!(
+            g.render_subtree("skill:nonexistent").is_none(),
+            "non-installed key must return None"
+        );
+    }
+
+    #[test]
+    fn forest_exact_format_locked() {
+        // spec: DEP-21
+        // Lock the exact multi-line forest string for a->b->c: two-space indent
+        // per depth, "- <key>" bullet, no role tag, trailing newline on each line.
+        let items = vec![
+            item(ItemKind::Skill, "a", "s"),
+            item(ItemKind::Skill, "b", "s"),
+            item(ItemKind::Skill, "c", "s"),
+        ];
+        let mut content = HashMap::new();
+        content.insert("skill:a".into(), "{{ns:b}}".into());
+        content.insert("skill:b".into(), "{{ns:c}}".into());
+        let mut installed_keys = HashSet::new();
+        installed_keys.insert("skill:a".to_string());
+        installed_keys.insert("skill:b".to_string());
+        installed_keys.insert("skill:c".to_string());
+
+        let g = installed_graph(&items, &installed_keys, reader(content));
+        let expected = "\
+- skill:a
+  - skill:b
+    - skill:c
+";
+        assert_eq!(g.render_forest(), expected);
+    }
+
+    #[test]
+    fn forest_cycle_exact_format_locked() {
+        // spec: DEP-21 DEP-22
+        // Lock the exact forest string for a two-node cycle a->b->a.
+        // Both have in-degree 1 from each other; no natural (in-degree-0) root
+        // exists. The lowest-index node (a, index 0) is promoted as a secondary
+        // root so every installed item appears in the forest.
+        let items = vec![
+            item(ItemKind::Skill, "a", "s"),
+            item(ItemKind::Skill, "b", "s"),
+        ];
+        let mut content = HashMap::new();
+        content.insert("skill:a".into(), "{{ns:b}}".into());
+        content.insert("skill:b".into(), "{{ns:a}}".into());
+        let mut installed_keys = HashSet::new();
+        installed_keys.insert("skill:a".to_string());
+        installed_keys.insert("skill:b".to_string());
+
+        let g = installed_graph(&items, &installed_keys, reader(content));
+        // a is promoted as the secondary root (lowest index); b nests under it;
+        // the back-edge from b to a is marked (cycle).
+        let expected = "\
+- skill:a
+  - skill:b
+    - skill:a (cycle)
+";
+        assert_eq!(
+            g.render_forest(),
+            expected,
+            "pure 2-cycle must render with the lowest-index node promoted as root"
+        );
+        // render_subtree still works for either node.
+        let sub = g.render_subtree("skill:a").expect("skill:a must be a node");
+        assert_eq!(sub, expected, "subtree of a must match the forest root");
+    }
+
+    // ---- ADVERSARIAL CERTIFICATION: gaps probed from outside the author ----
+
+    #[test]
+    fn direct_dependency_keys_item_not_in_catalog_is_empty() {
+        // spec: DEP-1
+        // direct_dependency_keys is given an `item` that is not an element of
+        // `items` (no pointer-identity match). It must return empty rather than
+        // panic on the usize::MAX sentinel index. A consuming shard that passes a
+        // stale/cloned item must degrade to "no deps", not crash.
+        let in_catalog = vec![
+            item(ItemKind::Skill, "review", "s"),
+            item(ItemKind::Agent, "test", "s"),
+        ];
+        // A separate item value with the same fields is NOT the same pointer.
+        let outsider = item(ItemKind::Skill, "review", "s");
+        let mut content = HashMap::new();
+        content.insert("skill:review".into(), "{{ns:test}}".into());
+        let read = reader(content);
+        let keys = direct_dependency_keys(&outsider, &in_catalog, &read);
+        assert!(
+            keys.is_empty(),
+            "an item not present in `items` must yield no keys, not panic: {keys:?}"
+        );
+    }
+
+    #[test]
+    fn direct_dependency_keys_prefixed_item_keys_use_effective_name() {
+        // spec: DEP-1 DEP-3
+        // A prefixed dependency: the referent sibling carries prefix "jk", so its
+        // effective_name() ("jk-test") differs from its bare name ("test"). The
+        // {{ns:test}} token must still resolve by BARE name (DEP-3 mirrors token
+        // expansion), and the returned dependency KEY must use the EFFECTIVE
+        // (prefixed) name, because that is the manifest/install identity the
+        // DEP-62 adjacency consumer needs.
+        let mut review = item(ItemKind::Skill, "review", "s");
+        review.prefix = Some("jk".to_string());
+        let mut test = item(ItemKind::Agent, "test", "s");
+        test.prefix = Some("jk".to_string());
+        let items = vec![review, test];
+        let mut content = HashMap::new();
+        // The token names the BARE sibling name, not the prefixed one.
+        content.insert("skill:review".into(), "hand off to {{ns:test}}".into());
+        let read = reader(content);
+        let keys = direct_dependency_keys(&items[0], &items, &read);
+        assert_eq!(
+            keys,
+            vec!["agent:jk-test".to_string()],
+            "dep key must use the effective (prefixed) name while the token resolved by bare name"
+        );
+    }
+
+    #[test]
+    fn direct_dependency_keys_multiple_tokens_in_stable_discovery_order() {
+        // spec: DEP-1
+        // Several distinct {{ns:}} tokens in one item's text yield one key each,
+        // in the order the tokens appear in the text (stable discovery order),
+        // deduped.
+        let items = vec![
+            item(ItemKind::Skill, "root", "s"),
+            item(ItemKind::Agent, "alpha", "s"),
+            item(ItemKind::Agent, "beta", "s"),
+            item(ItemKind::Agent, "gamma", "s"),
+        ];
+        let mut content = HashMap::new();
+        // Order in text: gamma, alpha, beta, then a duplicate alpha.
+        content.insert(
+            "skill:root".into(),
+            "first {{ns:gamma}} then {{ns:alpha}} then {{ns:beta}} again {{ns:alpha}}".into(),
+        );
+        let read = reader(content);
+        let keys = direct_dependency_keys(&items[0], &items, &read);
+        assert_eq!(
+            keys,
+            vec![
+                "agent:gamma".to_string(),
+                "agent:alpha".to_string(),
+                "agent:beta".to_string(),
+            ],
+            "keys must follow token discovery order and be deduped: {keys:?}"
+        );
+    }
+
+    #[test]
+    fn installed_graph_diamond_forest_nests_shared_dep_under_both_dependents() {
+        // spec: DEP-1 DEP-21
+        // Diamond a->b, a->c, b->d, c->d over installed items. The forest must
+        // mirror graph STRUCTURE (like render_tree_exact_nested_format_is_locked):
+        // a is the sole root (in-degree 0), and d nests under BOTH b and c. d must
+        // never be its own root (it has incoming edges). Lock the exact string.
+        let items = vec![
+            item(ItemKind::Skill, "a", "s"),
+            item(ItemKind::Skill, "b", "s"),
+            item(ItemKind::Skill, "c", "s"),
+            item(ItemKind::Skill, "d", "s"),
+        ];
+        let mut content = HashMap::new();
+        content.insert("skill:a".into(), "{{ns:b}} {{ns:c}}".into());
+        content.insert("skill:b".into(), "{{ns:d}}".into());
+        content.insert("skill:c".into(), "{{ns:d}}".into());
+        let mut installed_keys = HashSet::new();
+        installed_keys.insert("skill:a".to_string());
+        installed_keys.insert("skill:b".to_string());
+        installed_keys.insert("skill:c".to_string());
+        installed_keys.insert("skill:d".to_string());
+
+        let g = installed_graph(&items, &installed_keys, reader(content));
+        let expected = "\
+- skill:a
+  - skill:b
+    - skill:d
+  - skill:c
+    - skill:d
+";
+        assert_eq!(
+            g.render_forest(),
+            expected,
+            "diamond forest must nest the shared dep under each dependent with a as sole root"
+        );
+        // d is reachable but never a top-level root line.
+        assert!(
+            !g.render_forest().lines().any(|l| l == "- skill:d"),
+            "shared dependency d must not appear as its own root"
+        );
+    }
+
+    #[test]
+    fn installed_graph_excludes_catalog_items_with_no_installed_key() {
+        // spec: DEP-1 DEP-21
+        // The catalog has three items but only two are installed. The third
+        // (uninstalled) must be neither a node nor an edge target: it never
+        // appears in the forest, and render_subtree on it returns None.
+        let items = vec![
+            item(ItemKind::Skill, "a", "s"),
+            item(ItemKind::Skill, "b", "s"),
+            item(ItemKind::Skill, "ghost", "s"),
+        ];
+        let mut content = HashMap::new();
+        // a depends on b AND on the uninstalled ghost.
+        content.insert("skill:a".into(), "{{ns:b}} {{ns:ghost}}".into());
+        let mut installed_keys = HashSet::new();
+        installed_keys.insert("skill:a".to_string());
+        installed_keys.insert("skill:b".to_string());
+        // ghost is NOT installed.
+
+        let g = installed_graph(&items, &installed_keys, reader(content));
+        let forest = g.render_forest();
+        assert!(
+            !forest.contains("ghost"),
+            "uninstalled catalog item must not appear in the forest: {forest:?}"
+        );
+        // The edge to ghost is dropped, so the forest is exactly a -> b.
+        assert_eq!(forest, "- skill:a\n  - skill:b\n");
+        assert!(
+            g.render_subtree("skill:ghost").is_none(),
+            "uninstalled item is not a node: render_subtree must be None"
+        );
+        // ghost is not a dependent of anything and has no dependents.
+        assert!(g.dependents("skill:ghost").is_empty());
+    }
+
+    #[test]
+    fn installed_graph_prefixed_items_resolve_edges_by_effective_keys() {
+        // spec: DEP-1 DEP-21
+        // Prefixed installed items: keys in the manifest are the EFFECTIVE
+        // (prefixed) names ("skill:jk-a", "skill:jk-b"), while the {{ns:b}} token
+        // resolves by BARE name. The graph must still wire a -> b and render the
+        // prefixed keys.
+        let mut a = item(ItemKind::Skill, "a", "s");
+        a.prefix = Some("jk".to_string());
+        let mut b = item(ItemKind::Skill, "b", "s");
+        b.prefix = Some("jk".to_string());
+        let items = vec![a, b];
+        let mut content = HashMap::new();
+        content.insert("skill:a".into(), "{{ns:b}}".into());
+        let mut installed_keys = HashSet::new();
+        installed_keys.insert("skill:jk-a".to_string());
+        installed_keys.insert("skill:jk-b".to_string());
+
+        let g = installed_graph(&items, &installed_keys, reader(content));
+        assert_eq!(
+            g.dependents("skill:jk-b"),
+            vec!["skill:jk-a".to_string()],
+            "edge must resolve between prefixed nodes by effective key"
+        );
+        assert_eq!(
+            g.render_forest(),
+            "- skill:jk-a\n  - skill:jk-b\n",
+            "forest must render the prefixed effective keys"
+        );
+    }
+
+    #[test]
+    fn installed_dependents_multiple_dependents_all_returned() {
+        // spec: DEP-1
+        // Two installed items both depend on a common target. dependents(target)
+        // returns BOTH, in stable index order, deduped.
+        let items = vec![
+            item(ItemKind::Skill, "a", "s"),
+            item(ItemKind::Skill, "b", "s"),
+            item(ItemKind::Skill, "shared", "s"),
+        ];
+        let mut content = HashMap::new();
+        content.insert("skill:a".into(), "{{ns:shared}}".into());
+        content.insert("skill:b".into(), "{{ns:shared}}".into());
+        let mut installed_keys = HashSet::new();
+        installed_keys.insert("skill:a".to_string());
+        installed_keys.insert("skill:b".to_string());
+        installed_keys.insert("skill:shared".to_string());
+
+        let g = installed_graph(&items, &installed_keys, reader(content));
+        let deps = g.dependents("skill:shared");
+        assert_eq!(
+            deps,
+            vec!["skill:a".to_string(), "skill:b".to_string()],
+            "all dependents of the shared target must be returned in index order"
+        );
+    }
+
+    #[test]
+    fn installed_dependents_target_with_no_dependents_in_larger_graph() {
+        // spec: DEP-1 DEP-21
+        // In a non-trivial diamond, the top root `a` is depended on by nothing.
+        // dependents("skill:a") is empty even though a participates in many edges
+        // as a SOURCE. (Reverse-direction-only, exercised in a larger graph.)
+        let items = vec![
+            item(ItemKind::Skill, "a", "s"),
+            item(ItemKind::Skill, "b", "s"),
+            item(ItemKind::Skill, "c", "s"),
+            item(ItemKind::Skill, "d", "s"),
+        ];
+        let mut content = HashMap::new();
+        content.insert("skill:a".into(), "{{ns:b}} {{ns:c}}".into());
+        content.insert("skill:b".into(), "{{ns:d}}".into());
+        content.insert("skill:c".into(), "{{ns:d}}".into());
+        let mut installed_keys = HashSet::new();
+        installed_keys.insert("skill:a".to_string());
+        installed_keys.insert("skill:b".to_string());
+        installed_keys.insert("skill:c".to_string());
+        installed_keys.insert("skill:d".to_string());
+
+        let g = installed_graph(&items, &installed_keys, reader(content));
+        assert!(
+            g.dependents("skill:a").is_empty(),
+            "the top root must have no dependents in a diamond"
+        );
+        // Sanity: d (the sink) is depended on by both b and c.
+        assert_eq!(
+            g.dependents("skill:d"),
+            vec!["skill:b".to_string(), "skill:c".to_string()]
+        );
+    }
+
+    #[test]
+    fn forest_dependency_only_item_never_appears_as_root_two_dependents() {
+        // spec: DEP-21
+        // A single dependency-only item shared by TWO independent roots must nest
+        // under each dependent but NEVER appear at the top level. roots r1, r2 both
+        // depend on `lib`; lib has in-degree 2, so it is not a root. Lock the
+        // exact multi-line forest string.
+        let items = vec![
+            item(ItemKind::Skill, "r1", "s"),
+            item(ItemKind::Skill, "r2", "s"),
+            item(ItemKind::Skill, "lib", "s"),
+        ];
+        let mut content = HashMap::new();
+        content.insert("skill:r1".into(), "{{ns:lib}}".into());
+        content.insert("skill:r2".into(), "{{ns:lib}}".into());
+        let mut installed_keys = HashSet::new();
+        installed_keys.insert("skill:r1".to_string());
+        installed_keys.insert("skill:r2".to_string());
+        installed_keys.insert("skill:lib".to_string());
+
+        let g = installed_graph(&items, &installed_keys, reader(content));
+        let expected = "\
+- skill:r1
+  - skill:lib
+- skill:r2
+  - skill:lib
+";
+        assert_eq!(
+            g.render_forest(),
+            expected,
+            "lib must nest under both roots and never appear as its own top-level root"
+        );
+        // Defensive: no top-level "- skill:lib" line at depth 0.
+        assert!(
+            !g.render_forest().lines().any(|l| l == "- skill:lib"),
+            "dependency-only item must not be a root line"
+        );
+    }
+
+    #[test]
+    fn render_subtree_from_dependency_only_node_renders_its_own_subtree() {
+        // spec: DEP-21
+        // render_subtree on a node WITH incoming edges (a dependency-only node,
+        // in-degree > 0) must still render that node's own subtree, regardless of
+        // in-degree. This is the `recall <dep> --tree` path: scoping to a
+        // non-root node is valid.
+        let items = vec![
+            item(ItemKind::Skill, "a", "s"),
+            item(ItemKind::Skill, "b", "s"),
+            item(ItemKind::Skill, "c", "s"),
+        ];
+        let mut content = HashMap::new();
+        content.insert("skill:a".into(), "{{ns:b}}".into());
+        content.insert("skill:b".into(), "{{ns:c}}".into());
+        let mut installed_keys = HashSet::new();
+        installed_keys.insert("skill:a".to_string());
+        installed_keys.insert("skill:b".to_string());
+        installed_keys.insert("skill:c".to_string());
+
+        let g = installed_graph(&items, &installed_keys, reader(content));
+        // b is a dependency-only node (in-degree 1 from a) but its subtree is its
+        // own: b at depth 0 with c nested under it. a (its dependent) is absent.
+        let sub = g.render_subtree("skill:b").expect("skill:b must be a node");
+        assert_eq!(
+            sub, "- skill:b\n  - skill:c\n",
+            "subtree of a dependency-only node is rooted at that node, ignoring in-degree"
+        );
+    }
+
+    #[test]
+    fn forest_all_cycle_component_promoted_alongside_independent_root() {
+        // spec: DEP-21 DEP-22
+        // A graph with an independent root `c` plus an `a<->b` pure cycle.
+        // c has in-degree 0 and renders first. The a<->b cycle component has
+        // no in-degree-0 member, so `a` (lowest index, 0) is promoted as a
+        // secondary root after c. All three installed items appear in the output.
+        let items = vec![
+            item(ItemKind::Skill, "a", "s"),
+            item(ItemKind::Skill, "b", "s"),
+            item(ItemKind::Skill, "c", "s"),
+        ];
+        let mut content = HashMap::new();
+        content.insert("skill:a".into(), "{{ns:b}}".into());
+        content.insert("skill:b".into(), "{{ns:a}}".into());
+        // c stands alone (no edges): a natural primary root.
+        let mut installed_keys = HashSet::new();
+        installed_keys.insert("skill:a".to_string());
+        installed_keys.insert("skill:b".to_string());
+        installed_keys.insert("skill:c".to_string());
+
+        let g = installed_graph(&items, &installed_keys, reader(content));
+        let forest = g.render_forest();
+        // c renders first (primary root), then the cycle component with a
+        // promoted (index 0 < index 1).
+        let expected = "\
+- skill:c
+- skill:a
+  - skill:b
+    - skill:a (cycle)
+";
+        assert_eq!(
+            forest, expected,
+            "independent root then promoted cycle root: all items must appear"
+        );
+        // All three installed items appear in the forest.
+        assert!(
+            forest.contains("skill:a") && forest.contains("skill:b") && forest.contains("skill:c"),
+            "no installed item may be hidden from the forest"
+        );
+    }
+
+    #[test]
+    fn forest_independent_items_both_roots() {
+        // spec: DEP-21
+        // Two installed items with no edges between them: both are roots in the
+        // forest (each has in-degree 0) and each appears as a top-level line.
+        let items = vec![
+            item(ItemKind::Skill, "a", "s"),
+            item(ItemKind::Skill, "b", "s"),
+        ];
+        let mut installed_keys = HashSet::new();
+        installed_keys.insert("skill:a".to_string());
+        installed_keys.insert("skill:b".to_string());
+
+        let g = installed_graph(&items, &installed_keys, reader(HashMap::new()));
+        let forest = g.render_forest();
+        assert!(
+            forest.contains("- skill:a\n"),
+            "a must be a root: {forest:?}"
+        );
+        assert!(
+            forest.contains("- skill:b\n"),
+            "b must be a root: {forest:?}"
         );
     }
 }

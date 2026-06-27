@@ -233,6 +233,13 @@ pub enum Command {
         #[arg(long)]
         unmanaged: bool,
 
+        /// Skip the dependents confirmation when removing a single item that other
+        /// installed items depend on (DEP-60). Without this flag, `forget` warns and
+        /// prompts; with it, removal proceeds immediately. Does not affect the
+        /// multi-item glob confirmation (CLI-42).
+        #[arg(short = 'f', long)]
+        force: bool,
+
         /// Run an item's uninstall hook without the safety prompt. This executes
         /// arbitrary code from the source; only use it for a source you trust.
         /// Without this flag, a non-TTY run skips the hook and prints a note.
@@ -303,6 +310,11 @@ pub enum Command {
         /// Only list items from a source matching this selector (listing only).
         #[arg(long)]
         source: Option<String>,
+
+        /// Render installed items as a dependency forest (DEP-61). With no item,
+        /// shows the full forest; with an item ref, scopes to that item's subtree.
+        #[arg(long)]
+        tree: bool,
     },
 
     /// Search melded catalogs for available items, or launch the interactive TUI.

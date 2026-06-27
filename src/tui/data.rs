@@ -49,6 +49,9 @@ pub struct SnapshotInstalled {
     pub kind: ItemKind,
     pub commit: String,
     pub description: Option<String>,
+    /// Direct dependency keys (`kind:name`) for TUI-50 dependency subtree.
+    // spec: TUI-50
+    pub deps: Vec<String>,
 }
 
 /// One available (catalog) item in the snapshot.
@@ -60,6 +63,9 @@ pub struct SnapshotAvailable {
     pub kind: ItemKind,
     pub description: Option<String>,
     pub path: PathBuf,
+    /// Direct dependency keys (`kind:name`) for TUI-50 dependency subtree.
+    // spec: TUI-50
+    pub deps: Vec<String>,
 }
 
 /// One unmanaged lobe item in the snapshot (UNM-6). Its `key` is the
@@ -99,6 +105,20 @@ pub fn try_poll(paths: &Paths) -> Option<Snapshot> {
     load_inner(paths).ok()
 }
 
+/// Read all of a catalog item's text files into one buffer, for dependency
+/// detection (mirrors `commands::read_item_text`, kept local so data.rs stays
+/// independent of commands.rs and avoids a cross-module dep).
+fn read_item_text(item: &catalog::CatalogItem) -> String {
+    let mut buf = String::new();
+    for file in crate::review::item_files(item) {
+        if let Ok(content) = std::fs::read_to_string(&file) {
+            buf.push_str(&content);
+            buf.push('\n');
+        }
+    }
+    buf
+}
+
 /// Load registry, manifest, and catalog without acquiring the lock (the
 /// caller must already hold an appropriate guard).
 fn load_inner(paths: &Paths) -> Result<Snapshot> {
@@ -109,29 +129,45 @@ fn load_inner(paths: &Paths) -> Result<Snapshot> {
     let source_names: Vec<String> = registry.sources.iter().map(|s| s.name.clone()).collect();
 
     // Build installed list.
+    // spec: TUI-50 - compute direct dep keys for each installed item so the
+    // TUI can render the dependency subtree without extra I/O at display time.
     let installed: Vec<SnapshotInstalled> = manifest
         .items
         .values()
-        .map(|it| SnapshotInstalled {
-            key: it.key(),
-            name: it.name.clone(),
-            source: it.source.clone(),
-            kind: it.kind,
-            commit: it.commit.clone(),
-            description: it.description.clone(),
+        .map(|it| {
+            // Find the matching catalog item to get direct deps.
+            let deps = catalog_items
+                .iter()
+                .find(|ci| ci.source == it.source && ci.kind == it.kind && ci.name == it.bare_name)
+                .map(|ci| crate::deps::direct_dependency_keys(ci, &catalog_items, &read_item_text))
+                .unwrap_or_default();
+            SnapshotInstalled {
+                key: it.key(),
+                name: it.name.clone(),
+                source: it.source.clone(),
+                kind: it.kind,
+                commit: it.commit.clone(),
+                description: it.description.clone(),
+                deps,
+            }
         })
         .collect();
 
     // Build available list (all catalog items; de-dup vs installed happens in tree.rs).
+    // spec: TUI-50 - compute direct dep keys for each available item.
     let available: Vec<SnapshotAvailable> = catalog_items
         .iter()
-        .map(|it| SnapshotAvailable {
-            key: it.key(),
-            name: it.effective_name(),
-            source: it.source.clone(),
-            kind: it.kind,
-            description: it.description.clone(),
-            path: it.path.clone(),
+        .map(|it| {
+            let deps = crate::deps::direct_dependency_keys(it, &catalog_items, &read_item_text);
+            SnapshotAvailable {
+                key: it.key(),
+                name: it.effective_name(),
+                source: it.source.clone(),
+                kind: it.kind,
+                description: it.description.clone(),
+                path: it.path.clone(),
+                deps,
+            }
         })
         .collect();
 

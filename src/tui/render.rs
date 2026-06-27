@@ -257,6 +257,9 @@ fn flat_node_to_list_item(node: &FlatNode) -> ListItem<'_> {
         TreeNode::AvailableItem(_) => "\u{25cb} ", // hollow circle
         TreeNode::UnmanagedItem(_) => "\u{25cb} ", // hollow circle (not mind-managed)
         TreeNode::SuggestedSource(_) => "\u{25c7} ", // hollow diamond
+        // spec: TUI-50 - dependency child nodes shown under an expanded item.
+        TreeNode::DepChild(dep) if dep.is_cycle => "\u{21ba} ", // cycle arrow
+        TreeNode::DepChild(_) => "\u{21b3} ",                   // dep arrow
     };
 
     let style = match &node.node {
@@ -269,6 +272,12 @@ fn flat_node_to_list_item(node: &FlatNode) -> ListItem<'_> {
         TreeNode::Source(_) => Style::default().fg(Color::Cyan),
         TreeNode::KindBucket { .. } => Style::default().fg(Color::Blue),
         TreeNode::SuggestedSource(_) => Style::default().fg(Color::Magenta),
+        // spec: TUI-50 - dependency children use a dim style to distinguish
+        // them from canonical item lines in the same view.
+        TreeNode::DepChild(dep) if dep.is_cycle => Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::DIM),
+        TreeNode::DepChild(_) => Style::default().fg(Color::DarkGray),
     };
 
     let label = format!("{indent}{expand_marker}{icon}{}", node.label);
