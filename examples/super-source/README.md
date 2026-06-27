@@ -32,13 +32,13 @@ The two forms are equivalent:
 ```toml
 [discover]
 sources = [
-    { source = "acme/recommended-rules", install = true },
+    { source = "../tooling", install = true },
 ]
 ```
 
 ```toml
 [[discover.sources]]
-source = "acme/recommended-rules"
+source = "../tooling"
 install = true
 ```
 
@@ -49,25 +49,31 @@ skills/onboard/SKILL.md   this repo's own convention item (description in frontm
 mind.toml                 [source] metadata + [discover].sources curating the chain
 ```
 
-`mind.toml` lists three nested sources: a plain entry left available, an `as =`
-entry namespaced to `rev`, and an `install = true` entry offered on meld.
+`mind.toml` lists four nested sources: a plain entry left available, an `as =`
+entry namespaced to `rev`, an `install = true` entry offered on meld, and an
+adopt-an-un-onboarded entry that supplies `follow-branch`, `roots`, and a build
+hook for a source that ships no `mind.toml` of its own (DSC-59/60/61). The nested
+specs are local paths (`../explicit` and friends) to the sibling example repos in
+this tree, so the file is safe to read and copy; a real super-source lists remote
+specs in the same positions.
 
 ## Try it
 
-This directory is part of the `mind` repo, not its own git repo, so copy it out
-and init a repo before melding:
+This directory mainly demonstrates the `[discover].sources` shape; the `review`
+verb validates it with no network:
 
 ```
-cp -r examples/super-source /tmp/super-demo
-cd /tmp/super-demo && git init -q && git add -A && git commit -qm init
+mind review examples/super-source
 ```
 
-`mind meld /tmp/super-demo` would clone every repo named in `[discover].sources`,
-so the placeholders here (`acme/agent-lib` and friends) only work if you swap in
-real repos you control. With those in place:
+The nested specs are local paths (`../explicit`, `../namespacing`, `../tooling`,
+`../starter`) that resolve against the sibling example repos in this `examples/`
+tree, so a `meld` of this directory from a checkout registers those siblings as
+the chain. To curate your own chain, replace each `source` with a remote spec you
+control (`owner/repo`, `git@host:owner/repo`, or a URL) and meld:
 
 ```
-mind meld /tmp/super-demo     # registers this repo and the whole chain
+mind meld <path-or-repo>      # registers this repo and the whole chain
 mind probe                    # browse what the chain offers
 ```
 

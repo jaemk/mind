@@ -2,9 +2,15 @@
 description = "Worked example of a curated super-source: a repo that ships its own items AND registers a chain of other sources (see README.md)."
 prefix = "team"
 
+# The nested sources below are LOCAL paths to the sibling example repos in this
+# tree (../starter, ../namespacing, and so on), not remote `owner/repo` specs.
+# That keeps this example self-contained and safe to read or copy: melding it
+# never reaches a network remote. A real super-source lists remote specs
+# (`owner/repo`, `git@host:owner/repo`, a URL) in exactly the same positions.
+#
 # A bare [discover].sources list (no [[items]] and no [discover] kind globs) is
-# NOT authoritative, so convention scanning stays on and this repo's own
-# skills/ items still ship alongside the curated chain.
+# NOT authoritative, so convention scanning stays on and this repo's own skills/
+# items still ship alongside the curated chain.
 #
 # The table-array form ([[discover.sources]]) is required here because one entry
 # carries nested [[discover.sources.hooks]]; the inline-array form cannot express
@@ -12,28 +18,29 @@ prefix = "team"
 
 # Plain entry: melded and left available, its items not auto-offered.
 [[discover.sources]]
-source = "acme/agent-lib"
+source = "../explicit"
 
 # Imposes a namespace prefix on the nested source (like meld --as).
 [[discover.sources]]
-source = "github:acme/review-pack"
+source = "../namespacing"
 as = "rev"
 
 # Recommended: offered for install when this super-source is melded.
 [[discover.sources]]
-source = "acme/recommended-rules"
+source = "../tooling"
 install = true
 
-# Adopt an un-onboarded source: it ships no mind.toml of its own, so the
+# Adopt an un-onboarded source: ../starter ships no mind.toml of its own, so the
 # follow-branch, roots, and hooks below are applied as if it had declared them
 # itself (DSC-59/60/61). If it ever gains a mind.toml, that file takes over and
-# these fields are ignored (a warning is emitted).
+# these fields are ignored (a warning is emitted). The values below are
+# illustrative of the shape, not tied to ../starter's actual layout.
 [[discover.sources]]
-source = "acme/legacy-tools"
+source = "../starter"
 follow-branch = "main"             # track this branch on sync (DSC-41)
 roots = ["packages/agents"]        # scan under this subdir, not the repo root (DSC-50)
 
 [[discover.sources.hooks]]         # build hook, same shape as [[hooks]] (HOOK-50)
 run = "make build"
-name = "build legacy tooling"
+name = "build adopted tooling"
 event = "install"
