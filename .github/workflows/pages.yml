@@ -20,7 +20,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  MDBOOK_VERSION: '0.4.40'
+  MDBOOK_VERSION: '0.5.3'
 
 jobs:
   build:
@@ -35,10 +35,17 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Build
         run: mdbook build docs
+      - name: Assemble site
+        # Landing page at the root, mdBook docs under /guide/.
+        run: |
+          mkdir -p _site
+          cp -r docs/landing/. _site/
+          mkdir -p _site/guide
+          cp -r docs/book/. _site/guide/
       - uses: actions/configure-pages@v6
       - uses: actions/upload-pages-artifact@v5
         with:
-          path: docs/book
+          path: _site
 
   deploy:
     needs: build

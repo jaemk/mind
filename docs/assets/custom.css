@@ -1,0 +1,128 @@
+/* mind docs — bio-luminescent retint of the mdBook navy theme.
+   Loaded via `additional-css`; overrides theme variables and a few elements so
+   the book matches the landing page. */
+
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap");
+
+:root {
+  --aqua: #2dd4bf;
+  --lime: #a3e635;
+  --sidebar-width: 290px;
+  --content-max-width: 760px;
+}
+
+/* Retint the navy theme (default + preferred dark) to teal-black. */
+.navy {
+  --bg: #05131a;
+  --fg: #d6f5ee;
+
+  --sidebar-bg: #041015;
+  --sidebar-fg: #9fc6c0;
+  --sidebar-non-existant: #3a5a59;
+  --sidebar-active: #6ff0d8;
+  --sidebar-spacer: #0c2a2e;
+
+  --scrollbar: #1d514c;
+
+  --icons: #6f9c96;
+  --icons-hover: #b6fdec;
+
+  --links: #5fe3c9;
+
+  --inline-code-color: #a3e635;
+
+  --theme-popup-bg: #07191f;
+  --theme-popup-border: #163b3c;
+  --theme-hover: #0f2e30;
+
+  --quote-bg: #0a2024;
+  --quote-border: #14524c;
+
+  --table-border-color: #143b3c;
+  --table-header-bg: #0e2f30;
+  --table-alternate-bg: #081d22;
+
+  --searchbar-border-color: #1a4a47;
+  --searchbar-bg: #07191f;
+  --searchbar-fg: #d6f5ee;
+  --searchbar-shadow-color: #02323a;
+  --searchresults-header-fg: #6cae9f;
+  --searchresults-border-color: #143b3c;
+  --searchresults-li-bg: #0a2226;
+  --search-mark-bg: #2f7d57;
+}
+
+/* Page background: subtle aqua/lime glow behind the dark ground. */
+html.navy,
+.navy body {
+  background:
+    radial-gradient(1100px 620px at 78% -8%, #0a2a2c 0%, transparent 58%),
+    radial-gradient(820px 540px at 6% 4%, #0a232b 0%, transparent 52%),
+    var(--bg);
+}
+
+/* Typography */
+.navy .content {
+  font-family: "Inter", system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+}
+.navy .content h1,
+.navy .content h2,
+.navy .content h3 {
+  font-weight: 700;
+  letter-spacing: -0.4px;
+}
+.navy .content h1 {
+  background: linear-gradient(120deg, #eafff9 20%, var(--aqua) 70%, var(--lime) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.navy .content h2 {
+  border-bottom: 1px solid var(--quote-border);
+  padding-bottom: 0.3em;
+}
+
+/* Links: glow on hover. */
+.navy .content a { text-decoration: none; border-bottom: 1px solid transparent; transition: border-color 0.15s, color 0.15s; }
+.navy .content a:hover { color: #8af0db; border-bottom-color: rgba(95, 227, 201, 0.55); }
+
+/* Code: monospace + soft panel. */
+.navy code { font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace; }
+.navy .content pre {
+  border: 1px solid var(--quote-border);
+  border-radius: 12px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+}
+.navy .content pre > .buttons button { color: var(--icons); }
+
+/* Sidebar: active chapter gets an aqua spine. */
+.navy .chapter li.chapter-item a { border-radius: 7px; transition: background 0.15s, color 0.15s; padding-left: 8px; }
+.navy .chapter li.chapter-item a:hover { background: var(--theme-hover); color: #d6f5ee; }
+.navy .chapter li.chapter-item a.active {
+  background: linear-gradient(90deg, rgba(45, 212, 191, 0.16), transparent);
+  border-left: 3px solid var(--aqua);
+  color: #aef7e6;
+}
+.navy .sidebar .sidebar-title { color: #6cae9f; }
+
+/* Top bar: a hairline glow under the menu. */
+.navy .menu-bar { border-bottom: 1px solid var(--quote-border); backdrop-filter: blur(6px); }
+
+/* Blockquotes as glowing callouts. */
+.navy blockquote {
+  border-left: 3px solid var(--aqua);
+  border-radius: 0 10px 10px 0;
+}
+
+/* "Back to mind" link injected into the sidebar by the landing page wiring. */
+.mind-home {
+  display: block;
+  margin: 0 14px 14px;
+  padding: 9px 12px;
+  border: 1px solid var(--quote-border);
+  border-radius: 9px;
+  font-weight: 600;
+  color: #aef7e6 !important;
+  background: linear-gradient(120deg, rgba(45, 212, 191, 0.14), rgba(163, 230, 53, 0.1));
+}
+.mind-home:hover { border-color: rgba(163, 230, 53, 0.5); }

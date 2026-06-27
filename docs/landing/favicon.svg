@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <radialGradient id="g" cx="40%" cy="34%" r="72%">
+      <stop offset="0%" stop-color="#d9fbef"/>
+      <stop offset="45%" stop-color="#2dd4bf"/>
+      <stop offset="100%" stop-color="#0e7d74"/>
+    </radialGradient>
+    <linearGradient id="t" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#2dd4bf"/>
+      <stop offset="100%" stop-color="#a3e635"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="#05131a"/>
+  <g fill="none" stroke="url(#t)" stroke-width="3.4" stroke-linecap="round">
+    <path d="M26,38 C 20,46 18,52 21,56"/>
+    <path d="M38,38 C 44,46 46,52 43,56"/>
+    <path d="M32,42 C 33,50 32,54 32,58"/>
+  </g>
+  <path fill="url(#g)" stroke="#bdfff0" stroke-opacity="0.4" stroke-width="1.4"
+        d="M32,12
+           C 40,11 47,15 49,23
+           C 56,25 56,35 50,39
+           C 54,45 47,51 40,48
+           C 37,53 27,53 24,48
+           C 17,50 11,44 15,38
+           C 9,34 10,24 17,23
+           C 20,15 24,12 32,12 Z"/>
+  <path fill="none" stroke="#eafff7" stroke-opacity="0.6" stroke-width="1.6"
+        stroke-linecap="round" d="M32,14 C 29,22 35,28 31,34 C 28,40 34,44 32,48"/>
+</svg>

@@ -1,0 +1,48 @@
+// Progressive enhancement for the landing page. Nothing here is required for
+// the page to render or for the links to work.
+
+// Copy-to-clipboard on the install command.
+document.querySelectorAll(".copy").forEach((btn) => {
+  btn.addEventListener("click", async () => {
+    const text = btn.getAttribute("data-copy") || "";
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      // Clipboard API blocked (e.g. file://). Fall back to a hidden textarea.
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand("copy"); } catch { /* give up quietly */ }
+      ta.remove();
+    }
+    const original = btn.textContent;
+    btn.textContent = "Copied";
+    btn.classList.add("copied");
+    setTimeout(() => {
+      btn.textContent = original;
+      btn.classList.remove("copied");
+    }, 1400);
+  });
+});
+
+// Subtle pointer parallax on the brain. Skipped when the user prefers reduced
+// motion or on coarse (touch) pointers.
+const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+const coarse = window.matchMedia("(pointer: coarse)").matches;
+const brain = document.querySelector(".brain");
+const stage = document.getElementById("stage");
+if (brain && stage && !reduce && !coarse) {
+  let raf = 0;
+  window.addEventListener("pointermove", (e) => {
+    const dx = (e.clientX / window.innerWidth - 0.5) * 2;
+    const dy = (e.clientY / window.innerHeight - 0.5) * 2;
+    if (raf) return;
+    raf = requestAnimationFrame(() => {
+      brain.style.transform = `translate(${dx * 14}px, ${dy * 12}px) rotate(${dx * 1.2}deg)`;
+      raf = 0;
+    });
+  });
+}

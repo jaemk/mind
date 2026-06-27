@@ -10,6 +10,10 @@ default-theme = "navy"
 preferred-dark-theme = "navy"
 git-repository-url = "https://github.com/jaemk/mind"
 edit-url-template = "https://github.com/jaemk/mind/edit/main/docs/{path}"
+# Docs are served under /guide/ on the Pages site; the landing page owns the root.
+site-url = "/mind/guide/"
+additional-css = ["assets/custom.css"]
+additional-js = ["assets/custom.js"]
 
 [output.html.fold]
 enable = true

@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>mind — a manager for agent tooling</title>
+  <meta name="description" content="mind melds arbitrary git repos and links the skills, agents, rules, and tools they offer into one or more agent homes." />
+  <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="bg" aria-hidden="true">
+    <span class="orb orb-a"></span>
+    <span class="orb orb-b"></span>
+    <span class="orb orb-c"></span>
+    <span class="grain"></span>
+  </div>
+
+  <header class="nav">
+    <a class="brand" href="#top">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span class="brand-name">mind</span>
+    </a>
+    <nav class="nav-links">
+      <a href="guide/">Docs</a>
+      <a href="guide/quickstart.html">Quickstart</a>
+      <a href="https://github.com/jaemk/mind">GitHub</a>
+    </nav>
+  </header>
+
+  <main id="top" class="hero">
+    <div class="hero-stage" id="stage">
+      <!-- The brain. An organic, glowing blob with drifting tentacles that
+           hoist little GitHub mascots out of their repos. -->
+      <svg class="brain" viewBox="0 0 600 640" role="img"
+           aria-label="A glowing brain with tentacles lifting GitHub mascots">
+        <defs>
+          <radialGradient id="brainFill" cx="42%" cy="34%" r="72%">
+            <stop offset="0%" stop-color="#d9fbef" stop-opacity="0.95" />
+            <stop offset="34%" stop-color="#2dd4bf" stop-opacity="0.92" />
+            <stop offset="72%" stop-color="#0e7d74" stop-opacity="0.9" />
+            <stop offset="100%" stop-color="#06343a" stop-opacity="0.95" />
+          </radialGradient>
+          <linearGradient id="tentacle" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="#2dd4bf" />
+            <stop offset="60%" stop-color="#52e0a8" />
+            <stop offset="100%" stop-color="#a3e635" />
+          </linearGradient>
+          <radialGradient id="sheen" cx="38%" cy="28%" r="40%">
+            <stop offset="0%" stop-color="#ffffff" stop-opacity="0.85" />
+            <stop offset="100%" stop-color="#ffffff" stop-opacity="0" />
+          </radialGradient>
+          <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+            <feGaussianBlur stdDeviation="7" result="b" />
+            <feMerge>
+              <feMergeNode in="b" />
+              <feMergeNode in="SourceGraphic" />
+            </feMerge>
+          </filter>
+          <filter id="softGlow" x="-60%" y="-60%" width="220%" height="220%">
+            <feGaussianBlur stdDeviation="12" />
+          </filter>
+        </defs>
+
+        <!-- Tentacles drawn first so the brain body overlaps their roots. -->
+        <g class="tentacles" fill="none" stroke="url(#tentacle)"
+           stroke-linecap="round" filter="url(#glow)">
+          <path class="t t1" stroke-width="15"
+                d="M250,330 C 180,380 150,430 165,470" />
+          <path class="t t2" stroke-width="15"
+                d="M355,332 C 430,378 470,430 452,476" />
+          <path class="t t3" stroke-width="17"
+                d="M300,352 C 305,430 296,500 300,556" />
+          <path class="t t4" stroke-width="11" opacity="0.85"
+                d="M232,332 C 150,360 120,410 96,452" />
+          <path class="t t5" stroke-width="11" opacity="0.85"
+                d="M372,330 C 460,356 500,402 520,448" />
+          <path class="t t6" stroke-width="9" opacity="0.7"
+                d="M330,356 C 360,420 372,470 360,512" />
+        </g>
+
+        <!-- The mascots being grabbed. Positioning lives on the outer <g>; the
+             inner <path> carries the struggle animation so CSS transforms don't
+             clobber the placement. -->
+        <g class="mascots">
+          <g transform="translate(148,454) scale(2.2)">
+            <circle class="grab" cx="8" cy="8" r="11" />
+            <path class="cat cat1" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
+          </g>
+          <g transform="translate(434,460) scale(2.2)">
+            <circle class="grab" cx="8" cy="8" r="11" />
+            <path class="cat cat2" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
+          </g>
+          <g transform="translate(281,538) scale(2.5)">
+            <circle class="grab" cx="8" cy="8" r="11" />
+            <path class="cat cat3" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
+          </g>
+        </g>
+
+        <!-- The brain body. -->
+        <g class="brain-body" filter="url(#glow)">
+          <ellipse class="halo" cx="300" cy="200" rx="180" ry="150"
+                   fill="#19c7b0" opacity="0.18" filter="url(#softGlow)" />
+          <path class="blob" fill="url(#brainFill)" stroke="#bdfff0"
+                stroke-opacity="0.35" stroke-width="2"
+                d="M300,70
+                   C 366,60 420,92 436,150
+                   C 482,166 488,232 446,262
+                   C 476,300 432,344 378,330
+                   C 356,366 290,368 268,332
+                   C 214,348 174,302 200,260
+                   C 160,232 168,166 214,152
+                   C 232,96 240,70 300,70 Z" />
+          <!-- central fissure -->
+          <path class="fold" fill="none" stroke="#eafff7" stroke-opacity="0.5"
+                stroke-width="3" stroke-linecap="round"
+                d="M300,82 C 286,130 314,170 298,210 C 284,248 312,286 300,326" />
+          <!-- gyri squiggles -->
+          <g class="folds" fill="none" stroke="#dffff5" stroke-opacity="0.32"
+             stroke-width="2.4" stroke-linecap="round">
+            <path d="M250,120 C 232,150 264,168 244,196 C 228,220 258,244 240,272" />
+            <path d="M352,120 C 372,150 340,170 360,198 C 376,224 346,246 366,274" />
+            <path d="M214,206 C 244,200 250,224 232,236" />
+            <path d="M388,206 C 358,200 352,226 372,238" />
+            <path d="M272,150 C 286,170 270,186 282,206" />
+            <path d="M330,150 C 316,170 332,186 320,206" />
+          </g>
+          <ellipse class="glint" cx="252" cy="146" rx="56" ry="40"
+                   fill="url(#sheen)" />
+        </g>
+      </svg>
+    </div>
+
+    <div class="hero-copy">
+      <h1 class="title">mind</h1>
+      <p class="tagline">
+        A manager for agent tooling. <strong>Meld</strong> arbitrary git repos and
+        <strong>link</strong> the skills, agents, rules, and tools they offer into
+        one or more agent homes.
+      </p>
+
+      <div class="cmd" id="install">
+        <code><span class="prompt">$</span> mind meld jaemk/agents &amp;&amp; mind learn review</code>
+        <button class="copy" type="button" aria-label="Copy install command" data-copy="mind meld jaemk/agents &amp;&amp; mind learn review">Copy</button>
+      </div>
+
+      <div class="cta">
+        <a class="btn btn-primary" href="guide/">Read the docs</a>
+        <a class="btn btn-ghost" href="guide/quickstart.html">Quickstart</a>
+        <a class="btn btn-ghost" href="https://github.com/jaemk/mind">
+          <svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+          GitHub
+        </a>
+      </div>
+    </div>
+  </main>
+
+  <section class="features">
+    <article class="card">
+      <h3>Meld any repo</h3>
+      <p>Zero-config discovery finds skills, agents, rules, and tools by
+         convention in any git repo. A <code>mind.toml</code> is optional enrichment,
+         never a gate.</p>
+    </article>
+    <article class="card">
+      <h3>Link into lobes</h3>
+      <p><code>learn</code> copies an item into the store and symlinks it into every
+         agent home. Transactional installs keep the old version until the new one
+         is proven.</p>
+    </article>
+    <article class="card">
+      <h3>Sync &amp; upgrade</h3>
+      <p><code>sync</code> and <code>upgrade</code> track each source and installed
+         item by stable identity, so a rename is seen as a rename, not an orphan.</p>
+    </article>
+  </section>
+
+  <footer class="foot">
+    <span>mind &middot; melded from git, linked into your agents</span>
+    <a href="https://github.com/jaemk/mind/tree/main/spec">Spec</a>
+  </footer>
+
+  <script src="app.js" defer></script>
+</body>
+</html>
