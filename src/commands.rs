@@ -780,38 +780,28 @@ fn meld_recursive(
 
 /// Strip ANSI CSI escape sequences and control characters from `s`.
 /// CSI sequences (`ESC [` params final-byte) are removed in full; C0
-/// controls (< U+0020), DEL (U+007F), and C1 controls (U+0080–U+009F)
-/// are dropped individually. Printable non-ASCII (U+00A0 and above) is
-/// preserved so non-English curator messages are not corrupted.
+/// Strip ANSI/VT escape sequences and terminal-dangerous Unicode from `s`.
+/// `strip-ansi-escapes` handles the full escape grammar (CSI, OSC, DCS, etc.).
+/// A second pass drops C0/DEL/C1 controls and Unicode bidi-override/separator
+/// code points that are not escape sequences but can still corrupt terminal output.
+/// Printable non-ASCII (U+00A0 and above, minus the blocked ranges) is preserved
+/// so non-English curator messages are not corrupted.
 fn strip_ansi(s: &str) -> String {
-    let mut result = String::new();
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            if chars.peek() == Some(&'[') {
-                chars.next(); // consume '['
-                // Consume parameter/intermediate bytes, then the final byte.
-                for p in chars.by_ref() {
-                    if ('\x40'..='\x7e').contains(&p) {
-                        break; // final byte consumed
-                    }
-                }
-            }
-            // Other escape forms or lone ESC: just drop ESC; next char proceeds normally.
-        } else if (('\x20'..='\x7e').contains(&c) || c > '\u{009f}')
-            && !matches!(
-                c,
-                // Bidi-override code points: phishing/spoofing vectors.
-                '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
-                // Line separator and paragraph separator.
-                | '\u{2028}' | '\u{2029}'
-            )
-        {
-            result.push(c);
-        }
-        // else: C0/DEL/C1 controls and blocked Unicode ranges are dropped
-    }
-    result
+    let bytes = strip_ansi_escapes::strip(s);
+    // Input is valid UTF-8, so output is too; lossy conversion is a no-op in practice.
+    String::from_utf8_lossy(&bytes)
+        .chars()
+        .filter(|&c| {
+            (('\x20'..='\x7e').contains(&c) || c > '\u{009f}')
+                && !matches!(
+                    c,
+                    // Bidi-override code points: phishing/spoofing vectors.
+                    '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+                    // Line separator and paragraph separator.
+                    | '\u{2028}' | '\u{2029}'
+                )
+        })
+        .collect()
 }
 
 /// Build the human-readable lines for an auth failure of a nested source, per
