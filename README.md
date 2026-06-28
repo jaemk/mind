@@ -40,6 +40,11 @@ mind learn <item>           # install one into each agent home
 mind recall                 # list what's installed
 ```
 
+Agent homes can be Claude Code, Gemini CLI, Codex CLI, or Antigravity -- not just
+`~/.claude`. See
+[configuration](https://jaemk.github.io/mind/configuration.html#cross-harness-lobes)
+for details.
+
 The [documentation](https://jaemk.github.io/mind/) is the full reference: the
 [command reference](https://jaemk.github.io/mind/commands.html),
 [configuration](https://jaemk.github.io/mind/configuration.html),

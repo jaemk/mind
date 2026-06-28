@@ -2,7 +2,7 @@
 
 Linking installed items into agent homes other than Claude's (`~/.claude`), so a
 melded skill or agent is discovered by Codex CLI, Gemini CLI, and Antigravity as
-well. Status: planned.
+well.
 
 ## Motivation
 
@@ -69,11 +69,9 @@ per-rule files. Rules stay Claude-only here; an `AGENTS.md`-writer is out of sco
   `tools:` schema) is the author's responsibility; mind does not rewrite
   frontmatter to fit a target harness. This is an explicit non-goal.
 
-## Documentation to update
+## Documentation map
 
-When this ships, surface it in every place that currently explains lobes /
-agent homes. Each entry is a `done` gate: the feature is not complete until these
-are updated.
+Places that explain lobes / agent homes and reference this feature.
 
 - `spec/storage.md` (STO-2, STO-14): note the `kinds` filter on a lobe and that
   the skill/agent layouts double as the cross-tool conventions. `spec/cli.md`: the

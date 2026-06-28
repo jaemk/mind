@@ -57,6 +57,35 @@ rm -rf /tmp/multi-lobe /tmp/lobe-a /tmp/lobe-b
 unset CLAUDE_HOME
 ```
 
+## Cross-harness lobes
+
+A lobe entry in `~/.mind/config.toml` may carry a `kinds` filter. Use this
+to add a non-Claude harness home that receives only the item kinds it understands
+(skills and agents; not rules, which are Claude-only). The easiest path is the
+`--preset` flag, which sets the canonical path and `kinds` for a known harness:
+
+```
+mind config lobes add --preset gemini
+mind config lobes list
+# ~/.claude   (kinds: all)
+# ~/.gemini   (kinds: skill, agent)
+```
+
+After adding the preset, `learn` links a skill into both `~/.claude/skills/` and
+`~/.gemini/skills/`; rules are only linked into `~/.claude`. To detect which
+harnesses are installed and choose presets interactively:
+
+```
+mind config lobes detect
+```
+
+Available preset names: `gemini`, `codex`, `antigravity`, `antigravity-cli`,
+`universal`. See `../../spec/harness-lobes.md` for the per-preset path and
+`kinds` table (HARN-4/HARN-5).
+
+Note: lobe config lives in `~/.mind/config.toml`, not in a source's `mind.toml`.
+This example has no `mind.toml` because none is needed to demonstrate lobe fan-out.
+
 ## See also
 
 `../../spec/storage.md` - STO-14 (the agent homes, "lobes", an item is linked
@@ -65,6 +94,9 @@ STO-15 (the default lobe written on first use).
 
 `../../spec/lifecycle.md` - LIFE-40 (the store copy is linked into every
 configured agent home; uninstall removes the recorded link in every home).
+
+`../../spec/harness-lobes.md` - cross-harness lobe spec (HARN-1..6): the `kinds`
+filter, preset table, and auto-detect behavior.
 
 ## Verified
 

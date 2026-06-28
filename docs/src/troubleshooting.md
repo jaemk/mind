@@ -44,3 +44,13 @@
 - `meld` or `sync` fails with "git executable not found". mind shells out to
   `git` for all clone and fetch operations; put `git` on your PATH first. See
   the Install page.
+- A skill links to a Gemini or Codex lobe but a rule does not. Rules have no
+  cross-harness directory equivalent and are Claude-only (HARN-3). Only skills
+  and agents are linked into non-Claude lobes. If the lobe was added via a
+  preset, this is expected; rules remain in `~/.claude` only.
+- An agent's tool permissions don't work in Gemini or Codex after linking. mind
+  links files verbatim and does not rewrite frontmatter. A skill or agent whose
+  frontmatter uses Claude-specific keys (e.g. the `tools:` allow-list schema)
+  will link correctly but those keys may be ignored or produce a warning in the
+  target harness. Adapt the frontmatter for the target harness by hand (HARN-6).
+  See [Configuration](configuration.md#frontmatter-portability).

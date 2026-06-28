@@ -9,6 +9,10 @@ mind learn <item>           # install one into each agent home
 mind recall                 # list what's installed
 ```
 
+Agent homes can be Claude Code, Gemini CLI, Codex CLI, or Antigravity -- not just
+`~/.claude`. See [Configuration](configuration.md#cross-harness-lobes) for the
+per-harness path table and preset commands.
+
 For a self-contained first run with no remote, use the bundled starter source (a
 plain convention layout, see
 [examples/starter/](https://github.com/jaemk/mind/tree/main/examples/starter)):

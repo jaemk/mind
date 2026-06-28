@@ -26,12 +26,23 @@ The on-disk layout and the two persisted JSON files.
   (rule), where `<name>` is the effective name. A tool has no default link
   target: it is store-only (tooling.md TOOL-3). A `mind.toml` item may override
   the link target (applied in every home), which is how a tool opts into a link.
+  Note: the `skills/<name>` and `agents/<name>.md` layouts are also the
+  cross-tool conventions for Gemini CLI, Codex CLI, and Antigravity, so mind
+  links into those homes with no content transform (HARN-3; see
+  harness-lobes.md). A lobe may carry a `kinds` filter limiting which item kinds
+  are linked into it (HARN-1); rules are not linked into non-Claude preset lobes
+  (HARN-3).
 - `STO-3` Store and link paths use the effective name, so namespaced items do not
   collide with same-named items from other sources.
 - `STO-14` The agent homes ("lobes") items are linked into are, in order:
   `$MIND_AGENT_HOMES` (a `:`-separated path list), else `lobes` in
   `~/.mind/config.toml`, else `[claude root]`. A leading `~` is expanded. An
   unknown key in `config.toml` is an error (`Toml`).
+  Note: each lobe entry may carry a `kinds` filter (HARN-1). Non-Claude lobe
+  presets (gemini, codex, antigravity, antigravity-cli, universal) are added via
+  `config lobes add --preset <name>` (HARN-4) or the auto-detect-and-prompt path
+  `config lobes detect` (HARN-5). See harness-lobes.md for the preset path table
+  and per-harness `kinds` defaults.
 - `STO-15` When `~/.mind/config.toml` does not exist, it is created with the
   default lobe (the `$CLAUDE_HOME` override if set, else `~/.claude`) on first
   use (any command that sets up the layout, or any `config` command).

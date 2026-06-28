@@ -486,6 +486,13 @@ release artifacts as the install script and the Homebrew formula.
 - `CLI-113` `config lobes remove <path>` drops a configured agent home; a path
   that is not configured is an error (`UnknownLobe`).
 
+`config lobes add` also accepts `--preset <name>` to add a non-Claude harness
+home with its canonical path and `kinds` filter in one step, and `config lobes
+detect` scans the machine for known harness directories and offers to add the
+matching presets (opt-in; nothing is added without confirmation). Both are
+covered by HARN-4 and HARN-5; see harness-lobes.md for the preset names, paths,
+and per-harness `kinds` defaults.
+
 ## completions / man
 
 - `CLI-120` `completions <shell>` writes a shell completion script for the named

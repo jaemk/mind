@@ -21,6 +21,86 @@ Use `mind config lobes add <path>` and `mind config lobes remove <path>` to
 manage lobes without hand-editing the file; see [Commands](commands.md) for the
 full verb list.
 
+### Kinds filter
+
+A lobe may carry a `kinds` list so only items of the listed kinds link into it.
+A lobe without a `kinds` field receives all kinds (existing behavior; a bare string
+is equivalent):
+
+```toml
+lobes = ["~/.claude", { path = "~/.gemini", kinds = ["skill", "agent"] }]
+```
+
+Linking an item into a lobe whose `kinds` excludes its kind is a no-op for that
+lobe, not an error. The manifest records only the lobes that actually received a
+link, so `forget`, `upgrade`, and `introspect` never expect a link a filtered lobe
+was never given (HARN-1, HARN-2).
+
+### Cross-harness lobes
+
+Skills (`skills/<n>/SKILL.md`) and agents (`agents/<n>.md`) use layouts that are
+now cross-harness conventions. mind links them verbatim -- no content transform is
+needed. Rules (`rules/<name>.md`) have no cross-harness directory equivalent (the
+analog in other harnesses is a single concatenated context file like `AGENTS.md`
+or `GEMINI.md`, not a directory of per-rule files), so rules are Claude-only and
+are never linked into a lobe added via a non-Claude preset (HARN-3).
+
+Per-harness path table:
+
+| Harness | Skills dir | Agents dir | mind lobe (parent) |
+|---------|------------|------------|--------------------|
+| Claude Code | `~/.claude/skills/<n>/SKILL.md` | `~/.claude/agents/<n>.md` | `~/.claude` |
+| Gemini CLI | `~/.gemini/skills/` (or `~/.agents/skills/` alias) | `~/.gemini/agents/*.md` | `~/.gemini` |
+| Codex CLI | `~/.agents/skills/` | (subagents) | `~/.agents` |
+| Antigravity (IDE) | `~/.gemini/config/skills/` | - | `~/.gemini/config` |
+
+`~/.agents` is a vendor-neutral alias: Codex reads it as its user skills path and
+Gemini reads it as a higher-precedence alias, so one `~/.agents` lobe can serve
+multiple harnesses.
+
+Antigravity footgun: the Antigravity CLI (distinct from the IDE) uses
+`~/.gemini/antigravity-cli/skills/` for global scope and `<root>/.agent/skills/`
+(singular `.agent`) for project scope -- not the IDE's `~/.gemini/config/skills/`.
+Use the `antigravity-cli` preset for the CLI.
+
+### Presets
+
+`mind config lobes add --preset <name>` adds a lobe with the preset's path and
+`kinds` in one step. Presets:
+
+| preset | path | kinds |
+|--------|------|-------|
+| `gemini` | `~/.gemini` | skill, agent |
+| `codex` | `~/.agents` | skill |
+| `antigravity` | `~/.gemini/config` | skill |
+| `antigravity-cli` | `~/.gemini/antigravity-cli` | skill |
+| `universal` | `~/.agents` | skill |
+
+Example:
+
+```
+mind config lobes add --preset gemini
+# + added gemini lobe ~/.gemini [skill, agent]
+```
+
+`mind config lobes detect` detects which known harness homes exist on the machine
+and reports the matching presets it could add. It never mutates config on its own:
+it only adds a lobe with `--yes` or an interactive TTY confirm. `--json` emits the
+detection result as structured JSON (HARN-5).
+
+`mind config lobes list` shows the `kinds` filter for each lobe (e.g.
+`~/.gemini [skill, agent]`); a lobe with no filter shows just the path. `mind
+config show` uses the same format.
+
+### Frontmatter portability
+
+mind links skill and agent files verbatim. Frontmatter portability across
+harnesses -- for example, Gemini's `mcp_*` tool-permission wildcards vs Claude's
+`tools:` schema -- is the author's responsibility; mind does not rewrite
+frontmatter to fit a target harness (HARN-6). An item whose frontmatter uses
+Claude-specific keys will link into a Gemini or Codex lobe correctly, but those
+keys may be ignored or produce a warning in the target harness.
+
 ## Absorb destination
 
 `mind absorb` moves an unmanaged item into a version-controlled source you own.
@@ -62,7 +142,7 @@ credential helper) as git normally does.
 A single `~/.mind/config.toml` may contain any combination of the keys:
 
 ```toml
-lobes = ["~/.claude", "~/.config/some-other-agent"]
+lobes = ["~/.claude", { path = "~/.gemini", kinds = ["skill", "agent"] }]
 ssh = true
 absorb_to = "~/dev/my-agent-library"
 ```
