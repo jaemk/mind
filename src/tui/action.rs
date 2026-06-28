@@ -713,7 +713,7 @@ mod tests {
         // Verify the lobe was persisted to config.
         let cfg = crate::config::Config::load(&paths).unwrap();
         assert!(
-            cfg.lobes.contains(&lobe_path),
+            cfg.lobes.iter().any(|e| e.path() == lobe_path),
             "lobe must appear in config after LobeAdd: {:?}",
             cfg.lobes
         );
@@ -754,7 +754,7 @@ mod tests {
 
         let cfg = crate::config::Config::load(&paths).unwrap();
         assert!(
-            !cfg.lobes.contains(&lobe_path),
+            !cfg.lobes.iter().any(|e| e.path() == lobe_path),
             "lobe must be absent from config after LobeRemove: {:?}",
             cfg.lobes
         );
@@ -807,7 +807,7 @@ mod tests {
         }
 
         let cfg = crate::config::Config::load(&paths).unwrap();
-        let count = cfg.lobes.iter().filter(|l| *l == &lobe_path).count();
+        let count = cfg.lobes.iter().filter(|e| e.path() == lobe_path).count();
         assert_eq!(
             count, 1,
             "duplicate lobe add must not produce duplicate entries"
@@ -911,7 +911,9 @@ mod tests {
         // Pin the lobe to the isolated claude_home so the install never touches the
         // real ~/.claude (agent_homes() otherwise defaults to ~/.claude).
         crate::config::Config {
-            lobes: vec![paths.claude_home.to_str().unwrap().to_string()],
+            lobes: vec![crate::config::LobeEntry::bare(
+                paths.claude_home.to_str().unwrap(),
+            )],
             ..Default::default()
         }
         .save(&paths)
@@ -1034,7 +1036,9 @@ mod tests {
         // Pin the lobe to the isolated claude_home so the install never touches the
         // real ~/.claude (agent_homes() otherwise defaults to ~/.claude).
         crate::config::Config {
-            lobes: vec![paths.claude_home.to_str().unwrap().to_string()],
+            lobes: vec![crate::config::LobeEntry::bare(
+                paths.claude_home.to_str().unwrap(),
+            )],
             ..Default::default()
         }
         .save(&paths)
@@ -1110,7 +1114,9 @@ mod tests {
         let (paths, base) = temp_paths();
         crate::paths::mkdir_p(&paths.mind_home).unwrap();
         crate::config::Config {
-            lobes: vec![paths.claude_home.to_str().unwrap().to_string()],
+            lobes: vec![crate::config::LobeEntry::bare(
+                paths.claude_home.to_str().unwrap(),
+            )],
             ..Default::default()
         }
         .save(&paths)
@@ -1230,7 +1236,9 @@ mod tests {
         // the real ~/.claude (agent_homes() falls back to config, which defaults
         // to ~/.claude when CLAUDE_HOME is unset).
         crate::config::Config {
-            lobes: vec![paths.claude_home.to_str().unwrap().to_string()],
+            lobes: vec![crate::config::LobeEntry::bare(
+                paths.claude_home.to_str().unwrap(),
+            )],
             ..Default::default()
         }
         .save(&paths)

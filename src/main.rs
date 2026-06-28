@@ -87,7 +87,7 @@ fn lock_mode(command: &Command, json: bool) -> LockMode {
         | Command::Config {
             action:
                 ConfigCmd::Lobes {
-                    action: LobesCmd::Add { .. } | LobesCmd::Remove { .. },
+                    action: LobesCmd::Add { .. } | LobesCmd::Remove { .. } | LobesCmd::Detect { .. },
                 },
         } => LockMode::Exclusive,
 
@@ -358,8 +358,15 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
         Command::Config { action } => match action {
             ConfigCmd::Show => commands::config_show(paths),
             ConfigCmd::Lobes { action } => match action {
-                LobesCmd::Add { path } => commands::lobe_add(paths, &path),
+                LobesCmd::Add { path, preset } => match (path, preset) {
+                    (None, Some(name)) => commands::lobe_add_preset(paths, &name),
+                    (Some(p), None) => commands::lobe_add(paths, &p),
+                    // clap's `conflicts_with` rejects supplying both.
+                    (Some(_), Some(_)) => unreachable!("path and --preset conflict"),
+                    (None, None) => Err(crate::error::MindError::LobeTargetRequired),
+                },
                 LobesCmd::List => commands::lobe_list(paths),
+                LobesCmd::Detect { yes } => commands::lobe_detect(paths, yes),
                 LobesCmd::Remove { path } => commands::lobe_remove(paths, &path),
             },
         },

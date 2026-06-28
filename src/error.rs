@@ -68,8 +68,18 @@ impl ItemKind {
     }
 
     /// The kinds linked into an agent home: every kind except `Tool`, which is
-    /// store-only and reached by reference (tooling.md TOOL-3).
+    /// store-only and reached by reference (tooling.md TOOL-3). Also the "all
+    /// kinds" default for a lobe with no `kinds` filter (HARN-1).
     pub const LINKABLE: [ItemKind; 3] = [ItemKind::Skill, ItemKind::Agent, ItemKind::Rule];
+
+    /// Parse a list of kind strings into [`ItemKind`]s, rejecting any unknown
+    /// string with [`MindError::UnknownKind`]. Used by the config `kinds` filter
+    /// (HARN-1) and the harness presets (HARN-4).
+    pub fn parse_kinds(strs: &[String]) -> Result<Vec<ItemKind>> {
+        strs.iter()
+            .map(|s| ItemKind::parse(s).ok_or_else(|| MindError::UnknownKind { kind: s.clone() }))
+            .collect()
+    }
 }
 
 impl std::fmt::Display for ItemKind {
@@ -114,6 +124,17 @@ pub enum MindError {
 
     #[error("'{path}' is not a configured agent home (lobe)")]
     UnknownLobe { path: String },
+
+    #[error("'{kind}' is not a valid item kind (expected one of: skill, agent, rule, tool)")]
+    UnknownKind { kind: String },
+
+    #[error(
+        "'{name}' is not a known lobe preset (expected one of: gemini, codex, antigravity, antigravity-cli, universal)"
+    )]
+    UnknownPreset { name: String },
+
+    #[error("`config lobes add` needs a path or `--preset <name>`")]
+    LobeTargetRequired,
 
     #[error("mind.toml at {path}: {msg}")]
     MindToml { path: PathBuf, msg: String },
@@ -318,6 +339,57 @@ impl MindError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // HARN-1/HARN-4: the new lobe-related errors render actionable messages
+    // (the kind/preset list and the add-needs-a-target hint).
+    #[test]
+    fn lobe_errors_render_actionable_messages() {
+        // spec: HARN-1
+        // spec: HARN-4
+        let unknown_kind = MindError::UnknownKind {
+            kind: "wizard".into(),
+        }
+        .to_string();
+        assert!(unknown_kind.contains("wizard"), "{unknown_kind}");
+        assert!(
+            unknown_kind.contains("skill") && unknown_kind.contains("tool"),
+            "UnknownKind must list the valid kinds: {unknown_kind}"
+        );
+
+        let unknown_preset = MindError::UnknownPreset {
+            name: "emacs".into(),
+        }
+        .to_string();
+        assert!(unknown_preset.contains("emacs"), "{unknown_preset}");
+        assert!(
+            unknown_preset.contains("gemini")
+                && unknown_preset.contains("codex")
+                && unknown_preset.contains("antigravity-cli")
+                && unknown_preset.contains("universal"),
+            "UnknownPreset must list the valid presets: {unknown_preset}"
+        );
+
+        let needs_target = MindError::LobeTargetRequired.to_string();
+        assert!(
+            needs_target.contains("path") && needs_target.contains("--preset"),
+            "LobeTargetRequired must mention both a path and --preset: {needs_target}"
+        );
+    }
+
+    // HARN-1: parse_kinds rejects the first unknown string with UnknownKind and
+    // accepts a well-formed list in order.
+    #[test]
+    fn parse_kinds_accepts_known_rejects_unknown() {
+        // spec: HARN-1
+        let ok = ItemKind::parse_kinds(&["skill".into(), "agent".into(), "rule".into()]).unwrap();
+        assert_eq!(ok, vec![ItemKind::Skill, ItemKind::Agent, ItemKind::Rule]);
+
+        let err = ItemKind::parse_kinds(&["skill".into(), "wizard".into()]).unwrap_err();
+        assert!(
+            matches!(err, MindError::UnknownKind { ref kind } if kind == "wizard"),
+            "the first unknown kind must surface as UnknownKind: {err:?}"
+        );
+    }
 
     #[test]
     fn hook_failed_displays_identity_and_command() {

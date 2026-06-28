@@ -44,7 +44,11 @@ pub fn scan(paths: &Paths, manifest: &Manifest) -> Result<Vec<UnmanagedItem>> {
         .collect();
 
     let mut found: BTreeMap<(ItemKind, String), Vec<PathBuf>> = BTreeMap::new();
-    for home in paths.agent_homes()? {
+    for lobe in paths.agent_homes()? {
+        // Unmanaged detection is kind-agnostic: scan every lobe path regardless
+        // of its `kinds` filter (a filtered lobe can still hold a hand-placed
+        // item of an excluded kind).
+        let home = &lobe.path;
         // Tools are never linked into an agent home (tooling.md TOOL-3), so only
         // the linkable kinds are scanned.
         for kind in ItemKind::LINKABLE {

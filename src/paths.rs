@@ -16,12 +16,113 @@
 //! Items are linked into every configured agent home (see [`Paths::agent_homes`]).
 //! Roots are overridable via environment variables so the test harness can point
 //! them at temp dirs: `MIND_HOME`, `CLAUDE_HOME`, `MIND_AGENT_HOMES`.
+//!
+//! A lobe is the parent of `skills/` / `agents/` / `rules/`; the default is
+//! `~/.claude`, but a lobe may be any harness home (Gemini, Codex, Antigravity)
+//! because the skill/agent layouts double as the cross-tool conventions
+//! (spec/harness-lobes.md). A lobe may carry a `kinds` filter (HARN-1): only
+//! items of a listed kind link into it. The [`PRESETS`] table maps a harness name
+//! to its lobe path and kinds (HARN-4), and [`detect_homes`] reports which preset
+//! dirs exist under the detection base (HARN-5), consulting `MIND_DETECT_HOME`
+//! (else the home dir) so detection stays hermetic without mutating process HOME.
 
 use std::path::{Path, PathBuf};
 
 use crate::config::Config;
 use crate::error::{ItemKind, MindError, Result};
 use crate::policy::Policy;
+
+/// A resolved agent home: an absolute path plus the kinds it admits (HARN-1).
+/// `kinds == None` is "no filter": it admits every kind, the historical behavior
+/// (so a tool with an explicit `link`, TOOL-4, still surfaces). `Some(list)`
+/// admits only the listed kinds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Lobe {
+    pub path: PathBuf,
+    pub kinds: Option<Vec<ItemKind>>,
+}
+
+impl Lobe {
+    /// A lobe with no kinds filter (admits all kinds).
+    pub fn all_kinds(path: PathBuf) -> Self {
+        Lobe { path, kinds: None }
+    }
+
+    /// Whether this lobe accepts an item of `kind` (HARN-1). With no filter every
+    /// kind is admitted (preserving the pre-feature behavior, including a tool
+    /// with an explicit link); with a filter, only the listed kinds.
+    pub fn admits(&self, kind: ItemKind) -> bool {
+        match &self.kinds {
+            None => true,
+            Some(kinds) => kinds.contains(&kind),
+        }
+    }
+}
+
+/// A known harness preset (HARN-4): the lobe path (relative to the detection
+/// base / home) and the kinds it admits. `marker_rel` is the on-disk signal
+/// [`detect_homes`] checks to decide the harness is installed.
+pub struct Preset {
+    /// The preset name used on the CLI (`--preset <name>`).
+    pub name: &'static str,
+    /// The lobe parent directory, relative to home (e.g. `.gemini`).
+    pub rel_path: &'static str,
+    /// The kinds this preset's lobe admits.
+    pub kinds: &'static [ItemKind],
+    /// The directory whose presence signals this harness is installed, relative
+    /// to the detection base (e.g. `.gemini` for Gemini, `.codex` for Codex).
+    pub marker_rel: &'static str,
+}
+
+/// The harness presets (HARN-4). Detection signals (HARN-5):
+/// - `gemini`: `~/.gemini` exists (Gemini CLI's home).
+/// - `codex`: `~/.codex` exists (Codex CLI's home; it reads `~/.agents`).
+/// - `antigravity`: `~/.gemini/config` exists (the IDE's config dir).
+/// - `antigravity-cli`: `~/.gemini/antigravity-cli` exists (the CLI's global dir).
+/// - `universal`: `~/.agents` exists (the vendor-neutral alias dir itself).
+pub const PRESETS: &[Preset] = &[
+    Preset {
+        name: "gemini",
+        rel_path: ".gemini",
+        kinds: &[ItemKind::Skill, ItemKind::Agent],
+        marker_rel: ".gemini",
+    },
+    Preset {
+        name: "codex",
+        rel_path: ".agents",
+        kinds: &[ItemKind::Skill],
+        marker_rel: ".codex",
+    },
+    Preset {
+        name: "antigravity",
+        rel_path: ".gemini/config",
+        kinds: &[ItemKind::Skill],
+        marker_rel: ".gemini/config",
+    },
+    Preset {
+        name: "antigravity-cli",
+        rel_path: ".gemini/antigravity-cli",
+        kinds: &[ItemKind::Skill],
+        marker_rel: ".gemini/antigravity-cli",
+    },
+    Preset {
+        name: "universal",
+        rel_path: ".agents",
+        kinds: &[ItemKind::Skill],
+        marker_rel: ".agents",
+    },
+];
+
+/// Look up a preset by name, erroring with [`MindError::UnknownPreset`] on a bad
+/// name (HARN-4).
+pub fn lookup_preset(name: &str) -> Result<&'static Preset> {
+    PRESETS
+        .iter()
+        .find(|p| p.name == name)
+        .ok_or_else(|| MindError::UnknownPreset {
+            name: name.to_string(),
+        })
+}
 
 /// Resolved filesystem roots for a `mind` invocation.
 #[derive(Debug, Clone)]
@@ -133,16 +234,23 @@ impl Paths {
     /// A leading `~` is expanded, and a relative path is resolved to absolute
     /// against the current directory, so the link paths recorded in the manifest
     /// never depend on the working directory at a later uninstall.
-    pub fn agent_homes(&self) -> Result<Vec<PathBuf>> {
+    ///
+    /// Each returned [`Lobe`] carries its `kinds` filter (HARN-1): config entries
+    /// carry the filter they declared; `$MIND_AGENT_HOMES` entries and managed
+    /// policy targets resolve to `kinds: None` (all kinds), preserving current
+    /// behavior. Lobes are deduplicated by path (first-seen kinds win).
+    pub fn agent_homes(&self) -> Result<Vec<Lobe>> {
         // Compute the user's normal homes (pre-policy).
-        let user_homes: Vec<PathBuf> = {
-            let mut h = Vec::new();
+        let user_homes: Vec<Lobe> = {
+            let mut h: Vec<Lobe> = Vec::new();
             if let Some(raw) = std::env::var_os("MIND_AGENT_HOMES") {
+                // Env-var homes are all-kinds (HARN-2): they preserve the
+                // pre-feature behavior of `$MIND_AGENT_HOMES`.
                 let parsed = raw
                     .to_string_lossy()
                     .split(':')
                     .filter(|p| !p.is_empty())
-                    .map(absolute_home)
+                    .map(|p| Ok(Lobe::all_kinds(absolute_home(p)?)))
                     .collect::<Result<Vec<_>>>()?;
                 if !parsed.is_empty() {
                     h = parsed;
@@ -153,12 +261,17 @@ impl Paths {
                 if !configured.is_empty() {
                     h = configured
                         .iter()
-                        .map(|p| absolute_home(p))
+                        .map(|e| {
+                            Ok(Lobe {
+                                path: absolute_home(e.path())?,
+                                kinds: e.kinds().map(<[ItemKind]>::to_vec),
+                            })
+                        })
                         .collect::<Result<Vec<_>>>()?;
                 }
             }
             if h.is_empty() {
-                h = vec![make_absolute(self.claude_home.clone())?];
+                h = vec![Lobe::all_kinds(make_absolute(self.claude_home.clone())?)];
             }
             h
         };
@@ -172,13 +285,15 @@ impl Paths {
                 let targets = policy.lobes_targets();
                 if targets.is_empty() {
                     // Empty targets under a lock pins the default.
-                    Ok(vec![make_absolute(self.claude_home.clone())?])
+                    Ok(vec![Lobe::all_kinds(make_absolute(
+                        self.claude_home.clone(),
+                    )?)])
                 } else {
-                    let resolved: Vec<PathBuf> = targets
+                    let resolved: Vec<Lobe> = targets
                         .iter()
-                        .map(|p| absolute_home(p))
+                        .map(|p| Ok(Lobe::all_kinds(absolute_home(p)?)))
                         .collect::<Result<_>>()?;
-                    Ok(dedup_paths(resolved))
+                    Ok(dedup_lobes(resolved))
                 }
             }
             Some(policy) => {
@@ -186,20 +301,65 @@ impl Paths {
                 // deduped). The whole result is deduped to collapse duplicate targets and
                 // targets that equal a user home.
                 // spec: POL-41
-                let mut result: Vec<PathBuf> = Vec::new();
+                let mut result: Vec<Lobe> = Vec::new();
                 for p in policy.lobes_targets() {
-                    result.push(absolute_home(p)?);
+                    result.push(Lobe::all_kinds(absolute_home(p)?));
                 }
                 for h in user_homes {
                     result.push(h);
                 }
-                Ok(dedup_paths(result))
+                Ok(dedup_lobes(result))
             }
             None => {
-                // POL-4 inert: no policy, use user homes as-is.
-                Ok(user_homes)
+                // POL-4 inert: no policy. Dedup by path (first-seen kinds win),
+                // honoring the documented contract so two same-path config lobes
+                // (e.g. the codex + universal presets both at ~/.agents) collapse
+                // to one, exactly as the policy branches already do.
+                Ok(dedup_lobes(user_homes))
             }
         }
+    }
+
+    /// The lobe a `--preset <name>` resolves to (HARN-4): the preset's parent
+    /// path (with `~` expanded to absolute, STO-16) and its kinds filter. Errors
+    /// with [`MindError::UnknownPreset`] on a bad name.
+    pub fn preset_lobe(name: &str) -> Result<Lobe> {
+        let preset = lookup_preset(name)?;
+        Ok(Lobe {
+            path: absolute_home(&format!("~/{}", preset.rel_path))?,
+            kinds: Some(preset.kinds.to_vec()),
+        })
+    }
+
+    /// The base directory detection scans under (HARN-5): `$MIND_DETECT_HOME` if
+    /// set (so tests stay hermetic without mutating process HOME), else the home
+    /// directory.
+    pub fn detect_base() -> Result<PathBuf> {
+        match std::env::var_os("MIND_DETECT_HOME") {
+            Some(p) => Ok(PathBuf::from(p)),
+            None => home(),
+        }
+    }
+
+    /// Report which known harness preset dirs exist under the detection base
+    /// (HARN-5). A preset is reported when its marker dir exists; each entry is
+    /// the preset name and the [`Lobe`] (path under the base, plus kinds) to add.
+    /// Detection never mutates config on its own; the caller decides.
+    pub fn detect_homes() -> Result<Vec<(&'static str, Lobe)>> {
+        let base = Self::detect_base()?;
+        let mut found = Vec::new();
+        for preset in PRESETS {
+            if base.join(preset.marker_rel).is_dir() {
+                found.push((
+                    preset.name,
+                    Lobe {
+                        path: base.join(preset.rel_path),
+                        kinds: Some(preset.kinds.to_vec()),
+                    },
+                ));
+            }
+        }
+        Ok(found)
     }
 
     /// The default lobe written into a fresh config: the `$CLAUDE_HOME` override
@@ -215,7 +375,7 @@ impl Paths {
     pub fn ensure_config(&self) -> Result<()> {
         if !self.config_file().exists() {
             Config {
-                lobes: vec![self.default_lobe()],
+                lobes: vec![crate::config::LobeEntry::bare(self.default_lobe())],
                 ..Default::default()
             }
             .save(self)?;
@@ -303,12 +463,13 @@ fn make_absolute(path: PathBuf) -> Result<PathBuf> {
     Ok(cwd.join(path))
 }
 
-/// Deduplicate a `Vec<PathBuf>` preserving first-seen order.
-fn dedup_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+/// Deduplicate a `Vec<Lobe>` by path, preserving first-seen order. When the same
+/// path appears twice, the first-seen lobe (and its kinds) wins.
+fn dedup_lobes(lobes: Vec<Lobe>) -> Vec<Lobe> {
     let mut seen = std::collections::HashSet::new();
-    paths
+    lobes
         .into_iter()
-        .filter(|p| seen.insert(p.clone()))
+        .filter(|l| seen.insert(l.path.clone()))
         .collect()
 }
 
@@ -547,7 +708,12 @@ mod tests {
             std::env::set_var("MIND_AGENT_HOMES", env_lobe.to_str().unwrap());
         }
 
-        let homes = paths.agent_homes().unwrap();
+        let homes: Vec<PathBuf> = paths
+            .agent_homes()
+            .unwrap()
+            .into_iter()
+            .map(|l| l.path)
+            .collect();
 
         // Restore env before any asserts that might panic.
         // SAFETY: ENV_LOCK is held.
@@ -580,7 +746,12 @@ mod tests {
         let policy_toml = "[lobes]\nlock = true\ntargets = []\n";
         let (paths, base, _policy_file, _guard) = setup_policy_test(policy_toml);
 
-        let homes = paths.agent_homes().unwrap();
+        let homes: Vec<PathBuf> = paths
+            .agent_homes()
+            .unwrap()
+            .into_iter()
+            .map(|l| l.path)
+            .collect();
         assert_eq!(
             homes,
             vec![paths.claude_home.clone()],
@@ -613,7 +784,12 @@ mod tests {
         );
         std::fs::write(paths.mind_home.join("config.toml"), &config_toml).unwrap();
 
-        let homes = paths.agent_homes().unwrap();
+        let homes: Vec<PathBuf> = paths
+            .agent_homes()
+            .unwrap()
+            .into_iter()
+            .map(|l| l.path)
+            .collect();
         assert!(
             homes.contains(&policy_target),
             "POL-41: policy target must be present in union: {homes:?}"
@@ -656,7 +832,12 @@ mod tests {
         let config_toml = format!("lobes = [\"{shared}\"]\n", shared = shared.display());
         std::fs::write(paths.mind_home.join("config.toml"), &config_toml).unwrap();
 
-        let homes = paths.agent_homes().unwrap();
+        let homes: Vec<PathBuf> = paths
+            .agent_homes()
+            .unwrap()
+            .into_iter()
+            .map(|l| l.path)
+            .collect();
         assert_eq!(
             homes.len(),
             1,
@@ -700,7 +881,12 @@ mod tests {
             mind_home,
             claude_home,
         };
-        let homes = paths.agent_homes().unwrap();
+        let homes: Vec<PathBuf> = paths
+            .agent_homes()
+            .unwrap()
+            .into_iter()
+            .map(|l| l.path)
+            .collect();
         assert_eq!(
             homes,
             vec![user_lobe.clone()],
@@ -744,7 +930,7 @@ mod tests {
         unsafe {
             std::env::remove_var("MIND_AGENT_HOMES");
         }
-        let homes = homes.unwrap();
+        let homes: Vec<PathBuf> = homes.unwrap().into_iter().map(|l| l.path).collect();
 
         assert_eq!(
             homes,
@@ -798,7 +984,7 @@ mod tests {
         unsafe {
             std::env::remove_var("MIND_AGENT_HOMES");
         }
-        let homes = homes.unwrap();
+        let homes: Vec<PathBuf> = homes.unwrap().into_iter().map(|l| l.path).collect();
 
         assert_eq!(
             homes,
@@ -846,7 +1032,7 @@ mod tests {
         unsafe {
             std::env::remove_var("MIND_AGENT_HOMES");
         }
-        let homes = homes.unwrap();
+        let homes: Vec<PathBuf> = homes.unwrap().into_iter().map(|l| l.path).collect();
 
         assert_eq!(
             homes,
@@ -893,7 +1079,7 @@ mod tests {
         unsafe {
             std::env::remove_var("MIND_AGENT_HOMES");
         }
-        let homes = homes.unwrap();
+        let homes: Vec<PathBuf> = homes.unwrap().into_iter().map(|l| l.path).collect();
 
         assert_eq!(
             homes,
@@ -913,7 +1099,12 @@ mod tests {
         let policy_toml = "[lobes]\nlock = true\ntargets = [\"~/.claude-managed\"]\n";
         let (paths, base, _policy_file, _guard) = setup_policy_test(policy_toml);
 
-        let homes = paths.agent_homes().unwrap();
+        let homes: Vec<PathBuf> = paths
+            .agent_homes()
+            .unwrap()
+            .into_iter()
+            .map(|l| l.path)
+            .collect();
         assert_eq!(homes.len(), 1);
         let got = &homes[0];
         assert!(
@@ -943,7 +1134,12 @@ mod tests {
         let policy_toml = "[lobes]\nlock = true\ntargets = [\"managed-rel-lobe\"]\n";
         let (paths, base, _policy_file, _guard) = setup_policy_test(policy_toml);
 
-        let homes = paths.agent_homes().unwrap();
+        let homes: Vec<PathBuf> = paths
+            .agent_homes()
+            .unwrap()
+            .into_iter()
+            .map(|l| l.path)
+            .collect();
         assert_eq!(homes.len(), 1);
         let got = &homes[0];
         assert!(
@@ -979,7 +1175,7 @@ mod tests {
         unsafe {
             std::env::remove_var("MIND_AGENT_HOMES");
         }
-        let homes = homes.unwrap();
+        let homes: Vec<PathBuf> = homes.unwrap().into_iter().map(|l| l.path).collect();
 
         assert_eq!(homes.len(), 2, "target + one user home: {homes:?}");
         assert!(
@@ -1019,7 +1215,12 @@ mod tests {
         );
         std::fs::write(paths.mind_home.join("config.toml"), &config_toml).unwrap();
 
-        let homes = paths.agent_homes().unwrap();
+        let homes: Vec<PathBuf> = paths
+            .agent_homes()
+            .unwrap()
+            .into_iter()
+            .map(|l| l.path)
+            .collect();
 
         // dup_target appears only once (duplicate within targets collapsed), then user_lobe.
         assert_eq!(
@@ -1038,7 +1239,12 @@ mod tests {
         let config_toml2 = format!("lobes = [\"{shared}\"]\n", shared = shared.display());
         std::fs::write(paths.mind_home.join("config.toml"), &config_toml2).unwrap();
 
-        let homes2 = paths.agent_homes().unwrap();
+        let homes2: Vec<PathBuf> = paths
+            .agent_homes()
+            .unwrap()
+            .into_iter()
+            .map(|l| l.path)
+            .collect();
         assert_eq!(
             homes2,
             vec![shared.clone()],
@@ -1066,7 +1272,12 @@ mod tests {
         );
         let (paths, base, _policy_file, _guard) = setup_policy_test(&policy_toml);
 
-        let homes = paths.agent_homes().unwrap();
+        let homes: Vec<PathBuf> = paths
+            .agent_homes()
+            .unwrap()
+            .into_iter()
+            .map(|l| l.path)
+            .collect();
 
         assert_eq!(
             homes,
@@ -1076,5 +1287,256 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&base);
         let _ = std::fs::remove_dir_all(&base_dir);
+    }
+
+    // ---- HARN: kinds filter, presets, and detection ------------------------
+
+    // HARN-1: a lobe with no kinds filter admits every kind (no filter), while a
+    // filtered lobe admits only the listed kinds.
+    #[test]
+    fn lobe_admits_respects_kinds_filter() {
+        // spec: HARN-1
+        let all = Lobe::all_kinds(PathBuf::from("/x"));
+        assert!(all.admits(ItemKind::Skill));
+        assert!(all.admits(ItemKind::Agent));
+        assert!(all.admits(ItemKind::Rule));
+        assert!(
+            all.admits(ItemKind::Tool),
+            "an unfiltered lobe admits all kinds, so a tool with an explicit link surfaces (TOOL-4)"
+        );
+
+        let skills_only = Lobe {
+            path: PathBuf::from("/y"),
+            kinds: Some(vec![ItemKind::Skill]),
+        };
+        assert!(skills_only.admits(ItemKind::Skill));
+        assert!(
+            !skills_only.admits(ItemKind::Agent),
+            "a skill-only lobe must reject an agent (HARN-1)"
+        );
+        assert!(
+            !skills_only.admits(ItemKind::Rule),
+            "a skill-only lobe must reject a rule (HARN-3: rules are Claude-only)"
+        );
+    }
+
+    // HARN-4: each named preset resolves to its parent path and kinds; an unknown
+    // name errors with UnknownPreset.
+    #[test]
+    fn preset_lookup_and_resolution() {
+        // spec: HARN-4
+        let gemini = lookup_preset("gemini").unwrap();
+        assert_eq!(gemini.rel_path, ".gemini");
+        assert_eq!(gemini.kinds, &[ItemKind::Skill, ItemKind::Agent]);
+
+        let codex = lookup_preset("codex").unwrap();
+        assert_eq!(codex.rel_path, ".agents");
+        assert_eq!(codex.kinds, &[ItemKind::Skill]);
+
+        assert_eq!(
+            lookup_preset("antigravity").unwrap().rel_path,
+            ".gemini/config"
+        );
+        assert_eq!(
+            lookup_preset("antigravity-cli").unwrap().rel_path,
+            ".gemini/antigravity-cli"
+        );
+        assert_eq!(lookup_preset("universal").unwrap().rel_path, ".agents");
+
+        // An unknown preset name is a structured error.
+        assert!(matches!(
+            lookup_preset("emacs"),
+            Err(MindError::UnknownPreset { .. })
+        ));
+
+        // preset_lobe resolves the path to absolute and carries the kinds.
+        let lobe = Paths::preset_lobe("gemini").unwrap();
+        assert!(
+            lobe.path.is_absolute(),
+            "preset path must be absolute (STO-16)"
+        );
+        assert!(lobe.path.ends_with(".gemini"));
+        assert_eq!(
+            lobe.kinds.as_deref(),
+            Some([ItemKind::Skill, ItemKind::Agent].as_slice())
+        );
+        assert!(Paths::preset_lobe("nope").is_err());
+    }
+
+    // HARN-5: detect_homes reports a preset only when its marker dir exists under
+    // the detection base ($MIND_DETECT_HOME), and reports the lobe under that base.
+    #[test]
+    fn detect_homes_reports_existing_marker_dirs() {
+        // spec: HARN-5
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let base = std::env::temp_dir().join(format!("mind-detect-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        // Create .gemini and .agents but NOT .codex/.gemini/config.
+        std::fs::create_dir_all(base.join(".gemini")).unwrap();
+        std::fs::create_dir_all(base.join(".agents")).unwrap();
+
+        // SAFETY: ENV_LOCK is held.
+        unsafe {
+            std::env::set_var("MIND_DETECT_HOME", &base);
+        }
+        let detected = Paths::detect_homes();
+        // SAFETY: ENV_LOCK is held.
+        unsafe {
+            std::env::remove_var("MIND_DETECT_HOME");
+        }
+        let detected = detected.unwrap();
+
+        let names: Vec<&str> = detected.iter().map(|(n, _)| *n).collect();
+        assert!(names.contains(&"gemini"), "gemini marker exists: {names:?}");
+        assert!(
+            names.contains(&"universal"),
+            "agents marker exists: {names:?}"
+        );
+        assert!(
+            !names.contains(&"codex"),
+            "no .codex dir, so codex must not be detected: {names:?}"
+        );
+        assert!(
+            !names.contains(&"antigravity"),
+            "no .gemini/config dir: {names:?}"
+        );
+
+        // The reported gemini lobe is under the detection base and carries kinds.
+        let (_, gemini_lobe) = detected.iter().find(|(n, _)| *n == "gemini").unwrap();
+        assert_eq!(gemini_lobe.path, base.join(".gemini"));
+        assert_eq!(
+            gemini_lobe.kinds.as_deref(),
+            Some([ItemKind::Skill, ItemKind::Agent].as_slice())
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // HARN-1/HARN-2: a config lobe declaring a kinds filter flows through
+    // agent_homes carrying that filter, while a bare config lobe is all-kinds.
+    #[test]
+    fn agent_homes_carry_config_kinds_filter() {
+        // spec: HARN-1
+        // spec: HARN-2
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let base = std::env::temp_dir().join(format!("mind-harn-cfg-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let mind_home = base.join("mind");
+        let claude_home = base.join("claude");
+        std::fs::create_dir_all(&mind_home).unwrap();
+        std::fs::create_dir_all(&claude_home).unwrap();
+
+        // SAFETY: ENV_LOCK is held.
+        unsafe {
+            std::env::remove_var("MIND_POLICY_FILE");
+            std::env::remove_var("MIND_AGENT_HOMES");
+        }
+
+        std::fs::write(
+            mind_home.join("config.toml"),
+            "lobes = [\"/c/bare\", { path = \"/c/gem\", kinds = [\"skill\"] }]\n",
+        )
+        .unwrap();
+
+        let paths = Paths {
+            mind_home,
+            claude_home,
+        };
+        let homes = paths.agent_homes().unwrap();
+        assert_eq!(homes.len(), 2);
+        assert_eq!(homes[0].path, PathBuf::from("/c/bare"));
+        assert_eq!(homes[0].kinds, None, "a bare config lobe is all-kinds");
+        assert_eq!(homes[1].path, PathBuf::from("/c/gem"));
+        assert_eq!(
+            homes[1].kinds.as_deref(),
+            Some([ItemKind::Skill].as_slice()),
+            "a filtered config lobe must carry its kinds"
+        );
+        // And admits reflects the filter.
+        assert!(homes[1].admits(ItemKind::Skill));
+        assert!(!homes[1].admits(ItemKind::Rule));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // HARN-1/HARN-2: two config lobes naming the SAME path with DIFFERENT kinds
+    // dedup to a single lobe, and the first-seen kinds win. This is the direct
+    // collision case the codex+universal presets create (both resolve to
+    // ~/.agents): `agent_homes` must not emit the same path twice, and must keep
+    // the earlier entry's filter.
+    #[test]
+    fn agent_homes_dedup_collision_first_kinds_win() {
+        // spec: HARN-1
+        // spec: HARN-2
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let base = std::env::temp_dir().join(format!("mind-harn-dedup-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let mind_home = base.join("mind");
+        let claude_home = base.join("claude");
+        std::fs::create_dir_all(&mind_home).unwrap();
+        std::fs::create_dir_all(&claude_home).unwrap();
+
+        // SAFETY: ENV_LOCK is held.
+        unsafe {
+            std::env::remove_var("MIND_POLICY_FILE");
+            std::env::remove_var("MIND_AGENT_HOMES");
+        }
+
+        // Same path twice: first carries [skill], second carries [agent].
+        std::fs::write(
+            mind_home.join("config.toml"),
+            "lobes = [{ path = \"/c/dup\", kinds = [\"skill\"] }, { path = \"/c/dup\", kinds = [\"agent\"] }]\n",
+        )
+        .unwrap();
+
+        let paths = Paths {
+            mind_home,
+            claude_home,
+        };
+        let homes = paths.agent_homes().unwrap();
+        assert_eq!(
+            homes.len(),
+            1,
+            "same-path lobes must dedup to one entry: {homes:?}"
+        );
+        assert_eq!(homes[0].path, PathBuf::from("/c/dup"));
+        assert_eq!(
+            homes[0].kinds.as_deref(),
+            Some([ItemKind::Skill].as_slice()),
+            "first-seen kinds must win on a dedup collision: {homes:?}"
+        );
+        assert!(homes[0].admits(ItemKind::Skill));
+        assert!(
+            !homes[0].admits(ItemKind::Agent),
+            "the losing entry's [agent] kind must not leak in"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // HARN-2: the codex and universal presets both resolve to the SAME lobe path
+    // (~/.agents). `preset_lobe` must produce identical paths for the two, which
+    // is what lets `agent_homes`/detect dedup collapse them. (The dedup itself is
+    // covered above and in the CLI detect tests; this pins the precondition.)
+    #[test]
+    fn codex_and_universal_presets_share_a_path() {
+        // spec: HARN-2
+        // spec: HARN-4
+        let codex = Paths::preset_lobe("codex").unwrap();
+        let universal = Paths::preset_lobe("universal").unwrap();
+        assert_eq!(
+            codex.path, universal.path,
+            "codex and universal must resolve to the same ~/.agents path"
+        );
+        assert!(codex.path.ends_with(".agents"));
+        // Both are skill-only.
+        assert_eq!(codex.kinds.as_deref(), Some([ItemKind::Skill].as_slice()));
+        assert_eq!(
+            universal.kinds.as_deref(),
+            Some([ItemKind::Skill].as_slice())
+        );
     }
 }

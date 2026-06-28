@@ -55,11 +55,15 @@ pub fn install(
         .clone()
         .or_else(|| paths.default_link_rel(kind, &name));
     let store_root = paths.store_dir();
+    // Only link into lobes whose `kinds` admit this item's kind (HARN-2/HARN-3).
+    // A lobe that excludes the kind contributes no link and is not an error, so
+    // the recorded manifest `links` reflect exactly the admitted lobes.
     let planned_links: Vec<std::path::PathBuf> = match &link_rel {
         Some(rel) => paths
             .agent_homes()?
             .iter()
-            .map(|home| home.join(rel))
+            .filter(|home| home.admits(kind))
+            .map(|home| home.path.join(rel))
             .collect(),
         None => Vec::new(),
     };

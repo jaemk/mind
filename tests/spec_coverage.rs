@@ -120,11 +120,12 @@ const ALLOWLIST: &[&str] = &[
     //   HOOK-73: a build re-runs when its item is reinstalled/upgraded.
     "HOOK-71",
     "HOOK-73",
-    //   cross-harness lobes (see spec/harness-lobes.md): per-lobe `kinds` filter,
-    //   non-Claude home presets (Gemini/Codex/Antigravity), and the
-    //   auto-detect-and-prompt setup are documented ahead of implementation. Each
-    //   moves to a citing test when built, at which point it leaves this allowlist.
-    "HARN-1", "HARN-2", "HARN-3", "HARN-4", "HARN-5", "HARN-6",
+    //   cross-harness lobes (spec/harness-lobes.md) are implemented and cited:
+    //   HARN-1 (kinds filter) from src/config.rs + src/paths.rs + tests/cli_lobes.rs,
+    //   HARN-2/HARN-3 (link filtering / rules Claude-only) from tests/cli_lobes.rs,
+    //   HARN-4 (presets) from src/paths.rs + tests/cli_lobes.rs, HARN-5
+    //   (auto-detect-and-prompt) from src/paths.rs + tests/cli_lobes.rs, and
+    //   HARN-6 (verbatim link, no frontmatter rewrite) from tests/cli_lobes.rs.
     // Polished output: CLI-150 (global flags) is cited from unit tests in
     // src/main.rs; the capability gate (CLI-151), glyph/color semantics and the
     // ASCII fallback (CLI-152), the structured JSON result for mutating verbs

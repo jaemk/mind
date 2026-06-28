@@ -4362,7 +4362,8 @@ pub fn config_show(paths: &Paths) -> Result<()> {
             paths.claude_home.display()
         );
     } else {
-        println!("  {} lobes = {:?}", out.dim("·"), cfg.lobes);
+        let rendered: Vec<String> = cfg.lobes.iter().map(format_lobe).collect();
+        println!("  {} lobes = {}", out.dim("·"), rendered.join(", "));
     }
     println!(
         "  {} ssh = {}  (prefer SSH for melded remotes)",
@@ -4378,7 +4379,19 @@ pub fn config_show(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
-/// `mind config lobes add <path>` — add an agent home.
+/// Render a lobe entry for display: the path, plus its `kinds` filter in brackets
+/// when present (HARN-1). A no-kinds lobe shows just the path (it admits all).
+fn format_lobe(entry: &crate::config::LobeEntry) -> String {
+    match entry.kinds() {
+        None => entry.path().to_string(),
+        Some(kinds) => {
+            let names: Vec<&str> = kinds.iter().map(|k| k.as_str()).collect();
+            format!("{} [{}]", entry.path(), names.join(", "))
+        }
+    }
+}
+
+/// `mind config lobes add <path>` — add an agent home by path.
 pub fn lobe_add(paths: &Paths, path: &str) -> Result<()> {
     let out = crate::render::ctx();
     // POL-40: a lobe lock pins the effective agent homes; refuse and change
@@ -4390,14 +4403,14 @@ pub fn lobe_add(paths: &Paths, path: &str) -> Result<()> {
     }
     paths.ensure_config()?;
     let mut cfg = Config::load(paths)?;
-    if cfg.lobes.iter().any(|h| h == path) {
+    if cfg.lobes.iter().any(|e| e.path() == path) {
         if out.json {
             return print_json(&MutationResult::new("lobe-add", path, "no-op"));
         }
         println!("{} lobe already configured: {path}", out.available());
         return Ok(());
     }
-    cfg.lobes.push(path.to_string());
+    cfg.lobes.push(crate::config::LobeEntry::bare(path));
     cfg.save(paths)?;
     if out.json {
         return print_json(&MutationResult::new("lobe-add", path, "added"));
@@ -4406,24 +4419,59 @@ pub fn lobe_add(paths: &Paths, path: &str) -> Result<()> {
     Ok(())
 }
 
-/// `mind config lobes list` — list configured agent homes.
+/// `mind config lobes add --preset <name>` — add a known harness preset's lobe
+/// (its parent path and `kinds` filter) (HARN-4).
+pub fn lobe_add_preset(paths: &Paths, name: &str) -> Result<()> {
+    let out = crate::render::ctx();
+    // POL-40: refuse under a lobe lock before validating or writing anything.
+    if let Some(policy) = Policy::load()?
+        && policy.lobes_lock()
+    {
+        return Err(lobes_locked_error("add"));
+    }
+    // Resolve (and validate) the preset before touching config.
+    let lobe = Paths::preset_lobe(name)?;
+    let path = lobe.path.to_string_lossy().into_owned();
+    let entry = crate::config::LobeEntry {
+        path: path.clone(),
+        kinds: lobe.kinds.clone(),
+    };
+    paths.ensure_config()?;
+    let mut cfg = Config::load(paths)?;
+    if cfg.lobes.iter().any(|e| e.path() == path) {
+        if out.json {
+            return print_json(&MutationResult::new("lobe-add", &path, "no-op"));
+        }
+        println!("{} lobe already configured: {path}", out.available());
+        return Ok(());
+    }
+    cfg.lobes.push(entry.clone());
+    cfg.save(paths)?;
+    if out.json {
+        return print_json(&MutationResult::new("lobe-add", &path, "added"));
+    }
+    println!("{} added {name} lobe {}", out.ok(), format_lobe(&entry));
+    Ok(())
+}
+
+/// `mind config lobes list` — list configured agent homes, with each lobe's
+/// `kinds` filter when it carries one (HARN-1).
 pub fn lobe_list(paths: &Paths) -> Result<()> {
     let out = crate::render::ctx();
     paths.ensure_config()?;
     let cfg = Config::load(paths)?;
     if out.json {
-        let lobes = if cfg.lobes.is_empty() {
-            vec![paths.claude_home.display().to_string()]
-        } else {
-            cfg.lobes.clone()
-        };
-        return print_json(&serde_json::json!({ "lobes": lobes }));
+        if cfg.lobes.is_empty() {
+            let default = crate::config::LobeEntry::bare(paths.claude_home.display().to_string());
+            return print_json(&serde_json::json!({ "lobes": [default] }));
+        }
+        return print_json(&serde_json::json!({ "lobes": cfg.lobes }));
     }
     if cfg.lobes.is_empty() {
         println!("{}  (default)", paths.claude_home.display());
     } else {
-        for h in &cfg.lobes {
-            println!("{h}");
+        for e in &cfg.lobes {
+            println!("{}", format_lobe(e));
         }
     }
     // POL-40: under a managed lobe lock, `Paths::agent_homes` ignores
@@ -4457,7 +4505,7 @@ pub fn lobe_remove(paths: &Paths, path: &str) -> Result<()> {
     paths.ensure_config()?;
     let mut cfg = Config::load(paths)?;
     let before = cfg.lobes.len();
-    cfg.lobes.retain(|h| h != path);
+    cfg.lobes.retain(|e| e.path() != path);
     if cfg.lobes.len() == before {
         return Err(MindError::UnknownLobe {
             path: path.to_string(),
@@ -4468,6 +4516,105 @@ pub fn lobe_remove(paths: &Paths, path: &str) -> Result<()> {
         return print_json(&MutationResult::new("lobe-remove", path, "removed"));
     }
     println!("{} removed lobe {path}", out.ok());
+    Ok(())
+}
+
+/// `mind config lobes detect` — detect installed harness homes and offer to add
+/// their presets (HARN-5). Detection itself never mutates config: it adds the
+/// detected lobes only with `--yes` (or, on a TTY, after a confirm prompt).
+/// Without a TTY and without `--yes`, it reports only. Honors the POL-40 lobe
+/// lock and dedups against the already-configured lobes.
+pub fn lobe_detect(paths: &Paths, yes: bool) -> Result<()> {
+    let out = crate::render::ctx();
+    // POL-40: refuse under a lobe lock before reporting or writing anything.
+    if let Some(policy) = Policy::load()?
+        && policy.lobes_lock()
+    {
+        return Err(lobes_locked_error("detect"));
+    }
+    paths.ensure_config()?;
+    let mut cfg = Config::load(paths)?;
+    let configured: HashSet<String> = cfg.lobes.iter().map(|e| e.path().to_string()).collect();
+
+    // Dedup detected lobes against the configured set and against each other
+    // (codex and universal can both point at ~/.agents).
+    let detected = Paths::detect_homes()?;
+    let mut seen: HashSet<std::path::PathBuf> = HashSet::new();
+    let mut candidates: Vec<(&'static str, crate::config::LobeEntry)> = Vec::new();
+    for (name, lobe) in detected {
+        let path = lobe.path.to_string_lossy().into_owned();
+        if configured.contains(&path) || !seen.insert(lobe.path.clone()) {
+            continue;
+        }
+        candidates.push((
+            name,
+            crate::config::LobeEntry {
+                path,
+                kinds: lobe.kinds.clone(),
+            },
+        ));
+    }
+
+    // Decide whether to mutate. With --yes, add unconditionally. Without it, a
+    // TTY gets a confirm prompt; a non-TTY reports only (HARN-5).
+    let do_add = if candidates.is_empty() {
+        false
+    } else if yes {
+        true
+    } else if crate::hook::is_tty() {
+        let names: Vec<String> = candidates
+            .iter()
+            .map(|(n, e)| format!("{n} ({})", format_lobe(e)))
+            .collect();
+        confirm(&format!("add detected lobe(s): {}?", names.join(", ")))?
+    } else {
+        false
+    };
+
+    if out.json {
+        let detected_json: Vec<serde_json::Value> = candidates
+            .iter()
+            .map(|(name, entry)| {
+                serde_json::json!({
+                    "preset": name,
+                    "path": entry.path(),
+                    "kinds": entry.kinds().map(|ks| {
+                        ks.iter().map(|k| k.as_str()).collect::<Vec<_>>()
+                    }),
+                })
+            })
+            .collect();
+        if do_add {
+            for (_, entry) in &candidates {
+                cfg.lobes.push(entry.clone());
+            }
+            cfg.save(paths)?;
+        }
+        return print_json(&serde_json::json!({
+            "action": "lobe-detect",
+            "detected": detected_json,
+            "added": do_add,
+        }));
+    }
+
+    if candidates.is_empty() {
+        println!("{} no new harness homes detected", out.bullet());
+        return Ok(());
+    }
+
+    if do_add {
+        for (name, entry) in &candidates {
+            cfg.lobes.push(entry.clone());
+            println!("{} added {name} lobe {}", out.ok(), format_lobe(entry));
+        }
+        cfg.save(paths)?;
+    } else {
+        println!("{} detected harness home(s):", out.bullet());
+        for (name, entry) in &candidates {
+            println!("  {} {name}: {}", out.dim("·"), format_lobe(entry));
+        }
+        println!("re-run with --yes to add them");
+    }
     Ok(())
 }
 

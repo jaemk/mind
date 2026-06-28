@@ -652,7 +652,9 @@ mod tests {
         crate::paths::mkdir_p(&paths.mind_home).unwrap();
         // Pin the lobe to the isolated claude_home (hermeticity).
         crate::config::Config {
-            lobes: vec![paths.claude_home.to_str().unwrap().to_string()],
+            lobes: vec![crate::config::LobeEntry::bare(
+                paths.claude_home.to_str().unwrap(),
+            )],
             ..Default::default()
         }
         .save(&paths)
@@ -754,7 +756,9 @@ mod tests {
         };
         crate::paths::mkdir_p(&paths.mind_home).unwrap();
         crate::config::Config {
-            lobes: vec![paths.claude_home.to_str().unwrap().to_string()],
+            lobes: vec![crate::config::LobeEntry::bare(
+                paths.claude_home.to_str().unwrap(),
+            )],
             ..Default::default()
         }
         .save(&paths)
@@ -848,7 +852,9 @@ mod tests {
         };
         crate::paths::mkdir_p(&paths.mind_home).unwrap();
         crate::config::Config {
-            lobes: vec![paths.claude_home.to_str().unwrap().to_string()],
+            lobes: vec![crate::config::LobeEntry::bare(
+                paths.claude_home.to_str().unwrap(),
+            )],
             ..Default::default()
         }
         .save(&paths)

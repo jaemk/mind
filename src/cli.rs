@@ -471,14 +471,27 @@ pub enum ConfigCmd {
 
 #[derive(Debug, Subcommand)]
 pub enum LobesCmd {
-    /// Add an agent home.
+    /// Add an agent home, by path or by a `--preset <name>` harness preset.
     Add {
         /// Directory to link items into (a leading `~` is expanded at use).
-        path: String,
+        /// Mutually exclusive with `--preset`; give exactly one.
+        path: Option<String>,
+
+        /// Add a known harness preset (gemini, codex, antigravity,
+        /// antigravity-cli, universal): its parent path and kinds filter.
+        #[arg(long, value_name = "NAME", conflicts_with = "path")]
+        preset: Option<String>,
     },
 
     /// List configured agent homes.
     List,
+
+    /// Detect installed harness homes and offer to add their presets.
+    Detect {
+        /// Add the detected presets without prompting.
+        #[arg(long)]
+        yes: bool,
+    },
 
     /// Remove an agent home.
     Remove {
