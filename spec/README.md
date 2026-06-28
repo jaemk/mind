@@ -91,6 +91,7 @@ and verified.
 | `on-auth-failure` scope: descendant auth failures are not attributed to the entry | done | DSC-70 |
 | TUI: keep the highlighted row in the middle two-thirds (scroll margin) | done | TUI-16 |
 | TUI: Enter opens a details dialog with the node's valid actions | done | TUI-26 |
+| Cross-harness lobes: per-lobe `kinds` filter, non-Claude home presets (Gemini/Codex/Antigravity), auto-detect-and-prompt | planned | [harness-lobes.md](harness-lobes.md) (HARN-1..6) |
 
 ## Documents
 
@@ -122,6 +123,9 @@ and verified.
 - [unmanaged.md](unmanaged.md) - unmanaged lobe items: skills/agents/rules present
   in an agent home that `mind` did not install, surfaced in `recall`/`probe` and
   removable via `forget` with a distinct not-managed-by-mind warning.
+- [harness-lobes.md](harness-lobes.md) - cross-harness lobes: link skills and
+  agents into non-Claude agent homes (Gemini CLI, Codex CLI, Antigravity) via a
+  per-lobe `kinds` filter and detected-home presets. Planned.
 
 ## Conventions
 

@@ -120,6 +120,11 @@ const ALLOWLIST: &[&str] = &[
     //   HOOK-73: a build re-runs when its item is reinstalled/upgraded.
     "HOOK-71",
     "HOOK-73",
+    //   cross-harness lobes (see spec/harness-lobes.md): per-lobe `kinds` filter,
+    //   non-Claude home presets (Gemini/Codex/Antigravity), and the
+    //   auto-detect-and-prompt setup are documented ahead of implementation. Each
+    //   moves to a citing test when built, at which point it leaves this allowlist.
+    "HARN-1", "HARN-2", "HARN-3", "HARN-4", "HARN-5", "HARN-6",
     // Polished output: CLI-150 (global flags) is cited from unit tests in
     // src/main.rs; the capability gate (CLI-151), glyph/color semantics and the
     // ASCII fallback (CLI-152), the structured JSON result for mutating verbs
