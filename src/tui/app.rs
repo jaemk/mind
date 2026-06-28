@@ -670,13 +670,38 @@ impl App {
                     learn_ref: Some(lr),
                 }]
             }
-            TreeNode::InstalledItem(item) => vec![ItemAction {
-                kind: ActionKind::Forget {
-                    item_key: item.key.clone(),
-                },
-                description: format!("Forget (uninstall) {}?", item.key),
-                learn_ref: None,
-            }],
+            TreeNode::InstalledItem(item) => {
+                // spec: TUI-52 - warn about installed dependents in the confirm description
+                // (DEP-60 adapted for the TUI's confirm-then-act flow).
+                let dependents: Vec<String> = self
+                    .last_snapshot
+                    .as_ref()
+                    .map(|snap| {
+                        snap.installed
+                            .iter()
+                            .filter(|other| other.deps.contains(&item.key))
+                            .map(|other| other.key.clone())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let description = if dependents.is_empty() {
+                    format!("Forget (uninstall) {}?", item.key)
+                } else {
+                    format!(
+                        "Forget (uninstall) {}? {} installed item(s) depend on it: {}",
+                        item.key,
+                        dependents.len(),
+                        dependents.join(", ")
+                    )
+                };
+                vec![ItemAction {
+                    kind: ActionKind::Forget {
+                        item_key: item.key.clone(),
+                    },
+                    description,
+                    learn_ref: None,
+                }]
+            }
             TreeNode::UnmanagedItem(item) => vec![ItemAction {
                 kind: ActionKind::Forget {
                     item_key: item.key.clone(),
@@ -1695,6 +1720,70 @@ mod tests {
         assert!(
             !pending.description.contains("NOT managed by mind"),
             "the managed forget prompt must not claim the item is unmanaged: {:?}",
+            pending.description
+        );
+    }
+
+    #[test]
+    fn forget_with_dependents_includes_warning_in_description() {
+        // spec: TUI-52 - forgetting an item that other installed items depend on
+        // must surface the dependent keys in the confirm description.
+        let mut app = App::new(String::new(), None, None);
+        let mut snap = make_snapshot();
+        // Add a second installed item that depends on skill:review.
+        snap.installed.push(SnapshotInstalled {
+            key: "skill:do".to_string(),
+            name: "do".to_string(),
+            source: "local/agents".to_string(),
+            kind: ItemKind::Skill,
+            commit: "def67890".to_string(),
+            description: None,
+            deps: vec!["skill:review".to_string()],
+        });
+        app.apply_snapshot(snap);
+        let idx = app
+            .visible
+            .iter()
+            .position(|n| matches!(&n.node, crate::tui::tree::TreeNode::InstalledItem(i) if i.key == "skill:review"))
+            .expect("skill:review must be visible");
+        app.selected = idx;
+        app.apply_intent(Intent::ActionForget);
+        let pending = app
+            .pending_action
+            .as_ref()
+            .expect("forget must set a pending action");
+        assert!(
+            pending.description.contains("skill:do"),
+            "confirm description must list the dependent: {:?}",
+            pending.description
+        );
+        assert!(
+            pending.description.contains("depend"),
+            "confirm description must include a dependents warning: {:?}",
+            pending.description
+        );
+    }
+
+    #[test]
+    fn forget_without_dependents_omits_warning() {
+        // spec: TUI-52 - forgetting an item with no dependents uses the plain
+        // uninstall prompt with no warning text.
+        let mut app = App::new(String::new(), None, None);
+        app.apply_snapshot(make_snapshot()); // skill:review has no dependents
+        let idx = app
+            .visible
+            .iter()
+            .position(|n| matches!(&n.node, crate::tui::tree::TreeNode::InstalledItem(_)))
+            .expect("installed item must be visible");
+        app.selected = idx;
+        app.apply_intent(Intent::ActionForget);
+        let pending = app
+            .pending_action
+            .as_ref()
+            .expect("forget must set a pending action");
+        assert!(
+            !pending.description.contains("depend"),
+            "no-dependent forget must not include a warning: {:?}",
             pending.description
         );
     }

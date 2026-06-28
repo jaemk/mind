@@ -178,6 +178,12 @@ manifest, and store.
   TUI-45) and `unmeld` (uninstall-hook prompt HOOK-54). Non-prompting mutations
   (learn/forget/sync/upgrade) instead run with stdout captured (TUI-24) and do not
   suspend.
+- `TUI-52` When forgetting a single installed item that other installed items
+  depend on (DEP-60), the TUI surfaces the warning in the confirmation
+  description -- listing the dependent keys -- before the user confirms. The
+  action still proceeds on confirmation; the TUI does not block the removal.
+  This mirrors the CLI's DEP-60 warning, adapted to the TUI's confirm-then-act
+  flow (TUI-24) rather than a stdin prompt.
 - `TUI-45` While the TUI holds the terminal, every `git` child runs
   non-interactively (`GIT_TERMINAL_PROMPT=0` and an ssh `BatchMode=yes` wrapper),
   so an auth-required remote -- a private SSH repo whose key needs a passphrase, or
