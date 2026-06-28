@@ -1,0 +1,6 @@
+# The mind repo as a melding source. Convention discovery is rooted at the
+# hello example so `mind meld jaemk/mind` offers the `hello-mind` skill (DSC-50).
+# This is what the docs landing page runs.
+[source]
+description = "mind: meld this repo to learn the hello-mind example skill"
+roots = ["examples/hello"]

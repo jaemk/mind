@@ -67,6 +67,33 @@ impl Sandbox {
         sb
     }
 
+    /// A source repo carrying the crate's real root `mind.toml` plus the
+    /// `examples/hello` directory it points at, committed. Drives the
+    /// landing-page command (`mind meld jaemk/mind`, then `mind learn
+    /// hello-mind` in a non-TTY).
+    fn from_root_mindfile() -> Sandbox {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let base = std::env::temp_dir().join(format!("mind-it-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let source = base.join("mind");
+        let sb = Sandbox {
+            base: base.clone(),
+            source: source.clone(),
+            mind_home: base.join("home"),
+            claude_home: base.join("claude"),
+        };
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::copy(root.join("mind.toml"), source.join("mind.toml")).unwrap();
+        copy_dir(&root.join("examples/hello"), &source.join("examples/hello"));
+        git(&source, &["-c", "init.defaultBranch=main", "init", "-q"]);
+        git(&source, &["config", "user.email", "t@t"]);
+        git(&source, &["config", "user.name", "t"]);
+        git(&source, &["add", "-A"]);
+        git(&source, &["commit", "-qm", "initial"]);
+        sb
+    }
+
     fn build(name: &str, with_fixture: bool) -> Sandbox {
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
         let base = std::env::temp_dir().join(format!("mind-it-{}-{n}", std::process::id()));
@@ -4431,6 +4458,39 @@ fn example_starter_convention_discovery() {
     assert!(
         sb.mind_home.join("store/skill/greet/SKILL.md").exists(),
         "greet should be copied into the store"
+    );
+}
+
+#[test]
+fn root_mindfile_exposes_hello() {
+    // spec: DSC-1, DSC-50
+    // The repo-root mind.toml sets roots = ["examples/hello"], so melding the
+    // mind repo itself discovers the hello-mind skill by convention under that
+    // root, and `mind learn hello-mind` links it into the agent home. Guards
+    // the landing-page command `mind meld jaemk/mind`.
+    let sb = Sandbox::from_root_mindfile();
+    let meld = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(meld.success, "{}", meld.stderr);
+
+    let probe = sb.mind(&["probe"]);
+    assert!(probe.success, "{}", probe.stderr);
+    assert!(
+        probe.stdout.contains("skill:hello-mind"),
+        "{}",
+        probe.stdout
+    );
+
+    let learn = sb.mind(&["learn", "hello-mind"]);
+    assert!(learn.success, "{}", learn.stderr);
+    assert!(
+        sb.mind_home
+            .join("store/skill/hello-mind/SKILL.md")
+            .exists(),
+        "hello-mind should be copied into the store"
+    );
+    assert!(
+        sb.claude_home.join("skills/hello-mind").exists(),
+        "hello-mind should be linked into the agent home"
     );
 }
 

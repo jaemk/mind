@@ -137,14 +137,67 @@
     <div class="hero-copy">
       <h1 class="title">mind</h1>
       <p class="tagline">
-        A manager for agent tooling. <strong>Meld</strong> arbitrary git repos and
-        <strong>link</strong> the skills, agents, rules, and tools they offer into
-        one or more agent homes.
+        <strong>Meld</strong> a git <strong>source</strong> and <strong>learn</strong>
+        its skills, agents, rules, and tools. Manage installation and upgrades
+        across all of your agent homes.
       </p>
 
-      <div class="cmd" id="install">
-        <code><span class="prompt">$</span> mind meld jaemk/agents &amp;&amp; mind learn review</code>
-        <button class="copy" type="button" aria-label="Copy install command" data-copy="mind meld jaemk/agents &amp;&amp; mind learn review">Copy</button>
+      <div class="cmds">
+        <div class="cmd" id="install">
+          <code><span class="prompt">$</span> mind meld jaemk/mind</code>
+          <button class="copy" type="button" aria-label="Copy install command" data-copy="mind meld jaemk/mind">Copy</button>
+        </div>
+
+        <div class="then"><span>then, in a Claude session</span></div>
+
+        <div class="cmd cmd-session" id="invoke">
+          <!-- Pixel-blocky Claude spark, tucked top-left like the Claude Code UI. -->
+          <div class="session-top">
+            <svg class="spark" viewBox="1 1 24 24" width="30" height="30" role="img" aria-label="Claude">
+              <defs>
+                <linearGradient id="sparkFill" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stop-color="#f0a07e" />
+                  <stop offset="100%" stop-color="#cf6a45" />
+                </linearGradient>
+              </defs>
+              <g class="px" fill="url(#sparkFill)">
+                <rect x="10.1" y="10.1" width="1.8" height="1.8" />
+                <rect x="12.1" y="10.1" width="1.8" height="1.8" />
+                <rect x="14.1" y="10.1" width="1.8" height="1.8" />
+                <rect x="10.1" y="12.1" width="1.8" height="1.8" />
+                <rect x="12.1" y="12.1" width="1.8" height="1.8" />
+                <rect x="14.1" y="12.1" width="1.8" height="1.8" />
+                <rect x="10.1" y="14.1" width="1.8" height="1.8" />
+                <rect x="12.1" y="14.1" width="1.8" height="1.8" />
+                <rect x="14.1" y="14.1" width="1.8" height="1.8" />
+                <rect x="12.1" y="8.1" width="1.8" height="1.8" />
+                <rect x="12.1" y="6.1" width="1.8" height="1.8" />
+                <rect x="12.1" y="4.1" width="1.8" height="1.8" />
+                <rect x="12.1" y="16.1" width="1.8" height="1.8" />
+                <rect x="12.1" y="18.1" width="1.8" height="1.8" />
+                <rect x="12.1" y="20.1" width="1.8" height="1.8" />
+                <rect x="16.1" y="12.1" width="1.8" height="1.8" />
+                <rect x="18.1" y="12.1" width="1.8" height="1.8" />
+                <rect x="20.1" y="12.1" width="1.8" height="1.8" />
+                <rect x="8.1" y="12.1" width="1.8" height="1.8" />
+                <rect x="6.1" y="12.1" width="1.8" height="1.8" />
+                <rect x="4.1" y="12.1" width="1.8" height="1.8" />
+                <rect x="16.1" y="8.1" width="1.8" height="1.8" />
+                <rect x="18.1" y="6.1" width="1.8" height="1.8" />
+                <rect x="8.1" y="8.1" width="1.8" height="1.8" />
+                <rect x="6.1" y="6.1" width="1.8" height="1.8" />
+                <rect x="16.1" y="16.1" width="1.8" height="1.8" />
+                <rect x="18.1" y="18.1" width="1.8" height="1.8" />
+                <rect x="8.1" y="16.1" width="1.8" height="1.8" />
+                <rect x="6.1" y="18.1" width="1.8" height="1.8" />
+              </g>
+            </svg>
+          </div>
+          <div class="session-line">
+            <code><span class="prompt prompt-claude">&gt;</span> /hello-mind</code>
+            <button class="copy" type="button" aria-label="Copy skill invocation" data-copy="/hello-mind">Copy</button>
+          </div>
+        </div>
       </div>
 
       <div class="cta">
@@ -160,21 +213,21 @@
 
   <section class="features">
     <article class="card">
-      <h3>Meld any repo</h3>
-      <p>Zero-config discovery finds skills, agents, rules, and tools by
-         convention in any git repo. A <code>mind.toml</code> is optional enrichment,
-         never a gate.</p>
+      <h3>Meld</h3>
+      <p>Zero-config discovery finds skills, agents, rules, and tools in any
+         git repo. A <code>mind.toml</code> is optional, enabling
+         advanced features.</p>
     </article>
     <article class="card">
-      <h3>Link into lobes</h3>
-      <p><code>learn</code> copies an item into the store and symlinks it into every
-         agent home. Transactional installs keep the old version until the new one
-         is proven.</p>
+      <h3>Learn</h3>
+      <p>A centralized installation-store manages symlinks across all of your
+         agent homes. <code>Learn</code> everything a source has to offer
+         or choose items piecemeal.</p>
     </article>
     <article class="card">
       <h3>Sync &amp; upgrade</h3>
-      <p><code>sync</code> and <code>upgrade</code> track each source and installed
-         item by stable identity, so a rename is seen as a rename, not an orphan.</p>
+      <p>Stay in sync with your melded sources, and track the installation state
+         and availability of upgrades on an individual item level.</p>
     </article>
   </section>
 

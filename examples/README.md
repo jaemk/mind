@@ -16,6 +16,8 @@ Simplest to most advanced:
 
 - [starter/](starter/) - zero-config: meld an unmodified repo, items found by
   convention. START HERE.
+- [hello/](hello/) - the `hello-mind` hello-world skill the repo-root
+  `mind.toml` exposes via `[source].roots`; what `mind meld jaemk/mind` offers.
 - [namespacing/](namespacing/) - prefix namespacing and `{{ns:}}` reference
   tokens for colliding item names.
 - [explicit/](explicit/) - an authoritative `[[items]]` inventory with a custom
