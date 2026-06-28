@@ -1090,7 +1090,9 @@ mod tests {
     #[test]
     fn is_auth_failure_matches_http_basic_access_denied() {
         // spec: DSC-68 -- GitLab credential failure
-        let err = git_err("remote: HTTP Basic: Access denied. The provided password or token is incorrect.");
+        let err = git_err(
+            "remote: HTTP Basic: Access denied. The provided password or token is incorrect.",
+        );
         assert!(
             is_auth_failure(&err),
             "HTTP Basic: Access denied must match"

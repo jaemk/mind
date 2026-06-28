@@ -687,12 +687,19 @@ impl App {
                 let description = if dependents.is_empty() {
                     format!("Forget (uninstall) {}?", item.key)
                 } else {
-                    format!(
-                        "Forget (uninstall) {}? {} installed item(s) depend on it: {}",
-                        item.key,
-                        dependents.len(),
-                        dependents.join(", ")
-                    )
+                    let count = dependents.len();
+                    let list = dependents.join(", ");
+                    if count == 1 {
+                        format!(
+                            "Forget (uninstall) {}? 1 installed item depends on it: {}",
+                            item.key, list
+                        )
+                    } else {
+                        format!(
+                            "Forget (uninstall) {}? {count} installed items depend on it: {}",
+                            item.key, list
+                        )
+                    }
                 };
                 vec![ItemAction {
                     kind: ActionKind::Forget {

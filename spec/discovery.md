@@ -76,6 +76,7 @@ sources = [
 # no mind.toml of its own). The array-of-tables form carries hooks:
 [[discover.sources]]
 source = "owner/unonboarded"
+on-auth-failure = { action = "skip", message = "..." } # optional; skip if auth fails (DSC-68)
 follow-branch = "main"           # pin directive for the nested source (DSC-41)
 roots = ["packages/agents"]      # scan roots for the nested source (DSC-50)
 [[discover.sources.hooks]]       # build hooks for the nested source (HOOK-50)
@@ -266,16 +267,19 @@ field lets the curator opt in to named handling.
   table with a required `action` key and an optional `message` key.
   `action` must be `"error"` or `"skip"`. `message`, when present, is a plain
   string shown to the user alongside the standard auth-failure line (DSC-69).
-  `mind` detects authentication failure by matching known credential-denial
-  patterns in the git subprocess stderr. Without `on-auth-failure`, an auth
-  failure is a generic git error (hard error, non-zero exit). Authentication
+  Without `on-auth-failure`, an auth failure is a generic git error (hard
+  error, non-zero exit). Authentication
   failure is detected by matching the following credential-denial patterns in
   the git subprocess stderr (case-insensitive): `authentication failed`,
   `permission denied (publickey)`, `could not read username`,
+  `could not read password`,
   `the requested url returned error: 401`,
   `the requested url returned error: 403`, `invalid username or password`,
-  `invalid credentials`, `fatal: unable to authenticate`. Patterns that
-  conflate access denial with a missing repository (e.g. `repository not
+  `invalid credentials`, `http basic: access denied`,
+  `fatal: unable to authenticate`. Detection depends on English-language git
+  stderr; under a non-English locale (`LANG`/`LC_ALL` not `en`), patterns may
+  not match and the entry degrades to the generic hard-error path. Patterns
+  that conflate access denial with a missing repository (e.g. `repository not
   found`) are intentionally excluded. The same handling applies during `sync`,
   which re-walks `[discover].sources` through the same path (DSC-57); a
   skipped nested source is warned and left unregistered, and
@@ -295,9 +299,14 @@ field lets the curator opt in to named handling.
   ```
 
 - `DSC-69` When `on-auth-failure` is set and auth fails, `mind` always prints
-  `"unable to meld source <source> due to authentication failure"`, with
+  `"unable to meld source <source> due to authentication failure"` (where
+  `<source>` is the parsed short name, the `name` field derived from
+  `parse_spec`, not the full URL or spec string the curator wrote), with
   `" (skipping)"` appended when `action` is `"skip"`. If `message` is set, it is
-  printed on the line immediately following. Under `"error"`, the message (if any)
+  printed on the line immediately following. Both the source name and the
+  curator `message` have ANSI escape sequences and non-printable control
+  characters stripped before display, preventing terminal injection from
+  curator-controlled content. Under `"error"`, the message (if any)
   is printed before the process exits non-zero. Under `--json`, skipped entries
   appear as objects in a `"skipped"` array on the outer mutation result, each
   object carrying `"source"` and `"reason": "auth_failure"`. No separate JSON
@@ -305,10 +314,9 @@ field lets the curator opt in to named handling.
   total, consistent with CLI-153.
 
 - `DSC-70` `on-auth-failure` governs only the direct clone failure of the entry
-  itself. An auth failure that originates in a transitive descendant (a source
-  nested within the entry's own `mind.toml` that the entry does not handle) is not
-  attributed to the entry; it propagates unchanged as a hard error regardless of
-  the entry's `on-auth-failure` setting. The implementation detects this by
-  checking whether the entry's source is already present in the registry when the
-  auth failure arrives: a registered entry cloned successfully, so the failure is
-  from a deeper level. The same scoping applies during `sync` re-walk.
+  itself; auth failures from transitive descendants (sources nested within the
+  entry's own `mind.toml`) propagate as hard errors regardless of the entry's
+  policy. The implementation detects descendant failures by checking whether the
+  entry's source is already present in the registry at the point the auth failure
+  arrives: a registered entry cloned successfully, so the failure originates from
+  a deeper level. The same scoping applies during `sync` re-walk.

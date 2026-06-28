@@ -2052,6 +2052,182 @@ fn on_auth_failure_descendant_failure_propagates() {
 }
 
 #[test]
+fn on_auth_failure_descendant_failure_propagates_during_sync() {
+    // spec: DSC-70
+    // The same scoping that prevents T's skip-on-A from absorbing B's auth
+    // failure at meld time must also hold during sync's re-walk.
+    //
+    // Setup: T declares A with on-auth-failure=skip. A initially has no
+    // mind.toml (so the first meld of T succeeds cleanly). After meld, A is
+    // updated to declare B via https:// with no on-auth-failure. The next sync
+    // re-walks A's mind.toml, finds B unregistered, attempts to clone B via
+    // https://, and hits the fake-git auth failure. Because A is already in the
+    // registry (it cloned OK), the code knows the failure came from a descendant
+    // and must propagate it hard -- T's skip policy for A must not absorb it.
+    let a = Sandbox::bare("source_a");
+    // A starts without mind.toml so the initial meld has no nested sources to clone.
+    let a_spec = a.source_spec();
+
+    let t = Sandbox::bare("super_t");
+    let toml = format!(
+        "[[discover.sources]]\nsource = \"{a_spec}\"\non-auth-failure = {{ action = \"skip\" }}\n"
+    );
+    t.write_and_commit("mind.toml", &toml);
+    let t_spec = t.source_spec();
+
+    // Initial meld without fake git: A is a local path with no nested sources;
+    // T and A are both registered successfully.
+    let rm = t.mind(&["meld", &t_spec]);
+    assert!(rm.success, "initial meld must succeed: {}", rm.stderr);
+    let sources_after_meld = t.mind(&["recall", "--sources"]).stdout;
+    assert!(
+        sources_after_meld.contains("source_a"),
+        "A must be registered after meld: {}",
+        sources_after_meld
+    );
+
+    // Now update A to declare B via https:// with no on-auth-failure.
+    // Because A is a linked source (local path, no pin), sync reads its live
+    // working tree, so this change is picked up without re-melding.
+    a.write_and_commit(
+        "mind.toml",
+        "[[discover.sources]]\nsource = \"https://example.com/owner/private-b\"\n",
+    );
+
+    // Sync with the fake git binary: when the re-walk finds B (https://) unregistered
+    // and tries to clone it, the fake git exits 128 (auth failure).
+    let fake_dir = fake_git_bin_dir(&t.base);
+    let new_path = prepend_path(&fake_dir);
+
+    let rs = t.mind_env(&["sync"], &[("PATH", &new_path)]);
+
+    // B's auth failure must propagate as a hard error; T's skip for A must not
+    // absorb it because A itself is already in the registry (it cloned OK).
+    assert!(
+        !rs.success,
+        "B's auth failure during sync re-walk must exit non-zero: stderr={}",
+        rs.stderr
+    );
+    // The "unable to meld source" line must NOT appear: that line is only
+    // printed when on-auth-failure is present, which it is not for B's entry.
+    // Its presence would indicate the sync incorrectly applied T's skip for A
+    // to B's failure.
+    assert!(
+        !rs.stderr.contains("unable to meld source"),
+        "B's failure must not be attributed to A via the DSC-69 message: {}",
+        rs.stderr
+    );
+}
+
+#[test]
+fn on_auth_failure_descendant_failure_propagates_during_sync_with_error_action() {
+    // spec: DSC-70
+    // Same descendant-scoping as on_auth_failure_descendant_failure_propagates_during_sync,
+    // but T declares A with action = "error" (with a distinctive message) instead
+    // of "skip". B (A's descendant, no policy) failing auth during the sync
+    // re-walk must propagate hard -- and crucially A's "error" policy must not
+    // fire, because A itself cloned fine. If A's policy were misapplied to B, the
+    // DSC-69 lines (including A's message) would be printed; they must not be.
+    let a = Sandbox::bare("source_a");
+    let a_spec = a.source_spec();
+
+    let t = Sandbox::bare("super_t");
+    let toml = format!(
+        "[[discover.sources]]\nsource = \"{a_spec}\"\non-auth-failure = {{ action = \"error\", message = \"A-LEVEL-CREDS-HINT\" }}\n"
+    );
+    t.write_and_commit("mind.toml", &toml);
+    let t_spec = t.source_spec();
+
+    // Initial meld without fake git: A is a local path with no nested sources.
+    let rm = t.mind(&["meld", &t_spec]);
+    assert!(rm.success, "initial meld must succeed: {}", rm.stderr);
+    assert!(
+        t.mind(&["recall", "--sources"]).stdout.contains("source_a"),
+        "A must be registered after meld"
+    );
+
+    // A now declares B via https:// with no on-auth-failure of its own.
+    a.write_and_commit(
+        "mind.toml",
+        "[[discover.sources]]\nsource = \"https://example.com/owner/private-b\"\n",
+    );
+
+    let fake_dir = fake_git_bin_dir(&t.base);
+    let new_path = prepend_path(&fake_dir);
+    let rs = t.mind_env(&["sync"], &[("PATH", &new_path)]);
+
+    // B's auth failure propagates as a hard error even though A's policy is
+    // "error" rather than "skip": the outcome is non-zero either way, but the
+    // failure must travel via B's generic error path, not A's policy.
+    assert!(
+        !rs.success,
+        "B's auth failure during sync re-walk must exit non-zero with A's error action: stderr={}",
+        rs.stderr
+    );
+    // A's policy must not fire for B: neither the DSC-69 line nor A's message.
+    assert!(
+        !rs.stderr.contains("unable to meld source"),
+        "B's failure must not be reported via A's DSC-69 auth-failure line: {}",
+        rs.stderr
+    );
+    assert!(
+        !rs.stderr.contains("A-LEVEL-CREDS-HINT"),
+        "A's curator message must not be printed for B's descendant failure: {}",
+        rs.stderr
+    );
+}
+
+#[test]
+fn on_auth_failure_descendant_failure_during_sync_json_is_well_formed() {
+    // spec: DSC-70
+    // Under sync --json, a descendant (B) auth failure that must propagate hard
+    // (it is not absorbed by A's skip policy) still exits non-zero, and the JSON
+    // channel stays well-formed: no partial success object is emitted on stdout,
+    // mirroring the meld error --json contract (stdout empty, diagnostics on
+    // stderr).
+    let a = Sandbox::bare("source_a");
+    let a_spec = a.source_spec();
+
+    let t = Sandbox::bare("super_t");
+    let toml = format!(
+        "[[discover.sources]]\nsource = \"{a_spec}\"\non-auth-failure = {{ action = \"skip\" }}\n"
+    );
+    t.write_and_commit("mind.toml", &toml);
+    let t_spec = t.source_spec();
+
+    let rm = t.mind(&["meld", &t_spec]);
+    assert!(rm.success, "initial meld must succeed: {}", rm.stderr);
+
+    a.write_and_commit(
+        "mind.toml",
+        "[[discover.sources]]\nsource = \"https://example.com/owner/private-b\"\n",
+    );
+
+    let fake_dir = fake_git_bin_dir(&t.base);
+    let new_path = prepend_path(&fake_dir);
+    let rs = t.mind_env(&["sync", "--json"], &[("PATH", &new_path)]);
+
+    assert!(
+        !rs.success,
+        "descendant failure under sync --json must exit non-zero: stderr={}",
+        rs.stderr
+    );
+    // The error path must not emit a partial JSON success object on stdout; if
+    // anything is emitted it must still be valid JSON.
+    let out = rs.stdout.trim();
+    if !out.is_empty() {
+        let _: serde_json::Value =
+            serde_json::from_str(out).expect("any sync --json stdout must be well-formed JSON");
+    }
+    // B's failure must not be misattributed to A's skip policy.
+    assert!(
+        !rs.stderr.contains("unable to meld source"),
+        "B's failure must not be reported via A's DSC-69 auth-failure line: {}",
+        rs.stderr
+    );
+}
+
+#[test]
 fn super_source_meld_is_cycle_safe() {
     // spec: DSC-38
     // aa and bb each list the other; melding aa must terminate.

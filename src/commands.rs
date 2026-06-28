@@ -798,10 +798,18 @@ fn strip_ansi(s: &str) -> String {
                 }
             }
             // Other escape forms or lone ESC: just drop ESC; next char proceeds normally.
-        } else if ('\x20'..='\x7e').contains(&c) || c > '\u{009f}' {
+        } else if (('\x20'..='\x7e').contains(&c) || c > '\u{009f}')
+            && !matches!(
+                c,
+                // Bidi-override code points: phishing/spoofing vectors.
+                '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+                // Line separator and paragraph separator.
+                | '\u{2028}' | '\u{2029}'
+            )
+        {
             result.push(c);
         }
-        // else: C0/DEL/C1 controls are dropped
+        // else: C0/DEL/C1 controls and blocked Unicode ranges are dropped
     }
     result
 }
@@ -827,7 +835,6 @@ fn auth_failure_lines(entry_name: &str, cfg: &crate::mindfile::OnAuthFailure) ->
     }
     lines
 }
-
 
 /// Warn when a namespaced source references siblings in bare prose, which
 /// prefixing will break unless rewritten as `{{ns:name}}` tokens. Scans every
@@ -4747,6 +4754,104 @@ mod tests {
             !lines[1].contains('\x1b'),
             "ANSI escape must be stripped: {:?}",
             lines[1]
+        );
+    }
+
+    #[test]
+    fn strip_ansi_drops_bidi_and_separator_chars() {
+        // spec: DSC-69 -- bidi-override code points and line/paragraph separators
+        // are dropped so a curator-controlled message cannot spoof terminal output.
+
+        // U+202E (RIGHT-TO-LEFT OVERRIDE) is the canonical bidi-spoof char.
+        assert_eq!(
+            strip_ansi("pay \u{202E}oot"),
+            "pay oot",
+            "RLO must be dropped"
+        );
+        // Full blocked range U+202A-U+202E.
+        assert_eq!(
+            strip_ansi("\u{202A}\u{202B}\u{202C}\u{202D}\u{202E}"),
+            "",
+            "bidi U+202A-202E must all be dropped"
+        );
+        // Full blocked range U+2066-U+2069.
+        assert_eq!(
+            strip_ansi("\u{2066}\u{2067}\u{2068}\u{2069}"),
+            "",
+            "isolate U+2066-2069 must all be dropped"
+        );
+        // U+2028 (LINE SEPARATOR) and U+2029 (PARAGRAPH SEPARATOR).
+        assert_eq!(
+            strip_ansi("line\u{2028}break"),
+            "linebreak",
+            "U+2028 must be dropped"
+        );
+        assert_eq!(
+            strip_ansi("para\u{2029}sep"),
+            "parasep",
+            "U+2029 must be dropped"
+        );
+        // Plain ASCII and non-blocked Unicode are still passed through.
+        assert_eq!(strip_ansi("hello\u{00e9}"), "hello\u{00e9}");
+    }
+
+    #[test]
+    fn strip_ansi_preserves_chars_adjacent_to_blocked_ranges() {
+        // spec: DSC-69 -- the blocked sets are the exact ranges U+202A-U+202E,
+        // U+2066-U+2069, and the two separators U+2028/U+2029. Codepoints
+        // immediately adjacent to those ranges are legitimate text and must pass
+        // through; a widened range would be a regression that silently eats
+        // normal content.
+
+        // U+2027 (HYPHENATION POINT) sits just below the 2028/2029 separators.
+        assert_eq!(
+            strip_ansi("a\u{2027}b"),
+            "a\u{2027}b",
+            "U+2027 must pass through (below the separator block)"
+        );
+        // U+202F (NARROW NO-BREAK SPACE) sits just above the U+202A-202E block.
+        assert_eq!(
+            strip_ansi("a\u{202F}b"),
+            "a\u{202F}b",
+            "U+202F must pass through (above the bidi-override block)"
+        );
+        // U+2065 sits just below the U+2066-2069 isolate block.
+        assert_eq!(
+            strip_ansi("a\u{2065}b"),
+            "a\u{2065}b",
+            "U+2065 must pass through (below the isolate block)"
+        );
+        // U+206A sits just above the U+2066-2069 isolate block.
+        assert_eq!(
+            strip_ansi("a\u{206A}b"),
+            "a\u{206A}b",
+            "U+206A must pass through (above the isolate block)"
+        );
+    }
+
+    #[test]
+    fn strip_ansi_separator_at_every_position() {
+        // spec: DSC-69 -- a separator must be dropped regardless of where it
+        // appears: leading, interior, or trailing.
+        assert_eq!(strip_ansi("\u{2028}tail"), "tail", "leading U+2028");
+        assert_eq!(strip_ansi("mid\u{2028}dle"), "middle", "interior U+2028");
+        assert_eq!(strip_ansi("head\u{2028}"), "head", "trailing U+2028");
+        // A run consisting solely of separators collapses to empty.
+        assert_eq!(
+            strip_ansi("\u{2028}\u{2029}\u{2028}"),
+            "",
+            "only-separator run must be empty"
+        );
+    }
+
+    #[test]
+    fn strip_ansi_alternating_blocked_and_allowed() {
+        // spec: DSC-69 -- interleaving blocked codepoints with allowed text must
+        // drop only the blocked ones and keep the rest in order.
+        assert_eq!(
+            strip_ansi("a\u{202E}b\u{2066}c\u{2028}d\u{2069}e"),
+            "abcde",
+            "blocked chars removed, allowed text preserved in order"
         );
     }
 
