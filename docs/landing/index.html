@@ -143,12 +143,47 @@
       </p>
 
       <div class="cmds">
-        <div class="cmd" id="install">
-          <code><span class="prompt">$</span> mind meld jaemk/mind</code>
-          <button class="copy" type="button" aria-label="Copy install command" data-copy="mind meld jaemk/mind">Copy</button>
+        <div class="install" id="install">
+          <div class="tabs" role="tablist" aria-label="Install method">
+            <button class="tab is-active" type="button" role="tab" aria-selected="true" data-tab="brew">brew</button>
+            <button class="tab" type="button" role="tab" aria-selected="false" data-tab="curl">curl</button>
+            <button class="tab" type="button" role="tab" aria-selected="false" data-tab="github">GitHub</button>
+          </div>
+
+          <div class="panel is-active" role="tabpanel" data-panel="brew">
+            <div class="cmd cmd-multiline">
+              <code><span class="prompt">$</span> brew tap jaemk/mind https://github.com/jaemk/mind
+<span class="prompt">$</span> brew trust jaemk/mind
+<span class="prompt">$</span> brew install mind</code>
+              <button class="copy" type="button" aria-label="Copy Homebrew install commands" data-copy="brew tap jaemk/mind https://github.com/jaemk/mind
+brew trust jaemk/mind
+brew install mind">Copy</button>
+            </div>
+          </div>
+
+          <div class="panel" role="tabpanel" data-panel="curl" hidden>
+            <div class="cmd">
+              <code><span class="prompt">$</span> curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/jaemk/mind/main/resources/install.sh | sh</code>
+              <button class="copy" type="button" aria-label="Copy install script command" data-copy="curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/jaemk/mind/main/resources/install.sh | sh">Copy</button>
+            </div>
+          </div>
+
+          <div class="panel" role="tabpanel" data-panel="github" hidden>
+            <div class="cmd">
+              <code><span class="prompt">&#8599;</span> github.com/jaemk/mind/releases</code>
+              <a class="copy copy-link" href="https://github.com/jaemk/mind/releases" target="_blank" rel="noopener">Open</a>
+            </div>
+          </div>
         </div>
 
-        <div class="then"><span>then, in a Claude session</span></div>
+        <div class="then"><span>then, meld a source</span></div>
+
+        <div class="cmd" id="meld">
+          <code><span class="prompt">$</span> mind meld jaemk/mind</code>
+          <button class="copy" type="button" aria-label="Copy meld command" data-copy="mind meld jaemk/mind">Copy</button>
+        </div>
+
+        <div class="then"><span>then, in an agent session</span></div>
 
         <div class="cmd cmd-session" id="invoke">
           <!-- Pixel-blocky Claude spark, tucked top-left like the Claude Code UI. -->

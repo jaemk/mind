@@ -28,6 +28,27 @@ document.querySelectorAll(".copy").forEach((btn) => {
   });
 });
 
+// Install-method tabs: toggle the active tab and show its panel.
+document.querySelectorAll(".install").forEach((box) => {
+  const tabs = box.querySelectorAll(".tab");
+  const panels = box.querySelectorAll(".panel");
+  tabs.forEach((tab) => {
+    tab.addEventListener("click", () => {
+      const which = tab.getAttribute("data-tab");
+      tabs.forEach((t) => {
+        const on = t === tab;
+        t.classList.toggle("is-active", on);
+        t.setAttribute("aria-selected", on ? "true" : "false");
+      });
+      panels.forEach((p) => {
+        const on = p.getAttribute("data-panel") === which;
+        p.classList.toggle("is-active", on);
+        p.hidden = !on;
+      });
+    });
+  });
+});
+
 // Subtle pointer parallax on the brain. Skipped when the user prefers reduced
 // motion or on coarse (touch) pointers.
 const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
