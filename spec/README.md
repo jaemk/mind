@@ -88,6 +88,7 @@ and verified.
 | `[discover].sources` `install-items`: install only a named subset of a nested source | done | DSC-62, DSC-63, DSC-64 |
 | Pin/ref value validation at parse time + `--` terminator in git subcommands | done | DSC-66 |
 | auth failure handling for nested sources: `on-auth-failure = { action, message }` per entry | done | DSC-68, DSC-69 |
+| `on-auth-failure` scope: descendant auth failures are not attributed to the entry | done | DSC-70 |
 | TUI: keep the highlighted row in the middle two-thirds (scroll margin) | done | TUI-16 |
 | TUI: Enter opens a details dialog with the node's valid actions | done | TUI-26 |
 

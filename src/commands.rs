@@ -709,12 +709,19 @@ fn meld_recursive(
                 // DSC-68/DSC-69: an auth failure is governed by on-auth-failure
                 // when present; without it, it stays a generic git error.
                 Err(e) if git::is_auth_failure(&e) => {
-                    let Some(cfg) = &entry.on_auth_failure else {
-                        return Err(e);
-                    };
                     let entry_name = parse_spec(&entry.source)
                         .map(|s| s.name)
                         .unwrap_or_else(|_| entry.source.clone());
+                    // spec: DSC-70 -- on-auth-failure only covers the entry's own
+                    // clone failure. If the entry is already in the registry, it
+                    // cloned successfully and the failure came from a descendant;
+                    // propagate it unchanged so it is not misattributed to this entry.
+                    if registry.find(&entry_name).is_some() {
+                        return Err(e);
+                    }
+                    let Some(cfg) = &entry.on_auth_failure else {
+                        return Err(e);
+                    };
                     // spec: DSC-69 -- always warn to stderr regardless of --json mode;
                     // --json controls the outer result format, not warning visibility.
                     for line in auth_failure_lines(&entry_name, cfg) {
@@ -3159,12 +3166,19 @@ pub fn sync(paths: &Paths, then_upgrade: bool, dangerously_skip_hook_check: bool
             ) {
                 Ok(n) => discovered += n,
                 Err(e) if git::is_auth_failure(&e) => {
-                    let Some(cfg) = &todo.on_auth_failure else {
-                        return Err(e);
-                    };
                     let entry_name = parse_spec(&todo.spec)
                         .map(|s| s.name)
                         .unwrap_or_else(|_| todo.spec.clone());
+                    // spec: DSC-70 -- on-auth-failure only covers the entry's own
+                    // clone failure. If the entry is already in the registry, it
+                    // cloned successfully and the failure came from a descendant;
+                    // propagate it unchanged.
+                    if registry.find(&entry_name).is_some() {
+                        return Err(e);
+                    }
+                    let Some(cfg) = &todo.on_auth_failure else {
+                        return Err(e);
+                    };
                     // spec: DSC-69 -- always warn to stderr regardless of --json mode
                     for line in auth_failure_lines(&entry_name, cfg) {
                         eprintln!("{line}");

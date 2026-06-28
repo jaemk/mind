@@ -303,3 +303,12 @@ field lets the curator opt in to named handling.
   object carrying `"source"` and `"reason": "auth_failure"`. No separate JSON
   object is emitted per skipped source; the outer result is one JSON object
   total, consistent with CLI-153.
+
+- `DSC-70` `on-auth-failure` governs only the direct clone failure of the entry
+  itself. An auth failure that originates in a transitive descendant (a source
+  nested within the entry's own `mind.toml` that the entry does not handle) is not
+  attributed to the entry; it propagates unchanged as a hard error regardless of
+  the entry's `on-auth-failure` setting. The implementation detects this by
+  checking whether the entry's source is already present in the registry when the
+  auth failure arrives: a registered entry cloned successfully, so the failure is
+  from a deeper level. The same scoping applies during `sync` re-walk.

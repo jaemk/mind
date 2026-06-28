@@ -2005,6 +2005,53 @@ fn on_auth_failure_skip_sync_json_has_skipped_array() {
 }
 
 #[test]
+fn on_auth_failure_descendant_failure_propagates() {
+    // spec: DSC-70
+    // T declares A with on-auth-failure=skip; A declares B (no on-auth-failure).
+    // When B fails auth, the failure must propagate as a hard error from T's meld;
+    // T's skip policy for A must not fire because A itself cloned successfully.
+    let a = Sandbox::bare("source_a");
+    a.write_and_commit(
+        "mind.toml",
+        "[[discover.sources]]\nsource = \"https://example.com/owner/private-b\"\n",
+    );
+    let a_spec = a.source_spec();
+
+    let t = Sandbox::bare("super_t");
+    let toml = format!(
+        "[[discover.sources]]\nsource = \"{a_spec}\"\non-auth-failure = {{ action = \"skip\" }}\n"
+    );
+    t.write_and_commit("mind.toml", &toml);
+    let t_spec = t.source_spec();
+
+    let fake_dir = fake_git_bin_dir(&t.base);
+    let new_path = prepend_path(&fake_dir);
+
+    let r = t.mind_env(&["meld", &t_spec], &[("PATH", &new_path)]);
+
+    // B's auth failure propagates as a hard error; A's skip policy in T must not suppress it.
+    assert!(
+        !r.success,
+        "B's auth failure must exit non-zero, not be absorbed by A's on-auth-failure: stderr={}",
+        r.stderr
+    );
+    // The DSC-69 "unable to meld source" line must not appear: that would mean T
+    // misattributed B's failure to A and incorrectly applied A's skip policy.
+    assert!(
+        !r.stderr.contains("unable to meld source"),
+        "B's failure must not be reported as A's auth failure: {}",
+        r.stderr
+    );
+    // A is not persisted: the meld failed before registry.save() was reached.
+    let sources = t.mind(&["recall", "--sources"]);
+    assert!(
+        !sources.stdout.contains("source_a"),
+        "A must not remain registered after the failed meld: {}",
+        sources.stdout
+    );
+}
+
+#[test]
 fn super_source_meld_is_cycle_safe() {
     // spec: DSC-38
     // aa and bb each list the other; melding aa must terminate.
