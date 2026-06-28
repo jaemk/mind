@@ -1612,7 +1612,11 @@ fn fake_git_bin_dir(dir: &Path) -> PathBuf {
 /// Build a PATH string with `extra_dir` prepended to the current PATH.
 fn prepend_path(extra_dir: &Path) -> String {
     let current = std::env::var("PATH").unwrap_or_default();
-    format!("{}:{}", extra_dir.display(), current)
+    if current.is_empty() {
+        extra_dir.display().to_string()
+    } else {
+        format!("{}:{}", extra_dir.display(), current)
+    }
 }
 
 #[test]

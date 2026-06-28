@@ -61,22 +61,24 @@ pub fn validate_ref_value(value: &str) -> Result<()> {
 /// subprocess. Returns true when `err` is a [`MindError::Git`] whose stderr
 /// matches at least one known credential-denial pattern (case-insensitive).
 ///
-/// These patterns cover the common auth-failure messages from GitHub, GitLab,
-/// Bitbucket, and generic HTTP remotes over HTTPS and SSH.
+/// These patterns cover the common auth-failure messages from GitHub, GitLab
+/// (`HTTP Basic: Access denied`), Bitbucket, and generic HTTP/SSH remotes.
 pub fn is_auth_failure(err: &MindError) -> bool {
     // spec: DSC-68
     let stderr = match err {
-        MindError::Git { stderr, .. } => stderr.to_lowercase(),
+        MindError::Git { stderr, .. } => stderr.to_ascii_lowercase(),
         _ => return false,
     };
     const PATTERNS: &[&str] = &[
         "authentication failed",
         "permission denied (publickey)",
         "could not read username",
+        "could not read password",
         "the requested url returned error: 401",
         "the requested url returned error: 403",
         "invalid username or password",
         "invalid credentials",
+        "http basic: access denied",
         "fatal: unable to authenticate",
     ];
     PATTERNS.iter().any(|p| stderr.contains(p))
@@ -1074,6 +1076,25 @@ mod tests {
             "fatal: could not read Username for 'https://github.com': No such device or address",
         );
         assert!(is_auth_failure(&err), "could not read Username must match");
+    }
+
+    #[test]
+    fn is_auth_failure_matches_could_not_read_password() {
+        // spec: DSC-68 -- URL-embedded-username path under GIT_TERMINAL_PROMPT=0
+        let err = git_err(
+            "fatal: could not read Password for 'https://user@github.com': terminal prompts disabled",
+        );
+        assert!(is_auth_failure(&err), "could not read Password must match");
+    }
+
+    #[test]
+    fn is_auth_failure_matches_http_basic_access_denied() {
+        // spec: DSC-68 -- GitLab credential failure
+        let err = git_err("remote: HTTP Basic: Access denied. The provided password or token is incorrect.");
+        assert!(
+            is_auth_failure(&err),
+            "HTTP Basic: Access denied must match"
+        );
     }
 
     #[test]

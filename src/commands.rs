@@ -771,9 +771,11 @@ fn meld_recursive(
     Ok(added)
 }
 
-/// Strip ANSI CSI escape sequences and non-printable bytes from `s`.
-/// CSI sequences (`ESC [` params final-byte) are removed in full; other
-/// control characters (< 0x20 or > 0x7E) are dropped individually.
+/// Strip ANSI CSI escape sequences and control characters from `s`.
+/// CSI sequences (`ESC [` params final-byte) are removed in full; C0
+/// controls (< U+0020), DEL (U+007F), and C1 controls (U+0080–U+009F)
+/// are dropped individually. Printable non-ASCII (U+00A0 and above) is
+/// preserved so non-English curator messages are not corrupted.
 fn strip_ansi(s: &str) -> String {
     let mut result = String::new();
     let mut chars = s.chars().peekable();
@@ -789,10 +791,10 @@ fn strip_ansi(s: &str) -> String {
                 }
             }
             // Other escape forms or lone ESC: just drop ESC; next char proceeds normally.
-        } else if ('\x20'..='\x7e').contains(&c) {
+        } else if ('\x20'..='\x7e').contains(&c) || c > '\u{009f}' {
             result.push(c);
         }
-        // else: other control chars are dropped
+        // else: C0/DEL/C1 controls are dropped
     }
     result
 }
@@ -804,9 +806,10 @@ fn strip_ansi(s: &str) -> String {
 fn auth_failure_lines(entry_name: &str, cfg: &crate::mindfile::OnAuthFailure) -> Vec<String> {
     // spec: DSC-69
     let is_skip = cfg.action == AuthFailureAction::Skip;
+    let safe_name = strip_ansi(entry_name);
     let mut lines = vec![format!(
         "unable to meld source {} due to authentication failure{}",
-        entry_name,
+        safe_name,
         if is_skip { " (skipping)" } else { "" }
     )];
     if let Some(msg) = &cfg.message {
@@ -818,16 +821,6 @@ fn auth_failure_lines(entry_name: &str, cfg: &crate::mindfile::OnAuthFailure) ->
     lines
 }
 
-/// Build the structured value for one skipped-auth-failure entry, per DSC-69.
-/// Only used from unit tests; production embeds entries in MutationResult.skipped.
-#[cfg(test)]
-fn auth_failure_json(entry_name: &str) -> serde_json::Value {
-    // spec: DSC-69
-    serde_json::json!({
-        "source": entry_name,
-        "reason": "auth_failure"
-    })
-}
 
 /// Warn when a namespaced source references siblings in bare prose, which
 /// prefixing will break unless rewritten as `{{ns:name}}` tokens. Scans every
@@ -4497,7 +4490,6 @@ fn lobes_locked_error(action: &str) -> MindError {
     }
 }
 
-/// The structured result a mutating verb emits under `--json` (CLI-153). The
 /// A source entry that was skipped during meld or sync due to an auth failure
 /// with `on-auth-failure.action = "skip"` (DSC-68, DSC-69).
 #[derive(Serialize, Debug, PartialEq, Eq)]
@@ -4506,6 +4498,7 @@ struct SkippedEntry {
     reason: String,
 }
 
+/// The structured result a mutating verb emits under `--json` (CLI-153).
 /// `action` is the verb, `target` the item/source ref it acted on, and `outcome`
 /// a stable token (`installed|removed|melded|synced|upgraded|renamed|no-op|...`).
 /// Optional fields are only serialized when a verb genuinely returns more (e.g.
@@ -4721,18 +4714,6 @@ mod tests {
     }
 
     #[test]
-    fn auth_failure_json_has_correct_fields() {
-        // spec: DSC-69 -- skipped entry JSON has source/reason fields; no "status"
-        let val = auth_failure_json("owner/private-repo");
-        assert_eq!(val["source"], "owner/private-repo");
-        assert_eq!(val["reason"], "auth_failure");
-        assert!(
-            val.get("status").is_none(),
-            "status field must not be present in the new shape: {val}"
-        );
-    }
-
-    #[test]
     fn auth_failure_lines_strips_ansi_escape() {
         // spec: DSC-69 -- ANSI escape bytes in message are stripped before output
         use crate::mindfile::OnAuthFailure;
@@ -4742,7 +4723,7 @@ mod tests {
         };
         let lines = auth_failure_lines("src", &cfg);
         assert_eq!(lines.len(), 2);
-        // ANSI bytes are stripped; only printable ASCII remains.
+        // ANSI bytes are stripped; only printable characters remain.
         assert_eq!(
             lines[1], " hello",
             "expected printable portion only: {:?}",
