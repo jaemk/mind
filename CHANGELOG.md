@@ -6,6 +6,30 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-06-28
+
+### Added
+
+- A `[discover].sources` entry may carry `on-auth-failure`, an inline table with
+  a required `action` (`"error"` or `"skip"`) and an optional `message`, to
+  declare how a nested source's clone failure is handled when it is caused by an
+  authentication failure. `"skip"` warns and continues, leaving the source
+  unregistered; `"error"` exits non-zero with the standardized message. Auth
+  failure is detected from git stderr credential-denial patterns; the same
+  handling applies during `sync`, which re-walks `[discover].sources`. Without
+  the directive an auth failure stays a generic git error. The policy governs
+  only the entry's own clone; auth failures from transitive descendants
+  propagate as hard errors (DSC-68, DSC-69, DSC-70).
+
+### Changed
+
+- When forgetting a single installed item that other installed items depend on,
+  the TUI surfaces the dependent keys in the confirmation description before the
+  user confirms, mirroring the CLI's DEP-60 warning (TUI-52).
+- `strip_ansi` now uses the `strip-ansi-escapes` crate instead of a hand-rolled
+  parser, and additionally drops bidi-override and separator control characters,
+  hardening display of curator-controlled content against terminal injection.
+
 ## [0.7.0] - 2026-06-27
 
 ### Added
