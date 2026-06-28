@@ -34,6 +34,11 @@ const ALLOWLIST: &[&str] = &[
     // The statement is kept (marked removed) so the number is not reused; it has
     // no behavior and so no citing test.
     "INIT-8",
+    // Tombstone: the `private = true` flag was dropped before implementation in
+    // favor of the DSC-68 `on-auth-failure` inline-table form. The statement is
+    // kept (marked removed) so the number is not reused; it has no behavior and
+    // so no citing test.
+    "DSC-67",
     // Planned features (see spec/README.md feature status = planned): documented
     // with stable IDs ahead of implementation. Each must move to a citing test
     // when built, at which point it is removed from this allowlist.

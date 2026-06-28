@@ -57,6 +57,32 @@ pub fn validate_ref_value(value: &str) -> Result<()> {
     Ok(())
 }
 
+/// Detect whether a [`MindError`] is an authentication failure from a git
+/// subprocess. Returns true when `err` is a [`MindError::Git`] whose stderr
+/// matches at least one known credential-denial pattern (case-insensitive).
+///
+/// These patterns cover the common auth-failure messages from GitHub, GitLab,
+/// Bitbucket, and generic HTTP remotes over HTTPS and SSH.
+pub fn is_auth_failure(err: &MindError) -> bool {
+    // spec: DSC-68
+    let stderr = match err {
+        MindError::Git { stderr, .. } => stderr.to_lowercase(),
+        _ => return false,
+    };
+    const PATTERNS: &[&str] = &[
+        "authentication failed",
+        "permission denied (publickey)",
+        "could not read username",
+        "the requested url returned error: 401",
+        "the requested url returned error: 403",
+        "invalid username or password",
+        "repository not found",
+        "invalid credentials",
+        "fatal: unable to authenticate",
+    ];
+    PATTERNS.iter().any(|p| stderr.contains(p))
+}
+
 /// When set, every `git` child runs non-interactively: it never prompts on the
 /// controlling terminal for credentials, an SSH passphrase, or a host-key
 /// confirmation. The TUI turns this on while it owns the terminal so an
@@ -969,5 +995,122 @@ mod tests {
             .output()
             .unwrap();
         String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
+    // ---- DSC-68: is_auth_failure detection ----
+
+    /// Build a [`MindError::Git`] carrying `stderr`, for auth-detection tests.
+    fn git_err(stderr: &str) -> MindError {
+        MindError::Git {
+            url: "https://example.com/repo.git".into(),
+            args: vec!["clone".into()],
+            status: None,
+            stderr: stderr.into(),
+        }
+    }
+
+    #[test]
+    fn is_auth_failure_matches_authentication_failed() {
+        // spec: DSC-68
+        let err = git_err("fatal: Authentication failed for 'https://github.com/owner/private/'");
+        assert!(is_auth_failure(&err), "authentication failed must match");
+    }
+
+    #[test]
+    fn is_auth_failure_matches_permission_denied_publickey() {
+        // spec: DSC-68
+        let err = git_err("git@github.com: Permission denied (publickey).");
+        assert!(
+            is_auth_failure(&err),
+            "Permission denied (publickey) must match"
+        );
+    }
+
+    #[test]
+    fn is_auth_failure_matches_http_401() {
+        // spec: DSC-68
+        let err = git_err(
+            "fatal: unable to access 'https://example.com/private.git/': The requested URL returned error: 401",
+        );
+        assert!(is_auth_failure(&err), "401 error must match");
+    }
+
+    #[test]
+    fn is_auth_failure_matches_http_403() {
+        // spec: DSC-68
+        let err = git_err(
+            "fatal: unable to access 'https://example.com/private.git/': The requested URL returned error: 403",
+        );
+        assert!(is_auth_failure(&err), "403 error must match");
+    }
+
+    #[test]
+    fn is_auth_failure_matches_repository_not_found() {
+        // spec: DSC-68
+        let err = git_err("ERROR: Repository not found.");
+        assert!(is_auth_failure(&err), "Repository not found must match");
+    }
+
+    #[test]
+    fn is_auth_failure_matches_invalid_username_or_password() {
+        // spec: DSC-68
+        let err = git_err("remote: Invalid username or password.");
+        assert!(
+            is_auth_failure(&err),
+            "Invalid username or password must match"
+        );
+    }
+
+    #[test]
+    fn is_auth_failure_matches_could_not_read_username() {
+        // spec: DSC-68
+        let err = git_err(
+            "fatal: could not read Username for 'https://github.com': No such device or address",
+        );
+        assert!(is_auth_failure(&err), "could not read Username must match");
+    }
+
+    #[test]
+    fn is_auth_failure_matches_invalid_credentials() {
+        // spec: DSC-68
+        let err = git_err("Invalid credentials.");
+        assert!(is_auth_failure(&err), "invalid credentials must match");
+    }
+
+    #[test]
+    fn is_auth_failure_matches_unable_to_authenticate() {
+        // spec: DSC-68
+        let err = git_err("fatal: unable to authenticate");
+        assert!(is_auth_failure(&err), "unable to authenticate must match");
+    }
+
+    #[test]
+    fn is_auth_failure_does_not_match_network_error() {
+        // spec: DSC-68 -- a plain network failure is not an auth failure
+        let err = git_err("fatal: unable to connect to github.com: Connection refused");
+        assert!(
+            !is_auth_failure(&err),
+            "a network error must not match auth failure"
+        );
+    }
+
+    #[test]
+    fn is_auth_failure_does_not_match_non_git_error() {
+        // spec: DSC-68 -- a non-Git MindError is never an auth failure
+        let err = MindError::GitNotFound;
+        assert!(
+            !is_auth_failure(&err),
+            "GitNotFound must not be an auth failure"
+        );
+    }
+
+    #[test]
+    fn is_auth_failure_is_case_insensitive() {
+        // spec: DSC-68 -- pattern matching is case-insensitive
+        let err = git_err("AUTHENTICATION FAILED for something");
+        assert!(
+            is_auth_failure(&err),
+            "auth failure detection must be case-insensitive"
+        );
     }
 }

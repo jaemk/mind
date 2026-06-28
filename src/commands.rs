@@ -684,7 +684,7 @@ fn meld_recursive(
             };
             // Nested sources from a curated super-source get no consumer pin or
             // root override; the curator config (when applied) supplies them.
-            added += meld_recursive(
+            match meld_recursive(
                 paths,
                 registry,
                 &entry.source,
@@ -698,7 +698,36 @@ fn meld_recursive(
                 dangerously_skip_hook_check,
                 prefer_ssh, // nested sources inherit the SSH preference
                 Some(curated),
-            )?;
+            ) {
+                Ok(n) => added += n,
+                // DSC-68/DSC-69: an auth failure is governed by on-auth-failure
+                // when present; without it, it stays a generic git error.
+                Err(e) if git::is_auth_failure(&e) => {
+                    let Some(cfg) = &entry.on_auth_failure else {
+                        return Err(e);
+                    };
+                    let is_skip = cfg.action == "skip";
+                    let entry_name = parse_spec(&entry.source)
+                        .map(|s| s.name)
+                        .unwrap_or_else(|_| entry.source.clone());
+                    if out.json {
+                        if is_skip {
+                            print_json(&auth_failure_json(&entry_name))?;
+                        }
+                    } else {
+                        for line in auth_failure_lines(&entry_name, cfg) {
+                            eprintln!("{line}");
+                        }
+                    }
+                    if is_skip {
+                        // The source is not registered; its transitive chain is
+                        // unreachable and therefore also skipped.
+                        continue;
+                    }
+                    return Err(e);
+                }
+                Err(e) => return Err(e),
+            }
 
             // DSC-63: validate each install_items ref against the nested source's
             // offered bare names. A ref that names a non-existent item is an error
@@ -735,6 +764,34 @@ fn meld_recursive(
         }
     }
     Ok(added)
+}
+
+/// Build the human-readable lines for an auth failure of a nested source, per
+/// DSC-69. The first line is always the standard auth-failure line, with
+/// `" (skipping)"` appended under the `"skip"` action. When `message` is set it
+/// is the second line, shown immediately after.
+fn auth_failure_lines(entry_name: &str, cfg: &crate::mindfile::OnAuthFailure) -> Vec<String> {
+    // spec: DSC-69
+    let is_skip = cfg.action == "skip";
+    let mut lines = vec![format!(
+        "unable to meld source {} due to authentication failure{}",
+        entry_name,
+        if is_skip { " (skipping)" } else { "" }
+    )];
+    if let Some(msg) = &cfg.message {
+        lines.push(msg.clone());
+    }
+    lines
+}
+
+/// Build the structured `--json` value for a skipped auth failure, per DSC-69.
+fn auth_failure_json(entry_name: &str) -> serde_json::Value {
+    // spec: DSC-69
+    serde_json::json!({
+        "source": entry_name,
+        "status": "skipped",
+        "reason": "auth_failure"
+    })
 }
 
 /// Warn when a namespaced source references siblings in bare prose, which
@@ -4503,6 +4560,92 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    // ----- DSC-69: auth-failure message rendering -----
+
+    #[test]
+    fn auth_failure_skip_lines_no_message() {
+        // spec: DSC-69 -- skip action produces standard line + " (skipping)"
+        use crate::mindfile::OnAuthFailure;
+        let cfg = OnAuthFailure {
+            action: "skip".into(),
+            message: None,
+        };
+        let lines = auth_failure_lines("owner/private-repo", &cfg);
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].contains("unable to meld source owner/private-repo"),
+            "line: {}",
+            lines[0]
+        );
+        assert!(
+            lines[0].contains("(skipping)"),
+            "must include (skipping) for skip action: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn auth_failure_skip_lines_with_message() {
+        // spec: DSC-69 -- message is printed on the line immediately following
+        use crate::mindfile::OnAuthFailure;
+        let cfg = OnAuthFailure {
+            action: "skip".into(),
+            message: Some("Configure credentials: https://example.com/auth".into()),
+        };
+        let lines = auth_failure_lines("owner/private-repo", &cfg);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("(skipping)"), "first line: {}", lines[0]);
+        assert_eq!(lines[1], "Configure credentials: https://example.com/auth");
+    }
+
+    #[test]
+    fn auth_failure_error_lines_no_skipping_suffix() {
+        // spec: DSC-69 -- error action does NOT have " (skipping)" in the message
+        use crate::mindfile::OnAuthFailure;
+        let cfg = OnAuthFailure {
+            action: "error".into(),
+            message: None,
+        };
+        let lines = auth_failure_lines("owner/private-repo", &cfg);
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].contains("unable to meld source"),
+            "line: {}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains("(skipping)"),
+            "error action must NOT include (skipping): {}",
+            lines[0]
+        );
+    }
+
+    #[test]
+    fn auth_failure_error_lines_with_message_included() {
+        // spec: DSC-69 -- message is printed before the process exits non-zero
+        use crate::mindfile::OnAuthFailure;
+        let cfg = OnAuthFailure {
+            action: "error".into(),
+            message: Some("Contact admin for access.".into()),
+        };
+        let lines = auth_failure_lines("owner/private-repo", &cfg);
+        assert_eq!(lines.len(), 2);
+        assert!(
+            !lines[0].contains("(skipping)"),
+            "error action must NOT include (skipping)"
+        );
+        assert_eq!(lines[1], "Contact admin for access.");
+    }
+
+    #[test]
+    fn auth_failure_json_has_correct_fields() {
+        // spec: DSC-69 -- skipped entry JSON has status/reason fields
+        let val = auth_failure_json("owner/private-repo");
+        assert_eq!(val["source"], "owner/private-repo");
+        assert_eq!(val["status"], "skipped");
+        assert_eq!(val["reason"], "auth_failure");
+    }
 
     // CLI-153: the mutating-verb JSON result has the stable
     // action/target/outcome shape; optional fields appear only when populated.

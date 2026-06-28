@@ -251,3 +251,38 @@ subdirectories instead.
   the same kind and bare name within one source is an error (`DuplicateItem`),
   since an item's identity is `(source, kind, bare_name)` and the collision could
   not be installed unambiguously.
+
+## Authentication failure handling for nested sources
+
+A curator may list sources that require authentication (private GitHub repos,
+self-hosted forges). By default a git auth failure during meld or sync is a hard
+error indistinguishable from any other network error. The `on-auth-failure` entry
+field lets the curator opt in to named handling.
+
+- `DSC-67` *(removed: `private = true` flag was dropped before implementation in
+  favor of the inline-table form in DSC-68)*
+
+- `DSC-68` A `[discover].sources` entry may set `on-auth-failure` as an inline
+  table with a required `action` key and an optional `message` key.
+  `action` must be `"error"` or `"skip"`. `message`, when present, is a plain
+  string shown to the user alongside the standard auth-failure line (DSC-69).
+  `mind` detects authentication failure by matching known credential-denial
+  patterns in the git subprocess stderr. Without `on-auth-failure`, an auth
+  failure is a generic git error (hard error, non-zero exit). With it, the action
+  governs: `"error"` still exits non-zero; `"skip"` emits a warning and
+  continues. The source is not registered and any transitive chain reachable only
+  through it is also skipped.
+
+  ```toml
+  [[discover.sources]]
+  source = "owner/private-repo"
+  on-auth-failure = { action = "skip", message = "Configure credentials: https://example.com/auth" }
+  ```
+
+- `DSC-69` When `on-auth-failure` is set and auth fails, `mind` always prints
+  `"unable to meld source <source> due to authentication failure"`, with
+  `" (skipping)"` appended when `action` is `"skip"`. If `message` is set, it is
+  printed on the line immediately following. Under `"error"`, the message (if any)
+  is printed before the process exits non-zero. Under `--json`, a skipped entry
+  appears in the structured output with `"status": "skipped"` and
+  `"reason": "auth_failure"`.

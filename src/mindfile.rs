@@ -294,6 +294,18 @@ pub struct KindGlobs {
     pub exclude: Vec<String>,
 }
 
+/// Auth-failure policy for a nested source (DSC-68). When the nested source's
+/// clone fails with a credential-denial error, `action` (`"error"` or `"skip"`)
+/// governs whether `meld` exits non-zero or warns and continues, and `message`
+/// is an optional line shown to the user alongside the standard auth-failure line.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OnAuthFailure {
+    pub action: String,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
 /// A source referenced by a curated super-source.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -336,6 +348,11 @@ pub struct NestedSource {
     /// source-level `[[hooks]]` array.
     #[serde(default)]
     pub hooks: Vec<Hook>,
+    /// Auth failure policy for this nested source (DSC-68). When set and the
+    /// source's clone fails with credential-denial errors, `action` governs
+    /// whether to skip or error, and `message` is shown to the user.
+    #[serde(rename = "on-auth-failure", default)]
+    pub on_auth_failure: Option<OnAuthFailure>,
 }
 
 impl NestedSource {
@@ -357,6 +374,20 @@ impl NestedSource {
                     "nested source '{}': install = true and install-items are mutually exclusive; \
                      use install-items alone to offer a subset, or install = true to offer all",
                     self.source
+                ),
+            });
+        }
+
+        // DSC-68: on-auth-failure action must be "error" or "skip".
+        if let Some(cfg) = &self.on_auth_failure
+            && cfg.action != "error"
+            && cfg.action != "skip"
+        {
+            return Err(MindError::MindToml {
+                path: toml_path.to_path_buf(),
+                msg: format!(
+                    "nested source '{}': on-auth-failure action '{}' is not valid; expected 'error' or 'skip'",
+                    self.source, cfg.action
                 ),
             });
         }
@@ -1108,6 +1139,7 @@ mod tests {
             pin_ref: None,
             roots: None,
             hooks: vec![],
+            on_auth_failure: None,
         };
         assert_eq!(
             ns.pin_directive(Path::new("mind.toml")).expect("no error"),
@@ -1128,6 +1160,7 @@ mod tests {
             pin_ref: None,
             roots: None,
             hooks: vec![],
+            on_auth_failure: None,
         };
         assert!(
             ns.pin_directive(Path::new("mind.toml"))
@@ -1277,6 +1310,7 @@ mod tests {
                 optional: false,
                 event: None,
             }],
+            on_auth_failure: None,
         };
         let resolved = ns.resolved_hooks(Path::new("mind.toml")).expect("resolve");
         assert_eq!(resolved.len(), 1);
@@ -1299,6 +1333,7 @@ mod tests {
                 pin_ref: None,
                 roots: None,
                 hooks: vec![],
+                on_auth_failure: None,
             };
             match ns.pin_directive(Path::new("mind.toml")).expect("no error") {
                 Some(Pin::FollowBranch(b)) => assert_eq!(b, branch),
@@ -1480,6 +1515,7 @@ mod tests {
             pin_ref: None,
             roots: None,
             hooks: vec![],
+            on_auth_failure: None,
         };
         let toml_path = Path::new("/super/mind.toml");
         let err = ns.validate(toml_path).unwrap_err();
@@ -1514,6 +1550,7 @@ mod tests {
             pin_ref: None,
             roots: None,
             hooks: vec![],
+            on_auth_failure: None,
         };
         assert!(
             ns.validate(Path::new("mind.toml")).is_ok(),
@@ -1535,6 +1572,7 @@ mod tests {
             pin_ref: None,
             roots: None,
             hooks: vec![],
+            on_auth_failure: None,
         };
         assert!(
             ns.validate(Path::new("mind.toml")).is_ok(),
@@ -1726,6 +1764,7 @@ mod tests {
             pin_ref: None,
             roots: None,
             hooks: vec![],
+            on_auth_failure: None,
         };
         let err = ns.pin_directive(Path::new("mind.toml")).unwrap_err();
         assert!(
@@ -1747,6 +1786,7 @@ mod tests {
             pin_ref: None,
             roots: None,
             hooks: vec![],
+            on_auth_failure: None,
         };
         let err = ns.pin_directive(Path::new("mind.toml")).unwrap_err();
         assert!(
@@ -1768,6 +1808,7 @@ mod tests {
             pin_ref: Some("--depth=1".into()),
             roots: None,
             hooks: vec![],
+            on_auth_failure: None,
         };
         let err = ns.pin_directive(Path::new("mind.toml")).unwrap_err();
         assert!(
@@ -1789,6 +1830,7 @@ mod tests {
             pin_ref: None,
             roots: None,
             hooks: vec![],
+            on_auth_failure: None,
         };
         let err = ns.pin_directive(Path::new("mind.toml")).unwrap_err();
         assert!(
@@ -1810,6 +1852,7 @@ mod tests {
             pin_ref: Some("main..HEAD".into()),
             roots: None,
             hooks: vec![],
+            on_auth_failure: None,
         };
         let err = ns.pin_directive(Path::new("mind.toml")).unwrap_err();
         assert!(
@@ -1831,6 +1874,7 @@ mod tests {
             pin_ref: Some("cafebabecafebabecafebabecafebabecafebabe".into()),
             roots: None,
             hooks: vec![],
+            on_auth_failure: None,
         };
         assert!(
             ns.pin_directive(Path::new("mind.toml")).is_ok(),
@@ -1958,6 +2002,131 @@ mod tests {
             pin,
             Some(Pin::Ref(sha.into())),
             "pin-ref from dump output must round-trip as Pin::Ref"
+        );
+    }
+
+    // ----- DSC-68: on-auth-failure field on NestedSource -----
+
+    #[test]
+    fn on_auth_failure_skip_parses() {
+        // spec: DSC-68
+        let toml = r#"
+            [[discover.sources]]
+            source = "github:owner/private-repo"
+            on-auth-failure = { action = "skip" }
+        "#;
+        let parsed: MindToml = toml::from_str(toml).expect("parse");
+        let ns = &parsed.discover.as_ref().unwrap().sources[0];
+        let cfg = ns
+            .on_auth_failure
+            .as_ref()
+            .expect("on-auth-failure must be Some");
+        assert_eq!(cfg.action, "skip");
+        assert!(cfg.message.is_none());
+    }
+
+    #[test]
+    fn on_auth_failure_error_with_message_parses() {
+        // spec: DSC-68
+        let toml = r#"
+            [[discover.sources]]
+            source = "github:owner/private-repo"
+            on-auth-failure = { action = "error", message = "Configure credentials: https://example.com/auth" }
+        "#;
+        let parsed: MindToml = toml::from_str(toml).expect("parse");
+        let ns = &parsed.discover.as_ref().unwrap().sources[0];
+        let cfg = ns
+            .on_auth_failure
+            .as_ref()
+            .expect("on-auth-failure must be Some");
+        assert_eq!(cfg.action, "error");
+        assert_eq!(
+            cfg.message.as_deref(),
+            Some("Configure credentials: https://example.com/auth")
+        );
+    }
+
+    #[test]
+    fn on_auth_failure_absent_parses_to_none() {
+        // spec: DSC-68 -- without on-auth-failure, the field is absent
+        let toml = r#"
+            [[discover.sources]]
+            source = "github:owner/repo"
+        "#;
+        let parsed: MindToml = toml::from_str(toml).expect("parse");
+        let ns = &parsed.discover.as_ref().unwrap().sources[0];
+        assert!(
+            ns.on_auth_failure.is_none(),
+            "absent on-auth-failure must be None"
+        );
+    }
+
+    #[test]
+    fn on_auth_failure_unknown_action_is_mind_toml_error() {
+        // spec: DSC-68 -- action must be "error" or "skip"
+        let ns = NestedSource {
+            source: "github:owner/repo".into(),
+            alias: None,
+            install: false,
+            install_items: None,
+            follow_branch: None,
+            pin_tag: None,
+            pin_ref: None,
+            roots: None,
+            hooks: vec![],
+            on_auth_failure: Some(OnAuthFailure {
+                action: "warn".into(),
+                message: None,
+            }),
+        };
+        let toml_path = Path::new("/super/mind.toml");
+        let err = ns.validate(toml_path).unwrap_err();
+        match err {
+            MindError::MindToml { path, msg } => {
+                assert_eq!(path, toml_path);
+                assert!(msg.contains("warn"), "error must name the bad value: {msg}");
+                assert!(
+                    msg.contains("error") && msg.contains("skip"),
+                    "error must mention valid values: {msg}"
+                );
+            }
+            other => panic!("expected MindError::MindToml, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn on_auth_failure_unknown_field_in_inline_table_is_parse_error() {
+        // spec: DSC-68 -- unknown fields in on-auth-failure inline table are rejected
+        let toml = r#"
+            [[discover.sources]]
+            source = "github:owner/repo"
+            on-auth-failure = { action = "skip", typo-key = "x" }
+        "#;
+        let result: std::result::Result<MindToml, _> = toml::from_str(toml);
+        assert!(
+            result.is_err(),
+            "unknown field in on-auth-failure must be rejected"
+        );
+    }
+
+    #[test]
+    fn on_auth_failure_skip_with_message_parses() {
+        // spec: DSC-68 -- the example from the spec
+        let toml = r#"
+            [[discover.sources]]
+            source = "owner/private-repo"
+            on-auth-failure = { action = "skip", message = "Configure credentials: https://example.com/auth" }
+        "#;
+        let parsed: MindToml = toml::from_str(toml).expect("parse");
+        let ns = &parsed.discover.as_ref().unwrap().sources[0];
+        let cfg = ns
+            .on_auth_failure
+            .as_ref()
+            .expect("on-auth-failure must be Some");
+        assert_eq!(cfg.action, "skip");
+        assert_eq!(
+            cfg.message.as_deref(),
+            Some("Configure credentials: https://example.com/auth")
         );
     }
 }

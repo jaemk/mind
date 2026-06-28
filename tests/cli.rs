@@ -1524,6 +1524,62 @@ fn super_source_applies_nested_alias() {
 }
 
 #[test]
+fn on_auth_failure_field_accepted_in_super_source() {
+    // spec: DSC-68 -- on-auth-failure is a valid field on a nested source entry.
+    // No auth failure occurs here (the nested source is a reachable local repo),
+    // so the field is simply parsed: the meld must succeed and register the
+    // nested source, proving deny_unknown_fields accepts the schema.
+    let tools = Sandbox::named("tools");
+    let registry = Sandbox::bare("registry");
+    registry.write_and_commit(
+        "mind.toml",
+        &format!(
+            "[discover]\nsources = [{{ source = \"{}\", on-auth-failure = {{ action = \"skip\", message = \"Configure credentials: https://example.com/auth\" }} }}]\n",
+            tools.source_spec()
+        ),
+    );
+    let spec = registry.source_spec();
+    let r = registry.mind(&["meld", &spec]);
+    assert!(
+        r.success,
+        "meld of a super-source with on-auth-failure must succeed: {}",
+        r.stderr
+    );
+    // The nested source melded normally: its items are available and it is
+    // registered (no auth failure, so the policy never fires).
+    let probe = registry.mind(&["probe"]);
+    assert!(probe.stdout.contains("skill:review"), "{}", probe.stdout);
+    let sources = registry.mind(&["recall", "--sources"]);
+    assert!(sources.stdout.contains("tools"), "{}", sources.stdout);
+}
+
+#[test]
+fn on_auth_failure_invalid_action_rejected_in_super_source() {
+    // spec: DSC-68 -- an on-auth-failure action that is neither "error" nor
+    // "skip" is a MindToml error surfaced at meld time (NestedSource::validate).
+    let tools = Sandbox::named("tools");
+    let registry = Sandbox::bare("registry");
+    registry.write_and_commit(
+        "mind.toml",
+        &format!(
+            "[discover]\nsources = [{{ source = \"{}\", on-auth-failure = {{ action = \"warn\" }} }}]\n",
+            tools.source_spec()
+        ),
+    );
+    let spec = registry.source_spec();
+    let r = registry.mind(&["meld", &spec]);
+    assert!(
+        !r.success,
+        "an invalid on-auth-failure action must fail the meld"
+    );
+    assert!(
+        r.stderr.contains("on-auth-failure") || r.stderr.contains("expected 'error' or 'skip'"),
+        "error must explain the invalid action: {}",
+        r.stderr
+    );
+}
+
+#[test]
 fn super_source_meld_is_cycle_safe() {
     // spec: DSC-38
     // aa and bb each list the other; melding aa must terminate.
