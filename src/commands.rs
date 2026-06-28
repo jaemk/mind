@@ -12,6 +12,7 @@ use crate::git;
 use crate::hash::hash_path;
 use crate::install;
 use crate::manifest::Manifest;
+use crate::mindfile::AuthFailureAction;
 use crate::mindfile::HookEvent;
 use crate::mindfile::MindToml;
 use crate::paths::Paths;
@@ -59,6 +60,7 @@ pub fn meld(
     // Source names registered before this meld, to diff out the newly added ones
     // (the top-level source plus any nested chain) for DSC-55.
     let before: HashSet<String> = registry.sources.iter().map(|s| s.name.clone()).collect();
+    let mut meld_skipped: Vec<SkippedEntry> = Vec::new();
     let added = meld_recursive(
         paths,
         &mut registry,
@@ -73,6 +75,7 @@ pub fn meld(
         dangerously_skip_install_hook_check,
         prefer_ssh,
         None, // a top-level meld has no curator-supplied configuration
+        &mut meld_skipped,
     )?;
     let newly: Vec<String> = registry
         .sources
@@ -85,6 +88,7 @@ pub fn meld(
     if out.json {
         let mut result = MutationResult::new("meld", &source_name, "melded");
         result.count = Some(added);
+        result.skipped = meld_skipped;
         print_json(&result)?;
         return Ok(newly);
     }
@@ -357,6 +361,7 @@ fn meld_recursive(
     dangerously_skip_hook_check: bool,
     prefer_ssh: bool,
     curated: Option<CuratedConfig>,
+    skipped: &mut Vec<SkippedEntry>,
 ) -> Result<usize> {
     let out = crate::render::ctx();
     let mut source = parse_spec(repo)?;
@@ -698,6 +703,7 @@ fn meld_recursive(
                 dangerously_skip_hook_check,
                 prefer_ssh, // nested sources inherit the SSH preference
                 Some(curated),
+                skipped,
             ) {
                 Ok(n) => added += n,
                 // DSC-68/DSC-69: an auth failure is governed by on-auth-failure
@@ -706,20 +712,19 @@ fn meld_recursive(
                     let Some(cfg) = &entry.on_auth_failure else {
                         return Err(e);
                     };
-                    let is_skip = cfg.action == "skip";
                     let entry_name = parse_spec(&entry.source)
                         .map(|s| s.name)
                         .unwrap_or_else(|_| entry.source.clone());
-                    if out.json {
-                        if is_skip {
-                            print_json(&auth_failure_json(&entry_name))?;
-                        }
-                    } else {
-                        for line in auth_failure_lines(&entry_name, cfg) {
-                            eprintln!("{line}");
-                        }
+                    // spec: DSC-69 -- always warn to stderr regardless of --json mode;
+                    // --json controls the outer result format, not warning visibility.
+                    for line in auth_failure_lines(&entry_name, cfg) {
+                        eprintln!("{line}");
                     }
-                    if is_skip {
+                    if cfg.action == AuthFailureAction::Skip {
+                        skipped.push(SkippedEntry {
+                            source: entry_name,
+                            reason: "auth_failure".into(),
+                        });
                         // The source is not registered; its transitive chain is
                         // unreachable and therefore also skipped.
                         continue;
@@ -766,30 +771,60 @@ fn meld_recursive(
     Ok(added)
 }
 
+/// Strip ANSI CSI escape sequences and non-printable bytes from `s`.
+/// CSI sequences (`ESC [` params final-byte) are removed in full; other
+/// control characters (< 0x20 or > 0x7E) are dropped individually.
+fn strip_ansi(s: &str) -> String {
+    let mut result = String::new();
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            if chars.peek() == Some(&'[') {
+                chars.next(); // consume '['
+                // Consume parameter/intermediate bytes, then the final byte.
+                for p in chars.by_ref() {
+                    if ('\x40'..='\x7e').contains(&p) {
+                        break; // final byte consumed
+                    }
+                }
+            }
+            // Other escape forms or lone ESC: just drop ESC; next char proceeds normally.
+        } else if ('\x20'..='\x7e').contains(&c) {
+            result.push(c);
+        }
+        // else: other control chars are dropped
+    }
+    result
+}
+
 /// Build the human-readable lines for an auth failure of a nested source, per
 /// DSC-69. The first line is always the standard auth-failure line, with
 /// `" (skipping)"` appended under the `"skip"` action. When `message` is set it
 /// is the second line, shown immediately after.
 fn auth_failure_lines(entry_name: &str, cfg: &crate::mindfile::OnAuthFailure) -> Vec<String> {
     // spec: DSC-69
-    let is_skip = cfg.action == "skip";
+    let is_skip = cfg.action == AuthFailureAction::Skip;
     let mut lines = vec![format!(
         "unable to meld source {} due to authentication failure{}",
         entry_name,
         if is_skip { " (skipping)" } else { "" }
     )];
     if let Some(msg) = &cfg.message {
-        lines.push(msg.clone());
+        // spec: DSC-69 -- strip ANSI escape sequences and non-printable bytes so
+        // a malicious curator message cannot corrupt the terminal.
+        let safe_msg = strip_ansi(msg);
+        lines.push(safe_msg);
     }
     lines
 }
 
-/// Build the structured `--json` value for a skipped auth failure, per DSC-69.
+/// Build the structured value for one skipped-auth-failure entry, per DSC-69.
+/// Only used from unit tests; production embeds entries in MutationResult.skipped.
+#[cfg(test)]
 fn auth_failure_json(entry_name: &str) -> serde_json::Value {
     // spec: DSC-69
     serde_json::json!({
         "source": entry_name,
-        "status": "skipped",
         "reason": "auth_failure"
     })
 }
@@ -2916,6 +2951,7 @@ pub fn sync(paths: &Paths, then_upgrade: bool, dangerously_skip_hook_check: bool
     // CLI-19: auto-meld honors the user's SSH preference too.
     let prefer_ssh = Config::load(paths)?.ssh;
     let mut registry = Registry::load(paths)?;
+    let mut sync_skipped: Vec<SkippedEntry> = Vec::new();
 
     // POL-32: provision the policy's auto-meld base set before syncing. Each entry
     // not already in the registry is melded at its declared pin; an entry already
@@ -2950,6 +2986,7 @@ pub fn sync(paths: &Paths, then_upgrade: bool, dangerously_skip_hook_check: bool
                 false, // auto-meld is non-TTY, so its hooks take the HOOK-22 skip path
                 prefer_ssh,
                 None, // auto-meld has no curator-supplied configuration
+                &mut sync_skipped,
             )?;
         }
         if provisioned > 0 {
@@ -3068,6 +3105,10 @@ pub fn sync(paths: &Paths, then_upgrade: bool, dangerously_skip_hook_check: bool
             spec: String,
             alias: Option<String>,
             curated: CuratedConfig,
+            /// Auth-failure policy for this entry (DSC-68). Carried so the re-walk
+            /// loop can handle auth failures the same way as meld (DSC-68 requires
+            /// the same behavior applies during sync).
+            on_auth_failure: Option<crate::mindfile::OnAuthFailure>,
         }
         let mut nested: Vec<NestedTodo> = Vec::new();
         for s in &registry.sources {
@@ -3089,6 +3130,7 @@ pub fn sync(paths: &Paths, then_upgrade: bool, dangerously_skip_hook_check: bool
                     spec: ns.source,
                     alias: ns.alias,
                     curated,
+                    on_auth_failure: ns.on_auth_failure,
                 });
             }
         }
@@ -3102,7 +3144,11 @@ pub fn sync(paths: &Paths, then_upgrade: bool, dangerously_skip_hook_check: bool
             {
                 continue;
             }
-            discovered += meld_recursive(
+            // spec: DSC-68 -- auth failures during the sync re-walk honor
+            // on-auth-failure the same way as the nested-source loop in
+            // meld_recursive. Without on-auth-failure, the error propagates
+            // as a generic git error (hard failure).
+            match meld_recursive(
                 paths,
                 &mut registry,
                 &todo.spec,
@@ -3116,7 +3162,31 @@ pub fn sync(paths: &Paths, then_upgrade: bool, dangerously_skip_hook_check: bool
                 false, // sync is non-TTY: its hooks take the HOOK-22 skip path
                 prefer_ssh,
                 Some(todo.curated),
-            )?;
+                &mut sync_skipped,
+            ) {
+                Ok(n) => discovered += n,
+                Err(e) if git::is_auth_failure(&e) => {
+                    let Some(cfg) = &todo.on_auth_failure else {
+                        return Err(e);
+                    };
+                    let entry_name = parse_spec(&todo.spec)
+                        .map(|s| s.name)
+                        .unwrap_or_else(|_| todo.spec.clone());
+                    // spec: DSC-69 -- always warn to stderr regardless of --json mode
+                    for line in auth_failure_lines(&entry_name, cfg) {
+                        eprintln!("{line}");
+                    }
+                    if cfg.action == AuthFailureAction::Skip {
+                        sync_skipped.push(SkippedEntry {
+                            source: entry_name,
+                            reason: "auth_failure".into(),
+                        });
+                        continue;
+                    }
+                    return Err(e);
+                }
+                Err(e) => return Err(e),
+            }
         }
         if discovered > 0 {
             registry.save(paths)?;
@@ -3132,6 +3202,7 @@ pub fn sync(paths: &Paths, then_upgrade: bool, dangerously_skip_hook_check: bool
     if out.json {
         let mut result = MutationResult::new("sync", "", "synced");
         result.count = Some(synced);
+        result.skipped = sync_skipped;
         print_json(&result)?;
     }
     if then_upgrade {
@@ -4427,6 +4498,14 @@ fn lobes_locked_error(action: &str) -> MindError {
 }
 
 /// The structured result a mutating verb emits under `--json` (CLI-153). The
+/// A source entry that was skipped during meld or sync due to an auth failure
+/// with `on-auth-failure.action = "skip"` (DSC-68, DSC-69).
+#[derive(Serialize, Debug, PartialEq, Eq)]
+struct SkippedEntry {
+    source: String,
+    reason: String,
+}
+
 /// `action` is the verb, `target` the item/source ref it acted on, and `outcome`
 /// a stable token (`installed|removed|melded|synced|upgraded|renamed|no-op|...`).
 /// Optional fields are only serialized when a verb genuinely returns more (e.g.
@@ -4442,6 +4521,8 @@ struct MutationResult {
     installed: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     removed: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    skipped: Vec<SkippedEntry>,
 }
 
 impl MutationResult {
@@ -4454,6 +4535,7 @@ impl MutationResult {
             count: None,
             installed: Vec::new(),
             removed: Vec::new(),
+            skipped: Vec::new(),
         }
     }
 }
@@ -4568,7 +4650,7 @@ mod tests {
         // spec: DSC-69 -- skip action produces standard line + " (skipping)"
         use crate::mindfile::OnAuthFailure;
         let cfg = OnAuthFailure {
-            action: "skip".into(),
+            action: AuthFailureAction::Skip,
             message: None,
         };
         let lines = auth_failure_lines("owner/private-repo", &cfg);
@@ -4590,7 +4672,7 @@ mod tests {
         // spec: DSC-69 -- message is printed on the line immediately following
         use crate::mindfile::OnAuthFailure;
         let cfg = OnAuthFailure {
-            action: "skip".into(),
+            action: AuthFailureAction::Skip,
             message: Some("Configure credentials: https://example.com/auth".into()),
         };
         let lines = auth_failure_lines("owner/private-repo", &cfg);
@@ -4604,7 +4686,7 @@ mod tests {
         // spec: DSC-69 -- error action does NOT have " (skipping)" in the message
         use crate::mindfile::OnAuthFailure;
         let cfg = OnAuthFailure {
-            action: "error".into(),
+            action: AuthFailureAction::Error,
             message: None,
         };
         let lines = auth_failure_lines("owner/private-repo", &cfg);
@@ -4626,7 +4708,7 @@ mod tests {
         // spec: DSC-69 -- message is printed before the process exits non-zero
         use crate::mindfile::OnAuthFailure;
         let cfg = OnAuthFailure {
-            action: "error".into(),
+            action: AuthFailureAction::Error,
             message: Some("Contact admin for access.".into()),
         };
         let lines = auth_failure_lines("owner/private-repo", &cfg);
@@ -4640,11 +4722,37 @@ mod tests {
 
     #[test]
     fn auth_failure_json_has_correct_fields() {
-        // spec: DSC-69 -- skipped entry JSON has status/reason fields
+        // spec: DSC-69 -- skipped entry JSON has source/reason fields; no "status"
         let val = auth_failure_json("owner/private-repo");
         assert_eq!(val["source"], "owner/private-repo");
-        assert_eq!(val["status"], "skipped");
         assert_eq!(val["reason"], "auth_failure");
+        assert!(
+            val.get("status").is_none(),
+            "status field must not be present in the new shape: {val}"
+        );
+    }
+
+    #[test]
+    fn auth_failure_lines_strips_ansi_escape() {
+        // spec: DSC-69 -- ANSI escape bytes in message are stripped before output
+        use crate::mindfile::OnAuthFailure;
+        let cfg = OnAuthFailure {
+            action: AuthFailureAction::Skip,
+            message: Some("\x1b[2J hello\x1b[0m".into()),
+        };
+        let lines = auth_failure_lines("src", &cfg);
+        assert_eq!(lines.len(), 2);
+        // ANSI bytes are stripped; only printable ASCII remains.
+        assert_eq!(
+            lines[1], " hello",
+            "expected printable portion only: {:?}",
+            lines[1]
+        );
+        assert!(
+            !lines[1].contains('\x1b'),
+            "ANSI escape must be stripped: {:?}",
+            lines[1]
+        );
     }
 
     // CLI-153: the mutating-verb JSON result has the stable

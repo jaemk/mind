@@ -268,10 +268,25 @@ field lets the curator opt in to named handling.
   string shown to the user alongside the standard auth-failure line (DSC-69).
   `mind` detects authentication failure by matching known credential-denial
   patterns in the git subprocess stderr. Without `on-auth-failure`, an auth
-  failure is a generic git error (hard error, non-zero exit). With it, the action
-  governs: `"error"` still exits non-zero; `"skip"` emits a warning and
-  continues. The source is not registered and any transitive chain reachable only
-  through it is also skipped.
+  failure is a generic git error (hard error, non-zero exit). Authentication
+  failure is detected by matching the following credential-denial patterns in
+  the git subprocess stderr (case-insensitive): `authentication failed`,
+  `permission denied (publickey)`, `could not read username`,
+  `the requested url returned error: 401`,
+  `the requested url returned error: 403`, `invalid username or password`,
+  `invalid credentials`, `fatal: unable to authenticate`. Patterns that
+  conflate access denial with a missing repository (e.g. `repository not
+  found`) are intentionally excluded. The same handling applies during `sync`,
+  which re-walks `[discover].sources` through the same path (DSC-57); a
+  skipped nested source is warned and left unregistered, and
+  `action = "error"` fails the sync. Setting `action = "error"` vs. omitting
+  `on-auth-failure` entirely: both exit non-zero on auth failure, but
+  `"error"` uses the standardized DSC-69 message format and supports the
+  optional `message` field; omitting `on-auth-failure` produces a raw generic
+  git error with no custom message. With it, the action governs: `"error"`
+  still exits non-zero; `"skip"` emits a warning and continues. The source is
+  not registered and any transitive chain reachable only through it is also
+  skipped.
 
   ```toml
   [[discover.sources]]
@@ -283,6 +298,8 @@ field lets the curator opt in to named handling.
   `"unable to meld source <source> due to authentication failure"`, with
   `" (skipping)"` appended when `action` is `"skip"`. If `message` is set, it is
   printed on the line immediately following. Under `"error"`, the message (if any)
-  is printed before the process exits non-zero. Under `--json`, a skipped entry
-  appears in the structured output with `"status": "skipped"` and
-  `"reason": "auth_failure"`.
+  is printed before the process exits non-zero. Under `--json`, skipped entries
+  appear as objects in a `"skipped"` array on the outer mutation result, each
+  object carrying `"source"` and `"reason": "auth_failure"`. No separate JSON
+  object is emitted per skipped source; the outer result is one JSON object
+  total, consistent with CLI-153.

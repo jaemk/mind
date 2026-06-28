@@ -76,7 +76,6 @@ pub fn is_auth_failure(err: &MindError) -> bool {
         "the requested url returned error: 401",
         "the requested url returned error: 403",
         "invalid username or password",
-        "repository not found",
         "invalid credentials",
         "fatal: unable to authenticate",
     ];
@@ -1045,10 +1044,17 @@ mod tests {
     }
 
     #[test]
-    fn is_auth_failure_matches_repository_not_found() {
+    fn is_auth_failure_does_not_match_repository_not_found() {
         // spec: DSC-68
+        // "repository not found" is deliberately excluded: it conflates private
+        // repos (where the server hides existence behind a 404) with repos that
+        // are genuinely missing or have been deleted. Treating it as an auth
+        // failure would cause false prompts for repos that simply do not exist.
         let err = git_err("ERROR: Repository not found.");
-        assert!(is_auth_failure(&err), "Repository not found must match");
+        assert!(
+            !is_auth_failure(&err),
+            "Repository not found must not match"
+        );
     }
 
     #[test]

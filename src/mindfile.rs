@@ -294,6 +294,14 @@ pub struct KindGlobs {
     pub exclude: Vec<String>,
 }
 
+/// The action taken when a nested source's clone fails with an auth error (DSC-68).
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthFailureAction {
+    Skip,
+    Error,
+}
+
 /// Auth-failure policy for a nested source (DSC-68). When the nested source's
 /// clone fails with a credential-denial error, `action` (`"error"` or `"skip"`)
 /// governs whether `meld` exits non-zero or warns and continues, and `message`
@@ -301,7 +309,7 @@ pub struct KindGlobs {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OnAuthFailure {
-    pub action: String,
+    pub action: AuthFailureAction,
     #[serde(default)]
     pub message: Option<String>,
 }
@@ -374,20 +382,6 @@ impl NestedSource {
                     "nested source '{}': install = true and install-items are mutually exclusive; \
                      use install-items alone to offer a subset, or install = true to offer all",
                     self.source
-                ),
-            });
-        }
-
-        // DSC-68: on-auth-failure action must be "error" or "skip".
-        if let Some(cfg) = &self.on_auth_failure
-            && cfg.action != "error"
-            && cfg.action != "skip"
-        {
-            return Err(MindError::MindToml {
-                path: toml_path.to_path_buf(),
-                msg: format!(
-                    "nested source '{}': on-auth-failure action '{}' is not valid; expected 'error' or 'skip'",
-                    self.source, cfg.action
                 ),
             });
         }
@@ -2021,7 +2015,7 @@ mod tests {
             .on_auth_failure
             .as_ref()
             .expect("on-auth-failure must be Some");
-        assert_eq!(cfg.action, "skip");
+        assert_eq!(cfg.action, AuthFailureAction::Skip);
         assert!(cfg.message.is_none());
     }
 
@@ -2039,7 +2033,7 @@ mod tests {
             .on_auth_failure
             .as_ref()
             .expect("on-auth-failure must be Some");
-        assert_eq!(cfg.action, "error");
+        assert_eq!(cfg.action, AuthFailureAction::Error);
         assert_eq!(
             cfg.message.as_deref(),
             Some("Configure credentials: https://example.com/auth")
@@ -2063,7 +2057,28 @@ mod tests {
 
     #[test]
     fn on_auth_failure_unknown_action_is_mind_toml_error() {
-        // spec: DSC-68 -- action must be "error" or "skip"
+        // spec: DSC-68 -- serde rejects an unknown action variant at parse time;
+        // validate() is no longer the enforcement point now that action is a typed enum.
+        let toml = r#"
+            [[discover.sources]]
+            source = "github:owner/repo"
+            on-auth-failure = { action = "warn" }
+        "#;
+        let result: std::result::Result<MindToml, _> = toml::from_str(toml);
+        assert!(
+            result.is_err(),
+            "unknown on-auth-failure action must fail at parse time"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("warn") || err_msg.contains("error") || err_msg.contains("expected"),
+            "error must describe the invalid variant: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn on_auth_failure_validate_with_skip_returns_ok() {
+        // spec: DSC-68 -- a NestedSource with a well-formed on-auth-failure passes validate()
         let ns = NestedSource {
             source: "github:owner/repo".into(),
             alias: None,
@@ -2075,23 +2090,14 @@ mod tests {
             roots: None,
             hooks: vec![],
             on_auth_failure: Some(OnAuthFailure {
-                action: "warn".into(),
+                action: AuthFailureAction::Skip,
                 message: None,
             }),
         };
-        let toml_path = Path::new("/super/mind.toml");
-        let err = ns.validate(toml_path).unwrap_err();
-        match err {
-            MindError::MindToml { path, msg } => {
-                assert_eq!(path, toml_path);
-                assert!(msg.contains("warn"), "error must name the bad value: {msg}");
-                assert!(
-                    msg.contains("error") && msg.contains("skip"),
-                    "error must mention valid values: {msg}"
-                );
-            }
-            other => panic!("expected MindError::MindToml, got: {other:?}"),
-        }
+        assert!(
+            ns.validate(Path::new("mind.toml")).is_ok(),
+            "a valid on-auth-failure must not error from validate()"
+        );
     }
 
     #[test]
@@ -2123,7 +2129,7 @@ mod tests {
             .on_auth_failure
             .as_ref()
             .expect("on-auth-failure must be Some");
-        assert_eq!(cfg.action, "skip");
+        assert_eq!(cfg.action, AuthFailureAction::Skip);
         assert_eq!(
             cfg.message.as_deref(),
             Some("Configure credentials: https://example.com/auth")

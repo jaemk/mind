@@ -1556,7 +1556,8 @@ fn on_auth_failure_field_accepted_in_super_source() {
 #[test]
 fn on_auth_failure_invalid_action_rejected_in_super_source() {
     // spec: DSC-68 -- an on-auth-failure action that is neither "error" nor
-    // "skip" is a MindToml error surfaced at meld time (NestedSource::validate).
+    // "skip" is rejected by serde at mind.toml parse time (AuthFailureAction is
+    // a typed enum); the error surfaces as a TOML parse failure at meld time.
     let tools = Sandbox::named("tools");
     let registry = Sandbox::bare("registry");
     registry.write_and_commit(
@@ -1576,6 +1577,426 @@ fn on_auth_failure_invalid_action_rejected_in_super_source() {
         r.stderr.contains("on-auth-failure") || r.stderr.contains("expected 'error' or 'skip'"),
         "error must explain the invalid action: {}",
         r.stderr
+    );
+}
+
+/// Write a fake `git` script to `<dir>/bin/git` and return the bin dir path.
+/// The fake git exits non-zero with an auth-failure message whenever it is called
+/// with `clone` and the URL starts with `https://`. All other invocations are
+/// delegated to the real git.
+fn fake_git_bin_dir(dir: &Path) -> PathBuf {
+    // Resolve the real git once at test time.
+    let real_git = String::from_utf8(
+        std::process::Command::new("which")
+            .arg("git")
+            .output()
+            .expect("which git")
+            .stdout,
+    )
+    .expect("utf8")
+    .trim()
+    .to_string();
+
+    let bin_dir = dir.join("fake-git-bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let script = format!(
+        "#!/bin/sh\nif [ \"$1\" = \"clone\" ]; then\n  for a; do\n    case \"$a\" in\n      https://*)\n        echo \"fatal: Authentication failed for '$a'\" >&2\n        exit 128\n        ;;\n    esac\n  done\nfi\nexec \"{real_git}\" \"$@\"\n"
+    );
+    let script_path = bin_dir.join("git");
+    std::fs::write(&script_path, &script).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    bin_dir
+}
+
+/// Build a PATH string with `extra_dir` prepended to the current PATH.
+fn prepend_path(extra_dir: &Path) -> String {
+    let current = std::env::var("PATH").unwrap_or_default();
+    format!("{}:{}", extra_dir.display(), current)
+}
+
+#[test]
+fn on_auth_failure_skip_continues_meld() {
+    // spec: DSC-68, DSC-69
+    // A super-source with a nested entry whose clone fails with an auth error and
+    // action = "skip": the meld exits zero, the nested source is not registered,
+    // a warning is printed to stderr.
+    let registry = Sandbox::bare("registry");
+    let fake_dir = fake_git_bin_dir(&registry.base);
+    let new_path = prepend_path(&fake_dir);
+
+    registry.write_and_commit(
+        "mind.toml",
+        "[[discover.sources]]\nsource = \"https://example.com/owner/private-repo\"\non-auth-failure = { action = \"skip\" }\n",
+    );
+    let spec = registry.source_spec();
+
+    // Non-JSON mode: meld succeeds; nested source not registered; warning on stderr.
+    let r = registry.mind_env(&["meld", &spec], &[("PATH", &new_path)]);
+    assert!(
+        r.success,
+        "skip action must not abort meld: stderr={}",
+        r.stderr
+    );
+    let sources = registry.mind(&["recall", "--sources"]);
+    assert!(
+        !sources.stdout.contains("private-repo"),
+        "skipped source must not be registered: {}",
+        sources.stdout
+    );
+    assert!(
+        r.stderr.contains("unable to meld source") && r.stderr.contains("skipping"),
+        "auth failure warning must appear on stderr: {}",
+        r.stderr
+    );
+}
+
+#[test]
+fn on_auth_failure_skip_json_output_has_skipped_array() {
+    // spec: DSC-68, DSC-69
+    // Under --json, a skipped nested source appears in a "skipped" array on the
+    // single root object (one JSON output, not multiple).
+    let registry = Sandbox::bare("registry");
+    let fake_dir = fake_git_bin_dir(&registry.base);
+    let new_path = prepend_path(&fake_dir);
+
+    registry.write_and_commit(
+        "mind.toml",
+        "[[discover.sources]]\nsource = \"https://example.com/owner/private-repo\"\non-auth-failure = { action = \"skip\" }\n",
+    );
+    let spec = registry.source_spec();
+
+    let r = registry.mind_env(&["meld", &spec, "--json"], &[("PATH", &new_path)]);
+    assert!(
+        r.success,
+        "skip action --json must exit zero: stderr={}",
+        r.stderr
+    );
+    let v = parse_json(&r.stdout);
+    assert_eq!(v["action"], "meld", "action field: {}", r.stdout);
+    assert_eq!(v["outcome"], "melded", "outcome field: {}", r.stdout);
+    let skipped = v["skipped"].as_array().expect("skipped must be an array");
+    assert_eq!(skipped.len(), 1, "exactly one skipped entry: {}", r.stdout);
+    assert_eq!(
+        skipped[0]["reason"], "auth_failure",
+        "reason must be auth_failure: {}",
+        r.stdout
+    );
+    assert!(
+        skipped[0]["source"]
+            .as_str()
+            .unwrap_or("")
+            .contains("private-repo"),
+        "source must name the skipped repo: {}",
+        r.stdout
+    );
+    // Warning goes to stderr even under --json.
+    assert!(
+        r.stderr.contains("unable to meld source"),
+        "warning must appear on stderr under --json too: {}",
+        r.stderr
+    );
+}
+
+#[test]
+fn on_auth_failure_error_fails_meld() {
+    // spec: DSC-68, DSC-69
+    // action = "error": when the nested source clone fails with auth error, meld
+    // exits non-zero.
+    let registry = Sandbox::bare("registry");
+    let fake_dir = fake_git_bin_dir(&registry.base);
+    let new_path = prepend_path(&fake_dir);
+
+    registry.write_and_commit(
+        "mind.toml",
+        "[[discover.sources]]\nsource = \"https://example.com/owner/private-repo\"\non-auth-failure = { action = \"error\" }\n",
+    );
+    let spec = registry.source_spec();
+
+    let r = registry.mind_env(&["meld", &spec], &[("PATH", &new_path)]);
+    assert!(
+        !r.success,
+        "error action must cause non-zero exit: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+}
+
+#[test]
+fn on_auth_failure_error_prints_message() {
+    // spec: DSC-68, DSC-69
+    // action = "error" with message: the message and the standard auth-failure
+    // line appear on stderr, in both plain and --json modes.
+    let registry = Sandbox::bare("registry");
+    let fake_dir = fake_git_bin_dir(&registry.base);
+    let new_path = prepend_path(&fake_dir);
+
+    registry.write_and_commit(
+        "mind.toml",
+        "[[discover.sources]]\nsource = \"https://example.com/owner/private-repo\"\non-auth-failure = { action = \"error\", message = \"Configure credentials.\" }\n",
+    );
+    let spec = registry.source_spec();
+
+    // Plain mode.
+    let r = registry.mind_env(&["meld", &spec], &[("PATH", &new_path)]);
+    assert!(!r.success, "error action must fail: {}", r.stderr);
+    assert!(
+        r.stderr.contains("unable to meld source"),
+        "standard auth-failure line must appear: {}",
+        r.stderr
+    );
+    assert!(
+        r.stderr.contains("Configure credentials."),
+        "curator message must appear on stderr: {}",
+        r.stderr
+    );
+
+    // JSON mode: same stderr content (--json only affects stdout format).
+    let rj = registry.mind_env(&["meld", &spec, "--json"], &[("PATH", &new_path)]);
+    assert!(!rj.success, "error action --json must fail: {}", rj.stderr);
+    assert!(
+        rj.stderr.contains("unable to meld source"),
+        "standard auth-failure line must appear under --json: {}",
+        rj.stderr
+    );
+    assert!(
+        rj.stderr.contains("Configure credentials."),
+        "curator message must appear on stderr under --json: {}",
+        rj.stderr
+    );
+}
+
+#[test]
+fn on_auth_failure_error_json_stdout_is_empty() {
+    // spec: DSC-68, DSC-69
+    // action = "error" with --json: the process exits non-zero and emits
+    // nothing on stdout.  The error path must not emit a partial JSON success
+    // object; all diagnostic output goes to stderr.
+    let registry = Sandbox::bare("registry");
+    let fake_dir = fake_git_bin_dir(&registry.base);
+    let new_path = prepend_path(&fake_dir);
+
+    registry.write_and_commit(
+        "mind.toml",
+        "[[discover.sources]]\nsource = \"https://example.com/owner/private-repo\"\non-auth-failure = { action = \"error\" }\n",
+    );
+    let spec = registry.source_spec();
+
+    let r = registry.mind_env(&["meld", &spec, "--json"], &[("PATH", &new_path)]);
+    assert!(
+        !r.success,
+        "error action --json must exit non-zero: {}",
+        r.stderr
+    );
+    assert!(
+        r.stdout.trim().is_empty(),
+        "error path must produce no stdout; got: {:?}",
+        r.stdout
+    );
+    // The diagnostic still appears on stderr.
+    assert!(
+        r.stderr.contains("unable to meld source"),
+        "auth-failure warning must appear on stderr: {}",
+        r.stderr
+    );
+}
+
+#[test]
+fn on_auth_failure_absent_propagates_as_generic_error() {
+    // spec: DSC-68
+    // When a nested source fails auth and has NO on-auth-failure config, the
+    // error propagates as a generic git error (hard failure, non-zero exit).
+    // This is distinct from action = "error": no standardized DSC-69 message,
+    // just the raw git output.
+    let registry = Sandbox::bare("registry");
+    let fake_dir = fake_git_bin_dir(&registry.base);
+    let new_path = prepend_path(&fake_dir);
+
+    // No on-auth-failure field at all.
+    registry.write_and_commit(
+        "mind.toml",
+        "[[discover.sources]]\nsource = \"https://example.com/owner/unconfigured-private\"\n",
+    );
+    let spec = registry.source_spec();
+
+    let r = registry.mind_env(&["meld", &spec], &[("PATH", &new_path)]);
+    assert!(
+        !r.success,
+        "auth failure without on-auth-failure must fail: {}",
+        r.stderr
+    );
+    // The failure is the raw git error, NOT the structured DSC-69 message.
+    assert!(
+        !r.stderr.contains("unable to meld source"),
+        "no structured auth-failure message without on-auth-failure config: {}",
+        r.stderr
+    );
+}
+
+#[test]
+fn on_auth_failure_multiple_nested_sources_all_skipped() {
+    // spec: DSC-68, DSC-69
+    // A super-source with two nested entries that both fail auth with
+    // action = "skip": both are skipped, meld exits zero, and under --json
+    // the skipped array has two entries.  Uses separate sandbox instances for
+    // plain and JSON modes because a successful meld registers the source and
+    // a second meld of the same source would hit SourceExists.
+    let toml_body = "[[discover.sources]]\nsource = \"https://example.com/owner/private-one\"\non-auth-failure = { action = \"skip\" }\n\n[[discover.sources]]\nsource = \"https://example.com/owner/private-two\"\non-auth-failure = { action = \"skip\" }\n";
+
+    // Plain mode: exit zero, two auth-failure warnings on stderr.
+    {
+        let registry = Sandbox::bare("registry");
+        let fake_dir = fake_git_bin_dir(&registry.base);
+        let new_path = prepend_path(&fake_dir);
+        registry.write_and_commit("mind.toml", toml_body);
+        let spec = registry.source_spec();
+        let r = registry.mind_env(&["meld", &spec], &[("PATH", &new_path)]);
+        assert!(
+            r.success,
+            "two skipped nested sources must not abort meld: {}",
+            r.stderr
+        );
+        assert_eq!(
+            r.stderr.matches("unable to meld source").count(),
+            2,
+            "one warning per skipped source: {}",
+            r.stderr
+        );
+    }
+
+    // JSON mode: skipped array has exactly two entries, each with reason = "auth_failure".
+    {
+        let registry = Sandbox::bare("registry");
+        let fake_dir = fake_git_bin_dir(&registry.base);
+        let new_path = prepend_path(&fake_dir);
+        registry.write_and_commit("mind.toml", toml_body);
+        let spec = registry.source_spec();
+        let rj = registry.mind_env(&["meld", &spec, "--json"], &[("PATH", &new_path)]);
+        assert!(rj.success, "meld --json must succeed: {}", rj.stderr);
+        let v = parse_json(&rj.stdout);
+        let skipped = v["skipped"].as_array().expect("skipped must be an array");
+        assert_eq!(
+            skipped.len(),
+            2,
+            "two skipped sources must produce two skipped entries: {}",
+            rj.stdout
+        );
+        for entry in skipped {
+            assert_eq!(
+                entry["reason"], "auth_failure",
+                "each entry must have reason auth_failure: {}",
+                rj.stdout
+            );
+        }
+    }
+}
+
+#[test]
+fn on_auth_failure_skip_during_sync_rewalk() {
+    // spec: DSC-68, DSC-69
+    // During sync's DSC-57 re-walk, a nested source that was previously skipped
+    // (not registered) with action = "skip" is encountered again.  The sync
+    // must complete successfully, not fail hard.  This exercises the bug path
+    // where the sync re-walk loop did not carry on_auth_failure and let errors
+    // propagate via `?`.
+    let registry = Sandbox::bare("registry");
+    let fake_dir = fake_git_bin_dir(&registry.base);
+    let new_path = prepend_path(&fake_dir);
+
+    registry.write_and_commit(
+        "mind.toml",
+        "[[discover.sources]]\nsource = \"https://example.com/owner/private-repo\"\non-auth-failure = { action = \"skip\" }\n",
+    );
+    let spec = registry.source_spec();
+
+    // Initial meld: registry is registered; private-repo is skipped (auth fail).
+    let rm = registry.mind_env(&["meld", &spec], &[("PATH", &new_path)]);
+    assert!(rm.success, "initial meld must succeed: {}", rm.stderr);
+    let sources_after_meld = registry.mind(&["recall", "--sources"]).stdout;
+    assert!(
+        !sources_after_meld.contains("private-repo"),
+        "private-repo must not be registered after skipped initial meld: {}",
+        sources_after_meld
+    );
+
+    // sync: re-walks registry's mind.toml, finds private-repo not registered,
+    // tries to meld it, hits auth failure again.  With on-auth-failure = skip,
+    // sync must complete rather than failing hard.
+    let rs = registry.mind_env(&["sync"], &[("PATH", &new_path)]);
+    assert!(
+        rs.success,
+        "sync must complete when nested auth-failure has action=skip: stderr={}",
+        rs.stderr
+    );
+    // The nested source is still not registered (skip, not absorbed).
+    let sources_after_sync = registry.mind(&["recall", "--sources"]).stdout;
+    assert!(
+        !sources_after_sync.contains("private-repo"),
+        "skipped source must remain unregistered after sync: {}",
+        sources_after_sync
+    );
+    // The warning still appears on stderr.
+    assert!(
+        rs.stderr.contains("unable to meld source") && rs.stderr.contains("skipping"),
+        "auth-failure skip warning must appear on stderr during sync: {}",
+        rs.stderr
+    );
+}
+
+#[test]
+fn on_auth_failure_skip_sync_json_has_skipped_array() {
+    // spec: DSC-68, DSC-69
+    // Under sync --json, a skipped nested source (auth-fail, action=skip)
+    // discovered during the re-walk appears in the "skipped" array of the
+    // sync result object.
+    let registry = Sandbox::bare("registry");
+    let fake_dir = fake_git_bin_dir(&registry.base);
+    let new_path = prepend_path(&fake_dir);
+
+    registry.write_and_commit(
+        "mind.toml",
+        "[[discover.sources]]\nsource = \"https://example.com/owner/private-repo\"\non-auth-failure = { action = \"skip\" }\n",
+    );
+    let spec = registry.source_spec();
+
+    // Initial meld (non-JSON): establishes registry; private-repo is skipped.
+    let rm = registry.mind_env(&["meld", &spec], &[("PATH", &new_path)]);
+    assert!(rm.success, "initial meld must succeed: {}", rm.stderr);
+
+    // sync --json: skipped entry from the re-walk appears in the result.
+    let rs = registry.mind_env(&["sync", "--json"], &[("PATH", &new_path)]);
+    assert!(
+        rs.success,
+        "sync --json must exit zero with skip: {}",
+        rs.stderr
+    );
+    let v = parse_json(&rs.stdout);
+    assert_eq!(v["action"], "sync", "action field: {}", rs.stdout);
+    assert_eq!(v["outcome"], "synced", "outcome field: {}", rs.stdout);
+    let skipped = v["skipped"].as_array().expect("skipped must be an array");
+    assert_eq!(
+        skipped.len(),
+        1,
+        "one skipped entry in sync result: {}",
+        rs.stdout
+    );
+    assert_eq!(
+        skipped[0]["reason"], "auth_failure",
+        "reason must be auth_failure: {}",
+        rs.stdout
+    );
+    assert!(
+        skipped[0]["source"]
+            .as_str()
+            .unwrap_or("")
+            .contains("private-repo"),
+        "source must name the skipped repo: {}",
+        rs.stdout
+    );
+    // Warning still on stderr under --json.
+    assert!(
+        rs.stderr.contains("unable to meld source"),
+        "auth-failure warning must appear on stderr under sync --json: {}",
+        rs.stderr
     );
 }
 
