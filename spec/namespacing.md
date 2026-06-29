@@ -7,7 +7,11 @@ sources, and keeping intra-source references resolvable across a prefix.
 
 Two melded sources can each ship an item of the same name (both a `review`),
 which would collide at the same install path. A prefix namespaces a source so
-every item from it installs under `<prefix>-<name>`, keeping the two distinct.
+every item from it installs under `<prefix>:<name>`, keeping the two distinct.
+The separator is a colon, matching the harness's own namespace convention
+(`plugin:skill`). Because mind already uses `:` to separate a kind from a name in
+an item ref (`skill:review`), a prefix may not be a reserved kind word and the
+ref parser disambiguates the two readings (NS-25, NS-26).
 
 The prefix is an install-time transform, not part of an item's identity. The
 catalog holds bare names; the prefix is applied when an item is installed, so its
@@ -17,9 +21,9 @@ rename of the same item rather than a new one (see lifecycle.md).
 
 Prefixing breaks references between items in the same source: the Claude harness
 resolves agents and skills by the name in the text at runtime, so "the dev agent"
-no longer resolves once `dev` installs as `jk-dev`. Authors write such references
+no longer resolves once `dev` installs as `jk:dev`. Authors write such references
 as `{{ns:name}}` tokens instead. On install, each token is expanded to the
-referent's effective name (bare when unprefixed, `<prefix>-name` when prefixed)
+referent's effective name (bare when unprefixed, `<prefix>:name` when prefixed)
 and validated against the source's siblings. Expansion happens in the staging
 copy during the transactional install, so a bad reference fails before the live
 install is touched. The recorded content hash is of the source (token) form, not
@@ -44,11 +48,24 @@ The rest of this document states these rules normatively.
 
 - `NS-1` A source's effective prefix is, in order: its consumer `alias` (from
   `meld --as`), else its `mind.toml` `[source].prefix`, else none.
-- `NS-2` With prefix `p`, an item's effective name is `p-<bare>`; with no prefix
+- `NS-2` With prefix `p`, an item's effective name is `p:<bare>`; with no prefix
   it is the bare name. Prefixing applies to every item of every kind in the
   source.
 - `NS-3` The prefix is applied at install time, not stored in the catalog. The
   catalog and the stable identity `(source, kind, bare_name)` are prefix-free.
+- `NS-25` A prefix may not be a reserved kind word (`skill`, `agent`, `rule`,
+  `tool`). `meld --as <prefix>` and a `mind.toml` `[source].prefix` declaring
+  such a value are rejected, since the resulting `skill:foo` effective name would
+  be indistinguishable from a kind-qualified ref (NS-26).
+- `NS-26` An item ref's pre-colon token is read as a kind only when it is a
+  reserved kind word; otherwise the whole ref is an effective name. So
+  `jk:review` resolves by effective name while `skill:review` stays
+  kind-qualified. This keeps prefixed effective names usable as refs in
+  `forget`/`recall`/`upgrade` despite the shared `:` separator.
+- `NS-27` An item installed under the former `-` separator keeps its stable
+  identity `(source, kind, bare_name)`, so after the switch to `:` it is matched
+  by identity and `upgrade`/`introspect` report the move from `p-<bare>` to
+  `p:<bare>` as a rename (lifecycle.md), not as an orphan plus a new item.
 
 ## Reference tokens
 

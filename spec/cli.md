@@ -24,7 +24,9 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 
 - `CLI-1` An item ref is one of: `name`, `skill:name`, `agent:name`, `rule:name`,
   or `owner/repo#name` (source-qualified). `name` is the effective (installed)
-  name, so a namespaced item is referenced as `<prefix>-<bare>`.
+  name, so a namespaced item is referenced as `<prefix>:<bare>`. Because the same
+  `:` separates a kind from a name, the pre-colon token is read as a kind only
+  when it is a reserved kind word (NS-26).
 - `CLI-2` A bare `name` matches across kinds; a `kind:` prefix narrows to one kind.
 - `CLI-3` A ref that matches no catalog item is an error (`ItemNotFound`). A ref
   that matches more than one is an error (`AmbiguousItem`) listing the candidates.
@@ -113,9 +115,9 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 - `CLI-24` When a source declares `[source].prefix` and no `--as` was given, an
   interactive `meld` prompts whether to namespace its items under that prefix:
   accept it, type a different prefix, or choose none. The prompt previews the
-  resulting installed names under the declared prefix (e.g. `skill:jk-foo`) so the
+  resulting installed names under the declared prefix (e.g. `skill:jk:foo`) so the
   effect is visible before choosing. The choice becomes the source alias and
-  applies to the scan and the install (`<prefix>-<name>`). A non-interactive meld
+  applies to the scan and the install (`<prefix>:<name>`). A non-interactive meld
   accepts the declared prefix as-is. An empty alias (`--as ''` or the "no prefix"
   answer) explicitly overrides a declared prefix to none. A source that declares
   no prefix is not prompted.
