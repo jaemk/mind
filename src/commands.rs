@@ -39,6 +39,7 @@ pub fn meld(
     repo: &str,
     alias: Option<String>,
     roots: Vec<String>,
+    flat_skills: bool,
     follow_branch: Option<String>,
     pin_tag: Option<String>,
     pin_ref: Option<String>,
@@ -68,6 +69,7 @@ pub fn meld(
         repo,
         alias,
         roots,
+        flat_skills,
         consumer_pin,
         true,
         &mut visited,
@@ -313,6 +315,9 @@ struct CuratedConfig {
     /// The curator `roots`, if set (an explicit empty list is preserved).
     /// Gated by DSC-60: only applied when the nested source has no mind.toml.
     roots: Option<Vec<String>>,
+    /// The curator `flat-skills` (DSC-77). Gated by DSC-60: only applied when the
+    /// nested source has no mind.toml of its own.
+    flat_skills: bool,
     /// The curator `[[discover.sources.hooks]]`, resolved in declaration order.
     /// Gated by DSC-60: only applied when the nested source has no mind.toml.
     hooks: Vec<crate::mindfile::ResolvedHook>,
@@ -323,7 +328,7 @@ impl CuratedConfig {
     /// "ignored" warning is warranted when the nested source has its own
     /// `mind.toml`. The pin is NOT gated (DSC-65) and does NOT participate.
     fn has_gated_values(&self) -> bool {
-        self.roots.is_some() || !self.hooks.is_empty()
+        self.roots.is_some() || self.flat_skills || !self.hooks.is_empty()
     }
 }
 
@@ -348,6 +353,7 @@ fn meld_recursive(
     repo: &str,
     alias: Option<String>,
     roots: Vec<String>,
+    flat_skills: bool,
     consumer_pin: Option<Pin>,
     top_level: bool,
     visited: &mut HashSet<String>,
@@ -434,6 +440,7 @@ fn meld_recursive(
     let curated = curated.unwrap_or(CuratedConfig {
         pin: None,
         roots: None,
+        flat_skills: false,
         hooks: Vec::new(),
     });
     let apply_curated = mindfile.is_none();
@@ -443,7 +450,7 @@ fn meld_recursive(
         // spec: DSC-60 — warn only when gated fields (roots/hooks) are present
         // and suppressed. A pin-only entry must NOT trigger this warning.
         eprintln!(
-            "warning: {} ships its own mind.toml; curator-supplied roots/hooks are ignored",
+            "warning: {} ships its own mind.toml; curator-supplied roots/flat-skills/hooks are ignored",
             source.name
         );
     }
@@ -555,6 +562,29 @@ fn meld_recursive(
         // convention discovery just like a source's own [source].roots (DSC-50).
         // A gated source has no mind.toml, so it cannot be authoritative.
         source.roots = curated.roots.clone();
+    }
+
+    // Persist the consumer's --flat-skills override (STO-44, DSC-75), mirroring
+    // the --root handling above.
+    // DSC-76: if --flat-skills is given for an authoritative source, print a note
+    // (it affects convention discovery only).
+    if flat_skills {
+        if is_authoritative {
+            // spec: DSC-76
+            if !out.json {
+                println!(
+                    "note: {} uses an authoritative mind.toml; --flat-skills is ignored",
+                    source.name
+                );
+            }
+        } else {
+            source.flat_skills = true;
+        }
+    } else if apply_curated && curated.flat_skills {
+        // spec: DSC-77 / DSC-60 — with no consumer override, curator-supplied
+        // flat-skills governs convention discovery, applied only because the gated
+        // source has no mind.toml of its own (so it cannot be authoritative).
+        source.flat_skills = true;
     }
 
     // Scan before registering. If the source is rejected here (e.g. the
@@ -680,6 +710,7 @@ fn meld_recursive(
             let curated = CuratedConfig {
                 pin: entry.pin_directive(&toml_path)?,
                 roots: entry.roots.clone(),
+                flat_skills: entry.flat_skills,
                 hooks: entry.resolved_hooks(&toml_path)?,
             };
             // Nested sources from a curated super-source get no consumer pin or
@@ -690,6 +721,7 @@ fn meld_recursive(
                 &entry.source,
                 entry.alias.clone(),
                 vec![], // no consumer roots for nested sources
+                false,  // no consumer --flat-skills for nested sources (curator config supplies it)
                 None,   // no consumer pin for nested sources
                 false,
                 visited,
@@ -2637,6 +2669,7 @@ pub fn absorb(
             &dest_spec,
             None,
             vec![],
+            false,
             None,
             None,
             None,
@@ -3167,6 +3200,7 @@ pub fn sync(paths: &Paths, then_upgrade: bool, dangerously_skip_hook_check: bool
                 &am.repo,
                 None,
                 vec![],
+                false, // no consumer --flat-skills for an auto-melded source
                 Some(am.pin.clone()),
                 false, // skip (not error) if a same-URL entry is already present
                 &mut visited,
@@ -3313,6 +3347,7 @@ pub fn sync(paths: &Paths, then_upgrade: bool, dangerously_skip_hook_check: bool
                 let curated = CuratedConfig {
                     pin: ns.pin_directive(&toml_path)?,
                     roots: ns.roots.clone(),
+                    flat_skills: ns.flat_skills,
                     hooks: ns.resolved_hooks(&toml_path)?,
                 };
                 nested.push(NestedTodo {
@@ -3343,6 +3378,7 @@ pub fn sync(paths: &Paths, then_upgrade: bool, dangerously_skip_hook_check: bool
                 &todo.spec,
                 todo.alias,
                 vec![],
+                false, // no consumer --flat-skills on a sync re-walk (curator config supplies it)
                 None,
                 false,
                 &mut visited,

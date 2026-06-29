@@ -26,6 +26,14 @@ and the manifest are defined in [storage.md](storage.md).
   the pin resolved to the current commit (DUMP-1). `dump` references each source
   and does not inline its `[[items]]`, discovery globs, or hooks: those are read
   from each source's own `mind.toml` when the output is melded.
+- `DUMP-10` When a source carries the consumer `--flat-skills` override (STO-44),
+  `dump` emits `flat-skills = true` on that source's `[discover].sources` entry
+  (DSC-77), so melding the output reproduces the override. This mirrors DUMP-4
+  exactly: like `roots`, only the recorded consumer override is emitted, not the
+  source's own `[source].flat-skills` (which a source declaring its own flat layout
+  re-reads from its `mind.toml` when the output is re-melded, so emitting it here
+  would be redundant and would trip the DSC-60 gate on re-meld). A source without
+  the override emits no `flat-skills` key.
 - `DUMP-7` The emitted file is a valid super-source (it parses under DSC-3 and the
   strictness of DSC-30) that declares only `[discover].sources` and no items of its
   own, so melding it registers the chain and installs per the per-entry directive

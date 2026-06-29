@@ -52,6 +52,8 @@ description = "..."          # optional; shown by recall --sources
 prefix = "jk"                # optional; namespace (see namespacing.md)
 min-mind-version = "0.2"     # minimum mind version; enforced at scan/meld (DSC-40)
 roots = ["packages/tools"]   # optional; convention scan roots (DSC-50)
+flat-skills = true           # optional; skills are bare dirs at a root, no
+                             #   skills/ container (DSC-74)
 follow-branch = "main"       # optional; pin directive, one of
                              #   follow-branch / pin-tag / pin-ref (DSC-41)
 
@@ -79,6 +81,7 @@ source = "owner/unonboarded"
 on-auth-failure = { action = "skip", message = "..." } # optional; skip if auth fails (DSC-68)
 follow-branch = "main"           # pin directive for the nested source (DSC-41)
 roots = ["packages/agents"]      # scan roots for the nested source (DSC-50)
+flat-skills = true               # flat skill layout for the nested source (DSC-77)
 [[discover.sources.hooks]]       # build hooks for the nested source (HOOK-50)
 run = "make build"
 ```
@@ -161,7 +164,8 @@ run = "make build"
   nested source that the source itself would normally declare in its own
   `mind.toml`: a pin directive (exactly one of `follow-branch = "<branch>"`,
   `pin-tag = "<tag>"`, or `pin-ref = "<commit>"`, per DSC-41), `roots = [...]`
-  (convention scan roots, DSC-50), and one or more hooks as a
+  (convention scan roots, DSC-50), `flat-skills = true` (flat skill layout,
+  DSC-74; see DSC-77), and one or more hooks as a
   `[[discover.sources.hooks]]` array-of-tables (the `[[hooks]]` shape, HOOK-50).
   Declaring more than one pin directive on an entry is a `MindToml` error, the
   same one-of rule a `[source]` section follows (DSC-41). This lets a curator add
@@ -169,12 +173,13 @@ run = "make build"
   one with custom build requirements or a monorepo layout, without forking it,
   and lets a generated super-source pin each source to a reproducible revision
   (DSC-65, DUMP-1).
-- `DSC-60` The curator-supplied `roots` and `hooks` (DSC-59) apply only when the
-  nested source ships no `mind.toml` of its own. When the nested source has a
-  `mind.toml`, that file is authoritative for its roots and hooks and the
-  curator-supplied values are ignored (a warning is emitted, since the source has
-  onboarded). The gate is whole-file: a nested `mind.toml`, even one that does not
-  declare roots/hooks, suppresses both. The curator-supplied pin is NOT gated: it
+- `DSC-60` The curator-supplied `roots`, `flat-skills`, and `hooks` (DSC-59)
+  apply only when the nested source ships no `mind.toml` of its own. When the
+  nested source has a `mind.toml`, that file is authoritative for its roots,
+  flat-skills, and hooks and the curator-supplied values are ignored (a warning is
+  emitted, since the source has onboarded). The gate is whole-file: a nested
+  `mind.toml`, even one that does not declare roots/flat-skills/hooks, suppresses
+  all three. The curator-supplied pin is NOT gated: it
   is authoritative regardless of the nested `mind.toml` (DSC-65). `as` (DSC-39)
   and `install` (DSC-58) are registry/consumer concerns and are likewise
   unaffected by this gate; they always apply.
@@ -190,9 +195,9 @@ run = "make build"
 - `DSC-65` A pin directive on a `[discover].sources` entry (DSC-59) is
   authoritative: it sets the nested source's pin whether or not the source ships
   its own `mind.toml`, overriding the source's own `[source]` pin directive
-  (DSC-41). It is exempt from the DSC-60 fallback gate, which governs only `roots`
-  and `hooks`; a nested entry that supplies only a pin (no gated roots/hooks) does
-  not trigger the DSC-60 "ignored" warning. The precedence is: a consumer's direct
+  (DSC-41). It is exempt from the DSC-60 fallback gate, which governs only `roots`,
+  `flat-skills`, and `hooks`; a nested entry that supplies only a pin (no gated
+  roots/flat-skills/hooks) does not trigger the DSC-60 "ignored" warning. The precedence is: a consumer's direct
   top-level `meld` pin flag wins (DSC-41), then the entry's pin directive, then the
   source's own `[source]` pin directive, then the default branch. `dump` relies on
   this to reproduce each melded source at its recorded commit by emitting a
@@ -289,6 +294,58 @@ subdirectories instead.
   not be installed unambiguously. The same uniqueness check applies to explicit
   `[[items]]` declarations: two entries with the same kind and name in a
   `mind.toml` are a `DuplicateItem` error.
+
+## Flat skill layout
+
+By default a skill is a directory under a `skills/` container (DSC-10). A source
+whose skill directories sit directly at a scan root, with no `skills/` container,
+can opt into flat skill discovery instead of having to spell out a
+`[discover].skills` glob.
+
+- `DSC-74` `[source].flat-skills` is an optional boolean (default false). When
+  true, convention discovery finds a skill as a bare-name directory containing a
+  `SKILL.md` directly under a scan root (`<root>/<name>/SKILL.md`), taking the
+  directory name as the bare skill name, rather than requiring the `skills/`
+  container (DSC-10). The scan is shallow: only the immediate child directories of
+  each root are checked for a direct `SKILL.md`. It composes with `roots` (DSC-50):
+  with `roots` unset the single implicit root is the repo root, so flat discovery
+  scans `<repo>/*/SKILL.md`; with `roots` set it scans each listed root. Flat
+  discovery applies to the skill kind only: the `SKILL.md` anchor disambiguates a
+  skill directory from an arbitrary one, whereas agent and rule items are bare
+  `.md` files and tool directories carry no required anchor, so a bare directory at
+  a root cannot be classified for those kinds. Agent (`agents/`), rule (`rules/`),
+  and tool (`tools/`) discovery under each root is unchanged. False or unset is the
+  DSC-10 container behavior. Flat discovery changes only the discovered on-disk
+  path and the derived bare name; an item's stable identity, store path, and link
+  target are unchanged (a flat skill `<root>/foo/` installs and links identically
+  to a containered `skills/foo/`), so install, link, uninstall, drift, and the
+  `recall`/`probe` kind categorization (the item's `kind` is assigned at scan, not
+  inferred from its source path) need no layout-specific handling.
+- `DSC-75` `meld --flat-skills` force-enables flat skill discovery for the source:
+  it turns the flat layout on even for a source that did not declare
+  `[source].flat-skills`. The flag is one-directional (there is no
+  `--no-flat-skills`): the effective setting is the consumer override OR the
+  source's own `[source].flat-skills` (STO-44, DSC-74), so a consumer cannot
+  disable a source's declared flat layout (which would make its skills
+  undiscoverable). It is persisted on the source (STO-44) and applied by later
+  scans and `sync`. Like `--root` (DSC-51), it is set at the initial meld; a
+  re-meld of an already-registered source does not change the persisted value
+  (unmeld and meld again to change it). Like `roots`, it affects convention
+  discovery only.
+- `DSC-76` Flat skill discovery affects convention discovery only. An authoritative
+  `mind.toml` (one declaring `[[items]]` or `[discover]` item globs, DSC-3) keeps
+  its explicit paths and ignores `flat-skills`; if `--flat-skills` is passed for
+  such a source, `meld` prints a note that it is ignored (mirroring the DSC-52
+  treatment of `--root`).
+- `DSC-77` A `[discover].sources` entry may set `flat-skills = true` to declare
+  that a nested source uses the flat skill layout, alongside the other
+  curator-supplied configuration a source would normally declare in its own
+  `mind.toml` (`roots`, hooks, a pin; DSC-59). Like `roots` and hooks, it is
+  applied only when the nested source ships no `mind.toml` of its own; when the
+  nested source has a `mind.toml`, that file is authoritative and the
+  curator-supplied `flat-skills` is ignored with a warning (the DSC-60 gate). This
+  lets a curator adopt a flat-layout source that has not onboarded itself without
+  forking it.
 
 ## Authentication failure handling for nested sources
 

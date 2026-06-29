@@ -75,6 +75,13 @@ pub struct Source {
     /// None => use `[source].roots` from mind.toml, or the repo root.
     #[serde(default)]
     pub roots: Option<Vec<String>>,
+    /// Consumer `--flat-skills` override (STO-44, DSC-75): when true, convention
+    /// discovery finds skills as bare-name directories at each scan root (no
+    /// `skills/` container). Persisted at meld and not changed by sync. False (or
+    /// absent in older sources.json) means fall back to the source's own
+    /// `[source].flat-skills` or the `skills/` container (DSC-74).
+    #[serde(default)]
+    pub flat_skills: bool,
     /// The install hooks recorded for this source (HOOK-55). Supersedes the
     /// legacy single `install_hook`/`install_hook_commit` pair, which is
     /// migrated into this on load. Each entry records the command and the commit
@@ -262,6 +269,7 @@ fn make_source(host: &str, owner: &str, repo: &str, url: String) -> Source {
         alias: None,
         pin: Pin::default(),
         roots: None,
+        flat_skills: false,
         install_hooks: Vec::new(),
         install_hook: None,
         install_hook_commit: None,
@@ -495,6 +503,26 @@ mod tests {
             Pin::DefaultBranch,
             "absent pin should default to DefaultBranch"
         );
+    }
+
+    #[test]
+    fn flat_skills_round_trips_and_defaults_false() {
+        // spec: STO-44
+        // The consumer `--flat-skills` override persists on the source and
+        // round-trips; an older sources.json with no field deserializes as false.
+        let mut s = parse_spec("acme/tools").unwrap();
+        assert!(!s.flat_skills, "default must be false");
+        s.flat_skills = true;
+        let json = serde_json::to_string(&s).unwrap();
+        let back: Source = serde_json::from_str(&json).unwrap();
+        assert!(back.flat_skills, "flat_skills=true must round-trip");
+
+        // Absent in an older sources.json => false.
+        let legacy = r#"{
+            "name":"local/a/b","url":"/a/b","host":"local","owner":"a","repo":"b"
+        }"#;
+        let src: Source = serde_json::from_str(legacy).unwrap();
+        assert!(!src.flat_skills, "absent flat_skills must default to false");
     }
 
     #[test]

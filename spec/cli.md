@@ -5,7 +5,7 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 | command | role |
 |---------|------|
 | `probe [query] [-n\|--no-tui]` | interactive browser (default); catalog listing with `-n`/`--no-tui`/`--json` |
-| `meld [<repo>] [--link-only] [--yes] [--as <prefix>] [--root <dir>] [--follow-branch\|--pin-tag\|--pin-ref <ref>]` | connect a source (default `.`), then install its items |
+| `meld [<repo>] [--link-only] [--yes] [--as <prefix>] [--root <dir>] [--flat-skills] [--follow-branch\|--pin-tag\|--pin-ref <ref>]` | connect a source (default `.`), then install its items |
 | `init-source [<path>] [--template]` | scaffold `mind.toml` + detect references (maintainer) |
 | `unmeld <name\|glob> [--unlink-only] [--yes] [--uninstall-hook <cmd>] [--dangerously-skip-install-hook-check]` (alias: `detach`) | disconnect a source (or all sources matching a glob) and forget its items (`--unlink-only` keeps them) |
 | `learn <item> [--dangerously-skip-install-hook-check]` | install |
@@ -66,6 +66,14 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 - `CLI-16` `meld --root <dir>` (repeatable) sets the source's scan roots,
   overriding any `[source].roots` (DSC-51). The roots are persisted on the source
   (STO-17). A root that is not a directory in the clone is `InvalidRoot`.
+- `CLI-158` `meld --flat-skills` force-enables flat skill discovery for the
+  source: skills are bare-name directories at a scan root, with no `skills/`
+  container (DSC-74). The flag is one-directional (no `--no-flat-skills`): it turns
+  the layout on for a source that did not declare `[source].flat-skills`, but
+  cannot disable a source's declared flat layout (DSC-75). It applies to the skill
+  kind only; agent, rule, and tool discovery are unaffected. It is persisted on the
+  source (STO-44). For an authoritative `mind.toml` it is ignored with a note
+  (DSC-76).
 - `CLI-17` `meld` accepts at most one of `--follow-branch <branch>`,
   `--pin-tag <tag>`, `--pin-ref <commit>`; supplying more than one is
   `ConflictingPin`. The chosen pin is persisted on the source (STO-18). With none

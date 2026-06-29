@@ -67,6 +67,10 @@ The on-disk layout and the two persisted JSON files.
   (repo-root-relative directories, see DSC-51). Persisted at meld and not changed
   by `sync`. Absent means convention discovery uses `[source].roots` or the repo
   root (DSC-50).
+- `STO-44` A source records an optional `flat_skills` boolean: the consumer
+  `--flat-skills` override (see DSC-75). Persisted at meld and not changed by
+  `sync`. Absent or false means convention discovery uses `[source].flat-skills`
+  or the `skills/` container (DSC-74).
 - `STO-18` A source records its `pin`: the kind (`follow-branch` | `tag` | `ref`)
   and value (see DSC-41, CLI-17). Persisted at meld and not changed by `sync`. The
   implicit default when unset is `follow-branch` tracking the remote default

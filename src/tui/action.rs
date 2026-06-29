@@ -108,7 +108,18 @@ fn dispatch(paths: &Paths, kind: ActionKind) -> Result<()> {
         }
         // spec: TUI-21
         ActionKind::Meld { spec } => {
-            commands::meld(paths, &spec, None, vec![], None, None, None, None, false)?;
+            commands::meld(
+                paths,
+                &spec,
+                None,
+                vec![],
+                false,
+                None,
+                None,
+                None,
+                None,
+                false,
+            )?;
         }
         // spec: TUI-21
         // The TUI's `forget` toggle maps to the inverted `--unlink-only`; `yes =
@@ -526,8 +537,19 @@ mod tests {
         let src = make_source_repo(&base);
         let spec = src.to_str().unwrap().to_string();
         // First meld the source so there is something to unmeld.
-        commands::meld(&paths, &spec, None, vec![], None, None, None, None, false)
-            .expect("meld prerequisite");
+        commands::meld(
+            &paths,
+            &spec,
+            None,
+            vec![],
+            false,
+            None,
+            None,
+            None,
+            None,
+            false,
+        )
+        .expect("meld prerequisite");
         let source_name = crate::source::Registry::load(&paths).unwrap().sources[0]
             .name
             .clone();
@@ -564,7 +586,19 @@ mod tests {
         use crate::manifest::{InstalledItem, Manifest};
         let src = make_source_repo(base);
         let spec = src.to_str().unwrap().to_string();
-        commands::meld(paths, &spec, None, vec![], None, None, None, None, false).expect("meld");
+        commands::meld(
+            paths,
+            &spec,
+            None,
+            vec![],
+            false,
+            None,
+            None,
+            None,
+            None,
+            false,
+        )
+        .expect("meld");
         let source_name = crate::source::Registry::load(paths).unwrap().sources[0]
             .name
             .clone();
@@ -925,6 +959,7 @@ mod tests {
             src.to_str().unwrap(),
             None,
             vec![],
+            false,
             None,
             None,
             None,
@@ -1050,6 +1085,7 @@ mod tests {
             src.to_str().unwrap(),
             None,
             vec![],
+            false,
             None,
             None,
             None,
@@ -1128,6 +1164,7 @@ mod tests {
             src.to_str().unwrap(),
             None,
             vec![],
+            false,
             None,
             None,
             None,
@@ -1253,6 +1290,7 @@ mod tests {
             src_a.to_str().unwrap(),
             None,
             vec![],
+            false,
             None,
             None,
             None,
@@ -1265,6 +1303,7 @@ mod tests {
             src_b.to_str().unwrap(),
             None,
             vec![],
+            false,
             None,
             None,
             None,

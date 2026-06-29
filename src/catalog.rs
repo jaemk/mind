@@ -260,12 +260,18 @@ pub(crate) fn scan_source_at(
                 }
             }
 
+            // spec: DSC-74 — resolve the effective flat-skills setting: the
+            // consumer `--flat-skills` override (STO-44) wins; else the source's
+            // own `[source].flat-skills`; else false (the DSC-10 container layout).
+            let flat_skills =
+                source.flat_skills || mt.as_ref().map(|m| m.source.flat_skills).unwrap_or(false);
+
             // spec: DSC-53 — scan each root and union the results. Detect a
             // (kind, bare_name) collision within this source.
             let pre_scan_len = out.len();
             for r in &effective_roots {
                 let scan_root = clone_root.join(r);
-                scan_convention(&scan_root, source, &prefix, out)?;
+                scan_convention(&scan_root, source, &prefix, flat_skills, out)?;
             }
             // Check for duplicates among items contributed by this source.
             let new_items = &out[pre_scan_len..];
@@ -564,13 +570,27 @@ fn resolve_globs(root: &Path, globs: &KindGlobs) -> Result<Vec<PathBuf>> {
 }
 
 /// Convention scan: fixed `skills/`, `agents/`, `rules/` directories.
+///
+/// When `flat_skills` is true (DSC-74), skills are instead found as bare-name
+/// directories with a direct `SKILL.md` immediately under `root` (no `skills/`
+/// container); agent, rule, and tool discovery are unchanged either way.
 fn scan_convention(
     root: &Path,
     source: &Source,
     prefix: &Option<String>,
+    flat_skills: bool,
     out: &mut Vec<CatalogItem>,
 ) -> Result<()> {
-    let skills_dir = root.join(ItemKind::Skill.dir());
+    // spec: DSC-74 — flat layout: each immediate child directory of `root` that
+    // contains a direct `SKILL.md` is a skill, taking the directory name as its
+    // bare name. The scan is shallow (only `root`'s immediate children), and the
+    // `SKILL.md` anchor disambiguates a skill dir from `agents/`, `rules/`, etc.
+    // Otherwise (DSC-10) skills live under the `skills/` container.
+    let skills_dir = if flat_skills {
+        root.to_path_buf()
+    } else {
+        root.join(ItemKind::Skill.dir())
+    };
     for entry in read_dir_opt(&skills_dir)? {
         let skill_md = entry.join("SKILL.md");
         if entry.is_dir() && skill_md.is_file() {
@@ -663,6 +683,7 @@ mod lifecycle_tests {
             alias: None,
             pin: Pin::default(),
             roots: None,
+            flat_skills: false,
             install_hooks: Vec::new(),
             install_hook: None,
             install_hook_commit: None,
@@ -1119,6 +1140,7 @@ mod tests {
             alias: None,
             pin: Pin::default(),
             roots: None,
+            flat_skills: false,
             install_hooks: Vec::new(),
             install_hook: None,
             install_hook_commit: None,
@@ -1265,6 +1287,122 @@ mod tests {
         assert!(
             matches!(err, MindError::DuplicateItem { ref name, .. } if name == "review"),
             "expected DuplicateItem: {err}"
+        );
+    }
+
+    #[test]
+    fn flat_skills_discovers_bare_dirs_and_composes_with_roots() {
+        // spec: DSC-74
+        // With flat_skills set, a skill is a bare-name directory containing a
+        // direct SKILL.md under each scan root (no `skills/` container). The
+        // SKILL.md anchor disambiguates a skill dir from an arbitrary one, and
+        // agent discovery (a conventional `agents/` dir) is unchanged. It composes
+        // with roots: here a single root `pkg`.
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let clone = base.join("sources/local/test/repo");
+        // Flat skills directly under the `pkg` root.
+        write_file(
+            &clone.join("pkg/alpha/SKILL.md"),
+            "---\ndescription: alpha\n---\n# alpha\n",
+        );
+        write_file(
+            &clone.join("pkg/beta/SKILL.md"),
+            "---\ndescription: beta\n---\n# beta\n",
+        );
+        // A bare dir with no SKILL.md must NOT be classified as a skill.
+        write_file(&clone.join("pkg/notaskill/README.md"), "# nope\n");
+        // Agent discovery under the same root is unchanged.
+        write_file(
+            &clone.join("pkg/agents/dev.md"),
+            "---\ndescription: dev\n---\n# dev\n",
+        );
+
+        let paths = paths_for(base);
+        let mut source = make_source_for(&clone);
+        source.roots = Some(vec!["pkg".to_string()]);
+        source.flat_skills = true;
+
+        let mut items = Vec::new();
+        scan_source(&paths, &source, &mut items).unwrap();
+        let skills: Vec<&str> = items
+            .iter()
+            .filter(|i| i.kind == ItemKind::Skill)
+            .map(|i| i.name.as_str())
+            .collect();
+        assert!(
+            skills.contains(&"alpha"),
+            "expected flat skill alpha: {skills:?}"
+        );
+        assert!(
+            skills.contains(&"beta"),
+            "expected flat skill beta: {skills:?}"
+        );
+        assert!(
+            !skills.contains(&"notaskill"),
+            "a dir without SKILL.md must not be a skill: {skills:?}"
+        );
+        // The agent is still discovered conventionally.
+        assert!(
+            items
+                .iter()
+                .any(|i| i.kind == ItemKind::Agent && i.name == "dev"),
+            "agent discovery must be unchanged under flat-skills"
+        );
+    }
+
+    #[test]
+    fn flat_skills_off_requires_skills_container() {
+        // spec: DSC-74
+        // With flat_skills false (the default), a bare-name skill dir at the root
+        // is NOT discovered; the `skills/` container is required (DSC-10).
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let clone = base.join("sources/local/test/repo");
+        write_file(
+            &clone.join("alpha/SKILL.md"),
+            "---\ndescription: alpha\n---\n# alpha\n",
+        );
+
+        let paths = paths_for(base);
+        let source = make_source_for(&clone); // flat_skills defaults false
+        let mut items = Vec::new();
+        scan_source(&paths, &source, &mut items).unwrap();
+        assert!(
+            items.is_empty(),
+            "a root-level skill dir must not be found without flat-skills: {:?}",
+            items.iter().map(|i| i.name.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn flat_skills_duplicate_across_roots_is_an_error() {
+        // spec: DSC-74 DSC-53
+        // Flat discovery composes with multi-root union and the within-source
+        // uniqueness check: two roots each shipping a flat `alpha/SKILL.md` is a
+        // DuplicateItem, exactly as for the containered layout.
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let clone = base.join("sources/local/test/repo");
+        write_file(
+            &clone.join("a/alpha/SKILL.md"),
+            "---\ndescription: alpha a\n---\n# alpha\n",
+        );
+        write_file(
+            &clone.join("b/alpha/SKILL.md"),
+            "---\ndescription: alpha b\n---\n# alpha\n",
+        );
+
+        let paths = paths_for(base);
+        let mut source = make_source_for(&clone);
+        source.roots = Some(vec!["a".to_string(), "b".to_string()]);
+        source.flat_skills = true;
+
+        let mut items = Vec::new();
+        let err = scan_source(&paths, &source, &mut items).unwrap_err();
+        assert!(
+            matches!(err, MindError::DuplicateItem { ref name, .. } if name == "alpha"),
+            "expected DuplicateItem for a flat skill across two roots: {err}"
         );
     }
 

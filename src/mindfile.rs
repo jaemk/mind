@@ -104,6 +104,11 @@ pub struct SourceMeta {
     /// under each listed repo-root-relative directory instead of the repo root.
     #[serde(default)]
     pub roots: Option<Vec<String>>,
+    /// Flat skill layout (DSC-74). When true, convention discovery finds skills
+    /// as bare-name directories with a direct `SKILL.md` under each scan root,
+    /// with no `skills/` container. Default false (the DSC-10 container behavior).
+    #[serde(rename = "flat-skills", default)]
+    pub flat_skills: bool,
 }
 
 impl SourceMeta {
@@ -356,6 +361,11 @@ pub struct NestedSource {
     /// the repo root.
     #[serde(default)]
     pub roots: Option<Vec<String>>,
+    /// Curator-supplied flat skill layout (DSC-77): when true, the nested source
+    /// uses the flat skill layout (DSC-74). Like `roots`, gated by DSC-60: applied
+    /// only when the nested source ships no `mind.toml` of its own.
+    #[serde(rename = "flat-skills", default)]
+    pub flat_skills: bool,
     /// Curator-supplied lifecycle hooks (DSC-59). Addressed in mind.toml as
     /// `[[discover.sources.hooks]]` entries; validated the same way as a
     /// source-level `[[hooks]]` array.
@@ -575,6 +585,50 @@ impl MindToml {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn root_mindfile_curates_skill_libraries_register_only() {
+        // The repo-root mind.toml is the source behind `mind meld jaemk/mind`. It
+        // curates two external skill libraries as register-only nested sources
+        // (DSC-58 default install = false) while staying non-authoritative so its
+        // own convention discovery still surfaces the hello-mind example (DSC-35).
+        // This validates the real file offline; the live recursive meld is network
+        // dependent and is guarded hermetically with local stand-ins in tests/cli.rs.
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mt = MindToml::load(root)
+            .expect("root mind.toml must parse")
+            .expect("root mind.toml must exist");
+        assert!(
+            !mt.is_authoritative(),
+            "a bare [discover].sources list must keep convention discovery (DSC-35)"
+        );
+        let sources = &mt
+            .discover
+            .as_ref()
+            .expect("must declare [discover]")
+            .sources;
+        let urls: Vec<&str> = sources.iter().map(|s| s.source.as_str()).collect();
+        assert!(
+            urls.contains(&"https://github.com/anthropics/skills"),
+            "must curate anthropics/skills: {urls:?}"
+        );
+        assert!(
+            urls.contains(&"https://github.com/ComposioHQ/awesome-claude-skills"),
+            "must curate ComposioHQ/awesome-claude-skills: {urls:?}"
+        );
+        for s in sources {
+            assert!(
+                !s.install,
+                "curated source '{}' must be register-only (install = false)",
+                s.source
+            );
+            assert!(
+                s.install_items.is_none(),
+                "curated source '{}' must not pin an install subset",
+                s.source
+            );
+        }
+    }
 
     #[test]
     fn version_comparison_orders_dotted_components() {
@@ -1245,6 +1299,7 @@ mod tests {
             pin_ref: None,
             roots: None,
             hooks: vec![],
+            flat_skills: false,
             on_auth_failure: None,
         };
         assert_eq!(
@@ -1266,6 +1321,7 @@ mod tests {
             pin_ref: None,
             roots: None,
             hooks: vec![],
+            flat_skills: false,
             on_auth_failure: None,
         };
         assert!(
@@ -1416,6 +1472,7 @@ mod tests {
                 optional: false,
                 event: None,
             }],
+            flat_skills: false,
             on_auth_failure: None,
         };
         let resolved = ns.resolved_hooks(Path::new("mind.toml")).expect("resolve");
@@ -1439,6 +1496,7 @@ mod tests {
                 pin_ref: None,
                 roots: None,
                 hooks: vec![],
+                flat_skills: false,
                 on_auth_failure: None,
             };
             match ns.pin_directive(Path::new("mind.toml")).expect("no error") {
@@ -1621,6 +1679,7 @@ mod tests {
             pin_ref: None,
             roots: None,
             hooks: vec![],
+            flat_skills: false,
             on_auth_failure: None,
         };
         let toml_path = Path::new("/super/mind.toml");
@@ -1656,6 +1715,7 @@ mod tests {
             pin_ref: None,
             roots: None,
             hooks: vec![],
+            flat_skills: false,
             on_auth_failure: None,
         };
         assert!(
@@ -1678,6 +1738,7 @@ mod tests {
             pin_ref: None,
             roots: None,
             hooks: vec![],
+            flat_skills: false,
             on_auth_failure: None,
         };
         assert!(
@@ -1870,6 +1931,7 @@ mod tests {
             pin_ref: None,
             roots: None,
             hooks: vec![],
+            flat_skills: false,
             on_auth_failure: None,
         };
         let err = ns.pin_directive(Path::new("mind.toml")).unwrap_err();
@@ -1892,6 +1954,7 @@ mod tests {
             pin_ref: None,
             roots: None,
             hooks: vec![],
+            flat_skills: false,
             on_auth_failure: None,
         };
         let err = ns.pin_directive(Path::new("mind.toml")).unwrap_err();
@@ -1914,6 +1977,7 @@ mod tests {
             pin_ref: Some("--depth=1".into()),
             roots: None,
             hooks: vec![],
+            flat_skills: false,
             on_auth_failure: None,
         };
         let err = ns.pin_directive(Path::new("mind.toml")).unwrap_err();
@@ -1936,6 +2000,7 @@ mod tests {
             pin_ref: None,
             roots: None,
             hooks: vec![],
+            flat_skills: false,
             on_auth_failure: None,
         };
         let err = ns.pin_directive(Path::new("mind.toml")).unwrap_err();
@@ -1958,6 +2023,7 @@ mod tests {
             pin_ref: Some("main..HEAD".into()),
             roots: None,
             hooks: vec![],
+            flat_skills: false,
             on_auth_failure: None,
         };
         let err = ns.pin_directive(Path::new("mind.toml")).unwrap_err();
@@ -1980,6 +2046,7 @@ mod tests {
             pin_ref: Some("cafebabecafebabecafebabecafebabecafebabe".into()),
             roots: None,
             hooks: vec![],
+            flat_skills: false,
             on_auth_failure: None,
         };
         assert!(
@@ -2200,6 +2267,7 @@ mod tests {
             pin_tag: None,
             pin_ref: None,
             roots: None,
+            flat_skills: false,
             hooks: vec![],
             on_auth_failure: Some(OnAuthFailure {
                 action: AuthFailureAction::Skip,

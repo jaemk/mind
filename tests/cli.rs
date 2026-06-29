@@ -84,7 +84,45 @@ impl Sandbox {
         };
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         std::fs::create_dir_all(&source).unwrap();
-        std::fs::copy(root.join("mind.toml"), source.join("mind.toml")).unwrap();
+        // The real root mind.toml curates two REMOTE skill libraries via
+        // [discover].sources; melding it would clone them over the network, which
+        // the hermetic harness forbids. Substitute local stand-in repos for those
+        // URLs so the meld runs fully offline while still exercising the
+        // register-only curated chain alongside the repo's own hello-mind
+        // convention discovery. The real file's discover block is validated
+        // offline by a unit test in src/mindfile.rs.
+        let nested_a = base.join("anthropics-skills");
+        write(
+            &nested_a.join("skills/astand/SKILL.md"),
+            "---\nname: astand\ndescription: stand-in for a curated skill\n---\n# astand\n",
+        );
+        git(&nested_a, &["-c", "init.defaultBranch=main", "init", "-q"]);
+        git(&nested_a, &["config", "user.email", "t@t"]);
+        git(&nested_a, &["config", "user.name", "t"]);
+        git(&nested_a, &["add", "-A"]);
+        git(&nested_a, &["commit", "-qm", "initial"]);
+        let nested_b = base.join("awesome-claude-skills");
+        write(
+            &nested_b.join("README.md"),
+            "# awesome (stand-in, no items)\n",
+        );
+        git(&nested_b, &["-c", "init.defaultBranch=main", "init", "-q"]);
+        git(&nested_b, &["config", "user.email", "t@t"]);
+        git(&nested_b, &["config", "user.name", "t"]);
+        git(&nested_b, &["add", "-A"]);
+        git(&nested_b, &["commit", "-qm", "initial"]);
+
+        let mindfile = std::fs::read_to_string(root.join("mind.toml")).unwrap();
+        let mindfile = mindfile
+            .replace(
+                "https://github.com/anthropics/skills",
+                nested_a.to_str().unwrap(),
+            )
+            .replace(
+                "https://github.com/ComposioHQ/awesome-claude-skills",
+                nested_b.to_str().unwrap(),
+            );
+        write(&source.join("mind.toml"), &mindfile);
         copy_dir(&root.join("examples/hello"), &source.join("examples/hello"));
         git(&source, &["-c", "init.defaultBranch=main", "init", "-q"]);
         git(&source, &["config", "user.email", "t@t"]);
@@ -5172,6 +5210,11 @@ fn root_mindfile_exposes_hello() {
     // mind repo itself discovers the hello-mind skill by convention under that
     // root, and `mind learn hello-mind` links it into the agent home. Guards
     // the landing-page command `mind meld jaemk/mind`.
+    // spec: DSC-35, DSC-54, DSC-58
+    // The root mind.toml curates two skill libraries via [discover].sources
+    // (substituted with local stand-ins by the fixture to stay offline). Melding
+    // registers the whole chain register-only (install = false) while the repo's
+    // own hello-mind item is still discovered by convention and installable.
     let sb = Sandbox::from_root_mindfile();
     let meld = sb.mind(&["meld", &sb.source_spec()]);
     assert!(meld.success, "{}", meld.stderr);
@@ -5182,6 +5225,26 @@ fn root_mindfile_exposes_hello() {
         probe.stdout.contains("skill:hello-mind"),
         "{}",
         probe.stdout
+    );
+
+    // DSC-54/DSC-58: the curated nested sources are registered (browsable) but
+    // their items are NOT installed by default (install = false).
+    let sources = sb.mind(&["recall", "--sources"]);
+    assert!(sources.success, "{}", sources.stderr);
+    assert!(
+        sources.stdout.contains("anthropics-skills")
+            && sources.stdout.contains("awesome-claude-skills"),
+        "both curated sources must be registered: {}",
+        sources.stdout
+    );
+    assert!(
+        probe.stdout.contains("skill:astand"),
+        "the curated stand-in's item must be available to browse: {}",
+        probe.stdout
+    );
+    assert!(
+        !sb.claude_home.join("skills/astand").exists(),
+        "a register-only curated item must NOT be installed on meld"
     );
 
     let learn = sb.mind(&["learn", "hello-mind"]);
@@ -14128,5 +14191,245 @@ fn relearn_already_installed_signals_noop() {
     assert_eq!(
         v["outcome"], "up-to-date",
         "json outcome for re-learn must be 'up-to-date', not 'installed': {v}"
+    );
+}
+
+// ---- DSC-74..77 / STO-44 / CLI-158 / DUMP-10: flat skill layout -------------
+
+/// A bare source whose skill directories sit directly at the repo root (no
+/// `skills/` container), plus a conventional `agents/` dir. With `mindfile` set,
+/// also writes a `mind.toml` at the root. No commit beyond the initial bare one
+/// unless committed by the caller.
+fn make_flat_source(name: &str, mindfile: Option<&str>) -> Sandbox {
+    let sb = Sandbox::bare(name);
+    write(
+        &sb.source.join("alpha/SKILL.md"),
+        "---\nname: alpha\ndescription: Alpha flat skill\n---\n# alpha\n",
+    );
+    write(
+        &sb.source.join("beta/SKILL.md"),
+        "---\nname: beta\ndescription: Beta flat skill\n---\n# beta\n",
+    );
+    write(
+        &sb.source.join("agents/dev.md"),
+        "---\nname: dev\ndescription: A dev agent\n---\n# dev\n",
+    );
+    if let Some(toml) = mindfile {
+        write(&sb.source.join("mind.toml"), toml);
+    }
+    git(&sb.source, &["add", "-A"]);
+    git(&sb.source, &["commit", "-qm", "flat layout"]);
+    sb
+}
+
+#[test]
+fn meld_flat_skills_flag_discovers_root_level_skill_dirs() {
+    // spec: DSC-74 DSC-75 CLI-158 STO-44
+    // `meld --flat-skills` discovers skills as bare-name directories at the repo
+    // root (no `skills/` container), records the override on the source, and
+    // leaves agent discovery (a conventional `agents/` dir) unchanged.
+    let sb = make_flat_source("flatsrc", None);
+    let spec = sb.source_spec();
+    let r = sb.mind(&["meld", &spec, "--flat-skills", "--yes"]);
+    assert!(
+        r.success,
+        "meld --flat-skills failed: {} {}",
+        r.stdout, r.stderr
+    );
+
+    let recall = sb.mind(&["recall"]);
+    for item in ["alpha", "beta", "dev"] {
+        assert!(
+            recall.stdout.contains(item),
+            "flat skill/agent '{item}' must be discovered: {}",
+            recall.stdout
+        );
+    }
+
+    // STO-44: the consumer override is persisted on the source.
+    let json = read_sources_json(&sb);
+    assert!(
+        json.contains("\"flat_skills\": true"),
+        "the --flat-skills override must be persisted on the source: {json}"
+    );
+}
+
+#[test]
+fn meld_without_flat_skills_skips_root_level_skill_dirs() {
+    // spec: DSC-74
+    // Control: without the flag (and with no `[source].flat-skills`), the same
+    // root-level skill directories are NOT discovered (the DSC-10 container layout
+    // is required), while the conventional `agents/` dir still yields its item.
+    let sb = make_flat_source("flatsrc-control", None);
+    let spec = sb.source_spec();
+    let r = sb.mind(&["meld", &spec, "--yes"]);
+    assert!(r.success, "meld failed: {} {}", r.stdout, r.stderr);
+
+    let probe = sb.mind(&["probe"]);
+    assert!(
+        !probe.stdout.contains("skill:alpha") && !probe.stdout.contains("skill:beta"),
+        "root-level skill dirs must NOT be discovered without flat-skills: {}",
+        probe.stdout
+    );
+    assert!(
+        probe.stdout.contains("agent:dev"),
+        "the conventional agents/ item must still be discovered: {}",
+        probe.stdout
+    );
+}
+
+#[test]
+fn source_flat_skills_directive_discovers_without_flag() {
+    // spec: DSC-74
+    // A source that declares `[source].flat-skills = true` (non-authoritative
+    // mind.toml) gets flat skill discovery with no consumer flag.
+    let sb = make_flat_source("flatsrc-declared", Some("[source]\nflat-skills = true\n"));
+    let spec = sb.source_spec();
+    let r = sb.mind(&["meld", &spec, "--yes"]);
+    assert!(r.success, "meld failed: {} {}", r.stdout, r.stderr);
+
+    let probe = sb.mind(&["probe"]);
+    assert!(
+        probe.stdout.contains("skill:alpha") && probe.stdout.contains("skill:beta"),
+        "[source].flat-skills must enable flat discovery without a flag: {}",
+        probe.stdout
+    );
+}
+
+#[test]
+fn meld_flat_skills_ignored_for_authoritative_mindfile() {
+    // spec: DSC-76
+    // For an authoritative mind.toml (declaring [[items]]), --flat-skills affects
+    // nothing and `meld` prints a note that it is ignored. The explicitly declared
+    // item is found; the root-level flat dirs are not.
+    let toml = "[[items]]\nkind = \"skill\"\nname = \"alpha\"\npath = \"alpha\"\n";
+    let sb = make_flat_source("flatsrc-auth", Some(toml));
+    let spec = sb.source_spec();
+    let r = sb.mind(&["meld", &spec, "--flat-skills", "--yes"]);
+    assert!(r.success, "meld failed: {} {}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("--flat-skills is ignored"),
+        "an authoritative mind.toml must note that --flat-skills is ignored: {}",
+        r.stdout
+    );
+
+    // Authoritative discovery: only the declared `alpha`, and `beta` (a sibling
+    // root dir) is NOT scanned in.
+    let probe = sb.mind(&["probe"]);
+    assert!(
+        probe.stdout.contains("skill:alpha") && !probe.stdout.contains("skill:beta"),
+        "authoritative mind.toml must ignore the flat layout: {}",
+        probe.stdout
+    );
+}
+
+#[test]
+fn curator_flat_skills_applies_when_nested_has_no_mind_toml() {
+    // spec: DSC-77
+    // A super-source curates an un-onboarded nested flat-layout source (no
+    // mind.toml of its own), supplying `flat-skills = true`. The flag applies
+    // (the DSC-60 gate permits it), so the nested source's root-level skill dirs
+    // are discovered.
+    let nested = make_flat_source("flat-nested", None);
+    let registry = Sandbox::bare("registry-flat");
+    registry.write_and_commit(
+        "mind.toml",
+        &format!(
+            "[[discover.sources]]\n\
+             source = \"{}\"\n\
+             flat-skills = true\n",
+            nested.source_spec()
+        ),
+    );
+    let spec = registry.source_spec();
+    let r = registry.mind(&["meld", &spec]);
+    assert!(r.success, "meld should succeed: {} {}", r.stdout, r.stderr);
+
+    let probe = registry.mind(&["probe"]);
+    assert!(
+        probe.stdout.contains("skill:alpha") && probe.stdout.contains("skill:beta"),
+        "curator flat-skills must govern discovery of the un-onboarded nested source: {}",
+        probe.stdout
+    );
+}
+
+#[test]
+fn curator_flat_skills_ignored_with_warning_when_nested_has_mind_toml() {
+    // spec: DSC-77 DSC-60
+    // When the nested source ships its own mind.toml, a curator-supplied
+    // `flat-skills = true` is gated out (the DSC-60 whole-file gate) and a warning
+    // fires. The nested source's metadata-only mind.toml does not declare
+    // flat-skills, so its root-level skill dirs are NOT discovered; its
+    // conventional agents/ item still is.
+    let nested = make_flat_source(
+        "flat-onboarded",
+        Some("[source]\ndescription = \"onboarded\"\n"),
+    );
+    let registry = Sandbox::bare("registry-flat-gated");
+    registry.write_and_commit(
+        "mind.toml",
+        &format!(
+            "[[discover.sources]]\n\
+             source = \"{}\"\n\
+             flat-skills = true\n",
+            nested.source_spec()
+        ),
+    );
+    let spec = registry.source_spec();
+    let r = registry.mind(&["meld", &spec]);
+    assert!(r.success, "meld should succeed: {} {}", r.stdout, r.stderr);
+
+    // DSC-60: the warning fires (flat-skills is a gated field) and names the source.
+    assert!(
+        r.stderr.contains("ships its own mind.toml")
+            && r.stderr.contains("ignored")
+            && r.stderr.contains("flat-onboarded"),
+        "a DSC-60 warning must be emitted naming the onboarded source: {}",
+        r.stderr
+    );
+
+    let probe = registry.mind(&["probe"]);
+    assert!(
+        !probe.stdout.contains("skill:alpha") && !probe.stdout.contains("skill:beta"),
+        "curator flat-skills must be suppressed: root-level skill dirs must not appear: {}",
+        probe.stdout
+    );
+    assert!(
+        probe.stdout.contains("agent:dev"),
+        "the nested source's conventional agents/ item must still be discovered: {}",
+        probe.stdout
+    );
+}
+
+#[test]
+fn dump_emits_flat_skills_for_flat_source() {
+    // spec: DUMP-10
+    // A source melded with --flat-skills (the consumer override STO-44) is dumped
+    // with `flat-skills = true` on its [discover].sources entry, so re-melding the
+    // output reproduces the flat layout. A separate non-flat source emits no key.
+    let flat = make_flat_source("dump-flat", None);
+    let flat_spec = flat.source_spec();
+    assert!(
+        flat.mind(&["meld", &flat_spec, "--flat-skills", "--yes"])
+            .success
+    );
+
+    let dump = flat.mind(&["dump"]);
+    assert!(dump.success, "dump failed: {} {}", dump.stdout, dump.stderr);
+    assert!(
+        dump.stdout.contains("flat-skills = true"),
+        "dump must emit flat-skills = true for a flat source: {}",
+        dump.stdout
+    );
+
+    // Control: a conventional source dumps with no flat-skills key.
+    let normal = Sandbox::new();
+    let normal_spec = normal.source_spec();
+    assert!(normal.mind(&["meld", &normal_spec, "--yes"]).success);
+    let dump2 = normal.mind(&["dump"]);
+    assert!(
+        !dump2.stdout.contains("flat-skills"),
+        "a non-flat source must emit no flat-skills key: {}",
+        dump2.stdout
     );
 }

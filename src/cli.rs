@@ -103,6 +103,16 @@ pub enum Command {
         #[arg(long = "root", value_name = "DIR")]
         roots: Vec<String>,
 
+        /// Force-enable flat skill discovery: skills are bare-name directories at
+        /// each scan root, with no `skills/` container. Turns the layout on for a
+        /// source that did not declare `[source].flat-skills`; there is no way to
+        /// disable a source's declared flat layout. Applies to skills only (agent,
+        /// rule, and tool discovery are unaffected) and to convention discovery
+        /// only (ignored for an authoritative `mind.toml`). Persisted on the source
+        /// and used by later scans and sync.
+        #[arg(long)]
+        flat_skills: bool,
+
         /// Supply or override the source's install hook: a shell command run
         /// after checkout to build the tooling its items rely on. Before it runs,
         /// a prompt offers three choices: run it (the default, a bare Enter),

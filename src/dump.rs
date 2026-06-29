@@ -61,6 +61,13 @@ struct DumpEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     roots: Option<Vec<String>>,
 
+    /// Flat skill layout (DUMP-10): emitted as `flat-skills = true` when flat
+    /// discovery is in effect for the source (the consumer override STO-44 or the
+    /// source's own `[source].flat-skills`, DSC-74). Absent otherwise. Mirrors how
+    /// `roots` (DUMP-4) is emitted.
+    #[serde(rename = "flat-skills", skip_serializing_if = "Option::is_none")]
+    flat_skills: Option<bool>,
+
     /// Pin: emit the recorded commit sha as `pin-ref` (DUMP-1, DUMP-4, DSC-65).
     /// Absent when no commit has been recorded for this source.
     #[serde(rename = "pin-ref", skip_serializing_if = "Option::is_none")]
@@ -172,6 +179,13 @@ fn build_entry(
     // spec: DUMP-4 — scan roots recorded at meld time (STO-17).
     let roots = source.roots.clone();
 
+    // spec: DUMP-10 — emit flat-skills from the STO-44 consumer override only,
+    // exactly mirroring how `roots` (DUMP-4) emits `source.roots` and NOT the
+    // source's own `[source].flat-skills`. A source's own flat-skills is re-read
+    // from its mind.toml when the output is re-melded, so emitting it here would
+    // be redundant and would trip the DSC-60 "ignored" gate on re-meld.
+    let flat_skills = source.flat_skills.then_some(true);
+
     // spec: DUMP-1 / DUMP-4 / DSC-65 — emit the recorded commit sha as `pin-ref`
     // for every source that has one. This is the authoritative per-entry pin
     // (DSC-65): a re-meld of the output will apply it unconditionally, pinning
@@ -191,6 +205,7 @@ fn build_entry(
         source: source_spec,
         alias: effective_alias,
         roots,
+        flat_skills,
         pin_ref,
         install,
         install_items,
@@ -316,6 +331,7 @@ mod tests {
             alias: None,
             pin: crate::source::Pin::default(),
             roots: None,
+            flat_skills: false,
             install_hooks: vec![],
             install_hook: None,
             install_hook_commit: None,
@@ -350,6 +366,7 @@ mod tests {
             source: "/some/path".into(),
             alias: None,
             roots: None,
+            flat_skills: None,
             pin_ref: None,
             install: Some(true),
             install_items: None,
@@ -383,6 +400,7 @@ mod tests {
             source: "/some/path".into(),
             alias: None,
             roots: None,
+            flat_skills: None,
             pin_ref: None,
             install: Some(false),
             install_items: None,
@@ -421,6 +439,7 @@ mod tests {
             source: "/some/path".into(),
             alias: None,
             roots: None,
+            flat_skills: None,
             pin_ref: None,
             install: None,
             install_items: Some(items.clone()),
@@ -465,6 +484,7 @@ mod tests {
             source: "/some/path".into(),
             alias: None,
             roots: None,
+            flat_skills: None,
             pin_ref: None,
             install: Some(false),
             install_items: None, // None, not Some([])
@@ -501,6 +521,7 @@ mod tests {
                         source: "/path/to/repo".into(),
                         alias: Some("pfx".into()),
                         roots: Some(vec!["packages".into()]),
+                        flat_skills: Some(true),
                         pin_ref: Some("deadbeefdeadbeef1234".into()),
                         install: Some(true),
                         install_items: None,
@@ -509,6 +530,7 @@ mod tests {
                         source: "https://github.com/owner/repo".into(),
                         alias: None,
                         roots: None,
+                        flat_skills: None,
                         pin_ref: None,
                         install: None,
                         install_items: Some(vec!["skill:review".into(), "agent:dev".into()]),
@@ -535,6 +557,17 @@ mod tests {
         assert!(e0.install, "first entry: install must be true");
         assert_eq!(e0.alias.as_deref(), Some("pfx"));
         assert_eq!(e0.roots.as_deref(), Some(&["packages".to_string()][..]));
+        // spec: DUMP-10 — flat-skills round-trips: emitted as `flat-skills = true`
+        // and parses back as NestedSource.flat_skills on the first entry, while the
+        // second entry (no flat layout) parses back false.
+        assert!(
+            text.contains("flat-skills = true"),
+            "must emit flat-skills = true"
+        );
+        assert!(
+            e0.flat_skills,
+            "first entry: flat_skills must parse back true"
+        );
         assert!(
             e0.pin_ref.is_some(),
             "pin-ref must be present for pinned entry"
@@ -542,6 +575,10 @@ mod tests {
         // Second entry: install_items present, no install = true.
         let e1 = &disc.sources[1];
         assert!(!e1.install, "second entry: install must be false");
+        assert!(
+            !e1.flat_skills,
+            "second entry: flat_skills must parse back false (no key emitted)"
+        );
         let items = e1
             .install_items
             .as_deref()
@@ -586,6 +623,7 @@ mod tests {
             source: "/a/b".into(),
             alias: None,
             roots: None,
+            flat_skills: None,
             pin_ref: Some("deadbeefdeadbeef".into()),
             install: Some(true),
             install_items: None,
@@ -594,6 +632,7 @@ mod tests {
             source: "/a/b".into(),
             alias: None,
             roots: None,
+            flat_skills: None,
             pin_ref: None,
             install: Some(false),
             install_items: None,
@@ -682,6 +721,7 @@ mod tests {
             source: "/a/b".into(),
             alias: None,
             roots: None,
+            flat_skills: None,
             pin_ref: None,
             install: Some(true),
             install_items: None,
