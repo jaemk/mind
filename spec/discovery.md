@@ -85,6 +85,18 @@ run = "make build"
 
 - `DSC-30` Unknown top-level or table fields are rejected (the file is strict).
 - `DSC-31` A `[[items]]` entry with an unknown `kind` is an error (`MindToml`).
+- `DSC-71` A `[[items]]` `name` must be a single safe path component: it is
+  rejected (`MindToml`) when empty, equal to `.` or `..`, or containing a path
+  separator (`/` or `\`) or a NUL byte. The name indexes the store
+  (`store/<kind>/<name>`) and the per-home link (`<home>/<dir>/<name>`), so this
+  stops a melded source from steering either path outside its kind directory.
+  (Convention and `[discover]`-glob names are derived from a single filesystem
+  component, so they cannot carry a separator and are inherently safe.)
+- `DSC-72` A `[[items]]` `link` override (the link target relative to an agent
+  home) must be a safe relative path: it is rejected (`MindToml`) when empty,
+  absolute, beginning with `~`, containing a `..` (parent) component, or
+  containing a NUL byte. So a melded source cannot place a symlink outside the
+  agent home (e.g. `link = "../../.bashrc"`).
 - `DSC-32` An item's description is its `mind.toml` `description` if given, else
   its frontmatter description.
 - `DSC-33` Each `[discover]` kind (`skills`, `agents`, `rules`) is a table with

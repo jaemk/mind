@@ -284,6 +284,31 @@ fn from_decl(
         path: root.join("mind.toml"),
         msg: format!("unknown item kind '{}' for '{}'", decl.kind, decl.name),
     })?;
+    // DSC-71/DSC-72: a melded source's `name` and `link` flow into filesystem
+    // paths (the store key and the per-home symlink), so reject any value that
+    // could escape its kind directory or the agent home before it is used.
+    if !is_safe_item_name(&decl.name) {
+        return Err(MindError::MindToml {
+            path: root.join("mind.toml"),
+            msg: format!(
+                "item name '{}' is unsafe: it must be a single path component (no '/', '\\', \
+                 '.', '..', or NUL)",
+                decl.name
+            ),
+        });
+    }
+    if let Some(link) = &decl.link
+        && !is_safe_link_rel(link)
+    {
+        return Err(MindError::MindToml {
+            path: root.join("mind.toml"),
+            msg: format!(
+                "item '{}' has an unsafe link '{}': it must be a relative path inside the agent \
+                 home (no leading '/' or '~', no '..' component, no NUL)",
+                decl.name, link
+            ),
+        });
+    }
     // `bin` and `build` describe tooling, so they are valid only on a tool item.
     if kind != ItemKind::Tool && (decl.bin.is_some() || decl.build.is_some()) {
         return Err(MindError::MindToml {
@@ -318,6 +343,39 @@ fn from_decl(
             hooks: Some(hooks),
         },
     ))
+}
+
+/// True when `name` is a single safe path component (DSC-71): non-empty, not `.`
+/// or `..`, and free of a path separator or NUL. The name keys the store and the
+/// per-home symlink, so anything else could steer those paths out of the kind
+/// directory.
+fn is_safe_item_name(name: &str) -> bool {
+    if name.is_empty() || name == "." || name == ".." {
+        return false;
+    }
+    if name.contains('/') || name.contains('\\') || name.contains('\0') {
+        return false;
+    }
+    // Belt and suspenders: exactly one normal component, nothing else.
+    let mut comps = Path::new(name).components();
+    matches!(comps.next(), Some(std::path::Component::Normal(_))) && comps.next().is_none()
+}
+
+/// True when `rel` is a safe link target relative to an agent home (DSC-72):
+/// non-empty, not absolute, not `~`-rooted, and with no parent (`..`)/root/prefix
+/// component or NUL. `rel` may contain `/` for subdirectories; it just may not
+/// escape the home.
+fn is_safe_link_rel(rel: &str) -> bool {
+    if rel.is_empty() || rel.contains('\0') || rel.starts_with('~') {
+        return false;
+    }
+    let p = Path::new(rel);
+    if p.is_absolute() {
+        return false;
+    }
+    use std::path::Component;
+    p.components()
+        .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
 }
 
 /// Read a lifecycle hook (`install`/`uninstall`, HOOK-80) from an item's meta
@@ -1582,6 +1640,85 @@ mod tests {
             hooks: Vec::new(),
         };
         assert_eq!(item.resolved_bin(), None);
+    }
+
+    #[test]
+    fn is_safe_item_name_rejects_traversal_and_separators() {
+        // spec: DSC-71
+        for ok in ["x", "my-skill", "a.b", "review2"] {
+            assert!(is_safe_item_name(ok), "{ok:?} should be accepted");
+        }
+        for bad in ["", ".", "..", "a/b", "../x", "/etc", "a\\b", "x\0y"] {
+            assert!(!is_safe_item_name(bad), "{bad:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn is_safe_link_rel_rejects_escape() {
+        // spec: DSC-72
+        for ok in ["rules/x.md", "skills/x", "commands/x.toml", "./a/b.md"] {
+            assert!(is_safe_link_rel(ok), "{ok:?} should be accepted");
+        }
+        for bad in [
+            "",
+            "../../.bashrc",
+            "/etc/passwd",
+            "~/x",
+            "a/../../b",
+            "x\0y",
+        ] {
+            assert!(!is_safe_link_rel(bad), "{bad:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn from_decl_rejects_unsafe_name() {
+        // spec: DSC-71
+        let tmp = TmpDir::new();
+        let root = tmp.path();
+        let source = make_source_for(root);
+        let decl = ItemDecl {
+            kind: "rule".to_string(),
+            name: "../../evil".to_string(),
+            path: "rules/x.md".to_string(),
+            link: None,
+            description: None,
+            bin: None,
+            build: None,
+            install: None,
+            uninstall: None,
+            hooks: Vec::new(),
+        };
+        let err = from_decl(root, &source, &None, &decl).unwrap_err();
+        assert!(
+            matches!(err, MindError::MindToml { .. }),
+            "an unsafe item name must be a schema error: {err}"
+        );
+    }
+
+    #[test]
+    fn from_decl_rejects_escaping_link() {
+        // spec: DSC-72
+        let tmp = TmpDir::new();
+        let root = tmp.path();
+        let source = make_source_for(root);
+        let decl = ItemDecl {
+            kind: "rule".to_string(),
+            name: "x".to_string(),
+            path: "rules/x.md".to_string(),
+            link: Some("../../.bashrc".to_string()),
+            description: None,
+            bin: None,
+            build: None,
+            install: None,
+            uninstall: None,
+            hooks: Vec::new(),
+        };
+        let err = from_decl(root, &source, &None, &decl).unwrap_err();
+        assert!(
+            matches!(err, MindError::MindToml { .. }),
+            "an escaping link override must be a schema error: {err}"
+        );
     }
 
     #[test]
