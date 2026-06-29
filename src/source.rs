@@ -138,12 +138,18 @@ impl Source {
         format!("git@{}:{}/{}", self.host, self.owner, self.repo)
     }
 
-    /// Switch the clone URL to SSH when `prefer_ssh` is set and this is an https
-    /// remote (not a local path). The new URL is persisted on the source, so
-    /// later `sync`s reuse SSH too. A no-op for local paths and for URLs that are
-    /// already SSH (an explicit `git@...` or `ssh://`).
+    /// Switch the clone URL to SSH when `prefer_ssh` is set and this is an http
+    /// or https remote (not a local path). The new URL is persisted on the source,
+    /// so later `sync`s reuse SSH too. A no-op for local paths and for URLs that
+    /// are already SSH (an explicit `git@...` or `ssh://`).
     pub fn prefer_ssh(&mut self, prefer_ssh: bool) {
-        if prefer_ssh && self.host != "local" && self.url.starts_with("https://") {
+        // spec: DSC-66 (hardening) - rewrite both http:// and https:// remotes
+        // to the SSH form; a plain http:// remote is just as likely to carry a
+        // credential in the URL and deserves the same treatment.
+        if prefer_ssh
+            && self.host != "local"
+            && (self.url.starts_with("https://") || self.url.starts_with("http://"))
+        {
             self.url = self.ssh_url();
         }
     }
@@ -415,6 +421,33 @@ mod tests {
         let mut h = parse_spec("james/agents").unwrap();
         h.prefer_ssh(false);
         assert_eq!(h.url, "https://github.com/james/agents");
+    }
+
+    #[test]
+    fn prefer_ssh_rewrites_plain_http_url() {
+        // spec: DSC-66 - an http:// (non-TLS) remote is rewritten to the SSH
+        // form under prefer_ssh, the same as an https:// remote. Previously only
+        // https:// was handled; an http://host/owner/repo URL was passed through
+        // unchanged, leaving the same injection surface.
+        let mut s = parse_spec("https://example.com/owner/repo").unwrap();
+        // Manually set an http:// URL to simulate a plain-HTTP remote.
+        s.url = "http://example.com/owner/repo".to_string();
+        s.host = "example.com".to_string();
+        s.prefer_ssh(true);
+        assert_eq!(
+            s.url, "git@example.com:owner/repo",
+            "http:// remote must be rewritten to SSH form under prefer_ssh"
+        );
+
+        // http:// with prefer_ssh=false: unchanged.
+        let mut s2 = parse_spec("https://example.com/owner/repo").unwrap();
+        s2.url = "http://example.com/owner/repo".to_string();
+        s2.host = "example.com".to_string();
+        s2.prefer_ssh(false);
+        assert_eq!(
+            s2.url, "http://example.com/owner/repo",
+            "prefer_ssh=false must leave an http:// URL unchanged"
+        );
     }
 
     #[test]

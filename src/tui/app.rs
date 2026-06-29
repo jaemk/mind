@@ -372,10 +372,14 @@ impl App {
                 }
             }
             Intent::PageUp => {
+                self.error = None;
+                self.status = None;
                 let page = self.page_size();
                 self.selected = self.selected.saturating_sub(page);
             }
             Intent::PageDown => {
+                self.error = None;
+                self.status = None;
                 let page = self.page_size();
                 self.selected = (self.selected + page).min(self.visible.len().saturating_sub(1));
             }
@@ -1298,6 +1302,33 @@ mod tests {
         app.selected = last;
         app.apply_intent(Intent::MoveDown);
         assert_eq!(app.selected, last, "MoveDown at bottom should stay at last");
+    }
+
+    #[test]
+    fn page_up_clears_status_and_error() {
+        // spec: TUI-11 - PageUp must clear a stale status/error exactly as MoveUp does.
+        let mut app = App::new(String::new(), None, None);
+        app.apply_snapshot(make_snapshot());
+        // Position somewhere in the middle so PageUp has room to move.
+        app.selected = app.visible.len().saturating_sub(1);
+        app.status = Some("stale status".to_string());
+        app.error = Some("stale error".to_string());
+        app.apply_intent(Intent::PageUp);
+        assert!(app.status.is_none(), "PageUp must clear status");
+        assert!(app.error.is_none(), "PageUp must clear error");
+    }
+
+    #[test]
+    fn page_down_clears_status_and_error() {
+        // spec: TUI-11 - PageDown must clear a stale status/error exactly as MoveDown does.
+        let mut app = App::new(String::new(), None, None);
+        app.apply_snapshot(make_snapshot());
+        app.selected = 0;
+        app.status = Some("stale status".to_string());
+        app.error = Some("stale error".to_string());
+        app.apply_intent(Intent::PageDown);
+        assert!(app.status.is_none(), "PageDown must clear status");
+        assert!(app.error.is_none(), "PageDown must clear error");
     }
 
     #[test]

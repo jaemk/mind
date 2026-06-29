@@ -29,6 +29,10 @@ use crate::source::{Pin, Registry, parse_spec};
 /// If the source's `mind.toml` lists nested `[discover].sources`, each is melded
 /// too (recursively), so a repo can act as a curated super-source. Nested
 /// sources are skipped if already registered, and cycles are guarded by URL.
+///
+/// Returns a `MeldSummary` with the data needed for the caller to emit a combined
+/// JSON object (CLI-156): the dispatcher folds the post-meld install outcome into
+/// ONE JSON result rather than letting each step emit separately.
 #[allow(clippy::too_many_arguments)]
 pub fn meld(
     paths: &Paths,
@@ -40,7 +44,7 @@ pub fn meld(
     pin_ref: Option<String>,
     install_hook: Option<String>,
     dangerously_skip_install_hook_check: bool,
-) -> Result<Vec<String>> {
+) -> Result<MeldSummary> {
     // Resolve the consumer-supplied pin flags into a single Pin. The flags are
     // independent at the clap layer, so more than one surfaces here as the
     // structured `ConflictingPin` error (CLI-17) rather than a clap usage string.
@@ -57,9 +61,6 @@ pub fn meld(
     let source_name = parse_spec(repo)
         .map(|s| s.name)
         .unwrap_or_else(|_| repo.to_string());
-    // Source names registered before this meld, to diff out the newly added ones
-    // (the top-level source plus any nested chain) for DSC-55.
-    let before: HashSet<String> = registry.sources.iter().map(|s| s.name.clone()).collect();
     let mut meld_skipped: Vec<SkippedEntry> = Vec::new();
     let added = meld_recursive(
         paths,
@@ -77,25 +78,19 @@ pub fn meld(
         None, // a top-level meld has no curator-supplied configuration
         &mut meld_skipped,
     )?;
-    let newly: Vec<String> = registry
-        .sources
-        .iter()
-        .map(|s| s.name.clone())
-        .filter(|n| !before.contains(n))
-        .collect();
     registry.save(paths)?;
+    // JSON emission is deferred to the dispatcher (main.rs) so the install
+    // outcome can be folded into ONE object (CLI-156). Human output is still
+    // printed here because it is unrelated to the install step.
     let out = crate::render::ctx();
-    if out.json {
-        let mut result = MutationResult::new("meld", &source_name, "melded");
-        result.count = Some(added);
-        result.skipped = meld_skipped;
-        print_json(&result)?;
-        return Ok(newly);
-    }
-    if added > 1 {
+    if !out.json && added > 1 {
         println!("melded {added} source(s)");
     }
-    Ok(newly)
+    Ok(MeldSummary {
+        source_name,
+        added,
+        skipped: meld_skipped,
+    })
 }
 
 /// DSC-56: after melding a source that curates other sources (`[discover].sources`),
@@ -1545,6 +1540,16 @@ pub fn learn(paths: &Paths, item_ref: &str, dry_run: bool, flow: InstallFlow) ->
     let order = resolution.install_order();
     let closure: Vec<&CatalogItem> = order.iter().map(|&i| &items[i]).collect();
 
+    // CLI-157: empty closure means every requested item is already installed.
+    // Treat as a distinct no-op rather than being silent or claiming "installed".
+    if closure.is_empty() && !dry_run {
+        if out.json {
+            return print_json(&MutationResult::new("learn", item_ref, "up-to-date"));
+        }
+        println!("already installed; nothing to do");
+        return Ok(());
+    }
+
     // DEP-30: the collision check (CLI-33) runs over the FULL closure, not just
     // the explicit selection, so two items that would clobber each other abort
     // before anything is installed.
@@ -1671,6 +1676,79 @@ pub fn learn(paths: &Paths, item_ref: &str, dry_run: bool, flow: InstallFlow) ->
             }
             Ok(())
         }
+    }
+}
+
+/// Like `learn()` but installs silently and returns the installed keys instead
+/// of emitting a JSON result. Used by `install_source_items_for_json` so the
+/// meld dispatcher can fold the install outcome into ONE combined JSON object
+/// (CLI-156) rather than letting `learn` emit its own separate result.
+///
+/// Differences from `learn()`:
+/// - `dry_run` is never true (callers always want the real install).
+/// - No JSON is emitted at the end; the caller receives the keys.
+/// - The dep-prompt is skipped (callers always pass `yes=true` here).
+fn learn_collecting(paths: &Paths, item_ref: &str, flow: InstallFlow) -> Result<Vec<String>> {
+    let InstallFlow {
+        clobber,
+        dangerously_skip,
+        ..
+    } = flow;
+    let policy = Policy::load()?;
+    let (registry, items, resolution) = resolve_learn(paths, item_ref)?;
+
+    let order = resolution.install_order();
+    let closure: Vec<&CatalogItem> = order.iter().map(|&i| &items[i]).collect();
+
+    // Already all installed: nothing to collect.
+    if closure.is_empty() {
+        return Ok(vec![]);
+    }
+
+    if let Some((key, sources)) = colliding_install(&closure) {
+        return Err(MindError::AmbiguousItem {
+            query: key,
+            candidates: sources,
+        });
+    }
+
+    let mut manifest = Manifest::load(paths)?;
+    let mut failure = None;
+    let mut installed_keys: Vec<String> = Vec::new();
+    for target in &closure {
+        if let Some(policy) = policy.as_ref()
+            && policy.lock()
+            && !policy.allow_matches(&target.source)
+        {
+            continue; // policy-blocked items are silently skipped in collect mode
+        }
+        let commit = match registry.find(&target.source) {
+            Some(s) => s.commit.clone().unwrap_or_default(),
+            None => {
+                failure = Some(MindError::SourceNotFound {
+                    name: target.source.clone(),
+                });
+                break;
+            }
+        };
+        let siblings = siblings_of(&items, &target.source);
+        let force = clobber == Clobber::Force;
+        let result = install_item(paths, target, &commit, &siblings, force, dangerously_skip);
+        match result {
+            Ok(installed) => {
+                installed_keys.push(installed.key());
+                manifest.insert(installed);
+            }
+            Err(e) => {
+                failure = Some(e);
+                break;
+            }
+        }
+    }
+    manifest.save(paths)?;
+    match failure {
+        Some(e) => Err(e),
+        None => Ok(installed_keys),
     }
 }
 
@@ -1997,6 +2075,111 @@ pub fn install_curated_sources(
         }
     }
     Ok(())
+}
+
+/// Install `source_name`'s items silently (no JSON emitted by `learn`) and
+/// return `(installed_keys, pending_count)`. Used in `--json` mode so the
+/// meld dispatcher can emit ONE combined JSON object (CLI-156).
+///
+/// - `flow.yes = true`: installs everything, returns `(keys, 0)`.
+/// - `flow.yes = false`: returns `([], N)` where N is the pending item count
+///   without prompting (json mode is always non-interactive).
+pub(crate) fn install_source_items_for_json(
+    paths: &Paths,
+    source_name: &str,
+    flow: InstallFlow,
+) -> Result<(Vec<String>, usize)> {
+    let item_ref = format!("{source_name}#*");
+    let plan = match learn_preview(paths, &item_ref) {
+        Ok(plan) => plan,
+        Err(MindError::ItemNotFound { .. }) => return Ok((vec![], 0)),
+        Err(e) => return Err(e),
+    };
+    if plan.install_count == 0 {
+        return Ok((vec![], 0));
+    }
+    if flow.yes {
+        let keys = learn_collecting(paths, &item_ref, flow)?;
+        return Ok((keys, 0));
+    }
+    // No --yes in json mode: report the pending count without prompting.
+    Ok((vec![], plan.install_count))
+}
+
+/// Walk the curated source chain and install each nested source's items
+/// silently, returning all installed keys. Mirrors `install_curated_sources`
+/// but collects keys instead of printing JSON results, so the meld dispatcher
+/// can fold them into ONE combined JSON object (CLI-156).
+pub(crate) fn install_curated_sources_for_json(
+    paths: &Paths,
+    super_name: &str,
+    all: bool,
+    flow: InstallFlow,
+) -> Result<Vec<String>> {
+    let registry = Registry::load(paths)?;
+    let mut visited: HashSet<String> = HashSet::from([super_name.to_string()]);
+    let mut queue: Vec<String> = vec![super_name.to_string()];
+    let mut all_keys: Vec<String> = Vec::new();
+    while let Some(name) = queue.pop() {
+        let Some(source) = registry.find(&name) else {
+            continue;
+        };
+        let nested = MindToml::load(&source.clone_dir(paths))?
+            .and_then(|m| m.discover)
+            .map(|d| d.sources)
+            .unwrap_or_default();
+        for ns in nested {
+            let Ok(spec) = parse_spec(&ns.source) else {
+                continue;
+            };
+            if !visited.insert(spec.name.clone()) {
+                continue;
+            }
+            if registry.find(&spec.name).is_some() {
+                if all {
+                    let (keys, _) = install_source_items_for_json(paths, &spec.name, flow)?;
+                    all_keys.extend(keys);
+                } else if let Some(refs) = &ns.install_items {
+                    if !refs.is_empty() && flow.yes {
+                        for item_ref in refs {
+                            let qualified = format!("{}#{}", spec.name, item_ref);
+                            let keys = learn_collecting(paths, &qualified, flow)?;
+                            all_keys.extend(keys);
+                        }
+                    }
+                } else if ns.install {
+                    let (keys, _) = install_source_items_for_json(paths, &spec.name, flow)?;
+                    all_keys.extend(keys);
+                }
+                queue.push(spec.name);
+            }
+        }
+    }
+    Ok(all_keys)
+}
+
+/// Build and emit the single meld JSON result (CLI-153, CLI-156).
+///
+/// Called by the dispatcher in `main.rs` after both the registration step
+/// (`meld()`) and the post-meld install step (`install_source_items_for_json`)
+/// have completed, so ONE object covers both outcomes.
+///
+/// `installed` contains the effective keys installed in this call.
+/// `pending` is non-zero when `--yes` was absent and items remain to install.
+// spec: CLI-153 CLI-156
+pub(crate) fn emit_meld_json_result(
+    summary: MeldSummary,
+    installed: Vec<String>,
+    pending: usize,
+) -> Result<()> {
+    let mut result = MutationResult::new("meld", &summary.source_name, "melded");
+    result.count = Some(summary.added);
+    result.skipped = summary.skipped;
+    result.installed = installed;
+    if pending > 0 {
+        result.pending_items = Some(pending);
+    }
+    print_json(&result)
 }
 
 /// Print every item the source offers with its install state and the source
@@ -2465,6 +2648,8 @@ pub fn absorb(
             let _ = crate::install::remove_path(&dest_item_path);
             return Err(e);
         }
+        // meld() now returns MeldSummary; the Ok(_) case is discarded here
+        // because absorb handles its own JSON output (ABS-11).
     }
 
     // 4. Backup the source lobe item before removing it.
@@ -2494,21 +2679,24 @@ pub fn absorb(
     let effective_key = format!("{}:{}", item.kind.as_str(), effective_name);
 
     // ABS-1 / ABS-8: learn the item under the destination source.
+    // When `--json` is in effect use `learn_collecting` (no JSON emitted by
+    // learn itself) so that absorb can emit its own single result (ABS-11).
+    // In human mode the regular `learn()` path prints the "learned ..." line.
     let dest_source_name = parse_spec(&dest_spec)
         .map(|s| s.name)
         .unwrap_or_else(|_| dest_spec.clone());
     let learn_ref = format!("{}:{}", item.kind.as_str(), effective_name);
     let qualified_ref = format!("{dest_source_name}#{learn_ref}");
-    let learn_err = learn(
-        paths,
-        &qualified_ref,
-        false,
-        InstallFlow {
-            yes: true,               // already confirmed above
-            clobber: Clobber::Force, // stray lobe copies handled by Force
-            dangerously_skip: false,
-        },
-    );
+    let learn_flow = InstallFlow {
+        yes: true,               // already confirmed above
+        clobber: Clobber::Force, // stray lobe copies handled by Force
+        dangerously_skip: false,
+    };
+    let learn_err: Result<()> = if out.json {
+        learn_collecting(paths, &qualified_ref, learn_flow).map(|_| ())
+    } else {
+        learn(paths, &qualified_ref, false, learn_flow)
+    };
 
     if let Err(e) = learn_err {
         // Restore the original lobe entry from backup.
@@ -2524,13 +2712,17 @@ pub fn absorb(
     // 7. Success: drop the backup.
     let _ = crate::install::remove_path(&backup);
 
-    if !out.json {
-        println!(
-            "{} absorbed {} -> managed as {effective_key}",
-            out.ok(),
-            item.key()
-        );
+    if out.json {
+        // ABS-11: emit exactly one structured result on stdout.
+        let mut result = MutationResult::new("absorb", item_ref_str, "absorbed");
+        result.key = Some(effective_key);
+        return print_json(&result);
     }
+    println!(
+        "{} absorbed {} -> managed as {effective_key}",
+        out.ok(),
+        item.key()
+    );
     Ok(())
 }
 
@@ -4651,9 +4843,17 @@ fn lobes_locked_error(action: &str) -> MindError {
 /// A source entry that was skipped during meld or sync due to an auth failure
 /// with `on-auth-failure.action = "skip"` (DSC-68, DSC-69).
 #[derive(Serialize, Debug, PartialEq, Eq)]
-struct SkippedEntry {
+pub(crate) struct SkippedEntry {
     source: String,
     reason: String,
+}
+
+/// Data returned by `meld()` so the dispatcher can combine it with the
+/// post-meld install outcome into ONE JSON object (CLI-153, CLI-156).
+pub(crate) struct MeldSummary {
+    pub(crate) source_name: String,
+    pub(crate) added: usize,
+    pub(crate) skipped: Vec<SkippedEntry>,
 }
 
 /// The structured result a mutating verb emits under `--json` (CLI-153).
@@ -4674,6 +4874,13 @@ struct MutationResult {
     removed: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     skipped: Vec<SkippedEntry>,
+    /// Count of items available to install but not yet installed (no `--yes` given).
+    /// Only set for `meld` JSON results when items are pending (CLI-156).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pending_items: Option<usize>,
+    /// The managed `kind:name` key after a successful absorb (ABS-11).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    key: Option<String>,
 }
 
 impl MutationResult {
@@ -4687,6 +4894,8 @@ impl MutationResult {
             installed: Vec::new(),
             removed: Vec::new(),
             skipped: Vec::new(),
+            pending_items: None,
+            key: None,
         }
     }
 }

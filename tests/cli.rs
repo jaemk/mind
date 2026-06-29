@@ -14018,3 +14018,115 @@ fn meld_pin_tag_space_separated_leading_dash_is_rejected_before_git() {
         sources.stdout
     );
 }
+
+// ---- json-mode meld (CLI-156) -----------------------------------------------
+
+/// `meld --yes --json` must emit exactly ONE top-level JSON object whose
+/// `installed` array lists the items that were installed in this call.
+/// Multiple JSON documents would break `json.loads`; silent installs would
+/// make the meld result indistinguishable from a link-only run.
+#[test]
+fn meld_json_with_yes_installs_and_emits_single_object() {
+    // spec: CLI-156 CLI-153
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    let r = sb.mind(&["--json", "meld", &spec, "--yes"]);
+    assert!(
+        r.success,
+        "meld --yes --json must succeed: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+    // stdout must parse as exactly one JSON object (no concatenated documents).
+    let v: serde_json::Value = serde_json::from_str(r.stdout.trim()).unwrap_or_else(|e| {
+        panic!(
+            "meld --yes --json stdout must be one valid JSON object, got error {e}: '{}'",
+            r.stdout
+        )
+    });
+    assert_eq!(v["action"], "meld", "action must be 'meld': {v}");
+    assert_eq!(v["outcome"], "melded", "outcome must be 'melded': {v}");
+    // The fixture has skill:review, agent:dev, rule:style => at least one installed key.
+    let installed = v["installed"]
+        .as_array()
+        .expect("installed must be an array");
+    assert!(
+        !installed.is_empty(),
+        "installed must not be empty when --yes is given: {v}"
+    );
+}
+
+/// `meld --json` (no `--yes`) on a non-TTY (piped stdin) must not block
+/// waiting for a confirmation prompt and must emit exactly ONE JSON object
+/// with `pending_items >= 1`.
+#[test]
+fn meld_json_no_yes_non_tty_emits_single_object_with_pending() {
+    // spec: CLI-156
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    // Passing empty stdin ensures this is non-TTY; no --yes so items are pending.
+    let r = sb.mind_with_input(&["--json", "meld", &spec], Some(""));
+    assert!(
+        r.success,
+        "meld --json (no --yes) must succeed: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+    let v: serde_json::Value = serde_json::from_str(r.stdout.trim()).unwrap_or_else(|e| {
+        panic!(
+            "meld --json stdout must be one valid JSON object, got error {e}: '{}'",
+            r.stdout
+        )
+    });
+    assert_eq!(v["action"], "meld", "action must be 'meld': {v}");
+    assert_eq!(v["outcome"], "melded", "outcome must be 'melded': {v}");
+    let pending = v["pending_items"].as_u64().unwrap_or(0);
+    assert!(
+        pending >= 1,
+        "pending_items must be >= 1 when items exist but --yes was not given: {v}"
+    );
+}
+
+// ---- re-learn noop (CLI-157) -------------------------------------------------
+
+/// Re-learning an already-installed item must print a human-readable signal
+/// and, under --json, use the distinct "up-to-date" outcome rather than
+/// "installed". This lets callers distinguish a real install from a no-op.
+#[test]
+fn relearn_already_installed_signals_noop() {
+    // spec: CLI-157 DEP-23
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    // First learn succeeds.
+    let r1 = sb.mind(&["meld", &spec, "--yes"]);
+    assert!(r1.success, "initial meld+learn must succeed: {}", r1.stderr);
+
+    // Human mode: re-learn prints a recognizable noop message.
+    let r2 = sb.mind(&["learn", "skill:review"]);
+    assert!(
+        r2.success,
+        "re-learn must still exit 0: stdout={} stderr={}",
+        r2.stdout, r2.stderr
+    );
+    assert!(
+        r2.stdout.contains("already installed") || r2.stdout.contains("nothing to do"),
+        "re-learn human output must signal noop: '{}'",
+        r2.stdout
+    );
+
+    // JSON mode: outcome is "up-to-date", NOT "installed".
+    let r3 = sb.mind(&["--json", "learn", "skill:review"]);
+    assert!(
+        r3.success,
+        "re-learn --json must exit 0: stdout={} stderr={}",
+        r3.stdout, r3.stderr
+    );
+    let v: serde_json::Value = serde_json::from_str(r3.stdout.trim()).unwrap_or_else(|e| {
+        panic!(
+            "re-learn --json stdout must be one valid JSON object, got error {e}: '{}'",
+            r3.stdout
+        )
+    });
+    assert_eq!(
+        v["outcome"], "up-to-date",
+        "json outcome for re-learn must be 'up-to-date', not 'installed': {v}"
+    );
+}

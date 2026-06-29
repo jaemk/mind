@@ -234,13 +234,27 @@ run = "make build"
   by a melded super-source cannot inject git options (e.g.
   `--upload-pack=touch /tmp/pwned`) into a child `git` process. At the git call
   layer, a `--` end-of-options terminator is inserted before every positional
-  ref/branch/tag/sha argument so that git cannot interpret a value as an option
-  even if validation were bypassed.
+  ref/branch/tag/sha argument and before the repository URL in `git clone`
+  invocations, so that git cannot interpret a value as an option even if
+  validation were bypassed. The `prefer_ssh` rewrite applies to both `https://`
+  and `http://` remotes so that a plain-HTTP clone URL is not left unrewritten
+  when SSH is preferred.
 - `DSC-40` When a source's `[source].min-mind-version` is greater than the
   running `mind` version, melding or scanning that source is an error
   (`IncompatibleVersion`) rather than proceeding against a format it predates.
   Versions compare by dotted numeric component (a missing component is 0, so
-  `0.2` == `0.2.0`); a non-numeric component counts as 0.
+  `0.2` == `0.2.0`). The `min-mind-version` field value is validated at parse
+  time (`MindToml::load`): it must be a non-empty string of one or more
+  dot-separated components where every component is non-empty and consists
+  solely of ASCII decimal digits (e.g. `"1"`, `"0.7"`, `"2.3.1"`). A value
+  with an empty component, a non-digit character, or an empty string is
+  rejected with a `MindToml` error naming the field and the bad value (e.g.
+  `"0.3-beta"`, `"abc"`, `""`, `"1.x"` are all rejected). The running
+  binary's own version string (from the build environment) may carry a
+  pre-release segment (e.g. `0.2.0-rc1`); such a segment compares as 0 in
+  the version comparison only. The enforcement gate (`IncompatibleVersion`) is
+  advisory: parsed and recorded at load time, not yet universally enforced
+  across all call sites.
 - `DSC-41` `[source]` may declare a pin: exactly one of `follow-branch = "<branch>"`,
   `pin-tag = "<tag>"`, or `pin-ref = "<commit>"`. It is read from the source's
   default-branch `mind.toml` and supplies the default pin when the consumer gives

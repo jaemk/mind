@@ -183,8 +183,11 @@ impl Policy {
     /// Enforce the internal invariants. Every `auto_meld` entry has a tag/ref when
     /// `pinned` (POL-21); every `auto_meld` entry satisfies `allow` when `lock`
     /// (POL-31). Returns `Err(MindError::InvalidPolicy)` naming the problem.
-    /// Called by [`load`](Policy::load) (fail closed) and reused by
-    /// `mind review --policy`.
+    ///
+    /// The production path is [`validate_at`](Policy::validate_at), called by
+    /// `load_file` -> `parse_str` with the real file path so errors cite the
+    /// actual file. This convenience wrapper attributes errors to the system
+    /// policy path (`system_path()`) and is intended for tests only.
     pub fn validate(&self) -> Result<()> {
         self.validate_at(&system_path())
     }

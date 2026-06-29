@@ -88,7 +88,13 @@ struct DumpEntry {
 /// - `whole_sources` - when true, emit `install = true` for every source
 ///   regardless of what is actually installed (DUMP-3)
 pub fn run(paths: &Paths, output: Option<PathBuf>, whole_sources: bool) -> Result<()> {
-    // spec: DUMP-1 DUMP-2 DUMP-3 DUMP-4 DUMP-5 DUMP-6 DUMP-7 DUMP-8
+    // spec: DUMP-1 DUMP-2 DUMP-3 DUMP-4 DUMP-5 DUMP-6 DUMP-7 DUMP-8 DUMP-9
+
+    // DUMP-9: dump always writes TOML; --json has no effect on the output format.
+    // Print a note to stderr so the caller is not confused by the TOML output.
+    if crate::render::ctx().json {
+        eprintln!("note: --json does not apply to dump; output is always TOML");
+    }
 
     let registry = Registry::load(paths)?;
     let manifest = Manifest::load(paths)?;

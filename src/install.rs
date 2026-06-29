@@ -116,13 +116,51 @@ pub fn install(
     }
 
     // 3. Link the store copy into every agent home (targets were checked free in
-    //    step 0). On any failure, undo the links made so far and roll the store
-    //    back.
+    //    step 0, or force was given). Under force, any pre-existing foreign target
+    //    is stashed before ensure_link removes it so rollback can restore it
+    //    (LIFE-43). On any failure, undo the links made so far (restoring their
+    //    stashes) and roll the store back.
     let mut links: Vec<std::path::PathBuf> = Vec::new();
-    for link in planned_links {
+    let mut stashes: Vec<Option<std::path::PathBuf>> = Vec::new();
+    for (i, link) in planned_links.into_iter().enumerate() {
+        // Under force, move any pre-existing foreign target to a stash so it
+        // can be restored on rollback. A missing target or mind's own symlink
+        // needs no stash. (LIFE-43)
+        let stash = if force {
+            let sp = paths.tmp_dir().join("foreign-stash").join(i.to_string());
+            match maybe_stash_foreign(&store_root, &link, &sp) {
+                Ok(true) => Some(sp),
+                Ok(false) => None,
+                Err(e) => {
+                    // Stashing failed: roll back links and store made so far.
+                    for (made, s) in links.iter().zip(stashes.iter()) {
+                        let _ = remove_path(made);
+                        if let Some(s) = s {
+                            let _ = rename(s, made);
+                        }
+                    }
+                    let _ = remove_path(&store);
+                    if had_backup {
+                        let _ = rename(&backup, &store);
+                    }
+                    return Err(e);
+                }
+            }
+        } else {
+            None
+        };
+
         if let Err(e) = ensure_link(&store, &link) {
-            for made in &links {
+            // Rollback: remove symlinks made so far, restore their stashes, then
+            // restore the store. Also restore the current link's stash if any.
+            for (made, s) in links.iter().zip(stashes.iter()) {
                 let _ = remove_path(made);
+                if let Some(s) = s {
+                    let _ = rename(s, made);
+                }
+            }
+            if let Some(s) = &stash {
+                let _ = rename(s, &link);
             }
             let _ = remove_path(&store);
             if had_backup {
@@ -131,11 +169,16 @@ pub fn install(
             return Err(e);
         }
         links.push(link);
+        stashes.push(stash);
     }
 
-    // 4. Success: drop the backup.
+    // 4. Success: drop the backup and any foreign-target stashes (the new
+    //    symlinks have taken their place; LIFE-43).
     if had_backup {
         let _ = remove_path(&backup);
+    }
+    for s in stashes.iter().flatten() {
+        let _ = remove_path(s);
     }
 
     Ok(InstalledItem {
@@ -182,6 +225,37 @@ pub fn relink(paths: &Paths, item: &InstalledItem) -> Result<usize> {
         }
     }
     Ok(fixed)
+}
+
+/// Under a forced install, move a pre-existing foreign target at `link` to
+/// `stash` so it can be restored on rollback (LIFE-43). Returns `true` when
+/// the target was moved (a stash was created). Returns `false` when the link
+/// is absent or is already mind's own symlink into the store (no stash needed).
+///
+/// Uses the same "is mind's own" predicate as `ensure_unoccupied`: a symlink
+/// pointing into `store_root` is ours; everything else (regular file, directory,
+/// symlink to another location) is foreign.
+///
+/// Called only when `force` is true. The non-force path uses `ensure_unoccupied`
+/// which refuses to touch foreign targets at all.
+fn maybe_stash_foreign(store_root: &Path, link: &Path, stash: &Path) -> Result<bool> {
+    let meta = match std::fs::symlink_metadata(link) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(MindError::io(link, e)),
+        Ok(m) => m,
+    };
+    // Mind's own symlink: no stash needed.
+    if meta.file_type().is_symlink()
+        && std::fs::read_link(link).is_ok_and(|t| t.starts_with(store_root))
+    {
+        return Ok(false);
+    }
+    // Foreign target: move it to the stash so rollback can rename it back.
+    if let Some(parent) = stash.parent() {
+        mkdir_p(parent)?;
+    }
+    rename(link, stash)?;
+    Ok(true)
 }
 
 /// Refuse to install over a link target that mind does not own. A target is
@@ -848,6 +922,173 @@ mod tests {
             "a self-requires must resolve to the item itself and not error: {result:?}"
         );
         let _ = std::fs::remove_dir_all(&staging);
+    }
+
+    // ---- LIFE-43: forced-install transactional stash/restore ---------------
+
+    /// `maybe_stash_foreign` moves a foreign regular file to the stash (returning
+    /// true) and leaves an absent path or a mind-owned symlink untouched (false).
+    /// Renaming the stash back to the original path recovers the file intact.
+    #[cfg(unix)]
+    #[test]
+    fn maybe_stash_foreign_moves_foreign_file_and_restores_correctly() {
+        // spec: LIFE-43
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let base =
+            std::env::temp_dir().join(format!("mind-stash-helper-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+
+        let store_root = base.join("store");
+        let link = base.join("link-target.md");
+        let stash0 = base.join("stash").join("0");
+
+        // Case 1: absent path -> no stash, returns false.
+        let got = maybe_stash_foreign(&store_root, &link, &stash0).unwrap();
+        assert!(!got, "absent link must not be stashed (LIFE-43)");
+        assert!(
+            !stash0.exists(),
+            "no stash must be created for an absent link"
+        );
+
+        // Case 2: foreign regular file -> stashed, returns true.
+        let foreign_content = b"original foreign content";
+        std::fs::write(&link, foreign_content).unwrap();
+        let got = maybe_stash_foreign(&store_root, &link, &stash0).unwrap();
+        assert!(got, "foreign file must be stashed (LIFE-43)");
+        assert!(!link.exists(), "original path must be vacated after stash");
+        assert!(stash0.exists(), "stash file must exist");
+        assert_eq!(
+            std::fs::read(&stash0).unwrap(),
+            foreign_content,
+            "stash must preserve original content"
+        );
+
+        // Simulate rollback: rename stash back to original location.
+        rename(&stash0, &link).unwrap();
+        assert!(link.exists(), "restored path must exist");
+        assert_eq!(
+            std::fs::read(&link).unwrap(),
+            foreign_content,
+            "restored file must have original content (LIFE-43)"
+        );
+
+        // Case 3: mind's own symlink -> not stashed, returns false.
+        std::fs::create_dir_all(&store_root).unwrap();
+        let store_file = store_root.join("agent").join("myagent");
+        std::fs::create_dir_all(store_file.parent().unwrap()).unwrap();
+        std::fs::write(&store_file, b"mind managed").unwrap();
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&store_file, &link).unwrap();
+
+        let stash1 = base.join("stash").join("1");
+        let got = maybe_stash_foreign(&store_root, &link, &stash1).unwrap();
+        assert!(!got, "mind's own symlink must not be stashed (LIFE-43)");
+        assert!(!stash1.exists(), "no stash for mind's own symlink");
+        // Symlink is untouched.
+        assert!(std::fs::symlink_metadata(&link).is_ok());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A forced install that clobbers a foreign file at the first link target
+    /// but fails on a later link must leave the original foreign file restored
+    /// and the store copy rolled back (LIFE-43, LIFE-4).
+    ///
+    /// Two lobes are wired via config.toml: the first is a valid directory
+    /// containing a pre-existing foreign file; the second has a regular file as
+    /// its parent component, so `mkdir_p` inside `ensure_link` fails with ENOTDIR.
+    #[cfg(unix)]
+    #[test]
+    fn force_install_rollback_restores_stashed_foreign_target() {
+        // spec: LIFE-43
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let base = std::env::temp_dir().join(format!("mind-life43-e2e-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+
+        let mind_home = base.join("mind");
+        let lobe1 = base.join("lobe1");
+        // A regular file: using a subdirectory of it as a lobe causes ENOTDIR.
+        let blocker = base.join("not-a-dir");
+
+        std::fs::create_dir_all(&mind_home).unwrap();
+        std::fs::create_dir_all(&lobe1).unwrap();
+        std::fs::write(&blocker, b"i-am-a-regular-file").unwrap();
+
+        let lobe2 = blocker.join("lobe2");
+
+        // Config with two lobes; no env var mutation needed.
+        let cfg = format!(
+            "lobes = [\"{}\", \"{}\"]\n",
+            lobe1.to_str().unwrap(),
+            lobe2.to_str().unwrap(),
+        );
+        std::fs::write(mind_home.join("config.toml"), cfg.as_bytes()).unwrap();
+
+        let paths = Paths {
+            mind_home: mind_home.clone(),
+            claude_home: lobe1.clone(),
+        };
+
+        // Place a foreign regular file at lobe1's agent link location.
+        let agents_dir = lobe1.join("agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        let foreign_path = agents_dir.join("myagent.md");
+        let foreign_content = b"foreign content - must survive the rollback";
+        std::fs::write(&foreign_path, foreign_content).unwrap();
+
+        // Source file for the catalog item.
+        let src_file = base.join("myagent.md");
+        std::fs::write(&src_file, b"# My Agent\n").unwrap();
+
+        let item = CatalogItem {
+            kind: ItemKind::Agent,
+            name: "myagent".to_string(),
+            source: "local/test".to_string(),
+            prefix: None,
+            path: src_file,
+            description: None,
+            link_rel: None, // defaults to agents/myagent.md under each lobe
+            bin: None,
+            build: None,
+            install: None,
+            uninstall: None,
+            requires: Vec::new(),
+            hooks: Vec::new(),
+        };
+
+        // force=true: lobe1's link is stashed then overwritten with a symlink;
+        // lobe2's link fails (mkdir_p into a regular file is ENOTDIR); rollback
+        // must restore the stash to lobe1's link path.
+        let result = install(&paths, &item, "abc", std::slice::from_ref(&item), true);
+
+        assert!(
+            result.is_err(),
+            "install must fail when a later link cannot be created: {result:?}"
+        );
+
+        // Foreign file must be restored at its original path (LIFE-43).
+        let meta = std::fs::symlink_metadata(&foreign_path)
+            .expect("foreign file must exist at original path after rollback (LIFE-43)");
+        assert!(
+            !meta.file_type().is_symlink(),
+            "restored path must be a regular file, not a symlink (LIFE-43)"
+        );
+        assert_eq!(
+            std::fs::read(&foreign_path).unwrap(),
+            foreign_content,
+            "restored file must have original content (LIFE-43)"
+        );
+
+        // Store copy must be absent (LIFE-4 rollback).
+        let store_path = mind_home.join("store").join("agent").join("myagent");
+        assert!(
+            !store_path.exists(),
+            "store copy must be absent after rollback: {store_path:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// A source tree containing a symlink (e.g. pointing to a secret outside

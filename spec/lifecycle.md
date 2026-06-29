@@ -41,6 +41,16 @@ agent homes (a store-only tool is not linked; tooling.md TOOL-3).
   carrying the offending path. This prevents a crafted source from exfiltrating
   files outside the item tree or causing unbounded recursion via a symlink to an
   ancestor directory.
+- `LIFE-43` A forced install (`learn --force`, CLI-35) that replaces a
+  pre-existing foreign target at one link path and then fails on a later link
+  leaves every clobbered foreign target restored to its original content. Before
+  `ensure_link` removes a foreign target under force, the target is moved to a
+  transactional stash inside `~/.mind/.tmp/foreign-stash/`. On any failure
+  during the link loop, each stashed target is renamed back to its original link
+  path as part of the rollback (alongside removing the partial symlinks and
+  restoring the store backup). On success, the stashes are dropped. The
+  non-force path is unchanged: `ensure_unoccupied` prevents any foreign target
+  from being touched, so no stashing is needed there.
 
 > Platform limitation (non-unix): links are realized as real symlinks only on
 > unix. On platforms without symlink support the install falls back to copying

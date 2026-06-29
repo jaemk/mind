@@ -194,7 +194,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             if commands::is_melded(paths, &repo)? {
                 commands::remeld(paths, &repo, alias, link_only, flow, recursive)?;
             } else {
-                commands::meld(
+                let meld_sum = commands::meld(
                     paths,
                     &repo,
                     alias,
@@ -207,15 +207,38 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
                 )?;
                 // CLI-23: by default, offer to install the melded source's items
                 // right away (preview + prompt). `--link-only` stops at registering.
+                //
+                // CLI-156: in json mode the entire meld+install outcome is folded
+                // into ONE JSON object emitted here. Human output is unchanged.
                 if !link_only {
-                    commands::install_melded_source(paths, &repo, flow)?;
-                    // DSC-54 installs only the top-level source by default. Walk the
-                    // curated chain and install each nested source the curator
-                    // flagged `install = true` (DSC-58), or every nested source with
-                    // `--recursive` (DSC-55).
-                    if let Ok(top) = crate::source::parse_spec(&repo) {
-                        commands::install_curated_sources(paths, &top.name, recursive, flow)?;
+                    if json {
+                        // Install silently (no separate JSON from learn), collect keys.
+                        let (mut inst, pend) = commands::install_source_items_for_json(
+                            paths,
+                            &meld_sum.source_name,
+                            flow,
+                        )?;
+                        // Also walk the curated chain silently (DSC-54/55/58).
+                        if let Ok(top) = crate::source::parse_spec(&repo) {
+                            let curated = commands::install_curated_sources_for_json(
+                                paths, &top.name, recursive, flow,
+                            )?;
+                            inst.extend(curated);
+                        }
+                        commands::emit_meld_json_result(meld_sum, inst, pend)?;
+                    } else {
+                        commands::install_melded_source(paths, &repo, flow)?;
+                        // DSC-54 installs only the top-level source by default. Walk the
+                        // curated chain and install each nested source the curator
+                        // flagged `install = true` (DSC-58), or every nested source with
+                        // `--recursive` (DSC-55).
+                        if let Ok(top) = crate::source::parse_spec(&repo) {
+                            commands::install_curated_sources(paths, &top.name, recursive, flow)?;
+                        }
                     }
+                } else if json {
+                    // link-only + json: register only, emit the meld result now.
+                    commands::emit_meld_json_result(meld_sum, vec![], 0)?;
                 }
             }
             // DSC-56: suggest `mind probe` after melding a curated super-source.

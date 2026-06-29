@@ -1324,3 +1324,41 @@ fn dump_is_classified_as_shared_lock() {
     );
     drop(sb);
 }
+
+// ---- dump --json note (DUMP-9) -----------------------------------------------
+
+/// `dump --json` must still write TOML to stdout (not JSON), exit 0, and print
+/// a note to stderr indicating that --json does not apply.
+#[test]
+fn dump_json_flag_prints_stderr_note() {
+    // spec: DUMP-9
+    let sb = Sandbox::new("json-note");
+    let spec = sb.source_spec();
+    sb.mind(&["meld", &spec, "--yes"]);
+
+    let r = sb.mind(&["--json", "dump"]);
+    assert!(
+        r.success,
+        "`dump --json` must exit 0: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+    // stdout must be TOML, not JSON: a valid TOML file starts with a comment or
+    // a key; a JSON object would start with '{'.
+    assert!(
+        !r.stdout.trim_start().starts_with('{'),
+        "dump --json stdout must be TOML, not a JSON object: '{}'",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("[discover]") || r.stdout.contains("[source]"),
+        "dump --json stdout must contain TOML structure: '{}'",
+        r.stdout
+    );
+    // stderr must carry the note about --json not applying.
+    assert!(
+        r.stderr.contains("--json")
+            && (r.stderr.contains("does not apply") || r.stderr.contains("TOML")),
+        "dump --json must print a note to stderr: '{}'",
+        r.stderr
+    );
+}

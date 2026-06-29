@@ -95,6 +95,13 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   super-source's nested sources are not auto-installed), already-installed items
   are skipped (DEP-23), and a source install hook is still handled by its own
   prompt during the meld (HOOK-20).
+- `CLI-156` In `--json` mode, `meld` is fully non-interactive and never prompts.
+  When `--yes` is given the items are installed as part of the single meld result:
+  the `installed` array in the JSON object lists the effective keys of every item
+  installed in that call. When `--yes` is absent, no install prompt is shown and
+  no install occurs; instead the JSON result carries a `pending_items` integer with
+  the count of items available to install. In both cases exactly ONE top-level JSON
+  object is written to stdout (CLI-153).
 - `CLI-24` When a source declares `[source].prefix` and no `--as` was given, an
   interactive `meld` prompts whether to namespace its items under that prefix:
   accept it, type a different prefix, or choose none. The prompt previews the
@@ -187,6 +194,12 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   to a source qualifier and installing every item of that source (CLI-31), deps
   and all. `--all` is rejected with `InvalidItemRef` when the ref already carries
   a `#` selector, since the selector would be doubled.
+- `CLI-157` When every item in a `learn` selection is already installed (the
+  dependency closure after DEP-23 filtering is empty), `learn` exits 0 but treats
+  this as a distinct no-op, not a silent success. In human output it prints a line
+  such as "already installed; nothing to do". Under `--json` the outcome token is
+  `"up-to-date"` rather than `"installed"`, so callers can distinguish a real
+  install from a re-run that changed nothing.
 
 ## forget
 
@@ -472,6 +485,15 @@ release artifacts as the install script and the Homebrew formula.
   binary intact. A Homebrew-managed install is upgraded with `brew upgrade` instead;
   `evolve` replaces the binary it runs from and does not coordinate with a
   package manager.
+- `CLI-147` `evolve` never downgrades the binary. When `--version V` is given
+  explicitly and V is strictly below the running version, `evolve` exits 0 without
+  downloading anything and reports that the pinned version is below the running
+  version (e.g. "pinned 0.1.0 is below the running 0.3.0; not downgrading"). This
+  is distinct from the "up to date" message, which applies when V equals the running
+  version or when no `--version` is given and the running version is already current.
+  `--check` surfaces the same message. Under `--json`, the outcome is
+  `"not-downgrading"` rather than `"up-to-date"`, so callers can distinguish the
+  two cases.
 
 ## config
 
@@ -544,12 +566,15 @@ and per-harness `kinds` defaults.
   effective name of the item or source the verb acted on (e.g. `"skill:review"`,
   `"github.com/owner/repo"`). `outcome` is one of the values above; `"no-op"` is
   used when the verb completed successfully but changed nothing (e.g. re-melding an
-  already-registered source with nothing to install). A verb MAY add extra fields
-  where it genuinely returns more data (for example, `learn` MAY include an
-  `"installed"` array listing the effective names of all items installed in that
-  call, including dependency-closure items). The read-only verbs (`recall`, `probe`,
-  `introspect`) keep their existing JSON shapes (CLI-73, CLI-84, CLI-92) and are
-  not affected by CLI-153.
+  already-registered source with nothing to install); `"up-to-date"` is used when
+  the verb completed successfully but every item was already at the requested state
+  (e.g. `learn` on an already-installed item). A verb MAY add extra fields where it
+  genuinely returns more data (for example, `learn` MAY include an `"installed"`
+  array listing the effective names of all items installed in that call, including
+  dependency-closure items). The read-only verbs (`recall`, `probe`, `introspect`)
+  keep their existing JSON shapes (CLI-73, CLI-84, CLI-92) and are not affected by
+  CLI-153. `absorb` is also a mutating verb covered by CLI-153; see ABS-11 for its
+  specific extra field.
 
 - `CLI-154` `NO_COLOR` being set (to any value, including empty) forces the
   capability gate (CLI-151) OFF regardless of TTY or locale. A non-UTF-8 locale or
@@ -565,6 +590,12 @@ and per-harness `kinds` defaults.
   between installed-and-current and not-installed, so the out-of-date condition is
   visible from the marker alone and not only from the trailing `(outdated)` text.
   The marker is a human-view concern; the JSON output is unchanged.
+
+- `CLI-157` `learn` when every item in the requested set is already installed (the
+  closure is empty after DEP-23 exclusion, with no dry-run in effect) prints
+  "already installed; nothing to do" to stdout and under `--json` emits a single
+  result object with `outcome: "up-to-date"` (distinct from `"installed"`, which
+  requires at least one item was actually installed). Exit 0 in both cases.
 
 ## Exit status
 

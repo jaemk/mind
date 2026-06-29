@@ -337,6 +337,8 @@ pub fn run_hook(command: &str, clone_dir: &Path, identity: &str, label: &str) ->
             command: command.to_string(),
             status: None,
             stderr: e.to_string(),
+            // Spawn failed before any output was shown.
+            printed_output: false,
         })?;
 
     let stdout_str = String::from_utf8_lossy(&output.stdout);
@@ -371,11 +373,16 @@ pub fn run_hook(command: &str, clone_dir: &Path, identity: &str, label: &str) ->
     if output.status.success() {
         Ok(())
     } else {
+        // The hook's stdout/stderr were already streamed live to the terminal in
+        // the framed blocks above. Carry `printed_any` into the error so its
+        // Display can say "(see output above)" instead of the misleading "(no
+        // output)" when diagnostics were already shown (HOOK-30).
         Err(MindError::HookFailed {
             identity: identity.to_string(),
             command: command.to_string(),
             status: Some(output.status),
             stderr: String::new(),
+            printed_output: printed_any,
         })
     }
 }
@@ -1044,6 +1051,7 @@ mod tests {
                     ref command,
                     status,
                     ref stderr,
+                    printed_output,
                 },
             ) => {
                 assert_eq!(identity, "github.com/test/repo", "wrong identity");
@@ -1054,12 +1062,16 @@ mod tests {
                 );
                 let code = status.unwrap().code();
                 assert_eq!(code, Some(3), "expected exit code 3, got {code:?}");
-                // A silent hook (no output) must have an empty stderr field and the
-                // rendered message must say "(no output)" rather than pointing at
-                // framed output blocks that were never printed (M5).
+                // A silent hook (no output) must have an empty stderr field and
+                // printed_output=false; the rendered message must say "(no output)"
+                // rather than pointing at framed output blocks that were never printed.
                 assert!(
                     stderr.is_empty(),
                     "run_hook must set stderr to empty for a process that produced no output"
+                );
+                assert!(
+                    !printed_output,
+                    "printed_output must be false when the hook produced no output"
                 );
                 let msg = e.to_string();
                 assert!(
@@ -1069,6 +1081,78 @@ mod tests {
                 assert!(
                     !msg.contains("see the hook"),
                     "must not say 'see the hook's output above' when nothing was printed: {msg}"
+                );
+            }
+            other => panic!("expected HookFailed, got: {other:?}"),
+        }
+    }
+
+    // spec: HOOK-30
+    // A hook that prints output before failing must produce a HookFailed with
+    // printed_output=true, so its Display says "(see output above)" rather than
+    // the contradictory "(no output)".
+    #[test]
+    fn run_hook_with_output_before_failure_renders_see_output_above() {
+        let dir = TempDir::new("output-fail");
+        // Print to stdout, then exit non-zero.
+        let result = run_hook(
+            "echo 'hook output'; exit 2",
+            dir.path(),
+            "github.com/test/repo",
+            "test-label",
+        );
+        match result {
+            Err(
+                ref e @ MindError::HookFailed {
+                    printed_output,
+                    ref stderr,
+                    ..
+                },
+            ) => {
+                assert!(
+                    printed_output,
+                    "printed_output must be true when hook produced stdout"
+                );
+                assert!(
+                    stderr.is_empty(),
+                    "stderr field must be empty (output was streamed, not captured)"
+                );
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("(see output above)"),
+                    "must say '(see output above)' when output was streamed: {msg}"
+                );
+                assert!(
+                    !msg.contains("(no output)"),
+                    "must not say '(no output)' when output was printed: {msg}"
+                );
+            }
+            other => panic!("expected HookFailed, got: {other:?}"),
+        }
+    }
+
+    // spec: HOOK-30
+    // Same as above but with stderr output (not stdout): the framed output path
+    // uses `printed_any` which covers either stream.
+    #[test]
+    fn run_hook_with_stderr_output_before_failure_renders_see_output_above() {
+        let dir = TempDir::new("stderr-fail");
+        let result = run_hook(
+            "echo 'hook stderr' >&2; exit 1",
+            dir.path(),
+            "github.com/test/repo",
+            "test-label",
+        );
+        match result {
+            Err(ref e @ MindError::HookFailed { printed_output, .. }) => {
+                assert!(
+                    printed_output,
+                    "printed_output must be true when hook produced stderr"
+                );
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("(see output above)"),
+                    "stderr output must also trigger '(see output above)': {msg}"
                 );
             }
             other => panic!("expected HookFailed, got: {other:?}"),

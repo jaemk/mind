@@ -152,8 +152,13 @@ pub struct ItemDecl {
     pub name: String,
     /// Path to the item, relative to the repo root (a dir for skills/tools).
     pub path: String,
-    /// Optional override for where to link it under `~/.claude`
-    /// (relative to the claude home, e.g. `rules/style.md`).
+    /// Optional override for where to link this item within each agent home
+    /// (lobe). The value is a path relative to each lobe root
+    /// (e.g. `rules/style.md`), and is applied uniformly to every lobe that
+    /// admits this item's kind: the symlink lands at `<lobe-home>/<link>`.
+    /// With cross-harness lobes (Claude, Gemini, Codex, etc.) the same
+    /// relative path is resolved against every admitted lobe. Absent means
+    /// use the default location for the kind in each lobe.
     pub link: Option<String>,
     /// Optional description override (else taken from frontmatter).
     pub description: Option<String>,
@@ -450,6 +455,42 @@ impl Discover {
     }
 }
 
+/// Validate that `val` is a well-formed dotted numeric version string, as
+/// required for `min-mind-version` (DSC-40). A valid string is non-empty, and
+/// every dot-separated component is itself non-empty and consists solely of
+/// ASCII decimal digits (e.g. `"1"`, `"0.7"`, `"2.3.1"`). Returns a
+/// `MindToml` error naming `field` and the bad value when validation fails.
+///
+/// This validator applies to the *field value* in `mind.toml`. The running
+/// binary's version string (from the build environment) may carry a
+/// pre-release segment (e.g. `0.2.0-rc1`); such a segment compares as 0
+/// in [`version_at_least`] only.
+fn validate_version_string(val: &str, field: &str, path: &Path) -> Result<()> {
+    let bad = |reason: &str| {
+        Err(MindError::MindToml {
+            path: path.to_path_buf(),
+            msg: format!(
+                "field '{field}' must be a dotted numeric version \
+                 (e.g. \"1\", \"0.7\", \"2.3.1\"); got {val:?} ({reason})"
+            ),
+        })
+    };
+    if val.is_empty() {
+        return bad("empty string");
+    }
+    for component in val.split('.') {
+        if component.is_empty() {
+            return bad("empty component");
+        }
+        if !component.bytes().all(|b| b.is_ascii_digit()) {
+            return bad(&format!(
+                "component {component:?} is not a non-negative integer"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Whether `running` satisfies `>= required`, comparing dotted numeric version
 /// components (a missing component counts as 0, so `0.2` == `0.2.0`). A
 /// non-numeric component compares as 0, so a prerelease/build suffix is ignored.
@@ -473,14 +514,21 @@ pub fn version_at_least(running: &str, required: &str) -> bool {
 
 impl MindToml {
     /// Load `mind.toml` from a repo root, returning `None` if absent.
+    ///
+    /// Validates `[source].min-mind-version` format at parse time (DSC-40):
+    /// the field, when present, must be a dotted purely-numeric version string.
     pub fn load(root: &Path) -> Result<Option<MindToml>> {
         let file = root.join("mind.toml");
         match std::fs::read_to_string(&file) {
             Ok(text) => {
-                let parsed = toml::from_str(&text).map_err(|e| MindError::Toml {
+                let parsed: MindToml = toml::from_str(&text).map_err(|e| MindError::Toml {
                     path: file.clone(),
                     source: e,
                 })?;
+                // spec: DSC-40 — validate format of min-mind-version at parse time.
+                if let Some(v) = &parsed.source.min_mind_version {
+                    validate_version_string(v, "min-mind-version", &file)?;
+                }
                 Ok(Some(parsed))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -537,8 +585,72 @@ mod tests {
         assert!(version_at_least("0.10.0", "0.9.0"));
         assert!(!version_at_least("0.1.0", "0.2"));
         assert!(!version_at_least("0.1.0", "0.1.1"));
-        // Non-numeric / suffix components count as 0.
+        // Non-numeric / suffix components in the running binary's version count
+        // as 0; validation of the field value is a separate concern.
         assert!(version_at_least("0.2.0-rc1", "0.2"));
+    }
+
+    #[test]
+    fn min_mind_version_well_formed_parses_ok() {
+        // spec: DSC-40 -- well-formed dotted numeric versions are accepted.
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        for v in ["0.7", "2", "1.2.3", "0", "10.0.1"] {
+            let n = N.fetch_add(1, Ordering::SeqCst);
+            let dir =
+                std::env::temp_dir().join(format!("mind-dsc40-ok-{}-{n}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("mind.toml"),
+                format!("[source]\nmin-mind-version = \"{v}\"\n"),
+            )
+            .unwrap();
+            let result = MindToml::load(&dir);
+            assert!(
+                result.is_ok(),
+                "min-mind-version = {v:?} must parse OK, got: {result:?}"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn min_mind_version_malformed_is_mind_toml_error() {
+        // spec: DSC-40 -- malformed values are rejected with MindToml naming the
+        // field: non-numeric component, empty string, embedded suffix like `-beta`.
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        for v in ["0.3-beta", "abc", "", "1.x", "0.", ".1", "1..0"] {
+            let n = N.fetch_add(1, Ordering::SeqCst);
+            let dir =
+                std::env::temp_dir().join(format!("mind-dsc40-bad-{}-{n}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("mind.toml"),
+                format!("[source]\nmin-mind-version = \"{v}\"\n"),
+            )
+            .unwrap();
+            let err = MindToml::load(&dir).unwrap_err();
+            match err {
+                MindError::MindToml { msg, .. } => {
+                    assert!(
+                        msg.contains("min-mind-version"),
+                        "error must name the field for {v:?}: {msg}"
+                    );
+                    // The bad value should appear in the message (if non-empty).
+                    if !v.is_empty() {
+                        assert!(
+                            msg.contains(v),
+                            "error must include the bad value {v:?}: {msg}"
+                        );
+                    }
+                }
+                other => panic!("expected MindError::MindToml for {v:?}, got: {other:?}"),
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 
     #[test]

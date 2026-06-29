@@ -80,3 +80,9 @@ Unmanaged items, their detection, and single-ref resolution are defined in
   completes (a bad destination, a collision without `--force`, a declined prompt,
   a commit or meld error) leaves the original lobe entry in place and the manifest
   unchanged, so a failed absorb never loses the user's file.
+- `ABS-11` Under `--json`, `absorb --yes` emits exactly one structured result
+  object (CLI-153) with `action: "absorb"`, `target` set to the resolved item
+  ref, `outcome: "absorbed"`, and a `key` field set to the effective `kind:name`
+  the item is now managed under. Without `--yes`, `absorb --json` refuses with
+  `ConfirmationRequired` (json mode is non-interactive, ABS-7) and writes
+  nothing to stdout.

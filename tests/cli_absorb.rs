@@ -1626,6 +1626,50 @@ fn abs7_json_mode_single_lobe_without_yes_is_confirmation_required() {
     );
 }
 
+// ---- C4: absorb --json emits structured result (ABS-11) ---------------------
+
+/// `absorb --yes --json` must emit exactly one JSON object with the fields
+/// mandated by ABS-11: action "absorb", outcome "absorbed", and a `key` field
+/// set to the effective `kind:name` the item is now managed under.
+// spec: ABS-11
+#[test]
+fn absorb_json_emits_structured_result() {
+    let sb = Sandbox::new();
+    let dest = sb.dest_spec();
+
+    // Place an unmanaged agent and absorb it with --yes --json.
+    sb.place_unmanaged_agent("jsonagent");
+    let r = sb.mind(&[
+        "--json",
+        "absorb",
+        "agent:jsonagent",
+        "--to",
+        &dest,
+        "--yes",
+    ]);
+    assert!(
+        r.success,
+        "absorb --yes --json must succeed: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+    // Stdout must be exactly one parseable JSON object.
+    let v: serde_json::Value = serde_json::from_str(r.stdout.trim()).unwrap_or_else(|e| {
+        panic!(
+            "absorb --yes --json stdout must be one valid JSON object, got error {e}: '{}'",
+            r.stdout
+        )
+    });
+    assert_eq!(v["action"], "absorb", "action must be 'absorb': {v}");
+    assert_eq!(v["outcome"], "absorbed", "outcome must be 'absorbed': {v}");
+    let key = v["key"]
+        .as_str()
+        .unwrap_or_else(|| panic!("key field must be a string: {v}"));
+    assert!(
+        key.contains("agent") && key.contains("jsonagent"),
+        "key must encode the managed kind:name (agent:jsonagent): '{key}'"
+    );
+}
+
 // ---- C5: dest mind.toml roots escaping the repo => error --------------------
 
 /// When the destination's mind.toml declares a `roots` entry that escapes the

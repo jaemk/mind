@@ -54,3 +54,7 @@ and the manifest are defined in [storage.md](storage.md).
   emitted with `install = true` regardless of how many of its items are installed,
   so the output offers each source's full inventory rather than the recorded
   subset.
+- `DUMP-9` `dump` always writes TOML regardless of whether `--json` is passed;
+  the `--json` flag has no effect on the output format. When `--json` is in
+  effect, `dump` prints a one-line note to stderr indicating that `--json` does
+  not apply.

@@ -12,6 +12,7 @@
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{MindError, Result};
 use crate::mindfile::version_at_least;
@@ -25,6 +26,10 @@ pub enum Decision {
     UpToDate,
     /// The target is newer than the running version; replace the binary.
     Update,
+    /// An explicit `--version` was pinned strictly BELOW the running version.
+    /// We refuse to downgrade but report why rather than silently saying "up to date".
+    // spec: CLI-147
+    PinnedBelowCurrent,
 }
 
 /// Map an OS/arch pair to its release target triple, rejecting platforms with no
@@ -68,12 +73,28 @@ pub fn parse_latest_tag(json: &str) -> Result<String> {
     Ok(tag.strip_prefix('v').unwrap_or(tag).to_string())
 }
 
-/// Decide whether the running binary needs replacing: up to date when the current
-/// version already satisfies `>= target`, otherwise an update is pending.
+/// Decide whether the running binary needs replacing.
+///
+/// - `explicit` is true when the caller supplied an explicit `--version` flag
+///   (rather than resolving the latest release from the network).
+///
+/// When `explicit` is true and the pinned `target` is STRICTLY below `current`,
+/// returns `PinnedBelowCurrent` instead of `UpToDate` so the caller can emit a
+/// clear "not downgrading" message (CLI-147) rather than a misleading "up to date".
+/// When the target equals the running version, `UpToDate` is always returned,
+/// regardless of `explicit`. When the target is above `current`, `Update` is
+/// returned regardless of `explicit`.
 // spec: CLI-140
-pub fn decision(current: &str, target: &str) -> Decision {
+pub fn decision(current: &str, target: &str, explicit: bool) -> Decision {
     if version_at_least(current, target) {
-        Decision::UpToDate
+        // current >= target; check whether the target is strictly BELOW current
+        // and was given as an explicit pin.
+        if explicit && !version_at_least(target, current) {
+            // target < current: explicit downgrade request we refuse.
+            Decision::PinnedBelowCurrent
+        } else {
+            Decision::UpToDate
+        }
     } else {
         Decision::Update
     }
@@ -90,6 +111,10 @@ fn check_report(current: &str, target: &str, decision: &Decision) -> String {
         }
         Decision::Update => {
             format!("mind {current} -> {target} available; run `mind evolve` to update")
+        }
+        // spec: CLI-147
+        Decision::PinnedBelowCurrent => {
+            format!("pinned {target} is below the running {current}; not downgrading")
         }
     }
 }
@@ -111,6 +136,7 @@ pub fn run(check: bool, yes: bool, version: Option<String>) -> Result<()> {
 
     // Resolve the target version: an explicit --version bypasses the network
     // entirely; otherwise fetch and parse the latest release tag.
+    let explicit = version.is_some();
     let target_version = match version {
         Some(v) => v.strip_prefix('v').unwrap_or(&v).to_string(),
         None => {
@@ -119,35 +145,49 @@ pub fn run(check: bool, yes: bool, version: Option<String>) -> Result<()> {
         }
     };
 
-    let decision = decision(current, &target_version);
+    let d = decision(current, &target_version, explicit);
     let out = crate::render::ctx();
 
     if check {
         // CLI-141: report and change nothing, without downloading.
         if out.json {
-            let outcome = match decision {
+            let outcome = match d {
                 Decision::UpToDate => "up-to-date",
                 Decision::Update => "available",
+                Decision::PinnedBelowCurrent => "not-downgrading",
             };
             return print_evolve_json(&target_version, outcome);
         }
-        let marker = match decision {
-            Decision::UpToDate => out.ok(),
+        let marker = match d {
+            Decision::UpToDate | Decision::PinnedBelowCurrent => out.ok(),
             Decision::Update => out.warn(),
         };
-        println!(
-            "{marker} {}",
-            check_report(current, &target_version, &decision)
-        );
+        println!("{marker} {}", check_report(current, &target_version, &d));
         return Ok(());
     }
 
-    if decision == Decision::UpToDate {
-        if out.json {
-            return print_evolve_json(&target_version, "up-to-date");
+    match d {
+        Decision::UpToDate => {
+            if out.json {
+                return print_evolve_json(&target_version, "up-to-date");
+            }
+            println!("{} mind {current} is already up to date", out.ok());
+            return Ok(());
         }
-        println!("{} mind {current} is already up to date", out.ok());
-        return Ok(());
+        // spec: CLI-147 -- explicit pin below running version: report and exit 0,
+        // do NOT download or replace the binary.
+        Decision::PinnedBelowCurrent => {
+            if out.json {
+                return print_evolve_json(&target_version, "not-downgrading");
+            }
+            println!(
+                "{} {}",
+                out.ok(),
+                check_report(current, &target_version, &d)
+            );
+            return Ok(());
+        }
+        Decision::Update => {}
     }
 
     if !yes && !out.json && !crate::commands::confirm(&format!("update mind to {target_version}?"))?
@@ -264,11 +304,41 @@ fn swap_error(e: std::io::Error, current_exe: &Path, at: &Path) -> MindError {
     }
 }
 
-/// Create a unique temp directory for the download. Uses the system temp dir; the
-/// caller removes it.
+/// Per-process counter that makes successive `mktemp_dir` calls within the same
+/// process yield distinct paths even when the wall-clock resolution is coarser
+/// than the interval between calls.
+static MKTEMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Create an unpredictably-named, exclusively-owned temp directory for the
+/// download.  The name combines the PID, a subsecond wall-clock timestamp, and a
+/// per-process sequence number so that:
+///
+/// - two successive calls within the same process always yield distinct paths
+///   (the sequence number), and
+/// - the path is hard to predict from outside (the nanos component varies with
+///   the exact call time).
+///
+/// `create_dir` (not `create_dir_all`) gives exclusive-creation semantics: if the
+/// directory already exists the call fails rather than silently reusing it, which
+/// prevents a local attacker from pre-creating the path.
+///
+/// TODO: replace the nanos component with a CSPRNG once a `rand` dep is added;
+/// the principled hardening is to verify a published release digest/signature
+/// after download (out of scope here).
 fn mktemp_dir() -> Result<std::path::PathBuf> {
-    let base = std::env::temp_dir().join(format!("mind-evolve-{}", std::process::id()));
-    std::fs::create_dir_all(&base).map_err(|e| MindError::io(&base, e))?;
+    let pid = std::process::id();
+    let seq = MKTEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos();
+    let base = std::env::temp_dir().join(format!("mind-evolve-{pid}-{nanos}-{seq}"));
+    // Exclusive creation: fails if the path already exists.
+    std::fs::create_dir(&base).map_err(|e| MindError::io(&base, e))?;
+    // 0700: only the owning process can enter or read the directory.
+    #[cfg(unix)]
+    std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700))
+        .map_err(|e| MindError::io(&base, e))?;
     Ok(base)
 }
 
@@ -443,12 +513,47 @@ mod tests {
     #[test]
     // spec: CLI-140
     fn decision_compares_versions() {
-        // current == target => up to date.
-        assert_eq!(decision("0.3.0", "0.3.0"), Decision::UpToDate);
+        // current == target => up to date (explicit or not).
+        assert_eq!(decision("0.3.0", "0.3.0", false), Decision::UpToDate);
+        assert_eq!(decision("0.3.0", "0.3.0", true), Decision::UpToDate);
         // target newer => update.
-        assert_eq!(decision("0.2.0", "0.3.0"), Decision::Update);
-        // current newer => up to date (never a downgrade).
-        assert_eq!(decision("0.4.0", "0.3.0"), Decision::UpToDate);
+        assert_eq!(decision("0.2.0", "0.3.0", false), Decision::Update);
+        // current newer, no explicit pin => up to date.
+        assert_eq!(decision("0.4.0", "0.3.0", false), Decision::UpToDate);
+    }
+
+    #[test]
+    // spec: CLI-147
+    fn decision_explicit_pinned_below_current_yields_pinned_below() {
+        // An explicit --version strictly below the running version must NOT return
+        // UpToDate; the caller needs PinnedBelowCurrent to emit a "not downgrading"
+        // message rather than silently claiming up to date.
+        assert_eq!(
+            decision("0.3.0", "0.1.0", true),
+            Decision::PinnedBelowCurrent
+        );
+        assert_eq!(
+            decision("1.0.0", "0.9.9", true),
+            Decision::PinnedBelowCurrent
+        );
+        // With explicit=false (latest from network) a running version >= latest is
+        // still UpToDate, never PinnedBelowCurrent.
+        assert_eq!(decision("0.4.0", "0.3.0", false), Decision::UpToDate);
+    }
+
+    #[test]
+    // spec: CLI-140
+    fn decision_explicit_equal_to_current_is_up_to_date() {
+        // When the pinned version equals the running version "up to date" is correct
+        // even with explicit=true; no downgrade is attempted.
+        assert_eq!(decision("0.3.0", "0.3.0", true), Decision::UpToDate);
+    }
+
+    #[test]
+    // spec: CLI-140
+    fn decision_explicit_above_current_is_update() {
+        // An explicit --version newer than the running version requests an upgrade.
+        assert_eq!(decision("0.2.0", "0.3.0", true), Decision::Update);
     }
 
     #[test]
@@ -456,16 +561,76 @@ mod tests {
     fn check_report_reflects_the_decision_without_network() {
         // The --check branch reports pending vs up-to-date purely from the
         // decision over an explicit target version: no network is consulted.
-        let pending = decision("0.2.0", "0.3.0");
+        let pending = decision("0.2.0", "0.3.0", false);
         assert_eq!(pending, Decision::Update);
         let report = check_report("0.2.0", "0.3.0", &pending);
         assert!(report.contains("0.2.0"), "report: {report}");
         assert!(report.contains("0.3.0"), "report: {report}");
         assert!(report.contains("available"), "report: {report}");
 
-        let current = decision("0.3.0", "0.3.0");
+        let current = decision("0.3.0", "0.3.0", false);
         assert_eq!(current, Decision::UpToDate);
         let report = check_report("0.3.0", "0.3.0", &current);
         assert!(report.contains("up to date"), "report: {report}");
+    }
+
+    #[test]
+    // spec: CLI-147
+    fn check_report_pinned_below_says_not_downgrading() {
+        // The report for PinnedBelowCurrent must name both versions and say
+        // "not downgrading" -- it must NOT say "up to date".
+        let d = Decision::PinnedBelowCurrent;
+        let report = check_report("0.3.0", "0.1.0", &d);
+        assert!(report.contains("0.1.0"), "pinned version missing: {report}");
+        assert!(
+            report.contains("0.3.0"),
+            "running version missing: {report}"
+        );
+        assert!(
+            report.contains("not downgrading"),
+            "must say 'not downgrading': {report}"
+        );
+        assert!(
+            !report.contains("up to date"),
+            "must NOT say 'up to date': {report}"
+        );
+    }
+
+    #[test]
+    // spec: CLI-141
+    fn check_report_up_to_date_when_equal() {
+        // When the running and target versions are equal, "up to date" regardless
+        // of explicit; tests the UpToDate arm of check_report directly.
+        let d = Decision::UpToDate;
+        let report = check_report("0.3.0", "0.3.0", &d);
+        assert!(report.contains("up to date"), "report: {report}");
+        assert!(
+            !report.contains("not downgrading"),
+            "must NOT say 'not downgrading': {report}"
+        );
+    }
+
+    #[test]
+    fn mktemp_dir_creates_a_fresh_directory() {
+        // The directory must exist after mktemp_dir returns and must be empty.
+        let dir = mktemp_dir().expect("mktemp_dir");
+        let exists = dir.is_dir();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(exists, "mktemp_dir must create the directory: {dir:?}");
+    }
+
+    #[test]
+    fn mktemp_dir_yields_distinct_paths() {
+        // Two successive calls must return different paths (the sequence number
+        // component guarantees this within a process), and both must be creatable
+        // -- proving the exclusive-create semantics would reject a pre-existing dir.
+        let a = mktemp_dir().expect("first mktemp_dir");
+        let b = mktemp_dir().expect("second mktemp_dir");
+        let _ = std::fs::remove_dir_all(&a);
+        let _ = std::fs::remove_dir_all(&b);
+        assert_ne!(
+            a, b,
+            "successive mktemp_dir calls must yield distinct paths"
+        );
     }
 }

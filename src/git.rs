@@ -169,25 +169,33 @@ pub fn clone_at(url: &str, dest: &Path, pin: &Pin) -> Result<()> {
     let dest_str = dest.to_string_lossy().into_owned();
     match pin {
         Pin::DefaultBranch => {
-            run(url, None, &["clone", "--depth", "1", url, &dest_str])?;
+            // spec: DSC-66 - insert `--` before the URL so a URL beginning
+            // with `-` is not parsed as a git option.
+            run(url, None, &["clone", "--depth", "1", "--", url, &dest_str])?;
         }
         Pin::FollowBranch(branch) => {
             // --branch consumes its next argument as a value, not a positional,
             // so it is already safe.  Validate anyway (DSC-66) so a bad value
             // is caught at parse time before reaching any subprocess.
+            // `--` before the URL guards the URL positional (DSC-66).
             run(
                 url,
                 None,
-                &["clone", "--depth", "1", "--branch", branch, url, &dest_str],
+                &[
+                    "clone", "--depth", "1", "--branch", branch, "--", url, &dest_str,
+                ],
             )?;
         }
         Pin::Tag(tag) => {
             // git clone accepts a tag name as the --branch argument (value, not
             // positional).  Validate (DSC-66) for the same reason as above.
+            // `--` before the URL guards the URL positional (DSC-66).
             run(
                 url,
                 None,
-                &["clone", "--depth", "1", "--branch", tag, url, &dest_str],
+                &[
+                    "clone", "--depth", "1", "--branch", tag, "--", url, &dest_str,
+                ],
             )?;
         }
         Pin::Ref(sha) => {
@@ -202,7 +210,8 @@ pub fn clone_at(url: &str, dest: &Path, pin: &Pin) -> Result<()> {
             // argument (that form means "path operands follow"). Injection
             // safety is provided by `validate_ref_value` at parse time (DSC-66),
             // which rejects any value starting with `-` before it reaches here.
-            run(url, None, &["clone", url, &dest_str])?;
+            // `--` before the URL guards the URL positional (DSC-66).
+            run(url, None, &["clone", "--", url, &dest_str])?;
             run(url, Some(dest), &["checkout", sha])?;
         }
     }
