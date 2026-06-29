@@ -2,19 +2,87 @@
 
 ## Mental model
 
-- A *source* is a melded git repo (`mind meld`). It offers *items*: skills,
-  agents, rules, and tools, found by convention (`skills/<n>/SKILL.md`,
-  `agents/<n>.md`, `rules/<n>.md`, `tools/<n>/`) or declared in a `mind.toml`. A
-  tool is store-only helper tooling that other items reference, not linked into a
-  lobe by default.
-- `mind learn <item>` copies the item into the *store* (`~/.mind/store`) and
-  symlinks it into each *lobe* (agent home, default `~/.claude`). `forget`
-  reverses it.
-- `sync` refreshes every source's clone; `upgrade` upgrades installed items to the
-  refreshed version, reporting hash and commit deltas before changing anything.
-  `evolve` updates the mind binary itself.
-- `recall` and `probe` inspect what is installed and what is available;
-  `introspect` reports drift and broken links.
+`mind` sits between *sources* (git repos full of agent tooling) and *lobes*
+(your agent homes, like `~/.claude`). Two on-disk areas sit in between: a clone
+of each source, and a copy of each item you install. The four terms below name
+every moving part.
+
+**Source.** A melded git repo. `mind meld <repo>` clones it into
+`~/.mind/sources/<host>/<owner>/<repo>` and records it in `sources.json`. That
+clone is a staging area: melding alone links nothing into an agent home, it just
+makes the source's items available to install. `sync` (or re-melding) refreshes
+the clone.
+
+**Item.** A unit a source offers, of one of four *kinds*:
+
+- `skill` - a `skills/<name>/SKILL.md` directory.
+- `agent` - an `agents/<name>.md` file.
+- `rule` - a `rules/<name>.md` file.
+- `tool` - a `tools/<name>/` directory of helper code. A tool is *store-only*:
+  it is never linked into a lobe and the harness never loads it directly. Other
+  items reference it by path. Tools exist so a skill or agent can ship supporting
+  scripts (a linter, a fetch helper) without the harness mistaking that code for
+  a skill of its own.
+
+Items are discovered by convention (the paths above) or declared in a
+`mind.toml`.
+
+**Lobe.** An agent home `mind` links items into: the directory holding
+`skills/`, `agents/`, and `rules/`. The default lobe is `~/.claude`; you can add
+Gemini, Codex, Antigravity, or any directory, each with an optional per-kind
+filter (see [Configuration](configuration.md)).
+
+**Learn.** `mind learn <item>` copies the item out of the source clone into the
+*store* (`~/.mind/store/<kind>/<name>`) and symlinks that store copy into every
+lobe. The store copy is the stable thing your agent homes point at, so a later
+`sync` cannot change an installed item under you until you choose to `upgrade`.
+`forget` reverses it.
+
+### What each step puts on disk
+
+`mind meld jaemk/agents` clones the source. Nothing is linked yet:
+
+```text
+$ mind meld jaemk/agents
+
+~/.mind/
+  sources.json                              # registry: `agents` is now melded
+  sources/
+    github.com/jaemk/agents/                # the clone (a staging area)
+      skills/review/SKILL.md
+      agents/test.md
+      tools/lint/run.sh
+  store/                                    # empty - nothing learned yet
+```
+
+`mind learn jaemk/agents#skill:review` copies that one item into the store and
+symlinks it into the lobe:
+
+```text
+$ mind learn jaemk/agents#skill:review
+
+~/.mind/
+  manifest.json                             # registry: `review` is now installed
+  store/
+    skill/review/SKILL.md                   # the copy, taken from the clone
+  sources/
+    github.com/jaemk/agents/ ...            # clone untouched
+
+~/.claude/                                  # a lobe (agent home)
+  skills/
+    review -> ~/.mind/store/skill/review    # symlink the harness discovers
+```
+
+A `tool` the skill referenced would land in `~/.mind/store/tool/<name>` with no
+symlink under `~/.claude`, present for the skill to call but invisible to the
+harness.
+
+**Stay current.** `sync` refreshes every source clone; `upgrade` moves installed
+items to the refreshed version, reporting hash and commit deltas before changing
+anything; `evolve` updates the `mind` binary itself.
+
+**Inspect.** `recall` and `probe` show what is installed and what is available;
+`introspect` reports drift and broken links.
 
 ## Verbs
 
