@@ -2,27 +2,23 @@
 
 ## Mental model
 
-`mind` sits between *sources* (git repos full of agent tooling) and *lobes*
-(your agent homes, like `~/.claude`). Two on-disk areas sit in between: a clone
-of each source, and a copy of each item you install. The four terms below name
-every moving part.
+`mind` connects *sources* (git repos full of agent tooling) and *lobes*
+(your agent homes, like `~/.claude`/`~/.agents`).
 
-**Source.** A melded git repo. `mind meld <repo>` clones it into
-`~/.mind/sources/<host>/<owner>/<repo>` and records it in `sources.json`. That
-clone is a staging area: melding alone links nothing into an agent home, it just
-makes the source's items available to install. `sync` (or re-melding) refreshes
-the clone.
+**Source.** A melded git repo. `mind meld <repo>` clones the repo into
+`~/.mind/sources/<host>/<owner>/<repo>` and records it in `~/.mind/sources.json`.
+This initializes the source and makes its items available to `mind learn`.
+`mind sync` (or re-melding, re-running `mind meld <repo>`) refreshes the clone.
 
-**Item.** A unit a source offers, of one of four *kinds*:
+**Item.** A unit offered by a source, one of four *kinds*:
 
-- `skill` - a `skills/<name>/SKILL.md` directory.
+- `skill` - a `skills/<name>/` directory containing a `SKILL.md` and any associated
+  resources (scripts, templates, etc).
 - `agent` - an `agents/<name>.md` file.
 - `rule` - a `rules/<name>.md` file.
-- `tool` - a `tools/<name>/` directory of helper code. A tool is *store-only*:
-  it is never linked into a lobe and the harness never loads it directly. Other
-  items reference it by path. Tools exist so a skill or agent can ship supporting
-  scripts (a linter, a fetch helper) without the harness mistaking that code for
-  a skill of its own.
+- `tool` - a `tools/<name>/` directory containing a `TOOL.md`, a script/executable, 
+  any associated resources. Tools are an optional feature to assist with managing
+  and referencing shared scripts/executables utilized by multiple skills.
 
 Items are discovered by convention (the paths above) or declared in a
 `mind.toml`.
@@ -40,42 +36,42 @@ lobe. The store copy is the stable thing your agent homes point at, so a later
 
 ### What each step puts on disk
 
-`mind meld jaemk/agents` clones the source. Nothing is linked yet:
+`mind meld jaemk/mind` clones the source. Nothing is linked yet:
 
 ```text
-$ mind meld jaemk/agents
+$ mind meld jaemk/mind
 
 ~/.mind/
-  sources.json                              # registry: `agents` is now melded
+  sources.json                              # registry: `mind` is now melded
   sources/
-    github.com/jaemk/agents/                # the clone (a staging area)
-      skills/review/SKILL.md
-      agents/test.md
-      tools/lint/run.sh
+    github.com/jaemk/mind/                  # the clone (a staging area)
+      examples/hello/skills/hello-mind/     # the offered skill
+        SKILL.md
+      ...                                   # the rest of the repo
   store/                                    # empty - nothing learned yet
 ```
 
-`mind learn jaemk/agents#skill:review` copies that one item into the store and
+`mind learn jaemk/mind#skill:hello-mind` copies that one item into the store and
 symlinks it into the lobe:
 
 ```text
-$ mind learn jaemk/agents#skill:review
+$ mind learn jaemk/mind#skill:hello-mind
 
 ~/.mind/
-  manifest.json                             # registry: `review` is now installed
+  manifest.json                                  # registry: `hello-mind` installed
   store/
-    skill/review/SKILL.md                   # the copy, taken from the clone
+    skill/hello-mind/SKILL.md                    # the copy, taken from the clone
   sources/
-    github.com/jaemk/agents/ ...            # clone untouched
+    github.com/jaemk/mind/ ...                   # clone untouched
 
-~/.claude/                                  # a lobe (agent home)
+~/.claude/                                       # a lobe (agent home)
   skills/
-    review -> ~/.mind/store/skill/review    # symlink the harness discovers
+    hello-mind -> ~/.mind/store/skill/hello-mind # symlink the harness discovers
 ```
 
-A `tool` the skill referenced would land in `~/.mind/store/tool/<name>` with no
-symlink under `~/.claude`, present for the skill to call but invisible to the
-harness.
+The harness now resolves `/hello-mind` through that symlink. A `tool` the skill
+referenced would instead land in `~/.mind/store/tool/<name>` with no symlink
+under `~/.claude`, present for the skill to call but invisible to the harness.
 
 **Stay current.** `sync` refreshes every source clone; `upgrade` moves installed
 items to the refreshed version, reporting hash and commit deltas before changing
