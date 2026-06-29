@@ -4,3 +4,20 @@
 [source]
 description = "mind: meld this repo to learn the hello-mind example skill"
 roots = ["examples/hello"]
+
+# Curated skill libraries. A bare [discover].sources list keeps convention
+# discovery for this repo's own items (DSC-35) while registering each nested
+# source as a melded source. Both are register-only: install = false (the
+# default, DSC-58) leaves their items available to browse via `mind probe` and
+# install on demand, rather than installing them on meld.
+[[discover.sources]]
+source = "https://github.com/anthropics/skills"
+install = false
+
+[[discover.sources]]
+source = "https://github.com/ComposioHQ/awesome-claude-skills"
+install = false
+# This repo lays its skill directories out flat at the repo root (no `skills/`
+# container), so enable flat discovery for it (DSC-77; applied because it ships
+# no mind.toml of its own).
+flat-skills = true
