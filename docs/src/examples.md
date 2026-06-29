@@ -12,6 +12,7 @@ it out and init a repo before melding (each README shows the exact commands):
 cp -r examples/<name> /tmp/<name>-demo
 cd /tmp/<name>-demo && git init -q && git add -A && git commit -qm init
 mind meld /tmp/<name>-demo
+mind probe
 ```
 
 ## Example catalog

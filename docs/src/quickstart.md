@@ -21,6 +21,7 @@ plain convention layout, see
 cp -r examples/starter /tmp/starter
 cd /tmp/starter && git init -q && git add -A && git commit -qm init
 mind meld /tmp/starter
+mind probe
 mind learn greet
 ```
 

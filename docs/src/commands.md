@@ -51,6 +51,15 @@ $ mind meld jaemk/mind
   store/                                    # empty - nothing learned yet
 ```
 
+`mind probe` browses what the melded sources offer before you learn anything
+(`kind:name`, source, content hash, description):
+
+```text
+$ mind probe
+
+  skill:hello-mind  github.com/jaemk/mind  c62e88cc  A hello-world skill; confirms mind melded this repo
+```
+
 `mind learn jaemk/mind#skill:hello-mind` copies that one item into the store and
 symlinks it into the lobe:
 
