@@ -839,3 +839,73 @@ fn tool_with_explicit_link_respects_kinds_filter() {
 
     let _ = std::fs::remove_dir_all(&base);
 }
+
+// CLI-150: `mind config lobes detect -y` must parse and run (not error with
+// "unexpected argument '-y'"). With no detected homes the command exits 0.
+#[test]
+fn detect_short_yes_flag_is_accepted() {
+    // spec: CLI-150
+    let sb = Sandbox::new();
+    // Empty detection base: no harness markers, so detect exits cleanly.
+    let detect_home = sb.base.join("detect-empty");
+    std::fs::create_dir_all(&detect_home).unwrap();
+    let detect_str = detect_home.to_string_lossy().into_owned();
+
+    // Post-verb short flag: `mind config lobes detect -y`
+    let run = sb.mind_env(
+        &["config", "lobes", "detect", "-y"],
+        &[("MIND_DETECT_HOME", &detect_str)],
+    );
+    assert!(
+        run.success,
+        "detect -y must succeed (not error on the flag): stderr={}",
+        run.stderr
+    );
+    assert!(
+        !run.stderr.contains("unexpected argument"),
+        "detect -y must not produce 'unexpected argument': {}",
+        run.stderr
+    );
+}
+
+// CLI-150: `mind -y config lobes detect` must parse correctly; the global -y
+// must be the source of the confirmation flag, not a local field that would
+// silently ignore the pre-verb position.
+#[test]
+fn detect_global_yes_pre_verb_is_accepted() {
+    // spec: CLI-150
+    let sb = Sandbox::new();
+    let detect_home = sb.base.join("detect-empty2");
+    std::fs::create_dir_all(&detect_home).unwrap();
+    let detect_str = detect_home.to_string_lossy().into_owned();
+
+    // Pre-verb global flag: `mind -y config lobes detect`
+    let run = sb.mind_env(
+        &["-y", "config", "lobes", "detect"],
+        &[("MIND_DETECT_HOME", &detect_str)],
+    );
+    assert!(
+        run.success,
+        "mind -y config lobes detect must succeed: stderr={}",
+        run.stderr
+    );
+    assert!(
+        !run.stderr.contains("unexpected argument"),
+        "mind -y detect must not error on the flag: {}",
+        run.stderr
+    );
+
+    // Also verify pre-verb --yes works the same way.
+    let detect_home2 = sb.base.join("detect-empty3");
+    std::fs::create_dir_all(&detect_home2).unwrap();
+    let detect_str2 = detect_home2.to_string_lossy().into_owned();
+    let run2 = sb.mind_env(
+        &["--yes", "config", "lobes", "detect"],
+        &[("MIND_DETECT_HOME", &detect_str2)],
+    );
+    assert!(
+        run2.success,
+        "mind --yes config lobes detect must succeed: stderr={}",
+        run2.stderr
+    );
+}

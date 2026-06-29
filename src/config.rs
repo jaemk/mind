@@ -166,9 +166,9 @@ impl Config {
     pub fn load(paths: &Paths) -> Result<Config> {
         let file = paths.config_file();
         match std::fs::read_to_string(&file) {
-            Ok(text) => toml::from_str(&text).map_err(|e| MindError::Toml {
+            Ok(text) => toml::from_str(&text).map_err(|e| MindError::ConfigToml {
                 path: file.clone(),
-                source: e,
+                msg: e.to_string(),
             }),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
             Err(e) => Err(MindError::io(&file, e)),
@@ -279,5 +279,82 @@ mod tests {
             err.to_string().contains("wizard") || err.to_string().contains("valid item kind"),
             "invalid kind must be rejected: {err}"
         );
+    }
+
+    /// A malformed `config.toml` produces `MindError::ConfigToml`, not
+    /// `MindError::Toml`. The display must mention "config" (not "mind.toml")
+    /// so the user looks at the right file.
+    #[test]
+    fn malformed_config_toml_yields_config_toml_variant() {
+        use crate::paths::Paths;
+        use std::path::PathBuf;
+
+        let tmp = std::env::temp_dir().join(format!("mind-config-test-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let config_path = tmp.join("config.toml");
+        std::fs::write(&config_path, b"[[[not valid toml").unwrap();
+
+        let paths = Paths {
+            mind_home: tmp.clone(),
+            claude_home: PathBuf::from("/tmp/claude-unused"),
+        };
+
+        let err = Config::load(&paths).unwrap_err();
+
+        // Must be the ConfigToml variant, not Toml.
+        assert!(
+            matches!(err, MindError::ConfigToml { .. }),
+            "expected ConfigToml, got: {err:?}"
+        );
+
+        // The display must say "config" and must not say "mind.toml".
+        let msg = err.to_string();
+        assert!(
+            msg.contains("config"),
+            "display must mention 'config': {msg}"
+        );
+        assert!(
+            !msg.contains("mind.toml"),
+            "display must not name the wrong file 'mind.toml': {msg}"
+        );
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// A `config.toml` with an unknown top-level key (rejected by
+    /// `deny_unknown_fields`) also produces `MindError::ConfigToml`.
+    #[test]
+    fn unknown_key_in_config_toml_yields_config_toml_variant() {
+        use crate::paths::Paths;
+        use std::path::PathBuf;
+
+        let tmp = std::env::temp_dir().join(format!("mind-config-test-uk-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let config_path = tmp.join("config.toml");
+        std::fs::write(&config_path, b"no_such_field = true\n").unwrap();
+
+        let paths = Paths {
+            mind_home: tmp.clone(),
+            claude_home: PathBuf::from("/tmp/claude-unused"),
+        };
+
+        let err = Config::load(&paths).unwrap_err();
+
+        assert!(
+            matches!(err, MindError::ConfigToml { .. }),
+            "expected ConfigToml for unknown key, got: {err:?}"
+        );
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("config"),
+            "display must mention 'config': {msg}"
+        );
+        assert!(
+            !msg.contains("mind.toml"),
+            "display must not name the wrong file: {msg}"
+        );
+
+        std::fs::remove_dir_all(&tmp).ok();
     }
 }

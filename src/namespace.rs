@@ -663,12 +663,15 @@ pub fn referenced_names(content: &str) -> Vec<String> {
     names
 }
 
-/// Find sibling names referenced in bare prose (outside any `{{ns:}}` token).
+/// Find sibling names referenced in bare prose (outside any `{{...}}` token).
 ///
 /// Heuristic and advisory: used to warn when a source is about to be prefixed
 /// but references siblings without the token that would keep them resolvable.
+/// A sibling name that already appears inside any token kind (`{{ns:}}`,
+/// `{{tools:}}`, `{{path:}}`, `{{self}}`) is correctly guarded and is NOT
+/// reported; only names in genuinely bare prose are flagged.
 pub fn unguarded_refs(content: &str, siblings: &HashSet<String>) -> Vec<String> {
-    let stripped = strip_tokens(content);
+    let stripped = strip_braced(content);
     let mut found: Vec<String> = siblings
         .iter()
         .filter(|name| whole_word_present(&stripped, name))
@@ -676,29 +679,6 @@ pub fn unguarded_refs(content: &str, siblings: &HashSet<String>) -> Vec<String> 
         .collect();
     found.sort();
     found
-}
-
-/// Replace `{{ns:...}}` spans with a space so prose scanning ignores them.
-fn strip_tokens(content: &str) -> String {
-    const OPEN: &str = "{{ns:";
-    let mut out = String::with_capacity(content.len());
-    let mut rest = content;
-    while let Some(pos) = rest.find(OPEN) {
-        out.push_str(&rest[..pos]);
-        let after = &rest[pos + OPEN.len()..];
-        match after.find("}}") {
-            Some(end) => {
-                out.push(' ');
-                rest = &after[end + 2..];
-            }
-            None => {
-                rest = "";
-                break;
-            }
-        }
-    }
-    out.push_str(rest);
-    out
 }
 
 fn whole_word_present(haystack: &str, needle: &str) -> bool {
@@ -954,6 +934,51 @@ mod tests {
         // "doing" must not match the sibling "do".
         assert!(unguarded_refs("doing work", &s).is_empty());
         assert_eq!(unguarded_refs("just do it", &s), vec!["do".to_string()]);
+    }
+
+    #[test]
+    fn unguarded_does_not_flag_names_already_inside_any_token() {
+        // spec: NS-20
+        // A sibling name that appears only inside a token of any kind must not
+        // be reported as an unguarded prose reference.  Previously, strip_tokens
+        // only removed {{ns:...}} spans, so {{tools:detect}} or
+        // {{path:skill:other}} would still expose the bare sibling name to the
+        // whole-word scan and produce a false-positive advisory.
+        let s = sibs(&["detect", "other", "planner"]);
+
+        // Guarded by {{tools:NAME}}: not flagged.
+        assert!(
+            unguarded_refs("run {{tools:detect}} to start", &s).is_empty(),
+            "{{tools:detect}} must not produce an unguarded-reference advisory"
+        );
+
+        // Guarded by {{path:kind:NAME}}: not flagged.
+        assert!(
+            unguarded_refs("see {{path:skill:other}} for details", &s).is_empty(),
+            "{{path:skill:other}} must not produce an unguarded-reference advisory"
+        );
+
+        // Guarded by {{ns:NAME}}: not flagged (pre-existing behavior preserved).
+        assert!(
+            unguarded_refs("hand off to {{ns:planner}}", &s).is_empty(),
+            "{{ns:planner}} must not produce an unguarded-reference advisory"
+        );
+
+        // Bare prose mention is still flagged (true-positive preserved).
+        let bare = unguarded_refs("run detect and see other", &s);
+        assert_eq!(
+            bare,
+            vec!["detect".to_string(), "other".to_string()],
+            "bare prose sibling names must still be flagged"
+        );
+
+        // Mixed: guarded and bare in the same content.
+        let mixed = unguarded_refs("use {{tools:detect}} then call other directly", &s);
+        assert_eq!(
+            mixed,
+            vec!["other".to_string()],
+            "only the bare mention should be flagged when the same name also appears in a token"
+        );
     }
 
     #[test]

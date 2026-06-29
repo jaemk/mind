@@ -115,6 +115,9 @@ pub enum MindError {
         source: toml::de::Error,
     },
 
+    #[error("invalid config at {path}: {msg}")]
+    ConfigToml { path: PathBuf, msg: String },
+
     #[error("failed to write {path}: {source}")]
     TomlWrite {
         path: PathBuf,
@@ -241,8 +244,7 @@ pub enum MindError {
     #[error("review found {hard} hard error(s); see the findings above")]
     ReviewFailed { hard: usize },
 
-    // Constructed by the policy-enforcement paths (meld/sync/upgrade gating);
-    // until those land nothing builds these, so allow dead_code on just them.
+    // Constructed by the policy-enforcement paths (meld/sync/upgrade gating).
     #[error("source '{identity}' is not permitted by the managed policy's allowlist")]
     SourceNotAllowed { identity: String },
 

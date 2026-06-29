@@ -487,11 +487,8 @@ pub enum LobesCmd {
     List,
 
     /// Detect installed harness homes and offer to add their presets.
-    Detect {
-        /// Add the detected presets without prompting.
-        #[arg(long)]
-        yes: bool,
-    },
+    /// Honors the global `-y`/`--yes` flag to add without prompting.
+    Detect,
 
     /// Remove an agent home.
     Remove {

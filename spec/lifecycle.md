@@ -35,6 +35,12 @@ agent homes (a store-only tool is not linked; tooling.md TOOL-3).
   link path. The guard is overridable per install with force (`learn --force`,
   CLI-35): when forced, the check is skipped and the conflicting target is
   replaced.
+- `LIFE-42` A melded source's item file tree must not contain symlinks. During
+  staging, `copy_recursive` uses `symlink_metadata` (which does not follow
+  symlinks) and rejects any entry that is a symlink with a clear `Io` error
+  carrying the offending path. This prevents a crafted source from exfiltrating
+  files outside the item tree or causing unbounded recursion via a symlink to an
+  ancestor directory.
 
 > Platform limitation (non-unix): links are realized as real symlinks only on
 > unix. On platforms without symlink support the install falls back to copying
@@ -76,3 +82,8 @@ agent homes (a store-only tool is not linked; tooling.md TOOL-3).
   name is reported as a namespace change, directing the user to upgrade.
 - `LIFE-33` An installed item whose source-content hash differs from the recorded
   hash is reported as drifted, directing the user to upgrade.
+- `LIFE-34` The source-content hash walk (`hash_path` / `collect_files` in
+  `hash.rs`) uses `symlink_metadata` (which does not follow symlinks) at every
+  step. A symlink entry is included in the hash by its relative path and its
+  link-target string, so a retargeting is detected and a symlink cycle cannot
+  cause unbounded recursion or a stack overflow.

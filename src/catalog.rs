@@ -196,8 +196,21 @@ pub(crate) fn scan_source_at(
         Some(mt) if mt.is_authoritative() => {
             // spec: DSC-52 — authoritative mind.toml ignores scan roots entirely;
             // its paths are always repo-root-relative.
+            // spec: DSC-53 — (kind, bare_name) uniqueness applies to [[items]]
+            // declarations: two entries with the same kind+name are a DuplicateItem.
+            let mut seen: std::collections::HashSet<(crate::error::ItemKind, String)> =
+                std::collections::HashSet::new();
             for decl in &mt.items {
-                out.push(from_decl(clone_root, source, &prefix, decl)?);
+                let item = from_decl(clone_root, source, &prefix, decl)?;
+                let key = (item.kind, item.name.clone());
+                if !seen.insert(key.clone()) {
+                    return Err(MindError::DuplicateItem {
+                        source_name: source.name.clone(),
+                        kind: key.0,
+                        name: key.1,
+                    });
+                }
+                out.push(item);
             }
             if let Some(discover) = &mt.discover {
                 scan_globs(clone_root, source, &prefix, discover, out)?;
@@ -316,6 +329,20 @@ fn from_decl(
             msg: format!(
                 "`bin`/`build` are only valid on a tool item, not '{}' ('{}')",
                 decl.kind, decl.name
+            ),
+        });
+    }
+    // spec: DSC-73 — a [[items]] `path` must be a safe repo-root-relative path.
+    // Reuse `is_safe_link_rel` (the same rule: relative, no `..`, no absolute or
+    // `~`-rooted value, no NUL). Without this guard, `root.join` with an absolute
+    // operand silently discards `root`, and a `..`-bearing path escapes the clone.
+    if !is_safe_link_rel(&decl.path) {
+        return Err(MindError::MindToml {
+            path: root.join("mind.toml"),
+            msg: format!(
+                "item '{}' has an unsafe path '{}': must be a relative path inside the clone \
+                 (no leading '/' or '~', no '..' component, no NUL)",
+                decl.name, decl.path
             ),
         });
     }
@@ -1937,5 +1964,127 @@ mod tests {
 
         let agent = items.iter().find(|i| i.name == "dev").unwrap();
         assert_eq!(agent.requires, vec!["rule:style".to_string()],);
+    }
+
+    // ---- DSC-73: [[items]] path traversal guard ----------------------------
+
+    #[test]
+    fn from_decl_rejects_dotdot_path() {
+        // spec: DSC-71 DSC-72 DSC-73
+        // A [[items]] `path` with a `..` component must be rejected as MindToml
+        // before root.join() can escape the clone. Without the guard,
+        // root.join("../escape") silently resolves outside the clone.
+        let tmp = TmpDir::new();
+        let root = tmp.path();
+        let source = make_source_for(root);
+        let decl = crate::mindfile::ItemDecl {
+            kind: "rule".to_string(),
+            name: "evil".to_string(),
+            path: "../escape".to_string(),
+            link: None,
+            description: None,
+            bin: None,
+            build: None,
+            install: None,
+            uninstall: None,
+            hooks: Vec::new(),
+        };
+        let err = from_decl(root, &source, &None, &decl).unwrap_err();
+        assert!(
+            matches!(err, MindError::MindToml { .. }),
+            "a dotdot path must be a schema error: {err}"
+        );
+    }
+
+    #[test]
+    fn from_decl_rejects_absolute_path() {
+        // spec: DSC-71 DSC-72 DSC-73
+        // An absolute `path` (e.g. "/etc/passwd") is rejected as MindToml.
+        // Rust's Path::join with an absolute operand discards `root` entirely,
+        // so without this guard the install would copy from an arbitrary host path.
+        let tmp = TmpDir::new();
+        let root = tmp.path();
+        let source = make_source_for(root);
+        let decl = crate::mindfile::ItemDecl {
+            kind: "rule".to_string(),
+            name: "evil".to_string(),
+            path: "/etc/passwd".to_string(),
+            link: None,
+            description: None,
+            bin: None,
+            build: None,
+            install: None,
+            uninstall: None,
+            hooks: Vec::new(),
+        };
+        let err = from_decl(root, &source, &None, &decl).unwrap_err();
+        assert!(
+            matches!(err, MindError::MindToml { .. }),
+            "an absolute path must be a schema error: {err}"
+        );
+    }
+
+    #[test]
+    fn from_decl_accepts_subdir_path() {
+        // spec: DSC-73
+        // A path with in-bounds subdirectories is accepted; subdirectories are
+        // legitimate (a source can organize items below the repo root).
+        let tmp = TmpDir::new();
+        let root = tmp.path();
+        let source = make_source_for(root);
+        let decl = crate::mindfile::ItemDecl {
+            kind: "rule".to_string(),
+            name: "style".to_string(),
+            path: "sub/dir/style.md".to_string(),
+            link: None,
+            description: None,
+            bin: None,
+            build: None,
+            install: None,
+            uninstall: None,
+            hooks: Vec::new(),
+        };
+        // The file need not exist; frontmatter reads return None for absent files.
+        let item = from_decl(root, &source, &None, &decl).unwrap();
+        assert_eq!(item.name, "style");
+        assert_eq!(item.path, root.join("sub/dir/style.md"));
+    }
+
+    // ---- DSC-53 (authoritative branch): [[items]] duplicate guard ----------
+
+    #[test]
+    fn authoritative_mind_toml_duplicate_items_is_duplicate_item_error() {
+        // spec: DSC-53
+        // Two [[items]] entries with the same kind+name in one mind.toml must
+        // be a DuplicateItem error, enforcing the (source, kind, bare_name)
+        // identity invariant in the authoritative branch.
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let clone = base.join("sources/local/test/repo");
+        write_file(
+            &clone.join("rules/style.md"),
+            "---\ndescription: style\n---\n",
+        );
+        write_file(
+            &clone.join("mind.toml"),
+            concat!(
+                "[[items]]\n",
+                "kind = \"rule\"\n",
+                "name = \"style\"\n",
+                "path = \"rules/style.md\"\n",
+                "[[items]]\n",
+                "kind = \"rule\"\n",
+                "name = \"style\"\n",
+                "path = \"rules/style.md\"\n",
+            ),
+        );
+        let paths = paths_for(base);
+        let source = make_source_for(&clone);
+        let mut items = Vec::new();
+        let err = scan_source(&paths, &source, &mut items).unwrap_err();
+        assert!(
+            matches!(err, MindError::DuplicateItem { ref name, .. } if name == "style"),
+            "duplicate [[items]] entries must be DuplicateItem: {err}"
+        );
     }
 }

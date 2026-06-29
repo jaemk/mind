@@ -87,7 +87,7 @@ fn lock_mode(command: &Command, json: bool) -> LockMode {
         | Command::Config {
             action:
                 ConfigCmd::Lobes {
-                    action: LobesCmd::Add { .. } | LobesCmd::Remove { .. } | LobesCmd::Detect { .. },
+                    action: LobesCmd::Add { .. } | LobesCmd::Remove { .. } | LobesCmd::Detect,
                 },
         } => LockMode::Exclusive,
 
@@ -366,7 +366,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
                     (None, None) => Err(crate::error::MindError::LobeTargetRequired),
                 },
                 LobesCmd::List => commands::lobe_list(paths),
-                LobesCmd::Detect { yes } => commands::lobe_detect(paths, yes),
+                LobesCmd::Detect => commands::lobe_detect(paths, yes),
                 LobesCmd::Remove { path } => commands::lobe_remove(paths, &path),
             },
         },
@@ -437,6 +437,23 @@ mod tests {
             mode_of(&["mind", "config", "lobes", "remove", "/some/home"]),
             LockMode::Exclusive,
             "config lobes remove mutates config and must take the exclusive lock"
+        );
+        // detect may add lobes and mutates config when --yes / global -y is set.
+        assert_eq!(
+            mode_of(&["mind", "config", "lobes", "detect"]),
+            LockMode::Exclusive,
+            "config lobes detect must take the exclusive lock"
+        );
+        // Global -y and --yes are both accepted for detect (CLI-150).
+        assert_eq!(
+            mode_of(&["mind", "-y", "config", "lobes", "detect"]),
+            LockMode::Exclusive,
+            "mind -y config lobes detect must parse and take the exclusive lock"
+        );
+        assert_eq!(
+            mode_of(&["mind", "--yes", "config", "lobes", "detect"]),
+            LockMode::Exclusive,
+            "mind --yes config lobes detect must parse and take the exclusive lock"
         );
         // absorb mutates the manifest, the lobe, and optionally the config.
         assert_eq!(
@@ -683,6 +700,45 @@ mod tests {
         let cli = Cli::try_parse_from(["mind", "learn", "-y", "skill:foo"])
             .expect("learn -y should parse");
         assert!(cli.yes, "learn -y: cli.yes must be true");
+    }
+
+    /// `config lobes detect` reads confirmation from the global -y/--yes (CLI-150).
+    ///
+    /// The local `yes` field was removed from `LobesCmd::Detect`; the global
+    /// `cli.yes` is the sole source of the flag for this subcommand.
+    // spec: CLI-150
+    #[test]
+    fn detect_uses_global_yes_not_local() {
+        // Post-verb --yes: `mind config lobes detect --yes`
+        let cli = Cli::try_parse_from(["mind", "config", "lobes", "detect", "--yes"])
+            .expect("detect --yes should parse");
+        assert!(cli.yes, "detect --yes: cli.yes must be true");
+        assert!(
+            matches!(
+                cli.command,
+                Command::Config {
+                    action: ConfigCmd::Lobes {
+                        action: LobesCmd::Detect
+                    }
+                }
+            ),
+            "command must be Detect unit variant"
+        );
+
+        // Pre-verb --yes: `mind --yes config lobes detect`
+        let cli = Cli::try_parse_from(["mind", "--yes", "config", "lobes", "detect"])
+            .expect("--yes detect should parse");
+        assert!(cli.yes, "--yes detect: cli.yes must be true");
+
+        // Short form -y post-verb: `mind config lobes detect -y`
+        let cli = Cli::try_parse_from(["mind", "config", "lobes", "detect", "-y"])
+            .expect("detect -y should parse");
+        assert!(cli.yes, "detect -y: cli.yes must be true");
+
+        // Short form -y pre-verb: `mind -y config lobes detect`
+        let cli = Cli::try_parse_from(["mind", "-y", "config", "lobes", "detect"])
+            .expect("-y detect should parse");
+        assert!(cli.yes, "-y detect: cli.yes must be true");
     }
 
     /// Global --ascii is accepted before or after any verb (CLI-150).

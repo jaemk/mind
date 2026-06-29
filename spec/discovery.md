@@ -97,6 +97,15 @@ run = "make build"
   absolute, beginning with `~`, containing a `..` (parent) component, or
   containing a NUL byte. So a melded source cannot place a symlink outside the
   agent home (e.g. `link = "../../.bashrc"`).
+- `DSC-73` A `[[items]]` `path` must be a safe repo-root-relative path: it is
+  rejected (`MindToml`) when empty, absolute, beginning with `~`, containing a
+  `..` (parent) component, or containing a NUL byte. A relative value free of
+  those components may contain `/` for subdirectories (e.g.
+  `guidelines/style.md`). This stops a melded source from reading host files
+  outside its clone via the copy-to-store step (e.g.
+  `path = "../../../../etc/passwd"` or `path = "/home/victim/.ssh/id_rsa"`).
+  The same safety rule (`is_safe_link_rel`) that validates `link` (DSC-72)
+  applies to `path`.
 - `DSC-32` An item's description is its `mind.toml` `description` if given, else
   its frontmatter description.
 - `DSC-33` Each `[discover]` kind (`skills`, `agents`, `rules`) is a table with
@@ -263,7 +272,9 @@ subdirectories instead.
 - `DSC-53` When scanning multiple roots, results are unioned. Two roots that yield
   the same kind and bare name within one source is an error (`DuplicateItem`),
   since an item's identity is `(source, kind, bare_name)` and the collision could
-  not be installed unambiguously.
+  not be installed unambiguously. The same uniqueness check applies to explicit
+  `[[items]]` declarations: two entries with the same kind and name in a
+  `mind.toml` are a `DuplicateItem` error.
 
 ## Authentication failure handling for nested sources
 

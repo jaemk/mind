@@ -30,16 +30,26 @@ impl Fnv {
 }
 
 /// Hash an item path: a single file, or a directory hashed recursively.
+///
+/// Symlinks are never followed (LIFE-34): a symlink entry is hashed by its
+/// relative path and link-target string, so retargeting is detected and a
+/// symlink cycle cannot cause unbounded recursion.
 pub fn hash_path(path: &Path) -> Result<String> {
     let mut h = Fnv::new();
-    if path.is_dir() {
+    let meta = std::fs::symlink_metadata(path).map_err(|e| MindError::io(path, e))?;
+    if meta.file_type().is_symlink() {
+        // Hash the link target string so a retarget changes the hash, and so
+        // no external content is read through the link.
+        let target = std::fs::read_link(path).map_err(|e| MindError::io(path, e))?;
+        h.write(b"symlink\0");
+        h.write(target.to_string_lossy().as_bytes());
+    } else if meta.is_dir() {
         let mut files = Vec::new();
         collect_files(path, path, &mut files)?;
         files.sort();
-        for (rel, abs) in files {
+        for (rel, bytes) in files {
             h.write(rel.as_bytes());
             h.write(b"\0");
-            let bytes = std::fs::read(&abs).map_err(|e| MindError::io(&abs, e))?;
             h.write(&bytes);
         }
     } else {
@@ -49,16 +59,27 @@ pub fn hash_path(path: &Path) -> Result<String> {
     Ok(h.finish_hex())
 }
 
-fn collect_files(
-    root: &Path,
-    dir: &Path,
-    out: &mut Vec<(String, std::path::PathBuf)>,
-) -> Result<()> {
+/// Walk `dir` and collect `(relative_path_string, content_bytes)` pairs.
+///
+/// Uses `symlink_metadata` at every step so symlinks are never followed
+/// (LIFE-34). A symlink entry contributes its link-target string as its
+/// "content" (prefixed with `"symlink:"` in the relative path key), so a
+/// retargeting changes the hash and a cyclic symlink cannot recurse.
+fn collect_files(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) -> Result<()> {
     let rd = std::fs::read_dir(dir).map_err(|e| MindError::io(dir, e))?;
     for entry in rd {
         let entry = entry.map_err(|e| MindError::io(dir, e))?;
         let path = entry.path();
-        if path.is_dir() {
+        let meta = std::fs::symlink_metadata(&path).map_err(|e| MindError::io(&path, e))?;
+        let ft = meta.file_type();
+        if ft.is_symlink() {
+            let target = std::fs::read_link(&path).map_err(|e| MindError::io(&path, e))?;
+            let rel = format!(
+                "symlink:{}",
+                path.strip_prefix(root).unwrap_or(&path).to_string_lossy()
+            );
+            out.push((rel, target.to_string_lossy().into_owned().into_bytes()));
+        } else if ft.is_dir() {
             collect_files(root, &path, out)?;
         } else {
             let rel = path
@@ -66,7 +87,8 @@ fn collect_files(
                 .unwrap_or(&path)
                 .to_string_lossy()
                 .into_owned();
-            out.push((rel, path));
+            let bytes = std::fs::read(&path).map_err(|e| MindError::io(&path, e))?;
+            out.push((rel, bytes));
         }
     }
     Ok(())
@@ -128,5 +150,46 @@ mod tests {
         std::fs::write(&f, b"x").unwrap();
         assert!(!hash_path(&f).unwrap().is_empty());
         assert!(!hash_path(&dir).unwrap().is_empty());
+    }
+
+    /// A symlink that points to its own parent directory (a cycle) must not
+    /// cause unbounded recursion or a stack overflow (LIFE-34).
+    #[cfg(unix)]
+    #[test]
+    fn hash_path_symlink_cycle_does_not_overflow() {
+        // spec: LIFE-34
+        let dir = tmp("symlink-cycle");
+        // Create a symlink inside the dir that points back to the dir itself.
+        std::os::unix::fs::symlink(&*dir, dir.join("loop")).unwrap();
+        // Before the fix this would infinite-recurse; after it must terminate.
+        let result = hash_path(&dir);
+        assert!(
+            result.is_ok(),
+            "symlink cycle must not overflow: {result:?}"
+        );
+    }
+
+    /// A symlink's presence and its target must affect the hash so that adding,
+    /// removing, or retargeting a symlink is detected as drift (LIFE-34).
+    #[cfg(unix)]
+    #[test]
+    fn hash_path_symlink_target_affects_hash() {
+        // spec: LIFE-34
+        let dir = tmp("symlink-hash");
+        std::fs::write(dir.join("file.txt"), b"content").unwrap();
+
+        std::os::unix::fs::symlink("/target/a", dir.join("link")).unwrap();
+        let h_a = hash_path(&dir).unwrap();
+
+        // Retarget the symlink: hash must change.
+        std::fs::remove_file(dir.join("link")).unwrap();
+        std::os::unix::fs::symlink("/target/b", dir.join("link")).unwrap();
+        let h_b = hash_path(&dir).unwrap();
+        assert_ne!(h_a, h_b, "retargeting a symlink must change the hash");
+
+        // Remove the symlink entirely: hash must change again.
+        std::fs::remove_file(dir.join("link")).unwrap();
+        let h_none = hash_path(&dir).unwrap();
+        assert_ne!(h_a, h_none, "removing a symlink must change the hash");
     }
 }

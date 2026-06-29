@@ -473,8 +473,24 @@ pub(crate) fn remove_path(path: &Path) -> Result<()> {
     res.map_err(|e| MindError::io(path, e))
 }
 
+/// Copy a source item tree into `dst`, refusing any symlink entry (LIFE-42).
+///
+/// Uses `symlink_metadata` (no-follow) to determine whether each entry is a
+/// directory, a regular file, or a symlink. A symlink anywhere in the tree is
+/// rejected with an `Io` error carrying the offending path, so a crafted source
+/// cannot exfiltrate secrets or cause unbounded recursion via a directory cycle.
 fn copy_recursive(src: &Path, dst: &Path) -> Result<()> {
-    if src.is_dir() {
+    let meta = std::fs::symlink_metadata(src).map_err(|e| MindError::io(src, e))?;
+    if meta.file_type().is_symlink() {
+        return Err(MindError::io(
+            src,
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "source item trees must not contain symlinks",
+            ),
+        ));
+    }
+    if meta.is_dir() {
         mkdir_p(dst)?;
         let rd = std::fs::read_dir(src).map_err(|e| MindError::io(src, e))?;
         for entry in rd {
@@ -832,5 +848,39 @@ mod tests {
             "a self-requires must resolve to the item itself and not error: {result:?}"
         );
         let _ = std::fs::remove_dir_all(&staging);
+    }
+
+    /// A source tree containing a symlink (e.g. pointing to a secret outside
+    /// the tree) must be rejected by `copy_recursive` with a clear error that
+    /// names the offending path (LIFE-42). The caller (`install`) discards the
+    /// staging directory on any error, so the partial copy is cleaned up there.
+    #[cfg(unix)]
+    #[test]
+    fn copy_recursive_rejects_symlink_in_source_tree() {
+        // spec: LIFE-42
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let src = std::env::temp_dir().join(format!("mind-cplink-src-{}-{n}", std::process::id()));
+        let dst = std::env::temp_dir().join(format!("mind-cplink-dst-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&src);
+        let _ = std::fs::remove_dir_all(&dst);
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("ok.txt"), b"normal").unwrap();
+        // A symlink to /etc/passwd simulates a crafted source attempting to
+        // exfiltrate a secret file outside the item tree.
+        std::os::unix::fs::symlink("/etc/passwd", src.join("evil")).unwrap();
+
+        let result = copy_recursive(&src, &dst);
+
+        assert!(
+            result.is_err(),
+            "copy_recursive must reject a source tree containing a symlink"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("symlink"),
+            "error message must mention 'symlink': {msg}"
+        );
+        let _ = std::fs::remove_dir_all(&src);
+        let _ = std::fs::remove_dir_all(&dst);
     }
 }
