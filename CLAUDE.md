@@ -17,8 +17,10 @@ ALLOWLIST, and when a test cites an ID that the spec does not define. So a new
 spec ID forces a coverage decision - add a citing test or an allowlist entry with
 a reason - and a test cannot cite an undocumented behavior. CI is
 `.github/workflows/ci.yml` (runs `make ci`: fmt-check + clippy + test). Locally,
-`make check` runs the same lints and tests but formats in place (`cargo fmt`)
-instead of just checking.
+use `make ci-local` (alias: `make check`): it runs the same clippy + test gate
+but formats in place (`cargo fmt`) instead of `fmt-check`, so one command both
+fixes formatting and runs the full gate. Prefer `make ci-local` over chaining
+`cargo fmt` and `make ci`.
 
 ## Spec is mandatory for features
 

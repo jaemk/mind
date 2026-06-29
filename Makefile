@@ -1,6 +1,6 @@
 # Common developer tasks. Run `make help` for the list.
 
-.PHONY: help build fmt fmt-check clippy test check ci release clean docs docs-build
+.PHONY: help build fmt fmt-check clippy test check ci ci-local release clean docs docs-build
 
 # Package version from Cargo.toml, used to derive the release tag.
 VERSION := $(shell grep -m1 '^version' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')
@@ -15,6 +15,7 @@ help:
 	@echo "  test       cargo test (all features)"
 	@echo "  check      local gate: fmt (fix) + clippy + test"
 	@echo "  ci         CI gate: fmt-check + clippy + test"
+	@echo "  ci-local   like ci but formats in place (fmt) instead of fmt-check"
 	@echo "  release    tag v$(VERSION) and push it (triggers the release workflow)"
 	@echo "             override: make release TAG=v1.2.3  (or VERSION=1.2.3)"
 	@echo "  docs       build the docs site and serve it locally with live reload"
@@ -42,6 +43,11 @@ check: fmt clippy test
 # CI gate: the same lints and tests, but verify formatting (fail if unformatted)
 # rather than rewriting files. CI runs this; see .github/workflows/ci.yml.
 ci: fmt-check clippy test
+
+# Local pre-commit gate: identical to `ci` but formats in place (cargo fmt)
+# instead of just checking, so a single command both fixes formatting and runs
+# the full lint + test gate. Same set as `check`.
+ci-local: fmt clippy test
 
 # Tag the current commit and push it, which triggers .github/workflows/release.yml.
 # Defaults to v<Cargo.toml version>; override with `make release TAG=v1.2.3` or
