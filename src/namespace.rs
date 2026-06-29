@@ -3,11 +3,11 @@
 //!
 //! A source's *effective prefix* is the consumer's `--as` alias if set, else the
 //! `[source].prefix` declared in its `mind.toml`, else none. When a prefix `p`
-//! is in effect, item `name` installs as `p-name` (identity, symlink, ref).
+//! is in effect, item `name` installs as `p:name` (identity, symlink, ref).
 //!
 //! References between items in the same source must be written as `{{ns:name}}`
 //! tokens so they survive prefixing. [`expand`] rewrites each token to the
-//! effective name (`name` when unprefixed, `p-name` when prefixed) and validates
+//! effective name (`name` when unprefixed, `p:name` when prefixed) and validates
 //! that the referent is a real sibling. Sources that instead reference siblings
 //! in bare prose can be detected with [`unguarded_refs`].
 
@@ -17,7 +17,7 @@ use std::collections::HashSet;
 /// no prefix (the "no prefix" override; see [`prefix_choice`]).
 pub fn apply(bare: &str, prefix: &Option<String>) -> String {
     match prefix {
-        Some(p) if !p.is_empty() => format!("{p}-{bare}"),
+        Some(p) if !p.is_empty() => format!("{p}:{bare}"),
         _ => bare.to_string(),
     }
 }
@@ -168,6 +168,25 @@ pub fn prefix_choice(answer: &str) -> Option<String> {
         "n" | "no" | "none" => Some(String::new()),
         _ => Some(a.to_string()),
     }
+}
+
+/// Validate that `prefix` is safe to use as a namespace prefix (NS-25).
+///
+/// Rejects any prefix that is also a reserved item-kind word (`skill`, `agent`,
+/// `rule`, `tool`): such a prefix would make `prefix:name` indistinguishable
+/// from a kind-qualified item ref and break ref parsing. An empty prefix is
+/// always accepted (it means "no prefix in effect" and is handled by [`apply`]).
+///
+/// This is the single chokepoint for the NS-25 constraint: every code path that
+/// accepts a user-supplied prefix (meld `--as`, `[source].prefix`, config) must
+/// call this before storing the value.
+pub fn validate_prefix(prefix: &str) -> crate::error::Result<()> {
+    if !prefix.is_empty() && crate::error::ItemKind::parse(prefix).is_some() {
+        return Err(crate::error::MindError::ReservedPrefix {
+            prefix: prefix.to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// Expand every `{{ns:name}}` token in `content` to its effective name.
@@ -832,7 +851,7 @@ pub fn unwrap_misplaced(content: &str, all_code: bool) -> (String, usize) {
 
 #[cfg(test)]
 mod tests {
-    // spec: NS-2, NS-11, NS-12, NS-13, NS-14, NS-20, NS-21
+    // spec: NS-2, NS-11, NS-12, NS-13, NS-14, NS-20, NS-21, NS-25
     use super::*;
 
     fn sibs(names: &[&str]) -> HashSet<String> {
@@ -841,9 +860,10 @@ mod tests {
 
     #[test]
     fn apply_prefixes_or_passes_through() {
-        assert_eq!(apply("review", &Some("jk".into())), "jk-review");
+        // spec: NS-2
+        assert_eq!(apply("review", &Some("jk".into())), "jk:review");
         assert_eq!(apply("review", &None), "review");
-        // An empty prefix is "no prefix" (the override), not a leading dash.
+        // An empty prefix is "no prefix" (the override), not a leading colon.
         assert_eq!(apply("review", &Some(String::new())), "review");
     }
 
@@ -887,9 +907,10 @@ mod tests {
 
     #[test]
     fn expand_prefixed_yields_prefixed_names() {
+        // spec: NS-11
         let s = sibs(&["test"]);
         let got = expand("see {{ns:test}}.", &Some("jk".into()), &s).unwrap();
-        assert_eq!(got, "see jk-test.");
+        assert_eq!(got, "see jk:test.");
     }
 
     #[test]
@@ -914,7 +935,7 @@ mod tests {
         // Whitespace inside the token is trimmed before the sibling lookup.
         assert_eq!(
             expand("{{ns:  dev  }}", &Some("jk".into()), &s).unwrap(),
-            "jk-dev"
+            "jk:dev"
         );
         // An unterminated token (no closing `}}`) is passed through unchanged.
         assert_eq!(expand("see {{ns:dev", &None, &s).unwrap(), "see {{ns:dev");
@@ -1060,6 +1081,33 @@ mod tests {
         );
     }
 
+    // ---- validate_prefix (NS-25) ----------------------------------------------
+
+    #[test]
+    fn validate_prefix_rejects_reserved_kind_words() {
+        // spec: NS-25
+        for word in ["skill", "agent", "rule", "tool"] {
+            let err = validate_prefix(word).unwrap_err();
+            assert!(
+                matches!(err, crate::error::MindError::ReservedPrefix { ref prefix } if prefix == word),
+                "expected ReservedPrefix for '{word}', got: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_prefix_accepts_normal_prefix_and_empty() {
+        // spec: NS-25
+        // A normal user-chosen prefix is fine.
+        assert!(validate_prefix("jk").is_ok(), "'jk' must be accepted");
+        assert!(
+            validate_prefix("my-org").is_ok(),
+            "'my-org' must be accepted"
+        );
+        // Empty is fine: it means "no prefix in effect".
+        assert!(validate_prefix("").is_ok(), "empty must be accepted");
+    }
+
     // ---- path-reference tokens ({{self}}, {{tools:}}, {{path:}}) -------------
 
     use crate::error::ItemKind;
@@ -1110,7 +1158,7 @@ mod tests {
         let c = ctx(store, &pfx, ItemKind::Skill, "review", &[]);
         assert_eq!(
             expand_paths("{{self}}", &c).unwrap(),
-            "/m/store/skill/jk-review"
+            "/m/store/skill/jk:review"
         );
     }
 
@@ -1193,7 +1241,7 @@ mod tests {
         let c = ctx(store, &pfx, ItemKind::Skill, "review", &sibs);
         assert_eq!(
             expand_paths("{{tools:shard-plan}}", &c).unwrap(),
-            "/m/store/tool/jk-shard-plan/shard-plan"
+            "/m/store/tool/jk:shard-plan/shard-plan"
         );
     }
 

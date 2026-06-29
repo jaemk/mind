@@ -46,7 +46,7 @@ pub struct InstalledItem {
 }
 
 impl InstalledItem {
-    /// Manifest key, using the effective installed name, e.g. `skill:jk-review`.
+    /// Manifest key, using the effective installed name, e.g. `skill:jk:review`.
     pub fn key(&self) -> String {
         format!("{}:{}", self.kind.as_str(), self.name)
     }

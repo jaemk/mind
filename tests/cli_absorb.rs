@@ -866,18 +866,18 @@ fn abs8_effective_name_follows_destination_prefix() {
         r.stderr
     );
 
-    // The effective name should be mypfx-review.
-    let recall = sb.mind(&["recall", "skill:mypfx-review"]);
+    // The effective name should be mypfx:review.
+    let recall = sb.mind(&["recall", "skill:mypfx:review"]);
     assert!(
         recall.success,
-        "recall skill:mypfx-review must work after absorb with prefix: stderr={}",
+        "recall skill:mypfx:review must work after absorb with prefix: stderr={}",
         recall.stderr
     );
-    // The lobe symlink must be at skills/mypfx-review.
-    let link = sb.claude_home.join("skills").join("mypfx-review");
+    // The lobe symlink must be at skills/mypfx:review.
+    let link = sb.claude_home.join("skills").join("mypfx:review");
     assert!(
         is_symlink(&link),
-        "managed link must be at skills/mypfx-review when destination has prefix mypfx: {link:?}"
+        "managed link must be at skills/mypfx:review when destination has prefix mypfx: {link:?}"
     );
 }
 

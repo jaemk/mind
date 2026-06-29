@@ -746,7 +746,7 @@ mod tests {
         // is part of the installed set just like any other manifest entry.
         // Here we verify that bare_name is what goes into install_items, not
         // the effective name (which may be prefixed).
-        let item = make_installed(ItemKind::Skill, "pfx-review", "review", "local/dev/agents");
+        let item = make_installed(ItemKind::Skill, "pfx:review", "review", "local/dev/agents");
         // The bare_name is "review", so install_items should list "skill:review".
         let bare_ref = format!("{}:{}", item.kind.as_str(), item.bare_name);
         assert_eq!(bare_ref, "skill:review");

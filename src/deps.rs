@@ -1940,7 +1940,7 @@ mod tests {
     fn direct_dependency_keys_prefixed_item_keys_use_effective_name() {
         // spec: DEP-1 DEP-3
         // A prefixed dependency: the referent sibling carries prefix "jk", so its
-        // effective_name() ("jk-test") differs from its bare name ("test"). The
+        // effective_name() ("jk:test") differs from its bare name ("test"). The
         // {{ns:test}} token must still resolve by BARE name (DEP-3 mirrors token
         // expansion), and the returned dependency KEY must use the EFFECTIVE
         // (prefixed) name, because that is the manifest/install identity the
@@ -1957,7 +1957,7 @@ mod tests {
         let keys = direct_dependency_keys(&items[0], &items, &read);
         assert_eq!(
             keys,
-            vec!["agent:jk-test".to_string()],
+            vec!["agent:jk:test".to_string()],
             "dep key must use the effective (prefixed) name while the token resolved by bare name"
         );
     }
@@ -2075,7 +2075,7 @@ mod tests {
     fn installed_graph_prefixed_items_resolve_edges_by_effective_keys() {
         // spec: DEP-1 DEP-21
         // Prefixed installed items: keys in the manifest are the EFFECTIVE
-        // (prefixed) names ("skill:jk-a", "skill:jk-b"), while the {{ns:b}} token
+        // (prefixed) names ("skill:jk:a", "skill:jk:b"), while the {{ns:b}} token
         // resolves by BARE name. The graph must still wire a -> b and render the
         // prefixed keys.
         let mut a = item(ItemKind::Skill, "a", "s");
@@ -2086,18 +2086,18 @@ mod tests {
         let mut content = HashMap::new();
         content.insert("skill:a".into(), "{{ns:b}}".into());
         let mut installed_keys = HashSet::new();
-        installed_keys.insert("skill:jk-a".to_string());
-        installed_keys.insert("skill:jk-b".to_string());
+        installed_keys.insert("skill:jk:a".to_string());
+        installed_keys.insert("skill:jk:b".to_string());
 
         let g = installed_graph(&items, &installed_keys, reader(content));
         assert_eq!(
-            g.dependents("skill:jk-b"),
-            vec!["skill:jk-a".to_string()],
+            g.dependents("skill:jk:b"),
+            vec!["skill:jk:a".to_string()],
             "edge must resolve between prefixed nodes by effective key"
         );
         assert_eq!(
             g.render_forest(),
-            "- skill:jk-a\n  - skill:jk-b\n",
+            "- skill:jk:a\n  - skill:jk:b\n",
             "forest must render the prefixed effective keys"
         );
     }
@@ -2556,17 +2556,17 @@ mod tests {
         let mut content = HashMap::new();
         content.insert("skill:a".into(), "{{ns:b}}".into());
         let mut installed_keys = HashSet::new();
-        installed_keys.insert("skill:jk-a".to_string());
-        installed_keys.insert("skill:jk-b".to_string());
+        installed_keys.insert("skill:jk:a".to_string());
+        installed_keys.insert("skill:jk:b".to_string());
 
         let g = installed_graph(&items, &installed_keys, reader(content));
         let nodes = g.forest_nodes();
 
         assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].key, "skill:jk-a");
+        assert_eq!(nodes[0].key, "skill:jk:a");
         let children = nodes[0].dependencies.as_ref().unwrap();
         assert_eq!(children.len(), 1);
-        assert_eq!(children[0].key, "skill:jk-b");
+        assert_eq!(children[0].key, "skill:jk:b");
     }
 
     #[test]
@@ -2923,18 +2923,18 @@ mod tests {
         ru.prefix = Some("jk".to_string());
         let items = vec![root, a, ru];
         let mut installed_keys = HashSet::new();
-        installed_keys.insert("skill:jk-root".to_string());
-        installed_keys.insert("agent:jk-shared".to_string());
-        installed_keys.insert("rule:jk-shared".to_string());
+        installed_keys.insert("skill:jk:root".to_string());
+        installed_keys.insert("agent:jk:shared".to_string());
+        installed_keys.insert("rule:jk:shared".to_string());
 
         let g = installed_graph(&items, &installed_keys, reader(HashMap::new()));
         assert!(
-            g.dependents("agent:jk-shared").is_empty() && g.dependents("rule:jk-shared").is_empty(),
+            g.dependents("agent:jk:shared").is_empty() && g.dependents("rule:jk:shared").is_empty(),
             "ambiguous bare requires must emit no edge even when prefixed"
         );
         assert_eq!(
             g.render_forest(),
-            "- skill:jk-root\n- agent:jk-shared\n- rule:jk-shared\n",
+            "- skill:jk:root\n- agent:jk:shared\n- rule:jk:shared\n",
             "prefixed ambiguous requires yields a flat (edgeless) forest"
         );
     }

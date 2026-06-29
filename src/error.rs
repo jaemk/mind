@@ -152,6 +152,11 @@ pub enum MindError {
     )]
     InvalidItemRef { name: String },
 
+    #[error(
+        "'{prefix}' cannot be used as a namespace prefix: it is a reserved item-kind word (skill, agent, rule, tool), which would make a prefixed name indistinguishable from a kind-qualified ref"
+    )]
+    ReservedPrefix { prefix: String },
+
     #[error("source '{name}' is already melded (from {url})")]
     SourceExists { name: String, url: String },
 

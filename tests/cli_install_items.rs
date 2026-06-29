@@ -520,7 +520,7 @@ fn install_items_one_bad_ref_in_list_aborts_and_installs_nothing() {
 #[test]
 fn install_items_prefixed_name_ref_is_rejected() {
     // spec: DSC-63 — refs are BARE kind:name in source truth. A ref written with
-    // the prefix already applied (skill:pfx-review) does not name a real bare
+    // the prefix already applied (skill:pfx:review) does not name a real bare
     // item, so it is a BadReference even though the prefix is in effect. The
     // BadReference check must compare against the bare name, not reject a ref
     // merely because a prefix is set.
@@ -529,7 +529,7 @@ fn install_items_prefixed_name_ref_is_rejected() {
     registry.write_and_commit(
         "mind.toml",
         &format!(
-            "[discover]\nsources = [{{ source = {:?}, as = \"pfx\", install-items = [\"skill:pfx-review\"] }}]\n",
+            "[discover]\nsources = [{{ source = {:?}, as = \"pfx\", install-items = [\"skill:pfx:review\"] }}]\n",
             nested.source_spec()
         ),
     );
@@ -537,11 +537,11 @@ fn install_items_prefixed_name_ref_is_rejected() {
     let r = registry.mind(&["meld", &registry.source_spec()]);
     assert!(
         !r.success,
-        "a ref written with the prefix (skill:pfx-review) is not a bare name and must fail"
+        "a ref written with the prefix (skill:pfx:review) is not a bare name and must fail"
     );
     let combined = format!("{}{}", r.stdout, r.stderr);
     assert!(
-        combined.contains("pfx-review"),
+        combined.contains("pfx:review"),
         "error must name the bad ref: {combined}"
     );
 }
@@ -575,7 +575,7 @@ fn install_items_bare_ref_accepted_despite_prefix_in_effect() {
 fn install_items_prefix_applied_at_install_time() {
     // spec: DSC-63 — refs in install-items are bare (source truth); the prefix
     // in effect for the entry (`as`, DSC-39) is applied at install time.
-    // A ref of "skill:review" with `as = "pfx"` installs as "pfx-review".
+    // A ref of "skill:review" with `as = "pfx"` installs as "pfx:review".
     let nested = Sandbox::new("nested");
     let registry = Sandbox::bare("registry");
     registry.write_and_commit(
@@ -591,8 +591,8 @@ fn install_items_prefix_applied_at_install_time() {
 
     // The item installs under the prefixed name.
     assert!(
-        registry.claude_home.join("skills/pfx-review").exists(),
-        "prefixed name pfx-review must be installed: {:?}",
+        registry.claude_home.join("skills/pfx:review").exists(),
+        "prefixed name pfx:review must be installed: {:?}",
         registry.claude_home
     );
     // The bare name link must NOT exist.

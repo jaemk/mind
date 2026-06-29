@@ -132,14 +132,6 @@ const ALLOWLIST: &[&str] = &[
     // (CLI-153), and the NO_COLOR/non-UTF-8/--ascii gate-off conditions (CLI-154)
     // are now cited from integration tests in tests/cli.rs. The rich (TTY) branch
     // of the gate is unit-tested in src/render.rs (it needs a real PTY headlessly).
-    // Namespace separator change to `:` (spec/namespacing.md): documented, not yet
-    // implemented. NS-25 (reserved kind word rejected as a prefix), NS-26 (ref
-    // parser reads a pre-colon token as a kind only when it is a reserved kind
-    // word), and NS-27 (old `-` installs matched by stable identity and renamed to
-    // the `:` form on upgrade) are allowlisted until the implementation cites them.
-    "NS-25",
-    "NS-26",
-    "NS-27",
 ];
 
 #[test]

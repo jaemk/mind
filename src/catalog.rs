@@ -71,7 +71,7 @@ pub struct CatalogItem {
 }
 
 impl CatalogItem {
-    /// The name this item installs under: bare, or `<prefix>-<bare>` if namespaced.
+    /// The name this item installs under: bare, or `<prefix>:<bare>` if namespaced.
     pub fn effective_name(&self) -> String {
         namespace::apply(&self.name, &self.prefix)
     }
@@ -186,6 +186,9 @@ pub(crate) fn scan_source_at(
     // Effective prefix: consumer alias wins over the repo's own declaration. An
     // empty alias (`--as ''`, or the meld prompt's "no prefix" choice) is the
     // explicit "no prefix" override and suppresses a declared `[source].prefix`.
+    // No NS-25 guard is needed here: both inputs are validated upstream where they
+    // are set (the `--as` alias in commands.rs, the `[source].prefix` at mindfile
+    // load), so a reserved-kind-word prefix can never reach this resolution.
     let prefix = source
         .alias
         .clone()
@@ -2025,10 +2028,10 @@ mod tests {
         // spec: CLI-85
         let mut item = make_test_item("review", None);
         item.prefix = Some("jk".to_string());
-        // effective_name() is "jk-review"
-        assert!(matches_query(&item, "jk-review"));
+        // effective_name() is "jk:review"
+        assert!(matches_query(&item, "jk:review"));
         assert!(matches_query(&item, "jk"));
-        // "review" is a substring of "jk-review", so it also matches
+        // "review" is a substring of "jk:review", so it also matches
         assert!(matches_query(&item, "review"));
     }
 

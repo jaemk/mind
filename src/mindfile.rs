@@ -539,6 +539,12 @@ impl MindToml {
                 if let Some(v) = &parsed.source.min_mind_version {
                     validate_version_string(v, "min-mind-version", &file)?;
                 }
+                // spec: NS-25 — a declared `[source].prefix` that is a reserved
+                // item-kind word is rejected at load, before it can reach the
+                // effective-prefix resolution.
+                if let Some(p) = &parsed.source.prefix {
+                    crate::namespace::validate_prefix(p)?;
+                }
                 Ok(Some(parsed))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -705,6 +711,51 @@ mod tests {
             }
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+
+    #[test]
+    fn declared_reserved_kind_prefix_is_rejected_on_load() {
+        // spec: NS-25 — a `[source].prefix` equal to a reserved item-kind word
+        // (skill/agent/rule/tool) is rejected at load with ReservedPrefix, before
+        // it can become an effective prefix that would alias `prefix:name` onto a
+        // kind-qualified ref.
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        for word in ["skill", "agent", "rule", "tool"] {
+            let n = N.fetch_add(1, Ordering::SeqCst);
+            let dir =
+                std::env::temp_dir().join(format!("mind-ns25-bad-{}-{n}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("mind.toml"),
+                format!("[source]\nprefix = \"{word}\"\n"),
+            )
+            .unwrap();
+            let err = MindToml::load(&dir).unwrap_err();
+            assert!(
+                matches!(err, MindError::ReservedPrefix { ref prefix } if prefix == word),
+                "expected ReservedPrefix for declared prefix {word:?}, got: {err:?}"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn declared_normal_prefix_loads_ok() {
+        // spec: NS-25 — a non-reserved declared prefix loads fine.
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("mind-ns25-ok-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("mind.toml"), "[source]\nprefix = \"jk\"\n").unwrap();
+        let mt = MindToml::load(&dir)
+            .expect("normal prefix must load")
+            .expect("file exists");
+        assert_eq!(mt.source.prefix.as_deref(), Some("jk"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

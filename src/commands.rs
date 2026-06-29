@@ -366,6 +366,12 @@ fn meld_recursive(
 ) -> Result<usize> {
     let out = crate::render::ctx();
     let mut source = parse_spec(repo)?;
+    // NS-25: reject a reserved-kind-word prefix at the chokepoint where any alias
+    // (top-level `--as`, or a nested source's `as =`) is applied. An empty alias
+    // ("no prefix") is accepted by validate_prefix.
+    if let Some(a) = &alias {
+        crate::namespace::validate_prefix(a)?;
+    }
     source.alias = alias;
     // CLI-19: rewrite an https remote to its SSH form when SSH is preferred, so
     // the clone uses the user's key (no https username/password prompt). Done
@@ -627,6 +633,10 @@ fn meld_recursive(
             source.name
         ))?;
         let chosen = crate::namespace::prefix_choice(&answer);
+        // NS-25: a custom prefix typed at the prompt is held to the same rule.
+        if let Some(c) = &chosen {
+            crate::namespace::validate_prefix(c)?;
+        }
         if chosen != source.alias {
             source.alias = chosen;
             items = match catalog::scan(paths, &single(&source)) {
@@ -993,7 +1003,7 @@ pub fn init_source(dir: Option<&str>, template: bool) -> Result<()> {
         let scaffold = concat!(
             "[source]\n",
             "description = \"\"   # what this source offers\n",
-            "# prefix = \"prefix\"   # namespace items as prefix-<name>\n",
+            "# prefix = \"prefix\"   # namespace items as prefix:<name>\n",
             "\n",
             "# Declare hooks that run when a consumer melds or unmelds this source.\n",
             "# Remove the leading `# ` to enable a hook.\n",
@@ -1972,9 +1982,11 @@ pub fn remeld(
 
     // CLI-13: an explicit `--as` on a re-meld changes the source's prefix. Update
     // the recorded alias and rename its installed items to the new effective
-    // names (`<prefix>-<bare>`), so re-melding with a prefix actually re-namespaces
+    // names (`<prefix>:<bare>`), so re-melding with a prefix actually re-namespaces
     // an already-melded source. `--as ''` removes the prefix.
     if let Some(new_alias) = alias {
+        // NS-25: a `--as` prefix change on a re-meld is validated too.
+        crate::namespace::validate_prefix(&new_alias)?;
         let mut registry = Registry::load(paths)?;
         if let Some(source) = registry.sources.iter_mut().find(|s| s.name == source_name) {
             let current = source.alias.clone().unwrap_or_default();

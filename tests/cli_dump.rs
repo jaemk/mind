@@ -437,11 +437,11 @@ fn dump_install_items_are_bare_kind_name() {
     let sb = Sandbox::new("src");
     let meld = sb.mind(&["meld", &sb.source_spec(), "--as", "pfx", "--link-only"]);
     assert!(meld.success, "meld failed: {}", meld.stderr);
-    // Install only skill:review (under the prefixed name pfx-review).
-    let learn = sb.mind(&["learn", "skill:pfx-review"]);
+    // Install only skill:review (under the prefixed name pfx:review).
+    let learn = sb.mind(&["learn", "skill:pfx:review"]);
     assert!(
         learn.success,
-        "learn skill:pfx-review failed: {} {}",
+        "learn skill:pfx:review failed: {} {}",
         learn.stdout, learn.stderr
     );
 
@@ -450,11 +450,11 @@ fn dump_install_items_are_bare_kind_name() {
     // install-items must list the BARE name, not the prefixed name.
     assert!(
         r.stdout.contains("skill:review"),
-        "install_items must use bare kind:name (skill:review, not pfx-review): {}",
+        "install_items must use bare kind:name (skill:review, not pfx:review): {}",
         r.stdout
     );
     assert!(
-        !r.stdout.contains("skill:pfx-review"),
+        !r.stdout.contains("skill:pfx:review"),
         "prefixed name must NOT appear in install_items: {}",
         r.stdout
     );

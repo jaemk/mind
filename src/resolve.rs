@@ -48,24 +48,24 @@ fn split_kind(raw: &str) -> Result<(Option<ItemKind>, String)> {
     let invalid = || MindError::InvalidItemRef {
         name: raw.to_string(),
     };
-    if let Some((prefix, name)) = raw.split_once(':') {
-        let kind = match prefix {
-            "skill" => ItemKind::Skill,
-            "agent" => ItemKind::Agent,
-            "rule" => ItemKind::Rule,
-            "tool" => ItemKind::Tool,
-            _ => return Err(invalid()),
-        };
+    // A pre-colon token is read as a KIND only when it is a reserved kind word
+    // (NS-26). Otherwise the WHOLE ref (colon and all) is the effective name with
+    // kind=None, so a prefixed effective name like `jk:review` parses as a name and
+    // resolves by effective-name match, while `skill:review` stays kind-qualified.
+    if let Some((prefix, name)) = raw.split_once(':')
+        && let Some(kind) = ItemKind::parse(prefix)
+    {
+        // Kind-qualified: the name after the kind word must be non-empty
+        // (so `skill:` stays invalid).
         if name.is_empty() {
             return Err(invalid());
         }
-        Ok((Some(kind), name.to_string()))
-    } else {
-        if raw.is_empty() {
-            return Err(invalid());
-        }
-        Ok((None, raw.to_string()))
+        return Ok((Some(kind), name.to_string()));
     }
+    if raw.is_empty() {
+        return Err(invalid());
+    }
+    Ok((None, raw.to_string()))
 }
 
 /// Whether a source selector matches a full `host/owner/repo` source name. It
@@ -330,6 +330,35 @@ mod tests {
         assert_eq!(r.name, "dev");
     }
 
+    // spec: NS-26
+    #[test]
+    fn colon_token_is_kind_only_when_reserved_word() {
+        // A non-kind pre-colon token: the WHOLE ref is the effective name, kind=None.
+        // This lets a prefixed effective name like `jk:review` be used as a ref.
+        let r = parse_item_ref("jk:review").unwrap();
+        assert_eq!(r.kind, None);
+        assert_eq!(r.name, "jk:review");
+        assert_eq!(r.source, None);
+
+        // A reserved kind word stays kind-qualified.
+        let s = parse_item_ref("skill:review").unwrap();
+        assert_eq!(s.kind, Some(ItemKind::Skill));
+        assert_eq!(s.name, "review");
+
+        // Resolve by effective name: an item whose effective name is `jk:review`
+        // (built with prefix=None so this is independent of the separator constant)
+        // is found by the kindless effective-name ref.
+        let items = vec![cat(ItemKind::Skill, "jk:review", "agents")];
+        let found = resolve(&items, &parse_item_ref("jk:review").unwrap(), 1).unwrap();
+        assert_eq!(found.effective_name(), "jk:review");
+
+        // Source-qualified, kindless: the post-`#` token still parses as a name.
+        let q = parse_item_ref("owner/repo#jk:review").unwrap();
+        assert_eq!(q.source.as_deref(), Some("owner/repo"));
+        assert_eq!(q.kind, None);
+        assert_eq!(q.name, "jk:review");
+    }
+
     #[test]
     fn source_selector_matches_full_name_or_trailing_suffix() {
         let full = "github.com/james/agents";
@@ -419,7 +448,7 @@ mod tests {
 
     #[test]
     fn rejects_bad_refs() {
-        for bad in ["", "skill:", "bogus:name"] {
+        for bad in ["", "skill:"] {
             assert!(parse_item_ref(bad).is_err(), "expected error for {bad:?}");
         }
     }
@@ -629,7 +658,7 @@ mod tests {
         // still selected by its bare ref (the prefix is an install-time transform).
         let mut item = cat(ItemKind::Skill, "review", "a");
         item.prefix = Some("pfx".to_string());
-        assert_eq!(item.effective_name(), "pfx-review");
+        assert_eq!(item.effective_name(), "pfx:review");
         let items = vec![item];
 
         // The bare ref selects it.
@@ -637,7 +666,7 @@ mod tests {
         assert_eq!(by_bare.len(), 1, "bare ref must select the prefixed item");
 
         // A ref written with the prefix does NOT match (refs are bare in source truth).
-        let by_prefixed = select_by_bare_refs(&items, &["skill:pfx-review".to_string()]);
+        let by_prefixed = select_by_bare_refs(&items, &["skill:pfx:review".to_string()]);
         assert!(
             by_prefixed.is_empty(),
             "a prefixed-name ref must not match; refs are bare names"
@@ -657,7 +686,9 @@ mod tests {
             select_by_bare_refs(&items, &["review".to_string()]).is_empty(),
             "a kindless ref must not select anything"
         );
-        // Unknown kind / empty name are malformed -> skipped.
+        // A non-kind-word prefix is kindless (parses to kind=None), so the
+        // kindless filter drops it; an empty name after a kind word is malformed.
+        // Both are skipped.
         assert!(select_by_bare_refs(&items, &["bogus:review".to_string()]).is_empty());
         assert!(select_by_bare_refs(&items, &["skill:".to_string()]).is_empty());
         assert!(select_by_bare_refs(&items, &["".to_string()]).is_empty());

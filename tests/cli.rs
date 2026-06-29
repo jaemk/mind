@@ -402,7 +402,7 @@ fn meld_default_non_tty_registers_only_and_notes_install() {
 #[test]
 fn meld_uses_declared_prefix_when_installing() {
     // spec: CLI-24 - a non-interactive meld accepts a source's declared
-    // `[source].prefix`; installed items are namespaced `<prefix>-<name>`.
+    // `[source].prefix`; installed items are namespaced `<prefix>:<name>`.
     let sb = Sandbox::new();
     sb.write_and_commit("mind.toml", "[source]\nprefix = \"jk\"\n");
     let spec = sb.source_spec();
@@ -412,7 +412,7 @@ fn meld_uses_declared_prefix_when_installing() {
     );
     let recall = sb.mind(&["recall"]).stdout;
     assert!(
-        recall.contains("jk-review"),
+        recall.contains("jk:review"),
         "items must carry the declared prefix: {recall}"
     );
 }
@@ -431,7 +431,7 @@ fn meld_as_empty_overrides_a_declared_prefix() {
     let recall = sb.mind(&["recall"]).stdout;
     assert!(recall.contains("review"), "items must install: {recall}");
     assert!(
-        !recall.contains("jk-"),
+        !recall.contains("jk:"),
         "the declared prefix must be overridden to none: {recall}"
     );
 }
@@ -671,12 +671,12 @@ fn remeld_with_as_reprefixes_installed_items() {
     let r = sb.mind(&["meld", &spec, "--as", "jk", "--yes"]);
     assert!(r.success, "re-meld --as failed: {} {}", r.stdout, r.stderr);
     assert!(
-        r.stdout.contains("renamed skill:review -> skill:jk-review"),
+        r.stdout.contains("renamed skill:review -> skill:jk:review"),
         "re-meld --as must rename installed items: {}",
         r.stdout
     );
     assert!(
-        std::fs::symlink_metadata(sb.claude_home.join("skills/jk-review")).is_ok(),
+        std::fs::symlink_metadata(sb.claude_home.join("skills/jk:review")).is_ok(),
         "the prefixed link must exist"
     );
     assert!(
@@ -685,7 +685,7 @@ fn remeld_with_as_reprefixes_installed_items() {
     );
     let recall = sb.mind(&["recall"]).stdout;
     assert!(
-        recall.contains("jk-review"),
+        recall.contains("jk:review"),
         "recall must show the re-prefixed name: {recall}"
     );
 }
@@ -1558,7 +1558,7 @@ fn super_source_applies_nested_alias() {
     assert!(registry.mind(&["meld", &spec]).success);
 
     let probe = registry.mind(&["probe"]);
-    assert!(probe.stdout.contains("skill:tl-review"), "{}", probe.stdout);
+    assert!(probe.stdout.contains("skill:tl:review"), "{}", probe.stdout);
 }
 
 #[test]
@@ -2619,14 +2619,14 @@ fn meld_as_prefixes_names_links_and_refs() {
     assert!(sb.mind(&["meld", &spec, "--as", "jk"]).success);
 
     let probe = sb.mind(&["probe"]);
-    assert!(probe.stdout.contains("skill:jk-review"), "{}", probe.stdout);
-    assert!(probe.stdout.contains("agent:jk-dev"), "{}", probe.stdout);
+    assert!(probe.stdout.contains("skill:jk:review"), "{}", probe.stdout);
+    assert!(probe.stdout.contains("agent:jk:dev"), "{}", probe.stdout);
     // The bare names must not appear.
     assert!(!probe.stdout.contains("skill:review"), "{}", probe.stdout);
 
     // Install under the prefixed name; symlink lands at the prefixed location.
-    assert!(sb.mind(&["learn", "jk-review"]).success);
-    let link = sb.claude_home.join("skills/jk-review");
+    assert!(sb.mind(&["learn", "jk:review"]).success);
+    let link = sb.claude_home.join("skills/jk:review");
     assert!(
         std::fs::symlink_metadata(&link)
             .unwrap()
@@ -2647,7 +2647,7 @@ fn mind_toml_prefix_auto_applies_and_alias_overrides() {
     let spec = sb.source_spec();
     assert!(sb.mind(&["meld", &spec]).success);
     let probe = sb.mind(&["probe"]);
-    assert!(probe.stdout.contains("skill:ag-review"), "{}", probe.stdout);
+    assert!(probe.stdout.contains("skill:ag:review"), "{}", probe.stdout);
 
     // Consumer --as overrides the author's prefix.
     let sb2 = Sandbox::new();
@@ -2656,11 +2656,11 @@ fn mind_toml_prefix_auto_applies_and_alias_overrides() {
     assert!(sb2.mind(&["meld", &spec2, "--as", "zz"]).success);
     let probe2 = sb2.mind(&["probe"]);
     assert!(
-        probe2.stdout.contains("skill:zz-review"),
+        probe2.stdout.contains("skill:zz:review"),
         "{}",
         probe2.stdout
     );
-    assert!(!probe2.stdout.contains("ag-review"), "{}", probe2.stdout);
+    assert!(!probe2.stdout.contains("ag:review"), "{}", probe2.stdout);
 }
 
 #[test]
@@ -2674,12 +2674,12 @@ fn ns_token_expands_to_prefixed_reference_on_install() {
     let spec = sb.source_spec();
     assert!(sb.mind(&["meld", &spec, "--as", "jk"]).success);
     // `lead` references {{ns:dev}}; the closure prompt is confirmed with --yes.
-    assert!(sb.mind(&["learn", "jk-lead", "--yes"]).success);
+    assert!(sb.mind(&["learn", "jk:lead", "--yes"]).success);
 
-    let store = sb.mind_home.join("store/agent/jk-lead");
+    let store = sb.mind_home.join("store/agent/jk:lead");
     let body = std::fs::read_to_string(&store).expect("installed agent file");
     assert!(
-        body.contains("the jk-dev agent"),
+        body.contains("the jk:dev agent"),
         "expected expanded ref: {body}"
     );
     assert!(!body.contains("{{ns:dev}}"), "token should be gone: {body}");
@@ -2775,7 +2775,7 @@ fn upgrade_treats_a_prefix_change_as_a_rename() {
     );
     assert!(
         r.stdout
-            .contains("upgraded skill:review -> skill:jk-review"),
+            .contains("upgraded skill:review -> skill:jk:review"),
         "{}",
         r.stdout
     );
@@ -2783,7 +2783,7 @@ fn upgrade_treats_a_prefix_change_as_a_rename() {
     // Manifest now holds only the renamed item.
     let recall = sb.mind(&["recall"]);
     assert!(
-        recall.stdout.contains("skill:jk-review"),
+        recall.stdout.contains("skill:jk:review"),
         "{}",
         recall.stdout
     );
@@ -2791,10 +2791,10 @@ fn upgrade_treats_a_prefix_change_as_a_rename() {
 
     // Symlinks moved; the old one is gone, the new one exists.
     assert!(std::fs::symlink_metadata(sb.claude_home.join("skills/review")).is_err());
-    assert!(std::fs::symlink_metadata(sb.claude_home.join("skills/jk-review")).is_ok());
+    assert!(std::fs::symlink_metadata(sb.claude_home.join("skills/jk:review")).is_ok());
     // Old store copy removed, new one present.
     assert!(!sb.mind_home.join("store/skill/review").exists());
-    assert!(sb.mind_home.join("store/skill/jk-review").exists());
+    assert!(sb.mind_home.join("store/skill/jk:review").exists());
 }
 
 #[test]
@@ -3268,9 +3268,9 @@ fn failed_upgrade_preserves_the_previous_version() {
     let spec = sb.source_spec();
     assert!(sb.mind(&["meld", &spec, "--as", "jk"]).success);
     // `lead` references {{ns:dev}}; confirm the closure with --yes.
-    assert!(sb.mind(&["learn", "jk-lead", "--yes"]).success);
-    let store = sb.mind_home.join("store/agent/jk-lead");
-    assert!(std::fs::read_to_string(&store).unwrap().contains("jk-dev"));
+    assert!(sb.mind(&["learn", "jk:lead", "--yes"]).success);
+    let store = sb.mind_home.join("store/agent/jk:lead");
+    assert!(std::fs::read_to_string(&store).unwrap().contains("jk:dev"));
 
     // Upstream introduces a broken reference.
     sb.write_and_commit(
@@ -3286,10 +3286,10 @@ fn failed_upgrade_preserves_the_previous_version() {
     // The previously installed good version is untouched.
     let body = std::fs::read_to_string(&store).expect("old store copy should remain");
     assert!(
-        body.contains("jk-dev"),
+        body.contains("jk:dev"),
         "old version should be intact: {body}"
     );
-    assert!(std::fs::symlink_metadata(sb.claude_home.join("agents/jk-lead.md")).is_ok());
+    assert!(std::fs::symlink_metadata(sb.claude_home.join("agents/jk:lead.md")).is_ok());
 }
 
 #[test]
@@ -3380,7 +3380,7 @@ fn sync_preserves_consumer_alias() {
 
     assert!(sb.mind(&["recall", "--sources"]).stdout.contains("as:jk"));
     // Items remain namespaced under the alias after sync.
-    assert!(sb.mind(&["probe"]).stdout.contains("skill:jk-review"));
+    assert!(sb.mind(&["probe"]).stdout.contains("skill:jk:review"));
 }
 
 #[test]
@@ -5122,7 +5122,7 @@ fn unguarded_ref_warning_scans_all_files_of_an_item() {
     let r = sb.mind(&["meld", &sb.source_spec(), "--as", "jk"]);
     assert!(r.success, "{}", r.stderr);
     assert!(
-        r.stderr.contains("skill:jk-lead") && r.stderr.contains("dev"),
+        r.stderr.contains("skill:jk:lead") && r.stderr.contains("dev"),
         "warning should cite a sibling ref found in a non-SKILL.md file: {}",
         r.stderr
     );
@@ -5143,17 +5143,17 @@ fn example_namespacing_expands_references() {
     );
     // `lead` references siblings via {{ns:}}, so a partial learn pulls in the
     // closure and prompts (DEP-31); `--yes` confirms.
-    assert!(jk.mind(&["learn", "jk-lead", "--yes"]).success);
-    let lead = std::fs::read_to_string(jk.mind_home.join("store/agent/jk-lead")).unwrap();
-    assert!(lead.contains("the jk-dev agent"), "{lead}");
-    assert!(lead.contains("the jk-review skill"), "{lead}");
-    assert!(lead.contains("the jk-style rule"), "{lead}");
+    assert!(jk.mind(&["learn", "jk:lead", "--yes"]).success);
+    let lead = std::fs::read_to_string(jk.mind_home.join("store/agent/jk:lead")).unwrap();
+    assert!(lead.contains("the jk:dev agent"), "{lead}");
+    assert!(lead.contains("the jk:review skill"), "{lead}");
+    assert!(lead.contains("the jk:style rule"), "{lead}");
     assert!(!lead.contains("{{ns:"), "tokens should be gone: {lead}");
     // The skill references a rule from inside its directory; it expands too.
-    assert!(jk.mind(&["learn", "jk-review", "--yes"]).success);
+    assert!(jk.mind(&["learn", "jk:review", "--yes"]).success);
     let review =
-        std::fs::read_to_string(jk.mind_home.join("store/skill/jk-review/SKILL.md")).unwrap();
-    assert!(review.contains("jk-style rule"), "{review}");
+        std::fs::read_to_string(jk.mind_home.join("store/skill/jk:review/SKILL.md")).unwrap();
+    assert!(review.contains("jk:style rule"), "{review}");
     assert!(!review.contains("{{ns:"), "tokens should be gone: {review}");
 
     // Unprefixed: the same tokens expand to the bare names.
@@ -7196,7 +7196,7 @@ fn review_with_prefix_flag_evaluates_under_that_namespace() {
     );
     let spec = sb.source_spec();
 
-    // With --as jk: the token {{ns:dev}} should resolve to jk-dev (a sibling).
+    // With --as jk: the token {{ns:dev}} should resolve to jk:dev (a sibling).
     let r = sb.mind(&["review", &spec, "--as", "jk"]);
     // dev is a sibling, so no bad-reference error.
     assert!(
@@ -9618,11 +9618,11 @@ fn tool_prefix_applies_to_store_and_tokens() {
     assert!(r.success, "{} {}", r.stdout, r.stderr);
     let store = sb.mind_home.join("store");
     // The tool installs under the prefixed effective name.
-    assert!(store.join("tool/jk-detect/detect").is_file());
+    assert!(store.join("tool/jk:detect/detect").is_file());
     // The same tokens resolve to the prefixed store paths.
-    let skill_md = std::fs::read_to_string(store.join("skill/jk-review/SKILL.md")).unwrap();
+    let skill_md = std::fs::read_to_string(store.join("skill/jk:review/SKILL.md")).unwrap();
     assert!(
-        skill_md.contains(&format!("{}/tool/jk-detect/detect", store.display())),
+        skill_md.contains(&format!("{}/tool/jk:detect/detect", store.display())),
         "{skill_md}"
     );
 }
@@ -9876,25 +9876,25 @@ fn two_sources_same_names_coexist_under_a_prefix() {
     assert!(a.mind(&["meld", &b.source_spec(), "--as", "zz"]).success);
 
     // The prefix makes the effective names distinct, so each installs by its own
-    // name with no ambiguity and no qualifier: `review` from a, `zz-review` from b.
+    // name with no ambiguity and no qualifier: `review` from a, `zz:review` from b.
     let la = a.mind(&["learn", "review"]);
     assert!(la.success, "learn review: {} {}", la.stdout, la.stderr);
-    let lb = a.mind(&["learn", "zz-review"]);
-    assert!(lb.success, "learn zz-review: {} {}", lb.stdout, lb.stderr);
+    let lb = a.mind(&["learn", "zz:review"]);
+    assert!(lb.success, "learn zz:review: {} {}", lb.stdout, lb.stderr);
 
-    // Both coexist: the unprefixed one as `review`, the namespaced one as `zz-review`.
+    // Both coexist: the unprefixed one as `review`, the namespaced one as `zz:review`.
     let recall = a.mind(&["recall"]).stdout;
     assert!(recall.contains("skill:review"), "{recall}");
-    assert!(recall.contains("skill:zz-review"), "{recall}");
+    assert!(recall.contains("skill:zz:review"), "{recall}");
     assert!(
         a.mind_home.join("store/skill/review").is_dir(),
         "a's store copy"
     );
     assert!(
-        a.mind_home.join("store/skill/zz-review").is_dir(),
+        a.mind_home.join("store/skill/zz:review").is_dir(),
         "b's store copy"
     );
-    for link in ["skills/review", "skills/zz-review"] {
+    for link in ["skills/review", "skills/zz:review"] {
         assert!(
             std::fs::symlink_metadata(a.claude_home.join(link))
                 .unwrap()
@@ -11302,7 +11302,7 @@ fn recall_still_marks_item_outdated_after_commit_with_content_change() {
 /// must report it pending as a rename. The drift is created without re-melding
 /// `--as` (which would apply the rename immediately): the source declares a
 /// `[source].prefix` in `mind.toml` after install, so the catalog's effective
-/// name (`jk-review`) diverges from the still-recorded manifest name (`review`)
+/// name (`jk:review`) diverges from the still-recorded manifest name (`review`)
 /// with the item's SKILL.md content byte-identical (the hash is of the item
 /// content, not mind.toml -- LIFE-15). The four surfaces must agree with upgrade.
 // spec: CLI-75
@@ -11335,7 +11335,7 @@ fn recall_and_probe_mark_item_outdated_on_rename_without_content_change() {
     );
 
     // Introduce a namespace prefix via mind.toml WITHOUT re-melding. After sync,
-    // the catalog computes effective name `jk-review` while the manifest still
+    // the catalog computes effective name `jk:review` while the manifest still
     // records `review`; the SKILL.md content is unchanged so the hash matches.
     sb.write_and_commit("mind.toml", "[source]\nprefix = \"jk\"\n");
     assert!(sb.mind(&["sync"]).success, "sync failed");
@@ -11370,15 +11370,15 @@ fn recall_and_probe_mark_item_outdated_on_rename_without_content_change() {
     assert!(
         up.stdout.contains("rename")
             && up.stdout.contains("review -> ")
-            && up.stdout.contains("jk-review"),
-        "upgrade must report the rename review -> jk-review: {}",
+            && up.stdout.contains("jk:review"),
+        "upgrade must report the rename review -> jk:review: {}",
         up.stdout
     );
 }
 
 /// CLI-75 applies the rename marker to the default `recall` status view too. The
 /// status view matches catalog items to the manifest by stable identity
-/// `(source, kind, bare_name)`, so a renamed item (effective name `skill:jk-review`
+/// `(source, kind, bare_name)`, so a renamed item (effective name `skill:jk:review`
 /// vs the manifest's `skill:review`) still lands in the matched arm and `rename_lag`
 /// marks it outdated, rather than being misreported as `available` + an orphan
 /// `(removed upstream)`. The status view agrees with `probe`, the single-item
@@ -11556,7 +11556,7 @@ fn recall_status_renamed_item_appears_exactly_once_no_orphan_dup() {
     assert!(sb.mind(&["meld", &spec, "--yes"]).success, "meld failed");
 
     // Rename drift: declare a prefix after install, then sync so the catalog's
-    // effective name (`jk-review`) diverges from the recorded manifest name
+    // effective name (`jk:review`) diverges from the recorded manifest name
     // (`review`) with the SKILL.md content byte-identical.
     sb.write_and_commit("mind.toml", "[source]\nprefix = \"jk\"\n");
     assert!(sb.mind(&["sync"]).success, "sync failed");
@@ -11565,13 +11565,13 @@ fn recall_status_renamed_item_appears_exactly_once_no_orphan_dup() {
     assert!(recall.success, "recall failed: {}", recall.stderr);
 
     // Exactly one line carries the review-skill key (either the installed name
-    // `skill:review` or the catalog's new effective name `skill:jk-review`).
+    // `skill:review` or the catalog's new effective name `skill:jk:review`).
     // The `skill:` prefix anchors to an item row and avoids spurious matches
     // on output chrome that merely contains the word "review".
     let review_lines: Vec<&str> = recall
         .stdout
         .lines()
-        .filter(|l| l.contains("skill:review") || l.contains("skill:jk-review"))
+        .filter(|l| l.contains("skill:review") || l.contains("skill:jk:review"))
         .collect();
     assert_eq!(
         review_lines.len(),
@@ -11620,7 +11620,7 @@ fn recall_json_renamed_item_installed_once_not_orphaned() {
         .iter()
         .filter(|r| {
             let k = r["key"].as_str().unwrap_or("");
-            k == "skill:review" || k == "skill:jk-review"
+            k == "skill:review" || k == "skill:jk:review"
         })
         .collect();
     assert_eq!(
@@ -11631,7 +11631,7 @@ fn recall_json_renamed_item_installed_once_not_orphaned() {
     let row = review_rows[0];
     assert_eq!(
         row["key"].as_str(),
-        Some("skill:jk-review"),
+        Some("skill:jk:review"),
         "the renamed item must carry its new effective key: {row}"
     );
     assert_eq!(
@@ -11728,7 +11728,7 @@ fn removed_upstream_still_flagged_in_recall_human_and_json() {
 /// EDGE 3 (same bare name across two sources does not cross-match): identity is
 /// (source, kind, bare_name). Two melded sources each ship a `review` skill (the
 /// second namespaced so both can install). Removing `review` from source A must
-/// flag ONLY A's item as removed upstream and must NOT mislabel B's `zz-review`,
+/// flag ONLY A's item as removed upstream and must NOT mislabel B's `zz:review`,
 /// which is unchanged. This is the isolation the rework depends on: A's orphan
 /// scan must not match B's manifest entry by bare name, and B's catalog must not
 /// rescue A's removed item.
@@ -11746,8 +11746,8 @@ fn same_bare_name_across_sources_does_not_cross_match_on_removal() {
     // Both review skills install side by side under distinct effective names.
     assert!(a.mind(&["learn", "review"]).success, "learn review (a)");
     assert!(
-        a.mind(&["learn", "zz-review"]).success,
-        "learn zz-review (b)"
+        a.mind(&["learn", "zz:review"]).success,
+        "learn zz:review (b)"
     );
 
     // Remove review from source A only, then sync.
@@ -11757,7 +11757,7 @@ fn same_bare_name_across_sources_does_not_cross_match_on_removal() {
     let recall = a.mind(&["recall"]);
     assert!(recall.success, "recall failed: {}", recall.stderr);
 
-    // A's review is removed upstream; B's zz-review is untouched (not flagged).
+    // A's review is removed upstream; B's zz:review is untouched (not flagged).
     let removed_lines: Vec<&str> = recall
         .stdout
         .lines()
@@ -11770,13 +11770,13 @@ fn same_bare_name_across_sources_does_not_cross_match_on_removal() {
         removed_lines
     );
     assert!(
-        removed_lines[0].contains("skill:review") && !removed_lines[0].contains("zz-review"),
-        "the removed-upstream row must be A's review, not B's zz-review: {}",
+        removed_lines[0].contains("skill:review") && !removed_lines[0].contains("zz:review"),
+        "the removed-upstream row must be A's review, not B's zz:review: {}",
         removed_lines[0]
     );
 
     // JSON confirms the cross-match isolation: A's review orphaned, B's
-    // zz-review installed and NOT orphaned.
+    // zz:review installed and NOT orphaned.
     let jj = parse_json(&a.mind(&["recall", "--json"]).stdout);
     let sources = jj.as_array().expect("sources array");
     let mut saw_review_orphan = false;
@@ -11792,15 +11792,15 @@ fn same_bare_name_across_sources_does_not_cross_match_on_removal() {
                     );
                     saw_review_orphan = true;
                 }
-                Some("skill:zz-review") => {
+                Some("skill:zz:review") => {
                     assert!(
                         r.get("orphaned").is_none(),
-                        "B's zz-review must not be orphaned: {r}"
+                        "B's zz:review must not be orphaned: {r}"
                     );
                     assert_eq!(
                         r["installed"].as_bool(),
                         Some(true),
-                        "B's zz-review must stay installed: {r}"
+                        "B's zz:review must stay installed: {r}"
                     );
                     saw_zz_review_ok = true;
                 }
@@ -11810,7 +11810,7 @@ fn same_bare_name_across_sources_does_not_cross_match_on_removal() {
     }
     assert!(
         saw_review_orphan && saw_zz_review_ok,
-        "both A's orphaned review and B's intact zz-review must be present: {jj:#?}"
+        "both A's orphaned review and B's intact zz:review must be present: {jj:#?}"
     );
 }
 
@@ -13424,7 +13424,7 @@ fn probe_json_resolves_dependency_to_prefixed_effective_key() {
     // When a source is melded under a prefix, an item's dependency key in the
     // `probe --json` adjacency field must be the EFFECTIVE (prefixed) key, so a
     // consumer reconstructs the graph by the same identities the items install
-    // under. `skill:jk-review` must depend on `agent:jk-reviewer`, not the bare
+    // under. `skill:jk:review` must depend on `agent:jk:reviewer`, not the bare
     // `agent:reviewer`.
     let sb = Sandbox::bare("dep-prefix");
     sb.write_and_commit(
@@ -13447,14 +13447,14 @@ fn probe_json_resolves_dependency_to_prefixed_effective_key() {
     // The effective name carries the prefix.
     let review_row = rows
         .iter()
-        .find(|row| row["name"] == "jk-review")
-        .expect("skill:jk-review must be in JSON output (prefixed effective name)");
+        .find(|row| row["name"] == "jk:review")
+        .expect("skill:jk:review must be in JSON output (prefixed effective name)");
     let deps = review_row["dependencies"]
         .as_array()
         .expect("dependencies must be an array");
     assert!(
-        deps.iter().any(|d| d == "agent:jk-reviewer"),
-        "dependency key must be the prefixed effective key agent:jk-reviewer, not bare: {deps:?}"
+        deps.iter().any(|d| d == "agent:jk:reviewer"),
+        "dependency key must be the prefixed effective key agent:jk:reviewer, not bare: {deps:?}"
     );
     assert!(
         !deps.iter().any(|d| d == "agent:reviewer"),
@@ -13600,14 +13600,14 @@ fn recall_tree_json_with_prefix_uses_effective_keys() {
         "agents/reviewer.md",
         "---\nname: reviewer\ndescription: Reviewer\n---\n# reviewer\n",
     );
-    // Meld with a prefix so items install as "pfx-review" / "pfx-reviewer".
+    // Meld with a prefix so items install as "pfx:review" / "pfx:reviewer".
     assert!(
         sb.mind(&["meld", "--as", "pfx", &sb.source_spec()]).success,
         "meld with prefix must succeed"
     );
-    // Under a prefix, the effective name is "pfx-review" -- use that to learn.
+    // Under a prefix, the effective name is "pfx:review" -- use that to learn.
     assert!(
-        sb.mind(&["learn", "pfx-review", "--yes"]).success,
+        sb.mind(&["learn", "pfx:review", "--yes"]).success,
         "learn with prefix must succeed"
     );
 
@@ -13626,13 +13626,13 @@ fn recall_tree_json_with_prefix_uses_effective_keys() {
     // Root key must use the effective prefixed name.
     let root = arr
         .iter()
-        .find(|n| n["key"] == "skill:pfx-review")
-        .unwrap_or_else(|| panic!("root must be skill:pfx-review: {arr:?}"));
+        .find(|n| n["key"] == "skill:pfx:review")
+        .unwrap_or_else(|| panic!("root must be skill:pfx:review: {arr:?}"));
 
     let deps = root["dependencies"].as_array().unwrap();
     assert_eq!(deps.len(), 1, "one dep: {deps:?}");
     assert_eq!(
-        deps[0]["key"], "agent:pfx-reviewer",
+        deps[0]["key"], "agent:pfx:reviewer",
         "dep must use effective prefixed key: {deps:?}"
     );
 }
@@ -14431,5 +14431,361 @@ fn dump_emits_flat_skills_for_flat_source() {
         !dump2.stdout.contains("flat-skills"),
         "a non-flat source must emit no flat-skills key: {}",
         dump2.stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// NS-25: reserved kind word rejected as a namespace prefix (CLI path)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn meld_as_reserved_kind_word_is_rejected() {
+    // spec: NS-25
+    // A prefix equal to a reserved item-kind word (skill/agent/rule/tool) would
+    // make `prefix:name` indistinguishable from a kind-qualified item ref (NS-26),
+    // so `meld --as <kind-word>` must fail before registering the source.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+
+    // `--as skill` must be rejected.
+    let r = sb.mind(&["meld", &spec, "--as", "skill"]);
+    assert!(
+        !r.success,
+        "meld --as skill must fail: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr.contains("reserved") || r.stderr.contains("kind"),
+        "error must mention the reserved-kind-word problem: {}",
+        r.stderr
+    );
+    // Source must not have been registered.
+    assert!(
+        sb.mind(&["recall", "--sources"])
+            .stdout
+            .contains("no sources melded"),
+        "source must not be registered after a rejected meld"
+    );
+
+    // `--as agent` must also be rejected (second reserved word).
+    let sb2 = Sandbox::new();
+    let spec2 = sb2.source_spec();
+    let r2 = sb2.mind(&["meld", &spec2, "--as", "agent"]);
+    assert!(
+        !r2.success,
+        "meld --as agent must fail: stdout={} stderr={}",
+        r2.stdout, r2.stderr
+    );
+    assert!(
+        r2.stderr.contains("reserved") || r2.stderr.contains("kind"),
+        "error must mention the reserved-kind-word problem: {}",
+        r2.stderr
+    );
+}
+
+// ---------------------------------------------------------------------------
+// NS-27: item installed under former `-` separator migrates on upgrade
+// ---------------------------------------------------------------------------
+
+#[test]
+fn upgrade_migrates_dash_separator_to_colon_by_stable_identity() {
+    // spec: NS-27
+    // An item installed under the former `-` separator (e.g. `jk-review`) keeps
+    // its stable identity (source, kind, bare_name). When the binary now emits `:`
+    // (so the catalog yields `jk:review`), upgrade must detect the rename via
+    // identity match and re-link under the new separator, removing the old path.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    // Meld with prefix `jk`; the binary now emits `jk:review`.
+    assert!(sb.mind(&["meld", &spec, "--as", "jk"]).success);
+    assert!(
+        sb.mind(&["learn", "jk:review"]).success,
+        "learn must accept the colon-separated effective name"
+    );
+
+    // Verify the current (colon-separator) layout.
+    let new_store = sb.mind_home.join("store/skill/jk:review");
+    let new_link = sb.claude_home.join("skills/jk:review");
+    assert!(
+        new_store.exists(),
+        "store must be at jk:review after install"
+    );
+    assert!(
+        std::fs::symlink_metadata(&new_link).is_ok(),
+        "symlink must be at skills/jk:review after install"
+    );
+
+    // -- Simulate old `-` separator layout --
+    // Rewrite the manifest so it looks like an install from a binary that
+    // used `-` as the separator (e.g. jk-review instead of jk:review).
+    let manifest_path = sb.mind_home.join("manifest.json");
+    let manifest_text = std::fs::read_to_string(&manifest_path).unwrap();
+    // Replace the effective name in the JSON key, the name field, the store
+    // path, and the absolute link paths, while keeping bare_name/source/kind
+    // intact (those form the stable identity).
+    let manifest_old = manifest_text
+        .replace("\"skill:jk:review\"", "\"skill:jk-review\"")
+        .replace("\"jk:review\"", "\"jk-review\"")
+        .replace("store/skill/jk:review", "store/skill/jk-review")
+        .replace("skills/jk:review", "skills/jk-review");
+    std::fs::write(&manifest_path, &manifest_old).unwrap();
+
+    // Move the store directory to the old name.
+    let old_store = sb.mind_home.join("store/skill/jk-review");
+    std::fs::rename(&new_store, &old_store).unwrap();
+
+    // Recreate the symlink under the old name pointing at the renamed store.
+    std::fs::remove_file(&new_link).unwrap();
+    let old_link = sb.claude_home.join("skills/jk-review");
+    std::os::unix::fs::symlink(&old_store, &old_link).unwrap();
+
+    // -- Run upgrade --
+    // The catalog finds (source, kind=skill, bare_name=review, effective_name=jk:review).
+    // The manifest has (source, kind=skill, bare_name=review, name=jk-review).
+    // Identity match fires: new effective name != recorded name => rename.
+    let up = sb.mind(&["upgrade", "--yes"]);
+    assert!(
+        up.success,
+        "upgrade must succeed on a separator-migration rename: {} {}",
+        up.stdout, up.stderr
+    );
+    // The upgrade output must mention both the old and new names in the rename report.
+    assert!(
+        up.stdout.contains("jk-review") && up.stdout.contains("jk:review"),
+        "upgrade must report the rename jk-review -> jk:review: {}",
+        up.stdout
+    );
+
+    // After upgrade: new-separator paths must exist.
+    assert!(
+        sb.mind_home.join("store/skill/jk:review").exists(),
+        "store must be at jk:review after separator migration"
+    );
+    assert!(
+        std::fs::symlink_metadata(sb.claude_home.join("skills/jk:review")).is_ok(),
+        "symlink must be at skills/jk:review after separator migration"
+    );
+    // Old-separator paths must be gone.
+    assert!(
+        !sb.mind_home.join("store/skill/jk-review").exists(),
+        "old jk-review store must be removed after migration"
+    );
+    assert!(
+        std::fs::symlink_metadata(sb.claude_home.join("skills/jk-review")).is_err(),
+        "old jk-review symlink must be removed after migration"
+    );
+    // Recall must now show the new name.
+    let recall = sb.mind(&["recall"]).stdout;
+    assert!(
+        recall.contains("skill:jk:review"),
+        "recall must show skill:jk:review after migration: {recall}"
+    );
+    assert!(
+        !recall.contains("skill:jk-review"),
+        "recall must not show the old skill:jk-review after migration: {recall}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// NS-26: a prefixed effective name (`jk:review`) is usable as a ref in the
+// installed-side verbs (recall / upgrade / forget), not only `learn`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn prefixed_effective_name_resolves_for_recall_upgrade_and_forget() {
+    // spec: NS-26
+    // NS-26 promises prefixed effective names stay usable as refs despite the
+    // shared `:` separator. `learn jk:review` is covered elsewhere; this exercises
+    // the manifest-side resolution path (resolve_installed) used by recall,
+    // upgrade, and forget, which the resolve.rs unit test does not drive end to end.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    assert!(sb.mind(&["meld", &spec, "--as", "jk"]).success);
+    assert!(
+        sb.mind(&["learn", "jk:review"]).success,
+        "learn must accept the colon-separated effective name"
+    );
+
+    // recall <item> resolves the install by its effective name.
+    let recall = sb.mind(&["recall", "jk:review"]);
+    assert!(
+        recall.success && recall.stdout.contains("jk:review"),
+        "recall jk:review must resolve the installed item: {} {}",
+        recall.stdout,
+        recall.stderr
+    );
+
+    // upgrade <item> resolves it too (here a no-op, but it must not be reported
+    // as NotInstalled, which is what a broken `:`-name parse would produce).
+    let upgrade = sb.mind(&["upgrade", "jk:review", "--yes"]);
+    assert!(
+        upgrade.success,
+        "upgrade jk:review must resolve the installed item: {} {}",
+        upgrade.stdout, upgrade.stderr
+    );
+    assert!(
+        !upgrade.stderr.contains("not installed") && !upgrade.stdout.contains("not installed"),
+        "upgrade jk:review must not report the prefixed ref as not installed: {} {}",
+        upgrade.stdout,
+        upgrade.stderr
+    );
+
+    // forget <item> removes exactly that item, by its effective name.
+    let forget = sb.mind(&["forget", "jk:review"]);
+    assert!(
+        forget.success,
+        "forget jk:review must resolve and remove the installed item: {} {}",
+        forget.stdout, forget.stderr
+    );
+    assert!(
+        !sb.mind_home.join("store/skill/jk:review").exists(),
+        "forget jk:review must remove the store copy"
+    );
+    assert!(
+        std::fs::symlink_metadata(sb.claude_home.join("skills/jk:review")).is_err(),
+        "forget jk:review must remove the lobe symlink"
+    );
+    // It is no longer in the manifest: forgetting the same effective name again
+    // must now report it as not installed (proving the manifest entry was keyed
+    // and removed by the `:` effective name, not left behind).
+    let again = sb.mind(&["forget", "jk:review"]);
+    assert!(
+        !again.success
+            && (again.stderr.contains("not installed") || again.stderr.contains("jk:review")),
+        "a second forget jk:review must report it as not installed: {} {}",
+        again.stdout,
+        again.stderr
+    );
+}
+
+// ---------------------------------------------------------------------------
+// NS-2: a `:` in the effective name produces a real, resolvable on-disk store
+// dir and lobe symlink on this platform (the load-bearing assumption).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn prefixed_lobe_symlink_resolves_through_colon_path() {
+    // spec: NS-2
+    // The whole separator change rests on a literal `:` being valid in a store
+    // directory and a lobe symlink. Existing tests assert the paths EXIST; this
+    // asserts they are RESOLVABLE: the file is readable THROUGH the colon-bearing
+    // symlink and its content matches the store copy. If a `:` in a path broke on
+    // this platform, this would fail rather than silently certify a broken layout.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    assert!(sb.mind(&["meld", &spec, "--as", "jk"]).success);
+    assert!(sb.mind(&["learn", "jk:review"]).success);
+
+    let store_file = sb.mind_home.join("store/skill/jk:review/SKILL.md");
+    let link_file = sb.claude_home.join("skills/jk:review/SKILL.md");
+
+    // The lobe entry is a symlink (not a copy).
+    let link_dir = sb.claude_home.join("skills/jk:review");
+    assert!(
+        std::fs::symlink_metadata(&link_dir)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the prefixed lobe entry must be a symlink"
+    );
+
+    // Reading THROUGH the colon-bearing symlink path must resolve to the store
+    // copy: the file is readable and its bytes match.
+    let via_store = std::fs::read_to_string(&store_file).expect("store file readable");
+    let via_link =
+        std::fs::read_to_string(&link_file).expect("file readable through the colon-bearing link");
+    assert_eq!(
+        via_link, via_store,
+        "content read through the `:` symlink must equal the store copy"
+    );
+    assert!(
+        via_link.contains("review skill"),
+        "the resolved file must be the review SKILL.md: {via_link}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// DUMP-5 / NS-2: dump of a prefixed install records the prefix as `as = "<p>"`
+// and lists items by their BARE `kind:name`, not the prefixed effective name.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn dump_records_prefix_and_bare_install_items() {
+    // spec: DUMP-5
+    // A prefixed source's dump must carry the prefix (`as = "jk"`) so re-melding
+    // reproduces the namespace, while install-items stay in source/catalog truth
+    // (bare `skill:review`), never the install-time `skill:jk:review` form. A
+    // proper subset (only `review` of {review, dev, style}) forces the
+    // install-items listing rather than `install = true`.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    assert!(sb.mind(&["meld", &spec, "--as", "jk"]).success);
+    assert!(sb.mind(&["learn", "jk:review"]).success);
+
+    let dump = sb.mind(&["dump"]);
+    assert!(dump.success, "dump failed: {} {}", dump.stdout, dump.stderr);
+    assert!(
+        dump.stdout.contains("as = \"jk\""),
+        "dump must record the effective prefix as `as = \"jk\"`: {}",
+        dump.stdout
+    );
+    assert!(
+        dump.stdout.contains("\"skill:review\""),
+        "install-items must list the BARE ref skill:review: {}",
+        dump.stdout
+    );
+    assert!(
+        !dump.stdout.contains("skill:jk:review") && !dump.stdout.contains("jk:review"),
+        "install-items must NOT carry the prefixed effective name: {}",
+        dump.stdout
+    );
+
+    // The dumped document must parse as a mind.toml (re-meldable super-source).
+    let parsed: Result<toml::Value, _> = toml::from_str(&dump.stdout);
+    assert!(
+        parsed.is_ok(),
+        "dump output must be valid TOML: {:?}\n{}",
+        parsed.err(),
+        dump.stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// NS-25: the reserved-kind-word prefix guard fires on the re-meld `--as` path
+// (CLI-13) and for every reserved word, not just `skill`/`agent`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn remeld_as_reserved_kind_word_is_rejected() {
+    // spec: NS-25
+    // A source already melded can have its prefix changed by re-melding with
+    // `--as` (CLI-13). That change must be held to the same NS-25 rule, so a
+    // reserved kind word is rejected at the re-meld chokepoint too. Also covers
+    // `rule` and `tool`, which the initial-meld CLI test does not exercise.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    // First meld with a normal prefix so the source is registered.
+    assert!(sb.mind(&["meld", &spec, "--as", "jk"]).success);
+
+    for word in ["rule", "tool"] {
+        let r = sb.mind(&["meld", &spec, "--as", word]);
+        assert!(
+            !r.success,
+            "re-meld --as {word} must fail: stdout={} stderr={}",
+            r.stdout, r.stderr
+        );
+        assert!(
+            r.stderr.contains("reserved") || r.stderr.contains("kind"),
+            "error must mention the reserved-kind-word problem for {word}: {}",
+            r.stderr
+        );
+    }
+
+    // The original prefix must be intact (the rejected re-meld changed nothing).
+    let probe = sb.mind(&["probe"]);
+    assert!(
+        probe.stdout.contains("skill:jk:review"),
+        "the original prefix must survive a rejected re-meld: {}",
+        probe.stdout
     );
 }
