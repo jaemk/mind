@@ -93,7 +93,7 @@ Three layers, in precedence order:
 ```toml
 [source]
 description = "James's agent library"
-prefix = "jk"               # namespace: every item installs as jk-<name> (see below)
+prefix = "jk"               # namespace: every item installs as jk:<name> (see below)
 min-mind-version = "0.2"    # version gate: meld refuses a source the binary is too old for (DSC-40)
 
 # Explicit inventory (authoritative). Omit [[items]] and [discover] to keep
@@ -119,7 +119,7 @@ a real YAML parser rather than extending the hand-rolled scanner.
 
 Two melded sources can both ship a `review`; they would collide at
 `~/.claude/skills/review`. A *prefix* namespaces a source so every item from it
-installs under `<prefix>-<name>` (identity, store path, symlink, and ref). The
+installs under `<prefix>:<name>` (identity, store path, symlink, and ref). The
 effective prefix is, in order: the consumer's `meld --as <prefix>` (persisted as
 `Source.alias`), else the repo's `[source].prefix`, else none.
 
@@ -137,7 +137,7 @@ those references are rewritten. We do NOT guess in prose (sibling names like
 
 - **Reference token.** Authors write intra-source references as `{{ns:name}}`.
   On install, `install.rs` expands each token to the effective name (`name` when
-  unprefixed, `prefix-name` when prefixed) and validates the referent is a real
+  unprefixed, `prefix:name` when prefixed) and validates the referent is a real
   sibling (errors via `MindError::BadReference` on a typo). Unprefixed sources
   with tokens still work: the token expands to the bare name. Existing repos with
   no tokens are unaffected (expansion is a no-op when no `{{ns:` is present).

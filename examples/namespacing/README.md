@@ -6,14 +6,14 @@ source reference each other and survive a namespace prefix.
 ## Why tokens
 
 A prefix (`meld --as <prefix>`, or a repo's `[source].prefix`) installs every
-item from a source under `<prefix>-<name>`, so two sources can both ship a
+item from a source under `<prefix>:<name>`, so two sources can both ship a
 `review` without colliding. The Claude harness resolves agents and skills at
 runtime by the name in the text, so a plain-prose reference like "delegate to
-the dev agent" breaks once `dev` installs as `jk-dev`.
+the dev agent" breaks once `dev` installs as `jk:dev`.
 
 Authors write intra-source references as `{{ns:name}}` instead. On install, mind
 expands each token to that sibling's effective name: the bare name when the
-source is unprefixed, or `<prefix>-<name>` when prefixed. A token whose referent
+source is unprefixed, or `<prefix>:<name>` when prefixed. A token whose referent
 is not a real sibling is a `BadReference` error at install time.
 
 ## Layout
@@ -44,12 +44,12 @@ mind meld /tmp/ns-demo
 mind learn lead --yes      # --yes confirms the dep-closure prompt
 cat ~/.mind/store/agent/lead        # "the dev agent", "the review skill", ...
 
-# Prefixed: tokens expand to jk-<name>.
+# Prefixed: tokens expand to jk:<name>.
 # Re-melding an already-registered source with --as updates its prefix in place
 # (CLI-12, CLI-13) and renames any already-installed items; no unmeld needed.
 mind meld /tmp/ns-demo --as jk
-mind learn jk-lead --yes
-cat ~/.mind/store/agent/jk-lead     # "the jk-dev agent", "the jk-review skill", ...
+mind learn jk:lead --yes
+cat ~/.mind/store/agent/jk:lead     # "the jk:dev agent", "the jk:review skill", ...
 
 # Browse items non-interactively.
 mind probe --no-tui
@@ -62,12 +62,12 @@ references prefixing would break.
 
 ## Teardown
 
-Re-melding with `--as jk` renames the previously installed `lead` to `jk-lead`
-(CLI-13), and learning `jk-lead` pulls in its sibling dependencies. Run in
+Re-melding with `--as jk` renames the previously installed `lead` to `jk:lead`
+(CLI-13), and learning `jk:lead` pulls in its sibling dependencies. Run in
 inverse order:
 
 ```
-mind forget jk-lead
+mind forget jk:lead
 mind unmeld ns-demo
 rm -rf /tmp/ns-demo
 ```

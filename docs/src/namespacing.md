@@ -2,7 +2,7 @@
 
 Two melded sources can each ship an item of the same name (both a `review`).
 Without a prefix they would land at the same install path. A prefix namespaces a
-source so every item from it installs as `<prefix>-<name>`: the effective name,
+source so every item from it installs as `<prefix>:<name>`: the effective name,
 store path, symlink, and the name `mind` uses in the ref all carry the prefix.
 Most sources give their items unique, descriptive names and never need a prefix;
 this page covers the case where a prefix is needed.
@@ -20,7 +20,7 @@ Two ways, in precedence order:
 prefix = "jk"
 ```
 
-With prefix `jk`, every item in the source installs as `jk-<bare-name>`. The
+With prefix `jk`, every item in the source installs as `jk:<bare-name>`. The
 catalog and the item's stable identity keep the bare name; the prefix is applied
 at install time (NS-3), so a later change reads as a rename of the same item
 rather than an orphan plus a new item.
@@ -29,7 +29,7 @@ rather than an orphan plus a new item.
 
 The Claude harness resolves agents and skills at runtime by the name in the text.
 A plain-prose reference like "delegate to the dev agent" breaks once `dev`
-installs as `jk-dev`. Authors write intra-source references as `{{ns:name}}`
+installs as `jk:dev`. Authors write intra-source references as `{{ns:name}}`
 instead, where `name` is the sibling's bare name.
 
 At install time, mind expands each token to the referent's effective name:
@@ -37,7 +37,7 @@ At install time, mind expands each token to the referent's effective name:
 | source installed as | `{{ns:dev}}` expands to |
 |---------------------|-------------------------|
 | unprefixed          | `dev`                   |
-| `--as jk`           | `jk-dev`                |
+| `--as jk`           | `jk:dev`                |
 
 Expansion runs whether or not a prefix is in effect (NS-14), so a token-using
 source installs correctly in both cases.
@@ -60,7 +60,7 @@ Delegate the implementation to the dev agent.
 Installed with `meld --as jk`:
 
 ```
-Delegate the implementation to the jk-dev agent.
+Delegate the implementation to the jk:dev agent.
 ```
 
 A worked multi-item source is at

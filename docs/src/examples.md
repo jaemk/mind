@@ -38,7 +38,7 @@ You are installing and managing tooling that other people authored.
 - **Browse and search what is available.** `mind probe` opens an interactive
   browser, or prints a listing when piped. See [Commands](commands.md#probe).
 - **Resolve a name collision between two sources.** Namespace one on install with
-  `mind meld <repo> --as <prefix>`, so its items install as `<prefix>-<name>`. See
+  `mind meld <repo> --as <prefix>`, so its items install as `<prefix>:<name>`. See
   [namespacing](https://github.com/jaemk/mind/tree/main/examples/namespacing) and
   [Troubleshooting](troubleshooting.md).
 - **Pull from a curated registry.** Meld a super-source to register a whole chain

@@ -75,7 +75,7 @@ at runtime. Prefixing changes installed names, so references must be rewritten.
 - `NS-10` An intra-source reference is written `{{ns:name}}`, where `name` is a
   sibling's bare name.
 - `NS-11` At install, each `{{ns:name}}` token in the item's text files is
-  expanded to the effective name: `name` when unprefixed, `p-name` when prefixed.
+  expanded to the effective name: `name` when unprefixed, `p:name` when prefixed.
 - `NS-12` A token whose `name` is not a sibling in the same source is an error
   (`BadReference`), naming the referencing item and the bad referent.
 - `NS-13` Content with no `{{ns:` tokens is copied unchanged. Non-text (non-UTF-8)

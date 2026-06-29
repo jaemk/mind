@@ -31,7 +31,7 @@ reports it as installed (TOOL-3).
 store-only (TOOL-4).
 
 **Namespacing** (TOOL-6): a prefix gives a tool the effective name
-`<prefix>-<name>`, the same as any kind. Stable identity is
+`<prefix>:<name>`, the same as any kind. Stable identity is
 `(source, kind, bare_name)`, so a prefix change is a rename matched by
 `evolve`/`introspect`.
 
@@ -122,7 +122,7 @@ Expands to the item's own store directory. Available in every kind.
 ```
 
 A skill addresses its bundled resources with `{{self}}` without hardcoding its
-installed name. Without `{{self}}`, a prefix rename (e.g. `voice` to `jk-voice`)
+installed name. Without `{{self}}`, a prefix rename (e.g. `voice` to `jk:voice`)
 would silently point at the wrong path.
 
 ### `{{tools:name}}` (TOOL-12)
@@ -216,4 +216,4 @@ All three use tilde syntax so a `Bash(~/.mind/store/**)` permission rule covers
 them (TOOL-16).
 
 Under a prefix (`meld --as jk`), `{{tools:detect}}` expands to
-`~/.mind/store/tool/jk-detect/detect.sh` -- no edits to the skill needed.
+`~/.mind/store/tool/jk:detect/detect.sh` -- no edits to the skill needed.

@@ -59,7 +59,7 @@ advisory: each of those layouts is valid.
 Most sources give their items unique, descriptive names and are never prefixed, so
 this does not come up. A *prefix* exists only for the collision case: two sources
 that both ship a `review` would land at the same path, so a prefix namespaces one
-(`<prefix>-<name>`). The effective prefix is, in order: the consumer's
+(`<prefix>:<name>`). The effective prefix is, in order: the consumer's
 `meld --as <prefix>`, the repo's `[source].prefix`, else none.
 
 A prefix renames items, so if a prefixed source's items reference each other by

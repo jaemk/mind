@@ -37,7 +37,7 @@ All keys are optional.
 ```toml
 [source]
 description = "James's agent library"   # shown in recall/probe
-prefix = "jk"                            # namespace: items install as jk-<name>
+prefix = "jk"                            # namespace: items install as jk:<name>
 min-mind-version = "0.5"                 # refuse to scan under an older mind
 follow-branch = "main"                   # pin: track a branch ...
 # pin-tag = "v2"                          # ... or fix to a tag ...
@@ -45,7 +45,7 @@ follow-branch = "main"                   # pin: track a branch ...
 roots = ["packages"]                     # scan under these dirs, not the repo root
 ```
 
-- **`prefix`**: every item installs as `<prefix>-<name>` (identity, store path,
+- **`prefix`**: every item installs as `<prefix>:<name>` (identity, store path,
   symlink, and ref). A consumer's `meld --as <prefix>` overrides it; `meld --as ''`
   removes it. See [namespacing](namespacing.md).
 - **`install`** (deprecated): a shell command run once on `meld`, after checkout,
@@ -226,7 +226,7 @@ prefix = "jk"
 ```
 
 Convention scanning still finds `skills/<name>/SKILL.md`, `agents/<name>.md`,
-etc., and each installs as `jk-<name>`. Use `[[items]]` or `[discover]` instead
+etc., and each installs as `jk:<name>`. Use `[[items]]` or `[discover]` instead
 only when the layout is non-standard (those turn convention off).
 
 ### A super-source
@@ -245,7 +245,7 @@ sources = [
 ```
 
 Melding it registers `acme/agents` and `acme/skills` (the latter namespaced
-`acme-` and offered for install). It has no items of its own, so without
+`acme:` and offered for install). It has no items of its own, so without
 `install = true` (or `meld --recursive`) nothing installs; `mind probe` browses
 what the chain offers.
 
@@ -269,7 +269,7 @@ sources = [
 ]
 ```
 
-Melding installs this repo's own `jk-<name>` items (per the default install
+Melding installs this repo's own `jk:<name>` items (per the default install
 prompt) and registers `acme/skills` (offered for install via its `install = true`
 flag). If you instead need to declare this repo's items explicitly while also
 curating, add `[[items]]` or `[discover]` kind globs alongside `sources`; that

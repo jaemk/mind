@@ -89,7 +89,7 @@ review` classifies those as the advisory `hardcoded-path` finding:
 
 - A skill referencing its **own resources** by an agent-home path
   (`~/.claude/skills/<self>/resources/x`) resolves through the skill's symlink
-  today, but breaks the moment a prefix renames the item (`<prefix>-<self>`) or a
+  today, but breaks the moment a prefix renames the item (`<prefix>:<self>`) or a
   second agent home is configured. `{{self}}` generalizes it. Fragile, not broken.
 - A reference to a **tool** item by an agent-home path never resolves: a tool is
   not linked there. Use `{{tools:name}}` (or install it elsewhere via a hook).

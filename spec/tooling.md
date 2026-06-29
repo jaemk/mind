@@ -15,7 +15,7 @@ items (`resources/detect-project.sh`). Copying the files is already handled --
 
 - **Reference.** The item must name the tooling's installed path. A hardcoded
   `~/.claude/skills/voice/resources/...` breaks the moment a prefix renames the
-  item to `jk-voice`, and is ambiguous when more than one agent home is
+  item to `jk:voice`, and is ambiguous when more than one agent home is
   configured (which home?). This is the same fragility `{{ns:name}}` already
   fixes for sibling *names* (namespacing.md), one level down: a path, not a name.
 
