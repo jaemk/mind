@@ -11,9 +11,9 @@ the lock it takes per action is defined in storage.md (STO-40, STO-41).
 
 ## Entry and modes
 
-- `TUI-1` `mind probe` with no opt-out launches the interactive TUI. `probe` is
-  listed first in the command help, as the primary entry point. Launching the TUI
-  requires a TTY on stdout.
+- `TUI-1` `mind probe` with no opt-out launches the interactive TUI. It is the
+  primary interactive entry point, also reached by bare `mind` (no subcommand).
+  Launching the TUI requires a TTY on stdout.
 - `TUI-2` `probe` falls back to the non-interactive catalog listing (CLI-80..85)
   when any of these holds: `--no-tui` is given, `--json` is given, or stdout is not
   a TTY (piped or redirected). The `query`, `--kind`, and `--source` arguments

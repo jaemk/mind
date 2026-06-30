@@ -1,7 +1,7 @@
 //! Source namespacing: prefixing every item from a source, and rewriting the
 //! intra-source references that prefixing would otherwise break.
 //!
-//! A source's *effective prefix* is the consumer's `--as` alias if set, else the
+//! A source's *effective prefix* is the consumer's `--namespace` alias if set, else the
 //! `[source].prefix` declared in its `mind.toml`, else none. When a prefix `p`
 //! is in effect, item `name` installs as `p:name` (identity, symlink, ref).
 //!

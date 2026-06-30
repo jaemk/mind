@@ -258,9 +258,12 @@ the item is in place and is for host side effects.
   array form for multiple/named/optional item hooks; these scalars are then its
   shorthand.)
 - `HOOK-81` An item's install hook runs as the final step of installing the item:
-  after its store copy is swapped in and its links are created (LIFE-1), in the
-  installed store directory (`~/.mind/store/<kind>/<name>/`) as the working
-  directory, and after the item's `build` hook (which runs earlier, in staging).
+  after its store copy is swapped in and its links are created (LIFE-1), with the
+  working directory set to the item's installed store location (the item directory
+  `~/.mind/store/<kind>/<name>/` for directory-backed kinds like skill and tool;
+  the parent `~/.mind/store/<kind>/` for single-file agent and rule items, which
+  have no `<name>/` directory), and after the item's `build` hook (which runs
+  earlier, in staging).
   It runs at `learn` and re-runs whenever the item is reinstalled or upgraded
   (`upgrade`), so the side effect tracks the item's content, mirroring the build
   hook's re-run rule (HOOK-73). A non-zero exit is a `HookFailed` hard stop that
@@ -270,8 +273,8 @@ the item is in place and is for host side effects.
 - `HOOK-82` An item's uninstall hook runs when the item is removed: at `forget`,
   at `unmeld` (which removes the source's items), and for the OLD item when an
   `upgrade` renames it (a namespace change removes the old item via its registry).
-  It runs in the item's store directory before the store copy and links are
-  removed, so cleanup can use the installed files. It does NOT run on an in-place
+  It runs with the same working directory as the install hook (HOOK-81) before the
+  store copy and links are removed, so cleanup can use the installed files. It does NOT run on an in-place
   upgrade (same effective name, content swapped), since the item is not removed,
   only its install hook re-runs (HOOK-81). A non-zero exit is a hard stop
   (HOOK-53): the removal stops and the item is left installed, mirroring a failed

@@ -1,4 +1,4 @@
 [source]
 description = "Worked example of the tool kind and path-reference tokens (see README.md)."
-# Advisory: parsed and recorded, but not yet enforced as a version gate.
+# Hard version gate: a binary older than this refuses to scan the source.
 min-mind-version = "0.7"

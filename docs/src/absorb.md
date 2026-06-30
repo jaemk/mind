@@ -101,7 +101,7 @@ place and the manifest unchanged. A failed absorb never loses the user's file
 ## After absorb
 
 The item's effective name follows the destination source's prefix when one is in
-effect (`--as` or `[source].prefix` in `mind.toml`). It then appears in
+effect (`--namespace` or `[source].prefix` in `mind.toml`). It then appears in
 `mind recall`, participates in `mind upgrade` and `mind sync`, and can be removed
 with `mind forget <kind:name>` like any managed item (spec ABS-8).
 

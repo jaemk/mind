@@ -7,7 +7,7 @@
   did not create (the clobber guard). Move the existing one aside, then `learn`
   again.
 - Two sources ship an item with the same name. Namespace one with `mind meld
-  <repo> --as <prefix>`, so its items install as `<prefix>:<name>`. See
+  <repo> --namespace <prefix>`, so its items install as `<prefix>:<name>`. See
   [examples/namespacing/](https://github.com/jaemk/mind/tree/main/examples/namespacing).
 - Where things live: see [Configuration](configuration.md#paths). Override the
   roots with `MIND_HOME` and `CLAUDE_HOME`.

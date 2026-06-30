@@ -47,7 +47,7 @@ The rest of this document states these rules normatively.
 ## Effective prefix
 
 - `NS-1` A source's effective prefix is, in order: its consumer `alias` (from
-  `meld --as`), else its `mind.toml` `[source].prefix`, else none.
+  `meld --namespace`, CLI-159), else its `mind.toml` `[source].prefix`, else none.
 - `NS-2` With prefix `p`, an item's effective name is `p:<bare>`; with no prefix
   it is the bare name. Prefixing applies to every item of every kind in the
   source.
@@ -69,10 +69,9 @@ The rest of this document states these rules normatively.
 
 ## Namespace mutability
 
-Status: planned. The ID below extends the namespacing rules above and is
-documented ahead of implementation (see spec/README.md feature status). Namespacing
-stays opt-in: with no `--namespace` (NS-1, CLI-159) and no `[source].prefix`, a
-source's items install under their bare names (NS-2).
+The ID below extends the namespacing rules above. Namespacing stays opt-in: with
+no `--namespace` (NS-1, CLI-159) and no `[source].prefix`, a source's items
+install under their bare names (NS-2).
 
 - `NS-30` A source's namespace (set by `--namespace`, NS-1/CLI-159) is mutable
   only while none of its items are installed: a `--link-only` meld (CLI-23), or a

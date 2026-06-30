@@ -182,7 +182,7 @@ in a staging directory first; the previous version is moved to a backup and only
 dropped after the swap succeeds. A failure at any point restores the previous
 version from backup (LIFE-1..4).
 
-A prefix change (adding or removing `--as <prefix>` on a source) causes `upgrade`
+A prefix change (adding or removing `--namespace <prefix>` on a source) causes `upgrade`
 to report `rename old -> new` and is handled the same way: the new name is
 installed before the old one is removed (LIFE-14). This is normal, not an error.
 

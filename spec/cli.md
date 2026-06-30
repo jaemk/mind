@@ -5,7 +5,7 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 | command | role |
 |---------|------|
 | `probe [query] [-n\|--no-tui]` | interactive browser (default); catalog listing with `-n`/`--no-tui`/`--json` |
-| `meld [<repo>] [--link-only] [--yes] [--as <prefix>] [--root <dir>] [--flat-skills] [--follow-branch\|--pin-tag\|--pin-ref <ref>]` | connect a source (default `.`), then install its items |
+| `meld [<repo>] [--link-only] [--yes] [-n\|--namespace <prefix>] [--root <dir>] [--flat-skills] [--follow-branch\|--pin-tag\|--pin-ref <ref>]` | connect a source (default `.`), then install its items |
 | `init-source [<path>] [--template]` | scaffold `mind.toml` + detect references (maintainer) |
 | `unmeld <name\|glob> [--unlink-only] [--yes] [--uninstall-hook <cmd>] [--dangerously-skip-install-hook-check]` (alias: `detach`) | disconnect a source (or all sources matching a glob) and forget its items (`--unlink-only` keeps them) |
 | `learn <item> [--dangerously-skip-install-hook-check]` | install |
@@ -13,7 +13,7 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 | `sync` | refresh sources |
 | `upgrade [--yes] [item]` | upgrade installed |
 | `recall [item] [--sources] [--kind K] [--source S] [--json]` (alias: `status`) | status: sources with their items (install state marked); `--sources` narrows to sources |
-| `review [<target>] [--as <prefix>]` (default `.`) / `review --policy <path>` | validate a source / a policy file |
+| `review [<target>] [-n\|--namespace <prefix>]` (default `.`) / `review --policy <path>` | validate a source / a policy file |
 | `introspect` | diagnose |
 | `evolve [--check] [--yes] [--version <v>]` | update the `mind` binary itself |
 | `config show` / `config lobes ...` | view/edit config |
@@ -587,17 +587,24 @@ and per-harness `kinds` defaults.
   {
     "action":  "<verb>",
     "target":  "<item-or-source ref>",
-    "outcome": "<installed|removed|upgraded|synced|renamed|no-op|failed>"
+    "outcome": "<short verb-specific token; see below>"
   }
   ```
 
-  `action` is the CLI verb (e.g. `"learn"`, `"forget"`, `"meld"`). `target` is the
+  `action` is the CLI verb (e.g. `"learn"`, `"forget"`, `"meld"`); `config lobes
+  add`/`remove` report `action` as `"lobe-add"`/`"lobe-remove"`. `target` is the
   effective name of the item or source the verb acted on (e.g. `"skill:review"`,
-  `"github.com/owner/repo"`). `outcome` is one of the values above; `"no-op"` is
-  used when the verb completed successfully but changed nothing (e.g. re-melding an
-  already-registered source with nothing to install); `"up-to-date"` is used when
-  the verb completed successfully but every item was already at the requested state
-  (e.g. `learn` on an already-installed item). A verb MAY add extra fields where it
+  `"github.com/owner/repo"`). `outcome` is a short token describing what the verb
+  did. The tokens by verb are: `meld` -> `"melded"`, or `"already-melded"` when the
+  source was already registered with nothing new to install; `learn` -> `"installed"`,
+  `"up-to-date"` (already installed), or `"dry-run"` (`--dry-run`); `forget` and
+  `unmeld` -> `"removed"`, with `unmeld --unlink-only` -> `"unlinked"`; `sync` ->
+  `"synced"`, or `"no-op"` when there are no sources; `upgrade` -> `"upgraded"`,
+  `"renamed"`, or `"up-to-date"`; `absorb` -> `"absorbed"`; `config lobes add`/`remove`
+  -> `"added"`/`"removed"`, or `"no-op"` when the lobe was already in the desired
+  state. `"up-to-date"` means the verb completed successfully but every item was
+  already at the requested state; `"no-op"` means it completed successfully but had
+  nothing to act on. A verb MAY add extra fields where it
   genuinely returns more data (for example, `learn` MAY include an `"installed"`
   array listing the effective names of all items installed in that call, including
   dependency-closure items). The read-only verbs (`recall`, `probe`, `introspect`)

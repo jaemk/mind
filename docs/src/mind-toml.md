@@ -46,8 +46,8 @@ roots = ["packages"]                     # scan under these dirs, not the repo r
 ```
 
 - **`prefix`**: every item installs as `<prefix>:<name>` (identity, store path,
-  symlink, and ref). A consumer's `meld --as <prefix>` overrides it; `meld --as ''`
-  removes it. See [namespacing](namespacing.md).
+  symlink, and ref). A consumer's `meld --namespace <prefix>` overrides it;
+  `meld --namespace ''` removes it. See [namespacing](namespacing.md).
 - **`install`** (deprecated): a shell command run once on `meld`, after checkout,
   to build or install the tooling the source's items rely on. It is disclosed and
   prompted before it runs (`--dangerously-skip-install-hook-check` runs it
@@ -141,7 +141,7 @@ by hand (see [dump](commands.md#dump)).
 [discover]
 sources = [
   { source = "owner/repo" },                        # melded, items left available
-  { source = "github:foo/bar", as = "fb" },         # imposed namespace (like meld --as)
+  { source = "github:foo/bar", as = "fb" },         # imposed namespace (like meld --namespace)
   { source = "owner/recommended", install = true }, # offered for install on meld
 ]
 ```

@@ -131,9 +131,11 @@ normatively. Source identity is `host/owner/repo` (see storage.md).
 ## Validation (`mind review --policy`)
 
 - `POL-50` `mind review --policy <path>` statically validates a managed policy
-  file without cloning: it parses the TOML, rejects unknown keys, checks that
-  `allow` patterns are well formed and `auto_meld` repo specs parse, enforces that
-  every `auto_meld` entry is pinned when `pinned = true` (POL-21), and that every
-  `auto_meld` entry satisfies `allow` when locked (POL-31). It reports hard errors
-  and advisories and exits non-zero on a hard error, mirroring source review
-  (CLI-130..133).
+  file without cloning: it parses the TOML and rejects unknown keys (a parse
+  failure is a hard error), then emits advisories for a policy that would block
+  every meld (`lock = true` with an empty `allow`) or let org-provisioned sources
+  float (`auto_meld` entries present with `pinned = false` and `lock = false`). It
+  reports hard errors and advisories and exits non-zero on a hard error, mirroring
+  source review (CLI-130..133). The pinned-when-`pinned` (POL-21) and
+  satisfies-`allow`-when-locked (POL-31) constraints are enforced at meld time, not
+  re-checked here.

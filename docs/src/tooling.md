@@ -215,5 +215,5 @@ After `mind learn scan`:
 All three use tilde syntax so a `Bash(~/.mind/store/**)` permission rule covers
 them (TOOL-16).
 
-Under a prefix (`meld --as jk`), `{{tools:detect}}` expands to
+Under a prefix (`meld --namespace jk`), `{{tools:detect}}` expands to
 `~/.mind/store/tool/jk:detect/detect.sh` -- no edits to the skill needed.

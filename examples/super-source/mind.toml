@@ -21,7 +21,7 @@ prefix = "team"
 source = "../explicit"
 
 # Prefix plus install = true: every item of this source is offered for install
-# when the super-source is melded, namespaced to `rev-` (like meld --as).
+# when the super-source is melded, namespaced to `rev:` (like meld --namespace).
 [[discover.sources]]
 source = "../namespacing"
 as = "rev"

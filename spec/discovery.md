@@ -58,7 +58,7 @@ follow-branch = "main"       # optional; pin directive, one of
                              #   follow-branch / pin-tag / pin-ref (DSC-41)
 
 [[items]]                     # explicit inventory (authoritative)
-kind = "skill"               # skill | agent | rule
+kind = "skill"               # skill | agent | rule | tool
 name = "review"
 path = "skills/review"       # relative to repo root; a dir for skills
 link = "rules/x.md"          # optional; link target relative to ~/.claude
@@ -257,9 +257,10 @@ run = "make build"
   `"0.3-beta"`, `"abc"`, `""`, `"1.x"` are all rejected). The running
   binary's own version string (from the build environment) may carry a
   pre-release segment (e.g. `0.2.0-rc1`); such a segment compares as 0 in
-  the version comparison only. The enforcement gate (`IncompatibleVersion`) is
-  advisory: parsed and recorded at load time, not yet universally enforced
-  across all call sites.
+  the version comparison only. The gate (`IncompatibleVersion`) is enforced when
+  the source is scanned: a binary older than the declared version refuses to
+  scan it, so `meld`, `sync`, `recall`, and `probe` all fail rather than operate
+  on a source the binary is too old for.
 - `DSC-41` `[source]` may declare a pin: exactly one of `follow-branch = "<branch>"`,
   `pin-tag = "<tag>"`, or `pin-ref = "<commit>"`. It is read from the source's
   default-branch `mind.toml` and supplies the default pin when the consumer gives
