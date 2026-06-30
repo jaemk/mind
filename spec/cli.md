@@ -137,6 +137,25 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   `--pin-ref` or a `[source]` directive) is instead cloned as a snapshot at the
   pin, so pinning still works.
 
+The following meld IDs are planned (spec/README.md feature status) and extend the
+namespace flag above.
+
+- `CLI-159` `meld --namespace <prefix>` (short `-n`) sets the source's namespace,
+  opting the source into prefixing (with no flag and no `[source].prefix`, items
+  install bare, NS-2). It is the renamed `--as` (CLI-13); `--as` is retained as a
+  hidden, deprecated alias so existing invocations keep working. `review` takes the
+  same rename (`--namespace`/`-n` aliasing `--as`, CLI-133). The `-n` short is
+  subcommand-scoped, as in TUI-3, so it does not clash with `learn --dry-run`
+  (`-n`, CLI-32) or `probe --no-tui` (`-n`, TUI-3). `--namespace ''` removes the
+  prefix (the explicit no-prefix override of a declared `[source].prefix`, as
+  `--as ''` did, CLI-13).
+- `CLI-161` On a re-meld (CLI-12) of a source that already has installed items, a
+  `--namespace` that differs from the source's current namespace is an error
+  naming the installed items and directing the user to `forget` them first; the
+  namespace is unchanged and nothing is renamed. When the source has no installed
+  items the new namespace is applied and persisted (NS-30). This revises CLI-13,
+  which renamed installed items in place on such a re-meld.
+
 ## unmeld
 
 - `CLI-20` `unmeld <name>` (alias: `detach`) removes the source's clone and

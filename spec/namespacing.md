@@ -67,6 +67,25 @@ The rest of this document states these rules normatively.
   by identity and `upgrade`/`introspect` report the move from `p-<bare>` to
   `p:<bare>` as a rename (lifecycle.md), not as an orphan plus a new item.
 
+## Namespace mutability
+
+Status: planned. The ID below extends the namespacing rules above and is
+documented ahead of implementation (see spec/README.md feature status). Namespacing
+stays opt-in: with no `--namespace` (NS-1, CLI-159) and no `[source].prefix`, a
+source's items install under their bare names (NS-2).
+
+- `NS-30` A source's namespace (set by `--namespace`, NS-1/CLI-159) is mutable
+  only while none of its items are installed: a `--link-only` meld (CLI-23), or a
+  super-source whose nested sources are registered but not installed. Re-melding
+  such a source with a different `--namespace` updates the persisted alias. Once
+  any of the source's items are installed the namespace is locked: changing it
+  requires forgetting the source's installed items first. A re-meld that would
+  change the namespace of a source with installed items is refused with guidance to
+  uninstall first (CLI-161), not applied as an in-place rename. This supersedes
+  CLI-13's rename of installed items. It is distinct from the one-time `-`->`:`
+  separator migration (NS-27), which `upgrade` applies to already-installed items
+  without a namespace change.
+
 ## Reference tokens
 
 Items reference each other by name, and the Claude harness resolves those names

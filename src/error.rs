@@ -157,6 +157,15 @@ pub enum MindError {
     )]
     ReservedPrefix { prefix: String },
 
+    #[error(
+        "cannot change the namespace of source '{src_name}': the following items are installed ({items}); run `mind forget <item>` for each before changing the namespace",
+        items = items.join(", ")
+    )]
+    NamespaceLocked {
+        src_name: String,
+        items: Vec<String>,
+    },
+
     #[error("source '{name}' is already melded (from {url})")]
     SourceExists { name: String, url: String },
 
@@ -402,6 +411,25 @@ mod tests {
             matches!(err, MindError::UnknownKind { ref kind } if kind == "wizard"),
             "the first unknown kind must surface as UnknownKind: {err:?}"
         );
+    }
+
+    #[test]
+    fn namespace_locked_displays_items_and_forget_hint() {
+        // spec: NS-30 CLI-161 - the lock error names the source, lists every
+        // installed item, and directs the user to `mind forget` before changing
+        // the namespace.
+        let e = MindError::NamespaceLocked {
+            src_name: "github.com/acme/agents".into(),
+            items: vec!["skill:review".into(), "agent:dev".into()],
+        }
+        .to_string();
+        assert!(e.contains("github.com/acme/agents"), "{e}");
+        assert!(
+            e.contains("skill:review") && e.contains("agent:dev"),
+            "must list every installed item: {e}"
+        );
+        assert!(e.contains("forget"), "must direct the user to forget: {e}");
+        assert!(e.contains("namespace"), "must mention the namespace: {e}");
     }
 
     #[test]

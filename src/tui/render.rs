@@ -157,6 +157,14 @@ fn draw_frame(frame: &mut Frame, app: &App) {
     if let Some(dialog) = &app.dialog {
         draw_dialog(frame, dialog, size);
     }
+
+    // If namespace-input is active, overlay it (TUI-53). Drawn last so it
+    // appears on top of any open dialog (activate_dialog closes the dialog
+    // before opening input, so in practice they don't both appear at once).
+    // spec: TUI-53
+    if app.namespace_input_active {
+        draw_namespace_input(frame, app, size);
+    }
 }
 
 /// A rounded-border block with a title, the common frame for panes and modals.
@@ -446,6 +454,17 @@ fn draw_lobe_input(frame: &mut Frame, app: &App, area: Rect) {
     let hint = "Enter the agent home path (e.g. ~/.other-ai) then press Enter. Esc to cancel.";
     let input = format!("\u{276f} {}", app.lobe_input_text);
     draw_input_modal(frame, area, "Add Agent Home (Lobe)", hint, &input);
+}
+
+/// Draw the namespace-input box (TUI-53): where the user types a namespace
+/// prefix to install items under `<prefix>:<name>` (NS-1). Empty input clears
+/// any consumer alias (falls back to [source].prefix or no prefix). Only
+/// reachable when the source has no installed items (NS-30).
+// spec: TUI-53 NS-30
+fn draw_namespace_input(frame: &mut Frame, app: &App, area: Rect) {
+    let hint = "Enter a namespace prefix (e.g. jk) to install items as jk:<name>. Leave empty for no prefix. Enter to save, Esc to cancel.";
+    let input = format!("\u{276f} {}", app.namespace_input_text);
+    draw_input_modal(frame, area, "Set Namespace", hint, &input);
 }
 
 /// A centered single-field input dialog: a wrapped hint, a blank line, and the

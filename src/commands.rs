@@ -1980,24 +1980,14 @@ pub fn remeld(
         println!("{} {source_name} is already melded", out.bullet());
     }
 
-    // CLI-13: an explicit `--as` on a re-meld changes the source's prefix. Update
-    // the recorded alias and rename its installed items to the new effective
-    // names (`<prefix>:<bare>`), so re-melding with a prefix actually re-namespaces
-    // an already-melded source. `--as ''` removes the prefix.
-    if let Some(new_alias) = alias {
-        // NS-25: a `--as` prefix change on a re-meld is validated too.
-        crate::namespace::validate_prefix(&new_alias)?;
-        let mut registry = Registry::load(paths)?;
-        if let Some(source) = registry.sources.iter_mut().find(|s| s.name == source_name) {
-            let current = source.alias.clone().unwrap_or_default();
-            if current != new_alias {
-                source.alias = Some(new_alias);
-                registry.save(paths)?;
-                let renamed = reprefix_source(paths, &registry, &source_name)?;
-                if renamed == 0 && !out.json {
-                    println!("prefix updated; no installed items to rename");
-                }
-            }
+    // CLI-161/NS-30: an explicit `--namespace` (or deprecated `--as`) on a
+    // re-meld sets the source's namespace, but only while no items are
+    // installed. If items are installed and the alias differs, return an error
+    // naming them and directing the user to `forget` them first.
+    if alias.is_some() {
+        set_source_namespace(paths, &source_name, alias)?;
+        if !out.json {
+            println!("prefix updated; no installed items to rename");
         }
     }
 
@@ -2300,53 +2290,46 @@ fn source_status(paths: &Paths, source_name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Rename a source's installed items to their current effective names after its
-/// prefix changed (CLI-13). The registry must already carry the new alias.
-/// Matches the manifest by stable identity (source, kind, bare name) and reuses
-/// the upgrade rename step: install the new name, then drop the old item by its
-/// file registry and re-key the manifest. Returns the number renamed.
-fn reprefix_source(paths: &Paths, registry: &Registry, source_name: &str) -> Result<usize> {
-    let catalog = catalog::scan(paths, registry)?;
-    let mut manifest = Manifest::load(paths)?;
-    let installed: Vec<crate::manifest::InstalledItem> = manifest
+/// Set (or clear) the namespace alias for a source, enforcing the mutability
+/// lock (NS-30/CLI-161): the alias may only change while no items from the
+/// source are installed. If items are installed and the requested alias differs
+/// from the current one, returns `NamespaceLocked` listing those items. When
+/// the alias is unchanged nothing is written. Called by `remeld` and exported
+/// for the TUI source-details dialog (TUI-53).
+pub fn set_source_namespace(
+    paths: &Paths,
+    source_name: &str,
+    new_alias: Option<String>,
+) -> Result<()> {
+    // NS-25: validate the prefix (validate_prefix accepts None/empty).
+    if let Some(ref a) = new_alias {
+        crate::namespace::validate_prefix(a)?;
+    }
+    let mut registry = Registry::load(paths)?;
+    let Some(source) = registry.sources.iter_mut().find(|s| s.name == source_name) else {
+        return Ok(()); // source not found; nothing to change
+    };
+    let current = source.alias.clone().unwrap_or_default();
+    let requested = new_alias.clone().unwrap_or_default();
+    if current == requested {
+        return Ok(()); // no change; nothing to do
+    }
+    // NS-30/CLI-161: check whether any of this source's items are installed.
+    let manifest = Manifest::load(paths)?;
+    let installed_names: Vec<String> = manifest
         .items
         .values()
         .filter(|it| it.source == source_name)
-        .cloned()
+        .map(|it| it.key())
         .collect();
-
-    let mut count = 0;
-    for old in installed {
-        let Some(cat) = catalog
-            .iter()
-            .find(|c| c.kind == old.kind && c.name == old.bare_name && c.source == old.source)
-        else {
-            continue; // item removed upstream; introspect reports it
-        };
-        if cat.effective_name() == old.name {
-            continue; // prefix unchanged for this item
-        }
-        let siblings = siblings_of(&catalog, &old.source);
-        // HOOK-81/82: the prefix change reinstalls under the new name and removes
-        // the old item, so both lifecycle hooks fire (run/skip via the same TTY
-        // prompt; no dangerous-skip flag on this interactive path).
-        let new = install_item(paths, cat, &old.commit, &siblings, false, false)?;
-        uninstall_item(paths, &old, &cat.uninstall_hooks(), &old.commit, false)?;
-        manifest.items.remove(&old.key());
-        if !json_mode() {
-            let out = crate::render::ctx();
-            println!(
-                "{} renamed {} -> {}",
-                out.ok(),
-                old.key(),
-                out.green(&new.key())
-            );
-        }
-        manifest.insert(new);
-        count += 1;
+    if !installed_names.is_empty() {
+        return Err(MindError::NamespaceLocked {
+            src_name: source_name.to_string(),
+            items: installed_names,
+        });
     }
-    manifest.save(paths)?;
-    Ok(count)
+    source.alias = new_alias;
+    registry.save(paths)
 }
 
 /// If two selected items would install under the same `kind:name`, return that
@@ -5983,6 +5966,168 @@ mod tests {
             "an empty alias must not suppress the mind.toml prefix"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ----- NS-30/CLI-161: set_source_namespace mutability lock -----
+
+    /// A throwaway `Paths` under the system temp dir, unique per call.
+    fn ns_paths() -> (Paths, PathBuf) {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let base = std::env::temp_dir().join(format!("mind-ns-set-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let paths = Paths {
+            mind_home: base.join("mind"),
+            claude_home: base.join("claude"),
+        };
+        (paths, base)
+    }
+
+    /// Build a source named `github.com/acme/<repo>` with the given alias and
+    /// persist a registry holding exactly it.
+    fn seed_source(paths: &Paths, repo: &str, alias: Option<&str>) -> String {
+        let mut src = crate::source::parse_spec(&format!("github:acme/{repo}")).unwrap();
+        src.alias = alias.map(|s| s.to_string());
+        let name = src.name.clone();
+        let registry = crate::source::Registry { sources: vec![src] };
+        registry.save(paths).expect("save registry");
+        name
+    }
+
+    /// Record an installed item attributed to `source` in the manifest.
+    fn seed_installed_item(paths: &Paths, source: &str, kind: ItemKind, name: &str) {
+        let mut manifest = Manifest::load(paths).expect("load manifest");
+        manifest.insert(InstalledItem {
+            kind,
+            name: name.to_string(),
+            bare_name: name.to_string(),
+            source: source.to_string(),
+            commit: "deadbeef".to_string(),
+            hash: "abc123".to_string(),
+            store: format!("store/{name}"),
+            links: vec![],
+            description: None,
+        });
+        manifest.save(paths).expect("save manifest");
+    }
+
+    #[test]
+    fn set_source_namespace_source_not_found_is_noop() {
+        // spec: NS-30 CLI-161 - an unknown source name is a safe no-op (Ok), not
+        // an error, and writes nothing.
+        let (paths, base) = ns_paths();
+        seed_source(&paths, "agents", None);
+        let r = set_source_namespace(&paths, "github.com/nope/missing", Some("jk".into()));
+        assert!(r.is_ok(), "unknown source must be a no-op Ok: {r:?}");
+        // The real source's alias is untouched.
+        let reg = Registry::load(&paths).unwrap();
+        assert_eq!(reg.sources[0].alias, None, "no alias should be written");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn set_source_namespace_locked_when_items_installed_and_alias_differs() {
+        // spec: NS-30 CLI-161 - changing the alias while items are installed is
+        // refused with NamespaceLocked naming the installed item keys; nothing
+        // is persisted.
+        let (paths, base) = ns_paths();
+        let name = seed_source(&paths, "agents", None);
+        seed_installed_item(&paths, &name, ItemKind::Skill, "review");
+        let r = set_source_namespace(&paths, &name, Some("jk".into()));
+        match r {
+            Err(MindError::NamespaceLocked { src_name, items }) => {
+                assert_eq!(src_name, name);
+                assert!(
+                    items.contains(&"skill:review".to_string()),
+                    "locked error must list the installed item key: {items:?}"
+                );
+            }
+            other => panic!("expected NamespaceLocked, got {other:?}"),
+        }
+        // The alias must NOT have been persisted despite the requested change.
+        let reg = Registry::load(&paths).unwrap();
+        assert_eq!(
+            reg.sources[0].alias, None,
+            "a locked change must not write the new alias"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn set_source_namespace_unchanged_alias_with_items_is_noop() {
+        // spec: NS-30 CLI-161 - re-applying the SAME alias is allowed even with
+        // items installed: the lock only guards an actual change.
+        let (paths, base) = ns_paths();
+        let name = seed_source(&paths, "agents", Some("jk"));
+        seed_installed_item(&paths, &name, ItemKind::Skill, "jk:review");
+        let r = set_source_namespace(&paths, &name, Some("jk".into()));
+        assert!(
+            r.is_ok(),
+            "an unchanged alias must be a no-op even with items installed: {r:?}"
+        );
+        let reg = Registry::load(&paths).unwrap();
+        assert_eq!(reg.sources[0].alias.as_deref(), Some("jk"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn set_source_namespace_allowed_and_persisted_when_no_items() {
+        // spec: NS-30 CLI-161 - with zero installed items the alias changes and
+        // is persisted to sources.json.
+        let (paths, base) = ns_paths();
+        let name = seed_source(&paths, "agents", None);
+        set_source_namespace(&paths, &name, Some("jk".into())).expect("set namespace");
+        let reg = Registry::load(&paths).unwrap();
+        assert_eq!(
+            reg.sources[0].alias.as_deref(),
+            Some("jk"),
+            "the new alias must be persisted"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn set_source_namespace_empty_string_clears_consumer_prefix() {
+        // spec: NS-30 CLI-161 - setting an empty alias (the "no prefix" override)
+        // persists Some("") which the catalog treats as no consumer prefix.
+        let (paths, base) = ns_paths();
+        let name = seed_source(&paths, "agents", Some("jk"));
+        set_source_namespace(&paths, &name, Some(String::new())).expect("clear namespace");
+        let reg = Registry::load(&paths).unwrap();
+        assert_eq!(
+            reg.sources[0].alias.as_deref(),
+            Some(""),
+            "empty string override must persist as Some(\"\")"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn set_source_namespace_none_equals_empty_is_noop() {
+        // spec: NS-30 CLI-161 - None and Some("") are the same "no prefix" state,
+        // so requesting None when the current alias is None changes nothing.
+        let (paths, base) = ns_paths();
+        let name = seed_source(&paths, "agents", None);
+        set_source_namespace(&paths, &name, None).expect("noop");
+        let reg = Registry::load(&paths).unwrap();
+        assert_eq!(reg.sources[0].alias, None);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn set_source_namespace_rejects_reserved_kind_word() {
+        // spec: NS-25 NS-30 - validate_prefix rejects a reserved kind word before
+        // any registry mutation, returning ReservedPrefix.
+        let (paths, base) = ns_paths();
+        let name = seed_source(&paths, "agents", None);
+        let r = set_source_namespace(&paths, &name, Some("skill".into()));
+        assert!(
+            matches!(r, Err(MindError::ReservedPrefix { ref prefix }) if prefix == "skill"),
+            "a reserved kind word must be rejected: {r:?}"
+        );
+        // The registry must be untouched.
+        let reg = Registry::load(&paths).unwrap();
+        assert_eq!(reg.sources[0].alias, None);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// `offer_save_absorb_to(yes=true)` writes `absorb_to` into config.toml,

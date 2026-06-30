@@ -138,6 +138,35 @@ fn handle_key(paths: &Paths, app: &mut app::App, k: crossterm::event::KeyEvent) 
     }
     app.ctrl_c_armed = false;
 
+    // --- Namespace-input mode (TUI-53): user is typing a namespace prefix. ---
+    // Opened via "Set namespace" in the source details dialog when no items are
+    // installed. Intercept all keys so none route through normal intent dispatch.
+    // spec: TUI-53
+    if app.namespace_input_active {
+        match k.code {
+            KeyCode::Enter => {
+                let source = app.namespace_input_source.take().unwrap_or_default();
+                let text = app.namespace_input_text.trim().to_string();
+                app.namespace_input_active = false;
+                app.namespace_input_text.clear();
+                // Empty input means "no prefix" (clear consumer alias, NS-30).
+                let new_alias = if text.is_empty() { None } else { Some(text) };
+                run_set_namespace(paths, app, source, new_alias);
+            }
+            KeyCode::Esc => {
+                app.apply_intent(crate::tui::event::Intent::CancelAction);
+            }
+            KeyCode::Backspace => {
+                app.apply_intent(crate::tui::event::Intent::NamespaceInputBackspace);
+            }
+            KeyCode::Char(c) => {
+                app.apply_intent(crate::tui::event::Intent::NamespaceInputChar(c));
+            }
+            _ => {}
+        }
+        return;
+    }
+
     // --- Lobe-path input mode (TUI-23): user is typing a new lobe path. ---
     if app.lobe_input_active {
         match k.code {
@@ -354,6 +383,28 @@ pub(crate) fn action_needs_suspension(kind: &crate::tui::app::ActionKind) -> boo
     matches!(kind, ActionKind::Meld { .. } | ActionKind::Unmeld { .. })
 }
 
+/// Persist a namespace alias change for a source (TUI-53, NS-30).
+///
+/// Calls `commands::set_source_namespace` under the I/O layer (which holds the
+/// lock for the write). On success refreshes the snapshot so the dialog's
+/// namespace field reflects the change immediately. On failure surfaces the
+/// error inline (TUI-24): a `NamespaceLocked` error means items are installed.
+// spec: TUI-53 NS-30
+fn run_set_namespace(paths: &Paths, app: &mut app::App, source: String, new_alias: Option<String>) {
+    match crate::commands::set_source_namespace(paths, &source, new_alias) {
+        Ok(()) => {
+            app.set_status("Namespace updated.".to_string());
+            // Reload so the tree + dialog show the updated effective prefix.
+            if let Some(snapshot) = data::try_poll(paths) {
+                app.apply_snapshot(snapshot);
+            }
+        }
+        Err(e) => {
+            app.set_error(format!("{e}"));
+        }
+    }
+}
+
 /// After an interactive verb runs with the TUI suspended (TUI-44), hold the
 /// normal terminal so the user can read the verb's output before the browser
 /// redraws over it. A bare Enter (or EOF) returns. Best-effort: any I/O error
@@ -501,6 +552,7 @@ mod tests {
             source_names: vec!["local/agents".to_string()],
             suggestions: vec![],
             lobes: vec![],
+            source_namespaces: std::collections::HashMap::new(),
         });
         app
     }
@@ -921,6 +973,164 @@ mod tests {
                 forget: false,
             }),
             "Unmeld with forget=false must also be classified as requiring suspension"
+        );
+    }
+
+    /// Meld a throwaway local git source under `base` and return its registry name.
+    /// `commands::meld` only registers/clones (install is a separate step), so the
+    /// manifest is empty afterward unless the caller seeds it.
+    fn meld_plain_source(paths: &Paths, base: &std::path::Path) -> String {
+        use std::process::Command;
+        crate::paths::mkdir_p(&paths.mind_home).unwrap();
+        crate::config::Config {
+            lobes: vec![crate::config::LobeEntry::bare(
+                paths.claude_home.to_str().unwrap(),
+            )],
+            ..Default::default()
+        }
+        .save(paths)
+        .unwrap();
+        let src = base.join("ns-source");
+        std::fs::create_dir_all(src.join("skills/solo")).unwrap();
+        std::fs::write(
+            src.join("skills/solo/SKILL.md"),
+            "---\ndescription: solo skill\n---\n# solo\nNo references here.\n",
+        )
+        .unwrap();
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(&src)
+                .output()
+                .expect("git");
+        };
+        git(&["-c", "init.defaultBranch=main", "init", "-q"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "initial"]);
+        crate::commands::meld(
+            paths,
+            src.to_str().unwrap(),
+            None,
+            vec![],
+            false,
+            None,
+            None,
+            None,
+            None,
+            false,
+        )
+        .expect("meld");
+        crate::source::Registry::load(paths).unwrap().sources[0]
+            .name
+            .clone()
+    }
+
+    #[test]
+    fn run_set_namespace_persists_alias_when_no_items_installed() {
+        // spec: TUI-53 NS-30 - the live TUI persist seam writes the new alias to
+        // sources.json (via commands::set_source_namespace), reports success, and
+        // surfaces no error when no items from the source are installed.
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!("mind-tui-ns-ok-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let _owned = OwnedTemp(base.clone());
+        let paths = Paths {
+            mind_home: base.join("mind"),
+            claude_home: base.join("claude"),
+        };
+        let source_name = meld_plain_source(&paths, &base);
+
+        let mut app = app::App::new(String::new(), None, None);
+        run_set_namespace(
+            &paths,
+            &mut app,
+            source_name.clone(),
+            Some("jk".to_string()),
+        );
+
+        // The alias is persisted to sources.json.
+        let reg = crate::source::Registry::load(&paths).unwrap();
+        let src = reg.find(&source_name).expect("source present");
+        assert_eq!(
+            src.alias.as_deref(),
+            Some("jk"),
+            "run_set_namespace must persist the new alias"
+        );
+        assert!(
+            app.error.is_none(),
+            "success must set no error: {:?}",
+            app.error
+        );
+        assert!(
+            app.status
+                .as_deref()
+                .is_some_and(|s| s.contains("Namespace")),
+            "success must set a status: {:?}",
+            app.status
+        );
+    }
+
+    #[test]
+    fn run_set_namespace_surfaces_lock_error_when_items_installed() {
+        // spec: TUI-53 NS-30 - when items are installed the seam surfaces the
+        // NamespaceLocked error inline (TUI-24) and does NOT change sources.json.
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base =
+            std::env::temp_dir().join(format!("mind-tui-ns-lock-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let _owned = OwnedTemp(base.clone());
+        let paths = Paths {
+            mind_home: base.join("mind"),
+            claude_home: base.join("claude"),
+        };
+        let source_name = meld_plain_source(&paths, &base);
+
+        // Seed an installed item attributed to the source so the lock engages.
+        let mut manifest = crate::manifest::Manifest::load(&paths).unwrap();
+        manifest.insert(crate::manifest::InstalledItem {
+            kind: ItemKind::Skill,
+            name: "solo".to_string(),
+            bare_name: "solo".to_string(),
+            source: source_name.clone(),
+            commit: "deadbeef".to_string(),
+            hash: "abc123".to_string(),
+            store: "store/solo".to_string(),
+            links: vec![],
+            description: None,
+        });
+        manifest.save(&paths).unwrap();
+
+        let mut app = app::App::new(String::new(), None, None);
+        run_set_namespace(
+            &paths,
+            &mut app,
+            source_name.clone(),
+            Some("jk".to_string()),
+        );
+
+        // The error is surfaced inline.
+        let err = app
+            .error
+            .as_deref()
+            .expect("a locked change must set an error");
+        assert!(
+            err.contains("skill:solo") && err.contains("forget"),
+            "lock error must name the item and direct to forget: {err}"
+        );
+        // The alias must NOT have been written.
+        let reg = crate::source::Registry::load(&paths).unwrap();
+        let src = reg.find(&source_name).expect("source present");
+        assert_eq!(
+            src.alias, None,
+            "a refused change must leave the alias unchanged"
         );
     }
 

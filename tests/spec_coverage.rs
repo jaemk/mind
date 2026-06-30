@@ -126,6 +126,9 @@ const ALLOWLIST: &[&str] = &[
     //   HARN-4 (presets) from src/paths.rs + tests/cli_lobes.rs, HARN-5
     //   (auto-detect-and-prompt) from src/paths.rs + tests/cli_lobes.rs, and
     //   HARN-6 (verbatim link, no frontmatter rewrite) from tests/cli_lobes.rs.
+    // Namespace ergonomics: CLI-159 (--namespace flag), NS-30, and CLI-161
+    // (namespace mutability lock) are now implemented and cited from tests/cli.rs.
+    // TUI-53 (TUI namespace edit) is now implemented and cited from src/tui/app.rs.
     // Polished output: CLI-150 (global flags) is cited from unit tests in
     // src/main.rs; the capability gate (CLI-151), glyph/color semantics and the
     // ASCII fallback (CLI-152), the structured JSON result for mutating verbs

@@ -135,6 +135,13 @@ fn dispatch(paths: &Paths, kind: ActionKind) -> Result<()> {
         ActionKind::LobeAdd { path } => commands::lobe_add(paths, &path)?,
         // spec: TUI-23 CLI-113
         ActionKind::LobeRemove { path } => commands::lobe_remove(paths, &path)?,
+        // SetNamespace is intercepted by activate_dialog and opens the namespace-
+        // input overlay; it never reaches the executor (TUI-53).
+        // spec: TUI-53
+        ActionKind::SetNamespace { .. } => {
+            // Unreachable: activate_dialog short-circuits SetNamespace before
+            // setting a pending_action, so this arm can never be dispatched.
+        }
     }
     Ok(())
 }

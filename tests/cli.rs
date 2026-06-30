@@ -437,6 +437,27 @@ fn meld_as_empty_overrides_a_declared_prefix() {
 }
 
 #[test]
+fn meld_namespace_empty_overrides_a_declared_prefix() {
+    // spec: CLI-159 CLI-24 - `--namespace ''` (the renamed `--as`) is the explicit
+    // "no prefix" override and suppresses a declared `[source].prefix`, identically
+    // to the deprecated `--as ''`.
+    let sb = Sandbox::new();
+    sb.write_and_commit("mind.toml", "[source]\nprefix = \"jk\"\n");
+    let spec = sb.source_spec();
+    assert!(
+        sb.mind(&["meld", &spec, "--namespace", "", "--yes"])
+            .success,
+        "meld --namespace '' should succeed"
+    );
+    let recall = sb.mind(&["recall"]).stdout;
+    assert!(recall.contains("review"), "items must install: {recall}");
+    assert!(
+        !recall.contains("jk:"),
+        "the declared prefix must be overridden to none: {recall}"
+    );
+}
+
+#[test]
 fn meld_with_no_arg_melds_the_current_directory() {
     // spec: CLI-25 - `mind meld` with no repo argument melds the directory it is
     // run in. `--link-only` keeps the test to just the registration.
@@ -654,9 +675,10 @@ fn remeld_of_an_installed_source_shows_item_status() {
 }
 
 #[test]
-fn remeld_with_as_reprefixes_installed_items() {
-    // spec: CLI-13 - a re-meld with --as changes the prefix and renames the
-    // installed items (and their links) to the new effective names.
+fn remeld_namespace_change_locked_when_items_installed() {
+    // spec: CLI-13 CLI-161 NS-30 - a re-meld with --namespace that differs from
+    // the current namespace is refused when items are installed, naming the
+    // installed items and directing the user to forget them first.
     let sb = Sandbox::new();
     let spec = sb.source_spec();
     assert!(
@@ -668,25 +690,32 @@ fn remeld_with_as_reprefixes_installed_items() {
         "item installs unprefixed first"
     );
 
-    let r = sb.mind(&["meld", &spec, "--as", "jk", "--yes"]);
-    assert!(r.success, "re-meld --as failed: {} {}", r.stdout, r.stderr);
+    // Attempting to change the namespace while items are installed must fail.
+    let r = sb.mind(&["meld", &spec, "--namespace", "jk", "--yes"]);
     assert!(
-        r.stdout.contains("renamed skill:review -> skill:jk:review"),
-        "re-meld --as must rename installed items: {}",
-        r.stdout
+        !r.success,
+        "re-meld --namespace with installed items must fail: {} {}",
+        r.stdout, r.stderr
     );
     assert!(
-        std::fs::symlink_metadata(sb.claude_home.join("skills/jk:review")).is_ok(),
-        "the prefixed link must exist"
+        r.stderr.contains("namespace") || r.stderr.contains("installed"),
+        "error must mention namespace lock: {}",
+        r.stderr
     );
+    // The old unprefixed link must be untouched.
     assert!(
-        std::fs::symlink_metadata(sb.claude_home.join("skills/review")).is_err(),
-        "the old unprefixed link must be gone"
+        sb.claude_home.join("skills/review").exists(),
+        "existing unprefixed link must survive the refused re-meld"
+    );
+    // The prefixed link must NOT have been created.
+    assert!(
+        std::fs::symlink_metadata(sb.claude_home.join("skills/jk:review")).is_err(),
+        "the prefixed link must not exist after a refused re-meld"
     );
     let recall = sb.mind(&["recall"]).stdout;
     assert!(
-        recall.contains("jk:review"),
-        "recall must show the re-prefixed name: {recall}"
+        !recall.contains("jk:review"),
+        "recall must still show the original unprefixed name: {recall}"
     );
 }
 
@@ -2636,6 +2665,105 @@ fn meld_as_prefixes_names_links_and_refs() {
 
     let sources = sb.mind(&["recall", "--sources"]);
     assert!(sources.stdout.contains("as:jk"), "{}", sources.stdout);
+}
+
+#[test]
+fn meld_namespace_flag_sets_prefix_and_as_alias_still_works() {
+    // spec: CLI-159 - `--namespace` (short `-n`) is the renamed `--as`; both set
+    // the source's namespace. `--as` is retained as a hidden deprecated alias.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+
+    // --namespace sets the prefix; items install under jk:<bare>.
+    assert!(sb.mind(&["meld", &spec, "--namespace", "jk"]).success);
+    let probe = sb.mind(&["probe"]);
+    assert!(
+        probe.stdout.contains("skill:jk:review"),
+        "--namespace must set prefix: {}",
+        probe.stdout
+    );
+    assert!(
+        !probe.stdout.contains("skill:review"),
+        "bare name must not appear when prefixed: {}",
+        probe.stdout
+    );
+
+    // Verify the short form -n also works (a separate sandbox to avoid
+    // re-meld collision).
+    let sb2 = Sandbox::new();
+    let spec2 = sb2.source_spec();
+    assert!(sb2.mind(&["meld", &spec2, "-n", "zz"]).success);
+    let probe2 = sb2.mind(&["probe"]);
+    assert!(
+        probe2.stdout.contains("skill:zz:review"),
+        "-n short form must set prefix: {}",
+        probe2.stdout
+    );
+
+    // Verify the hidden --as alias still works identically.
+    let sb3 = Sandbox::new();
+    let spec3 = sb3.source_spec();
+    assert!(sb3.mind(&["meld", &spec3, "--as", "qq"]).success);
+    let probe3 = sb3.mind(&["probe"]);
+    assert!(
+        probe3.stdout.contains("skill:qq:review"),
+        "--as deprecated alias must still set prefix: {}",
+        probe3.stdout
+    );
+}
+
+#[test]
+fn review_namespace_flag_evaluates_under_prefix() {
+    // spec: CLI-159 - `review --namespace <prefix>` (short `-n`) evaluates the
+    // source under that prospective prefix; `--as` is a hidden deprecated alias.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+
+    // --namespace accepted (same behavior as former --as).
+    let r = sb.mind(&["review", &spec, "--namespace", "jk"]);
+    assert!(
+        r.success,
+        "review --namespace must exit 0 for clean source: {} {}",
+        r.stdout, r.stderr
+    );
+
+    // Short -n accepted.
+    let r2 = sb.mind(&["review", &spec, "-n", "jk"]);
+    assert!(
+        r2.success,
+        "review -n must exit 0 for clean source: {} {}",
+        r2.stdout, r2.stderr
+    );
+}
+
+#[test]
+fn remeld_namespace_change_allowed_when_no_items_installed() {
+    // spec: NS-30 CLI-161 - when no items are installed from the source,
+    // re-melding with a different --namespace updates the persisted alias.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+
+    // Meld with --link-only so no items are installed.
+    assert!(
+        sb.mind(&["meld", &spec, "--link-only"]).success,
+        "initial link-only meld"
+    );
+
+    // Re-meld with a new namespace: must succeed and persist the alias.
+    let r = sb.mind(&["meld", &spec, "--namespace", "jk"]);
+    assert!(
+        r.success,
+        "re-meld --namespace with no installed items must succeed: {} {}",
+        r.stdout, r.stderr
+    );
+
+    // The new prefix must be reflected in the catalog.
+    let probe = sb.mind(&["probe"]);
+    assert!(
+        probe.stdout.contains("skill:jk:review"),
+        "probe must show the new prefixed name: {}",
+        probe.stdout
+    );
 }
 
 #[test]

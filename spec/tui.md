@@ -193,3 +193,11 @@ manifest, and store.
   passphrase or host-key prompt works on the normal terminal. This is why a typed
   spec (TUI-30) can meld a private SSH source while a background preview, sync, or
   upgrade of one fails fast rather than freezing.
+- `TUI-53` The source details dialog (TUI-26) shows the namespace the
+  source will install under (its effective prefix: the consumer `--namespace` alias,
+  else `[source].prefix`, else none; NS-1). When none of the source's items are
+  installed, the namespace is editable in the dialog (an input field), and the
+  edited value is persisted as the source alias before the Install-all action runs
+  (NS-30). When any of the source's items are installed the namespace is shown
+  read-only with a note that it is locked until those items are forgotten (NS-30,
+  CLI-161).

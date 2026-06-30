@@ -77,8 +77,9 @@ pub enum Command {
         repo: Option<String>,
 
         /// Namespace every item from this source under this prefix
-        /// (overrides the repo's own `[source].prefix`).
-        #[arg(long = "as", value_name = "PREFIX")]
+        /// (overrides the repo's own `[source].prefix`). `--as` is a
+        /// hidden deprecated alias for backwards compatibility.
+        #[arg(short = 'n', long = "namespace", alias = "as", value_name = "PREFIX")]
         alias: Option<String>,
 
         /// Track a named branch (overrides the repo's [source] pin directive).
@@ -371,8 +372,9 @@ pub enum Command {
 
         /// Evaluate the source under this prospective prefix (affects effective
         /// names, `{{ns:}}` expansion, and the unguarded-reference scan).
-        /// Ignored when `--policy` is given.
-        #[arg(long = "as", value_name = "PREFIX")]
+        /// Ignored when `--policy` is given. `--as` is a hidden deprecated
+        /// alias for backwards compatibility.
+        #[arg(short = 'n', long = "namespace", alias = "as", value_name = "PREFIX")]
         alias: Option<String>,
 
         /// Validate a managed policy TOML file at this path instead of a source.

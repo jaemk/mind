@@ -84,6 +84,12 @@ pub enum Intent {
     LobeSelectUp,
     /// Move selection down within the lobes modal list.
     LobeSelectDown,
+    /// Type a character into the namespace-input box (TUI-53).
+    // spec: TUI-53
+    NamespaceInputChar(char),
+    /// Delete the last character in the namespace-input box (TUI-53).
+    // spec: TUI-53
+    NamespaceInputBackspace,
     /// Quit the TUI.
     Quit,
     /// No recognized binding.

@@ -33,6 +33,9 @@ and verified.
 | Curator adopts an un-onboarded nested source: per-entry `follow-branch`/`roots`/`[[hooks]]`, applied only when it has no `mind.toml` | done | DSC-59, DSC-60, DSC-61 |
 | Namespacing: prefix, `{{ns:}}` tokens, unguarded-ref warning | done | [namespacing.md](namespacing.md) |
 | Namespace separator is `:` (reserved kind words rejected; ref parser disambiguates; old `-` installs rename on upgrade) | done | NS-25, NS-26, NS-27 |
+| `meld`/`review` `--namespace`/`-n` flag (renames `--as`, still a hidden alias) | done | CLI-159 |
+| Namespace mutable only until items install; changing it after requires forget-first (revises in-place rename) | done | NS-30, CLI-161 |
+| TUI: show + edit a source's install namespace in the details dialog (editable until items installed) | done | TUI-53 |
 | Transactional install, upgrade, rename, uninstall, drift | done | [lifecycle.md](lifecycle.md) |
 | `forget`/`recall`/`upgrade` honor kind + source qualifier, error on ambiguity | done | CLI-40, CLI-63, CLI-71 |
 | Clobber guard: refuse to overwrite a non-mind link target | done | LIFE-41 |

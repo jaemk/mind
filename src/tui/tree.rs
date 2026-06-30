@@ -747,6 +747,7 @@ mod tests {
             source_names: vec!["src/a".to_string()],
             suggestions: vec![],
             lobes: vec![],
+            source_namespaces: std::collections::HashMap::new(),
         }
     }
 

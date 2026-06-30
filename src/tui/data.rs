@@ -38,6 +38,12 @@ pub struct Snapshot {
     /// Configured agent homes (lobes) from config.toml (TUI-23).
     // spec: TUI-23
     pub lobes: Vec<String>,
+    /// Effective namespace prefix for each melded source (NS-1). The key is the
+    /// source name; the value is the effective prefix (`Some(p)`) or `None` when
+    /// the source has no prefix. Derived in priority order: consumer alias, then
+    /// `[source].prefix` from mind.toml, then none.
+    // spec: TUI-53
+    pub source_namespaces: std::collections::HashMap<String, Option<String>>,
 }
 
 /// One installed item in the snapshot.
@@ -196,6 +202,24 @@ fn load_inner(paths: &Paths) -> Result<Snapshot> {
         .map(|c| c.lobes.iter().map(|e| e.path().to_string()).collect())
         .unwrap_or_default();
 
+    // Build source namespace map (TUI-53, NS-1): effective prefix per source.
+    // All catalog items from the same source share the same prefix (set in
+    // catalog::scan), so the first item's prefix is the effective prefix.
+    // For sources with no catalog items, fall back to the raw alias.
+    // spec: TUI-53
+    let source_namespaces: std::collections::HashMap<String, Option<String>> = {
+        let mut m = std::collections::HashMap::new();
+        for item in &catalog_items {
+            m.entry(item.source.clone())
+                .or_insert_with(|| item.prefix.clone());
+        }
+        for source in &registry.sources {
+            m.entry(source.name.clone())
+                .or_insert_with(|| source.alias.clone().filter(|p| !p.is_empty()));
+        }
+        m
+    };
+
     Ok(Snapshot {
         generation: next_generation(),
         installed,
@@ -204,6 +228,7 @@ fn load_inner(paths: &Paths) -> Result<Snapshot> {
         source_names,
         suggestions,
         lobes,
+        source_namespaces,
     })
 }
 

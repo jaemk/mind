@@ -93,6 +93,12 @@ pub enum ActionKind {
     /// Remove an agent home (lobe) via `config lobes remove` (TUI-23, CLI-113).
     // spec: TUI-23
     LobeRemove { path: String },
+    /// Set (or clear) the namespace alias for a source (TUI-53, NS-30).
+    /// Selected from the source details dialog when no items are installed.
+    /// Does not go through the confirm modal: `activate_dialog` intercepts this
+    /// and opens the namespace-input overlay instead.
+    // spec: TUI-53
+    SetNamespace { source: String },
 }
 
 /// A details-and-actions dialog, opened with Enter on a source or item (TUI-26).
@@ -221,6 +227,17 @@ pub struct App {
     /// Text being typed into the add-lobe input box.
     pub lobe_input_text: String,
 
+    // --- namespace input state (TUI-53) ---
+    /// True when the namespace-input overlay is open for editing a source's alias.
+    // spec: TUI-53
+    pub namespace_input_active: bool,
+    /// Text being typed into the namespace-input box (the new alias).
+    // spec: TUI-53
+    pub namespace_input_text: String,
+    /// Source whose namespace alias is being edited.
+    // spec: TUI-53
+    pub namespace_input_source: Option<String>,
+
     // --- misc ---
     pub size: (u16, u16),
     pub mutating: bool,
@@ -277,6 +294,9 @@ impl App {
             lobes_selected: 0,
             lobe_input_active: false,
             lobe_input_text: String::new(),
+            namespace_input_active: false,
+            namespace_input_text: String::new(),
+            namespace_input_source: None,
             size: (80, 24),
             mutating: false,
             quit: false,
@@ -476,7 +496,13 @@ impl App {
                 self.initiate_unmeld();
             }
             Intent::CancelAction => {
-                if self.lobe_input_active {
+                if self.namespace_input_active {
+                    // Esc while in namespace-input mode cancels the input (TUI-53).
+                    // spec: TUI-53
+                    self.namespace_input_active = false;
+                    self.namespace_input_source = None;
+                    self.namespace_input_text.clear();
+                } else if self.lobe_input_active {
                     // Esc while in lobe-input mode cancels the input.
                     self.lobe_input_active = false;
                     self.lobe_input_text.clear();
@@ -582,6 +608,18 @@ impl App {
             // LobeInputSubmit: handled in mod.rs (needs to trigger an action).
             Intent::LobeInputSubmit => {
                 // Handled in mod.rs where action dispatch is available.
+            }
+            // Namespace-input intents (TUI-53): route text into the namespace-input box.
+            // spec: TUI-53
+            Intent::NamespaceInputChar(c) => {
+                if self.namespace_input_active {
+                    self.namespace_input_text.push(c);
+                }
+            }
+            Intent::NamespaceInputBackspace => {
+                if self.namespace_input_active {
+                    self.namespace_input_text.pop();
+                }
             }
             Intent::LobeSelectUp => {
                 if self.lobes_selected > 0 {
@@ -1044,24 +1082,57 @@ impl App {
 
     /// Build the source dialog: detail plus the actions valid for a source
     /// (install all available, uninstall all installed, unmeld), gated on whether
-    /// there is anything to install/uninstall (TUI-26).
-    ///
-    /// Actions are sourced from `node_actions` (single source of truth for prompt
-    /// strings); labels are added here because they carry the count.  The dialog
-    /// gates Install on `available > 0` and Uninstall on `installed > 0`
-    /// ("omit when it would do nothing"), while the direct key-action paths leave
-    /// those always available.
+    /// there is anything to install/uninstall (TUI-26). Also shows the source's
+    /// effective namespace prefix (TUI-53, NS-1), editable when no items are
+    /// installed, read-only with a lock note when any are installed (NS-30).
+    // spec: TUI-26 TUI-53
     fn source_dialog(&self, name: &str) -> Dialog {
         let (installed, available) = self.source_counts(name);
-        let actions: Vec<DialogAction> = self
+
+        // NS-1: effective prefix = consumer alias, else [source].prefix, else none.
+        // spec: TUI-53 NS-1
+        let effective_prefix = self
+            .last_snapshot
+            .as_ref()
+            .and_then(|s| s.source_namespaces.get(name))
+            .and_then(|p| p.as_deref())
+            .unwrap_or("(none)");
+
+        // Build the detail lines: always include source, counts, and namespace.
+        // When items are installed, add a lock note (NS-30, CLI-161).
+        let mut detail = vec![
+            format!("source:    {name}"),
+            format!("installed: {installed}"),
+            format!("available: {available}"),
+            format!("namespace: {effective_prefix}"),
+        ];
+        if installed > 0 {
+            detail.push("  locked: forget all items to change namespace".to_string());
+        }
+
+        // Build the actions list. When no items are installed, offer "Set namespace"
+        // first so the user can set the prefix before installing (NS-30).
+        // spec: TUI-53 NS-30
+        let mut actions: Vec<DialogAction> = Vec::new();
+        if installed == 0 {
+            actions.push(DialogAction {
+                label: "Set namespace".to_string(),
+                kind: ActionKind::SetNamespace {
+                    source: name.to_string(),
+                },
+                description: format!("Set namespace prefix for {name}"),
+                learn_ref: None,
+            });
+        }
+
+        // Add the standard source actions (install/uninstall/unmeld).
+        let standard: Vec<DialogAction> = self
             .node_actions(&TreeNode::Source(crate::tui::tree::SourceInfo {
                 name: name.to_string(),
                 installed: installed > 0,
             }))
             .into_iter()
             .filter_map(|a| {
-                // Apply dialog-specific gates: omit Learn when nothing is
-                // available, omit Forget when nothing is installed.
                 let include = match &a.kind {
                     ActionKind::Learn { .. } => available > 0,
                     ActionKind::Forget { .. } => installed > 0,
@@ -1084,13 +1155,11 @@ impl App {
                 Some(DialogAction::from_item_action(label, a))
             })
             .collect();
+        actions.extend(standard);
+
         Dialog {
             title: name.to_string(),
-            detail: vec![
-                format!("source:    {name}"),
-                format!("installed: {installed}"),
-                format!("available: {available}"),
-            ],
+            detail,
             actions,
             selected: 0,
         }
@@ -1140,7 +1209,10 @@ impl App {
     /// the confirm modal (TUI-24) and close the dialog. For an Install it also
     /// arms the dependency-closure preview (DEP-40) by setting `pending_learn_ref`,
     /// which the event loop consumes exactly as it does for the direct `i` action.
-    // spec: TUI-26
+    ///
+    /// SetNamespace is intercepted here and opens the namespace-input overlay
+    /// instead of the confirm modal (TUI-53).
+    // spec: TUI-26 TUI-53
     pub fn activate_dialog(&mut self) {
         let Some(d) = self.dialog.take() else {
             return;
@@ -1149,6 +1221,18 @@ impl App {
         let Some(action) = d.actions.into_iter().nth(sel) else {
             return;
         };
+
+        // TUI-53: SetNamespace bypasses the confirm-modal flow and opens the
+        // namespace-input overlay directly (no confirm step needed for a metadata
+        // edit that only changes the alias, not installed items).
+        // spec: TUI-53
+        if let ActionKind::SetNamespace { ref source } = action.kind {
+            self.namespace_input_active = true;
+            self.namespace_input_source = Some(source.clone());
+            self.namespace_input_text.clear();
+            return;
+        }
+
         if let Some(lr) = &action.learn_ref {
             self.pending_learn_ref = Some(lr.clone());
         }
@@ -1238,6 +1322,7 @@ mod tests {
             source_names: vec!["local/agents".to_string()],
             suggestions: vec![],
             lobes: vec![],
+            source_namespaces: std::collections::HashMap::new(),
         }
     }
 
@@ -2472,6 +2557,285 @@ mod tests {
         assert_eq!(app.lobes_selected, 2);
     }
 
+    // --- TUI-53: namespace field in the source details dialog ---
+
+    /// Build a snapshot for TUI-53 tests: one source with zero installed items
+    /// and one available item, with an effective prefix recorded.
+    fn snapshot_with_namespace(prefix: Option<&str>) -> Snapshot {
+        let mut ns = std::collections::HashMap::new();
+        ns.insert("local/agents".to_string(), prefix.map(|s| s.to_string()));
+        Snapshot {
+            generation: 1,
+            installed: vec![],
+            available: vec![SnapshotAvailable {
+                key: "agent:dev".to_string(),
+                name: "dev".to_string(),
+                source: "local/agents".to_string(),
+                kind: ItemKind::Agent,
+                description: Some("Dev agent".to_string()),
+                path: std::path::PathBuf::from("/fake/path"),
+                deps: vec![],
+            }],
+            unmanaged: vec![],
+            source_names: vec!["local/agents".to_string()],
+            suggestions: vec![],
+            lobes: vec![],
+            source_namespaces: ns,
+        }
+    }
+
+    #[test]
+    fn source_dialog_shows_namespace_editable_when_no_items_installed() {
+        // spec: TUI-53 NS-1 NS-30 - when a source has no installed items, the
+        // source details dialog must (a) show the effective namespace prefix in
+        // its detail lines, and (b) offer a "Set namespace" action so the user
+        // can edit it before installing.
+        let mut app = App::new(String::new(), None, None);
+        // Source has alias "jk" and no installed items.
+        app.apply_snapshot(snapshot_with_namespace(Some("jk")));
+
+        // Open the dialog for the source node.
+        let src_idx = app
+            .visible
+            .iter()
+            .position(|n| matches!(&n.node, crate::tui::tree::TreeNode::Source(_)))
+            .expect("source node must be visible");
+        app.selected = src_idx;
+        app.apply_intent(Intent::OpenDialog);
+
+        let d = app.dialog.as_ref().expect("source dialog must open");
+
+        // The detail must mention the namespace.
+        let ns_line = d.detail.iter().find(|l| l.contains("namespace:"));
+        assert!(
+            ns_line.is_some(),
+            "dialog detail must include a namespace: line: {:?}",
+            d.detail
+        );
+        assert!(
+            ns_line.unwrap().contains("jk"),
+            "namespace: line must show the effective prefix 'jk': {:?}",
+            ns_line
+        );
+
+        // No lock note when nothing is installed.
+        assert!(
+            !d.detail.iter().any(|l| l.contains("locked")),
+            "no lock note when nothing is installed: {:?}",
+            d.detail
+        );
+
+        // "Set namespace" action must be present (namespace is editable).
+        assert!(
+            d.actions
+                .iter()
+                .any(|a| matches!(&a.kind, ActionKind::SetNamespace { .. })),
+            "dialog must offer a Set namespace action when no items are installed: {:?}",
+            d.actions.iter().map(|a| &a.label).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn source_dialog_shows_none_namespace_when_no_prefix_set() {
+        // spec: TUI-53 NS-1 - when the source has no effective prefix, the
+        // dialog must display "(none)" in the namespace: line and still offer
+        // "Set namespace" (since nothing is installed).
+        let mut app = App::new(String::new(), None, None);
+        app.apply_snapshot(snapshot_with_namespace(None));
+
+        let src_idx = app
+            .visible
+            .iter()
+            .position(|n| matches!(&n.node, crate::tui::tree::TreeNode::Source(_)))
+            .expect("source node must be visible");
+        app.selected = src_idx;
+        app.apply_intent(Intent::OpenDialog);
+
+        let d = app.dialog.as_ref().expect("source dialog must open");
+        let ns_line = d.detail.iter().find(|l| l.contains("namespace:"));
+        assert!(
+            ns_line.is_some(),
+            "dialog must include a namespace: line even when no prefix is set"
+        );
+        assert!(
+            ns_line.unwrap().contains("(none)"),
+            "namespace: line must show (none) when no prefix is set: {:?}",
+            ns_line
+        );
+
+        // "Set namespace" must still be present (unlocked).
+        assert!(
+            d.actions
+                .iter()
+                .any(|a| matches!(&a.kind, ActionKind::SetNamespace { .. })),
+            "Set namespace action must be offered even when prefix is (none)"
+        );
+    }
+
+    #[test]
+    fn source_dialog_shows_namespace_read_only_when_items_installed() {
+        // spec: TUI-53 NS-30 CLI-161 - when a source has at least one installed item,
+        // the namespace is shown read-only: the dialog detail includes a "locked" note,
+        // and there is NO "Set namespace" action in the action list.
+        let mut app = App::new(String::new(), None, None);
+        // Source has alias "jk" AND installed items.
+        let mut ns = std::collections::HashMap::new();
+        ns.insert("local/agents".to_string(), Some("jk".to_string()));
+        app.apply_snapshot(Snapshot {
+            generation: 1,
+            installed: vec![SnapshotInstalled {
+                key: "agent:jk:dev".to_string(),
+                name: "jk:dev".to_string(),
+                source: "local/agents".to_string(),
+                kind: ItemKind::Agent,
+                commit: "abc12345".to_string(),
+                description: None,
+                deps: vec![],
+            }],
+            available: vec![],
+            unmanaged: vec![],
+            source_names: vec!["local/agents".to_string()],
+            suggestions: vec![],
+            lobes: vec![],
+            source_namespaces: ns,
+        });
+
+        let src_idx = app
+            .visible
+            .iter()
+            .position(|n| matches!(&n.node, crate::tui::tree::TreeNode::Source(_)))
+            .expect("source node must be visible");
+        app.selected = src_idx;
+        app.apply_intent(Intent::OpenDialog);
+
+        let d = app.dialog.as_ref().expect("source dialog must open");
+
+        // Namespace line must be present.
+        let ns_line = d.detail.iter().find(|l| l.contains("namespace:"));
+        assert!(
+            ns_line.is_some(),
+            "dialog detail must include a namespace: line even when locked"
+        );
+        assert!(
+            ns_line.unwrap().contains("jk"),
+            "namespace: line must show current prefix: {:?}",
+            ns_line
+        );
+
+        // A lock note must appear in the detail (NS-30, CLI-161).
+        assert!(
+            d.detail.iter().any(|l| l.contains("locked")),
+            "dialog detail must include a lock note when items are installed: {:?}",
+            d.detail
+        );
+
+        // "Set namespace" must NOT be offered (locked).
+        assert!(
+            !d.actions
+                .iter()
+                .any(|a| matches!(&a.kind, ActionKind::SetNamespace { .. })),
+            "Set namespace action must NOT appear when items are installed: {:?}",
+            d.actions.iter().map(|a| &a.label).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn activate_dialog_set_namespace_opens_input_mode() {
+        // spec: TUI-53 - selecting the "Set namespace" action from the source
+        // details dialog must close the dialog and open the namespace-input overlay
+        // (namespace_input_active = true), NOT create a pending confirm-modal action.
+        // This is the pure model's routing: no confirm step for a metadata edit.
+        let mut app = App::new(String::new(), None, None);
+        app.apply_snapshot(snapshot_with_namespace(None));
+
+        // Manually set up a dialog with a SetNamespace action selected.
+        app.dialog = Some(crate::tui::app::Dialog {
+            title: "local/agents".to_string(),
+            detail: vec!["namespace: (none)".to_string()],
+            actions: vec![crate::tui::app::DialogAction {
+                label: "Set namespace".to_string(),
+                kind: ActionKind::SetNamespace {
+                    source: "local/agents".to_string(),
+                },
+                description: "Set namespace prefix for local/agents".to_string(),
+                learn_ref: None,
+            }],
+            selected: 0,
+        });
+
+        app.activate_dialog();
+
+        // Dialog must be gone (activate_dialog takes it).
+        assert!(
+            app.dialog.is_none(),
+            "activate_dialog must close the dialog"
+        );
+        // Namespace-input mode must be active.
+        assert!(
+            app.namespace_input_active,
+            "activate_dialog(SetNamespace) must open namespace-input mode"
+        );
+        assert_eq!(
+            app.namespace_input_source.as_deref(),
+            Some("local/agents"),
+            "namespace_input_source must be set to the source name"
+        );
+        // No confirm modal: SetNamespace bypasses TUI-24 gating.
+        assert!(
+            !app.modal_visible,
+            "SetNamespace must NOT open a confirm modal"
+        );
+        assert!(
+            app.pending_action.is_none(),
+            "SetNamespace must NOT set a pending action"
+        );
+    }
+
+    #[test]
+    fn namespace_input_char_appends_and_backspace_removes() {
+        // spec: TUI-53 - characters route into the namespace-input buffer while
+        // namespace_input_active is true; Backspace removes the last character.
+        let mut app = App::new(String::new(), None, None);
+        app.namespace_input_active = true;
+
+        app.apply_intent(Intent::NamespaceInputChar('j'));
+        app.apply_intent(Intent::NamespaceInputChar('k'));
+        assert_eq!(app.namespace_input_text, "jk");
+
+        app.apply_intent(Intent::NamespaceInputBackspace);
+        assert_eq!(app.namespace_input_text, "j");
+    }
+
+    #[test]
+    fn cancel_while_namespace_input_active_clears_input_mode() {
+        // spec: TUI-53 - Esc/CancelAction while in namespace-input mode cancels
+        // without making any change: namespace_input_active is cleared, source is
+        // cleared, text is cleared, and no action is pending.
+        let mut app = App::new(String::new(), None, None);
+        app.namespace_input_active = true;
+        app.namespace_input_source = Some("local/agents".to_string());
+        app.namespace_input_text = "partial".to_string();
+
+        app.apply_intent(Intent::CancelAction);
+
+        assert!(
+            !app.namespace_input_active,
+            "namespace-input mode must be cleared on cancel"
+        );
+        assert!(
+            app.namespace_input_source.is_none(),
+            "namespace_input_source must be cleared on cancel"
+        );
+        assert!(
+            app.namespace_input_text.is_empty(),
+            "namespace-input text must be cleared on cancel"
+        );
+        assert!(
+            app.pending_action.is_none(),
+            "no action must be pending after cancel"
+        );
+    }
+
     // --- DEP-40: dependency tree surfaced in the Learn confirm ---
 
     #[test]
@@ -3127,6 +3491,7 @@ mod tests {
             source_names: vec!["local/agents".to_string()],
             suggestions: vec![],
             lobes: vec![],
+            source_namespaces: std::collections::HashMap::new(),
         }
     }
 
@@ -3149,6 +3514,7 @@ mod tests {
             source_names: vec!["local/agents".to_string()],
             suggestions: vec![],
             lobes: vec![],
+            source_namespaces: std::collections::HashMap::new(),
         }
     }
 
@@ -3513,6 +3879,7 @@ mod tests {
             source_names: vec!["local/agents".to_string()],
             suggestions: vec![],
             lobes: vec![],
+            source_namespaces: std::collections::HashMap::new(),
         }
     }
 
@@ -3673,6 +4040,7 @@ mod tests {
             source_names: vec!["local/agents".to_string()],
             suggestions: vec![],
             lobes: vec![],
+            source_namespaces: std::collections::HashMap::new(),
         }
     }
 
@@ -3743,6 +4111,7 @@ mod tests {
             source_names: vec!["local/agents".to_string()],
             suggestions: vec![],
             lobes: vec![],
+            source_namespaces: std::collections::HashMap::new(),
         }
     }
 
