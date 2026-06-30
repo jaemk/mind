@@ -5,7 +5,7 @@ source reference each other and survive a namespace prefix.
 
 ## Why tokens
 
-A prefix (`meld --as <prefix>`, or a repo's `[source].prefix`) installs every
+A prefix (`meld --namespace <prefix>`, or a repo's `[source].prefix`) installs every
 item from a source under `<prefix>:<name>`, so two sources can both ship a
 `review` without colliding. The Claude harness resolves agents and skills at
 runtime by the name in the text, so a plain-prose reference like "delegate to
@@ -45,9 +45,9 @@ mind learn lead --yes      # --yes confirms the dep-closure prompt
 cat ~/.mind/store/agent/lead        # "the dev agent", "the review skill", ...
 
 # Prefixed: tokens expand to jk:<name>.
-# Re-melding an already-registered source with --as updates its prefix in place
-# (CLI-12, CLI-13) and renames any already-installed items; no unmeld needed.
-mind meld /tmp/ns-demo --as jk
+# To switch to a namespace, forget any installed items first (mind errors if items remain).
+mind forget lead --yes
+mind meld /tmp/ns-demo --namespace jk
 mind learn jk:lead --yes
 cat ~/.mind/store/agent/jk:lead     # "the jk:dev agent", "the jk:review skill", ...
 
@@ -57,13 +57,12 @@ mind probe --no-tui
 
 Because every sibling reference here is a token, prefixing produces no
 unguarded-reference warnings. Change one token to bare prose (e.g. write `dev`
-instead of `{{ns:dev}}`) and re-meld with `--as` to see the warning that flags
+instead of `{{ns:dev}}`) and re-meld with `--namespace` to see the warning that flags
 references prefixing would break.
 
 ## Teardown
 
-Re-melding with `--as jk` renames the previously installed `lead` to `jk:lead`
-(CLI-13), and learning `jk:lead` pulls in its sibling dependencies. Run in
+After following Try it, `jk:lead` and its sibling dependencies are installed. Run in
 inverse order:
 
 ```

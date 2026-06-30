@@ -11,8 +11,10 @@ this page covers the case where a prefix is needed.
 
 Two ways, in precedence order:
 
-1. **Consumer-side**: `meld --as <prefix>`. Stored as the source alias and takes
-   priority over anything the repo declares. `meld --as ''` removes a prefix.
+1. **Consumer-side**: `meld --namespace <prefix>` (short `-n`). Stored as the
+   source alias and takes priority over anything the repo declares.
+   `meld --namespace ''` removes a prefix. (`--as <prefix>` is a deprecated alias
+   for `--namespace`.)
 2. **Repo-side**: `[source].prefix` in `mind.toml`.
 
 ```toml
@@ -22,8 +24,8 @@ prefix = "jk"
 
 With prefix `jk`, every item in the source installs as `jk:<bare-name>`. The
 catalog and the item's stable identity keep the bare name; the prefix is applied
-at install time (NS-3), so a later change reads as a rename of the same item
-rather than an orphan plus a new item.
+at install time (NS-3). To change a prefix after items are installed, forget
+the installed items first (`mind forget`) and then re-meld with the new prefix.
 
 ## Why `{{ns:name}}` tokens exist (NS-10, NS-11)
 
@@ -37,7 +39,7 @@ At install time, mind expands each token to the referent's effective name:
 | source installed as | `{{ns:dev}}` expands to |
 |---------------------|-------------------------|
 | unprefixed          | `dev`                   |
-| `--as jk`           | `jk:dev`                |
+| `--namespace jk`    | `jk:dev`                |
 
 Expansion runs whether or not a prefix is in effect (NS-14), so a token-using
 source installs correctly in both cases.
@@ -57,7 +59,7 @@ Installed unprefixed:
 Delegate the implementation to the dev agent.
 ```
 
-Installed with `meld --as jk`:
+Installed with `meld --namespace jk`:
 
 ```
 Delegate the implementation to the jk:dev agent.

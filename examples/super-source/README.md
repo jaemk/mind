@@ -33,7 +33,7 @@ super-source does with that nested source's items:
 ### Per-entry prefix (DSC-39)
 
 `as = "<prefix>"` imposes a namespace prefix on a nested source, exactly like
-`meld --as`: its items install as `<prefix>-<name>`. The `../namespacing` entry
+`meld --namespace`: its items install as `<prefix>-<name>`. The `../namespacing` entry
 sets `as = "rev"`, so its `review` skill installs as `rev-review`. `as` is a
 registry concern and always applies, independent of the DSC-60 gate below.
 
