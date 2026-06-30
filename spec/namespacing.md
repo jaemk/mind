@@ -20,9 +20,13 @@ identity stays `(source, kind, bare_name)`, so a later prefix change reads as a
 rename of the same item rather than a new one (see lifecycle.md).
 
 Prefixing breaks references between items in the same source: the Claude harness
-resolves agents and skills by the name in the text at runtime, so "the dev agent"
-no longer resolves once `dev` installs as `jk:dev`. Authors write such references
-as `{{ns:name}}` tokens instead. On install, each token is expanded to the
+resolves a skill by its directory name, so "the dev skill" no longer resolves once
+`dev` installs as `jk:dev`. Authors write such references as `{{ns:name}}` tokens
+instead. Agents are the exception. The harness keys an agent by its frontmatter
+`name`, not its filename, so a prefix on the link does not change the resolved
+name and mind does not prefix an agent's harness identity at all (it links under
+the bare name and detects collisions; see "Agent identity" below). The token rules
+here therefore govern skill references; an agent reference stays bare. On install, each token is expanded to the
 referent's effective name (bare when unprefixed, `<prefix>:name` when prefixed)
 and validated against the source's siblings. Expansion happens in the staging
 copy during the transactional install, so a bad reference fails before the live
@@ -66,6 +70,44 @@ The rest of this document states these rules normatively.
   identity `(source, kind, bare_name)`, so after the switch to `:` it is matched
   by identity and `upgrade`/`introspect` report the move from `p-<bare>` to
   `p:<bare>` as a rename (lifecycle.md), not as an orphan plus a new item.
+
+## Agent identity
+
+The harness keys an agent differently from a skill, which bounds how a prefix can
+apply. A skill is keyed by its directory name (the frontmatter `name` is
+display-only), so prefixing a skill's directory and link changes the name the
+harness resolves. An agent is keyed by the `name` field in its frontmatter, not
+its filename, so renaming the link to `<prefix>:<name>` does not change the
+resolved name; only rewriting the frontmatter `name` would, and that would break
+every reference to the agent not written as a `{{ns:}}` token. mind does not do
+that rewrite, so a prefix cannot transparently namespace an agent.
+
+- `NS-40` mind does not apply a source's prefix to an agent's harness identity. An
+  agent links into each agent home under its bare frontmatter `name` even when the
+  source has a prefix in effect. The prefix still applies to the agent's store path
+  and manifest key, so mind's stable identity `(source, kind, bare_name)` and the
+  store stay collision-free and a prefix change is still a rename (lifecycle.md);
+  only the harness-visible link name is bare. This narrows NS-2 for the agent kind's
+  link target. Skills (directory-keyed) and tools (store-only, token-referenced)
+  are unaffected: a skill's prefix applies to its directory and link as before.
+- `NS-41` Because agents link under their bare name (NS-40), two melded sources
+  that each ship an agent with the same frontmatter `name` resolve to the same
+  agent-home link regardless of their prefixes. mind detects this rather than
+  silently repointing the link: installing an agent whose bare name already maps to
+  an installed agent from a different source is reported as a collision and the user
+  is prompted to resolve it (keep one, or forget the other). The collision is also
+  surfaced at `meld` of a source that would introduce it. A prefix does not avert
+  it (the prefix does not reach the agent link), so two same-named agents from
+  different sources cannot both be active; this is an inherent limit of the
+  harness's global agent namespace, made explicit instead of mishandled.
+- `NS-42` An agent's effective harness name is always bare (NS-40), so a bare prose
+  reference to a sibling agent resolves correctly with or without a prefix. The
+  unguarded-reference warning (NS-20) therefore does not fire for a reference whose
+  referent is a sibling agent (it would be a false positive); the warning and the
+  `{{ns:}}` token machinery apply to references whose referent is prefixed (a
+  sibling skill). A `{{ns:}}` token naming a sibling agent still expands (to the
+  bare name) and is not an error, so an over-cautious author who tokenizes an agent
+  reference is not penalized.
 
 ## Namespace mutability
 

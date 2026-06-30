@@ -17,6 +17,12 @@ Three layers, in order:
   source. A bare `[discover].sources` list (no item globs) does not disable
   convention.
 
+A fourth, external-manifest layer reads Claude Code's native plugin manifests
+(`.claude-plugin/marketplace.json`, `.claude-plugin/plugin.json`) as a discovery
+input for repos published to the built-in plugin system. It feeds the same catalog
+and leaves the install model unchanged; an authoritative `mind.toml` (DSC-3) still
+wins over it. See [marketplace.md](marketplace.md) (MKT-1..11).
+
 ## Convention
 
 - `DSC-10` A skill is a directory `skills/<name>/` containing `SKILL.md`; its name

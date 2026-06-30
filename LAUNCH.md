@@ -19,6 +19,52 @@ working tooling, not an empty `recall`. That is the bar.
 The differentiator vs. "just copy files": drift detection, install/upgrade/
 uninstall, cross-harness linking. Lead with that, not with "it manages files."
 
+## Versus the built-in marketplace
+
+Claude Code ships a first-party plugin marketplace. It will own default
+distribution, so do not pitch `mind` as another store. The framing that holds:
+the marketplace is a store, `mind` is a package manager (Homebrew vs the App
+Store). They coexist.
+
+Confirmed structural gaps in the first-party system (current docs, 2026-06-30):
+
+- No zero-config discovery. An author must add `.claude-plugin/plugin.json` and
+  list the plugin in a `marketplace.json`. `mind` melds an arbitrary unpackaged
+  repo. This is the wedge: addressable supply is every repo with a `SKILL.md`, not
+  every repo whose owner published a marketplace.
+- Whole-plugin install only. The marketplace install unit is the entire plugin
+  bundle; a user cannot cherry-pick one skill. `mind` installs a single item.
+- Claude-only. Plugins target Claude Code; `mind` links into Gemini/Codex/
+  Antigravity lobes too.
+- Consumer-side, optional namespacing vs the native mandatory `plugin:skill`.
+
+Where the marketplace is at parity or ahead (do not claim these as gaps): it has
+semver versioning, git-tag release channels, inter-plugin dependency resolution
+with version constraints, auto-update, and a renames migration map. So demote the
+"lifecycle ops" angle to what `mind` actually wins on: drift reporting
+(`introspect`/`upgrade` source-hash + commit deltas, which the marketplace lacks),
+transactional rollback, `absorb`, and `dump`.
+
+Cross-harness is contested, not owned. Community generators (ECC, wshobson/agents)
+already emit multi-harness artifacts from one source. Differentiate against them on
+meld-arbitrary-repos (they still require their own packaged source), not on "we
+support many harnesses" alone.
+
+Interop, do not compete. A marketplace repo is a git repo with a JSON manifest, so
+`mind` can consume it as one source type. That turns the marketplace's growth into
+`mind`'s supply. Spec: [spec/marketplace.md](spec/marketplace.md) (MKT-1..11,
+status planned).
+
+Install-model decision (settled): keep `mind`'s own store + symlink model; treat a
+marketplace as a source (input), never a sink. The native plugin system is itself
+an own-store copy cache (`~/.claude/plugins/cache/...`), not canonical
+`~/.claude/skills` files, so conforming to it buys neither a shared format nor
+cleaner uninstall while losing namespacing, `{{ns:}}` expansion, the `rule`/`tool`
+kinds, and the source-hash drift model. This is also the dominant pattern among
+real package managers (Homebrew kegs, Nix store, pipx venvs, Stow): own store, link
+into the host's discovery path. Native-format output, if ever wanted, is a
+`dump`-style export, kept separate from the install path.
+
 ## Critical path (gates the launch)
 
 The flagship is the curated `jaemk/mind` super-source itself, not an own-authored

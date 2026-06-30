@@ -35,6 +35,7 @@ and verified.
 | Namespace separator is `:` (reserved kind words rejected; ref parser disambiguates; old `-` installs rename on upgrade) | done | NS-25, NS-26, NS-27 |
 | `meld`/`review` `--namespace`/`-n` flag (renames `--as`, still a hidden alias) | done | CLI-159 |
 | Namespace mutable only until items install; changing it after requires forget-first (revises in-place rename) | done | NS-30, CLI-161 |
+| Agents not namespaced: an agent links under its bare frontmatter `name` (the harness keys agents by frontmatter, not filename); same-named agents across sources are a detected collision | planned | NS-40, NS-41, NS-42 |
 | TUI: show + edit a source's install namespace in the details dialog (editable until items installed) | done | TUI-53 |
 | Transactional install, upgrade, rename, uninstall, drift | done | [lifecycle.md](lifecycle.md) |
 | `forget`/`recall`/`upgrade` honor kind + source qualifier, error on ambiguity | done | CLI-40, CLI-63, CLI-71 |
@@ -98,6 +99,7 @@ and verified.
 | TUI: keep the highlighted row in the middle two-thirds (scroll margin) | done | TUI-16 |
 | TUI: Enter opens a details dialog with the node's valid actions | done | TUI-26 |
 | Cross-harness lobes: per-lobe `kinds` filter, non-Claude home presets (Gemini/Codex/Antigravity), auto-detect-and-prompt | done | [harness-lobes.md](harness-lobes.md) (HARN-1..6) |
+| Consume Claude plugin marketplaces: `.claude-plugin/marketplace.json` + `plugin.json` read as a discovery source, own store+symlink install unchanged | planned | [marketplace.md](marketplace.md) (MKT-1..11) |
 
 ## Documents
 
@@ -132,6 +134,11 @@ and verified.
 - [harness-lobes.md](harness-lobes.md) - cross-harness lobes: link skills and
   agents into non-Claude agent homes (Gemini CLI, Codex CLI, Antigravity) via a
   per-lobe `kinds` filter and detected-home presets.
+- [marketplace.md](marketplace.md) - consume Claude Code's native plugin manifests
+  (`.claude-plugin/marketplace.json`, `plugin.json`) as a discovery source so a
+  repo published for the built-in plugin system melds without re-packaging; the
+  manifest is an input (a source), not a sink, and the store+symlink install model
+  is unchanged.
 
 ## Conventions
 
