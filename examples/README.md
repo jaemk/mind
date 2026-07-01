@@ -32,6 +32,11 @@ Simplest to most advanced:
 - [policy/](policy/) - a managed `policy.toml` validated by `review --policy`.
 - [super-source/](super-source/) - a curated registry that references and pins
   nested sources; `dump` output.
+- [marketplace-plugin/](marketplace-plugin/) - a Claude `.claude-plugin/plugin.json`
+  melded as a source: skills and agents become items, unsupported components report
+  a skipped count.
+- [marketplace-catalog/](marketplace-catalog/) - a Claude `.claude-plugin/marketplace.json`
+  catalog of in-repo plugins, each a namespaced sub-source.
 
 Operational walkthroughs (lifecycle verbs):
 

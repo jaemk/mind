@@ -22,6 +22,7 @@
 - [The mind.toml file](mind-toml.md)
 - [Authoring a source](authoring.md)
 - [Namespacing](namespacing.md)
+- [Claude plugin marketplaces](marketplace.md)
 - [Tooling](tooling.md)
 - [Dependencies](dependencies.md)
 - [The init-source command](init-source.md)

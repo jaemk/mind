@@ -8,6 +8,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Consume Claude Code plugin manifests as a discovery source. A melded repo with
+  a `.claude-plugin/plugin.json` (a single plugin) or `.claude-plugin/marketplace.json`
+  (a catalog) has its skills and agents mapped to `mind` items and installed
+  through the usual store-and-symlink path; `mind` never writes Claude's plugin
+  cache or `settings.json`. The plugin `name` is the default namespace prefix
+  (agents stay bare per NS-40); unsupported components (`commands`, `hooks`,
+  `.mcp.json`, ...) report a skipped count on meld. A marketplace is consumed as a
+  curated super-source, one sub-source per listed plugin, in-repo or external.
+  Manifests are held to the same path-safety and strict-parse guards as
+  `mind.toml`, and `recall --sources` labels a source's manifest origin
+  (`claude-plugin` / `claude-marketplace`) (MKT-1..11).
 - `upgrade` accepts a glob in place of an exact item ref, mirroring `forget`; the
   kind prefix and source qualifier compose (`upgrade 'jk:*'`, `upgrade
   'skill:*'`, `upgrade 'owner/repo#*'`). A glob (or exact ref) that matches no

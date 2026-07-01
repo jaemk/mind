@@ -26,6 +26,8 @@ mind probe
 | [monorepo](https://github.com/jaemk/mind/tree/main/examples/monorepo) | `[source].roots`: convention discovery rooted at per-package subtrees | [discovery.md](https://github.com/jaemk/mind/blob/main/spec/discovery.md) |
 | [namespacing](https://github.com/jaemk/mind/tree/main/examples/namespacing) | A prefix plus `{{ns:name}}` reference tokens that survive a rename | [namespacing.md](https://github.com/jaemk/mind/blob/main/spec/namespacing.md) |
 | [super-source](https://github.com/jaemk/mind/tree/main/examples/super-source) | `[discover].sources`: a curated registry that melds other repos, optionally namespaced or auto-installed | [discovery.md](https://github.com/jaemk/mind/blob/main/spec/discovery.md) |
+| [marketplace-plugin](https://github.com/jaemk/mind/tree/main/examples/marketplace-plugin) | A Claude `.claude-plugin/plugin.json`: skills and agents mapped to items, unsupported components reported | [marketplace.md](https://github.com/jaemk/mind/blob/main/spec/marketplace.md) |
+| [marketplace-catalog](https://github.com/jaemk/mind/tree/main/examples/marketplace-catalog) | A Claude `.claude-plugin/marketplace.json`: a catalog of in-repo plugins, each a namespaced sub-source | [marketplace.md](https://github.com/jaemk/mind/blob/main/spec/marketplace.md) |
 | [policy](https://github.com/jaemk/mind/tree/main/examples/policy) | An enterprise managed policy: trusted-source allowlist, require-pinned, lobe lock | [policy.md](https://github.com/jaemk/mind/blob/main/spec/policy.md) |
 
 ## Consumer use cases
@@ -44,6 +46,12 @@ You are installing and managing tooling that other people authored.
 - **Pull from a curated registry.** Meld a super-source to register a whole chain
   of repos at once; `meld --recursive` offers every nested source for install. See
   [super-source](https://github.com/jaemk/mind/tree/main/examples/super-source).
+- **Meld a Claude plugin or marketplace.** A repo with a `.claude-plugin/plugin.json`
+  or `.claude-plugin/marketplace.json` melds with no re-packaging; its skills and
+  agents show up as items. See [Claude plugin marketplaces](marketplace.md) and the
+  [marketplace-plugin](https://github.com/jaemk/mind/tree/main/examples/marketplace-plugin)
+  / [marketplace-catalog](https://github.com/jaemk/mind/tree/main/examples/marketplace-catalog)
+  examples.
 - **Install into more than one agent home.** Configure `lobes` in
   `~/.mind/config.toml`. See [Configuration](configuration.md#agent-homes-lobes).
 - **Stay up to date.** `mind sync` refreshes every source; `mind upgrade` upgrades

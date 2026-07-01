@@ -111,7 +111,8 @@ anything; `evolve` updates the `mind` binary itself.
 | `mind completions <shell>` / `mind man` | shell completions / man page |
 
 A source repo exposes items by convention (`skills/<n>/SKILL.md`,
-`agents/<n>.md`, `rules/<n>.md`, `tools/<n>/`) or via a `mind.toml`. See
+`agents/<n>.md`, `rules/<n>.md`, `tools/<n>/`), via a `mind.toml`, or via a Claude
+`.claude-plugin/` manifest (see [Claude plugin marketplaces](marketplace.md)). See
 [Source layout](source-layout.md) and the
 [examples/](https://github.com/jaemk/mind/tree/main/examples): `starter` for the
 plain convention layout, `namespacing` for `{{ns:}}` reference tokens under a

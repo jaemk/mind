@@ -5,21 +5,27 @@ how `mind` should treat it. It is always optional: a repo with no `mind.toml` is
 discovered by [convention](source-layout.md). `mind.toml` is enrichment, never a
 gate.
 
-There are three discovery layers, in precedence order:
+There are four discovery layers, in precedence order:
 
 1. **Convention** (default, no file): the scanner finds `skills/<name>/SKILL.md`,
    `agents/<name>.md`, `rules/<name>.md`, and `tools/<name>/`.
 2. **Frontmatter** (always read): each item's `description` (and a tool's `bin` /
    `build`) come from the frontmatter it already carries.
-3. **`mind.toml`** (optional): `[source]` metadata is read regardless. Declaring
+3. **Claude plugin manifest** (optional): a `.claude-plugin/plugin.json` or
+   `.claude-plugin/marketplace.json` in the repo is read as a discovery input. It
+   is authoritative for the items it declares (convention scanning is skipped for
+   the paths it covers) but an authoritative `mind.toml` overrides it. See
+   [Claude plugin marketplaces](marketplace.md).
+4. **`mind.toml`** (optional): `[source]` metadata is read regardless. Declaring
    `[[items]]` or `[discover]` item globs makes the file **authoritative**:
-   convention scanning is turned off and only what the file lists is offered.
+   convention scanning and the plugin-manifest layer are both turned off and only
+   what the file lists is offered.
 
 ## When does `mind.toml` take over discovery?
 
 | `mind.toml` contains | convention scan | result |
 |----------------------|-----------------|--------|
-| nothing / no file | on | items found by convention |
+| nothing / no file | on | items found by convention (or by a `.claude-plugin/` manifest, if present) |
 | `[source]` only | on | convention items, plus metadata (prefix, pin, ...) |
 | `[discover].sources` only | **on** | convention items, plus a curated chain |
 | `[[items]]` | off | exactly the declared items |
@@ -29,6 +35,12 @@ The last two are *authoritative*. A bare `[discover].sources` list (curating
 other repos) does **not** turn off convention scanning, so a repo can ship its
 own items by convention and curate others at the same time (see
 [Regular plus super-source](#regular-plus-super-source)).
+
+When a repo has no authoritative `mind.toml` but does carry a Claude
+`.claude-plugin/plugin.json` or `.claude-plugin/marketplace.json`, that manifest
+supplies the items instead of convention scanning. An authoritative `mind.toml`
+overrides it (and `meld` notes the manifest was ignored). See
+[Claude plugin marketplaces](marketplace.md).
 
 ## `[source]` - repo metadata
 

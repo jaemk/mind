@@ -27,6 +27,11 @@ namespace `prefix`, and (when you need it) explicit `[[items]]` or `[discover]`
 globs for non-standard or monorepo layouts. See
 [examples/](https://github.com/jaemk/mind/tree/main/examples).
 
+A repo published for Claude Code's plugin system needs no changes either: a
+`.claude-plugin/plugin.json` or `.claude-plugin/marketplace.json` is read as a
+discovery input, mapping the plugin's skills and agents to `mind` items. See
+[Claude plugin marketplaces](marketplace.md).
+
 ## Where shared helpers belong
 
 A helper used by a single skill lives in that skill's own directory and is
