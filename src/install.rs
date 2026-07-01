@@ -238,6 +238,53 @@ pub fn relink(paths: &Paths, item: &InstalledItem) -> Result<usize> {
     Ok(fixed)
 }
 
+/// Link an already-installed item into one or more new lobes (HARN-7/HARN-8).
+/// Recovers `link_rel` from the item's existing links by stripping known lobe
+/// prefixes; falls back to `paths.default_link_rel`. Returns the paths
+/// successfully created and (path, error) pairs for failures.
+/// Does NOT update the manifest — the caller records created paths into item.links.
+pub fn link_into_new_lobes(
+    paths: &Paths,
+    item: &InstalledItem,
+    new_lobes: &[crate::paths::Lobe],
+) -> (
+    Vec<std::path::PathBuf>,
+    Vec<(std::path::PathBuf, MindError)>,
+) {
+    let mut created = Vec::new();
+    let mut failed = Vec::new();
+
+    let agent_homes = paths.agent_homes().unwrap_or_default();
+    let link_rel = item.links.iter().find_map(|link_str| {
+        let link = Path::new(link_str);
+        agent_homes
+            .iter()
+            .find_map(|lobe| link.strip_prefix(&lobe.path).ok())
+            .map(|rel| rel.to_string_lossy().into_owned())
+    });
+    let link_rel = match link_rel.or_else(|| paths.default_link_rel(item.kind, &item.name)) {
+        Some(rel) => rel,
+        None => return (created, failed),
+    };
+
+    let store = paths.mind_home.join(&item.store);
+    for lobe in new_lobes {
+        if !lobe.admits(item.kind) {
+            continue;
+        }
+        let expected = lobe.path.join(&link_rel);
+        let expected_str = expected.to_string_lossy().into_owned();
+        if item.links.iter().any(|l| l == &expected_str) {
+            continue;
+        }
+        match ensure_link(&store, &expected) {
+            Ok(()) => created.push(expected),
+            Err(e) => failed.push((expected, e)),
+        }
+    }
+    (created, failed)
+}
+
 /// Under a forced install, move a pre-existing foreign target at `link` to
 /// `stash` so it can be restored on rollback (LIFE-43). Returns `true` when
 /// the target was moved (a stash was created). Returns `false` when the link
@@ -292,7 +339,7 @@ fn ensure_unoccupied(store_root: &Path, link: &Path) -> Result<()> {
 }
 
 /// Create (or refresh) a symlink at `link` pointing to `store`.
-fn ensure_link(store: &Path, link: &Path) -> Result<()> {
+pub(crate) fn ensure_link(store: &Path, link: &Path) -> Result<()> {
     if let Some(parent) = link.parent() {
         mkdir_p(parent)?;
     }

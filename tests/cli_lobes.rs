@@ -909,3 +909,530 @@ fn detect_global_yes_pre_verb_is_accepted() {
         run2.stderr
     );
 }
+
+// HARN-7: `config lobes add --yes <path>` backfills already-installed items into
+// the newly-added lobe without prompting.
+#[test]
+fn lobe_add_backfills_installed_items_with_yes() {
+    // spec: HARN-7
+    let sb = Sandbox::new();
+    sb.write_config(&format!("lobes = [\"{}\"]\n", sb.claude_home.display()));
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    assert!(sb.mind(&["learn", "review"]).success, "learn skill");
+
+    let new_lobe = sb.base.join("newlobe");
+    let new_lobe_str = new_lobe.to_string_lossy().into_owned();
+    let added = sb.mind(&["config", "lobes", "add", "--yes", &new_lobe_str]);
+    assert!(added.success, "lobe add --yes failed: {}", added.stderr);
+
+    assert!(
+        std::fs::symlink_metadata(new_lobe.join("skills/review")).is_ok(),
+        "the installed skill must be backfilled into the new lobe: {}",
+        added.stdout
+    );
+}
+
+// HARN-7: `config lobes add --preset <name> --yes` backfills installed items into
+// the preset's lobe.
+#[test]
+fn lobe_add_preset_backfills_with_yes() {
+    // spec: HARN-7
+    let sb = Sandbox::new();
+    sb.write_config(&format!("lobes = [\"{}\"]\n", sb.claude_home.display()));
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    assert!(sb.mind(&["learn", "review"]).success, "learn skill");
+
+    // Pin HOME to the sandbox so the gemini preset resolves under it (never the
+    // real home), keeping the backfilled symlink hermetic.
+    let home_str = sb.base.to_string_lossy().into_owned();
+    let added = sb.mind_env(
+        &["config", "lobes", "add", "--preset", "gemini", "--yes"],
+        &[("HOME", &home_str)],
+    );
+    assert!(added.success, "preset add --yes failed: {}", added.stderr);
+
+    assert!(
+        std::fs::symlink_metadata(sb.base.join(".gemini/skills/review")).is_ok(),
+        "the installed skill must be backfilled into the gemini preset lobe: {}",
+        added.stdout
+    );
+}
+
+// HARN-7: `config lobes detect --yes` backfills installed items into a detected
+// harness lobe.
+#[test]
+fn lobe_detect_backfills_with_yes() {
+    // spec: HARN-7
+    let sb = Sandbox::new();
+    sb.write_config(&format!("lobes = [\"{}\"]\n", sb.claude_home.display()));
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    assert!(sb.mind(&["learn", "review"]).success, "learn skill");
+
+    let detect_home = sb.base.join("detect");
+    std::fs::create_dir_all(detect_home.join(".gemini")).unwrap();
+    let detect_str = detect_home.to_string_lossy().into_owned();
+    let added = sb.mind_env(
+        &["config", "lobes", "detect", "--yes"],
+        &[("MIND_DETECT_HOME", &detect_str)],
+    );
+    assert!(added.success, "detect --yes failed: {}", added.stderr);
+
+    assert!(
+        std::fs::symlink_metadata(detect_home.join(".gemini/skills/review")).is_ok(),
+        "the installed skill must be backfilled into the detected gemini lobe: {}",
+        added.stdout
+    );
+}
+
+// HARN-7: non-interactive (non-TTY) `config lobes add` without `--yes` prints a
+// note pointing at `introspect --fix` and does NOT backfill.
+#[test]
+fn lobe_add_no_tty_no_yes_prints_note() {
+    // spec: HARN-7
+    let sb = Sandbox::new();
+    sb.write_config(&format!("lobes = [\"{}\"]\n", sb.claude_home.display()));
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    assert!(sb.mind(&["learn", "review"]).success, "learn skill");
+
+    let new_lobe = sb.base.join("newlobe");
+    let new_lobe_str = new_lobe.to_string_lossy().into_owned();
+    let added = sb.mind(&["config", "lobes", "add", &new_lobe_str]);
+    assert!(added.success, "lobe add failed: {}", added.stderr);
+
+    assert!(
+        added.stdout.contains("mind introspect --fix"),
+        "non-TTY add without --yes must print the introspect note: {}",
+        added.stdout
+    );
+    assert!(
+        std::fs::symlink_metadata(new_lobe.join("skills/review")).is_err(),
+        "without --yes the skill must NOT be backfilled into the new lobe"
+    );
+}
+
+// HARN-8: `introspect` (without --fix) reports a lobe whose installed items were
+// never linked into it as a `missing-lobe-link` finding.
+#[test]
+fn introspect_reports_missing_lobe_links() {
+    // spec: HARN-8
+    let sb = Sandbox::new();
+    sb.write_config(&format!("lobes = [\"{}\"]\n", sb.claude_home.display()));
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    assert!(sb.mind(&["learn", "review"]).success, "learn skill");
+
+    // Add a second lobe without backfilling (non-TTY, no --yes): the config now
+    // carries it but the installed skill is not linked there.
+    let new_lobe = sb.base.join("newlobe");
+    let new_lobe_str = new_lobe.to_string_lossy().into_owned();
+    assert!(
+        sb.mind(&["config", "lobes", "add", &new_lobe_str]).success,
+        "lobe add failed"
+    );
+
+    let intro = sb.mind(&["introspect", "--json"]);
+    let iv = parse_json(&intro.stdout);
+    let issues = iv["issues"].as_array().expect("issues array");
+    assert!(
+        issues.iter().any(|i| i["kind"] == "missing-lobe-link"),
+        "introspect must report the uncovered lobe as missing-lobe-link: {}",
+        intro.stdout
+    );
+}
+
+// HARN-8: `introspect --fix` creates the missing lobe links, updates the
+// manifest, and leaves no missing-lobe-link finding on a re-run.
+#[test]
+fn introspect_fix_creates_missing_lobe_links() {
+    // spec: HARN-8
+    let sb = Sandbox::new();
+    sb.write_config(&format!("lobes = [\"{}\"]\n", sb.claude_home.display()));
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    assert!(sb.mind(&["learn", "review"]).success, "learn skill");
+
+    let new_lobe = sb.base.join("newlobe");
+    let new_lobe_str = new_lobe.to_string_lossy().into_owned();
+    assert!(
+        sb.mind(&["config", "lobes", "add", &new_lobe_str]).success,
+        "lobe add failed"
+    );
+
+    let fixed = sb.mind(&["introspect", "--fix"]);
+    assert!(fixed.success, "introspect --fix failed: {}", fixed.stderr);
+    assert!(
+        std::fs::symlink_metadata(new_lobe.join("skills/review")).is_ok(),
+        "introspect --fix must create the missing lobe link: {}",
+        fixed.stdout
+    );
+
+    // A re-run is clean: the manifest now records the link, so no finding remains.
+    let intro = sb.mind(&["introspect", "--json"]);
+    let iv = parse_json(&intro.stdout);
+    let issues = iv["issues"].as_array().expect("issues array");
+    assert!(
+        !issues.iter().any(|i| i["kind"] == "missing-lobe-link"),
+        "after --fix no missing-lobe-link finding must remain: {}",
+        intro.stdout
+    );
+}
+
+// HARN-7: adding a lobe when nothing is installed skips the backfill silently
+// (no prompt, no note) and still reports the added lobe.
+#[test]
+fn lobe_add_no_items_skips_backfill_silently() {
+    // spec: HARN-7
+    let sb = Sandbox::new();
+    let new_lobe = sb.base.join("newlobe");
+    let new_lobe_str = new_lobe.to_string_lossy().into_owned();
+    let added = sb.mind(&["config", "lobes", "add", &new_lobe_str]);
+    assert!(added.success, "lobe add failed: {}", added.stderr);
+
+    assert!(
+        added.stdout.contains("added lobe"),
+        "add must confirm the lobe: {}",
+        added.stdout
+    );
+    assert!(
+        !added.stdout.contains("mind introspect --fix"),
+        "with nothing installed there is no backfill note: {}",
+        added.stdout
+    );
+}
+
+// HARN-7: `config lobes add --json <path>` without `--yes` must skip backfill
+// silently in JSON mode — no "introspect" prose note in stdout, only valid JSON.
+#[test]
+fn harn7_json_no_yes_skips_backfill_silently() {
+    // spec: HARN-7
+    let sb = Sandbox::new();
+    sb.write_config(&format!("lobes = [\"{}\"]\n", sb.claude_home.display()));
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    assert!(sb.mind(&["learn", "review"]).success, "learn skill");
+
+    let new_lobe = sb.base.join("newlobe-json-noskip");
+    let new_lobe_str = new_lobe.to_string_lossy().into_owned();
+    // Non-TTY, no --yes, but in --json mode.
+    let run = sb.mind(&["config", "lobes", "add", "--json", &new_lobe_str]);
+    assert!(run.success, "lobe add --json failed: {}", run.stderr);
+
+    // Output must be parseable JSON (not prose).
+    let v = parse_json(&run.stdout);
+    assert_eq!(
+        v["action"], "lobe-add",
+        "JSON must include action: {}",
+        run.stdout
+    );
+    assert_eq!(v["outcome"], "added", "lobe must be added: {}", run.stdout);
+
+    // The "introspect --fix" note must be suppressed in JSON mode.
+    assert!(
+        !run.stdout.contains("introspect"),
+        "JSON mode must not emit the introspect note: {}",
+        run.stdout
+    );
+
+    // The item must NOT be backfilled (JSON + no --yes = silent skip).
+    assert!(
+        std::fs::symlink_metadata(new_lobe.join("skills/review")).is_err(),
+        "without --yes the skill must NOT be backfilled in JSON mode"
+    );
+}
+
+// HARN-7: `config lobes add --json --yes <path>` backfills already-installed items
+// silently (no prose) and emits valid JSON as its only stdout output.
+#[test]
+fn harn7_json_yes_backfills_silently() {
+    // spec: HARN-7
+    let sb = Sandbox::new();
+    sb.write_config(&format!("lobes = [\"{}\"]\n", sb.claude_home.display()));
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    assert!(sb.mind(&["learn", "review"]).success, "learn skill");
+
+    let new_lobe = sb.base.join("newlobe-json-yes");
+    let new_lobe_str = new_lobe.to_string_lossy().into_owned();
+    let run = sb.mind(&["config", "lobes", "add", "--json", "--yes", &new_lobe_str]);
+    assert!(run.success, "lobe add --json --yes failed: {}", run.stderr);
+
+    // Output must be parseable JSON.
+    let v = parse_json(&run.stdout);
+    assert_eq!(v["action"], "lobe-add", "{}", run.stdout);
+    assert_eq!(v["outcome"], "added", "{}", run.stdout);
+
+    // The item IS backfilled (JSON + --yes = silent backfill).
+    assert!(
+        std::fs::symlink_metadata(new_lobe.join("skills/review")).is_ok(),
+        "with --yes the skill must be backfilled in JSON mode: {}",
+        run.stdout
+    );
+}
+
+// HARN-7: backfill via a skill-only preset (codex) respects the `kinds` filter:
+// the skill is linked into the new lobe but the rule is NOT.
+#[test]
+fn harn7_backfill_preset_codex_skill_only_excludes_rule() {
+    // spec: HARN-7
+    let sb = Sandbox::new();
+    sb.write_config(&format!("lobes = [\"{}\"]\n", sb.claude_home.display()));
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    assert!(sb.mind(&["learn", "review"]).success, "learn skill");
+    assert!(sb.mind(&["learn", "style"]).success, "learn rule");
+
+    // Add the codex preset (skill-only, resolves to ~/.agents) with --yes to
+    // trigger immediate backfill. Pin HOME to the sandbox base so the preset
+    // resolves hermetically under it.
+    let home_str = sb.base.to_string_lossy().into_owned();
+    let added = sb.mind_env(
+        &["config", "lobes", "add", "--preset", "codex", "--yes"],
+        &[("HOME", &home_str)],
+    );
+    assert!(added.success, "preset add --yes failed: {}", added.stderr);
+
+    // The skill IS backfilled into the codex lobe (<base>/.agents/skills/review).
+    assert!(
+        std::fs::symlink_metadata(sb.base.join(".agents/skills/review")).is_ok(),
+        "the skill must be backfilled into the codex (skill-only) lobe"
+    );
+    // The rule is NOT linked: codex preset is skill-only and excludes rules.
+    assert!(
+        std::fs::symlink_metadata(sb.base.join(".agents/rules/style.md")).is_err(),
+        "the rule must NOT be backfilled into a skill-only lobe (HARN-1/HARN-7)"
+    );
+}
+
+// HARN-7: adding a lobe that is ALREADY configured (no-op path) does NOT trigger
+// backfill; only newly-added lobes receive the backfill offer.
+#[test]
+fn harn7_no_op_lobe_add_does_not_backfill() {
+    // spec: HARN-7
+    let sb = Sandbox::new();
+    sb.write_config(&format!("lobes = [\"{}\"]\n", sb.claude_home.display()));
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    assert!(sb.mind(&["learn", "review"]).success, "learn skill");
+
+    let new_lobe = sb.base.join("existing-lobe");
+    let new_lobe_str = new_lobe.to_string_lossy().into_owned();
+
+    // First add: newly-added lobe receives backfill with --yes.
+    let first = sb.mind(&["config", "lobes", "add", "--yes", &new_lobe_str]);
+    assert!(first.success, "{}", first.stderr);
+    assert!(
+        std::fs::symlink_metadata(new_lobe.join("skills/review")).is_ok(),
+        "first add must backfill the skill"
+    );
+
+    // Remove the link so we can detect if a second add re-creates it.
+    std::fs::remove_file(new_lobe.join("skills/review")).unwrap();
+
+    // Second add (same path) is a no-op: lobe already configured.
+    let second = sb.mind(&["config", "lobes", "add", "--yes", &new_lobe_str]);
+    assert!(second.success, "{}", second.stderr);
+    assert!(
+        second.stdout.contains("already configured"),
+        "must report lobe already configured: {}",
+        second.stdout
+    );
+    // The link was NOT recreated: no-op add does not trigger backfill.
+    assert!(
+        std::fs::symlink_metadata(new_lobe.join("skills/review")).is_err(),
+        "no-op add must not backfill items into an already-configured lobe"
+    );
+}
+
+// HARN-8: when a foreign file at the expected link's parent directory blocks link
+// creation during `introspect --fix`, the fix emits a `missing-lobe-link` finding
+// but still exits 0 and does not abort processing of other items or lobes.
+#[test]
+fn harn8_introspect_fix_clobber_reports_finding_and_continues() {
+    // spec: HARN-8
+    let sb = Sandbox::new();
+    sb.write_config(&format!("lobes = [\"{}\"]\n", sb.claude_home.display()));
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    assert!(sb.mind(&["learn", "review"]).success, "learn skill");
+
+    // Add a second lobe without backfill (non-TTY, no --yes).
+    let new_lobe = sb.base.join("blocked-lobe");
+    let new_lobe_str = new_lobe.to_string_lossy().into_owned();
+    assert!(
+        sb.mind(&["config", "lobes", "add", &new_lobe_str]).success,
+        "lobe add failed"
+    );
+
+    // Plant a regular FILE at `new_lobe/skills` so that mkdir_p inside
+    // ensure_link fails with ENOTDIR when it tries to create the skills/ dir.
+    std::fs::create_dir_all(&new_lobe).unwrap();
+    std::fs::write(new_lobe.join("skills"), "blocking file").unwrap();
+
+    // introspect --fix must report the clobber but still exit 0.
+    let run = sb.mind(&["introspect", "--fix", "--json"]);
+    assert!(
+        run.success,
+        "introspect --fix must not abort on a clobber conflict: {}",
+        run.stderr
+    );
+
+    let v = parse_json(&run.stdout);
+    let issues = v["issues"].as_array().expect("issues array");
+    assert!(
+        issues.iter().any(|i| i["kind"] == "missing-lobe-link"),
+        "a blocked link must produce a missing-lobe-link finding: {}",
+        run.stdout
+    );
+
+    // The skill is still NOT linked (creation failed).
+    assert!(
+        std::fs::symlink_metadata(new_lobe.join("skills/review")).is_err(),
+        "the blocked link must remain absent after --fix"
+    );
+}
+
+// HARN-8: when a recorded link is in the manifest but absent from disk (broken
+// symlink), `introspect` (without --fix) fires BOTH `missing-link` and
+// `missing-lobe-link` for that link. This documents the current behavior: the
+// first fires from the manifest-vs-disk check; the second fires from the HARN-8
+// lobe-coverage check (on-disk test fails). With `--fix`, relink restores the
+// symlink and neither finding fires on a re-run.
+#[test]
+fn harn8_broken_recorded_link_fires_both_findings_without_fix() {
+    // spec: HARN-8
+    let sb = Sandbox::new();
+    sb.write_config(&format!("lobes = [\"{}\"]\n", sb.claude_home.display()));
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    assert!(sb.mind(&["learn", "review"]).success, "learn skill");
+
+    // Delete the skill symlink from disk; it remains in the manifest.
+    // The link is a symlink, so remove_file removes the link itself (not the store).
+    std::fs::remove_file(sb.claude_home.join("skills/review")).unwrap();
+
+    // Without --fix: both missing-link and missing-lobe-link fire for the same path.
+    let intro = sb.mind(&["introspect", "--json"]);
+    let iv = parse_json(&intro.stdout);
+    let issues = iv["issues"].as_array().expect("issues array");
+    assert!(
+        issues.iter().any(|i| i["kind"] == "missing-link"),
+        "a broken recorded link must fire a missing-link finding: {}",
+        intro.stdout
+    );
+    assert!(
+        issues.iter().any(|i| i["kind"] == "missing-lobe-link"),
+        "a broken recorded link also fires missing-lobe-link (on-disk check, HARN-8): {}",
+        intro.stdout
+    );
+
+    // With --fix: relink restores the symlink; a re-run finds no issues.
+    let fixed = sb.mind(&["introspect", "--fix", "--json"]);
+    assert!(fixed.success, "{}", fixed.stderr);
+    let fv = parse_json(&fixed.stdout);
+    let fixed_issues = fv["issues"].as_array().expect("issues array");
+    assert!(
+        fixed_issues.is_empty(),
+        "after --fix no issues must remain for a broken recorded link: {}",
+        fixed.stdout
+    );
+    assert!(
+        std::fs::symlink_metadata(sb.claude_home.join("skills/review")).is_ok(),
+        "the symlink must be restored by --fix"
+    );
+}
+
+// HARN-8: the real user scenario -- items installed with the implicit default
+// (no lobes in config), then lobes added, then `introspect --fix` backfills
+// them. The `link_rel` recovery falls back to `default_link_rel` because
+// the recorded links are in claude_home, which is NOT in agent_homes() once an
+// explicit lobe list is configured.
+#[test]
+fn introspect_fix_backfills_after_implicit_default_install() {
+    // spec: HARN-8
+    let sb = Sandbox::new();
+    // NOTE: no write_config here -- install goes to the implicit claude_home default.
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    assert!(sb.mind(&["learn", "review"]).success, "learn skill");
+    assert!(
+        std::fs::symlink_metadata(sb.claude_home.join("skills/review")).is_ok(),
+        "skill must be linked into implicit claude_home"
+    );
+
+    // Add a new lobe (no --yes; HARN-7 prints the note, backfill is deferred).
+    let new_lobe = sb.base.join("newlobe");
+    let new_lobe_str = new_lobe.to_string_lossy().into_owned();
+    assert!(
+        sb.mind(&["config", "lobes", "add", &new_lobe_str]).success,
+        "lobe add failed"
+    );
+
+    // introspect --fix must create the missing link in the new lobe.
+    let fixed = sb.mind(&["introspect", "--fix"]);
+    assert!(fixed.success, "introspect --fix failed: {}", fixed.stderr);
+    assert!(
+        std::fs::symlink_metadata(new_lobe.join("skills/review")).is_ok(),
+        "introspect --fix must create the missing lobe link: {}",
+        fixed.stdout
+    );
+
+    // A re-run must be clean.
+    let intro = sb.mind(&["introspect", "--json"]);
+    let iv = parse_json(&intro.stdout);
+    let issues = iv["issues"].as_array().expect("issues array");
+    assert!(
+        !issues.iter().any(|i| i["kind"] == "missing-lobe-link"),
+        "after --fix no missing-lobe-link must remain: {}",
+        intro.stdout
+    );
+}
+
+// HARN-9: when the first explicit lobe is added to an empty lobes config,
+// claude_home is auto-preserved so that new installs still reach it.
+#[test]
+fn first_lobe_add_preserves_claude_home() {
+    // spec: HARN-9
+    let sb = Sandbox::new();
+    // No write_config: lobes config starts empty (implicit claude_home default).
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+
+    let new_lobe = sb.base.join("newlobe");
+    let new_lobe_str = new_lobe.to_string_lossy().into_owned();
+    assert!(
+        sb.mind(&["config", "lobes", "add", &new_lobe_str]).success,
+        "lobe add must succeed"
+    );
+
+    // Install an item after the lobe add.
+    assert!(
+        sb.mind(&["learn", "review"]).success,
+        "learn after lobe-add failed"
+    );
+
+    // Item must be in BOTH claude_home (preserved implicit default) and new_lobe.
+    assert!(
+        std::fs::symlink_metadata(sb.claude_home.join("skills/review")).is_ok(),
+        "new install must reach claude_home after first lobe-add"
+    );
+    assert!(
+        std::fs::symlink_metadata(new_lobe.join("skills/review")).is_ok(),
+        "new install must reach the explicitly-added lobe"
+    );
+}
+
+// HARN-9: `config lobes add` when claude_home itself is the path does not
+// create a duplicate entry.
+#[test]
+fn lobe_add_claude_home_no_duplicate() {
+    // spec: HARN-9
+    let sb = Sandbox::new();
+    let ch = sb.claude_home.to_string_lossy().into_owned();
+    let added = sb.mind(&["config", "lobes", "add", &ch]);
+    assert!(
+        added.success,
+        "lobe add claude_home failed: {}",
+        added.stderr
+    );
+
+    // lobe list must show exactly one entry (not claude_home twice).
+    let listed = sb.mind(&["config", "lobes", "list", "--json"]);
+    let lv = parse_json(&listed.stdout);
+    let lobes = lv["lobes"].as_array().expect("lobes array");
+    assert_eq!(
+        lobes.len(),
+        1,
+        "adding claude_home must not create a duplicate: {}",
+        listed.stdout
+    );
+}

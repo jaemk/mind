@@ -75,6 +75,7 @@ and verified.
 | `meld` installs by default (`--link-only`/`--yes`); no-arg melds `.`; prefix prompt when declared | done (`--link-only`/`--yes`/prefix) | CLI-23, CLI-24 |
 | `meld` with no arg defaults to the current directory | done | CLI-25 |
 | `init-source`: scaffold `mind.toml`, detect references, `{{ns:}}` templating (maintainer) | done | [init-source.md](init-source.md) |
+| `init-source --marketplace`: generate `.claude-plugin/marketplace.json` for Claude plugin compatibility; `--flat-skills`: set `flat-skills = true` in `mind.toml` and populate the plugin skills list | done | [init-source.md](init-source.md) (INIT-10..12) |
 | Deprecate `[source].install` (still parsed); `review` advises the `[[hooks]]` form, `init-source` scaffolds only `[[hooks]]` | done | HOOK-90 |
 | Item `[[items.hooks]]` array (parity with source `[[hooks]]`); nested lifecycle order `source.install -> item.install* ... item.uninstall* -> source.uninstall` | done | HOOK-86, HOOK-87 |
 | `init-source` flags bare sibling references only under a prefix; `hardcoded-path`/`bare-tool` messages note install-hook-populated locations are safe | done | INIT-9, CLI-146 |
@@ -102,6 +103,8 @@ and verified.
 | TUI: keep the highlighted row in the middle two-thirds (scroll margin) | done | TUI-16 |
 | TUI: Enter opens a details dialog with the node's valid actions | done | TUI-26 |
 | Cross-harness lobes: per-lobe `kinds` filter, non-Claude home presets (Gemini/Codex/Antigravity), auto-detect-and-prompt | done | [harness-lobes.md](harness-lobes.md) (HARN-1..6) |
+| Retroactive lobe backfill: `config lobes add/detect` offers to link existing items into new lobes; `introspect --fix` repairs missing lobe coverage | done | [harness-lobes.md](harness-lobes.md) (HARN-7, HARN-8) |
+| Implicit claude_home preservation: first explicit lobe-add auto-prepends claude_home to the saved lobes list so new installs still reach `~/.claude` | done | [harness-lobes.md](harness-lobes.md) (HARN-9) |
 | Consume Claude plugin marketplaces: `.claude-plugin/marketplace.json` + `plugin.json` read as a discovery source, own store+symlink install unchanged | done | [marketplace.md](marketplace.md) (MKT-1..11) |
 | Plugin repos as `[discover].sources` nested entries: inherit plugin `name` as default namespace (MKT-12); marketplace-as-nested-source per-plugin namespacing (MKT-13) | done | MKT-12, MKT-13 |
 | In-repo marketplace plugin scan roots: `skills` array for explicit skill dirs, convention fallback when absent, marketplace authoritative (skips convention discovery) | done | MKT-14 |

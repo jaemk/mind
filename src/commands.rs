@@ -1291,13 +1291,20 @@ fn siblings_of(items: &[CatalogItem], source: &str) -> Vec<CatalogItem> {
         .collect()
 }
 
-/// `mind init-source [path] [--template]` — maintainer scaffolding. Discovers the
-/// repo's items, reports the intra-source reference graph, scaffolds a `mind.toml`
-/// if absent, and (with `--template`) rewrites bare sibling references into
-/// `{{ns:}}` tokens. Operates only on the target directory: no store, no agent
-/// home, no network (INIT-6).
-// spec: INIT-1 INIT-2 INIT-3 INIT-4 INIT-6 INIT-9
-pub fn init_source(dir: Option<&str>, template: bool) -> Result<()> {
+/// `mind init-source [path] [--template] [--marketplace] [--flat-skills] [-n <ns>]`
+/// — maintainer scaffolding. Discovers the repo's items, reports the intra-source
+/// reference graph, scaffolds a `mind.toml` if absent, and (with `--template`)
+/// rewrites bare sibling references into `{{ns:}}` tokens. With `--marketplace`
+/// generates `.claude-plugin/marketplace.json`. Operates only on the target
+/// directory: no store, no agent home, no network (INIT-6).
+// spec: INIT-1 INIT-2 INIT-3 INIT-4 INIT-6 INIT-9 INIT-10 INIT-11 INIT-12
+pub fn init_source(
+    dir: Option<&str>,
+    template: bool,
+    marketplace: bool,
+    flat_skills_flag: bool,
+    namespace: Option<String>,
+) -> Result<()> {
     let dir = dir.unwrap_or(".");
     let path = std::path::Path::new(dir);
     if !path.is_dir() {
@@ -1307,9 +1314,24 @@ pub fn init_source(dir: Option<&str>, template: bool) -> Result<()> {
     }
     let root = path.canonicalize().map_err(|e| MindError::io(path, e))?;
 
+    let toml_path = root.join("mind.toml");
+
+    // Read the pre-existing mind.toml content (if any) for the scaffold patching
+    // step and for extracting description/prefix for the marketplace manifest.
+    let pre_toml = if toml_path.exists() {
+        Some(std::fs::read_to_string(&toml_path).map_err(|e| MindError::io(&toml_path, e))?)
+    } else {
+        None
+    };
+
     // Discover items exactly as melding would (INIT-2): build a local Source for
     // the directory and scan it (honors convention + mind.toml + min-mind-version).
-    let source = parse_spec(&root.to_string_lossy())?;
+    // Set flat_skills on the source struct before scanning so flat layout is used
+    // even before mind.toml is written (INIT-12, DSC-74).
+    let mut source = parse_spec(&root.to_string_lossy())?;
+    if flat_skills_flag {
+        source.flat_skills = true;
+    }
     let mut items: Vec<CatalogItem> = Vec::new();
     catalog::scan_source_at(&root, &source, &mut items)?;
 
@@ -1377,34 +1399,80 @@ pub fn init_source(dir: Option<&str>, template: bool) -> Result<()> {
         );
     }
 
-    // mind.toml scaffold (INIT-3): create only when absent; never overwrite.
-    let toml_path = root.join("mind.toml");
-    if toml_path.exists() {
+    // mind.toml handling: INIT-3 (create if absent) + INIT-12 (patch when flags
+    // require it). When flat_skills_flag or namespace is set, always write (patch
+    // existing or create with scaffold); otherwise keep the create-if-absent logic.
+    if flat_skills_flag || namespace.is_some() {
+        let patched = crate::scaffold::patch_source_meta(
+            pre_toml.as_deref(),
+            flat_skills_flag,
+            namespace.as_deref(),
+        );
+        std::fs::write(&toml_path, &patched).map_err(|e| MindError::io(&toml_path, e))?;
+        println!("  wrote mind.toml");
+    } else if toml_path.exists() {
         println!("  mind.toml already exists; left unchanged");
     } else {
-        let scaffold = concat!(
-            "[source]\n",
-            "description = \"\"   # what this source offers\n",
-            "# prefix = \"prefix\"   # namespace items as prefix:<name>\n",
-            "\n",
-            "# Declare hooks that run when a consumer melds or unmelds this source.\n",
-            "# Remove the leading `# ` to enable a hook.\n",
-            "#\n",
-            "# [[hooks]]\n",
-            "# run = \"make install\"         # shell command to run\n",
-            "# name = \"Build\"               # optional label shown in the prompt\n",
-            "# event = \"install\"             # \"install\" (default) or \"uninstall\"\n",
-            "# optional = false              # false = required (default). optional only lets the\n",
-            "#                               # user decline running it; a failure always aborts.\n",
-            "#\n",
-            "# [[hooks]]\n",
-            "# run = \"make clean\"            # cleanup hook run at unmeld time\n",
-            "# name = \"Cleanup\"\n",
-            "# event = \"uninstall\"\n",
-            "# optional = true               # the user may decline this step (its failure still aborts)\n",
-        );
-        std::fs::write(&toml_path, scaffold).map_err(|e| MindError::io(&toml_path, e))?;
+        std::fs::write(&toml_path, crate::scaffold::SCAFFOLD)
+            .map_err(|e| MindError::io(&toml_path, e))?;
         println!("  wrote mind.toml");
+    }
+
+    // Marketplace manifest (INIT-10): generate .claude-plugin/marketplace.json
+    // when --marketplace is passed, unless one already exists.
+    if marketplace {
+        if plugin_manifest::find_marketplace_manifest(&root).is_some() {
+            println!("  .claude-plugin/marketplace.json already exists; left unchanged");
+        } else {
+            // INIT-11: name priority: --namespace > mind.toml prefix > dir basename.
+            let dir_basename = root
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            // Read the current mind.toml (after any writes) for the prefix.
+            let mindfile_prefix =
+                crate::mindfile::MindToml::load(&root)?.and_then(|mt| mt.source.prefix);
+            let name = crate::scaffold::plugin_name(
+                &dir_basename,
+                mindfile_prefix.as_deref(),
+                namespace.as_deref(),
+            );
+
+            // Description: from [source].description in the pre-existing mind.toml
+            // (preserved through patch), else placeholder.
+            let description = crate::mindfile::MindToml::load(&root)
+                .ok()
+                .flatten()
+                .and_then(|mt| mt.source.description)
+                .filter(|d| !d.trim().is_empty())
+                .unwrap_or_else(|| "TODO: describe this plugin".to_string());
+
+            // Skills array only when --flat-skills is also in effect (INIT-10).
+            let skills: Option<Vec<String>> = if flat_skills_flag {
+                let mut paths: Vec<String> = items
+                    .iter()
+                    .filter(|it| it.kind == ItemKind::Skill)
+                    .filter_map(|it| {
+                        it.path
+                            .strip_prefix(&root)
+                            .ok()
+                            .map(|rel| rel.to_string_lossy().into_owned())
+                    })
+                    .collect();
+                paths.sort();
+                Some(paths)
+            } else {
+                None
+            };
+
+            let plugin_dir = root.join(".claude-plugin");
+            std::fs::create_dir_all(&plugin_dir).map_err(|e| MindError::io(&plugin_dir, e))?;
+            let json_path = plugin_manifest::marketplace_manifest_path(&root);
+            let json =
+                crate::scaffold::render_marketplace_json(&name, &description, skills.as_deref());
+            std::fs::write(&json_path, &json).map_err(|e| MindError::io(&json_path, e))?;
+            println!("  wrote .claude-plugin/marketplace.json");
+        }
     }
 
     // Templating (INIT-5): rewrite bare sibling mentions to tokens, per file.
@@ -4923,9 +4991,13 @@ struct Issue {
 pub fn introspect(paths: &Paths, fix: bool, json: bool) -> Result<()> {
     let registry = Registry::load(paths)?;
     let catalog = catalog::scan(paths, &registry)?;
-    let manifest = Manifest::load(paths)?;
+    let mut manifest = Manifest::load(paths)?;
     let mut issues: Vec<Issue> = Vec::new();
     let mut repaired: Vec<String> = Vec::new();
+    // HARN-8: `--fix` may create new lobe links; record whether we mutated the
+    // manifest so it is saved once after the loop.
+    let mut manifest_dirty = false;
+    let all_lobes = paths.agent_homes()?;
 
     for s in &registry.sources {
         if !s.clone_dir(paths).join(".git").is_dir() {
@@ -4943,11 +5015,12 @@ pub fn introspect(paths: &Paths, fix: bool, json: bool) -> Result<()> {
         }
     }
 
-    for it in manifest.items.values() {
-        let missing: Vec<&String> = it
+    for it in manifest.items.values_mut() {
+        let missing: Vec<String> = it
             .links
             .iter()
             .filter(|link| std::fs::symlink_metadata(link).is_err())
+            .cloned()
             .collect();
         if !missing.is_empty() {
             // With --fix, re-link from the store copy; report only what cannot
@@ -4998,6 +5071,86 @@ pub fn introspect(paths: &Paths, fix: bool, json: bool) -> Result<()> {
                 }
             }
         }
+
+        // HARN-8: missing lobe coverage. For each configured lobe whose `kinds`
+        // admits this item, the expected link must be recorded in the manifest
+        // AND present on disk; otherwise it is drift. With --fix, create it and
+        // record the new link; report only what still cannot be linked.
+        let link_rel = it
+            .links
+            .iter()
+            .find_map(|link_str| {
+                let link = std::path::Path::new(link_str);
+                all_lobes
+                    .iter()
+                    .find_map(|lobe| link.strip_prefix(&lobe.path).ok())
+                    .map(|rel| rel.to_string_lossy().into_owned())
+            })
+            .or_else(|| paths.default_link_rel(it.kind, &it.name));
+        if let Some(rel) = link_rel {
+            for lobe in &all_lobes {
+                if !lobe.admits(it.kind) {
+                    continue;
+                }
+                let expected = lobe.path.join(&rel);
+                let expected_str = expected.to_string_lossy().into_owned();
+                let in_manifest = it.links.iter().any(|l| l == &expected_str);
+                let on_disk = std::fs::symlink_metadata(&expected).is_ok();
+                if in_manifest && on_disk {
+                    continue;
+                }
+                if fix {
+                    let (created, errs) =
+                        install::link_into_new_lobes(paths, it, std::slice::from_ref(lobe));
+                    if !created.is_empty() {
+                        it.links.extend(
+                            created
+                                .into_iter()
+                                .map(|p| p.to_string_lossy().into_owned()),
+                        );
+                        manifest_dirty = true;
+                        repaired.push(format!(
+                            "{}: linked into new lobe {}",
+                            it.key(),
+                            lobe.path.display()
+                        ));
+                    }
+                    for (p, e) in errs {
+                        issues.push(Issue {
+                            kind: "missing-lobe-link",
+                            target: it.key(),
+                            message: format!("{}: {e}", p.display()),
+                        });
+                    }
+                    // Report a finding only if the link still doesn't exist.
+                    if std::fs::symlink_metadata(&expected).is_err() {
+                        issues.push(Issue {
+                            kind: "missing-lobe-link",
+                            target: it.key(),
+                            message: format!(
+                                "{}: could not link into lobe {}",
+                                it.key(),
+                                lobe.path.display()
+                            ),
+                        });
+                    }
+                } else {
+                    issues.push(Issue {
+                        kind: "missing-lobe-link",
+                        target: it.key(),
+                        message: format!(
+                            "{}: not linked into lobe {}; run `mind introspect --fix`",
+                            it.key(),
+                            lobe.path.display()
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
+    if fix && manifest_dirty {
+        manifest.save(paths)?;
     }
 
     if json {
@@ -5127,8 +5280,71 @@ fn format_lobe(entry: &crate::config::LobeEntry) -> String {
     }
 }
 
+/// Offer to backfill already-installed items into `new_lobes` after they were
+/// added (HARN-7). With `yes`, backfill unconditionally; on an interactive TTY
+/// (non-JSON), prompt with `confirm_default_yes`; non-interactively without
+/// `--yes` print a note pointing at `introspect --fix` and skip; in JSON mode
+/// backfill silently when `yes`, else skip silently. With nothing installed,
+/// return without prompting. Per-item link failures are reported but do not
+/// abort the rest.
+fn backfill_new_lobes(paths: &Paths, new_lobes: &[crate::paths::Lobe], yes: bool) -> Result<()> {
+    let out = crate::render::ctx();
+    let mut manifest = Manifest::load(paths)?;
+    if manifest.items.is_empty() {
+        return Ok(());
+    }
+
+    let do_backfill = if yes {
+        true
+    } else if !out.json && crate::hook::is_tty() {
+        confirm_default_yes(&format!(
+            "Link {} installed item(s) into {} new lobe(s)?",
+            manifest.items.len(),
+            new_lobes.len()
+        ))?
+    } else if !out.json {
+        println!("note: run `mind introspect --fix` to link installed items into new lobe(s)");
+        return Ok(());
+    } else {
+        return Ok(());
+    };
+
+    if !do_backfill {
+        return Ok(());
+    }
+
+    for item in manifest.items.values_mut() {
+        let (created, errs) = install::link_into_new_lobes(paths, item, new_lobes);
+        item.links.extend(
+            created
+                .into_iter()
+                .map(|p| p.to_string_lossy().into_owned()),
+        );
+        for (p, e) in errs {
+            println!("{} could not link {}: {e}", out.warn(), p.display());
+        }
+    }
+    manifest.save(paths)?;
+    Ok(())
+}
+
+/// Convert detected-lobe candidates (name + config entry) into resolved
+/// [`Lobe`]s for backfill (HARN-7). Each entry's path is used verbatim (the
+/// detection base produces absolute paths) with its declared `kinds` filter.
+fn candidates_to_lobes(
+    candidates: &[(&'static str, crate::config::LobeEntry)],
+) -> Vec<crate::paths::Lobe> {
+    candidates
+        .iter()
+        .map(|(_, entry)| crate::paths::Lobe {
+            path: std::path::PathBuf::from(entry.path()),
+            kinds: entry.kinds().map(|ks| ks.to_vec()),
+        })
+        .collect()
+}
+
 /// `mind config lobes add <path>` — add an agent home by path.
-pub fn lobe_add(paths: &Paths, path: &str) -> Result<()> {
+pub fn lobe_add(paths: &Paths, path: &str, yes: bool) -> Result<()> {
     let out = crate::render::ctx();
     // POL-40: a lobe lock pins the effective agent homes; refuse and change
     // nothing. Load the policy first so the refusal precedes any config write.
@@ -5146,18 +5362,41 @@ pub fn lobe_add(paths: &Paths, path: &str) -> Result<()> {
         println!("{} lobe already configured: {path}", out.available());
         return Ok(());
     }
+    // spec: HARN-9 -- preserve the implicit claude_home default when this is
+    // the first explicit lobe. Without this the default is silently replaced
+    // by the configured list and new installs no longer reach ~/.claude.
+    if cfg.lobes.is_empty() {
+        let ch = paths.claude_home.to_string_lossy().into_owned();
+        if ch.as_str() != path {
+            cfg.lobes.push(crate::config::LobeEntry::bare(&ch));
+        }
+    }
     cfg.lobes.push(crate::config::LobeEntry::bare(path));
     cfg.save(paths)?;
     if out.json {
+        backfill_new_lobes(
+            paths,
+            &[crate::paths::Lobe::all_kinds(std::path::PathBuf::from(
+                path,
+            ))],
+            yes,
+        )?;
         return print_json(&MutationResult::new("lobe-add", path, "added"));
     }
     println!("{} added lobe {path}", out.ok());
+    backfill_new_lobes(
+        paths,
+        &[crate::paths::Lobe::all_kinds(std::path::PathBuf::from(
+            path,
+        ))],
+        yes,
+    )?;
     Ok(())
 }
 
 /// `mind config lobes add --preset <name>` — add a known harness preset's lobe
 /// (its parent path and `kinds` filter) (HARN-4).
-pub fn lobe_add_preset(paths: &Paths, name: &str) -> Result<()> {
+pub fn lobe_add_preset(paths: &Paths, name: &str, yes: bool) -> Result<()> {
     let out = crate::render::ctx();
     // POL-40: refuse under a lobe lock before validating or writing anything.
     if let Some(policy) = Policy::load()?
@@ -5181,12 +5420,21 @@ pub fn lobe_add_preset(paths: &Paths, name: &str) -> Result<()> {
         println!("{} lobe already configured: {path}", out.available());
         return Ok(());
     }
+    // spec: HARN-9
+    if cfg.lobes.is_empty() {
+        let ch = paths.claude_home.to_string_lossy().into_owned();
+        if ch.as_str() != path {
+            cfg.lobes.push(crate::config::LobeEntry::bare(&ch));
+        }
+    }
     cfg.lobes.push(entry.clone());
     cfg.save(paths)?;
     if out.json {
+        backfill_new_lobes(paths, std::slice::from_ref(&lobe), yes)?;
         return print_json(&MutationResult::new("lobe-add", &path, "added"));
     }
     println!("{} added {name} lobe {}", out.ok(), format_lobe(&entry));
+    backfill_new_lobes(paths, std::slice::from_ref(&lobe), yes)?;
     Ok(())
 }
 
@@ -5321,10 +5569,19 @@ pub fn lobe_detect(paths: &Paths, yes: bool) -> Result<()> {
             })
             .collect();
         if do_add {
+            // spec: HARN-9
+            if cfg.lobes.is_empty() {
+                let ch = paths.claude_home.to_string_lossy().into_owned();
+                if !candidates.iter().any(|(_, e)| e.path() == ch.as_str()) {
+                    cfg.lobes.push(crate::config::LobeEntry::bare(&ch));
+                }
+            }
             for (_, entry) in &candidates {
                 cfg.lobes.push(entry.clone());
             }
             cfg.save(paths)?;
+            let new_lobes = candidates_to_lobes(&candidates);
+            backfill_new_lobes(paths, &new_lobes, yes)?;
         }
         return print_json(&serde_json::json!({
             "action": "lobe-detect",
@@ -5339,11 +5596,20 @@ pub fn lobe_detect(paths: &Paths, yes: bool) -> Result<()> {
     }
 
     if do_add {
+        // spec: HARN-9
+        if cfg.lobes.is_empty() {
+            let ch = paths.claude_home.to_string_lossy().into_owned();
+            if !candidates.iter().any(|(_, e)| e.path() == ch.as_str()) {
+                cfg.lobes.push(crate::config::LobeEntry::bare(&ch));
+            }
+        }
         for (name, entry) in &candidates {
             cfg.lobes.push(entry.clone());
             println!("{} added {name} lobe {}", out.ok(), format_lobe(entry));
         }
         cfg.save(paths)?;
+        let new_lobes = candidates_to_lobes(&candidates);
+        backfill_new_lobes(paths, &new_lobes, yes)?;
     } else {
         println!("{} detected harness home(s):", out.bullet());
         for (name, entry) in &candidates {
@@ -6113,7 +6379,8 @@ mod tests {
         let _rm = Rm(tmp.clone());
 
         // init_source should create the scaffold.
-        init_source(Some(tmp.to_str().unwrap()), false).expect("init_source should succeed");
+        init_source(Some(tmp.to_str().unwrap()), false, false, false, None)
+            .expect("init_source should succeed");
 
         let toml_path = tmp.join("mind.toml");
         assert!(toml_path.exists(), "mind.toml must be created");

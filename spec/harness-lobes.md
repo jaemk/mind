@@ -69,6 +69,40 @@ per-rule files. Rules stay Claude-only here; an `AGENTS.md`-writer is out of sco
   `tools:` schema) is the author's responsibility; mind does not rewrite
   frontmatter to fit a target harness. This is an explicit non-goal.
 
+- `HARN-7` After `config lobes add` (including `--preset`) or `config lobes
+  detect` successfully adds one or more lobes, mind offers to backfill
+  already-installed items into the new lobe(s): in interactive mode it prompts
+  ("Link N installed items into the new lobe(s)?"); `--yes` backfills
+  automatically without prompting; in non-interactive mode without `--yes` it
+  prints a note suggesting `mind introspect --fix` and skips the backfill. The
+  backfill is the same per-item link operation as `learn`, subject to the same
+  `kinds` filter (HARN-1), clobber guard (LIFE-41), and manifest update (HARN-2).
+  A lobe that was already present before the command runs is not backfilled (only
+  newly-added lobes receive the offer); items that fail to link into a new lobe
+  are reported individually and do not abort the rest of the backfill.
+
+- `HARN-8` `introspect --fix` (CLI-91) also repairs missing lobe coverage: for
+  each installed item and each configured lobe whose `kinds` admits the item's
+  kind, if the expected link is absent (not present in the manifest `links` or
+  not on disk), the link is created and the manifest entry updated to record it.
+  This makes `introspect --fix` the single repair command for both broken
+  existing links (its original role) and newly-added lobes whose items were
+  installed before the lobe was configured. An item that cannot be linked into a
+  lobe (e.g. clobber conflict) is reported as a finding; the fix continues with
+  remaining items and lobes. `introspect` (without `--fix`) reports missing lobe
+  links as drift findings alongside the existing broken-symlink findings.
+
+- `HARN-9` When `config lobes add` (including `--preset`) or `config lobes
+  detect` adds the first explicit lobe to an empty lobes config (i.e. the user
+  was relying on the implicit `claude_home` default, STO-14), `claude_home` is
+  automatically prepended to the saved `lobes` list before the new lobe(s) are
+  appended. This preserves the implicit default as an explicit entry so that
+  `agent_homes()` continues to return `claude_home` alongside the new lobes, and
+  new installs continue to reach `~/.claude`. The auto-preserved entry is silent
+  (no separate confirmation or output line). It is excluded from the HARN-7
+  backfill offer because it was already the effective home before the command ran;
+  only the newly-configured lobes receive the backfill.
+
 ## Documentation map
 
 Places that explain lobes / agent homes and reference this feature.

@@ -163,6 +163,22 @@ pub enum Command {
         /// the repo's item files; it is heuristic, so review the result.
         #[arg(long)]
         template: bool,
+
+        /// Generate `.claude-plugin/marketplace.json` for Claude plugin
+        /// compatibility. Skipped if the file already exists.
+        #[arg(long)]
+        marketplace: bool,
+
+        /// Set `flat-skills = true` in `[source]` in `mind.toml` and use flat
+        /// skill layout for discovery. With `--marketplace`, populates the
+        /// `skills` array in the generated manifest.
+        #[arg(long)]
+        flat_skills: bool,
+
+        /// Override the plugin name / `[source].prefix` written to `mind.toml`
+        /// and the marketplace manifest `name` field.
+        #[arg(short = 'n', long)]
+        namespace: Option<String>,
     },
 
     /// Unmeld a source, removing its clone and catalog entry.

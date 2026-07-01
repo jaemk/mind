@@ -78,3 +78,46 @@ namespacing.md.
   `review` (CLI-133), neither of which flags a bare sibling reference absent a
   prefix. The `{{ns:}}`-token edges (INIT-4) and the `--template` rewrite (INIT-5)
   are unaffected; only the bare-prose advisory is gated.
+
+## Marketplace output (`--marketplace`, `--flat-skills`)
+
+`init-source --marketplace` is the publish-side counterpart to the consume-side
+marketplace reading (marketplace.md, MKT-1..14). It generates the
+`.claude-plugin/marketplace.json` that makes a skills repo compatible with
+Claude's native plugin marketplace, without altering `mind`'s own discovery or
+install model. The generated file is an input to Claude's plugin system and to
+`mind`'s marketplace reader (MKT-1); `mind` itself is not the consumer here.
+
+- `INIT-10` When `--marketplace` is passed, `init-source` generates a
+  `.claude-plugin/marketplace.json` file, creating `.claude-plugin/` if absent.
+  The generated file declares a single in-repo plugin entry. `name` is the
+  effective plugin name (INIT-11). `source` is `"."` (the repo root). `description`
+  is taken from `[source].description` in an existing `mind.toml` if present, else
+  a placeholder comment is emitted. When `--flat-skills` is also in effect (INIT-12),
+  the plugin entry includes a `skills` array listing the relative paths of every
+  skill directory discovered by flat-skill layout (DSC-74..76, MKT-14); without
+  `--flat-skills` the `skills` key is omitted and skill discovery falls back to the
+  convention `skills/` directory (DSC-10, MKT-14). An existing
+  `.claude-plugin/marketplace.json` is never overwritten: `init-source` prints a
+  message noting the file already exists and exits 0, matching the behavior for
+  `mind.toml` (INIT-3).
+
+- `INIT-11` The plugin `name` in the generated marketplace entry defaults to the
+  repo directory basename (the same value `mind` uses as the source identity). If
+  the repo's `mind.toml` carries `[source].prefix`, that value is the default
+  instead, since a `mind` source prefix and a marketplace plugin name serve the
+  same namespacing role: they both scope a source's skills under a publisher
+  identity. Passing `--namespace <n>` (or `-n <n>`) to `init-source` overrides the
+  default; if `--namespace` causes `mind.toml` to be created or updated (INIT-3,
+  INIT-12), the same value is written as `[source].prefix`.
+
+- `INIT-12` When `--flat-skills` is passed, `init-source` sets `flat-skills = true`
+  in the `[source]` table of `mind.toml`, creating the file if absent (same as
+  INIT-3 otherwise) or inserting the key if it is missing, or updating it if it is
+  already present, without altering other content. This is the only `mind.toml`
+  mutation `--flat-skills` makes; discovery (INIT-2) and the reference analysis
+  (INIT-4) then proceed using the flat-skill layout (DSC-74..76). When `--flat-skills`
+  is combined with `--marketplace`, the flat-skill discovery results populate the
+  `skills` array in the generated marketplace plugin entry (INIT-10, MKT-14) so
+  that Claude's plugin reader finds the same skill directories that `mind`'s flat
+  discovery would.

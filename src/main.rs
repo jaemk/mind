@@ -20,6 +20,7 @@ mod policy;
 mod render;
 mod resolve;
 mod review;
+mod scaffold;
 mod selfupdate;
 mod source;
 mod tui;
@@ -247,7 +248,19 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             // DSC-56: suggest `mind probe` after melding a curated super-source.
             commands::maybe_probe_hint(paths, &repo)
         }
-        Command::InitSource { path, template } => commands::init_source(path.as_deref(), template),
+        Command::InitSource {
+            path,
+            template,
+            marketplace,
+            flat_skills,
+            namespace,
+        } => commands::init_source(
+            path.as_deref(),
+            template,
+            marketplace,
+            flat_skills,
+            namespace,
+        ),
         Command::Unmeld {
             name,
             unlink_only,
@@ -385,8 +398,8 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             ConfigCmd::Show => commands::config_show(paths),
             ConfigCmd::Lobes { action } => match action {
                 LobesCmd::Add { path, preset } => match (path, preset) {
-                    (None, Some(name)) => commands::lobe_add_preset(paths, &name),
-                    (Some(p), None) => commands::lobe_add(paths, &p),
+                    (None, Some(name)) => commands::lobe_add_preset(paths, &name, yes),
+                    (Some(p), None) => commands::lobe_add(paths, &p, yes),
                     // clap's `conflicts_with` rejects supplying both.
                     (Some(_), Some(_)) => unreachable!("path and --preset conflict"),
                     (None, None) => Err(crate::error::MindError::LobeTargetRequired),

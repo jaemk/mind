@@ -132,7 +132,8 @@ fn dispatch(paths: &Paths, kind: ActionKind) -> Result<()> {
         // spec: TUI-22 - `yes: true` so it applies without prompting on stdin.
         ActionKind::Upgrade => commands::upgrade(paths, true, None, false)?,
         // spec: TUI-23 CLI-112
-        ActionKind::LobeAdd { path } => commands::lobe_add(paths, &path)?,
+        // `yes: true` so backfill applies without prompting on stdin in the TUI.
+        ActionKind::LobeAdd { path } => commands::lobe_add(paths, &path, true)?,
         // spec: TUI-23 CLI-113
         ActionKind::LobeRemove { path } => commands::lobe_remove(paths, &path)?,
         // SetNamespace is intercepted by activate_dialog and opens the namespace-

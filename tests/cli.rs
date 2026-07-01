@@ -17232,3 +17232,436 @@ fn skill_collision_with_namespace_set_does_not_collide() {
         probe.stdout
     );
 }
+
+// ---------------------------------------------------------------------------
+// init-source --marketplace / --flat-skills / --namespace (INIT-10..12)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn init_source_marketplace_generates_correct_json() {
+    // spec: INIT-10 INIT-11
+    // Conventional source with no mind.toml. --marketplace generates a
+    // marketplace.json with name = dir basename, source = ".", no `skills` key.
+    let sb = Sandbox::new();
+    let repo = sb.base.join("my-plugin");
+    write(
+        &repo.join("skills/review/SKILL.md"),
+        "---\ndescription: review\n---\n# review\n",
+    );
+    let dir = repo.to_str().unwrap();
+    let r = sb.mind(&["init-source", dir, "--marketplace"]);
+    assert!(
+        r.success,
+        "init-source --marketplace failed: {} {}",
+        r.stdout, r.stderr
+    );
+
+    let mkt_path = repo.join(".claude-plugin/marketplace.json");
+    assert!(
+        mkt_path.exists(),
+        ".claude-plugin/marketplace.json must be created"
+    );
+    let content = std::fs::read_to_string(&mkt_path).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&content).expect("valid JSON");
+
+    // INIT-11: name defaults to dir basename when no prefix or --namespace.
+    assert_eq!(
+        v["name"], "my-plugin",
+        "top-level name must be the dir basename"
+    );
+    let plugin = &v["plugins"][0];
+    assert_eq!(plugin["name"], "my-plugin", "plugin entry name");
+    assert_eq!(plugin["source"], ".", "plugin source must be '.'");
+
+    // Without --flat-skills the skills key must be absent (INIT-10).
+    assert!(
+        plugin.get("skills").is_none(),
+        "skills key must be absent without --flat-skills: {content}"
+    );
+}
+
+#[test]
+fn init_source_marketplace_uses_mindtoml_prefix() {
+    // spec: INIT-10 INIT-11
+    // When mind.toml has [source].prefix, that value becomes the plugin name.
+    let sb = Sandbox::new();
+    let repo = sb.base.join("irrelevant-dirname");
+    write(
+        &repo.join("skills/build/SKILL.md"),
+        "---\ndescription: build\n---\n# build\n",
+    );
+    write(
+        &repo.join("mind.toml"),
+        "[source]\nprefix = \"mypkg\"\ndescription = \"A great plugin\"\n",
+    );
+    let dir = repo.to_str().unwrap();
+    let r = sb.mind(&["init-source", dir, "--marketplace"]);
+    assert!(r.success, "failed: {} {}", r.stdout, r.stderr);
+
+    let content = std::fs::read_to_string(repo.join(".claude-plugin/marketplace.json")).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&content).expect("valid JSON");
+    assert_eq!(
+        v["name"], "mypkg",
+        "prefix from mind.toml must override dirname"
+    );
+    assert_eq!(v["plugins"][0]["name"], "mypkg", "plugin entry name");
+    assert_eq!(
+        v["plugins"][0]["description"], "A great plugin",
+        "description from mind.toml [source].description"
+    );
+}
+
+#[test]
+fn init_source_marketplace_namespace_flag_overrides() {
+    // spec: INIT-10 INIT-11 INIT-12
+    // --namespace <n> overrides both mind.toml prefix and dir basename; the value
+    // is also written as [source].prefix in mind.toml.
+    let sb = Sandbox::new();
+    let repo = sb.base.join("some-dir");
+    write(
+        &repo.join("skills/build/SKILL.md"),
+        "---\ndescription: build\n---\n# build\n",
+    );
+    let dir = repo.to_str().unwrap();
+    let r = sb.mind(&["init-source", dir, "--marketplace", "--namespace", "foo"]);
+    assert!(r.success, "failed: {} {}", r.stdout, r.stderr);
+
+    // marketplace.json uses the --namespace value.
+    let content = std::fs::read_to_string(repo.join(".claude-plugin/marketplace.json")).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&content).expect("valid JSON");
+    assert_eq!(v["name"], "foo", "name must be the --namespace value");
+    assert_eq!(v["plugins"][0]["name"], "foo", "plugin entry name");
+
+    // mind.toml must carry prefix = "foo" (INIT-11).
+    let toml = std::fs::read_to_string(repo.join("mind.toml")).unwrap();
+    assert!(
+        toml.contains("prefix = \"foo\""),
+        "mind.toml must carry prefix = \"foo\": {toml}"
+    );
+}
+
+#[test]
+fn init_source_marketplace_no_overwrite() {
+    // spec: INIT-10
+    // An existing .claude-plugin/marketplace.json is left unchanged; the command
+    // still exits 0 and prints the "already exists" notice.
+    let sb = Sandbox::new();
+    let repo = sb.base.join("existing-mkt");
+    write(
+        &repo.join("skills/build/SKILL.md"),
+        "---\ndescription: build\n---\n# build\n",
+    );
+    let sentinel = r#"{"name":"sentinel","plugins":[]}"#;
+    write(&repo.join(".claude-plugin/marketplace.json"), sentinel);
+    let dir = repo.to_str().unwrap();
+
+    let r = sb.mind(&["init-source", dir, "--marketplace"]);
+    assert!(
+        r.success,
+        "must exit 0 even when file exists: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stdout.contains("already exists"),
+        "must print 'already exists' message: {}",
+        r.stdout
+    );
+
+    let content = std::fs::read_to_string(repo.join(".claude-plugin/marketplace.json")).unwrap();
+    assert_eq!(content, sentinel, "file must be left unchanged");
+}
+
+#[test]
+fn init_source_flat_skills_sets_mindtoml_key() {
+    // spec: INIT-12
+    // Three sub-cases: no mind.toml, existing without the key, existing with it.
+
+    let sb = Sandbox::new();
+
+    // Case A: no existing mind.toml -> creates from scaffold with flat-skills = true.
+    let repo_a = sb.base.join("flat-a");
+    write(
+        &repo_a.join("review/SKILL.md"),
+        "---\ndescription: review\n---\n# review\n",
+    );
+    let r = sb.mind(&["init-source", repo_a.to_str().unwrap(), "--flat-skills"]);
+    assert!(r.success, "case A failed: {} {}", r.stdout, r.stderr);
+    let toml_a = std::fs::read_to_string(repo_a.join("mind.toml")).unwrap();
+    assert!(
+        toml_a.contains("flat-skills = true"),
+        "case A: flat-skills must be set: {toml_a}"
+    );
+
+    // Case B: existing mind.toml without flat-skills -> inserts the key.
+    let repo_b = sb.base.join("flat-b");
+    write(
+        &repo_b.join("review/SKILL.md"),
+        "---\ndescription: review\n---\n# review\n",
+    );
+    write(
+        &repo_b.join("mind.toml"),
+        "[source]\ndescription = \"existing\"\n",
+    );
+    let r = sb.mind(&["init-source", repo_b.to_str().unwrap(), "--flat-skills"]);
+    assert!(r.success, "case B failed: {} {}", r.stdout, r.stderr);
+    let toml_b = std::fs::read_to_string(repo_b.join("mind.toml")).unwrap();
+    assert!(
+        toml_b.contains("flat-skills = true"),
+        "case B: flat-skills must be inserted: {toml_b}"
+    );
+    assert!(
+        toml_b.contains("description = \"existing\""),
+        "case B: existing content must be preserved: {toml_b}"
+    );
+
+    // Case C: existing mind.toml with flat-skills = false -> replaces with true.
+    let repo_c = sb.base.join("flat-c");
+    write(
+        &repo_c.join("review/SKILL.md"),
+        "---\ndescription: review\n---\n# review\n",
+    );
+    write(
+        &repo_c.join("mind.toml"),
+        "[source]\nflat-skills = false\ndescription = \"existing\"\n",
+    );
+    let r = sb.mind(&["init-source", repo_c.to_str().unwrap(), "--flat-skills"]);
+    assert!(r.success, "case C failed: {} {}", r.stdout, r.stderr);
+    let toml_c = std::fs::read_to_string(repo_c.join("mind.toml")).unwrap();
+    assert!(
+        toml_c.contains("flat-skills = true"),
+        "case C: flat-skills must be true: {toml_c}"
+    );
+    assert!(
+        !toml_c.contains("flat-skills = false"),
+        "case C: old value must be gone: {toml_c}"
+    );
+}
+
+#[test]
+fn init_source_flat_skills_marketplace_skills_array() {
+    // spec: INIT-10 INIT-12
+    // With --flat-skills --marketplace on a flat source (skill dirs at root),
+    // the generated marketplace.json includes a `skills` array with the relative
+    // dir path of each discovered skill.
+    let sb = Sandbox::new();
+    let repo = sb.base.join("flat-mkt");
+    // Two flat skills at the repo root.
+    write(
+        &repo.join("review/SKILL.md"),
+        "---\ndescription: review\n---\n# review\n",
+    );
+    write(
+        &repo.join("build/SKILL.md"),
+        "---\ndescription: build\n---\n# build\n",
+    );
+    let dir = repo.to_str().unwrap();
+    let r = sb.mind(&["init-source", dir, "--flat-skills", "--marketplace"]);
+    assert!(r.success, "failed: {} {}", r.stdout, r.stderr);
+
+    let content = std::fs::read_to_string(repo.join(".claude-plugin/marketplace.json")).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&content).expect("valid JSON");
+    let skills = v["plugins"][0]["skills"]
+        .as_array()
+        .expect("skills array must be present with --flat-skills");
+
+    let skill_strings: Vec<&str> = skills.iter().filter_map(|s| s.as_str()).collect();
+    assert!(
+        skill_strings.contains(&"review"),
+        "skills must include 'review': {skill_strings:?}"
+    );
+    assert!(
+        skill_strings.contains(&"build"),
+        "skills must include 'build': {skill_strings:?}"
+    );
+
+    // mind.toml must have flat-skills = true.
+    let toml = std::fs::read_to_string(repo.join("mind.toml")).unwrap();
+    assert!(
+        toml.contains("flat-skills = true"),
+        "mind.toml must have flat-skills = true: {toml}"
+    );
+}
+
+#[test]
+fn init_source_namespace_writes_prefix() {
+    // spec: INIT-11 INIT-12
+    // --namespace bar writes prefix = "bar" to mind.toml (creating it if absent).
+    let sb = Sandbox::new();
+    let repo = sb.base.join("ns-test");
+    write(
+        &repo.join("skills/scan/SKILL.md"),
+        "---\ndescription: scan\n---\n# scan\n",
+    );
+    let dir = repo.to_str().unwrap();
+    let r = sb.mind(&["init-source", dir, "--namespace", "bar"]);
+    assert!(r.success, "failed: {} {}", r.stdout, r.stderr);
+
+    let toml = std::fs::read_to_string(repo.join("mind.toml")).unwrap();
+    assert!(
+        toml.contains("prefix = \"bar\""),
+        "mind.toml must have prefix = \"bar\": {toml}"
+    );
+    // Other scaffold content is preserved.
+    assert!(
+        toml.contains("[source]"),
+        "must still have [source] header: {toml}"
+    );
+}
+
+#[test]
+fn init_source_marketplace_placeholder_description() {
+    // spec: INIT-10
+    // When no [source].description is present in mind.toml (or no mind.toml
+    // exists at all), the generated marketplace.json must contain the placeholder
+    // description "TODO: describe this plugin", not an empty string.
+    let sb = Sandbox::new();
+
+    // Case A: no mind.toml at all.
+    let repo_a = sb.base.join("placeholder-a");
+    write(
+        &repo_a.join("skills/plan/SKILL.md"),
+        "---\ndescription: plan\n---\n# plan\n",
+    );
+    let r = sb.mind(&["init-source", repo_a.to_str().unwrap(), "--marketplace"]);
+    assert!(r.success, "case A failed: {} {}", r.stdout, r.stderr);
+    let content_a =
+        std::fs::read_to_string(repo_a.join(".claude-plugin/marketplace.json")).unwrap();
+    let v_a: serde_json::Value = serde_json::from_str(&content_a).expect("valid JSON");
+    assert_eq!(
+        v_a["plugins"][0]["description"], "TODO: describe this plugin",
+        "case A: description must be the placeholder when no mind.toml: {content_a}"
+    );
+
+    // Case B: mind.toml exists but [source].description is empty.
+    let repo_b = sb.base.join("placeholder-b");
+    write(
+        &repo_b.join("skills/plan/SKILL.md"),
+        "---\ndescription: plan\n---\n# plan\n",
+    );
+    write(&repo_b.join("mind.toml"), "[source]\ndescription = \"\"\n");
+    let r = sb.mind(&["init-source", repo_b.to_str().unwrap(), "--marketplace"]);
+    assert!(r.success, "case B failed: {} {}", r.stdout, r.stderr);
+    let content_b =
+        std::fs::read_to_string(repo_b.join(".claude-plugin/marketplace.json")).unwrap();
+    let v_b: serde_json::Value = serde_json::from_str(&content_b).expect("valid JSON");
+    assert_eq!(
+        v_b["plugins"][0]["description"], "TODO: describe this plugin",
+        "case B: description must be the placeholder when description is empty: {content_b}"
+    );
+}
+
+#[test]
+fn init_source_namespace_updates_existing_mindtoml() {
+    // spec: INIT-11
+    // When --namespace is passed and mind.toml already exists, the prefix key is
+    // inserted or updated in the existing file without destroying its other content.
+    let sb = Sandbox::new();
+
+    // Case A: existing mind.toml without a prefix key -- prefix is inserted.
+    let repo_a = sb.base.join("ns-existing-a");
+    write(
+        &repo_a.join("skills/deploy/SKILL.md"),
+        "---\ndescription: deploy\n---\n# deploy\n",
+    );
+    write(
+        &repo_a.join("mind.toml"),
+        "[source]\ndescription = \"my source\"\n",
+    );
+    let r = sb.mind(&[
+        "init-source",
+        repo_a.to_str().unwrap(),
+        "--namespace",
+        "mypkg",
+    ]);
+    assert!(r.success, "case A failed: {} {}", r.stdout, r.stderr);
+    let toml_a = std::fs::read_to_string(repo_a.join("mind.toml")).unwrap();
+    assert!(
+        toml_a.contains("prefix = \"mypkg\""),
+        "case A: prefix must be inserted: {toml_a}"
+    );
+    assert!(
+        toml_a.contains("description = \"my source\""),
+        "case A: existing content must be preserved: {toml_a}"
+    );
+
+    // Case B: existing mind.toml with a different prefix -- prefix is replaced.
+    let repo_b = sb.base.join("ns-existing-b");
+    write(
+        &repo_b.join("skills/deploy/SKILL.md"),
+        "---\ndescription: deploy\n---\n# deploy\n",
+    );
+    write(
+        &repo_b.join("mind.toml"),
+        "[source]\nprefix = \"old\"\ndescription = \"my source\"\n",
+    );
+    let r = sb.mind(&[
+        "init-source",
+        repo_b.to_str().unwrap(),
+        "--namespace",
+        "new",
+    ]);
+    assert!(r.success, "case B failed: {} {}", r.stdout, r.stderr);
+    let toml_b = std::fs::read_to_string(repo_b.join("mind.toml")).unwrap();
+    assert!(
+        toml_b.contains("prefix = \"new\""),
+        "case B: prefix must be updated to new: {toml_b}"
+    );
+    assert!(
+        !toml_b.contains("prefix = \"old\""),
+        "case B: old prefix must be gone: {toml_b}"
+    );
+    assert!(
+        toml_b.contains("description = \"my source\""),
+        "case B: other content must be preserved: {toml_b}"
+    );
+}
+
+#[test]
+fn init_source_namespace_overrides_existing_prefix_in_marketplace() {
+    // spec: INIT-10 INIT-11
+    // When mind.toml already has [source].prefix = "old" but --namespace "new" is
+    // passed, the generated marketplace.json uses "new" as the plugin name
+    // (--namespace beats [source].prefix, INIT-11) and mind.toml is updated so
+    // the stored prefix also becomes "new".
+    let sb = Sandbox::new();
+    let repo = sb.base.join("ns-override");
+    write(
+        &repo.join("skills/lint/SKILL.md"),
+        "---\ndescription: lint\n---\n# lint\n",
+    );
+    write(
+        &repo.join("mind.toml"),
+        "[source]\nprefix = \"old\"\ndescription = \"lint tools\"\n",
+    );
+    let dir = repo.to_str().unwrap();
+    let r = sb.mind(&["init-source", dir, "--marketplace", "--namespace", "new"]);
+    assert!(r.success, "failed: {} {}", r.stdout, r.stderr);
+
+    // marketplace.json must use "new", not "old" or the dirname.
+    let content = std::fs::read_to_string(repo.join(".claude-plugin/marketplace.json")).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&content).expect("valid JSON");
+    assert_eq!(
+        v["name"], "new",
+        "top-level name must be the --namespace value: {content}"
+    );
+    assert_eq!(
+        v["plugins"][0]["name"], "new",
+        "plugin entry name must be --namespace value: {content}"
+    );
+    // description comes from existing mind.toml [source].description.
+    assert_eq!(
+        v["plugins"][0]["description"], "lint tools",
+        "description from existing mind.toml must be preserved: {content}"
+    );
+
+    // mind.toml must have the prefix updated to "new".
+    let toml = std::fs::read_to_string(repo.join("mind.toml")).unwrap();
+    assert!(
+        toml.contains("prefix = \"new\""),
+        "mind.toml prefix must be updated to 'new': {toml}"
+    );
+    assert!(
+        !toml.contains("prefix = \"old\""),
+        "old prefix must no longer be present: {toml}"
+    );
+}

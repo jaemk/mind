@@ -127,6 +127,8 @@ const ALLOWLIST: &[&str] = &[
     //   HARN-4 (presets) from src/paths.rs + tests/cli_lobes.rs, HARN-5
     //   (auto-detect-and-prompt) from src/paths.rs + tests/cli_lobes.rs, and
     //   HARN-6 (verbatim link, no frontmatter rewrite) from tests/cli_lobes.rs.
+    //   HARN-7 (backfill on lobe-add) and HARN-8 (introspect --fix missing-lobe
+    //   coverage) are cited from tests/cli_lobes.rs.
     //   cross-source skill/rule/tool collision detection: NS-43 (detection) and
     //   NS-45 (non-interactive error) are now implemented and cited from
     //   src/error.rs and src/commands.rs. NS-44 (interactive TTY prompt) requires
