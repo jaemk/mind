@@ -80,7 +80,7 @@ it only adds a lobe with `--yes` or an interactive TTY confirm. `--json` emits t
 detection result as structured JSON (HARN-5).
 
 `mind config lobes list` shows the `kinds` filter for each lobe (e.g.
-`~/.gemini [skill, agent]`); a lobe with no filter shows just the path. `mind
+`~/.gemini/config [skill]`); a lobe with no filter shows just the path. `mind
 config show` uses the same format.
 
 ### Frontmatter portability
