@@ -16,12 +16,13 @@ use crate::mindfile::AuthFailureAction;
 use crate::mindfile::HookEvent;
 use crate::mindfile::MindToml;
 use crate::paths::Paths;
+use crate::plugin_manifest;
 use crate::policy::Policy;
 use crate::resolve::{
     is_glob, parse_item_ref, resolve, select, select_by_bare_refs, select_installed,
     source_matches, source_matches_glob,
 };
-use crate::source::{Pin, Registry, parse_spec};
+use crate::source::{ManifestOrigin, Pin, Registry, parse_spec};
 
 /// `mind meld <repo> [--as <prefix>] [--root <dir>] [--follow-branch|--pin-tag|--pin-ref]`
 /// — register and clone a source.
@@ -110,10 +111,14 @@ pub fn maybe_probe_hint(paths: &Paths, repo: &str) -> Result<()> {
     let Some(source) = registry.find(&name) else {
         return Ok(());
     };
-    let curates = MindToml::load(&source.clone_dir(paths))?
+    let clone_dir = source.clone_dir(paths);
+    let curates = MindToml::load(&clone_dir)?
         .and_then(|m| m.discover)
         .is_some_and(|d| !d.sources.is_empty());
-    if curates {
+    // MKT-7: a marketplace source is also a curated super-source; fire the
+    // probe hint so the user knows to browse what became available.
+    let has_marketplace = plugin_manifest::find_marketplace_manifest(&clone_dir).is_some();
+    if curates || has_marketplace {
         println!(
             "note: this source curates other sources; run `mind probe` to browse and search what is available"
         );
@@ -551,6 +556,22 @@ fn meld_recursive(
     // Persist the consumer's --root override (STO-17, DSC-51).
     // DSC-52: if --root is given for an authoritative source, print a note.
     let is_authoritative = mindfile.as_ref().is_some_and(|m| m.is_authoritative());
+
+    // MKT-2: when the source has an authoritative mind.toml, the plugin-manifest
+    // layer is suppressed. Emit an advisory note so the user is not surprised to
+    // find the manifest silently ignored. Both plugin.json and marketplace.json
+    // trigger the note; catalog.rs stays quiet and leaves reporting here.
+    if is_authoritative && !out.json {
+        let has_plugin = plugin_manifest::find_plugin_manifest(&dir).is_some();
+        let has_marketplace = plugin_manifest::find_marketplace_manifest(&dir).is_some();
+        if has_plugin || has_marketplace {
+            println!(
+                "note: {} uses an authoritative mind.toml; its .claude-plugin/ manifest is ignored",
+                source.name
+            );
+        }
+    }
+
     if !roots.is_empty() {
         if is_authoritative {
             // spec: DSC-52
@@ -662,6 +683,18 @@ fn meld_recursive(
         );
     }
 
+    // MKT-4: for a single-plugin source, report any unsupported component kinds
+    // (hooks, mcp servers, etc.) that were silently dropped. This is advisory and
+    // never a silent drop: the user sees a count so they are not misled into
+    // thinking the plugin is fully represented. Only for plugin.json sources
+    // (not marketplace catalogs, not convention-discovered sources).
+    if !is_authoritative && !out.json && plugin_manifest::find_plugin_manifest(&dir).is_some() {
+        let skipped_comps = catalog::plugin_skipped_components(&dir);
+        if let Some(summary) = skipped_comps.summary() {
+            println!("note: {summary}");
+        }
+    }
+
     // Install hooks (HOOK-50..60): the working tree is now checked out at the
     // resolved pin, so hooks run in the right tree. A fresh meld runs every
     // (as-yet-unrun) install hook.
@@ -695,6 +728,28 @@ fn meld_recursive(
                 let _ = std::fs::remove_dir_all(&dir);
             }
             return Err(e);
+        }
+    }
+
+    // MKT-6/MKT-10: record plugin/marketplace provenance and metadata when the
+    // source came from a Claude plugin manifest (not suppressed by an authoritative
+    // mind.toml). The description from plugin.json fills in only when mind.toml
+    // [source].description has not already set it (DSC-32 precedence). Strings
+    // from the manifest are passed through strip_ansi to prevent terminal injection
+    // (MKT-9/DSC-69).
+    if !is_authoritative {
+        if let Some(plugin_path) = plugin_manifest::find_plugin_manifest(&dir) {
+            source.origin = Some(ManifestOrigin::ClaudePlugin);
+            if let Ok(pm) = plugin_manifest::load_plugin_manifest(&plugin_path) {
+                source.plugin_version = pm.version;
+                if source.description.is_none() {
+                    source.description = pm.description.map(|d| strip_ansi(&d));
+                }
+            }
+        } else if plugin_manifest::find_marketplace_manifest(&dir).is_some() {
+            // The marketplace-level origin; per-entry origins are set below (Section C)
+            // after each sub-source is recursively melded.
+            source.origin = Some(ManifestOrigin::ClaudeMarketplace);
         }
     }
 
@@ -813,6 +868,92 @@ fn meld_recursive(
             }
         }
     }
+
+    // MKT-7/MKT-8: marketplace catalog as a curated super-source. When the
+    // melded source has a .claude-plugin/marketplace.json (and no authoritative
+    // mind.toml), iterate its entries and meld each as a sub-source, reusing the
+    // same [discover].sources machinery. This is an additive pass that runs after
+    // the mind.toml nested-source loop above.
+    if !is_authoritative
+        && let Some(marketplace_path) = plugin_manifest::find_marketplace_manifest(&dir)
+    {
+        match plugin_manifest::load_marketplace_manifest(&marketplace_path) {
+            Ok(manifest) => {
+                for entry in manifest.into_entries() {
+                    // belt-and-suspenders: into_entries() already validates
+                    // in-repo paths, so this is a redundant safety check.
+                    if let plugin_manifest::PluginSource::InRepo { ref path } = entry.source
+                        && !plugin_manifest::is_safe_manifest_path(path)
+                    {
+                        return Err(MindError::MindToml {
+                            path: marketplace_path.clone(),
+                            msg: format!(
+                                "marketplace.json: in-repo plugin path {:?} is unsafe",
+                                path
+                            ),
+                        });
+                    }
+                    let repo_spec = marketplace_entry_spec(&entry, &dir);
+                    let entry_name = entry.name.clone();
+                    let entry_version = entry.version;
+                    let entry_description = entry.description;
+                    // Recurse exactly like [discover].sources: cycle-safe
+                    // via visited, no consumer pin or roots, no install hook.
+                    match meld_recursive(
+                        paths,
+                        registry,
+                        &repo_spec,
+                        Some(entry_name.clone()),
+                        vec![],
+                        false,
+                        None,  // no consumer pin
+                        false, // nested, not top-level
+                        visited,
+                        policy,
+                        None, // no install hook override
+                        dangerously_skip_hook_check,
+                        prefer_ssh,
+                        None, // no curator config
+                        skipped,
+                    ) {
+                        Ok(n) => {
+                            added += n;
+                            // MKT-8: marketplace entry fields are authoritative
+                            // over the sub-source's own plugin.json. After the
+                            // recursive meld, find the just-registered sub-source
+                            // by its computed name and overwrite any fields the
+                            // entry supplies (entry wins when both supply a value).
+                            if let Ok(sub_spec) = parse_spec(&repo_spec)
+                                && let Some(sub) = registry
+                                    .sources
+                                    .iter_mut()
+                                    .find(|s| s.name == sub_spec.name)
+                            {
+                                // Always tag as ClaudeMarketplace regardless of
+                                // what the sub-source's own plugin.json says.
+                                sub.origin = Some(ManifestOrigin::ClaudeMarketplace);
+                                if entry_version.is_some() {
+                                    sub.plugin_version = entry_version;
+                                }
+                                if entry_description.is_some() {
+                                    sub.description = entry_description.map(|d| strip_ansi(&d));
+                                }
+                            }
+                        }
+                        Err(e) if git::is_auth_failure(&e) => {
+                            // No on_auth_failure is defined for marketplace
+                            // entries (no curator config); an auth failure
+                            // propagates as a generic error.
+                            return Err(e);
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
     Ok(added)
 }
 
@@ -840,6 +981,37 @@ fn strip_ansi(s: &str) -> String {
                 )
         })
         .collect()
+}
+
+/// Return the display token for a source's manifest origin (MKT-10).
+///
+/// The token is prepended with a space so it can be concatenated directly into
+/// the bracketed metadata string `[commit ns hook origin]`. Returns an empty
+/// string when the source has no recorded origin (convention / mind.toml source).
+fn origin_label(origin: Option<ManifestOrigin>) -> String {
+    match origin {
+        None => String::new(),
+        Some(ManifestOrigin::ClaudePlugin) => " origin:claude-plugin".to_string(),
+        Some(ManifestOrigin::ClaudeMarketplace) => " origin:claude-marketplace".to_string(),
+    }
+}
+
+/// Resolve a [`plugin_manifest::MarketplaceEntry`] to the repo spec string
+/// needed by `meld_recursive`.
+///
+/// - `External { spec }`: the spec is used verbatim (passed to `parse_spec`).
+/// - `InRepo { path }`: the path is joined onto `clone_dir` to produce an
+///   absolute local path, which `parse_spec` recognises as a local source.
+fn marketplace_entry_spec(
+    entry: &plugin_manifest::MarketplaceEntry,
+    clone_dir: &std::path::Path,
+) -> String {
+    match &entry.source {
+        plugin_manifest::PluginSource::External { spec } => spec.clone(),
+        plugin_manifest::PluginSource::InRepo { path } => {
+            clone_dir.join(path).to_string_lossy().into_owned()
+        }
+    }
 }
 
 /// Build the human-readable lines for an auth failure of a nested source, per
@@ -2255,8 +2427,49 @@ pub fn install_curated_sources(
                 queue.push(spec.name);
             }
         }
+        // MKT-7: a marketplace catalog is a curated super-source too. Its in-repo
+        // plugins are offered for install on meld like the catalog's own items
+        // (CLI-23); its external plugins are register-only unless `all`
+        // (--recursive, DSC-55), mirroring the DSC-54 default for nested sources.
+        for (spec, in_repo) in marketplace_subsources(paths, source)? {
+            if !visited.insert(spec.name.clone()) {
+                continue;
+            }
+            if registry.find(&spec.name).is_some() {
+                if all || in_repo {
+                    install_source_items(paths, &spec.name, flow)?;
+                }
+                queue.push(spec.name);
+            }
+        }
     }
     Ok(())
+}
+
+/// Resolve the marketplace sub-sources a source curates (MKT-7): each
+/// `.claude-plugin/marketplace.json` entry mapped to `(parsed source spec,
+/// is_in_repo)`. Empty when the source has no marketplace manifest or an
+/// authoritative `mind.toml` suppresses it (MKT-2). In-repo entries install by
+/// default; external entries are register-only unless `--recursive`.
+fn marketplace_subsources(
+    paths: &Paths,
+    source: &crate::source::Source,
+) -> Result<Vec<(crate::source::Source, bool)>> {
+    let clone = source.clone_dir(paths);
+    if MindToml::load(&clone)?.is_some_and(|m| m.is_authoritative()) {
+        return Ok(Vec::new());
+    }
+    let Some(mp) = plugin_manifest::find_marketplace_manifest(&clone) else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for entry in plugin_manifest::load_marketplace_manifest(&mp)?.into_entries() {
+        let in_repo = matches!(entry.source, plugin_manifest::PluginSource::InRepo { .. });
+        if let Ok(spec) = parse_spec(&marketplace_entry_spec(&entry, &clone)) {
+            out.push((spec, in_repo));
+        }
+    }
+    Ok(out)
 }
 
 /// Install `source_name`'s items silently (no JSON emitted by `learn`) and
@@ -2330,6 +2543,20 @@ pub(crate) fn install_curated_sources_for_json(
                         }
                     }
                 } else if ns.install {
+                    let (keys, _) = install_source_items_for_json(paths, &spec.name, flow)?;
+                    all_keys.extend(keys);
+                }
+                queue.push(spec.name);
+            }
+        }
+        // MKT-7: marketplace sub-sources (in-repo install by default, external
+        // only under `--recursive`). Mirrors `install_curated_sources`.
+        for (spec, in_repo) in marketplace_subsources(paths, source)? {
+            if !visited.insert(spec.name.clone()) {
+                continue;
+            }
+            if registry.find(&spec.name).is_some() {
+                if all || in_repo {
                     let (keys, _) = install_source_items_for_json(paths, &spec.name, flow)?;
                     all_keys.extend(keys);
                 }
@@ -3501,6 +3728,45 @@ pub fn sync(paths: &Paths, then_upgrade: bool, dangerously_skip_hook_check: bool
                 });
             }
         }
+        // MKT-7/DSC-57: also re-walk .claude-plugin/marketplace.json from registered
+        // sources. For each marketplace source, add newly-listed plugin entries that
+        // are not already registered. Additive only: a removed entry stays registered
+        // (removal is an explicit `unmeld`). Cycle-safe via the visited set below.
+        for s in &registry.sources {
+            let clone_dir = s.clone_dir(paths);
+            // An authoritative mind.toml suppresses the marketplace manifest (MKT-2).
+            let is_authoritative_source = MindToml::load(&clone_dir)
+                .ok()
+                .flatten()
+                .is_some_and(|m| m.is_authoritative());
+            if is_authoritative_source {
+                continue;
+            }
+            let marketplace_path = plugin_manifest::marketplace_manifest_path(&clone_dir);
+            if !marketplace_path.is_file() {
+                continue;
+            }
+            // Skip parse errors during sync re-walk (advisory; a bad manifest
+            // was already surfaced at meld time).
+            let Ok(manifest) = plugin_manifest::load_marketplace_manifest(&marketplace_path) else {
+                continue;
+            };
+            for entry in manifest.into_entries() {
+                let repo_spec = marketplace_entry_spec(&entry, &clone_dir);
+                nested.push(NestedTodo {
+                    spec: repo_spec,
+                    alias: Some(entry.name),
+                    curated: CuratedConfig {
+                        pin: None,
+                        roots: None,
+                        flat_skills: false,
+                        hooks: Vec::new(),
+                    },
+                    on_auth_failure: None,
+                });
+            }
+        }
+
         // Seed the cycle guard with every registered URL so an existing source is
         // skipped without a clone attempt.
         let mut visited: HashSet<String> = registry.sources.iter().map(|s| s.url.clone()).collect();
@@ -4079,11 +4345,14 @@ pub fn recall(
                     1 => " hook".to_string(),
                     n => format!(" hooks({n})"),
                 };
+                // MKT-10: show the manifest origin so a native-plugin source is
+                // distinguishable from a convention or mind.toml source.
+                let origin = origin_label(s.origin);
                 vec![
                     out.bullet(),
                     s.name.clone(),
                     out.dim(&s.url),
-                    out.dim(&format!("[{commit}{ns}{hook}]")),
+                    out.dim(&format!("[{commit}{ns}{hook}{origin}]")),
                     s.description.clone().unwrap_or_default(),
                 ]
             })
@@ -4250,11 +4519,14 @@ pub fn recall(
             1 => " hook".to_string(),
             n => format!(" hooks({n})"),
         };
+        // MKT-10: show the manifest origin in the source header so the
+        // provenance is visible in the default recall view too.
+        let origin = origin_label(s.origin);
         println!(
             "{} {}  {}{}",
             out.bullet(),
             out.bold(&s.name),
-            out.dim(&format!("[{commit}{ns}{hook}]")),
+            out.dim(&format!("[{commit}{ns}{hook}{origin}]")),
             s.description
                 .as_deref()
                 .map(|d| format!("  {d}"))
@@ -6288,6 +6560,95 @@ mod tests {
         let reg = Registry::load(&paths).unwrap();
         assert_eq!(reg.sources[0].alias, None);
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ----- MKT-10: origin_label mapping -----
+
+    #[test]
+    fn origin_label_none_returns_empty() {
+        assert_eq!(
+            origin_label(None),
+            "",
+            "no origin -> empty string (no extra token)"
+        );
+    }
+
+    #[test]
+    fn origin_label_claude_plugin_returns_token() {
+        let label = origin_label(Some(ManifestOrigin::ClaudePlugin));
+        assert_eq!(
+            label, " origin:claude-plugin",
+            "ClaudePlugin must produce the 'origin:claude-plugin' token with leading space"
+        );
+    }
+
+    #[test]
+    fn origin_label_claude_marketplace_returns_token() {
+        let label = origin_label(Some(ManifestOrigin::ClaudeMarketplace));
+        assert_eq!(
+            label, " origin:claude-marketplace",
+            "ClaudeMarketplace must produce the 'origin:claude-marketplace' token with leading space"
+        );
+    }
+
+    // ----- MKT-7: marketplace_entry_spec helper -----
+
+    #[test]
+    fn marketplace_entry_spec_external_passes_spec_through() {
+        let entry = plugin_manifest::MarketplaceEntry {
+            name: "my-plugin".to_string(),
+            source: plugin_manifest::PluginSource::External {
+                spec: "owner/my-plugin".to_string(),
+            },
+            version: None,
+            description: None,
+        };
+        let clone_dir = std::path::Path::new("/some/catalog/clone");
+        let spec = marketplace_entry_spec(&entry, clone_dir);
+        assert_eq!(
+            spec, "owner/my-plugin",
+            "External spec must pass through verbatim"
+        );
+    }
+
+    #[test]
+    fn marketplace_entry_spec_in_repo_joins_onto_clone_dir() {
+        let entry = plugin_manifest::MarketplaceEntry {
+            name: "embedded".to_string(),
+            source: plugin_manifest::PluginSource::InRepo {
+                path: "plugins/embedded".to_string(),
+            },
+            version: None,
+            description: None,
+        };
+        let clone_dir = std::path::Path::new("/home/user/.mind/sources/local/owner/catalog");
+        let spec = marketplace_entry_spec(&entry, clone_dir);
+        assert_eq!(
+            spec, "/home/user/.mind/sources/local/owner/catalog/plugins/embedded",
+            "InRepo spec must be clone_dir joined with the in-repo path"
+        );
+    }
+
+    #[test]
+    fn marketplace_entry_spec_in_repo_dotslash_prefix() {
+        // A relative path like "./plugins/p1" (validated safe by load_marketplace_manifest)
+        // is joined onto clone_dir and the result is a usable local path.
+        let entry = plugin_manifest::MarketplaceEntry {
+            name: "p1".to_string(),
+            source: plugin_manifest::PluginSource::InRepo {
+                path: "./plugins/p1".to_string(),
+            },
+            version: None,
+            description: None,
+        };
+        let clone_dir = std::path::Path::new("/repo");
+        let spec = marketplace_entry_spec(&entry, clone_dir);
+        // Path::join normalises "./" on the joined string; the key property is
+        // that the spec resolves inside clone_dir.
+        assert!(
+            spec.starts_with("/repo"),
+            "InRepo spec with ./ prefix must still be rooted inside clone_dir: {spec}"
+        );
     }
 
     /// `offer_save_absorb_to(yes=true)` writes `absorb_to` into config.toml,

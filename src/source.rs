@@ -41,6 +41,20 @@ pub struct RecordedHook {
     pub ran_at: Option<String>,
 }
 
+/// How a source's items were discovered, when they came from a Claude plugin
+/// manifest rather than convention or `mind.toml` (MKT-10). Recorded at meld
+/// time and shown by `recall --sources` / the probe source view so a
+/// native-plugin source is distinguishable from a convention or `mind.toml`
+/// source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ManifestOrigin {
+    /// Items came from a single `.claude-plugin/plugin.json`.
+    ClaudePlugin,
+    /// Items came from a `.claude-plugin/marketplace.json` catalog.
+    ClaudeMarketplace,
+}
+
 /// One melded source repo.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Source {
@@ -82,6 +96,18 @@ pub struct Source {
     /// `[source].flat-skills` or the `skills/` container (DSC-74).
     #[serde(default)]
     pub flat_skills: bool,
+    /// The manifest origin of this source's items (MKT-10), when they came from
+    /// a Claude plugin manifest (`.claude-plugin/plugin.json` or
+    /// `marketplace.json`). `None` for a convention- or `mind.toml`-discovered
+    /// source. Persisted at meld; shown by `recall --sources` / probe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<ManifestOrigin>,
+    /// The plugin `version` declared in a `.claude-plugin` manifest (MKT-6),
+    /// recorded for display only. Informational: drift/upgrade still compare
+    /// source content hash and commit, never this value. `None` when the source
+    /// did not come from a plugin manifest or declared no version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_version: Option<String>,
     /// The install hooks recorded for this source (HOOK-55). Supersedes the
     /// legacy single `install_hook`/`install_hook_commit` pair, which is
     /// migrated into this on load. Each entry records the command and the commit
@@ -270,6 +296,8 @@ fn make_source(host: &str, owner: &str, repo: &str, url: String) -> Source {
         pin: Pin::default(),
         roots: None,
         flat_skills: false,
+        origin: None,
+        plugin_version: None,
         install_hooks: Vec::new(),
         install_hook: None,
         install_hook_commit: None,
@@ -795,5 +823,50 @@ mod tests {
         assert_eq!(pending.len(), 2);
         assert_eq!(pending[0].command, "hook-a");
         assert_eq!(pending[1].command, "hook-b");
+    }
+
+    #[test]
+    fn origin_and_version_round_trip() {
+        let mut s = parse_spec("acme/tools").unwrap();
+        s.origin = Some(ManifestOrigin::ClaudePlugin);
+        s.plugin_version = Some("1.2.3".into());
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(
+            json.contains("\"claude-plugin\""),
+            "serialized JSON must contain the kebab-case origin label"
+        );
+        assert!(
+            json.contains("\"1.2.3\""),
+            "serialized JSON must contain the plugin version"
+        );
+        let back: Source = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.origin, Some(ManifestOrigin::ClaudePlugin));
+        assert_eq!(back.plugin_version.as_deref(), Some("1.2.3"));
+    }
+
+    #[test]
+    fn absent_origin_defaults_to_none_and_omits_keys() {
+        // A legacy sources.json with no origin/plugin_version fields deserializes
+        // with both as None.
+        let legacy = r#"{"name":"local/a/b","url":"/a/b","host":"local","owner":"a","repo":"b"}"#;
+        let src: Source = serde_json::from_str(legacy).unwrap();
+        assert_eq!(src.origin, None, "absent origin must default to None");
+        assert_eq!(
+            src.plugin_version, None,
+            "absent plugin_version must default to None"
+        );
+
+        // A freshly constructed source (both fields None) must not emit the keys
+        // at all (skip_serializing_if = "Option::is_none").
+        let fresh = parse_spec("acme/tools").unwrap();
+        let json = serde_json::to_string(&fresh).unwrap();
+        assert!(
+            !json.contains("\"origin\""),
+            "origin must be absent from JSON when None"
+        );
+        assert!(
+            !json.contains("\"plugin_version\""),
+            "plugin_version must be absent from JSON when None"
+        );
     }
 }

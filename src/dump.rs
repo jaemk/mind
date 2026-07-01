@@ -332,6 +332,8 @@ mod tests {
             pin: crate::source::Pin::default(),
             roots: None,
             flat_skills: false,
+            origin: None,
+            plugin_version: None,
             install_hooks: vec![],
             install_hook: None,
             install_hook_commit: None,

@@ -100,7 +100,7 @@ and verified.
 | TUI: keep the highlighted row in the middle two-thirds (scroll margin) | done | TUI-16 |
 | TUI: Enter opens a details dialog with the node's valid actions | done | TUI-26 |
 | Cross-harness lobes: per-lobe `kinds` filter, non-Claude home presets (Gemini/Codex/Antigravity), auto-detect-and-prompt | done | [harness-lobes.md](harness-lobes.md) (HARN-1..6) |
-| Consume Claude plugin marketplaces: `.claude-plugin/marketplace.json` + `plugin.json` read as a discovery source, own store+symlink install unchanged | planned | [marketplace.md](marketplace.md) (MKT-1..11) |
+| Consume Claude plugin marketplaces: `.claude-plugin/marketplace.json` + `plugin.json` read as a discovery source, own store+symlink install unchanged | done | [marketplace.md](marketplace.md) (MKT-1..11) |
 
 ## Documents
 

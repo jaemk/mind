@@ -15,6 +15,7 @@ mod manifest;
 mod mindfile;
 mod namespace;
 mod paths;
+mod plugin_manifest;
 mod policy;
 mod render;
 mod resolve;

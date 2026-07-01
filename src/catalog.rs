@@ -18,6 +18,7 @@ use crate::frontmatter;
 use crate::mindfile::{Discover, HookEvent, ItemDecl, KindGlobs, MindToml, ResolvedHook};
 use crate::namespace;
 use crate::paths::Paths;
+use crate::plugin_manifest;
 use crate::source::{Registry, Source};
 
 /// One installable item discovered in a source.
@@ -243,6 +244,59 @@ pub(crate) fn scan_source_at(
             Ok(())
         }
         ref mt => {
+            // MKT-1/MKT-2: Single-plugin discovery layer.
+            //
+            // Check for `.claude-plugin/plugin.json` at the clone root BEFORE
+            // falling back to convention discovery. When present, the plugin manifest
+            // is the authoritative item source and convention discovery is skipped
+            // (MKT-2). A `.claude-plugin/marketplace.json` (catalog super-source) is
+            // handled by commands.rs at meld time (shard 4) and is NOT processed here.
+            //
+            // This branch is only reached when mind.toml is absent or `[source]`-only
+            // (non-authoritative). An authoritative mind.toml suppresses the plugin
+            // manifest -- that is handled in the `Some(mt) if mt.is_authoritative()`
+            // arm above. The "found and ignored" NOTE for that case is
+            // commands.rs's responsibility (shard 4); catalog stays quiet (MKT-2).
+            if let Some(plugin_path) = plugin_manifest::find_plugin_manifest(clone_root) {
+                // Load the plugin manifest; a parse error propagates as MindToml (MKT-9).
+                let manifest = plugin_manifest::load_plugin_manifest(&plugin_path)?;
+
+                // Effective prefix (MKT-5): alias > mind.toml [source].prefix > plugin name.
+                // The `prefix` variable above already resolved alias and mindfile prefix.
+                // If it is still `None` AND no explicit override was declared, use the
+                // plugin name as the default prefix. An explicitly-empty alias or mindfile
+                // prefix suppresses the plugin-name fallback (user intentionally cleared it).
+                let plugin_prefix = if source.alias.is_some()
+                    || mt.as_ref().and_then(|m| m.source.prefix.as_ref()).is_some()
+                {
+                    // A prefix was explicitly set (possibly to "" = cleared). Respect it.
+                    prefix.clone()
+                } else {
+                    // No explicit prefix; try the plugin name as the default (MKT-5).
+                    let plugin_name = manifest.name.trim().to_string();
+                    // Resilience (NS-25): if the plugin name is a reserved kind word
+                    // (e.g. "skill", "agent"), do NOT use it as a prefix. Prefer
+                    // silently falling through to no prefix over making the whole source
+                    // un-meldable -- a plugin you don't control should not block install.
+                    match namespace::validate_prefix(&plugin_name) {
+                        Ok(()) if !plugin_name.is_empty() => Some(plugin_name),
+                        _ => None,
+                    }
+                };
+
+                // MKT-3: map skills/<n>/SKILL.md -> Skill, agents/<n>.md -> Agent.
+                // Flat-skills and [source].roots knobs do NOT apply to a plugin.
+                scan_plugin_components(clone_root, source, &plugin_prefix, out)?;
+
+                // MKT-6/DSC-32: The plugin-level `description` describes the source
+                // (not each item); recording it on the Source is commands.rs's job
+                // (shard 4). Per-item descriptions continue to come from frontmatter.
+
+                return Ok(());
+            }
+
+            // No plugin manifest found; fall through to the existing convention scan.
+
             // spec: DSC-50 / DSC-51 — resolve the effective scan roots:
             //   source.roots (--root override) wins; else mindfile [source].roots;
             //   else implicit single root of the repo root.
@@ -709,6 +763,8 @@ mod lifecycle_tests {
             pin: Pin::default(),
             roots: None,
             flat_skills: false,
+            origin: None,
+            plugin_version: None,
             install_hooks: Vec::new(),
             install_hook: None,
             install_hook_commit: None,
@@ -1061,6 +1117,65 @@ mod lifecycle_tests {
     }
 }
 
+/// Scan a plugin root for skills and agents only (MKT-3).
+///
+/// A plugin's component layout matches `mind`'s convention layout (DSC-10, DSC-11):
+/// `skills/<name>/SKILL.md` -> Skill, `agents/<name>.md` -> Agent. Rules and tools
+/// have no plugin equivalent and are not emitted. The flat-skills knob and
+/// `[source].roots` do not apply to a plugin.
+fn scan_plugin_components(
+    plugin_root: &Path,
+    source: &Source,
+    prefix: &Option<String>,
+    out: &mut Vec<CatalogItem>,
+) -> Result<()> {
+    // Skills: skills/<name>/SKILL.md at the plugin root (DSC-10, MKT-3).
+    let skills_dir = plugin_root.join(ItemKind::Skill.dir());
+    for entry in read_dir_opt(&skills_dir)? {
+        let skill_md = entry.join("SKILL.md");
+        if entry.is_dir() && skill_md.is_file() {
+            out.push(make_item(source, prefix, ItemKind::Skill, entry, &skill_md));
+        }
+    }
+    // Agents: agents/<name>.md at the plugin root (DSC-11, MKT-3).
+    // NS-40: agent_harness_name reads frontmatter `name:` just as convention does.
+    let agents_dir = plugin_root.join(ItemKind::Agent.dir());
+    for entry in read_dir_opt(&agents_dir)? {
+        if entry.is_file() && entry.extension().is_some_and(|e| e == "md") {
+            out.push(make_item(
+                source,
+                prefix,
+                ItemKind::Agent,
+                entry.clone(),
+                &entry,
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Count unsupported Claude plugin components present at a plugin root (MKT-4).
+///
+/// Checks for directory-based components: `commands/` and `hooks/` (which have no
+/// `mind` equivalent), and a `.mcp.json` file (mcpServers). Manifest-declared keys
+/// beyond these (lsp servers, monitors, themes, output styles) are not counted here
+/// because they leave no directory marker — they would require re-parsing the
+/// manifest. This is a dir-based heuristic; commands.rs (shard 4) calls this at
+/// meld time and prints the summary via `SkippedComponents::summary`.
+pub fn plugin_skipped_components(plugin_root: &Path) -> plugin_manifest::SkippedComponents {
+    let mut sc = plugin_manifest::SkippedComponents::default();
+    if plugin_root.join("commands").is_dir() {
+        sc.commands = 1;
+    }
+    if plugin_root.join("hooks").is_dir() {
+        sc.hooks = 1;
+    }
+    if plugin_root.join(".mcp.json").is_file() {
+        sc.mcp_servers = 1;
+    }
+    sc
+}
+
 /// The file whose frontmatter describes an item (SKILL.md for a skill, TOOL.md
 /// for a tool, the item file itself for an agent/rule). The file may be absent
 /// for a tool (it is optional), in which case frontmatter reads yield `None`.
@@ -1166,6 +1281,8 @@ mod tests {
             pin: Pin::default(),
             roots: None,
             flat_skills: false,
+            origin: None,
+            plugin_version: None,
             install_hooks: Vec::new(),
             install_hook: None,
             install_hook_commit: None,
@@ -2321,5 +2438,479 @@ mod tests {
         let mut item = agent_item(p, "review");
         item.kind = ItemKind::Skill;
         assert_eq!(item.agent_harness_name(), None);
+    }
+}
+
+/// Plugin-manifest discovery tests (MKT-1..6).
+/// Note: spec IDs are added in tests/cli.rs (shard 5); these are unit tests only.
+#[cfg(test)]
+mod plugin_tests {
+    use super::*;
+    use crate::paths::Paths;
+    use crate::source::{Pin, Source};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static PLUGIN_COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    struct TmpDir(PathBuf);
+    impl TmpDir {
+        fn new() -> Self {
+            let n = PLUGIN_COUNTER.fetch_add(1, Ordering::SeqCst);
+            let p = std::env::temp_dir()
+                .join(format!("mind-catalog-plugin-{}-{n}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&p);
+            std::fs::create_dir_all(&p).unwrap();
+            TmpDir(p)
+        }
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+    impl Drop for TmpDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn write_file(path: &std::path::Path, contents: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+
+    fn make_plugin_source(clone: &std::path::Path) -> Source {
+        Source {
+            name: "local/test/plugin-repo".to_string(),
+            url: clone.to_string_lossy().into_owned(),
+            host: "local".to_string(),
+            owner: "test".to_string(),
+            repo: "plugin-repo".to_string(),
+            commit: None,
+            description: None,
+            alias: None,
+            pin: Pin::default(),
+            roots: None,
+            flat_skills: false,
+            origin: None,
+            plugin_version: None,
+            install_hooks: Vec::new(),
+            install_hook: None,
+            install_hook_commit: None,
+        }
+    }
+
+    fn paths_for(base: &std::path::Path) -> Paths {
+        Paths {
+            mind_home: base.to_path_buf(),
+            claude_home: base.join("claude"),
+        }
+    }
+
+    // Plugin.json with skill + agent is discovered; prefix from plugin name (MKT-1, MKT-3, MKT-5).
+    // Agent uses NS-40 harness-name from frontmatter. No rules or tools.
+    #[test]
+    fn plugin_json_discovers_skill_and_agent_with_plugin_name_prefix() {
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let clone = base.join("sources/local/test/plugin-repo");
+
+        write_file(
+            &clone.join(".claude-plugin/plugin.json"),
+            r#"{"name":"acme","version":"1.0","description":"Acme plugin"}"#,
+        );
+        write_file(
+            &clone.join("skills/foo/SKILL.md"),
+            "---\ndescription: foo skill\n---\n# foo\n",
+        );
+        // Agent with a distinct frontmatter name (NS-40 flattening)
+        write_file(
+            &clone.join("agents/bar.md"),
+            "---\nname: bar-agent\ndescription: bar agent\n---\n# bar\n",
+        );
+
+        let paths = paths_for(base);
+        let source = make_plugin_source(&clone);
+        let mut items = Vec::new();
+        scan_source(&paths, &source, &mut items).unwrap();
+
+        // Skill: bare name "foo", effective name "acme:foo"
+        let skill = items
+            .iter()
+            .find(|i| i.kind == ItemKind::Skill && i.name == "foo")
+            .expect("skill 'foo' must be discovered from plugin");
+        assert_eq!(
+            skill.effective_name(),
+            "acme:foo",
+            "skill must carry plugin name as prefix (MKT-5)"
+        );
+        assert_eq!(skill.prefix.as_deref(), Some("acme"));
+
+        // Agent: bare catalog name "bar" (file stem), harness name from frontmatter
+        let agent = items
+            .iter()
+            .find(|i| i.kind == ItemKind::Agent && i.name == "bar")
+            .expect("agent 'bar' must be discovered from plugin");
+        assert_eq!(
+            agent.agent_harness_name(),
+            Some("bar-agent".to_string()),
+            "agent harness name must come from frontmatter `name:` field (NS-40)"
+        );
+
+        // No rules or tools from a plugin (MKT-3)
+        assert!(
+            !items.iter().any(|i| i.kind == ItemKind::Rule),
+            "no rules must be emitted from a plugin (MKT-3)"
+        );
+        assert!(
+            !items.iter().any(|i| i.kind == ItemKind::Tool),
+            "no tools must be emitted from a plugin (MKT-3)"
+        );
+    }
+
+    // A plugin that ships rules/ and tools/ dirs at its root: those kinds have no
+    // plugin equivalent and must NOT be emitted (MKT-3). The existing discovery
+    // test asserts "no rules/tools" but its fixture has no such dirs, so it would
+    // pass even if the scan wrongly emitted them. This test creates real rules/ and
+    // tools/ trees to make the negative assertion load-bearing.
+    #[test]
+    fn plugin_rules_and_tools_dirs_present_are_not_emitted() {
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let clone = base.join("sources/local/test/plugin-repo");
+
+        write_file(
+            &clone.join(".claude-plugin/plugin.json"),
+            r#"{"name":"acme"}"#,
+        );
+        // A supported skill so the scan produces at least one item.
+        write_file(
+            &clone.join("skills/foo/SKILL.md"),
+            "---\ndescription: foo\n---\n# foo\n",
+        );
+        // A rules/ dir with a well-formed rule that convention discovery WOULD emit.
+        write_file(
+            &clone.join("rules/housestyle.md"),
+            "---\ndescription: a rule\n---\n# housestyle\n",
+        );
+        // A tools/ dir with a tool that convention discovery WOULD emit.
+        write_file(&clone.join("tools/helper/helper"), "#!/bin/sh\n");
+        write_file(
+            &clone.join("tools/helper/TOOL.md"),
+            "---\ndescription: a tool\n---\n# helper\n",
+        );
+
+        let paths = paths_for(base);
+        let source = make_plugin_source(&clone);
+        let mut items = Vec::new();
+        scan_source(&paths, &source, &mut items).unwrap();
+
+        assert!(
+            items
+                .iter()
+                .any(|i| i.kind == ItemKind::Skill && i.name == "foo"),
+            "the plugin's skill must still be discovered"
+        );
+        assert!(
+            !items.iter().any(|i| i.kind == ItemKind::Rule),
+            "a rules/ dir at a plugin root must NOT be emitted (MKT-3): {:?}",
+            items
+                .iter()
+                .map(|i| (i.kind, i.name.as_str()))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !items.iter().any(|i| i.kind == ItemKind::Tool),
+            "a tools/ dir at a plugin root must NOT be emitted (MKT-3): {:?}",
+            items
+                .iter()
+                .map(|i| (i.kind, i.name.as_str()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    // A plugin agent WITHOUT a frontmatter `name:` flattens to its file stem as
+    // the harness name (NS-40). The existing discovery test only covers an agent
+    // that DOES carry a frontmatter name, so the fallback branch on the plugin
+    // path was untested.
+    #[test]
+    fn plugin_agent_without_frontmatter_name_flattens_to_file_stem() {
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let clone = base.join("sources/local/test/plugin-repo");
+
+        write_file(
+            &clone.join(".claude-plugin/plugin.json"),
+            r#"{"name":"acme"}"#,
+        );
+        // Agent file `agents/nameless.md` with NO `name:` key in its frontmatter.
+        write_file(
+            &clone.join("agents/nameless.md"),
+            "---\ndescription: an agent with no name field\n---\n# nameless\n",
+        );
+
+        let paths = paths_for(base);
+        let source = make_plugin_source(&clone);
+        let mut items = Vec::new();
+        scan_source(&paths, &source, &mut items).unwrap();
+
+        let agent = items
+            .iter()
+            .find(|i| i.kind == ItemKind::Agent && i.name == "nameless")
+            .expect("plugin agent 'nameless' must be discovered");
+        assert_eq!(
+            agent.agent_harness_name(),
+            Some("nameless".to_string()),
+            "an agent with no frontmatter name must flatten to its file stem (NS-40)"
+        );
+    }
+
+    // Consumer alias overrides the plugin name as the effective prefix (MKT-5).
+    #[test]
+    fn consumer_alias_overrides_plugin_name_as_prefix() {
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let clone = base.join("sources/local/test/plugin-repo");
+
+        write_file(
+            &clone.join(".claude-plugin/plugin.json"),
+            r#"{"name":"acme"}"#,
+        );
+        write_file(
+            &clone.join("skills/foo/SKILL.md"),
+            "---\ndescription: foo\n---\n# foo\n",
+        );
+
+        let paths = paths_for(base);
+        let mut source = make_plugin_source(&clone);
+        source.alias = Some("z".to_string());
+        let mut items = Vec::new();
+        scan_source(&paths, &source, &mut items).unwrap();
+
+        let skill = items.iter().find(|i| i.name == "foo").unwrap();
+        assert_eq!(
+            skill.effective_name(),
+            "z:foo",
+            "consumer alias must override plugin name as prefix (MKT-5)"
+        );
+    }
+
+    // Explicitly cleared alias (Some("")) yields no prefix, overriding plugin name (MKT-5).
+    #[test]
+    fn cleared_alias_yields_no_prefix_overriding_plugin_name() {
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let clone = base.join("sources/local/test/plugin-repo");
+
+        write_file(
+            &clone.join(".claude-plugin/plugin.json"),
+            r#"{"name":"acme"}"#,
+        );
+        write_file(
+            &clone.join("skills/foo/SKILL.md"),
+            "---\ndescription: foo\n---\n# foo\n",
+        );
+
+        let paths = paths_for(base);
+        let mut source = make_plugin_source(&clone);
+        source.alias = Some(String::new()); // explicit empty = clear prefix
+        let mut items = Vec::new();
+        scan_source(&paths, &source, &mut items).unwrap();
+
+        let skill = items.iter().find(|i| i.name == "foo").unwrap();
+        assert_eq!(
+            skill.effective_name(),
+            "foo",
+            "an explicitly-cleared alias must suppress the plugin name prefix"
+        );
+        assert!(
+            skill.prefix.is_none(),
+            "prefix must be None when alias was cleared"
+        );
+    }
+
+    // A [source]-only mind.toml alongside plugin.json: its prefix participates,
+    // and items still come from the plugin (not convention). (MKT-2)
+    #[test]
+    fn source_only_mind_toml_prefix_participates_with_plugin_json() {
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let clone = base.join("sources/local/test/plugin-repo");
+
+        write_file(
+            &clone.join(".claude-plugin/plugin.json"),
+            r#"{"name":"acme"}"#,
+        );
+        write_file(
+            &clone.join("skills/foo/SKILL.md"),
+            "---\ndescription: foo\n---\n# foo\n",
+        );
+        write_file(
+            &clone.join("agents/bar.md"),
+            "---\ndescription: bar\n---\n# bar\n",
+        );
+        // [source]-only mind.toml: no [[items]] or [discover], just [source].prefix
+        write_file(&clone.join("mind.toml"), "[source]\nprefix = \"mp\"\n");
+        // Also place a conventional rule that would normally be found by convention scan
+        // but must NOT appear (plugin defines the items)
+        write_file(
+            &clone.join("rules/should-not-appear.md"),
+            "---\ndescription: nope\n---\n",
+        );
+
+        let paths = paths_for(base);
+        let source = make_plugin_source(&clone);
+        let mut items = Vec::new();
+        scan_source(&paths, &source, &mut items).unwrap();
+
+        // [source].prefix "mp" overrides plugin name "acme"
+        let skill = items
+            .iter()
+            .find(|i| i.kind == ItemKind::Skill && i.name == "foo")
+            .expect("skill from plugin must be present");
+        assert_eq!(
+            skill.effective_name(),
+            "mp:foo",
+            "mind.toml [source].prefix must win over plugin name"
+        );
+
+        // Convention scan was skipped (rule not present)
+        assert!(
+            !items.iter().any(|i| i.name == "should-not-appear"),
+            "convention scan must be skipped when plugin.json is present"
+        );
+    }
+
+    // Authoritative mind.toml (with [[items]]) alongside plugin.json: plugin is suppressed (MKT-2).
+    #[test]
+    fn authoritative_mind_toml_suppresses_plugin_json() {
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let clone = base.join("sources/local/test/plugin-repo");
+
+        // Plugin with a skill
+        write_file(
+            &clone.join(".claude-plugin/plugin.json"),
+            r#"{"name":"acme"}"#,
+        );
+        write_file(
+            &clone.join("skills/plugin-skill/SKILL.md"),
+            "---\ndescription: from plugin\n---\n",
+        );
+        // Authoritative mind.toml declares a different item
+        write_file(
+            &clone.join("rules/my-rule.md"),
+            "---\ndescription: my rule\n---\n",
+        );
+        write_file(
+            &clone.join("mind.toml"),
+            concat!(
+                "[[items]]\n",
+                "kind = \"rule\"\n",
+                "name = \"my-rule\"\n",
+                "path = \"rules/my-rule.md\"\n",
+            ),
+        );
+
+        let paths = paths_for(base);
+        let source = make_plugin_source(&clone);
+        let mut items = Vec::new();
+        scan_source(&paths, &source, &mut items).unwrap();
+
+        // Only the mind.toml-declared item; plugin skill must NOT appear
+        assert_eq!(
+            items.len(),
+            1,
+            "authoritative mind.toml must suppress plugin.json (MKT-2); got: {:?}",
+            items
+                .iter()
+                .map(|i| (i.kind, i.name.as_str()))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(items[0].name, "my-rule");
+        assert!(
+            items.iter().all(|i| i.kind != ItemKind::Skill),
+            "plugin skill must not appear when authoritative mind.toml is present"
+        );
+    }
+
+    // Malformed plugin.json is propagated as a MindToml scan error (MKT-9).
+    #[test]
+    fn malformed_plugin_json_is_scan_error() {
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let clone = base.join("sources/local/test/plugin-repo");
+
+        write_file(
+            &clone.join(".claude-plugin/plugin.json"),
+            r#"{not valid json"#,
+        );
+
+        let paths = paths_for(base);
+        let source = make_plugin_source(&clone);
+        let mut items = Vec::new();
+        let err = scan_source(&paths, &source, &mut items).unwrap_err();
+        assert!(
+            matches!(err, MindError::MindToml { .. }),
+            "malformed plugin.json must propagate as MindToml error (MKT-9): {err:?}"
+        );
+    }
+
+    // plugin_skipped_components counts commands/ and hooks/ dirs (MKT-4).
+    #[test]
+    fn plugin_skipped_components_counts_unsupported_dirs() {
+        let tmp = TmpDir::new();
+        let plugin_root = tmp.path().join("my-plugin");
+
+        std::fs::create_dir_all(plugin_root.join("commands")).unwrap();
+        std::fs::create_dir_all(plugin_root.join("hooks")).unwrap();
+
+        let skipped = plugin_skipped_components(&plugin_root);
+        assert!(
+            skipped.commands > 0,
+            "commands/ dir must be counted as skipped"
+        );
+        assert!(skipped.hooks > 0, "hooks/ dir must be counted as skipped");
+        assert!(
+            skipped.total() >= 2,
+            "at least 2 skipped components: {:?}",
+            skipped
+        );
+    }
+
+    // Plugin whose name is a reserved kind word (e.g. "skill") falls back to no
+    // prefix rather than erroring -- resilience over strict enforcement (NS-25, MKT-5).
+    #[test]
+    fn plugin_with_reserved_kind_name_falls_back_to_no_prefix() {
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let clone = base.join("sources/local/test/plugin-repo");
+
+        // Plugin named "skill" -- a reserved kind word per NS-25
+        write_file(
+            &clone.join(".claude-plugin/plugin.json"),
+            r#"{"name":"skill"}"#,
+        );
+        write_file(
+            &clone.join("skills/foo/SKILL.md"),
+            "---\ndescription: foo\n---\n# foo\n",
+        );
+
+        let paths = paths_for(base);
+        let source = make_plugin_source(&clone);
+        let mut items = Vec::new();
+        // Must NOT error; reserved kind word is silently skipped as prefix
+        scan_source(&paths, &source, &mut items)
+            .expect("a plugin named with a reserved kind word must not fail scan");
+
+        let skill = items.iter().find(|i| i.name == "foo").unwrap();
+        assert_eq!(
+            skill.effective_name(),
+            "foo",
+            "reserved kind word as plugin name must fall through to no prefix"
+        );
+        assert!(
+            skill.prefix.is_none(),
+            "prefix must be None when plugin name is a reserved kind word"
+        );
     }
 }

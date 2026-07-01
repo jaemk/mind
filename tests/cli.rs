@@ -15596,3 +15596,896 @@ fn remeld_as_reserved_kind_word_is_rejected() {
         probe.stdout
     );
 }
+
+// ---------------------------------------------------------------------------
+// Claude plugin marketplace support (MKT-1..11)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn marketplace_plugin_meld_discovers_skill_and_agent() {
+    // spec: MKT-1, MKT-3
+    // A single-plugin source (.claude-plugin/plugin.json) feeds the normal
+    // catalog -> store -> symlink pipeline.  Only skill and agent kinds are
+    // produced; no rule or tool items come from a plugin.
+    //
+    // Note: agents appear in probe with the plugin-name prefix in their key
+    // (agent:acme-tools:helper), matching the existing NS-40 behavior where
+    // probe uses the effective name but the installed LINK is the bare
+    // frontmatter name (agents/helper.md).
+    let sb = Sandbox::from_example("marketplace-plugin");
+    let spec = sb.source_spec();
+    let r = sb.mind(&["meld", &spec, "--link-only"]);
+    assert!(r.success, "meld failed: {} {}", r.stdout, r.stderr);
+
+    let probe = sb.mind(&["probe"]);
+    assert!(
+        probe.stdout.contains("skill:acme-tools:greet"),
+        "plugin skill must appear in probe: {}",
+        probe.stdout
+    );
+    // Agent probe key uses the effective (prefixed) name per NS-40/MKT-5.
+    assert!(
+        probe.stdout.contains("agent:acme-tools:helper"),
+        "plugin agent must appear in probe: {}",
+        probe.stdout
+    );
+    // MKT-3: no rule or tool items
+    assert!(
+        !probe.stdout.contains("rule:"),
+        "no rule items from a plugin: {}",
+        probe.stdout
+    );
+    assert!(
+        !probe.stdout.contains("tool:"),
+        "no tool items from a plugin: {}",
+        probe.stdout
+    );
+}
+
+#[test]
+fn marketplace_plugin_learn_installs_and_links() {
+    // spec: MKT-1
+    // `learn` installs a plugin skill through the normal store+symlink pipeline.
+    let sb = Sandbox::from_example("marketplace-plugin");
+    let spec = sb.source_spec();
+    assert!(sb.mind(&["meld", &spec, "--link-only"]).success);
+
+    let r = sb.mind(&["learn", "acme-tools:greet"]);
+    assert!(r.success, "learn failed: {} {}", r.stdout, r.stderr);
+
+    // The skill directory is symlinked into the lobe under its effective name.
+    let link = sb.claude_home.join("skills/acme-tools:greet");
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false),
+        "symlink must exist at claude_home/skills/acme-tools:greet"
+    );
+}
+
+#[test]
+fn marketplace_plugin_skipped_components_note() {
+    // spec: MKT-4
+    // Unsupported component kinds (commands/, hooks/) are not installed; meld
+    // prints a count note so the user is not misled into thinking the plugin is
+    // fully represented.
+    let sb = Sandbox::from_example("marketplace-plugin");
+    let spec = sb.source_spec();
+    let r = sb.mind(&["meld", &spec]);
+    assert!(r.success, "meld failed: {} {}", r.stdout, r.stderr);
+
+    let combined = format!("{}\n{}", r.stdout, r.stderr);
+    assert!(
+        combined.contains("not installed (no mind equivalent)"),
+        "meld must print the skipped-components note: {combined}"
+    );
+    // The note must mention at least one of the fixture's unsupported kinds.
+    assert!(
+        combined.contains("hook") || combined.contains("command"),
+        "skipped-components note must name a kind: {combined}"
+    );
+}
+
+#[test]
+fn marketplace_plugin_name_is_default_prefix_for_skills() {
+    // spec: MKT-5
+    // The plugin.json `name` is the default namespace prefix for skills.
+    // For agents, NS-40 specifies the lobe LINK is always the bare frontmatter
+    // `name` (not `plugin:agent`), even though probe still shows the effective
+    // (prefixed) key.  Verify both: skill prefix in probe, bare link on disk.
+    let sb = Sandbox::from_example("marketplace-plugin");
+    let spec = sb.source_spec();
+    assert!(sb.mind(&["meld", &spec, "--link-only"]).success);
+
+    let probe = sb.mind(&["probe"]);
+    // Skill carries the plugin name as prefix.
+    assert!(
+        probe.stdout.contains("skill:acme-tools:greet"),
+        "skill must be prefixed with the plugin name: {}",
+        probe.stdout
+    );
+
+    // Install the agent and verify its lobe link is the bare frontmatter name.
+    // The probe key is `agent:acme-tools:helper` (effective name), so we learn
+    // by that key.
+    let r = sb.mind(&["learn", "acme-tools:helper"]);
+    assert!(r.success, "learn agent failed: {} {}", r.stdout, r.stderr);
+    // NS-40/MKT-5: the lobe link is under the bare harness name, not the prefix.
+    assert!(
+        sb.claude_home.join("agents/helper.md").exists(),
+        "agent link must be at agents/helper.md (bare harness name, not prefixed)"
+    );
+    assert!(
+        !sb.claude_home.join("agents/acme-tools:helper.md").exists(),
+        "no prefixed agent link must exist"
+    );
+}
+
+#[test]
+fn marketplace_plugin_namespace_override_sets_prefix() {
+    // spec: MKT-5
+    // `meld --namespace z` overrides the plugin-name prefix; skills install as
+    // z:<bare>.  The agent LINK is still bare (NS-40: lobe link ignores the
+    // prefix); its probe key reflects the override (agent:z:helper).
+    let sb = Sandbox::from_example("marketplace-plugin");
+    let spec = sb.source_spec();
+    assert!(
+        sb.mind(&["meld", &spec, "--namespace", "z", "--link-only"])
+            .success
+    );
+
+    let probe = sb.mind(&["probe"]);
+    assert!(
+        probe.stdout.contains("skill:z:greet"),
+        "consumer --namespace must override the plugin-name prefix: {}",
+        probe.stdout
+    );
+
+    // Install the agent; its lobe link must remain bare regardless of the
+    // consumer namespace.
+    let r = sb.mind(&["learn", "z:helper"]);
+    assert!(r.success, "learn agent failed: {} {}", r.stdout, r.stderr);
+    assert!(
+        sb.claude_home.join("agents/helper.md").exists(),
+        "agent link must be bare (agents/helper.md) even with a consumer namespace"
+    );
+    assert!(
+        !sb.claude_home.join("agents/z:helper.md").exists(),
+        "no prefixed agent link must exist"
+    );
+}
+
+#[test]
+fn marketplace_plugin_namespace_empty_clears_prefix() {
+    // spec: MKT-5
+    // `meld --namespace ''` (empty) removes the plugin-name prefix.
+    let sb = Sandbox::from_example("marketplace-plugin");
+    let spec = sb.source_spec();
+    assert!(
+        sb.mind(&["meld", &spec, "--namespace", "", "--link-only"])
+            .success
+    );
+
+    let probe = sb.mind(&["probe"]);
+    assert!(
+        probe.stdout.contains("skill:greet"),
+        "empty --namespace must clear the plugin-name prefix (skill is bare): {}",
+        probe.stdout
+    );
+    assert!(
+        !probe.stdout.contains("skill:acme-tools:greet"),
+        "plugin-name prefix must not appear after --namespace '': {}",
+        probe.stdout
+    );
+}
+
+#[test]
+fn marketplace_plugin_description_and_version_recorded() {
+    // spec: MKT-6
+    // The plugin.json `description` is recorded on the source and appears in
+    // `recall --sources`.  The `version` is stored and visible in JSON output.
+    let sb = Sandbox::from_example("marketplace-plugin");
+    let spec = sb.source_spec();
+    assert!(sb.mind(&["meld", &spec, "--link-only"]).success);
+
+    // Description surfaces in the plain-text recall --sources output.
+    let sources = sb.mind(&["recall", "--sources"]);
+    assert!(
+        sources.stdout.contains("Acme developer tools plugin"),
+        "plugin description must appear in recall --sources: {}",
+        sources.stdout
+    );
+
+    // plugin_version is recorded; confirm via --json output.
+    let jsrc = sb.mind(&["recall", "--sources", "--json"]);
+    assert!(jsrc.success, "{}", jsrc.stderr);
+    assert!(
+        jsrc.stdout.contains("1.0.0"),
+        "plugin_version must be present in JSON output: {}",
+        jsrc.stdout
+    );
+}
+
+#[test]
+fn marketplace_catalog_melds_in_repo_plugins() {
+    // spec: MKT-7
+    // A .claude-plugin/marketplace.json catalog melds each listed in-repo
+    // plugin as a sub-source; both plugins' items appear in probe.
+    // Installing a sub-source item works through the normal `learn` path.
+    let sb = Sandbox::from_example("marketplace-catalog");
+    let spec = sb.source_spec();
+    let r = sb.mind(&["meld", &spec]);
+    assert!(r.success, "meld failed: {} {}", r.stdout, r.stderr);
+
+    // Both sub-sources are registered.
+    let sources = sb.mind(&["recall", "--sources"]);
+    assert!(
+        sources.stdout.contains("marketplace-catalog"),
+        "catalog source must appear: {}",
+        sources.stdout
+    );
+    assert!(
+        sources.stdout.contains("alpha"),
+        "alpha sub-source must appear: {}",
+        sources.stdout
+    );
+    assert!(
+        sources.stdout.contains("beta"),
+        "beta sub-source must appear: {}",
+        sources.stdout
+    );
+
+    // Both plugins' items are available for install via probe.
+    // Beta's agent probe key is `agent:beta:two` (effective/prefixed name per
+    // NS-40), but its lobe LINK lands at agents/two.md (bare harness name).
+    let probe = sb.mind(&["probe"]);
+    assert!(
+        probe.stdout.contains("skill:alpha:one"),
+        "alpha's skill must appear in probe: {}",
+        probe.stdout
+    );
+    assert!(
+        probe.stdout.contains("agent:beta:two"),
+        "beta's agent must appear in probe (prefixed effective name): {}",
+        probe.stdout
+    );
+
+    // Items from sub-sources are installable through the normal `learn` path.
+    let r = sb.mind(&["learn", "alpha:one"]);
+    assert!(
+        r.success,
+        "learn alpha:one failed: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        sb.claude_home.join("skills/alpha:one").exists(),
+        "skill alpha:one must be symlinked into the lobe"
+    );
+
+    // Beta's agent links under the bare frontmatter name (NS-40/MKT-5).
+    let r = sb.mind(&["learn", "beta:two"]);
+    assert!(
+        r.success,
+        "learn beta:two failed: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        sb.claude_home.join("agents/two.md").exists(),
+        "beta's agent link must be at agents/two.md (bare harness name)"
+    );
+}
+
+#[test]
+fn marketplace_catalog_probe_hint_fires() {
+    // spec: MKT-7
+    // After melding a marketplace catalog, `maybe_probe_hint` prints the
+    // curated-source hint (DSC-56) so the user knows to browse with `probe`.
+    let sb = Sandbox::from_example("marketplace-catalog");
+    let spec = sb.source_spec();
+    let r = sb.mind(&["meld", &spec]);
+    assert!(r.success, "meld failed: {} {}", r.stdout, r.stderr);
+
+    let combined = format!("{}\n{}", r.stdout, r.stderr);
+    assert!(
+        combined.contains("mind probe"),
+        "meld of a marketplace catalog must print the probe hint: {combined}"
+    );
+}
+
+#[test]
+fn marketplace_catalog_external_plugin_registers() {
+    // spec: MKT-7
+    // A marketplace entry pointing at an external git source (local path via
+    // file:// URL in the test) melds it as a nested sub-source tracking its
+    // own commit, mirroring the [discover].sources external-source behavior.
+    let extplugin = Sandbox::bare("extplugin");
+    extplugin.write_and_commit(
+        ".claude-plugin/plugin.json",
+        r#"{"name":"ext","version":"0.1","description":"External test plugin"}"#,
+    );
+    extplugin.write_and_commit(
+        "skills/extskill/SKILL.md",
+        "---\nname: extskill\ndescription: External skill\n---\n# extskill\n",
+    );
+
+    // A catalog that references the external plugin via file:// URL
+    // (file:// is detected as External by is_external_string -> contains "://").
+    let catalog = Sandbox::bare("ext-catalog");
+    let ext_url = format!("file://{}", extplugin.source_spec());
+    catalog.write_and_commit(
+        ".claude-plugin/marketplace.json",
+        &format!(r#"{{"name":"ext-market","plugins":[{{"name":"ext","source":"{ext_url}"}}]}}"#),
+    );
+
+    let cat_spec = catalog.source_spec();
+    let r = catalog.mind(&["meld", &cat_spec]);
+    assert!(r.success, "meld failed: {} {}", r.stdout, r.stderr);
+
+    // The external plugin is registered as a sub-source.
+    let sources = catalog.mind(&["recall", "--sources"]);
+    assert!(
+        sources.stdout.contains("extplugin"),
+        "external plugin sub-source must be registered: {}",
+        sources.stdout
+    );
+
+    // Its skill is discoverable.
+    let probe = catalog.mind(&["probe"]);
+    assert!(
+        probe.stdout.contains("skill:ext:extskill"),
+        "external plugin's skill must appear in probe: {}",
+        probe.stdout
+    );
+}
+
+#[test]
+fn marketplace_yes_auto_installs_in_repo_plugins() {
+    // spec: MKT-7
+    // MKT-7: a marketplace catalog's in-repo plugins are offered for install on
+    // meld like the catalog's own items (CLI-23). With `--yes` (non-TTY), they
+    // install automatically -- no explicit `learn` needed.
+    let sb = Sandbox::from_example("marketplace-catalog");
+    let spec = sb.source_spec();
+    let r = sb.mind(&["meld", &spec, "--yes"]);
+    assert!(r.success, "meld --yes failed: {} {}", r.stdout, r.stderr);
+
+    // Both in-repo plugins' items were installed automatically.
+    assert!(
+        sb.claude_home.join("skills/alpha:one").exists(),
+        "alpha's skill must be auto-installed under --yes: lobe = {}",
+        sb.claude_home.display()
+    );
+    assert!(
+        sb.claude_home.join("agents/two.md").exists(),
+        "beta's agent must be auto-installed under --yes (bare harness name)"
+    );
+}
+
+#[test]
+fn marketplace_external_plugin_installs_only_under_recursive() {
+    // spec: MKT-7
+    // DSC-54/DSC-55 via MKT-7: an EXTERNAL marketplace plugin is register-only on
+    // a plain `--yes` meld (left available), and installs only under
+    // `--recursive`, mirroring a `[discover].sources` external nested source.
+    let extplugin = Sandbox::bare("extplugin2");
+    extplugin.write_and_commit(
+        ".claude-plugin/plugin.json",
+        r#"{"name":"ext","version":"0.1","description":"External test plugin"}"#,
+    );
+    extplugin.write_and_commit(
+        "skills/extskill/SKILL.md",
+        "---\nname: extskill\ndescription: External skill\n---\n# extskill\n",
+    );
+    let catalog = Sandbox::bare("ext-catalog2");
+    let ext_url = format!("file://{}", extplugin.source_spec());
+    catalog.write_and_commit(
+        ".claude-plugin/marketplace.json",
+        &format!(r#"{{"name":"ext-market","plugins":[{{"name":"ext","source":"{ext_url}"}}]}}"#),
+    );
+    let cat_spec = catalog.source_spec();
+
+    // Plain --yes meld: the external plugin registers but is NOT installed.
+    let r = catalog.mind(&["meld", &cat_spec, "--yes"]);
+    assert!(r.success, "meld --yes failed: {} {}", r.stdout, r.stderr);
+    assert!(
+        !catalog.claude_home.join("skills/ext:extskill").exists(),
+        "external plugin must be register-only without --recursive"
+    );
+
+    // Re-meld with --recursive --yes: now the external plugin's item installs.
+    let r = catalog.mind(&["meld", &cat_spec, "--recursive", "--yes"]);
+    assert!(
+        r.success,
+        "remeld --recursive --yes failed: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        catalog.claude_home.join("skills/ext:extskill").exists(),
+        "external plugin's skill must install under --recursive"
+    );
+}
+
+#[test]
+fn marketplace_entry_name_wins_over_plugin_json_name() {
+    // spec: MKT-8
+    // The marketplace entry `name` is used as the alias (namespace prefix) for
+    // that plugin's items, overriding whatever name the in-repo plugin.json
+    // declares.  The entry name is authoritative.
+    let catalog = Sandbox::bare("mkt8-catalog");
+    // Build an in-repo plugin whose plugin.json says "original-name".
+    catalog.write_and_commit(
+        "plugins/myplugin/.claude-plugin/plugin.json",
+        r#"{"name":"original-name","version":"0.1"}"#,
+    );
+    catalog.write_and_commit(
+        "plugins/myplugin/skills/theskill/SKILL.md",
+        "---\nname: theskill\ndescription: A skill\n---\n# theskill\n",
+    );
+    // The catalog entry uses "override-name" as the name (MKT-8: entry wins).
+    catalog.write_and_commit(
+        ".claude-plugin/marketplace.json",
+        r#"{"name":"test","plugins":[{"name":"override-name","source":"./plugins/myplugin"}]}"#,
+    );
+
+    let spec = catalog.source_spec();
+    assert!(catalog.mind(&["meld", &spec]).success);
+
+    // The skill must appear under "override-name", not "original-name".
+    let probe = catalog.mind(&["probe"]);
+    assert!(
+        probe.stdout.contains("skill:override-name:theskill"),
+        "entry name must override plugin.json name as the prefix: {}",
+        probe.stdout
+    );
+    assert!(
+        !probe.stdout.contains("skill:original-name:theskill"),
+        "plugin.json name must not appear as prefix when entry overrides it: {}",
+        probe.stdout
+    );
+}
+
+#[test]
+fn marketplace_unsafe_in_repo_path_fails_meld() {
+    // spec: MKT-9
+    // An in-repo source path of "../escape" contains ".." and must be rejected
+    // at meld time before any filesystem traversal happens.
+    let catalog = Sandbox::bare("unsafe-mkt");
+    catalog.write_and_commit(
+        ".claude-plugin/marketplace.json",
+        r#"{"name":"bad","plugins":[{"name":"evil","source":"../escape"}]}"#,
+    );
+
+    let spec = catalog.source_spec();
+    let r = catalog.mind(&["meld", &spec]);
+    assert!(!r.success, "unsafe path must cause meld to fail");
+    assert!(
+        r.stderr.contains("unsafe") || r.stderr.contains("..") || r.stderr.contains("escape"),
+        "error must describe the path safety violation: {}",
+        r.stderr
+    );
+}
+
+#[test]
+fn marketplace_malformed_plugin_json_fails_meld() {
+    // spec: MKT-9
+    // A .claude-plugin/plugin.json that is not valid JSON must fail the meld
+    // with a clear error rather than silently producing zero items.
+    let sb = Sandbox::bare("bad-plugin-json");
+    sb.write_and_commit(".claude-plugin/plugin.json", "{not valid json at all");
+
+    let spec = sb.source_spec();
+    let r = sb.mind(&["meld", &spec]);
+    assert!(!r.success, "malformed plugin.json must cause meld to fail");
+    assert!(
+        r.stderr.contains("plugin.json") || r.stderr.contains("invalid"),
+        "error must indicate the invalid plugin.json: {}",
+        r.stderr
+    );
+}
+
+#[test]
+fn marketplace_malformed_marketplace_json_fails_meld() {
+    // spec: MKT-9
+    // A .claude-plugin/marketplace.json that is not valid JSON must fail meld.
+    let sb = Sandbox::bare("bad-market-json");
+    sb.write_and_commit(".claude-plugin/marketplace.json", "{bad json");
+
+    let spec = sb.source_spec();
+    let r = sb.mind(&["meld", &spec]);
+    assert!(
+        !r.success,
+        "malformed marketplace.json must cause meld to fail"
+    );
+    assert!(
+        r.stderr.contains("marketplace.json") || r.stderr.contains("invalid"),
+        "error must indicate the invalid marketplace.json: {}",
+        r.stderr
+    );
+}
+
+#[test]
+fn marketplace_ansi_escape_stripped_in_recall_sources() {
+    // spec: MKT-9
+    // Descriptions taken from a plugin.json have ANSI escape sequences stripped
+    // before display, so a malicious or miscoded description cannot corrupt the
+    // terminal via `recall --sources`.
+    let sb = Sandbox::bare("ansi-plugin");
+    // ESC [ 3 1 m = red-color CSI sequence; should be stripped.
+    sb.write_and_commit(
+        ".claude-plugin/plugin.json",
+        "{\"name\":\"ansi-p\",\"description\":\"\\u001b[31mred text\\u001b[0m safe\"}",
+    );
+
+    let spec = sb.source_spec();
+    assert!(sb.mind(&["meld", &spec, "--link-only"]).success);
+
+    let sources = sb.mind(&["recall", "--sources"]);
+    // The ESC byte (0x1b) must not appear in the output.
+    assert!(
+        !sources.stdout.contains('\x1b'),
+        "ANSI escape bytes must be stripped from recall --sources output: {:?}",
+        sources.stdout
+    );
+    // The visible text portion must still appear (the safe suffix after stripping).
+    assert!(
+        sources.stdout.contains("safe") || sources.stdout.contains("red text"),
+        "stripped text must still be visible: {}",
+        sources.stdout
+    );
+}
+
+#[test]
+fn marketplace_plugin_origin_label_in_recall_sources() {
+    // spec: MKT-10
+    // A source whose items came from a .claude-plugin/plugin.json is labelled
+    // `origin:claude-plugin` in `recall --sources`.
+    let sb = Sandbox::from_example("marketplace-plugin");
+    let spec = sb.source_spec();
+    assert!(sb.mind(&["meld", &spec, "--link-only"]).success);
+
+    let sources = sb.mind(&["recall", "--sources"]);
+    assert!(
+        sources.stdout.contains("origin:claude-plugin"),
+        "recall --sources must label a plugin source with origin:claude-plugin: {}",
+        sources.stdout
+    );
+}
+
+#[test]
+fn marketplace_catalog_origin_label_in_recall_sources() {
+    // spec: MKT-10
+    // A source whose items came from a .claude-plugin/marketplace.json (both the
+    // catalog itself and its sub-sources) is labelled `origin:claude-marketplace`.
+    let sb = Sandbox::from_example("marketplace-catalog");
+    let spec = sb.source_spec();
+    assert!(sb.mind(&["meld", &spec]).success);
+
+    let sources = sb.mind(&["recall", "--sources"]);
+    assert!(
+        sources.stdout.contains("origin:claude-marketplace"),
+        "recall --sources must label a marketplace source with origin:claude-marketplace: {}",
+        sources.stdout
+    );
+}
+
+#[test]
+fn mind_toml_suppresses_plugin_manifest_with_note() {
+    // spec: MKT-2
+    // When a source has an authoritative mind.toml (one that declares [[items]])
+    // AND a .claude-plugin/plugin.json, the mind.toml wins and a note is printed
+    // saying the plugin manifest was found but ignored.
+    let sb = Sandbox::bare("toml-wins");
+    // Authoritative mind.toml declaring one item.
+    sb.write_and_commit(
+        "mind.toml",
+        "[[items]]\nkind = \"skill\"\nname = \"toml-skill\"\npath = \"skills/toml-skill/SKILL.md\"\n",
+    );
+    sb.write_and_commit(
+        "skills/toml-skill/SKILL.md",
+        "---\nname: toml-skill\ndescription: From mind.toml\n---\n# toml\n",
+    );
+    // Also has a plugin.json declaring different items.
+    sb.write_and_commit(
+        ".claude-plugin/plugin.json",
+        r#"{"name":"plugin-name","version":"1.0","description":"Plugin desc"}"#,
+    );
+    sb.write_and_commit(
+        "skills/plugin-skill/SKILL.md",
+        "---\nname: plugin-skill\ndescription: From plugin\n---\n# plugin\n",
+    );
+
+    let spec = sb.source_spec();
+    let r = sb.mind(&["meld", &spec]);
+    assert!(r.success, "meld must succeed: {} {}", r.stdout, r.stderr);
+
+    // Advisory note: mind.toml is authoritative, plugin manifest is ignored.
+    let combined = format!("{}\n{}", r.stdout, r.stderr);
+    assert!(
+        combined.contains("authoritative mind.toml")
+            || combined.contains(".claude-plugin/ manifest is ignored"),
+        "meld must print the advisory note about mind.toml suppressing plugin manifest: {combined}"
+    );
+
+    // Items come from mind.toml, not from the plugin.json.
+    let probe = sb.mind(&["probe"]);
+    assert!(
+        probe.stdout.contains("skill:toml-skill"),
+        "mind.toml item must appear in probe: {}",
+        probe.stdout
+    );
+    assert!(
+        !probe.stdout.contains("skill:plugin-skill"),
+        "plugin item must not appear (mind.toml is authoritative): {}",
+        probe.stdout
+    );
+    // The plugin-name prefix from plugin.json must also not be applied.
+    assert!(
+        !probe.stdout.contains("skill:plugin-name:"),
+        "plugin-name prefix must not appear: {}",
+        probe.stdout
+    );
+}
+
+#[test]
+fn marketplace_plugin_does_not_emit_claude_plugin_manifest() {
+    // spec: MKT-11
+    // Consuming a marketplace does not make mind a plugin publisher: no
+    // .claude-plugin/ directory is created in the store or lobe, and `dump`
+    // output contains no .claude-plugin reference.
+    let sb = Sandbox::from_example("marketplace-plugin");
+    let spec = sb.source_spec();
+    assert!(sb.mind(&["meld", &spec, "--yes"]).success);
+
+    // No .claude-plugin dir in the store.
+    let store_dir = sb.mind_home.join("store");
+    if store_dir.is_dir() {
+        for entry in std::fs::read_dir(&store_dir).unwrap().flatten() {
+            let p = entry.path();
+            assert!(
+                !p.join(".claude-plugin").exists(),
+                "store entry must not contain .claude-plugin: {:?}",
+                p
+            );
+        }
+    }
+
+    // No .claude-plugin dir in the lobe.
+    assert!(
+        !sb.claude_home.join(".claude-plugin").exists(),
+        "lobe must not contain a .claude-plugin dir"
+    );
+
+    // `dump` output contains no .claude-plugin reference.
+    let dump = sb.mind(&["dump"]);
+    assert!(
+        !dump.stdout.contains(".claude-plugin"),
+        "dump output must contain no .claude-plugin reference: {}",
+        dump.stdout
+    );
+}
+
+#[test]
+fn marketplace_entry_version_wins_over_plugin_json_version() {
+    // spec: MKT-8
+    // A marketplace entry's declared `version` is authoritative over the in-repo
+    // plugin.json's own `version` (mirrors Claude's "strict": false). The existing
+    // MKT-8 test only proves the entry NAME wins; this proves the VERSION field
+    // does too, surfaced via `recall --sources --json`.
+    let catalog = Sandbox::bare("mkt8-version");
+    // In-repo plugin whose plugin.json declares version 9.9.9.
+    catalog.write_and_commit(
+        "plugins/myplugin/.claude-plugin/plugin.json",
+        r#"{"name":"myplugin","version":"9.9.9"}"#,
+    );
+    catalog.write_and_commit(
+        "plugins/myplugin/skills/theskill/SKILL.md",
+        "---\nname: theskill\ndescription: A skill\n---\n# theskill\n",
+    );
+    // The catalog entry declares a DIFFERENT version 1.1.1 (entry wins).
+    catalog.write_and_commit(
+        ".claude-plugin/marketplace.json",
+        r#"{"name":"test","plugins":[{"name":"override","source":"./plugins/myplugin","version":"1.1.1"}]}"#,
+    );
+
+    let spec = catalog.source_spec();
+    assert!(catalog.mind(&["meld", &spec]).success);
+
+    let jsrc = catalog.mind(&["recall", "--sources", "--json"]);
+    assert!(jsrc.success, "{}", jsrc.stderr);
+    assert!(
+        jsrc.stdout.contains("1.1.1"),
+        "the marketplace entry version must win and appear in JSON: {}",
+        jsrc.stdout
+    );
+    assert!(
+        !jsrc.stdout.contains("9.9.9"),
+        "the plugin.json version must be overridden by the entry version: {}",
+        jsrc.stdout
+    );
+}
+
+#[test]
+fn mind_toml_suppresses_marketplace_manifest_with_note() {
+    // spec: MKT-2
+    // The marketplace analogue of mind_toml_suppresses_plugin_manifest_with_note:
+    // an authoritative mind.toml alongside a .claude-plugin/marketplace.json wins,
+    // a note is printed, and NONE of the marketplace's sub-source plugins are
+    // melded (only the mind.toml item exists).
+    let catalog = Sandbox::bare("mkt2-market-suppress");
+    // Authoritative mind.toml declaring one rule.
+    catalog.write_and_commit(
+        "rules/my-rule.md",
+        "---\ndescription: my rule\n---\n# rule\n",
+    );
+    catalog.write_and_commit(
+        "mind.toml",
+        "[[items]]\nkind = \"rule\"\nname = \"my-rule\"\npath = \"rules/my-rule.md\"\n",
+    );
+    // A marketplace.json that would otherwise meld an in-repo plugin sub-source.
+    catalog.write_and_commit(
+        "plugins/embedded/.claude-plugin/plugin.json",
+        r#"{"name":"embedded","version":"0.1"}"#,
+    );
+    catalog.write_and_commit(
+        "plugins/embedded/skills/embskill/SKILL.md",
+        "---\nname: embskill\ndescription: embedded skill\n---\n# embskill\n",
+    );
+    catalog.write_and_commit(
+        ".claude-plugin/marketplace.json",
+        r#"{"name":"cat","plugins":[{"name":"embedded","source":"./plugins/embedded"}]}"#,
+    );
+
+    let spec = catalog.source_spec();
+    let r = catalog.mind(&["meld", &spec]);
+    assert!(r.success, "meld failed: {} {}", r.stdout, r.stderr);
+
+    let combined = format!("{}\n{}", r.stdout, r.stderr);
+    assert!(
+        combined.contains("authoritative mind.toml")
+            || combined.contains(".claude-plugin/ manifest is ignored"),
+        "meld must print the advisory note for a suppressed marketplace manifest: {combined}"
+    );
+
+    // No sub-source was registered from the suppressed marketplace.
+    let sources = catalog.mind(&["recall", "--sources"]);
+    assert!(
+        !sources.stdout.contains("embedded"),
+        "the marketplace's in-repo plugin must NOT be melded when mind.toml is authoritative: {}",
+        sources.stdout
+    );
+
+    // Only the mind.toml rule item exists; the plugin skill does not.
+    let probe = catalog.mind(&["probe"]);
+    assert!(
+        probe.stdout.contains("rule:my-rule"),
+        "the mind.toml rule must be present: {}",
+        probe.stdout
+    );
+    assert!(
+        !probe.stdout.contains("embskill"),
+        "the suppressed plugin's skill must not appear: {}",
+        probe.stdout
+    );
+}
+
+#[test]
+fn marketplace_two_plugins_same_agent_name_collide() {
+    // spec: NS-41
+    // Per MKT-5/NS-40 a plugin's agents flatten to their bare frontmatter name and
+    // the plugin prefix does NOT reach agents. So two catalog plugins each shipping
+    // an agent with the SAME frontmatter `name:` both target agents/<name>.md -- a
+    // detected collision (NS-41), not a silent overwrite. Learning the second one
+    // must fail with an agent-collision error.
+    let catalog = Sandbox::bare("mkt-agent-collide");
+    // Plugin A ships an agent whose frontmatter name is "shared".
+    catalog.write_and_commit("plugins/a/.claude-plugin/plugin.json", r#"{"name":"pa"}"#);
+    catalog.write_and_commit(
+        "plugins/a/agents/from-a.md",
+        "---\nname: shared\ndescription: agent from A\n---\n# a\n",
+    );
+    // Plugin B ships a differently-filed agent with the SAME frontmatter name.
+    catalog.write_and_commit("plugins/b/.claude-plugin/plugin.json", r#"{"name":"pb"}"#);
+    catalog.write_and_commit(
+        "plugins/b/agents/from-b.md",
+        "---\nname: shared\ndescription: agent from B\n---\n# b\n",
+    );
+    catalog.write_and_commit(
+        ".claude-plugin/marketplace.json",
+        r#"{"name":"cat","plugins":[{"name":"pa","source":"./plugins/a"},{"name":"pb","source":"./plugins/b"}]}"#,
+    );
+
+    let spec = catalog.source_spec();
+    assert!(catalog.mind(&["meld", &spec]).success);
+
+    // Both agents flatten to the bare harness name "shared" (prefix omitted).
+    // Learn the first: it installs at agents/shared.md.
+    let r1 = catalog.mind(&["learn", "pa:from-a"]);
+    assert!(
+        r1.success,
+        "first agent must install: {} {}",
+        r1.stdout, r1.stderr
+    );
+    assert!(
+        catalog.claude_home.join("agents/shared.md").exists(),
+        "first agent must link at agents/shared.md"
+    );
+
+    // Learn the second (a different source): NS-41 must refuse the colliding link.
+    let r2 = catalog.mind(&["learn", "pb:from-b"]);
+    assert!(
+        !r2.success,
+        "a second agent colliding at agents/shared.md must be refused (NS-41): {} {}",
+        r2.stdout, r2.stderr
+    );
+    assert!(
+        r2.stderr.to_lowercase().contains("collid") || r2.stderr.to_lowercase().contains("shared"),
+        "the error must describe the agent collision: {}",
+        r2.stderr
+    );
+}
+
+#[test]
+fn marketplace_sync_rewalk_registers_new_entry() {
+    // spec: MKT-7
+    // DSC-57 parity for marketplaces: after melding a catalog, adding a NEW in-repo
+    // plugin entry to marketplace.json and running `sync` must register the newly
+    // listed sub-source, exactly as the [discover].sources re-walk does. Confirms
+    // the marketplace branch of the sync re-walk actually fires.
+    let catalog = Sandbox::bare("mkt-sync-rewalk");
+    // First plugin present from the start.
+    catalog.write_and_commit(
+        "plugins/first/.claude-plugin/plugin.json",
+        r#"{"name":"first"}"#,
+    );
+    catalog.write_and_commit(
+        "plugins/first/skills/oneskill/SKILL.md",
+        "---\nname: oneskill\ndescription: skill one\n---\n# one\n",
+    );
+    catalog.write_and_commit(
+        ".claude-plugin/marketplace.json",
+        r#"{"name":"cat","plugins":[{"name":"first","source":"./plugins/first"}]}"#,
+    );
+
+    let spec = catalog.source_spec();
+    assert!(catalog.mind(&["meld", &spec]).success);
+
+    // Only "first" is registered initially; "second" does not yet exist.
+    let before = catalog.mind(&["recall", "--sources"]);
+    assert!(
+        !before.stdout.contains("second"),
+        "second sub-source must not exist before it is added: {}",
+        before.stdout
+    );
+
+    // Add a SECOND in-repo plugin and list it in the marketplace, then commit.
+    catalog.write_and_commit(
+        "plugins/second/.claude-plugin/plugin.json",
+        r#"{"name":"second"}"#,
+    );
+    catalog.write_and_commit(
+        "plugins/second/skills/twoskill/SKILL.md",
+        "---\nname: twoskill\ndescription: skill two\n---\n# two\n",
+    );
+    catalog.write_and_commit(
+        ".claude-plugin/marketplace.json",
+        r#"{"name":"cat","plugins":[{"name":"first","source":"./plugins/first"},{"name":"second","source":"./plugins/second"}]}"#,
+    );
+
+    // Sync must fetch the catalog and re-walk the marketplace, registering "second".
+    let sync = catalog.mind(&["sync"]);
+    assert!(sync.success, "sync failed: {} {}", sync.stdout, sync.stderr);
+
+    let after = catalog.mind(&["recall", "--sources"]);
+    assert!(
+        after.stdout.contains("second"),
+        "the sync re-walk must register the newly-listed marketplace entry (DSC-57): {}",
+        after.stdout
+    );
+    // The new sub-source's item is discoverable.
+    let probe = catalog.mind(&["probe"]);
+    assert!(
+        probe.stdout.contains("twoskill"),
+        "the newly-added plugin's skill must be discoverable after sync: {}",
+        probe.stdout
+    );
+}
