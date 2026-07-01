@@ -250,7 +250,8 @@ pub(crate) fn scan_source_at(
             // falling back to convention discovery. When present, the plugin manifest
             // is the authoritative item source and convention discovery is skipped
             // (MKT-2). A `.claude-plugin/marketplace.json` (catalog super-source) is
-            // handled by commands.rs at meld time (shard 4) and is NOT processed here.
+            // handled by commands.rs at meld time (shard 4) for external entries;
+            // in-repo entries are scanned directly here (MKT-14).
             //
             // This branch is only reached when mind.toml is absent or `[source]`-only
             // (non-authoritative). An authoritative mind.toml suppresses the plugin
@@ -1199,6 +1200,11 @@ fn scan_marketplace_in_repo_plugins(
     has_explicit_prefix: bool,
     out: &mut Vec<CatalogItem>,
 ) -> Result<()> {
+    // Pre-compute canonicalized clone root once for the path-traversal guard (H4).
+    let canon_clone = clone_root
+        .canonicalize()
+        .unwrap_or_else(|_| clone_root.to_path_buf());
+
     for entry in manifest.into_entries() {
         // Only process in-repo entries; external ones are sub-melded by commands.rs.
         let inrepo_path = match &entry.source {
@@ -1210,18 +1216,52 @@ fn scan_marketplace_in_repo_plugins(
         //    clone_root.join("./") normalizes to clone_root on all platforms.
         let plugin_root = clone_root.join(&inrepo_path);
 
-        // 2. Compute the effective prefix (MKT-5 / MKT-8).
-        //    If the consumer set an explicit override, use it (even when it resolves
-        //    to None because the alias was explicitly cleared). Otherwise, fall back
-        //    to the entry name as the default namespace prefix.
+        // H4 (MKT-14, MKT-9): path-traversal guard -- skip entries whose resolved
+        // plugin_root escapes the clone root, including paths traversed via symlinks.
+        // Same "skip silently" tolerance as the scan-root guard uses "skip silently" for
+        // an unresolvable path; here we also skip rather than error to keep resilience.
+        let Ok(canon_plugin) = plugin_root.canonicalize() else {
+            continue; // non-existent or unresolvable -- skip silently
+        };
+        if !canon_plugin.starts_with(&canon_clone) {
+            continue; // plugin_root escapes the clone -- skip silently
+        }
+
+        // 2. Compute the effective prefix (MKT-5 / MKT-8 / MKT-13).
+        //    M5a (MKT-14): strip ANSI from the entry name before using as a prefix
+        //    to prevent terminal injection from catalog-controlled content.
+        let entry_name = strip_ansi(entry.name.trim());
+
         let plugin_prefix = if has_explicit_prefix {
-            outer_prefix.clone()
+            // Consumer set an explicit namespace override (MKT-13).  Per-plugin
+            // namespacing (MKT-8) still applies regardless; outer_prefix layers on
+            // top when present.
+            match outer_prefix {
+                Some(p) if !entry_name.is_empty() => {
+                    // outer_prefix:entry_name combined; items end up outer:entry:name.
+                    Some(format!("{p}:{entry_name}"))
+                }
+                Some(p) => {
+                    // entry_name was empty/ANSI-only after sanitization; use outer alone.
+                    Some(p.clone())
+                }
+                None => {
+                    // Outer prefix explicitly cleared (namespace=""); per-plugin prefix
+                    // (entry name) is still intact per MKT-13.
+                    // Resilience (NS-25): fall back to no prefix when entry name is
+                    // reserved or empty rather than making the entry un-installable.
+                    match namespace::validate_prefix(&entry_name) {
+                        Ok(()) if !entry_name.is_empty() => Some(entry_name.clone()),
+                        _ => None,
+                    }
+                }
+            }
         } else {
-            let entry_name = entry.name.trim().to_string();
-            // Resilience (NS-25): if the entry name is a reserved kind word or empty,
-            // fall back to no prefix rather than making the entry un-installable.
+            // No override; use entry name as default namespace prefix (MKT-8).
+            // Resilience (NS-25): fall back to no prefix when entry name is reserved
+            // or empty rather than making the entry un-installable.
             match namespace::validate_prefix(&entry_name) {
-                Ok(()) if !entry_name.is_empty() => Some(entry_name),
+                Ok(()) if !entry_name.is_empty() => Some(entry_name.clone()),
                 _ => None,
             }
         };
@@ -1309,6 +1349,32 @@ fn meta_file(kind: ItemKind, path: &Path) -> PathBuf {
         ItemKind::Tool => path.join("TOOL.md"),
         ItemKind::Agent | ItemKind::Rule => path.to_path_buf(),
     }
+}
+
+/// Strip ANSI escape sequences and certain unsafe Unicode code points from `s`.
+///
+/// Used to sanitize names and descriptions read from plugin/marketplace manifests
+/// (MKT-9) before using them as namespace prefixes or display strings, preventing
+/// terminal injection from catalog-controlled content (DSC-69 rule).
+///
+/// Mirrors `commands::strip_ansi`; duplicated here to avoid a cross-module
+/// private dependency.
+fn strip_ansi(s: &str) -> String {
+    let bytes = strip_ansi_escapes::strip(s);
+    // Input is valid UTF-8, so output is too; lossy is a no-op in practice.
+    String::from_utf8_lossy(&bytes)
+        .chars()
+        .filter(|&c| {
+            (('\x20'..='\x7e').contains(&c) || c > '\u{009f}')
+                && !matches!(
+                    c,
+                    // Bidi-override code points: phishing/spoofing vectors.
+                    '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+                    // Line separator and paragraph separator.
+                    | '\u{2028}' | '\u{2029}'
+                )
+        })
+        .collect()
 }
 
 /// Expand a glob pattern rooted at `root`, returning sorted matches.
@@ -3191,6 +3257,279 @@ mod plugin_tests {
         assert!(
             skill.prefix.is_none(),
             "prefix must be None when plugin name is a reserved kind word"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // H4: Path-traversal guard in scan_marketplace_in_repo_plugins (MKT-14, MKT-9)
+    // ---------------------------------------------------------------------------
+
+    // A marketplace entry whose `source` path is a symlink that points outside the
+    // clone root must be skipped silently -- no items, no error.
+    #[test]
+    fn marketplace_symlink_outside_clone_is_skipped() {
+        // spec: MKT-14
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let clone = base.join("sources/local/test/plugin-repo");
+
+        // An "outside" directory with a skill that should NOT be discovered.
+        let outside = base.join("outside-clone");
+        write_file(
+            &outside.join("skills/secret/SKILL.md"),
+            "---\ndescription: secret\n---\n",
+        );
+
+        // Create the clone root and a symlink `clone/external` -> `../outside-clone`.
+        std::fs::create_dir_all(clone.join(".claude-plugin")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, clone.join("external")).unwrap();
+        // On non-Unix platforms, skip this test by writing no marketplace.json so
+        // the scan yields zero items but doesn't fail.
+        #[cfg(not(unix))]
+        {
+            return;
+        }
+
+        // marketplace.json declares an in-repo entry pointing at the symlink.
+        write_file(
+            &clone.join(".claude-plugin/marketplace.json"),
+            r#"{
+                "name": "Acme Market",
+                "plugins": [
+                    {"name": "escape", "source": "external"}
+                ]
+            }"#,
+        );
+
+        let paths = paths_for(base);
+        let source = make_plugin_source(&clone);
+        let mut items = Vec::new();
+        // Must not error; must not discover the skill outside the clone.
+        scan_source(&paths, &source, &mut items)
+            .expect("path-traversal via symlink must be skipped, not errored");
+        assert!(
+            !items.iter().any(|i| i.name == "secret"),
+            "skill behind a symlink escaping the clone must NOT be discovered (MKT-14, MKT-9)"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // H5 / M13: per-plugin namespacing when has_explicit_prefix=true (MKT-13)
+    // ---------------------------------------------------------------------------
+
+    // No explicit consumer override: entry name is used as the default prefix (MKT-8).
+    // Verifies the pre-existing baseline still passes after the H5 refactor.
+    #[test]
+    fn marketplace_no_override_uses_entry_name_as_prefix() {
+        // spec: MKT-14 MKT-13
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let clone = base.join("sources/local/test/plugin-repo");
+
+        write_file(
+            &clone.join(".claude-plugin/marketplace.json"),
+            r#"{
+                "name": "Market",
+                "plugins": [
+                    {"name": "myplugin", "source": "./", "skills": ["./skills/alpha"]}
+                ]
+            }"#,
+        );
+        write_file(
+            &clone.join("skills/alpha/SKILL.md"),
+            "---\ndescription: alpha\n---\n",
+        );
+
+        // No alias set -> no explicit override.
+        let paths = paths_for(base);
+        let source = make_plugin_source(&clone);
+        let mut items = Vec::new();
+        scan_source(&paths, &source, &mut items).unwrap();
+
+        let skill = items
+            .iter()
+            .find(|i| i.kind == ItemKind::Skill && i.name == "alpha")
+            .expect("skill 'alpha' must be discovered");
+        assert_eq!(
+            skill.effective_name(),
+            "myplugin:alpha",
+            "entry name must be the default prefix when no consumer override is set (MKT-8)"
+        );
+    }
+
+    // Explicit outer prefix set (Some("outer")): items are named outer:entry:skill.
+    #[test]
+    fn marketplace_outer_prefix_combines_with_entry_name() {
+        // spec: MKT-14 MKT-13
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let clone = base.join("sources/local/test/plugin-repo");
+
+        write_file(
+            &clone.join(".claude-plugin/marketplace.json"),
+            r#"{
+                "name": "Market",
+                "plugins": [
+                    {"name": "myplugin", "source": "./", "skills": ["./skills/beta"]}
+                ]
+            }"#,
+        );
+        write_file(
+            &clone.join("skills/beta/SKILL.md"),
+            "---\ndescription: beta\n---\n",
+        );
+
+        // Set alias "outer" -> has_explicit_prefix=true, outer_prefix=Some("outer").
+        let paths = paths_for(base);
+        let mut source = make_plugin_source(&clone);
+        source.alias = Some("outer".to_string());
+        let mut items = Vec::new();
+        scan_source(&paths, &source, &mut items).unwrap();
+
+        let skill = items
+            .iter()
+            .find(|i| i.kind == ItemKind::Skill && i.name == "beta")
+            .expect("skill 'beta' must be discovered");
+        assert_eq!(
+            skill.effective_name(),
+            "outer:myplugin:beta",
+            "outer prefix and entry name must combine (MKT-13): outer:entry:item"
+        );
+    }
+
+    // Explicit empty prefix (namespace=""): outer prefix cleared but per-plugin
+    // entry-name prefix remains intact (MKT-13).
+    #[test]
+    fn marketplace_cleared_outer_prefix_keeps_entry_name_prefix() {
+        // spec: MKT-14 MKT-13
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let clone = base.join("sources/local/test/plugin-repo");
+
+        write_file(
+            &clone.join(".claude-plugin/marketplace.json"),
+            r#"{
+                "name": "Market",
+                "plugins": [
+                    {"name": "myplugin", "source": "./", "skills": ["./skills/gamma"]}
+                ]
+            }"#,
+        );
+        write_file(
+            &clone.join("skills/gamma/SKILL.md"),
+            "---\ndescription: gamma\n---\n",
+        );
+
+        // alias = Some("") -> has_explicit_prefix=true, outer_prefix=None (cleared).
+        let paths = paths_for(base);
+        let mut source = make_plugin_source(&clone);
+        source.alias = Some(String::new());
+        let mut items = Vec::new();
+        scan_source(&paths, &source, &mut items).unwrap();
+
+        let skill = items
+            .iter()
+            .find(|i| i.kind == ItemKind::Skill && i.name == "gamma")
+            .expect("skill 'gamma' must be discovered");
+        assert_eq!(
+            skill.effective_name(),
+            "myplugin:gamma",
+            "cleared outer prefix must leave per-plugin entry-name prefix intact (MKT-13)"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // M5a: ANSI stripping of entry.name before use as prefix (MKT-14)
+    // ---------------------------------------------------------------------------
+
+    // An entry whose name contains ANSI escape sequences must produce a clean prefix.
+    #[test]
+    fn marketplace_entry_name_with_ansi_produces_clean_prefix() {
+        // spec: MKT-14
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let clone = base.join("sources/local/test/plugin-repo");
+
+        // Entry name with embedded ANSI bold sequence: "\x1b[1mplugin\x1b[0m"
+        write_file(
+            &clone.join(".claude-plugin/marketplace.json"),
+            "{\"name\":\"Market\",\"plugins\":[{\"name\":\"\\u001b[1mplugin\\u001b[0m\",\"source\":\"./\",\"skills\":[\"./skills/delta\"]}]}",
+        );
+        write_file(
+            &clone.join("skills/delta/SKILL.md"),
+            "---\ndescription: delta\n---\n",
+        );
+
+        let paths = paths_for(base);
+        let source = make_plugin_source(&clone);
+        let mut items = Vec::new();
+        scan_source(&paths, &source, &mut items).unwrap();
+
+        let skill = items
+            .iter()
+            .find(|i| i.kind == ItemKind::Skill && i.name == "delta")
+            .expect("skill 'delta' must be discovered");
+        // The effective prefix must be "plugin" with ANSI stripped, not the raw ANSI string.
+        assert_eq!(
+            skill.effective_name(),
+            "plugin:delta",
+            "ANSI sequences in entry.name must be stripped before use as prefix (MKT-14)"
+        );
+        // The raw ANSI sequence must NOT appear in the prefix.
+        assert!(
+            !skill.prefix.as_deref().unwrap_or("").contains('\x1b'),
+            "prefix must not contain raw ANSI escape (\\x1b) after stripping"
+        );
+        // Positive check: prefix is the clean "plugin".
+        assert_eq!(
+            skill.prefix.as_deref(),
+            Some("plugin"),
+            "prefix must be 'plugin' after stripping ANSI escapes"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // M12: Agent scanning in scan_marketplace_in_repo_plugins (MKT-14)
+    // ---------------------------------------------------------------------------
+
+    // A marketplace in-repo entry with no `skills` array and an agent markdown file
+    // must discover the agent as ItemKind::Agent.
+    #[test]
+    fn marketplace_in_repo_entry_discovers_agents() {
+        // spec: MKT-14
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let clone = base.join("sources/local/test/plugin-repo");
+
+        // Entry points at "./" with no skills array; place an agent file.
+        write_file(
+            &clone.join(".claude-plugin/marketplace.json"),
+            r#"{
+                "name": "Acme Market",
+                "plugins": [
+                    {"name": "acme", "source": "./"}
+                ]
+            }"#,
+        );
+        write_file(
+            &clone.join("agents/myagent.md"),
+            "---\ndescription: my agent\n---\n# myagent\n",
+        );
+
+        let paths = paths_for(base);
+        let source = make_plugin_source(&clone);
+        let mut items = Vec::new();
+        scan_source(&paths, &source, &mut items).unwrap();
+
+        let agent = items
+            .iter()
+            .find(|i| i.kind == ItemKind::Agent && i.name == "myagent")
+            .expect("agent 'myagent' must be discovered from marketplace in-repo entry");
+        assert_eq!(
+            agent.effective_name(),
+            "acme:myagent",
+            "agent must be namespaced under its marketplace entry name (MKT-14)"
         );
     }
 }

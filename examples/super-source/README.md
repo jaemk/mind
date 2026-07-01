@@ -140,16 +140,16 @@ path; the bare repo names are used below for brevity:
 + melded starter (1 item(s))
 melded 5 source(s)
 learned skill:team-onboard from super-source
-learned skill:rev-review from namespacing
-learned agent:rev-dev from namespacing
-learned agent:rev-lead from namespacing
-learned rule:rev-style from namespacing
+learned skill:rev:review from namespacing
+learned agent:rev:dev from namespacing
+learned agent:rev:lead from namespacing
+learned rule:rev:style from namespacing
 learned skill:scan from tooling
 note: this source curates other sources; run `mind probe` to browse and search what is available
 ```
 
 `../explicit` is registered but none of its items are installed (no install
-flag), `../namespacing` installs all four items under the `rev-` prefix, and
+flag), `../namespacing` installs all four items under the `rev:` prefix, and
 `../tooling` installs only `skill:scan`. `meld --recursive` (`-r`) would instead
 offer every nested source's items for install, including `../explicit`.
 
@@ -176,10 +176,10 @@ commit hashes vary by clone):
 
 ```
 * namespacing  [2c427fc4 namespace:rev]
-  +  agent:rev-dev     installed
-  +  agent:rev-lead    installed
-  +  rule:rev-style    installed
-  +  skill:rev-review  installed
+  +  agent:rev:dev     installed
+  +  agent:rev:lead    installed
+  +  rule:rev:style    installed
+  +  skill:rev:review  installed
 * tooling  [b80d1a2d]
   +  skill:scan   installed
   -  tool:detect  available

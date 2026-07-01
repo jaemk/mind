@@ -1286,6 +1286,56 @@ fn harn8_introspect_fix_clobber_reports_finding_and_continues() {
         std::fs::symlink_metadata(new_lobe.join("skills/review")).is_err(),
         "the blocked link must remain absent after --fix"
     );
+
+    // The original skill symlink in claude_home must survive the clobber error
+    // and remain intact -- only the new blocked lobe is affected. spec: HARN-8
+    assert!(
+        std::fs::symlink_metadata(sb.claude_home.join("skills/review")).is_ok(),
+        "the original claude_home skill symlink must be intact after a blocked lobe error (HARN-8)"
+    );
+}
+
+// HARN-8: `introspect --fix` must report exactly ONE `missing-lobe-link` finding per
+// blocked link -- the error propagated from `link_into_new_lobes`, and no additional
+// redundant finding from a second `symlink_metadata` check.
+//
+#[test]
+fn harn8_introspect_fix_reports_exactly_one_finding_per_blocked_link() {
+    // spec: HARN-8
+    let sb = Sandbox::new();
+    sb.write_config(&format!("lobes = [\"{}\"]\n", sb.claude_home.display()));
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    assert!(sb.mind(&["learn", "review"]).success, "learn skill");
+
+    let new_lobe = sb.base.join("blocked-lobe-count");
+    let new_lobe_str = new_lobe.to_string_lossy().into_owned();
+    assert!(
+        sb.mind(&["config", "lobes", "add", &new_lobe_str]).success,
+        "lobe add failed"
+    );
+
+    // Plant a regular FILE at `new_lobe/skills` so mkdir_p fails with ENOTDIR.
+    std::fs::create_dir_all(&new_lobe).unwrap();
+    std::fs::write(new_lobe.join("skills"), "blocking file").unwrap();
+
+    let run = sb.mind(&["introspect", "--fix", "--json"]);
+    assert!(
+        run.success,
+        "introspect --fix must not abort: {}",
+        run.stderr
+    );
+
+    let v = parse_json(&run.stdout);
+    let issues = v["issues"].as_array().expect("issues array");
+    let count = issues
+        .iter()
+        .filter(|i| i["kind"] == "missing-lobe-link")
+        .count();
+    assert_eq!(
+        count, 1,
+        "exactly one missing-lobe-link finding per blocked link, got {count}: {}",
+        run.stdout
+    );
 }
 
 // HARN-8: when a recorded link is in the manifest but absent from disk (broken
@@ -1437,6 +1487,89 @@ fn lobe_add_claude_home_no_duplicate() {
         lobes.len(),
         1,
         "adding claude_home must not create a duplicate: {}",
+        listed.stdout
+    );
+}
+
+// HARN-9: `config lobes add --preset gemini` on an explicit empty lobes config
+// (`lobes = []`) auto-prepends claude_home before saving the new lobe. This
+// exercises the `cfg.lobes.is_empty()` branch -- distinct from the no-config-file
+// case, which goes through `ensure_config` and already has claude_home in the list.
+#[test]
+fn preset_add_preserves_claude_home_on_empty_lobes_config() {
+    // spec: HARN-9
+    let sb = Sandbox::new();
+    // Explicit empty lobes list to trigger the cfg.lobes.is_empty() HARN-9 branch.
+    sb.write_config("lobes = []\n");
+
+    // Pin HOME so the gemini preset resolves hermetically under the sandbox.
+    let home_str = sb.base.to_string_lossy().into_owned();
+    let added = sb.mind_env(
+        &["config", "lobes", "add", "--preset", "gemini"],
+        &[("HOME", &home_str)],
+    );
+    assert!(added.success, "preset add failed: {}", added.stderr);
+
+    let listed = sb.mind(&["config", "lobes", "list", "--json"]);
+    let v = parse_json(&listed.stdout);
+    let lobes = v["lobes"].as_array().expect("lobes array");
+
+    // Must have two saved entries: claude_home (auto-prepended) + gemini preset.
+    assert_eq!(
+        lobes.len(),
+        2,
+        "claude_home must be auto-prepended before the gemini preset on empty config: {}",
+        listed.stdout
+    );
+    let ch = sb.claude_home.to_string_lossy().into_owned();
+    assert!(
+        lobes.iter().any(|l| {
+            // bare entries serialize as plain JSON strings
+            l.as_str() == Some(ch.as_str()) || l["path"].as_str() == Some(ch.as_str())
+        }),
+        "claude_home must appear as first entry in the saved lobe list: {}",
+        listed.stdout
+    );
+}
+
+// HARN-9: `config lobes detect --yes` on an explicit empty lobes config
+// (`lobes = []`) auto-prepends claude_home before saving the detected lobes.
+// Mirrors the preset path but exercises the `lobe_detect` HARN-9 branch.
+#[test]
+fn detect_yes_preserves_claude_home_on_empty_lobes_config() {
+    // spec: HARN-9
+    let sb = Sandbox::new();
+    // Explicit empty lobes list to trigger the cfg.lobes.is_empty() HARN-9 branch.
+    sb.write_config("lobes = []\n");
+
+    // Create a .gemini marker dir under the detect base so the gemini preset is found.
+    let detect_home = sb.base.join("detect");
+    std::fs::create_dir_all(detect_home.join(".gemini")).unwrap();
+    let detect_str = detect_home.to_string_lossy().into_owned();
+    let added = sb.mind_env(
+        &["config", "lobes", "detect", "--yes"],
+        &[("MIND_DETECT_HOME", &detect_str)],
+    );
+    assert!(added.success, "detect --yes failed: {}", added.stderr);
+
+    let listed = sb.mind(&["config", "lobes", "list", "--json"]);
+    let v = parse_json(&listed.stdout);
+    let lobes = v["lobes"].as_array().expect("lobes array");
+
+    // Must have two saved entries: claude_home (auto-prepended) + detected gemini lobe.
+    assert_eq!(
+        lobes.len(),
+        2,
+        "claude_home must be auto-prepended by detect --yes on empty config: {}",
+        listed.stdout
+    );
+    let ch = sb.claude_home.to_string_lossy().into_owned();
+    assert!(
+        lobes.iter().any(|l| {
+            // bare entries serialize as plain JSON strings
+            l.as_str() == Some(ch.as_str()) || l["path"].as_str() == Some(ch.as_str())
+        }),
+        "claude_home must appear in the saved lobe list after detect: {}",
         listed.stdout
     );
 }

@@ -332,7 +332,6 @@ pub struct NestedSource {
     pub source: String,
     /// Canonical namespace key (DSC-78): namespace to impose on the nested source (like `meld --as`).
     #[serde(rename = "namespace", default)]
-    #[allow(dead_code)] // consumed by callers in commands.rs once DSC-78 is wired end-to-end
     pub namespace: Option<String>,
     /// Legacy alias key kept for backwards compatibility (DSC-78). Prefer `namespace`.
     #[serde(rename = "as", default)]
@@ -387,7 +386,6 @@ impl NestedSource {
     ///
     /// `namespace` is the canonical key; `as` is the legacy alias. When both
     /// are set, `namespace` wins. Returns `None` when neither is set.
-    #[allow(dead_code)] // consumed by callers in commands.rs once DSC-78 is wired end-to-end
     pub fn effective_alias(&self) -> Option<String> {
         self.namespace.clone().or_else(|| self.alias.clone())
     }
@@ -1280,11 +1278,11 @@ mod tests {
     #[test]
     fn nested_source_parses_all_curator_fields() {
         // Parses follow-branch, roots, and [[discover.sources.hooks]] in a
-        // full MindToml round-trip.
+        // full MindToml round-trip using the canonical `namespace` key (DSC-78).
         let toml = r#"
             [[discover.sources]]
             source = "github:owner/repo"
-            as = "or"
+            namespace = "or"
             install = true
             follow-branch = "main"
             roots = ["packages", "tools"]
@@ -1303,7 +1301,7 @@ mod tests {
         let ns = &parsed.discover.as_ref().unwrap().sources[0];
 
         assert_eq!(ns.source, "github:owner/repo");
-        assert_eq!(ns.alias.as_deref(), Some("or"));
+        assert_eq!(ns.namespace.as_deref(), Some("or"));
         assert_eq!(ns.effective_alias(), Some("or".to_string()));
         assert!(ns.install);
         assert_eq!(ns.follow_branch.as_deref(), Some("main"));

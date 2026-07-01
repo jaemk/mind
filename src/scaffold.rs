@@ -104,6 +104,11 @@ pub fn patch_source_meta(
 
 /// Replace the active `<key> = ...` line in `content`, or insert it after
 /// the `[source]` header. Non-active (commented) lines are left untouched.
+///
+/// When no `[source]` section exists, appends one at the end of the file
+/// before inserting the key.
+///
+/// Always emits a trailing newline; normalizes content that lacks one.
 fn set_key(content: &str, key: &str, value: &str) -> String {
     let new_line = format!("{key} = {value}");
     let key_eq = format!("{key} =");
@@ -130,8 +135,13 @@ fn set_key(content: &str, key: &str, value: &str) -> String {
     }
 
     if !replaced {
-        let insert_at = source_line_idx.map(|i| i + 1).unwrap_or(0);
-        output.insert(insert_at, new_line);
+        if let Some(i) = source_line_idx {
+            output.insert(i + 1, new_line);
+        } else {
+            // No [source] section in the file; append one followed by the key.
+            output.push("[source]".to_string());
+            output.push(new_line);
+        }
     }
 
     let mut result = output.join("\n");
@@ -362,5 +372,62 @@ mod tests {
         assert_eq!(toml_string("foo"), "\"foo\"");
         assert_eq!(toml_string("foo\"bar"), "\"foo\\\"bar\"");
         assert_eq!(toml_string("foo\\bar"), "\"foo\\\\bar\"");
+    }
+
+    // -------------------------------------------------------------------------
+    // set_key — M7: missing [source] section
+    // -------------------------------------------------------------------------
+
+    /// spec: M7 — when the file has no [source] header, set_key must append
+    /// one before inserting the key so the value lands in the right TOML scope.
+    #[test]
+    fn set_key_creates_source_section_when_absent() {
+        // A mind.toml that only has [[items]] and no [source] block.
+        let content = "[[items]]\nkind = \"skill\"\nname = \"foo\"\n";
+        let out = set_key(content, "prefix", "\"mypkg\"");
+
+        // The [source] header must now be present.
+        assert!(
+            out.contains("[source]"),
+            "must create [source] section: {out}"
+        );
+        // The key must be present.
+        assert!(
+            out.contains("prefix = \"mypkg\""),
+            "must insert key under [source]: {out}"
+        );
+        // [source] must precede the key.
+        let source_pos = out.find("[source]").unwrap();
+        let key_pos = out.find("prefix = \"mypkg\"").unwrap();
+        assert!(source_pos < key_pos, "[source] must precede the key: {out}");
+        // Original [[items]] content must be preserved.
+        assert!(
+            out.contains("[[items]]"),
+            "must keep [[items]] section: {out}"
+        );
+        // Output must end with a newline.
+        assert!(out.ends_with('\n'), "must end with newline: {out:?}");
+    }
+
+    /// spec: M7 regression — when [source] already exists, set_key inserts the
+    /// key right after the header (existing happy path must not regress).
+    #[test]
+    fn set_key_inserts_after_existing_source_section() {
+        let content = "[source]\ndescription = \"\"\n";
+        let out = set_key(content, "prefix", "\"mypkg\"");
+
+        assert!(out.contains("prefix = \"mypkg\""), "must insert key: {out}");
+        // The key must appear after [source].
+        let source_pos = out.find("[source]").unwrap();
+        let key_pos = out.find("prefix = \"mypkg\"").unwrap();
+        assert!(
+            source_pos < key_pos,
+            "key must appear after [source]: {out}"
+        );
+        // description line must still be present.
+        assert!(
+            out.contains("description = \"\""),
+            "must preserve existing lines: {out}"
+        );
     }
 }

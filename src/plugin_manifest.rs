@@ -311,6 +311,15 @@ pub fn load_marketplace_manifest(path: &Path) -> Result<MarketplaceManifest> {
 
     let mut entries = Vec::with_capacity(raw.plugins.len());
     for entry in raw.plugins {
+        // spec: MKT-9 — a marketplace entry's name is required and must be
+        // non-empty; an absent or whitespace-only name disables namespacing and
+        // is rejected with the same MindToml class as load_plugin_manifest uses.
+        if entry.name.trim().is_empty() {
+            return Err(MindError::MindToml {
+                path: path.to_path_buf(),
+                msg: "marketplace.json: entry 'name' must be a non-empty string".to_string(),
+            });
+        }
         let source = resolve_source(entry.source, path)?;
         // Validate each skills path (MKT-9: same safe-path rule as in-repo source paths).
         for skill_path in &entry.skills {
@@ -962,6 +971,43 @@ mod tests {
         let m = load_marketplace_manifest(&path).expect("should parse");
         let entries = m.into_entries();
         assert_eq!(entries.len(), 1);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // spec: MKT-9
+    // A marketplace entry with an empty name must be rejected with MindToml,
+    // matching the same guard applied by load_plugin_manifest. A valid sibling
+    // entry in the same list does not suppress the error.
+    #[test]
+    fn marketplace_entry_empty_name_is_rejected() {
+        let json = format!(
+            r#"{{"name":"Test Market","plugins":[{},{}]}}"#,
+            r#"{"name":"good","source":"./good"}"#, r#"{"name":"","source":"./bad"}"#,
+        );
+        let path = write_temp(&json, "mkt-emptyname");
+        let err = load_marketplace_manifest(&path).unwrap_err();
+        match err {
+            MindError::MindToml { msg, .. } => {
+                assert!(msg.contains("name"), "error must mention 'name': {msg}");
+            }
+            other => panic!("expected MindToml for empty entry name, got: {other:?}"),
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // spec: MKT-9
+    // A marketplace entry whose name is whitespace-only (e.g. "  ") must also be
+    // rejected; the trim() guard catches this case just as it does in
+    // load_plugin_manifest.
+    #[test]
+    fn marketplace_entry_whitespace_name_is_rejected() {
+        let json = make_marketplace(r#"{"name":"  ","source":"./p"}"#);
+        let path = write_temp(&json, "mkt-wsname");
+        let err = load_marketplace_manifest(&path).unwrap_err();
+        assert!(
+            matches!(err, MindError::MindToml { .. }),
+            "whitespace-only entry name must be MindToml error: {err:?}"
+        );
         let _ = std::fs::remove_file(&path);
     }
 

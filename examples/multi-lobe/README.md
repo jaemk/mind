@@ -95,7 +95,7 @@ STO-15 (the default lobe written on first use).
 `../../spec/lifecycle.md` - LIFE-40 (the store copy is linked into every
 configured agent home; uninstall removes the recorded link in every home).
 
-`../../spec/harness-lobes.md` - cross-harness lobe spec (HARN-1..6): the `kinds`
+`../../spec/harness-lobes.md` - cross-harness lobe spec (HARN-1..9): the `kinds`
 filter, preset table, and auto-detect behavior.
 
 ## Verified

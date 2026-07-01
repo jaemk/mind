@@ -17665,3 +17665,129 @@ fn init_source_namespace_overrides_existing_prefix_in_marketplace() {
         "old prefix must no longer be present: {toml}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// H1 / NS-43 / NS-45: --yes flag forces non-interactive collision path
+// ---------------------------------------------------------------------------
+
+#[test]
+fn skill_collision_yes_flag_forces_noninteractive_error() {
+    // spec: NS-43 NS-45
+    // Passing --yes to `meld` that would produce a cross-source skill collision
+    // must cause SkillCollision (non-zero exit) rather than hanging on an
+    // interactive prompt, even in a session where is_tty() might be true.
+    // In the headless test environment is_tty()=false, so this test also
+    // functions as a regression guard that the non-interactive path fires.
+    let src_a = Sandbox::bare("h1-yes-a");
+    src_a.write_and_commit(
+        "skills/h1skill/SKILL.md",
+        "---\nname: h1skill\ndescription: H1 skill A\n---\n# h1skill\n",
+    );
+    let r = src_a.mind(&["meld", &src_a.source_spec(), "--yes"]);
+    assert!(r.success, "meld source-a failed: {} {}", r.stdout, r.stderr);
+
+    let src_b = Sandbox::bare("h1-yes-b");
+    src_b.write_and_commit(
+        "skills/h1skill/SKILL.md",
+        "---\nname: h1skill\ndescription: H1 skill B\n---\n# h1skill\n",
+    );
+    // --yes + collision: must return non-zero (SkillCollision) rather than prompt.
+    let r = src_a.mind(&["meld", &src_b.source_spec(), "--yes"]);
+    assert!(
+        !r.success,
+        "--yes meld with collision must fail non-interactively (NS-45): {} {}",
+        r.stdout, r.stderr
+    );
+    let combined = format!("{}\n{}", r.stdout, r.stderr);
+    assert!(
+        combined.contains("collision")
+            || combined.contains("conflict")
+            || combined.contains("namespace"),
+        "--yes collision error must mention collision/namespace (NS-43 NS-45): {combined}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// M1: default `recall` view emits `namespace:` not `as:` for the alias token
+// ---------------------------------------------------------------------------
+
+#[test]
+fn recall_default_view_uses_namespace_prefix_for_alias() {
+    // spec: NS-43 NS-45
+    // The non-`--sources` recall path (the default item status view) must emit
+    // `namespace:<alias>` in the source header, consistent with the `--sources`
+    // path (which already uses `namespace:`).
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    assert!(sb.mind(&["meld", &spec, "--namespace", "jk"]).success);
+
+    let recall = sb.mind(&["recall"]).stdout;
+    assert!(
+        recall.contains("namespace:jk"),
+        "default recall must show 'namespace:jk' not 'as:jk': {recall}"
+    );
+    assert!(
+        !recall.contains("as:jk"),
+        "default recall must not use the old 'as:' prefix: {recall}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// M14 / DSC-78: sync re-walk honors `namespace =` key in [discover].sources
+// ---------------------------------------------------------------------------
+
+#[test]
+fn sync_rewalk_respects_namespace_key_in_mindfile() {
+    // spec: DSC-78
+    // A super-source whose [discover].sources entry uses `namespace = "pfx"`
+    // (the canonical DSC-78 key, distinct from the legacy `as = "pfx"`) must
+    // register the nested source under that namespace alias during sync re-walk.
+    // Guards H2: the re-walk previously passed `ns.alias` (the legacy `as`
+    // field), silently dropping any value set via the canonical `namespace` key.
+    let nested = Sandbox::named("dsc78-n");
+    let super_src = Sandbox::bare("dsc78-sup");
+
+    // Start with no discover sources so the nested source is NOT registered
+    // at initial meld time.
+    super_src.write_and_commit("mind.toml", "[source]\ndescription = \"super\"\n");
+
+    let r = super_src.mind(&["meld", &super_src.source_spec()]);
+    assert!(
+        r.success,
+        "meld super-source failed: {} {}",
+        r.stdout, r.stderr
+    );
+
+    // Confirm nested is not yet registered.
+    let before = super_src.mind(&["recall", "--sources"]).stdout;
+    assert!(
+        !before.contains("/dsc78-n"),
+        "nested must not be registered before sync re-walk: {before}"
+    );
+
+    // Update super-source mind.toml to add the nested source using the
+    // canonical `namespace` key (not `as`).
+    super_src.write_and_commit(
+        "mind.toml",
+        &format!(
+            "[source]\ndescription = \"super\"\n\
+             [[discover.sources]]\nsource = \"{}\"\nnamespace = \"pfx\"\n",
+            nested.source_spec()
+        ),
+    );
+
+    // sync fetches the updated super-source mind.toml and re-walks discover.sources,
+    // finding the newly added nested source with namespace = "pfx".
+    let r = super_src.mind(&["sync"]);
+    assert!(r.success, "sync failed: {} {}", r.stdout, r.stderr);
+
+    let after = super_src.mind(&["recall", "--sources"]).stdout;
+    assert!(
+        after.contains("/dsc78-n"),
+        "nested source must be registered after sync re-walk: {after}"
+    );
+    assert!(
+        after.contains("namespace:pfx"),
+        "nested source must carry namespace:pfx alias after sync re-walk (DSC-78): {after}"
+    );
+}

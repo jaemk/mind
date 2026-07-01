@@ -93,7 +93,7 @@ install model. The generated file is an input to Claude's plugin system and to
   The generated file declares a single in-repo plugin entry. `name` is the
   effective plugin name (INIT-11). `source` is `"."` (the repo root). `description`
   is taken from `[source].description` in an existing `mind.toml` if present, else
-  a placeholder comment is emitted. When `--flat-skills` is also in effect (INIT-12),
+  a placeholder string is emitted. When `--flat-skills` is also in effect (INIT-12),
   the plugin entry includes a `skills` array listing the relative paths of every
   skill directory discovered by flat-skill layout (DSC-74..76, MKT-14); without
   `--flat-skills` the `skills` key is omitted and skill discovery falls back to the

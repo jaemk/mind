@@ -26,7 +26,10 @@ Items are discovered by convention (the paths above) or declared in a
 **Lobe.** An agent home `mind` links items into: the directory holding
 `skills/`, `agents/`, and `rules/`. The default lobe is `~/.claude`; you can add
 Gemini, Codex, Antigravity, or any directory, each with an optional per-kind
-filter (see [Configuration](configuration.md)).
+filter (see [Configuration](configuration.md)). The `gemini` preset (path
+`~/.gemini/config`) covers both Gemini CLI and the Antigravity IDE. Users of the
+Antigravity CLI who previously used an `antigravity-cli` preset should configure a
+custom lobe path manually.
 
 **Learn.** `mind learn <item>` copies the item out of the source clone into the
 *store* (`~/.mind/store/<kind>/<name>`) and symlinks that store copy into every

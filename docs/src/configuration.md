@@ -74,6 +74,14 @@ mind config lobes add --preset gemini
 # + added gemini lobe ~/.gemini/config [skill]
 ```
 
+> **Note (migration):** The `gemini` preset path changed from `~/.gemini` to
+> `~/.gemini/config` in a previous release. If you added this preset earlier, your
+> `~/.mind/config.toml` may still have the old path. Update it by running:
+> ```
+> mind config lobes remove ~/.gemini && mind config lobes add --preset gemini
+> ```
+> Or hand-edit `~/.mind/config.toml` and replace `~/.gemini` with `~/.gemini/config`.
+
 `mind config lobes detect` detects which known harness homes exist on the machine
 and reports the matching presets it could add. It never mutates config on its own:
 it only adds a lobe with `--yes` or an interactive TTY confirm. `--json` emits the

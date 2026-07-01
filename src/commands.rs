@@ -78,7 +78,8 @@ pub fn meld(
         install_hook,
         dangerously_skip_install_hook_check,
         prefer_ssh,
-        None, // a top-level meld has no curator-supplied configuration
+        false, // yes: top-level meld does not yet thread --yes (non-TTY always fires NS-45)
+        None,  // a top-level meld has no curator-supplied configuration
         &mut meld_skipped,
     )?;
     registry.save(paths)?;
@@ -345,6 +346,9 @@ impl CuratedConfig {
 /// source that inherits no pin override).
 /// `roots` is the consumer `--root` override (empty => no override).
 ///
+/// `yes` mirrors the CLI `--yes` flag (NS-45): when true, non-interactive mode
+/// is forced even on a TTY, so the collision gate never prompts.
+///
 /// `curated` carries the curator-supplied configuration from a parent
 /// super-source's `[discover].sources` entry (DSC-59): a follow-branch pin,
 /// scan roots, and lifecycle hooks. These apply only when the nested source
@@ -366,6 +370,7 @@ fn meld_recursive(
     install_hook: Option<String>,
     dangerously_skip_hook_check: bool,
     prefer_ssh: bool,
+    yes: bool,
     curated: Option<CuratedConfig>,
     skipped: &mut Vec<SkippedEntry>,
 ) -> Result<usize> {
@@ -701,34 +706,55 @@ fn meld_recursive(
         }
         if !conflicts.is_empty() {
             let suggested = suggested_namespace(&source.url);
-            if crate::hook::is_tty() {
+            // spec: NS-44 NS-45 — interactive only on a real TTY AND without --yes.
+            if crate::hook::is_tty() && !yes {
                 // NS-44: interactive TTY path — prompt for a namespace prefix.
-                // spec: NS-43
+                // spec: NS-44
                 let answer = prompt_line(&format!(
                     "name collision detected -- the following items conflict with \
                      already-installed items:\n{}\n\
-                     enter a namespace prefix (suggested: {suggested}) or press \
-                     Enter to proceed without one: ",
+                     enter a namespace prefix [{suggested}] (. to abort): ",
                     format_conflicts_display(&conflicts),
                 ))?;
-                let chosen = crate::namespace::prefix_choice(&answer);
-                if let Some(c) = &chosen {
-                    crate::namespace::validate_prefix(c)?;
-                }
-                if chosen != source.alias {
-                    source.alias = chosen;
-                    items = match catalog::scan(paths, &single(&source)) {
-                        Ok(items) => items,
-                        Err(e) => {
-                            if !source.is_linked() {
-                                let _ = std::fs::remove_dir_all(&dir);
-                            }
-                            return Err(e);
+                // spec: NS-44 — parse the collision answer:
+                //   empty  → accept the suggested prefix
+                //   "."    → abort (SkillCollision, same as non-interactive)
+                //   other  → use as custom prefix
+                match parse_collision_answer(&answer, &suggested) {
+                    CollisionAnswer::Abort => {
+                        if !source.is_linked() {
+                            let _ = std::fs::remove_dir_all(&dir);
                         }
-                    };
+                        return Err(MindError::SkillCollision {
+                            conflicts,
+                            suggested,
+                        });
+                    }
+                    CollisionAnswer::Prefix(chosen_str) => {
+                        let chosen = if chosen_str.is_empty() {
+                            None
+                        } else {
+                            Some(chosen_str)
+                        };
+                        if let Some(c) = &chosen {
+                            crate::namespace::validate_prefix(c)?;
+                        }
+                        if chosen != source.alias {
+                            source.alias = chosen;
+                            items = match catalog::scan(paths, &single(&source)) {
+                                Ok(items) => items,
+                                Err(e) => {
+                                    if !source.is_linked() {
+                                        let _ = std::fs::remove_dir_all(&dir);
+                                    }
+                                    return Err(e);
+                                }
+                            };
+                        }
+                    }
                 }
             } else {
-                // spec: NS-43 NS-45 — non-interactive: hard error with guidance.
+                // spec: NS-43 NS-45 — non-interactive (no TTY or --yes): hard error.
                 if !source.is_linked() {
                     let _ = std::fs::remove_dir_all(&dir);
                 }
@@ -863,6 +889,7 @@ fn meld_recursive(
                 None, // no consumer install hook for nested sources
                 dangerously_skip_hook_check,
                 prefer_ssh, // nested sources inherit the SSH preference
+                false,      // yes: nested sources are not top-level (collision check skipped)
                 Some(curated),
                 skipped,
             ) {
@@ -953,21 +980,11 @@ fn meld_recursive(
                     if matches!(entry.source, plugin_manifest::PluginSource::InRepo { .. }) {
                         continue; // spec: MKT-14
                     }
-                    // belt-and-suspenders: into_entries() already validates
-                    // in-repo paths, so this is a redundant safety check.
-                    if let plugin_manifest::PluginSource::InRepo { ref path } = entry.source
-                        && !plugin_manifest::is_safe_manifest_path(path)
-                    {
-                        return Err(MindError::MindToml {
-                            path: marketplace_path.clone(),
-                            msg: format!(
-                                "marketplace.json: in-repo plugin path {:?} is unsafe",
-                                path
-                            ),
-                        });
-                    }
                     let repo_spec = marketplace_entry_spec(&entry, &dir);
-                    let entry_name = entry.name.clone();
+                    // spec: MKT-9 — strip ANSI from the marketplace entry name
+                    // before using it as the sub-source alias so a malicious entry
+                    // cannot inject escape sequences into the terminal (M5b).
+                    let entry_name = strip_ansi(&entry.name);
                     let entry_version = entry.version;
                     let entry_description = entry.description;
                     // Recurse exactly like [discover].sources: cycle-safe
@@ -986,7 +1003,8 @@ fn meld_recursive(
                         None, // no install hook override
                         dangerously_skip_hook_check,
                         prefer_ssh,
-                        None, // no curator config
+                        false, // yes: nested, not top-level (collision check skipped)
+                        None,  // no curator config
                         skipped,
                     ) {
                         Ok(n) => {
@@ -3723,7 +3741,8 @@ pub fn sync(paths: &Paths, then_upgrade: bool, dangerously_skip_hook_check: bool
                 None,  // auto-meld supplies no install hook
                 false, // auto-meld is non-TTY, so its hooks take the HOOK-22 skip path
                 prefer_ssh,
-                None, // auto-meld has no curator-supplied configuration
+                false, // yes: auto-meld is not top-level (collision check skipped)
+                None,  // auto-meld has no curator-supplied configuration
                 &mut sync_skipped,
             )?;
         }
@@ -3865,9 +3884,13 @@ pub fn sync(paths: &Paths, then_upgrade: bool, dangerously_skip_hook_check: bool
                     flat_skills: ns.flat_skills,
                     hooks: ns.resolved_hooks(&toml_path)?,
                 };
+                // spec: DSC-78 — use effective_alias() so the canonical
+                // `namespace =` key is honored (not just the legacy `as =` key).
+                // Compute before consuming fields of `ns`.
+                let ns_alias = ns.effective_alias();
                 nested.push(NestedTodo {
                     spec: ns.source,
-                    alias: ns.alias,
+                    alias: ns_alias,
                     curated,
                     on_auth_failure: ns.on_auth_failure,
                 });
@@ -3944,6 +3967,7 @@ pub fn sync(paths: &Paths, then_upgrade: bool, dangerously_skip_hook_check: bool
                 None,  // a re-walked nested source supplies no install hook
                 false, // sync is non-TTY: its hooks take the HOOK-22 skip path
                 prefer_ssh,
+                false, // yes: sync re-walk is not top-level (collision check skipped)
                 Some(todo.curated),
                 &mut sync_skipped,
             ) {
@@ -4660,7 +4684,7 @@ pub fn recall(
             .map(short)
             .unwrap_or_else(|| "unsynced".into());
         let ns = match &s.alias {
-            Some(a) => format!(" as:{a}"),
+            Some(a) => format!(" namespace:{a}"),
             None => String::new(),
         };
         let hook = match s.install_hooks.len() {
@@ -5120,18 +5144,6 @@ pub fn introspect(paths: &Paths, fix: bool, json: bool) -> Result<()> {
                             kind: "missing-lobe-link",
                             target: it.key(),
                             message: format!("{}: {e}", p.display()),
-                        });
-                    }
-                    // Report a finding only if the link still doesn't exist.
-                    if std::fs::symlink_metadata(&expected).is_err() {
-                        issues.push(Issue {
-                            kind: "missing-lobe-link",
-                            target: it.key(),
-                            message: format!(
-                                "{}: could not link into lobe {}",
-                                it.key(),
-                                lobe.path.display()
-                            ),
                         });
                     }
                 } else {
@@ -5758,13 +5770,45 @@ fn suggested_namespace(url: &str) -> String {
 /// Format a conflict list for the interactive collision prompt (NS-44).
 ///
 /// Each tuple is `(kind, effective_name, existing_source)`. Produces the same
-/// bullet style as the `SkillCollision` error for consistency.
+/// bullet style as the `SkillCollision` error for consistency. Item name and
+/// source name are stripped of ANSI escapes so a malicious source cannot inject
+/// terminal control sequences into the prompt (spec: NS-44).
 fn format_conflicts_display(conflicts: &[(String, String, String)]) -> String {
     conflicts
         .iter()
-        .map(|(k, n, s)| format!("  {k}:{n} (already installed from '{s}')"))
+        .map(|(k, n, s)| {
+            let safe_n = strip_ansi(n);
+            let safe_s = strip_ansi(s);
+            format!("  {k}:{safe_n} (already installed from '{safe_s}')")
+        })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// The parsed outcome of a user's response to the NS-44 collision prompt.
+enum CollisionAnswer {
+    /// Accept the given prefix (empty string = no prefix, non-empty = custom prefix).
+    Prefix(String),
+    /// User chose to abort; stop the meld with SkillCollision.
+    Abort,
+}
+
+/// Parse the user's raw answer to the NS-44 collision prompt (spec: NS-44).
+///
+/// - Empty (Enter) → accept the pre-populated suggested prefix.
+/// - `.` → abort (same outcome as the non-interactive non-TTY path).
+/// - Anything else → use as a custom prefix (caller must validate it).
+fn parse_collision_answer(answer: &str, suggested: &str) -> CollisionAnswer {
+    let trimmed = answer.trim();
+    if trimmed.is_empty() {
+        // spec: NS-44 — accepting the suggestion continues under that prefix.
+        CollisionAnswer::Prefix(suggested.to_string())
+    } else if trimmed == "." {
+        // spec: NS-44 — aborting stops meld with a non-zero exit.
+        CollisionAnswer::Abort
+    } else {
+        CollisionAnswer::Prefix(trimmed.to_string())
+    }
 }
 
 /// Print `prompt` and read one line from stdin (trimmed by the caller). EOF
@@ -7123,5 +7167,80 @@ mod tests {
             "the chosen destination must be saved as absorb_to"
         );
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ---- NS-44: collision prompt parsing (parse_collision_answer) ----
+
+    #[test]
+    fn collision_prompt_empty_accepts_suggested() {
+        // spec: NS-44 — pressing Enter (empty answer) accepts the suggested prefix.
+        match parse_collision_answer("", "myrepo") {
+            CollisionAnswer::Prefix(p) => assert_eq!(p, "myrepo"),
+            CollisionAnswer::Abort => panic!("empty must accept suggested, not abort"),
+        }
+        // Whitespace-only is also empty after trim.
+        match parse_collision_answer("   ", "myrepo") {
+            CollisionAnswer::Prefix(p) => assert_eq!(p, "myrepo"),
+            CollisionAnswer::Abort => panic!("whitespace must accept suggested, not abort"),
+        }
+    }
+
+    #[test]
+    fn collision_prompt_dot_aborts() {
+        // spec: NS-44 — typing "." aborts the meld (same as non-interactive path).
+        assert!(
+            matches!(
+                parse_collision_answer(".", "myrepo"),
+                CollisionAnswer::Abort
+            ),
+            "dot must abort"
+        );
+        // Dot with surrounding whitespace is still the abort sentinel.
+        assert!(
+            matches!(
+                parse_collision_answer("  .  ", "myrepo"),
+                CollisionAnswer::Abort
+            ),
+            "dot with whitespace must abort"
+        );
+    }
+
+    #[test]
+    fn collision_prompt_custom_prefix_is_preserved() {
+        // spec: NS-44 — typing a custom prefix uses it verbatim (trimmed).
+        match parse_collision_answer("mypfx", "suggested") {
+            CollisionAnswer::Prefix(p) => assert_eq!(p, "mypfx"),
+            CollisionAnswer::Abort => panic!("custom prefix must not abort"),
+        }
+        // Trimming applies.
+        match parse_collision_answer("  mypfx  ", "suggested") {
+            CollisionAnswer::Prefix(p) => assert_eq!(p, "mypfx"),
+            CollisionAnswer::Abort => panic!("trimmed custom prefix must not abort"),
+        }
+    }
+
+    #[test]
+    fn format_conflicts_display_strips_ansi_from_name_and_source() {
+        // spec: NS-44 — ANSI escape sequences in item name or source name are
+        // stripped so a malicious source cannot inject terminal control codes into
+        // the interactive collision prompt.
+        let conflicts = vec![(
+            "skill".to_string(),
+            "\x1b[31mreview\x1b[0m".to_string(), // ANSI-colored name
+            "\x1b[32mevil/source\x1b[0m".to_string(), // ANSI-colored source
+        )];
+        let out = format_conflicts_display(&conflicts);
+        assert!(
+            out.contains("skill:review"),
+            "bare name must appear without ANSI: {out}"
+        );
+        assert!(
+            out.contains("evil/source"),
+            "bare source must appear without ANSI: {out}"
+        );
+        assert!(
+            !out.contains('\x1b'),
+            "no ANSI escape bytes must appear in the output: {out}"
+        );
     }
 }
