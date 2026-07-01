@@ -21,7 +21,7 @@ and the manifest are defined in [storage.md](storage.md).
   (DSC-65), overriding each source's own `[source]` pin, so melding the output
   reproduces the same source set at the same revisions.
 - `DUMP-4` Each emitted entry carries the meld-time settings in effect for its
-  source so the reproduction matches: the prefix (`as`, from the consumer alias or
+  source so the reproduction matches: the prefix (`namespace`, from the consumer alias or
   the source's `[source].prefix`, namespacing.md), the scan `roots` (STO-17), and
   the pin resolved to the current commit (DUMP-1). `dump` references each source
   and does not inline its `[[items]]`, discovery globs, or hooks: those are read
@@ -52,7 +52,7 @@ and the manifest are defined in [storage.md](storage.md).
   The empty `install-items = []` form is never emitted; that case is `install =
   false`.
 - `DUMP-5` Items in `install-items` are listed by bare `kind:name` (catalog and
-  source truth), so a prefix carried by the entry's `as` (DUMP-4) still applies at
+  source truth), so a prefix carried by the entry's `namespace` (DUMP-4) still applies at
   install, consistent with the catalog (namespacing.md).
 - `DUMP-6` An item installed only as a within-source dependency (dependencies.md)
   is part of the installed set and is listed in `install-items` like any other, so

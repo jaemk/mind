@@ -88,6 +88,18 @@ impl std::fmt::Display for ItemKind {
     }
 }
 
+/// Format a conflicts list for display in error messages.
+///
+/// Each tuple is `(kind, effective_name, existing_source)`. Used by the
+/// [`MindError::SkillCollision`] `#[error(...)]` format string.
+fn format_conflicts(conflicts: &[(String, String, String)]) -> String {
+    conflicts
+        .iter()
+        .map(|(k, n, s)| format!("  {k}:{n} (already installed from '{s}')"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// All the ways a `mind` operation can fail.
 #[derive(Debug, thiserror::Error)]
 pub enum MindError {
@@ -347,6 +359,22 @@ pub enum MindError {
         /// The source of the agent being installed.
         incoming: String,
     },
+
+    /// Cross-source skill/rule/tool name collision detected at `meld` (NS-43/NS-45).
+    /// One or more incoming items share a `(kind, effective_name)` with an already-
+    /// installed item from a different source, and the session is non-interactive.
+    #[error(
+        "name collision: the following items from the incoming source conflict with \
+         already-installed items:\n{}\nRun `mind meld --namespace {suggested} <repo>` \
+         to namespace the incoming source.",
+        format_conflicts(conflicts)
+    )]
+    SkillCollision {
+        /// Each conflict: `(kind, effective_name, existing_source)`.
+        conflicts: Vec<(String, String, String)>,
+        /// Suggested namespace prefix (the repo name / last URL component).
+        suggested: String,
+    },
 }
 
 fn status_suffix(status: Option<ExitStatus>) -> String {
@@ -539,6 +567,46 @@ mod tests {
             "missing identity: {msg}"
         );
         assert!(msg.contains("make install"), "missing command: {msg}");
+    }
+
+    // NS-43 / NS-45: SkillCollision lists all conflicting items, names the
+    // existing source for each, and suggests --namespace with the repo name.
+    #[test]
+    fn skill_collision_renders_conflict_list_and_namespace_hint() {
+        // spec: NS-43 NS-45
+        let e = MindError::SkillCollision {
+            conflicts: vec![
+                (
+                    "skill".into(),
+                    "review".into(),
+                    "github.com/acme/agents".into(),
+                ),
+                (
+                    "rule".into(),
+                    "style".into(),
+                    "github.com/acme/rules".into(),
+                ),
+            ],
+            suggested: "acme".into(),
+        };
+        let msg = e.to_string();
+        assert!(
+            msg.contains("name collision"),
+            "must contain 'name collision': {msg}"
+        );
+        assert!(
+            msg.contains("skill:review"),
+            "must list skill:review: {msg}"
+        );
+        assert!(msg.contains("rule:style"), "must list rule:style: {msg}");
+        assert!(
+            msg.contains("github.com/acme/agents"),
+            "must name the existing source: {msg}"
+        );
+        assert!(
+            msg.contains("--namespace acme"),
+            "must suggest --namespace with the repo name: {msg}"
+        );
     }
 
     // spec: HOOK-30

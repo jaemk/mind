@@ -295,6 +295,29 @@ pub(crate) fn scan_source_at(
                 return Ok(());
             }
 
+            // MKT-14: Check for a marketplace.json AFTER plugin.json (plugin.json wins
+            // if both are present) and BEFORE the convention fallback. In-repo entries
+            // are scanned as roots within this repo; external entries are skipped here
+            // (they are sub-melded by commands.rs). The marketplace is authoritative:
+            // when found, convention discovery is skipped.
+            if let Some(marketplace_path) = plugin_manifest::find_marketplace_manifest(clone_root) {
+                let manifest = plugin_manifest::load_marketplace_manifest(&marketplace_path)?;
+                // Detect whether the consumer set an explicit prefix override (even ""
+                // to clear it). Used to distinguish "no override → use entry name as
+                // the default prefix" from "override set → respect it".
+                let has_explicit_prefix = source.alias.is_some()
+                    || mt.as_ref().and_then(|m| m.source.prefix.as_ref()).is_some();
+                scan_marketplace_in_repo_plugins(
+                    clone_root,
+                    source,
+                    manifest,
+                    &prefix,
+                    has_explicit_prefix,
+                    out,
+                )?;
+                return Ok(()); // marketplace is authoritative (MKT-2 / MKT-14)
+            }
+
             // No plugin manifest found; fall through to the existing convention scan.
 
             // spec: DSC-50 / DSC-51 — resolve the effective scan roots:
@@ -1149,6 +1172,107 @@ fn scan_plugin_components(
                 entry.clone(),
                 &entry,
             ));
+        }
+    }
+    Ok(())
+}
+
+/// Scan in-repo plugins declared in a marketplace manifest (MKT-14).
+///
+/// Each entry with [`plugin_manifest::PluginSource::InRepo`] is treated as a scan
+/// root within the catalog repo. When an entry's `skills` array is non-empty, only
+/// the listed leaf skill directories are scanned; otherwise `plugin_root/skills/` is
+/// scanned conventionally. Agents are always scanned conventionally from
+/// `plugin_root/agents/`. External entries are skipped — those are sub-melded by
+/// `commands.rs`.
+///
+/// `outer_prefix`: the already-resolved effective prefix for the source (alias or
+/// mindfile prefix, filtered to `None` when empty). `has_explicit_prefix`: true when
+/// the consumer set an explicit override (even `""` to clear), used to decide whether
+/// to fall back to the entry name as the default namespace prefix.
+// spec: MKT-14
+fn scan_marketplace_in_repo_plugins(
+    clone_root: &Path,
+    source: &Source,
+    manifest: plugin_manifest::MarketplaceManifest,
+    outer_prefix: &Option<String>,
+    has_explicit_prefix: bool,
+    out: &mut Vec<CatalogItem>,
+) -> Result<()> {
+    for entry in manifest.into_entries() {
+        // Only process in-repo entries; external ones are sub-melded by commands.rs.
+        let inrepo_path = match &entry.source {
+            plugin_manifest::PluginSource::InRepo { path } => path.clone(),
+            plugin_manifest::PluginSource::External { .. } => continue,
+        };
+
+        // 1. Compute the plugin root.
+        //    clone_root.join("./") normalizes to clone_root on all platforms.
+        let plugin_root = clone_root.join(&inrepo_path);
+
+        // 2. Compute the effective prefix (MKT-5 / MKT-8).
+        //    If the consumer set an explicit override, use it (even when it resolves
+        //    to None because the alias was explicitly cleared). Otherwise, fall back
+        //    to the entry name as the default namespace prefix.
+        let plugin_prefix = if has_explicit_prefix {
+            outer_prefix.clone()
+        } else {
+            let entry_name = entry.name.trim().to_string();
+            // Resilience (NS-25): if the entry name is a reserved kind word or empty,
+            // fall back to no prefix rather than making the entry un-installable.
+            match namespace::validate_prefix(&entry_name) {
+                Ok(()) if !entry_name.is_empty() => Some(entry_name),
+                _ => None,
+            }
+        };
+
+        // 3. Scan skills.
+        if !entry.skills.is_empty() {
+            // Explicit skill paths: each is a leaf dir (relative to plugin_root)
+            // that contains a SKILL.md. Missing dirs or absent SKILL.md are skipped
+            // silently (same tolerance as scan_plugin_components).
+            for skill_path in &entry.skills {
+                let skill_dir = plugin_root.join(skill_path);
+                let skill_md = skill_dir.join("SKILL.md");
+                if skill_dir.is_dir() && skill_md.is_file() {
+                    out.push(make_item(
+                        source,
+                        &plugin_prefix,
+                        ItemKind::Skill,
+                        skill_dir,
+                        &skill_md,
+                    ));
+                }
+            }
+        } else {
+            // No explicit skills array: scan plugin_root/skills/ conventionally.
+            let skills_dir = plugin_root.join(ItemKind::Skill.dir());
+            for entry_path in read_dir_opt(&skills_dir)? {
+                let skill_md = entry_path.join("SKILL.md");
+                if entry_path.is_dir() && skill_md.is_file() {
+                    out.push(make_item(
+                        source,
+                        &plugin_prefix,
+                        ItemKind::Skill,
+                        entry_path,
+                        &skill_md,
+                    ));
+                }
+            }
+        }
+
+        // 4. Scan agents (always): agents/<name>.md at the plugin root (DSC-11, MKT-3).
+        let agents_dir = plugin_root.join(ItemKind::Agent.dir());
+        for agent_path in read_dir_opt(&agents_dir)? {
+            if agent_path.is_file() && agent_path.extension().is_some_and(|e| e == "md") {
+                out.push(make_item(
+                    source,
+                    &plugin_prefix,
+                    ItemKind::Agent,
+                    agent_path.clone(),
+                    &agent_path,
+                ));
+            }
         }
     }
     Ok(())
@@ -2874,6 +2998,162 @@ mod plugin_tests {
             skipped.total() >= 2,
             "at least 2 skipped components: {:?}",
             skipped
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Marketplace in-repo scan tests (MKT-14)
+    // ---------------------------------------------------------------------------
+
+    // Two in-repo entries with explicit `skills` arrays each discover only their
+    // listed skill dirs, namespaced under their respective entry names.
+    #[test]
+    fn marketplace_in_repo_with_skills_array_scans_explicit_skill_dirs() {
+        // spec: MKT-14
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let clone = base.join("sources/local/test/plugin-repo");
+
+        // marketplace.json: two entries both pointing at "./" (the repo root),
+        // each with an explicit skills array.
+        write_file(
+            &clone.join(".claude-plugin/marketplace.json"),
+            r#"{
+                "name": "Acme Market",
+                "plugins": [
+                    {"name": "p1", "source": "./", "skills": ["./skills/foo"]},
+                    {"name": "p2", "source": "./", "skills": ["./skills/bar"]}
+                ]
+            }"#,
+        );
+        // Skill dirs at the repo root (plugin_root = clone_root for "./").
+        write_file(
+            &clone.join("skills/foo/SKILL.md"),
+            "---\ndescription: foo skill\n---\n# foo\n",
+        );
+        write_file(
+            &clone.join("skills/bar/SKILL.md"),
+            "---\ndescription: bar skill\n---\n# bar\n",
+        );
+
+        let paths = paths_for(base);
+        let source = make_plugin_source(&clone);
+        let mut items = Vec::new();
+        scan_source(&paths, &source, &mut items).unwrap();
+
+        // foo should appear under p1's prefix.
+        let foo = items
+            .iter()
+            .find(|i| i.kind == ItemKind::Skill && i.name == "foo")
+            .expect("skill 'foo' must be discovered from marketplace entry p1");
+        assert_eq!(
+            foo.effective_name(),
+            "p1:foo",
+            "foo must carry entry name 'p1' as prefix (MKT-14)"
+        );
+
+        // bar should appear under p2's prefix.
+        let bar = items
+            .iter()
+            .find(|i| i.kind == ItemKind::Skill && i.name == "bar")
+            .expect("skill 'bar' must be discovered from marketplace entry p2");
+        assert_eq!(
+            bar.effective_name(),
+            "p2:bar",
+            "bar must carry entry name 'p2' as prefix (MKT-14)"
+        );
+    }
+
+    // An in-repo entry with no `skills` array falls back to conventional skills/
+    // directory scanning within the plugin root.
+    #[test]
+    fn marketplace_in_repo_without_skills_array_falls_back_to_convention_scan() {
+        // spec: MKT-14
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let clone = base.join("sources/local/test/plugin-repo");
+
+        // One entry with source "./" and no skills field.
+        write_file(
+            &clone.join(".claude-plugin/marketplace.json"),
+            r#"{
+                "name": "Acme Market",
+                "plugins": [
+                    {"name": "p1", "source": "./"}
+                ]
+            }"#,
+        );
+        // Skill baz should be discovered via conventional skills/ scan.
+        write_file(
+            &clone.join("skills/baz/SKILL.md"),
+            "---\ndescription: baz skill\n---\n# baz\n",
+        );
+
+        let paths = paths_for(base);
+        let source = make_plugin_source(&clone);
+        let mut items = Vec::new();
+        scan_source(&paths, &source, &mut items).unwrap();
+
+        let baz = items
+            .iter()
+            .find(|i| i.kind == ItemKind::Skill && i.name == "baz")
+            .expect(
+                "skill 'baz' must be discovered via conventional scan when skills array is absent",
+            );
+        assert_eq!(
+            baz.effective_name(),
+            "p1:baz",
+            "baz must carry entry name 'p1' as prefix (MKT-14)"
+        );
+    }
+
+    // An explicit `skills` array limits scanning to only the listed dirs; skills
+    // present in skills/ but not in the array must NOT be discovered (no double-count).
+    #[test]
+    fn marketplace_in_repo_skills_array_does_not_double_count() {
+        // spec: MKT-14
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let clone = base.join("sources/local/test/plugin-repo");
+
+        // Entry lists only ./skills/foo; skills/qux also exists but must be excluded.
+        write_file(
+            &clone.join(".claude-plugin/marketplace.json"),
+            r#"{
+                "name": "Acme Market",
+                "plugins": [
+                    {"name": "p1", "source": "./", "skills": ["./skills/foo"]}
+                ]
+            }"#,
+        );
+        write_file(
+            &clone.join("skills/foo/SKILL.md"),
+            "---\ndescription: foo skill\n---\n# foo\n",
+        );
+        // qux is in skills/ but NOT in the skills array.
+        write_file(
+            &clone.join("skills/qux/SKILL.md"),
+            "---\ndescription: qux skill\n---\n# qux\n",
+        );
+
+        let paths = paths_for(base);
+        let source = make_plugin_source(&clone);
+        let mut items = Vec::new();
+        scan_source(&paths, &source, &mut items).unwrap();
+
+        // foo is discovered.
+        assert!(
+            items
+                .iter()
+                .any(|i| i.kind == ItemKind::Skill && i.name == "foo"),
+            "skill 'foo' must be discovered (it is in the skills array)"
+        );
+        // qux is NOT discovered (not in the skills array; conventional scan bypassed).
+        assert!(
+            !items
+                .iter()
+                .any(|i| i.kind == ItemKind::Skill && i.name == "qux"),
+            "skill 'qux' must NOT be discovered when it is absent from the skills array (MKT-14)"
         );
     }
 

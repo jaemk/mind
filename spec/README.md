@@ -36,6 +36,7 @@ and verified.
 | `meld`/`review` `--namespace`/`-n` flag (renames `--as`, still a hidden alias) | done | CLI-159 |
 | Namespace mutable only until items install; changing it after requires forget-first (revises in-place rename) | done | NS-30, CLI-161 |
 | Agents not namespaced: an agent links under its bare frontmatter `name` (the harness keys agents by frontmatter, not filename); same-named agents across sources are a detected collision | done | NS-40, NS-41, NS-42 |
+| Collision-triggered namespace prompt: skill/rule/tool cross-source name collision at `meld` prompts for a namespace (interactive) or errors with guidance (non-interactive); repo name suggested as default | partial | NS-43, NS-44, NS-45 |
 | TUI: show + edit a source's install namespace in the details dialog (editable until items installed) | done | TUI-53 |
 | Transactional install, upgrade, rename, uninstall, drift | done | [lifecycle.md](lifecycle.md) |
 | `forget`/`recall`/`upgrade` honor kind + source qualifier, error on ambiguity | done | CLI-40, CLI-63, CLI-71 |
@@ -57,6 +58,7 @@ and verified.
 | Shell completions + man page | done | CLI-120, CLI-121 |
 | Scan roots: `[source].roots` + `meld --root` (monorepo/subtree sources) | done | DSC-50, DSC-51, DSC-52, DSC-53, STO-17, CLI-16 |
 | Flat skill layout: `[source].flat-skills` + `meld --flat-skills` + per-entry `[[discover.sources]]` flag (skill dirs at a root, no `skills/` container); `dump` propagates it | done | DSC-74, DSC-75, DSC-76, DSC-77, STO-44, CLI-158, DUMP-10 |
+| Rename mindfile `as` key to `namespace` in `[discover].sources` entries; `as` remains a backwards-compatible alias; `init-source`/`dump` emit `namespace`; `review` advises migration | done | DSC-78 |
 | Version pinning: `--follow-branch`/`--pin-tag`/`--pin-ref` + `[source]` directive | done | DSC-41, STO-18, CLI-17, CLI-18, CLI-55 |
 | `review` verb: author-side source validation | done | CLI-130, CLI-131, CLI-132, CLI-133 |
 | `review` flags path tokens + hardcoded paths + bare tool refs + misplaced `{{ns:}}`; `--fix` rewrites | done | CLI-135, CLI-136, CLI-137, CLI-138, CLI-139, CLI-145, NS-24 |
@@ -101,6 +103,8 @@ and verified.
 | TUI: Enter opens a details dialog with the node's valid actions | done | TUI-26 |
 | Cross-harness lobes: per-lobe `kinds` filter, non-Claude home presets (Gemini/Codex/Antigravity), auto-detect-and-prompt | done | [harness-lobes.md](harness-lobes.md) (HARN-1..6) |
 | Consume Claude plugin marketplaces: `.claude-plugin/marketplace.json` + `plugin.json` read as a discovery source, own store+symlink install unchanged | done | [marketplace.md](marketplace.md) (MKT-1..11) |
+| Plugin repos as `[discover].sources` nested entries: inherit plugin `name` as default namespace (MKT-12); marketplace-as-nested-source per-plugin namespacing (MKT-13) | done | MKT-12, MKT-13 |
+| In-repo marketplace plugin scan roots: `skills` array for explicit skill dirs, convention fallback when absent, marketplace authoritative (skips convention discovery) | done | MKT-14 |
 
 ## Documents
 

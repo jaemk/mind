@@ -225,6 +225,8 @@ pub struct MarketplaceEntry {
     pub version: Option<String>,
     /// Description (MKT-6/MKT-8).
     pub description: Option<String>,
+    /// Explicit skill paths declared by the entry (MKT-9).
+    pub skills: Vec<String>,
 }
 
 /// Deserialized and validated `.claude-plugin/marketplace.json`.
@@ -273,6 +275,8 @@ struct RawPluginEntry {
     version: Option<String>,
     #[serde(default)]
     description: Option<String>,
+    #[serde(default)]
+    skills: Vec<String>,
 }
 
 /// The `source` field in a marketplace entry: a string or a JSON object.
@@ -308,11 +312,25 @@ pub fn load_marketplace_manifest(path: &Path) -> Result<MarketplaceManifest> {
     let mut entries = Vec::with_capacity(raw.plugins.len());
     for entry in raw.plugins {
         let source = resolve_source(entry.source, path)?;
+        // Validate each skills path (MKT-9: same safe-path rule as in-repo source paths).
+        for skill_path in &entry.skills {
+            if !is_safe_manifest_path(skill_path) {
+                return Err(MindError::MindToml {
+                    path: path.to_path_buf(),
+                    msg: format!(
+                        "marketplace.json: skills path {:?} is unsafe (absolute, \
+                         ~-rooted, contains .., or contains NUL)",
+                        skill_path
+                    ),
+                });
+            }
+        }
         entries.push(MarketplaceEntry {
             name: entry.name,
             source,
             version: entry.version,
             description: entry.description,
+            skills: entry.skills,
         });
     }
 

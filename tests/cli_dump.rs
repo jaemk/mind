@@ -391,7 +391,8 @@ fn dump_whole_sources_always_emits_install_true() {
 
 #[test]
 fn dump_emits_alias_when_melded_with_as() {
-    // spec: DUMP-4 — the entry carries the `as` prefix from the consumer alias.
+    // spec: DUMP-4 DSC-78 — the entry carries the consumer alias as `namespace`
+    // (the canonical key) so re-melding restores the prefix.
     let sb = Sandbox::new("src");
     let meld = sb.mind(&["meld", &sb.source_spec(), "--as", "mypfx", "--link-only"]);
     assert!(meld.success, "meld --as failed: {}", meld.stderr);
@@ -399,8 +400,8 @@ fn dump_emits_alias_when_melded_with_as() {
     let r = sb.mind(&["dump"]);
     assert!(r.success, "dump failed: {} {}", r.stdout, r.stderr);
     assert!(
-        r.stdout.contains("as = \"mypfx\""),
-        "emitted entry must carry as = \"mypfx\": {}",
+        r.stdout.contains("namespace = \"mypfx\""),
+        "emitted entry must carry namespace = \"mypfx\" (DSC-78 canonical key): {}",
         r.stdout
     );
 }
@@ -952,8 +953,8 @@ fn dump_emits_alias_from_source_own_prefix_when_no_consumer_alias() {
     let r = sb.mind(&["dump"]);
     assert!(r.success, "dump failed: {} {}", r.stdout, r.stderr);
     assert!(
-        r.stdout.contains("as = \"sp\""),
-        "dump must emit as = \"sp\" from the source's own [source].prefix: {}",
+        r.stdout.contains("namespace = \"sp\""),
+        "dump must emit namespace = \"sp\" from the source's own [source].prefix (DSC-78): {}",
         r.stdout
     );
 }

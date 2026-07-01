@@ -77,7 +77,7 @@ rules  = { include = ["rules/*.md"] }
 # A curated super-source: list other repos to meld recursively.
 sources = [
   { source = "owner/repo" },
-  { source = "github:foo/bar", as = "fb" },        # impose a namespace on the nested source
+  { source = "github:foo/bar", namespace = "fb" },  # impose a namespace on the nested source
   { source = "owner/recommended", install = true } # offer this one for install on meld
 ]
 # Adopt an un-onboarded source: supply config it lacks (applied only when it has
@@ -137,8 +137,9 @@ run = "make build"
   seen is skipped, matched both by URL within the run and by `host/owner/repo`
   identity against the registry (so two spellings of the same repo do not slip
   past). Each source in the transitive set is therefore processed at most once.
-- `DSC-39` A `[discover].sources` entry may set `as = "<prefix>"` to impose a
-  namespace on that nested source (equivalent to `meld --as`).
+- `DSC-39` A `[discover].sources` entry may set `namespace = "<prefix>"` to impose a
+  namespace on that nested source (equivalent to `meld --namespace`, CLI-159). The
+  legacy key `as` is accepted as a backwards-compatible alias (DSC-78).
 - `DSC-58` A `[discover].sources` entry may set `install = true` (default false)
   to recommend that nested source for install: melding the super-source offers its
   items via the same preview-and-prompt as the top-level source (CLI-23, honoring
@@ -159,7 +160,7 @@ run = "make build"
   When `install-items` is present it governs the entry's install behavior; when it
   is absent the `install` boolean governs as before (DSC-58).
 - `DSC-63` Refs in `install-items` (DSC-62) are bare `kind:name` in source truth;
-  a prefix in effect for the entry (`as`, DSC-39) is applied at install. A ref
+  a prefix in effect for the entry (`namespace`/`as`, DSC-39) is applied at install. A ref
   naming an item the nested source does not offer is an error (`BadReference`) at
   meld, not a silent skip.
 - `DSC-64` Setting `install = true` together with a non-empty `install-items` on
@@ -186,8 +187,8 @@ run = "make build"
   emitted, since the source has onboarded). The gate is whole-file: a nested
   `mind.toml`, even one that does not declare roots/flat-skills/hooks, suppresses
   all three. The curator-supplied pin is NOT gated: it
-  is authoritative regardless of the nested `mind.toml` (DSC-65). `as` (DSC-39)
-  and `install` (DSC-58) are registry/consumer concerns and are likewise
+  is authoritative regardless of the nested `mind.toml` (DSC-65). `namespace`/`as`
+  (DSC-39, DSC-78) and `install` (DSC-58) are registry/consumer concerns and are likewise
   unaffected by this gate; they always apply.
 - `DSC-61` A curator-supplied entry behaves as if the source had declared the
   same in its own `mind.toml`: when applied (the DSC-60 gate permits, i.e. the
@@ -353,6 +354,14 @@ can opt into flat skill discovery instead of having to spell out a
   curator-supplied `flat-skills` is ignored with a warning (the DSC-60 gate). This
   lets a curator adopt a flat-layout source that has not onboarded itself without
   forking it.
+
+- `DSC-78` The `namespace` key in a `[discover].sources` entry is the canonical
+  form (DSC-39), mirroring the `--namespace` CLI flag (CLI-159). The legacy key
+  `as` is accepted as a backwards-compatible alias and behaves identically. When
+  both keys appear in the same entry, `namespace` takes precedence. `init-source`
+  (INIT-1) and `dump` (DUMP-1) emit `namespace`; they do not emit `as`. A `review`
+  of a source that uses `as` emits an advisory suggesting `namespace` instead
+  (CLI-130).
 
 ## Authentication failure handling for nested sources
 

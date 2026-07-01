@@ -105,6 +105,47 @@ curated super-source, so it reuses that machinery.
   field, the entry is authoritative (it mirrors Claude's `"strict": false` mode
   where the marketplace overrides the plugin manifest).
 
+- `MKT-14` In-repo marketplace entries (those whose `source` field resolves to a
+  repo-relative path) are scanned as scan roots within the catalog repo, handled
+  directly in `catalog.rs` without sub-melding. When an entry declares a non-empty
+  `skills` array, each element is a leaf skill directory path (relative to the
+  plugin root) that contains a `SKILL.md`; only those explicit paths are scanned
+  for skills. When the `skills` array is absent or empty, the plugin root's
+  `skills/` directory is scanned conventionally per DSC-10. Agents are always
+  scanned conventionally from the plugin root's `agents/` directory (DSC-11). A
+  `marketplace.json` is authoritative for its source: when found, convention
+  discovery is skipped (same as a `plugin.json` per MKT-2). External entries in the
+  marketplace are not scanned by `catalog.rs`; they are sub-melded by `commands.rs`.
+
+## Plugin repos as nested sources
+
+A `[discover].sources` entry in a curator's `mind.toml` may point to a repo that
+ships a `.claude-plugin/plugin.json` -- the curator is reaching into a repo built
+for Claude's native plugin system without the author having packaged it for `mind`
+directly. The same namespace defaulting that applies at direct meld (MKT-5) should
+apply here, so the curator does not need to re-declare the plugin's own name.
+
+- `MKT-12` When a `[discover].sources` entry (DSC-38) points to a nested source
+  that carries a `.claude-plugin/plugin.json` (recognized per MKT-1) and the entry
+  does not set `namespace` (or its alias `as`, DSC-78), the plugin's `name` field
+  is used as the default effective prefix for that nested source, exactly as if it
+  had been melded directly under MKT-5. An explicit `namespace` on the
+  `[discover].sources` entry (DSC-39) takes precedence over this default;
+  `namespace = ""` explicitly clears it. The rule that `namespace`/`as`
+  and `install` are registry/consumer concerns that bypass the DSC-60 fallback gate
+  (DSC-60 prose, DSC-65) applies equally here: the plugin-name default is applied
+  regardless of whether the nested source ships its own `mind.toml`.
+
+- `MKT-13` When a `[discover].sources` entry carries a nested source whose
+  discovered items come from a `marketplace.json` rather than a `plugin.json`
+  (MKT-7), the per-plugin `name` field in each marketplace entry namespaces that
+  plugin's items per MKT-8, regardless of whether the super-source set `namespace`
+  on the entry. A `namespace` on the entry imposes an additional outer prefix on
+  the nested source as a whole (over and above the per-plugin namespace MKT-8
+  assigns each plugin), unless the curator intends to flatten the marketplace's own
+  scoping -- an empty `namespace = ""` suppresses the per-entry outer prefix while
+  leaving per-plugin namespacing intact.
+
 ## Safety
 
 The manifests are attacker-controlled content shipped by a melded repo and are

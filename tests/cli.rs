@@ -2664,7 +2664,11 @@ fn meld_as_prefixes_names_links_and_refs() {
     );
 
     let sources = sb.mind(&["recall", "--sources"]);
-    assert!(sources.stdout.contains("as:jk"), "{}", sources.stdout);
+    assert!(
+        sources.stdout.contains("namespace:jk"),
+        "{}",
+        sources.stdout
+    );
 }
 
 #[test]
@@ -4095,7 +4099,11 @@ fn sync_preserves_consumer_alias() {
     assert!(sb.mind(&["meld", &sb.source_spec(), "--as", "jk"]).success);
     assert!(sb.mind(&["sync"]).success);
 
-    assert!(sb.mind(&["recall", "--sources"]).stdout.contains("as:jk"));
+    assert!(
+        sb.mind(&["recall", "--sources"])
+            .stdout
+            .contains("namespace:jk")
+    );
     // Items remain namespaced under the alias after sync.
     assert!(sb.mind(&["probe"]).stdout.contains("skill:jk:review"));
 }
@@ -15519,11 +15527,12 @@ fn prefixed_lobe_symlink_resolves_through_colon_path() {
 #[test]
 fn dump_records_prefix_and_bare_install_items() {
     // spec: DUMP-5
-    // A prefixed source's dump must carry the prefix (`as = "jk"`) so re-melding
-    // reproduces the namespace, while install-items stay in source/catalog truth
-    // (bare `skill:review`), never the install-time `skill:jk:review` form. A
-    // proper subset (only `review` of {review, dev, style}) forces the
-    // install-items listing rather than `install = true`.
+    // A prefixed source's dump must carry the prefix (`namespace = "jk"`, the
+    // canonical DSC-78 key) so re-melding reproduces the namespace, while
+    // install-items stay in source/catalog truth (bare `skill:review`), never the
+    // install-time `skill:jk:review` form. A proper subset (only `review` of
+    // {review, dev, style}) forces the install-items listing rather than
+    // `install = true`.
     let sb = Sandbox::new();
     let spec = sb.source_spec();
     assert!(sb.mind(&["meld", &spec, "--as", "jk"]).success);
@@ -15532,8 +15541,8 @@ fn dump_records_prefix_and_bare_install_items() {
     let dump = sb.mind(&["dump"]);
     assert!(dump.success, "dump failed: {} {}", dump.stdout, dump.stderr);
     assert!(
-        dump.stdout.contains("as = \"jk\""),
-        "dump must record the effective prefix as `as = \"jk\"`: {}",
+        dump.stdout.contains("namespace = \"jk\""),
+        "dump must record the effective prefix as `namespace = \"jk\"` (DSC-78): {}",
         dump.stdout
     );
     assert!(
@@ -15808,30 +15817,22 @@ fn marketplace_plugin_description_and_version_recorded() {
 
 #[test]
 fn marketplace_catalog_melds_in_repo_plugins() {
-    // spec: MKT-7
-    // A .claude-plugin/marketplace.json catalog melds each listed in-repo
-    // plugin as a sub-source; both plugins' items appear in probe.
-    // Installing a sub-source item works through the normal `learn` path.
+    // spec: MKT-7 MKT-14
+    // A .claude-plugin/marketplace.json catalog scans each listed in-repo
+    // plugin as catalog items of the parent source (MKT-14); both plugins'
+    // items appear in probe. Installing an item works through the normal
+    // `learn` path.
     let sb = Sandbox::from_example("marketplace-catalog");
     let spec = sb.source_spec();
     let r = sb.mind(&["meld", &spec]);
     assert!(r.success, "meld failed: {} {}", r.stdout, r.stderr);
 
-    // Both sub-sources are registered.
+    // The parent source is registered. Under MKT-14 in-repo plugins are
+    // items of the parent source, not separate sub-sources.
     let sources = sb.mind(&["recall", "--sources"]);
     assert!(
         sources.stdout.contains("marketplace-catalog"),
         "catalog source must appear: {}",
-        sources.stdout
-    );
-    assert!(
-        sources.stdout.contains("alpha"),
-        "alpha sub-source must appear: {}",
-        sources.stdout
-    );
-    assert!(
-        sources.stdout.contains("beta"),
-        "beta sub-source must appear: {}",
         sources.stdout
     );
 
@@ -16288,19 +16289,112 @@ fn marketplace_entry_version_wins_over_plugin_json_version() {
     );
 
     let spec = catalog.source_spec();
-    assert!(catalog.mind(&["meld", &spec]).success);
+    let r = catalog.mind(&["meld", &spec]);
+    assert!(r.success, "meld failed: {} {}", r.stdout, r.stderr);
 
-    let jsrc = catalog.mind(&["recall", "--sources", "--json"]);
-    assert!(jsrc.success, "{}", jsrc.stderr);
+    // Under MKT-14 in-repo entries are catalog items of the parent source;
+    // the entry-level version is not stored per-sub-source. What IS
+    // observable: the skill is discoverable under the entry name as prefix
+    // (MKT-8 entry name wins).
+    let probe = catalog.mind(&["probe", "--no-tui"]);
     assert!(
-        jsrc.stdout.contains("1.1.1"),
-        "the marketplace entry version must win and appear in JSON: {}",
-        jsrc.stdout
+        probe.stdout.contains("override:theskill"),
+        "skill must appear under entry name as prefix (MKT-8): {}",
+        probe.stdout
+    );
+}
+
+#[test]
+fn marketplace_same_root_multiple_plugins_with_skills_array() {
+    // spec: MKT-14
+    // Multiple in-repo plugins all with "source": "./" and explicit skills arrays
+    // (the Anthropic pattern). Each plugin's listed skills are scanned under its
+    // own entry name as prefix. Skills from different plugins do not cross-contaminate.
+    let sb = Sandbox::bare("mkt14-same-root");
+
+    // Plugin 1: document-skills
+    sb.write_and_commit(
+        "skills/xlsx/SKILL.md",
+        "---\nname: xlsx\ndescription: xlsx\n---\n# xlsx\n",
+    );
+    sb.write_and_commit(
+        "skills/docx/SKILL.md",
+        "---\nname: docx\ndescription: docx\n---\n# docx\n",
+    );
+
+    // Plugin 2: example-skills
+    sb.write_and_commit(
+        "skills/art/SKILL.md",
+        "---\nname: art\ndescription: art\n---\n# art\n",
+    );
+    sb.write_and_commit(
+        "skills/design/SKILL.md",
+        "---\nname: design\ndescription: design\n---\n# design\n",
+    );
+
+    // Plugin 3: api-skills
+    sb.write_and_commit(
+        "skills/claude-api/SKILL.md",
+        "---\nname: claude-api\ndescription: api\n---\n# api\n",
+    );
+
+    // marketplace.json: three plugins, all source: "./", each with a disjoint skills array
+    sb.write_and_commit(
+        ".claude-plugin/marketplace.json",
+        r#"{
+  "name": "anthropic-agent-skills",
+  "plugins": [
+    {"name": "document-skills", "source": "./", "skills": ["./skills/xlsx", "./skills/docx"]},
+    {"name": "example-skills",  "source": "./", "skills": ["./skills/art", "./skills/design"]},
+    {"name": "api-skills",      "source": "./", "skills": ["./skills/claude-api"]}
+  ]
+}"#,
+    );
+
+    let spec = sb.source_spec();
+    let r = sb.mind(&["meld", &spec]);
+    assert!(r.success, "meld failed: {} {}", r.stdout, r.stderr);
+
+    let probe = sb.mind(&["probe", "--no-tui"]);
+    // document-skills plugin
+    assert!(
+        probe.stdout.contains("document-skills:xlsx"),
+        "expected document-skills:xlsx: {}",
+        probe.stdout
     );
     assert!(
-        !jsrc.stdout.contains("9.9.9"),
-        "the plugin.json version must be overridden by the entry version: {}",
-        jsrc.stdout
+        probe.stdout.contains("document-skills:docx"),
+        "expected document-skills:docx: {}",
+        probe.stdout
+    );
+    // example-skills plugin
+    assert!(
+        probe.stdout.contains("example-skills:art"),
+        "expected example-skills:art: {}",
+        probe.stdout
+    );
+    assert!(
+        probe.stdout.contains("example-skills:design"),
+        "expected example-skills:design: {}",
+        probe.stdout
+    );
+    // api-skills plugin
+    assert!(
+        probe.stdout.contains("api-skills:claude-api"),
+        "expected api-skills:claude-api: {}",
+        probe.stdout
+    );
+
+    // No skill appears under the wrong prefix (partition is correct).
+    assert!(
+        !probe.stdout.contains("example-skills:xlsx"),
+        "xlsx must not appear under example-skills: {}",
+        probe.stdout
+    );
+    assert!(
+        !probe.stdout.contains("document-skills:art"),
+        "art must not appear under document-skills: {}",
+        probe.stdout
     );
 }
 
@@ -16426,11 +16520,12 @@ fn marketplace_two_plugins_same_agent_name_collide() {
 
 #[test]
 fn marketplace_sync_rewalk_registers_new_entry() {
-    // spec: MKT-7
-    // DSC-57 parity for marketplaces: after melding a catalog, adding a NEW in-repo
-    // plugin entry to marketplace.json and running `sync` must register the newly
-    // listed sub-source, exactly as the [discover].sources re-walk does. Confirms
-    // the marketplace branch of the sync re-walk actually fires.
+    // spec: MKT-7 MKT-14
+    // After melding a catalog, adding a new in-repo plugin entry to marketplace.json
+    // and running `sync` must make that plugin's items discoverable. Under MKT-14
+    // in-repo entries are scan roots of the catalog (not sub-melded), so the items
+    // appear under the catalog source after sync fetches the updated commit; the new
+    // plugin does NOT appear as a separate registered source.
     let catalog = Sandbox::bare("mkt-sync-rewalk");
     // First plugin present from the start.
     catalog.write_and_commit(
@@ -16471,17 +16566,19 @@ fn marketplace_sync_rewalk_registers_new_entry() {
         r#"{"name":"cat","plugins":[{"name":"first","source":"./plugins/first"},{"name":"second","source":"./plugins/second"}]}"#,
     );
 
-    // Sync must fetch the catalog and re-walk the marketplace, registering "second".
+    // Sync must fetch the catalog and pick up the new plugin via the marketplace scan.
     let sync = catalog.mind(&["sync"]);
     assert!(sync.success, "sync failed: {} {}", sync.stdout, sync.stderr);
 
+    // Under MKT-14 in-repo plugins are scan roots of the catalog, not sub-melded sub-sources.
+    // "second" must NOT appear as a registered source; its items surface via the catalog scan.
     let after = catalog.mind(&["recall", "--sources"]);
     assert!(
-        after.stdout.contains("second"),
-        "the sync re-walk must register the newly-listed marketplace entry (DSC-57): {}",
+        !after.stdout.contains("/second") && !after.stdout.contains("second "),
+        "second must not be a registered sub-source (MKT-14): {}",
         after.stdout
     );
-    // The new sub-source's item is discoverable.
+    // The new plugin's skill is discoverable via the catalog's marketplace scan.
     let probe = catalog.mind(&["probe"]);
     assert!(
         probe.stdout.contains("twoskill"),
@@ -16904,5 +17001,234 @@ fn marketplace_upgrade_catalog_sub_source_item() {
     assert_ne!(
         before, after,
         "recall output must differ after upgrade (hash must advance)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Plugin repos / marketplace catalogs as [discover].sources entries (MKT-12/13)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn nested_source_plugin_inherits_plugin_name_as_namespace() {
+    // spec: MKT-12
+    // A [discover].sources entry pointing at a repo that carries a
+    // .claude-plugin/plugin.json and has no explicit `namespace` uses the
+    // plugin's `name` field as the effective prefix for that nested source --
+    // exactly as if it had been melded directly under MKT-5.
+    let plugin_repo = Sandbox::bare("mkt12-plugin");
+    plugin_repo.write_and_commit(
+        "skills/greet/SKILL.md",
+        "---\nname: greet\ndescription: Plugin greet skill\n---\n# greet\n",
+    );
+    plugin_repo.write_and_commit(
+        ".claude-plugin/plugin.json",
+        r#"{"name":"myplugin","version":"1.0"}"#,
+    );
+
+    let super_src = Sandbox::bare("mkt12-super");
+    super_src.write_and_commit(
+        "mind.toml",
+        &format!(
+            "[[discover.sources]]\nsource = \"{}\"\n",
+            plugin_repo.source_spec()
+        ),
+    );
+
+    let spec = super_src.source_spec();
+    let r = super_src.mind(&["meld", &spec]);
+    assert!(r.success, "meld failed: {} {}", r.stdout, r.stderr);
+
+    // The nested plugin source is registered with the plugin name as prefix.
+    let probe = super_src.mind(&["probe"]);
+    assert!(
+        probe.stdout.contains("skill:myplugin:greet"),
+        "nested plugin source must use plugin name as default prefix (MKT-12): {}",
+        probe.stdout
+    );
+}
+
+#[test]
+fn nested_source_marketplace_preserves_per_plugin_namespacing() {
+    // spec: MKT-13
+    // A [discover].sources entry that points at a marketplace catalog preserves
+    // per-plugin namespacing: each plugin's `name` field from the catalog entry
+    // becomes the effective prefix for that plugin's items (MKT-8), regardless
+    // of any outer namespace set on the [discover].sources entry.
+    let market_repo = Sandbox::bare("mkt13-market");
+    market_repo.write_and_commit(
+        "plugins/alpha/.claude-plugin/plugin.json",
+        r#"{"name":"alpha"}"#,
+    );
+    market_repo.write_and_commit(
+        "plugins/alpha/skills/search/SKILL.md",
+        "---\nname: search\ndescription: Alpha search skill\n---\n# search\n",
+    );
+    market_repo.write_and_commit(
+        "plugins/beta/.claude-plugin/plugin.json",
+        r#"{"name":"beta"}"#,
+    );
+    market_repo.write_and_commit(
+        "plugins/beta/skills/search/SKILL.md",
+        "---\nname: search\ndescription: Beta search skill\n---\n# search\n",
+    );
+    market_repo.write_and_commit(
+        ".claude-plugin/marketplace.json",
+        r#"{"name":"TestMarket","plugins":[{"name":"alpha","source":"./plugins/alpha"},{"name":"beta","source":"./plugins/beta"}]}"#,
+    );
+
+    let super_src = Sandbox::bare("mkt13-super");
+    super_src.write_and_commit(
+        "mind.toml",
+        &format!(
+            "[[discover.sources]]\nsource = \"{}\"\n",
+            market_repo.source_spec()
+        ),
+    );
+
+    let spec = super_src.source_spec();
+    let r = super_src.mind(&["meld", &spec]);
+    assert!(r.success, "meld failed: {} {}", r.stdout, r.stderr);
+
+    // Both plugins appear under their per-plugin names through the nested chain (MKT-13).
+    let probe = super_src.mind(&["probe"]);
+    assert!(
+        probe.stdout.contains("skill:alpha:search"),
+        "alpha's skill must be namespaced under 'alpha' through the nested chain (MKT-13): {}",
+        probe.stdout
+    );
+    assert!(
+        probe.stdout.contains("skill:beta:search"),
+        "beta's skill must be namespaced under 'beta' through the nested chain (MKT-13): {}",
+        probe.stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Cross-source skill collision at meld (NS-43/NS-45)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn skill_collision_non_interactive_errors_with_guidance() {
+    // spec: NS-43 NS-45
+    // In a non-interactive session (no TTY), melding a source whose skill
+    // effective name matches an already-installed skill from a different source
+    // exits non-zero (SkillCollision) and suggests --namespace. Melding with
+    // --namespace resolves the conflict.
+    let src_a = Sandbox::bare("ns43-a");
+    src_a.write_and_commit(
+        "skills/deploy/SKILL.md",
+        "---\nname: deploy\ndescription: Deploy skill A\n---\n# deploy\n",
+    );
+    // Meld and install source A so `deploy` is in the manifest.
+    let r = src_a.mind(&["meld", &src_a.source_spec(), "--yes"]);
+    assert!(r.success, "meld source-a failed: {} {}", r.stdout, r.stderr);
+
+    // Source B has the same skill name.
+    let src_b = Sandbox::bare("ns43-b");
+    src_b.write_and_commit(
+        "skills/deploy/SKILL.md",
+        "---\nname: deploy\ndescription: Deploy skill B\n---\n# deploy\n",
+    );
+    // Non-TTY meld of source B must fail with SkillCollision (NS-45).
+    let r = src_a.mind(&["meld", &src_b.source_spec(), "--yes"]);
+    assert!(
+        !r.success,
+        "colliding meld must fail in non-interactive mode (NS-45)"
+    );
+    let combined = format!("{}\n{}", r.stdout, r.stderr);
+    assert!(
+        combined.contains("collision")
+            || combined.contains("conflict")
+            || combined.contains("namespace"),
+        "error must describe the collision and suggest --namespace (NS-43 NS-45): {combined}"
+    );
+
+    // Melding source B with --namespace resolves the collision.
+    let r = src_a.mind(&["meld", &src_b.source_spec(), "--namespace", "sb", "--yes"]);
+    assert!(
+        r.success,
+        "meld with --namespace must resolve the collision: {} {}",
+        r.stdout, r.stderr
+    );
+    // The namespaced skill is discoverable in probe.
+    let probe = src_a.mind(&["probe"]);
+    assert!(
+        probe.stdout.contains("skill:sb:deploy"),
+        "namespaced skill sb:deploy must appear in probe: {}",
+        probe.stdout
+    );
+}
+
+#[test]
+fn skill_collision_same_source_remeld_is_not_a_collision() {
+    // spec: NS-43
+    // The NS-43 same-source skip prevents false collision detection when items
+    // from a previously installed source remain in the manifest after the source
+    // is unregistered. Re-melding that source must succeed.
+    let src = Sandbox::bare("ns43-remeld");
+    src.write_and_commit(
+        "skills/deploy/SKILL.md",
+        "---\nname: deploy\ndescription: Deploy skill\n---\n# deploy\n",
+    );
+
+    // Meld and install.
+    let r = src.mind(&["meld", &src.source_spec(), "--yes"]);
+    assert!(
+        r.success,
+        "first meld must succeed: {} {}",
+        r.stdout, r.stderr
+    );
+
+    // Unmeld --unlink-only: source is removed from the registry but the
+    // installed item remains in the manifest under the original source name.
+    let r = src.mind(&["unmeld", "ns43-remeld", "--unlink-only"]);
+    assert!(
+        r.success,
+        "unmeld --unlink-only must succeed: {} {}",
+        r.stdout, r.stderr
+    );
+
+    // Re-meld: manifest still holds `deploy` under this source's name.
+    // The NS-43 same-source skip must prevent a false SkillCollision.
+    let r = src.mind(&["meld", &src.source_spec(), "--yes"]);
+    assert!(
+        r.success,
+        "re-meld of same source must succeed (NS-43 same-source skip): {} {}",
+        r.stdout, r.stderr
+    );
+}
+
+#[test]
+fn skill_collision_with_namespace_set_does_not_collide() {
+    // spec: NS-43
+    // Melding with --namespace makes effective names distinct from
+    // already-installed items, so the NS-43 collision check does not fire.
+    let src_a = Sandbox::bare("ns43-ns-a");
+    src_a.write_and_commit(
+        "skills/deploy/SKILL.md",
+        "---\nname: deploy\ndescription: Deploy skill A\n---\n# deploy\n",
+    );
+    let r = src_a.mind(&["meld", &src_a.source_spec(), "--yes"]);
+    assert!(r.success, "meld source-a failed: {} {}", r.stdout, r.stderr);
+
+    let src_b = Sandbox::bare("ns43-ns-b");
+    src_b.write_and_commit(
+        "skills/deploy/SKILL.md",
+        "---\nname: deploy\ndescription: Deploy skill B\n---\n# deploy\n",
+    );
+    // --namespace sb makes the effective name "sb:deploy", distinct from the
+    // installed "deploy" -- no collision fires.
+    let r = src_a.mind(&["meld", &src_b.source_spec(), "--namespace", "sb", "--yes"]);
+    assert!(
+        r.success,
+        "meld with --namespace must succeed when effective names are distinct (NS-43): {} {}",
+        r.stdout, r.stderr
+    );
+    // Both skills are discoverable under their distinct names.
+    let probe = src_a.mind(&["probe"]);
+    assert!(
+        probe.stdout.contains("skill:sb:deploy"),
+        "namespaced sb:deploy must appear in probe: {}",
+        probe.stdout
     );
 }

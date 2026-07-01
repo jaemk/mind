@@ -137,9 +137,6 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   `--pin-ref` or a `[source]` directive) is instead cloned as a snapshot at the
   pin, so pinning still works.
 
-The following meld IDs are planned (spec/README.md feature status) and extend the
-namespace flag above.
-
 - `CLI-159` `meld --namespace <prefix>` (short `-n`) sets the source's namespace,
   opting the source into prefixing (with no flag and no `[source].prefix`, items
   install bare, NS-2). It is the renamed `--as` (CLI-13); `--as` is retained as a
@@ -155,6 +152,17 @@ namespace flag above.
   namespace is unchanged and nothing is renamed. When the source has no installed
   items the new namespace is applied and persisted (NS-30). This revises CLI-13,
   which renamed installed items in place on such a re-meld.
+- Cross-source collision detection (namespacing.md NS-43/44/45): after catalog
+  discovery and before install, `meld` checks incoming skills, rules, and tools
+  against already-installed items from other sources. An incoming item whose
+  effective `(kind, name)` pair matches an installed item from a different source
+  is a cross-source collision (distinct from the same-invocation check at CLI-33
+  and from NS-41 for agents). In an interactive session (TTY, no `--yes`), `meld`
+  pauses and prompts for a namespace prefix, pre-populated with the repo name
+  (NS-44). In a non-interactive session (no TTY or `--yes`), `meld` exits
+  non-zero, lists the conflicts, and suggests re-running with `--namespace
+  <repo-name>` (NS-45). A source already carrying a namespace whose effective
+  names do not collide is not affected.
 
 ## unmeld
 

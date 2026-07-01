@@ -24,7 +24,7 @@ source = "../explicit"
 # when the super-source is melded, namespaced to `rev:` (like meld --namespace).
 [[discover.sources]]
 source = "../namespacing"
-as = "rev"
+namespace = "rev"
 install = true
 
 # install-items: offer only the named items of this source; its other items stay

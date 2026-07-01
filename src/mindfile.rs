@@ -330,7 +330,11 @@ pub struct OnAuthFailure {
 pub struct NestedSource {
     /// A repo spec, parsed exactly like a `meld` argument.
     pub source: String,
-    /// Optional namespace to impose on the nested source (like `meld --as`).
+    /// Canonical namespace key (DSC-78): namespace to impose on the nested source (like `meld --as`).
+    #[serde(rename = "namespace", default)]
+    #[allow(dead_code)] // consumed by callers in commands.rs once DSC-78 is wired end-to-end
+    pub namespace: Option<String>,
+    /// Legacy alias key kept for backwards compatibility (DSC-78). Prefer `namespace`.
     #[serde(rename = "as", default)]
     pub alias: Option<String>,
     /// When true, melding the super-source offers this nested source's items for
@@ -379,6 +383,15 @@ pub struct NestedSource {
 }
 
 impl NestedSource {
+    /// Return the effective namespace alias for this nested source (DSC-78).
+    ///
+    /// `namespace` is the canonical key; `as` is the legacy alias. When both
+    /// are set, `namespace` wins. Returns `None` when neither is set.
+    #[allow(dead_code)] // consumed by callers in commands.rs once DSC-78 is wired end-to-end
+    pub fn effective_alias(&self) -> Option<String> {
+        self.namespace.clone().or_else(|| self.alias.clone())
+    }
+
     /// Validate this entry for mutual-exclusion constraints (DSC-64).
     ///
     /// `install = true` together with a non-empty `install_items` list is a
@@ -1291,6 +1304,7 @@ mod tests {
 
         assert_eq!(ns.source, "github:owner/repo");
         assert_eq!(ns.alias.as_deref(), Some("or"));
+        assert_eq!(ns.effective_alias(), Some("or".to_string()));
         assert!(ns.install);
         assert_eq!(ns.follow_branch.as_deref(), Some("main"));
         assert_eq!(
@@ -1337,11 +1351,77 @@ mod tests {
         assert!(result.is_err(), "unknown keys must be rejected");
     }
 
+    // ----- DSC-78: namespace key and effective_alias() -----
+
+    #[test]
+    fn namespace_key_parses_as_canonical_form() {
+        // spec: DSC-78
+        // The canonical `namespace` key is parsed into NestedSource::namespace;
+        // the legacy `alias` field stays None, and effective_alias() returns the value.
+        let toml = r#"
+            [[discover.sources]]
+            source = "github:owner/repo"
+            namespace = "pfx"
+        "#;
+        let parsed: MindToml = toml::from_str(toml).expect("parse");
+        let ns = &parsed.discover.as_ref().unwrap().sources[0];
+        assert_eq!(ns.namespace.as_deref(), Some("pfx"));
+        assert!(ns.alias.is_none());
+        assert_eq!(ns.effective_alias(), Some("pfx".to_string()));
+    }
+
+    #[test]
+    fn as_key_still_accepted_as_legacy_alias() {
+        // spec: DSC-78
+        // The legacy `as` key still deserializes into NestedSource::alias for
+        // backwards compatibility; namespace stays None.
+        let toml = r#"
+            [[discover.sources]]
+            source = "github:owner/repo"
+            as = "pfx"
+        "#;
+        let parsed: MindToml = toml::from_str(toml).expect("parse");
+        let ns = &parsed.discover.as_ref().unwrap().sources[0];
+        assert_eq!(ns.alias.as_deref(), Some("pfx"));
+        assert!(ns.namespace.is_none());
+        assert_eq!(ns.effective_alias(), Some("pfx".to_string()));
+    }
+
+    #[test]
+    fn namespace_takes_precedence_over_as_when_both_present() {
+        // spec: DSC-78
+        // When both `namespace` and `as` are present, effective_alias() returns
+        // the `namespace` value. Both keys map to distinct struct fields, so
+        // TOML accepts the snippet and deny_unknown_fields is satisfied.
+        let toml = r#"
+            [[discover.sources]]
+            source = "github:owner/repo"
+            namespace = "ns-wins"
+            as = "as-loses"
+        "#;
+        let parsed: MindToml = toml::from_str(toml).expect("parse");
+        let ns = &parsed.discover.as_ref().unwrap().sources[0];
+        assert_eq!(ns.effective_alias(), Some("ns-wins".to_string()));
+    }
+
+    #[test]
+    fn effective_alias_returns_none_when_neither_set() {
+        // spec: DSC-78
+        // When neither namespace nor alias is set, effective_alias() is None.
+        let toml = "[[discover.sources]]\nsource = \"github:owner/repo\"\n";
+        let parsed: MindToml = toml::from_str(toml).expect("parse");
+        let ns = &parsed.discover.as_ref().unwrap().sources[0];
+        assert!(ns.namespace.is_none());
+        assert!(ns.alias.is_none());
+        assert_eq!(ns.effective_alias(), None);
+    }
+
     #[test]
     fn nested_source_pin_directive_returns_follow_branch_pin() {
         // spec: DSC-59 — pin_directive returns Pin::FollowBranch for follow-branch entries.
         let ns = NestedSource {
             source: "x".into(),
+            namespace: None,
             alias: None,
             install: false,
             install_items: None,
@@ -1364,6 +1444,7 @@ mod tests {
         // spec: DSC-59 — no pin fields => None.
         let ns = NestedSource {
             source: "x".into(),
+            namespace: None,
             alias: None,
             install: false,
             install_items: None,
@@ -1510,6 +1591,7 @@ mod tests {
         // the [[discover.sources.hooks]] array is considered.
         let ns = NestedSource {
             source: "x".into(),
+            namespace: None,
             alias: None,
             install: false,
             install_items: None,
@@ -1539,6 +1621,7 @@ mod tests {
         for branch in ["main", "develop", "v1", "release/2.0", "abc123"] {
             let ns = NestedSource {
                 source: "x".into(),
+                namespace: None,
                 alias: None,
                 install: false,
                 install_items: None,
@@ -1722,6 +1805,7 @@ mod tests {
         // entry is a MindToml error (mutually exclusive).
         let ns = NestedSource {
             source: "github:owner/repo".into(),
+            namespace: None,
             alias: None,
             install: true,
             install_items: Some(vec!["skill:review".into()]),
@@ -1758,6 +1842,7 @@ mod tests {
         // so there is no contradiction. Only a non-empty list conflicts.
         let ns = NestedSource {
             source: "github:owner/repo".into(),
+            namespace: None,
             alias: None,
             install: true,
             install_items: Some(vec![]), // empty is fine
@@ -1781,6 +1866,7 @@ mod tests {
         // left false/unset). Must not error from validate().
         let ns = NestedSource {
             source: "github:owner/repo".into(),
+            namespace: None,
             alias: None,
             install: false,
             install_items: Some(vec!["skill:review".into(), "agent:dev".into()]),
@@ -1974,6 +2060,7 @@ mod tests {
         // rejected at parse time to prevent git argument injection.
         let ns = NestedSource {
             source: "x".into(),
+            namespace: None,
             alias: None,
             install: false,
             install_items: None,
@@ -1997,6 +2084,7 @@ mod tests {
         // spec: DSC-66
         let ns = NestedSource {
             source: "x".into(),
+            namespace: None,
             alias: None,
             install: false,
             install_items: None,
@@ -2020,6 +2108,7 @@ mod tests {
         // spec: DSC-66
         let ns = NestedSource {
             source: "x".into(),
+            namespace: None,
             alias: None,
             install: false,
             install_items: None,
@@ -2043,6 +2132,7 @@ mod tests {
         // spec: DSC-66 — whitespace in a pin value is rejected.
         let ns = NestedSource {
             source: "x".into(),
+            namespace: None,
             alias: None,
             install: false,
             install_items: None,
@@ -2066,6 +2156,7 @@ mod tests {
         // spec: DSC-66 — '..' in a pin value (git range syntax) is rejected.
         let ns = NestedSource {
             source: "x".into(),
+            namespace: None,
             alias: None,
             install: false,
             install_items: None,
@@ -2089,6 +2180,7 @@ mod tests {
         // spec: DSC-66 — well-formed values pass.
         let ns = NestedSource {
             source: "x".into(),
+            namespace: None,
             alias: None,
             install: false,
             install_items: None,
@@ -2311,6 +2403,7 @@ mod tests {
         // spec: DSC-68 -- a NestedSource with a well-formed on-auth-failure passes validate()
         let ns = NestedSource {
             source: "github:owner/repo".into(),
+            namespace: None,
             alias: None,
             install: false,
             install_items: None,

@@ -26,16 +26,18 @@ super-source does with that nested source's items:
 * `install = true` offers all of that source's items for install (DSC-58).
 * `install-items = ["kind:name", ...]` offers only the named items; the rest
   stay available (DSC-62). Refs are bare `kind:name`; a prefix in effect for the
-  entry (`as`) is applied at install (DSC-63). A ref naming an item the source
+  entry (`namespace`) is applied at install (DSC-63). A ref naming an item the source
   does not offer is an error at meld. `install-items` and `install = true` are
   mutually exclusive on one entry (DSC-64).
 
 ### Per-entry prefix (DSC-39)
 
-`as = "<prefix>"` imposes a namespace prefix on a nested source, exactly like
-`meld --namespace`: its items install as `<prefix>:<name>`. The `../namespacing` entry
-sets `as = "rev"`, so its `review` skill installs as `rev:review`. `as` is a
-registry concern and always applies, independent of the DSC-60 gate below.
+`namespace = "<prefix>"` imposes a namespace prefix on a nested source, exactly
+like `meld --namespace`: its items install as `<prefix>:<name>`. The `../namespacing`
+entry sets `namespace = "rev"`, so its `review` skill installs as `rev:review`.
+`as = "<prefix>"` is a backwards-compatible alias for `namespace` (DSC-78); new
+entries should use `namespace`. The prefix is a registry concern and always
+applies, independent of the DSC-60 gate below.
 
 ### Authoritative pin vs the fallback gate (DSC-59/60/65)
 
@@ -94,8 +96,9 @@ mind.toml                 [source] metadata + [discover].sources curating the ch
 `mind.toml` lists four nested sources, each demonstrating one knob:
 
 * `../explicit` plain: registered and left available.
-* `../namespacing` with `as = "rev"` and `install = true`: all items installed,
-  namespaced to `rev-`.
+* `../namespacing` with `namespace = "rev"` and `install = true`: all items
+  installed, namespaced to `rev:`.
+
 * `../tooling` with `install-items = ["skill:scan"]`: only `skill:scan` installed.
 * `../starter` adopt entry: an authoritative `follow-branch` pin plus
   fallback-only `roots`/`hooks` for a source that ships no `mind.toml`
@@ -163,16 +166,16 @@ commit hashes vary by clone):
 ```
 *  super-source  ...  [61602d93]
 *  explicit      ...  [8e1f53ff]
-*  namespacing   ...  [2c427fc4 as:rev]
+*  namespacing   ...  [2c427fc4 namespace:rev]
 *  tooling       ...  [b80d1a2d]
 *  starter       ...  [f6d428d4 hook]
 ```
 
 `recall` shows the installed items, including the prefixed names from the
-`as = "rev"` entry and the single subset item from `../tooling`:
+`namespace = "rev"` entry and the single subset item from `../tooling`:
 
 ```
-* namespacing  [2c427fc4 as:rev]
+* namespacing  [2c427fc4 namespace:rev]
   +  agent:rev-dev     installed
   +  agent:rev-lead    installed
   +  rule:rev-style    installed
@@ -206,7 +209,7 @@ install = false
 
 [[discover.sources]]
 source = "../namespacing"
-as = "rev"
+namespace = "rev"
 pin-ref = "2c427fc4e9ba2895d13c4f93d65132833c406e34"
 install = true
 
@@ -254,6 +257,7 @@ and asserts it validates, so the example stays correct as the code changes.
 ## See also
 
 `../../spec/discovery.md` (DSC-58, DSC-59, DSC-60, DSC-61, DSC-62, DSC-63,
-DSC-64, DSC-65: the `[discover].sources` registry, per-entry install control,
-the `as` prefix, the authoritative pin, and the fallback gate) and
-`../../spec/dump.md` (DUMP-1..8: generating a super-source from installed state).
+DSC-64, DSC-65, DSC-78: the `[discover].sources` registry, per-entry install
+control, the `namespace` prefix and its `as` alias, the authoritative pin, and
+the fallback gate) and `../../spec/dump.md` (DUMP-1..10: generating a
+super-source from installed state).

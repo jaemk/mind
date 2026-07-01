@@ -71,6 +71,36 @@ The rest of this document states these rules normatively.
   by identity and `upgrade`/`introspect` report the move from `p-<bare>` to
   `p:<bare>` as a rename (lifecycle.md), not as an orphan plus a new item.
 
+## Collision-triggered namespace prompt
+
+- `NS-43` At `meld`, after catalog discovery and before install, mind checks the
+  incoming source's effective items (skills, rules, and tools -- agents are handled
+  separately by NS-41) against all already-installed items from other sources. An
+  incoming item whose effective `(kind, name)` pair matches an already-installed
+  item from a different source is a cross-source collision. The check uses the
+  effective names that would result from the incoming source's current alias, if
+  any; it does not pre-apply a namespace. A source that already has a namespace in
+  effect (from `--namespace` or `mind.toml`) whose effective names do not collide
+  is not prompted. This check is distinct from the same-invocation check at
+  CLI-33 (two items in one `learn` call) and from NS-41 (agent collisions by bare
+  name).
+
+- `NS-44` When one or more cross-source collisions are detected (NS-43) in an
+  interactive session (TTY and no `--yes`), `meld` pauses and prompts the user to
+  enter a namespace prefix, listing the colliding items and their existing source.
+  The prompt pre-populates the repo name (the last path or URL component of the
+  source) as the suggested value. Accepting the suggestion or typing a different
+  prefix is equivalent to re-running with `--namespace <prefix>` and continues the
+  meld under that prefix. Entering an empty value explicitly clears the namespace
+  and continues (the user acknowledges the collision and proceeds without one).
+  Aborting stops `meld` with a non-zero exit and no source registration.
+
+- `NS-45` When one or more cross-source collisions are detected (NS-43) in a
+  non-interactive session (no TTY or `--yes`), `meld` errors (`SkillCollision`)
+  and lists the conflicting items and their existing source. The error message
+  suggests re-running with `--namespace <prefix>`, using the repo name as the
+  example value. No source is registered and no items are installed.
+
 ## Agent identity
 
 The harness keys an agent differently from a skill, which bounds how a prefix can

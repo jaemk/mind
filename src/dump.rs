@@ -55,8 +55,8 @@ struct DumpDiscover {
 struct DumpEntry {
     source: String,
 
-    #[serde(rename = "as", skip_serializing_if = "Option::is_none")]
-    alias: Option<String>,
+    #[serde(rename = "namespace", skip_serializing_if = "Option::is_none")]
+    namespace: Option<String>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     roots: Option<Vec<String>>,
@@ -203,7 +203,7 @@ fn build_entry(
 
     Ok(DumpEntry {
         source: source_spec,
-        alias: effective_alias,
+        namespace: effective_alias,
         roots,
         flat_skills,
         pin_ref,
@@ -366,7 +366,7 @@ mod tests {
         // Directly test the TOML emitter shape with a hand-crafted entry.
         let entry = DumpEntry {
             source: "/some/path".into(),
-            alias: None,
+            namespace: None,
             roots: None,
             flat_skills: None,
             pin_ref: None,
@@ -400,7 +400,7 @@ mod tests {
         // spec: DUMP-2 — none installed -> install = false; never emit [].
         let entry = DumpEntry {
             source: "/some/path".into(),
-            alias: None,
+            namespace: None,
             roots: None,
             flat_skills: None,
             pin_ref: None,
@@ -439,7 +439,7 @@ mod tests {
         let items = vec!["agent:dev".to_string(), "skill:review".to_string()];
         let entry = DumpEntry {
             source: "/some/path".into(),
-            alias: None,
+            namespace: None,
             roots: None,
             flat_skills: None,
             pin_ref: None,
@@ -484,7 +484,7 @@ mod tests {
         // install = false.
         let entry = DumpEntry {
             source: "/some/path".into(),
-            alias: None,
+            namespace: None,
             roots: None,
             flat_skills: None,
             pin_ref: None,
@@ -521,7 +521,7 @@ mod tests {
                 sources: vec![
                     DumpEntry {
                         source: "/path/to/repo".into(),
-                        alias: Some("pfx".into()),
+                        namespace: Some("pfx".into()),
                         roots: Some(vec!["packages".into()]),
                         flat_skills: Some(true),
                         pin_ref: Some("deadbeefdeadbeef1234".into()),
@@ -530,7 +530,7 @@ mod tests {
                     },
                     DumpEntry {
                         source: "https://github.com/owner/repo".into(),
-                        alias: None,
+                        namespace: None,
                         roots: None,
                         flat_skills: None,
                         pin_ref: None,
@@ -557,7 +557,7 @@ mod tests {
         // First entry: install = true, pin-ref (commit pin) present, alias present.
         let e0 = &disc.sources[0];
         assert!(e0.install, "first entry: install must be true");
-        assert_eq!(e0.alias.as_deref(), Some("pfx"));
+        assert_eq!(e0.namespace.as_deref(), Some("pfx"));
         assert_eq!(e0.roots.as_deref(), Some(&["packages".to_string()][..]));
         // spec: DUMP-10 — flat-skills round-trips: emitted as `flat-skills = true`
         // and parses back as NestedSource.flat_skills on the first entry, while the
@@ -623,7 +623,7 @@ mod tests {
         // DefaultBranch). A source with no recorded commit emits no pin.
         let entry_with_commit = DumpEntry {
             source: "/a/b".into(),
-            alias: None,
+            namespace: None,
             roots: None,
             flat_skills: None,
             pin_ref: Some("deadbeefdeadbeef".into()),
@@ -632,7 +632,7 @@ mod tests {
         };
         let entry_no_commit = DumpEntry {
             source: "/a/b".into(),
-            alias: None,
+            namespace: None,
             roots: None,
             flat_skills: None,
             pin_ref: None,
@@ -721,7 +721,7 @@ mod tests {
         // spec: DUMP-3 — --whole-sources always emits install = true.
         let entry = DumpEntry {
             source: "/a/b".into(),
-            alias: None,
+            namespace: None,
             roots: None,
             flat_skills: None,
             pin_ref: None,
@@ -752,6 +752,52 @@ mod tests {
         // The bare_name is "review", so install_items should list "skill:review".
         let bare_ref = format!("{}:{}", item.kind.as_str(), item.bare_name);
         assert_eq!(bare_ref, "skill:review");
+    }
+
+    #[test]
+    fn namespace_field_emitted_not_as_key() {
+        // spec: DSC-78 — dump emits `namespace = "pfx"` (canonical key), not the
+        // legacy `as = "pfx"`, and the value round-trips through NestedSource::namespace.
+        let entry = DumpEntry {
+            source: "/a/b".into(),
+            namespace: Some("pfx".into()),
+            roots: None,
+            flat_skills: None,
+            pin_ref: None,
+            install: Some(true),
+            install_items: None,
+        };
+        let doc = DumpDoc {
+            source: DumpSource {
+                description: "t".into(),
+            },
+            discover: DumpDiscover {
+                sources: vec![entry],
+            },
+        };
+        let text = toml::to_string(&doc).unwrap();
+        assert!(
+            text.contains("namespace = \"pfx\""),
+            "must emit `namespace = \"pfx\"` (canonical key): {text}"
+        );
+        assert!(
+            !text.contains("as = "),
+            "must NOT emit the legacy `as = ` key: {text}"
+        );
+        // Round-trip: the emitted `namespace` key populates NestedSource::namespace,
+        // not ::alias.
+        let back: MindToml = toml::from_str(&text)
+            .unwrap_or_else(|e| panic!("namespace output must parse as MindToml: {e}\n{text}"));
+        let ns = &back.discover.unwrap().sources[0];
+        assert_eq!(
+            ns.namespace.as_deref(),
+            Some("pfx"),
+            "emitted namespace key must populate NestedSource::namespace"
+        );
+        assert!(
+            ns.alias.is_none(),
+            "emitted namespace key must NOT populate NestedSource::alias"
+        );
     }
 
     #[test]

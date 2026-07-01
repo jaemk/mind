@@ -75,7 +75,7 @@ const ALLOWLIST: &[&str] = &[
     //   meld no-arg defaults to `.` (CLI-25, cited in tests/cli.rs) and the
     //   maintainer `init-source` scaffolder (INIT-1..6; src/namespace.rs +
     //   tests/cli.rs) are now implemented and cited; no IDs remain allowlisted.
-    //   Claude plugin marketplaces (spec/marketplace.md, MKT-1..11): now
+    //   Claude plugin marketplaces (spec/marketplace.md, MKT-1..13): now
     //   implemented and cited from tests/cli.rs; no MKT IDs remain allowlisted.
     //   self-update `evolve` verb: in-place upgrade of the mind binary using the
     //   same native curl/wget downloader as resources/install.sh (no external
@@ -120,14 +120,20 @@ const ALLOWLIST: &[&str] = &[
     // because it requires a TTY-approved run and cannot be exercised headlessly:
     //   HOOK-71: build runs in staging, non-zero exit rolls the install back.
     //   HOOK-73: a build re-runs when its item is reinstalled/upgraded.
-    "HOOK-71",
-    "HOOK-73",
+    "HOOK-71", "HOOK-73",
     //   cross-harness lobes (spec/harness-lobes.md) are implemented and cited:
     //   HARN-1 (kinds filter) from src/config.rs + src/paths.rs + tests/cli_lobes.rs,
     //   HARN-2/HARN-3 (link filtering / rules Claude-only) from tests/cli_lobes.rs,
     //   HARN-4 (presets) from src/paths.rs + tests/cli_lobes.rs, HARN-5
     //   (auto-detect-and-prompt) from src/paths.rs + tests/cli_lobes.rs, and
     //   HARN-6 (verbatim link, no frontmatter rewrite) from tests/cli_lobes.rs.
+    //   cross-source skill/rule/tool collision detection: NS-43 (detection) and
+    //   NS-45 (non-interactive error) are now implemented and cited from
+    //   src/error.rs and src/commands.rs. NS-44 (interactive TTY prompt) requires
+    //   a real TTY to exercise the prompt path and cannot be tested headlessly.
+    "NS-44",
+    //   rename mindfile `as` key to `namespace` in [discover].sources entries;
+    //   `as` stays as a backwards-compatible alias (DSC-78): implemented and cited.
     // Namespace ergonomics: CLI-159 (--namespace flag), NS-30, and CLI-161
     // (namespace mutability lock) are now implemented and cited from tests/cli.rs.
     // TUI-53 (TUI namespace edit) is now implemented and cited from src/tui/app.rs.

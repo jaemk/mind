@@ -347,6 +347,28 @@ fn run_checks(
         }
     }
 
+    // --- Check 6b: deprecated `as` key in [discover.sources] (advisory) ---
+    // spec: DSC-78
+    // The `as` key in a [[discover.sources]] entry is deprecated; the canonical
+    // key is `namespace`. Emit an advisory for each entry that uses `as` without
+    // also supplying the canonical `namespace` key.
+    if let Some(ref mf) = mindfile
+        && let Some(d) = mf.discover.as_ref()
+    {
+        for entry in &d.sources {
+            if entry.alias.is_some() && entry.namespace.is_none() {
+                advisory.push(Finding::advisory(
+                    "deprecated-field",
+                    format!(
+                        "[discover.sources] entry for '{}': use 'namespace = ...' instead of \
+                         the deprecated 'as = ...' key",
+                        entry.source
+                    ),
+                ));
+            }
+        }
+    }
+
     // --- Check 3: catalog scan (version gate + unknown kind) ---
     // Build a synthetic source for scanning. Use scan_source_at so we can pass
     // the actual source_dir directly, bypassing the clone_dir() path resolution
@@ -1504,6 +1526,84 @@ mod tests {
         assert!(
             result.advisory.iter().all(|f| f.kind != "install-hook"),
             "no hooks declared => no install-hook advisory: {:?}",
+            result.advisory
+        );
+    }
+
+    /// A mind.toml with a [discover.sources] entry that uses the legacy `as` key
+    /// instead of the canonical `namespace` key produces a `deprecated-field`
+    /// advisory. Using `namespace` directly produces no such advisory.
+    /// spec: DSC-78
+    #[test]
+    fn legacy_as_key_in_discover_sources_is_advisory() {
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let source_dir = base.join("src");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(
+            source_dir.join("mind.toml"),
+            "[[discover.sources]]\nsource = \"github:owner/repo\"\nas = \"pfx\"\n",
+        )
+        .unwrap();
+        write_file(
+            &source_dir.join("agents/tool.md"),
+            "---\ndescription: tool agent\n---\n# tool\n",
+        );
+        let paths = paths_for(base);
+
+        let result = run_checks(&paths, &source_dir, None, false, true).unwrap();
+        assert!(
+            result.hard.is_empty(),
+            "legacy as= key must not be a hard finding: {:?}",
+            result.hard
+        );
+        let df: Vec<&Finding> = result
+            .advisory
+            .iter()
+            .filter(|f| f.kind == "deprecated-field")
+            .collect();
+        assert_eq!(
+            df.len(),
+            1,
+            "expected exactly one deprecated-field advisory: {:?}",
+            result.advisory
+        );
+        assert!(
+            df[0].message.contains("github:owner/repo"),
+            "advisory must name the source entry: {}",
+            df[0].message
+        );
+        assert!(
+            df[0].message.contains("namespace"),
+            "advisory must mention the canonical key: {}",
+            df[0].message
+        );
+    }
+
+    /// A mind.toml that uses `namespace` (not `as`) in [discover.sources]
+    /// produces no `deprecated-field` advisory for that entry.
+    /// spec: DSC-78
+    #[test]
+    fn canonical_namespace_key_produces_no_deprecated_advisory() {
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let source_dir = base.join("src");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(
+            source_dir.join("mind.toml"),
+            "[[discover.sources]]\nsource = \"github:owner/repo\"\nnamespace = \"pfx\"\n",
+        )
+        .unwrap();
+        write_file(
+            &source_dir.join("agents/tool.md"),
+            "---\ndescription: tool agent\n---\n# tool\n",
+        );
+        let paths = paths_for(base);
+
+        let result = run_checks(&paths, &source_dir, None, false, true).unwrap();
+        assert!(
+            result.advisory.iter().all(|f| f.kind != "deprecated-field"),
+            "canonical namespace= key must not produce a deprecated-field advisory: {:?}",
             result.advisory
         );
     }

@@ -672,6 +672,74 @@ fn meld_recursive(
         }
     }
 
+    // NS-43: Cross-source skill/rule/tool collision check. Only runs for a
+    // top-level `meld` (not for curated nested sources which the caller controls).
+    if top_level {
+        let manifest = crate::manifest::Manifest::load(paths)?;
+        let mut conflicts: Vec<(String, String, String)> = Vec::new();
+        for entry in manifest.items.values() {
+            // Agents are handled separately by NS-41.
+            if entry.kind == crate::error::ItemKind::Agent {
+                continue;
+            }
+            // Skip items from the same source (re-meld / upgrade).
+            if entry.source == source.name {
+                continue;
+            }
+            // Collision: same (kind, effective_name) pair from a different source.
+            let eff_name = entry.name.as_str();
+            if items
+                .iter()
+                .any(|it| it.kind == entry.kind && it.effective_name() == eff_name)
+            {
+                conflicts.push((
+                    entry.kind.as_str().to_string(),
+                    eff_name.to_string(),
+                    entry.source.clone(),
+                ));
+            }
+        }
+        if !conflicts.is_empty() {
+            let suggested = suggested_namespace(&source.url);
+            if crate::hook::is_tty() {
+                // NS-44: interactive TTY path — prompt for a namespace prefix.
+                // spec: NS-43
+                let answer = prompt_line(&format!(
+                    "name collision detected -- the following items conflict with \
+                     already-installed items:\n{}\n\
+                     enter a namespace prefix (suggested: {suggested}) or press \
+                     Enter to proceed without one: ",
+                    format_conflicts_display(&conflicts),
+                ))?;
+                let chosen = crate::namespace::prefix_choice(&answer);
+                if let Some(c) = &chosen {
+                    crate::namespace::validate_prefix(c)?;
+                }
+                if chosen != source.alias {
+                    source.alias = chosen;
+                    items = match catalog::scan(paths, &single(&source)) {
+                        Ok(items) => items,
+                        Err(e) => {
+                            if !source.is_linked() {
+                                let _ = std::fs::remove_dir_all(&dir);
+                            }
+                            return Err(e);
+                        }
+                    };
+                }
+            } else {
+                // spec: NS-43 NS-45 — non-interactive: hard error with guidance.
+                if !source.is_linked() {
+                    let _ = std::fs::remove_dir_all(&dir);
+                }
+                return Err(MindError::SkillCollision {
+                    conflicts,
+                    suggested,
+                });
+            }
+        }
+    }
+
     warn_unguarded_references(&items);
     warn_agent_collisions(paths, &items); // spec: NS-41 advisory
     if !out.json {
@@ -785,10 +853,10 @@ fn meld_recursive(
                 paths,
                 registry,
                 &entry.source,
-                entry.alias.clone(),
-                vec![], // no consumer roots for nested sources
-                false,  // no consumer --flat-skills for nested sources (curator config supplies it)
-                None,   // no consumer pin for nested sources
+                entry.effective_alias(), // spec: DSC-78 — prefer `namespace`, fall back to `as`
+                vec![],                  // no consumer roots for nested sources
+                false, // no consumer --flat-skills for nested sources (curator config supplies it)
+                None,  // no consumer pin for nested sources
                 false,
                 visited,
                 policy,
@@ -880,6 +948,11 @@ fn meld_recursive(
         match plugin_manifest::load_marketplace_manifest(&marketplace_path) {
             Ok(manifest) => {
                 for entry in manifest.into_entries() {
+                    // In-repo plugins are discovered as scan roots in catalog.rs
+                    // (MKT-14); only external entries need a recursive sub-meld here.
+                    if matches!(entry.source, plugin_manifest::PluginSource::InRepo { .. }) {
+                        continue; // spec: MKT-14
+                    }
                     // belt-and-suspenders: into_entries() already validates
                     // in-repo paths, so this is a redundant safety check.
                     if let plugin_manifest::PluginSource::InRepo { ref path } = entry.source
@@ -2464,9 +2537,13 @@ fn marketplace_subsources(
     };
     let mut out = Vec::new();
     for entry in plugin_manifest::load_marketplace_manifest(&mp)?.into_entries() {
-        let in_repo = matches!(entry.source, plugin_manifest::PluginSource::InRepo { .. });
+        // spec: MKT-14 — in-repo plugins are catalog items of the parent source,
+        // not independent registered sub-sources; exclude them here.
+        if matches!(entry.source, plugin_manifest::PluginSource::InRepo { .. }) {
+            continue;
+        }
         if let Ok(spec) = parse_spec(&marketplace_entry_spec(&entry, &clone)) {
-            out.push((spec, in_repo));
+            out.push((spec, false)); // external entries are never in-repo
         }
     }
     Ok(out)
@@ -3752,6 +3829,10 @@ pub fn sync(paths: &Paths, then_upgrade: bool, dangerously_skip_hook_check: bool
                 continue;
             };
             for entry in manifest.into_entries() {
+                // In-repo plugins are scan roots in catalog.rs, not sub-melded. spec: MKT-14
+                if matches!(entry.source, plugin_manifest::PluginSource::InRepo { .. }) {
+                    continue;
+                }
                 let repo_spec = marketplace_entry_spec(&entry, &clone_dir);
                 nested.push(NestedTodo {
                     spec: repo_spec,
@@ -4335,7 +4416,7 @@ pub fn recall(
                     .map(short)
                     .unwrap_or_else(|| "unsynced".into());
                 let ns = match &s.alias {
-                    Some(a) => format!(" as:{a}"),
+                    Some(a) => format!(" namespace:{a}"),
                     None => String::new(),
                 };
                 // HOOK-58: surface that a source carries install hooks with a
@@ -5397,6 +5478,27 @@ fn summary(desc: Option<&str>, max: usize) -> String {
     }
     let cut: String = first.chars().take(max.saturating_sub(1)).collect();
     format!("{}...", cut.trim_end())
+}
+
+/// Extract the suggested namespace prefix from a source URL or local path.
+///
+/// Takes the last `/`-separated component and strips any `.git` suffix, so
+/// `"https://github.com/foo/bar"` → `"bar"` and `"local/x/y"` → `"y"`.
+fn suggested_namespace(url: &str) -> String {
+    let base = url.split('/').next_back().unwrap_or(url);
+    base.strip_suffix(".git").unwrap_or(base).to_string()
+}
+
+/// Format a conflict list for the interactive collision prompt (NS-44).
+///
+/// Each tuple is `(kind, effective_name, existing_source)`. Produces the same
+/// bullet style as the `SkillCollision` error for consistency.
+fn format_conflicts_display(conflicts: &[(String, String, String)]) -> String {
+    conflicts
+        .iter()
+        .map(|(k, n, s)| format!("  {k}:{n} (already installed from '{s}')"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Print `prompt` and read one line from stdin (trimmed by the caller). EOF
@@ -6602,6 +6704,7 @@ mod tests {
             },
             version: None,
             description: None,
+            skills: vec![],
         };
         let clone_dir = std::path::Path::new("/some/catalog/clone");
         let spec = marketplace_entry_spec(&entry, clone_dir);
@@ -6620,6 +6723,7 @@ mod tests {
             },
             version: None,
             description: None,
+            skills: vec![],
         };
         let clone_dir = std::path::Path::new("/home/user/.mind/sources/local/owner/catalog");
         let spec = marketplace_entry_spec(&entry, clone_dir);
@@ -6640,6 +6744,7 @@ mod tests {
             },
             version: None,
             description: None,
+            skills: vec![],
         };
         let clone_dir = std::path::Path::new("/repo");
         let spec = marketplace_entry_spec(&entry, clone_dir);
@@ -6649,6 +6754,76 @@ mod tests {
             spec.starts_with("/repo"),
             "InRepo spec with ./ prefix must still be rooted inside clone_dir: {spec}"
         );
+    }
+
+    // ----- marketplace_subsources: InRepo skip guard -----
+
+    /// `marketplace_subsources` must exclude InRepo entries and only return
+    /// External ones. The `in_repo` bool was used to distinguish auto-install
+    /// defaults; with InRepo entries excluded, it is always `false`.
+    #[test]
+    fn marketplace_subsources_skips_in_repo_entries() {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let base = std::env::temp_dir().join(format!("mind-mkt-sub-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(base.join(".claude-plugin")).unwrap();
+        // One InRepo entry and one External entry.
+        std::fs::write(
+            base.join(".claude-plugin/marketplace.json"),
+            r#"{
+  "name": "test-catalog",
+  "plugins": [
+    {"name": "inrepo-plugin", "source": "./plugins/inrepo"},
+    {"name": "ext-plugin",    "source": "owner/ext-plugin"}
+  ]
+}"#,
+        )
+        .unwrap();
+
+        // A local linked source whose clone_dir == base (no paths lookup needed).
+        let source = crate::source::Source {
+            name: "local/test/test-catalog".to_string(),
+            url: base.to_str().unwrap().to_string(),
+            host: "local".to_string(),
+            owner: "test".to_string(),
+            repo: "test-catalog".to_string(),
+            commit: None,
+            description: None,
+            alias: None,
+            pin: crate::source::Pin::DefaultBranch,
+            roots: None,
+            flat_skills: false,
+            origin: None,
+            plugin_version: None,
+            install_hooks: vec![],
+            install_hook: None,
+            install_hook_commit: None,
+        };
+
+        let paths = crate::paths::Paths {
+            mind_home: base.join("mind"),
+            claude_home: base.join("claude"),
+        };
+
+        let subsources =
+            marketplace_subsources(&paths, &source).expect("marketplace_subsources must not fail");
+
+        assert_eq!(
+            subsources.len(),
+            1,
+            "only the External entry must be returned; InRepo entries must be skipped"
+        );
+        let (spec, in_repo_flag) = &subsources[0];
+        assert!(
+            spec.repo == "ext-plugin",
+            "the returned entry must be the external plugin, got: {}",
+            spec.name
+        );
+        assert!(
+            !in_repo_flag,
+            "in_repo flag must always be false for external entries"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// `offer_save_absorb_to(yes=true)` writes `absorb_to` into config.toml,
