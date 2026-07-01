@@ -67,7 +67,9 @@ name, those references must be tokens: `{{ns:name}}` in prose, and the path toke
 (`{{self}}` / `{{tools:name}}` / `{{path:ref}}`) for code and paths. `mind`
 expands each at install. `review` and `init-source` warn (advisory) when a source
 that is being prefixed references a sibling in bare prose. An unprefixed source,
-or one with no intra-source references, needs none of this.
+or one with no intra-source references, needs none of this. Agents are the
+exception: they link under their bare name even under a prefix, so a reference to
+a sibling agent is not renamed and does not warn.
 
 See the [spec](https://github.com/jaemk/mind/tree/main/spec) for the normative
 rules and [examples/namespacing](https://github.com/jaemk/mind/tree/main/examples/namespacing)

@@ -31,9 +31,9 @@ reports it as installed (TOOL-3).
 store-only (TOOL-4).
 
 **Namespacing** (TOOL-6): a prefix gives a tool the effective name
-`<prefix>:<name>`, the same as any kind. Stable identity is
-`(source, kind, bare_name)`, so a prefix change is a rename matched by
-`evolve`/`introspect`.
+`<prefix>:<name>`, the same as a skill or rule (agents are the exception and keep
+their bare link name). Stable identity is `(source, kind, bare_name)`, so a
+prefix change is a rename matched by `evolve`/`introspect`.
 
 ### When to use a `tool`
 

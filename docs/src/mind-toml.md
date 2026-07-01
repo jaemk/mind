@@ -46,8 +46,9 @@ roots = ["packages"]                     # scan under these dirs, not the repo r
 ```
 
 - **`prefix`**: every item installs as `<prefix>:<name>` (identity, store path,
-  symlink, and ref). A consumer's `meld --namespace <prefix>` overrides it;
-  `meld --namespace ''` removes it. See [namespacing](namespacing.md).
+  symlink, and ref), except an agent's harness link, which stays bare. A
+  consumer's `meld --namespace <prefix>` overrides it; `meld --namespace ''`
+  removes it. See [namespacing](namespacing.md).
 - **`install`** (deprecated): a shell command run once on `meld`, after checkout,
   to build or install the tooling the source's items rely on. It is disclosed and
   prompted before it runs (`--dangerously-skip-install-hook-check` runs it

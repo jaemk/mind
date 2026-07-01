@@ -127,8 +127,9 @@ the listing instead.
 
 ## Selecting items (globs)
 
-`learn`, `forget`, `unmeld`, `probe`, and `recall` all accept a glob in place of
-an exact item ref. The kind prefix, source qualifier, and glob compose:
+`learn`, `forget`, `upgrade`, `unmeld`, `probe`, and `recall` all accept a glob
+in place of an exact item ref. The kind prefix, source qualifier, and glob
+compose:
 
 | pattern | selects |
 |---------|---------|
@@ -138,7 +139,9 @@ an exact item ref. The kind prefix, source qualifier, and glob compose:
 | `'review*'` | items whose name starts with `review` |
 
 The glob is matched against the effective (installed) name. A glob matching
-nothing is `ItemNotFound` (for items) or `SourceNotFound` (for sources).
+nothing is `ItemNotFound` (for items) or `SourceNotFound` (for sources). The
+exception is `upgrade`: a glob (or exact ref) that matches no installed item
+reports up-to-date rather than erroring, since upgrading nothing is a no-op.
 
 Shell-quoting caveat: quote the glob so the shell does not expand it before
 `mind` sees it:
@@ -148,7 +151,7 @@ mind learn 'skill:*'
 mind forget 'owner/repo#*'
 ```
 
-Spec: CLI-31, CLI-41.
+Spec: CLI-31, CLI-41, CLI-65.
 
 ## Filtering with --kind and --source
 

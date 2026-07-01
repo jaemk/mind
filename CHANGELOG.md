@@ -6,6 +6,29 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `upgrade` accepts a glob in place of an exact item ref, mirroring `forget`; the
+  kind prefix and source qualifier compose (`upgrade 'jk:*'`, `upgrade
+  'skill:*'`, `upgrade 'owner/repo#*'`). A glob (or exact ref) that matches no
+  installed item reports up-to-date rather than erroring (CLI-65).
+
+### Changed
+
+- The namespace separator is `:` instead of `-`: a prefixed item installs as
+  `<prefix>:<name>`. `upgrade` migrates already-installed items from the old
+  `<prefix>-<name>` form in place, without a namespace change.
+- `meld --as` is renamed `--namespace` (short `-n`); `--as` stays as a deprecated
+  alias. A source's namespace is locked once any of its items are installed:
+  changing it requires forgetting those items first, rather than an in-place
+  rename of installed items (NS-30, CLI-161).
+- Agents are no longer namespaced by a source prefix. An agent links into each
+  lobe under its bare frontmatter `name` (the harness keys agents by that name,
+  not the filename), so a prefix reaches only its store path and manifest key.
+  Two sources shipping a same-named agent now collide: `learn` refuses with an
+  `AgentCollision` error and `meld` emits an advisory warning (NS-40, NS-41,
+  NS-42).
+
 ## [0.8.0] - 2026-06-28
 
 ### Added
