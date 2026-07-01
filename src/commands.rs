@@ -3606,13 +3606,13 @@ pub fn upgrade(
     // (arbitrary code) for sources unrelated to the targeted item. When a filter
     // is present, restrict the hook re-run to sources that have at least one
     // INSTALLED item matching the filter (the same scoping the per-item loop uses
-    // via `installed_matches`). With no filter, `None` means every source is in
-    // scope, leaving the unscoped behavior unchanged.
+    // via `installed_matches_glob`). With no filter, `None` means every source is
+    // in scope, leaving the unscoped behavior unchanged.
     let hook_scope: Option<HashSet<String>> = filter.as_ref().map(|f| {
         manifest
             .items
             .values()
-            .filter(|it| crate::resolve::installed_matches(it, f))
+            .filter(|it| crate::resolve::installed_matches_glob(it, f))
             .map(|it| it.source.clone())
             .collect()
     });
@@ -3902,7 +3902,7 @@ fn upgrade_item_disposition(
     policy: Option<&Policy>,
 ) -> UpgradeDisposition {
     if let Some(f) = filter
-        && !crate::resolve::installed_matches(installed, f)
+        && !crate::resolve::installed_matches_glob(installed, f)
     {
         return UpgradeDisposition::OutOfScope;
     }

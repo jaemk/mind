@@ -43,6 +43,7 @@ and verified.
 | Release pipeline + Homebrew tap (tag-driven) | done | `.github/workflows/release.yml`, `Formula/mind.rb` |
 | `curl \| sh` install script (Linux/macOS-arm) | done | `resources/install.sh` |
 | `forget` glob selection | done | CLI-41 |
+| `upgrade` glob selection (mirrors `forget`; namespace/kind/source in one pass) | done | CLI-65 |
 | `unmeld` uninstalls source items by default; `--unlink-only` keeps them | done | CLI-21, CLI-22 |
 | `unmeld` glob/partial source selection (multi-source, mirrors `learn`/`forget` globs) | done | CLI-28 |
 | `introspect --fix` (re-link missing symlinks) | done | CLI-91 |

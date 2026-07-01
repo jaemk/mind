@@ -225,8 +225,8 @@ pub fn select_by_bare_refs<'a>(
 
 /// Whether an installed item matches a parsed ref: its kind (when the ref names
 /// one), its effective installed name, and the source qualifier (when given).
-/// Used by `forget`, `recall <item>`, and `upgrade [item]`, which match against
-/// the manifest rather than the catalog.
+/// Used by `recall <item>` and `resolve_installed`, which require exact
+/// effective-name matching against the manifest.
 pub fn installed_matches(it: &InstalledItem, r: &ItemRef) -> bool {
     r.kind.is_none_or(|k| it.kind == k)
         && it.name == r.name
@@ -235,26 +235,32 @@ pub fn installed_matches(it: &InstalledItem, r: &ItemRef) -> bool {
             .is_none_or(|s| source_matches(&it.source, s))
 }
 
+/// Like [`installed_matches`] but the name matches as a glob when it contains
+/// glob metacharacters (`*`, `?`, `[`), else exactly. Used by `forget` and
+/// `upgrade` for multi-item selection.
+pub fn installed_matches_glob(it: &InstalledItem, r: &ItemRef) -> bool {
+    r.kind.is_none_or(|k| it.kind == k)
+        && r.source
+            .as_ref()
+            .is_none_or(|s| source_matches(&it.source, s))
+        && if is_glob(&r.name) {
+            glob::Pattern::new(&r.name).is_ok_and(|p| p.matches(&it.name))
+        } else {
+            it.name == r.name
+        }
+}
+
 /// Select every installed item matching `r`: the name as a glob when it contains
 /// glob metacharacters, else by exact effective name, honoring the kind and
-/// source qualifier as in [`installed_matches`]. Used for multi-item `forget`.
+/// source qualifier as in [`installed_matches`]. Used for multi-item `forget`
+/// and `upgrade`.
 pub fn select_installed<'a>(
     items: &'a std::collections::BTreeMap<String, InstalledItem>,
     r: &ItemRef,
 ) -> Vec<&'a InstalledItem> {
-    let pattern = glob::Pattern::new(&r.name).ok();
     items
         .values()
-        .filter(|it| {
-            r.kind.is_none_or(|k| it.kind == k)
-                && r.source
-                    .as_ref()
-                    .is_none_or(|s| source_matches(&it.source, s))
-                && match &pattern {
-                    Some(p) => p.matches(&it.name),
-                    None => it.name == r.name,
-                }
-        })
+        .filter(|it| installed_matches_glob(it, r))
         .collect()
 }
 
@@ -570,6 +576,56 @@ mod tests {
             select_installed(&m, &parse_item_ref("review").unwrap()).len(),
             1
         );
+    }
+
+    // spec: CLI-65
+    #[test]
+    fn installed_matches_glob_bare_star_matches_all() {
+        let items = [
+            inst(ItemKind::Skill, "review", "github.com/james/agents"),
+            inst(ItemKind::Agent, "dev", "github.com/james/agents"),
+            inst(ItemKind::Rule, "style", "github.com/bob/agents"),
+        ];
+        let r = parse_item_ref("*").unwrap();
+        assert!(items.iter().all(|it| installed_matches_glob(it, &r)));
+    }
+
+    // spec: CLI-65
+    #[test]
+    fn installed_matches_glob_kind_prefix_narrows() {
+        let skill = inst(ItemKind::Skill, "review", "github.com/james/agents");
+        let agent = inst(ItemKind::Agent, "dev", "github.com/james/agents");
+        let r = parse_item_ref("skill:*").unwrap();
+        assert!(installed_matches_glob(&skill, &r));
+        assert!(!installed_matches_glob(&agent, &r));
+    }
+
+    // spec: CLI-65
+    #[test]
+    fn installed_matches_glob_source_qualifier_narrows() {
+        let james = inst(ItemKind::Skill, "review", "github.com/james/agents");
+        let bob = inst(ItemKind::Skill, "audit", "github.com/bob/agents");
+        let r = parse_item_ref("james/agents#*").unwrap();
+        assert!(installed_matches_glob(&james, &r));
+        assert!(!installed_matches_glob(&bob, &r));
+    }
+
+    // spec: CLI-65
+    #[test]
+    fn installed_matches_glob_exact_name_matches_only_that_item() {
+        let review = inst(ItemKind::Skill, "review", "github.com/james/agents");
+        let release = inst(ItemKind::Skill, "release", "github.com/james/agents");
+        let r = parse_item_ref("review").unwrap();
+        assert!(installed_matches_glob(&review, &r));
+        assert!(!installed_matches_glob(&release, &r));
+    }
+
+    // spec: CLI-65
+    #[test]
+    fn installed_matches_glob_non_matching_glob_is_false() {
+        let review = inst(ItemKind::Skill, "review", "github.com/james/agents");
+        let r = parse_item_ref("xyz*").unwrap();
+        assert!(!installed_matches_glob(&review, &r));
     }
 
     #[test]

@@ -289,6 +289,15 @@ namespace flag above.
   and an `owner/repo#` source qualifier. The ref may match several installed
   items, all of which are upgraded.
 - `CLI-64` With nothing pending, `upgrade` reports up to date and changes nothing.
+- `CLI-65` When the `item` ref name is a glob (`*`, `?`, `[`), `upgrade` limits the
+  pass to every installed item whose effective name matches the glob, mirroring
+  `forget`'s glob selection (CLI-41). The `kind:` prefix and `owner/repo#` source
+  qualifier compose with the glob exactly as they do for an exact ref (CLI-63), so
+  `upgrade 'jk:*'` upgrades a namespace, `upgrade 'skill:*'` a kind, and
+  `upgrade 'owner/repo#*'` a whole source in one pass. Like any ref, a glob that
+  matches no installed item -- or matches only items already up to date -- reports
+  nothing pending and changes nothing (CLI-64); it is not an error (this is where
+  `upgrade` differs from `forget`, whose no-match glob is `NotInstalled`, CLI-41).
 
 ## recall
 
