@@ -193,10 +193,17 @@ pub fn validate_prefix(prefix: &str) -> crate::error::Result<()> {
 ///
 /// Returns `Err(name)` if a token names something that is not a sibling, so the
 /// caller can report the typo. Sources with no tokens pass through unchanged.
+///
+/// `bare_names` is the set of sibling bare names that must expand to their bare
+/// name even when a prefix is in effect (NS-42: agent referents, unless they are
+/// also shadowed by a non-agent sibling of the same name). A name in
+/// `bare_names` is still validated against `siblings` as normal; only the output
+/// form is bare rather than `<prefix>:<name>`.
 pub fn expand(
     content: &str,
     prefix: &Option<String>,
     siblings: &HashSet<String>,
+    bare_names: &HashSet<String>,
 ) -> Result<String, String> {
     const OPEN: &str = "{{ns:";
     let mut out = String::with_capacity(content.len());
@@ -213,7 +220,13 @@ pub fn expand(
         if !siblings.contains(name) {
             return Err(name.to_string());
         }
-        out.push_str(&apply(name, prefix));
+        // spec: NS-42 -- agent referents expand bare; skill/rule/tool referents
+        // expand with the prefix as before.
+        if bare_names.contains(name) {
+            out.push_str(name);
+        } else {
+            out.push_str(&apply(name, prefix));
+        }
         rest = &after[end + 2..];
     }
     out.push_str(rest);
@@ -901,7 +914,8 @@ mod tests {
     #[test]
     fn expand_unprefixed_yields_bare_names() {
         let s = sibs(&["test"]);
-        let got = expand("hand off to {{ns:test}} now", &None, &s).unwrap();
+        let no_bare: HashSet<String> = HashSet::new();
+        let got = expand("hand off to {{ns:test}} now", &None, &s, &no_bare).unwrap();
         assert_eq!(got, "hand off to test now");
     }
 
@@ -909,21 +923,27 @@ mod tests {
     fn expand_prefixed_yields_prefixed_names() {
         // spec: NS-11
         let s = sibs(&["test"]);
-        let got = expand("see {{ns:test}}.", &Some("jk".into()), &s).unwrap();
+        let no_bare: HashSet<String> = HashSet::new();
+        let got = expand("see {{ns:test}}.", &Some("jk".into()), &s, &no_bare).unwrap();
         assert_eq!(got, "see jk:test.");
     }
 
     #[test]
     fn expand_rejects_unknown_referent() {
         let s = sibs(&["test"]);
-        assert_eq!(expand("{{ns:nope}}", &None, &s), Err("nope".to_string()));
+        let no_bare: HashSet<String> = HashSet::new();
+        assert_eq!(
+            expand("{{ns:nope}}", &None, &s, &no_bare),
+            Err("nope".to_string())
+        );
     }
 
     #[test]
     fn expand_passes_content_without_tokens() {
         let s = sibs(&["test"]);
+        let no_bare: HashSet<String> = HashSet::new();
         assert_eq!(
-            expand("no tokens here", &None, &s).unwrap(),
+            expand("no tokens here", &None, &s, &no_bare).unwrap(),
             "no tokens here"
         );
     }
@@ -932,13 +952,52 @@ mod tests {
     fn expand_trims_token_and_leaves_unterminated_verbatim() {
         // spec: NS-15
         let s = sibs(&["dev"]);
+        let no_bare: HashSet<String> = HashSet::new();
         // Whitespace inside the token is trimmed before the sibling lookup.
         assert_eq!(
-            expand("{{ns:  dev  }}", &Some("jk".into()), &s).unwrap(),
+            expand("{{ns:  dev  }}", &Some("jk".into()), &s, &no_bare).unwrap(),
             "jk:dev"
         );
         // An unterminated token (no closing `}}`) is passed through unchanged.
-        assert_eq!(expand("see {{ns:dev", &None, &s).unwrap(), "see {{ns:dev");
+        assert_eq!(
+            expand("see {{ns:dev", &None, &s, &no_bare).unwrap(),
+            "see {{ns:dev"
+        );
+    }
+
+    #[test]
+    fn expand_agent_referent_expands_bare_under_prefix() {
+        // spec: NS-42
+        // An agent referent in bare_names expands to its bare name even under a
+        // prefix. A skill referent NOT in bare_names still expands prefixed.
+        let s = sibs(&["dev", "review"]);
+        let bare = sibs(&["dev"]); // dev is an agent (bare); review is a skill (not bare)
+        let pfx = Some("jk".to_string());
+        // Agent token: always bare regardless of prefix.
+        assert_eq!(
+            expand("delegate to {{ns:dev}}", &pfx, &s, &bare).unwrap(),
+            "delegate to dev"
+        );
+        // Skill token: still prefixed.
+        assert_eq!(
+            expand("use {{ns:review}}", &pfx, &s, &bare).unwrap(),
+            "use jk:review"
+        );
+        // Cross-kind shadow: if "shared" is both an agent AND a skill, it is NOT
+        // in bare_names, so it expands prefixed.
+        let s2 = sibs(&["shared"]);
+        let no_bare: HashSet<String> = HashSet::new(); // "shared" not in bare_names -> prefixed
+        assert_eq!(
+            expand("{{ns:shared}}", &pfx, &s2, &no_bare).unwrap(),
+            "jk:shared"
+        );
+        // An agent token still validates: a missing name is still Err.
+        let bare2 = sibs(&["dev"]);
+        let s3 = sibs(&["dev"]);
+        assert_eq!(
+            expand("{{ns:ghost}}", &pfx, &s3, &bare2),
+            Err("ghost".to_string())
+        );
     }
 
     #[test]

@@ -331,6 +331,22 @@ pub enum MindError {
         name: String,
         dest_path: String,
     },
+
+    /// NS-41: two agents from different sources share the same harness name and
+    /// would overwrite each other's agent-home link.
+    #[error(
+        "agent '{name}' from source '{incoming}' conflicts with the installed agent from \
+         '{existing}': both link as agents/{name}.md in the agent home -- \
+         run `mind forget agent:{name}` (or the prefixed name) to remove the existing agent first"
+    )]
+    AgentCollision {
+        /// The bare harness name (frontmatter `name:`) that both agents share.
+        name: String,
+        /// The source of the already-installed agent.
+        existing: String,
+        /// The source of the agent being installed.
+        incoming: String,
+    },
 }
 
 fn status_suffix(status: Option<ExitStatus>) -> String {

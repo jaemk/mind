@@ -76,6 +76,28 @@ impl CatalogItem {
         namespace::apply(&self.name, &self.prefix)
     }
 
+    /// The harness-visible name for an agent: the frontmatter `name:` field when
+    /// it is non-empty and a safe single path component, else the bare catalog
+    /// name (`self.name`). Returns `None` for non-agent kinds.
+    ///
+    /// The Claude harness keys an agent by its frontmatter `name`, not its
+    /// filename, so this is the name mind links the agent under in each agent
+    /// home (NS-40).
+    pub fn agent_harness_name(&self) -> Option<String> {
+        // spec: NS-40
+        if self.kind != ItemKind::Agent {
+            return None;
+        }
+        if let Some(fm_name) = frontmatter::file_field(&self.path, "name") {
+            let trimmed = fm_name.trim().to_string();
+            if !trimmed.is_empty() && is_safe_item_name(&trimmed) {
+                return Some(trimmed);
+            }
+        }
+        // Fall back to the bare catalog name (file stem).
+        Some(self.name.clone())
+    }
+
     /// A tool's entrypoint relative to its dir, for `{{tools:name}}`: the
     /// declared `bin`, else the convention default `<name>` (a file named after
     /// the tool at the dir root) when that file is present in the source. `None`
@@ -2227,5 +2249,77 @@ mod tests {
             matches!(err, MindError::DuplicateItem { ref name, .. } if name == "style"),
             "duplicate [[items]] entries must be DuplicateItem: {err}"
         );
+    }
+
+    // ---- agent_harness_name tests (NS-40) ----
+
+    /// Build a minimal `CatalogItem` pointing at a given file for testing
+    /// `agent_harness_name()`.
+    fn agent_item(path: std::path::PathBuf, bare_name: &str) -> CatalogItem {
+        CatalogItem {
+            source: "src".to_string(),
+            kind: ItemKind::Agent,
+            name: bare_name.to_string(),
+            prefix: None,
+            path,
+            description: None,
+            link_rel: None,
+            bin: None,
+            build: None,
+            install: None,
+            uninstall: None,
+            requires: Vec::new(),
+            hooks: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn agent_harness_name_reads_frontmatter_name() {
+        // spec: NS-40 -- the harness name comes from the frontmatter `name:` field,
+        // not the file stem.
+        let dir = TmpDir::new();
+        let p = dir.path().join("agents/coder.md");
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, "---\nname: dev\ndescription: d\n---\n# dev\n").unwrap();
+        let item = agent_item(p, "coder");
+        // bare catalog name is "coder", but frontmatter says "dev".
+        assert_eq!(item.agent_harness_name(), Some("dev".to_string()));
+    }
+
+    #[test]
+    fn agent_harness_name_falls_back_to_bare_name_when_frontmatter_absent() {
+        // spec: NS-40 -- if there is no frontmatter name, fall back to the bare
+        // catalog name (file stem).
+        let dir = TmpDir::new();
+        let p = dir.path().join("agents/coder.md");
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, "---\ndescription: d\n---\n# coder\n").unwrap();
+        let item = agent_item(p, "coder");
+        assert_eq!(item.agent_harness_name(), Some("coder".to_string()));
+    }
+
+    #[test]
+    fn agent_harness_name_rejects_unsafe_frontmatter_name() {
+        // spec: NS-40 -- a frontmatter `name:` that is not a safe path component
+        // is ignored and the bare catalog name is used instead.
+        let dir = TmpDir::new();
+        let p = dir.path().join("agents/coder.md");
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, "---\nname: ../evil\ndescription: d\n---\n# coder\n").unwrap();
+        let item = agent_item(p, "coder");
+        // unsafe name is rejected; falls back to catalog name.
+        assert_eq!(item.agent_harness_name(), Some("coder".to_string()));
+    }
+
+    #[test]
+    fn agent_harness_name_returns_none_for_non_agents() {
+        // spec: NS-40 -- only the Agent kind has a harness name.
+        let dir = TmpDir::new();
+        let p = dir.path().join("skills/review/SKILL.md");
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, "---\nname: review\n---\n").unwrap();
+        let mut item = agent_item(p, "review");
+        item.kind = ItemKind::Skill;
+        assert_eq!(item.agent_harness_name(), None);
     }
 }

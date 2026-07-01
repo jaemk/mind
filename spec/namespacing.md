@@ -94,12 +94,13 @@ that rewrite, so a prefix cannot transparently namespace an agent.
   that each ship an agent with the same frontmatter `name` resolve to the same
   agent-home link regardless of their prefixes. mind detects this rather than
   silently repointing the link: installing an agent whose bare name already maps to
-  an installed agent from a different source is reported as a collision and the user
-  is prompted to resolve it (keep one, or forget the other). The collision is also
-  surfaced at `meld` of a source that would introduce it. A prefix does not avert
-  it (the prefix does not reach the agent link), so two same-named agents from
-  different sources cannot both be active; this is an inherent limit of the
-  harness's global agent namespace, made explicit instead of mishandled.
+  an installed agent from a different source is refused at `learn` with an
+  `AgentCollision` error that tells the user to `mind forget` the existing agent
+  first. The collision is also surfaced at `meld` as an advisory warning (does not
+  prevent the source from being melded). A prefix does not avert it (the prefix
+  does not reach the agent link), so two same-named agents from different sources
+  cannot both be active; this is an inherent limit of the harness's global agent
+  namespace, made explicit instead of mishandled.
 - `NS-42` An agent's effective harness name is always bare (NS-40), so a bare prose
   reference to a sibling agent resolves correctly with or without a prefix. The
   unguarded-reference warning (NS-20) therefore does not fire for a reference whose

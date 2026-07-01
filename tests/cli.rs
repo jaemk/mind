@@ -2793,24 +2793,34 @@ fn mind_toml_prefix_auto_applies_and_alias_overrides() {
 
 #[test]
 fn ns_token_expands_to_prefixed_reference_on_install() {
-    // spec: NS-11
+    // spec: NS-11, NS-42
+    // A skill sibling token expands prefixed; an agent sibling token expands bare
+    // (NS-42: agents link under the bare name regardless of prefix).
     let sb = Sandbox::new();
     sb.write_and_commit(
         "agents/lead.md",
+        // {{ns:dev}} is an agent sibling -> expands bare even under prefix.
         "---\nname: lead\ndescription: lead\n---\nDelegate to the {{ns:dev}} agent.\n",
     );
     let spec = sb.source_spec();
     assert!(sb.mind(&["meld", &spec, "--as", "jk"]).success);
-    // `lead` references {{ns:dev}}; the closure prompt is confirmed with --yes.
+    // `lead` references {{ns:dev}}; confirm the closure with --yes.
     assert!(sb.mind(&["learn", "jk:lead", "--yes"]).success);
 
+    // Store path still uses the effective (prefixed) name; only the link is bare.
     let store = sb.mind_home.join("store/agent/jk:lead");
     let body = std::fs::read_to_string(&store).expect("installed agent file");
+    // Agent referent expands bare, not jk:dev.
     assert!(
-        body.contains("the jk:dev agent"),
-        "expected expanded ref: {body}"
+        body.contains("the dev agent"),
+        "expected bare agent ref: {body}"
     );
     assert!(!body.contains("{{ns:dev}}"), "token should be gone: {body}");
+    // NS-40: the link is under the bare harness name, not the prefixed name.
+    assert!(
+        sb.claude_home.join("agents/lead.md").exists(),
+        "agent should link as agents/lead.md"
+    );
 }
 
 #[test]
@@ -2847,19 +2857,22 @@ fn bad_ns_reference_errors_on_install() {
 
 #[test]
 fn meld_as_warns_about_unguarded_prose_references() {
-    // spec: NS-20, NS-22, CLI-14
+    // spec: NS-20, NS-22, NS-42, CLI-14
+    // NS-42: the warning does NOT fire for agent-only referents (agent links
+    // are bare regardless of prefix, so prose refs to agents are not broken).
+    // The warning fires only for non-agent referents whose name would be prefixed.
+    // This fixture references `review` (a skill sibling) in bare prose.
     let sb = Sandbox::new();
-    // Bare prose reference to sibling `dev`, no token.
     sb.write_and_commit(
         "agents/lead.md",
-        "---\nname: lead\ndescription: lead\n---\nDelegate to the dev agent.\n",
+        "---\nname: lead\ndescription: lead\n---\nDelegate to the review skill.\n",
     );
     let spec = sb.source_spec();
     let r = sb.mind(&["meld", &spec, "--as", "jk"]);
     assert!(r.success, "{}", r.stderr);
     assert!(
-        r.stderr.contains("references sibling(s) in prose") && r.stderr.contains("dev"),
-        "expected unguarded-ref warning: {}",
+        r.stderr.contains("references sibling(s) in prose") && r.stderr.contains("review"),
+        "expected unguarded-ref warning for skill referent: {}",
         r.stderr
     );
 }
@@ -2881,6 +2894,298 @@ fn no_warning_when_unprefixed() {
         r.stderr
     );
 }
+
+// ---- NS-40 / NS-41 / NS-42: agents not namespaced -------------------------
+
+#[test]
+fn prefixed_agent_links_under_bare_harness_name() {
+    // spec: NS-40 -- an agent from a prefixed source installs its store copy
+    // under the effective (prefixed) name but creates the agent-home link under
+    // the bare frontmatter `name`, which is how the harness resolves the agent.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    assert!(sb.mind(&["meld", &spec, "--as", "jk"]).success);
+    assert!(sb.mind(&["learn", "jk:dev"]).success);
+    // Store uses the effective prefixed name.
+    assert!(
+        sb.mind_home.join("store/agent/jk:dev").exists(),
+        "store should be at jk:dev"
+    );
+    // Agent-home link is under the bare frontmatter name, not the prefixed one.
+    assert!(
+        sb.claude_home.join("agents/dev.md").exists(),
+        "link should be agents/dev.md"
+    );
+    assert!(
+        !sb.claude_home.join("agents/jk:dev.md").exists(),
+        "no link should exist at the prefixed path"
+    );
+}
+
+#[test]
+fn prefixed_agent_manifest_key_uses_effective_name() {
+    // spec: NS-40 -- the manifest key and `recall` output use the effective
+    // (prefixed) name; only the link is bare.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    assert!(sb.mind(&["meld", &spec, "--as", "jk"]).success);
+    assert!(sb.mind(&["learn", "jk:dev"]).success);
+    let r = sb.mind(&["recall"]);
+    assert!(r.success, "{}", r.stderr);
+    assert!(
+        r.stdout.contains("jk:dev"),
+        "recall should show jk:dev: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn agent_collision_is_refused_at_learn() {
+    // spec: NS-41 -- installing an agent whose bare harness name conflicts with
+    // an installed agent from a different source is refused with AgentCollision.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    assert!(sb.mind(&["meld", &spec]).success);
+    assert!(sb.mind(&["learn", "dev"]).success);
+
+    // A second source ships an agent with the same frontmatter name "dev".
+    let other = Sandbox::bare("other");
+    other.write_and_commit(
+        "agents/coder.md",
+        "---\nname: dev\ndescription: another dev\n---\n# dev\n",
+    );
+    assert!(sb.mind(&["meld", &other.source_spec()]).success);
+
+    let r = sb.mind(&["learn", "coder"]);
+    assert!(!r.success, "colliding agent install must be refused");
+    assert!(
+        r.stderr.contains("conflict"),
+        "expected collision error message: {}",
+        r.stderr
+    );
+}
+
+#[test]
+fn meld_warns_when_incoming_agent_would_collide() {
+    // spec: NS-41 -- `meld` emits an advisory warning (not an error) when the
+    // incoming source carries an agent that would collide with an installed one.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    assert!(sb.mind(&["meld", &spec]).success);
+    assert!(sb.mind(&["learn", "dev"]).success);
+
+    let other = Sandbox::bare("other");
+    other.write_and_commit(
+        "agents/coder.md",
+        "---\nname: dev\ndescription: another dev\n---\n# dev\n",
+    );
+    // Meld must succeed (advisory only).
+    let r = sb.mind(&["meld", &other.source_spec()]);
+    assert!(
+        r.success,
+        "meld should succeed even on collision: {}",
+        r.stderr
+    );
+    assert!(
+        r.stderr.contains("would collide"),
+        "expected advisory collision warning: {}",
+        r.stderr
+    );
+}
+
+#[test]
+fn no_agent_collision_when_reinstalling_same_source() {
+    // spec: NS-41 -- re-learning the same agent (same source + bare name) is not
+    // a collision; upgrade / re-install must succeed.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    assert!(sb.mind(&["meld", &spec]).success);
+    assert!(sb.mind(&["learn", "dev"]).success);
+    // Re-learn the same item: should succeed, not collide.
+    let r = sb.mind(&["learn", "dev"]);
+    assert!(
+        r.success,
+        "re-learn of same agent should succeed: {}",
+        r.stderr
+    );
+}
+
+#[test]
+fn agent_token_expands_bare_under_prefix() {
+    // spec: NS-42 -- a {{ns:name}} token whose referent is a sibling agent
+    // expands to the bare name even when the source has a prefix.
+    let sb = Sandbox::new();
+    sb.write_and_commit(
+        "agents/lead.md",
+        "---\nname: lead\ndescription: lead\n---\nDelegate to {{ns:dev}} for coding.\n",
+    );
+    let spec = sb.source_spec();
+    assert!(sb.mind(&["meld", &spec, "--as", "jk"]).success);
+    assert!(sb.mind(&["learn", "jk:lead", "--yes"]).success);
+
+    // The stored content uses the bare name for the agent referent.
+    let store = sb.mind_home.join("store/agent/jk:lead");
+    let body = std::fs::read_to_string(&store).expect("store file");
+    assert!(
+        body.contains("dev") && !body.contains("jk:dev"),
+        "agent token should expand bare: {body}"
+    );
+}
+
+#[test]
+fn unguarded_ref_warning_skips_agent_only_sibling_names() {
+    // spec: NS-42 -- bare prose references to a sibling agent do not trigger the
+    // unguarded-reference warning: the agent links bare regardless of prefix, so
+    // the prose reference resolves correctly even without a token.
+    let sb = Sandbox::new();
+    // The standard fixture has `agents/dev.md`; reference it in bare prose.
+    sb.write_and_commit(
+        "agents/lead.md",
+        "---\nname: lead\ndescription: lead\n---\nDelegate to the dev agent.\n",
+    );
+    let spec = sb.source_spec();
+    let r = sb.mind(&["meld", &spec, "--as", "jk"]);
+    assert!(r.success, "{}", r.stderr);
+    // `dev` is an agent sibling -- must not appear in the warning.
+    assert!(
+        !r.stderr.contains("dev"),
+        "agent-only sibling should not trigger unguarded-ref warning: {}",
+        r.stderr
+    );
+}
+
+#[test]
+fn unprefixed_agent_links_under_frontmatter_name_not_filename() {
+    // spec: NS-40 -- even with no prefix, an agent links under its frontmatter
+    // `name`, which may differ from its filename. The store copy and stable
+    // identity use the file stem; only the agent-home link uses the harness name.
+    let sb = Sandbox::new();
+    sb.write_and_commit(
+        "agents/coder.md",
+        "---\nname: reviewer\ndescription: reviews code\n---\n# reviewer\n",
+    );
+    let spec = sb.source_spec();
+    assert!(sb.mind(&["meld", &spec]).success);
+    assert!(sb.mind(&["learn", "coder"]).success);
+    // The link uses the frontmatter name, not the filename.
+    assert!(
+        sb.claude_home.join("agents/reviewer.md").exists(),
+        "link should use the frontmatter name"
+    );
+    assert!(
+        !sb.claude_home.join("agents/coder.md").exists(),
+        "no link at the filename path"
+    );
+    // Store and identity use the file stem.
+    assert!(sb.mind_home.join("store/agent/coder").exists());
+}
+
+#[test]
+fn upgrade_moves_agent_link_when_frontmatter_name_changes() {
+    // spec: NS-40 -- an agent links under its frontmatter `name`. When the source
+    // changes that name but keeps the same filename (so the item's effective name
+    // and stable identity are unchanged, i.e. this is an in-place content upgrade,
+    // not a rename), `upgrade` must move the agent-home link to the new bare name
+    // and leave no orphaned old link.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    assert!(sb.mind(&["meld", &spec]).success);
+    assert!(sb.mind(&["learn", "dev"]).success);
+    assert!(sb.claude_home.join("agents/dev.md").exists());
+
+    // Same file, new frontmatter name.
+    sb.write_and_commit(
+        "agents/dev.md",
+        "---\nname: lead\ndescription: now the lead\n---\n# lead agent\n",
+    );
+    assert!(sb.mind(&["sync"]).success);
+    let r = sb.mind(&["upgrade", "--yes"]);
+    assert!(r.success, "{}", r.stderr);
+
+    // The link moved to the new harness name; the old one is not orphaned.
+    assert!(
+        sb.claude_home.join("agents/lead.md").exists(),
+        "link should move to the new harness name"
+    );
+    assert!(
+        std::fs::symlink_metadata(sb.claude_home.join("agents/dev.md")).is_err(),
+        "the old harness-name link must not be left orphaned"
+    );
+    // The store path and identity are unchanged (keyed on the file stem).
+    assert!(sb.mind_home.join("store/agent/dev").exists());
+}
+
+#[test]
+fn introspect_fix_recreates_bare_agent_link() {
+    // spec: NS-40 -- `introspect --fix` recreates a missing agent link at its
+    // recorded (bare) path from the manifest link registry, not a prefixed path.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    assert!(sb.mind(&["meld", &spec, "--as", "jk"]).success);
+    assert!(sb.mind(&["learn", "jk:dev"]).success);
+    let link = sb.claude_home.join("agents/dev.md");
+    assert!(link.exists());
+    // Simulate drift: the link is deleted out from under mind.
+    std::fs::remove_file(&link).unwrap();
+    assert!(sb.mind(&["introspect", "--fix"]).success);
+    assert!(
+        link.exists(),
+        "introspect --fix must recreate the bare link"
+    );
+    assert!(
+        !sb.claude_home.join("agents/jk:dev.md").exists(),
+        "the recreated link must be bare, not prefixed"
+    );
+}
+
+#[test]
+fn forget_removes_bare_agent_link() {
+    // spec: NS-40 -- `forget` removes the agent link at its recorded bare path via
+    // the manifest link registry, even when the source is prefixed.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    assert!(sb.mind(&["meld", &spec, "--as", "jk"]).success);
+    assert!(sb.mind(&["learn", "jk:dev"]).success);
+    assert!(sb.claude_home.join("agents/dev.md").exists());
+    assert!(sb.mind(&["forget", "jk:dev"]).success);
+    assert!(
+        std::fs::symlink_metadata(sb.claude_home.join("agents/dev.md")).is_err(),
+        "forget must remove the bare agent link"
+    );
+    assert!(!sb.mind_home.join("store/agent/jk:dev").exists());
+}
+
+#[test]
+fn cross_kind_shadow_name_still_warns_in_prose_under_prefix() {
+    // spec: NS-42 -- the cross-kind shadow rule: a name that is BOTH an agent and
+    // a skill is NOT treated as a bare agent referent, so a bare prose reference
+    // to it under a prefix still triggers the unguarded-reference warning (the
+    // skill side would be prefixed and break).
+    let sb = Sandbox::new();
+    // `shared` exists as both a skill and an agent.
+    sb.write_and_commit(
+        "skills/shared/SKILL.md",
+        "---\nname: shared\ndescription: shared skill\n---\n# shared\n",
+    );
+    sb.write_and_commit(
+        "agents/shared.md",
+        "---\nname: shared\ndescription: shared agent\n---\n# shared\n",
+    );
+    // Another item references `shared` in bare prose.
+    sb.write_and_commit(
+        "agents/lead.md",
+        "---\nname: lead\ndescription: lead\n---\nHand off to shared for the work.\n",
+    );
+    let r = sb.mind(&["meld", &sb.source_spec(), "--as", "jk"]);
+    assert!(r.success, "{}", r.stderr);
+    assert!(
+        r.stderr.contains("shared"),
+        "a name shadowed across agent+skill must still be flagged: {}",
+        r.stderr
+    );
+}
+
+// ---- end NS-40 / NS-41 / NS-42 -------------------------------------------
 
 #[test]
 fn upgrade_treats_a_prefix_change_as_a_rename() {
@@ -3398,7 +3703,8 @@ fn failed_upgrade_preserves_the_previous_version() {
     // `lead` references {{ns:dev}}; confirm the closure with --yes.
     assert!(sb.mind(&["learn", "jk:lead", "--yes"]).success);
     let store = sb.mind_home.join("store/agent/jk:lead");
-    assert!(std::fs::read_to_string(&store).unwrap().contains("jk:dev"));
+    // NS-42: {{ns:dev}} expands bare (dev is an agent sibling).
+    assert!(std::fs::read_to_string(&store).unwrap().contains("dev"));
 
     // Upstream introduces a broken reference.
     sb.write_and_commit(
@@ -3413,11 +3719,10 @@ fn failed_upgrade_preserves_the_previous_version() {
 
     // The previously installed good version is untouched.
     let body = std::fs::read_to_string(&store).expect("old store copy should remain");
-    assert!(
-        body.contains("jk:dev"),
-        "old version should be intact: {body}"
-    );
-    assert!(std::fs::symlink_metadata(sb.claude_home.join("agents/jk:lead.md")).is_ok());
+    // NS-42: agent token expanded bare; NS-40: link is under bare harness name.
+    assert!(body.contains("dev"), "old version should be intact: {body}");
+    // NS-40: the agent link is under its bare frontmatter name, not the prefixed name.
+    assert!(std::fs::symlink_metadata(sb.claude_home.join("agents/lead.md")).is_ok());
 }
 
 #[test]
@@ -5237,20 +5542,22 @@ fn relative_lobe_is_canonicalized_to_absolute() {
 
 #[test]
 fn unguarded_ref_warning_scans_all_files_of_an_item() {
-    // spec: NS-20
+    // spec: NS-20, NS-42
     let sb = Sandbox::new();
-    // A skill whose bare prose reference to sibling `dev` lives in a secondary
-    // file, not SKILL.md. The warning must still catch it (scan is item-wide).
+    // A skill whose bare prose reference to the skill sibling `review` lives in
+    // a secondary file, not SKILL.md. The warning must still catch it (scan is
+    // item-wide). Using a skill referent (not an agent) because NS-42 excludes
+    // pure-agent sibling names from the warning scan.
     sb.write_and_commit(
         "skills/lead/SKILL.md",
         "---\nname: lead\ndescription: lead skill\n---\n# lead\n",
     );
-    sb.write_and_commit("skills/lead/NOTES.md", "Delegate to the dev agent.\n");
+    sb.write_and_commit("skills/lead/NOTES.md", "Run the review skill first.\n");
 
     let r = sb.mind(&["meld", &sb.source_spec(), "--as", "jk"]);
     assert!(r.success, "{}", r.stderr);
     assert!(
-        r.stderr.contains("skill:jk:lead") && r.stderr.contains("dev"),
+        r.stderr.contains("skill:jk:lead") && r.stderr.contains("review"),
         "warning should cite a sibling ref found in a non-SKILL.md file: {}",
         r.stderr
     );
@@ -5273,7 +5580,13 @@ fn example_namespacing_expands_references() {
     // closure and prompts (DEP-31); `--yes` confirms.
     assert!(jk.mind(&["learn", "jk:lead", "--yes"]).success);
     let lead = std::fs::read_to_string(jk.mind_home.join("store/agent/jk:lead")).unwrap();
-    assert!(lead.contains("the jk:dev agent"), "{lead}");
+    // NS-42: {{ns:dev}} is an agent sibling -- expands bare under prefix too.
+    assert!(lead.contains("the dev agent"), "{lead}");
+    assert!(
+        !lead.contains("jk:dev"),
+        "agent token must not be prefixed: {lead}"
+    );
+    // Skill and rule referents still expand with the prefix (NS-11).
     assert!(lead.contains("the jk:review skill"), "{lead}");
     assert!(lead.contains("the jk:style rule"), "{lead}");
     assert!(!lead.contains("{{ns:"), "tokens should be gone: {lead}");

@@ -17,7 +17,7 @@
 use std::path::Path;
 
 use crate::catalog::CatalogItem;
-use crate::error::{MindError, Result};
+use crate::error::{ItemKind, MindError, Result};
 use crate::hash::hash_path;
 use crate::manifest::InstalledItem;
 use crate::namespace;
@@ -50,10 +50,21 @@ pub fn install(
     //    target (LIFE-41).
     // A tool with no explicit `link` is store-only: no link target, so no agent
     // home symlink (the harness does not discover it; items reach it by token).
+    //
+    // spec: NS-40 -- an agent's default link uses the bare harness name (the
+    // frontmatter `name:` field, which is what the Claude harness resolves), NOT
+    // the effective (possibly prefixed) name. The store path and manifest `name`
+    // still use the effective name. An explicit `link_rel` from mind.toml wins.
+    let link_name = if kind == ItemKind::Agent {
+        item.agent_harness_name()
+            .unwrap_or_else(|| item.name.clone())
+    } else {
+        name.clone()
+    };
     let link_rel = item
         .link_rel
         .clone()
-        .or_else(|| paths.default_link_rel(kind, &name));
+        .or_else(|| paths.default_link_rel(kind, &link_name));
     let store_root = paths.store_dir();
     // Only link into lobes whose `kinds` admit this item's kind (HARN-2/HARN-3).
     // A lobe that excludes the kind contributes no link and is not an error, so
@@ -303,6 +314,22 @@ fn expand_references(
 ) -> Result<()> {
     let names: std::collections::HashSet<String> =
         siblings.iter().map(|s| s.name.clone()).collect();
+    // spec: NS-42 -- agent referents expand bare even under a prefix. Compute the
+    // set of agent bare names that are NOT also a non-agent sibling name (the
+    // cross-kind shadow rule: if a name is both an agent and a skill/rule/tool, it
+    // is NOT bare -- it keeps the prefix).
+    let agent_names: std::collections::HashSet<String> = siblings
+        .iter()
+        .filter(|s| s.kind == crate::error::ItemKind::Agent)
+        .map(|s| s.name.clone())
+        .collect();
+    let non_agent_names: std::collections::HashSet<String> = siblings
+        .iter()
+        .filter(|s| s.kind != crate::error::ItemKind::Agent)
+        .map(|s| s.name.clone())
+        .collect();
+    let bare_names: std::collections::HashSet<String> =
+        agent_names.difference(&non_agent_names).cloned().collect();
     let path_siblings: Vec<namespace::PathSibling> =
         siblings.iter().map(CatalogItem::as_path_sibling).collect();
     // TOOL-16: render store paths with a leading `~` when the store is under
@@ -357,7 +384,7 @@ fn expand_references(
         if !content.contains("{{") {
             continue;
         }
-        let expanded = namespace::expand(&content, &item.prefix, &names)
+        let expanded = namespace::expand(&content, &item.prefix, &names, &bare_names)
             .map_err(|name| bad_ref(format!("{{{{ns:{name}}}}}")))?;
         let expanded = namespace::expand_paths(&expanded, &ctx).map_err(&bad_ref)?;
         std::fs::write(&file, expanded).map_err(|e| MindError::io(&file, e))?;

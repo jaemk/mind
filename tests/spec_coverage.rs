@@ -75,13 +75,6 @@ const ALLOWLIST: &[&str] = &[
     //   meld no-arg defaults to `.` (CLI-25, cited in tests/cli.rs) and the
     //   maintainer `init-source` scaffolder (INIT-1..6; src/namespace.rs +
     //   tests/cli.rs) are now implemented and cited; no IDs remain allowlisted.
-    //   Agents are not namespaced (see spec/namespacing.md "Agent identity",
-    //   status = planned): the harness keys an agent by its frontmatter `name`,
-    //   not its filename, so an agent links under its bare name regardless of the
-    //   source prefix (NS-40), same-named agents across sources are a detected
-    //   collision (NS-41), and the unguarded-ref warning skips agent referents
-    //   (NS-42). Moves to citing tests when built.
-    "NS-40", "NS-41", "NS-42",
     //   Claude plugin marketplaces (see spec/marketplace.md, status = planned):
     //   consume `.claude-plugin/marketplace.json` and `plugin.json` as a discovery
     //   source, store+symlink install model unchanged. Documented ahead of

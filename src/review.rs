@@ -443,7 +443,11 @@ fn run_checks(
                 Ok(c) => c,
                 Err(_) => continue,
             };
-            if let Err(bad_ref) = crate::namespace::expand(&content, &prefix, &siblings) {
+            // The bare_names set is empty here: review validates token resolution
+            // (whether the name exists), not the expansion form, so bare vs.
+            // prefixed output is irrelevant for this check.
+            let no_bare = std::collections::HashSet::<String>::new();
+            if let Err(bad_ref) = crate::namespace::expand(&content, &prefix, &siblings, &no_bare) {
                 hard.push(Finding::hard(
                     "bad-reference",
                     format!(

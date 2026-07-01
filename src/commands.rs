@@ -652,6 +652,7 @@ fn meld_recursive(
     }
 
     warn_unguarded_references(&items);
+    warn_agent_collisions(paths, &items); // spec: NS-41 advisory
     if !out.json {
         println!(
             "{} melded {} ({} item(s))",
@@ -872,8 +873,32 @@ fn warn_unguarded_references(items: &[CatalogItem]) {
     if !items.iter().any(|it| it.prefix.is_some()) {
         return;
     }
-    let siblings: std::collections::HashSet<String> =
-        items.iter().map(|it| it.name.clone()).collect();
+    // spec: NS-42 -- exclude pure-agent names from the warning scan: a bare prose
+    // reference to a sibling agent resolves correctly even under a prefix (because
+    // agents link under their bare harness name, NS-40). Flagging agent references
+    // would be a false positive. The cross-kind shadow rule: if a name is both an
+    // agent AND a non-agent sibling, it is NOT excluded (it does get prefixed for
+    // the non-agent kind, so the warning is still meaningful).
+    let agent_names: std::collections::HashSet<String> = items
+        .iter()
+        .filter(|it| it.kind == ItemKind::Agent)
+        .map(|it| it.name.clone())
+        .collect();
+    let non_agent_names: std::collections::HashSet<String> = items
+        .iter()
+        .filter(|it| it.kind != ItemKind::Agent)
+        .map(|it| it.name.clone())
+        .collect();
+    // The scanning set: all names except pure-agent-only ones.
+    let siblings: std::collections::HashSet<String> = items
+        .iter()
+        .map(|it| it.name.clone())
+        .filter(|name| {
+            // Keep the name if it is not an agent, OR if it is also a non-agent
+            // sibling (the shadow case).
+            !agent_names.contains(name) || non_agent_names.contains(name)
+        })
+        .collect();
     for item in items {
         let mut refs: Vec<String> = Vec::new();
         for file in crate::review::item_files(item) {
@@ -895,6 +920,118 @@ fn warn_unguarded_references(items: &[CatalogItem]) {
             );
         }
     }
+}
+
+/// Warn when melding a source whose agents would collide with already-installed
+/// agents from a different source (NS-41 advisory). Does not fail meld; the
+/// actual enforcement is at `learn` time with `AgentCollision`.
+fn warn_agent_collisions(paths: &Paths, items: &[CatalogItem]) {
+    // spec: NS-41
+    let manifest = match Manifest::load(paths) {
+        Ok(m) => m,
+        Err(_) => return, // manifest unavailable; skip advisory rather than propagate
+    };
+    let agent_homes = match paths.agent_homes() {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+    for item in items {
+        if item.kind != ItemKind::Agent {
+            continue;
+        }
+        let harness_name = item
+            .agent_harness_name()
+            .unwrap_or_else(|| item.name.clone());
+        let link_rel = item
+            .link_rel
+            .clone()
+            .or_else(|| paths.default_link_rel(ItemKind::Agent, &harness_name));
+        let Some(rel) = link_rel else { continue };
+        let planned: Vec<std::path::PathBuf> = agent_homes
+            .iter()
+            .filter(|h| h.admits(ItemKind::Agent))
+            .map(|h| h.path.join(&rel))
+            .collect();
+        for entry in manifest.items.values() {
+            if entry.kind != ItemKind::Agent {
+                continue;
+            }
+            // Same item (re-meld of the same source): not a collision.
+            if entry.source == item.source && entry.bare_name == item.name {
+                continue;
+            }
+            let collides = entry.links.iter().any(|link| {
+                planned
+                    .iter()
+                    .any(|p| p.as_path() == std::path::Path::new(link.as_str()))
+            });
+            if collides {
+                eprintln!(
+                    "warning: agent '{harness_name}' from '{}' would collide with the installed \
+                     agent from '{}' at agents/{harness_name}.md -- run `mind forget {}` to \
+                     remove it first",
+                    item.source,
+                    entry.source,
+                    entry.key(),
+                );
+            }
+        }
+    }
+}
+
+/// NS-41: if `target` is an agent whose bare harness link would collide with an
+/// already-installed agent from a *different* source, return the `AgentCollision`
+/// error to raise. Returns `Ok(None)` for a non-agent, no collision, or a
+/// same-identity re-install/upgrade (matched by stable identity
+/// `(source, bare_name)`). The planned links mirror what `install` will create,
+/// so an explicit `mind.toml` `link` is honored the same way.
+fn agent_collision(
+    paths: &Paths,
+    manifest: &Manifest,
+    target: &CatalogItem,
+) -> Result<Option<MindError>> {
+    // spec: NS-41
+    if target.kind != ItemKind::Agent {
+        return Ok(None);
+    }
+    let harness_name = target
+        .agent_harness_name()
+        .unwrap_or_else(|| target.name.clone());
+    let Some(rel) = target
+        .link_rel
+        .clone()
+        .or_else(|| paths.default_link_rel(ItemKind::Agent, &harness_name))
+    else {
+        return Ok(None);
+    };
+    let planned: Vec<std::path::PathBuf> = paths
+        .agent_homes()?
+        .iter()
+        .filter(|h| h.admits(ItemKind::Agent))
+        .map(|h| h.path.join(&rel))
+        .collect();
+    for entry in manifest.items.values() {
+        if entry.kind != ItemKind::Agent {
+            continue;
+        }
+        // Same item from the same source (upgrade / re-install): not a collision.
+        if entry.source == target.source && entry.bare_name == target.name {
+            continue;
+        }
+        let collides = entry.links.iter().any(|link| {
+            planned
+                .iter()
+                .any(|p| p.as_path() == std::path::Path::new(link.as_str()))
+        });
+        if collides {
+            return Ok(Some(MindError::AgentCollision {
+                name: harness_name,
+                existing: entry.source.clone(),
+                incoming: target.source.clone(),
+            }));
+        }
+    }
+    Ok(None)
 }
 
 /// The set of bare item names belonging to a source, for reference validation.
@@ -1665,6 +1802,12 @@ pub fn learn(paths: &Paths, item_ref: &str, dry_run: bool, flow: InstallFlow) ->
                 break;
             }
         };
+        // spec: NS-41 -- refuse to install an agent whose bare harness name
+        // already maps to an installed agent from a different source.
+        if let Some(err) = agent_collision(paths, &manifest, target)? {
+            failure = Some(err);
+            break;
+        }
         let siblings = siblings_of(&items, &target.source);
         let force = clobber == Clobber::Force;
         let mut result = install_item(paths, target, &commit, &siblings, force, dangerously_skip);
@@ -1773,6 +1916,11 @@ fn learn_collecting(paths: &Paths, item_ref: &str, flow: InstallFlow) -> Result<
                 break;
             }
         };
+        // spec: NS-41 -- refuse to install a colliding agent (same check as learn).
+        if let Some(err) = agent_collision(paths, &manifest, target)? {
+            failure = Some(err);
+            break;
+        }
         let siblings = siblings_of(&items, &target.source);
         let force = clobber == Clobber::Force;
         let result = install_item(paths, target, &commit, &siblings, force, dangerously_skip);
@@ -3588,8 +3736,20 @@ pub fn upgrade(
                     out.green(&installed.key())
                 );
             }
-        } else if !out.json {
-            println!("{} upgraded {}", out.ok(), out.green(&installed.key()));
+        } else {
+            // In-place upgrade (same effective name, so not a rename). The link
+            // set can still change when an agent's harness name (its frontmatter
+            // `name`, NS-40) changed: the new copy links under the new bare name,
+            // so remove any old link the new install no longer owns, leaving no
+            // orphaned symlink behind.
+            for old_link in &up.old.links {
+                if !installed.links.contains(old_link) {
+                    install::remove_path(std::path::Path::new(old_link))?;
+                }
+            }
+            if !out.json {
+                println!("{} upgraded {}", out.ok(), out.green(&installed.key()));
+            }
         }
         applied.push(installed.key());
         manifest.insert(installed);
