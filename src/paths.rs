@@ -75,16 +75,14 @@ pub struct Preset {
 }
 
 /// The harness presets (HARN-4). Detection signals (HARN-5):
-/// - `gemini`: `~/.gemini` exists (Gemini CLI's home).
+/// - `gemini`: `~/.gemini` exists (Gemini CLI / Antigravity shared home; lobe is `~/.gemini/config`).
 /// - `codex`: `~/.codex` exists (Codex CLI's home; it reads `~/.agents`).
-/// - `antigravity`: `~/.gemini/config` exists (the IDE's config dir).
-/// - `antigravity-cli`: `~/.gemini/antigravity-cli` exists (the CLI's global dir).
 /// - `universal`: `~/.agents` exists (the vendor-neutral alias dir itself).
 pub const PRESETS: &[Preset] = &[
     Preset {
         name: "gemini",
-        rel_path: ".gemini",
-        kinds: &[ItemKind::Skill, ItemKind::Agent],
+        rel_path: ".gemini/config",
+        kinds: &[ItemKind::Skill],
         marker_rel: ".gemini",
     },
     Preset {
@@ -92,18 +90,6 @@ pub const PRESETS: &[Preset] = &[
         rel_path: ".agents",
         kinds: &[ItemKind::Skill],
         marker_rel: ".codex",
-    },
-    Preset {
-        name: "antigravity",
-        rel_path: ".gemini/config",
-        kinds: &[ItemKind::Skill],
-        marker_rel: ".gemini/config",
-    },
-    Preset {
-        name: "antigravity-cli",
-        rel_path: ".gemini/antigravity-cli",
-        kinds: &[ItemKind::Skill],
-        marker_rel: ".gemini/antigravity-cli",
     },
     Preset {
         name: "universal",
@@ -1326,22 +1312,24 @@ mod tests {
     fn preset_lookup_and_resolution() {
         // spec: HARN-4
         let gemini = lookup_preset("gemini").unwrap();
-        assert_eq!(gemini.rel_path, ".gemini");
-        assert_eq!(gemini.kinds, &[ItemKind::Skill, ItemKind::Agent]);
+        assert_eq!(gemini.rel_path, ".gemini/config");
+        assert_eq!(gemini.kinds, &[ItemKind::Skill]);
 
         let codex = lookup_preset("codex").unwrap();
         assert_eq!(codex.rel_path, ".agents");
         assert_eq!(codex.kinds, &[ItemKind::Skill]);
 
-        assert_eq!(
-            lookup_preset("antigravity").unwrap().rel_path,
-            ".gemini/config"
-        );
-        assert_eq!(
-            lookup_preset("antigravity-cli").unwrap().rel_path,
-            ".gemini/antigravity-cli"
-        );
         assert_eq!(lookup_preset("universal").unwrap().rel_path, ".agents");
+
+        // Removed presets are unknown.
+        assert!(matches!(
+            lookup_preset("antigravity"),
+            Err(MindError::UnknownPreset { .. })
+        ));
+        assert!(matches!(
+            lookup_preset("antigravity-cli"),
+            Err(MindError::UnknownPreset { .. })
+        ));
 
         // An unknown preset name is a structured error.
         assert!(matches!(
@@ -1355,11 +1343,8 @@ mod tests {
             lobe.path.is_absolute(),
             "preset path must be absolute (STO-16)"
         );
-        assert!(lobe.path.ends_with(".gemini"));
-        assert_eq!(
-            lobe.kinds.as_deref(),
-            Some([ItemKind::Skill, ItemKind::Agent].as_slice())
-        );
+        assert!(lobe.path.ends_with(".gemini/config"));
+        assert_eq!(lobe.kinds.as_deref(), Some([ItemKind::Skill].as_slice()));
         assert!(Paths::preset_lobe("nope").is_err());
     }
 
@@ -1397,17 +1382,13 @@ mod tests {
             !names.contains(&"codex"),
             "no .codex dir, so codex must not be detected: {names:?}"
         );
-        assert!(
-            !names.contains(&"antigravity"),
-            "no .gemini/config dir: {names:?}"
-        );
 
-        // The reported gemini lobe is under the detection base and carries kinds.
+        // The reported gemini lobe is under the detection base (.gemini/config) and carries kinds.
         let (_, gemini_lobe) = detected.iter().find(|(n, _)| *n == "gemini").unwrap();
-        assert_eq!(gemini_lobe.path, base.join(".gemini"));
+        assert_eq!(gemini_lobe.path, base.join(".gemini/config"));
         assert_eq!(
             gemini_lobe.kinds.as_deref(),
-            Some([ItemKind::Skill, ItemKind::Agent].as_slice())
+            Some([ItemKind::Skill].as_slice())
         );
 
         let _ = std::fs::remove_dir_all(&base);

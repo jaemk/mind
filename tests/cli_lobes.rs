@@ -132,20 +132,30 @@ fn preset_add_records_path_and_kinds() {
     let lobes = v["lobes"].as_array().expect("lobes array");
     let gemini = lobes
         .iter()
-        .find(|l| l["path"].as_str().is_some_and(|p| p.ends_with(".gemini")))
-        .expect("a .gemini lobe entry");
+        .find(|l| {
+            l["path"]
+                .as_str()
+                .is_some_and(|p| p.ends_with(".gemini/config"))
+        })
+        .expect("a .gemini/config lobe entry");
     let kinds: Vec<&str> = gemini["kinds"]
         .as_array()
         .expect("kinds array")
         .iter()
         .map(|k| k.as_str().unwrap())
         .collect();
-    assert_eq!(kinds, vec!["skill", "agent"], "gemini admits skill+agent");
+    assert_eq!(kinds, vec!["skill"], "gemini is skill-only");
 
     // An unknown preset name is rejected.
     let bad = sb.mind(&["config", "lobes", "add", "--preset", "emacs"]);
     assert!(!bad.success, "unknown preset must fail");
     assert!(bad.stderr.contains("preset"), "{}", bad.stderr);
+
+    // Removed presets are also unknown.
+    let ag = sb.mind(&["config", "lobes", "add", "--preset", "antigravity"]);
+    assert!(!ag.success, "removed antigravity preset must fail");
+    let agcli = sb.mind(&["config", "lobes", "add", "--preset", "antigravity-cli"]);
+    assert!(!agcli.success, "removed antigravity-cli preset must fail");
 
     // Supplying both a path and --preset is rejected by the CLI.
     let both = sb.mind(&["config", "lobes", "add", "/tmp/x", "--preset", "gemini"]);
@@ -237,13 +247,13 @@ fn list_and_show_display_kinds() {
 
     let list = sb.mind(&["config", "lobes", "list"]).stdout;
     assert!(
-        list.contains(".gemini") && list.contains("skill") && list.contains("agent"),
+        list.contains(".gemini/config") && list.contains("skill"),
         "list must show the kinds filter: {list}"
     );
 
     let show = sb.mind(&["config", "show"]).stdout;
     assert!(
-        show.contains(".gemini") && show.contains("skill"),
+        show.contains(".gemini/config") && show.contains("skill"),
         "show must surface the kinds filter: {show}"
     );
 }
@@ -274,11 +284,9 @@ fn detect_reports_then_yes_adds() {
     let after_report = sb.mind(&["config", "lobes", "list", "--json"]);
     let v = parse_json(&after_report.stdout);
     assert!(
-        !v["lobes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|l| l["path"].as_str().is_some_and(|p| p.ends_with(".gemini"))),
+        !v["lobes"].as_array().unwrap().iter().any(|l| l["path"]
+            .as_str()
+            .is_some_and(|p| p.ends_with(".gemini/config"))),
         "report-only detect must NOT add the lobe: {}",
         after_report.stdout
     );
@@ -317,11 +325,15 @@ fn detect_reports_then_yes_adds() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|l| l["path"].as_str().is_some_and(|p| p.ends_with(".gemini")))
-        .expect("detect --yes must add the gemini lobe");
+        .find(|l| {
+            l["path"]
+                .as_str()
+                .is_some_and(|p| p.ends_with(".gemini/config"))
+        })
+        .expect("detect --yes must add the gemini/config lobe");
     assert_eq!(
         gemini["path"].as_str().unwrap(),
-        detect_home.join(".gemini").display().to_string(),
+        detect_home.join(".gemini/config").display().to_string(),
         "added lobe path must be under the detection base"
     );
 }
@@ -348,10 +360,10 @@ fn detect_yes_text_output_reports_and_persists() {
         added.stdout
     );
 
-    // It must have persisted: a second non-JSON list shows the .gemini lobe.
+    // It must have persisted: a second non-JSON list shows the .gemini/config lobe.
     let list = sb.mind(&["config", "lobes", "list"]).stdout;
     assert!(
-        list.contains(".gemini"),
+        list.contains(".gemini/config"),
         "detect --yes must persist the lobe: {list}"
     );
 }
@@ -407,7 +419,7 @@ fn detect_no_homes_reports_nothing_and_mutates_nothing() {
     assert!(
         !lv["lobes"].as_array().unwrap().iter().any(|l| l["path"]
             .as_str()
-            .is_some_and(|p| p.ends_with(".gemini") || p.ends_with(".agents"))),
+            .is_some_and(|p| p.ends_with(".gemini/config") || p.ends_with(".agents"))),
         "empty detection must not have added any harness lobe: {}",
         list.stdout
     );
@@ -469,38 +481,30 @@ fn detect_dedups_codex_and_universal_same_path() {
     );
 }
 
-// HARN-4: the antigravity, antigravity-cli, and codex presets each add their
-// specific parent path and kinds end-to-end through the CLI (not just the unit
-// lookup). antigravity/antigravity-cli/codex are all skill-only.
+// HARN-4: the codex preset adds its specific parent path and kinds end-to-end
+// through the CLI (not just the unit lookup). codex is skill-only.
 #[test]
-fn preset_add_antigravity_antigravity_cli_and_codex() {
+fn preset_add_codex() {
     // spec: HARN-4
-    let cases = [
-        ("antigravity", ".gemini/config", vec!["skill"]),
-        ("antigravity-cli", ".gemini/antigravity-cli", vec!["skill"]),
-        ("codex", ".agents", vec!["skill"]),
-    ];
-    for (preset, suffix, want_kinds) in cases {
-        let sb = Sandbox::new();
-        let added = sb.mind(&["config", "lobes", "add", "--preset", preset]);
-        assert!(added.success, "{preset} add failed: {}", added.stderr);
+    let sb = Sandbox::new();
+    let added = sb.mind(&["config", "lobes", "add", "--preset", "codex"]);
+    assert!(added.success, "codex add failed: {}", added.stderr);
 
-        let listed = sb.mind(&["config", "lobes", "list", "--json"]);
-        let v = parse_json(&listed.stdout);
-        let entry = v["lobes"]
-            .as_array()
-            .expect("lobes array")
-            .iter()
-            .find(|l| l["path"].as_str().is_some_and(|p| p.ends_with(suffix)))
-            .unwrap_or_else(|| panic!("a {suffix} lobe entry for {preset}: {}", listed.stdout));
-        let kinds: Vec<&str> = entry["kinds"]
-            .as_array()
-            .expect("kinds array")
-            .iter()
-            .map(|k| k.as_str().unwrap())
-            .collect();
-        assert_eq!(kinds, want_kinds, "{preset} kinds");
-    }
+    let listed = sb.mind(&["config", "lobes", "list", "--json"]);
+    let v = parse_json(&listed.stdout);
+    let entry = v["lobes"]
+        .as_array()
+        .expect("lobes array")
+        .iter()
+        .find(|l| l["path"].as_str().is_some_and(|p| p.ends_with(".agents")))
+        .unwrap_or_else(|| panic!("a .agents lobe entry for codex: {}", listed.stdout));
+    let kinds: Vec<&str> = entry["kinds"]
+        .as_array()
+        .expect("kinds array")
+        .iter()
+        .map(|k| k.as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, vec!["skill"], "codex kinds");
 }
 
 // HARN-2: a kinds-filtered lobe survives the item lifecycle. Install a skill
@@ -674,7 +678,7 @@ fn preset_add_preserves_bare_entry_shape() {
         "the original bare lobe must remain a bare string after rewrite:\n{raw}"
     );
     assert!(
-        raw.contains("kinds") && raw.contains(".gemini"),
+        raw.contains("kinds") && raw.contains(".gemini/config"),
         "the preset lobe must be a table with kinds:\n{raw}"
     );
 
@@ -693,7 +697,9 @@ fn preset_add_preserves_bare_entry_shape() {
     );
     assert!(
         lobes.iter().any(|l| l.is_object()
-            && l["path"].as_str().is_some_and(|p| p.ends_with(".gemini"))
+            && l["path"]
+                .as_str()
+                .is_some_and(|p| p.ends_with(".gemini/config"))
             && l["kinds"].is_array()),
         "the preset lobe must serialize as an object with a kinds array: {}",
         listed.stdout
@@ -722,7 +728,7 @@ fn remove_preset_added_detailed_lobe_by_path() {
         .find_map(|l| {
             l["path"]
                 .as_str()
-                .filter(|p| p.ends_with(".gemini"))
+                .filter(|p| p.ends_with(".gemini/config"))
                 .map(str::to_string)
         })
         .expect("gemini lobe path");
@@ -737,11 +743,9 @@ fn remove_preset_added_detailed_lobe_by_path() {
     let after = sb.mind(&["config", "lobes", "list", "--json"]);
     let av = parse_json(&after.stdout);
     assert!(
-        !av["lobes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|l| l["path"].as_str().is_some_and(|p| p.ends_with(".gemini"))),
+        !av["lobes"].as_array().unwrap().iter().any(|l| l["path"]
+            .as_str()
+            .is_some_and(|p| p.ends_with(".gemini/config"))),
         "the gemini lobe must be gone after remove: {}",
         after.stdout
     );
@@ -952,7 +956,7 @@ fn lobe_add_preset_backfills_with_yes() {
     assert!(added.success, "preset add --yes failed: {}", added.stderr);
 
     assert!(
-        std::fs::symlink_metadata(sb.base.join(".gemini/skills/review")).is_ok(),
+        std::fs::symlink_metadata(sb.base.join(".gemini/config/skills/review")).is_ok(),
         "the installed skill must be backfilled into the gemini preset lobe: {}",
         added.stdout
     );
@@ -978,7 +982,7 @@ fn lobe_detect_backfills_with_yes() {
     assert!(added.success, "detect --yes failed: {}", added.stderr);
 
     assert!(
-        std::fs::symlink_metadata(detect_home.join(".gemini/skills/review")).is_ok(),
+        std::fs::symlink_metadata(detect_home.join(".gemini/config/skills/review")).is_ok(),
         "the installed skill must be backfilled into the detected gemini lobe: {}",
         added.stdout
     );

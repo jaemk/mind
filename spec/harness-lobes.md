@@ -22,17 +22,11 @@ mind links a skill as `<lobe>/skills/<name>` and an agent as
 | Harness | Skills dir | Agents dir | mind lobe (parent) |
 |---------|------------|------------|--------------------|
 | Claude Code | `~/.claude/skills/<n>/SKILL.md` | `~/.claude/agents/<n>.md` | `~/.claude` |
-| Gemini CLI | `~/.gemini/skills/` (or `~/.agents/skills/` alias) | `~/.gemini/agents/*.md` | `~/.gemini` |
+| Gemini CLI / Antigravity | `~/.gemini/config/skills/` | - | `~/.gemini/config` |
 | Codex CLI | `~/.agents/skills/` (native user path; `$CODEX_HOME` toggles, not discovery) | (subagents) | `~/.agents` |
-| Antigravity (IDE) | `~/.gemini/config/skills/` | - | `~/.gemini/config` |
 
 `~/.agents/` is the emerging vendor-neutral alias: Codex reads it as its user
-skills path, Gemini reads it as a higher-precedence alias, and the standard
-installer targets it. One `~/.agents` lobe therefore serves multiple harnesses.
-
-Footgun to preserve in the preset table: the Antigravity *CLI* (distinct from the
-IDE) uses `~/.gemini/antigravity-cli/skills/` for global and `<root>/.agent/skills/`
-(singular `.agent`) for project scope - not the IDE's `~/.gemini/config/skills/`.
+skills path and the standard installer targets it.
 
 `rules` (`rules/<name>.md`) have no cross-tool directory equivalent: the analog is
 a single concatenated context file (`AGENTS.md` / `GEMINI.md`), not a directory of
@@ -54,11 +48,10 @@ per-rule files. Rules stay Claude-only here; an `AGENTS.md`-writer is out of sco
   cross-tool conventions. Rules are Claude-only and are never linked into a lobe
   added via a non-Claude preset.
 - `HARN-4` `config lobes add --preset <name>` adds a lobe with the preset's parent
-  path and `kinds`. Presets: `gemini` (`~/.gemini`, skill+agent), `codex`
-  (`~/.agents`, skill), `antigravity` (`~/.gemini/config`, skill), `antigravity-cli`
-  (`~/.gemini/antigravity-cli`, skill), `universal` (`~/.agents`, skill). A preset
-  honors the `CLAUDE_HOME`-style overrides where applicable and resolves `~`/relative
-  paths to absolute (STO-16).
+  path and `kinds`. Presets: `gemini` (`~/.gemini/config`, skill -- detected by the
+  presence of `~/.gemini`), `codex` (`~/.agents`, skill), `universal` (`~/.agents`,
+  skill). A preset honors the `CLAUDE_HOME`-style overrides where applicable and
+  resolves `~`/relative paths to absolute (STO-16).
 - `HARN-5` Adding non-Claude lobes is opt-in by auto-detect-and-prompt: a setup
   path detects which known harness dirs exist on the machine and offers to add the
   matching presets, but never adds one without confirmation. The default lobe set

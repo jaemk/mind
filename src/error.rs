@@ -143,9 +143,7 @@ pub enum MindError {
     #[error("'{kind}' is not a valid item kind (expected one of: skill, agent, rule, tool)")]
     UnknownKind { kind: String },
 
-    #[error(
-        "'{name}' is not a known lobe preset (expected one of: gemini, codex, antigravity, antigravity-cli, universal)"
-    )]
+    #[error("'{name}' is not a known lobe preset (expected one of: gemini, codex, universal)")]
     UnknownPreset { name: String },
 
     #[error("`config lobes add` needs a path or `--preset <name>`")]
@@ -430,7 +428,6 @@ mod tests {
         assert!(
             unknown_preset.contains("gemini")
                 && unknown_preset.contains("codex")
-                && unknown_preset.contains("antigravity-cli")
                 && unknown_preset.contains("universal"),
             "UnknownPreset must list the valid presets: {unknown_preset}"
         );

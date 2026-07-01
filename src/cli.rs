@@ -505,8 +505,8 @@ pub enum LobesCmd {
         /// Mutually exclusive with `--preset`; give exactly one.
         path: Option<String>,
 
-        /// Add a known harness preset (gemini, codex, antigravity,
-        /// antigravity-cli, universal): its parent path and kinds filter.
+        /// Add a known harness preset (gemini, codex, universal): its parent
+        /// path and kinds filter.
         #[arg(long, value_name = "NAME", conflicts_with = "path")]
         preset: Option<String>,
     },

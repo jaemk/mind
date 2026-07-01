@@ -67,21 +67,21 @@ to add a non-Claude harness home that receives only the item kinds it understand
 ```
 mind config lobes add --preset gemini
 mind config lobes list
-# ~/.claude   (kinds: all)
-# ~/.gemini   (kinds: skill, agent)
+# ~/.claude          (kinds: all)
+# ~/.gemini/config   (kinds: skill)
 ```
 
 After adding the preset, `learn` links a skill into both `~/.claude/skills/` and
-`~/.gemini/skills/`; rules are only linked into `~/.claude`. To detect which
+`~/.gemini/config/skills/`; rules are only linked into `~/.claude`. To detect which
 harnesses are installed and choose presets interactively:
 
 ```
 mind config lobes detect
 ```
 
-Available preset names: `gemini`, `codex`, `antigravity`, `antigravity-cli`,
-`universal`. See `../../spec/harness-lobes.md` for the per-preset path and
-`kinds` table (HARN-4/HARN-5).
+Available preset names: `gemini`, `codex`, `universal`. See
+`../../spec/harness-lobes.md` for the per-preset path and `kinds` table
+(HARN-4/HARN-5).
 
 Note: lobe config lives in `~/.mind/config.toml`, not in a source's `mind.toml`.
 This example has no `mind.toml` because none is needed to demonstrate lobe fan-out.

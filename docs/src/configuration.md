@@ -28,7 +28,7 @@ A lobe without a `kinds` field receives all kinds (existing behavior; a bare str
 is equivalent):
 
 ```toml
-lobes = ["~/.claude", { path = "~/.gemini", kinds = ["skill", "agent"] }]
+lobes = ["~/.claude", { path = "~/.gemini/config", kinds = ["skill"] }]
 ```
 
 Linking an item into a lobe whose `kinds` excludes its kind is a no-op for that
@@ -50,18 +50,11 @@ Per-harness path table:
 | Harness | Skills dir | Agents dir | mind lobe (parent) |
 |---------|------------|------------|--------------------|
 | Claude Code | `~/.claude/skills/<n>/SKILL.md` | `~/.claude/agents/<n>.md` | `~/.claude` |
-| Gemini CLI | `~/.gemini/skills/` (or `~/.agents/skills/` alias) | `~/.gemini/agents/*.md` | `~/.gemini` |
+| Gemini CLI / Antigravity | `~/.gemini/config/skills/` | - | `~/.gemini/config` |
 | Codex CLI | `~/.agents/skills/` | (subagents) | `~/.agents` |
-| Antigravity (IDE) | `~/.gemini/config/skills/` | - | `~/.gemini/config` |
 
-`~/.agents` is a vendor-neutral alias: Codex reads it as its user skills path and
-Gemini reads it as a higher-precedence alias, so one `~/.agents` lobe can serve
-multiple harnesses.
-
-Antigravity footgun: the Antigravity CLI (distinct from the IDE) uses
-`~/.gemini/antigravity-cli/skills/` for global scope and `<root>/.agent/skills/`
-(singular `.agent`) for project scope -- not the IDE's `~/.gemini/config/skills/`.
-Use the `antigravity-cli` preset for the CLI.
+`~/.agents` is a vendor-neutral alias: Codex reads it as its user skills path, so
+one `~/.agents` lobe serves Codex and any harness that follows the same convention.
 
 ### Presets
 
@@ -70,17 +63,15 @@ Use the `antigravity-cli` preset for the CLI.
 
 | preset | path | kinds |
 |--------|------|-------|
-| `gemini` | `~/.gemini` | skill, agent |
+| `gemini` | `~/.gemini/config` | skill |
 | `codex` | `~/.agents` | skill |
-| `antigravity` | `~/.gemini/config` | skill |
-| `antigravity-cli` | `~/.gemini/antigravity-cli` | skill |
 | `universal` | `~/.agents` | skill |
 
 Example:
 
 ```
 mind config lobes add --preset gemini
-# + added gemini lobe ~/.gemini [skill, agent]
+# + added gemini lobe ~/.gemini/config [skill]
 ```
 
 `mind config lobes detect` detects which known harness homes exist on the machine
@@ -142,7 +133,7 @@ credential helper) as git normally does.
 A single `~/.mind/config.toml` may contain any combination of the keys:
 
 ```toml
-lobes = ["~/.claude", { path = "~/.gemini", kinds = ["skill", "agent"] }]
+lobes = ["~/.claude", { path = "~/.gemini/config", kinds = ["skill"] }]
 ssh = true
 absorb_to = "~/dev/my-agent-library"
 ```
