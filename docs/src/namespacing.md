@@ -51,6 +51,12 @@ already maps to an installed agent from a different source fails with an
 `meld` surfaces it as an advisory warning (NS-41). A prefix does not avert the
 collision, since it does not reach the agent link.
 
+Because a prefix cannot disambiguate agents for you, give a custom agent profile
+a distinctive frontmatter `name` so it does not clash with agents from other
+sources. If a generic name (`dev`, `review`, `lead`) is unavoidable, bake the
+namespace into the name itself (`acme-dev`, `acme-review`), since that is the
+identity the harness resolves and the only part you control.
+
 A sibling agent's name is the same bare name with or without a prefix, so a bare
 prose reference to it resolves either way and the unguarded-reference warning does
 not fire for it (NS-42). A `{{ns:}}` token naming a sibling agent still expands
