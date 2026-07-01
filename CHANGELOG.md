@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-07-01
+
 ### Added
 
 - Consume Claude Code plugin manifests as a discovery source. A melded repo with
