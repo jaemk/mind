@@ -346,15 +346,14 @@ impl CuratedConfig {
 /// source that inherits no pin override).
 /// `roots` is the consumer `--root` override (empty => no override).
 ///
-/// `yes` mirrors the CLI `--yes` flag (NS-45): when true, non-interactive mode
-/// is forced even on a TTY, so the collision gate never prompts.
-///
 /// `curated` carries the curator-supplied configuration from a parent
 /// super-source's `[discover].sources` entry (DSC-59): a follow-branch pin,
 /// scan roots, and lifecycle hooks. These apply only when the nested source
 /// ships no `mind.toml` of its own (DSC-60); when it does, they are ignored with
 /// a warning. `None` for a top-level meld or a nested source with no curator
 /// configuration.
+/// `yes` mirrors the CLI `--yes` flag (NS-45): when true, non-interactive mode
+/// is forced (the NS-43 collision prompt is skipped and hard-errors instead).
 #[allow(clippy::too_many_arguments)]
 fn meld_recursive(
     paths: &Paths,
@@ -853,6 +852,10 @@ fn meld_recursive(
     registry.sources.push(source);
 
     let mut added = 1;
+    // DSC-80: count nested entries that failed to register for a non-auth reason,
+    // so the curator-empty guard below can distinguish "curator with all nested
+    // sources gone" from an ordinary curator that simply has nothing nested.
+    let mut nested_clone_failures = 0usize;
     if let Some(nested) = mindfile
         .as_ref()
         .and_then(|m| m.discover.as_ref())
@@ -889,7 +892,7 @@ fn meld_recursive(
                 None, // no consumer install hook for nested sources
                 dangerously_skip_hook_check,
                 prefer_ssh, // nested sources inherit the SSH preference
-                false,      // yes: nested sources are not top-level (collision check skipped)
+                false,      // nested sources inherit non-interactive mode but not --yes
                 Some(curated),
                 skipped,
             ) {
@@ -926,7 +929,32 @@ fn meld_recursive(
                     }
                     return Err(e);
                 }
-                Err(e) => return Err(e),
+                // spec: DSC-79 -- a non-auth clone failure (network error,
+                // not-found, etc.) of a nested entry is skipped with a warning
+                // rather than hard-failing the whole meld.
+                Err(e) => {
+                    let entry_name = parse_spec(&entry.source)
+                        .map(|s| s.name)
+                        .unwrap_or_else(|_| entry.source.clone());
+                    // spec: DSC-79/DSC-70 -- if the entry is already registered it
+                    // cloned fine and the error came from a descendant; propagate
+                    // it unchanged rather than misattributing it to this entry.
+                    // The primary's own clone failure exits before this loop is
+                    // reached (parse/clone of the primary happens in the top-level
+                    // meld_recursive call), so this arm only sees nested failures.
+                    if registry.find(&entry_name).is_some() {
+                        return Err(e);
+                    }
+                    for line in clone_failure_lines(&entry_name, &e) {
+                        eprintln!("{line}");
+                    }
+                    skipped.push(SkippedEntry {
+                        source: entry_name,
+                        reason: "clone_failure".into(),
+                    });
+                    nested_clone_failures += 1;
+                    continue;
+                }
             }
 
             // DSC-63: validate each install_items ref against the nested source's
@@ -975,16 +1003,27 @@ fn meld_recursive(
         match plugin_manifest::load_marketplace_manifest(&marketplace_path) {
             Ok(manifest) => {
                 for entry in manifest.into_entries() {
-                    // In-repo plugins are discovered as scan roots in catalog.rs
-                    // (MKT-14); only external entries need a recursive sub-meld here.
+                    // MKT-14: in-repo plugins are catalog items of the parent source
+                    // (handled by catalog::scan_source_at); only external entries
+                    // need a recursive sub-meld here.
                     if matches!(entry.source, plugin_manifest::PluginSource::InRepo { .. }) {
                         continue; // spec: MKT-14
                     }
+                    // belt-and-suspenders: into_entries() already validates
+                    // in-repo paths, so this is a redundant safety check.
+                    if let plugin_manifest::PluginSource::InRepo { ref path } = entry.source
+                        && !plugin_manifest::is_safe_manifest_path(path)
+                    {
+                        return Err(MindError::MindToml {
+                            path: marketplace_path.clone(),
+                            msg: format!(
+                                "marketplace.json: in-repo plugin path {:?} is unsafe",
+                                path
+                            ),
+                        });
+                    }
                     let repo_spec = marketplace_entry_spec(&entry, &dir);
-                    // spec: MKT-9 — strip ANSI from the marketplace entry name
-                    // before using it as the sub-source alias so a malicious entry
-                    // cannot inject escape sequences into the terminal (M5b).
-                    let entry_name = strip_ansi(&entry.name);
+                    let entry_name = entry.name.clone();
                     let entry_version = entry.version;
                     let entry_description = entry.description;
                     // Recurse exactly like [discover].sources: cycle-safe
@@ -1003,7 +1042,7 @@ fn meld_recursive(
                         None, // no install hook override
                         dangerously_skip_hook_check,
                         prefer_ssh,
-                        false, // yes: nested, not top-level (collision check skipped)
+                        false, // marketplace nested sources inherit non-interactive
                         None,  // no curator config
                         skipped,
                     ) {
@@ -1037,12 +1076,50 @@ fn meld_recursive(
                             // propagates as a generic error.
                             return Err(e);
                         }
-                        Err(e) => return Err(e),
+                        // spec: DSC-79 -- a non-auth clone failure of a marketplace
+                        // sub-source is skipped with a warning, mirroring the
+                        // [discover].sources loop above.
+                        Err(e) => {
+                            let sub_name = parse_spec(&repo_spec)
+                                .map(|s| s.name)
+                                .unwrap_or_else(|_| entry_name.clone());
+                            // spec: DSC-79/DSC-70 -- a failure after the sub-source is
+                            // already registered originates from a descendant; propagate.
+                            if registry.find(&sub_name).is_some() {
+                                return Err(e);
+                            }
+                            for line in clone_failure_lines(&sub_name, &e) {
+                                eprintln!("{line}");
+                            }
+                            skipped.push(SkippedEntry {
+                                source: sub_name,
+                                reason: "clone_failure".into(),
+                            });
+                            nested_clone_failures += 1;
+                            continue;
+                        }
                     }
                 }
             }
             Err(e) => return Err(e),
         }
+    }
+
+    // spec: DSC-80 -- when the primary source is exclusively a curator (a catalog
+    // scan of its own directory yields zero items) and every nested source failed
+    // to register, registering a source with no discoverable items is not useful;
+    // hard-fail. Only relevant when at least one nested source failed to clone; a
+    // primary with its own items, or with any nested source that registered
+    // (added > 1), succeeds. The primary/top-level source's own clone failure is a
+    // separate hard error handled before the nested loop.
+    if nested_clone_failures > 0
+        && added == 1
+        && let Some(primary) = registry.find(&super_source_name)
+        && catalog::scan(paths, &single(primary))?.is_empty()
+    {
+        return Err(MindError::CuratorAllNestedFailed {
+            super_source: super_source_name.to_string(),
+        });
     }
 
     Ok(added)
@@ -1072,6 +1149,59 @@ fn strip_ansi(s: &str) -> String {
                 )
         })
         .collect()
+}
+
+/// Derive a suggested namespace prefix from a source URL or local path.
+///
+/// Takes the last `/`-separated component and strips any `.git` suffix, so
+/// `"https://github.com/foo/bar"` → `"bar"` and `"local/x/y"` → `"y"`.
+fn suggested_namespace(url: &str) -> String {
+    let base = url.split('/').next_back().unwrap_or(url);
+    base.strip_suffix(".git").unwrap_or(base).to_string()
+}
+
+/// Format a conflict list for the interactive collision prompt (NS-44).
+///
+/// Each tuple is `(kind, effective_name, existing_source)`. Produces the same
+/// bullet style as the `SkillCollision` error for consistency. Item name and
+/// source name are stripped of ANSI escapes so a malicious source cannot inject
+/// terminal control sequences into the prompt (spec: NS-44).
+fn format_conflicts_display(conflicts: &[(String, String, String)]) -> String {
+    conflicts
+        .iter()
+        .map(|(k, n, s)| {
+            let safe_n = strip_ansi(n);
+            let safe_s = strip_ansi(s);
+            format!("  {k}:{safe_n} (already installed from '{safe_s}')")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The parsed outcome of a user's response to the NS-44 collision prompt.
+enum CollisionAnswer {
+    /// Accept the given prefix (empty string = no prefix, non-empty = custom prefix).
+    Prefix(String),
+    /// User chose to abort; stop the meld with SkillCollision.
+    Abort,
+}
+
+/// Parse the user's raw answer to the NS-44 collision prompt (spec: NS-44).
+///
+/// - Empty (Enter) → accept the pre-populated suggested prefix.
+/// - `.` → abort (same outcome as the non-interactive non-TTY path).
+/// - Anything else → use as a custom prefix (caller must validate it).
+fn parse_collision_answer(answer: &str, suggested: &str) -> CollisionAnswer {
+    let trimmed = answer.trim();
+    if trimmed.is_empty() {
+        // spec: NS-44 — accepting the suggestion continues under that prefix.
+        CollisionAnswer::Prefix(suggested.to_string())
+    } else if trimmed == "." {
+        // spec: NS-44 — aborting stops meld with a non-zero exit.
+        CollisionAnswer::Abort
+    } else {
+        CollisionAnswer::Prefix(trimmed.to_string())
+    }
 }
 
 /// Return the display token for a source's manifest origin (MKT-10).
@@ -1125,6 +1255,19 @@ fn auth_failure_lines(entry_name: &str, cfg: &crate::mindfile::OnAuthFailure) ->
         lines.push(safe_msg);
     }
     lines
+}
+
+/// Build the human-readable warning lines for a non-auth clone failure of a
+/// nested source, per DSC-79. The entry name and the underlying error are both
+/// passed through `strip_ansi` so a malicious remote (via error text) or entry
+/// name cannot corrupt the terminal.
+fn clone_failure_lines(entry_name: &str, err: &MindError) -> Vec<String> {
+    // spec: DSC-79
+    let safe_name = strip_ansi(entry_name);
+    let safe_err = strip_ansi(&err.to_string());
+    vec![format!(
+        "  warning: skipping '{safe_name}': clone failed ({safe_err}), source unavailable"
+    )]
 }
 
 /// Warn when a namespaced source references siblings in bare prose, which
@@ -1309,12 +1452,11 @@ fn siblings_of(items: &[CatalogItem], source: &str) -> Vec<CatalogItem> {
         .collect()
 }
 
-/// `mind init-source [path] [--template] [--marketplace] [--flat-skills] [-n <ns>]`
-/// — maintainer scaffolding. Discovers the repo's items, reports the intra-source
-/// reference graph, scaffolds a `mind.toml` if absent, and (with `--template`)
-/// rewrites bare sibling references into `{{ns:}}` tokens. With `--marketplace`
-/// generates `.claude-plugin/marketplace.json`. Operates only on the target
-/// directory: no store, no agent home, no network (INIT-6).
+/// `mind init-source [path] [--template]` — maintainer scaffolding. Discovers the
+/// repo's items, reports the intra-source reference graph, scaffolds a `mind.toml`
+/// if absent, and (with `--template`) rewrites bare sibling references into
+/// `{{ns:}}` tokens. With `--marketplace` generates `.claude-plugin/marketplace.json`.
+/// Operates only on the target directory: no store, no agent home, no network (INIT-6).
 // spec: INIT-1 INIT-2 INIT-3 INIT-4 INIT-6 INIT-9 INIT-10 INIT-11 INIT-12
 pub fn init_source(
     dir: Option<&str>,
@@ -2623,13 +2765,9 @@ fn marketplace_subsources(
     };
     let mut out = Vec::new();
     for entry in plugin_manifest::load_marketplace_manifest(&mp)?.into_entries() {
-        // spec: MKT-14 — in-repo plugins are catalog items of the parent source,
-        // not independent registered sub-sources; exclude them here.
-        if matches!(entry.source, plugin_manifest::PluginSource::InRepo { .. }) {
-            continue;
-        }
+        let in_repo = matches!(entry.source, plugin_manifest::PluginSource::InRepo { .. });
         if let Ok(spec) = parse_spec(&marketplace_entry_spec(&entry, &clone)) {
-            out.push((spec, false)); // external entries are never in-repo
+            out.push((spec, in_repo));
         }
     }
     Ok(out)
@@ -3741,8 +3879,8 @@ pub fn sync(paths: &Paths, then_upgrade: bool, dangerously_skip_hook_check: bool
                 None,  // auto-meld supplies no install hook
                 false, // auto-meld is non-TTY, so its hooks take the HOOK-22 skip path
                 prefer_ssh,
-                false, // yes: auto-meld is not top-level (collision check skipped)
-                None,  // auto-meld has no curator-supplied configuration
+                true, // auto-meld is non-interactive (no collision prompt)
+                None, // auto-meld has no curator-supplied configuration
                 &mut sync_skipped,
             )?;
         }
@@ -3967,7 +4105,7 @@ pub fn sync(paths: &Paths, then_upgrade: bool, dangerously_skip_hook_check: bool
                 None,  // a re-walked nested source supplies no install hook
                 false, // sync is non-TTY: its hooks take the HOOK-22 skip path
                 prefer_ssh,
-                false, // yes: sync re-walk is not top-level (collision check skipped)
+                true, // sync re-walk is non-interactive (no collision prompt)
                 Some(todo.curated),
                 &mut sync_skipped,
             ) {
@@ -3999,7 +4137,25 @@ pub fn sync(paths: &Paths, then_upgrade: bool, dangerously_skip_hook_check: bool
                     }
                     return Err(e);
                 }
-                Err(e) => return Err(e),
+                // spec: DSC-79 -- the same non-auth clone-failure skip applies during
+                // the sync re-walk. No curator-empty guard here: the source is already
+                // melded, so DSC-80 does not apply.
+                Err(e) => {
+                    let entry_name = parse_spec(&todo.spec)
+                        .map(|s| s.name)
+                        .unwrap_or_else(|_| todo.spec.clone());
+                    if registry.find(&entry_name).is_some() {
+                        return Err(e);
+                    }
+                    for line in clone_failure_lines(&entry_name, &e) {
+                        eprintln!("{line}");
+                    }
+                    sync_skipped.push(SkippedEntry {
+                        source: entry_name,
+                        reason: "clone_failure".into(),
+                    });
+                    continue;
+                }
             }
         }
         if discovered > 0 {
@@ -5063,43 +5219,11 @@ pub fn introspect(paths: &Paths, fix: bool, json: bool) -> Result<()> {
                 }
             }
         }
-        // Match on stable identity (source, kind, bare_name).
-        match catalog
-            .iter()
-            .find(|c| c.kind == it.kind && c.name == it.bare_name && c.source == it.source)
-        {
-            None => issues.push(Issue {
-                kind: "removed-upstream",
-                target: it.key(),
-                message: format!("{}: no longer present in source '{}'", it.key(), it.source),
-            }),
-            Some(cat) => {
-                if cat.effective_name() != it.name {
-                    issues.push(Issue {
-                        kind: "namespace-changed",
-                        target: it.key(),
-                        message: format!(
-                            "{}: namespace changed to '{}'; run `mind upgrade`",
-                            it.key(),
-                            cat.effective_name()
-                        ),
-                    });
-                } else if let Ok(h) = hash_path(&cat.path)
-                    && h != it.hash
-                {
-                    issues.push(Issue {
-                        kind: "drifted",
-                        target: it.key(),
-                        message: format!("{}: upstream changed; run `mind upgrade`", it.key()),
-                    });
-                }
-            }
-        }
-
-        // HARN-8: missing lobe coverage. For each configured lobe whose `kinds`
-        // admits this item, the expected link must be recorded in the manifest
-        // AND present on disk; otherwise it is drift. With --fix, create it and
-        // record the new link; report only what still cannot be linked.
+        // HARN-8: check that the item is linked into every configured lobe that
+        // admits its kind. A link that is in the manifest but not on disk is
+        // already handled above (missing-link). This checks for lobes that were
+        // added after the item was installed -- the link would be absent from
+        // both the manifest and disk.
         let link_rel = it
             .links
             .iter()
@@ -5155,6 +5279,38 @@ pub fn introspect(paths: &Paths, fix: bool, json: bool) -> Result<()> {
                             it.key(),
                             lobe.path.display()
                         ),
+                    });
+                }
+            }
+        }
+        // Match on stable identity (source, kind, bare_name).
+        match catalog
+            .iter()
+            .find(|c| c.kind == it.kind && c.name == it.bare_name && c.source == it.source)
+        {
+            None => issues.push(Issue {
+                kind: "removed-upstream",
+                target: it.key(),
+                message: format!("{}: no longer present in source '{}'", it.key(), it.source),
+            }),
+            Some(cat) => {
+                if cat.effective_name() != it.name {
+                    issues.push(Issue {
+                        kind: "namespace-changed",
+                        target: it.key(),
+                        message: format!(
+                            "{}: namespace changed to '{}'; run `mind upgrade`",
+                            it.key(),
+                            cat.effective_name()
+                        ),
+                    });
+                } else if let Ok(h) = hash_path(&cat.path)
+                    && h != it.hash
+                {
+                    issues.push(Issue {
+                        kind: "drifted",
+                        target: it.key(),
+                        message: format!("{}: upstream changed; run `mind upgrade`", it.key()),
                     });
                 }
             }
@@ -5292,13 +5448,10 @@ fn format_lobe(entry: &crate::config::LobeEntry) -> String {
     }
 }
 
-/// Offer to backfill already-installed items into `new_lobes` after they were
-/// added (HARN-7). With `yes`, backfill unconditionally; on an interactive TTY
-/// (non-JSON), prompt with `confirm_default_yes`; non-interactively without
-/// `--yes` print a note pointing at `introspect --fix` and skip; in JSON mode
-/// backfill silently when `yes`, else skip silently. With nothing installed,
-/// return without prompting. Per-item link failures are reported but do not
-/// abort the rest.
+/// Backfill all installed items into `new_lobes`. Called after a lobe is added
+/// so existing items also land in the new home. With `yes = true`, applies
+/// unconditionally; otherwise prompts on a TTY or defers to `introspect --fix`
+/// in non-TTY / JSON mode (HARN-8).
 fn backfill_new_lobes(paths: &Paths, new_lobes: &[crate::paths::Lobe], yes: bool) -> Result<()> {
     let out = crate::render::ctx();
     let mut manifest = Manifest::load(paths)?;
@@ -5756,59 +5909,6 @@ fn summary(desc: Option<&str>, max: usize) -> String {
     }
     let cut: String = first.chars().take(max.saturating_sub(1)).collect();
     format!("{}...", cut.trim_end())
-}
-
-/// Extract the suggested namespace prefix from a source URL or local path.
-///
-/// Takes the last `/`-separated component and strips any `.git` suffix, so
-/// `"https://github.com/foo/bar"` → `"bar"` and `"local/x/y"` → `"y"`.
-fn suggested_namespace(url: &str) -> String {
-    let base = url.split('/').next_back().unwrap_or(url);
-    base.strip_suffix(".git").unwrap_or(base).to_string()
-}
-
-/// Format a conflict list for the interactive collision prompt (NS-44).
-///
-/// Each tuple is `(kind, effective_name, existing_source)`. Produces the same
-/// bullet style as the `SkillCollision` error for consistency. Item name and
-/// source name are stripped of ANSI escapes so a malicious source cannot inject
-/// terminal control sequences into the prompt (spec: NS-44).
-fn format_conflicts_display(conflicts: &[(String, String, String)]) -> String {
-    conflicts
-        .iter()
-        .map(|(k, n, s)| {
-            let safe_n = strip_ansi(n);
-            let safe_s = strip_ansi(s);
-            format!("  {k}:{safe_n} (already installed from '{safe_s}')")
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// The parsed outcome of a user's response to the NS-44 collision prompt.
-enum CollisionAnswer {
-    /// Accept the given prefix (empty string = no prefix, non-empty = custom prefix).
-    Prefix(String),
-    /// User chose to abort; stop the meld with SkillCollision.
-    Abort,
-}
-
-/// Parse the user's raw answer to the NS-44 collision prompt (spec: NS-44).
-///
-/// - Empty (Enter) → accept the pre-populated suggested prefix.
-/// - `.` → abort (same outcome as the non-interactive non-TTY path).
-/// - Anything else → use as a custom prefix (caller must validate it).
-fn parse_collision_answer(answer: &str, suggested: &str) -> CollisionAnswer {
-    let trimmed = answer.trim();
-    if trimmed.is_empty() {
-        // spec: NS-44 — accepting the suggestion continues under that prefix.
-        CollisionAnswer::Prefix(suggested.to_string())
-    } else if trimmed == "." {
-        // spec: NS-44 — aborting stops meld with a non-zero exit.
-        CollisionAnswer::Abort
-    } else {
-        CollisionAnswer::Prefix(trimmed.to_string())
-    }
 }
 
 /// Print `prompt` and read one line from stdin (trimmed by the caller). EOF
@@ -7065,76 +7165,6 @@ mod tests {
             spec.starts_with("/repo"),
             "InRepo spec with ./ prefix must still be rooted inside clone_dir: {spec}"
         );
-    }
-
-    // ----- marketplace_subsources: InRepo skip guard -----
-
-    /// `marketplace_subsources` must exclude InRepo entries and only return
-    /// External ones. The `in_repo` bool was used to distinguish auto-install
-    /// defaults; with InRepo entries excluded, it is always `false`.
-    #[test]
-    fn marketplace_subsources_skips_in_repo_entries() {
-        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let base = std::env::temp_dir().join(format!("mind-mkt-sub-{}-{n}", std::process::id()));
-        std::fs::create_dir_all(base.join(".claude-plugin")).unwrap();
-        // One InRepo entry and one External entry.
-        std::fs::write(
-            base.join(".claude-plugin/marketplace.json"),
-            r#"{
-  "name": "test-catalog",
-  "plugins": [
-    {"name": "inrepo-plugin", "source": "./plugins/inrepo"},
-    {"name": "ext-plugin",    "source": "owner/ext-plugin"}
-  ]
-}"#,
-        )
-        .unwrap();
-
-        // A local linked source whose clone_dir == base (no paths lookup needed).
-        let source = crate::source::Source {
-            name: "local/test/test-catalog".to_string(),
-            url: base.to_str().unwrap().to_string(),
-            host: "local".to_string(),
-            owner: "test".to_string(),
-            repo: "test-catalog".to_string(),
-            commit: None,
-            description: None,
-            alias: None,
-            pin: crate::source::Pin::DefaultBranch,
-            roots: None,
-            flat_skills: false,
-            origin: None,
-            plugin_version: None,
-            install_hooks: vec![],
-            install_hook: None,
-            install_hook_commit: None,
-        };
-
-        let paths = crate::paths::Paths {
-            mind_home: base.join("mind"),
-            claude_home: base.join("claude"),
-        };
-
-        let subsources =
-            marketplace_subsources(&paths, &source).expect("marketplace_subsources must not fail");
-
-        assert_eq!(
-            subsources.len(),
-            1,
-            "only the External entry must be returned; InRepo entries must be skipped"
-        );
-        let (spec, in_repo_flag) = &subsources[0];
-        assert!(
-            spec.repo == "ext-plugin",
-            "the returned entry must be the external plugin, got: {}",
-            spec.name
-        );
-        assert!(
-            !in_repo_flag,
-            "in_repo flag must always be false for external entries"
-        );
-
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// `offer_save_absorb_to(yes=true)` writes `absorb_to` into config.toml,

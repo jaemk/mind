@@ -143,7 +143,9 @@ pub enum MindError {
     #[error("'{kind}' is not a valid item kind (expected one of: skill, agent, rule, tool)")]
     UnknownKind { kind: String },
 
-    #[error("'{name}' is not a known lobe preset (expected one of: gemini, codex, universal)")]
+    #[error(
+        "'{name}' is not a known lobe preset (expected one of: gemini, codex, antigravity, antigravity-cli, universal)"
+    )]
     UnknownPreset { name: String },
 
     #[error("`config lobes add` needs a path or `--preset <name>`")]
@@ -244,6 +246,13 @@ pub enum MindError {
         status: Option<ExitStatus>,
         stderr: String,
     },
+
+    // `source` is reserved by thiserror (it auto-treats a field named `source` as
+    // the error source, which must impl `Error`); use `super_source` instead.
+    #[error(
+        "melding '{super_source}' produced no discoverable items: it has no items of its own and every nested source failed to register"
+    )]
+    CuratorAllNestedFailed { super_source: String },
 
     #[error("git executable not found on PATH; install git to meld and sync sources")]
     GitNotFound,
@@ -428,6 +437,7 @@ mod tests {
         assert!(
             unknown_preset.contains("gemini")
                 && unknown_preset.contains("codex")
+                && unknown_preset.contains("antigravity-cli")
                 && unknown_preset.contains("universal"),
             "UnknownPreset must list the valid presets: {unknown_preset}"
         );
