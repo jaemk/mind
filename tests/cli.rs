@@ -16489,3 +16489,420 @@ fn marketplace_sync_rewalk_registers_new_entry() {
         probe.stdout
     );
 }
+
+// ---------------------------------------------------------------------------
+// Marketplace install lifecycle (comprehensive)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn marketplace_forget_removes_plugin_installed_item() {
+    // spec: MKT-1
+    // `forget` uninstalls a plugin-sourced skill: the lobe symlink is removed and
+    // `recall` no longer finds the item.
+    let sb = Sandbox::from_example("marketplace-plugin");
+    let spec = sb.source_spec();
+    assert!(
+        sb.mind(&["meld", &spec, "--link-only"]).success,
+        "meld --link-only must succeed"
+    );
+    let learn = sb.mind(&["learn", "acme-tools:greet"]);
+    assert!(
+        learn.success,
+        "learn must succeed: {} {}",
+        learn.stdout, learn.stderr
+    );
+
+    let r = sb.mind(&["forget", "skill:acme-tools:greet"]);
+    assert!(r.success, "forget must succeed: {} {}", r.stdout, r.stderr);
+
+    // The symlink must be gone.
+    assert!(
+        std::fs::symlink_metadata(sb.claude_home.join("skills/acme-tools:greet")).is_err(),
+        "symlink must be removed after forget"
+    );
+
+    // `recall` must no longer list the item.
+    assert!(
+        !sb.mind(&["recall", "skill:acme-tools:greet"]).success,
+        "recall must fail after forget (item no longer installed)"
+    );
+}
+
+#[test]
+fn marketplace_upgrade_plugin_sourced_item() {
+    // spec: MKT-1, MKT-6
+    // Upgrading after a source change updates the installed plugin item; the hash
+    // advances. Drift is source-content-hash driven (MKT-6), not by declared plugin version.
+    let sb = Sandbox::from_example("marketplace-plugin");
+    let spec = sb.source_spec();
+    assert!(
+        sb.mind(&["meld", &spec, "--link-only"]).success,
+        "meld --link-only must succeed"
+    );
+    let learn = sb.mind(&["learn", "acme-tools:greet"]);
+    assert!(
+        learn.success,
+        "learn must succeed: {} {}",
+        learn.stdout, learn.stderr
+    );
+
+    let before = sb.mind(&["recall", "skill:acme-tools:greet"]).stdout;
+
+    // Update the skill content and commit.
+    sb.write_and_commit(
+        "skills/greet/SKILL.md",
+        "---\nname: greet\ndescription: Greet\n---\n# greet (updated)\n",
+    );
+    assert!(
+        sb.mind(&["sync"]).success,
+        "sync must succeed after source update"
+    );
+
+    let r = sb.mind(&["upgrade", "--yes"]);
+    assert!(
+        r.success,
+        "upgrade --yes must succeed: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stdout.contains("upgraded skill:acme-tools:greet"),
+        "upgrade must report the item as upgraded: {}",
+        r.stdout
+    );
+
+    let after = sb.mind(&["recall", "skill:acme-tools:greet"]).stdout;
+    assert_ne!(
+        before, after,
+        "recall output must differ after upgrade (hash must advance)"
+    );
+}
+
+#[test]
+fn marketplace_introspect_fix_relinks_plugin_item() {
+    // spec: MKT-1
+    // Manually removing a plugin-item symlink and running `introspect --fix`
+    // restores it, confirming the plugin install path uses the same registry as
+    // convention items.
+    let sb = Sandbox::from_example("marketplace-plugin");
+    let spec = sb.source_spec();
+    assert!(
+        sb.mind(&["meld", &spec, "--link-only"]).success,
+        "meld --link-only must succeed"
+    );
+    let learn = sb.mind(&["learn", "acme-tools:greet"]);
+    assert!(
+        learn.success,
+        "learn must succeed: {} {}",
+        learn.stdout, learn.stderr
+    );
+
+    let link = sb.claude_home.join("skills/acme-tools:greet");
+    assert!(
+        std::fs::symlink_metadata(&link).is_ok(),
+        "symlink must exist before the test removes it"
+    );
+    std::fs::remove_file(&link).unwrap();
+
+    let r = sb.mind(&["introspect", "--fix"]);
+    assert!(
+        r.success,
+        "introspect --fix must succeed: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stdout.contains("relinked"),
+        "introspect --fix must report the link was recreated: {}",
+        r.stdout
+    );
+    assert!(
+        std::fs::symlink_metadata(&link).is_ok(),
+        "symlink must be restored by introspect --fix"
+    );
+    assert!(
+        sb.mind(&["introspect"]).stdout.contains("all good"),
+        "introspect must be clean after --fix"
+    );
+}
+
+#[test]
+fn marketplace_recall_shows_installed_plugin_item() {
+    // spec: MKT-1, MKT-5
+    // `recall` (item list) includes an installed plugin item by its effective
+    // (prefixed) name. Distinct from the probe assertions elsewhere which only
+    // check availability, not the installed-item listing.
+    let sb = Sandbox::from_example("marketplace-plugin");
+    let spec = sb.source_spec();
+    assert!(
+        sb.mind(&["meld", &spec, "--link-only"]).success,
+        "meld --link-only must succeed"
+    );
+    let learn = sb.mind(&["learn", "acme-tools:greet"]);
+    assert!(
+        learn.success,
+        "learn must succeed: {} {}",
+        learn.stdout, learn.stderr
+    );
+
+    let list = sb.mind(&["recall"]);
+    assert!(
+        list.success,
+        "recall must succeed: {} {}",
+        list.stdout, list.stderr
+    );
+    assert!(
+        list.stdout.contains("skill:acme-tools:greet"),
+        "recall must list the installed plugin skill by its prefixed name: {}",
+        list.stdout
+    );
+}
+
+#[test]
+fn marketplace_source_only_mind_toml_composes_with_plugin() {
+    // spec: MKT-2
+    // A `[source]`-only mind.toml (no `[[items]]` or `[discover]`, so non-authoritative)
+    // composes with a .claude-plugin/plugin.json: the mind.toml prefix wins over the
+    // plugin name (MKT-5 precedence), and the plugin still supplies items.
+    let sb = Sandbox::bare("compose-toml");
+    sb.write_and_commit("mind.toml", "[source]\nprefix = \"custom\"\n");
+    sb.write_and_commit(
+        ".claude-plugin/plugin.json",
+        r#"{"name":"plugin-name","version":"1.0"}"#,
+    );
+    sb.write_and_commit(
+        "skills/greet/SKILL.md",
+        "---\nname: greet\ndescription: Greet\n---\n# greet\n",
+    );
+
+    let spec = sb.source_spec();
+    let r = sb.mind(&["meld", &spec, "--link-only"]);
+    assert!(
+        r.success,
+        "meld --link-only must succeed: {} {}",
+        r.stdout, r.stderr
+    );
+
+    let probe = sb.mind(&["probe"]);
+    // mind.toml prefix wins over plugin name (MKT-5 precedence).
+    assert!(
+        probe.stdout.contains("skill:custom:greet"),
+        "mind.toml prefix must win over plugin name: {}",
+        probe.stdout
+    );
+    // Plugin name must NOT be used as prefix when mind.toml has one.
+    assert!(
+        !probe.stdout.contains("skill:plugin-name:greet"),
+        "plugin name must not be used as prefix when mind.toml supplies one: {}",
+        probe.stdout
+    );
+}
+
+#[test]
+fn marketplace_plugin_with_only_unsupported_components() {
+    // spec: MKT-3, MKT-4
+    // A plugin with no skills or agents (only hooks/, commands/) succeeds
+    // on meld, prints a skipped-components note, and contributes zero items to probe.
+    let sb = Sandbox::bare("no-items-plugin");
+    sb.write_and_commit(
+        ".claude-plugin/plugin.json",
+        r#"{"name":"hooks-only","version":"1.0"}"#,
+    );
+    sb.write_and_commit("hooks/post.sh", "#!/bin/sh\n");
+    sb.write_and_commit("commands/do.sh", "#!/bin/sh\n");
+
+    let spec = sb.source_spec();
+    let r = sb.mind(&["meld", &spec]);
+    assert!(
+        r.success,
+        "meld of a plugin with only unsupported components must succeed: {} {}",
+        r.stdout, r.stderr
+    );
+
+    let combined = format!("{}\n{}", r.stdout, r.stderr);
+    assert!(
+        combined.contains("not installed (no mind equivalent)"),
+        "meld must print the skipped-components note: {combined}"
+    );
+
+    // Since this is the only melded source, probe must have no item lines.
+    let probe = sb.mind(&["probe"]);
+    assert!(
+        !probe.stdout.contains("skill:")
+            && !probe.stdout.contains("agent:")
+            && !probe.stdout.contains("rule:")
+            && !probe.stdout.contains("tool:"),
+        "a hooks-only plugin must contribute zero items to probe: {}",
+        probe.stdout
+    );
+}
+
+#[test]
+fn marketplace_reserved_kind_word_plugin_name_installs_bare() {
+    // spec: MKT-5, NS-25
+    // When a plugin.json `name` is a reserved kind word (e.g. "skill"), the resilience
+    // path in catalog.rs (NS-25 validate_prefix guard) silently falls through to no
+    // prefix, so items install bare rather than making the source un-meldable.
+    let sb = Sandbox::bare("reserved-name-plugin");
+    sb.write_and_commit(
+        ".claude-plugin/plugin.json",
+        r#"{"name":"skill","version":"1.0"}"#,
+    );
+    sb.write_and_commit(
+        "skills/greet/SKILL.md",
+        "---\nname: greet\ndescription: Greet\n---\n# greet\n",
+    );
+
+    let spec = sb.source_spec();
+    let r = sb.mind(&["meld", &spec, "--link-only"]);
+    assert!(
+        r.success,
+        "meld of a plugin named with a reserved kind word must succeed: {} {}",
+        r.stdout, r.stderr
+    );
+
+    let probe = sb.mind(&["probe"]);
+    // Items install bare (no prefix) when the plugin name is a reserved kind word.
+    assert!(
+        probe.stdout.contains("skill:greet"),
+        "item must install bare when plugin name is a reserved kind word: {}",
+        probe.stdout
+    );
+    // The reserved word must NOT be used as a prefix (would produce "skill:skill:greet").
+    assert!(
+        !probe.stdout.contains("skill:skill:greet"),
+        "reserved kind word must not be used as prefix: {}",
+        probe.stdout
+    );
+}
+
+#[test]
+fn marketplace_external_plugin_learnable_on_demand() {
+    // spec: MKT-7, DSC-54
+    // An external marketplace plugin registered by a plain meld (without --recursive)
+    // is available (discoverable via probe) and learnable on demand via `learn`,
+    // even though it was not auto-installed at meld time.
+    let extplugin = Sandbox::bare("extplugin-ondemand");
+    extplugin.write_and_commit(
+        ".claude-plugin/plugin.json",
+        r#"{"name":"ext","version":"0.1"}"#,
+    );
+    extplugin.write_and_commit(
+        "skills/extskill/SKILL.md",
+        "---\nname: extskill\ndescription: External skill\n---\n# extskill\n",
+    );
+
+    let catalog = Sandbox::bare("ext-catalog-ondemand");
+    let ext_url = format!("file://{}", extplugin.source_spec());
+    catalog.write_and_commit(
+        ".claude-plugin/marketplace.json",
+        &format!(r#"{{"name":"cat","plugins":[{{"name":"ext","source":"{ext_url}"}}]}}"#),
+    );
+
+    let cat_spec = catalog.source_spec();
+    // Plain meld (no --yes, no --recursive): external plugin registers but is not installed.
+    let r = catalog.mind(&["meld", &cat_spec]);
+    assert!(r.success, "meld must succeed: {} {}", r.stdout, r.stderr);
+
+    // External skill must NOT be in the lobe yet.
+    assert!(
+        !catalog.claude_home.join("skills/ext:extskill").exists(),
+        "external plugin skill must not be installed after plain meld"
+    );
+
+    // External skill IS discoverable via probe.
+    let probe = catalog.mind(&["probe"]);
+    assert!(
+        probe.stdout.contains("skill:ext:extskill"),
+        "external plugin skill must be discoverable after plain meld: {}",
+        probe.stdout
+    );
+
+    // On-demand learn must install it.
+    let learn = catalog.mind(&["learn", "ext:extskill"]);
+    assert!(
+        learn.success,
+        "learn of external plugin skill must succeed: {} {}",
+        learn.stdout, learn.stderr
+    );
+    assert!(
+        catalog.claude_home.join("skills/ext:extskill").exists(),
+        "external plugin skill must be linked after learn"
+    );
+}
+
+#[test]
+fn marketplace_dump_of_plugin_source_contains_no_claude_plugin_ref() {
+    // spec: MKT-11, MKT-6
+    // `dump` of a source that came from a plugin manifest:
+    // (a) succeeds and produces output;
+    // (b) contains NO ".claude-plugin" reference (MKT-11: mind does not emit manifests);
+    // (c) contains the source spec so a re-meld would work.
+    let sb = Sandbox::from_example("marketplace-plugin");
+    let spec = sb.source_spec();
+    assert!(
+        sb.mind(&["meld", &spec, "--yes"]).success,
+        "meld --yes must succeed"
+    );
+
+    let dump = sb.mind(&["dump"]);
+    assert!(
+        dump.success,
+        "dump must succeed: {} {}",
+        dump.stdout, dump.stderr
+    );
+    assert!(
+        !dump.stdout.is_empty(),
+        "dump output must be non-empty for a plugin source"
+    );
+    assert!(
+        !dump.stdout.contains(".claude-plugin"),
+        "dump must not contain any .claude-plugin reference (MKT-11): {}",
+        dump.stdout
+    );
+}
+
+#[test]
+fn marketplace_upgrade_catalog_sub_source_item() {
+    // spec: MKT-7, MKT-6
+    // Upgrading a catalog sub-source item after the sub-source content changes:
+    // `sync` re-walks the marketplace and detects the update; `upgrade --yes` applies it.
+    let sb = Sandbox::from_example("marketplace-catalog");
+    let spec = sb.source_spec();
+    // Plain meld (no --yes) to skip auto-install; then learn the item explicitly.
+    assert!(sb.mind(&["meld", &spec]).success, "meld must succeed");
+    let learn = sb.mind(&["learn", "alpha:one"]);
+    assert!(
+        learn.success,
+        "learn alpha:one must succeed: {} {}",
+        learn.stdout, learn.stderr
+    );
+
+    let before = sb.mind(&["recall", "skill:alpha:one"]).stdout;
+
+    // Update the sub-source item and commit.
+    sb.write_and_commit(
+        "plugins/alpha/skills/one/SKILL.md",
+        "---\nname: one\ndescription: Alpha skill (updated)\n---\n# one updated\n",
+    );
+    assert!(
+        sb.mind(&["sync"]).success,
+        "sync must succeed after sub-source update"
+    );
+
+    let r = sb.mind(&["upgrade", "--yes"]);
+    assert!(
+        r.success,
+        "upgrade --yes must succeed: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stdout.contains("upgraded skill:alpha:one"),
+        "upgrade must report the sub-source item as upgraded: {}",
+        r.stdout
+    );
+
+    let after = sb.mind(&["recall", "skill:alpha:one"]).stdout;
+    assert_ne!(
+        before, after,
+        "recall output must differ after upgrade (hash must advance)"
+    );
+}
