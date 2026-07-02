@@ -6,6 +6,59 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-07-01
+
+### Added
+
+- `init-source --marketplace` scaffolds a `.claude-plugin/marketplace.json`
+  (via a new `scaffold` module); `--flat-skills` sets `flat-skills = true` in
+  `mind.toml` and, combined with `--marketplace`, populates the plugin `skills`
+  array from flat-skill discovery. Plugin-name precedence is `--namespace` >
+  `[source].prefix` > directory name (INIT-10, INIT-11, INIT-12).
+- Cross-source collision detection at `meld` for skills, rules, and tools: when
+  a melded source would install an item that collides with an existing one, the
+  non-interactive path errors with `SkillCollision` and suggests `--namespace
+  <repo-name>`, and an interactive TTY prompts for a prefix (NS-43, NS-44,
+  NS-45).
+- `config lobes add`/`detect` backfills already-installed items into a
+  newly-added lobe: `--yes` backfills automatically, an interactive TTY prompts,
+  and a non-interactive run prints a note pointing at `introspect --fix`
+  (HARN-7).
+- `introspect --fix` repairs missing lobe coverage, creating links for items not
+  yet linked into a configured lobe and updating the manifest (HARN-8).
+
+### Changed
+
+- The gemini and antigravity harness lobes are unified to `~/.gemini/config`,
+  the skill directory both Gemini CLI and Antigravity read. The `gemini` preset
+  now targets `.gemini/config` with `kinds = [skill]` (was `.gemini` with
+  `[skill, agent]`); the redundant `antigravity` and `antigravity-cli` presets
+  are removed (HARN-4, HARN-5).
+- The `[discover].sources` entry key `as` is renamed `namespace` (`as` remains a
+  backwards-compatible parse alias). `dump` emits `namespace`, `review` advises
+  migrating, and `recall --sources` displays `namespace:<prefix>` instead of
+  `as:<prefix>` (DSC-78).
+- A `[discover].sources` entry whose clone fails for a non-auth reason (network
+  error, not-found) now warns and skips rather than failing the whole meld; the
+  primary source and successfully-cloned nested sources stay registered, and the
+  skipped entry is recorded with `reason="clone_failure"`. The same skip applies
+  during `sync` re-walk. The one hard-fail case is a pure curator (no items of
+  its own) whose nested sources all fail, which errors with
+  `CuratorAllNestedFailed` (DSC-79, DSC-80).
+
+### Fixed
+
+- Adding the first explicit lobe to an empty lobes config via `config lobes
+  add`/`detect` now prepends `claude_home` to the saved list. Previously the
+  implicit `~/.claude` default was silently dropped from `agent_homes()`, so new
+  installs stopped reaching Claude and `introspect --fix` could not see the
+  Claude home as a coverage target (HARN-9).
+- In-repo marketplace entries with `source: "./"` no longer drop all but the
+  first plugin; each plugin is scanned as its own catalog root. Plugin repos
+  used as nested `[discover].sources` entries inherit the plugin `name` as their
+  default namespace, and marketplace-as-nested-source preserves per-plugin
+  namespacing (MKT-12, MKT-13, MKT-14).
+
 ## [0.9.0] - 2026-07-01
 
 ### Added
