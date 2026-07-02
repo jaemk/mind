@@ -52,8 +52,12 @@ cargo build        # rewrites Cargo.lock's mind version
 Add a `## [X.Y.Z] - YYYY-MM-DD` section at the top of `CHANGELOG.md` (Keep a
 Changelog format), grouping the changes under `Added` / `Changed` / `Fixed` /
 `Removed`. Describe user-facing behavior, not the commit workflow. Update the
-link references at the bottom (`[X.Y.Z]: .../compare/v<prev>...vX.Y.Z`). Keep the
-voice plain and factual (see `~/.local/share/agents/voice/voice-profile.md`).
+link references at the bottom: point `[Unreleased]` at
+`.../compare/vX.Y.Z...HEAD` and add `[X.Y.Z]: .../compare/v<prev>...vX.Y.Z`.
+`tests/changelog.rs` enforces this (every version section needs a matching ref,
+`[Unreleased]` must compare from the newest version, and each ref chains to the
+next-older one), so `make ci` fails if a ref is missing or stale. Keep the voice
+plain and factual (see `~/.local/share/agents/voice/voice-profile.md`).
 
 ### 5. Commit the release prep
 
