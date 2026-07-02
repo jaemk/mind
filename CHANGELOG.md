@@ -6,6 +6,25 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-07-02
+
+### Added
+
+- A repo can be both a Claude plugin marketplace and a `mind` curator. A bare
+  `[discover].sources` list in a co-present `mind.toml` composes with a
+  `.claude-plugin/marketplace.json` (or `plugin.json`) instead of suppressing it:
+  the manifest defines the repo's own items and the curated chain layers on top
+  (MKT-16). New `marketplace-curator` example.
+
+### Changed
+
+- An own-item source-discovery directive now suppresses only a co-present
+  `.claude-plugin/` manifest's own-item layer, and the set of such directives is
+  broadened. A `mind.toml` `[source].roots`/`flat-skills`, or a consumer `meld
+  --root`/`--flat-skills` flag, suppresses the manifest and runs convention
+  discovery instead (with a note), so `--root` is no longer a silent no-op on a
+  manifest source (MKT-15).
+
 ## [0.11.0] - 2026-07-01
 
 ### Added
