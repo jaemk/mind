@@ -45,6 +45,8 @@ Agent homes can be Claude Code, Gemini CLI, Codex CLI, or Antigravity -- not jus
 [configuration](https://jaemk.github.io/mind/configuration.html#cross-harness-lobes)
 for details.
 
+[![asciicast](https://asciinema.org/a/qcAxP5PD7H6cuLTE.svg)](https://asciinema.org/a/qcAxP5PD7H6cuLTE)
+
 The [documentation](https://jaemk.github.io/mind/) is the full reference: the
 [command reference](https://jaemk.github.io/mind/commands.html),
 [configuration](https://jaemk.github.io/mind/configuration.html),

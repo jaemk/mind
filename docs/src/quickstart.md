@@ -1,5 +1,7 @@
 # Quickstart
 
+<script src="https://asciinema.org/a/qcAxP5PD7H6cuLTE.js" id="asciicast-qcAxP5PD7H6cuLTE" async="true"></script>
+
 Meld a source, install an item, and see it linked into `~/.claude`:
 
 ```
