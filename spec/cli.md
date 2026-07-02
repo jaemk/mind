@@ -59,9 +59,10 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   prefix and renames its installed items to the new effective names (the upgrade
   rename, matched by stable identity), re-expanding intra-source `{{ns:}}`
   references to those names. `--as ''` removes the prefix.
-- `CLI-14` After melding, if a prefix is in effect, unguarded prose references to
-  siblings are reported as warnings (see namespacing.md). Warnings do not fail
-  the command.
+- `CLI-14` After melding, if a prefix is in effect and `--verbose` is in effect
+  (CLI-162), unguarded prose references to siblings are reported as warnings (see
+  namespacing.md NS-20). Without `--verbose` the warnings are suppressed. Warnings
+  do not fail the command.
 - `CLI-15` If the melded repo's `mind.toml` lists `[discover].sources`, each is
   melded recursively (see DSC-38), so one `meld` can pull in a curated set. When
   more than one source is added, `meld` reports the total count.
@@ -649,6 +650,12 @@ and per-harness `kinds` defaults.
   "already installed; nothing to do" to stdout and under `--json` emits a single
   result object with `outcome: "up-to-date"` (distinct from `"installed"`, which
   requires at least one item was actually installed). Exit 0 in both cases.
+
+- `CLI-162` `--verbose` (short `-v`) is a global flag accepted before or after the
+  verb, resolved at the top level like `--json`, `--yes`, and `--ascii` (CLI-150).
+  It enables extra advisory output that is otherwise suppressed: the unguarded-
+  reference warning emitted during `meld` when a prefix is in effect (CLI-14,
+  NS-20). It does not affect the color/Unicode capability gate (CLI-151).
 
 ## Exit status
 

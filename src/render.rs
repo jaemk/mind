@@ -30,6 +30,7 @@ pub fn ctx() -> OutputCtx {
         json: false,
         color: false,
         unicode: false,
+        verbose: false,
     })
 }
 
@@ -39,16 +40,20 @@ pub struct OutputCtx {
     pub json: bool,
     pub color: bool,
     pub unicode: bool,
+    pub verbose: bool,
 }
 
 impl OutputCtx {
-    /// Build from the global `--json`/`--ascii` flags plus the environment and TTY.
-    pub fn detect(json: bool, ascii: bool) -> Self {
+    /// Build from the global `--json`/`--ascii`/`--verbose` flags plus the environment and TTY.
+    pub fn detect(json: bool, ascii: bool, verbose: bool) -> Self {
         use std::io::IsTerminal;
         let is_tty = std::io::stdout().is_terminal();
         let no_color = std::env::var_os("NO_COLOR").is_some();
         let utf8_locale = detect_utf8_locale();
-        Self::compute(json, ascii, is_tty, no_color, utf8_locale)
+        Self {
+            verbose,
+            ..Self::compute(json, ascii, is_tty, no_color, utf8_locale)
+        }
     }
 
     /// Pure, fully-injected core of `detect` so the gate is unit-testable without
@@ -68,6 +73,7 @@ impl OutputCtx {
             json,
             color: rich,
             unicode: rich,
+            verbose: false,
         }
     }
 
@@ -642,6 +648,68 @@ mod tests {
     }
 
     // ==========================================================================
+    // verbose orthogonality (CLI-162)
+    // ==========================================================================
+
+    /// `detect` propagates the `verbose` argument into the context verbatim.
+    // spec: CLI-162
+    #[test]
+    fn detect_propagates_verbose_flag() {
+        assert!(
+            OutputCtx::detect(false, false, true).verbose,
+            "detect(_, _, true) must yield verbose=true"
+        );
+        assert!(
+            !OutputCtx::detect(false, false, false).verbose,
+            "detect(_, _, false) must yield verbose=false"
+        );
+    }
+
+    /// `verbose` is orthogonal to the color/unicode gate: toggling it does not
+    /// change color or unicode for otherwise-identical inputs. Whatever the
+    /// ambient TTY/locale/env resolves to, both contexts must agree on color and
+    /// unicode; only `verbose` differs.
+    // spec: CLI-162
+    #[test]
+    fn verbose_does_not_affect_color_or_unicode() {
+        for json in [false, true] {
+            for ascii in [false, true] {
+                let off = OutputCtx::detect(json, ascii, false);
+                let on = OutputCtx::detect(json, ascii, true);
+                assert_eq!(
+                    off.color, on.color,
+                    "verbose must not change color (json={json} ascii={ascii})"
+                );
+                assert_eq!(
+                    off.unicode, on.unicode,
+                    "verbose must not change unicode (json={json} ascii={ascii})"
+                );
+                assert_eq!(
+                    off.json, on.json,
+                    "verbose must not change json (json={json} ascii={ascii})"
+                );
+                assert!(!off.verbose, "verbose=false expected");
+                assert!(on.verbose, "verbose=true expected");
+            }
+        }
+    }
+
+    /// `compute` always leaves `verbose` false (it is set only by `detect`).
+    // spec: CLI-162
+    #[test]
+    fn compute_leaves_verbose_false() {
+        for tty in [false, true] {
+            for utf8 in [false, true] {
+                let ctx = OutputCtx::compute(false, false, tty, false, utf8);
+                assert!(
+                    !ctx.verbose,
+                    "compute must not set verbose (tty={tty} utf8={utf8})"
+                );
+            }
+        }
+    }
+
+    // ==========================================================================
     // Process-global ctx / set_ctx
     // ==========================================================================
 
@@ -687,11 +755,13 @@ mod tests {
             json: false,
             color: false,
             unicode: false,
+            verbose: false,
         };
         set_ctx(installed);
         let got = ctx();
         assert_eq!(got.json, installed.json);
         assert_eq!(got.color, installed.color);
         assert_eq!(got.unicode, installed.unicode);
+        assert_eq!(got.verbose, installed.verbose);
     }
 }

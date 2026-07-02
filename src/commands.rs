@@ -1275,6 +1275,10 @@ fn clone_failure_lines(entry_name: &str, err: &MindError) -> Vec<String> {
 /// text file of each item (the whole skill directory, or the agent/rule file),
 /// matching the breadth of install-time `{{ns:}}` expansion.
 fn warn_unguarded_references(items: &[CatalogItem]) {
+    // spec: CLI-162 -- advisory only emitted under --verbose.
+    if !crate::render::ctx().verbose {
+        return;
+    }
     // Only meaningful once a prefix is in effect.
     if !items.iter().any(|it| it.prefix.is_some()) {
         return;

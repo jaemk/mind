@@ -129,7 +129,11 @@ fn run(cli: Cli) -> Result<()> {
     // Install the process-wide output context before any dispatch so that
     // render::ctx() returns real capabilities for all commands (including the
     // mutating verbs that read it internally). spec: CLI-150 CLI-151 CLI-154
-    crate::render::set_ctx(crate::render::OutputCtx::detect(cli.json, cli.ascii));
+    crate::render::set_ctx(crate::render::OutputCtx::detect(
+        cli.json,
+        cli.ascii,
+        cli.verbose,
+    ));
 
     let paths = Paths::resolve()?;
 
@@ -793,5 +797,32 @@ mod tests {
         let cli =
             Cli::try_parse_from(["mind", "--ascii", "probe"]).expect("--ascii probe should parse");
         assert!(cli.ascii, "--ascii probe: cli.ascii must be true");
+    }
+
+    /// Global --verbose/-v is accepted before or after any verb and defaults false (CLI-162).
+    // spec: CLI-162
+    #[test]
+    fn global_verbose_is_accepted_before_or_after_verb() {
+        // Default: cli.verbose is false.
+        let cli = Cli::try_parse_from(["mind", "probe"]).expect("probe should parse");
+        assert!(!cli.verbose, "cli.verbose must default to false");
+
+        // Post-verb long form: `mind probe --verbose`
+        let cli = Cli::try_parse_from(["mind", "probe", "--verbose"])
+            .expect("probe --verbose should parse");
+        assert!(cli.verbose, "probe --verbose: cli.verbose must be true");
+
+        // Pre-verb long form: `mind --verbose probe`
+        let cli = Cli::try_parse_from(["mind", "--verbose", "probe"])
+            .expect("--verbose probe should parse");
+        assert!(cli.verbose, "--verbose probe: cli.verbose must be true");
+
+        // Post-verb short form: `mind probe -v`
+        let cli = Cli::try_parse_from(["mind", "probe", "-v"]).expect("probe -v should parse");
+        assert!(cli.verbose, "probe -v: cli.verbose must be true");
+
+        // Pre-verb short form: `mind -v probe`
+        let cli = Cli::try_parse_from(["mind", "-v", "probe"]).expect("-v probe should parse");
+        assert!(cli.verbose, "-v probe: cli.verbose must be true");
     }
 }

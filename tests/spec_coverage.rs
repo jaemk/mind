@@ -146,6 +146,8 @@ const ALLOWLIST: &[&str] = &[
     // (CLI-153), and the NO_COLOR/non-UTF-8/--ascii gate-off conditions (CLI-154)
     // are now cited from integration tests in tests/cli.rs. The rich (TTY) branch
     // of the gate is unit-tested in src/render.rs (it needs a real PTY headlessly).
+    // CLI-162 (--verbose global flag) is cited from unit tests in src/main.rs
+    // and integration tests in tests/cli.rs.
 ];
 
 #[test]

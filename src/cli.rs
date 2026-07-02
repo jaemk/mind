@@ -55,6 +55,10 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub ascii: bool,
 
+    /// Emit extra advisory output (e.g. unguarded-reference warnings on meld).
+    #[arg(short = 'v', long, global = true)]
+    pub verbose: bool,
+
     #[command(subcommand)]
     pub command: Command,
 }

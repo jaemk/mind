@@ -32,6 +32,7 @@ and verified.
 | Super-source: `--recursive`, per-source `install = true`, post-meld `probe` hint, `sync` re-walks the discover chain | done | DSC-55, DSC-56, DSC-57, DSC-58 |
 | Curator adopts an un-onboarded nested source: per-entry `follow-branch`/`roots`/`[[hooks]]`, applied only when it has no `mind.toml` | done | DSC-59, DSC-60, DSC-61 |
 | Namespacing: prefix, `{{ns:}}` tokens, unguarded-ref warning | done | [namespacing.md](namespacing.md) |
+| `--verbose`/`-v` global flag; gates unguarded-ref warning | done | CLI-162 |
 | Namespace separator is `:` (reserved kind words rejected; ref parser disambiguates; old `-` installs rename on upgrade) | done | NS-25, NS-26, NS-27 |
 | `meld`/`review` `--namespace`/`-n` flag (renames `--as`, still a hidden alias) | done | CLI-159 |
 | Namespace mutable only until items install; changing it after requires forget-first (revises in-place rename) | done | NS-30, CLI-161 |

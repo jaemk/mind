@@ -3197,10 +3197,10 @@ fn bad_ns_reference_errors_on_install() {
 
 #[test]
 fn meld_as_warns_about_unguarded_prose_references() {
-    // spec: NS-20, NS-22, NS-42, CLI-14
-    // NS-42: the warning does NOT fire for agent-only referents (agent links
-    // are bare regardless of prefix, so prose refs to agents are not broken).
-    // The warning fires only for non-agent referents whose name would be prefixed.
+    // spec: NS-20, NS-22, NS-42, CLI-14, CLI-162
+    // Without --verbose the unguarded-reference warning is suppressed (CLI-162).
+    // With --verbose it is emitted for non-agent referents whose name would be
+    // prefixed; NS-42: agent-only names are excluded from the warning.
     // This fixture references `review` (a skill sibling) in bare prose.
     let sb = Sandbox::new();
     sb.write_and_commit(
@@ -3208,25 +3208,46 @@ fn meld_as_warns_about_unguarded_prose_references() {
         "---\nname: lead\ndescription: lead\n---\nDelegate to the review skill.\n",
     );
     let spec = sb.source_spec();
+
+    // Default (no --verbose): warning is suppressed.
     let r = sb.mind(&["meld", &spec, "--as", "jk"]);
     assert!(r.success, "{}", r.stderr);
     assert!(
-        r.stderr.contains("references sibling(s) in prose") && r.stderr.contains("review"),
-        "expected unguarded-ref warning for skill referent: {}",
+        !r.stderr.contains("references sibling(s) in prose"),
+        "expected no unguarded-ref warning without --verbose: {}",
         r.stderr
+    );
+
+    // With --verbose: warning is emitted.
+    let sb2 = Sandbox::new();
+    sb2.write_and_commit(
+        "agents/lead.md",
+        "---\nname: lead\ndescription: lead\n---\nDelegate to the review skill.\n",
+    );
+    let spec2 = sb2.source_spec();
+    let r2 = sb2.mind(&["--verbose", "meld", &spec2, "--as", "jk"]);
+    assert!(r2.success, "{}", r2.stderr);
+    assert!(
+        r2.stderr.contains("references sibling(s) in prose") && r2.stderr.contains("review"),
+        "expected unguarded-ref warning under --verbose: {}",
+        r2.stderr
     );
 }
 
 #[test]
 fn no_warning_when_unprefixed() {
-    // spec: NS-23
+    // spec: NS-23, CLI-162 -- no prefix in effect => no warning, EVEN under
+    // --verbose. The meld runs with --verbose so the warning gate is open; the
+    // only reason it stays silent is the absent prefix (NS-23). A fixture that
+    // WOULD warn under a prefix (bare prose ref to the skill sibling `review`)
+    // must still stay silent unprefixed.
     let sb = Sandbox::new();
     sb.write_and_commit(
         "agents/lead.md",
-        "---\nname: lead\ndescription: lead\n---\nDelegate to the dev agent.\n",
+        "---\nname: lead\ndescription: lead\n---\nDelegate to the dev agent, then run the review skill.\n",
     );
     let spec = sb.source_spec();
-    let r = sb.mind(&["meld", &spec]); // no prefix -> bare refs are correct
+    let r = sb.mind(&["--verbose", "meld", &spec]); // no prefix -> bare refs are correct
     assert!(r.success);
     assert!(
         !r.stderr.contains("references sibling(s) in prose"),
@@ -3374,19 +3395,29 @@ fn agent_token_expands_bare_under_prefix() {
 
 #[test]
 fn unguarded_ref_warning_skips_agent_only_sibling_names() {
-    // spec: NS-42 -- bare prose references to a sibling agent do not trigger the
-    // unguarded-reference warning: the agent links bare regardless of prefix, so
-    // the prose reference resolves correctly even without a token.
+    // spec: NS-42, CLI-162 -- bare prose references to a sibling agent do not
+    // trigger the unguarded-reference warning: the agent links bare regardless of
+    // prefix, so the prose reference resolves correctly even without a token. The
+    // meld runs under --verbose (CLI-162), so the warning IS active for non-agent
+    // siblings; the fixture references BOTH the skill sibling `review` (which MUST
+    // be flagged) and the agent sibling `dev` (which MUST NOT be) so the assertion
+    // distinguishes "excluded because agent" from "warning never fired at all".
     let sb = Sandbox::new();
-    // The standard fixture has `agents/dev.md`; reference it in bare prose.
+    // The standard fixture has `agents/dev.md` (agent) and `skills/review`.
     sb.write_and_commit(
         "agents/lead.md",
-        "---\nname: lead\ndescription: lead\n---\nDelegate to the dev agent.\n",
+        "---\nname: lead\ndescription: lead\n---\nDelegate to the dev agent, then run the review skill.\n",
     );
     let spec = sb.source_spec();
-    let r = sb.mind(&["meld", &spec, "--as", "jk"]);
+    let r = sb.mind(&["--verbose", "meld", &spec, "--as", "jk"]);
     assert!(r.success, "{}", r.stderr);
-    // `dev` is an agent sibling -- must not appear in the warning.
+    // The warning fires for the non-agent sibling `review`...
+    assert!(
+        r.stderr.contains("references sibling(s) in prose") && r.stderr.contains("review"),
+        "non-agent sibling `review` must be flagged under --verbose: {}",
+        r.stderr
+    );
+    // ...but `dev` is an agent sibling and must NOT appear in the warning.
     assert!(
         !r.stderr.contains("dev"),
         "agent-only sibling should not trigger unguarded-ref warning: {}",
@@ -3516,7 +3547,7 @@ fn cross_kind_shadow_name_still_warns_in_prose_under_prefix() {
         "agents/lead.md",
         "---\nname: lead\ndescription: lead\n---\nHand off to shared for the work.\n",
     );
-    let r = sb.mind(&["meld", &sb.source_spec(), "--as", "jk"]);
+    let r = sb.mind(&["--verbose", "meld", &sb.source_spec(), "--as", "jk"]);
     assert!(r.success, "{}", r.stderr);
     assert!(
         r.stderr.contains("shared"),
@@ -6182,7 +6213,7 @@ fn unguarded_ref_warning_scans_all_files_of_an_item() {
     );
     sb.write_and_commit("skills/lead/NOTES.md", "Run the review skill first.\n");
 
-    let r = sb.mind(&["meld", &sb.source_spec(), "--as", "jk"]);
+    let r = sb.mind(&["--verbose", "meld", &sb.source_spec(), "--as", "jk"]);
     assert!(r.success, "{}", r.stderr);
     assert!(
         r.stderr.contains("skill:jk:lead") && r.stderr.contains("review"),
@@ -6197,7 +6228,9 @@ fn example_namespacing_expands_references() {
     // Prefixed: tokens expand to the prefixed effective names, and a guarded
     // source produces no unguarded-reference warning.
     let jk = Sandbox::from_example("namespacing");
-    let meld = jk.mind(&["meld", &jk.source_spec(), "--as", "jk"]);
+    // --verbose (CLI-162) opens the warning gate so the "no warning" assertion is
+    // genuine: the source is prefixed, yet all refs are tokens, so nothing fires.
+    let meld = jk.mind(&["--verbose", "meld", &jk.source_spec(), "--as", "jk"]);
     assert!(meld.success, "{}", meld.stderr);
     assert!(
         !meld.stderr.contains("references sibling(s) in prose"),
