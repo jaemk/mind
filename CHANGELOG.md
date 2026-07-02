@@ -6,6 +6,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-07-01
+
+### Added
+
+- Global `--verbose` (`-v`) flag, accepted before or after the verb like
+  `--json`/`--yes`/`--ascii`. It enables extra advisory output and does not
+  affect the color/Unicode capability gate (CLI-162).
+
+### Changed
+
+- The unguarded-reference warning emitted during `meld` (when a prefix is in
+  effect) is now shown only under `--verbose`; the default meld is silent
+  (CLI-14, NS-20, NS-22).
+
 ## [0.10.0] - 2026-07-01
 
 ### Added
