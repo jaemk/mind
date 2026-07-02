@@ -244,21 +244,41 @@ pub(crate) fn scan_source_at(
             Ok(())
         }
         ref mt => {
+            // MKT-15: an own-item scan layout means the repo's own items are
+            // defined through convention at a chosen layout, so a co-present
+            // `.claude-plugin/` manifest's own-item layer is suppressed and
+            // convention discovery (honoring roots/flat-skills) runs instead. The
+            // layout may come from the source's own mind.toml (`[source].roots` /
+            // `[source].flat-skills`) OR from a consumer override persisted on the
+            // source (`meld --root` / `--flat-skills`, DSC-51/DSC-75): both are the
+            // same "define my own items by convention" signal, so a consumer flag
+            // is not a silent no-op on a manifest source. A bare
+            // `[discover].sources` list is a curator directive, NOT an own-item
+            // directive, so it does not suppress the manifest (MKT-16): the
+            // manifest still supplies the immediate source's items and the curator
+            // layer composes on top (handled at meld time in commands.rs). (The
+            // authoritative `[[items]]`/`[discover]`-glob case never reaches this
+            // arm; it is handled by the `is_authoritative()` arm above.)
+            let suppress_manifest = source.roots.is_some()
+                || source.flat_skills
+                || mt.as_ref().is_some_and(|m| m.declares_scan_layout());
+
             // MKT-1/MKT-2: Single-plugin discovery layer.
             //
             // Check for `.claude-plugin/plugin.json` at the clone root BEFORE
-            // falling back to convention discovery. When present, the plugin manifest
-            // is the authoritative item source and convention discovery is skipped
-            // (MKT-2). A `.claude-plugin/marketplace.json` (catalog super-source) is
-            // handled by commands.rs at meld time (shard 4) for external entries;
-            // in-repo entries are scanned directly here (MKT-14).
+            // falling back to convention discovery. When present (and not suppressed
+            // by MKT-15), the plugin manifest is the authoritative item source and
+            // convention discovery is skipped (MKT-2). A
+            // `.claude-plugin/marketplace.json` (catalog super-source) is handled by
+            // commands.rs at meld time for external entries; in-repo entries are
+            // scanned directly here (MKT-14).
             //
-            // This branch is only reached when mind.toml is absent or `[source]`-only
-            // (non-authoritative). An authoritative mind.toml suppresses the plugin
-            // manifest -- that is handled in the `Some(mt) if mt.is_authoritative()`
-            // arm above. The "found and ignored" NOTE for that case is
-            // commands.rs's responsibility (shard 4); catalog stays quiet (MKT-2).
-            if let Some(plugin_path) = plugin_manifest::find_plugin_manifest(clone_root) {
+            // The "found and ignored" NOTE (for both the authoritative and the
+            // MKT-15 scan-layout suppression cases) is commands.rs's
+            // responsibility; catalog stays quiet (MKT-2).
+            if !suppress_manifest
+                && let Some(plugin_path) = plugin_manifest::find_plugin_manifest(clone_root)
+            {
                 // Load the plugin manifest; a parse error propagates as MindToml (MKT-9).
                 let manifest = plugin_manifest::load_plugin_manifest(&plugin_path)?;
 
@@ -299,9 +319,15 @@ pub(crate) fn scan_source_at(
             // MKT-14: Check for a marketplace.json AFTER plugin.json (plugin.json wins
             // if both are present) and BEFORE the convention fallback. In-repo entries
             // are scanned as roots within this repo; external entries are skipped here
-            // (they are sub-melded by commands.rs). The marketplace is authoritative:
-            // when found, convention discovery is skipped.
-            if let Some(marketplace_path) = plugin_manifest::find_marketplace_manifest(clone_root) {
+            // (they are sub-melded by commands.rs). The marketplace is authoritative
+            // for the immediate source: when found (and not suppressed by MKT-15),
+            // convention discovery is skipped. MKT-15: a mind.toml scan layout
+            // suppresses only the manifest's own-item (in-repo plugin) layer; the
+            // marketplace's external curator entries still compose (commands.rs).
+            if !suppress_manifest
+                && let Some(marketplace_path) =
+                    plugin_manifest::find_marketplace_manifest(clone_root)
+            {
                 let manifest = plugin_manifest::load_marketplace_manifest(&marketplace_path)?;
                 // Detect whether the consumer set an explicit prefix override (even ""
                 // to clear it). Used to distinguish "no override → use entry name as
@@ -3530,6 +3556,147 @@ mod plugin_tests {
             agent.effective_name(),
             "acme:myagent",
             "agent must be namespaced under its marketplace entry name (MKT-14)"
+        );
+    }
+
+    #[test]
+    fn mkt15_mind_toml_roots_suppress_plugin_manifest_own_items() {
+        // spec: MKT-15
+        // A repo ships a `.claude-plugin/plugin.json` AND a mind.toml declaring a
+        // `[source].roots` scan layout. The roots layout is an own-item directive:
+        // it suppresses the plugin manifest's own-item layer, so convention
+        // discovery under the root supplies the repo's items and the plugin's
+        // components are NOT scanned.
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let clone = base.join("sources/local/test/plugin-repo");
+
+        // The plugin manifest would (absent MKT-15) contribute skills/greet.
+        write_file(
+            &clone.join(".claude-plugin/plugin.json"),
+            "{\n  \"name\": \"acme-tools\",\n  \"version\": \"1.0.0\"\n}\n",
+        );
+        write_file(
+            &clone.join("skills/greet/SKILL.md"),
+            "---\nname: greet\ndescription: plugin greet\n---\n# greet\n",
+        );
+        // The mind.toml relocates convention to pkg/, where the repo's own skill lives.
+        write_file(&clone.join("mind.toml"), "[source]\nroots = [\"pkg\"]\n");
+        write_file(
+            &clone.join("pkg/skills/own/SKILL.md"),
+            "---\nname: own\ndescription: convention own skill\n---\n# own\n",
+        );
+
+        let paths = paths_for(base);
+        let source = make_plugin_source(&clone);
+        let mut items = Vec::new();
+        scan_source(&paths, &source, &mut items).unwrap();
+
+        let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
+        assert!(
+            names.contains(&"own"),
+            "convention skill under the declared root must be discovered: {names:?}"
+        );
+        assert!(
+            !names.contains(&"greet"),
+            "the plugin manifest's own items must be suppressed by the roots layout (MKT-15): {names:?}"
+        );
+    }
+
+    #[test]
+    fn mkt15_mind_toml_flat_skills_suppress_marketplace_own_items() {
+        // spec: MKT-15
+        // A repo ships a `.claude-plugin/marketplace.json` (in-repo plugin) AND a
+        // mind.toml declaring `[source].flat-skills`. The flat layout is an
+        // own-item directive: it suppresses the marketplace's in-repo plugin scan,
+        // and flat convention discovery supplies the repo's own skills instead.
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let clone = base.join("sources/local/test/plugin-repo");
+
+        write_file(
+            &clone.join(".claude-plugin/marketplace.json"),
+            r#"{
+                "name": "Acme Market",
+                "plugins": [
+                    {"name": "acme", "source": "./plugins/alpha"}
+                ]
+            }"#,
+        );
+        // The in-repo plugin the marketplace would contribute (suppressed).
+        write_file(
+            &clone.join("plugins/alpha/skills/mkt/SKILL.md"),
+            "---\nname: mkt\ndescription: marketplace skill\n---\n# mkt\n",
+        );
+        // Flat convention layout: a bare skill dir at the repo root.
+        write_file(&clone.join("mind.toml"), "[source]\nflat-skills = true\n");
+        write_file(
+            &clone.join("own/SKILL.md"),
+            "---\nname: own\ndescription: flat own skill\n---\n# own\n",
+        );
+
+        let paths = paths_for(base);
+        let source = make_plugin_source(&clone);
+        let mut items = Vec::new();
+        scan_source(&paths, &source, &mut items).unwrap();
+
+        let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
+        assert!(
+            names.contains(&"own"),
+            "flat convention skill at the repo root must be discovered: {names:?}"
+        );
+        assert!(
+            !names.contains(&"mkt"),
+            "the marketplace's in-repo plugin items must be suppressed by the flat layout (MKT-15): {names:?}"
+        );
+    }
+
+    #[test]
+    fn mkt16_bare_discover_sources_does_not_suppress_marketplace_own_items() {
+        // spec: MKT-16
+        // A repo ships a `.claude-plugin/marketplace.json` (in-repo plugin) AND a
+        // mind.toml whose only discovery content is `[discover].sources` (a curator
+        // directive over OTHER repos, not an own-item directive). The marketplace
+        // still defines the immediate source: its in-repo plugin items ARE
+        // discovered. (The nested curator sources are melded at meld time in
+        // commands.rs; this scan-level test asserts the compose, i.e. no
+        // suppression of the manifest's own items.)
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let clone = base.join("sources/local/test/plugin-repo");
+
+        write_file(
+            &clone.join(".claude-plugin/marketplace.json"),
+            r#"{
+                "name": "Acme Market",
+                "plugins": [
+                    {"name": "acme", "source": "./plugins/alpha"}
+                ]
+            }"#,
+        );
+        write_file(
+            &clone.join("plugins/alpha/skills/mkt/SKILL.md"),
+            "---\nname: mkt\ndescription: marketplace skill\n---\n# mkt\n",
+        );
+        // A bare [discover].sources list: curator only, not an own-item directive.
+        write_file(
+            &clone.join("mind.toml"),
+            "[source]\ndescription = \"marketplace + curator\"\n\n[discover]\nsources = [{ source = \"owner/repo\" }]\n",
+        );
+
+        let paths = paths_for(base);
+        let source = make_plugin_source(&clone);
+        let mut items = Vec::new();
+        scan_source(&paths, &source, &mut items).unwrap();
+
+        let mkt = items
+            .iter()
+            .find(|i| i.kind == ItemKind::Skill && i.name == "mkt")
+            .expect("the marketplace's in-repo plugin skill must still be discovered (MKT-16)");
+        assert_eq!(
+            mkt.effective_name(),
+            "acme:mkt",
+            "the in-repo plugin skill keeps its marketplace-entry namespace (MKT-8)"
         );
     }
 }

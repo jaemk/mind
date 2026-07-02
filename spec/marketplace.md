@@ -42,6 +42,44 @@ an independent store and link into the host's discovery location.
   covers. A `[source]`-only `mind.toml` (metadata, no item globs) still composes:
   its `[source]` metadata is read and the plugin manifest supplies the items.
 
+- `MKT-15` A source may ship both a `.claude-plugin/` manifest and a `mind.toml`.
+  The manifest defines the *immediate source* (the repo's own items: an in-repo
+  plugin's components per MKT-3, a marketplace catalog's own in-repo plugins per
+  MKT-7/MKT-14) UNLESS the co-present `mind.toml` declares an own-item
+  source-discovery directive, in which case the author is defining their own
+  repo's items and the manifest's own-item layer is suppressed for that source
+  (the MKT-2 note that a `.claude-plugin/` manifest was found and ignored is
+  printed). The own-item directives are: a `[[items]]` entry, a `[discover]` item
+  glob (`skills`/`agents`/`rules`, DSC-33), `[source].roots` (DSC-50), or
+  `[source].flat-skills` (DSC-74). This broadens the MKT-2 suppression set - which
+  named only `[[items]]`/`[discover]` item globs - to add `roots` and
+  `flat-skills`, since each redefines how the repo's own items are discovered. A
+  consumer `meld --root` / `--flat-skills` override (DSC-51/DSC-75) suppresses the
+  manifest's own-item layer the same way a source's own `[source].roots` /
+  `flat-skills` does: it is the same "define my own items by convention" signal, so
+  the flag is not a silent no-op on a manifest source (the MKT-15 note is printed,
+  naming the consumer flag as the source of the layout).
+  When none of these directives is present, the manifest defines the immediate
+  source even though a `mind.toml` is present (a `[source]`-only file per MKT-2,
+  or a `[discover].sources`-only file per MKT-16). Suppression is scoped to the
+  immediate source's item layer; it does not disable the curator layer (MKT-16).
+
+- `MKT-16` A co-present `mind.toml`'s `[discover].sources` (DSC-38) composes with
+  the manifest rather than suppressing it. `[discover].sources` curates OTHER
+  repos; it does not redefine the immediate source's items, so it is not one of
+  the MKT-15 own-item directives and does not trigger suppression (consistent with
+  DSC-35, where a bare `[discover].sources` list does not disable convention
+  discovery). When a repo ships both a `.claude-plugin/marketplace.json` (or
+  `plugin.json`) and a `mind.toml` whose only discovery content is
+  `[discover].sources`, the manifest supplies the immediate source's items (its
+  own in-repo plugins and any external plugin entries, MKT-7) and the
+  `[discover].sources` list adds its curated nested sources; the two nested-source
+  sets union, de-duplicated by the DSC-38 identity guard, and the whole chain is
+  registered and install-gated by the super-source rules (DSC-54..58). So one repo
+  is a standard Claude marketplace to the native plugin system and, when melded
+  with `mind`, additionally a curated super-source. This extends the MKT-2 compose
+  case (a `[source]`-only `mind.toml`) to `[discover].sources`.
+
 ## A single plugin (`plugin.json`)
 
 A plugin is a directory containing `.claude-plugin/plugin.json` whose component

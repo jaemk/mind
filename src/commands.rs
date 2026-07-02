@@ -561,18 +561,46 @@ fn meld_recursive(
     // DSC-52: if --root is given for an authoritative source, print a note.
     let is_authoritative = mindfile.as_ref().is_some_and(|m| m.is_authoritative());
 
-    // MKT-2: when the source has an authoritative mind.toml, the plugin-manifest
-    // layer is suppressed. Emit an advisory note so the user is not surprised to
-    // find the manifest silently ignored. Both plugin.json and marketplace.json
-    // trigger the note; catalog.rs stays quiet and leaves reporting here.
-    if is_authoritative && !out.json {
+    // MKT-2/MKT-15: when an own-item source-discovery directive is in effect, the
+    // plugin-manifest's own-item layer is suppressed. Emit an advisory note so the
+    // user is not surprised to find the manifest ignored. Both plugin.json and
+    // marketplace.json trigger the note; catalog.rs stays quiet and leaves
+    // reporting here. Three distinct cases:
+    //   - authoritative `[[items]]`/`[discover]` globs (MKT-2): the manifest is
+    //     wholly ignored (its external curator entries are not walked either).
+    //   - a mind.toml `[source].roots`/`flat-skills` scan layout (MKT-15): only the
+    //     manifest's own-item layer is ignored; convention discovery supplies the
+    //     repo's items and any marketplace external entries still compose.
+    //   - a consumer `--root`/`--flat-skills` override (MKT-15, DSC-51/DSC-75):
+    //     same as the scan-layout case, so the flag is not a silent no-op on a
+    //     manifest source.
+    // A bare `[discover].sources` list is NOT an own-item directive and prints no
+    // note: the manifest still defines the immediate source (MKT-16).
+    let declares_scan_layout = mindfile.as_ref().is_some_and(|m| m.declares_scan_layout());
+    let consumer_scan_layout = !roots.is_empty() || flat_skills;
+    if !out.json && (is_authoritative || declares_scan_layout || consumer_scan_layout) {
         let has_plugin = plugin_manifest::find_plugin_manifest(&dir).is_some();
         let has_marketplace = plugin_manifest::find_marketplace_manifest(&dir).is_some();
         if has_plugin || has_marketplace {
-            println!(
-                "note: {} uses an authoritative mind.toml; its .claude-plugin/ manifest is ignored",
-                source.name
-            );
+            if is_authoritative {
+                println!(
+                    "note: {} uses an authoritative mind.toml; its .claude-plugin/ manifest is ignored",
+                    source.name
+                );
+            } else {
+                // spec: MKT-15 — the manifest's own-item layer is suppressed; name
+                // where the convention layout came from (consumer flag vs mind.toml).
+                let via = if declares_scan_layout {
+                    "mind.toml [source].roots/flat-skills"
+                } else {
+                    "--root/--flat-skills"
+                };
+                println!(
+                    "note: {} discovers its own items by convention ({via}); \
+                     the .claude-plugin/ manifest's plugin components are ignored",
+                    source.name
+                );
+            }
         }
     }
 

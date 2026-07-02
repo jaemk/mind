@@ -1,0 +1,24 @@
+[source]
+description = "A repo that is both a Claude plugin marketplace (its own in-repo plugins) and a mind curator (a [discover].sources chain). See README.md."
+
+# [discover].sources is a CURATOR directive over OTHER repos. It is NOT an
+# own-item directive, so it does not suppress the .claude-plugin/marketplace.json:
+# the marketplace still defines this repo's own items (the in-repo `toolkit`
+# plugin), and the curated sources below compose on top (MKT-16). By contrast
+# [source].roots / flat-skills / [[items]] / a [discover] item glob WOULD suppress
+# the manifest's own-item layer, since each redefines how this repo's own items
+# are discovered (MKT-15).
+#
+# The nested sources are LOCAL paths to sibling example repos, so reading or
+# `mind review`-ing this example never reaches the network. A real curator lists
+# remote specs (owner/repo, git@host:owner/repo, a URL) in the same positions.
+
+# Registered and left available; its items are not auto-offered on meld.
+[[discover.sources]]
+source = "../starter"
+
+# Registered under the namespace `ex`, offered for install on meld.
+[[discover.sources]]
+source = "../explicit"
+namespace = "ex"
+install = true

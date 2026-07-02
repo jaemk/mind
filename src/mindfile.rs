@@ -569,6 +569,22 @@ impl MindToml {
         !self.items.is_empty() || self.discover.as_ref().is_some_and(|d| d.has_item_globs())
     }
 
+    /// Whether the file relocates or reshapes convention discovery of the repo's
+    /// OWN items via `[source].roots` or `[source].flat-skills` (as opposed to the
+    /// authoritative `[[items]]`/`[discover]`-glob inventory, [`is_authoritative`]).
+    ///
+    /// This is the non-authoritative half of an "own-item source-discovery
+    /// directive" (MKT-15): when set, the author is defining the repo's own items
+    /// through convention at a chosen layout, which suppresses a co-present
+    /// `.claude-plugin/` manifest's own-item layer (alongside the authoritative
+    /// case, [`is_authoritative`]). A bare `[discover].sources` list is a curator
+    /// directive over OTHER repos, not an own-item directive, so it deliberately
+    /// does not count here (MKT-16).
+    pub fn declares_scan_layout(&self) -> bool {
+        // spec: MKT-15
+        self.source.roots.is_some() || self.source.flat_skills
+    }
+
     /// Return all hooks in resolved, normalized form.
     ///
     /// The legacy `[source].install` (HOOK-50 back-compat) folds in as the
@@ -644,6 +660,69 @@ mod tests {
                 "curated source '{}' must not pin an install subset",
                 s.source
             );
+        }
+    }
+
+    #[test]
+    fn declares_scan_layout_covers_roots_and_flat_skills_but_not_sources() {
+        // spec: MKT-15, MKT-16
+        // `declares_scan_layout` is the non-authoritative own-item directive that
+        // suppresses a co-present .claude-plugin/ manifest: `[source].roots` or
+        // `[source].flat-skills`. A bare `[discover].sources` list (MKT-16) and a
+        // `[source]`-metadata-only file are NOT own-item directives.
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        // (mind.toml body, declares_scan_layout, is_authoritative)
+        let cases: &[(&str, bool, bool)] = &[
+            // roots-only: a scan layout, not authoritative.
+            ("[source]\nroots = [\"pkg\"]\n", true, false),
+            // explicitly empty roots is still a declared layout (DSC-50).
+            ("[source]\nroots = []\n", true, false),
+            // flat-skills only: a scan layout, not authoritative.
+            ("[source]\nflat-skills = true\n", true, false),
+            // flat-skills = false is NOT a declared layout.
+            ("[source]\nflat-skills = false\n", false, false),
+            // bare [discover].sources: a curator directive, NOT an own-item one.
+            (
+                "[source]\n[discover]\nsources = [{ source = \"owner/repo\" }]\n",
+                false,
+                false,
+            ),
+            // metadata-only: nothing declared.
+            ("[source]\ndescription = \"x\"\n", false, false),
+            // authoritative [[items]] is a separate arm; not a scan layout.
+            (
+                "[[items]]\nkind = \"rule\"\nname = \"style\"\npath = \"r.md\"\n",
+                false,
+                true,
+            ),
+            // roots alongside a curator [discover].sources: still a scan layout.
+            (
+                "[source]\nroots = [\"pkg\"]\n[discover]\nsources = [{ source = \"owner/repo\" }]\n",
+                true,
+                false,
+            ),
+        ];
+        for (body, want_layout, want_auth) in cases {
+            let n = N.fetch_add(1, Ordering::SeqCst);
+            let dir = std::env::temp_dir().join(format!("mind-mkt15-{}-{n}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("mind.toml"), body).unwrap();
+            let mt = MindToml::load(&dir)
+                .expect("must parse")
+                .expect("must exist");
+            assert_eq!(
+                mt.declares_scan_layout(),
+                *want_layout,
+                "declares_scan_layout mismatch for body: {body:?}"
+            );
+            assert_eq!(
+                mt.is_authoritative(),
+                *want_auth,
+                "is_authoritative mismatch for body: {body:?}"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
         }
     }
 

@@ -21,7 +21,11 @@ A fourth, external-manifest layer reads Claude Code's native plugin manifests
 (`.claude-plugin/marketplace.json`, `.claude-plugin/plugin.json`) as a discovery
 input for repos published to the built-in plugin system. It feeds the same catalog
 and leaves the install model unchanged; an authoritative `mind.toml` (DSC-3) still
-wins over it. See [marketplace.md](marketplace.md) (MKT-1..11).
+wins over it. A co-present `mind.toml` composes at a finer grain: own-item
+directives (`[[items]]`, `[discover]` item globs, `roots`, `flat-skills`) suppress
+the manifest's own-item layer, while a `[discover].sources` list layers a curated
+super-source on top of the manifest (MKT-15, MKT-16). See
+[marketplace.md](marketplace.md) (MKT-1..16).
 
 ## Convention
 

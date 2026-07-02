@@ -75,8 +75,13 @@ const ALLOWLIST: &[&str] = &[
     //   meld no-arg defaults to `.` (CLI-25, cited in tests/cli.rs) and the
     //   maintainer `init-source` scaffolder (INIT-1..6; src/namespace.rs +
     //   tests/cli.rs) are now implemented and cited; no IDs remain allowlisted.
-    //   Claude plugin marketplaces (spec/marketplace.md, MKT-1..13): now
-    //   implemented and cited from tests/cli.rs; no MKT IDs remain allowlisted.
+    //   Claude plugin marketplaces (spec/marketplace.md, MKT-1..16): now
+    //   implemented and cited from tests/cli.rs and unit tests in src/catalog.rs
+    //   and src/mindfile.rs; no MKT IDs remain allowlisted. This includes the
+    //   marketplace + curator compose (MKT-15/16): a co-present mind.toml's
+    //   own-item directives (roots/flat-skills/[[items]]/[discover] globs) suppress
+    //   the manifest's own-item layer, while [discover].sources composes a curator
+    //   on top.
     //   self-update `evolve` verb: in-place upgrade of the mind binary using the
     //   same native curl/wget downloader as resources/install.sh (no external
     //   crate). The pure logic (platform triple, version compare/decision, the

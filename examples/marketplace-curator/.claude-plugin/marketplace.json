@@ -1,0 +1,11 @@
+{
+  "name": "Dev Toolkit Marketplace",
+  "plugins": [
+    {
+      "name": "toolkit",
+      "source": "./plugins/toolkit",
+      "version": "1.0",
+      "description": "The repo's own in-repo plugin"
+    }
+  ]
+}

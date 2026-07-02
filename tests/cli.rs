@@ -17388,6 +17388,163 @@ fn marketplace_source_only_mind_toml_composes_with_plugin() {
 }
 
 #[test]
+fn marketplace_mind_toml_roots_suppress_manifest_own_items_with_note() {
+    // spec: MKT-15
+    // A repo ships a .claude-plugin/plugin.json AND a mind.toml declaring a
+    // [source].roots scan layout. The roots layout is an own-item directive: it
+    // suppresses the manifest's own-item layer, so convention discovery under the
+    // root supplies the repo's items, the plugin's components are not scanned, and
+    // meld prints a note that the manifest's plugin components are ignored.
+    let sb = Sandbox::bare("mkt15-roots");
+    // The plugin manifest would (absent MKT-15) contribute skills/greet as acme:greet.
+    sb.write_and_commit(".claude-plugin/plugin.json", "{\n  \"name\": \"acme\"\n}\n");
+    sb.write_and_commit(
+        "skills/greet/SKILL.md",
+        "---\nname: greet\ndescription: plugin greet\n---\n# greet\n",
+    );
+    // The mind.toml relocates convention to pkg/, defining the repo's own items.
+    sb.write_and_commit("mind.toml", "[source]\nroots = [\"pkg\"]\n");
+    sb.write_and_commit(
+        "pkg/skills/own/SKILL.md",
+        "---\nname: own\ndescription: convention own skill\n---\n# own\n",
+    );
+
+    let spec = sb.source_spec();
+    let r = sb.mind(&["meld", &spec, "--link-only"]);
+    assert!(r.success, "meld must succeed: {} {}", r.stdout, r.stderr);
+
+    // The MKT-15 suppression note is printed.
+    let combined = format!("{}\n{}", r.stdout, r.stderr);
+    assert!(
+        combined.contains("plugin components are ignored"),
+        "meld must note the manifest's own-item layer is ignored: {combined}"
+    );
+
+    let probe = sb.mind(&["probe"]).stdout;
+    assert!(
+        probe.contains("skill:own"),
+        "convention skill under the declared root must be discovered: {probe}"
+    );
+    assert!(
+        !probe.contains("greet"),
+        "the plugin manifest's own items must be suppressed by the roots layout: {probe}"
+    );
+}
+
+#[test]
+fn marketplace_consumer_root_flag_suppresses_manifest_with_note() {
+    // spec: MKT-15, DSC-51
+    // A consumer `meld --root pkg` on a manifest source with no mind.toml scan
+    // layout is an own-item directive too: it suppresses the manifest's own-item
+    // layer, convention discovery under the consumer root supplies the items, and
+    // meld prints the suppression note (naming the flag). Without this, --root
+    // would be a silent no-op on a manifest source.
+    let sb = Sandbox::bare("mkt15-consumer-root");
+    // The plugin manifest would (absent MKT-15) contribute skills/greet as acme:greet.
+    sb.write_and_commit(".claude-plugin/plugin.json", "{\n  \"name\": \"acme\"\n}\n");
+    sb.write_and_commit(
+        "skills/greet/SKILL.md",
+        "---\nname: greet\ndescription: plugin greet\n---\n# greet\n",
+    );
+    // The repo's own items live under pkg/, reached only via a consumer --root.
+    sb.write_and_commit(
+        "pkg/skills/own/SKILL.md",
+        "---\nname: own\ndescription: convention own skill\n---\n# own\n",
+    );
+
+    let spec = sb.source_spec();
+    let r = sb.mind(&["meld", &spec, "--root", "pkg", "--link-only"]);
+    assert!(r.success, "meld must succeed: {} {}", r.stdout, r.stderr);
+
+    let combined = format!("{}\n{}", r.stdout, r.stderr);
+    assert!(
+        combined.contains("plugin components are ignored")
+            && combined.contains("--root/--flat-skills"),
+        "meld must note the manifest is ignored and name the consumer flag: {combined}"
+    );
+
+    let probe = sb.mind(&["probe"]).stdout;
+    assert!(
+        probe.contains("skill:own"),
+        "convention skill under the consumer root must be discovered: {probe}"
+    );
+    assert!(
+        !probe.contains("greet"),
+        "the plugin manifest's own items must be suppressed by --root: {probe}"
+    );
+}
+
+#[test]
+fn marketplace_and_curator_compose_via_discover_sources() {
+    // spec: MKT-16
+    // A repo ships a .claude-plugin/marketplace.json (an in-repo plugin) AND a
+    // mind.toml whose only discovery content is [discover].sources (a curator
+    // directive over OTHER repos). The two compose: the marketplace still defines
+    // the immediate source (its in-repo plugin item is discovered, not suppressed),
+    // and the curated nested source is registered. No suppression note is printed.
+    let curator = Sandbox::bare("curator");
+    let nested = Sandbox::named("curated"); // a normal source with fixture items
+    // Marketplace with one in-repo plugin: the curator's own items.
+    curator.write_and_commit(
+        ".claude-plugin/marketplace.json",
+        r#"{ "name": "M", "plugins": [ {"name": "toolkit", "source": "./plugins/toolkit"} ] }"#,
+    );
+    curator.write_and_commit(
+        "plugins/toolkit/skills/format/SKILL.md",
+        "---\nname: format\ndescription: fmt\n---\n# format\n",
+    );
+    // A co-present mind.toml with ONLY [discover].sources (curator directive).
+    curator.write_and_commit(
+        "mind.toml",
+        &format!(
+            "[source]\ndescription = \"marketplace + curator\"\n\n[discover]\nsources = [{{ source = \"{}\" }}]\n",
+            nested.source_spec()
+        ),
+    );
+
+    let spec = curator.source_spec();
+    let r = curator.mind(&["meld", &spec, "--link-only"]);
+    assert!(r.success, "meld must succeed: {} {}", r.stdout, r.stderr);
+
+    // Compose: the marketplace's own in-repo plugin item IS discovered (the
+    // [discover].sources list does not suppress the manifest).
+    let probe = curator.mind(&["probe"]).stdout;
+    assert!(
+        probe.contains("toolkit:format"),
+        "the marketplace in-repo plugin item must be discovered (not suppressed by [discover].sources): {probe}"
+    );
+    // And the curated nested source is registered.
+    let sources = curator.mind(&["recall", "--sources"]).stdout;
+    assert!(
+        sources.contains("/curated"),
+        "the curated nested source must be registered alongside the marketplace: {sources}"
+    );
+    // No manifest-suppression note: a bare [discover].sources is not an own-item directive.
+    let combined = format!("{}\n{}", r.stdout, r.stderr);
+    assert!(
+        !combined.contains("manifest's plugin components are ignored")
+            && !combined.contains("manifest is ignored"),
+        "a [discover].sources-only mind.toml must not suppress the manifest: {combined}"
+    );
+}
+
+#[test]
+fn example_marketplace_curator_validates() {
+    // spec: MKT-15, MKT-16
+    // The marketplace-curator example is both a Claude marketplace and a mind
+    // curator. It validates clean structurally (review does not clone the nested
+    // chain), pinning that the compose shape parses and passes author validation.
+    let sb = Sandbox::new();
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/marketplace-curator");
+    let r = sb.mind(&["review", dir.to_str().unwrap()]);
+    assert!(
+        r.success,
+        "marketplace-curator example must validate clean:\nstdout: {}\nstderr: {}",
+        r.stdout, r.stderr
+    );
+}
+
+#[test]
 fn marketplace_plugin_with_only_unsupported_components() {
     // spec: MKT-3, MKT-4
     // A plugin with no skills or agents (only hooks/, commands/) succeeds

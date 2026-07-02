@@ -37,6 +37,9 @@ Simplest to most advanced:
   a skipped count.
 - [marketplace-catalog/](marketplace-catalog/) - a Claude `.claude-plugin/marketplace.json`
   catalog of in-repo plugins, each a namespaced sub-source.
+- [marketplace-curator/](marketplace-curator/) - a repo that is both a Claude
+  marketplace (its own in-repo plugin) and a `mind` curator: a `mind.toml`
+  `[discover].sources` composes with the manifest instead of suppressing it.
 
 Operational walkthroughs (lifecycle verbs):
 
