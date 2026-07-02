@@ -127,6 +127,62 @@ from a plugin manifest with its origin (`claude-plugin` or `claude-marketplace`)
 so you can tell a native-plugin source from a convention or `mind.toml` source at
 a glance.
 
+## Authoring a plugin or marketplace
+
+You don't need a `mind.toml` to make a Claude plugin repo meldable: the manifest
+layer is enough on its own, and everything below is Claude's own format, not
+something `mind` adds.
+
+**A single plugin.** Put `.claude-plugin/plugin.json` at the repo root (or at a
+scan root) with `name`, and optionally `version` and `description`:
+
+```json
+{
+  "name": "acme-tools",
+  "version": "1.0.0",
+  "description": "Acme developer tools plugin"
+}
+```
+
+Lay out `skills/<name>/SKILL.md` and `agents/<name>.md` next to it, same as any
+`mind` source ([Source layout](source-layout.md)). `commands/`, `hooks/`,
+`.mcp.json`, and the other Claude-only component kinds are fine to keep in the
+repo for Claude users; `mind` just skips them (with a printed count) rather than
+erroring, so one repo layout serves both consumers. There is no plugin-level
+place for a `rule` or a `tool` - if you want `mind` users to get those, add a
+`mind.toml` with `[[items]]` for them; it composes with the plugin manifest as
+long as it stays metadata-only or covers different items ([Precedence](#precedence-when-a-plugin-manifest-is-used)).
+
+Pick `name` deliberately: it becomes every consumer's default namespace prefix
+(`acme-tools:greet`), so treat it like a package name - short, unique enough to
+avoid colliding with other plugins someone might meld, and stable across
+releases (renaming it renames every item for existing consumers).
+
+**A marketplace catalog.** Put `.claude-plugin/marketplace.json` at the repo
+root listing each plugin by `name` and `source` (a repo-relative path for an
+in-repo plugin, or a git URL for an external one), plus optional `version` /
+`description`:
+
+```json
+{
+  "name": "Acme Marketplace",
+  "plugins": [
+    { "name": "alpha", "source": "./plugins/alpha", "description": "Alpha plugin" },
+    { "name": "beta", "source": "./plugins/beta", "description": "Beta plugin" }
+  ]
+}
+```
+
+Each in-repo entry's `source` must resolve inside the repo (no `..`, no
+absolute path, no `~`) or `mind` rejects it ([Safety](#safety)). An entry's
+`version`/`description` override the same fields in that plugin's own
+`plugin.json` if it has one, so a curator can relabel a plugin without editing
+its manifest.
+
+Validate either shape the same way you'd validate any `mind` source: run
+`mind meld <path-or-repo>` against a local clone and `mind probe` to confirm the
+items and namespacing came out as expected.
+
 ## Try it
 
 Two runnable fixtures live in the repo:

@@ -1,9 +1,60 @@
 # Authoring a source
 
+A source is a git repo. Publishing one is mostly "lay the items out and push";
+`mind` melds arbitrary repos with no config, so there is no manifest to write and
+nothing to register.
+
+## Publish in two minutes
+
+A repo with a `skills/` directory is already a source. Nothing else is required.
+
+```
+myrepo/
+  skills/greet/SKILL.md      # a skill (the directory is the item)
+  agents/reviewer.md         # optional: an agent
+  rules/style.md             # optional: a rule
+```
+
+Push it, and anyone can meld it:
+
+```
+mind meld owner/myrepo       # discovers the items by convention
+mind probe                   # they show up, ready to learn
+```
+
+See [examples/starter](https://github.com/jaemk/mind/tree/main/examples/starter)
+for a minimal repo of this shape and [Source layout](source-layout.md) for the
+full convention.
+
+### Flat skill layout
+
+If your repo keeps skill directories at the root with no `skills/` container
+(`<repo>/greet/SKILL.md`), set `[source].flat-skills` so convention discovery
+finds them:
+
+```toml
+[source]
+flat-skills = true
+```
+
+A consumer can also force it at meld time with `mind meld owner/repo
+--flat-skills` (useful for adopting a flat-layout repo that has not set the flag
+itself). It applies to skills only; agents, rules, and tools keep their
+`agents/` / `rules/` / `tools/` directories. See [DSC-74..77](https://github.com/jaemk/mind/blob/main/spec/discovery.md).
+
+### A Claude plugin or marketplace
+
+A repo published for Claude Code's plugin system is meldable as-is: a
+`.claude-plugin/plugin.json` or `.claude-plugin/marketplace.json` is read as a
+discovery source, no `mind.toml` needed. See [Authoring a plugin or
+marketplace](marketplace.md#authoring-a-plugin-or-marketplace).
+
+## Preparing a source
+
 Two commands help a maintainer prepare a repo for melding: `init-source`
 scaffolds and reports, `review` validates.
 
-## init-source
+### init-source
 
 Run `mind init-source` in the repo. It discovers the items the repo offers
 (exactly as melding would), reports the references among them, scaffolds a
@@ -17,7 +68,7 @@ mind init-source --template      # also rewrite bare sibling refs to {{ns:}}
 It is read-only except for creating an absent `mind.toml` and, with
 `--template`, editing item files. It registers nothing and touches no agent home.
 
-## review
+### review
 
 `mind review <target>` validates a source for publishing without changing
 anything (`--fix` is the one exception). `<target>` is a melded source name, a
