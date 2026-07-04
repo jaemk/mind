@@ -75,6 +75,23 @@ trap 'rm -rf "$tmp"' EXIT
 
 echo "mind-install: downloading ${asset}"
 fetch_to "$url" "$tmp/$asset" || err "download failed: $url"
+
+# Verify the tarball against the published checksums.
+sums_url="https://github.com/${REPO}/releases/download/v${version}/SHA256SUMS"
+echo "mind-install: downloading SHA256SUMS"
+fetch_to "$sums_url" "$tmp/SHA256SUMS" || err "could not download SHA256SUMS"
+expected="$(grep "  ${asset}$" "$tmp/SHA256SUMS" | awk '{print $1}')"
+[ -n "$expected" ] || err "SHA256SUMS has no entry for ${asset}"
+if command -v sha256sum >/dev/null 2>&1; then
+	actual="$(sha256sum "$tmp/$asset" | awk '{print $1}')"
+elif command -v shasum >/dev/null 2>&1; then
+	actual="$(shasum -a 256 "$tmp/$asset" | awk '{print $1}')"
+else
+	err "need sha256sum or shasum to verify the download; install one and retry"
+fi
+[ "$expected" = "$actual" ] || err "checksum mismatch for ${asset}: expected ${expected}, got ${actual}"
+echo "mind-install: checksum OK"
+
 tar -xzf "$tmp/$asset" -C "$tmp" || err "could not extract $asset"
 [ -f "$tmp/mind" ] || err "archive did not contain a 'mind' binary"
 

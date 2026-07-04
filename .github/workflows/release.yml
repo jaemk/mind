@@ -22,9 +22,19 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: make ci
 
+  ci-macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: make ci
+
   build:
     name: build ${{ matrix.target }}
-    needs: ci
+    needs: [ci, ci-macos]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -38,8 +48,18 @@ jobs:
             os: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
+      - name: verify tag matches Cargo.toml version
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          cargo_version="$(grep '^version = ' Cargo.toml | head -n1 | cut -d'"' -f2)"
+          if [ "$tag_version" != "$cargo_version" ]; then
+            echo "tag v${tag_version} does not match Cargo.toml version ${cargo_version}" >&2
+            exit 1
+          fi
+          echo "version OK: ${tag_version}"
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: "1.96.0"
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
@@ -68,13 +88,18 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      - name: generate SHA256SUMS
+        run: |
+          cd dist
+          sha256sum *.tar.gz > ../SHA256SUMS
+          cd ..
       - name: create release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           version="${GITHUB_REF_NAME#v}"
           bash resources/changelog-section.sh "$version" > notes.md
-          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz --title "$GITHUB_REF_NAME" --notes-file notes.md
+          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz SHA256SUMS --title "$GITHUB_REF_NAME" --notes-file notes.md
 
   publish:
     needs: release
@@ -85,10 +110,13 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v7
+        # Default checkout is github.ref (the tag). cargo publish --locked must
+        # run from the exact tagged commit, not from main.
         with:
-          ref: main
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.96.0"
       - uses: Swatinem/rust-cache@v2
       - uses: rust-lang/crates-io-auth-action@v1
         id: auth
@@ -100,12 +128,12 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - name: regenerate formula
-        run: bash resources/update-formula.sh "${GITHUB_REF_NAME#v}" dist Formula/mind.rb
       - name: commit formula
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout main
+          bash resources/update-formula.sh "${GITHUB_REF_NAME#v}" dist Formula/mind.rb
           git add Formula/mind.rb
           if git diff --cached --quiet; then
             echo "formula already up to date"

@@ -19,3 +19,13 @@ jobs:
       # neither cited by a test nor allowlisted. (`make check` is the local gate:
       # same lints and tests, but formats in place instead of just checking.)
       - run: make ci
+
+  check-macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: make ci

@@ -1,0 +1,29 @@
+name: canary
+
+# Daily layout-drift canary: melds jaemk/mind for real and probes the catalog.
+# This job runs independently of the release pipeline; failures are visible
+# (workflow shows red) but do not block releases.
+on:
+  schedule:
+    - cron: "0 8 * * *"
+  workflow_dispatch:
+
+jobs:
+  flagship-meld:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: build
+        run: cargo build --release --locked --bin mind
+      - name: meld jaemk/mind and probe
+        env:
+          MIND_HOME: ${{ runner.temp }}/canary-mind
+          CLAUDE_HOME: ${{ runner.temp }}/canary-claude
+        run: |
+          mkdir -p "$MIND_HOME" "$CLAUDE_HOME"
+          ./target/release/mind meld jaemk/mind
+          ./target/release/mind recall --sources | grep -q 'jaemk/mind' \
+            || { echo "canary: jaemk/mind not found in recall --sources" >&2; exit 1; }
+          ./target/release/mind probe
