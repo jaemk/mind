@@ -104,12 +104,13 @@ install model. The generated file is an input to Claude's plugin system and to
 
 - `INIT-11` The plugin `name` in the generated marketplace entry defaults to the
   repo directory basename (the same value `mind` uses as the source identity). If
-  the repo's `mind.toml` carries `[source].prefix`, that value is the default
-  instead, since a `mind` source prefix and a marketplace plugin name serve the
-  same namespacing role: they both scope a source's skills under a publisher
-  identity. Passing `--namespace <n>` (or `-n <n>`) to `init-source` overrides the
-  default; if `--namespace` causes `mind.toml` to be created or updated (INIT-3,
-  INIT-12), the same value is written as `[source].prefix`.
+  the repo's `mind.toml` carries `[source].namespace` (or the deprecated `prefix`
+  alias, DSC-82), that value is the default instead, since a `mind` source
+  namespace and a marketplace plugin name serve the same namespacing role: they
+  both scope a source's skills under a publisher identity. Passing
+  `--namespace <n>` (or `-N <n>`) to `init-source` overrides the default; if
+  `--namespace` causes `mind.toml` to be created or updated (INIT-3, INIT-12),
+  the same value is written as `[source].namespace`.
 
 - `INIT-12` When `--flat-skills` is passed, `init-source` sets `flat-skills = true`
   in the `[source]` table of `mind.toml`, creating the file if absent (same as

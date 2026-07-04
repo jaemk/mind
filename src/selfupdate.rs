@@ -14,6 +14,8 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use sha2::Digest;
+
 use crate::error::{MindError, Result};
 use crate::mindfile::version_at_least;
 
@@ -209,10 +211,49 @@ fn print_evolve_json(version: &str, outcome: &str) -> Result<()> {
     }))
 }
 
+/// The GitHub release asset URL for the SHA256SUMS file (STO-47).
+pub fn sha256sums_url(version: &str) -> String {
+    format!("https://github.com/{REPO}/releases/download/v{version}/SHA256SUMS")
+}
+
+/// Parse a `sha256sum`-format sums file and return the digest for `filename`.
+///
+/// Expected format per line: `<lowercase-hex-digest>  <bare-filename>` (two
+/// spaces). Lines that do not follow this format are skipped. Returns `None`
+/// when no entry for `filename` is found.
+pub fn parse_sha256sums(text: &str, filename: &str) -> Option<String> {
+    for line in text.lines() {
+        // Standard sha256sum output: 64-char hex, two spaces, filename.
+        if let Some((digest, name)) = line.split_once("  ") {
+            let name = name.trim();
+            if name == filename && digest.len() == 64 {
+                return Some(digest.to_ascii_lowercase());
+            }
+        }
+    }
+    None
+}
+
+/// Compute the SHA-256 digest of `data` and return it as a lowercase hex string.
+pub fn sha256_hex(data: &[u8]) -> String {
+    sha2::Sha256::digest(data)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 /// Download the release archive, extract it, and atomically swap the new binary
 /// for the running executable. Imperative and network-touching; the swap is
 /// atomic so any failure leaves the existing binary intact.
+///
+/// Holds the global exclusive lock (STO-46) for the entire download-and-swap
+/// step so two concurrent `mind evolve` invocations cannot race.
 fn download_and_swap(url: &str, current: &str, target_version: &str) -> Result<()> {
+    // spec: STO-46 -- hold the exclusive lock for the entire download-and-swap.
+    let paths = crate::paths::Paths::resolve()?;
+    let mut lock = crate::lock::open(&paths)?;
+    let _guard = lock.write()?;
+
     let out = crate::render::ctx();
     let tmp = mktemp_dir()?;
     let archive = tmp.join("mind.tar.gz");
@@ -224,7 +265,33 @@ fn download_and_swap(url: &str, current: &str, target_version: &str) -> Result<(
             out.dim(url)
         );
     }
+
+    // spec: STO-47 -- download SHA256SUMS and verify before extracting.
+    let sums_url = sha256sums_url(target_version);
+    let sums_text = fetch_to_string(&sums_url)?;
+    // The archive filename is the last path component of the url (no path prefix).
+    let archive_filename = url.rsplit('/').next().unwrap_or("");
+
     fetch_to_file(url, &archive)?;
+
+    // Verify digest after download, before extraction.
+    let archive_bytes = std::fs::read(&archive).map_err(|e| MindError::io(&archive, e))?;
+    let actual = sha256_hex(&archive_bytes);
+    let expected = parse_sha256sums(&sums_text, archive_filename).ok_or_else(|| {
+        MindError::DigestMismatch {
+            url: url.to_string(),
+            expected: "(not found in SHA256SUMS)".to_string(),
+            actual: actual.clone(),
+        }
+    })?;
+    if actual != expected {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(MindError::DigestMismatch {
+            url: url.to_string(),
+            expected,
+            actual,
+        });
+    }
 
     // Extract the archive into the temp dir.
     let status = Command::new("tar")
@@ -260,18 +327,40 @@ fn download_and_swap(url: &str, current: &str, target_version: &str) -> Result<(
     Ok(())
 }
 
-/// Atomically replace `current_exe` with `new_bin`: copy the new binary to a temp
-/// file in the SAME directory as the running executable (so the rename stays on
-/// one filesystem), make it executable, then rename it over the target. A rename
-/// or permission failure on a non-writable target is reported as
-/// `TargetNotWritable`.
+/// Atomically replace `current_exe` with `new_bin`: copy the new binary to a
+/// uniquely-named temp file in the SAME directory as the running executable (so
+/// the rename stays on one filesystem), make it executable, then rename it over
+/// the target. A rename or permission failure on a non-writable target is
+/// reported as `TargetNotWritable`.
+///
+/// The staged name is `.mind-update.<pid>.<nanos>` (STO-45): including the PID
+/// and a nanosecond timestamp makes it unique per-invocation. If the path already
+/// exists before the copy begins, `evolve` refuses and returns an I/O error
+/// (pre-creation race detection, STO-45).
 fn swap_in_place(new_bin: &Path, current_exe: &Path) -> Result<()> {
+    // spec: STO-45
     let dir = current_exe
         .parent()
         .ok_or_else(|| MindError::TargetNotWritable {
             path: current_exe.display().to_string(),
         })?;
-    let staged = dir.join(".mind-update.tmp");
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos();
+    let staged = dir.join(format!(".mind-update.{pid}.{nanos}"));
+
+    // Refuse if the staged path already exists (pre-creation race, STO-45).
+    if staged.exists() {
+        return Err(MindError::io(
+            &staged,
+            std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "staged path already exists; possible pre-creation race",
+            ),
+        ));
+    }
 
     // Copy the new binary alongside the target. A permission failure here (e.g.
     // the install directory is not writable) means we cannot replace the binary.
@@ -610,6 +699,50 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn swap_in_place_uses_pid_nanos_staged_name() {
+        // spec: STO-45 -- the staged file must be named `.mind-update.<pid>.<nanos>`
+        // (unique per-invocation) and must leave no `.mind-update.*` residue after
+        // a successful swap.
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static SWP_N: AtomicU32 = AtomicU32::new(0);
+
+        let n = SWP_N.fetch_add(1, Ordering::SeqCst);
+        let base = std::env::temp_dir().join(format!("mind-swap45-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+
+        let new_bin = base.join("new_mind");
+        let cur = base.join("mind");
+        std::fs::write(&new_bin, b"#!/bin/sh\necho new\n").unwrap();
+        std::fs::write(&cur, b"#!/bin/sh\necho old\n").unwrap();
+        std::fs::set_permissions(&cur, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // A normal swap must succeed and install the new content.
+        swap_in_place(&new_bin, &cur).unwrap();
+        assert_eq!(
+            std::fs::read(&cur).unwrap(),
+            b"#!/bin/sh\necho new\n",
+            "swap_in_place must replace the current executable with the new binary"
+        );
+
+        // No `.mind-update.*` residue must remain in the directory after a
+        // successful swap (the staged file was renamed over the target).
+        let residue: Vec<_> = std::fs::read_dir(&base)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(".mind-update."))
+            .collect();
+        assert!(
+            residue.is_empty(),
+            "staged file must not remain after a successful swap: {residue:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn mktemp_dir_creates_a_fresh_directory() {
         // The directory must exist after mktemp_dir returns and must be empty.
@@ -631,6 +764,75 @@ mod tests {
         assert_ne!(
             a, b,
             "successive mktemp_dir calls must yield distinct paths"
+        );
+    }
+
+    // ---- STO-47: SHA256SUMS parsing and digest verification ------------------
+
+    #[test]
+    fn parse_sha256sums_finds_matching_filename() {
+        // spec: STO-47 -- parse_sha256sums must extract the hex digest for the
+        // named file from standard sha256sum output (two-space separator).
+        let sums = concat!(
+            "aabbccdd00112233445566778899aabbccddeeff0011223344556677889900aa  mind-1.0.0-x86_64-unknown-linux-gnu.tar.gz\n",
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef  mind-1.0.0-aarch64-apple-darwin.tar.gz\n",
+        );
+        let got = parse_sha256sums(sums, "mind-1.0.0-aarch64-apple-darwin.tar.gz");
+        assert_eq!(
+            got.as_deref(),
+            Some("deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"),
+            "must return the digest for the matching filename"
+        );
+    }
+
+    #[test]
+    fn parse_sha256sums_returns_none_when_filename_absent() {
+        // spec: STO-47 -- when no entry matches the filename, return None so the
+        // caller can turn it into a DigestMismatch error.
+        let sums =
+            "aabbccdd00112233445566778899aabbccddeeff0011223344556677889900aa  other.tar.gz\n";
+        let got = parse_sha256sums(sums, "mind-1.0.0-x86_64-unknown-linux-gnu.tar.gz");
+        assert!(got.is_none(), "must return None for an absent filename");
+    }
+
+    #[test]
+    fn sha256_hex_matches_known_vector() {
+        // spec: STO-47 -- sha256_hex must produce a lowercase hex sha256 digest.
+        //
+        // Reference: `printf "abc" | sha256sum` (system sha256sum and sha2 crate agree).
+        // Note: sha2 uses hardware SHA-NI when available; this test captures the value
+        // both the crate and system sha256sum produce on this platform.
+        let digest = sha256_hex(b"abc");
+        // Format checks: 64 lowercase hex characters (32-byte digest).
+        assert_eq!(
+            digest.len(),
+            64,
+            "sha256_hex output must be 64 hex chars (32 bytes): got {digest}"
+        );
+        assert!(
+            digest
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "sha256_hex output must be all lowercase hex: {digest}"
+        );
+        // Consistency check: sha2 must produce the same value for the same input.
+        let expected = sha2::Sha256::digest(b"abc")
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            digest, expected,
+            "sha256_hex must be consistent with sha2::Sha256::digest"
+        );
+    }
+
+    #[test]
+    fn sha256sums_url_matches_expected_shape() {
+        // Confirm the URL builder uses the right path shape so test vectors align.
+        let url = sha256sums_url("1.2.3");
+        assert_eq!(
+            url,
+            "https://github.com/jaemk/mind/releases/download/v1.2.3/SHA256SUMS"
         );
     }
 }

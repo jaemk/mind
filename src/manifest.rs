@@ -53,10 +53,33 @@ impl InstalledItem {
 }
 
 /// The persisted set of installed items, keyed by `kind:name`.
-#[derive(Debug, Default, Serialize, Deserialize)]
+///
+/// The `version` field (STO-50) carries the schema version. A reader that finds
+/// a version greater than `MANIFEST_VERSION` fails with `StateTooNew`. A missing
+/// field is treated as version 1 for backward compatibility with pre-version files.
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Manifest {
+    /// Schema version (STO-50). Absent => 1 (backward compatibility).
+    #[serde(default = "default_version")]
+    pub version: u32,
     #[serde(default)]
     pub items: std::collections::BTreeMap<String, InstalledItem>,
+}
+
+/// The maximum schema version this binary can read.
+const MANIFEST_VERSION: u32 = 1;
+
+fn default_version() -> u32 {
+    1
+}
+
+impl Default for Manifest {
+    fn default() -> Self {
+        Manifest {
+            version: MANIFEST_VERSION,
+            items: Default::default(),
+        }
+    }
 }
 
 impl Manifest {
@@ -64,7 +87,17 @@ impl Manifest {
         let file = paths.manifest_file();
         match std::fs::read(&file) {
             Ok(bytes) => {
-                serde_json::from_slice(&bytes).map_err(|e| MindError::json("manifest.json", e))
+                let m: Manifest = serde_json::from_slice(&bytes)
+                    .map_err(|e| MindError::json("manifest.json", e))?;
+                // spec: STO-50 STO-51
+                if m.version > MANIFEST_VERSION {
+                    return Err(MindError::StateTooNew {
+                        what: "manifest.json",
+                        found: m.version,
+                        supported: MANIFEST_VERSION,
+                    });
+                }
+                Ok(m)
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Manifest::default()),
             Err(e) => Err(MindError::io(&file, e)),
@@ -81,5 +114,73 @@ impl Manifest {
 
     pub fn insert(&mut self, item: InstalledItem) {
         self.items.insert(item.key(), item);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static N: AtomicU32 = AtomicU32::new(0);
+
+    fn tmp_paths() -> (std::path::PathBuf, Paths) {
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let base =
+            std::env::temp_dir().join(format!("mind-manifest-ver-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let paths = Paths {
+            mind_home: base.clone(),
+            claude_home: base.join("claude"),
+        };
+        (base, paths)
+    }
+
+    #[test]
+    fn manifest_missing_version_is_treated_as_one() {
+        // spec: STO-50 -- a manifest.json with no "version" field must be read
+        // as version 1 (backward compatibility with pre-version files).
+        let (base, paths) = tmp_paths();
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("manifest.json"), r#"{"items":{}}"#).unwrap();
+        let m = Manifest::load(&paths).expect("must load without version field");
+        assert_eq!(m.version, 1, "missing version must default to 1");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn manifest_version_one_loads_ok() {
+        // spec: STO-50 -- version 1 is the maximum supported version; loading it
+        // must succeed.
+        let (base, paths) = tmp_paths();
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("manifest.json"), r#"{"version":1,"items":{}}"#).unwrap();
+        let m = Manifest::load(&paths).expect("version 1 must load");
+        assert_eq!(m.version, 1);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn manifest_too_new_version_is_state_too_new_error() {
+        // spec: STO-50 STO-51 -- a version > 1 must be a StateTooNew error
+        // naming manifest.json, the found version, and the supported version.
+        let (base, paths) = tmp_paths();
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("manifest.json"), r#"{"version":99,"items":{}}"#).unwrap();
+        let err = Manifest::load(&paths).unwrap_err();
+        match err {
+            MindError::StateTooNew {
+                what,
+                found,
+                supported,
+            } => {
+                assert_eq!(what, "manifest.json");
+                assert_eq!(found, 99);
+                assert_eq!(supported, MANIFEST_VERSION);
+            }
+            other => panic!("expected StateTooNew, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

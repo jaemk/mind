@@ -6710,8 +6710,8 @@ mod tests {
             "scaffold must still have [source]"
         );
         assert!(
-            contents.contains("# prefix = \"prefix\""),
-            "scaffold must still have commented prefix: {contents}"
+            contents.contains("# namespace = \"prefix\""),
+            "scaffold must still have commented namespace: {contents}"
         );
     }
 

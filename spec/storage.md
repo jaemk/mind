@@ -121,6 +121,34 @@ prevent the lost-update and torn-read races a plain read-modify-write would allo
   and a crash mid-write leaves the previous file intact. This holds independently
   of the lock, so it protects even a lock-less reader.
 
+## `evolve` binary swap
+
+- `STO-45` `evolve` stages the replacement binary in the same directory as the
+  running executable under a unique name `.mind-update.<pid>.<nanos>` rather
+  than a fixed name. If the staged path already exists before the copy begins,
+  `evolve` refuses and returns an `Io` error, preventing a pre-creation race.
+- `STO-46` `evolve` holds the global exclusive lock (STO-40) for the entire
+  download-and-swap step, serializing concurrent `mind evolve` invocations so
+  two processes cannot download and swap over each other.
+- `STO-47` Before extracting a release archive, `evolve` downloads the
+  `SHA256SUMS` asset for that release and verifies the archive's SHA-256
+  digest. The `SHA256SUMS` format is standard `sha256sum` output: lowercase hex
+  digest, two spaces, bare filename, one line per file. A digest mismatch, or a
+  sums file that has no entry for the archive, is a `DigestMismatch` error and
+  the archive is not extracted. Version-pinned `evolve` (`--version V`) verifies
+  the pinned release's `SHA256SUMS`.
+
+## Schema versions
+
+- `STO-50` Both `sources.json` and `manifest.json` carry a top-level `"version"`
+  field with value `1`. A reader that finds a version greater than `1` fails with
+  a `StateTooNew` error rather than silently misinterpreting the file. A missing
+  `"version"` field is treated as `1` (backward compatibility with files written
+  before this field existed).
+- `STO-51` A `StateTooNew` error names the file (`"sources.json"` or
+  `"manifest.json"`), the version found, and the highest version supported, and
+  advises the user to upgrade mind.
+
 ## Errors
 
 - `STO-30` Filesystem failures carry the offending path (`Io { path, source }`).

@@ -305,23 +305,55 @@ fn make_source(host: &str, owner: &str, repo: &str, url: String) -> Source {
 }
 
 /// The persisted registry of melded sources.
+///
+/// Schema version is checked during `load` via a private wrapper type (STO-50):
+/// the public struct is unchanged so `commands.rs` struct literals continue to
+/// compile. `save` always writes `"version": 1`.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Registry {
     #[serde(default)]
     pub sources: Vec<Source>,
 }
 
+/// Private serde wrapper for schema-version detection (STO-50).
+#[derive(Deserialize)]
+struct RegistryWithVersion {
+    #[serde(default = "default_version")]
+    version: u32,
+    #[serde(default)]
+    sources: Vec<Source>,
+}
+
+/// The maximum schema version this binary can read.
+const REGISTRY_VERSION: u32 = 1;
+
+fn default_version() -> u32 {
+    1
+}
+
 impl Registry {
     /// Load the registry, returning an empty one if the file does not exist.
     ///
-    /// Migrates any legacy `install_hook`/`install_hook_commit` pairs into
-    /// `install_hooks` transparently on load (HOOK-55).
+    /// Checks the schema version (STO-50) and migrates any legacy
+    /// `install_hook`/`install_hook_commit` pairs into `install_hooks`
+    /// transparently on load (HOOK-55).
     pub fn load(paths: &Paths) -> Result<Self> {
         let file = paths.sources_file();
         match std::fs::read(&file) {
             Ok(bytes) => {
-                let mut reg: Registry = serde_json::from_slice(&bytes)
+                let raw: RegistryWithVersion = serde_json::from_slice(&bytes)
                     .map_err(|e| MindError::json("sources.json", e))?;
+                // spec: STO-50 STO-51
+                if raw.version > REGISTRY_VERSION {
+                    return Err(MindError::StateTooNew {
+                        what: "sources.json",
+                        found: raw.version,
+                        supported: REGISTRY_VERSION,
+                    });
+                }
+                let mut reg = Registry {
+                    sources: raw.sources,
+                };
                 for src in &mut reg.sources {
                     src.migrate_legacy_hook();
                 }
@@ -335,8 +367,13 @@ impl Registry {
     pub fn save(&self, paths: &Paths) -> Result<()> {
         paths.ensure_layout()?;
         let file = paths.sources_file();
-        let json =
-            serde_json::to_vec_pretty(self).map_err(|e| MindError::json("sources.json", e))?;
+        // Always write the current version (STO-50).
+        let versioned = serde_json::json!({
+            "version": REGISTRY_VERSION,
+            "sources": self.sources,
+        });
+        let json = serde_json::to_vec_pretty(&versioned)
+            .map_err(|e| MindError::json("sources.json", e))?;
         Paths::atomic_write(&file, &json)
     }
 
@@ -868,5 +905,69 @@ mod tests {
             !json.contains("\"plugin_version\""),
             "plugin_version must be absent from JSON when None"
         );
+    }
+
+    // ---- STO-50/STO-51: schema version in sources.json ----------------------
+
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static SRC_N: AtomicU32 = AtomicU32::new(0);
+
+    fn tmp_paths_src() -> (std::path::PathBuf, Paths) {
+        let n = SRC_N.fetch_add(1, Ordering::SeqCst);
+        let base =
+            std::env::temp_dir().join(format!("mind-sources-ver-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let paths = Paths {
+            mind_home: base.clone(),
+            claude_home: base.join("claude"),
+        };
+        (base, paths)
+    }
+
+    #[test]
+    fn registry_missing_version_is_treated_as_one() {
+        // spec: STO-50 -- a sources.json with no "version" field must load
+        // successfully (treated as version 1 for backward compatibility).
+        let (base, paths) = tmp_paths_src();
+        std::fs::write(base.join("sources.json"), r#"{"sources":[]}"#).unwrap();
+        let r = Registry::load(&paths).expect("must load without version field");
+        assert!(r.sources.is_empty(), "sources must be empty: {r:?}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn registry_version_one_loads_ok() {
+        // spec: STO-50 -- version 1 is the maximum supported version.
+        let (base, paths) = tmp_paths_src();
+        std::fs::write(base.join("sources.json"), r#"{"version":1,"sources":[]}"#).unwrap();
+        let r = Registry::load(&paths).expect("version 1 must load");
+        assert!(
+            r.sources.is_empty(),
+            "version 1 must load successfully: {r:?}"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn registry_too_new_version_is_state_too_new_error() {
+        // spec: STO-50 STO-51 -- a version > 1 must be a StateTooNew error
+        // naming sources.json, the found version, and the supported version.
+        let (base, paths) = tmp_paths_src();
+        std::fs::write(base.join("sources.json"), r#"{"version":42,"sources":[]}"#).unwrap();
+        let err = Registry::load(&paths).unwrap_err();
+        match err {
+            MindError::StateTooNew {
+                what,
+                found,
+                supported,
+            } => {
+                assert_eq!(what, "sources.json");
+                assert_eq!(found, 42);
+                assert_eq!(supported, REGISTRY_VERSION);
+            }
+            other => panic!("expected StateTooNew, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

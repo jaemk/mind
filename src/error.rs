@@ -143,9 +143,7 @@ pub enum MindError {
     #[error("'{kind}' is not a valid item kind (expected one of: skill, agent, rule, tool)")]
     UnknownKind { kind: String },
 
-    #[error(
-        "'{name}' is not a known lobe preset (expected one of: gemini, codex, antigravity, antigravity-cli, universal)"
-    )]
+    #[error("'{name}' is not a known lobe preset (expected one of: gemini, codex, universal)")]
     UnknownPreset { name: String },
 
     #[error("`config lobes add` needs a path or `--preset <name>`")]
@@ -168,6 +166,12 @@ pub enum MindError {
         "'{prefix}' cannot be used as a namespace prefix: it is a reserved item-kind word (skill, agent, rule, tool), which would make a prefixed name indistinguishable from a kind-qualified ref"
     )]
     ReservedPrefix { prefix: String },
+
+    /// NS-28: prefix contains a path-unsafe character or structure.
+    #[error(
+        "'{prefix}' cannot be used as a namespace prefix: it must be a single safe path component (no `/`, `\\`, `:`, `.`, `..`, leading `~`, NUL, or control characters)"
+    )]
+    UnsafePrefix { prefix: String },
 
     #[error(
         "cannot change the namespace of source '{src_name}': the following items are installed ({items}); run `mind forget <item>` for each before changing the namespace",
@@ -198,7 +202,12 @@ pub enum MindError {
     },
 
     #[error(
-        "no item matches '{query}' across {sources} melded source(s); run `mind sync` then `mind probe`"
+        "no item matches '{query}'{}",
+        if *sources == 0 {
+            "; no sources are melded yet -- run `mind meld <repo>` to add one".to_string()
+        } else {
+            format!(" across {sources} melded source(s); run `mind sync` then `mind probe`")
+        }
     )]
     ItemNotFound { query: String, sources: usize },
 
@@ -224,7 +233,7 @@ pub enum MindError {
     },
 
     #[error(
-        "{path} already exists and is not managed by mind; remove it (or `mind forget` the item) before installing"
+        "{path} already exists and is not managed by mind; remove it (or `mind forget` the item) before installing, or re-run with `--force` to overwrite"
     )]
     LinkOccupied { path: String },
 
@@ -382,6 +391,32 @@ pub enum MindError {
         /// Suggested namespace prefix (the repo name / last URL component).
         suggested: String,
     },
+
+    /// NS-28: effective item name contains path-traversal characters.
+    #[error(
+        "unsafe effective name '{name}': contains path-traversal characters or resolves to a relative component (`.`/`..`); refusing to build store or link paths from it"
+    )]
+    UnsafeName { name: String },
+
+    /// STO-47: downloaded archive SHA-256 does not match the published digest.
+    #[error(
+        "digest mismatch for {url}: expected {expected}, got {actual}; the download may be corrupted or tampered with"
+    )]
+    DigestMismatch {
+        url: String,
+        expected: String,
+        actual: String,
+    },
+
+    /// STO-50/STO-51: state file was written by a newer mind and uses an unknown schema version.
+    #[error(
+        "{what} uses schema version {found} but this mind only supports up to version {supported}; upgrade mind to read it"
+    )]
+    StateTooNew {
+        what: &'static str,
+        found: u32,
+        supported: u32,
+    },
 }
 
 fn status_suffix(status: Option<ExitStatus>) -> String {
@@ -434,12 +469,16 @@ mod tests {
         }
         .to_string();
         assert!(unknown_preset.contains("emacs"), "{unknown_preset}");
+        // spec: HARN-4 -- only the three real presets (gemini, codex, universal).
         assert!(
             unknown_preset.contains("gemini")
                 && unknown_preset.contains("codex")
-                && unknown_preset.contains("antigravity-cli")
                 && unknown_preset.contains("universal"),
             "UnknownPreset must list the valid presets: {unknown_preset}"
+        );
+        assert!(
+            !unknown_preset.contains("antigravity"),
+            "UnknownPreset must not mention removed presets: {unknown_preset}"
         );
 
         let needs_target = MindError::LobeTargetRequired.to_string();
@@ -637,5 +676,104 @@ mod tests {
             !msg.contains("(no output)"),
             "must not say '(no output)': {msg}"
         );
+    }
+
+    #[test]
+    fn item_not_found_no_sources_hints_meld() {
+        // When no sources are melded, the error must direct the user to `mind meld`
+        // rather than `mind sync` (which would be useless with no sources).
+        let e = MindError::ItemNotFound {
+            query: "review".into(),
+            sources: 0,
+        }
+        .to_string();
+        assert!(e.contains("review"), "must include query: {e}");
+        assert!(
+            e.contains("meld"),
+            "no-sources hint must mention `meld`: {e}"
+        );
+        assert!(
+            !e.contains("sync"),
+            "no-sources path must not suggest `sync`: {e}"
+        );
+    }
+
+    #[test]
+    fn item_not_found_with_sources_hints_sync_probe() {
+        // With sources present the hint directs the user to sync then probe.
+        let e = MindError::ItemNotFound {
+            query: "review".into(),
+            sources: 3,
+        }
+        .to_string();
+        assert!(e.contains("review"), "must include query: {e}");
+        assert!(e.contains("3"), "must include source count: {e}");
+        assert!(e.contains("sync"), "must mention `sync`: {e}");
+        assert!(e.contains("probe"), "must mention `probe`: {e}");
+        // Must not suggest running `mind meld` (only appropriate when sources == 0).
+        // The word "melded" may appear in the count phrase "across N melded source(s)".
+        assert!(
+            !e.contains("mind meld") && !e.contains("meld <"),
+            "with sources must not suggest `meld`: {e}"
+        );
+    }
+
+    #[test]
+    fn link_occupied_includes_force_hint() {
+        // spec: LIFE-41 -- the `--force` remedy must be surfaced in the error.
+        let e = MindError::LinkOccupied {
+            path: "/home/user/.claude/skills/foo".into(),
+        }
+        .to_string();
+        assert!(
+            e.contains("--force"),
+            "LinkOccupied must mention --force: {e}"
+        );
+        assert!(
+            e.contains("/home/user/.claude/skills/foo"),
+            "must include the path: {e}"
+        );
+    }
+
+    #[test]
+    fn digest_mismatch_includes_url_and_digests() {
+        // spec: STO-47
+        let e = MindError::DigestMismatch {
+            url: "https://example.com/mind-0.1.0.tar.gz".into(),
+            expected: "abc123".into(),
+            actual: "def456".into(),
+        }
+        .to_string();
+        assert!(e.contains("abc123"), "must include expected digest: {e}");
+        assert!(e.contains("def456"), "must include actual digest: {e}");
+        assert!(
+            e.contains("https://example.com/mind-0.1.0.tar.gz"),
+            "must include URL: {e}"
+        );
+    }
+
+    #[test]
+    fn state_too_new_names_file_and_versions() {
+        // spec: STO-51
+        let e = MindError::StateTooNew {
+            what: "sources.json",
+            found: 3,
+            supported: 1,
+        }
+        .to_string();
+        assert!(e.contains("sources.json"), "must name the file: {e}");
+        assert!(e.contains("3"), "must name the found version: {e}");
+        assert!(e.contains("1"), "must name the supported version: {e}");
+        assert!(e.contains("upgrade"), "must suggest upgrading: {e}");
+    }
+
+    #[test]
+    fn unsafe_prefix_error_mentions_prefix() {
+        // spec: NS-28
+        let e = MindError::UnsafePrefix {
+            prefix: "../evil".into(),
+        }
+        .to_string();
+        assert!(e.contains("../evil"), "must include the prefix: {e}");
     }
 }

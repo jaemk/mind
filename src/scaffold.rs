@@ -4,10 +4,13 @@
 
 // The same scaffold text written by INIT-3; kept here so `patch_source_meta`
 // can start from it when no mind.toml exists yet.
+// The `[source]` table accepts both `namespace` and `prefix` (DSC-82 alias).
+// On write, `namespace` is the canonical key (DSC-82); any active `prefix =`
+// line is stripped so a patched file never carries both keys.
 pub(crate) const SCAFFOLD: &str = concat!(
     "[source]\n",
     "description = \"\"   # what this source offers\n",
-    "# prefix = \"prefix\"   # namespace items as prefix:<name>\n",
+    "# namespace = \"prefix\"   # namespace items as prefix:<name>\n",
     "\n",
     "# Declare hooks that run when a consumer melds or unmelds this source.\n",
     "# Remove the leading `# ` to enable a hook.\n",
@@ -96,7 +99,22 @@ pub fn patch_source_meta(
     }
     if let Some(ns) = namespace {
         let value = toml_string(ns);
-        result = set_key(&result, "prefix", &value);
+        // spec: INIT-11 / DSC-82 -- write `namespace =` as the active key.
+        // `set_key("namespace", ...)` replaces any existing `namespace =` line
+        // or inserts a new one after the `[source]` header.
+        result = set_key(&result, "namespace", &value);
+        // spec: DSC-82 -- strip any active `prefix =` line that may remain
+        // (the deprecated alias key). This prevents a file from ending up with
+        // both `namespace =` and `prefix =`.
+        result = result
+            .lines()
+            .filter(|l| {
+                let t = l.trim_start();
+                t.starts_with('#') || (!t.starts_with("prefix =") && !t.starts_with("prefix="))
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
     }
 
     result
@@ -266,17 +284,21 @@ mod tests {
     }
 
     #[test]
-    fn patch_source_meta_inserts_prefix_into_scaffold() {
+    fn patch_source_meta_inserts_namespace_into_scaffold() {
+        // spec: DSC-82 / INIT-11 -- patch_source_meta must write `namespace =` as
+        // the active key (`prefix` is the deprecated read alias).
         let out = patch_source_meta(None, false, Some("mypkg"));
         assert!(
-            out.contains("prefix = \"mypkg\""),
-            "must insert prefix: {out}"
+            out.contains("namespace = \"mypkg\""),
+            "must insert namespace key: {out}"
         );
-        // The commented-out generic prefix line is preserved (it is a comment,
-        // not the active key).
+        // Must not emit `prefix =` as an active line (only `namespace =` is written).
+        let active_prefix = out
+            .lines()
+            .any(|l| !l.trim_start().starts_with('#') && l.trim_start().starts_with("prefix ="));
         assert!(
-            out.contains("# prefix = \"prefix\""),
-            "must keep commented prefix: {out}"
+            !active_prefix,
+            "active key must be `namespace`, not `prefix`: {out}"
         );
     }
 
@@ -295,17 +317,26 @@ mod tests {
     }
 
     #[test]
-    fn patch_source_meta_replaces_existing_prefix() {
+    fn patch_source_meta_replaces_existing_prefix_key() {
+        // spec: DSC-82 -- when the existing mind.toml uses the deprecated
+        // `prefix = "old"`, patch_source_meta must normalize it to
+        // `namespace = "new"` (single key, no duplication).
         let existing = "[source]\nprefix = \"old\"\ndescription = \"\"\n";
         let out = patch_source_meta(Some(existing), false, Some("new"));
         assert!(
-            out.contains("prefix = \"new\""),
-            "must replace old prefix: {out}"
+            out.contains("namespace = \"new\""),
+            "must write namespace = new: {out}"
         );
+        // The old prefix key must be gone (replaced, not left alongside).
         assert!(
             !out.contains("prefix = \"old\""),
-            "old prefix must be gone: {out}"
+            "old prefix = old must be gone: {out}"
         );
+        // No stray active `prefix =` line.
+        let active_prefix = out
+            .lines()
+            .any(|l| !l.trim_start().starts_with('#') && l.trim_start().starts_with("prefix ="));
+        assert!(!active_prefix, "no active prefix key must remain: {out}");
     }
 
     #[test]
@@ -324,12 +355,13 @@ mod tests {
     #[test]
     fn patch_source_meta_comment_lines_not_treated_as_active() {
         // A commented prefix line is not treated as an active key; the new
-        // prefix is inserted as an active line.
+        // namespace is inserted as an active line (INIT-11 write key is
+        // `namespace`).
         let existing = "[source]\n# prefix = \"old\"\ndescription = \"\"\n";
         let out = patch_source_meta(Some(existing), false, Some("real"));
         assert!(
-            out.contains("prefix = \"real\""),
-            "must insert active prefix: {out}"
+            out.contains("namespace = \"real\""),
+            "must insert active namespace key: {out}"
         );
         assert!(
             out.contains("# prefix = \"old\""),
@@ -339,14 +371,15 @@ mod tests {
 
     #[test]
     fn patch_source_meta_both_flags() {
+        // Both flags: flat-skills and namespace (INIT-11/INIT-12 write behavior).
         let out = patch_source_meta(None, true, Some("mypkg"));
         assert!(
             out.contains("flat-skills = true"),
             "must have flat-skills: {out}"
         );
         assert!(
-            out.contains("prefix = \"mypkg\""),
-            "must have prefix: {out}"
+            out.contains("namespace = \"mypkg\""),
+            "must emit namespace key: {out}"
         );
     }
 

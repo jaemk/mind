@@ -14,7 +14,7 @@
 //! Uninstall is driven by the per-item file registry recorded in the manifest
 //! (`store` + `links`), so it removes exactly what was installed.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::catalog::CatalogItem;
 use crate::error::{ItemKind, MindError, Result};
@@ -39,6 +39,27 @@ pub fn install(
 ) -> Result<InstalledItem> {
     let kind = item.kind;
     let name = item.effective_name();
+
+    // Defense-in-depth: verify the effective name is safe before using it to
+    // build any filesystem paths (NS-28 / UnsafeName). The prefix validator
+    // (`validate_prefix`) and catalog name check (`is_safe_item_name`) already
+    // guard the inputs individually, but this belt-and-suspenders check ensures
+    // that even an unexpected combination cannot yield a traversal name.
+    {
+        use std::path::Component;
+        let effective_safe = !name.is_empty()
+            && !name.contains('\0')
+            && std::path::Path::new(&name).components().all(|c| {
+                !matches!(
+                    c,
+                    Component::RootDir | Component::ParentDir | Component::Prefix(..)
+                )
+            });
+        if !effective_safe {
+            return Err(MindError::UnsafeName { name: name.clone() });
+        }
+    }
+
     let store = paths.store_item(kind, &name);
     let staging = paths.staging_path(kind, &name);
     let backup = paths.backup_path(kind, &name);
@@ -210,12 +231,74 @@ pub fn install(
 
 /// Remove an installed item using its recorded file registry (absolute link
 /// paths across every agent home, then the store copy).
+///
+/// Before removing any path, each one is verified to be lexically under the
+/// expected root (store root for the store copy; a configured lobe for links).
+/// Paths that contain `..` components or fail the `starts_with` check are
+/// skipped with a warning rather than removed (LIFE-44).
 pub fn uninstall(paths: &Paths, item: &InstalledItem) -> Result<()> {
+    let store_root = paths.store_dir();
+    let agent_homes = paths.agent_homes()?;
+
+    // Precompute canonicalized lobe roots once (LIFE-44). Lobe paths may be
+    // stored as relative paths resolved against the cwd at config-load time,
+    // but the manifest records absolute link paths (resolved at install time).
+    // Canonicalization aligns both sides so a legitimate install-from-other-cwd
+    // is not rejected as out-of-bounds.
+    let canonical_roots: Vec<PathBuf> = agent_homes
+        .iter()
+        .map(|h| h.path.canonicalize().unwrap_or_else(|_| h.path.clone()))
+        .collect();
+    let root_refs: Vec<&Path> = canonical_roots.iter().map(|p| p.as_path()).collect();
+
     for link in &item.links {
-        remove_path(Path::new(link))?;
+        let p = Path::new(link);
+        // Canonicalize the link path for the comparison. If the link no longer
+        // exists, fall back to the raw path (it will be absent anyway).
+        let canon_p = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+        if !is_confined_under_any(&canon_p, &root_refs) {
+            // Secondary check: if the stored link IS absolute and contains no
+            // `..` components, allow deletion (the manifest was written by mind
+            // itself and the path is structurally safe even if not under a
+            // currently-configured lobe). This handles the case where a lobe
+            // was removed from config after install.
+            if !p.is_absolute() || p.components().any(|c| c == std::path::Component::ParentDir) {
+                eprintln!(
+                    "mind: warning: skipping removal of '{}' -- path is outside all configured agent homes",
+                    p.display()
+                );
+                continue;
+            }
+        }
+        remove_path(p)?;
     }
-    remove_path(&paths.mind_home.join(&item.store))?;
+    let store_path = paths.mind_home.join(&item.store);
+    if !is_confined_under(&store_path, &store_root) {
+        eprintln!(
+            "mind: warning: skipping removal of '{}' -- path is outside the mind store root",
+            store_path.display()
+        );
+        return Ok(());
+    }
+    remove_path(&store_path)?;
     Ok(())
+}
+
+/// True when `path` is lexically under `root`: `Path::starts_with(root)` is
+/// true AND the path contains no `..` components (which could defeat the
+/// component-by-component check on some edge cases where canonicalization has
+/// not been performed). (LIFE-44)
+fn is_confined_under(path: &Path, root: &Path) -> bool {
+    use std::path::Component;
+    if path.components().any(|c| c == Component::ParentDir) {
+        return false;
+    }
+    path.starts_with(root)
+}
+
+/// True when `path` is confined under at least one of `roots`. (LIFE-44)
+fn is_confined_under_any(path: &Path, roots: &[&Path]) -> bool {
+    roots.iter().any(|root| is_confined_under(path, root))
 }
 
 /// Recreate any missing links for an installed item, pointing at its existing
@@ -1163,6 +1246,61 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ---- LIFE-44: uninstall path confinement checks --------------------------
+
+    #[test]
+    fn is_confined_under_accepts_child_paths() {
+        // spec: LIFE-44
+        let root = std::path::Path::new("/home/user/.mind/store");
+        assert!(
+            is_confined_under(
+                std::path::Path::new("/home/user/.mind/store/skill/review"),
+                root
+            ),
+            "a child of the root must be confined"
+        );
+        assert!(
+            is_confined_under(root, root),
+            "the root itself must be accepted"
+        );
+    }
+
+    #[test]
+    fn is_confined_under_rejects_parent_dir_components() {
+        // spec: LIFE-44 -- a `..` component in the recorded path is a violation
+        // regardless of where the path appears to start with the root.
+        let root = std::path::Path::new("/home/user/.mind/store");
+        // Lexically starts with root but contains `..` -> must be rejected.
+        assert!(
+            !is_confined_under(
+                std::path::Path::new("/home/user/.mind/store/skill/../../../etc/passwd"),
+                root
+            ),
+            "path with .. must be rejected even if it starts with the root"
+        );
+        // A plain `..` relative path must be rejected too.
+        assert!(
+            !is_confined_under(std::path::Path::new("../outside"), root),
+            "relative path with leading .. must be rejected"
+        );
+    }
+
+    #[test]
+    fn is_confined_under_rejects_sibling_paths() {
+        // spec: LIFE-44
+        let root = std::path::Path::new("/home/user/.mind/store");
+        assert!(
+            !is_confined_under(std::path::Path::new("/home/user/.claude/skills/x"), root),
+            "a path outside the root must be rejected"
+        );
+        // A path that is a proper prefix of the root in string terms but not a
+        // child in path-component terms must also be rejected.
+        assert!(
+            !is_confined_under(std::path::Path::new("/home/user/.mind"), root),
+            "a parent of the root must be rejected"
+        );
     }
 
     /// A source tree containing a symlink (e.g. pointing to a secret outside

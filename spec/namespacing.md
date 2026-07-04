@@ -70,6 +70,19 @@ The rest of this document states these rules normatively.
   identity `(source, kind, bare_name)`, so after the switch to `:` it is matched
   by identity and `upgrade`/`introspect` report the move from `p-<bare>` to
   `p:<bare>` as a rename (lifecycle.md), not as an orphan plus a new item.
+- `NS-28` A namespace prefix must be a single safe path component: it must not
+  be empty; must not equal `.` or `..`; must not start with `~`; must not
+  contain a path separator (`/` or `\`), a colon (`:`), a NUL byte, or a
+  control character (U+0000--U+001F or U+007F). Every ingress that accepts a
+  prefix -- `meld --namespace`, `[source].prefix` / `[source].namespace`,
+  `config` -- calls `validate_prefix` before persisting the value. A violation
+  is a structured `UnsafePrefix` error, distinct from the `ReservedPrefix`
+  error for the kind-word/DEC-9 reserved list (NS-25/NS-29).
+- `NS-29` The reserved-kind-word list (NS-25) is permanent and append-only
+  (DEC-9). The following additional words are reserved against plausible future
+  item kinds or CLI subsystem names: `command`, `hook`, `mcp`, `plugin`,
+  `prompt`, `mode`, `output-style`. A prefix equal to any of these is rejected
+  with the same `ReservedPrefix` error as the kind-word list.
 
 ## Collision-triggered namespace prompt
 

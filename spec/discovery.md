@@ -53,6 +53,10 @@ super-source on top of the manifest (MKT-15, MKT-16). See
   breaks; the chomping indicator (`-` strip, `+` keep, none clip) governs trailing
   newlines. The result is trimmed for display in `recall`/`probe`. Other nested
   structures and flow collections remain uninterpreted.
+- `DSC-23` The frontmatter reader strips a leading UTF-8 BOM (`\xEF\xBB\xBF`,
+  U+FEFF) from the file text before checking for the `---` opening delimiter.
+  A file authored on Windows or by an editor that emits a BOM still has its
+  frontmatter read correctly.
 
 ## mind.toml
 
@@ -446,3 +450,24 @@ field lets the curator opt in to named handling.
   primary source with at least one of its own items, or with at least one nested source that
   registered, succeeds (exit 0). The primary/top-level source's own clone failure is a hard
   error regardless (unchanged).
+
+## Glob confinement and name safety
+
+- `DSC-81` A `[discover]` glob pattern must be a relative path: a pattern that
+  is absolute or contains a `..` path component is rejected at `mind.toml` parse
+  time with a `MindToml` error. Every filesystem path produced by expanding a
+  `[discover]` glob is canonicalized and checked to lie within the clone root; a
+  match outside the root is an error (mirrors the DSC-73 treatment of explicit
+  `[[items]]` paths). Glob-discovered item names are validated with the same
+  safe-component rule as `[[items]]` names (DSC-71): an empty, `.`, `..`, or
+  separator-bearing name is rejected with a `MindToml` error.
+
+## `[source].namespace`
+
+- `DSC-82` The `[source]` table accepts both `namespace` and `prefix` for the
+  namespace prefix field. Both keys name the same field; `namespace` is the
+  canonical key (written by `init-source` per INIT-11, matching the nested-entry
+  key per DSC-78 and the `--namespace` flag per CLI-159) and `prefix` stays
+  accepted indefinitely as a deprecated parse alias. When a `mind.toml` carries
+  `prefix =` and is rewritten by `init-source`, the `prefix =` line is replaced
+  with `namespace =` so only one key is present after the update.

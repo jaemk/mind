@@ -84,7 +84,10 @@ pub struct SourceMeta {
     /// the source declares no hook.
     pub install: Option<String>,
     /// Namespace prefix applied to every item from this source (see
-    /// [`crate::namespace`]). A consumer `meld --as` overrides it.
+    /// [`crate::namespace`]). A consumer `meld --namespace` overrides it.
+    /// `namespace` is the canonical key; the legacy `prefix` spelling still
+    /// parses as a deprecated alias (DSC-82).
+    #[serde(rename = "namespace", alias = "prefix")]
     pub prefix: Option<String>,
     /// The minimum `mind` version this repo expects. Enforced at scan/meld time:
     /// a source requiring a newer `mind` than the one running is rejected (see
@@ -486,6 +489,47 @@ impl Discover {
 /// binary's version string (from the build environment) may carry a
 /// pre-release segment (e.g. `0.2.0-rc1`); such a segment compares as 0
 /// in [`version_at_least`] only.
+/// Validate every glob pattern in a `[discover]` section (DSC-81): patterns
+/// must be relative (no leading `/` or `~`) and must not contain `..` components.
+/// Called at parse time in [`MindToml::load`].
+fn validate_discover_patterns(discover: &Discover, toml_path: &Path) -> Result<()> {
+    let all_globs: Vec<&str> = discover
+        .skills
+        .include
+        .iter()
+        .chain(discover.skills.exclude.iter())
+        .chain(discover.agents.include.iter())
+        .chain(discover.agents.exclude.iter())
+        .chain(discover.rules.include.iter())
+        .chain(discover.rules.exclude.iter())
+        .chain(discover.tools.include.iter())
+        .chain(discover.tools.exclude.iter())
+        .map(String::as_str)
+        .collect();
+
+    for pattern in all_globs {
+        let pp = std::path::Path::new(pattern);
+        if pp.is_absolute() || pattern.starts_with('~') {
+            return Err(MindError::MindToml {
+                path: toml_path.to_path_buf(),
+                msg: format!(
+                    "discover glob '{pattern}' is absolute; globs must be relative to the repo root"
+                ),
+            });
+        }
+        use std::path::Component;
+        if pp.components().any(|c| c == Component::ParentDir) {
+            return Err(MindError::MindToml {
+                path: toml_path.to_path_buf(),
+                msg: format!(
+                    "discover glob '{pattern}' contains '..'; globs must not escape the repo root"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn validate_version_string(val: &str, field: &str, path: &Path) -> Result<()> {
     let bad = |reason: &str| {
         Err(MindError::MindToml {
@@ -555,6 +599,12 @@ impl MindToml {
                 // effective-prefix resolution.
                 if let Some(p) = &parsed.source.prefix {
                     crate::namespace::validate_prefix(p)?;
+                }
+                // spec: DSC-81 — validate [discover] glob patterns at parse time:
+                // reject absolute patterns and patterns with `..` components before
+                // they can reach `glob_paths` and the filesystem.
+                if let Some(discover) = &parsed.discover {
+                    validate_discover_patterns(discover, &file)?;
                 }
                 Ok(Some(parsed))
             }
@@ -2534,6 +2584,98 @@ mod tests {
         assert_eq!(
             cfg.message.as_deref(),
             Some("Configure credentials: https://example.com/auth")
+        );
+    }
+
+    // ---- DSC-81: [discover] glob confinement at parse time -------------------
+
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static MINDFILE_N: AtomicU32 = AtomicU32::new(0);
+
+    fn make_tmp_root() -> std::path::PathBuf {
+        let n = MINDFILE_N.fetch_add(1, Ordering::SeqCst);
+        let p = std::env::temp_dir().join(format!("mind-mindfile-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn discover_glob_absolute_pattern_is_rejected_at_load() {
+        // spec: DSC-81 -- an absolute discover glob is rejected when the
+        // mind.toml is loaded, before any filesystem glob expansion.
+        let root = make_tmp_root();
+        std::fs::write(
+            root.join("mind.toml"),
+            "[discover]\nagents = { include = [\"/etc/*.md\"] }\n",
+        )
+        .unwrap();
+        let err = MindToml::load(&root).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("absolute"),
+            "error must mention 'absolute': {msg}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn discover_glob_parent_dir_pattern_is_rejected_at_load() {
+        // spec: DSC-81 -- a `..` component in a discover glob is rejected at load.
+        let root = make_tmp_root();
+        std::fs::write(
+            root.join("mind.toml"),
+            "[discover]\nskills = { include = [\"../other-repo/skills/*/SKILL.md\"] }\n",
+        )
+        .unwrap();
+        let err = MindToml::load(&root).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains(".."), "error must mention '..': {msg}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn discover_glob_exclude_absolute_pattern_is_rejected_at_load() {
+        // spec: DSC-81 -- the confinement check also applies to exclude patterns.
+        let root = make_tmp_root();
+        std::fs::write(
+            root.join("mind.toml"),
+            "[discover]\nagents = { include = [\"agents/*.md\"], exclude = [\"/tmp/*.md\"] }\n",
+        )
+        .unwrap();
+        let err = MindToml::load(&root).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("absolute"),
+            "error must mention 'absolute': {msg}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ---- DSC-82: `namespace` as alias for `prefix` in [source] ---------------
+
+    #[test]
+    fn source_prefix_parses_via_namespace_alias() {
+        // spec: DSC-82 -- [source].namespace is an accepted alias for [source].prefix
+        // at the serde level, so repos that use the new canonical key still parse.
+        let toml = "[source]\nnamespace = \"jk\"\n";
+        let parsed: MindToml = toml::from_str(toml).expect("parse");
+        assert_eq!(
+            parsed.source.prefix.as_deref(),
+            Some("jk"),
+            "namespace alias must populate the prefix field: {parsed:?}"
+        );
+    }
+
+    #[test]
+    fn source_prefix_parses_via_legacy_prefix_key() {
+        // spec: DSC-82 -- the existing `prefix` key still works for backwards compat.
+        let toml = "[source]\nprefix = \"jk\"\n";
+        let parsed: MindToml = toml::from_str(toml).expect("parse");
+        assert_eq!(
+            parsed.source.prefix.as_deref(),
+            Some("jk"),
+            "legacy prefix key must still work: {parsed:?}"
         );
     }
 }

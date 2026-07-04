@@ -82,6 +82,14 @@ agent homes (a store-only tool is not linked; tooling.md TOOL-3).
 - `LIFE-20` Uninstall removes exactly the paths in the item's file registry (its
   links, then its store copy), then deletes the manifest entry.
 - `LIFE-21` Removing a path that is already absent is not an error.
+- `LIFE-44` Before removing any path from the file registry, `uninstall`
+  verifies that each store path is lexically under the mind store root
+  (`<mind_home>/store`) and that each link path is lexically under one of the
+  configured agent home (lobe) roots. A path that does not satisfy this check is
+  skipped with a stderr warning naming the path; it is not removed. `..`
+  components in a recorded path are treated as a violation regardless of the
+  apparent `starts_with` result. This prevents a doctored manifest from causing
+  `forget` to delete files outside mind's ownership.
 
 ## Drift (introspect)
 

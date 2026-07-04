@@ -1274,21 +1274,34 @@ fn scan_marketplace_in_repo_plugins(
                 None => {
                     // Outer prefix explicitly cleared (namespace=""); per-plugin prefix
                     // (entry name) is still intact per MKT-13.
-                    // Resilience (NS-25): fall back to no prefix when entry name is
-                    // reserved or empty rather than making the entry un-installable.
-                    match namespace::validate_prefix(&entry_name) {
-                        Ok(()) if !entry_name.is_empty() => Some(entry_name.clone()),
-                        _ => None,
+                    // Resilience (NS-25/NS-28): fall back to no prefix when entry name is
+                    // a reserved kind word or not a safe path component, rather than making
+                    // the entry un-installable.  Note: we use is_safe_prefix_component here
+                    // rather than validate_prefix because the NS-29 extended reserved list
+                    // is a gate for user-supplied prefixes only; auto-generated names from
+                    // marketplace entry names (e.g. "plugin") must remain usable.
+                    if !entry_name.is_empty()
+                        && namespace::is_safe_prefix_component(&entry_name)
+                        && !matches!(entry_name.as_str(), "skill" | "agent" | "rule" | "tool")
+                    {
+                        Some(entry_name.clone())
+                    } else {
+                        None
                     }
                 }
             }
         } else {
             // No override; use entry name as default namespace prefix (MKT-8).
-            // Resilience (NS-25): fall back to no prefix when entry name is reserved
-            // or empty rather than making the entry un-installable.
-            match namespace::validate_prefix(&entry_name) {
-                Ok(()) if !entry_name.is_empty() => Some(entry_name.clone()),
-                _ => None,
+            // Resilience (NS-25/NS-28): same rationale as above -- use the
+            // is_safe_prefix_component check rather than the full validate_prefix so
+            // that NS-29 words (e.g. "plugin") remain valid auto-generated prefixes.
+            if !entry_name.is_empty()
+                && namespace::is_safe_prefix_component(&entry_name)
+                && !matches!(entry_name.as_str(), "skill" | "agent" | "rule" | "tool")
+            {
+                Some(entry_name.clone())
+            } else {
+                None
             }
         };
 
@@ -1405,6 +1418,31 @@ fn strip_ansi(s: &str) -> String {
 
 /// Expand a glob pattern rooted at `root`, returning sorted matches.
 fn glob_paths(root: &Path, pattern: &str) -> Result<Vec<PathBuf>> {
+    // spec: DSC-81 -- confinement of [discover] globs to the clone root.
+    // Reject absolute patterns and patterns with `..` components up front,
+    // before the glob expands and before any filesystem access.
+    {
+        let pp = Path::new(pattern);
+        if pp.is_absolute() || pattern.starts_with('~') {
+            return Err(MindError::MindToml {
+                path: root.join("mind.toml"),
+                msg: format!(
+                    "discover glob '{pattern}' is absolute; globs must be relative to the repo root"
+                ),
+            });
+        }
+        use std::path::Component;
+        if pp.components().any(|c| c == Component::ParentDir) {
+            return Err(MindError::MindToml {
+                path: root.join("mind.toml"),
+                msg: format!(
+                    "discover glob '{pattern}' contains '..'; globs must not escape the repo root"
+                ),
+            });
+        }
+    }
+
+    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let joined = root.join(pattern);
     let full = joined.to_string_lossy();
     let paths = glob::glob(&full).map_err(|e| MindError::MindToml {
@@ -1414,7 +1452,38 @@ fn glob_paths(root: &Path, pattern: &str) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     for entry in paths {
         match entry {
-            Ok(p) => out.push(p),
+            Ok(p) => {
+                // spec: DSC-81 -- canonicalize each match and verify it stays
+                // within the clone root. A symlink that points outside the root
+                // would pass a lexical `starts_with` but fail after canonicalization.
+                let canonical = p.canonicalize().unwrap_or_else(|_| p.clone());
+                if !canonical.starts_with(&canonical_root) {
+                    return Err(MindError::MindToml {
+                        path: root.join("mind.toml"),
+                        msg: format!(
+                            "discover glob '{pattern}' matched '{}' which is outside the repo root",
+                            p.display()
+                        ),
+                    });
+                }
+                // Derive the item name from the matched path and verify it is safe.
+                let item_name = p
+                    .file_stem()
+                    .or_else(|| p.file_name())
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                if !is_safe_item_name(&item_name) {
+                    return Err(MindError::MindToml {
+                        path: root.join("mind.toml"),
+                        msg: format!(
+                            "discover glob '{pattern}' matched '{}' whose derived name '{}' is unsafe",
+                            p.display(),
+                            item_name
+                        ),
+                    });
+                }
+                out.push(p);
+            }
             Err(e) => {
                 let path = e.path().to_path_buf();
                 return Err(MindError::io(path, e.into_error()));
@@ -2654,6 +2723,51 @@ mod tests {
         let mut item = agent_item(p, "review");
         item.kind = ItemKind::Skill;
         assert_eq!(item.agent_harness_name(), None);
+    }
+
+    // ---- DSC-81: [discover] glob confinement --------------------------------
+
+    #[test]
+    fn glob_paths_rejects_absolute_pattern() {
+        // spec: DSC-81 -- an absolute pattern in [discover] must be rejected at
+        // parse time, before any filesystem access.
+        let tmp = TmpDir::new();
+        let root = tmp.path();
+        let err = glob_paths(root, "/etc/passwd").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("absolute"),
+            "error must mention 'absolute': {msg}"
+        );
+    }
+
+    #[test]
+    fn glob_paths_rejects_parent_dir_in_pattern() {
+        // spec: DSC-81 -- a `..` component in the pattern must be rejected before
+        // any filesystem access, preventing escape from the clone root.
+        let tmp = TmpDir::new();
+        let root = tmp.path();
+        let err = glob_paths(root, "../outside/*.md").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains(".."), "error must mention '..': {msg}");
+    }
+
+    #[test]
+    fn glob_paths_accepts_normal_relative_pattern() {
+        // spec: DSC-81 -- a normal relative glob must be accepted and match files
+        // within the root.
+        let tmp = TmpDir::new();
+        let root = tmp.path();
+        write_file(
+            &root.join("agents/coder.md"),
+            "---\ndescription: coder\n---\n",
+        );
+        let matches = glob_paths(root, "agents/*.md").unwrap();
+        assert_eq!(matches.len(), 1, "should find one match: {matches:?}");
+        assert!(
+            matches[0].ends_with("coder.md"),
+            "matched the wrong file: {matches:?}"
+        );
     }
 }
 

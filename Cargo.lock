@@ -842,6 +842,7 @@ dependencies = [
  "ratatui",
  "serde",
  "serde_json",
+ "sha2",
  "strip-ansi-escapes",
  "thiserror 2.0.18",
  "toml",

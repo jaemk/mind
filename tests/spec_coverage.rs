@@ -90,6 +90,10 @@ const ALLOWLIST: &[&str] = &[
     //   (CLI-143) need a real release and a writable install path, so they cannot
     //   run headlessly and stay allowlisted.
     "CLI-142", "CLI-143",
+    //   evolve locking (STO-46) is cited from src/selfupdate.rs: the lock
+    //   acquisition site carries the citation; the serialization behavior itself
+    //   needs two concurrent processes and a real binary swap, so it has no
+    //   dedicated headless test.
     //   install hooks (source-declared or user-supplied build command gated by a
     //   safety prompt; see spec/install-hooks.md) is fully cited: the core
     //   (parse/resolve/disclosure/run) from src/hook.rs, the data/error/parse

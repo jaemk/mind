@@ -36,7 +36,12 @@ pub fn file_field(file: &Path, key: &str) -> Option<String> {
 }
 
 /// Extract a top-level scalar `key` from the leading frontmatter block.
+///
+/// A UTF-8 BOM (`\u{FEFF}`) at the start of the text is stripped before the
+/// `---` delimiter check (DSC-23).
 pub fn field(text: &str, key: &str) -> Option<String> {
+    // spec: DSC-23 -- strip a utf-8 BOM (U+FEFF) before the delimiter check.
+    let text = text.strip_prefix('\u{FEFF}').unwrap_or(text);
     let mut lines = text.lines().peekable();
     // The very first line must be the opening delimiter.
     if lines.next()?.trim() != "---" {
@@ -515,5 +520,28 @@ mod tests {
         assert_eq!(result, "> extra words");
         assert!(parse_block_indicator("> extra words").is_none());
         assert!(parse_block_indicator(">x").is_none());
+    }
+
+    // ---- DSC-23: UTF-8 BOM stripping ----------------------------------------
+
+    #[test]
+    fn bom_before_delimiter_is_stripped_and_field_is_read() {
+        // spec: DSC-23 -- a utf-8 BOM (U+FEFF) immediately before the opening
+        // `---` must be stripped so the frontmatter is still recognized.
+        let bom = "\u{FEFF}";
+        let t = format!("{bom}---\ndescription: BOM test\n---\n");
+        let result = field(&t, "description");
+        assert_eq!(
+            result.as_deref(),
+            Some("BOM test"),
+            "BOM before frontmatter delimiter must be stripped and field read"
+        );
+    }
+
+    #[test]
+    fn no_bom_works_normally() {
+        // spec: DSC-23 -- files without a BOM must still be parsed correctly.
+        let t = "---\ndescription: no bom\n---\n";
+        assert_eq!(field(t, "description").as_deref(), Some("no bom"));
     }
 }

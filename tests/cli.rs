@@ -550,11 +550,11 @@ fn init_source_reports_refs_scaffolds_toml_and_templates() {
         r.stdout
     );
     // INIT-3: a mind.toml is scaffolded when absent, with a `[source]` table and
-    // a commented-out generic prefix example whose value matches its comment.
+    // a commented-out generic namespace example whose value matches its comment.
     let scaffold = std::fs::read_to_string(repo.join("mind.toml")).unwrap();
     assert!(
-        scaffold.contains("[source]") && scaffold.contains("# prefix = \"prefix\""),
-        "scaffold must carry a [source] table and a generic commented prefix: {scaffold}"
+        scaffold.contains("[source]") && scaffold.contains("# namespace = \"prefix\""),
+        "scaffold must carry a [source] table and a generic commented namespace: {scaffold}"
     );
     // INIT-6: init-source registers nothing (no store state).
     assert!(
@@ -17869,11 +17869,11 @@ fn init_source_marketplace_namespace_flag_overrides() {
     assert_eq!(v["name"], "foo", "name must be the --namespace value");
     assert_eq!(v["plugins"][0]["name"], "foo", "plugin entry name");
 
-    // mind.toml must carry prefix = "foo" (INIT-11).
+    // mind.toml must carry namespace = "foo" (INIT-11, DSC-82 write key).
     let toml = std::fs::read_to_string(repo.join("mind.toml")).unwrap();
     assert!(
-        toml.contains("prefix = \"foo\""),
-        "mind.toml must carry prefix = \"foo\": {toml}"
+        toml.contains("namespace = \"foo\""),
+        "mind.toml must carry namespace = \"foo\": {toml}"
     );
 }
 
@@ -18020,9 +18020,10 @@ fn init_source_flat_skills_marketplace_skills_array() {
 }
 
 #[test]
-fn init_source_namespace_writes_prefix() {
+fn init_source_namespace_writes_namespace_key() {
     // spec: INIT-11 INIT-12
-    // --namespace bar writes prefix = "bar" to mind.toml (creating it if absent).
+    // --namespace bar writes namespace = "bar" to mind.toml (creating it if
+    // absent; DSC-82 write key).
     let sb = Sandbox::new();
     let repo = sb.base.join("ns-test");
     write(
@@ -18035,8 +18036,8 @@ fn init_source_namespace_writes_prefix() {
 
     let toml = std::fs::read_to_string(repo.join("mind.toml")).unwrap();
     assert!(
-        toml.contains("prefix = \"bar\""),
-        "mind.toml must have prefix = \"bar\": {toml}"
+        toml.contains("namespace = \"bar\""),
+        "mind.toml must have namespace = \"bar\": {toml}"
     );
     // Other scaffold content is preserved.
     assert!(
@@ -18113,8 +18114,8 @@ fn init_source_namespace_updates_existing_mindtoml() {
     assert!(r.success, "case A failed: {} {}", r.stdout, r.stderr);
     let toml_a = std::fs::read_to_string(repo_a.join("mind.toml")).unwrap();
     assert!(
-        toml_a.contains("prefix = \"mypkg\""),
-        "case A: prefix must be inserted: {toml_a}"
+        toml_a.contains("namespace = \"mypkg\""),
+        "case A: namespace must be inserted: {toml_a}"
     );
     assert!(
         toml_a.contains("description = \"my source\""),
@@ -18140,12 +18141,12 @@ fn init_source_namespace_updates_existing_mindtoml() {
     assert!(r.success, "case B failed: {} {}", r.stdout, r.stderr);
     let toml_b = std::fs::read_to_string(repo_b.join("mind.toml")).unwrap();
     assert!(
-        toml_b.contains("prefix = \"new\""),
-        "case B: prefix must be updated to new: {toml_b}"
+        toml_b.contains("namespace = \"new\""),
+        "case B: namespace must be updated to new: {toml_b}"
     );
     assert!(
         !toml_b.contains("prefix = \"old\""),
-        "case B: old prefix must be gone: {toml_b}"
+        "case B: old prefix key must be gone: {toml_b}"
     );
     assert!(
         toml_b.contains("description = \"my source\""),
@@ -18191,15 +18192,15 @@ fn init_source_namespace_overrides_existing_prefix_in_marketplace() {
         "description from existing mind.toml must be preserved: {content}"
     );
 
-    // mind.toml must have the prefix updated to "new".
+    // mind.toml must have the namespace updated to "new" (DSC-82 write key).
     let toml = std::fs::read_to_string(repo.join("mind.toml")).unwrap();
     assert!(
-        toml.contains("prefix = \"new\""),
-        "mind.toml prefix must be updated to 'new': {toml}"
+        toml.contains("namespace = \"new\""),
+        "mind.toml namespace must be updated to 'new': {toml}"
     );
     assert!(
         !toml.contains("prefix = \"old\""),
-        "old prefix must no longer be present: {toml}"
+        "old prefix key must no longer be present: {toml}"
     );
 }
 

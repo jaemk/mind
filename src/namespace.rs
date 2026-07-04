@@ -170,18 +170,84 @@ pub fn prefix_choice(answer: &str) -> Option<String> {
     }
 }
 
-/// Validate that `prefix` is safe to use as a namespace prefix (NS-25).
+/// Extended reserved prefix words (NS-29 / DEC-9): plausible future item-kind
+/// or CLI-subsystem names that are banned pre-emptively.
+const EXTRA_RESERVED: &[&str] = &[
+    "command",
+    "hook",
+    "mcp",
+    "plugin",
+    "prompt",
+    "mode",
+    "output-style",
+];
+
+/// Return `true` when `prefix` passes the NS-28 path-safety requirement.
 ///
-/// Rejects any prefix that is also a reserved item-kind word (`skill`, `agent`,
-/// `rule`, `tool`): such a prefix would make `prefix:name` indistinguishable
-/// from a kind-qualified item ref and break ref parsing. An empty prefix is
-/// always accepted (it means "no prefix in effect" and is handled by [`apply`]).
+/// This is the low-level guard used by `validate_prefix` and by catalog code
+/// that auto-generates a prefix from an untrusted name (e.g. a marketplace entry
+/// name). Unlike `validate_prefix` it does **not** enforce the NS-25/NS-29
+/// reserved-word lists: auto-generated prefixes originate from structured
+/// content (not user input at a CLI/config ingress) and legitimate names like
+/// `"plugin"` must remain usable.
 ///
-/// This is the single chokepoint for the NS-25 constraint: every code path that
-/// accepts a user-supplied prefix (meld `--as`, `[source].prefix`, config) must
-/// call this before storing the value.
+/// A safe prefix must not be empty, `.`, or `..`; must not start with `~`; and
+/// must not contain `/`, `\`, `:`, NUL, or any ASCII control character (0x00-0x1F
+/// or 0x7F).  The Path component check is belt-and-suspenders: it rejects anything
+/// the byte-level scan would miss on unusual platforms.
+pub(crate) fn is_safe_prefix_component(prefix: &str) -> bool {
+    if prefix.is_empty() || prefix == "." || prefix == ".." {
+        return false;
+    }
+    if prefix.starts_with('~') {
+        return false;
+    }
+    for b in prefix.bytes() {
+        // Control characters and DEL.
+        if b < 0x20 || b == 0x7f {
+            return false;
+        }
+        // Path separators and the namespace colon separator.
+        if b == b'/' || b == b'\\' || b == b':' || b == b'\0' {
+            return false;
+        }
+    }
+    // Belt-and-suspenders: exactly one Normal path component.
+    let mut comps = std::path::Path::new(prefix).components();
+    matches!(comps.next(), Some(std::path::Component::Normal(_))) && comps.next().is_none()
+}
+
+/// Validate that `prefix` is safe to use as a namespace prefix (NS-25, NS-28, NS-29).
+///
+/// Rejects any prefix that:
+/// - is a reserved item-kind word (`skill`, `agent`, `rule`, `tool`; NS-25), or
+/// - is in the extended DEC-9 reserved list (NS-29), or
+/// - is not a single safe path component (NS-28).
+///
+/// An empty prefix is always accepted -- it means "no prefix in effect" and is
+/// handled by [`apply`].
+///
+/// This is the single chokepoint: every code path that accepts a user-supplied
+/// prefix (`meld --namespace`, `[source].prefix`, config) must call this before
+/// persisting the value.
 pub fn validate_prefix(prefix: &str) -> crate::error::Result<()> {
-    if !prefix.is_empty() && crate::error::ItemKind::parse(prefix).is_some() {
+    if prefix.is_empty() {
+        return Ok(());
+    }
+    // NS-28: must be a single safe path component.
+    if !is_safe_prefix_component(prefix) {
+        return Err(crate::error::MindError::UnsafePrefix {
+            prefix: prefix.to_string(),
+        });
+    }
+    // NS-25: reject reserved item-kind words.
+    if crate::error::ItemKind::parse(prefix).is_some() {
+        return Err(crate::error::MindError::ReservedPrefix {
+            prefix: prefix.to_string(),
+        });
+    }
+    // NS-29: reject extended DEC-9 reserved words.
+    if EXTRA_RESERVED.contains(&prefix) {
         return Err(crate::error::MindError::ReservedPrefix {
             prefix: prefix.to_string(),
         });
@@ -1165,6 +1231,42 @@ mod tests {
         );
         // Empty is fine: it means "no prefix in effect".
         assert!(validate_prefix("").is_ok(), "empty must be accepted");
+    }
+
+    #[test]
+    fn validate_prefix_rejects_path_traversal_and_separators() {
+        // spec: NS-28 -- a prefix with path traversal, separators, or control
+        // characters is unsafe and must be rejected with UnsafePrefix.
+        for bad in [
+            "../evil", "..", ".", "a/b", "a\\b", "~home", "a:b", "a\x00b",
+        ] {
+            let err = validate_prefix(bad).unwrap_err();
+            assert!(
+                matches!(err, crate::error::MindError::UnsafePrefix { .. }),
+                "expected UnsafePrefix for {bad:?}, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_prefix_rejects_extended_reserved_words() {
+        // spec: NS-29 -- future kind words are banned even though they are not
+        // item-kind words (so NS-25 alone would not catch them).
+        for word in [
+            "command",
+            "hook",
+            "mcp",
+            "plugin",
+            "prompt",
+            "mode",
+            "output-style",
+        ] {
+            let err = validate_prefix(word).unwrap_err();
+            assert!(
+                matches!(err, crate::error::MindError::ReservedPrefix { .. }),
+                "expected ReservedPrefix for {word:?}, got {err:?}"
+            );
+        }
     }
 
     // ---- path-reference tokens ({{self}}, {{tools:}}, {{path:}}) -------------
