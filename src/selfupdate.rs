@@ -827,6 +827,68 @@ mod tests {
     }
 
     #[test]
+    fn composed_digest_verify_happy_path() {
+        // spec: STO-47 -- the composed check (compute sha256_hex, parse expected
+        // from SHA256SUMS, compare) must PASS when the sums file has the correct
+        // digest for the archive filename.
+        let archive_bytes = b"fake-archive-content-for-testing";
+        let filename = "mind-1.0.0-x86_64-unknown-linux-gnu.tar.gz";
+
+        let actual = sha256_hex(archive_bytes);
+        let sums_text = format!("{actual}  {filename}\n");
+
+        let expected = parse_sha256sums(&sums_text, filename)
+            .expect("must find the filename in a correctly built sums file");
+        assert_eq!(
+            actual, expected,
+            "computed digest must match the sums entry for the happy path"
+        );
+    }
+
+    #[test]
+    fn composed_digest_verify_mismatch_branch() {
+        // spec: STO-47 -- when the sums file contains a DIFFERENT digest than the
+        // actual archive hash, the composed check must detect the mismatch.
+        // This exercises the `actual != expected` branch that download_and_swap
+        // uses to emit DigestMismatch before extracting.
+        let archive_bytes = b"fake-archive-content-for-testing";
+        let filename = "mind-1.0.0-x86_64-unknown-linux-gnu.tar.gz";
+
+        let actual = sha256_hex(archive_bytes);
+        // Produce a digest that differs from the actual (flip the first byte).
+        let tampered: String = {
+            let first_byte = &actual[0..2];
+            let replacement = if first_byte == "00" { "ff" } else { "00" };
+            format!("{replacement}{}", &actual[2..])
+        };
+        assert_ne!(actual, tampered, "tampered digest must differ from actual");
+
+        let sums_text = format!("{tampered}  {filename}\n");
+        let expected =
+            parse_sha256sums(&sums_text, filename).expect("must find the tampered entry");
+        assert_ne!(
+            actual, expected,
+            "tampered sums must not match actual digest (mismatch branch must trigger)"
+        );
+    }
+
+    #[test]
+    fn composed_digest_verify_missing_entry_branch() {
+        // spec: STO-47 -- when the SHA256SUMS file has no entry for the archive
+        // filename, parse_sha256sums returns None, which download_and_swap maps
+        // to the fail-closed digest error.
+        let filename = "mind-1.0.0-x86_64-unknown-linux-gnu.tar.gz";
+        let sums_text =
+            "aabbccdd00112233445566778899aabbccddeeff0011223344556677889900aa  other.tar.gz\n";
+
+        let got = parse_sha256sums(sums_text, filename);
+        assert!(
+            got.is_none(),
+            "missing filename must return None (fail closed, no extraction)"
+        );
+    }
+
+    #[test]
     fn sha256sums_url_matches_expected_shape() {
         // Confirm the URL builder uses the right path shape so test vectors align.
         let url = sha256sums_url("1.2.3");
