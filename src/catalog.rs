@@ -2769,6 +2769,65 @@ mod tests {
             "matched the wrong file: {matches:?}"
         );
     }
+
+    #[test]
+    fn missing_convention_directories_yield_no_items_not_an_error() {
+        // spec: DSC-13
+        // A repo with none of the convention directories (no `skills/`, `agents/`,
+        // `rules/`, or `tools/`) scans without error and produces an empty catalog.
+        // Each missing kind directory is silently treated as empty.
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let clone = base.join("sources/local/test/repo");
+        // Create the repo root with no convention subdirectories.
+        std::fs::create_dir_all(&clone).unwrap();
+        write_file(&clone.join("README.md"), "# empty repo\n");
+
+        let paths = paths_for(base);
+        let source = make_source_for(&clone);
+        let mut items = Vec::new();
+        let result = scan_source(&paths, &source, &mut items);
+        assert!(
+            result.is_ok(),
+            "scan_source must not error when convention directories are absent (DSC-13): {result:?}"
+        );
+        assert!(
+            items.is_empty(),
+            "no items must be discovered when convention directories are absent (DSC-13): {items:?}"
+        );
+    }
+
+    #[test]
+    fn missing_individual_convention_directories_yield_no_items_for_that_kind() {
+        // spec: DSC-13
+        // Only a subset of the convention directories is present; the missing ones
+        // each yield no items (not an error) and the present ones are scanned normally.
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let clone = base.join("sources/local/test/repo");
+
+        // Only `agents/` exists; `skills/`, `rules/`, and `tools/` are absent.
+        write_file(
+            &clone.join("agents/helper.md"),
+            "---\ndescription: helper\n---\n# helper\n",
+        );
+
+        let paths = paths_for(base);
+        let source = make_source_for(&clone);
+        let mut items = Vec::new();
+        let result = scan_source(&paths, &source, &mut items);
+        assert!(
+            result.is_ok(),
+            "scan_source must not error when only some convention directories exist (DSC-13): {result:?}"
+        );
+        let kinds: Vec<_> = items.iter().map(|i| i.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![ItemKind::Agent],
+            "only the agent from the present agents/ dir must be discovered; \
+             missing skill/rule/tool dirs must not cause an error (DSC-13): {items:?}"
+        );
+    }
 }
 
 /// Plugin-manifest discovery tests (MKT-1..6).

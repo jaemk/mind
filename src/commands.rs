@@ -2200,12 +2200,15 @@ pub enum Clobber {
 
 /// The install-time options that travel together through the learn/meld chain:
 /// whether to skip confirmation (`yes`), how to treat an occupied link target
-/// (`clobber`), and whether to run install hooks unattended (`dangerously_skip`).
+/// (`clobber`), whether to run item install/uninstall hooks unattended
+/// (`dangerously_skip`), and whether to run item build hooks unattended
+/// (`dangerously_skip_build`, HOOK-74).
 #[derive(Clone, Copy)]
 pub struct InstallFlow {
     pub yes: bool,
     pub clobber: Clobber,
     pub dangerously_skip: bool,
+    pub dangerously_skip_build: bool,
 }
 
 pub fn learn(paths: &Paths, item_ref: &str, dry_run: bool, flow: InstallFlow) -> Result<()> {
@@ -2213,6 +2216,7 @@ pub fn learn(paths: &Paths, item_ref: &str, dry_run: bool, flow: InstallFlow) ->
         yes,
         clobber,
         dangerously_skip,
+        dangerously_skip_build,
     } = flow;
     // POL-3: load the managed policy once (fail closed on Err; None = inert).
     let policy = Policy::load()?;
@@ -2315,7 +2319,15 @@ pub fn learn(paths: &Paths, item_ref: &str, dry_run: bool, flow: InstallFlow) ->
         }
         let siblings = siblings_of(&items, &target.source);
         let force = clobber == Clobber::Force;
-        let mut result = install_item(paths, target, &commit, &siblings, force, dangerously_skip);
+        let mut result = install_item(
+            paths,
+            target,
+            &commit,
+            &siblings,
+            force,
+            dangerously_skip,
+            dangerously_skip_build,
+        );
         // CLI-34: a conflicting (non-mind) target refuses by default. With
         // `Prompt` (the default `learn`), offer to overwrite it on a TTY; on a
         // yes, retry forced. `install` aborts before touching anything on a
@@ -2329,7 +2341,15 @@ pub fn learn(paths: &Paths, item_ref: &str, dry_run: bool, flow: InstallFlow) ->
             result = if confirm(&format!(
                 "{path} exists and is not managed by mind; overwrite it?"
             ))? {
-                install_item(paths, target, &commit, &siblings, true, dangerously_skip)
+                install_item(
+                    paths,
+                    target,
+                    &commit,
+                    &siblings,
+                    true,
+                    dangerously_skip,
+                    dangerously_skip_build,
+                )
             } else {
                 Err(MindError::LinkOccupied { path })
             };
@@ -2382,6 +2402,7 @@ fn learn_collecting(paths: &Paths, item_ref: &str, flow: InstallFlow) -> Result<
     let InstallFlow {
         clobber,
         dangerously_skip,
+        dangerously_skip_build,
         ..
     } = flow;
     let policy = Policy::load()?;
@@ -2428,7 +2449,15 @@ fn learn_collecting(paths: &Paths, item_ref: &str, flow: InstallFlow) -> Result<
         }
         let siblings = siblings_of(&items, &target.source);
         let force = clobber == Clobber::Force;
-        let result = install_item(paths, target, &commit, &siblings, force, dangerously_skip);
+        let result = install_item(
+            paths,
+            target,
+            &commit,
+            &siblings,
+            force,
+            dangerously_skip,
+            dangerously_skip_build,
+        );
         match result {
             Ok(installed) => {
                 installed_keys.push(installed.key());
@@ -3053,7 +3082,9 @@ fn colliding_install(targets: &[&CatalogItem]) -> Option<(String, Vec<String>)> 
 /// Install one item, then run its install hook (HOOK-81) as the final step. On a
 /// hook failure, roll the just-installed item back (remove its links and store
 /// copy via the file registry) so it is left not installed, then propagate the
-/// error. `dangerously_skip` runs the hook unattended (HOOK-83).
+/// error. `dangerously_skip` runs item install/uninstall hooks unattended
+/// (HOOK-83); `dangerously_skip_build` runs the item's build hook unattended
+/// (HOOK-74).
 fn install_item(
     paths: &Paths,
     item: &CatalogItem,
@@ -3061,8 +3092,9 @@ fn install_item(
     siblings: &[CatalogItem],
     force: bool,
     dangerously_skip: bool,
+    dangerously_skip_build: bool,
 ) -> Result<crate::manifest::InstalledItem> {
-    let installed = install::install(paths, item, commit, siblings, force)?;
+    let installed = install::install(paths, item, commit, siblings, force, dangerously_skip_build)?;
     // HOOK-86: run every resolved install hook in declaration order (the scalar
     // shorthand is folded in as the first required hook). On a hook failure, roll
     // the just-installed item back.
@@ -3427,6 +3459,7 @@ pub fn absorb(
         yes: true,               // already confirmed above
         clobber: Clobber::Force, // stray lobe copies handled by Force
         dangerously_skip: false,
+        dangerously_skip_build: false,
     };
     let learn_err: Result<()> = if out.json {
         learn_collecting(paths, &qualified_ref, learn_flow).map(|_| ())
@@ -3862,14 +3895,20 @@ fn forget_unmanaged_bulk(paths: &Paths, item_ref: Option<&str>, yes: bool) -> Re
     Ok(())
 }
 
-/// `mind sync [--upgrade] [--dangerously-skip-install-hook-check]` — fetch every
-/// source and refresh its recorded commit. With `--upgrade`, an `upgrade` pass
-/// runs after the refresh (reporting pending upgrades and prompting before
-/// applying, exactly like `mind upgrade`), so one command both fetches upstream
-/// and applies pending upgrades. `dangerously_skip_hook_check` is forwarded to
-/// the `upgrade` pass so install-hook re-runs can run unattended in CI (HOOK-11,
-/// HOOK-23); it is unused when `--upgrade` is absent.
-pub fn sync(paths: &Paths, then_upgrade: bool, dangerously_skip_hook_check: bool) -> Result<()> {
+/// `mind sync [--upgrade] [--dangerously-skip-install-hook-check]
+/// [--dangerously-skip-build-hook-check]` — fetch every source and refresh its
+/// recorded commit. With `--upgrade`, an `upgrade` pass runs after the refresh
+/// (reporting pending upgrades and prompting before applying, exactly like
+/// `mind upgrade`), so one command both fetches upstream and applies pending
+/// upgrades. Both `dangerously_skip_hook_check` and
+/// `dangerously_skip_build_hook_check` are forwarded to the `upgrade` pass so
+/// hooks can run unattended in CI; they are unused when `--upgrade` is absent.
+pub fn sync(
+    paths: &Paths,
+    then_upgrade: bool,
+    dangerously_skip_hook_check: bool,
+    dangerously_skip_build_hook_check: bool,
+) -> Result<()> {
     let out = crate::render::ctx();
     // POL-3: load the managed policy once (fail closed on Err; None = inert).
     let policy = Policy::load()?;
@@ -4210,7 +4249,13 @@ pub fn sync(paths: &Paths, then_upgrade: bool, dangerously_skip_hook_check: bool
     if then_upgrade {
         // spec: HOOK-11, HOOK-23 - sync already done above; use upgrade_no_sync
         // to avoid a redundant fetch. Deprecated: prefer `mind upgrade` (CLI-169).
-        upgrade_no_sync(paths, false, None, dangerously_skip_hook_check)?;
+        upgrade_no_sync(
+            paths,
+            false,
+            None,
+            dangerously_skip_hook_check,
+            dangerously_skip_build_hook_check,
+        )?;
     }
     Ok(())
 }
@@ -4293,15 +4338,22 @@ fn sync_sources_for_upgrade(
 
 /// `mind upgrade [--yes] [item]` — report and optionally apply upgrades.
 ///
-/// Syncs first by default (CLI-169). Kept as the 4-arg public entry point so
-/// callers that pre-date `no_sync` (e.g. the TUI) continue to compile unchanged.
+/// Syncs first by default (CLI-169).
 pub fn upgrade(
     paths: &Paths,
     yes: bool,
     item_ref: Option<&str>,
     dangerously_skip_hook_check: bool,
+    dangerously_skip_build_hook_check: bool,
 ) -> Result<()> {
-    upgrade_inner(paths, yes, item_ref, false, dangerously_skip_hook_check)
+    upgrade_inner(
+        paths,
+        yes,
+        item_ref,
+        false,
+        dangerously_skip_hook_check,
+        dangerously_skip_build_hook_check,
+    )
 }
 
 /// `mind upgrade --no-sync` — skip the pre-upgrade source fetch (CLI-169).
@@ -4310,8 +4362,16 @@ pub fn upgrade_no_sync(
     yes: bool,
     item_ref: Option<&str>,
     dangerously_skip_hook_check: bool,
+    dangerously_skip_build_hook_check: bool,
 ) -> Result<()> {
-    upgrade_inner(paths, yes, item_ref, true, dangerously_skip_hook_check)
+    upgrade_inner(
+        paths,
+        yes,
+        item_ref,
+        true,
+        dangerously_skip_hook_check,
+        dangerously_skip_build_hook_check,
+    )
 }
 
 fn upgrade_inner(
@@ -4320,6 +4380,7 @@ fn upgrade_inner(
     item_ref: Option<&str>,
     no_sync: bool,
     dangerously_skip_hook_check: bool,
+    dangerously_skip_build_hook_check: bool,
 ) -> Result<()> {
     let out = crate::render::ctx();
     // POL-3: load the managed policy once (fail closed on Err; None = inert).
@@ -4449,6 +4510,7 @@ fn upgrade_inner(
             &siblings,
             false,
             dangerously_skip_hook_check,
+            dangerously_skip_build_hook_check,
         )?;
         if up.new_name != up.old.name {
             // Rename: drop the old item (by its file registry) and re-key. The OLD

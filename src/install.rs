@@ -29,13 +29,16 @@ use crate::paths::{Paths, mkdir_p};
 /// the same source (including `item` itself), used to validate `{{ns:}}` name
 /// tokens and to resolve the `{{self}}` / `{{tools:}}` / `{{path:}}` path tokens
 /// to store paths. The recorded hash is of the *source* content so drift
-/// detection compares like with like.
+/// detection compares like with like. `dangerously_skip_build` runs a build hook
+/// non-interactively without prompting (HOOK-74); without it a non-TTY context
+/// skips the build hook (HOOK-72).
 pub fn install(
     paths: &Paths,
     item: &CatalogItem,
     commit: &str,
     siblings: &[CatalogItem],
     force: bool,
+    dangerously_skip_build: bool,
 ) -> Result<InstalledItem> {
     let kind = item.kind;
     let name = item.effective_name();
@@ -118,11 +121,12 @@ pub fn install(
 
     // 1b. Per-item build hook: build the item's tooling inside staging, before
     //     the swap, so a failed build is rolled back with staging and never
-    //     touches the live install (HOOK-70..73). It is arbitrary code, so it is
+    //     touches the live install (HOOK-70..74). It is arbitrary code, so it is
     //     disclosed and prompted on a TTY; a non-TTY context skips it (the item
-    //     installs unbuilt, HOOK-72).
+    //     installs unbuilt, HOOK-72); `dangerously_skip_build` runs it unattended
+    //     (HOOK-74).
     if let Some(build) = &item.build
-        && let Err(e) = run_build_hook(item, build, &staging, commit)
+        && let Err(e) = run_build_hook(item, build, &staging, commit, dangerously_skip_build)
     {
         let _ = remove_path(&staging);
         return Err(e);
@@ -524,9 +528,19 @@ fn expand_references(
 
 /// Run an item's build hook in its staging directory. Disclosed and prompted on
 /// a TTY (two-way: run, or skip and install unbuilt); a non-TTY context skips it
-/// (HOOK-72). A non-zero exit is a hard stop (HOOK-71) the caller rolls back.
-fn run_build_hook(item: &CatalogItem, build: &str, staging: &Path, commit: &str) -> Result<()> {
-    let run = if !crate::hook::is_tty() {
+/// (HOOK-72); `dangerously_skip` runs it unattended (HOOK-74). A non-zero exit
+/// is a hard stop (HOOK-71) the caller rolls back.
+fn run_build_hook(
+    item: &CatalogItem,
+    build: &str,
+    staging: &Path,
+    commit: &str,
+    dangerously_skip: bool,
+) -> Result<()> {
+    // spec: HOOK-72 HOOK-74
+    let run = if dangerously_skip {
+        true
+    } else if !crate::hook::is_tty() {
         println!(
             "note: skipped build hook for {} in a non-interactive context; its tooling is not built",
             item.key()
@@ -549,7 +563,7 @@ fn run_build_hook(item: &CatalogItem, build: &str, staging: &Path, commit: &str)
     if run {
         println!("running build hook for {}", item.key());
         crate::hook::run_hook(build, staging, &item.source, "build")?;
-    } else if crate::hook::is_tty() {
+    } else if crate::hook::is_tty() && !dangerously_skip {
         println!(
             "note: skipped build hook for {}; its tooling is not built",
             item.key()
@@ -796,7 +810,14 @@ mod tests {
             std::path::PathBuf::from("/src/tools/t"),
         );
 
-        run_build_hook(&item, item.build.as_deref().unwrap(), &staging, "abc123").unwrap();
+        run_build_hook(
+            &item,
+            item.build.as_deref().unwrap(),
+            &staging,
+            "abc123",
+            false,
+        )
+        .unwrap();
         assert!(
             !marker.exists(),
             "a non-TTY context must skip the build hook (HOOK-72)"
@@ -1218,7 +1239,14 @@ mod tests {
         // force=true: lobe1's link is stashed then overwritten with a symlink;
         // lobe2's link fails (mkdir_p into a regular file is ENOTDIR); rollback
         // must restore the stash to lobe1's link path.
-        let result = install(&paths, &item, "abc", std::slice::from_ref(&item), true);
+        let result = install(
+            &paths,
+            &item,
+            "abc",
+            std::slice::from_ref(&item),
+            true,
+            false,
+        );
 
         assert!(
             result.is_err(),

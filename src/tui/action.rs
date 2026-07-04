@@ -97,6 +97,7 @@ fn dispatch(paths: &Paths, kind: ActionKind) -> Result<()> {
                     yes: true,
                     clobber: commands::Clobber::Error,
                     dangerously_skip: false,
+                    dangerously_skip_build: false,
                 },
             )?;
         }
@@ -128,9 +129,9 @@ fn dispatch(paths: &Paths, kind: ActionKind) -> Result<()> {
             commands::unmeld(paths, &name, !forget, true, false, None)?
         }
         // spec: TUI-22
-        ActionKind::Sync => commands::sync(paths, false, false)?,
+        ActionKind::Sync => commands::sync(paths, false, false, false)?,
         // spec: TUI-22 - `yes: true` so it applies without prompting on stdin.
-        ActionKind::Upgrade => commands::upgrade(paths, true, None, false)?,
+        ActionKind::Upgrade => commands::upgrade(paths, true, None, false, false)?,
         // spec: TUI-23 CLI-112
         // `yes: true` so backfill applies without prompting on stdin in the TUI.
         ActionKind::LobeAdd { path } => commands::lobe_add(paths, &path, true)?,

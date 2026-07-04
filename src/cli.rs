@@ -138,6 +138,13 @@ pub enum Command {
         #[arg(long)]
         dangerously_skip_install_hook_check: bool,
 
+        /// Run item build hooks without the safety prompt during the install-all
+        /// pass. This executes arbitrary code from the source; only use it for a
+        /// source you trust. Without this flag, a non-TTY run skips build hooks
+        /// and prints a note, so the item's tooling is not built.
+        #[arg(long)]
+        dangerously_skip_build_hook_check: bool,
+
         /// Only register the source; do not prompt to install its items. By
         /// default, `meld` previews the source's items and offers to install them
         /// all (the interactive form of `learn '<source>#*'`).
@@ -258,6 +265,13 @@ pub enum Command {
         /// Without this flag, a non-TTY run skips the hook and prints a note.
         #[arg(long)]
         dangerously_skip_install_hook_check: bool,
+
+        /// Run an item's build hook without the safety prompt. This executes
+        /// arbitrary code from the source; only use it for a source you trust.
+        /// Without this flag, a non-TTY run skips the build hook and prints a
+        /// note, so the item's tooling is not built.
+        #[arg(long)]
+        dangerously_skip_build_hook_check: bool,
     },
 
     /// Remove an installed item, or many via a glob.
@@ -308,6 +322,13 @@ pub enum Command {
         /// `--upgrade` pass (executes arbitrary code; only with `--upgrade`).
         #[arg(long, requires = "upgrade")]
         dangerously_skip_install_hook_check: bool,
+
+        /// Run item build hooks without the safety prompt during the `--upgrade`
+        /// pass. This executes arbitrary code from the source; only use it for a
+        /// source you trust. Without this flag, a non-TTY run skips build hooks
+        /// and prints a note. Only valid with `--upgrade`.
+        #[arg(long, requires = "upgrade")]
+        dangerously_skip_build_hook_check: bool,
     },
 
     /// Upgrade installed items to their latest source version.
@@ -333,6 +354,13 @@ pub enum Command {
         /// to run it unattended.
         #[arg(long)]
         dangerously_skip_install_hook_check: bool,
+
+        /// Run item build hooks without the safety prompt. This executes
+        /// arbitrary code from the source; only use it for a source you trust.
+        /// Without this flag, a non-TTY upgrade skips build hooks and prints a
+        /// note, so the item's tooling is not rebuilt.
+        #[arg(long)]
+        dangerously_skip_build_hook_check: bool,
     },
 
     /// Update the `mind` binary itself to the latest release (or `--version`).

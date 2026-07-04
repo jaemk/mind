@@ -235,9 +235,18 @@ kind and `{{tools:name}}` (tooling.md, TOOL-12), but any kind may declare one.
   a build hook offers no abort, so a single item's build never aborts a batch
   install.
 - `HOOK-73` A build hook re-runs whenever its item is (re)installed or upgraded,
-  since the store copy is rebuilt from staging each time. `learn`/`evolve`/
-  `upgrade` disclose and prompt for it as part of installing the item; nothing
+  since the store copy is rebuilt from staging each time. `learn`/`upgrade`
+  disclose and prompt for it as part of installing the item; nothing
   beyond the item's content hash is recorded for it.
+- `HOOK-74` `--dangerously-skip-build-hook-check` on `learn`, `upgrade`, `meld`
+  (for its install-all path), and `sync --upgrade` runs an item's build hook
+  non-interactively (no prompt, treated as approved), enabling build hooks in CI
+  and headless scripts. Without it, the HOOK-72 behavior is unchanged: a non-TTY
+  context skips the build hook and prints a note. The flag name mirrors
+  `--dangerously-skip-install-hook-check` (HOOK-23) and is deliberately explicit
+  about the risk. A non-zero exit from the build hook under this flag is still a
+  hard stop: the staging copy is discarded and the install is left untouched
+  (HOOK-71). Approving the run headlessly does not waive the failure contract.
 
 ## Item install and uninstall hooks
 

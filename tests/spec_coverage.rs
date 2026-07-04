@@ -24,8 +24,7 @@ const ALLOWLIST: &[&str] = &[
     "LIFE-3", "LIFE-6", "LIFE-21",
     // Namespacing: install-time application and the token's written form are
     // definitional, exercised by the expansion tests.
-    "NS-3", "NS-10", // Discovery edge: missing directories yield no items.
-    "DSC-13",
+    "NS-3", "NS-10",
     // A curated super-source adopting an un-onboarded nested source (DSC-59/60/61)
     // is implemented and cited from tests/cli.rs (the apply, gate-with-warning,
     // and consumer-pin-override tests); no longer allowlisted.
@@ -128,13 +127,10 @@ const ALLOWLIST: &[&str] = &[
     // discovery (TOOL-1/2/5/7) from src/catalog.rs, the path-token expander
     // (TOOL-10/11/12/14) from src/namespace.rs, and the end-to-end install
     // behavior (TOOL-3/4/6/13/15) from tests/cli.rs. Item build hooks: the
-    // declaration (HOOK-70) and the non-TTY skip (HOOK-72) are cited from
-    // src/catalog.rs and src/install.rs. The build RUN path stays allowlisted
-    // because it requires a TTY-approved run and cannot be exercised headlessly:
-    //   HOOK-71: build runs in staging, non-zero exit rolls the install back.
-    //   HOOK-73: a build re-runs when its item is reinstalled/upgraded.
-    "HOOK-71",
-    "HOOK-73",
+    // declaration (HOOK-70), the non-TTY skip (HOOK-72), the run-in-staging +
+    // rollback (HOOK-71), the re-run on reinstall/upgrade (HOOK-73), and the
+    // headless flag (HOOK-74) are all cited from src/install.rs and
+    // tests/cli_build_hooks.rs.
     //   cross-harness lobes (spec/harness-lobes.md) are implemented and cited:
     //   HARN-1 (kinds filter) from src/config.rs + src/paths.rs + tests/cli_lobes.rs,
     //   HARN-2/HARN-3 (link filtering / rules Claude-only) from tests/cli_lobes.rs,

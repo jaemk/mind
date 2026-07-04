@@ -171,6 +171,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             pin_ref,
             install_hook,
             dangerously_skip_install_hook_check,
+            dangerously_skip_build_hook_check,
             register_only,
             recursive,
             force,
@@ -196,6 +197,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
                 yes,
                 clobber,
                 dangerously_skip: dangerously_skip_install_hook_check,
+                dangerously_skip_build: dangerously_skip_build_hook_check,
             };
             // CLI-12: re-melding an already-melded source is not an error; it
             // ensures the items are installed, else reports their status.
@@ -285,6 +287,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             dry_run,
             force,
             dangerously_skip_install_hook_check,
+            dangerously_skip_build_hook_check,
         } => {
             // CLI-36: `--all` rewrites the ref into the `<source>#*` selector.
             let item = if all {
@@ -304,6 +307,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
                         commands::Clobber::Prompt
                     },
                     dangerously_skip: dangerously_skip_install_hook_check,
+                    dangerously_skip_build: dangerously_skip_build_hook_check,
                 },
             )
         }
@@ -323,11 +327,18 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
         Command::Sync {
             upgrade,
             dangerously_skip_install_hook_check,
-        } => commands::sync(paths, upgrade, dangerously_skip_install_hook_check),
+            dangerously_skip_build_hook_check,
+        } => commands::sync(
+            paths,
+            upgrade,
+            dangerously_skip_install_hook_check,
+            dangerously_skip_build_hook_check,
+        ),
         Command::Upgrade {
             item,
             no_sync,
             dangerously_skip_install_hook_check,
+            dangerously_skip_build_hook_check,
         } => {
             // spec: CLI-169 - default syncs first; --no-sync skips the fetch.
             if no_sync {
@@ -336,6 +347,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
                     yes,
                     item.as_deref(),
                     dangerously_skip_install_hook_check,
+                    dangerously_skip_build_hook_check,
                 )
             } else {
                 commands::upgrade(
@@ -343,6 +355,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
                     yes,
                     item.as_deref(),
                     dangerously_skip_install_hook_check,
+                    dangerously_skip_build_hook_check,
                 )
             }
         }
@@ -618,6 +631,7 @@ mod tests {
             Command::Sync {
                 upgrade,
                 dangerously_skip_install_hook_check,
+                ..
             } => {
                 assert!(upgrade, "--upgrade should be true");
                 assert!(
@@ -640,6 +654,7 @@ mod tests {
             Command::Sync {
                 upgrade,
                 dangerously_skip_install_hook_check,
+                ..
             } => {
                 assert!(upgrade, "--upgrade should be true");
                 assert!(
