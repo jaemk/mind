@@ -126,7 +126,10 @@ impl Paths {
             Some(p) => PathBuf::from(p),
             None => home()?.join(".mind"),
         };
-        let claude_home = match std::env::var_os("CLAUDE_HOME") {
+        // spec: CLI-170 - MIND_DEFAULT_LOBE takes precedence over CLAUDE_HOME.
+        let claude_home = match std::env::var_os("MIND_DEFAULT_LOBE")
+            .or_else(|| std::env::var_os("CLAUDE_HOME"))
+        {
             Some(p) => PathBuf::from(p),
             None => home()?.join(".claude"),
         };
@@ -351,7 +354,8 @@ impl Paths {
     /// The default lobe written into a fresh config: the `$CLAUDE_HOME` override
     /// if set, else `~/.claude`.
     pub fn default_lobe(&self) -> String {
-        match std::env::var_os("CLAUDE_HOME") {
+        // spec: CLI-170 - MIND_DEFAULT_LOBE takes precedence over CLAUDE_HOME.
+        match std::env::var_os("MIND_DEFAULT_LOBE").or_else(|| std::env::var_os("CLAUDE_HOME")) {
             Some(v) => v.to_string_lossy().into_owned(),
             None => "~/.claude".to_string(),
         }

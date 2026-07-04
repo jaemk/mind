@@ -108,14 +108,14 @@ set wins:
 
 1. `--to <path>` flag on the command line.
 2. `MIND_ABSORB_TO` environment variable.
-3. `absorb_to` key in `~/.mind/config.toml`.
+3. `absorb-to` key in `~/.mind/config.toml`.
 
 When none of the three is set and the run is interactive, `absorb` prompts and
 offers `~/.mind/personal` as the default. That directory is created and
 `git init`-ed on demand if it does not exist. After an interactive resolution,
-`absorb` offers to save the chosen path as `absorb_to` in `config.toml` so
+`absorb` offers to save the chosen path as `absorb-to` in `config.toml` so
 future runs skip the prompt. A `--to` flag, `MIND_ABSORB_TO`, or an existing
-`absorb_to` value is used as-is and never triggers a save.
+`absorb-to` value is used as-is and never triggers a save.
 
 A non-TTY run with no destination configured (none of the three sources set) is
 an error; there is no silent default to assume.
@@ -123,11 +123,14 @@ an error; there is no silent default to assume.
 Set the persistent default in `~/.mind/config.toml`:
 
 ```toml
-absorb_to = "~/dev/my-agent-library"
+absorb-to = "~/dev/my-agent-library"
 ```
 
 `~` is expanded at use. The destination must be a git repository; a path that is
 not a git repo is an error.
+
+Note: the legacy key spelling `absorb_to` (underscore) is still accepted when
+reading the file. New writes and the interactive save always use `absorb-to`.
 
 ## SSH cloning
 
@@ -143,14 +146,14 @@ A single `~/.mind/config.toml` may contain any combination of the keys:
 ```toml
 lobes = ["~/.claude", { path = "~/.gemini/config", kinds = ["skill"] }]
 ssh = true
-absorb_to = "~/dev/my-agent-library"
+absorb-to = "~/dev/my-agent-library"
 ```
 
 ## Paths
 
 ```
 ~/.mind/
-  config.toml                   persistent settings (lobes, ssh, absorb_to)
+  config.toml                   persistent settings (lobes, ssh, absorb-to)
   sources.json                  source registry (melded repos)
   manifest.json                 installed-item manifest and file registry
   sources/<host>/<owner>/<repo> clone of each melded repo
@@ -161,8 +164,9 @@ absorb_to = "~/dev/my-agent-library"
   .lock                         global advisory lock
 ```
 
-Override the roots with `MIND_HOME` (the `~/.mind` tree) and `CLAUDE_HOME` (the
-default lobe).
+Override the roots with `MIND_HOME` (the `~/.mind` tree) and `MIND_DEFAULT_LOBE`
+(the default lobe). `CLAUDE_HOME` is a legacy alias for `MIND_DEFAULT_LOBE`;
+`MIND_DEFAULT_LOBE` takes precedence when both are set.
 
 ## Concurrency
 

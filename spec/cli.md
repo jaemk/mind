@@ -4,18 +4,20 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 
 | command | role |
 |---------|------|
-| `probe [query] [-n\|--no-tui]` | interactive browser (default); catalog listing with `-n`/`--no-tui`/`--json` |
-| `meld [<repo>] [--link-only] [--yes] [-n\|--namespace <prefix>] [--root <dir>] [--flat-skills] [--follow-branch\|--pin-tag\|--pin-ref <ref>]` | connect a source (default `.`), then install its items |
-| `init-source [<path>] [--template]` | scaffold `mind.toml` + detect references (maintainer) |
-| `unmeld <name\|glob> [--unlink-only] [--yes] [--uninstall-hook <cmd>] [--dangerously-skip-install-hook-check]` (alias: `detach`) | disconnect a source (or all sources matching a glob) and forget its items (`--unlink-only` keeps them) |
-| `learn <item> [--dangerously-skip-install-hook-check]` | install |
-| `forget <item> [--dangerously-skip-install-hook-check]` (alias: `unlearn`) | uninstall |
-| `sync` | refresh sources |
-| `upgrade [--yes] [item]` | upgrade installed |
-| `recall [item] [--sources] [--kind K] [--source S] [--json]` (alias: `status`) | status: sources with their items (install state marked); `--sources` narrows to sources |
-| `review [<target>] [-n\|--namespace <prefix>]` (default `.`) / `review --policy <path>` | validate a source / a policy file |
-| `introspect` | diagnose |
-| `evolve [--check] [--yes] [--version <v>]` | update the `mind` binary itself |
+| `probe [query] [--no-tui]` | interactive browser (default); catalog listing with `--no-tui`/`--json` |
+| `meld [<repo>] [--register-only] [--yes] [-N\|--namespace <prefix>] [--root <dir>] [--flat-skills] [--follow-branch\|--pin-tag\|--pin-ref <ref>]` | connect a source (default `.`), then install its items |
+| `init-source [<path>] [--template] [--marketplace] [--flat-skills] [-N\|--namespace <prefix>]` | scaffold `mind.toml` + detect references (maintainer) |
+| `unmeld <name\|glob> [--keep-items] [--yes] [--uninstall-hook <cmd>] [--dangerously-skip-install-hook-check]` | disconnect a source (or all sources matching a glob) and uninstall its items (`--keep-items` leaves them) |
+| `learn <item> [--dangerously-skip-install-hook-check]` (alias: `install`) | install |
+| `forget <item> [--dangerously-skip-install-hook-check]` (aliases: `unlearn`, `uninstall`) | uninstall |
+| `sync` (alias: `update`) | refresh sources |
+| `upgrade [--yes] [--no-sync] [item]` | upgrade installed; syncs first by default |
+| `recall [item] [--sources] [--kind K] [--source S] [--json]` (aliases: `status`, `list`) | status: sources with their items (install state marked); `--sources` narrows to sources |
+| `review [<target>] [-N\|--namespace <prefix>]` (default `.`) / `review --policy <path>` | validate a source / a policy file |
+| `introspect` (alias: `doctor`) | diagnose |
+| `evolve [--check] [--yes] [--version <v>]` (alias: `self-update`) | update the `mind` binary itself |
+| `absorb <item> [--to <path>]` | claim an unmanaged lobe item into a managed source |
+| `dump [--whole-sources] [--output <path>]` | write a super-source `mind.toml` reproducing the melded + installed state |
 | `config show` / `config lobes ...` | view/edit config |
 | `completions <shell>` | print a shell completion script |
 | `man` | print the roff man page |
@@ -98,14 +100,14 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   and prompts to install them all (the interactive form of `learn '<source>#*'`),
   installing the whole source on a yes. The prompt defaults to yes (`[Y/n]`, a
   bare Enter installs), since reaching it means the user chose to meld the source;
-  it is reversible with `forget`. `--link-only` stops at registering the
-  source; its items remain available to `learn` later. `--yes` installs without
-  prompting, including in a non-TTY context; without `--yes` a non-TTY `meld`
-  registers only and prints how to install later (mirroring the install-hook
-  non-TTY behavior, HOOK-22). Only the top-level source is offered (a curated
-  super-source's nested sources are not auto-installed), already-installed items
-  are skipped (DEP-23), and a source install hook is still handled by its own
-  prompt during the meld (HOOK-20).
+  it is reversible with `forget`. `--register-only` (deprecated alias:
+  `--link-only`, see CLI-165) stops at registering the source; its items remain
+  available to `learn` later. `--yes` installs without prompting, including in a
+  non-TTY context; without `--yes` a non-TTY `meld` registers only and prints how
+  to install later (mirroring the install-hook non-TTY behavior, HOOK-22). Only
+  the top-level source is offered (a curated super-source's nested sources are not
+  auto-installed), already-installed items are skipped (DEP-23), and a source
+  install hook is still handled by its own prompt during the meld (HOOK-20).
 - `CLI-156` In `--json` mode, `meld` is fully non-interactive and never prompts.
   When `--yes` is given the items are installed as part of the single meld result:
   the `installed` array in the JSON object lists the effective keys of every item
@@ -138,15 +140,13 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   `--pin-ref` or a `[source]` directive) is instead cloned as a snapshot at the
   pin, so pinning still works.
 
-- `CLI-159` `meld --namespace <prefix>` (short `-n`) sets the source's namespace,
-  opting the source into prefixing (with no flag and no `[source].prefix`, items
-  install bare, NS-2). It is the renamed `--as` (CLI-13); `--as` is retained as a
-  hidden, deprecated alias so existing invocations keep working. `review` takes the
-  same rename (`--namespace`/`-n` aliasing `--as`, CLI-133). The `-n` short is
-  subcommand-scoped, as in TUI-3, so it does not clash with `learn --dry-run`
-  (`-n`, CLI-32) or `probe --no-tui` (`-n`, TUI-3). `--namespace ''` removes the
+- `CLI-159` `meld --namespace <prefix>` sets the source's namespace, opting the
+  source into prefixing (with no flag and no `[source].prefix`, items install bare,
+  NS-2). It is the renamed `--as` (CLI-13); `--as` is retained as a hidden,
+  deprecated alias so existing invocations keep working. `review` takes the same
+  rename (`--namespace` aliasing `--as`, CLI-133). `--namespace ''` removes the
   prefix (the explicit no-prefix override of a declared `[source].prefix`, as
-  `--as ''` did, CLI-13).
+  `--as ''` did, CLI-13). As of CLI-163, the short form is `-N` (uppercase).
 - `CLI-161` On a re-meld (CLI-12) of a source that already has installed items, a
   `--namespace` that differs from the source's current namespace is an error
   naming the installed items and directing the user to `forget` them first; the
@@ -167,19 +167,21 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 
 ## unmeld
 
-- `CLI-20` `unmeld <name>` (alias: `detach`) removes the source's clone and
-  registry entry. `name` is the full `host/owner/repo` or an unambiguous trailing
-  suffix (e.g. `repo` or `owner/repo`); an unknown name is `SourceNotFound` and an
-  ambiguous suffix is `AmbiguousSource`.
+- `CLI-20` `unmeld <name>` removes the source's clone and registry entry. `name`
+  is the full `host/owner/repo` or an unambiguous trailing suffix (e.g. `repo` or
+  `owner/repo`); an unknown name is `SourceNotFound` and an ambiguous suffix is
+  `AmbiguousSource`. The former visible alias `detach` is removed and is now a
+  usage error (CLI-172).
 - `CLI-21` `unmeld <name>` by default uninstalls every item installed from the
   source (each via its file registry, then its manifest entry), mirroring meld's
   install-by-default (CLI-23): dropping a source cleans up after itself in one
   step. It first lists the items it will remove; the multi-item confirmation
   (CLI-42) applies, and `--yes` skips it.
-- `CLI-22` `unmeld --unlink-only` removes only the source (clone and registry
-  entry) and leaves its installed items in place. It lists those orphaned items
-  and suggests the `forget` command to remove them later. This is the opt-out from
-  the default item removal (CLI-21), mirroring `meld --link-only` (CLI-23).
+- `CLI-22` `unmeld --keep-items` (deprecated alias: `--unlink-only`, see CLI-166)
+  removes only the source (clone and registry entry) and leaves its installed items
+  in place. It lists those orphaned items and suggests the `forget` command to
+  remove them later. This is the opt-out from the default item removal (CLI-21),
+  mirroring `meld --register-only` (CLI-165).
 - `unmeld` runs the source's uninstall hooks before removal and accepts
   `--dangerously-skip-install-hook-check` to run them unattended, and
   `--uninstall-hook <cmd>` to supply or override the uninstall hook (see
@@ -325,8 +327,10 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   nested items.
 - `CLI-73` `recall --json` emits the data as JSON on stdout instead of the table:
   the default view emits the sources each with their nested items (carrying the
-  installed flag and, when installed, the commit); a lookup emits the single
-  item; `--sources` emits the source array. An empty registry is `[]`.
+  installed flag and, when installed, the commit); a lookup emits the single item
+  as a plain JSON object (not wrapped); `--sources` emits the source list. Array
+  outputs (default view, `--sources`) are wrapped in the envelope introduced by
+  CLI-167. An empty registry emits `{"schema": 1, "items": []}`.
 - `CLI-74` In the default status view, each item line marks its install state
   inline: an installed item shows that it is installed and its short commit; a
   not-installed item is marked available. Items are grouped under their source, so
@@ -360,15 +364,15 @@ define the non-interactive catalog listing, which `probe` prints instead when
 - `CLI-82` List outputs (`probe`, `recall`) left-align columns padded to the
   widest value in each column, so rows stay aligned regardless of item-name
   length.
-- `CLI-83` `probe` and `recall` accept `--kind <skill|agent|rule>` and
+- `CLI-83` `probe` and `recall` accept `--kind <skill|agent|rule|tool>` and
   `--source <selector>` filters that narrow the listing, composing with `probe`'s
   substring query. For `recall` they apply to the installed-items listing, not to
   `--sources` or a single-item lookup (use a `kind:` / `owner/repo#` ref there);
   passing them with `--sources` or a single item prints a note that they are
   ignored.
-- `CLI-84` `probe --json` emits the rows as a JSON array on stdout instead of the
-  table; each row carries the installed flag, kind, effective name, source,
-  content hash, and description.
+- `CLI-84` `probe --json` emits the rows on stdout instead of the table, wrapped
+  in the envelope introduced by CLI-167; each row carries the installed flag,
+  kind, effective name, source, content hash, and description.
 - `CLI-85` `probe`'s query matches an item whose effective name *or* description
   contains the query, case-insensitively. This supersedes the name-only matching
   of CLI-80 so an item is found by what it does, not only by its name. The
@@ -548,8 +552,8 @@ release artifacts as the install script and the Homebrew formula.
   config file path and its key/value pairs (`lobes`, with the default shown when
   unset). It also notes when `MIND_AGENT_HOMES` is set and overrides `lobes`.
 - `CLI-111` `config lobes list` lists the configured agent homes, or the default
-  home when none are configured. `target` is a visible alias of the whole `lobes`
-  subcommand, so `config target list` / `add` / `remove` all work too.
+  home when none are configured. `target` was formerly a visible alias of `lobes`;
+  as of CLI-172 it is removed and `config target` is a usage error.
 - `CLI-112` `config lobes add <path>` appends an agent home to `config.toml`,
   creating the file if needed; adding one already present is a no-op.
 - `CLI-113` `config lobes remove <path>` drops a configured agent home; a path
@@ -657,8 +661,76 @@ and per-harness `kinds` defaults.
   reference warning emitted during `meld` when a prefix is in effect (CLI-14,
   NS-20). It does not affect the color/Unicode capability gate (CLI-151).
 
+- `CLI-163` The short flag `-n` is reserved for `--dry-run` on `learn` (CLI-32),
+  which already owned it. As a consequence, `--namespace` on `meld`, `review`, and
+  `init-source` moves to short `-N` (uppercase). No other short is assigned to
+  `--namespace`; the long form and `-N` are the two accepted spellings.
+
+- `CLI-164` `probe --no-tui` is long-only; its former short `-n` (TUI-3) is removed
+  to free `-n` globally (CLI-163). See also TUI-54.
+
+- `CLI-165` `meld --register-only` replaces `--link-only` as the canonical name for
+  "register the source without installing its items" (CLI-23). `--link-only` is
+  retained as a hidden deprecated alias and continues to work; it does not appear in
+  `--help` output.
+
+- `CLI-166` `unmeld --keep-items` replaces `--unlink-only` as the canonical name for
+  "remove the source but leave its installed items in place" (CLI-22).
+  `--unlink-only` is retained as a hidden deprecated alias.
+
+- `CLI-167` `probe --json` and `recall --json` (default view, `--sources`) wrap their
+  array output in a versioned envelope:
+
+  ```json
+  {"schema": 1, "items": [...]}
+  ```
+
+  The top-level `"schema"` field is a monotonically increasing integer; readers
+  should treat an absent field as `1`. Single-item `recall <item> --json` is already
+  a plain JSON object and is not wrapped. This supersedes the bare-array form of
+  CLI-73 and CLI-84.
+
+- `CLI-168` The mutation result envelope (CLI-153) gains a top-level `"schema": 1`
+  field. Existing stable fields (`action`, `target`, `outcome`, and verb-specific
+  extras) are unchanged; `"schema"` is additive.
+
+- `CLI-169` `upgrade` fetches each involved source before computing deltas (syncs
+  first by default). The sync uses the same per-source resilience as CLI-54:
+  individual source failures are reported and skipped; the upgrade pass runs on
+  the sources that did succeed. Pass `--no-sync` to skip the fetch and compute
+  deltas from the current (potentially stale) clone. `sync --upgrade` continues to
+  work but its `--upgrade` flag is noted as deprecated in help text; prefer
+  `upgrade` (which now syncs) or `upgrade --no-sync` (to match the old
+  `sync --upgrade` behavior of explicit sync then upgrade).
+
+- `CLI-170` `MIND_DEFAULT_LOBE` is the primary environment variable for setting the
+  default agent home (lobe). When set, it takes precedence over `CLAUDE_HOME`.
+  `CLAUDE_HOME` is kept as a documented legacy fallback: if `MIND_DEFAULT_LOBE` is
+  unset, `CLAUDE_HOME` is used; if neither is set, the default is `~/.claude`.
+
+- `CLI-171` The `absorb-to` config key in `~/.mind/config.toml` is the canonical
+  (kebab-case) spelling. The underscore form `absorb_to` is accepted as a
+  backwards-compatible alias during parsing; new writes always emit `absorb-to`.
+
+- `CLI-172` Visible aliases added: `add` for `meld`, `install` for `learn`,
+  `uninstall` for `forget`, `update` for `sync`, `search` for `probe`, `list` for
+  `recall`, `doctor` for `introspect`, `self-update` for `evolve`. Former aliases
+  `detach` (for `unmeld`) and `target` (for `config lobes`) are removed and are
+  now usage errors; `unlearn` (for `forget`) and `status` (for `recall`) remain
+  visible.
+
+- `CLI-173` The one-line help for `meld` reflects that melding installs items by
+  default (interactive prompt): "Meld with a source repo and install its items."
+
+- `CLI-174` The long help (`--help` body) for `unmeld` leads with: "Unmelds a
+  source and uninstalls every item the source installed; use `--keep-items` to keep
+  them."
+
 ## Exit status
 
 - `CLI-100` A command that completes its work exits 0. Any `MindError` is printed
   to stderr (with its source chain) and exits non-zero.
+- `CLI-175` The exit-code contract: 0 for success, 1 for a runtime error
+  (`MindError`), and 2 for a usage error (clap parse failure). Clap handles code 2
+  automatically. Code 1 comes from `ExitCode::FAILURE` in `main`.
 

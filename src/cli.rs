@@ -39,24 +39,24 @@ impl KindArg {
 #[command(
     name = "mind",
     version,
-    about = "A manager for agent tooling: skills, agents, and rules.",
+    about = "A manager for agent tooling: skills, agents, rules, and tools.",
     propagate_version = true
 )]
 pub struct Cli {
     /// Emit machine-readable JSON instead of formatted text.
-    #[arg(long, global = true)]
+    #[arg(long, global = true, help_heading = "Global options")]
     pub json: bool,
 
     /// Skip confirmation prompts (assume yes).
-    #[arg(short = 'y', long, global = true)]
+    #[arg(short = 'y', long, global = true, help_heading = "Global options")]
     pub yes: bool,
 
     /// Force plain ASCII output (no color, no Unicode glyphs).
-    #[arg(long, global = true)]
+    #[arg(long, global = true, help_heading = "Global options")]
     pub ascii: bool,
 
     /// Emit extra advisory output (e.g. unguarded-reference warnings on meld).
-    #[arg(short = 'v', long, global = true)]
+    #[arg(short = 'v', long, global = true, help_heading = "Global options")]
     pub verbose: bool,
 
     #[command(subcommand)]
@@ -65,7 +65,9 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Meld with a source repo so its items become available.
+    /// Meld with a source repo and install its items (prompts to install; use `--register-only` to skip).
+    // spec: CLI-173
+    #[command(visible_alias = "add")]
     Meld {
         /// Repo spec to meld. Supported forms:
         ///
@@ -83,7 +85,8 @@ pub enum Command {
         /// Namespace every item from this source under this prefix
         /// (overrides the repo's own `[source].prefix`). `--as` is a
         /// hidden deprecated alias for backwards compatibility.
-        #[arg(short = 'n', long = "namespace", alias = "as", value_name = "PREFIX")]
+        // spec: CLI-163 - short moved to -N (uppercase); -n is reserved for --dry-run.
+        #[arg(short = 'N', long = "namespace", alias = "as", value_name = "PREFIX")]
         alias: Option<String>,
 
         /// Track a named branch (overrides the repo's [source] pin directive).
@@ -138,8 +141,9 @@ pub enum Command {
         /// Only register the source; do not prompt to install its items. By
         /// default, `meld` previews the source's items and offers to install them
         /// all (the interactive form of `learn '<source>#*'`).
-        #[arg(long)]
-        link_only: bool,
+        // spec: CLI-165 - canonical name; --link-only is a hidden deprecated alias.
+        #[arg(long, alias = "link-only")]
+        register_only: bool,
 
         /// Offer to install the items of every nested source a super-source
         /// curates (`[discover].sources`), not just the super-source's own items
@@ -181,20 +185,30 @@ pub enum Command {
 
         /// Override the plugin name / `[source].prefix` written to `mind.toml`
         /// and the marketplace manifest `name` field.
-        #[arg(short = 'n', long)]
+        // spec: CLI-163 - short moved to -N (uppercase).
+        #[arg(short = 'N', long)]
         namespace: Option<String>,
     },
 
-    /// Unmeld a source, removing its clone and catalog entry.
-    #[command(visible_alias = "detach")]
+    /// Unmeld a source, uninstalling every item the source installed.
+    ///
+    /// Unmelds a source and uninstalls every item the source installed; use
+    /// `--keep-items` to keep them.
+    ///
+    /// The source name may be the full `host/owner/repo` or an unambiguous
+    /// trailing suffix (e.g. `repo` or `owner/repo`). A glob removes all
+    /// matching sources.
+    // spec: CLI-174 - long_about leads with the uninstall default.
+    // spec: CLI-172 - the former `detach` alias is removed.
     Unmeld {
         /// The source name (see `mind recall --sources`).
         name: String,
 
         /// Remove only the source, leaving its installed items in place (the
-        /// opt-out from the default item removal, mirroring `meld --link-only`).
-        #[arg(long)]
-        unlink_only: bool,
+        /// opt-out from the default item removal, mirroring `meld --register-only`).
+        // spec: CLI-166 - canonical name; --unlink-only is a hidden deprecated alias.
+        #[arg(long, alias = "unlink-only")]
+        keep_items: bool,
 
         /// Supply or override the source's uninstall hook: a shell command run
         /// in the clone before the source is removed. Replaces the source's
@@ -218,6 +232,8 @@ pub enum Command {
     /// intra-source `{{ns:}}` dependencies those items reference (the closure),
     /// printing a dependency tree and prompting before installing; `--dry-run`
     /// previews the closure without installing anything and `--yes` skips the prompt.
+    // spec: CLI-172
+    #[command(visible_alias = "install")]
     Learn {
         /// Item ref or glob: `name`, `skill:name`, `owner/repo#name`, `'review*'`, `'*'`.
         item: String,
@@ -250,7 +266,8 @@ pub enum Command {
     /// (the deliberate inverse of the default, which matches managed items only).
     /// With no `<item>` and `--unmanaged`, every unmanaged item across all
     /// configured lobes is removed.
-    #[command(visible_alias = "unlearn")]
+    // spec: CLI-172 - added `uninstall` visible alias; `unlearn` kept.
+    #[command(visible_aliases = ["unlearn", "uninstall"])]
     Forget {
         /// The installed item ref or glob: `name`, `skill:name`, `'review*'`, `'*'`.
         /// With `--unmanaged`: the ref or glob scopes removal to unmanaged items only;
@@ -279,8 +296,11 @@ pub enum Command {
     },
 
     /// Refresh every melded source's clone and catalog.
+    // spec: CLI-172
+    #[command(visible_alias = "update")]
     Sync {
         /// After refreshing, run an `upgrade` pass (report + prompt) to apply upgrades.
+        /// Deprecated: prefer `mind upgrade` which now syncs first by default (CLI-169).
         #[arg(long)]
         upgrade: bool,
 
@@ -292,11 +312,19 @@ pub enum Command {
 
     /// Upgrade installed items to their latest source version.
     ///
-    /// By default this only *reports* pending upgrades (hash and commit deltas
-    /// plus a compare link per source) and prompts before changing anything.
+    /// By default, syncs each involved source first (fetches from remote), then
+    /// reports pending upgrades and prompts before applying. Use `--no-sync` to
+    /// skip the fetch and compute deltas from the current clone.
+    // spec: CLI-169
     Upgrade {
         /// Only upgrade this item; default is every installed item.
         item: Option<String>,
+
+        /// Skip the automatic source sync before computing deltas. By default,
+        /// `upgrade` fetches each involved source before checking for changes.
+        // spec: CLI-169
+        #[arg(long)]
+        no_sync: bool,
 
         /// Re-run a source's install hook without the safety prompt when its
         /// commit advanced. This executes arbitrary code from the source; only
@@ -314,7 +342,8 @@ pub enum Command {
     /// changes nothing. Without `--yes` it prompts before replacing.
     // Disable clap's auto `--version` flag on this subcommand so the explicit
     // `--version <VERSION>` argument below (pin a target release) owns the name.
-    #[command(disable_version_flag = true)]
+    // spec: CLI-172
+    #[command(disable_version_flag = true, visible_alias = "self-update")]
     Evolve {
         /// Report whether an update is available, then exit without changing anything.
         #[arg(long)]
@@ -325,7 +354,8 @@ pub enum Command {
     },
 
     /// List installed items, or show one item's details.
-    #[command(visible_alias = "status")]
+    // spec: CLI-172 - added `list` visible alias; `status` kept.
+    #[command(visible_aliases = ["status", "list"])]
     Recall {
         /// Show melded sources instead of installed items.
         #[arg(long)]
@@ -354,6 +384,8 @@ pub enum Command {
     /// Falls back to the catalog listing when `--no-tui`, `--json` (global), or
     /// stdout is not a TTY (piped or redirected). The query, `--kind`, and
     /// `--source` arguments seed the initial search/filter state in both modes.
+    // spec: CLI-172
+    #[command(visible_alias = "search")]
     Probe {
         /// Case-insensitive substring matched against item names and descriptions; empty lists everything.
         query: Option<String>,
@@ -367,9 +399,8 @@ pub enum Command {
         source: Option<String>,
 
         /// Skip the interactive TUI and use the plain catalog listing.
-        // TUI-3: `-n` is the subcommand-scoped short for `--no-tui`; it does not
-        // clash with `learn`'s `-n` (`--dry-run`) since clap shorts are local.
-        #[arg(long, short = 'n')]
+        // spec: CLI-164, TUI-54 - long-only; former -n short removed (CLI-163 reserves -n for --dry-run).
+        #[arg(long)]
         no_tui: bool,
     },
 
@@ -394,7 +425,8 @@ pub enum Command {
         /// names, `{{ns:}}` expansion, and the unguarded-reference scan).
         /// Ignored when `--policy` is given. `--as` is a hidden deprecated
         /// alias for backwards compatibility.
-        #[arg(short = 'n', long = "namespace", alias = "as", value_name = "PREFIX")]
+        // spec: CLI-163 - short moved to -N (uppercase).
+        #[arg(short = 'N', long = "namespace", alias = "as", value_name = "PREFIX")]
         alias: Option<String>,
 
         /// Validate a managed policy TOML file at this path instead of a source.
@@ -410,6 +442,8 @@ pub enum Command {
     },
 
     /// Diagnose drift, broken symlinks, and unsynced sources.
+    // spec: CLI-172
+    #[command(visible_alias = "doctor")]
     Introspect {
         /// Repair what is fixable without changing versions (recreate missing links).
         #[arg(long)]
@@ -494,7 +528,7 @@ pub enum ConfigCmd {
     Show,
 
     /// Manage agent homes ("lobes") - the directories items are linked into.
-    #[command(visible_alias = "target")]
+    // spec: CLI-172 - the former `target` alias is removed.
     Lobes {
         #[command(subcommand)]
         action: LobesCmd,

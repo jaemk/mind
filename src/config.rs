@@ -157,7 +157,16 @@ pub struct Config {
     /// this path as the destination unless `--to` or `MIND_ABSORB_TO` is given.
     /// Saved interactively when the user chooses a destination via the ABS-3 prompt
     /// and confirms saving (ABS-4). `~` is expanded at use.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ///
+    /// The canonical config key is `absorb-to` (kebab-case); `absorb_to` (snake_case)
+    /// is accepted as a legacy alias. New writes always emit `absorb-to`.
+    // spec: CLI-171
+    #[serde(
+        rename = "absorb-to",
+        alias = "absorb_to",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub absorb_to: Option<String>,
 }
 
@@ -356,5 +365,40 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// The canonical `absorb-to` (kebab-case) key is accepted in config.toml.
+    // spec: CLI-171
+    #[test]
+    fn absorb_to_kebab_key_is_accepted() {
+        let cfg: Config = toml::from_str("\"absorb-to\" = \"/some/path\"\n").unwrap();
+        assert_eq!(cfg.absorb_to.as_deref(), Some("/some/path"));
+    }
+
+    /// The legacy `absorb_to` (snake_case) key is still accepted as an alias.
+    // spec: CLI-171
+    #[test]
+    fn absorb_to_snake_key_is_alias() {
+        let cfg: Config = toml::from_str("absorb_to = \"/legacy/path\"\n").unwrap();
+        assert_eq!(cfg.absorb_to.as_deref(), Some("/legacy/path"));
+    }
+
+    /// Serializing a config with `absorb_to` set emits the kebab-case key.
+    // spec: CLI-171
+    #[test]
+    fn absorb_to_serializes_as_kebab() {
+        let cfg = Config {
+            absorb_to: Some("/out/path".to_string()),
+            ..Config::default()
+        };
+        let s = toml::to_string(&cfg).unwrap();
+        assert!(
+            s.contains("absorb-to"),
+            "serialized config must use kebab key: {s}"
+        );
+        assert!(
+            !s.contains("absorb_to"),
+            "serialized config must not use snake key: {s}"
+        );
     }
 }

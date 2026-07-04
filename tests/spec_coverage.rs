@@ -116,6 +116,10 @@ const ALLOWLIST: &[&str] = &[
     //   TUI-40 (terminal restore on panic) is now cited: the poison-recovery path
     //   is exercised by a unit test in src/tui/term.rs.
     "TUI-1",
+    // TUI-3: tombstone - the `-n` short form of `--no-tui` was removed (TUI-54,
+    // CLI-163). The spec entry is kept so the ID is not reused; it has no
+    // current behavior and so no citing test.
+    "TUI-3",
     // Resource and helper tooling (spec/tooling.md) is cited: the `tool` kind and
     // discovery (TOOL-1/2/5/7) from src/catalog.rs, the path-token expander
     // (TOOL-10/11/12/14) from src/namespace.rs, and the end-to-end install

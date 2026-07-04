@@ -16,6 +16,17 @@ pub(crate) fn print_json<T: Serialize>(value: &T) -> Result<()> {
     Ok(())
 }
 
+/// Serialize `items` wrapped in a versioned envelope `{"schema": 1, "items": [...]}`.
+/// Used by `probe --json` and `recall --json` array outputs (CLI-167).
+pub(crate) fn print_json_envelope<T: Serialize>(items: &[T]) -> Result<()> {
+    #[derive(Serialize)]
+    struct Envelope<'a, T: Serialize> {
+        schema: u8,
+        items: &'a [T],
+    }
+    print_json(&Envelope { schema: 1, items })
+}
+
 /// Install the process-wide output context. Call once, early in `main`, after
 /// parsing the global flags. A second call is ignored.
 pub fn set_ctx(ctx: OutputCtx) {

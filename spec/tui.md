@@ -20,10 +20,9 @@ the lock it takes per action is defined in storage.md (STO-40, STO-41).
   apply in both modes: in the listing they filter it (CLI-80, CLI-83); in the TUI
   they seed the initial search and filter state. Bare `mind` (no subcommand) is
   unchanged and does not launch the TUI.
-- `TUI-3` `-n` is the short form of `--no-tui` on `probe` (TUI-2): `mind probe -n`
-  prints the non-interactive catalog listing. The short is subcommand-scoped, so it
-  does not clash with `learn`'s `-n` (`--dry-run`, CLI-32); each is local to its own
-  command.
+- `TUI-3` (removed, superseded by TUI-54) `-n` was formerly the short form of
+  `--no-tui` on `probe`. Removed to free `-n` globally for `--dry-run` (CLI-163).
+  `--no-tui` is now long-only; see TUI-54.
 
 ## Browse tree
 
@@ -201,6 +200,9 @@ manifest, and store.
   (NS-30). When any of the source's items are installed the namespace is shown
   read-only with a note that it is locked until those items are forgotten (NS-30,
   CLI-161).
+- `TUI-54` `probe --no-tui` is long-only; its former short `-n` is removed (CLI-164,
+  CLI-163). `mind probe --no-tui` is the only accepted form; `mind probe -n` is now
+  a usage error.
 
 ## Security
 

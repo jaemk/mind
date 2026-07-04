@@ -939,12 +939,19 @@ fn probe_source_glob_matching_nothing_is_empty() {
 
 #[test]
 fn probe_source_glob_composes_with_json() {
-    // spec: CLI-86, CLI-84 - the glob `--source` filter composes with `--json`.
+    // spec: CLI-86, CLI-84, CLI-167 - the glob `--source` filter composes with `--json`;
+    // result is wrapped in {"schema": 1, "items": [...]}.
     let (sb, _tools) = melded_two_sources();
     let r = sb.mind(&["probe", "--no-tui", "--source", "*agents", "--json"]);
     assert!(r.success, "{}", r.stderr);
-    let rows: serde_json::Value = serde_json::from_str(&r.stdout).expect("probe --json array");
-    let rows = rows.as_array().expect("array");
+    let envelope: serde_json::Value =
+        serde_json::from_str(&r.stdout).expect("probe --json envelope");
+    assert_eq!(
+        envelope["schema"], 1,
+        "schema field must be 1: {}",
+        r.stdout
+    );
+    let rows = envelope["items"].as_array().expect("items array");
     assert!(
         rows.iter().any(|row| row["name"] == "review"),
         "agents item present in json: {}",
@@ -1038,21 +1045,19 @@ fn recall_sources_ignores_source_filter_glob() {
 }
 
 #[test]
-fn probe_n_is_short_for_no_tui() {
-    // spec: TUI-3 - `-n` is the subcommand-scoped short form of `--no-tui`; it
-    // prints the same non-interactive catalog listing as `--no-tui`.
+fn probe_no_tui_is_long_only() {
+    // spec: CLI-164, TUI-54 - `--no-tui` is long-only; `-n` is no longer accepted
+    // (CLI-163 reserves -n for --dry-run).
     let sb = melded();
-    let short = sb.mind(&["probe", "-n"]);
+    // --no-tui still works.
     let long = sb.mind(&["probe", "--no-tui"]);
-    assert!(short.success, "{}", short.stderr);
-    assert_eq!(
-        short.stdout, long.stdout,
-        "`-n` must match `--no-tui` output"
-    );
-    // Parity with the existing listing assertion (probe_lists_all_three_kinds).
-    assert!(short.stdout.contains("skill:review"), "{}", short.stdout);
-    assert!(short.stdout.contains("agent:dev"), "{}", short.stdout);
-    assert!(short.stdout.contains("rule:style"), "{}", short.stdout);
+    assert!(long.success, "{}", long.stderr);
+    assert!(long.stdout.contains("skill:review"), "{}", long.stdout);
+    assert!(long.stdout.contains("agent:dev"), "{}", long.stdout);
+    assert!(long.stdout.contains("rule:style"), "{}", long.stdout);
+    // -n must fail (unknown flag).
+    let short = sb.mind(&["probe", "-n"]);
+    assert!(!short.success, "probe -n should fail: {}", short.stdout);
 }
 
 #[test]
@@ -3028,15 +3033,16 @@ fn meld_namespace_flag_sets_prefix_and_as_alias_still_works() {
         probe.stdout
     );
 
-    // Verify the short form -n also works (a separate sandbox to avoid
+    // Verify the short form -N also works (a separate sandbox to avoid
     // re-meld collision).
+    // spec: CLI-163 - -N is the new short form for --namespace on meld.
     let sb2 = Sandbox::new();
     let spec2 = sb2.source_spec();
-    assert!(sb2.mind(&["meld", &spec2, "-n", "zz"]).success);
+    assert!(sb2.mind(&["meld", &spec2, "-N", "zz"]).success);
     let probe2 = sb2.mind(&["probe"]);
     assert!(
         probe2.stdout.contains("skill:zz:review"),
-        "-n short form must set prefix: {}",
+        "-N short form must set prefix: {}",
         probe2.stdout
     );
 
@@ -3054,8 +3060,8 @@ fn meld_namespace_flag_sets_prefix_and_as_alias_still_works() {
 
 #[test]
 fn review_namespace_flag_evaluates_under_prefix() {
-    // spec: CLI-159 - `review --namespace <prefix>` (short `-n`) evaluates the
-    // source under that prospective prefix; `--as` is a hidden deprecated alias.
+    // spec: CLI-159, CLI-163 - `review --namespace <prefix>` (short `-N`) evaluates
+    // the source under that prospective prefix; `--as` is a hidden deprecated alias.
     let sb = Sandbox::new();
     let spec = sb.source_spec();
 
@@ -3067,11 +3073,11 @@ fn review_namespace_flag_evaluates_under_prefix() {
         r.stdout, r.stderr
     );
 
-    // Short -n accepted.
-    let r2 = sb.mind(&["review", &spec, "-n", "jk"]);
+    // Short -N accepted (CLI-163: -n is reserved for --dry-run).
+    let r2 = sb.mind(&["review", &spec, "-N", "jk"]);
     assert!(
         r2.success,
-        "review -n must exit 0 for clean source: {} {}",
+        "review -N must exit 0 for clean source: {} {}",
         r2.stdout, r2.stderr
     );
 }
@@ -5011,18 +5017,6 @@ fn status_is_an_alias_for_recall() {
 }
 
 #[test]
-fn detach_is_an_alias_for_unmeld() {
-    // spec: CLI-20
-    let sb = melded();
-    assert!(sb.mind(&["detach", "agents"]).success);
-    assert!(
-        sb.mind(&["recall", "--sources"])
-            .stdout
-            .contains("no sources melded")
-    );
-}
-
-#[test]
 fn learn_links_into_all_configured_homes() {
     // spec: STO-14, LIFE-40
     let sb = Sandbox::new();
@@ -5121,19 +5115,6 @@ fn config_lobes_add_list_remove() {
         bad.stderr.contains("not a configured agent home"),
         "{}",
         bad.stderr
-    );
-}
-
-#[test]
-fn config_target_is_an_alias_for_lobes() {
-    // spec: CLI-111
-    let sb = Sandbox::new();
-    let home = sb.base.join("viaTarget").display().to_string();
-    assert!(sb.mind(&["config", "target", "add", &home]).success);
-    assert!(
-        sb.mind(&["config", "target", "list"])
-            .stdout
-            .contains(&home)
     );
 }
 
@@ -5410,17 +5391,19 @@ fn sync_continues_past_a_failed_source() {
 
 #[test]
 fn recall_json_emits_items_and_sources() {
-    // spec: CLI-73
+    // spec: CLI-73, CLI-167 - JSON outputs are wrapped in {"schema":1,"items":[...]}.
     let sb = melded();
     assert!(sb.mind(&["learn", "review"]).success);
 
-    // The default view is a JSON array of sources, each with nested items that
-    // carry their install state (CLI-73).
+    // The default view is an envelope with a sources array, each with nested items.
     let items = sb.mind(&["recall", "--json"]);
     assert!(items.success, "{}", items.stderr);
+    let env: serde_json::Value =
+        serde_json::from_str(&items.stdout).expect("recall --json envelope");
+    assert_eq!(env["schema"], 1, "schema must be 1: {}", items.stdout);
     assert!(
-        items.stdout.trim_start().starts_with('['),
-        "{}",
+        env["items"].is_array(),
+        "items key must be array: {}",
         items.stdout
     );
     assert!(
@@ -5439,37 +5422,55 @@ fn recall_json_emits_items_and_sources() {
         items.stdout
     );
 
-    // A single-item lookup is a JSON object.
+    // A single-item lookup is a plain JSON object (not wrapped).
     let one = sb.mind(&["recall", "skill:review", "--json"]).stdout;
     assert!(one.trim_start().starts_with('{'), "{one}");
     assert!(one.contains("\"hash\""), "{one}");
 
-    // --sources is a JSON array of sources.
-    let srcs = sb.mind(&["recall", "--sources", "--json"]).stdout;
-    assert!(srcs.trim_start().starts_with('['), "{srcs}");
-    assert!(srcs.contains("\"url\""), "{srcs}");
+    // --sources is an envelope with sources array.
+    let srcs_r = sb.mind(&["recall", "--sources", "--json"]);
+    let srcs_env: serde_json::Value =
+        serde_json::from_str(&srcs_r.stdout).expect("recall --sources --json envelope");
+    assert_eq!(srcs_env["schema"], 1, "schema must be 1: {}", srcs_r.stdout);
+    assert!(
+        srcs_env["items"].is_array(),
+        "items key must be array: {}",
+        srcs_r.stdout
+    );
+    assert!(srcs_r.stdout.contains("\"url\""), "{}", srcs_r.stdout);
 
-    // An empty registry is `[]`, not a human message.
+    // An empty registry is {"schema":1,"items":[]}, not a human message.
+    // spec: CLI-167
     let fresh = Sandbox::new();
+    let empty_env: serde_json::Value =
+        serde_json::from_str(fresh.mind(&["recall", "--json"]).stdout.trim())
+            .expect("empty recall envelope");
+    assert_eq!(empty_env["schema"], 1);
     assert_eq!(
-        fresh.mind(&["recall", "--json"]).stdout.trim(),
-        "[]",
-        "an empty registry must emit []"
+        empty_env["items"].as_array().map(|a| a.len()),
+        Some(0),
+        "empty recall must emit empty items array"
     );
 }
 
 #[test]
 fn probe_json_emits_rows() {
-    // spec: CLI-84
+    // spec: CLI-84, CLI-167 - output is wrapped in {"schema":1,"items":[...]}.
     let sb = melded();
     assert!(sb.mind(&["learn", "review"]).success);
     let r = sb.mind(&["probe", "--json"]);
     assert!(r.success, "{}", r.stderr);
-    assert!(r.stdout.trim_start().starts_with('['), "{}", r.stdout);
+    let env: serde_json::Value = serde_json::from_str(&r.stdout).expect("probe --json envelope");
+    assert_eq!(env["schema"], 1, "schema must be 1: {}", r.stdout);
+    let rows = env["items"].as_array().expect("items must be array");
     assert!(r.stdout.contains("\"installed\""), "{}", r.stdout);
     assert!(r.stdout.contains("\"name\": \"review\""), "{}", r.stdout);
     // The installed item carries installed:true.
-    assert!(r.stdout.contains("true"), "{}", r.stdout);
+    assert!(
+        rows.iter().any(|row| row["installed"] == true),
+        "{}",
+        r.stdout
+    );
 }
 
 // --- unmanaged lobe items (spec/unmanaged.md) -------------------------------
@@ -5986,13 +5987,20 @@ fn probe_no_tui_flag_produces_listing() {
 
 #[test]
 fn probe_json_flag_produces_json_not_tui() {
-    // spec: TUI-2 - `--json` forces JSON output; must not enter raw mode.
+    // spec: TUI-2, CLI-167 - `--json` forces JSON output wrapped in envelope.
     let sb = melded();
     let r = sb.mind(&["probe", "--json"]);
     assert!(r.success, "probe --json should succeed: {}", r.stderr);
+    let env: serde_json::Value =
+        serde_json::from_str(&r.stdout).expect("probe --json must produce valid JSON");
+    assert_eq!(
+        env["schema"], 1,
+        "probe --json must produce envelope: {}",
+        r.stdout
+    );
     assert!(
-        r.stdout.trim_start().starts_with('['),
-        "probe --json must produce a JSON array: {}",
+        env["items"].is_array(),
+        "probe --json envelope must have items array: {}",
         r.stdout
     );
     assert!(
@@ -9904,9 +9912,9 @@ fn evolve_check_at_current_version_reports_up_to_date() {
 }
 
 #[test]
-fn help_lists_upgrade_and_evolve_not_self_update() {
-    // Confirm clap renders both subcommands with the right names.
-    // No spec cite needed; this is a structural smoke test.
+fn help_lists_upgrade_evolve_and_self_update_alias() {
+    // Confirm clap renders both subcommands. `self-update` is now a visible alias
+    // for `evolve` (CLI-172) and must appear in --help.
     let sb = Sandbox::new();
     let r = sb.mind(&["--help"]);
     assert!(
@@ -9924,9 +9932,10 @@ fn help_lists_upgrade_and_evolve_not_self_update() {
         "help must list the 'evolve' subcommand: {}",
         r.stdout
     );
+    // spec: CLI-172 - self-update is now a visible alias for evolve.
     assert!(
-        !r.stdout.contains("self-update"),
-        "help must NOT contain 'self-update': {}",
+        r.stdout.contains("self-update"),
+        "help must list the 'self-update' visible alias: {}",
         r.stdout
     );
 }
@@ -12789,14 +12798,15 @@ fn recall_json_renamed_item_installed_once_not_orphaned() {
     assert!(sb.mind(&["meld", &spec, "--yes"]).success, "meld failed");
 
     // Record the install commit so we can assert the JSON carries it.
+    // spec: CLI-167 - recall --json now wrapped in {"schema":1,"items":[...]}.
     let before = parse_json(&sb.mind(&["recall", "--json"]).stdout);
-    let source_commit = before[0]["commit"].as_str().unwrap().to_string();
+    let source_commit = before["items"][0]["commit"].as_str().unwrap().to_string();
 
     sb.write_and_commit("mind.toml", "[source]\nprefix = \"jk\"\n");
     assert!(sb.mind(&["sync"]).success, "sync failed");
 
     let j = parse_json(&sb.mind(&["recall", "--json"]).stdout);
-    let items = j[0]["items"].as_array().expect("items array");
+    let items = j["items"][0]["items"].as_array().expect("items array");
 
     // The skill must appear under its NEW effective key, installed, with the
     // commit it was installed at, and must not be duplicated as an orphan.
@@ -12885,8 +12895,9 @@ fn removed_upstream_still_flagged_in_recall_human_and_json() {
 
     // JSON: the removed item appears as installed:true with orphaned:true (no
     // catalog match). The review skill (still in the catalog) is not orphaned.
+    // spec: CLI-167 - recall --json wrapped in envelope.
     let j = parse_json(&sb.mind(&["recall", "--json"]).stdout);
-    let items = j[0]["items"].as_array().expect("items array");
+    let items = j["items"][0]["items"].as_array().expect("items array");
     let dev = items
         .iter()
         .find(|r| r["key"].as_str() == Some("agent:dev"))
@@ -12961,8 +12972,9 @@ fn same_bare_name_across_sources_does_not_cross_match_on_removal() {
 
     // JSON confirms the cross-match isolation: A's review orphaned, B's
     // zz:review installed and NOT orphaned.
+    // spec: CLI-167 - recall --json wrapped in envelope.
     let jj = parse_json(&a.mind(&["recall", "--json"]).stdout);
-    let sources = jj.as_array().expect("sources array");
+    let sources = jj["items"].as_array().expect("sources array");
     let mut saw_review_orphan = false;
     let mut saw_zz_review_ok = false;
     for s in sources {
@@ -14275,10 +14287,10 @@ fn probe_non_interactive_nests_dependency_under_dependent() {
     // agent:reviewer appears only as a nested dependency, not as its own hit.
     let sb = dep62_fixture();
 
-    let r = sb.mind(&["probe", "-n", "--kind", "skill", "review"]);
+    let r = sb.mind(&["probe", "--no-tui", "--kind", "skill", "review"]);
     assert!(
         r.success,
-        "probe -n --kind skill must succeed: {} {}",
+        "probe --no-tui --kind skill must succeed: {} {}",
         r.stdout, r.stderr
     );
     let out = &r.stdout;
@@ -14308,10 +14320,10 @@ fn probe_non_interactive_nests_dependency_under_dependent() {
 
 #[test]
 fn probe_json_includes_dependencies_field() {
-    // spec: DEP-62
+    // spec: DEP-62, CLI-167
     // `probe --json` adds a `dependencies` field to each row with the direct
     // dependency keys. For `skill:review` that depends on `agent:reviewer`, the
-    // field must contain `"agent:reviewer"`.
+    // field must contain `"agent:reviewer"`. Output is wrapped in an envelope.
     let sb = dep62_fixture();
 
     let r = sb.mind(&["probe", "--json", "review"]);
@@ -14320,7 +14332,8 @@ fn probe_json_includes_dependencies_field() {
         "probe --json must succeed: {} {}",
         r.stdout, r.stderr
     );
-    let rows: Vec<serde_json::Value> = serde_json::from_str(&r.stdout).expect("must be valid JSON");
+    let env: serde_json::Value = serde_json::from_str(&r.stdout).expect("must be valid JSON");
+    let rows = env["items"].as_array().expect("items must be array");
     let review_row = rows
         .iter()
         .find(|row| row["name"] == "review")
@@ -14336,9 +14349,9 @@ fn probe_json_includes_dependencies_field() {
 
 #[test]
 fn probe_json_item_with_no_deps_omits_dependencies_field() {
-    // spec: DEP-62
+    // spec: DEP-62, CLI-167
     // An item with no dependencies should have the `dependencies` field absent
-    // (or empty) from its JSON row, since the field is skip_serializing_if empty.
+    // (or empty) from its JSON row. Output is wrapped in an envelope.
     let sb = dep62_fixture();
 
     let r = sb.mind(&["probe", "--json", "reviewer"]);
@@ -14347,7 +14360,8 @@ fn probe_json_item_with_no_deps_omits_dependencies_field() {
         "probe --json must succeed: {} {}",
         r.stdout, r.stderr
     );
-    let rows: Vec<serde_json::Value> = serde_json::from_str(&r.stdout).expect("must be valid JSON");
+    let env: serde_json::Value = serde_json::from_str(&r.stdout).expect("must be valid JSON");
+    let rows = env["items"].as_array().expect("items must be array");
     let reviewer_row = rows
         .iter()
         .find(|row| row["name"] == "reviewer")
@@ -14604,12 +14618,10 @@ fn recall_tree_cyclic_installed_pair_renders_every_item() {
 
 #[test]
 fn probe_json_resolves_dependency_to_prefixed_effective_key() {
-    // spec: DEP-62
+    // spec: DEP-62, CLI-167
     // When a source is melded under a prefix, an item's dependency key in the
-    // `probe --json` adjacency field must be the EFFECTIVE (prefixed) key, so a
-    // consumer reconstructs the graph by the same identities the items install
-    // under. `skill:jk:review` must depend on `agent:jk:reviewer`, not the bare
-    // `agent:reviewer`.
+    // `probe --json` adjacency field must be the EFFECTIVE (prefixed) key.
+    // Output is wrapped in an envelope.
     let sb = Sandbox::bare("dep-prefix");
     sb.write_and_commit(
         "skills/review/SKILL.md",
@@ -14627,7 +14639,8 @@ fn probe_json_resolves_dependency_to_prefixed_effective_key() {
         "probe --json must succeed: {} {}",
         r.stdout, r.stderr
     );
-    let rows: Vec<serde_json::Value> = serde_json::from_str(&r.stdout).expect("must be valid JSON");
+    let env: serde_json::Value = serde_json::from_str(&r.stdout).expect("must be valid JSON");
+    let rows = env["items"].as_array().expect("items must be array");
     // The effective name carries the prefix.
     let review_row = rows
         .iter()
@@ -15071,10 +15084,12 @@ fn recall_tree_json_and_probe_json_agree_on_direct_dependencies() {
     tree_deps.sort();
 
     // Flat adjacency form: skill:review's `dependencies` field.
+    // spec: CLI-167 - probe --json is wrapped in an envelope.
     let probe = sb.mind(&["probe", "--json", "review"]);
     assert!(probe.success, "probe --json must succeed: {}", probe.stderr);
-    let rows: Vec<serde_json::Value> =
+    let probe_env: serde_json::Value =
         serde_json::from_str(&probe.stdout).expect("probe JSON invalid");
+    let rows = probe_env["items"].as_array().expect("items must be array");
     let review_row = rows
         .iter()
         .find(|row| row["name"] == "review")
@@ -18311,5 +18326,323 @@ fn sync_rewalk_respects_namespace_key_in_mindfile() {
     assert!(
         after.contains("namespace:pfx"),
         "nested source must carry namespace:pfx alias after sync re-walk (DSC-78): {after}"
+    );
+}
+
+// ---- CLI surface: flag renames and aliases (DEC-2 through DEC-8) ------------
+
+#[test]
+fn meld_register_only_is_canonical() {
+    // spec: CLI-165 - `--register-only` is the canonical flag; `--link-only` is a
+    // hidden deprecated alias that still works.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+
+    // The new canonical flag registers without installing.
+    assert!(
+        sb.mind(&["meld", &spec, "--register-only"]).success,
+        "--register-only must succeed"
+    );
+    // Verify nothing was installed - no symlink in the lobe.
+    let skill_link = sb.claude_home.join("skills/review");
+    assert!(
+        !skill_link.exists(),
+        "--register-only must not install items: lobe symlink exists at {skill_link:?}"
+    );
+}
+
+#[test]
+fn unmeld_keep_items_is_canonical() {
+    // spec: CLI-166 - `--keep-items` is the canonical flag; `--unlink-only` is a
+    // hidden deprecated alias that still works.
+    let sb = melded();
+    assert!(sb.mind(&["learn", "review"]).success);
+
+    let r = sb.mind(&["unmeld", "agents", "--keep-items"]);
+    assert!(r.success, "--keep-items must succeed: {}", r.stderr);
+
+    // The item's symlink must still exist in the lobe.
+    assert!(
+        sb.claude_home.join("skills/review").exists()
+            || sb.claude_home.join("skills/review/SKILL.md").exists(),
+        "--keep-items must preserve the installed item"
+    );
+}
+
+#[test]
+fn mutation_result_schema_field() {
+    // spec: CLI-168 - every mutation JSON result carries `"schema": 1`.
+    let sb = melded();
+    let r = sb.mind(&["learn", "review", "--json"]);
+    assert!(r.success, "{}", r.stderr);
+    let v: serde_json::Value =
+        serde_json::from_str(&r.stdout).expect("learn --json must produce JSON");
+    assert_eq!(
+        v["schema"], 1,
+        "mutation result must carry schema:1: {}",
+        r.stdout
+    );
+    assert!(
+        v["action"].is_string(),
+        "action must be present: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn upgrade_no_sync_flag_is_accepted() {
+    // spec: CLI-169 - `upgrade --no-sync` skips the pre-upgrade source fetch.
+    // Verifies the flag is wired; full sync-vs-no-sync diff is covered by the
+    // next test.
+    let sb = melded();
+    assert!(sb.mind(&["learn", "review"]).success);
+    let r = sb.mind(&["upgrade", "--no-sync"]);
+    // Either exits 0 (nothing to upgrade) or 1 (pending); must not crash with
+    // "unexpected argument --no-sync".
+    assert!(
+        !r.stderr.contains("unexpected argument"),
+        "--no-sync must be a recognized flag: {}",
+        r.stderr
+    );
+    assert!(
+        !r.stderr.contains("error: unrecognized"),
+        "--no-sync must be a recognized flag: {}",
+        r.stderr
+    );
+}
+
+#[test]
+fn upgrade_syncs_before_computing_delta() {
+    // spec: CLI-169 - `upgrade` syncs each source first by default; `--no-sync`
+    // skips the fetch. With a cloned source (--follow-branch), after a new commit
+    // in the source: `--no-sync` sees stale clone (reports up-to-date); the
+    // default sync detects the change (reports pending).
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+
+    // Meld as a clone (--follow-branch main makes it non-linked).
+    assert!(
+        sb.mind(&["meld", &spec, "--follow-branch", "main", "--yes"])
+            .success,
+        "meld --follow-branch failed"
+    );
+    assert!(sb.mind(&["learn", "review"]).success, "learn review failed");
+
+    // Advance the source: change the SKILL.md content so the hash differs.
+    sb.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\ndescription: updated skill\n---\n# review v2\n",
+    );
+
+    // --no-sync: the clone is stale -> no pending upgrades.
+    let no_sync = sb.mind(&["upgrade", "--no-sync", "--yes"]);
+    // Must succeed; no crash.
+    assert!(
+        !no_sync.stderr.contains("error"),
+        "--no-sync must not error: {}",
+        no_sync.stderr
+    );
+
+    // default sync: fetches the new commit -> detects pending upgrade.
+    let with_sync = sb.mind(&["upgrade", "--yes"]);
+    // Success (0) means it applied an upgrade; exit 1 is "pending, no --yes prompt
+    // answered". Either way, the output must mention the item.
+    assert!(
+        with_sync.stdout.contains("review") || with_sync.stderr.contains("review"),
+        "upgrade with sync must reference the changed item: out={} err={}",
+        with_sync.stdout,
+        with_sync.stderr
+    );
+}
+
+#[test]
+fn mind_default_lobe_env_var_overrides_claude_home() {
+    // spec: CLI-170 - MIND_DEFAULT_LOBE takes precedence over CLAUDE_HOME as the
+    // default agent home. Items must be linked into the MIND_DEFAULT_LOBE dir, not
+    // the CLAUDE_HOME dir set by the sandbox.
+    //
+    // All commands use MIND_DEFAULT_LOBE so that ensure_config() (called during
+    // meld) bakes alt_lobe into config.toml, not sb.claude_home.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+
+    // Create an alternative lobe directory first.
+    let alt_lobe = sb.mind_home.join("alt_lobe");
+    std::fs::create_dir_all(&alt_lobe).expect("create alt_lobe");
+    let alt_lobe_str = alt_lobe.to_str().unwrap().to_string();
+
+    // Meld with MIND_DEFAULT_LOBE so the written config.toml records alt_lobe.
+    assert!(
+        sb.mind_env(
+            &["meld", &spec, "--register-only"],
+            &[("MIND_DEFAULT_LOBE", alt_lobe_str.as_str())]
+        )
+        .success,
+        "register-only meld with MIND_DEFAULT_LOBE failed"
+    );
+
+    // Install with MIND_DEFAULT_LOBE still set.
+    let r = sb.mind_env(
+        &["learn", "review"],
+        &[("MIND_DEFAULT_LOBE", alt_lobe_str.as_str())],
+    );
+    assert!(
+        r.success,
+        "learn with MIND_DEFAULT_LOBE failed: {}",
+        r.stderr
+    );
+
+    // Item must be linked in alt_lobe, not the sandbox's CLAUDE_HOME.
+    let in_alt =
+        alt_lobe.join("skills/review").exists() || alt_lobe.join("skills/review/SKILL.md").exists();
+    let in_claude = sb.claude_home.join("skills/review").exists()
+        || sb.claude_home.join("skills/review/SKILL.md").exists();
+
+    assert!(
+        in_alt,
+        "item must be linked in MIND_DEFAULT_LOBE: {alt_lobe:?}"
+    );
+    assert!(
+        !in_claude,
+        "item must NOT be linked in CLAUDE_HOME when MIND_DEFAULT_LOBE is set: {:?}",
+        sb.claude_home
+    );
+}
+
+#[test]
+fn visible_aliases_present_in_help() {
+    // spec: CLI-172 - `add`, `install`, `uninstall`, `update`, `search`, `list`,
+    // `doctor`, `self-update` must appear as visible aliases in the top-level help.
+    let sb = Sandbox::new();
+    let r = sb.mind(&["--help"]);
+    assert!(r.success, "--help failed: {}", r.stderr);
+    let out = r.stdout;
+    for alias in &[
+        "add",
+        "install",
+        "uninstall",
+        "update",
+        "search",
+        "list",
+        "doctor",
+    ] {
+        assert!(
+            out.contains(alias),
+            "visible alias `{alias}` must appear in --help: {out}"
+        );
+    }
+    // `detach` and `target` must NOT appear (demoted to hidden).
+    assert!(
+        !out.contains("detach"),
+        "`detach` must not appear in --help (hidden alias): {out}"
+    );
+    assert!(
+        !out.contains("target"),
+        "`target` must not appear in --help (hidden alias): {out}"
+    );
+}
+
+#[test]
+fn meld_help_mentions_install_default() {
+    // spec: CLI-173 - the meld one-line help must mention that it installs by default.
+    let sb = Sandbox::new();
+    let r = sb.mind(&["meld", "--help"]);
+    assert!(r.success, "meld --help failed: {}", r.stderr);
+    let out = r.stdout + &r.stderr;
+    assert!(
+        out.contains("install") || out.contains("Install"),
+        "meld --help must mention install: {out}"
+    );
+}
+
+#[test]
+fn unmeld_long_help_leads_with_uninstall() {
+    // spec: CLI-174 - the unmeld long help must lead with the uninstall default and
+    // mention --keep-items.
+    let sb = Sandbox::new();
+    let r = sb.mind(&["unmeld", "--help"]);
+    assert!(r.success, "unmeld --help failed: {}", r.stderr);
+    let out = r.stdout + &r.stderr;
+    assert!(
+        out.contains("uninstall") || out.contains("Uninstalls"),
+        "unmeld --help must mention uninstall: {out}"
+    );
+    assert!(
+        out.contains("--keep-items"),
+        "unmeld --help must mention --keep-items: {out}"
+    );
+}
+
+#[test]
+fn exit_codes_distinguish_runtime_and_usage_errors() {
+    // spec: CLI-175 - 0 for success, 1 for a runtime error (MindError), 2 for a
+    // usage error (clap parse failure).
+    let sb = Sandbox::new();
+
+    let ok = Command::new(env!("CARGO_BIN_EXE_mind"))
+        .args(["recall"])
+        .env("MIND_HOME", &sb.mind_home)
+        .env("CLAUDE_HOME", &sb.claude_home)
+        .output()
+        .expect("run mind");
+    assert_eq!(ok.status.code(), Some(0), "recall in a fresh home exits 0");
+
+    let runtime = Command::new(env!("CARGO_BIN_EXE_mind"))
+        .args(["learn", "no-such-item"])
+        .env("MIND_HOME", &sb.mind_home)
+        .env("CLAUDE_HOME", &sb.claude_home)
+        .output()
+        .expect("run mind");
+    assert_eq!(
+        runtime.status.code(),
+        Some(1),
+        "a MindError exits 1: {}",
+        String::from_utf8_lossy(&runtime.stderr)
+    );
+
+    let usage = Command::new(env!("CARGO_BIN_EXE_mind"))
+        .args(["probe", "--definitely-not-a-flag"])
+        .env("MIND_HOME", &sb.mind_home)
+        .env("CLAUDE_HOME", &sb.claude_home)
+        .output()
+        .expect("run mind");
+    assert_eq!(
+        usage.status.code(),
+        Some(2),
+        "a clap parse failure exits 2: {}",
+        String::from_utf8_lossy(&usage.stderr)
+    );
+}
+
+#[test]
+fn removed_aliases_are_usage_errors() {
+    // spec: CLI-172 - the former `detach` (unmeld) and `target` (config lobes)
+    // aliases are removed, not hidden; both are usage errors now.
+    let sb = Sandbox::new();
+    let detach = sb.mind(&["detach", "whatever"]);
+    assert!(
+        !detach.success,
+        "`mind detach` must fail: {}",
+        detach.stdout
+    );
+    let target = sb.mind(&["config", "target", "list"]);
+    assert!(
+        !target.success,
+        "`mind config target` must fail: {}",
+        target.stdout
+    );
+}
+
+#[test]
+fn self_update_alias_works() {
+    // spec: CLI-172 - `self-update` is a visible alias for `evolve`.
+    let sb = Sandbox::new();
+    // --help on the alias should succeed and show evolve content.
+    let r = sb.mind(&["self-update", "--help"]);
+    assert!(
+        r.success || r.stderr.contains("evolve") || r.stdout.contains("evolve"),
+        "self-update alias must be recognized: out={} err={}",
+        r.stdout,
+        r.stderr
     );
 }

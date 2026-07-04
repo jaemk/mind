@@ -171,7 +171,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             pin_ref,
             install_hook,
             dangerously_skip_install_hook_check,
-            link_only,
+            register_only,
             recursive,
             force,
         } => {
@@ -200,7 +200,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             // CLI-12: re-melding an already-melded source is not an error; it
             // ensures the items are installed, else reports their status.
             if commands::is_melded(paths, &repo)? {
-                commands::remeld(paths, &repo, alias, link_only, flow, recursive)?;
+                commands::remeld(paths, &repo, alias, register_only, flow, recursive)?;
             } else {
                 let meld_sum = commands::meld(
                     paths,
@@ -215,11 +215,11 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
                     dangerously_skip_install_hook_check,
                 )?;
                 // CLI-23: by default, offer to install the melded source's items
-                // right away (preview + prompt). `--link-only` stops at registering.
+                // right away (preview + prompt). `--register-only` stops at registering.
                 //
                 // CLI-156: in json mode the entire meld+install outcome is folded
                 // into ONE JSON object emitted here. Human output is unchanged.
-                if !link_only {
+                if !register_only {
                     if json {
                         // Install silently (no separate JSON from learn), collect keys.
                         let (mut inst, pend) = commands::install_source_items_for_json(
@@ -246,7 +246,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
                         }
                     }
                 } else if json {
-                    // link-only + json: register only, emit the meld result now.
+                    // register-only + json: register only, emit the meld result now.
                     commands::emit_meld_json_result(meld_sum, vec![], 0)?;
                 }
             }
@@ -268,13 +268,13 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
         ),
         Command::Unmeld {
             name,
-            unlink_only,
+            keep_items,
             uninstall_hook,
             dangerously_skip_install_hook_check,
         } => commands::unmeld(
             paths,
             &name,
-            unlink_only,
+            keep_items,
             yes,
             dangerously_skip_install_hook_check,
             uninstall_hook,
@@ -326,13 +326,26 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
         } => commands::sync(paths, upgrade, dangerously_skip_install_hook_check),
         Command::Upgrade {
             item,
+            no_sync,
             dangerously_skip_install_hook_check,
-        } => commands::upgrade(
-            paths,
-            yes,
-            item.as_deref(),
-            dangerously_skip_install_hook_check,
-        ),
+        } => {
+            // spec: CLI-169 - default syncs first; --no-sync skips the fetch.
+            if no_sync {
+                commands::upgrade_no_sync(
+                    paths,
+                    yes,
+                    item.as_deref(),
+                    dangerously_skip_install_hook_check,
+                )
+            } else {
+                commands::upgrade(
+                    paths,
+                    yes,
+                    item.as_deref(),
+                    dangerously_skip_install_hook_check,
+                )
+            }
+        }
         Command::Evolve { check, version } => selfupdate::run(check, yes, version),
         Command::Recall {
             sources,

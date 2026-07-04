@@ -4208,23 +4208,131 @@ pub fn sync(paths: &Paths, then_upgrade: bool, dangerously_skip_hook_check: bool
         print_json(&result)?;
     }
     if then_upgrade {
-        // spec: HOOK-11, HOOK-23
-        upgrade(paths, false, None, dangerously_skip_hook_check)?;
+        // spec: HOOK-11, HOOK-23 - sync already done above; use upgrade_no_sync
+        // to avoid a redundant fetch. Deprecated: prefer `mind upgrade` (CLI-169).
+        upgrade_no_sync(paths, false, None, dangerously_skip_hook_check)?;
     }
     Ok(())
 }
 
+/// Sync sources relevant to the upgrade scope. Per-source failures are reported
+/// and skipped (CLI-54 resilience); the upgrade pass uses whatever was refreshed.
+// spec: CLI-169
+fn sync_sources_for_upgrade(
+    paths: &Paths,
+    registry: &mut Registry,
+    item_ref: Option<&str>,
+    out: &crate::render::OutputCtx,
+) -> Result<()> {
+    // Determine which source names are in scope. With no filter, all sources sync.
+    let in_scope: Option<HashSet<String>> =
+        item_ref.and_then(|r| parse_item_ref(r).ok()).map(|f| {
+            Manifest::load(paths)
+                .map(|m| {
+                    m.items
+                        .values()
+                        .filter(|it| crate::resolve::installed_matches_glob(it, &f))
+                        .map(|it| it.source.clone())
+                        .collect()
+                })
+                .unwrap_or_default()
+        });
+
+    let should_sync = |name: &str| in_scope.as_ref().is_none_or(|s| s.contains(name));
+
+    for source in &mut registry.sources {
+        if !should_sync(&source.name) {
+            continue;
+        }
+        let dir = source.clone_dir(paths);
+        let refreshed = (|| -> Result<(String, bool)> {
+            if source.is_linked() {
+                if !dir.is_dir() {
+                    return Err(MindError::NotADirectory {
+                        path: dir.display().to_string(),
+                    });
+                }
+                let new_commit = git::head_commit(&source.url, &dir)
+                    .ok()
+                    .or_else(|| source.commit.clone())
+                    .unwrap_or_default();
+                let changed = source.commit.as_deref() != Some(new_commit.as_str());
+                return Ok((new_commit, changed));
+            }
+            let pin = source.pin.clone();
+            if dir.join(".git").is_dir() {
+                git::sync_to_pin(&source.url, &dir, &pin)?;
+            } else {
+                if let Some(parent) = dir.parent() {
+                    crate::paths::mkdir_p(parent)?;
+                }
+                git::clone_at(&source.url, &dir, &pin)?;
+            }
+            let new_commit = git::head_commit(&source.url, &dir)?;
+            let changed = source.commit.as_deref() != Some(new_commit.as_str());
+            Ok((new_commit, changed))
+        })();
+        match refreshed {
+            Ok((new_commit, _)) => {
+                source.commit = Some(new_commit);
+            }
+            Err(e) => {
+                if !out.json {
+                    eprintln!(
+                        "  warning: could not sync {}: {e}; upgrade will use stale clone",
+                        source.name
+                    );
+                }
+            }
+        }
+    }
+    // Persist whatever was refreshed before the upgrade pass reads the registry.
+    registry.save(paths)?;
+    Ok(())
+}
+
 /// `mind upgrade [--yes] [item]` — report and optionally apply upgrades.
+///
+/// Syncs first by default (CLI-169). Kept as the 4-arg public entry point so
+/// callers that pre-date `no_sync` (e.g. the TUI) continue to compile unchanged.
 pub fn upgrade(
     paths: &Paths,
     yes: bool,
     item_ref: Option<&str>,
     dangerously_skip_hook_check: bool,
 ) -> Result<()> {
+    upgrade_inner(paths, yes, item_ref, false, dangerously_skip_hook_check)
+}
+
+/// `mind upgrade --no-sync` — skip the pre-upgrade source fetch (CLI-169).
+pub fn upgrade_no_sync(
+    paths: &Paths,
+    yes: bool,
+    item_ref: Option<&str>,
+    dangerously_skip_hook_check: bool,
+) -> Result<()> {
+    upgrade_inner(paths, yes, item_ref, true, dangerously_skip_hook_check)
+}
+
+fn upgrade_inner(
+    paths: &Paths,
+    yes: bool,
+    item_ref: Option<&str>,
+    no_sync: bool,
+    dangerously_skip_hook_check: bool,
+) -> Result<()> {
     let out = crate::render::ctx();
     // POL-3: load the managed policy once (fail closed on Err; None = inert).
     let policy = Policy::load()?;
     let mut registry = Registry::load(paths)?;
+
+    // spec: CLI-169 - sync each involved source before computing deltas, unless
+    // --no-sync is given. Per-source failures are reported and skipped (CLI-54);
+    // the upgrade pass runs on the sources that did succeed.
+    if !no_sync {
+        sync_sources_for_upgrade(paths, &mut registry, item_ref, &out)?;
+    }
+
     let manifest = Manifest::load(paths)?;
 
     let filter = item_ref.map(parse_item_ref).transpose()?;
@@ -4680,7 +4788,8 @@ pub fn recall(
     if sources {
         let registry = Registry::load(paths)?;
         if json {
-            return print_json(&registry.sources);
+            // spec: CLI-167 - array wrapped in versioned envelope.
+            return print_json_envelope(&registry.sources);
         }
         if registry.sources.is_empty() {
             println!("no sources melded");
@@ -4849,7 +4958,8 @@ pub fn recall(
                 })
             })
             .collect();
-        return print_json(&out);
+        // spec: CLI-167 - array wrapped in versioned envelope.
+        return print_json_envelope(&out);
     }
 
     if registry.sources.is_empty() {
@@ -5068,7 +5178,8 @@ pub fn probe(
                 dependencies: Vec::new(),
             });
         }
-        return print_json(&rows);
+        // spec: CLI-167 - array wrapped in versioned envelope.
+        return print_json_envelope(&rows);
     }
 
     if hits.is_empty() && unmanaged.is_empty() {
@@ -5870,6 +5981,8 @@ pub(crate) struct MeldSummary {
 /// `learn` fills `installed` with its closure keys; `sync` fills `count`).
 #[derive(Serialize, Debug, PartialEq, Eq)]
 struct MutationResult {
+    // spec: CLI-168 - schema version; always 1.
+    schema: u8,
     action: &'static str,
     target: String,
     outcome: &'static str,
@@ -5894,6 +6007,7 @@ impl MutationResult {
     /// A result with no optional fields populated.
     fn new(action: &'static str, target: &str, outcome: &'static str) -> Self {
         Self {
+            schema: 1,
             action,
             target: target.to_string(),
             outcome,
@@ -5913,7 +6027,7 @@ fn json_mode() -> bool {
     crate::render::ctx().json
 }
 
-use crate::render::print_json;
+use crate::render::{print_json, print_json_envelope};
 
 /// A throwaway registry holding just one source, for catalog scans during meld.
 fn single(source: &crate::source::Source) -> Registry {
