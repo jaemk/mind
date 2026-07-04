@@ -18647,3 +18647,318 @@ fn self_update_alias_works() {
         r.stderr
     );
 }
+
+// ---- gap-closing tests added by qa agent ------------------------------------
+
+#[test]
+fn all_mutating_verbs_carry_schema_1_in_json_envelope() {
+    // spec: CLI-168 - every mutation JSON result carries "schema": 1.
+    // mutation_result_schema_field covers `learn`; this test pins the remaining
+    // mutating verbs: meld, forget, sync, upgrade, and unmeld.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+
+    // meld
+    let meld_r = sb.mind(&["meld", &spec, "--json"]);
+    assert!(meld_r.success, "meld --json failed: {}", meld_r.stderr);
+    assert_eq!(
+        parse_json(&meld_r.stdout)["schema"],
+        1,
+        "meld --json must carry schema:1: {}",
+        meld_r.stdout
+    );
+
+    // sync
+    let sync_r = sb.mind(&["sync", "--json"]);
+    assert!(sync_r.success, "sync --json failed: {}", sync_r.stderr);
+    assert_eq!(
+        parse_json(&sync_r.stdout)["schema"],
+        1,
+        "sync --json must carry schema:1: {}",
+        sync_r.stdout
+    );
+
+    // learn then forget
+    assert!(
+        sb.mind(&["learn", "skill:review"]).success,
+        "learn review failed"
+    );
+    let forget_r = sb.mind(&["forget", "skill:review", "--json"]);
+    assert!(
+        forget_r.success,
+        "forget --json failed: {}",
+        forget_r.stderr
+    );
+    assert_eq!(
+        parse_json(&forget_r.stdout)["schema"],
+        1,
+        "forget --json must carry schema:1: {}",
+        forget_r.stdout
+    );
+
+    // upgrade (reinstall item first; no delta case)
+    assert!(
+        sb.mind(&["learn", "skill:review"]).success,
+        "learn review failed"
+    );
+    let upgrade_r = sb.mind(&["upgrade", "--json"]);
+    assert!(
+        upgrade_r.success,
+        "upgrade --json failed: {}",
+        upgrade_r.stderr
+    );
+    assert_eq!(
+        parse_json(&upgrade_r.stdout)["schema"],
+        1,
+        "upgrade --json must carry schema:1: {}",
+        upgrade_r.stdout
+    );
+
+    // unmeld (removes source and its installed items)
+    let unmeld_r = sb.mind(&["unmeld", "agents", "--json"]);
+    assert!(
+        unmeld_r.success,
+        "unmeld --json failed: {}",
+        unmeld_r.stderr
+    );
+    assert_eq!(
+        parse_json(&unmeld_r.stdout)["schema"],
+        1,
+        "unmeld --json must carry schema:1: {}",
+        unmeld_r.stdout
+    );
+}
+
+#[test]
+fn short_n_is_usage_error_on_meld_review_and_init_source() {
+    // spec: CLI-163 - -n is reserved for --dry-run on `learn` only. The verbs
+    // meld, review, and init-source do not define -n; passing it must be
+    // rejected as a clap usage error (unknown flag), not accepted.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+
+    let meld_n = sb.mind(&["meld", "-n", &spec]);
+    assert!(
+        !meld_n.success,
+        "meld -n must be rejected as an unknown flag: {}",
+        meld_n.stderr
+    );
+
+    let review_n = sb.mind(&["review", "-n", &spec]);
+    assert!(
+        !review_n.success,
+        "review -n must be rejected as an unknown flag: {}",
+        review_n.stderr
+    );
+
+    let init_n = sb.mind(&["init-source", "-n"]);
+    assert!(
+        !init_n.success,
+        "init-source -n must be rejected as an unknown flag: {}",
+        init_n.stderr
+    );
+
+    // learn -n is still accepted as --dry-run (the reserved use).
+    assert!(sb.mind(&["meld", &spec]).success, "meld without -n failed");
+    let learn_n = sb.mind(&["learn", "-n", "skill:review"]);
+    assert!(
+        learn_n.success,
+        "learn -n must still work as --dry-run: {}",
+        learn_n.stderr
+    );
+}
+
+#[test]
+fn deprecated_flag_aliases_are_hidden_from_help() {
+    // spec: CLI-165 - --link-only is a hidden deprecated alias for
+    // --register-only; it must NOT appear in `meld --help` output.
+    // spec: CLI-166 - --unlink-only is a hidden deprecated alias for
+    // --keep-items; it must NOT appear in `unmeld --help` output.
+    // The canonical names must still be visible in their respective help text.
+    let sb = Sandbox::new();
+
+    let meld_help = sb.mind(&["meld", "--help"]).stdout;
+    assert!(
+        !meld_help.contains("link-only"),
+        "--link-only must not appear in meld --help (hidden alias): {meld_help}"
+    );
+    assert!(
+        meld_help.contains("register-only"),
+        "--register-only must appear in meld --help (canonical name): {meld_help}"
+    );
+
+    let unmeld_help = sb.mind(&["unmeld", "--help"]).stdout;
+    assert!(
+        !unmeld_help.contains("unlink-only"),
+        "--unlink-only must not appear in unmeld --help (hidden alias): {unmeld_help}"
+    );
+    assert!(
+        unmeld_help.contains("keep-items"),
+        "--keep-items must appear in unmeld --help (canonical name): {unmeld_help}"
+    );
+}
+
+#[test]
+fn verb_aliases_dispatch_to_correct_commands() {
+    // spec: CLI-172 - aliases must not merely appear in --help; they must
+    // dispatch the correct command and produce real output. Tests the verbs
+    // most likely to silently mis-route: add, install, list, search, update,
+    // doctor, uninstall.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+
+    // `add` -> meld: registers the source.
+    let add_r = sb.mind(&["add", &spec]);
+    assert!(
+        add_r.success,
+        "mind add must dispatch to meld: {}",
+        add_r.stderr
+    );
+    assert!(
+        sb.mind(&["recall", "--sources"]).stdout.contains("agents"),
+        "mind add must register the source"
+    );
+
+    // `install` -> learn: installs an item.
+    let install_r = sb.mind(&["install", "skill:review"]);
+    assert!(
+        install_r.success,
+        "mind install must dispatch to learn: {}",
+        install_r.stderr
+    );
+
+    // `list` -> recall: lists installed items.
+    let list_r = sb.mind(&["list"]);
+    assert!(
+        list_r.success,
+        "mind list must dispatch to recall: {}",
+        list_r.stderr
+    );
+    assert!(
+        list_r.stdout.contains("skill:review"),
+        "mind list must show the installed item: {}",
+        list_r.stdout
+    );
+
+    // `search` -> probe: lists catalog items (--no-tui forces text output in non-TTY).
+    let search_r = sb.mind(&["search", "--no-tui"]);
+    assert!(
+        search_r.success,
+        "mind search must dispatch to probe: {}",
+        search_r.stderr
+    );
+    assert!(
+        search_r.stdout.contains("review"),
+        "mind search must list catalog items: {}",
+        search_r.stdout
+    );
+
+    // `update` -> sync: syncs sources without error.
+    let update_r = sb.mind(&["update"]);
+    assert!(
+        update_r.success,
+        "mind update must dispatch to sync: {}",
+        update_r.stderr
+    );
+
+    // `doctor` -> introspect: reports health diagnostics.
+    let doctor_r = sb.mind(&["doctor"]);
+    assert!(
+        doctor_r.success,
+        "mind doctor must dispatch to introspect: {}",
+        doctor_r.stderr
+    );
+
+    // `uninstall` -> forget: removes the installed item (no more "installed @" marker).
+    let uninstall_r = sb.mind(&["uninstall", "skill:review"]);
+    assert!(
+        uninstall_r.success,
+        "mind uninstall must dispatch to forget: {}",
+        uninstall_r.stderr
+    );
+    let recall_after = sb.mind(&["recall"]).stdout;
+    assert!(
+        !recall_after.contains("installed @"),
+        "mind uninstall must have removed skill:review (no installed-at marker): {recall_after}"
+    );
+}
+
+#[test]
+fn sync_upgrade_is_noted_as_deprecated_in_help() {
+    // spec: CLI-169 - `sync --upgrade` continues to work but the --upgrade flag
+    // is noted as deprecated in help text; prefer `upgrade` which now syncs
+    // first by default.
+    let sb = Sandbox::new();
+    let r = sb.mind(&["sync", "--help"]);
+    assert!(r.success, "sync --help failed: {}", r.stderr);
+    let out = r.stdout + &r.stderr;
+    assert!(
+        out.to_lowercase().contains("deprecated") || out.to_lowercase().contains("prefer"),
+        "sync --help must note that --upgrade is deprecated: {out}"
+    );
+}
+
+#[test]
+fn upgrade_sync_first_outcome_with_drift_example() {
+    // spec: CLI-169 - upgrade fetches each involved source before computing
+    // deltas (sync-first). With a cloned source and a new upstream commit that
+    // the clone has not yet fetched:
+    //   --no-sync: clone is stale -> item appears up-to-date (no delta seen).
+    //   default (sync-first): fetches the commit -> detects and applies upgrade.
+    //
+    // Uses from_example("drift") to drive a real-world-ish source layout
+    // (skills/audit/SKILL.md) and --follow-branch to create an actual git clone
+    // so the sync path runs a real fetch.
+    let sb = Sandbox::from_example("drift");
+    let spec = sb.source_spec();
+
+    assert!(
+        sb.mind(&["meld", &spec, "--follow-branch", "main", "--register-only"])
+            .success,
+        "meld --follow-branch failed"
+    );
+    assert!(sb.mind(&["learn", "audit"]).success, "learn audit failed");
+
+    // Advance the source without syncing the clone.
+    write(
+        &sb.source.join("skills/audit/SKILL.md"),
+        "---\nname: audit\ndescription: Updated audit skill\n---\n# audit v2 body\n",
+    );
+    git(&sb.source, &["commit", "-aqm", "update audit"]);
+
+    // --no-sync: clone is stale, so the installed hash still matches the old content.
+    let no_sync = sb.mind(&["upgrade", "--no-sync", "--json"]);
+    assert!(
+        no_sync.success,
+        "--no-sync must succeed: {}",
+        no_sync.stderr
+    );
+    let ns = parse_json(&no_sync.stdout);
+    assert_eq!(
+        ns["outcome"], "up-to-date",
+        "--no-sync on stale clone must report up-to-date (no delta visible from old clone): {}",
+        no_sync.stdout
+    );
+
+    // Default upgrade (sync-first): fetches the new commit then upgrades.
+    let with_sync = sb.mind(&["upgrade", "--yes", "--json"]);
+    assert!(
+        with_sync.success,
+        "upgrade with sync must succeed: {}",
+        with_sync.stderr
+    );
+    let ws = parse_json(&with_sync.stdout);
+    assert_eq!(
+        ws["outcome"], "upgraded",
+        "upgrade with sync must detect and apply the upstream change: {}",
+        with_sync.stdout
+    );
+
+    // After the sync-first upgrade the item is current (not outdated).
+    let after = sb.mind(&["recall"]);
+    assert!(
+        !after.stdout.contains("outdated"),
+        "item must be current after sync-first upgrade: {}",
+        after.stdout
+    );
+}
