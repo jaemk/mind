@@ -201,3 +201,12 @@ manifest, and store.
   (NS-30). When any of the source's items are installed the namespace is shown
   read-only with a note that it is locked until those items are forgotten (NS-30,
   CLI-161).
+
+## Security
+
+- `TUI-60` All source-derived strings entering the TUI snapshot model --
+  item names, descriptions, source names, and any other catalog-controlled text --
+  are normalized through `strip_ansi` (the same sanitization applied at the CLI's
+  display sites, DSC-69 / MKT-9) before being stored in the `Snapshot`. This
+  prevents terminal injection from catalog-controlled content on the TUI's
+  default interactive surface, including during destructive-action confirms.

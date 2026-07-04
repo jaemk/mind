@@ -129,7 +129,10 @@ struct RawAutoMeld {
 
 impl RawAutoMeld {
     /// Normalize the at-most-one-pin TOML shape into the shared [`Pin`] enum.
-    /// More than one of `tag`/`ref`/`follow_branch` is invalid (POL-5).
+    /// More than one of `tag`/`ref`/`follow_branch` is invalid (POL-5). Each
+    /// value is validated by [`crate::git::validate_ref_value`] (DSC-66 /
+    /// POL-33) before constructing the [`Pin`], so hostile values such as
+    /// `--upload-pack=...` are rejected as an invalid policy.
     fn into_auto_meld(self, path: &Path) -> Result<AutoMeld> {
         let pins = self.tag.is_some() as u8
             + self.ref_.is_some() as u8
@@ -143,11 +146,29 @@ impl RawAutoMeld {
                 ),
             });
         }
+
+        /// Validate a pin value, mapping `MindError::InvalidRef` to
+        /// `MindError::InvalidPolicy` so the error is attributed to the policy
+        /// file rather than to a generic ref parsing context.
+        fn validate_pin(value: &str, repo: &str, path: &Path) -> Result<()> {
+            // spec: POL-33
+            crate::git::validate_ref_value(value).map_err(|e| MindError::InvalidPolicy {
+                path: path.display().to_string(),
+                reason: format!(
+                    "auto_meld entry '{}' has an invalid pin value {:?}: {}",
+                    repo, value, e
+                ),
+            })
+        }
+
         let pin = if let Some(tag) = self.tag {
+            validate_pin(&tag, &self.repo, path)?;
             Pin::Tag(tag)
         } else if let Some(r) = self.ref_ {
+            validate_pin(&r, &self.repo, path)?;
             Pin::Ref(r)
         } else if let Some(branch) = self.follow_branch {
+            validate_pin(&branch, &self.repo, path)?;
             Pin::FollowBranch(branch)
         } else {
             Pin::DefaultBranch
@@ -1071,5 +1092,93 @@ targets = [""]
         let multi = "[lobes]\ntargets = [\"~/.claude\", \"/opt/agent-home\"]\n";
         let p = parse(multi).expect("multiple non-empty targets must be valid");
         assert_eq!(p.lobes_targets().len(), 2);
+    }
+
+    // POL-33: auto_meld pin values are passed through validate_ref_value (DSC-66).
+    // A leading `-` (injection via option-like value), whitespace, and `..` (git
+    // range syntax) are all rejected as an invalid policy.
+    // spec: POL-33
+    #[test]
+    fn pin_values_are_validated_against_ref_rules() {
+        // Leading dash is rejected (looks like a git option).
+        let leading_dash = r#"
+[[sources.auto_meld]]
+repo = "github.com/acme/a"
+tag = "--upload-pack=/tmp/evil"
+"#;
+        let err = parse(leading_dash).unwrap_err();
+        match err {
+            MindError::InvalidPolicy { reason, .. } => {
+                assert!(
+                    reason.contains("--upload-pack=/tmp/evil"),
+                    "reason should quote the hostile value: {reason}"
+                );
+                assert!(
+                    reason.contains("github.com/acme/a"),
+                    "reason should name the entry: {reason}"
+                );
+            }
+            other => panic!("expected InvalidPolicy, got {other:?}"),
+        }
+
+        // Whitespace in a tag is rejected.
+        let with_space = r#"
+[[sources.auto_meld]]
+repo = "github.com/acme/a"
+tag = "v1 0"
+"#;
+        let err = parse(with_space).unwrap_err();
+        assert!(
+            matches!(err, MindError::InvalidPolicy { .. }),
+            "whitespace in tag must be rejected: {err:?}"
+        );
+
+        // `..` range syntax in a ref is rejected.
+        let with_range = r#"
+[[sources.auto_meld]]
+repo = "github.com/acme/a"
+ref = "HEAD..evil"
+"#;
+        let err = parse(with_range).unwrap_err();
+        assert!(
+            matches!(err, MindError::InvalidPolicy { .. }),
+            "'..' in ref must be rejected: {err:?}"
+        );
+
+        // Leading dash in follow_branch is rejected.
+        let dash_branch = r#"
+[[sources.auto_meld]]
+repo = "github.com/acme/a"
+follow_branch = "-bad-branch"
+"#;
+        let err = parse(dash_branch).unwrap_err();
+        assert!(
+            matches!(err, MindError::InvalidPolicy { .. }),
+            "leading dash in follow_branch must be rejected: {err:?}"
+        );
+
+        // Empty pin value is rejected.
+        let empty_tag = "[[sources.auto_meld]]\nrepo = \"github.com/acme/a\"\ntag = \"\"\n";
+        let err = parse(empty_tag).unwrap_err();
+        assert!(
+            matches!(err, MindError::InvalidPolicy { .. }),
+            "empty tag must be rejected: {err:?}"
+        );
+
+        // Normal values are accepted.
+        let ok = r#"
+[[sources.auto_meld]]
+repo = "github.com/acme/a"
+tag = "v1.4.0"
+
+[[sources.auto_meld]]
+repo = "github.com/acme/b"
+ref = "9f3a1c2edeadbeef"
+
+[[sources.auto_meld]]
+repo = "github.com/acme/c"
+follow_branch = "main"
+"#;
+        assert!(parse(ok).is_ok(), "normal pin values must be accepted");
     }
 }

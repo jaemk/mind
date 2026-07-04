@@ -20,6 +20,7 @@ mod policy;
 mod render;
 mod resolve;
 mod review;
+mod sanitize;
 mod scaffold;
 mod selfupdate;
 mod source;

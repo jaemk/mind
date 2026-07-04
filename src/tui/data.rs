@@ -15,6 +15,7 @@ use crate::error::{ItemKind, Result};
 use crate::lock;
 use crate::manifest::Manifest;
 use crate::paths::Paths;
+use crate::sanitize::strip_ansi;
 use crate::source::Registry;
 
 /// A snapshot of the TUI's data, built from registry + manifest + catalog.
@@ -132,11 +133,19 @@ fn load_inner(paths: &Paths) -> Result<Snapshot> {
     let manifest = Manifest::load(paths)?;
     let catalog_items = catalog::scan(paths, &registry)?;
 
-    let source_names: Vec<String> = registry.sources.iter().map(|s| s.name.clone()).collect();
+    // spec: TUI-60 - source names are source-controlled and must be sanitized.
+    let source_names: Vec<String> = registry
+        .sources
+        .iter()
+        .map(|s| strip_ansi(&s.name))
+        .collect();
 
     // Build installed list.
     // spec: TUI-50 - compute direct dep keys for each installed item so the
     // TUI can render the dependency subtree without extra I/O at display time.
+    // spec: TUI-60 - all source-derived strings are sanitized through strip_ansi
+    // at the model boundary to prevent terminal injection from catalog-controlled
+    // content (consistent with the CLI's DSC-69 / MKT-9 call sites).
     let installed: Vec<SnapshotInstalled> = manifest
         .items
         .values()
@@ -149,11 +158,11 @@ fn load_inner(paths: &Paths) -> Result<Snapshot> {
                 .unwrap_or_default();
             SnapshotInstalled {
                 key: it.key(),
-                name: it.name.clone(),
-                source: it.source.clone(),
+                name: strip_ansi(&it.name),
+                source: strip_ansi(&it.source),
                 kind: it.kind,
                 commit: it.commit.clone(),
-                description: it.description.clone(),
+                description: it.description.as_deref().map(strip_ansi),
                 deps,
             }
         })
@@ -161,16 +170,17 @@ fn load_inner(paths: &Paths) -> Result<Snapshot> {
 
     // Build available list (all catalog items; de-dup vs installed happens in tree.rs).
     // spec: TUI-50 - compute direct dep keys for each available item.
+    // spec: TUI-60 - strip_ansi on all source-derived display strings.
     let available: Vec<SnapshotAvailable> = catalog_items
         .iter()
         .map(|it| {
             let deps = crate::deps::direct_dependency_keys(it, &catalog_items, &read_item_text);
             SnapshotAvailable {
                 key: it.key(),
-                name: it.effective_name(),
-                source: it.source.clone(),
+                name: strip_ansi(&it.effective_name()),
+                source: strip_ansi(&it.source),
                 kind: it.kind,
-                description: it.description.clone(),
+                description: it.description.as_deref().map(strip_ansi),
                 path: it.path.clone(),
                 deps,
             }
@@ -181,12 +191,13 @@ fn load_inner(paths: &Paths) -> Result<Snapshot> {
     // that mind did not install. A scan failure is non-fatal: the rest of the
     // TUI stays usable, the unmanaged group is simply empty.
     // spec: UNM-6
+    // spec: TUI-60 - strip_ansi on name (unmanaged item names come from lobe filenames).
     let unmanaged: Vec<SnapshotUnmanaged> = crate::unmanaged::scan(paths, &manifest)
         .unwrap_or_default()
         .into_iter()
         .map(|u| SnapshotUnmanaged {
             key: u.key(),
-            name: u.name,
+            name: strip_ansi(&u.name),
             kind: u.kind,
             paths: u.paths,
         })
@@ -321,6 +332,74 @@ mod tests {
             snap2.generation > snap1.generation,
             "generation should increment on each load"
         );
+        cleanup(&base);
+    }
+
+    /// ANSI escapes and bidi-override code points in source-derived strings
+    /// must be stripped before they enter the TUI snapshot model (TUI-60).
+    ///
+    /// Builds a manifest.json with ANSI color escapes in name/source and a
+    /// bidi-override (U+202E) in description, loads the snapshot, and asserts
+    /// every model field is clean. The bidi character is injected via format!
+    /// to avoid triggering the text_direction_codepoint_in_literal lint.
+    #[test]
+    fn snapshot_installed_strips_ansi_from_source_derived_strings() {
+        // spec: TUI-60
+        let (paths, base) = temp_paths();
+        crate::paths::mkdir_p(&paths.mind_home).unwrap();
+
+        // U+202E RIGHT-TO-LEFT OVERRIDE injected at runtime to avoid lint.
+        let bidi = '\u{202E}';
+        let manifest_json = format!(
+            concat!(
+                "{{\n",
+                "  \"items\": {{\n",
+                "    \"skill:\\u001b[31mevil\\u001b[0m\": {{\n",
+                "      \"kind\": \"skill\",\n",
+                "      \"name\": \"\\u001b[31mevil\\u001b[0m\",\n",
+                "      \"bare_name\": \"evil\",\n",
+                "      \"source\": \"\\u001b[32msrc\\u001b[0m\",\n",
+                "      \"commit\": \"abc1234\",\n",
+                "      \"hash\": \"deadbeef\",\n",
+                "      \"store\": \"store/skill/evil\",\n",
+                "      \"links\": [],\n",
+                "      \"description\": \"\\u001b[1mbold\\u001b[0m with {}bidi\"\n",
+                "    }}\n",
+                "  }}\n",
+                "}}"
+            ),
+            bidi
+        );
+        std::fs::write(paths.manifest_file(), manifest_json).unwrap();
+
+        let snap = load(&paths).expect("load should succeed");
+
+        assert_eq!(snap.installed.len(), 1, "one installed item");
+        let item = &snap.installed[0];
+
+        assert_eq!(
+            item.name, "evil",
+            "ANSI escapes must be stripped from name; got: {:?}",
+            item.name
+        );
+        assert_eq!(
+            item.source, "src",
+            "ANSI escapes must be stripped from source; got: {:?}",
+            item.source
+        );
+        let desc = item.description.as_deref().unwrap_or("");
+        assert!(
+            !desc.contains('\x1b'),
+            "ANSI escapes must be stripped from description; got: {:?}",
+            desc
+        );
+        assert!(
+            !desc.contains('\u{202E}'),
+            "bidi-override must be stripped from description; got: {:?}",
+            desc
+        );
+        assert_eq!(item.kind, ItemKind::Skill, "kind field must be preserved");
+
         cleanup(&base);
     }
 }

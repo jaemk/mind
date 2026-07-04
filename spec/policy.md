@@ -114,6 +114,12 @@ normatively. Source identity is `host/owner/repo` (see storage.md).
   pin. It is idempotent: an entry already melded at the declared pin is left
   unchanged. `auto_meld` may point at a curated super-source, which then discovers
   its nested sources (DSC-38).
+- `POL-33` The `tag`, `ref`, and `follow_branch` values in each
+  `[[sources.auto_meld]]` entry are validated by the same `validate_ref_value`
+  rule as `[source]` pin values declared in `mind.toml` (DSC-66). A value that
+  begins with `-`, contains ASCII whitespace or control characters, or uses `..`
+  is rejected as an invalid policy (POL-5). This prevents a hostile value such as
+  `--upload-pack=...` from reaching the git subprocess.
 
 ## Lobe lock
 

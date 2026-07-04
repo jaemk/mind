@@ -97,3 +97,15 @@ agent homes (a store-only tool is not linked; tooling.md TOOL-3).
   step. A symlink entry is included in the hash by its relative path and its
   link-target string, so a retargeting is detected and a symlink cycle cannot
   cause unbounded recursion or a stack overflow.
+- `LIFE-35` Each entry in the directory hash uses length-prefixed fields (8-byte
+  LE u64 for path length, then path bytes, then 8-byte LE u64 for content
+  length, then content bytes) and a 1-byte type tag (`F` for a regular file,
+  `S` for a symlink). Together these ensure that distinct `(type, path, content)`
+  triples always produce distinct byte streams: a file named `"symlink:foo"` and
+  a symlink named `"foo"` with the same target cannot collide, and two entries
+  `("ab", "c")` and `("a", "bc")` cannot collide. Single-file and single-symlink
+  hashes also carry a type-tag prefix so a symlink hash is always distinct from a
+  regular-file hash with matching bytes. Note: this framing change alters every
+  stored hash; after upgrading `mind`, all previously-installed items will report
+  drift on the next `recall` or `upgrade` run until they are re-installed or
+  upgraded (a one-time event).

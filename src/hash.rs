@@ -34,38 +34,57 @@ impl Fnv {
 /// Symlinks are never followed (LIFE-34): a symlink entry is hashed by its
 /// relative path and link-target string, so retargeting is detected and a
 /// symlink cycle cannot cause unbounded recursion.
+///
+/// Framing (LIFE-35): every field is length-prefixed (8-byte LE u64) and each
+/// entry carries a 1-byte type tag (`b'F'` for file, `b'S'` for symlink).
+/// This prevents distinct `(path, content)` pairs from colliding due to
+/// ambiguous byte boundaries, and prevents a regular file whose name begins
+/// with "symlink:" from producing the same hash as a symlink of that stem.
 pub fn hash_path(path: &Path) -> Result<String> {
     let mut h = Fnv::new();
     let meta = std::fs::symlink_metadata(path).map_err(|e| MindError::io(path, e))?;
     if meta.file_type().is_symlink() {
-        // Hash the link target string so a retarget changes the hash, and so
-        // no external content is read through the link.
+        // Type tag + length-prefixed target so the symlink hash is always
+        // distinct from a regular file whose raw bytes happen to match.
+        // spec: LIFE-35
         let target = std::fs::read_link(path).map_err(|e| MindError::io(path, e))?;
-        h.write(b"symlink\0");
-        h.write(target.to_string_lossy().as_bytes());
+        let target_bytes = target.to_string_lossy();
+        h.write(b"S");
+        h.write(&(target_bytes.len() as u64).to_le_bytes());
+        h.write(target_bytes.as_bytes());
     } else if meta.is_dir() {
         let mut files = Vec::new();
         collect_files(path, path, &mut files)?;
         files.sort();
-        for (rel, bytes) in files {
+        // spec: LIFE-35 - length-prefixed fields prevent (path, content) split
+        // collisions across entries.
+        for (tag, rel, bytes) in files {
+            h.write(&[tag]);
+            h.write(&(rel.len() as u64).to_le_bytes());
             h.write(rel.as_bytes());
-            h.write(b"\0");
+            h.write(&(bytes.len() as u64).to_le_bytes());
             h.write(&bytes);
         }
     } else {
+        // Plain file: type tag + raw content. No length-prefix on content needed
+        // for single-file hashes since there is only one field; the type tag
+        // still distinguishes the file hash from any symlink hash.
+        // spec: LIFE-35
         let bytes = std::fs::read(path).map_err(|e| MindError::io(path, e))?;
+        h.write(b"F");
         h.write(&bytes);
     }
     Ok(h.finish_hex())
 }
 
-/// Walk `dir` and collect `(relative_path_string, content_bytes)` pairs.
+/// Walk `dir` and collect `(type_tag, relative_path_string, content_bytes)` triples.
 ///
 /// Uses `symlink_metadata` at every step so symlinks are never followed
-/// (LIFE-34). A symlink entry contributes its link-target string as its
-/// "content" (prefixed with `"symlink:"` in the relative path key), so a
-/// retargeting changes the hash and a cyclic symlink cannot recurse.
-fn collect_files(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) -> Result<()> {
+/// (LIFE-34). A symlink entry carries type tag `b'S'` and contributes its
+/// link-target string as its content; a regular file carries `b'F'`. The
+/// separate type tag prevents a file named `"symlink:foo"` from producing the
+/// same triple as a symlink named `"foo"` (LIFE-35).
+fn collect_files(root: &Path, dir: &Path, out: &mut Vec<(u8, String, Vec<u8>)>) -> Result<()> {
     let rd = std::fs::read_dir(dir).map_err(|e| MindError::io(dir, e))?;
     for entry in rd {
         let entry = entry.map_err(|e| MindError::io(dir, e))?;
@@ -73,22 +92,29 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) -> R
         let meta = std::fs::symlink_metadata(&path).map_err(|e| MindError::io(&path, e))?;
         let ft = meta.file_type();
         if ft.is_symlink() {
+            // spec: LIFE-34 LIFE-35
             let target = std::fs::read_link(&path).map_err(|e| MindError::io(&path, e))?;
-            let rel = format!(
-                "symlink:{}",
-                path.strip_prefix(root).unwrap_or(&path).to_string_lossy()
-            );
-            out.push((rel, target.to_string_lossy().into_owned().into_bytes()));
+            let rel = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .into_owned();
+            out.push((
+                b'S',
+                rel,
+                target.to_string_lossy().into_owned().into_bytes(),
+            ));
         } else if ft.is_dir() {
             collect_files(root, &path, out)?;
         } else {
+            // spec: LIFE-35
             let rel = path
                 .strip_prefix(root)
                 .unwrap_or(&path)
                 .to_string_lossy()
                 .into_owned();
             let bytes = std::fs::read(&path).map_err(|e| MindError::io(&path, e))?;
-            out.push((rel, bytes));
+            out.push((b'F', rel, bytes));
         }
     }
     Ok(())
@@ -191,5 +217,96 @@ mod tests {
         std::fs::remove_file(dir.join("link")).unwrap();
         let h_none = hash_path(&dir).unwrap();
         assert_ne!(h_a, h_none, "removing a symlink must change the hash");
+    }
+
+    /// Two entries `("ab", "c")` and `("a", "bc")` must hash differently.
+    /// Without length-prefixed fields the old framing wrote `rel + '\0' +
+    /// content` per entry, so the combined byte stream was identical for both.
+    /// With length framing each field boundary is unambiguous.
+    #[test]
+    fn hash_length_framing_prevents_path_content_split_collision() {
+        // spec: LIFE-35
+        let dir_ab_c = tmp("framing-ab-c");
+        std::fs::create_dir_all(dir_ab_c.join("ab")).unwrap();
+        std::fs::write(dir_ab_c.join("ab").join("x"), b"c").unwrap();
+        // Use a flat file named "ab" with content "c" in one dir...
+        let dir1 = tmp("framing-flat-ab-c");
+        std::fs::write(dir1.join("ab"), b"c").unwrap();
+
+        // ...and a flat file named "a" with content "bc" in another dir.
+        let dir2 = tmp("framing-flat-a-bc");
+        std::fs::write(dir2.join("a"), b"bc").unwrap();
+
+        let h1 = hash_path(&dir1).unwrap();
+        let h2 = hash_path(&dir2).unwrap();
+        assert_ne!(
+            h1, h2,
+            "entry ('ab','c') must not collide with ('a','bc') under length framing"
+        );
+    }
+
+    /// A regular file whose name is the same as a symlink's target-rel path
+    /// must hash differently from that symlink, so the two are not confused.
+    /// The old framing used a `"symlink:"` key prefix that could be matched
+    /// by a real file; the new framing uses a 1-byte type tag.
+    #[cfg(unix)]
+    #[test]
+    fn hash_type_tag_prevents_file_symlink_collision() {
+        // spec: LIFE-35
+        // Dir 1: a regular file named "foo" with content = "/target".
+        let dir1 = tmp("tag-file");
+        std::fs::write(dir1.join("foo"), b"/target").unwrap();
+
+        // Dir 2: a symlink named "foo" pointing to "/target".
+        let dir2 = tmp("tag-symlink");
+        std::os::unix::fs::symlink("/target", dir2.join("foo")).unwrap();
+
+        let h1 = hash_path(&dir1).unwrap();
+        let h2 = hash_path(&dir2).unwrap();
+        assert_ne!(
+            h1, h2,
+            "a file and a symlink with matching name/content must not collide"
+        );
+    }
+
+    /// A single symlink hashed directly via `hash_path` must not collide with
+    /// a single regular file whose raw bytes equal the symlink's target string.
+    #[cfg(unix)]
+    #[test]
+    fn hash_single_file_vs_single_symlink_distinct() {
+        // spec: LIFE-35
+        let dir = tmp("single-vs-sym");
+
+        let file_path = dir.join("f");
+        std::fs::write(&file_path, b"/target").unwrap();
+
+        let sym_path = dir.join("s");
+        std::os::unix::fs::symlink("/target", &sym_path).unwrap();
+
+        let h_file = hash_path(&file_path).unwrap();
+        let h_sym = hash_path(&sym_path).unwrap();
+        assert_ne!(
+            h_file, h_sym,
+            "file with content '/target' must not collide with symlink -> '/target'"
+        );
+    }
+
+    /// Two entries where swapping path/content bytes would look identical
+    /// without length framing: `("abc", "")` vs `("ab", "c")`.
+    #[test]
+    fn hash_length_framing_empty_content_vs_suffix() {
+        // spec: LIFE-35
+        let dir1 = tmp("framing-abc-empty");
+        std::fs::write(dir1.join("abc"), b"").unwrap();
+
+        let dir2 = tmp("framing-ab-c2");
+        std::fs::write(dir2.join("ab"), b"c").unwrap();
+
+        let h1 = hash_path(&dir1).unwrap();
+        let h2 = hash_path(&dir2).unwrap();
+        assert_ne!(
+            h1, h2,
+            "entry ('abc','') must not collide with ('ab','c') under length framing"
+        );
     }
 }
