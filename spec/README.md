@@ -71,7 +71,7 @@ and verified.
 | Dependency-graph operations: `forget` warns about dependents, `recall --tree`, non-interactive `probe` tree + `--json` edges | done | DEP-60, DEP-61, DEP-62 |
 | TUI dependency navigation: expand an item to its dependency subtree, Enter on a dependency jumps to its item | done | TUI-50, TUI-51 |
 | `recall --tree --json`: structured (nested) dependency forest output | done | DEP-63 |
-| `meld` installs by default (`--link-only`/`--yes`); no-arg melds `.`; prefix prompt when declared | done (`--link-only`/`--yes`/prefix) | CLI-23, CLI-24 |
+| `meld` installs by default (`--register-only`/`--yes`); no-arg melds `.`; prefix prompt when declared | done | CLI-23, CLI-24 |
 | `meld` with no arg defaults to the current directory | done | CLI-25 |
 | `init-source`: scaffold `mind.toml`, detect references, `{{ns:}}` templating (maintainer) | done | [init-source.md](init-source.md) |
 | Deprecate `[source].install` (still parsed); `review` advises the `[[hooks]]` form, `init-source` scaffolds only `[[hooks]]` | done | HOOK-90 |
@@ -79,10 +79,10 @@ and verified.
 | `init-source` flags bare sibling references only under a prefix; `hardcoded-path`/`bare-tool` messages note install-hook-populated locations are safe | done | INIT-9, CLI-146 |
 | Concurrency: global advisory lock + atomic registry writes (via `fd-lock`) | done | STO-40, STO-41, STO-42, STO-43 |
 | `probe` matches description text, not just name | done | CLI-85 |
-| README quickstart, mental model, troubleshooting/FAQ | done | [../README.md](../README.md) |
+| README quickstart and mental model; troubleshooting/FAQ on the docs site | done | [../README.md](../README.md), [../docs/src/](../docs/src/) |
 | Starter source example (plain convention layout) | done | [../examples/](../examples/) |
 | Interactive TUI: `probe` default, Installed/Available tree, full-parity actions, preview + registry meld | done | [tui.md](tui.md) |
-| `probe -n` short form of `--no-tui` | done | TUI-3 |
+| `probe -n` short form of `--no-tui` | removed (TUI-54: `--no-tui` is long-only) | TUI-3 |
 | `tool` item kind: store-only installable, referenced not discovered | done | [tooling.md](tooling.md) (TOOL-1..7) |
 | Path-reference tokens `{{self}}` / `{{tools:name}}` / `{{path:ref}}` | done | [tooling.md](tooling.md) (TOOL-10..16) |
 | Item build hooks: per-item `build`, staging-time, transactional | done | [install-hooks.md](install-hooks.md) (HOOK-70..73) |
@@ -105,6 +105,26 @@ and verified.
 | Consume Claude plugin marketplaces: `.claude-plugin/marketplace.json` + `plugin.json` read as a discovery source, own store+symlink install unchanged | done | [marketplace.md](marketplace.md) (MKT-1..11) |
 | Marketplace + curator compose: a co-present `mind.toml` `[discover].sources` layers on a `.claude-plugin/` manifest; `roots`/`flat-skills`/`[[items]]`/`[discover]` globs suppress the manifest's own-item layer | done | MKT-15, MKT-16 |
 | Graceful degradation of nested non-auth clone failures (skip + curator-empty guard) | done | DSC-79, DSC-80 |
+| Namespace prefix is a safe path component; future kind words reserved (command, hook, mcp, plugin, prompt, mode, output-style) | done | NS-28, NS-29 |
+| `[discover]` glob confinement: reject absolute/`..` patterns, canonicalize matches into the clone | done | DSC-81 |
+| `evolve` integrity: SHA256SUMS verification before extraction, unique staging name, exclusive lock | done | STO-45, STO-46, STO-47 |
+| Uninstall confinement: recorded paths must resolve under the store or a configured lobe | done | LIFE-44 |
+| State-file schema versions in sources.json/manifest.json (absent = 1; newer errors) | done | STO-50, STO-51 |
+| Content-hash framing: length-prefixed fields, type-tagged symlinks | done | LIFE-35 |
+| TUI sanitization: source-derived strings stripped of ANSI/control/bidi at the model boundary | done | TUI-60 |
+| Managed-policy pin values validated as git refs | done | POL-33 |
+| `-n` reserved for `--dry-run`; `-N` short for `--namespace`; `probe --no-tui` long-only | done | CLI-163, CLI-164, TUI-54 |
+| `meld --register-only` / `unmeld --keep-items` (old spellings hidden deprecated aliases) | done | CLI-165, CLI-166 |
+| JSON envelopes: `{"schema": 1, "items": [...]}` for read verbs; `"schema": 1` on mutating results | done | CLI-167, CLI-168 |
+| `upgrade` syncs involved sources first; `--no-sync` opt-out; `sync --upgrade` deprecated sugar | done | CLI-169 |
+| `MIND_DEFAULT_LOBE` env var; `CLAUDE_HOME` legacy fallback | done | CLI-170 |
+| config.toml `absorb-to` canonical (kebab); `absorb_to` parse alias | done | CLI-171 |
+| Conventional verb aliases (add/install/uninstall/update/search/list/doctor/self-update); `detach` and `config target` removed | done | CLI-172 |
+| meld/unmeld help states the install/uninstall defaults | done | CLI-173, CLI-174 |
+| Exit-code contract: 0 success, 1 runtime error, 2 usage error | done | CLI-175 |
+| `--dangerously-skip-build-hook-check`: run item build hooks non-interactively (CI installs) | done | HOOK-74 |
+| `[source].namespace` canonical mind.toml key; `prefix` deprecated parse alias; `init-source` rewrites | done | DSC-82 |
+| Frontmatter reader strips a leading UTF-8 BOM | done | DSC-23 |
 
 ## Documents
 

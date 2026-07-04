@@ -6,6 +6,118 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- The namespace prefix is validated as a single safe path component at every
+  ingress (`[source]` declaration, marketplace entry name, `--namespace` flag
+  and prompt), and `install()` re-checks the effective name before building
+  store/staging/link paths. A hostile prefix like `../../x` can no longer write
+  or later delete outside the store and lobes (NS-28, LIFE-44).
+- `[discover]` glob patterns are rejected when absolute or `..`-bearing, and
+  every match is canonicalized and confined to the source clone, closing an
+  arbitrary-file-read into the store (DSC-81).
+- `mind evolve` verifies the downloaded tarball against the release's
+  `SHA256SUMS` asset before extraction (fails closed), stages the replacement
+  binary under a unique non-clobbering name, and holds an exclusive lock across
+  the swap (STO-45, STO-46, STO-47). `install.sh` performs the same checksum
+  verification.
+- All source-derived strings are stripped of ANSI escapes, control characters,
+  and bidi overrides before entering the TUI model (TUI-60).
+- Managed-policy `auto_meld` pin values (`tag`/`ref`/`follow_branch`) pass
+  through git ref validation, rejecting values like `--upload-pack=...`
+  (POL-33).
+
+### Added
+
+- Conventional verb aliases: `add` (meld), `install` (learn), `uninstall`
+  (forget), `update` (sync), `search` (probe), `list` (recall), `doctor`
+  (introspect), `self-update` (evolve). All visible in `--help` (CLI-172).
+- `learn`/`upgrade`/`meld`/`sync --upgrade` accept
+  `--dangerously-skip-build-hook-check` to run item build hooks
+  non-interactively, making built items installable in CI (HOOK-74).
+- `MIND_DEFAULT_LOBE` sets the default agent home; `CLAUDE_HOME` remains a
+  documented legacy fallback (CLI-170).
+- `sources.json` and `manifest.json` carry a `"version": 1` schema field
+  (absent = 1 on read); a file written by a newer `mind` produces a clean
+  error telling the user to upgrade (STO-50, STO-51).
+- The exit-code contract is specified and tested: 0 success, 1 runtime error,
+  2 usage error, others reserved (CLI-175).
+- Release pipeline: a `SHA256SUMS` asset covering all tarballs, a macos-14 test
+  job in CI and the release gate, a tag-vs-Cargo.toml version guard, a pinned
+  release toolchain, and a daily canary workflow that melds `jaemk/mind` to
+  catch flagship layout drift.
+- `cargo install mind-cli` documented as a first-class install method (README,
+  install guide, landing page) with a crates.io badge; Intel macOS installs
+  this way (no Intel darwin binaries are published).
+
+### Changed
+
+- Breaking: the `-n` short flag now consistently means `--dry-run`.
+  `--namespace` is `-N` on `meld`/`review`/`init-source`; `probe --no-tui` is
+  long-only (CLI-163, CLI-164, TUI-54).
+- `meld --link-only` is renamed `--register-only` and `unmeld --unlink-only`
+  is renamed `--keep-items`; the old spellings keep working as hidden
+  deprecated aliases (CLI-165, CLI-166).
+- Breaking for JSON consumers: `probe --json` and `recall --json` emit
+  `{"schema": 1, "items": [...]}` instead of a bare top-level array, and the
+  mutating-verb JSON envelope gains `"schema": 1` (CLI-167, CLI-168).
+- Breaking for scripts: `upgrade` now fetches each involved source before
+  computing deltas (per-source failures are reported and skipped);
+  `--no-sync` restores the old fetch-free behavior. `sync --upgrade` remains
+  as deprecated sugar (CLI-169).
+- `[source].namespace` is the canonical mind.toml key for the namespace
+  prefix; `prefix` still parses as a deprecated alias and `init-source`
+  rewrites it on update (DSC-82).
+- config.toml `absorb-to` (kebab-case) is the canonical key; `absorb_to`
+  still parses (CLI-171).
+- Future kind words are reserved as namespaces: command, hook, mcp, plugin,
+  prompt, mode, output-style (NS-29).
+- Onboarding docs teach meld's install-by-default flow: `mind meld <repo>`
+  previews the catalog and prompts to install everything; the granular
+  register-then-learn path uses `--register-only`. The meld and unmeld help
+  text states the install/uninstall defaults (CLI-173, CLI-174).
+- `cargo publish` runs from the tagged commit instead of main.
+- Cargo.toml carries publish metadata: `keywords`, `categories`, `readme`,
+  `rust-version = "1.85"`, and excludes spec/ and docs/ from the crate.
+
+### Removed
+
+- Breaking: the `unmeld detach` and `config target` synonym aliases; both are
+  usage errors now. `unlearn` and `status` remain (CLI-172).
+
+### Fixed
+
+- The six README deep links into the docs site 404'd; they now point under
+  `/guide/` where the mdBook deploys.
+- `ItemNotFound` suggests `mind meld <repo>` when no sources are melded
+  instead of the unhelpful sync/probe hint; `UnknownPreset` lists the real
+  presets (gemini, codex, universal); `LinkOccupied` names the `--force`
+  remedy.
+- Content hashing length-prefixes fields and type-tags symlinks so contrived
+  (path, content) splits and file/symlink pairs cannot collide (LIFE-35).
+  Every stored hash changes: each installed item reports drift once after
+  upgrading; run `mind upgrade --yes` to re-record.
+- The frontmatter reader strips a leading UTF-8 BOM, so BOM-prefixed items
+  keep their descriptions (DSC-23).
+- Stale terminology: the old item-upgrade sense of `evolve` replaced with
+  `upgrade` across spec and docs; `as =` examples replaced with
+  `namespace =`; the formula and about strings list all four item kinds.
+
+### Migration notes
+
+- Replace `meld -n <ns>` / `review -n <ns>` / `init-source -n <ns>` with `-N`
+  or `--namespace`; replace `probe -n` with `probe --no-tui`.
+- Replace `--link-only` with `--register-only` and `--unlink-only` with
+  `--keep-items` (old spellings still work, hidden).
+- JSON consumers of `probe --json` / `recall --json` must read the `items`
+  field of the new envelope.
+- Scripts relying on `upgrade` not fetching should pass `--no-sync`.
+- Replace `unmeld detach` with `unmeld`; `config target` with `config lobes`.
+- After upgrading, every installed item reports drift once (hash framing
+  change); `mind upgrade --yes` re-records the new hashes.
+- In mind.toml, prefer `[source].namespace` over `prefix`, and in
+  config.toml `absorb-to` over `absorb_to`; the old keys still parse.
+
 ## [0.12.0] - 2026-07-02
 
 ### Added
