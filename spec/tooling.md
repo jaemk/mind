@@ -63,7 +63,7 @@ The rest of this document states the rules normatively.
 - `TOOL-6` Namespacing applies to tools as to any kind: a prefix gives the
   effective name `<prefix>-<name>`, and a tool's stable identity is
   `(source, kind, bare_name)` (namespacing.md), so a prefix change is a rename
-  matched on identity by `evolve`/`introspect` (lifecycle.md).
+  matched on identity by `upgrade`/`introspect` (lifecycle.md).
 - `TOOL-7` `mind.toml` accepts `kind = "tool"` wherever a kind is named
   (`[[items]]`, and `[discover].tools` globs, which match the tool DIRECTORY
   rather than an anchor file). The `bin` and `build` item fields are valid only on

@@ -126,7 +126,7 @@ effective prefix is, in order: the consumer's `meld --as <prefix>` (persisted as
 The catalog is source truth: `CatalogItem.name` is the *bare* name, and the
 prefix is an install-time transform (`CatalogItem::effective_name()`), not baked
 in during the scan. So an item's stable identity is `(source, kind, bare_name)`,
-which `evolve`/`introspect` match on. That is what lets a prefix change be seen
+which `upgrade`/`introspect` match on. That is what lets a prefix change be seen
 as a *rename* of the same item rather than an orphan plus a new item.
 
 Prefixing changes an item's identity, and the Claude harness resolves agents and
@@ -147,7 +147,7 @@ those references are rewritten. We do NOT guess in prose (sibling names like
   will break at runtime instead of letting them fail silently.
 
 Drift note: the manifest records the hash of the *source* content, not the
-expanded store copy, so `evolve`/`introspect` compare source-vs-source.
+expanded store copy, so `upgrade`/`introspect` compare source-vs-source.
 
 ## Install, upgrade, and uninstall (`install.rs`)
 
@@ -168,7 +168,7 @@ Each installed item records a **file registry** in the manifest (`store` plus
 recorded paths rather than recomputing them from kind+name, so it stays correct
 even if link conventions change.
 
-`evolve` matches installed items to the catalog by stable identity. When the
+`upgrade` matches installed items to the catalog by stable identity. When the
 effective name changed (a prefix change), it builds the new name first, then
 removes the old item via its registry and re-keys the manifest entry, reporting
 `rename old -> new`. When only content changed, it swaps in place under the same

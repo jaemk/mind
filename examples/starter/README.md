@@ -15,7 +15,7 @@ rules/tone.md            rule, description in frontmatter
 
 Each item's `description` comes from its own YAML frontmatter. There is no
 `mind.toml`: convention scanning is the default and needs no configuration. Add
-a `mind.toml` only to set repo metadata, a prefix, or a non-standard layout (see
+a `mind.toml` only to set repo metadata, a namespace, or a non-standard layout (see
 [../namespacing/](../namespacing/) for a repo that ships one).
 
 In real use you skip the local copy entirely and run:
@@ -36,24 +36,33 @@ and init a repo before melding:
 ```
 cp -r examples/starter /tmp/starter
 cd /tmp/starter && git init -q && git add -A && git commit -qm init
+```
 
-mind meld /tmp/starter
+The default flow: `meld` clones and prompts to install available items. Confirm
+to install all three (greet, scribe, tone):
+
+```
+mind meld /tmp/starter       # prompts to install; confirm to install all three
 mind probe --no-tui          # lists greet, scribe, tone with their descriptions
-mind learn greet             # links skills/greet into each agent home
-mind recall                  # shows greet as installed
+mind recall                  # shows all three as installed
 ```
 
 `probe` matches descriptions too, so `mind probe --no-tui plain` finds `tone` by
 its frontmatter text, not just its name. Note: bare `mind probe` launches the TUI;
 pass `--no-tui` for non-interactive output.
 
-### Teardown
-
-Undo the demo in reverse order:
+To register without installing and choose items individually, use `--register-only`:
 
 ```
-mind forget greet
-mind unmeld local/tmp/starter
+mind meld /tmp/starter --register-only   # register only, skip install prompt
+mind probe --no-tui                      # browse available items
+mind learn greet                         # install one item
+```
+
+### Teardown
+
+```
+mind unmeld starter    # uninstalls items and drops the source
 rm -rf /tmp/starter
 ```
 

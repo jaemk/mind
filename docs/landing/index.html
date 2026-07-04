@@ -149,6 +149,7 @@
           <div class="tabs" role="tablist" aria-label="Install method">
             <button class="tab is-active" type="button" role="tab" aria-selected="true" data-tab="brew">brew</button>
             <button class="tab" type="button" role="tab" aria-selected="false" data-tab="curl">curl</button>
+            <button class="tab" type="button" role="tab" aria-selected="false" data-tab="cargo">cargo</button>
             <button class="tab" type="button" role="tab" aria-selected="false" data-tab="github">GitHub</button>
           </div>
 
@@ -167,6 +168,13 @@ brew install mind">Copy</button>
             <div class="cmd">
               <code><span class="prompt">$</span> curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/jaemk/mind/main/resources/install.sh | sh</code>
               <button class="copy" type="button" aria-label="Copy install script command" data-copy="curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/jaemk/mind/main/resources/install.sh | sh">Copy</button>
+            </div>
+          </div>
+
+          <div class="panel" role="tabpanel" data-panel="cargo" hidden>
+            <div class="cmd">
+              <code><span class="prompt">$</span> cargo install mind-cli</code>
+              <button class="copy" type="button" aria-label="Copy cargo install command" data-copy="cargo install mind-cli">Copy</button>
             </div>
           </div>
 

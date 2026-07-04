@@ -5,7 +5,7 @@ did not install: files a user wrote by hand, or items another installer dropped
 in (unmanaged.md UNM-1). `forget --unmanaged` (UNM-7) deletes them; `absorb` is
 the constructive inverse. It claims one unmanaged item into a version-controlled
 source the user owns and installs it through the normal managed path, so a
-hand-written item becomes a first-class `mind` item that syncs, evolves, and
+hand-written item becomes a first-class `mind` item that syncs, upgrades, and
 forgets like any other. `absorb` never copies an item into the store as a
 sourceless orphan: the file is moved into a real source so the user properly
 manages their personal items, and the lobe path is reoccupied by a managed link.
@@ -29,8 +29,8 @@ Unmanaged items, their detection, and single-ref resolution are defined in
   A glob ref is an error (`InvalidItemRef`); bulk absorb is not offered.
 - `ABS-8` After absorb the item is an ordinary managed item: it is recorded in the
   manifest keyed `kind:effective-name` with the destination source as its source
-  and its file registry (storage.md), and it participates in `sync`, `evolve`,
-  `upgrade`, and `forget` like any installed item. Its effective name follows the
+  and its file registry (storage.md), and it participates in `sync`, `upgrade`,
+  and `forget` like any installed item. Its effective name follows the
   destination source's prefix (`as` or `[source].prefix`, namespacing.md) when one
   is in effect.
 

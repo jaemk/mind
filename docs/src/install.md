@@ -7,25 +7,25 @@ your `PATH`. The methods below fetch the `mind` binary itself; they do not insta
 git. Without git, `meld` and `sync` fail with a clear "git executable not found"
 error.
 
-## Linux (install script)
+## Install script (Linux and Apple Silicon macOS)
 
 ```
 curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/jaemk/mind/main/resources/install.sh | sh
 ```
 
-Downloads the release binary for your platform (x86_64 / aarch64) and installs it
-to `~/.local/bin`. Override the target dir with `MIND_INSTALL_DIR` or pin a version
-with `MIND_VERSION`:
+Downloads the release binary for your platform (x86_64 Linux or aarch64 macOS)
+and installs it to `~/.local/bin`. The script verifies the download against the
+published `SHA256SUMS` asset before extracting. Override the target dir with
+`MIND_INSTALL_DIR` or pin a version with `MIND_VERSION`:
 
 ```
 curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/jaemk/mind/main/resources/install.sh \
-  | MIND_INSTALL_DIR=/usr/local/bin MIND_VERSION=0.2.0 sh
+  | MIND_INSTALL_DIR=/usr/local/bin MIND_VERSION=0.12.0 sh
 ```
 
-If `~/.local/bin` is not on your `PATH`, the script prints the line to add. The
-same script also serves Apple Silicon macOS; Intel macOS should use the tap below.
+If `~/.local/bin` is not on your `PATH`, the script prints the line to add.
 
-## Homebrew (macOS / Linux)
+## Homebrew (Apple Silicon macOS and Linux)
 
 ```
 brew tap jaemk/mind https://github.com/jaemk/mind
@@ -33,11 +33,28 @@ brew trust jaemk/mind
 brew install mind
 ```
 
-The repo is not named `homebrew-mind`, so the tap needs its clone URL.
+The repo is not named `homebrew-mind`, so the tap needs its clone URL. Homebrew
+bottles are provided for Apple Silicon macOS (arm64) and x86_64 Linux. Intel
+macOS is not covered by the tap; use `cargo install mind-cli` instead (see below).
+
+> **Note (migration):** Earlier versions of this page said Intel macOS should use
+> the tap. That instruction was wrong: no Intel macOS bottle exists. Use
+> `cargo install mind-cli` on Intel macOS.
+
+## cargo install (any platform)
+
+```
+cargo install mind-cli
+```
+
+Builds from source using the Rust toolchain. This is the recommended path for
+Intel macOS and any other platform not covered by the install script or Homebrew
+tap. Requires Rust 1.85 or later (`rustup` is the standard way to install it).
 
 ## Updating
 
 `mind evolve` updates the binary itself to the latest release. It reports the
 target version and prompts before downloading, unless `--yes` is given (`--check`
 reports without changing anything, `--version <v>` pins a target). It uses the
-same download path as the install script.
+same download path as the install script and verifies the `SHA256SUMS` asset
+before swapping in the new binary.

@@ -26,7 +26,7 @@ There are four discovery layers, in precedence order:
 | `mind.toml` contains | convention scan | result |
 |----------------------|-----------------|--------|
 | nothing / no file | on | items found by convention (or by a `.claude-plugin/` manifest, if present) |
-| `[source]` only | on | convention items, plus metadata (prefix, pin, ...) |
+| `[source]` only | on | convention items, plus metadata (namespace, pin, ...) |
 | `[discover].sources` only | **on** | convention items, plus a curated chain |
 | `[[items]]` | off | exactly the declared items |
 | `[discover]` with kind globs | off | exactly the glob matches |
@@ -49,7 +49,7 @@ All keys are optional.
 ```toml
 [source]
 description = "James's agent library"   # shown in recall/probe
-prefix = "jk"                            # namespace: items install as jk:<name>
+namespace = "jk"                         # items install as jk:<name>
 min-mind-version = "0.5"                 # refuse to scan under an older mind
 follow-branch = "main"                   # pin: track a branch ...
 # pin-tag = "v2"                          # ... or fix to a tag ...
@@ -57,10 +57,15 @@ follow-branch = "main"                   # pin: track a branch ...
 roots = ["packages"]                     # scan under these dirs, not the repo root
 ```
 
-- **`prefix`**: every item installs as `<prefix>:<name>` (identity, store path,
-  symlink, and ref), except an agent's harness link, which stays bare. A
-  consumer's `meld --namespace <prefix>` overrides it; `meld --namespace ''`
-  removes it. See [namespacing](namespacing.md).
+- **`namespace`** (previously `prefix`): every item installs as `<namespace>:<name>`
+  (identity, store path, symlink, and ref), except an agent's harness link, which
+  stays bare. A consumer's `meld --namespace <ns>` overrides it; `meld --namespace ''`
+  removes it. See [namespacing](namespacing.md). The old key `prefix` still parses
+  as a deprecated alias; new sources should use `namespace`.
+
+> **Note (migration):** `[source].prefix` is deprecated in favor of `[source].namespace`.
+> Both keys parse and behave identically. `mind dump` and `mind init-source` now emit
+> `namespace`. Update your `mind.toml` at any time; no re-install is needed.
 - **`install`** (deprecated): a shell command run once on `meld`, after checkout,
   to build or install the tooling the source's items rely on. It is disclosed and
   prompted before it runs (`--dangerously-skip-install-hook-check` runs it
@@ -154,7 +159,7 @@ by hand (see [dump](commands.md#dump)).
 [discover]
 sources = [
   { source = "owner/repo" },                        # melded, items left available
-  { source = "github:foo/bar", as = "fb" },         # imposed namespace (like meld --namespace)
+  { source = "github:foo/bar", namespace = "fb" },   # imposed namespace (like meld --namespace)
   { source = "owner/recommended", install = true }, # offered for install on meld
 ]
 ```
@@ -169,7 +174,8 @@ install = true
 
 - **`source`**: any repo spec `meld` accepts (`owner/repo`, a host-qualified
   spec, or a local path).
-- **`as`**: impose a namespace prefix on that nested source.
+- **`namespace`** (previously `as`): impose a namespace on that nested source.
+  The old key `as` still parses as a deprecated alias.
 - **`install`** (default `false`): when `true`, melding the super-source offers
   that nested source's items for install (the same preview-and-prompt as the
   top-level source), instead of leaving them registered but not installed.
@@ -206,8 +212,8 @@ These fields apply ONLY when the nested source ships no `mind.toml`. If the
 nested source has a `mind.toml`, that file is authoritative for its pin, roots,
 and hooks, and the curator-supplied values are ignored (a warning is emitted). The
 gate is whole-file: a nested `mind.toml`, even one that does not declare a
-pin/roots/hooks, suppresses all three. `as` and `install` are unaffected; they
-always apply.
+pin/roots/hooks, suppresses all three. `namespace` and `install` are unaffected;
+they always apply.
 
 ```toml
 # Adopt a source that has no mind.toml: supply config it lacks.
@@ -230,12 +236,12 @@ event = "install"
 
 A repo that ships its own skills, agents, rules, and tools. The simplest form is
 no `mind.toml` at all (pure convention). Add a `mind.toml` to attach metadata or a
-prefix:
+namespace:
 
 ```toml
 [source]
 description = "James's agent library"
-prefix = "jk"
+namespace = "jk"
 ```
 
 Convention scanning still finds `skills/<name>/SKILL.md`, `agents/<name>.md`,
@@ -253,7 +259,7 @@ description = "Curated agent registry"
 [discover]
 sources = [
   { source = "acme/agents" },
-  { source = "acme/skills", as = "acme", install = true },
+  { source = "acme/skills", namespace = "acme", install = true },
 ]
 ```
 
@@ -271,14 +277,14 @@ this repo's own items:
 ```toml
 [source]
 description = "James's library and registry"
-prefix = "jk"
+namespace = "jk"
 
 # This repo's own items are still found by convention (skills/, agents/, ...)
 # because only [discover].sources is declared, not [[items]] or kind globs.
 
 [discover]
 sources = [
-  { source = "acme/skills", as = "acme", install = true },
+  { source = "acme/skills", namespace = "acme", install = true },
 ]
 ```
 
