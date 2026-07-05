@@ -300,22 +300,30 @@ mod tests {
         let (paths, base) = temp_paths("blockwait");
         mkdir_p(&paths.mind_home).unwrap();
         let paths = Arc::new(paths);
+        let a_acquired = Arc::new(AtomicBool::new(false));
         let a_released = Arc::new(AtomicBool::new(false));
 
         let hold = Duration::from_millis(300);
         let p_a = Arc::clone(&paths);
+        let acq_a = Arc::clone(&a_acquired);
         let rel_a = Arc::clone(&a_released);
         let a = std::thread::spawn(move || {
             let mut lock = open(&p_a).expect("open A");
             let guard = lock.write().expect("A exclusive");
+            // Signal acquisition before the hold so B contends for real. A fixed
+            // head-start sleep is unreliable on a loaded runner: it can oversleep
+            // past the whole hold, so B starts after A already released.
+            acq_a.store(true, Ordering::SeqCst);
             // Hold long enough that B must observe the release ordering.
             std::thread::sleep(hold);
             rel_a.store(true, Ordering::SeqCst);
             drop(guard);
         });
 
-        // Give A a head start so it acquires first.
-        std::thread::sleep(Duration::from_millis(50));
+        // Wait until A actually holds the exclusive lock.
+        while !a_acquired.load(Ordering::SeqCst) {
+            std::thread::yield_now();
+        }
 
         let p_b = Arc::clone(&paths);
         let rel_b = Arc::clone(&a_released);

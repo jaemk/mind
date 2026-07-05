@@ -365,22 +365,33 @@ mod tests {
         let (paths, _base) = temp_paths();
         crate::paths::mkdir_p(&paths.mind_home).unwrap();
         let paths = Arc::new(paths);
+        let reader_acquired = Arc::new(AtomicBool::new(false));
         let reader_released = Arc::new(AtomicBool::new(false));
 
         let hold = Duration::from_millis(300);
         let p_reader = Arc::clone(&paths);
+        let acq = Arc::clone(&reader_acquired);
         let rel = Arc::clone(&reader_released);
         let reader = std::thread::spawn(move || {
             // Hold a shared lock on the same lock file for `hold`.
             let lock = lock::open(&p_reader).expect("open reader lock");
             let guard = lock.read().expect("acquire shared lock");
+            // Signal that the shared lock is held before starting the hold, so
+            // the main thread starts `execute` only once there is real
+            // contention. A fixed "let the reader acquire" sleep is unreliable
+            // on a loaded runner: it can oversleep past the whole hold, so
+            // `execute` starts after the reader already released and never
+            // contends.
+            acq.store(true, Ordering::SeqCst);
             std::thread::sleep(hold);
             rel.store(true, Ordering::SeqCst);
             drop(guard);
         });
 
-        // Let the reader acquire first.
-        std::thread::sleep(Duration::from_millis(50));
+        // Wait until the reader actually holds the shared lock.
+        while !reader_acquired.load(Ordering::SeqCst) {
+            std::thread::yield_now();
+        }
 
         let p_exec = Arc::clone(&paths);
         let rel_check = Arc::clone(&reader_released);
