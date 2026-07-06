@@ -77,6 +77,15 @@ fn lock_mode(command: &Command, json: bool) -> LockMode {
         // the store).
         Command::Completions { .. } | Command::Man | Command::InitSource { .. } => LockMode::None,
 
+        // `evolve` takes NO outer command lock. It manages the binary swap under
+        // its own exclusive lock inside `download_and_swap` (STO-46), acquired only
+        // after the network-free decision/prompt phase. Classifying it Exclusive
+        // here would take the same lock on a first fd and then deadlock when the
+        // inner step blocks acquiring it on a second fd (flock contends across two
+        // fds in the same process). `evolve --check` touches no state at all.
+        // spec: STO-48
+        Command::Evolve { .. } => LockMode::None,
+
         // Mutating commands.
         Command::Meld { .. }
         | Command::Unmeld { .. }
@@ -84,7 +93,6 @@ fn lock_mode(command: &Command, json: bool) -> LockMode {
         | Command::Forget { .. }
         | Command::Sync { .. }
         | Command::Upgrade { .. }
-        | Command::Evolve { .. }
         | Command::Absorb { .. }
         | Command::Introspect { fix: true, .. }
         | Command::Config {
@@ -484,14 +492,6 @@ mod tests {
         assert_eq!(mode_of(&["mind", "sync", "--upgrade"]), LockMode::Exclusive);
         assert_eq!(mode_of(&["mind", "upgrade"]), LockMode::Exclusive);
         assert_eq!(mode_of(&["mind", "upgrade", "--yes"]), LockMode::Exclusive);
-        // `evolve` is now the binary self-update verb; it mutates the on-disk
-        // binary and must take the exclusive lock.
-        assert_eq!(mode_of(&["mind", "evolve"]), LockMode::Exclusive);
-        assert_eq!(mode_of(&["mind", "evolve", "--check"]), LockMode::Exclusive);
-        assert_eq!(
-            mode_of(&["mind", "evolve", "--version", "1.2.3"]),
-            LockMode::Exclusive
-        );
         // introspect --fix is mutating (it recreates links) and MUST be exclusive,
         // not shared. This is the easy-to-get-wrong case.
         assert_eq!(
@@ -686,9 +686,12 @@ mod tests {
     }
 
     /// `evolve` (the binary self-update verb) parses with and without its flags
-    /// and classifies Exclusive. `--version` resolves the target offline.
+    /// and classifies `None` (no outer command lock): it acquires the exclusive
+    /// lock itself inside `download_and_swap` (STO-46), so an outer exclusive lock
+    /// would deadlock the inner acquisition (C4). `--version` resolves offline.
+    // spec: STO-48
     #[test]
-    fn evolve_self_update_parses_and_is_exclusive() {
+    fn evolve_self_update_parses_and_takes_no_outer_lock() {
         // Bare evolve parses.
         let cli = Cli::try_parse_from(["mind", "evolve"]).expect("evolve should parse");
         assert!(!cli.yes, "global --yes should default to false");
@@ -718,12 +721,14 @@ mod tests {
             other => panic!("expected Evolve, got {other:?}"),
         }
 
-        // All three forms classify Exclusive (they mutate the on-disk binary).
-        assert_eq!(mode_of(&["mind", "evolve"]), LockMode::Exclusive);
-        assert_eq!(mode_of(&["mind", "evolve", "--check"]), LockMode::Exclusive);
+        // All three forms classify None: `evolve` takes the exclusive lock itself
+        // inside download_and_swap (STO-46). Taking it here too would deadlock the
+        // inner acquisition on a second fd (C4 regression guard).
+        assert_eq!(mode_of(&["mind", "evolve"]), LockMode::None);
+        assert_eq!(mode_of(&["mind", "evolve", "--check"]), LockMode::None);
         assert_eq!(
             mode_of(&["mind", "evolve", "--version", "1.2.3"]),
-            LockMode::Exclusive
+            LockMode::None
         );
     }
 

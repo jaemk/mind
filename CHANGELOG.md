@@ -6,6 +6,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- `mind evolve` no longer self-deadlocks on the real update path. `evolve` takes
+  no outer command lock; it acquires the exclusive lock itself inside the
+  download-and-swap step (STO-46, STO-48). The 0.13.0 classification took the
+  lock on one fd and then blocked forever re-acquiring it on a second fd, so any
+  `evolve` that reached the download hung. A 0.13.0 binary cannot self-update
+  past this hang: reinstall via install.sh, Homebrew, or `cargo install` to get
+  this fix.
+
 ## [0.13.0] - 2026-07-04
 
 ### Security

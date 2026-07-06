@@ -137,6 +137,14 @@ prevent the lost-update and torn-read races a plain read-modify-write would allo
   sums file that has no entry for the archive, is a `DigestMismatch` error and
   the archive is not extracted. Version-pinned `evolve` (`--version V`) verifies
   the pinned release's `SHA256SUMS`.
+- `STO-48` `evolve` takes NO outer command lock (its `lock_mode` is `None`). It
+  acquires the global exclusive lock itself inside the download-and-swap step
+  (STO-46), only after the network-free decision/prompt phase, and `evolve
+  --check` takes no lock at all. Classifying `evolve` as an outer exclusive
+  command would deadlock: the outer guard holds the lock on one fd and the inner
+  step then blocks forever acquiring the same lock on a second fd (flock contends
+  across two fds in one process, per STO-41/STO-42). This keeps the lock window
+  tight and is the fix for the 0.13.0 self-deadlock regression.
 
 ## Schema versions
 

@@ -107,7 +107,7 @@ and verified.
 | Graceful degradation of nested non-auth clone failures (skip + curator-empty guard) | done | DSC-79, DSC-80 |
 | Namespace prefix is a safe path component; future kind words reserved (command, hook, mcp, plugin, prompt, mode, output-style) | done | NS-28, NS-29 |
 | `[discover]` glob confinement: reject absolute/`..` patterns, canonicalize matches into the clone | done | DSC-81 |
-| `evolve` integrity: SHA256SUMS verification before extraction, unique staging name, exclusive lock | done | STO-45, STO-46, STO-47 |
+| `evolve` integrity: SHA256SUMS verification before extraction, unique staging name, exclusive lock (self-managed, no outer lock) | done | STO-45, STO-46, STO-47, STO-48 |
 | Uninstall confinement: recorded paths must resolve under the store or a configured lobe | done | LIFE-44 |
 | State-file schema versions in sources.json/manifest.json (absent = 1; newer errors) | done | STO-50, STO-51 |
 | Content-hash framing: length-prefixed fields, type-tagged symlinks | done | LIFE-35 |
