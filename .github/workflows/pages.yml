@@ -52,7 +52,16 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+      url: ${{ steps.deployment.outputs.page_url || steps.deployment_retry.outputs.page_url }}
     steps:
+      # Pages intermittently returns "Deployment failed, try again later" on the
+      # first status poll. Retry once after a short settle so a transient backend
+      # blip does not fail the run; a persistent failure still fails the retry.
       - id: deployment
+        uses: actions/deploy-pages@v5
+        continue-on-error: true
+      - if: steps.deployment.outcome == 'failure'
+        run: sleep 30
+      - id: deployment_retry
+        if: steps.deployment.outcome == 'failure'
         uses: actions/deploy-pages@v5
