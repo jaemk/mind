@@ -113,13 +113,20 @@ normatively. Source identity is `host/owner/repo` (see storage.md).
 - `POL-32` Auto-meld provisioning runs during `sync`, using each entry's declared
   pin. It is idempotent: an entry already melded at the declared pin is left
   unchanged. `auto_meld` may point at a curated super-source, which then discovers
-  its nested sources (DSC-38).
+  its nested sources (DSC-38). (Superseded for failure mode by POL-34.)
 - `POL-33` The `tag`, `ref`, and `follow_branch` values in each
   `[[sources.auto_meld]]` entry are validated by the same `validate_ref_value`
   rule as `[source]` pin values declared in `mind.toml` (DSC-66). A value that
   begins with `-`, contains ASCII whitespace or control characters, or uses `..`
   is rejected as an invalid policy (POL-5). This prevents a hostile value such as
   `--upload-pack=...` from reaching the git subprocess.
+- `POL-34` Auto-meld provisioning failures during `sync` are soft: a failure to
+  provision an entry (e.g. the host is unreachable) is warned about on stderr
+  naming the entry and the error, recorded, and the provisioning loop continues to
+  the next entry. Sources already melded before the provisioning pass still sync
+  normally. If any provisioning entry failed, `sync` exits non-zero after all
+  sources have been synced, reporting the combined count of provisioning and
+  per-source sync failures.
 
 ## Lobe lock
 

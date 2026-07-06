@@ -43,6 +43,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   flags. The wget string-fetch path no longer suppresses stderr, so a failure
   reports a real reason, and proxy failures (HTTP 407) carry a
   `HTTPS_PROXY`/`git http.proxy` hint (STO-52).
+- `sync` soft-fails individual policy `auto_meld` provisioning entries (warn,
+  record, continue) instead of aborting the whole command, so already-melded
+  sources still sync when an entry is unreachable; `sync` exits non-zero when
+  any entry failed (POL-34, supersedes the POL-32 failure mode).
 
 ## [0.13.0] - 2026-07-04
 

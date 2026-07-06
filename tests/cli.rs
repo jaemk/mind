@@ -9127,6 +9127,56 @@ fn auto_meld_entry_already_melded_is_not_remelded() {
 }
 
 #[test]
+fn sync_auto_meld_provisioning_soft_fails_on_unreachable_entry() {
+    // spec: POL-34
+    // When an auto_meld entry cannot be provisioned (here a nonexistent local
+    // path that git cannot clone -- fully offline), `sync` warns and continues
+    // rather than aborting. The already-melded source still syncs, and the
+    // command exits non-zero with the failed entry named in stderr.
+    let sb = Sandbox::named("good-src-pol34");
+    let good_spec = sb.source_spec();
+
+    // Meld the good source up front (unmanaged).
+    let meld = sb.mind(&["meld", &good_spec]);
+    assert!(meld.success, "meld good source failed: {}", meld.stderr);
+    assert_eq!(source_count(&sb), 1, "good source should be melded");
+
+    // Policy: one entry already melded (idempotent skip), one pointing at a
+    // nonexistent path that will fail to clone without any network access.
+    let bad_repo = "/nonexistent/path/that/cannot/be/cloned";
+    let escaped_good = good_spec.replace('\\', "\\\\");
+    let body = format!(
+        "[[sources.auto_meld]]\nrepo = \"{escaped_good}\"\n\n[[sources.auto_meld]]\nrepo = \"{bad_repo}\"\n"
+    );
+    let policy = write_policy(&sb, &body);
+
+    let r = sb.mind_env(&["sync"], &[("MIND_POLICY_FILE", policy.as_str())]);
+
+    // (b) exits non-zero because provisioning the bad entry failed.
+    assert!(
+        !r.success,
+        "sync must exit non-zero when an auto_meld entry fails to provision: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+
+    // (c) the failed entry is named in the output.
+    assert!(
+        r.stderr.contains(bad_repo) || r.stdout.contains(bad_repo),
+        "the failed entry must be named in the output: stderr={} stdout={}",
+        r.stderr,
+        r.stdout
+    );
+
+    // (a) the already-melded good source is still in the registry: the sync
+    // loop ran past the provisioning failure rather than aborting.
+    assert_eq!(
+        source_count(&sb),
+        1,
+        "the already-melded source must still be registered after a provisioning failure"
+    );
+}
+
+#[test]
 fn meld_pinned_policy_accepts_source_directive_tag() {
     // spec: POL-20
     // The pin may come from the source's own mind.toml `[source]` directive

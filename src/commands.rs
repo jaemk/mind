@@ -3916,6 +3916,9 @@ pub fn sync(
     let prefer_ssh = Config::load(paths)?.ssh;
     let mut registry = Registry::load(paths)?;
     let mut sync_skipped: Vec<SkippedEntry> = Vec::new();
+    // spec: POL-34 -- provisioning failures are soft; collect them here so the
+    // per-source sync loop still runs and they are reported at the end.
+    let mut provision_failures: Vec<String> = Vec::new();
 
     // POL-32: provision the policy's auto-meld base set before syncing. Each entry
     // not already in the registry is melded at its declared pin; an entry already
@@ -3936,7 +3939,9 @@ pub fn sync(
             {
                 continue;
             }
-            provisioned += meld_recursive(
+            // spec: POL-34 -- soft-fail: warn and continue so already-melded
+            // sources still sync; record the failure for the final exit-code check.
+            match meld_recursive(
                 paths,
                 &mut registry,
                 &am.repo,
@@ -3953,14 +3958,29 @@ pub fn sync(
                 true, // auto-meld is non-interactive (no collision prompt)
                 None, // auto-meld has no curator-supplied configuration
                 &mut sync_skipped,
-            )?;
+            ) {
+                Ok(n) => provisioned += n,
+                Err(e) => {
+                    if !out.json {
+                        eprintln!(
+                            "  {} auto_meld provisioning failed for '{}': {e}",
+                            out.warn(),
+                            am.repo
+                        );
+                    }
+                    provision_failures.push(am.repo.clone());
+                }
+            }
         }
         if provisioned > 0 {
             registry.save(paths)?;
         }
     }
 
-    if registry.sources.is_empty() {
+    // spec: POL-34 -- only treat an empty registry as a no-op when there are also
+    // no provisioning failures to report; otherwise fall through so the failures
+    // are collected and the command exits non-zero.
+    if registry.sources.is_empty() && provision_failures.is_empty() {
         if out.json {
             return print_json(&MutationResult::new("sync", "", "no-op"));
         }
@@ -4234,10 +4254,14 @@ pub fn sync(
         }
     }
 
-    if !failures.is_empty() {
+    // spec: POL-34 -- combine per-source and provisioning failures so either
+    // kind causes a non-zero exit. total includes the failed provisioning entries
+    // (they are not in registry.sources because they never landed).
+    let total_failed = failures.len() + provision_failures.len();
+    if total_failed > 0 {
         return Err(MindError::SyncFailed {
-            failed: failures.len(),
-            total,
+            failed: total_failed,
+            total: total + provision_failures.len(),
         });
     }
     if out.json {
