@@ -4,9 +4,21 @@
 [![release](https://img.shields.io/github/v/release/jaemk/mind)](https://github.com/jaemk/mind/releases/latest)
 [![crates.io](https://img.shields.io/crates/v/mind-cli)](https://crates.io/crates/mind-cli)
 
-A manager for agent tooling (skills, agents, rules, tools) that melds arbitrary git
-repos and links installed items into your agent directories (default
-`~/.claude`). Modeled on Homebrew.
+Skills, agents, and rules get copy-pasted between repos and machines, drift
+silently against their source, and have no install/upgrade/uninstall story.
+`mind` is a package manager for agent tooling, modeled on Homebrew: it melds a
+git repo of skills, agents, rules, and tools and links its items into your agent
+directories (default `~/.claude`).
+
+```
+mind meld jaemk/mind
+```
+
+[![asciicast](https://asciinema.org/a/qcAxP5PD7H6cuLTE.svg)](https://asciinema.org/a/qcAxP5PD7H6cuLTE)
+
+Each installed item is tracked and checked for drift from its source, install /
+upgrade / uninstall are transactional, and linking works across Claude Code,
+Gemini CLI, Codex CLI, and Antigravity, not just `~/.claude`.
 
 Full documentation: https://jaemk.github.io/mind/
 
@@ -35,14 +47,15 @@ brew install mind
 Bottles are provided for Apple Silicon macOS (arm64) and x86_64 Linux. Intel
 macOS is not covered; use `cargo install mind-cli` instead.
 
-Any platform (requires the Rust toolchain):
+Linux and macOS with the Rust toolchain:
 
 ```
 cargo install mind-cli
 ```
 
-See the [install guide](https://jaemk.github.io/mind/guide/install.html) for
-version pinning, target-dir overrides, and platform details.
+mind targets Linux and macOS; on Windows, run it under WSL. See the
+[install guide](https://jaemk.github.io/mind/guide/install.html) for version
+pinning, target-dir overrides, and platform details.
 
 ## Quickstart
 
@@ -64,8 +77,6 @@ Agent homes can be Claude Code, Gemini CLI, Codex CLI, or Antigravity -- not jus
 `~/.claude`. See
 [configuration](https://jaemk.github.io/mind/guide/configuration.html#cross-harness-lobes)
 for details.
-
-[![asciicast](https://asciinema.org/a/qcAxP5PD7H6cuLTE.svg)](https://asciinema.org/a/qcAxP5PD7H6cuLTE)
 
 The [documentation](https://jaemk.github.io/mind/) is the full reference: the
 [command reference](https://jaemk.github.io/mind/guide/commands.html),
