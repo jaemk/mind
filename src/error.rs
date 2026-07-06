@@ -449,6 +449,69 @@ impl MindError {
             source,
         }
     }
+
+    /// A stable kebab-case slug that identifies this error variant. Used as the
+    /// `kind` field in the JSON error envelope emitted under `--json` (CLI-181).
+    /// These slugs are API: they must not change once assigned.
+    // spec: CLI-182
+    pub fn kind(&self) -> &'static str {
+        match self {
+            MindError::HomeDirNotFound => "home-dir-not-found",
+            MindError::Io { .. } => "io",
+            MindError::Json { .. } => "json",
+            MindError::Toml { .. } => "toml",
+            MindError::ConfigToml { .. } => "config-toml",
+            MindError::TomlWrite { .. } => "toml-write",
+            MindError::UnknownLobe { .. } => "unknown-lobe",
+            MindError::UnknownKind { .. } => "unknown-kind",
+            MindError::UnknownPreset { .. } => "unknown-preset",
+            MindError::LobeTargetRequired => "lobe-target-required",
+            MindError::MindToml { .. } => "mind-toml",
+            MindError::InvalidRepoSpec { .. } => "invalid-repo-spec",
+            MindError::InvalidItemRef { .. } => "invalid-item-ref",
+            MindError::ReservedPrefix { .. } => "reserved-prefix",
+            MindError::UnsafePrefix { .. } => "unsafe-prefix",
+            MindError::NamespaceLocked { .. } => "namespace-locked",
+            MindError::SourceExists { .. } => "source-exists",
+            MindError::SourceNotFound { .. } => "source-not-found",
+            MindError::InvalidPattern { .. } => "invalid-pattern",
+            MindError::AmbiguousSource { .. } => "ambiguous-source",
+            MindError::ItemNotFound { .. } => "item-not-found",
+            MindError::AmbiguousItem { .. } => "ambiguous-item",
+            MindError::NotInstalled { .. } => "not-installed",
+            MindError::SyncFailed { .. } => "sync-failed",
+            MindError::IncompatibleVersion { .. } => "incompatible-version",
+            MindError::LinkOccupied { .. } => "link-occupied",
+            MindError::BadReference { .. } => "bad-reference",
+            MindError::Git { .. } => "git",
+            MindError::CuratorAllNestedFailed { .. } => "curator-all-nested-failed",
+            MindError::GitNotFound => "git-not-found",
+            MindError::ConflictingPin { .. } => "conflicting-pin",
+            MindError::InvalidRoot { .. } => "invalid-root",
+            MindError::DuplicateItem { .. } => "duplicate-item",
+            MindError::ReviewFailed { .. } => "review-failed",
+            MindError::SourceNotAllowed { .. } => "source-not-allowed",
+            MindError::UnpinnedSourceForbidden { .. } => "unpinned-source-forbidden",
+            MindError::InvalidPolicy { .. } => "invalid-policy",
+            MindError::LobesLocked { .. } => "lobes-locked",
+            MindError::HookFailed { .. } => "hook-failed",
+            MindError::UnsupportedPlatform { .. } => "unsupported-platform",
+            MindError::DownloadFailed { .. } => "download-failed",
+            MindError::ReleaseAssetEmpty => "release-asset-empty",
+            MindError::TargetNotWritable { .. } => "target-not-writable",
+            MindError::NotADirectory { .. } => "not-a-directory",
+            MindError::ConfirmationRequired { .. } => "confirmation-required",
+            MindError::DestinationNotRepo { .. } => "destination-not-repo",
+            MindError::InvalidRef { .. } => "invalid-ref",
+            MindError::AbsorbCollision { .. } => "absorb-collision",
+            MindError::AgentCollision { .. } => "agent-collision",
+            MindError::SkillCollision { .. } => "skill-collision",
+            MindError::UnsafeName { .. } => "unsafe-name",
+            MindError::DigestMismatch { .. } => "digest-mismatch",
+            MindError::SelfUpdatePolicy { .. } => "self-update-policy",
+            MindError::StateTooNew { .. } => "state-too-new",
+        }
+    }
 }
 
 #[cfg(test)]
@@ -782,6 +845,64 @@ mod tests {
         }
         .to_string();
         assert!(e.contains("../evil"), "must include the prefix: {e}");
+    }
+
+    // spec: CLI-182
+    // kind() returns stable, non-empty kebab-case slugs. Spot-check a
+    // representative sample; the exhaustive match in the impl guarantees every
+    // variant has a slug.
+    #[test]
+    fn kind_slugs_are_stable() {
+        assert_eq!(
+            MindError::ItemNotFound {
+                query: "x".into(),
+                sources: 0
+            }
+            .kind(),
+            "item-not-found"
+        );
+        assert_eq!(
+            MindError::DigestMismatch {
+                url: "u".into(),
+                expected: "e".into(),
+                actual: "a".into()
+            }
+            .kind(),
+            "digest-mismatch"
+        );
+        assert_eq!(
+            MindError::SelfUpdatePolicy { detail: "d".into() }.kind(),
+            "self-update-policy"
+        );
+        assert_eq!(MindError::HomeDirNotFound.kind(), "home-dir-not-found");
+        assert_eq!(MindError::GitNotFound.kind(), "git-not-found");
+        assert_eq!(MindError::ReleaseAssetEmpty.kind(), "release-asset-empty");
+        assert_eq!(MindError::LobeTargetRequired.kind(), "lobe-target-required");
+
+        // Every slug must be non-empty and kebab-case (lowercase, hyphens only).
+        let samples: &[(&str, &MindError)] = &[
+            (
+                "item-not-found",
+                &MindError::ItemNotFound {
+                    query: "x".into(),
+                    sources: 0,
+                },
+            ),
+            ("home-dir-not-found", &MindError::HomeDirNotFound),
+            ("git-not-found", &MindError::GitNotFound),
+        ];
+        for (expected, err) in samples {
+            let slug = err.kind();
+            assert_eq!(slug, *expected, "slug mismatch for variant");
+            assert!(
+                !slug.is_empty(),
+                "slug must be non-empty for variant {expected}"
+            );
+            assert!(
+                slug.chars().all(|c| c.is_ascii_lowercase() || c == '-'),
+                "slug must be lowercase kebab-case: {slug}"
+            );
+        }
     }
 
     #[test]

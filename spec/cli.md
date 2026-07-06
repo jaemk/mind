@@ -766,4 +766,21 @@ and per-harness `kinds` defaults.
 - `CLI-175` The exit-code contract: 0 for success, 1 for a runtime error
   (`MindError`), and 2 for a usage error (clap parse failure). Clap handles code 2
   automatically. Code 1 comes from `ExitCode::FAILURE` in `main`.
+- `CLI-181` Under `--json`, when a `MindError` occurs the process emits a JSON
+  error envelope on stdout and exits with code 1 (unchanged). The envelope shape
+  is `{"schema": 1, "error": {"kind": "<slug>", "message": "<display-text>"}}`.
+  The `schema` field matches the success-envelope version (currently 1). The
+  `message` field is the full `Display` text of the error. Nothing is written to
+  stderr in this path. In non-json mode the existing behavior is unchanged: the
+  error message and its source chain are printed to stderr and the process exits 1.
+- `CLI-182` The `kind` field in the JSON error envelope (CLI-181) is a stable
+  kebab-case slug assigned once per `MindError` variant and never changed. Scripts
+  may branch on `kind` to handle specific failures. Example slugs: `ItemNotFound`
+  -> `"item-not-found"`, `DigestMismatch` -> `"digest-mismatch"`,
+  `SelfUpdatePolicy` -> `"self-update-policy"`. The slug set is exhaustive: every
+  variant has exactly one slug.
+- `CLI-183` Clap argument-parse failures (exit code 2) are not JSON-enveloped.
+  They occur before flag parsing settles and are rendered by clap as plain text to
+  stderr. Scripts may treat exit 2 as a usage error without inspecting stdout.
+  Only the post-parse `MindError` path (exit 1) emits the envelope.
 

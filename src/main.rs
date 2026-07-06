@@ -37,15 +37,34 @@ use paths::Paths;
 
 fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
+    // Capture the json flag before `cli` is moved into `run`. Clap's parse
+    // succeeded at this point, so cli.json is trustworthy.
+    let json = cli.json;
     match run(cli) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(err) => {
-            // Structured errors print their own Display; print the source chain too.
-            eprintln!("error: {err}");
-            let mut src = std::error::Error::source(&err);
-            while let Some(e) = src {
-                eprintln!("  caused by: {e}");
-                src = e.source();
+            if json {
+                // spec: CLI-181 -- emit the error as a JSON envelope on stdout so
+                // that scripts parsing stdout get a machine-readable reason. The
+                // exit code is unchanged (FAILURE = 1). Plain-text stderr output
+                // is suppressed; the envelope carries the full Display message.
+                let envelope = serde_json::json!({
+                    "schema": 1,
+                    "error": {
+                        "kind": err.kind(),
+                        "message": err.to_string(),
+                    }
+                });
+                // Ignore the Result: we are already in the error path.
+                let _ = crate::render::print_json(&envelope);
+            } else {
+                // Structured errors print their own Display; print the source chain too.
+                eprintln!("error: {err}");
+                let mut src = std::error::Error::source(&err);
+                while let Some(e) = src {
+                    eprintln!("  caused by: {e}");
+                    src = e.source();
+                }
             }
             std::process::ExitCode::FAILURE
         }

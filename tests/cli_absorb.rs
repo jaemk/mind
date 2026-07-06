@@ -1578,9 +1578,14 @@ fn abs7_json_mode_without_yes_when_stray_copies_is_confirmation_required() {
         !out.status.success(),
         "absorb --json without --yes must fail when stray copies exist: stdout={stdout} stderr={stderr}"
     );
-    assert!(
-        stderr.contains("needs confirmation") || stderr.contains("ConfirmationRequired"),
-        "must return ConfirmationRequired: stderr={stderr}"
+    // Under --json the ConfirmationRequired error goes to stdout as the CLI-181 envelope.
+    // spec: CLI-181
+    let v: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("stdout must be a JSON error envelope, got {e}: {stdout:?}"));
+    assert_eq!(v["schema"], 1, "schema must be 1: {stdout}");
+    assert_eq!(
+        v["error"]["kind"], "confirmation-required",
+        "kind must be confirmation-required: {stdout}"
     );
 
     // Nothing must have been moved: both lobe entries must be original files.
@@ -1614,10 +1619,19 @@ fn abs7_json_mode_single_lobe_without_yes_is_confirmation_required() {
         "--json without --yes must fail even with single lobe: stdout={} stderr={}",
         r.stdout, r.stderr
     );
-    assert!(
-        r.stderr.contains("needs confirmation") || r.stderr.contains("ConfirmationRequired"),
-        "must return ConfirmationRequired: stderr={}",
-        r.stderr
+    // Under --json the ConfirmationRequired error goes to stdout as the CLI-181 envelope.
+    // spec: CLI-181
+    let v: serde_json::Value = serde_json::from_str(r.stdout.trim()).unwrap_or_else(|e| {
+        panic!(
+            "stdout must be a JSON error envelope, got {e}: {:?}",
+            r.stdout
+        )
+    });
+    assert_eq!(v["schema"], 1, "schema must be 1: {}", r.stdout);
+    assert_eq!(
+        v["error"]["kind"], "confirmation-required",
+        "kind must be confirmation-required: {}",
+        r.stdout
     );
     // Lobe must be unchanged.
     assert!(

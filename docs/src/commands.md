@@ -216,10 +216,24 @@ error, `-` available) so no information is lost (CLI-151, CLI-152, CLI-154).
 result object with `"schema": 1` and at minimum `action`, `target`, and `outcome`
 fields (CLI-153).
 
+When an error occurs under `--json`, the process emits a JSON error envelope on
+stdout instead of plain text on stderr, then exits 1 (unchanged):
+
+```json
+{"schema": 1, "error": {"kind": "item-not-found", "message": "..."}}
+```
+
+The `kind` field is a stable kebab-case slug per `MindError` variant (e.g.
+`"item-not-found"`, `"source-not-found"`, `"git"`, `"digest-mismatch"`).
+Scripts may branch on `kind` to handle specific failures. The `message` field
+is the full display text. Exit code is always 1 for runtime errors; clap usage
+errors (exit 2) remain plain text and are not enveloped (CLI-181, CLI-182,
+CLI-183).
+
 ## Exit status
 
-Exit 0 on success. Any `MindError` is printed to stderr and exits non-zero
-(CLI-100).
+Exit 0 on success. Any `MindError` exits 1; under `--json` it is written to
+stdout as the error envelope above instead of stderr (CLI-100, CLI-181).
 
 `sync` exits non-zero (`SyncFailed`) when any per-source fetch fails, even if
 other sources succeeded; successfully fetched commits are persisted and reported

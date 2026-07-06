@@ -1826,7 +1826,9 @@ fn on_auth_failure_error_prints_message() {
         r.stderr
     );
 
-    // JSON mode: same stderr content (--json only affects stdout format).
+    // JSON mode: the auth-failure warning lines (printed by the meld command
+    // before returning the error, DSC-69) still appear on stderr regardless of
+    // --json. The final MindError goes to stdout as the CLI-181 envelope.
     let rj = registry.mind_env(&["meld", &spec, "--json"], &[("PATH", &new_path)]);
     assert!(!rj.success, "error action --json must fail: {}", rj.stderr);
     assert!(
@@ -1842,11 +1844,12 @@ fn on_auth_failure_error_prints_message() {
 }
 
 #[test]
-fn on_auth_failure_error_json_stdout_is_empty() {
-    // spec: DSC-68, DSC-69
-    // action = "error" with --json: the process exits non-zero and emits
-    // nothing on stdout.  The error path must not emit a partial JSON success
-    // object; all diagnostic output goes to stderr.
+fn on_auth_failure_error_json_emits_error_envelope() {
+    // spec: DSC-68, DSC-69, CLI-181
+    // action = "error" with --json: the process exits non-zero and emits the
+    // JSON error envelope on stdout. The auth-failure warning is printed to
+    // stderr by the meld command before the error is returned (DSC-69), and
+    // the final MindError is wrapped in the CLI-181 envelope on stdout.
     let registry = Sandbox::bare("registry");
     let fake_dir = fake_git_bin_dir(&registry.base);
     let new_path = prepend_path(&fake_dir);
@@ -1863,12 +1866,23 @@ fn on_auth_failure_error_json_stdout_is_empty() {
         "error action --json must exit non-zero: {}",
         r.stderr
     );
+    // The final MindError goes to stdout as a JSON error envelope (CLI-181).
+    let v = parse_json(&r.stdout);
+    assert_eq!(v["schema"], 1, "schema must be 1: {}", r.stdout);
     assert!(
-        r.stdout.trim().is_empty(),
-        "error path must produce no stdout; got: {:?}",
+        v["error"]["kind"].is_string(),
+        "error envelope must have a kind: {}",
         r.stdout
     );
-    // The diagnostic still appears on stderr.
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty()),
+        "error envelope must have a non-empty message: {}",
+        r.stdout
+    );
+    // The auth-failure warning (printed before the error is returned) still
+    // appears on stderr (DSC-69: always warn to stderr regardless of --json).
     assert!(
         r.stderr.contains("unable to meld source"),
         "auth-failure warning must appear on stderr: {}",
@@ -11647,22 +11661,98 @@ fn json_learn_dry_run_lists_nothing_installed_as_prose() {
 }
 
 #[test]
-fn json_error_goes_to_stderr_and_stdout_stays_clean() {
-    // spec: CLI-153
-    // An error under --json must not corrupt stdout: the failure is reported on
-    // stderr and stdout carries no half-written JSON object.
+fn json_error_emits_envelope_on_stdout_not_stderr() {
+    // spec: CLI-181, CLI-182
+    // Under --json an error emits {"schema":1,"error":{"kind":"...","message":"..."}}
+    // to stdout; nothing is written to stderr by the main error handler.
     let sb = melded();
     let r = sb.mind(&["learn", "does-not-exist", "--json"]);
     assert!(!r.success, "unknown item must fail");
-    assert!(
-        r.stderr.contains("no item matches"),
-        "error must go to stderr: {}",
-        r.stderr
+    // The envelope must be valid JSON on stdout.
+    let v = parse_json(&r.stdout);
+    assert_eq!(v["schema"], 1, "schema must be 1: {}", r.stdout);
+    let err = &v["error"];
+    assert_eq!(
+        err["kind"], "item-not-found",
+        "kind must be item-not-found: {}",
+        r.stdout
     );
     assert!(
-        r.stdout.trim().is_empty(),
-        "no JSON (or prose) must be written to stdout on error: {:?}",
+        err["message"]
+            .as_str()
+            .map(|s| s.contains("does-not-exist"))
+            .unwrap_or(false),
+        "message must contain the query: {}",
         r.stdout
+    );
+    // No error text on stderr from the main error handler.
+    assert!(
+        !r.stderr.contains("error:"),
+        "main error handler must not write to stderr under --json: {}",
+        r.stderr
+    );
+    // Exit code must be 1 (FAILURE), not 2.
+    // (success == false + no clap usage error means exit 1.)
+}
+
+#[test]
+fn json_error_envelope_schema_and_kind_fields() {
+    // spec: CLI-181, CLI-182
+    // A second distinct error class (SourceNotFound via `forget`) also produces
+    // the envelope, confirming the schema/kind contract is not specific to learn.
+    let sb = melded();
+    // `forget` on a name that is not installed -> NotInstalled (not SourceNotFound,
+    // since forget resolves from the manifest). Use `unmeld` on a nonexistent
+    // source name to get SourceNotFound.
+    let r = sb.mind(&["--json", "unmeld", "no-such-source"]);
+    assert!(!r.success, "unmeld unknown source must fail");
+    let v = parse_json(&r.stdout);
+    assert_eq!(v["schema"], 1, "schema field must be 1: {}", r.stdout);
+    let err = &v["error"];
+    // The kind slug must be the stable source-not-found slug.
+    assert_eq!(
+        err["kind"], "source-not-found",
+        "kind must be source-not-found: {}",
+        r.stdout
+    );
+    // message must be non-empty and contain the queried name.
+    let msg = err["message"].as_str().unwrap_or("");
+    assert!(!msg.is_empty(), "message must be non-empty: {}", r.stdout);
+    assert!(
+        msg.contains("no-such-source"),
+        "message must contain the source name: {}",
+        r.stdout
+    );
+    // Nothing on stderr from the main error handler.
+    assert!(
+        !r.stderr.contains("error:"),
+        "no stderr from main handler under --json: {}",
+        r.stderr
+    );
+}
+
+#[test]
+fn clap_usage_error_is_not_json_enveloped() {
+    // spec: CLI-183
+    // A clap argument-parse failure (unknown flag) exits 2 with plain text on
+    // stderr, not a JSON envelope on stdout. The --json envelope only applies to
+    // post-parse MindError failures (exit 1).
+    let sb = Sandbox::new();
+    // An unknown flag causes clap to exit 2 before any command logic runs.
+    let r = sb.mind(&["--no-such-flag"]);
+    // Exit code 2 is reported by Command::status() as non-success.
+    assert!(!r.success, "unknown flag must fail");
+    // stdout must NOT contain a JSON envelope; clap writes to stderr.
+    assert!(
+        r.stdout.trim().is_empty(),
+        "clap usage errors must not produce stdout output: {:?}",
+        r.stdout
+    );
+    // stderr must carry clap's plain-text error message.
+    assert!(
+        !r.stderr.is_empty(),
+        "clap must write the usage error to stderr: {:?}",
+        r.stderr
     );
 }
 
@@ -15084,18 +15174,23 @@ fn recall_tree_json_not_installed_item_errors_like_non_json() {
     let json = sb.mind(&["recall", "skill:nope", "--tree", "--json"]);
     assert!(
         !json.success,
-        "recall <uninstalled> --tree --json must fail, not emit JSON: {} {}",
+        "recall <uninstalled> --tree --json must fail: {} {}",
         json.stdout, json.stderr
     );
-    assert!(
-        json.stderr.contains("not installed"),
-        "must report NotInstalled: {}",
-        json.stderr
+    // Under --json the error appears as the CLI-181 envelope on stdout.
+    let v = parse_json(&json.stdout);
+    assert_eq!(v["schema"], 1, "schema must be 1: {}", json.stdout);
+    assert_eq!(
+        v["error"]["kind"], "not-installed",
+        "kind must be not-installed: {}",
+        json.stdout
     );
-    // It must NOT have printed a stray JSON null/object/array to stdout.
     assert!(
-        json.stdout.trim().is_empty(),
-        "no JSON should be emitted for an uninstalled item: {:?}",
+        v["error"]["message"]
+            .as_str()
+            .map(|s| s.contains("not installed") || s.contains("nope"))
+            .unwrap_or(false),
+        "message must mention the missing item: {}",
         json.stdout
     );
 
@@ -15320,7 +15415,7 @@ fn recall_tree_json_and_probe_json_agree_on_direct_dependencies() {
 /// destructive confirmation (DEP-60).
 #[test]
 fn forget_json_without_yes_when_dependents_exist_is_confirmation_required() {
-    // spec: DEP-60
+    // spec: DEP-60, CLI-181
     let sb = dep60_fixture(); // skill:review depends on agent:reviewer
 
     // --json but no --yes and no --force.
@@ -15330,10 +15425,13 @@ fn forget_json_without_yes_when_dependents_exist_is_confirmation_required() {
         "forget --json without --yes must refuse when dependents exist: stdout={} stderr={}",
         r.stdout, r.stderr
     );
-    assert!(
-        r.stderr.contains("needs confirmation") || r.stderr.contains("ConfirmationRequired"),
-        "must return ConfirmationRequired: stderr={}",
-        r.stderr
+    // Under --json the ConfirmationRequired error goes to stdout as the CLI-181 envelope.
+    let v = parse_json(&r.stdout);
+    assert_eq!(v["schema"], 1, "schema must be 1: {}", r.stdout);
+    assert_eq!(
+        v["error"]["kind"], "confirmation-required",
+        "kind must be confirmation-required: {}",
+        r.stdout
     );
     // The item must still be installed.
     assert!(

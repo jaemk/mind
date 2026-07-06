@@ -13,6 +13,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   --check` fail before any network call), `self-update = "X.Y.Z"` pins evolve to
   a version (resolved offline, a conflicting `--version` is rejected), and
   `true`/absent leaves it unrestricted (POL-51, POL-52, POL-53, POL-54).
+- Under `--json`, a `MindError` is emitted to stdout as
+  `{"schema":1,"error":{"kind":"...","message":"..."}}` instead of only plain
+  text on stderr, so a script parsing stdout gets a machine-readable reason. The
+  exit code is unchanged, `kind` is a stable per-variant slug, and clap usage
+  errors (exit 2) stay plain text (CLI-181, CLI-182, CLI-183).
 
 ### Security
 
