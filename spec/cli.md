@@ -294,6 +294,11 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   or `forget`).
 - `CLI-61` The report lists, per item, the hash and commit deltas, and a compare
   URL when the source host supports one. A namespace change is shown as a rename.
+- `CLI-176` The compare URL is produced for any https remote by constructing
+  `https://<host>/<owner>/<repo>/compare/<old>...<new>`. This covers GitHub.com
+  and GitHub Enterprise Server (and any other https forge using the same URL
+  shape). SSH remotes and local/file paths return no compare URL because there is
+  no web host to link to.
 - `CLI-62` `--yes` applies upgrades without prompting.
 - `CLI-63` An optional `item` limits upgrade to the matching installed item(s),
   matched against the manifest by effective name and honoring a `kind:` prefix

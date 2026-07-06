@@ -82,6 +82,18 @@ CLI-17).
 - `HOOK-23` `--dangerously-skip-install-hook-check` runs the hook without
   prompting, and is what enables hooks in non-interactive use. The flag name is
   deliberately explicit about the risk.
+- `HOOK-91` All source-derived text included in the hook consent disclosure
+  (identity, pin description, commit, clone path, hook command, declared
+  command) is sanitized -- ANSI escape sequences, C0/DEL/C1 control characters,
+  and Unicode bidi-override/separator code points stripped -- before the
+  disclosure string is printed. This prevents a malicious source from using
+  cursor/line-clear escapes to overwrite the warning line or bidi-reorder the
+  displayed command to look innocuous on the exact surface where the user
+  consents to run arbitrary code. Static literal text in the disclosure (the
+  WARNING line, field labels) is not sanitized (it is not untrusted). The same
+  sanitization rule applies to the hook label shown in multi-hook disclosures
+  (HOOK-52). This is consistent with the TUI model-boundary rule (TUI-60) and
+  extends it to the CLI consent prompt.
 
 ## Execution and recording
 

@@ -6,6 +6,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Security
+
+- Source-derived fields in the hook consent disclosure (command, identity, pin
+  description, commit, clone path) are stripped of ANSI escapes, control
+  characters, and bidi overrides before the prompt is shown, so a malicious
+  source can no longer rewrite the warning line or reorder the displayed command
+  on the surface where the user consents to run hook code (HOOK-91).
+- `[discover]` skill globs now validate the parent directory name (the bare
+  skill name) instead of the always-"SKILL" file stem, so a hostile skill
+  directory name is rejected at discovery time as the `[[items]]` path already
+  was (DSC-83).
+
 ### Fixed
 
 - `mind evolve` no longer self-deadlocks on the real update path. `evolve` takes
@@ -15,6 +27,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `evolve` that reached the download hung. A 0.13.0 binary cannot self-update
   past this hang: reinstall via install.sh, Homebrew, or `cargo install` to get
   this fix.
+- `upgrade` produces a `/compare/` link for any https remote, including GitHub
+  Enterprise Server, instead of only github.com (CLI-176).
 
 ## [0.13.0] - 2026-07-04
 

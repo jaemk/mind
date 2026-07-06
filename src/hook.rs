@@ -53,9 +53,12 @@ pub fn disclosure_text(
     command: &str,
     declared_override: Option<&str>,
 ) -> String {
+    // Sanitize identity for the header line; disclosure_body sanitizes all body
+    // fields independently (HOOK-91).
+    let identity_clean = crate::sanitize::strip_ansi(identity);
     let mut out = String::new();
     out.push_str("====== hook: ");
-    out.push_str(identity);
+    out.push_str(&identity_clean);
     out.push_str(" ======\n");
     out.push_str(&disclosure_body(
         identity,
@@ -183,13 +186,16 @@ pub fn hook_disclosure_text(
     command: &str,
     declared_override: Option<&str>,
 ) -> String {
+    // Sanitize label for the header and "Hook:" lines; disclosure_body
+    // sanitizes identity and the remaining body fields independently (HOOK-91).
+    let label_clean = crate::sanitize::strip_ansi(label);
     let kind = if optional { "optional" } else { "required" };
     let mut out = String::new();
     out.push_str("====== hook: ");
-    out.push_str(label);
+    out.push_str(&label_clean);
     out.push_str(" ======\n");
     out.push_str("  Hook:      ");
-    out.push_str(label);
+    out.push_str(&label_clean);
     out.push_str(" (");
     out.push_str(kind);
     out.push_str(")\n");
@@ -209,6 +215,9 @@ pub fn hook_disclosure_text(
 /// The fields-only portion of a disclosure block (no header line). Used by
 /// both `disclosure_text` (which prepends its own header) and
 /// `hook_disclosure_text` (which prepends a different header then calls this).
+///
+/// All source-derived fields are sanitized (ANSI/control/bidi stripped) before
+/// being included in the returned string (HOOK-91).
 fn disclosure_body(
     identity: &str,
     pin_desc: &str,
@@ -217,22 +226,36 @@ fn disclosure_body(
     command: &str,
     declared_override: Option<&str>,
 ) -> String {
+    // Sanitize all source-derived fields: ANSI escapes, C0/DEL/C1 control
+    // characters, and bidi-override code points are stripped so a malicious
+    // source cannot use cursor/line-clear sequences or bidi reordering to make
+    // a dangerous command appear innocuous on the exact surface where the user
+    // consents to run it (HOOK-91, S8).
+    let identity = crate::sanitize::strip_ansi(identity);
+    let pin_desc = crate::sanitize::strip_ansi(pin_desc);
+    let commit = crate::sanitize::strip_ansi(commit);
+    let clone_path = crate::sanitize::strip_ansi(clone_path);
+    let command = crate::sanitize::strip_ansi(command);
+    let declared_override_owned: Option<String> =
+        declared_override.map(crate::sanitize::strip_ansi);
+    let declared_override = declared_override_owned.as_deref();
+
     let mut out = String::new();
 
     out.push_str("  Source:    ");
-    out.push_str(identity);
+    out.push_str(&identity);
     out.push('\n');
 
     out.push_str("  Pin:       ");
-    out.push_str(pin_desc);
+    out.push_str(&pin_desc);
     out.push('\n');
 
     out.push_str("  Commit:    ");
-    out.push_str(commit);
+    out.push_str(&commit);
     out.push('\n');
 
     out.push_str("  Clone:     ");
-    out.push_str(clone_path);
+    out.push_str(&clone_path);
     out.push('\n');
 
     if let Some(declared) = declared_override {
@@ -240,12 +263,12 @@ fn disclosure_body(
         out.push_str(declared);
         out.push('\n');
         out.push_str("  Override:  ");
-        out.push_str(command);
+        out.push_str(&command);
         out.push('\n');
         out.push_str("  NOTE: the user-supplied command replaces the source's declared command.\n");
     } else {
         out.push_str("  Command:   ");
-        out.push_str(command);
+        out.push_str(&command);
         out.push('\n');
     }
 
@@ -731,6 +754,76 @@ mod tests {
         assert_eq!(
             via_fn, expected,
             "disclosure_text output must equal header + disclosure_body"
+        );
+    }
+
+    // spec: HOOK-91
+    // Source-derived fields containing ANSI escapes and bidi-override code points
+    // must be stripped from the produced disclosure string before it reaches the
+    // terminal where the user consents to run the hook.
+    #[test]
+    fn disclosure_sanitizes_ansi_and_bidi_in_source_fields() {
+        // The ESC byte (0x1b) starts ANSI sequences; U+202E is a bidi-override.
+        let ansi_command = "\x1b[2K\x1b[1A rm -rf /  \x1b[0m";
+        let bidi_identity = "github.com/\u{202E}kcal/evil\u{202E}";
+
+        // Test disclosure_text: checks identity in header and command in body.
+        let text = disclosure_text(
+            bidi_identity,
+            "main",
+            "abc1234",
+            "/tmp/clone",
+            ansi_command,
+            None,
+        );
+        assert!(
+            !text.contains('\x1b'),
+            "disclosure_text must not contain raw ESC byte; got: {text:?}"
+        );
+        assert!(
+            !text.chars().any(|c| matches!(
+                c,
+                '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+            )),
+            "disclosure_text must not contain bidi-override code points; got: {text:?}"
+        );
+
+        // Test hook_disclosure_text: label is also source-derived (hook name from mind.toml).
+        let ansi_label = "\x1b[31mbuild\x1b[0m\u{202E}";
+        let text2 = hook_disclosure_text(
+            ansi_label,
+            false,
+            bidi_identity,
+            "main",
+            "abc1234",
+            "/tmp/clone",
+            ansi_command,
+            None,
+        );
+        assert!(
+            !text2.contains('\x1b'),
+            "hook_disclosure_text must not contain raw ESC byte; got: {text2:?}"
+        );
+        assert!(
+            !text2.chars().any(|c| matches!(
+                c,
+                '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+            )),
+            "hook_disclosure_text must not contain bidi-override code points; got: {text2:?}"
+        );
+
+        // Test with declared_override path: both declared and override commands sanitized.
+        let text3 = disclosure_text(
+            bidi_identity,
+            "v1.0",
+            "def5678",
+            "/tmp/clone",
+            ansi_command,
+            Some("\x1b[32m malicious_decl \x1b[0m"),
+        );
+        assert!(
+            !text3.contains('\x1b'),
+            "disclosure with override must not contain raw ESC byte; got: {text3:?}"
         );
     }
 

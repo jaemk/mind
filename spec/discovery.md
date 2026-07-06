@@ -462,6 +462,12 @@ field lets the curator opt in to named handling.
   safe-component rule as `[[items]]` names (DSC-71): an empty, `.`, `..`, or
   separator-bearing name is rejected with a `MindToml` error.
 
+- `DSC-83` For skill globs in `[discover]`, the bare skill name is the parent
+  directory name (not the `SKILL.md` file stem). The safe-component check
+  (DSC-81) is applied to the parent directory name so that a skill directory
+  whose name contains a path separator or NUL is rejected at discovery time,
+  consistent with how `[[items]]` names are validated (DSC-71).
+
 ## `[source].namespace`
 
 - `DSC-82` The `[source]` table accepts both `namespace` and `prefix` for the

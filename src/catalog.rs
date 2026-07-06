@@ -656,7 +656,7 @@ fn scan_globs(
     discover: &Discover,
     out: &mut Vec<CatalogItem>,
 ) -> Result<()> {
-    for skill_md in resolve_globs(root, &discover.skills)? {
+    for skill_md in resolve_globs(root, &discover.skills, ItemKind::Skill)? {
         // The glob points at the SKILL.md; the item is its parent dir.
         if let Some(dir) = skill_md.parent() {
             out.push(make_item(
@@ -672,13 +672,13 @@ fn scan_globs(
         (ItemKind::Agent, &discover.agents),
         (ItemKind::Rule, &discover.rules),
     ] {
-        for md in resolve_globs(root, globs)? {
+        for md in resolve_globs(root, globs, kind)? {
             out.push(make_item(source, prefix, kind, md.clone(), &md));
         }
     }
     // Tool globs match the tool directory itself; its `TOOL.md` (if any) is the
     // metadata source.
-    for dir in resolve_globs(root, &discover.tools)? {
+    for dir in resolve_globs(root, &discover.tools, ItemKind::Tool)? {
         let meta = dir.join("TOOL.md");
         out.push(make_item(source, prefix, ItemKind::Tool, dir, &meta));
     }
@@ -686,14 +686,14 @@ fn scan_globs(
 }
 
 /// Expand a kind's include globs, then drop anything its exclude globs match.
-fn resolve_globs(root: &Path, globs: &KindGlobs) -> Result<Vec<PathBuf>> {
+fn resolve_globs(root: &Path, globs: &KindGlobs, kind: ItemKind) -> Result<Vec<PathBuf>> {
     let mut included = BTreeSet::new();
     for pattern in &globs.include {
-        included.extend(glob_paths(root, pattern)?);
+        included.extend(glob_paths(root, pattern, kind)?);
     }
     let mut excluded = BTreeSet::new();
     for pattern in &globs.exclude {
-        excluded.extend(glob_paths(root, pattern)?);
+        excluded.extend(glob_paths(root, pattern, kind)?);
     }
     Ok(included.difference(&excluded).cloned().collect())
 }
@@ -1417,7 +1417,7 @@ fn strip_ansi(s: &str) -> String {
 }
 
 /// Expand a glob pattern rooted at `root`, returning sorted matches.
-fn glob_paths(root: &Path, pattern: &str) -> Result<Vec<PathBuf>> {
+fn glob_paths(root: &Path, pattern: &str, kind: ItemKind) -> Result<Vec<PathBuf>> {
     // spec: DSC-81 -- confinement of [discover] globs to the clone root.
     // Reject absolute patterns and patterns with `..` components up front,
     // before the glob expands and before any filesystem access.
@@ -1467,11 +1467,20 @@ fn glob_paths(root: &Path, pattern: &str) -> Result<Vec<PathBuf>> {
                     });
                 }
                 // Derive the item name from the matched path and verify it is safe.
-                let item_name = p
-                    .file_stem()
-                    .or_else(|| p.file_name())
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_default();
+                // spec: DSC-83 -- for skill globs the pattern points at SKILL.md;
+                // the bare skill name is the parent directory name. For all other
+                // kinds the matched path's stem is the bare name.
+                let item_name = if kind == ItemKind::Skill {
+                    p.parent()
+                        .and_then(|d| d.file_name())
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_default()
+                } else {
+                    p.file_stem()
+                        .or_else(|| p.file_name())
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_default()
+                };
                 if !is_safe_item_name(&item_name) {
                     return Err(MindError::MindToml {
                         path: root.join("mind.toml"),
@@ -2733,7 +2742,7 @@ mod tests {
         // parse time, before any filesystem access.
         let tmp = TmpDir::new();
         let root = tmp.path();
-        let err = glob_paths(root, "/etc/passwd").unwrap_err();
+        let err = glob_paths(root, "/etc/passwd", ItemKind::Agent).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("absolute"),
@@ -2747,7 +2756,7 @@ mod tests {
         // any filesystem access, preventing escape from the clone root.
         let tmp = TmpDir::new();
         let root = tmp.path();
-        let err = glob_paths(root, "../outside/*.md").unwrap_err();
+        let err = glob_paths(root, "../outside/*.md", ItemKind::Agent).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains(".."), "error must mention '..': {msg}");
     }
@@ -2762,10 +2771,48 @@ mod tests {
             &root.join("agents/coder.md"),
             "---\ndescription: coder\n---\n",
         );
-        let matches = glob_paths(root, "agents/*.md").unwrap();
+        let matches = glob_paths(root, "agents/*.md", ItemKind::Agent).unwrap();
         assert_eq!(matches.len(), 1, "should find one match: {matches:?}");
         assert!(
             matches[0].ends_with("coder.md"),
+            "matched the wrong file: {matches:?}"
+        );
+    }
+
+    #[test]
+    fn glob_paths_skill_rejects_hostile_parent_dir_name() {
+        // spec: DSC-83 -- for skill globs the safe-component check must be applied
+        // to the parent directory name (the bare skill name), not the SKILL.md
+        // stem. A skill directory whose name contains a path separator is rejected.
+        let tmp = TmpDir::new();
+        let root = tmp.path();
+        // A backslash in a directory name is valid on Linux but rejected by
+        // is_safe_item_name, so it exercises the check on the right name.
+        write_file(
+            &root.join("packages").join("evil\\skill").join("SKILL.md"),
+            "---\ndescription: hostile\n---\n",
+        );
+        let err = glob_paths(root, "packages/*/SKILL.md", ItemKind::Skill).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unsafe"),
+            "error must mention 'unsafe' for hostile parent dir name: {msg}"
+        );
+    }
+
+    #[test]
+    fn glob_paths_skill_accepts_normal_parent_dir_name() {
+        // spec: DSC-83 -- a skill whose parent directory has a safe name is accepted.
+        let tmp = TmpDir::new();
+        let root = tmp.path();
+        write_file(
+            &root.join("packages/good-skill/SKILL.md"),
+            "---\ndescription: fine\n---\n",
+        );
+        let matches = glob_paths(root, "packages/*/SKILL.md", ItemKind::Skill).unwrap();
+        assert_eq!(matches.len(), 1, "should find one match: {matches:?}");
+        assert!(
+            matches[0].ends_with("SKILL.md"),
             "matched the wrong file: {matches:?}"
         );
     }

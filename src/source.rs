@@ -155,11 +155,16 @@ impl Source {
     }
 
     /// A browser URL to compare two commits, for `mind upgrade` output.
+    ///
+    /// Emitted for any https remote (spec: CLI-176): the `/compare/<old>...<new>`
+    /// shape is standard across GitHub.com, GitHub Enterprise Server, and any
+    /// other https-hosted forge. SSH remotes and local paths return `None` because
+    /// there is no web host to link to.
     pub fn compare_url(&self, from: &str, to: &str) -> Option<String> {
-        if self.host == "github.com" {
+        if self.url.starts_with("https://") {
             Some(format!(
-                "https://github.com/{}/{}/compare/{from}...{to}",
-                self.owner, self.repo
+                "https://{}/{}/{}/compare/{from}...{to}",
+                self.host, self.owner, self.repo
             ))
         } else {
             None
@@ -384,8 +389,8 @@ impl Registry {
 
 #[cfg(test)]
 mod tests {
-    // spec: CLI-11 (repo spec parsing), CLI-61 (compare url), STO-13 (identity)
-    // spec: STO-18 (pin serde round-trip)
+    // spec: CLI-11 (repo spec parsing), CLI-61 (compare url), CLI-176 (compare url for any https host)
+    // spec: STO-13 (identity), STO-18 (pin serde round-trip)
     use super::*;
 
     #[test]
@@ -523,15 +528,47 @@ mod tests {
         );
     }
 
+    // spec: CLI-61, CLI-176
     #[test]
-    fn compare_url_only_for_github() {
+    fn compare_url_github_com_produces_correct_link() {
+        // (a) github.com https remote -> same URL as before
         let gh = parse_spec("foo/bar").unwrap();
         assert_eq!(
             gh.compare_url("aaaa", "bbbb").as_deref(),
             Some("https://github.com/foo/bar/compare/aaaa...bbbb")
         );
-        let local = parse_spec("/tmp/x").unwrap();
+    }
+
+    #[test]
+    fn compare_url_ghes_host_produces_same_shape() {
+        // (b) GitHub Enterprise Server (any https host) -> same /compare/ shape on that host
+        let ghes = parse_spec("https://github.example.com/acme/tools").unwrap();
+        assert_eq!(
+            ghes.compare_url("deadbeef", "cafebabe").as_deref(),
+            Some("https://github.example.com/acme/tools/compare/deadbeef...cafebabe")
+        );
+        // Also verify a non-GitHub corporate forge host
+        let corp = parse_spec("https://git.corp.internal/devtools/scripts").unwrap();
+        assert_eq!(
+            corp.compare_url("old", "new").as_deref(),
+            Some("https://git.corp.internal/devtools/scripts/compare/old...new")
+        );
+    }
+
+    #[test]
+    fn compare_url_ssh_remote_yields_none() {
+        // (c) SSH remotes have no web host to link to
+        let ssh = parse_spec("git@github.com:foo/bar.git").unwrap();
+        assert_eq!(ssh.compare_url("aaaa", "bbbb"), None);
+    }
+
+    #[test]
+    fn compare_url_local_path_yields_none() {
+        // (d) local/file paths have no web host to link to
+        let local = parse_spec("/home/james/dev/agents").unwrap();
         assert_eq!(local.compare_url("aaaa", "bbbb"), None);
+        let file_url = parse_spec("file:///home/james/dev/agents").unwrap();
+        assert_eq!(file_url.compare_url("aaaa", "bbbb"), None);
     }
 
     #[test]
