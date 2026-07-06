@@ -19160,3 +19160,168 @@ fn upgrade_sync_first_outcome_with_drift_example() {
         after.stdout
     );
 }
+
+// ---- helper: fake git that emits a proxy 407 on https:// clone ----------
+
+fn fake_git_proxy_bin_dir(dir: &Path) -> PathBuf {
+    let real_git = String::from_utf8(
+        std::process::Command::new("which")
+            .arg("git")
+            .output()
+            .expect("which git")
+            .stdout,
+    )
+    .expect("utf8")
+    .trim()
+    .to_string();
+
+    let bin_dir = dir.join("fake-git-proxy-bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let script = format!(
+        "#!/bin/sh\nif [ \"$1\" = \"clone\" ]; then\n  for a; do\n    case \"$a\" in\n      https://*)\n        echo \"fatal: unable to access '$a': Received HTTP code 407 from proxy after CONNECT\" >&2\n        exit 128\n        ;;\n    esac\n  done\nfi\nexec \"{real_git}\" \"$@\"\n"
+    );
+    let script_path = bin_dir.join("git");
+    std::fs::write(&script_path, &script).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    bin_dir
+}
+
+#[test]
+fn meld_top_level_auth_failure_prints_ssh_hint() {
+    // spec: CLI-177 -- auth failure on a direct meld emits SSH/credential hints.
+    let sb = Sandbox::bare("auth-hint-test");
+    let fake_dir = fake_git_bin_dir(&sb.base);
+    let new_path = prepend_path(&fake_dir);
+    let r = sb.mind_env(
+        &["meld", "https://example.com/owner/private-repo"],
+        &[("PATH", &new_path)],
+    );
+    assert!(!r.success, "meld must fail on auth error: {}", r.stderr);
+    assert!(
+        r.stderr.contains("git@example.com:owner/private-repo"),
+        "auth hint must include the SSH URL: {}",
+        r.stderr
+    );
+    assert!(
+        r.stderr.contains("ssh = true"),
+        "auth hint must mention `ssh = true` config option: {}",
+        r.stderr
+    );
+    assert!(
+        r.stderr.contains("credential helper"),
+        "auth hint must mention credential helper: {}",
+        r.stderr
+    );
+}
+
+#[test]
+fn meld_top_level_proxy_failure_prints_proxy_hint() {
+    // spec: CLI-178 -- 407 proxy error on a direct meld emits HTTPS_PROXY hint.
+    let sb = Sandbox::bare("proxy-hint-test");
+    let fake_dir = fake_git_proxy_bin_dir(&sb.base);
+    let new_path = prepend_path(&fake_dir);
+    let r = sb.mind_env(
+        &["meld", "https://example.com/owner/repo"],
+        &[("PATH", &new_path)],
+    );
+    assert!(!r.success, "meld must fail on proxy error: {}", r.stderr);
+    assert!(
+        r.stderr.contains("HTTPS_PROXY"),
+        "proxy hint must mention HTTPS_PROXY: {}",
+        r.stderr
+    );
+    assert!(
+        r.stderr.contains("http.proxy"),
+        "proxy hint must mention http.proxy: {}",
+        r.stderr
+    );
+    // Auth hint must NOT be shown for a proxy failure.
+    assert!(
+        !r.stderr.contains("credential helper"),
+        "auth hint must not appear for a proxy failure: {}",
+        r.stderr
+    );
+}
+
+#[test]
+fn meld_top_level_clone_error_leads_with_git_stderr() {
+    // spec: CLI-180 -- git's stderr leads the output; the explicitly constructed
+    // "  command:" and "  store:" lines are suppressed without --verbose.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    // Clone a valid local repo but request a branch that does not exist; this
+    // exercises the re-clone-at-pin error path (top_level=true).
+    let r = sb.mind(&["meld", &spec, "--follow-branch", "nonexistent-branch"]);
+    assert!(!r.success, "meld must fail: {}", r.stderr);
+    // git's stderr (the fatal error) must appear.
+    assert!(
+        r.stderr.contains("fatal:")
+            || r.stderr.contains("error:")
+            || r.stderr.contains("not found"),
+        "git stderr must appear in output: {}",
+        r.stderr
+    );
+    // Without --verbose the explicitly constructed "  command:" and "  store:"
+    // lines must NOT appear (they expose the internal store path).
+    assert!(
+        !r.stderr.contains("  command: git clone"),
+        "explicit command line must be absent without --verbose: {}",
+        r.stderr
+    );
+    assert!(
+        !r.stderr.contains("  store:   "),
+        "explicit store path line must be absent without --verbose: {}",
+        r.stderr
+    );
+}
+
+#[test]
+fn meld_top_level_clone_error_verbose_shows_command_and_store() {
+    // spec: CLI-180 -- under --verbose the command line and store path lines appear.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    let r = sb.mind(&[
+        "meld",
+        "--verbose",
+        &spec,
+        "--follow-branch",
+        "nonexistent-branch",
+    ]);
+    assert!(!r.success, "meld must fail: {}", r.stderr);
+    // Under --verbose the explicitly constructed lines must appear.
+    assert!(
+        r.stderr.contains("  command: git clone"),
+        "explicit command line must appear under --verbose: {}",
+        r.stderr
+    );
+    assert!(
+        r.stderr.contains("  store:   "),
+        "explicit store path line must appear under --verbose: {}",
+        r.stderr
+    );
+}
+
+#[test]
+fn learn_not_found_with_sources_hints_probe_not_sync() {
+    // spec: CLI-179 -- when sources are melded and the item is unknown, the hint
+    // points at `mind probe <query>` rather than `mind sync`.
+    let sb = melded();
+    let r = sb.mind(&["learn", "does-not-exist"]);
+    assert!(!r.success, "learn must fail for unknown item: {}", r.stderr);
+    assert!(
+        r.stderr.contains("probe does-not-exist"),
+        "hint must point at `mind probe <query>`: {}",
+        r.stderr
+    );
+    // The probe-hint line must not mention sync.
+    let probe_line = r
+        .stderr
+        .lines()
+        .find(|l| l.contains("probe does-not-exist"))
+        .expect("probe hint line not found");
+    assert!(
+        !probe_line.contains("sync"),
+        "probe hint line must not mention sync: {probe_line}"
+    );
+}

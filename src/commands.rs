@@ -440,7 +440,16 @@ fn meld_recursive(
         if let Some(parent) = dir.parent() {
             crate::paths::mkdir_p(parent)?;
         }
-        git::clone(&source.url, &dir)?;
+        // spec: CLI-177, CLI-178, CLI-180 -- for a top-level meld, intercept
+        // clone failures to lead with git's stderr and emit auth/proxy hints.
+        git::clone(&source.url, &dir).map_err(|e| {
+            if top_level {
+                let ssh = (!source.is_local()).then(|| source.ssh_url());
+                handle_top_level_clone_err(e, ssh, &dir, out)
+            } else {
+                e
+            }
+        })?;
     }
     let mut mindfile = MindToml::load(&dir)?;
     source.description = mindfile.as_ref().and_then(|m| m.source.description.clone());
@@ -538,6 +547,15 @@ fn meld_recursive(
         }
         if let Err(e) = git::clone_at(&source.url, &target, &effective_pin) {
             let _ = std::fs::remove_dir_all(&target);
+            // spec: CLI-177, CLI-178, CLI-180 -- apply the same top-level clone
+            // error handling (lead with stderr, auth/proxy hints, strip store path)
+            // for the re-clone-at-pin step.
+            let e = if top_level {
+                let ssh = (!source.is_local()).then(|| source.ssh_url());
+                handle_top_level_clone_err(e, ssh, &target, out)
+            } else {
+                e
+            };
             return Err(e);
         }
         dir = target;
@@ -1296,6 +1314,65 @@ fn clone_failure_lines(entry_name: &str, err: &MindError) -> Vec<String> {
     vec![format!(
         "  warning: skipping '{safe_name}': clone failed ({safe_err}), source unavailable"
     )]
+}
+
+/// Handle a top-level (direct, user-initiated) git clone failure for `meld`.
+///
+/// Applies three behaviors for a top-level failure:
+/// - Prints git's stderr as the first line of output so the actual cause is
+///   immediately visible (CLI-180).
+/// - Under `--verbose` also prints the reconstructed command line and the
+///   internal store path (CLI-180); without it those details are suppressed.
+/// - Prints auth or proxy remediation hints where applicable (CLI-177, CLI-178).
+///
+/// Returns a stripped [`MindError::Git`] with args reduced to `["clone"]` and
+/// stderr cleared (already printed above) so `main.rs` does not repeat the
+/// internal store path or duplicate the git error text.
+fn handle_top_level_clone_err(
+    e: MindError,
+    ssh_url: Option<String>,
+    store_path: &std::path::Path,
+    out: crate::render::OutputCtx,
+) -> MindError {
+    // spec: CLI-180 -- lead with git's stderr (the actual cause).
+    if let MindError::Git {
+        ref stderr,
+        ref args,
+        ..
+    } = e
+    {
+        if !stderr.is_empty() {
+            eprintln!("{stderr}");
+        }
+        if out.verbose {
+            eprintln!("  command: git {}", args.join(" "));
+            eprintln!("  store:   {}", store_path.display());
+        }
+    }
+    // spec: CLI-177 -- auth hint for non-local remotes.
+    if git::is_auth_failure(&e) {
+        if let Some(ref ssh) = ssh_url {
+            for line in git::auth_hint_lines(ssh) {
+                eprintln!("{line}");
+            }
+        }
+    // spec: CLI-178 -- proxy hint.
+    } else if git::is_proxy_failure(&e) {
+        for line in git::proxy_hint_lines() {
+            eprintln!("{line}");
+        }
+    }
+    // Strip the clone command args and stderr from the error so main.rs does not
+    // re-print the internal store path or duplicate the already-shown git error.
+    match e {
+        MindError::Git { url, status, .. } => MindError::Git {
+            url,
+            args: vec!["clone".to_string()],
+            status,
+            stderr: String::new(),
+        },
+        other => other,
+    }
 }
 
 /// Warn when a namespaced source references siblings in bare prose, which
@@ -2221,7 +2298,17 @@ pub fn learn(paths: &Paths, item_ref: &str, dry_run: bool, flow: InstallFlow) ->
     // POL-3: load the managed policy once (fail closed on Err; None = inert).
     let policy = Policy::load()?;
     let out = crate::render::ctx();
-    let (registry, items, resolution) = resolve_learn(paths, item_ref)?;
+    let (registry, items, resolution) = resolve_learn(paths, item_ref).map_err(|e| {
+        // spec: CLI-179 -- when sources are melded and the name is not found,
+        // direct the user to `mind probe <query>` (search) rather than
+        // `mind sync` (which cannot help if the item simply does not exist).
+        if let MindError::ItemNotFound { ref query, sources } = e {
+            if sources > 0 {
+                eprintln!("hint: run `mind probe {query}` to search available items");
+            }
+        }
+        e
+    })?;
 
     // The full closure to install, dependency-first (DEP-21, DEP-30), excluding
     // already-installed items (DEP-23).
@@ -4069,6 +4156,17 @@ pub fn sync(
                 if !out.json {
                     println!("{}", out.red("failed"));
                     eprintln!("  {} {}: {e}", out.err(), source.name);
+                    // spec: CLI-177, CLI-178 -- auth and proxy hints on a direct
+                    // per-source sync git failure, mirroring the meld top-level hints.
+                    if git::is_auth_failure(&e) && !source.is_local() {
+                        for line in git::auth_hint_lines(&source.ssh_url()) {
+                            eprintln!("{line}");
+                        }
+                    } else if git::is_proxy_failure(&e) {
+                        for line in git::proxy_hint_lines() {
+                            eprintln!("{line}");
+                        }
+                    }
                 }
                 failures.push(source.name.clone());
             }

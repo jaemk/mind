@@ -84,6 +84,60 @@ pub fn is_auth_failure(err: &MindError) -> bool {
     PATTERNS.iter().any(|p| stderr.contains(p))
 }
 
+/// Detect whether a [`MindError`] is a proxy interception from a git subprocess.
+/// Returns true when `err` is a [`MindError::Git`] whose stderr matches at least
+/// one known corporate-proxy failure pattern (case-insensitive).
+///
+/// These patterns cover the three most common proxy failure messages:
+/// - `Received HTTP code 407 from proxy` (git HTTP backend)
+/// - `The requested URL returned error: 407` (curl backend)
+/// - `Could not resolve proxy` (DNS failure reaching the proxy host itself)
+pub fn is_proxy_failure(err: &MindError) -> bool {
+    // spec: CLI-178
+    let stderr = match err {
+        MindError::Git { stderr, .. } => stderr.to_ascii_lowercase(),
+        _ => return false,
+    };
+    const PATTERNS: &[&str] = &[
+        "received http code 407",
+        "the requested url returned error: 407",
+        "could not resolve proxy",
+    ];
+    PATTERNS.iter().any(|p| stderr.contains(p))
+}
+
+/// Build the hint lines to print when a top-level `meld` or `sync` operation
+/// fails with an authentication error (CLI-177). The three suggested remedies are:
+///   1. Retry using the SSH remote form directly.
+///   2. Set `ssh = true` in `~/.mind/config.toml` so all HTTPS remotes use SSH.
+///   3. Configure a git credential helper.
+///
+/// `ssh_url` is the `git@host:owner/repo` form of the failing remote.
+pub fn auth_hint_lines(ssh_url: &str) -> Vec<String> {
+    // spec: CLI-177
+    vec![
+        "hint: authentication failed; to use SSH:".to_string(),
+        format!("  mind meld {ssh_url}"),
+        "  or set `ssh = true` in ~/.mind/config.toml to always prefer SSH for HTTPS remotes"
+            .to_string(),
+        "  or configure a git credential helper: https://git-scm.com/doc/credential-helpers"
+            .to_string(),
+    ]
+}
+
+/// Build the hint lines to print when a `meld` or `sync` git operation fails
+/// with a proxy error (CLI-178). Mirrors the wording used by `evolve` for the
+/// same class of failure.
+pub fn proxy_hint_lines() -> Vec<String> {
+    // spec: CLI-178
+    vec![
+        "hint: a proxy may be blocking the connection; \
+         set HTTPS_PROXY (e.g. export HTTPS_PROXY=http://proxy.example.com:8080) \
+         or configure git's http.proxy setting"
+            .to_string(),
+    ]
+}
+
 /// When set, every `git` child runs non-interactively: it never prompts on the
 /// controlling terminal for credentials, an SSH passphrase, or a host-key
 /// confirmation. The TUI turns this on while it owns the terminal so an
@@ -1149,6 +1203,120 @@ mod tests {
         assert!(
             is_auth_failure(&err),
             "auth failure detection must be case-insensitive"
+        );
+    }
+
+    // ---- CLI-178: is_proxy_failure detection --------------------------------
+
+    #[test]
+    fn is_proxy_failure_matches_received_http_code_407() {
+        // spec: CLI-178 -- git HTTP backend 407 proxy response
+        let err = git_err(
+            "fatal: unable to access 'https://github.com/owner/repo.git/': \
+             Received HTTP code 407 from proxy after CONNECT",
+        );
+        assert!(
+            is_proxy_failure(&err),
+            "Received HTTP code 407 from proxy must match"
+        );
+    }
+
+    #[test]
+    fn is_proxy_failure_matches_url_returned_407() {
+        // spec: CLI-178 -- curl backend returning a 407 status
+        let err = git_err(
+            "fatal: unable to access 'https://github.com/owner/repo.git/': \
+             The requested URL returned error: 407",
+        );
+        assert!(
+            is_proxy_failure(&err),
+            "The requested URL returned error: 407 must match"
+        );
+    }
+
+    #[test]
+    fn is_proxy_failure_matches_could_not_resolve_proxy() {
+        // spec: CLI-178 -- DNS failure reaching the proxy host itself
+        let err = git_err(
+            "fatal: unable to access 'https://github.com/owner/repo.git/': \
+             Could not resolve proxy: proxy.corp.example.com",
+        );
+        assert!(is_proxy_failure(&err), "Could not resolve proxy must match");
+    }
+
+    #[test]
+    fn is_proxy_failure_does_not_match_auth_failure() {
+        // spec: CLI-178 -- an auth failure is not a proxy failure
+        let err = git_err("fatal: Authentication failed for 'https://github.com/owner/repo/'");
+        assert!(
+            !is_proxy_failure(&err),
+            "auth failure must not match proxy failure"
+        );
+    }
+
+    #[test]
+    fn is_proxy_failure_does_not_match_network_error() {
+        // spec: CLI-178 -- a plain network error is not a proxy failure
+        let err = git_err("fatal: unable to connect to github.com: Connection refused");
+        assert!(
+            !is_proxy_failure(&err),
+            "plain network error must not match proxy failure"
+        );
+    }
+
+    #[test]
+    fn is_proxy_failure_does_not_match_non_git_error() {
+        // spec: CLI-178 -- a non-Git MindError is never a proxy failure
+        let err = MindError::GitNotFound;
+        assert!(
+            !is_proxy_failure(&err),
+            "GitNotFound must not be a proxy failure"
+        );
+    }
+
+    #[test]
+    fn is_proxy_failure_is_case_insensitive() {
+        // spec: CLI-178 -- pattern matching is case-insensitive
+        let err = git_err("RECEIVED HTTP CODE 407 FROM PROXY AFTER CONNECT");
+        assert!(
+            is_proxy_failure(&err),
+            "proxy failure detection must be case-insensitive"
+        );
+    }
+
+    // ---- CLI-177 / CLI-178: hint line content --------------------------------
+
+    #[test]
+    fn auth_hint_lines_include_ssh_url_and_config_and_helper() {
+        // spec: CLI-177 -- the three remediation options are all present.
+        let lines = auth_hint_lines("git@github.com:owner/private");
+        let combined = lines.join("\n");
+        assert!(
+            combined.contains("git@github.com:owner/private"),
+            "SSH URL must appear in auth hint: {combined}"
+        );
+        assert!(
+            combined.contains("ssh = true"),
+            "config option must appear in auth hint: {combined}"
+        );
+        assert!(
+            combined.contains("credential helper"),
+            "credential helper mention must appear in auth hint: {combined}"
+        );
+    }
+
+    #[test]
+    fn proxy_hint_lines_mention_https_proxy_and_http_proxy_setting() {
+        // spec: CLI-178 -- both HTTPS_PROXY and http.proxy are mentioned.
+        let lines = proxy_hint_lines();
+        let combined = lines.join("\n");
+        assert!(
+            combined.contains("HTTPS_PROXY"),
+            "HTTPS_PROXY must appear in proxy hint: {combined}"
+        );
+        assert!(
+            combined.contains("http.proxy"),
+            "http.proxy must appear in proxy hint: {combined}"
         );
     }
 }

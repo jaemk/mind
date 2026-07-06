@@ -164,6 +164,27 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   non-zero, lists the conflicts, and suggests re-running with `--namespace
   <repo-name>` (NS-45). A source already carrying a namespace whose effective
   names do not collide is not affected.
+- `CLI-177` When the top-level `meld` command fails to clone a remote source due
+  to an authentication error (DSC-68 patterns), it prints a remediation hint to
+  stderr before surfacing the error. The hint lists three alternatives: (1) the
+  SSH remote form of the URL (e.g. `mind meld git@host:owner/repo`), (2) setting
+  `ssh = true` in `~/.mind/config.toml` to always prefer SSH for HTTPS remotes,
+  and (3) configuring a git credential helper. The hint is suppressed for local
+  sources (no SSH alternative applies).
+- `CLI-178` When a `meld` (top-level) or `sync` (per-source) git operation fails
+  with a proxy error -- matching "Received HTTP code 407", "The requested URL
+  returned error: 407", or "Could not resolve proxy" (case-insensitive) -- a hint
+  pointing at `HTTPS_PROXY` and `git http.proxy` is printed to stderr before the
+  error is surfaced. The check is applied to the same `MindError::Git` stderr
+  matching used by `is_auth_failure`.
+- `CLI-180` Top-level `meld` clone errors (both the initial default-branch clone
+  and the re-clone at pin) lead with git's stderr as the first line printed to
+  stderr, so the actual cause is immediately visible. The reconstructed git
+  command line and the internal store path are shown only under `--verbose`
+  (CLI-162); without it those details are suppressed. The git stderr always
+  appears regardless of `--verbose`. The error returned to the caller has its args
+  reduced to `["clone"]` and its stderr cleared (already printed) so the error
+  display does not repeat the internal store path.
 
 ## unmeld
 
@@ -240,6 +261,13 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   such as "already installed; nothing to do". Under `--json` the outcome token is
   `"up-to-date"` rather than `"installed"`, so callers can distinguish a real
   install from a re-run that changed nothing.
+- `CLI-179` When `learn <name>` finds no item matching the query and at least one
+  source is melded (`sources > 0`), a hint is printed to stderr directing the user
+  to `mind probe <query>` to search the available catalog. The zero-sources case
+  (`sources == 0`) is unchanged: it directs the user to `mind meld` instead.
+  `mind sync` is not mentioned because syncing cannot surface an item that does not
+  exist in any melded source; only browsing with `probe` can confirm what is
+  available.
 
 ## forget
 

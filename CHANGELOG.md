@@ -47,6 +47,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   record, continue) instead of aborting the whole command, so already-melded
   sources still sync when an entry is unreachable; `sync` exits non-zero when
   any entry failed (POL-34, supersedes the POL-32 failure mode).
+- A top-level `meld` that fails to clone now leads with git's stderr (the real
+  cause) and hints at the SSH remote form, `ssh = true`, or a credential helper
+  on an auth failure, and at `HTTPS_PROXY`/`git http.proxy` on an HTTP 407; the
+  reconstructed clone command and internal store path move behind `--verbose`
+  (CLI-177, CLI-178, CLI-180).
+- `learn <typo>` with sources melded points at `mind probe <partial>` to search
+  instead of `mind sync`, which cannot conjure a nonexistent item (CLI-179).
 
 ## [0.13.0] - 2026-07-04
 
