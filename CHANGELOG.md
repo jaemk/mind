@@ -59,6 +59,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (CLI-177, CLI-178, CLI-180).
 - `learn <typo>` with sources melded points at `mind probe <partial>` to search
   instead of `mind sync`, which cannot conjure a nonexistent item (CLI-179).
+- The note printed when `meld` registers only over non-TTY stdin now says
+  explicitly "registered only, nothing installed", so a CI run does not mistake
+  the exit-0 success for an install.
 
 ## [0.13.0] - 2026-07-04
 
