@@ -96,13 +96,13 @@ anything; `evolve` updates the `mind` binary itself.
 
 | command | does |
 |---------|------|
-| `mind meld [<repo>] [--register-only] [--yes] [-f\|--force] [-r\|--recursive] [-N\|--namespace <ns>] [--flat-skills] [--root <dir>] [--follow-branch <branch> \| --pin-tag <tag> \| --pin-ref <commit>] [--install-hook <cmd>] [--dangerously-skip-install-hook-check]` | clone and register a source (default `.`), then prompt to install its items (`--register-only` registers without installing; `--yes` installs without prompting; `-f`/`--force` overwrites conflicting non-mind link targets; `-r`/`--recursive` offers to install items from every nested source a super-source curates). Re-melding an already-melded source installs any missing items, else shows each item's install state and commit |
+| `mind meld [<repo>] [--register-only] [--yes] [-f\|--force] [-r\|--recursive] [-N\|--namespace <ns>] [--flat-skills] [--root <dir>] [--follow-branch <branch> \| --pin-tag <tag> \| --pin-ref <commit>] [--install-hook <cmd>] [--dangerously-skip-install-hook-check] [--dangerously-skip-build-hook-check]` | clone and register a source (default `.`), then prompt to install its items (`--register-only` registers without installing; `--yes` installs without prompting; `-f`/`--force` overwrites conflicting non-mind link targets; `-r`/`--recursive` offers to install items from every nested source a super-source curates). Re-melding an already-melded source installs any missing items, else shows each item's install state and commit |
 | `mind init-source [<path>] [--template] [-N\|--namespace <ns>] [--marketplace] [--flat-skills]` | scaffold `mind.toml` + report references; `--template` rewrites bare refs as `{{ns:}}` (maintainer); `-N`/`--namespace` sets `[source].namespace` in the scaffold; `--marketplace` emits a `.claude-plugin/` marketplace scaffold; `--flat-skills` uses a flat skill layout |
 | `mind unmeld <name> [--keep-items] [--yes] [--uninstall-hook <cmd>] [--dangerously-skip-install-hook-check]` | uninstall every item the source installed and drop the source (`--keep-items` skips the uninstall step) |
-| `mind learn [--yes] [-f\|--force] [-n\|--dry-run] [--all] <item>` | install a skill/agent/rule/tool (glob installs many); a partial selection also pulls in the source siblings it references. `--force` overwrites a conflicting non-mind link target (without it, a conflict prompts on a TTY); `--all` installs every item of the named source (shorthand for `<source>#*`); `-n`/`--dry-run` previews the dependency closure without installing anything |
+| `mind learn [--yes] [-f\|--force] [-n\|--dry-run] [--all] [--dangerously-skip-install-hook-check] [--dangerously-skip-build-hook-check] <item>` | install a skill/agent/rule/tool (glob installs many); a partial selection also pulls in the source siblings it references. `--force` overwrites a conflicting non-mind link target (without it, a conflict prompts on a TTY); `--all` installs every item of the named source (shorthand for `<source>#*`); `-n`/`--dry-run` previews the dependency closure without installing anything |
 | `mind forget [--yes] [-f\|--force] [--unmanaged] [--dangerously-skip-install-hook-check] [<item>]` (alias `unlearn`) | remove an installed item (glob removes many; a multi-match glob confirms first, `--yes` skips). `--unmanaged` scopes removal to unmanaged lobe items only; with no `<item>`, removes every unmanaged item across all lobes. `-f`/`--force` skips the dependents confirmation when the item being removed has dependents. `--dangerously-skip-install-hook-check` runs uninstall hooks without the safety prompt |
-| `mind sync [--upgrade] [--dangerously-skip-install-hook-check]` | refresh every source clone; use `upgrade` to also upgrade items. `--upgrade` is deprecated sugar for `sync` followed by `upgrade` |
-| `mind upgrade [--yes] [--no-sync] [--dangerously-skip-install-hook-check] [item]` | fetch each involved source, then upgrade installed items to their latest version (re-runs install hooks on sources that advance); `--no-sync` skips the fetch step |
+| `mind sync [--upgrade] [--dangerously-skip-install-hook-check] [--dangerously-skip-build-hook-check]` | refresh every source clone; use `upgrade` to also upgrade items. `--upgrade` is deprecated sugar for `sync` followed by `upgrade` (the two hook-check flags are valid only with `--upgrade`) |
+| `mind upgrade [--yes] [--no-sync] [--dangerously-skip-install-hook-check] [--dangerously-skip-build-hook-check] [item]` | fetch each involved source, then upgrade installed items to their latest version (re-runs install hooks on sources that advance); `--no-sync` skips the fetch step |
 | `mind evolve [--check] [--yes] [--version <v>]` | update the mind binary itself to the latest release (or --version) |
 | `mind recall [item] [--sources] [--kind K] [--source S] [--tree] [--json]` (alias `status`) | status: each source with its items, marked installed or available; `--sources` narrows to sources; `<item>` shows one item's details; `--tree` renders installed items as a dependency forest (with an item ref, scopes to that item's subtree) |
 | `mind probe [query] [--kind K] [--source S] [--json] [--no-tui]` | browse and search items (interactive TUI on a terminal) |
@@ -250,10 +250,23 @@ Pass `--yes` (`-y`) to skip confirmation prompts. Without it, any command that
 would prompt on a TTY instead exits non-zero with `ConfirmationRequired` when
 stdin is not a TTY (CLI-23, CLI-42).
 
+`meld` is the exception: a non-TTY `meld` without `--yes` registers the source
+only, prints a note that nothing was installed, and exits 0. Pass `--yes` to
+install its items non-interactively.
+
 Install and uninstall hooks are skipped in non-TTY contexts and a note is
 printed. To run them unattended, pass `--dangerously-skip-install-hook-check`.
 This executes arbitrary code from the source; only use it for sources you trust
 (HOOK-22).
+
+Item build hooks (the per-item build command, distinct from a source's install
+hook) are likewise skipped in non-TTY contexts, so an item's tooling is not
+built. To run them unattended, pass `--dangerously-skip-build-hook-check`
+(available on `meld`, `learn`, `upgrade`, and `sync --upgrade`). It too executes
+arbitrary code from the source; only use it for sources you trust.
+
+For an end-to-end CI provisioning recipe, see [Team / CI provisioning
+recipe](enterprise.md#team--ci-provisioning-recipe).
 
 ## dump
 

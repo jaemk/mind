@@ -44,6 +44,24 @@
 - `meld` or `sync` fails with "git executable not found". mind shells out to
   `git` for all clone and fetch operations; put `git` on your PATH first. See
   the Install page.
+- `meld`/`sync` fails behind a proxy (HTTP 407 or a connection refused). mind
+  inherits the environment; set `HTTPS_PROXY` (and `NO_PROXY` for internal hosts)
+  or git's own `http.proxy` (`git config --global http.proxy
+  http://proxy.corp:8080`). See [Restricted networks and
+  enterprise](enterprise.md#proxies).
+- A clone or `evolve` fails with a TLS/certificate error behind a company proxy.
+  Point the tool at the corporate CA: git via `http.sslCAInfo` (`git config
+  --global http.sslCAInfo /path/to/corp-ca.pem`), curl (used by `evolve` and
+  `install.sh`) via `CURL_CA_BUNDLE` or `SSL_CERT_FILE`. Note that the `wget`
+  fallback path honors no CA environment variable, so if only `wget` is present
+  the corporate CA must be in the system trust store (or `wgetrc`); prefer having
+  `curl` installed. See [Restricted networks and
+  enterprise](enterprise.md#custom-ca--tls-intercepting-proxy).
+- A private-repo `meld` fails to authenticate. mind uses your existing git auth:
+  configure a git credential helper for HTTPS, or meld the SSH form
+  (`git@host:owner/repo`, or `ssh = true` in `~/.mind/config.toml`) with a key in
+  your `ssh-agent`. See [Restricted networks and
+  enterprise](enterprise.md#private-repos).
 - A skill links to a Gemini or Codex lobe but a rule does not. Rules have no
   cross-harness directory equivalent and are Claude-only (HARN-3). Only skills
   and agents are linked into non-Claude lobes. If the lobe was added via a

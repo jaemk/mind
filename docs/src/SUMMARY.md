@@ -14,6 +14,7 @@
 - [Absorb unmanaged items](absorb.md)
 - [Install hooks](install-hooks.md)
 - [Managed policy](policy.md)
+- [Restricted networks and enterprise](enterprise.md)
 - [Troubleshooting](troubleshooting.md)
 
 # Authoring

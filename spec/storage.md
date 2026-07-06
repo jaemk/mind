@@ -149,14 +149,16 @@ prevent the lost-update and torn-read races a plain read-modify-write would allo
 ## Network fetch timeouts
 
 - `STO-52` The network fetches in `evolve` (`fetch_to_string` and `fetch_to_file`)
-  and in `resources/install.sh` use a configurable connect timeout (default 15 s,
-  overridable by the `MIND_HTTP_TIMEOUT_SECS` environment variable) and a generous
-  max-time ceiling of 600 s to accommodate slow downloads. For curl, the flags are
-  `--connect-timeout N --max-time 600`; for wget, `--timeout=N`. A missing or
-  non-numeric `MIND_HTTP_TIMEOUT_SECS` silently falls back to 15. The argument
-  vectors are built by pure helper functions (`curl_string_args`,
-  `wget_string_args`, `curl_file_args`, `wget_file_args`) and are unit-testable
-  without spawning a process.
+  use a configurable connect timeout (default 15 s, overridable by the
+  `MIND_HTTP_TIMEOUT_SECS` environment variable) and a generous max-time ceiling of
+  600 s to accommodate slow downloads. For curl, the flags are `--connect-timeout N
+  --max-time 600`; for wget, `--timeout=N`. A missing or non-numeric
+  `MIND_HTTP_TIMEOUT_SECS` silently falls back to 15. The argument vectors are built
+  by pure helper functions (`curl_string_args`, `wget_string_args`,
+  `curl_file_args`, `wget_file_args`) and are unit-testable without spawning a
+  process. `resources/install.sh` applies the same flags with a fixed 15 s connect
+  timeout and 600 s max-time; it does not read `MIND_HTTP_TIMEOUT_SECS`, because it
+  runs before `mind` is installed.
 
 ## Schema versions
 
