@@ -18,6 +18,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   text on stderr, so a script parsing stdout gets a machine-readable reason. The
   exit code is unchanged, `kind` is a stable per-variant slug, and clap usage
   errors (exit 2) stay plain text (CLI-181, CLI-182, CLI-183).
+- Documentation: a "Restricted networks and enterprise" guide page (egress
+  endpoints, proxy/CA/private-repo config, the self-update policy knob,
+  air-gapped installs, a worked `policy.toml`, and a team/CI provisioning
+  recipe), plus `--dangerously-skip-build-hook-check` and troubleshooting
+  entries for proxy/CA/auth failures.
 
 ### Security
 
