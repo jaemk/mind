@@ -134,6 +134,28 @@ normatively. Source identity is `host/owner/repo` (see storage.md).
   may add more). This mirrors `auto_meld` (POL-30): a policy-provided base that
   the user can add to when the corresponding lock is off.
 
+## Binary self-update control
+
+- `POL-51` The `[binary]` table in the managed policy controls the `mind evolve`
+  command (and its `self-update` alias). A missing `[binary]` table, or a missing
+  `self-update` key within it, leaves `evolve` unrestricted (default, unchanged
+  behavior; POL-4 inert).
+- `POL-52` `[binary].self-update = false` disables `evolve` entirely. Both
+  `mind evolve` and `mind evolve --check` fail before any network call with a
+  `SelfUpdatePolicy` error. Rationale: an organization that disables updates does
+  not want version-nagging either.
+- `POL-53` `[binary].self-update = "<version>"` pins the target to that version
+  string, behaving exactly as if `--version <pin>` were passed (offline resolution;
+  the GitHub API is not consulted for "latest"). The pinned version string is
+  validated as a dotted numeric value (e.g. `"0.14.0"`) at policy-parse time
+  (POL-5 fail closed); a leading `v` is stripped before validation. If the user
+  also passes `--version V` where V differs from the pin, the command fails with
+  `SelfUpdatePolicy` naming the conflict. `evolve --check` reports against the
+  pinned version and respects the existing `PinnedBelowCurrent` no-downgrade logic.
+- `POL-54` `[binary].self-update = true` is identical to the absent key: `evolve`
+  is allowed to any version. It exists so a policy file can explicitly re-enable
+  updates after a `false` entry in a layered deployment.
+
 ## Validation (`mind review --policy`)
 
 - `POL-50` `mind review --policy <path>` statically validates a managed policy

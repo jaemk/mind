@@ -530,6 +530,15 @@ fn validate_discover_patterns(discover: &Discover, toml_path: &Path) -> Result<(
     Ok(())
 }
 
+/// Returns `true` if `s` is a dotted numeric version string acceptable as a
+/// version pin or `min-mind-version` value (e.g. "1", "0.7", "2.3.1").
+/// Each dot-separated component must be a non-empty run of ASCII digits.
+pub fn is_plausible_version(s: &str) -> bool {
+    !s.is_empty()
+        && s.split('.')
+            .all(|c| !c.is_empty() && c.bytes().all(|b| b.is_ascii_digit()))
+}
+
 fn validate_version_string(val: &str, field: &str, path: &Path) -> Result<()> {
     let bad = |reason: &str| {
         Err(MindError::MindToml {

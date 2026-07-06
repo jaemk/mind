@@ -75,6 +75,8 @@ pub struct Policy {
     lobes_lock: bool,
     /// `[lobes].targets`: policy-provided agent homes (POL-40/41).
     lobes_targets: Vec<String>,
+    /// `[binary].self-update`: control over `mind evolve` (POL-51..54).
+    self_update: SelfUpdateControl,
 }
 
 // --- TOML wire shape --------------------------------------------------------
@@ -83,6 +85,33 @@ pub struct Policy {
 // unknown key is a hard error (POL-5). The structs below are the raw file shape;
 // `Policy` is the validated public form.
 
+/// The policy decision for `mind evolve` / `self-update` (POL-51..54).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SelfUpdateControl {
+    /// `evolve` is allowed to any version (default when the key is absent or true).
+    Allowed,
+    /// `evolve` is disabled entirely; `--check` is also gated (POL-52).
+    Disabled,
+    /// `evolve` may only target this pinned version (behaves as `--version <pin>`).
+    Pinned(String),
+}
+
+/// Raw deserialization shim for `[binary].self-update`, which accepts a bool OR
+/// a version string (TOML's type-tagged values require an untagged enum).
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawSelfUpdate {
+    Bool(bool),
+    Pin(String),
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawBinary {
+    #[serde(default, rename = "self-update")]
+    self_update: Option<RawSelfUpdate>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawPolicy {
@@ -90,6 +119,8 @@ struct RawPolicy {
     sources: RawSources,
     #[serde(default)]
     lobes: RawLobes,
+    #[serde(default)]
+    binary: RawBinary,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -299,6 +330,11 @@ impl Policy {
     pub fn allow(&self) -> &[String] {
         &self.allow
     }
+
+    /// `[binary].self-update` control for `mind evolve` (POL-51..54).
+    pub fn self_update_control(&self) -> &SelfUpdateControl {
+        &self.self_update
+    }
 }
 
 /// Resolve the policy file path from the system path and env var, applying the
@@ -344,6 +380,28 @@ fn parse_str(text: &str, path: &Path) -> Result<Policy> {
         .into_iter()
         .map(|am| am.into_auto_meld(path))
         .collect::<Result<Vec<_>>>()?;
+
+    // Resolve [binary].self-update into the typed control enum.
+    // A pinned version is stripped of a leading 'v' and validated (POL-53/POL-5).
+    let self_update = match raw.binary.self_update {
+        None | Some(RawSelfUpdate::Bool(true)) => SelfUpdateControl::Allowed,
+        Some(RawSelfUpdate::Bool(false)) => SelfUpdateControl::Disabled,
+        Some(RawSelfUpdate::Pin(v)) => {
+            let v = v.strip_prefix('v').unwrap_or(&v).to_string();
+            if !crate::mindfile::is_plausible_version(&v) {
+                return Err(MindError::InvalidPolicy {
+                    path: path.display().to_string(),
+                    reason: format!(
+                        "[binary].self-update pin {:?} is not a valid version string \
+                         (expected dotted numeric, e.g. \"0.14.0\")",
+                        v
+                    ),
+                });
+            }
+            SelfUpdateControl::Pinned(v)
+        }
+    };
+
     let policy = Policy {
         allow: raw.sources.allow,
         lock: raw.sources.lock,
@@ -351,6 +409,7 @@ fn parse_str(text: &str, path: &Path) -> Result<Policy> {
         auto_meld,
         lobes_lock: raw.lobes.lock,
         lobes_targets: raw.lobes.targets,
+        self_update,
     };
     policy.validate_at(path)?;
     Ok(policy)
@@ -679,6 +738,92 @@ repo = "acme/baseline"
         assert!(p.auto_meld().is_empty());
         assert!(p.lobes_targets().is_empty());
         assert!(p.allow().is_empty());
+        // POL-51: absent [binary].self-update defaults to Allowed.
+        assert_eq!(p.self_update_control(), &SelfUpdateControl::Allowed);
+    }
+
+    // POL-51/POL-54: [binary].self-update absent or true -> Allowed.
+    // spec: POL-51
+    // spec: POL-54
+    #[test]
+    fn binary_self_update_absent_or_true_is_allowed() {
+        // Absent [binary] table.
+        let p = parse("").unwrap();
+        assert_eq!(p.self_update_control(), &SelfUpdateControl::Allowed);
+
+        // Explicit true.
+        let p = parse("[binary]\nself-update = true\n").unwrap();
+        assert_eq!(p.self_update_control(), &SelfUpdateControl::Allowed);
+    }
+
+    // POL-52: [binary].self-update = false disables evolve.
+    // spec: POL-52
+    #[test]
+    fn binary_self_update_false_is_disabled() {
+        let p = parse("[binary]\nself-update = false\n").unwrap();
+        assert_eq!(p.self_update_control(), &SelfUpdateControl::Disabled);
+    }
+
+    // POL-53: [binary].self-update = "<version>" pins evolve to that version.
+    // spec: POL-53
+    #[test]
+    fn binary_self_update_version_string_is_pinned() {
+        let p = parse("[binary]\nself-update = \"0.14.0\"\n").unwrap();
+        assert_eq!(
+            p.self_update_control(),
+            &SelfUpdateControl::Pinned("0.14.0".to_string())
+        );
+
+        // Leading 'v' is stripped.
+        let p = parse("[binary]\nself-update = \"v1.2.3\"\n").unwrap();
+        assert_eq!(
+            p.self_update_control(),
+            &SelfUpdateControl::Pinned("1.2.3".to_string())
+        );
+    }
+
+    // POL-53/POL-5: an invalid version string in [binary].self-update is a
+    // hard parse error (fail closed).
+    // spec: POL-53
+    // spec: POL-5
+    #[test]
+    fn binary_self_update_invalid_version_string_is_error() {
+        // Non-numeric component.
+        let err = parse("[binary]\nself-update = \"not-a-version\"\n").unwrap_err();
+        match err {
+            MindError::InvalidPolicy { reason, .. } => {
+                assert!(
+                    reason.contains("not a valid version string"),
+                    "reason: {reason}"
+                );
+            }
+            other => panic!("expected InvalidPolicy, got {other:?}"),
+        }
+
+        // Empty string.
+        let err = parse("[binary]\nself-update = \"\"\n").unwrap_err();
+        assert!(
+            matches!(err, MindError::InvalidPolicy { .. }),
+            "empty version must be invalid: {err:?}"
+        );
+
+        // Trailing dot.
+        let err = parse("[binary]\nself-update = \"1.2.\"\n").unwrap_err();
+        assert!(
+            matches!(err, MindError::InvalidPolicy { .. }),
+            "trailing dot must be invalid: {err:?}"
+        );
+    }
+
+    // POL-5: [binary] with an unknown key is rejected (deny_unknown_fields).
+    // spec: POL-5
+    #[test]
+    fn binary_unknown_key_is_error() {
+        let err = parse("[binary]\nauto-update = true\n").unwrap_err();
+        assert!(
+            matches!(err, MindError::InvalidPolicy { .. }),
+            "unknown [binary] key must be rejected: {err:?}"
+        );
     }
 
     // load_file with a real temp file round-trips through the filesystem seam.

@@ -9940,6 +9940,154 @@ fn help_lists_upgrade_evolve_and_self_update_alias() {
     );
 }
 
+// ---- evolve policy control tests (POL-51..54) --------------------------------
+//
+// Policy is injected via $MIND_POLICY_FILE. evolve --check --version <X> is
+// fully offline (no network); that property is exploited here so tests run
+// without a live GitHub connection.
+
+#[test]
+fn evolve_disabled_by_policy_rejects_both_check_and_run() {
+    // spec: POL-52 -- self-update = false must gate both evolve and evolve --check
+    // before any network call.
+    let sb = Sandbox::new();
+    let policy = write_policy(&sb, "[binary]\nself-update = false\n");
+
+    // --check mode: must fail even though it normally makes no network call.
+    let r = sb.mind_env(
+        &["evolve", "--check", "--version", "9.9.9"],
+        &[("MIND_POLICY_FILE", policy.as_str())],
+    );
+    assert!(
+        !r.success,
+        "evolve --check must be refused when self-update = false: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr.contains("disabled by the managed policy"),
+        "error must name the policy: {}",
+        r.stderr
+    );
+
+    // run mode (--yes skips the interactive prompt): must also fail, no download.
+    let r = sb.mind_env(
+        &["evolve", "--yes", "--version", "9.9.9"],
+        &[("MIND_POLICY_FILE", policy.as_str())],
+    );
+    assert!(
+        !r.success,
+        "evolve --yes must be refused when self-update = false: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr.contains("disabled by the managed policy"),
+        "run error must also name the policy: {}",
+        r.stderr
+    );
+}
+
+#[test]
+fn evolve_pinned_by_policy_check_is_offline_and_names_pin() {
+    // spec: POL-53 -- self-update = "<version>" forces that version as the target
+    // without any API call. evolve --check with the pin set must succeed offline
+    // and mention the pinned version in its report.
+    let sb = Sandbox::new();
+    // Pin to "0.1.0", which is below any real build, so the decision is
+    // PinnedBelowCurrent and the output says "not downgrading". No network needed.
+    let policy = write_policy(&sb, "[binary]\nself-update = \"0.1.0\"\n");
+
+    let r = sb.mind_env(
+        &["evolve", "--check"],
+        &[("MIND_POLICY_FILE", policy.as_str())],
+    );
+    assert!(
+        r.success,
+        "evolve --check with a pin below current must succeed (not-downgrading path): {} {}",
+        r.stdout, r.stderr
+    );
+    // The output must reference the pinned version.
+    assert!(
+        r.stdout.contains("0.1.0"),
+        "check output must name the pinned version: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn evolve_pinned_mismatched_version_arg_fails() {
+    // spec: POL-53 -- when policy pins to X and --version Y (Y != X) is given,
+    // the command must fail naming the conflict.
+    let sb = Sandbox::new();
+    let policy = write_policy(&sb, "[binary]\nself-update = \"0.14.0\"\n");
+
+    let r = sb.mind_env(
+        &["evolve", "--check", "--version", "0.15.0"],
+        &[("MIND_POLICY_FILE", policy.as_str())],
+    );
+    assert!(
+        !r.success,
+        "mismatched --version must be refused by a pinned policy: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr.contains("0.14.0"),
+        "error must name the policy pin: {}",
+        r.stderr
+    );
+    assert!(
+        r.stderr.contains("conflicts") || r.stderr.contains("conflict"),
+        "error must say 'conflicts': {}",
+        r.stderr
+    );
+}
+
+#[test]
+fn evolve_pinned_matching_version_arg_succeeds() {
+    // spec: POL-53 -- when --version matches the policy pin exactly, the command
+    // proceeds normally. Pin = 0.1.0 (below current) with --version 0.1.0 ->
+    // PinnedBelowCurrent report, exit 0.
+    let sb = Sandbox::new();
+    let policy = write_policy(&sb, "[binary]\nself-update = \"0.1.0\"\n");
+
+    let r = sb.mind_env(
+        &["evolve", "--check", "--version", "0.1.0"],
+        &[("MIND_POLICY_FILE", policy.as_str())],
+    );
+    assert!(
+        r.success,
+        "matching --version must be accepted by a pinned policy: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stdout.contains("0.1.0"),
+        "output must name the pinned version: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn evolve_self_update_true_allows_evolve() {
+    // spec: POL-54 -- self-update = true is identical to the absent key.
+    // evolve --check --version 9.9.9 (offline explicit check) must succeed.
+    let sb = Sandbox::new();
+    let policy = write_policy(&sb, "[binary]\nself-update = true\n");
+
+    let r = sb.mind_env(
+        &["evolve", "--check", "--version", "9.9.9"],
+        &[("MIND_POLICY_FILE", policy.as_str())],
+    );
+    assert!(
+        r.success,
+        "self-update = true must allow evolve: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stdout.contains("9.9.9"),
+        "output must name the target version: {}",
+        r.stdout
+    );
+}
+
 // ---- lifecycle-hook system tests (HOOK-50..58) --------------------------------
 //
 // These tests cover the extended hook system: multiple named [[hooks]] entries,

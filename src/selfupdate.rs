@@ -121,6 +121,46 @@ fn check_report(current: &str, target: &str, decision: &Decision) -> String {
     }
 }
 
+/// Consult the managed policy for the self-update control (POL-51..POL-54).
+///
+/// Returns:
+/// - `Ok(None)` when the policy allows `evolve` to any version (no pin).
+/// - `Ok(Some(pin))` when the policy pins to a specific version (use as `--version`).
+/// - `Err(SelfUpdatePolicy)` when `evolve` is disabled (POL-52) or when
+///   `user_version` conflicts with the pin (POL-53).
+///
+/// Pure: no network call. `user_version` is the raw `--version` argument (may
+/// have a leading `v`, which is stripped before comparison).
+pub(crate) fn check_policy_for_evolve(
+    policy: Option<&crate::policy::Policy>,
+    user_version: Option<&str>,
+) -> Result<Option<String>> {
+    use crate::policy::SelfUpdateControl;
+    let Some(pol) = policy else {
+        return Ok(None);
+    };
+    match pol.self_update_control() {
+        SelfUpdateControl::Allowed => Ok(None),
+        SelfUpdateControl::Disabled => Err(MindError::SelfUpdatePolicy {
+            detail: "self-update is disabled by the managed policy".to_string(),
+        }),
+        SelfUpdateControl::Pinned(pin) => {
+            if let Some(uv) = user_version {
+                let uv_clean = uv.strip_prefix('v').unwrap_or(uv);
+                if uv_clean != pin {
+                    return Err(MindError::SelfUpdatePolicy {
+                        detail: format!(
+                            "managed policy pins self-update to {pin}; \
+                             --version {uv_clean} conflicts with the pin"
+                        ),
+                    });
+                }
+            }
+            Ok(Some(pin.clone()))
+        }
+    }
+}
+
 /// `mind evolve [--check] [--yes] [--version <v>]` — update the running binary.
 ///
 /// `--version` resolves the target WITHOUT any network call, so
@@ -128,7 +168,7 @@ fn check_report(current: &str, target: &str, decision: &Decision) -> String {
 /// latest release is fetched from the GitHub API. `--check` reports the decision
 /// and returns without downloading. Otherwise, unless `--yes`, it prompts before
 /// replacing the binary.
-pub fn run(check: bool, yes: bool, version: Option<String>) -> Result<()> {
+pub fn run(check: bool, yes: bool, mut version: Option<String>) -> Result<()> {
     let current = env!("CARGO_PKG_VERSION");
     let os = std::env::consts::OS;
     let arch = std::env::consts::ARCH;
@@ -136,8 +176,16 @@ pub fn run(check: bool, yes: bool, version: Option<String>) -> Result<()> {
     // platform fails before any network call.
     let target = target_triple(os, arch)?;
 
-    // Resolve the target version: an explicit --version bypasses the network
-    // entirely; otherwise fetch and parse the latest release tag.
+    // Load the managed policy and check the self-update control before any network
+    // call (POL-51..POL-54). A machine with no policy file behaves exactly as today.
+    let policy = crate::policy::Policy::load()?;
+    if let Some(pin) = check_policy_for_evolve(policy.as_ref(), version.as_deref())? {
+        // Policy pins to a specific version; behave as if --version <pin> was passed.
+        version = Some(pin);
+    }
+
+    // Resolve the target version: an explicit --version (or a policy pin) bypasses
+    // the network entirely; otherwise fetch and parse the latest release tag.
     let explicit = version.is_some();
     let target_version = match version {
         Some(v) => v.strip_prefix('v').unwrap_or(&v).to_string(),
@@ -431,24 +479,113 @@ fn mktemp_dir() -> Result<std::path::PathBuf> {
     Ok(base)
 }
 
+/// Read the connect-timeout from `MIND_HTTP_TIMEOUT_SECS` (STO-52).
+/// Falls back to 15 on a missing or non-numeric value.
+fn http_timeout_secs() -> u64 {
+    std::env::var("MIND_HTTP_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(15)
+}
+
+/// Build the curl argument list for a URL-to-stdout fetch (STO-52).
+///
+/// Includes the secure-transport flags mirroring install.sh, a configurable
+/// connect timeout, and a generous 600-second max-time ceiling. Returns a
+/// `Vec<String>` so the arg list is unit-testable without spawning a process.
+pub(crate) fn curl_string_args(url: &str, timeout_secs: u64) -> Vec<String> {
+    vec![
+        "--proto".into(),
+        "=https".into(),
+        "--proto-redir".into(),
+        "=https".into(),
+        "--tlsv1.2".into(),
+        "-fsSL".into(),
+        "--connect-timeout".into(),
+        timeout_secs.to_string(),
+        "--max-time".into(),
+        "600".into(),
+        url.into(),
+    ]
+}
+
+/// Build the wget argument list for a URL-to-stdout fetch (STO-52).
+///
+/// `-q` is intentionally omitted so wget's stderr is captured on failure and
+/// can populate `DownloadFailed.reason` with an actionable message.
+pub(crate) fn wget_string_args(url: &str, timeout_secs: u64) -> Vec<String> {
+    vec![
+        "--https-only".into(),
+        "-O-".into(),
+        format!("--timeout={timeout_secs}"),
+        url.into(),
+    ]
+}
+
+/// Build the curl argument list for a URL-to-file fetch (STO-52).
+///
+/// `dest` is included as the `-o` value so the full arg list is unit-testable.
+pub(crate) fn curl_file_args(url: &str, dest: &str, timeout_secs: u64) -> Vec<String> {
+    vec![
+        "--proto".into(),
+        "=https".into(),
+        "--proto-redir".into(),
+        "=https".into(),
+        "--tlsv1.2".into(),
+        "-fsSL".into(),
+        "--connect-timeout".into(),
+        timeout_secs.to_string(),
+        "--max-time".into(),
+        "600".into(),
+        url.into(),
+        "-o".into(),
+        dest.into(),
+    ]
+}
+
+/// Build the wget argument list for a URL-to-file fetch (STO-52).
+///
+/// `-q` is kept here (file-fetch; exit code signals failure) and `dest` is
+/// included in the arg list for unit-testability.
+pub(crate) fn wget_file_args(url: &str, dest: &str, timeout_secs: u64) -> Vec<String> {
+    vec![
+        "--https-only".into(),
+        "-qO".into(),
+        dest.into(),
+        format!("--timeout={timeout_secs}"),
+        url.into(),
+    ]
+}
+
+/// Append a proxy-setup hint when the failure reason looks like a proxy error.
+///
+/// Matches HTTP 407 responses and "Could not resolve proxy" messages that curl
+/// and wget emit when a proxy is misconfigured or missing credentials.
+fn maybe_proxy_hint(reason: &str) -> String {
+    if reason.contains("407")
+        || reason.contains("Could not resolve proxy")
+        || reason.contains("Received HTTP code 407 from proxy")
+    {
+        format!(
+            "{reason}\nhint: if you are behind a proxy, set the HTTPS_PROXY environment variable \
+             (e.g. export HTTPS_PROXY=http://proxy.example.com:8080) or configure git's http.proxy setting"
+        )
+    } else {
+        reason.to_string()
+    }
+}
+
 /// Fetch a URL to a string via curl or wget, mirroring install.sh's secure flags.
 fn fetch_to_string(url: &str) -> Result<String> {
+    let timeout = http_timeout_secs();
     let output = if have("curl") {
         Command::new("curl")
-            .args([
-                "--proto",
-                "=https",
-                "--proto-redir",
-                "=https",
-                "--tlsv1.2",
-                "-fsSL",
-                url,
-            ])
+            .args(curl_string_args(url, timeout))
             .output()
             .map_err(|e| MindError::io("curl", e))?
     } else if have("wget") {
         Command::new("wget")
-            .args(["--https-only", "-qO-", url])
+            .args(wget_string_args(url, timeout))
             .output()
             .map_err(|e| MindError::io("wget", e))?
     } else {
@@ -458,9 +595,10 @@ fn fetch_to_string(url: &str) -> Result<String> {
         });
     };
     if !output.status.success() {
+        let reason = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(MindError::DownloadFailed {
             url: url.to_string(),
-            reason: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            reason: maybe_proxy_hint(&reason),
         });
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
@@ -468,26 +606,16 @@ fn fetch_to_string(url: &str) -> Result<String> {
 
 /// Fetch a URL to a file via curl or wget, mirroring install.sh's secure flags.
 fn fetch_to_file(url: &str, dest: &Path) -> Result<()> {
+    let timeout = http_timeout_secs();
+    let dest_str = dest.to_string_lossy();
     let status = if have("curl") {
         Command::new("curl")
-            .args([
-                "--proto",
-                "=https",
-                "--proto-redir",
-                "=https",
-                "--tlsv1.2",
-                "-fsSL",
-                url,
-                "-o",
-            ])
-            .arg(dest)
+            .args(curl_file_args(url, &dest_str, timeout))
             .status()
             .map_err(|e| MindError::io("curl", e))?
     } else if have("wget") {
         Command::new("wget")
-            .args(["--https-only", "-qO"])
-            .arg(dest)
-            .arg(url)
+            .args(wget_file_args(url, &dest_str, timeout))
             .status()
             .map_err(|e| MindError::io("wget", e))?
     } else {
@@ -520,6 +648,236 @@ fn have(cmd: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- STO-52: timeout arg-vector helpers ----------------------------------
+
+    #[test]
+    // spec: STO-52
+    fn curl_string_args_includes_connect_timeout_and_max_time() {
+        // The arg vector must contain --connect-timeout N and --max-time 600 so
+        // a blackholing firewall doesn't hang evolve forever.
+        let args = curl_string_args("https://example.com/data", 15);
+        let ct = args
+            .iter()
+            .position(|a| a == "--connect-timeout")
+            .expect("--connect-timeout must be present");
+        assert_eq!(
+            args[ct + 1],
+            "15",
+            "connect-timeout value must follow --connect-timeout"
+        );
+        let mt = args
+            .iter()
+            .position(|a| a == "--max-time")
+            .expect("--max-time must be present");
+        assert_eq!(args[mt + 1], "600", "max-time must be 600 seconds");
+        // The URL must also be present.
+        assert!(
+            args.contains(&"https://example.com/data".to_string()),
+            "URL must be in the arg list"
+        );
+    }
+
+    #[test]
+    // spec: STO-52
+    fn wget_string_args_includes_timeout_and_no_quiet_flag() {
+        // wget string-fetch must include --timeout=N and must NOT include -q,
+        // so that wget's stderr is captured and available as the failure reason.
+        let args = wget_string_args("https://example.com/data", 15);
+        assert!(
+            args.contains(&"--timeout=15".to_string()),
+            "wget args must include --timeout=15: {args:?}"
+        );
+        assert!(
+            args.contains(&"https://example.com/data".to_string()),
+            "wget args must include the URL: {args:?}"
+        );
+        assert!(
+            !args.iter().any(|a| a == "-q" || a.contains('q')),
+            "wget string-fetch must not include -q (stderr must be visible): {args:?}"
+        );
+    }
+
+    #[test]
+    // spec: STO-52
+    fn curl_file_args_includes_connect_timeout_and_dest() {
+        let args = curl_file_args("https://example.com/file.tar.gz", "/tmp/dest.tar.gz", 30);
+        let ct = args
+            .iter()
+            .position(|a| a == "--connect-timeout")
+            .expect("--connect-timeout must be present");
+        assert_eq!(
+            args[ct + 1],
+            "30",
+            "custom connect-timeout value must be 30"
+        );
+        assert!(
+            args.contains(&"--max-time".to_string()),
+            "must include --max-time: {args:?}"
+        );
+        assert!(
+            args.contains(&"/tmp/dest.tar.gz".to_string()),
+            "dest path must be in arg list: {args:?}"
+        );
+        assert!(
+            args.contains(&"https://example.com/file.tar.gz".to_string()),
+            "URL must be in arg list: {args:?}"
+        );
+    }
+
+    #[test]
+    // spec: STO-52
+    fn wget_file_args_includes_timeout_and_dest() {
+        let args = wget_file_args("https://example.com/file.tar.gz", "/tmp/dest.tar.gz", 30);
+        assert!(
+            args.contains(&"--timeout=30".to_string()),
+            "wget file args must include --timeout=30: {args:?}"
+        );
+        assert!(
+            args.contains(&"/tmp/dest.tar.gz".to_string()),
+            "dest must be in file-fetch args: {args:?}"
+        );
+        assert!(
+            args.contains(&"https://example.com/file.tar.gz".to_string()),
+            "URL must be in file-fetch args: {args:?}"
+        );
+    }
+
+    #[test]
+    // spec: STO-52
+    fn timeout_param_flows_through_arg_builders() {
+        // Verify that different timeout values produce the corresponding flag
+        // values, proving the parameter is not hardcoded.
+        let args = curl_string_args("https://example.com/", 42);
+        let ct = args.iter().position(|a| a == "--connect-timeout").unwrap();
+        assert_eq!(
+            args[ct + 1],
+            "42",
+            "custom timeout must appear in curl args"
+        );
+
+        let args = wget_string_args("https://example.com/", 42);
+        assert!(
+            args.contains(&"--timeout=42".to_string()),
+            "custom timeout must appear in wget args: {args:?}"
+        );
+    }
+
+    // ---- POL-51..54: policy control over self-update -------------------------
+
+    /// Load a `Policy` from a TOML string via a temp file (mirrors the
+    /// MIND_POLICY_FILE fixture pattern used in tests/cli.rs).
+    fn policy_from_toml(toml: &str) -> crate::policy::Policy {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "mind-selfupdate-pol-{}-{}.toml",
+            std::process::id(),
+            MKTEMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::write(&path, toml).unwrap();
+        let p = crate::policy::load_file(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+        p
+    }
+
+    #[test]
+    // spec: POL-51
+    fn policy_absent_allows_evolve_with_no_pin() {
+        // No policy -> check_policy_for_evolve returns Ok(None): unrestricted.
+        let result = check_policy_for_evolve(None, None);
+        assert_eq!(
+            result.unwrap(),
+            None,
+            "absent policy must return Ok(None): unrestricted evolve"
+        );
+    }
+
+    #[test]
+    // spec: POL-54
+    fn policy_self_update_true_allows_evolve() {
+        // [binary].self-update = true is explicitly allowed (same as absent).
+        let pol = policy_from_toml("[binary]\nself-update = true\n");
+        let result = check_policy_for_evolve(Some(&pol), None);
+        assert_eq!(
+            result.unwrap(),
+            None,
+            "self-update = true must return Ok(None): unrestricted evolve"
+        );
+    }
+
+    #[test]
+    // spec: POL-52
+    fn policy_disabled_denies_evolve_check_and_run() {
+        // [binary].self-update = false -> Err(SelfUpdatePolicy) in all invocation modes.
+        let pol = policy_from_toml("[binary]\nself-update = false\n");
+
+        // No --version: disabled.
+        let err = check_policy_for_evolve(Some(&pol), None).unwrap_err();
+        match err {
+            MindError::SelfUpdatePolicy { detail } => {
+                assert!(
+                    detail.contains("disabled by the managed policy"),
+                    "disabled detail must say the policy disabled it: {detail}"
+                );
+            }
+            other => panic!("expected SelfUpdatePolicy, got {other:?}"),
+        }
+
+        // With --version: still disabled (no version makes it OK).
+        let err = check_policy_for_evolve(Some(&pol), Some("9.9.9")).unwrap_err();
+        assert!(
+            matches!(err, MindError::SelfUpdatePolicy { .. }),
+            "disabled policy must error even with a --version arg: {err:?}"
+        );
+    }
+
+    #[test]
+    // spec: POL-53
+    fn policy_pinned_no_version_arg_returns_pin() {
+        // Policy pins to "0.14.0"; no --version -> return the pin, no network call.
+        let pol = policy_from_toml("[binary]\nself-update = \"0.14.0\"\n");
+        let pin = check_policy_for_evolve(Some(&pol), None).unwrap();
+        assert_eq!(
+            pin,
+            Some("0.14.0".to_string()),
+            "pinned policy with no --version must return the pin"
+        );
+    }
+
+    #[test]
+    // spec: POL-53
+    fn policy_pinned_matching_version_arg_returns_pin() {
+        // Policy pins to "0.14.0"; --version 0.14.0 matches -> returns the pin.
+        let pol = policy_from_toml("[binary]\nself-update = \"0.14.0\"\n");
+        let pin = check_policy_for_evolve(Some(&pol), Some("0.14.0")).unwrap();
+        assert_eq!(
+            pin,
+            Some("0.14.0".to_string()),
+            "matching --version must succeed with a pinned policy"
+        );
+    }
+
+    #[test]
+    // spec: POL-53
+    fn policy_pinned_mismatched_version_arg_errors() {
+        // Policy pins to "0.14.0"; --version 0.15.0 conflicts -> Err.
+        let pol = policy_from_toml("[binary]\nself-update = \"0.14.0\"\n");
+        let result = check_policy_for_evolve(Some(&pol), Some("0.15.0"));
+        match result.unwrap_err() {
+            MindError::SelfUpdatePolicy { detail } => {
+                assert!(detail.contains("0.14.0"), "must name the pin: {detail}");
+                assert!(
+                    detail.contains("0.15.0"),
+                    "must name the conflicting version: {detail}"
+                );
+                assert!(
+                    detail.contains("conflicts"),
+                    "must say 'conflicts': {detail}"
+                );
+            }
+            other => panic!("expected SelfUpdatePolicy, got {other:?}"),
+        }
+    }
 
     #[test]
     fn have_detects_present_and_absent_commands() {

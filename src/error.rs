@@ -408,6 +408,13 @@ pub enum MindError {
         actual: String,
     },
 
+    /// POL-52/POL-53: `evolve` was refused or redirected by the managed policy.
+    /// The `detail` field carries the human-readable reason: "self-update is
+    /// disabled by the managed policy" for the disabled case (POL-52), or the
+    /// specific mismatch message for the pinned-version-conflict case (POL-53).
+    #[error("{detail}")]
+    SelfUpdatePolicy { detail: String },
+
     /// STO-50/STO-51: state file was written by a newer mind and uses an unknown schema version.
     #[error(
         "{what} uses schema version {found} but this mind only supports up to version {supported}; upgrade mind to read it"
@@ -775,5 +782,36 @@ mod tests {
         }
         .to_string();
         assert!(e.contains("../evil"), "must include the prefix: {e}");
+    }
+
+    #[test]
+    fn self_update_policy_displays_detail() {
+        // spec: POL-52 -- the disabled case reads "self-update is disabled by the
+        // managed policy" (carried as `detail`).
+        let disabled = MindError::SelfUpdatePolicy {
+            detail: "self-update is disabled by the managed policy".into(),
+        }
+        .to_string();
+        assert!(
+            disabled.contains("disabled by the managed policy"),
+            "disabled detail must appear: {disabled}"
+        );
+
+        // spec: POL-53 -- the pin-mismatch case names the pin and the conflict.
+        let mismatch = MindError::SelfUpdatePolicy {
+            detail:
+                "managed policy pins self-update to 0.14.0; --version 0.15.0 conflicts with the pin"
+                    .into(),
+        }
+        .to_string();
+        assert!(mismatch.contains("0.14.0"), "must name the pin: {mismatch}");
+        assert!(
+            mismatch.contains("0.15.0"),
+            "must name the requested version: {mismatch}"
+        );
+        assert!(
+            mismatch.contains("conflicts"),
+            "must say 'conflicts': {mismatch}"
+        );
     }
 }

@@ -113,6 +113,8 @@ and verified.
 | Content-hash framing: length-prefixed fields, type-tagged symlinks | done | LIFE-35 |
 | TUI sanitization: source-derived strings stripped of ANSI/control/bidi at the model boundary | done | TUI-60 |
 | Managed-policy pin values validated as git refs | done | POL-33 |
+| Managed-policy `[binary].self-update` control: disable, pin to a version, or allow | done | POL-51, POL-52, POL-53, POL-54 |
+| `evolve`/install.sh network fetch timeouts (`MIND_HTTP_TIMEOUT_SECS`) | done | STO-52 |
 | `-n` reserved for `--dry-run`; `-N` short for `--namespace`; `probe --no-tui` long-only | done | CLI-163, CLI-164, TUI-54 |
 | `meld --register-only` / `unmeld --keep-items` (old spellings hidden deprecated aliases) | done | CLI-165, CLI-166 |
 | JSON envelopes: `{"schema": 1, "items": [...]}` for read verbs; `"schema": 1` on mutating results | done | CLI-167, CLI-168 |

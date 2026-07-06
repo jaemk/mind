@@ -16,13 +16,19 @@ err() {
 	exit 1
 }
 
+# Connect timeout in seconds; literal 15 (does not read MIND_HTTP_TIMEOUT_SECS
+# because install.sh runs before mind is on PATH).  STO-52.
+CONNECT_TIMEOUT=15
+MAX_TIME=600
+
 # A downloader: curl or wget, whichever exists.
 fetch() {
 	# fetch <url> -> stdout
 	if command -v curl >/dev/null 2>&1; then
-		curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL "$1"
+		curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL \
+			--connect-timeout "$CONNECT_TIMEOUT" --max-time "$MAX_TIME" "$1"
 	elif command -v wget >/dev/null 2>&1; then
-		wget --https-only -qO- "$1"
+		wget --https-only --timeout="$CONNECT_TIMEOUT" -qO- "$1"
 	else
 		err "need curl or wget on PATH"
 	fi
@@ -31,9 +37,10 @@ fetch() {
 fetch_to() {
 	# fetch_to <url> <dest-file>
 	if command -v curl >/dev/null 2>&1; then
-		curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL "$1" -o "$2"
+		curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL \
+			--connect-timeout "$CONNECT_TIMEOUT" --max-time "$MAX_TIME" "$1" -o "$2"
 	else
-		wget --https-only -qO "$2" "$1"
+		wget --https-only --timeout="$CONNECT_TIMEOUT" -qO "$2" "$1"
 	fi
 }
 

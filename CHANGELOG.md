@@ -6,6 +6,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Managed policy can control `mind evolve` via a `[binary]` table:
+  `self-update = false` disables self-update entirely (both `evolve` and `evolve
+  --check` fail before any network call), `self-update = "X.Y.Z"` pins evolve to
+  a version (resolved offline, a conflicting `--version` is rejected), and
+  `true`/absent leaves it unrestricted (POL-51, POL-52, POL-53, POL-54).
+
 ### Security
 
 - Source-derived fields in the hook consent disclosure (command, identity, pin
@@ -29,6 +37,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   this fix.
 - `upgrade` produces a `/compare/` link for any https remote, including GitHub
   Enterprise Server, instead of only github.com (CLI-176).
+- `evolve` network fetches now carry a connect timeout (default 15s, override
+  via `MIND_HTTP_TIMEOUT_SECS`) and a generous max-time, so a blackholing
+  firewall no longer hangs the update indefinitely; `install.sh` gets the same
+  flags. The wget string-fetch path no longer suppresses stderr, so a failure
+  reports a real reason, and proxy failures (HTTP 407) carry a
+  `HTTPS_PROXY`/`git http.proxy` hint (STO-52).
 
 ## [0.13.0] - 2026-07-04
 
