@@ -397,6 +397,11 @@ fn meld_default_non_tty_registers_only_and_notes_install() {
         "it should note how to install later: {}",
         r.stdout
     );
+    assert!(
+        r.stdout.contains("nothing installed"),
+        "the note must say explicitly that nothing was installed: {}",
+        r.stdout
+    );
 }
 
 #[test]

@@ -2604,7 +2604,7 @@ pub fn install_source_items(paths: &Paths, source_name: &str, flow: InstallFlow)
     if !crate::hook::is_tty() {
         if !json_mode() {
             println!(
-                "note: {source_name} has {} item(s) to install; run `mind learn '{item_ref}'` (or re-meld with --yes)",
+                "note: registered only, nothing installed (not a TTY); {source_name} has {} item(s) to install; run `mind learn '{item_ref}'` (or re-meld with --yes)",
                 plan.install_count
             );
         }
@@ -2690,7 +2690,7 @@ pub fn install_source_items_subset(
         let ref_list = refs.join(", ");
         if !json_mode() {
             println!(
-                "note: {source_name} has {count} item(s) to install; run `mind learn '{}'` (or re-meld with --yes)",
+                "note: registered only, nothing installed (not a TTY); {source_name} has {count} item(s) to install; run `mind learn '{}'` (or re-meld with --yes)",
                 if refs.len() == 1 {
                     refs[0].clone()
                 } else {
