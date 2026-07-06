@@ -125,3 +125,9 @@ Optionally smoke-test the install path (`resources/install.sh`, or
 - The release is outward-facing and hard to reverse (it publishes binaries and
   pushes a formula commit). Confirm steps 1-5 are correct before running
   `make release`.
+- Known flake: `ci-macos` can fail the timing-based lock test
+  `tui::action::tests::execute_lock_is_exclusive_not_shared` under a loaded
+  runner (it did on the first v0.13.0 tag, run 28724441026; the re-tag passed).
+  If that single test is the only failure on `ci-macos`, treat it as a flake:
+  delete the tag (see above), re-tag, and re-run. Investigate only if it fails
+  deterministically across re-runs.
