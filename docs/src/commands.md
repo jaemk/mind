@@ -210,8 +210,10 @@ error, `-` available) so no information is lost (CLI-151, CLI-152, CLI-154).
 `NO_COLOR` set to any value (including empty), a non-UTF-8 or unset locale, or
 `--ascii` each independently force plain ASCII regardless of the others.
 
-**`--json` output.** Read-only verbs (`recall`, `probe`, `introspect`) emit
-`{"schema": 1, "items": [...]}`. Every mutating verb (`meld`, `learn`, `forget`,
+**`--json` output.** `recall` and `probe` emit `{"schema": 1, "items": [...]}`.
+`introspect` emits `{"schema": 1, "issues": [...], "sources": N, "items": N}`
+where `issues` is an array of findings and `sources`/`items` are integer counts.
+Every mutating verb (`meld`, `learn`, `forget`,
 `sync`, `upgrade`, `unmeld`, `config lobes add`/`remove`) emits a structured
 result object with `"schema": 1` and at minimum `action`, `target`, and `outcome`
 fields (CLI-153).
@@ -284,7 +286,7 @@ mind dump --whole-sources        # include all items, not just installed ones
 Each entry in the emitted `[discover].sources` references a melded source and
 pins it to its currently recorded commit as a `pin-ref`, overriding any pin the
 source itself declares (DUMP-1). The meld-time settings are carried through:
-namespace (`as`), scan `roots`, and the resolved commit pin (DUMP-4).
+namespace, scan `roots`, and the resolved commit pin (DUMP-4).
 
 **Item filtering.** By default each source entry is stamped with the install
 directive that reproduces exactly which items are installed (DUMP-2):

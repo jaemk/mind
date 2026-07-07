@@ -201,12 +201,13 @@ pub enum MindError {
         candidates: Vec<String>,
     },
 
+    // spec: CLI-179
     #[error(
         "no item matches '{query}'{}",
         if *sources == 0 {
             "; no sources are melded yet -- run `mind meld <repo>` to add one".to_string()
         } else {
-            format!(" across {sources} melded source(s); run `mind sync` then `mind probe`")
+            format!(" across {sources} melded source(s); run `mind probe` to search available items")
         }
     )]
     ItemNotFound { query: String, sources: usize },
@@ -289,6 +290,12 @@ pub enum MindError {
     // Constructed by the policy-enforcement paths (meld/sync/upgrade gating).
     #[error("source '{identity}' is not permitted by the managed policy's allowlist")]
     SourceNotAllowed { identity: String },
+
+    #[error(
+        "local-path and file:// melds are forbidden by the managed policy \
+         ([sources].allow-local = false)"
+    )]
+    LocalMeldForbidden { identity: String },
 
     #[error(
         "source '{identity}' must be pinned to a tag or ref: the managed policy forbids floating branches"
@@ -491,6 +498,7 @@ impl MindError {
             MindError::DuplicateItem { .. } => "duplicate-item",
             MindError::ReviewFailed { .. } => "review-failed",
             MindError::SourceNotAllowed { .. } => "source-not-allowed",
+            MindError::LocalMeldForbidden { .. } => "local-meld-forbidden",
             MindError::UnpinnedSourceForbidden { .. } => "unpinned-source-forbidden",
             MindError::InvalidPolicy { .. } => "invalid-policy",
             MindError::LobesLocked { .. } => "lobes-locked",
@@ -768,9 +776,11 @@ mod tests {
         );
     }
 
+    // spec: CLI-179
     #[test]
-    fn item_not_found_with_sources_hints_sync_probe() {
-        // With sources present the hint directs the user to sync then probe.
+    fn item_not_found_with_sources_hints_probe_not_sync() {
+        // With sources present the hint directs the user to probe; sync is not
+        // mentioned because syncing cannot surface an item that does not exist.
         let e = MindError::ItemNotFound {
             query: "review".into(),
             sources: 3,
@@ -778,8 +788,12 @@ mod tests {
         .to_string();
         assert!(e.contains("review"), "must include query: {e}");
         assert!(e.contains("3"), "must include source count: {e}");
-        assert!(e.contains("sync"), "must mention `sync`: {e}");
         assert!(e.contains("probe"), "must mention `probe`: {e}");
+        // sync must not appear -- it cannot help a name that will never exist.
+        assert!(
+            !e.contains("sync"),
+            "with sources must not mention `sync`: {e}"
+        );
         // Must not suggest running `mind meld` (only appropriate when sources == 0).
         // The word "melded" may appear in the count phrase "across N melded source(s)".
         assert!(

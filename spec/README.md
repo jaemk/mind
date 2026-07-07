@@ -54,7 +54,7 @@ and verified.
 | `probe`/`recall` `--source` accepts a source glob (mirrors `unmeld` glob) | done | CLI-86 |
 | Enforce `min-mind-version` | done | DSC-40 |
 | `sync` per-source resilience (continue + report, exit non-zero) | done | CLI-54 |
-| `--json` output (recall, probe, introspect) | done | CLI-73, CLI-84, CLI-92 |
+| `--json` output (recall, probe, introspect) | done | CLI-73, CLI-84, CLI-92, CLI-189 |
 | Shell completions + man page | done | CLI-120, CLI-121 |
 | Scan roots: `[source].roots` + `meld --root` (monorepo/subtree sources) | done | DSC-50, DSC-51, DSC-52, DSC-53, STO-17, CLI-16 |
 | Flat skill layout: `[source].flat-skills` + `meld --flat-skills` + per-entry `[[discover.sources]]` flag (skill dirs at a root, no `skills/` container); `dump` propagates it | done | DSC-74, DSC-75, DSC-76, DSC-77, STO-44, CLI-158, DUMP-10 |
@@ -114,6 +114,12 @@ and verified.
 | TUI sanitization: source-derived strings stripped of ANSI/control/bidi at the model boundary | done | TUI-60 |
 | Managed-policy pin values validated as git refs | done | POL-33 |
 | Managed-policy `[binary].self-update` control: disable, pin to a version, or allow | done | POL-51, POL-52, POL-53, POL-54 |
+| Managed-policy `auto_meld` pin reconciliation: pin-bump propagates to already-provisioned machines on next `sync` | done | POL-55 |
+| Managed-policy `[sources].allow-local` knob: forbid local-path and `file://` melds under lock | done | POL-56, POL-57 |
+| Managed-policy `auto_meld` `install = true`: headless item install after provisioning; `run-build-hooks` opt-in; per-item soft-fail | done | POL-58, POL-59, POL-60 |
+| Managed-policy `min-mind-version` gate: checked before strict parse; gives a clear error on schema skew instead of an opaque unknown-field error | done | POL-61, POL-62, POL-63 |
+| Managed-policy permission warning: warn when the system policy file or its parent dir is group/world-writable or not root-owned; skipped for `$MIND_POLICY_FILE` | done | POL-64, POL-65 |
+| Managed-policy pin skew warning: when running binary is above the policy pin, print a human-only warning that the pin is an upper bound and does not downgrade; `--json` outcome is the machine hook | done | POL-66 |
 | `evolve`/install.sh network fetch timeouts (`MIND_HTTP_TIMEOUT_SECS`) | done | STO-52 |
 | Actionable git-failure hints: auth (SSH/config/helper), proxy (407); clone errors lead with stderr, detail behind `--verbose`; `learn` typo points at `probe` | done | CLI-177, CLI-178, CLI-179, CLI-180 |
 | `--json` error envelope on stdout (`{"schema":1,"error":{"kind","message"}}`); stable per-variant `kind`; clap usage errors stay text | done | CLI-181, CLI-182, CLI-183 |
@@ -129,6 +135,8 @@ and verified.
 | `--dangerously-skip-build-hook-check`: run item build hooks non-interactively (CI installs) | done | HOOK-74 |
 | `[source].namespace` canonical mind.toml key; `prefix` deprecated parse alias; `init-source` rewrites | done | DSC-82 |
 | Frontmatter reader strips a leading UTF-8 BOM | done | DSC-23 |
+| `compare_url` suppressed for gitlab/bitbucket hosts (GitHub-shaped link was wrong for those forges) | done | CLI-188 |
+| `introspect --json` includes `"schema": 1`; shape is `{"schema":1,"issues":[...],"sources":N,"items":N}` | done | CLI-189 |
 
 ## Documents
 

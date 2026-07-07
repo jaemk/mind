@@ -6,6 +6,124 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Managed-policy `auto_meld` entries can install items during provisioning:
+  `install = true` installs every item the source offers after it is provisioned,
+  confirmed already registered, or re-pinned, so `mind sync` on a policy-managed
+  machine yields a working agent home with no second command. Build hooks are
+  skipped by default and opted in per entry with `run-build-hooks = true`;
+  install hooks remain skipped in the non-TTY provisioning context (HOOK-22).
+  Per-item failures soft-fail (warn, record, continue, non-zero exit) like other
+  provisioning errors (POL-58, POL-59, POL-60).
+- `mind sync` reconciles a policy `auto_meld` pin change: when a source is
+  already registered but its recorded pin differs from the policy's declared pin,
+  the recorded pin is updated and the fetch lands the new ref, reported as
+  `re-pinned <name> <old> -> <new>`. A fleet pin bump in policy now reaches
+  already-provisioned machines instead of applying only to fresh ones (POL-55).
+- A `[sources] allow-local` policy knob (default `true`). With `allow-local =
+  false` under `lock = true`, local-path and `file://` melds are refused
+  regardless of allow patterns, closing the accidental-bypass where a
+  `local/*/*` pattern admits anything a user can clone locally. The refusal names
+  the reason and the policy file path (POL-56, POL-57).
+- A policy may declare `min-mind-version = "X.Y.Z"`. A binary that understands
+  the key but is older reports `managed policy requires mind >= X, running Y;
+  upgrade mind` instead of an opaque unknown-field error, and the check runs
+  before the strict parse so it wins over any newer key the old binary does not
+  know (POL-61, POL-62, POL-63).
+
+### Security
+
+- `mind` warns when the system managed-policy file or its parent directory is
+  writable by a non-root user, since a local user could otherwise alter enforced
+  policy. The check is a warning, never a refusal (a misprovisioned fleet stays
+  functional while the misconfiguration is visible), and is skipped for a
+  `MIND_POLICY_FILE` path, which is user-trust by definition (POL-64, POL-65).
+- A policy-disallowed `meld` is now refused before any clone. The allow/lock
+  check runs on the parsed source identity ahead of the network fetch, so a
+  source outside the allowlist produces no egress and no repo content lands on
+  disk (the pinned-ref check still runs post-clone, since it needs
+  `mind.toml`). Previously the full clone happened and was then deleted
+  (POL-36).
+- Git stderr echoed on a clone or `sync` failure, and curl/wget output echoed on
+  a self-update failure, are stripped of ANSI escapes, control characters, and
+  bidi overrides before printing. A hostile source or endpoint can no longer use
+  those bytes to spoof or hide the displayed error (CLI-186, STO-54).
+
+### Fixed
+
+- Under `--json`, a `meld` clone failure now carries git's stderr as the cause
+  in the error envelope instead of the placeholder `<no stderr>`; the
+  human-mode trailer reads `(git output above)` rather than swallowing the cause
+  that was just streamed (CLI-184, CLI-185).
+- `MIND_HTTP_TIMEOUT_SECS=0` is clamped to the default 15s instead of being
+  passed through as "no timeout", which had silently defeated the knob whose
+  purpose is bounding a blackholing firewall (STO-52).
+- Every `wget` invocation (self-update and `install.sh`) now passes `--tries=1`,
+  so a blackholed endpoint no longer takes ~20x the intended timeout bound via
+  wget's default 20 retries (STO-53).
+- A failed policy `auto_meld` provisioning entry no longer persists a
+  partially-registered source: `sync` snapshots and rolls back the in-memory
+  source list around each entry, so a later save cannot record a partial entry
+  (POL-35).
+- The `evolve` proxy hint no longer suggests configuring git's `http.proxy`,
+  which has no effect on the curl/wget subprocesses `evolve` uses; it now points
+  at `HTTPS_PROXY`/`HTTP_PROXY` and the `~/.curlrc` `proxy-negotiate` escape
+  hatch for NTLM/Kerberos proxies.
+
+### Changed
+
+- `learn <typo>` with sources melded no longer suggests `mind sync` in the base
+  error; it points only at `mind probe`, since `sync` cannot conjure an item
+  name that does not exist (CLI-179).
+- The "no sources melded" message is now identical across `sync`, `recall`,
+  `recall --sources`, and `probe`, always naming `mind meld <owner/repo>` as the
+  next step (CLI-187).
+- A `SourceNotAllowed` refusal now names the active policy file path, so a
+  developer behind a locked policy can see what refused them (POL-37).
+- `mind introspect --json` now includes a `"schema": 1` field alongside the
+  existing `issues`, `sources`, and `items` fields, matching the envelope that
+  `recall` and `probe` emit. The existing fields are unchanged, so scripts
+  keying on them keep working (CLI-189).
+- When a managed policy pins `[binary] self-update` below the running binary,
+  `evolve` (and `evolve --check`) prints a warning that the running version
+  differs from the policy pin, which is an upper bound and does not downgrade.
+  The exit code is unchanged and `--json` output is unaffected, so
+  `evolve --check --json`'s `outcome` field stays the hook for fleet skew
+  monitoring (POL-66).
+
+### Documentation
+
+- Enterprise guide: corrected the release-download CDN host to
+  `release-assets.githubusercontent.com` (recommending `*.githubusercontent.com`;
+  the previously listed `objects.githubusercontent.com` blocked `evolve` and
+  `install.sh` at the redirect); added a binary-update trust-model note
+  (checksums verify integrity, not origin; a TLS-terminating proxy can
+  substitute both, so the posture for untrusted egress is `self-update = false`
+  plus IT-distributed binaries); corrected the proxy env-var guidance (curl
+  ignores uppercase `HTTP_PROXY`, wget reads lowercase only) and added the
+  `~/.curlrc` escape hatch, a `known_hosts` pre-seed step, a `recall --json` jq
+  example, and a GHES non-standard-port note.
+- Policy reference: documented the `[binary]` self-update table and its
+  `POL-51..54` semantics; corrected the fail-closed claim (plain `recall` and
+  `review --policy` remain usable against a malformed deployed policy); reworded
+  the POL-11 note to "refused before any clone".
+- Install guide: the Updating section warns that a 0.13.0 binary self-deadlocks
+  on `evolve` and must be reinstalled.
+- Commands reference: the `dump` section names the carried-through key as
+  `namespace`, not the stale `as`; the `--json` section now documents
+  `introspect`'s real shape (`issues` array with `sources` and `items` integer
+  counts) separately from `recall`/`probe`, instead of implying `introspect`
+  emits an `items` array.
+- Policy reference: documented the `auto_meld` `install` and `run-build-hooks`
+  entries, the `[sources] allow-local` knob with the local-path identity shape
+  and mirror-directory guidance, `min-mind-version` and the deployment-ordering
+  constraint (upgrade binaries before deploying a policy that uses new keys),
+  the pin's upper-bound semantics for `evolve`, and a deployment section for the
+  policy file's ownership and permissions. The enterprise guide's CI recipe now
+  uses `install = true` so `mind sync` followed by `mind recall --json` is a
+  complete provisioning step.
+
 ## [0.14.0] - 2026-07-06
 
 ### Added
@@ -49,6 +167,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   this fix.
 - `upgrade` produces a `/compare/` link for any https remote, including GitHub
   Enterprise Server, instead of only github.com (CLI-176).
+- `upgrade` no longer prints a 404-prone GitHub-shaped compare link for GitLab
+  and Bitbucket remotes (hosts containing `gitlab` or `bitbucket`); the link is
+  suppressed for those forges and unchanged for GitHub/GHES/Gitea (CLI-188).
 - `evolve` network fetches now carry a connect timeout (default 15s, override
   via `MIND_HTTP_TIMEOUT_SECS`) and a generous max-time, so a blackholing
   firewall no longer hangs the update indefinitely; `install.sh` gets the same

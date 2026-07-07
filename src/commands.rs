@@ -423,6 +423,44 @@ fn meld_recursive(
         );
     }
 
+    // spec: POL-36 -- the allow/lock check requires only the parsed source
+    // identity (available now, before any clone). Hoisting it here ensures no
+    // git network call or directory creation occurs for a refused source (E14).
+    // The pinned check (POL-20) stays post-clone because it needs the effective
+    // pin, which may come from the source's mind.toml (read after the clone).
+    if let Some(policy) = policy {
+        let identity = source.name.clone();
+
+        // spec: POL-56 -- when allow-local is false under a lock, local-path
+        // and file:// melds are refused regardless of allow patterns. This check
+        // precedes the allow-pattern check so the error message names the
+        // allow-local reason rather than a pattern miss.
+        if policy.lock() && !policy.allow_local() && is_local {
+            if let Some(path) = effective_policy_path() {
+                // spec: POL-37 (same hint pattern as SourceNotAllowed)
+                eprintln!("hint: managed policy at {path}");
+            }
+            return Err(MindError::LocalMeldForbidden { identity });
+        }
+
+        let allowed = policy.allow_matches(&identity);
+        if policy.lock() && !allowed {
+            // spec: POL-11, POL-36 -- refused before any clone or dir creation.
+            // Print the policy file path so the developer knows where to look.
+            if let Some(path) = effective_policy_path() {
+                // spec: POL-37
+                eprintln!("hint: managed policy at {path}");
+            }
+            return Err(MindError::SourceNotAllowed { identity });
+        }
+        if !policy.lock() && !allowed {
+            // POL-13: with lock off, allow is advisory; warn but proceed.
+            eprintln!(
+                "warning: source '{identity}' is not in the managed policy's allowlist (advisory; not enforced because [sources].lock is false)"
+            );
+        }
+    }
+
     // A local source with no pin is read straight from its working tree (CLI-27):
     // no clone, and `mind` never touches the directory. Any other source is cloned
     // into the sources tree (default branch first so we can read mind.toml, then
@@ -498,26 +536,10 @@ fn meld_recursive(
         .or(directive_pin)
         .unwrap_or(Pin::DefaultBranch);
 
-    // Managed-policy enforcement (POL-3 authoritative). The identity is known and
-    // the effective pin is resolved, but nothing is registered yet and the only
-    // thing on disk is the throwaway default-branch clone (removed on refusal), so
-    // a refusal here leaves nothing behind.
+    // spec: POL-20 -- pinned check stays post-clone because it needs the
+    // effective pin, which may come from the source's mind.toml.
     if let Some(policy) = policy {
         let identity = source.name.clone();
-        let allowed = policy.allow_matches(&identity);
-        if policy.lock() && !allowed {
-            // POL-11: locked allowlist refuses a non-matching source outright.
-            if !is_local {
-                let _ = std::fs::remove_dir_all(&dir);
-            }
-            return Err(MindError::SourceNotAllowed { identity });
-        }
-        if !policy.lock() && !allowed {
-            // POL-13: with lock off, allow is advisory; warn but proceed.
-            eprintln!(
-                "warning: source '{identity}' is not in the managed policy's allowlist (advisory; not enforced because [sources].lock is false)"
-            );
-        }
         if policy.pinned() && matches!(effective_pin, Pin::DefaultBranch | Pin::FollowBranch(_)) {
             // POL-20: pinned policy forbids a floating branch (default branch or
             // --follow-branch); only a tag/ref pin is permitted.
@@ -1197,6 +1219,40 @@ fn strip_ansi(s: &str) -> String {
         .collect()
 }
 
+/// Return the path of the managed policy file currently in effect, if any.
+///
+/// Mirrors the POL-1/POL-2 precedence of `Policy::load()`: the system path when
+/// it exists, else `$MIND_POLICY_FILE` when set and the file exists. Used to
+/// name the policy file in `SourceNotAllowed` output (POL-37) without requiring
+/// the `Policy` struct to carry a path field.
+fn effective_policy_path() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    const SYSTEM_FIXED: &str = "/Library/Application Support/mind/policy.toml";
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    const SYSTEM_FIXED: &str = "/etc/mind/policy.toml";
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let sys = std::path::Path::new(SYSTEM_FIXED);
+        if sys.exists() {
+            return Some(SYSTEM_FIXED.to_string());
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let base = std::env::var_os("PROGRAMDATA")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from(r"C:\ProgramData"));
+        let sys = base.join("mind").join("policy.toml");
+        if sys.exists() {
+            return Some(sys.display().to_string());
+        }
+    }
+    // Fall back to $MIND_POLICY_FILE when set and the file exists (POL-2).
+    let env_path = std::env::var_os("MIND_POLICY_FILE").map(std::path::PathBuf::from)?;
+    env_path.exists().then(|| env_path.display().to_string())
+}
+
 /// Derive a suggested namespace prefix from a source URL or local path.
 ///
 /// Takes the last `/`-separated component and strips any `.git` suffix, so
@@ -1318,23 +1374,48 @@ fn clone_failure_lines(entry_name: &str, err: &MindError) -> Vec<String> {
 
 /// Handle a top-level (direct, user-initiated) git clone failure for `meld`.
 ///
-/// Applies three behaviors for a top-level failure:
-/// - Prints git's stderr as the first line of output so the actual cause is
-///   immediately visible (CLI-180).
+/// In human mode (spec: CLI-180):
+/// - Prints git's stderr (sanitized via strip_ansi, spec: CLI-186) so the
+///   actual cause is immediately visible.
 /// - Under `--verbose` also prints the reconstructed command line and the
-///   internal store path (CLI-180); without it those details are suppressed.
+///   internal store path; without it those details are suppressed.
 /// - Prints auth or proxy remediation hints where applicable (CLI-177, CLI-178).
+/// - Returns a `MindError::Git` with args reduced to `["clone"]` and stderr set
+///   to `"(git output above)"` so the display does not repeat the store path
+///   and never shows the literal `<no stderr>` (CLI-185).
 ///
-/// Returns a stripped [`MindError::Git`] with args reduced to `["clone"]` and
-/// stderr cleared (already printed above) so `main.rs` does not repeat the
-/// internal store path or duplicate the git error text.
+/// Under `--json` (spec: CLI-184):
+/// - Skips all eprintln output (hints and stderr) so only the JSON envelope
+///   appears on stdout; git's stderr is preserved in the returned error so the
+///   CLI-181 envelope's `message` field carries the actual cause.
 fn handle_top_level_clone_err(
     e: MindError,
     ssh_url: Option<String>,
     store_path: &std::path::Path,
     out: crate::render::OutputCtx,
 ) -> MindError {
-    // spec: CLI-180 -- lead with git's stderr (the actual cause).
+    // spec: CLI-184 -- under --json skip all stderr output; preserve the cause
+    // so the JSON envelope message is informative.
+    if out.json {
+        // Keep git's stderr intact; reduce args to hide the internal store path.
+        return match e {
+            MindError::Git {
+                url,
+                status,
+                stderr,
+                ..
+            } => MindError::Git {
+                url,
+                args: vec!["clone".to_string()],
+                status,
+                stderr,
+            },
+            other => other,
+        };
+    }
+
+    // spec: CLI-180, CLI-186 -- lead with git's stderr (sanitized against
+    // ANSI/bidi injection from a hostile server).
     if let MindError::Git {
         ref stderr,
         ref args,
@@ -1342,7 +1423,7 @@ fn handle_top_level_clone_err(
     } = e
     {
         if !stderr.is_empty() {
-            eprintln!("{stderr}");
+            eprintln!("{}", strip_ansi(stderr));
         }
         if out.verbose {
             eprintln!("  command: git {}", args.join(" "));
@@ -1362,14 +1443,15 @@ fn handle_top_level_clone_err(
             eprintln!("{line}");
         }
     }
-    // Strip the clone command args and stderr from the error so main.rs does not
-    // re-print the internal store path or duplicate the already-shown git error.
+    // spec: CLI-185 -- set stderr to "(git output above)" so the returned
+    // error's Display never shows the misleading literal `<no stderr>` when
+    // git output was already streamed to the terminal above.
     match e {
         MindError::Git { url, status, .. } => MindError::Git {
             url,
             args: vec!["clone".to_string()],
             status,
-            stderr: String::new(),
+            stderr: "(git output above)".to_string(),
         },
         other => other,
     }
@@ -2716,6 +2798,74 @@ pub fn install_source_items_subset(
     Ok(())
 }
 
+/// Install all items from a provisioned source headlessly, for the policy
+/// `auto_meld` `install = true` path (POL-58/59/60).
+///
+/// Each item from `source_name` that is not yet installed is attempted
+/// independently via `learn` so a single failure does not abort installation of
+/// the remaining items (POL-60). Build hooks are skipped unless `run_build_hooks`
+/// is `true` (POL-59, same as `--dangerously-skip-build-hook-check`). Install
+/// hooks follow the standard non-TTY path: they are skipped in a non-interactive
+/// context (HOOK-72).
+///
+/// Returns a list of `(item_key, error)` pairs for each failed item so the
+/// caller can apply POL-34/POL-60 soft-fail semantics (warn, record, continue,
+/// non-zero exit). An empty list means all items installed successfully (or there
+/// were no items to install).
+// spec: POL-58 POL-59 POL-60
+pub fn install_provisioned_items(
+    paths: &Paths,
+    source_name: &str,
+    run_build_hooks: bool,
+) -> Vec<(String, MindError)> {
+    let flow = InstallFlow {
+        yes: true,
+        clobber: Clobber::Prompt,
+        dangerously_skip: false,
+        dangerously_skip_build: run_build_hooks,
+    };
+
+    // Load the registry and scan items for this source only.
+    let registry = match Registry::load(paths) {
+        Ok(r) => r,
+        Err(e) => return vec![(source_name.to_string(), e)],
+    };
+    let Some(source) = registry.find(source_name) else {
+        return vec![];
+    };
+    let source_items = match catalog::scan(paths, &single(source)) {
+        Ok(items) => items,
+        Err(e) => return vec![(source_name.to_string(), e)],
+    };
+    if source_items.is_empty() {
+        return vec![];
+    }
+
+    // Load the manifest once to know what is already installed; `learn` will
+    // also check per call, but this avoids the overhead of starting `learn`
+    // for items that are clearly already done.
+    let manifest = match Manifest::load(paths) {
+        Ok(m) => m,
+        Err(e) => return vec![(source_name.to_string(), e)],
+    };
+    let installed: std::collections::HashSet<String> = manifest.items.keys().cloned().collect();
+
+    // Install each not-yet-installed item independently so a failure on one
+    // does not block the rest (POL-60).
+    let mut failures = Vec::new();
+    for item in &source_items {
+        let key = item.key();
+        if installed.contains(&key) {
+            continue; // already installed; no-op
+        }
+        let item_ref = format!("{source_name}#{key}");
+        if let Err(e) = learn(paths, &item_ref, false, flow) {
+            failures.push((key, e));
+        }
+    }
+    failures
+}
+
 /// True when the repo spec resolves to an already-registered source.
 pub fn is_melded(paths: &Paths, repo: &str) -> Result<bool> {
     let name = parse_spec(repo)?.name;
@@ -4018,44 +4168,126 @@ pub fn sync(
         let mut visited = HashSet::new();
         let mut provisioned = 0usize;
         for am in policy.auto_meld() {
-            // Idempotency: derive the entry's identity and skip if already melded.
+            // Determine which of three outcomes this entry reaches, computing
+            // whether the source ends this sync registered.  Using a labeled block
+            // lets all three branches fall through to the common install pass below
+            // rather than `continue`-ing past it.
+            //
+            //   - registered at declared pin (POL-32)  -> confirmed registered
+            //   - registered at different pin (POL-55) -> re-pinned, confirmed registered
+            //   - not yet registered                   -> meld_recursive -> registered or failure
+            //
             // (meld_recursive also skips a same-URL duplicate, but checking here
             // avoids the clone attempt and the "melding ..." chatter.)
-            if let Ok(spec) = parse_spec(&am.repo)
-                && registry.find(&spec.name).is_some()
-            {
-                continue;
-            }
-            // spec: POL-34 -- soft-fail: warn and continue so already-melded
-            // sources still sync; record the failure for the final exit-code check.
-            match meld_recursive(
-                paths,
-                &mut registry,
-                &am.repo,
-                None,
-                vec![],
-                false, // no consumer --flat-skills for an auto-melded source
-                Some(am.pin.clone()),
-                false, // skip (not error) if a same-URL entry is already present
-                &mut visited,
-                Some(policy),
-                None,  // auto-meld supplies no install hook
-                false, // auto-meld is non-TTY, so its hooks take the HOOK-22 skip path
-                prefer_ssh,
-                true, // auto-meld is non-interactive (no collision prompt)
-                None, // auto-meld has no curator-supplied configuration
-                &mut sync_skipped,
-            ) {
-                Ok(n) => provisioned += n,
-                Err(e) => {
-                    if !out.json {
-                        eprintln!(
-                            "  {} auto_meld provisioning failed for '{}': {e}",
-                            out.warn(),
-                            am.repo
-                        );
+            let source_registered: bool = 'registered: {
+                if let Ok(spec) = parse_spec(&am.repo) {
+                    if let Some(src) = registry.sources.iter_mut().find(|s| s.name == spec.name) {
+                        let old_pin = src.pin.clone();
+                        if old_pin == am.pin {
+                            // spec: POL-32 -- already at the declared pin; confirmed registered.
+                            break 'registered true;
+                        }
+                        // spec: POL-55 -- pin drift: update the recorded pin so the
+                        // per-source sync fetch below lands the new ref.
+                        src.pin = am.pin.clone();
+                        provisioned += 1; // mark registry dirty to trigger save below
+                        if !out.json {
+                            println!(
+                                "  {} re-pinned {} {} -> {}",
+                                out.ok(),
+                                spec.name,
+                                pin_description(&old_pin),
+                                pin_description(&am.pin),
+                            );
+                        }
+                        break 'registered true;
                     }
-                    provision_failures.push(am.repo.clone());
+                }
+                // spec: POL-34 -- soft-fail: warn and continue so already-melded
+                // sources still sync; record the failure for the final exit-code check.
+                // spec: POL-35 -- snapshot registry length before the call so any
+                // sources pushed by a partially-failing meld_recursive can be rolled
+                // back, preventing a subsequent save from persisting a partial entry.
+                let snapshot_len = registry.sources.len();
+                match meld_recursive(
+                    paths,
+                    &mut registry,
+                    &am.repo,
+                    None,
+                    vec![],
+                    false, // no consumer --flat-skills for an auto-melded source
+                    Some(am.pin.clone()),
+                    false, // skip (not error) if a same-URL entry is already present
+                    &mut visited,
+                    Some(policy),
+                    None,  // auto-meld supplies no install hook
+                    false, // auto-meld is non-TTY, so its hooks take the HOOK-22 skip path
+                    prefer_ssh,
+                    true, // auto-meld is non-interactive (no collision prompt)
+                    None, // auto-meld has no curator-supplied configuration
+                    &mut sync_skipped,
+                ) {
+                    Ok(n) => {
+                        provisioned += n;
+                        break 'registered true;
+                    }
+                    Err(e) => {
+                        // spec: POL-35 -- roll back any partial registry push from
+                        // this entry so the save below does not persist it.
+                        registry.sources.truncate(snapshot_len);
+                        if !out.json {
+                            eprintln!(
+                                "  {} auto_meld provisioning failed for '{}': {e}",
+                                out.warn(),
+                                am.repo
+                            );
+                        }
+                        provision_failures.push(am.repo.clone());
+                        break 'registered false;
+                    }
+                }
+            };
+            // spec: POL-58 -- install pass: runs for ALL registered outcomes
+            // (fresh meld, same-pin idempotent confirmation, or re-pin reconciliation)
+            // so a machine that was register-only and later gains `install = true`
+            // converges on the next sync.  The per-item skip inside
+            // `install_provisioned_items` (`installed.contains(&key)`) makes repeat
+            // syncs idempotent: already-installed items are skipped without error.
+            if am.install && source_registered {
+                if let Ok(spec) = parse_spec(&am.repo) {
+                    // Save the registry first so the install pass can read
+                    // the newly registered source from disk.
+                    if provisioned > 0 {
+                        if let Err(e) = registry.save(paths) {
+                            provision_failures.push(am.repo.clone());
+                            if !out.json {
+                                eprintln!(
+                                    "  {} auto_meld registry save failed before install for '{}': {e}",
+                                    out.warn(),
+                                    am.repo
+                                );
+                            }
+                            provisioned = 0; // reset so we don't double-save
+                            continue;
+                        }
+                        provisioned = 0; // already saved
+                    }
+                    // spec: POL-60 -- per-item failures are soft: warn,
+                    // record, continue; do not abort remaining items or
+                    // other sources.
+                    let item_failures =
+                        install_provisioned_items(paths, &spec.name, am.run_build_hooks);
+                    for (key, e) in item_failures {
+                        if !out.json {
+                            eprintln!(
+                                "  {} auto_meld item install failed for '{}' ({}): {e}",
+                                out.warn(),
+                                am.repo,
+                                key,
+                            );
+                        }
+                        provision_failures.push(format!("{}:{}", am.repo, key));
+                    }
                 }
             }
         }
@@ -4071,7 +4303,8 @@ pub fn sync(
         if out.json {
             return print_json(&MutationResult::new("sync", "", "no-op"));
         }
-        println!("no sources melded; run `mind meld <owner/repo>`");
+        // spec: CLI-187
+        println!("no sources melded; run `mind meld <owner/repo>` to add one");
         return Ok(());
     }
     // A per-source failure (e.g. a network error on one remote) must not abort
@@ -4155,7 +4388,10 @@ pub fn sync(
             Err(e) => {
                 if !out.json {
                     println!("{}", out.red("failed"));
-                    eprintln!("  {} {}: {e}", out.err(), source.name);
+                    // spec: CLI-186 -- sanitize git stderr before printing to
+                    // prevent ANSI/bidi injection from a hostile remote.
+                    let safe_e = strip_ansi(&e.to_string());
+                    eprintln!("  {} {}: {safe_e}", out.err(), source.name);
                     // spec: CLI-177, CLI-178 -- auth and proxy hints on a direct
                     // per-source sync git failure, mirroring the meld top-level hints.
                     if git::is_auth_failure(&e) && !source.is_local() {
@@ -4976,7 +5212,8 @@ pub fn recall(
             return print_json_envelope(&registry.sources);
         }
         if registry.sources.is_empty() {
-            println!("no sources melded");
+            // spec: CLI-187
+            println!("no sources melded; run `mind meld <owner/repo>` to add one");
             return Ok(());
         }
         let rows = registry
@@ -5147,7 +5384,8 @@ pub fn recall(
     }
 
     if registry.sources.is_empty() {
-        println!("no sources melded; `mind meld <repo>` to add one");
+        // spec: CLI-187
+        println!("no sources melded; run `mind meld <owner/repo>` to add one");
         // Fall through: unmanaged lobe items are still worth showing (UNM-2).
     }
 
@@ -5368,7 +5606,8 @@ pub fn probe(
 
     if hits.is_empty() && unmanaged.is_empty() {
         if registry.sources.is_empty() {
-            println!("no sources melded; run `mind meld <owner/repo>`");
+            // spec: CLI-187
+            println!("no sources melded; run `mind meld <owner/repo>` to add one");
         } else {
             println!("no items match '{q}'");
         }
@@ -5651,11 +5890,14 @@ pub fn introspect(paths: &Paths, fix: bool, json: bool) -> Result<()> {
     if json {
         #[derive(Serialize)]
         struct Report<'a> {
+            // spec: CLI-189 - schema version; always 1.
+            schema: u8,
             issues: &'a [Issue],
             sources: usize,
             items: usize,
         }
         return print_json(&Report {
+            schema: 1,
             issues: &issues,
             sources: registry.sources.len(),
             items: manifest.items.len(),

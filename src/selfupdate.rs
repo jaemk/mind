@@ -179,10 +179,14 @@ pub fn run(check: bool, yes: bool, mut version: Option<String>) -> Result<()> {
     // Load the managed policy and check the self-update control before any network
     // call (POL-51..POL-54). A machine with no policy file behaves exactly as today.
     let policy = crate::policy::Policy::load()?;
-    if let Some(pin) = check_policy_for_evolve(policy.as_ref(), version.as_deref())? {
-        // Policy pins to a specific version; behave as if --version <pin> was passed.
-        version = Some(pin);
-    }
+    let policy_pin_active =
+        if let Some(pin) = check_policy_for_evolve(policy.as_ref(), version.as_deref())? {
+            // Policy pins to a specific version; behave as if --version <pin> was passed.
+            version = Some(pin);
+            true
+        } else {
+            false
+        };
 
     // Resolve the target version: an explicit --version (or a policy pin) bypasses
     // the network entirely; otherwise fetch and parse the latest release tag.
@@ -213,6 +217,15 @@ pub fn run(check: bool, yes: bool, mut version: Option<String>) -> Result<()> {
             Decision::Update => out.warn(),
         };
         println!("{marker} {}", check_report(current, &target_version, &d));
+        // spec: POL-66 -- when running is above the policy pin, warn that the pin is
+        // an upper bound and does not downgrade. Human mode only; --json already
+        // returned above.
+        if matches!(d, Decision::PinnedBelowCurrent) && policy_pin_active {
+            println!(
+                "warning: running {current} differs from the managed policy pin \
+                 {target_version}; the policy pin is an upper bound and does not downgrade"
+            );
+        }
         return Ok(());
     }
 
@@ -235,6 +248,15 @@ pub fn run(check: bool, yes: bool, mut version: Option<String>) -> Result<()> {
                 out.ok(),
                 check_report(current, &target_version, &d)
             );
+            // spec: POL-66 -- when running is above the policy pin, warn that the pin
+            // is an upper bound and does not downgrade. Human mode only; --json already
+            // returned above.
+            if policy_pin_active {
+                println!(
+                    "warning: running {current} differs from the managed policy pin \
+                     {target_version}; the policy pin is an upper bound and does not downgrade"
+                );
+            }
             return Ok(());
         }
         Decision::Update => {}
@@ -479,13 +501,27 @@ fn mktemp_dir() -> Result<std::path::PathBuf> {
     Ok(base)
 }
 
+/// Clamp the raw parsed value of `MIND_HTTP_TIMEOUT_SECS` to the usable range.
+///
+/// A value of 0 is treated the same as a missing value and falls back to 15:
+/// both `--connect-timeout 0` (curl) and `--timeout=0` (wget) mean "no limit",
+/// which silently defeats the intent of the knob (STO-52).
+// spec: STO-52
+pub(crate) fn clamp_http_timeout(raw: Option<u64>) -> u64 {
+    match raw {
+        None | Some(0) => 15,
+        Some(n) => n,
+    }
+}
+
 /// Read the connect-timeout from `MIND_HTTP_TIMEOUT_SECS` (STO-52).
-/// Falls back to 15 on a missing or non-numeric value.
+/// Falls back to 15 on a missing, non-numeric, or zero value.
 fn http_timeout_secs() -> u64 {
-    std::env::var("MIND_HTTP_TIMEOUT_SECS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(15)
+    clamp_http_timeout(
+        std::env::var("MIND_HTTP_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok()),
+    )
 }
 
 /// Build the curl argument list for a URL-to-stdout fetch (STO-52).
@@ -509,13 +545,16 @@ pub(crate) fn curl_string_args(url: &str, timeout_secs: u64) -> Vec<String> {
     ]
 }
 
-/// Build the wget argument list for a URL-to-stdout fetch (STO-52).
+/// Build the wget argument list for a URL-to-stdout fetch (STO-52, STO-53).
 ///
 /// `-q` is intentionally omitted so wget's stderr is captured on failure and
 /// can populate `DownloadFailed.reason` with an actionable message.
+/// `--tries=1` prevents wget's default 20-retry behaviour from multiplying the
+/// effective timeout by up to 20x on a blackholed endpoint (STO-53).
 pub(crate) fn wget_string_args(url: &str, timeout_secs: u64) -> Vec<String> {
     vec![
         "--https-only".into(),
+        "--tries=1".into(),
         "-O-".into(),
         format!("--timeout={timeout_secs}"),
         url.into(),
@@ -543,13 +582,16 @@ pub(crate) fn curl_file_args(url: &str, dest: &str, timeout_secs: u64) -> Vec<St
     ]
 }
 
-/// Build the wget argument list for a URL-to-file fetch (STO-52).
+/// Build the wget argument list for a URL-to-file fetch (STO-52, STO-53).
 ///
 /// `-q` is kept here (file-fetch; exit code signals failure) and `dest` is
 /// included in the arg list for unit-testability.
+/// `--tries=1` prevents wget's default 20-retry behaviour from multiplying the
+/// effective timeout by up to 20x on a blackholed endpoint (STO-53).
 pub(crate) fn wget_file_args(url: &str, dest: &str, timeout_secs: u64) -> Vec<String> {
     vec![
         "--https-only".into(),
+        "--tries=1".into(),
         "-qO".into(),
         dest.into(),
         format!("--timeout={timeout_secs}"),
@@ -561,17 +603,26 @@ pub(crate) fn wget_file_args(url: &str, dest: &str, timeout_secs: u64) -> Vec<St
 ///
 /// Matches HTTP 407 responses and "Could not resolve proxy" messages that curl
 /// and wget emit when a proxy is misconfigured or missing credentials.
+///
+/// The `reason` text comes from curl/wget stderr, which is untrusted (a MITM'd
+/// or hostile endpoint controls those bytes). It is sanitized via `strip_ansi`
+/// before being embedded in the returned string (STO-54).
 fn maybe_proxy_hint(reason: &str) -> String {
+    // spec: STO-54 -- sanitize curl/wget output before it is placed in
+    // DownloadFailed.reason; a hostile endpoint controls stderr bytes.
+    let reason = crate::sanitize::strip_ansi(reason);
     if reason.contains("407")
         || reason.contains("Could not resolve proxy")
         || reason.contains("Received HTTP code 407 from proxy")
     {
         format!(
-            "{reason}\nhint: if you are behind a proxy, set the HTTPS_PROXY environment variable \
-             (e.g. export HTTPS_PROXY=http://proxy.example.com:8080) or configure git's http.proxy setting"
+            "{reason}\nhint: if you are behind a proxy, set HTTPS_PROXY or HTTP_PROXY \
+             (e.g. export HTTPS_PROXY=http://proxy.example.com:8080); \
+             for NTLM or Kerberos proxies, configure proxy settings in ~/.curlrc \
+             (proxy-negotiate)"
         )
     } else {
-        reason.to_string()
+        reason
     }
 }
 
@@ -761,6 +812,260 @@ mod tests {
             args.contains(&"--timeout=42".to_string()),
             "custom timeout must appear in wget args: {args:?}"
         );
+    }
+
+    #[test]
+    // spec: STO-52
+    fn http_timeout_zero_clamped_to_default() {
+        // MIND_HTTP_TIMEOUT_SECS=0 means "no limit" in both curl (--connect-timeout 0)
+        // and wget (--timeout=0), silently defeating the knob. clamp_http_timeout
+        // must treat 0 the same as a missing value and return the 15-second default.
+        assert_eq!(
+            clamp_http_timeout(Some(0)),
+            15,
+            "a zero value must clamp to the 15-second default"
+        );
+        assert_eq!(
+            clamp_http_timeout(None),
+            15,
+            "a missing value must default to 15"
+        );
+        assert_eq!(
+            clamp_http_timeout(Some(30)),
+            30,
+            "a non-zero value must pass through unchanged"
+        );
+        assert_eq!(
+            clamp_http_timeout(Some(1)),
+            1,
+            "the minimum non-zero value (1) must not be altered"
+        );
+    }
+
+    #[test]
+    // spec: STO-53
+    fn wget_args_include_tries_1() {
+        // All wget invocations must pass --tries=1 so a blackholed endpoint cannot
+        // exhaust ~20x the intended timeout bound (wget defaults to 20 retries;
+        // curl is already a single attempt bounded by --max-time).
+        let str_args = wget_string_args("https://example.com/data", 15);
+        assert!(
+            str_args.contains(&"--tries=1".to_string()),
+            "wget string-fetch must include --tries=1: {str_args:?}"
+        );
+
+        let file_args = wget_file_args("https://example.com/file.tar.gz", "/tmp/dest.tar.gz", 30);
+        assert!(
+            file_args.contains(&"--tries=1".to_string()),
+            "wget file-fetch must include --tries=1: {file_args:?}"
+        );
+    }
+
+    #[test]
+    // spec: STO-54
+    fn maybe_proxy_hint_strips_ansi_and_bidi_from_reason() {
+        // The reason text comes from curl/wget stderr, which a MITM'd or hostile
+        // endpoint controls. maybe_proxy_hint must strip ANSI escapes and bidi
+        // override characters before embedding the reason in DownloadFailed.reason.
+        let ansi_reason = "download error \x1b[31mred\x1b[0m text";
+        let result = maybe_proxy_hint(ansi_reason);
+        assert!(
+            !result.contains('\x1b'),
+            "ANSI escape sequences must be stripped from the reason: {result:?}"
+        );
+        assert!(
+            result.contains("download error"),
+            "visible text must be preserved after stripping: {result:?}"
+        );
+
+        // Bidi override characters (U+202E and siblings) must also be stripped.
+        let bidi_reason = "pay \u{202E}oot";
+        let result = maybe_proxy_hint(bidi_reason);
+        assert!(
+            !result.contains('\u{202E}'),
+            "bidi override (U+202E) must be stripped: {result:?}"
+        );
+
+        // The proxy-hint branch must also produce a sanitized output.
+        let hostile_407 = "\x1b[1m407 Proxy Auth Required\x1b[0m \u{202E}spoofed";
+        let result = maybe_proxy_hint(hostile_407);
+        assert!(
+            !result.contains('\x1b'),
+            "ANSI must be stripped even in the proxy-hint branch: {result:?}"
+        );
+        assert!(
+            !result.contains('\u{202E}'),
+            "bidi must be stripped even in the proxy-hint branch: {result:?}"
+        );
+        // The hint must still be appended (407 was present after sanitization).
+        assert!(
+            result.contains("HTTPS_PROXY"),
+            "proxy hint must still be appended when 407 is present: {result:?}"
+        );
+    }
+
+    #[test]
+    // spec: STO-54
+    fn maybe_proxy_hint_curlrc_mention_no_git_proxy() {
+        // The proxy hint must NOT mention git's http.proxy setting (which has no
+        // effect on curl/wget subprocesses) and MUST mention the curlrc escape hatch.
+        let reason_407 = "Received HTTP code 407 from proxy";
+        let hint = maybe_proxy_hint(reason_407);
+        assert!(
+            !hint.contains("http.proxy"),
+            "hint must not mention git's http.proxy (ineffective for curl/wget): {hint:?}"
+        );
+        assert!(
+            hint.contains("curlrc") || hint.contains(".curlrc"),
+            "hint must mention ~/.curlrc as the NTLM/Kerberos escape hatch: {hint:?}"
+        );
+        assert!(
+            hint.contains("HTTPS_PROXY") || hint.contains("HTTP_PROXY"),
+            "hint must name HTTPS_PROXY or HTTP_PROXY: {hint:?}"
+        );
+    }
+
+    #[test]
+    // spec: STO-54
+    fn maybe_proxy_hint_407_in_escape_sequence_does_not_trigger_hint() {
+        // Adversarial: a hostile endpoint emits an SGR color escape whose numeric
+        // parameter is `407` (`ESC [ 4 0 7 m`). strip_ansi removes the whole escape
+        // BEFORE the `contains("407")` test, so the digits inside the escape must
+        // NOT be left behind to spuriously trigger the proxy hint. The `407` was
+        // never real HTTP-407 text; it was an ANSI parameter.
+        let colored = "\x1b[407mdownload timed out\x1b[0m";
+        let result = maybe_proxy_hint(colored);
+        assert!(
+            !result.contains('\x1b'),
+            "escape must be stripped: {result:?}"
+        );
+        assert!(
+            !result.contains("407"),
+            "the `407` ANSI parameter must be stripped, not surface as text: {result:?}"
+        );
+        assert!(
+            !result.contains("HTTPS_PROXY"),
+            "an ANSI-parameter 407 must NOT append the proxy hint: {result:?}"
+        );
+        assert_eq!(
+            result, "download timed out",
+            "only the visible message survives: {result:?}"
+        );
+    }
+
+    #[test]
+    // spec: STO-54
+    fn maybe_proxy_hint_real_407_split_across_escapes_is_detected() {
+        // Adversarial converse: a genuine HTTP-407 message with a color escape
+        // spliced into the middle of the digits (`4 ESC[0m 07`). Because strip_ansi
+        // runs FIRST, the escape is removed and the digits rejoin into `407`, so the
+        // proxy hint IS correctly appended. This pins the ordering: sanitize, then
+        // match -- not match, then sanitize (which would miss this).
+        let split = "HTTP 4\x1b[0m07 from proxy";
+        let result = maybe_proxy_hint(split);
+        assert!(
+            !result.contains('\x1b'),
+            "escape must be stripped: {result:?}"
+        );
+        assert!(
+            result.contains("407"),
+            "digits must rejoin into 407 after stripping the interior escape: {result:?}"
+        );
+        assert!(
+            result.contains("HTTPS_PROXY"),
+            "a real 407 (revealed after sanitization) must append the proxy hint: {result:?}"
+        );
+    }
+
+    #[test]
+    // spec: STO-54
+    fn maybe_proxy_hint_could_not_resolve_proxy_branch() {
+        // The second recognized proxy-failure phrase must also append the hint, and
+        // the output must still be sanitized (ANSI stripped) in that branch.
+        let reason = "wget: \x1b[31mCould not resolve proxy\x1b[0m: proxy.local";
+        let result = maybe_proxy_hint(reason);
+        assert!(
+            !result.contains('\x1b'),
+            "ANSI must be stripped in the resolve-proxy branch: {result:?}"
+        );
+        assert!(
+            result.contains("Could not resolve proxy"),
+            "the recognized phrase must survive sanitization: {result:?}"
+        );
+        assert!(
+            result.contains("HTTPS_PROXY"),
+            "the resolve-proxy phrase must trigger the proxy hint: {result:?}"
+        );
+    }
+
+    #[test]
+    // spec: STO-54
+    fn maybe_proxy_hint_non_proxy_reason_is_returned_verbatim_after_sanitizing() {
+        // A non-proxy failure must be returned sanitized but WITHOUT the hint
+        // appended, so ordinary download errors are not decorated with proxy advice.
+        let reason = "server returned HTTP 500";
+        let result = maybe_proxy_hint(reason);
+        assert_eq!(
+            result, "server returned HTTP 500",
+            "a non-proxy reason must pass through unchanged (already ASCII): {result:?}"
+        );
+        assert!(
+            !result.contains("HTTPS_PROXY"),
+            "a non-proxy reason must NOT append the proxy hint: {result:?}"
+        );
+    }
+
+    // ---- STO-53: install.sh wget invocations pass --tries=1 ------------------
+
+    /// Read the shipped `resources/install.sh` from the crate root (mirrors the
+    /// CHANGELOG.md resource-reading pattern in tests/changelog.rs).
+    fn install_sh() -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/install.sh");
+        std::fs::read_to_string(&path).expect("resources/install.sh must exist and be readable")
+    }
+
+    #[test]
+    // spec: STO-53
+    fn install_sh_every_wget_invocation_passes_tries_1() {
+        // STO-53 requires that *every* wget invocation in resources/install.sh (not
+        // just the Rust downloader) pass --tries=1, so the shell installer cannot
+        // hang ~20x the timeout on a blackholed endpoint. The Rust arg builders are
+        // covered by wget_args_include_tries_1; this closes the shell-script half.
+        let script = install_sh();
+        let wget_lines: Vec<&str> = script
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| l.starts_with("wget "))
+            .collect();
+        assert_eq!(
+            wget_lines.len(),
+            2,
+            "install.sh must invoke wget exactly twice (fetch + fetch_to); found: {wget_lines:?}"
+        );
+        for line in &wget_lines {
+            assert!(
+                line.contains("--tries=1"),
+                "every wget invocation in install.sh must pass --tries=1: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    // spec: STO-52
+    fn install_sh_wget_invocations_carry_a_timeout() {
+        // install.sh's wget calls must also carry an explicit --timeout so a stalled
+        // connect cannot hang the installer (STO-52; the fixed 15 s CONNECT_TIMEOUT).
+        let script = install_sh();
+        for line in script
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| l.starts_with("wget "))
+        {
+            assert!(
+                line.contains("--timeout="),
+                "every wget invocation in install.sh must pass --timeout=: {line:?}"
+            );
+        }
     }
 
     // ---- POL-51..54: policy control over self-update -------------------------

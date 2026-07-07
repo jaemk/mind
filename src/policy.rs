@@ -58,6 +58,12 @@ pub struct AutoMeld {
     pub repo: String,
     /// The declared pin (tag, ref, follow-branch, or the default branch).
     pub pin: Pin,
+    /// Install every item the source offers after successful provisioning (POL-58).
+    /// When false (the default), `sync` registers the source only.
+    pub install: bool,
+    /// Run build hooks during the headless install pass (POL-59). Only meaningful
+    /// when `install = true`; ignored otherwise.
+    pub run_build_hooks: bool,
 }
 
 /// A parsed and validated managed policy (POL-3 authoritative when in effect).
@@ -69,6 +75,10 @@ pub struct Policy {
     lock: bool,
     /// `[sources].pinned`: require every meld to resolve to a tag/ref (POL-20).
     pinned: bool,
+    /// `[sources].allow-local`: whether local-path and `file://` melds are
+    /// permitted under a lock (POL-56/57). Defaults to `true` (preserves
+    /// existing behavior).
+    allow_local: bool,
     /// `[[sources.auto_meld]]` base set (POL-30).
     auto_meld: Vec<AutoMeld>,
     /// `[lobes].lock`: pin the effective agent homes to `lobes_targets` (POL-40).
@@ -81,9 +91,23 @@ pub struct Policy {
 
 // --- TOML wire shape --------------------------------------------------------
 //
-// Deserialized with `deny_unknown_fields` (mirroring src/config.rs) so an
-// unknown key is a hard error (POL-5). The structs below are the raw file shape;
-// `Policy` is the validated public form.
+// The parse is two-phase (POL-61):
+//   1. A permissive probe (`RawPolicyProbe`) reads only `min-mind-version`
+//      while silently ignoring all other keys. The version gate runs here.
+//   2. The strict parse (`RawPolicy`, `deny_unknown_fields`) validates every
+//      known key and rejects unknowns (POL-5).
+// This ordering ensures a future-schema policy with `min-mind-version` set
+// gives a clear "upgrade mind" error (POL-62) instead of an opaque
+// "unknown field" error on whatever new key triggered the old binary.
+
+/// Phase-1 probe: reads only `min-mind-version`; ignores all other keys
+/// (NO `deny_unknown_fields`). Used to check the schema-version gate before
+/// the strict parse fires (POL-61).
+#[derive(Debug, Default, Deserialize)]
+struct RawPolicyProbe {
+    #[serde(default, rename = "min-mind-version")]
+    min_mind_version: Option<String>,
+}
 
 /// The policy decision for `mind evolve` / `self-update` (POL-51..54).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,6 +139,11 @@ struct RawBinary {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawPolicy {
+    /// Recognized by the strict parse so it is not rejected as an unknown key
+    /// (POL-61). The actual version comparison runs in the phase-1 probe before
+    /// this struct is ever populated.
+    #[serde(default, rename = "min-mind-version")]
+    min_mind_version: Option<String>,
     #[serde(default)]
     sources: RawSources,
     #[serde(default)]
@@ -123,7 +152,11 @@ struct RawPolicy {
     binary: RawBinary,
 }
 
-#[derive(Debug, Default, Deserialize)]
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawSources {
     #[serde(default)]
@@ -132,8 +165,25 @@ struct RawSources {
     lock: bool,
     #[serde(default)]
     pinned: bool,
+    /// `allow-local = false` forbids local-path and `file://` melds under lock
+    /// regardless of `allow` patterns (POL-56). Defaults to `true` so that
+    /// existing policies without this key continue to work unchanged.
+    #[serde(default = "default_true", rename = "allow-local")]
+    allow_local: bool,
     #[serde(default)]
     auto_meld: Vec<RawAutoMeld>,
+}
+
+impl Default for RawSources {
+    fn default() -> Self {
+        Self {
+            allow: Vec::new(),
+            lock: false,
+            pinned: false,
+            allow_local: true,
+            auto_meld: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -156,6 +206,12 @@ struct RawAutoMeld {
     ref_: Option<String>,
     #[serde(default)]
     follow_branch: Option<String>,
+    /// Install all items from the source after successful provisioning (POL-58).
+    #[serde(default)]
+    install: bool,
+    /// Run build hooks during the headless install pass (POL-59).
+    #[serde(default, rename = "run-build-hooks")]
+    run_build_hooks: bool,
 }
 
 impl RawAutoMeld {
@@ -207,6 +263,8 @@ impl RawAutoMeld {
         Ok(AutoMeld {
             repo: self.repo,
             pin,
+            install: self.install,
+            run_build_hooks: self.run_build_hooks,
         })
     }
 }
@@ -217,10 +275,23 @@ impl Policy {
     /// Reads the fixed per-OS system path; falls back to `$MIND_POLICY_FILE` only
     /// when no system file exists (POL-1, POL-2). A parse error, unknown key, or
     /// failed [`validate`](Policy::validate) is `Err` (POL-5 fail closed).
+    ///
+    /// When the policy is loaded from the real system path, emits warnings to
+    /// stderr if the file or its parent directory is not securely owned/permissioned
+    /// (POL-64). The check is skipped for `$MIND_POLICY_FILE` paths (POL-65).
     pub fn load() -> Result<Option<Policy>> {
         let env = std::env::var_os(ENV_VAR).map(PathBuf::from);
-        match locate_existing(&system_path(), env.as_deref()) {
-            Some(path) => Ok(Some(load_file(&path)?)),
+        let system = system_path();
+        match locate_existing(&system, env.as_deref()) {
+            Some(path) => {
+                // spec: POL-65 -- permission check only for the real system path.
+                let is_system = path == system;
+                let (policy, warnings) = load_and_check(&path, is_system)?;
+                for w in &warnings {
+                    eprintln!("{w}");
+                }
+                Ok(Some(policy))
+            }
             None => Ok(None),
         }
     }
@@ -306,6 +377,11 @@ impl Policy {
         self.lock
     }
 
+    /// `[sources].allow-local` (POL-56/57). Defaults to `true`.
+    pub fn allow_local(&self) -> bool {
+        self.allow_local
+    }
+
     /// `[sources].pinned` (POL-20).
     pub fn pinned(&self) -> bool {
         self.pinned
@@ -335,6 +411,90 @@ impl Policy {
     pub fn self_update_control(&self) -> &SelfUpdateControl {
         &self.self_update
     }
+}
+
+// --- Permission check (POL-64/POL-65) ---------------------------------------
+//
+// Returns the reasons why a path's ownership/mode is insecure.
+// Pure: accepts (mode, uid) so unit tests pass known values without touching
+// the filesystem. The `is_parent` flag tweaks the message wording and the
+// suggested chmod value.
+#[cfg(unix)]
+fn policy_path_security_warnings(
+    path_display: &str,
+    mode: u32,
+    uid: u32,
+    is_parent: bool,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    let (kind, fix) = if is_parent {
+        (
+            "parent directory of managed policy",
+            "chown root and chmod 755",
+        )
+    } else {
+        ("managed policy", "chown root and chmod 644")
+    };
+    if mode & 0o022 != 0 {
+        out.push(format!(
+            "warning: {kind} {path_display} is group/world-writable; \
+             a local user could alter enforced policy. {fix}."
+        ));
+    }
+    if uid != 0 {
+        out.push(format!(
+            "warning: {kind} {path_display} is not root-owned (uid {uid}); \
+             a local user could alter enforced policy. {fix}."
+        ));
+    }
+    out
+}
+
+/// Check ownership and mode of `path` and its parent directory (POL-64).
+/// Returns warning strings; empty when all checks pass or on non-unix.
+/// Only called for the real system policy path (POL-65 skip for env path).
+#[cfg(unix)]
+fn check_policy_file_permissions(path: &Path) -> Vec<String> {
+    use std::os::unix::fs::MetadataExt;
+    let mut out = Vec::new();
+    if let Ok(meta) = std::fs::metadata(path) {
+        out.extend(policy_path_security_warnings(
+            &path.display().to_string(),
+            meta.mode(),
+            meta.uid(),
+            false,
+        ));
+    }
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        if let Ok(meta) = std::fs::metadata(parent) {
+            out.extend(policy_path_security_warnings(
+                &parent.display().to_string(),
+                meta.mode(),
+                meta.uid(),
+                true,
+            ));
+        }
+    }
+    out
+}
+
+#[cfg(not(unix))]
+fn check_policy_file_permissions(_path: &Path) -> Vec<String> {
+    Vec::new()
+}
+
+/// Internal load used by `Policy::load`, with the `is_system_path` flag that
+/// gates the permission check (POL-64/POL-65). Factored out so tests can verify
+/// the check is skipped for the `$MIND_POLICY_FILE` path without needing to
+/// create a real `/etc/mind/policy.toml`.
+fn load_and_check(path: &Path, is_system_path: bool) -> Result<(Policy, Vec<String>)> {
+    let policy = load_file(path)?;
+    let warnings = if is_system_path {
+        check_policy_file_permissions(path)
+    } else {
+        Vec::new()
+    };
+    Ok((policy, warnings))
 }
 
 /// Resolve the policy file path from the system path and env var, applying the
@@ -370,6 +530,38 @@ pub fn load_file(path: &Path) -> Result<Policy> {
 /// Parse policy TOML text and validate it, attributing errors to `path`. Factored
 /// out so tests can feed strings without temp files.
 fn parse_str(text: &str, path: &Path) -> Result<Policy> {
+    // spec: POL-61 -- phase-1 probe: permissive parse to extract min-mind-version
+    // before the strict deny_unknown_fields parse. This ensures that a policy
+    // written for a newer schema gives a clear "upgrade mind" error (POL-62) on
+    // an old binary instead of an opaque "unknown field" error.
+    //
+    // unwrap_or_default: if the TOML is syntactically malformed the probe yields
+    // no version, and the strict parse below reports the real parse error.
+    let probe: RawPolicyProbe = toml::from_str(text).unwrap_or_default();
+    if let Some(v) = &probe.min_mind_version {
+        // spec: POL-63 -- invalid version string fails closed at policy parse.
+        if !crate::mindfile::is_plausible_version(v) {
+            return Err(MindError::InvalidPolicy {
+                path: path.display().to_string(),
+                reason: format!(
+                    "min-mind-version {v:?} is not a valid version string \
+                     (expected dotted numeric, e.g. \"0.15.0\")"
+                ),
+            });
+        }
+        // spec: POL-62 -- version gate: give a clear error instead of an opaque
+        // "unknown field" when the policy was written for a newer binary.
+        let running = env!("CARGO_PKG_VERSION");
+        if !crate::mindfile::version_at_least(running, v) {
+            return Err(MindError::InvalidPolicy {
+                path: path.display().to_string(),
+                reason: format!(
+                    "managed policy requires mind >= {v}, running {running}; upgrade mind"
+                ),
+            });
+        }
+    }
+
     let raw: RawPolicy = toml::from_str(text).map_err(|e| MindError::InvalidPolicy {
         path: path.display().to_string(),
         reason: e.to_string(),
@@ -406,6 +598,7 @@ fn parse_str(text: &str, path: &Path) -> Result<Policy> {
         allow: raw.sources.allow,
         lock: raw.sources.lock,
         pinned: raw.sources.pinned,
+        allow_local: raw.sources.allow_local,
         auto_meld,
         lobes_lock: raw.lobes.lock,
         lobes_targets: raw.lobes.targets,
@@ -666,6 +859,8 @@ repo = "github.com/acme/floating"
             AutoMeld {
                 repo: "github.com/acme/tagged".into(),
                 pin: Pin::Tag("v1.4.0".into()),
+                install: false,
+                run_build_hooks: false,
             }
         );
         assert_eq!(
@@ -673,6 +868,8 @@ repo = "github.com/acme/floating"
             AutoMeld {
                 repo: "github.com/acme/reffed".into(),
                 pin: Pin::Ref("9f3a1c2e".into()),
+                install: false,
+                run_build_hooks: false,
             }
         );
         assert_eq!(
@@ -680,6 +877,8 @@ repo = "github.com/acme/floating"
             AutoMeld {
                 repo: "github.com/acme/branched".into(),
                 pin: Pin::FollowBranch("release".into()),
+                install: false,
+                run_build_hooks: false,
             }
         );
         assert_eq!(
@@ -687,6 +886,8 @@ repo = "github.com/acme/floating"
             AutoMeld {
                 repo: "github.com/acme/floating".into(),
                 pin: Pin::DefaultBranch,
+                install: false,
+                run_build_hooks: false,
             }
         );
     }
@@ -740,6 +941,27 @@ repo = "acme/baseline"
         assert!(p.allow().is_empty());
         // POL-51: absent [binary].self-update defaults to Allowed.
         assert_eq!(p.self_update_control(), &SelfUpdateControl::Allowed);
+        // POL-57: absent allow-local defaults to true (existing behavior preserved).
+        assert!(p.allow_local());
+    }
+
+    // POL-56: allow-local = false parses and the accessor reflects it.
+    // POL-57: allow-local = true (explicit) is the same as absent (true).
+    // spec: POL-56
+    // spec: POL-57
+    #[test]
+    fn allow_local_parses_correctly() {
+        // Explicit false.
+        let p = parse("[sources]\nallow-local = false\n").unwrap();
+        assert!(!p.allow_local());
+
+        // Explicit true.
+        let p = parse("[sources]\nallow-local = true\n").unwrap();
+        assert!(p.allow_local());
+
+        // Absent defaults to true.
+        let p = parse("[sources]\nlock = true\n").unwrap();
+        assert!(p.allow_local());
     }
 
     // POL-51/POL-54: [binary].self-update absent or true -> Allowed.
@@ -1129,18 +1351,26 @@ tag = "v2.0.0"
             AutoMeld {
                 repo: "github.com/acme/floating".into(),
                 pin: Pin::DefaultBranch,
+                install: false,
+                run_build_hooks: false,
             },
             AutoMeld {
                 repo: "github.com/acme/branched".into(),
                 pin: Pin::FollowBranch("release".into()),
+                install: false,
+                run_build_hooks: false,
             },
             AutoMeld {
                 repo: "github.com/acme/reffed".into(),
                 pin: Pin::Ref("9f3a1c2e".into()),
+                install: false,
+                run_build_hooks: false,
             },
             AutoMeld {
                 repo: "github.com/acme/tagged".into(),
                 pin: Pin::Tag("v2.0.0".into()),
+                install: false,
+                run_build_hooks: false,
             },
         ];
         assert_eq!(p.auto_meld(), expected.as_slice());
@@ -1325,5 +1555,359 @@ repo = "github.com/acme/c"
 follow_branch = "main"
 "#;
         assert!(parse(ok).is_ok(), "normal pin values must be accepted");
+    }
+
+    // ----- POL-61/62/63: min-mind-version gate --------------------------------
+
+    // POL-62: a policy declaring min-mind-version higher than the running binary
+    // returns a clear "upgrade mind" error rather than an opaque unknown-field error.
+    // POL-61: the check fires before the strict deny_unknown_fields parse.
+    // spec: POL-61
+    // spec: POL-62
+    #[test]
+    fn min_mind_version_too_high_is_clear_error() {
+        // Unknown key alongside min-mind-version ensures the test confirms the
+        // gate fires BEFORE the strict parse would reject the unknown key.
+        let text = "min-mind-version = \"999.0.0\"\n[sources]\nlock = true\n";
+        let path = Path::new("test-policy.toml");
+        let err = parse_str(text, path).unwrap_err();
+        match err {
+            MindError::InvalidPolicy { path: p, reason } => {
+                assert_eq!(p, "test-policy.toml");
+                assert!(
+                    reason.contains("requires mind >="),
+                    "must name the gate: {reason}"
+                );
+                assert!(
+                    reason.contains("999.0.0"),
+                    "must name the required version: {reason}"
+                );
+                assert!(
+                    reason.contains("upgrade mind"),
+                    "must tell the user to upgrade: {reason}"
+                );
+            }
+            other => panic!("expected InvalidPolicy, got {other:?}"),
+        }
+    }
+
+    // POL-61: the phase-1 version gate fires BEFORE the phase-2 strict
+    // deny_unknown_fields parse. A policy that declares BOTH a too-high
+    // min-mind-version AND an unknown key (which the strict parse would reject)
+    // must surface the version error, not the unknown-field error. This is the
+    // core correctness claim of the two-phase parse: an old binary reading a
+    // newer-schema policy gets "upgrade mind", never an opaque unknown-field
+    // error on whatever new key the newer schema introduced.
+    // spec: POL-61
+    // spec: POL-62
+    #[test]
+    fn min_mind_version_gate_beats_unknown_field_error() {
+        // `[future]` is an unknown top-level table; the strict parse rejects it.
+        // The version gate must win regardless.
+        let text = "min-mind-version = \"999.0.0\"\n[future]\nunknown-key = 1\n";
+        let err = parse_str(text, Path::new("test-policy.toml")).unwrap_err();
+        match err {
+            MindError::InvalidPolicy { reason, .. } => {
+                assert!(
+                    reason.contains("requires mind >=") && reason.contains("999.0.0"),
+                    "version gate must win over the unknown-field error: {reason}"
+                );
+                assert!(
+                    !reason.contains("unknown field") && !reason.contains("future"),
+                    "must NOT be the strict-parse unknown-field error: {reason}"
+                );
+            }
+            other => panic!("expected InvalidPolicy, got {other:?}"),
+        }
+
+        // Same claim with an unknown key inside a KNOWN table ([sources]): the
+        // version gate still fires first, before deny_unknown_fields on [sources].
+        let nested = "min-mind-version = \"999.0.0\"\n[sources]\nbogus-key = true\n";
+        match parse_str(nested, Path::new("test-policy.toml")).unwrap_err() {
+            MindError::InvalidPolicy { reason, .. } => {
+                assert!(
+                    reason.contains("requires mind >="),
+                    "version gate must win over a nested unknown-field error: {reason}"
+                );
+                assert!(
+                    !reason.contains("unknown field") && !reason.contains("bogus-key"),
+                    "must not be the unknown-field error: {reason}"
+                );
+            }
+            other => panic!("expected InvalidPolicy, got {other:?}"),
+        }
+    }
+
+    // POL-62: min-mind-version equal to the running binary is accepted (>= check).
+    // spec: POL-62
+    #[test]
+    fn min_mind_version_equal_to_current_is_accepted() {
+        let current = env!("CARGO_PKG_VERSION");
+        let text = format!("min-mind-version = \"{current}\"\n[sources]\nlock = true\n");
+        parse_str(&text, Path::new("test-policy.toml"))
+            .expect("version == running binary must be accepted");
+    }
+
+    // POL-61: a min-mind-version lower than the running binary is silently OK.
+    // spec: POL-61
+    #[test]
+    fn min_mind_version_lower_than_current_is_accepted() {
+        let text = "min-mind-version = \"0.0.1\"\n";
+        parse_str(text, Path::new("test-policy.toml"))
+            .expect("version < running binary must be accepted");
+    }
+
+    // POL-61: min-mind-version absent means no gate (POL-4 inert).
+    // spec: POL-61
+    #[test]
+    fn min_mind_version_absent_is_fine() {
+        let text = "[sources]\nlock = true\n";
+        parse_str(text, Path::new("test-policy.toml"))
+            .expect("absent min-mind-version must be accepted");
+    }
+
+    // POL-63: an invalid version string in min-mind-version fails closed at
+    // policy parse, consistent with POL-5.
+    // spec: POL-63
+    #[test]
+    fn min_mind_version_invalid_string_fails_closed() {
+        // Non-numeric component.
+        let err = parse_str(
+            "min-mind-version = \"not-a-version\"\n",
+            Path::new("test-policy.toml"),
+        )
+        .unwrap_err();
+        match err {
+            MindError::InvalidPolicy { reason, .. } => {
+                assert!(
+                    reason.contains("not a valid version string"),
+                    "must explain the problem: {reason}"
+                );
+            }
+            other => panic!("expected InvalidPolicy, got {other:?}"),
+        }
+
+        // Empty string.
+        let err =
+            parse_str("min-mind-version = \"\"\n", Path::new("test-policy.toml")).unwrap_err();
+        assert!(
+            matches!(err, MindError::InvalidPolicy { .. }),
+            "empty version must be invalid: {err:?}"
+        );
+
+        // Trailing dot.
+        let err = parse_str(
+            "min-mind-version = \"1.2.\"\n",
+            Path::new("test-policy.toml"),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, MindError::InvalidPolicy { .. }),
+            "trailing dot must be invalid: {err:?}"
+        );
+
+        // Prerelease suffix.
+        let err = parse_str(
+            "min-mind-version = \"0.14.0-rc1\"\n",
+            Path::new("test-policy.toml"),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, MindError::InvalidPolicy { .. }),
+            "prerelease suffix must be invalid: {err:?}"
+        );
+    }
+
+    // POL-61: min-mind-version is recognized by the strict parse (not an unknown
+    // key) so a version-gated policy with no new keys round-trips cleanly.
+    // spec: POL-61
+    #[test]
+    fn min_mind_version_is_not_rejected_by_strict_parse() {
+        // min-mind-version <= running is OK; the key must be in RawPolicy so
+        // deny_unknown_fields does not reject it in the strict phase-2 parse.
+        let text = "min-mind-version = \"0.1.0\"\n[sources]\nlock = false\n";
+        let p = parse_str(text, Path::new("test-policy.toml"))
+            .expect("recognized key must not trigger unknown-field error");
+        assert!(!p.lock(), "lock should be false");
+    }
+
+    // ----- POL-64/65: permission warning seam ---------------------------------
+
+    // POL-65: when load_and_check is called with is_system_path=false (the
+    // MIND_POLICY_FILE path), no permission check runs even for an insecure file.
+    // spec: POL-65
+    #[test]
+    fn env_path_permissions_not_checked() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("mind-pol65-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("policy.toml");
+        std::fs::write(&path, "").unwrap();
+
+        // On unix, make the file world-writable so a permission check WOULD fire.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&path).unwrap().permissions();
+            perms.set_mode(0o666);
+            std::fs::set_permissions(&path, perms).unwrap();
+        }
+
+        // With is_system_path=false (env path) no warnings are returned.
+        let (_, warnings) = load_and_check(&path, false).expect("load must succeed");
+        assert!(
+            warnings.is_empty(),
+            "MIND_POLICY_FILE path must not be checked; got: {warnings:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // POL-64: the pure helper returns warnings for group/world-writable mode.
+    // Tested against known (mode, uid) pairs without touching the filesystem.
+    // spec: POL-64
+    #[cfg(unix)]
+    #[test]
+    fn permission_warns_on_group_writable_mode() {
+        // Group-writable (mode & 0o020 != 0).
+        let w = policy_path_security_warnings("/etc/mind/policy.toml", 0o664, 0, false);
+        assert!(!w.is_empty(), "group-writable must warn");
+        assert!(
+            w[0].contains("group/world-writable"),
+            "must name the problem: {}",
+            w[0]
+        );
+        assert!(
+            w[0].contains("/etc/mind/policy.toml"),
+            "must name the path: {}",
+            w[0]
+        );
+    }
+
+    // POL-64: world-writable mode warns.
+    // spec: POL-64
+    #[cfg(unix)]
+    #[test]
+    fn permission_warns_on_world_writable_mode() {
+        let w = policy_path_security_warnings("/etc/mind/policy.toml", 0o646, 0, false);
+        assert!(!w.is_empty(), "world-writable must warn");
+        assert!(w[0].contains("group/world-writable"), "message: {}", w[0]);
+    }
+
+    // POL-64: mode 0o644 with uid 0 (root-owned, not group/world-writable) => no warning.
+    // spec: POL-64
+    #[cfg(unix)]
+    #[test]
+    fn permission_no_warn_on_secure_root_owned_file() {
+        let w = policy_path_security_warnings("/etc/mind/policy.toml", 0o644, 0, false);
+        assert!(w.is_empty(), "root-owned 644 file must not warn: {w:?}");
+    }
+
+    // POL-64: non-root uid warns even when mode bits are fine.
+    // spec: POL-64
+    #[cfg(unix)]
+    #[test]
+    fn permission_warns_on_non_root_uid() {
+        let w = policy_path_security_warnings("/etc/mind/policy.toml", 0o644, 1000, false);
+        assert!(!w.is_empty(), "non-root uid must warn");
+        assert!(
+            w[0].contains("not root-owned"),
+            "must name the uid problem: {}",
+            w[0]
+        );
+    }
+
+    // POL-64: parent-directory mode and uid are checked independently.
+    // spec: POL-64
+    #[cfg(unix)]
+    #[test]
+    fn permission_parent_dir_warnings_are_distinct() {
+        // Parent dir group-writable + root-owned => one warning (mode only).
+        let w = policy_path_security_warnings("/etc/mind", 0o775, 0, true);
+        assert!(!w.is_empty(), "group-writable parent must warn");
+        assert!(
+            w[0].contains("parent directory"),
+            "must say 'parent directory': {}",
+            w[0]
+        );
+        assert!(
+            w[0].contains("chown root and chmod 755"),
+            "must suggest chmod 755: {}",
+            w[0]
+        );
+
+        // Parent dir 755 + root-owned => no warnings.
+        let w = policy_path_security_warnings("/etc/mind", 0o755, 0, true);
+        assert!(w.is_empty(), "secure parent must not warn: {w:?}");
+    }
+
+    // POL-64: load_and_check with is_system_path=true on a real temp file that is
+    // world-writable produces at least one mode warning on unix.
+    // spec: POL-64
+    #[cfg(unix)]
+    #[test]
+    fn load_and_check_system_path_world_writable_warns() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("mind-pol64-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("policy.toml");
+        std::fs::write(&path, "").unwrap();
+
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o666); // world-writable
+        std::fs::set_permissions(&path, perms).unwrap();
+
+        let (_, warnings) = load_and_check(&path, true).expect("load must succeed");
+        let mode_warn = warnings.iter().any(|w| w.contains("group/world-writable"));
+        assert!(
+            mode_warn,
+            "world-writable file with is_system_path=true must produce a mode warning: {warnings:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // POL-64: load_and_check with is_system_path=true on a mode-secure file
+    // does not produce a mode warning (uid warning may still fire in a non-root
+    // test environment, which is expected and correct behavior -- the file is not
+    // root-owned; we only assert the mode-based warning is absent).
+    // spec: POL-64
+    #[cfg(unix)]
+    #[test]
+    fn load_and_check_system_path_mode_secure_no_mode_warn() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("mind-pol64-sec-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        use std::os::unix::fs::PermissionsExt;
+        // Explicitly set the parent dir to 0o755 so its mode does not trigger
+        // a "group/world-writable" warning regardless of the process umask.
+        let mut dir_perms = std::fs::metadata(&dir).unwrap().permissions();
+        dir_perms.set_mode(0o755);
+        std::fs::set_permissions(&dir, dir_perms).unwrap();
+
+        let path = dir.join("policy.toml");
+        std::fs::write(&path, "").unwrap();
+        let mut file_perms = std::fs::metadata(&path).unwrap().permissions();
+        file_perms.set_mode(0o644);
+        std::fs::set_permissions(&path, file_perms).unwrap();
+
+        let (_, warnings) = load_and_check(&path, true).expect("load must succeed");
+        // Only check that mode-based warnings are absent; uid warnings may fire
+        // in a non-root test context and are expected/correct.
+        let mode_warn = warnings.iter().any(|w| w.contains("group/world-writable"));
+        assert!(
+            !mode_warn,
+            "mode-secure file must not produce a group/world-writable warning: {warnings:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

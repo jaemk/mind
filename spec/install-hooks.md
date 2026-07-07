@@ -364,9 +364,13 @@ Open questions to resolve:
   `--dangerously-skip-install-hook-check` (force the prompt, or forbid running
   hooks at all), so a user cannot opt out of the policy's stance?
 - Non-interactive provisioning. `auto_meld` (POL-32) runs during `sync` with no
-  TTY, so a declared hook is skipped today (HOOK-22). A policy that provisions a
-  source whose tooling is required needs a way to pre-approve that hook, or the
-  provisioned source is left without its tooling.
+  TTY, so a declared hook is skipped today (HOOK-22). This is partly resolved for
+  build hooks: an `auto_meld` entry with `install = true` (POL-58) installs the
+  source's items during provisioning, with build hooks skipped by default and
+  opted in per entry via `run-build-hooks = true` (POL-59). Install hooks remain
+  skipped per HOOK-22 (a policy provisioning a source whose tooling depends on an
+  install hook still leaves that tooling unrun); pre-approving install hooks for
+  unattended runs is the open part of this question.
 - Audit. Whether a managed deployment should record each hook execution (source,
   command, commit, and how it was approved) for compliance.
 

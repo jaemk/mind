@@ -468,6 +468,19 @@ field lets the curator opt in to named handling.
   whose name contains a path separator or NUL is rejected at discovery time,
   consistent with how `[[items]]` names are validated (DSC-71).
 
+## Accepted risks
+
+Metadata reads during discovery (`mind.toml`, `SKILL.md`, and the agent and rule
+`.md` files) are not size-capped, and TOML nesting depth is not bounded. A source
+author could ship a multi-gigabyte `SKILL.md` or a deeply nested `mind.toml` to
+make `mind` allocate heavily while scanning that source. This is a self-inflicted
+denial of service: the operator chose to meld that source, no privilege boundary
+is crossed, and the only party harmed is the operator who melded a hostile repo.
+The cost of a fixed cap (a false ceiling that could someday reject a legitimately
+large skill) is judged higher than the benefit at the current adoption scale. The
+decision is to accept the risk and revisit if melding untrusted third-party
+sources at scale becomes common. Recorded so the point stops recurring in review.
+
 ## `[source].namespace`
 
 - `DSC-82` The `[source]` table accepts both `namespace` and `prefix` for the

@@ -152,13 +152,24 @@ prevent the lost-update and torn-read races a plain read-modify-write would allo
   use a configurable connect timeout (default 15 s, overridable by the
   `MIND_HTTP_TIMEOUT_SECS` environment variable) and a generous max-time ceiling of
   600 s to accommodate slow downloads. For curl, the flags are `--connect-timeout N
-  --max-time 600`; for wget, `--timeout=N`. A missing or non-numeric
-  `MIND_HTTP_TIMEOUT_SECS` silently falls back to 15. The argument vectors are built
+  --max-time 600`; for wget, `--timeout=N`. A missing, non-numeric, or zero value
+  of `MIND_HTTP_TIMEOUT_SECS` falls back to 15 (zero means "no limit" in both curl
+  and wget, which defeats the purpose of the knob). The argument vectors are built
   by pure helper functions (`curl_string_args`, `wget_string_args`,
   `curl_file_args`, `wget_file_args`) and are unit-testable without spawning a
   process. `resources/install.sh` applies the same flags with a fixed 15 s connect
   timeout and 600 s max-time; it does not read `MIND_HTTP_TIMEOUT_SECS`, because it
   runs before `mind` is installed.
+- `STO-53` All wget invocations in `evolve` and `resources/install.sh` pass
+  `--tries=1`. wget defaults to 20 retries, so without this flag a blackholed
+  endpoint can take up to 20 times the configured timeout before failing. curl is
+  already a single attempt bounded by `--max-time 600`.
+- `STO-54` curl/wget failure output (stderr captured by `fetch_to_string`) is
+  sanitized via `strip_ansi` before it is embedded in `DownloadFailed.reason`.
+  A MITM'd or hostile endpoint controls stderr bytes and can inject ANSI escape
+  sequences or Unicode bidi override characters to spoof terminal output. The
+  sanitization is applied before the proxy-hint logic so the reason field and any
+  appended hint are both free of hostile control sequences.
 
 ## Schema versions
 

@@ -182,9 +182,29 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   stderr, so the actual cause is immediately visible. The reconstructed git
   command line and the internal store path are shown only under `--verbose`
   (CLI-162); without it those details are suppressed. The git stderr always
-  appears regardless of `--verbose`. The error returned to the caller has its args
-  reduced to `["clone"]` and its stderr cleared (already printed) so the error
-  display does not repeat the internal store path.
+  appears regardless of `--verbose`. In human mode the error returned to the
+  caller has its args reduced to `["clone"]` and its stderr set to
+  `"(git output above)"` so the display does not repeat the store path and does
+  not show the literal `<no stderr>` when output was already printed (CLI-185).
+  Under `--json` the stderr is preserved intact in the returned error (CLI-184).
+- `CLI-184` Under `--json`, `handle_top_level_clone_err` skips all stderr
+  printing and returns the `MindError::Git` with git's stderr field intact and
+  args reduced to `["clone"]`, so the CLI-181 JSON envelope's `message` field
+  contains the actual cause from git rather than the literal `<no stderr>`.
+- `CLI-185` In human mode, after printing git's stderr to the terminal,
+  `handle_top_level_clone_err` sets the returned error's stderr field to
+  `"(git output above)"` instead of clearing it, so the error trailer never
+  displays the misleading literal `<no stderr>`.
+- `CLI-186` Git stderr and error text echoed during meld clone failures (the
+  top-level clone path) and sync per-source failures are passed through
+  `strip_ansi` before being printed, preventing a hostile remote from embedding
+  ANSI escape or Unicode bidi-override sequences to corrupt or spoof terminal
+  output.
+- `CLI-187` When no sources are melded, all verbs that report the empty state
+  (sync, recall, probe) emit the same message: "no sources melded; run `mind
+  meld <owner/repo>` to add one". This consistent phrasing always names the
+  next command so a first-run user has a clear path forward regardless of which
+  verb they tried first.
 
 ## unmeld
 
@@ -322,11 +342,17 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   or `forget`).
 - `CLI-61` The report lists, per item, the hash and commit deltas, and a compare
   URL when the source host supports one. A namespace change is shown as a rename.
-- `CLI-176` The compare URL is produced for any https remote by constructing
-  `https://<host>/<owner>/<repo>/compare/<old>...<new>`. This covers GitHub.com
-  and GitHub Enterprise Server (and any other https forge using the same URL
-  shape). SSH remotes and local/file paths return no compare URL because there is
-  no web host to link to.
+- `CLI-176` The compare URL is produced for https remotes using the GitHub
+  `/compare/<old>...<new>` URL shape by constructing
+  `https://<host>/<owner>/<repo>/compare/<old>...<new>`. This covers GitHub.com,
+  GitHub Enterprise Server, and Gitea/Forgejo instances. SSH remotes and
+  local/file paths return no compare URL because there is no web host to link to.
+- `CLI-188` Hosts whose hostname contains the substring "gitlab" or "bitbucket"
+  (case-insensitive) use a different compare URL shape and therefore return no
+  compare URL. This supersedes the broader claim in CLI-176 that the GitHub shape
+  applies to any https forge: those two forge families are suppressed because the
+  GitHub-shaped link would 404. A self-hosted instance on a neutral hostname (e.g.
+  `git.corp.internal`) continues to produce the GitHub-shaped link.
 - `CLI-62` `--yes` applies upgrades without prompting.
 - `CLI-63` An optional `item` limits upgrade to the matching installed item(s),
   matched against the manifest by effective name and honoring a `kind:` prefix
@@ -544,6 +570,12 @@ only appear at meld or install time. It is read-only and installs nothing.
 - `CLI-92` `introspect --json` emits the findings as JSON on stdout: an object
   with an `issues` array (each carrying a stable `kind` tag, a `target`, and a
   `message`) plus the source and item counts. An empty `issues` array means clean.
+- `CLI-189` The `introspect --json` output includes a top-level `"schema": 1`
+  field, matching the envelope version used by other `--json` verbs (CLI-167).
+  The full shape is `{"schema": 1, "issues": [...], "sources": N, "items": N}`
+  where `sources` and `items` are integer counts, not arrays. This field is
+  additive; existing consumers keying on `issues`, `sources`, or `items` are
+  unaffected.
 
 ## evolve
 

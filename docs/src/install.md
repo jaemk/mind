@@ -57,6 +57,10 @@ on Windows. On Windows, run `mind` under WSL (Windows Subsystem for Linux).
 
 ## Updating
 
+> **Note:** if you are running mind 0.13.0, do not run `mind evolve` -- it
+> deadlocks and hangs. Reinstall from scratch using the install script, Homebrew
+> (`brew upgrade mind`), or `cargo install mind-cli` before using `evolve`.
+
 `mind evolve` updates the binary itself to the latest release. It reports the
 target version and prompts before downloading, unless `--yes` is given (`--check`
 reports without changing anything, `--version <v>` pins a target). It uses the

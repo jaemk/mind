@@ -156,19 +156,27 @@ impl Source {
 
     /// A browser URL to compare two commits, for `mind upgrade` output.
     ///
-    /// Emitted for any https remote (spec: CLI-176): the `/compare/<old>...<new>`
-    /// shape is standard across GitHub.com, GitHub Enterprise Server, and any
-    /// other https-hosted forge. SSH remotes and local paths return `None` because
-    /// there is no web host to link to.
+    /// Emitted for https remotes that use the GitHub `/compare/<old>...<new>`
+    /// URL shape (spec: CLI-176, CLI-188). This covers GitHub.com, GitHub
+    /// Enterprise Server, and Gitea/Forgejo instances. SSH remotes and local
+    /// paths return `None` because there is no web host to link to.
+    ///
+    /// Hosts whose hostname contains "gitlab" or "bitbucket" (case-insensitive)
+    /// use a different compare URL shape and therefore also return `None`; those
+    /// hosts previously received a GitHub-shaped link that would 404 (CLI-188).
     pub fn compare_url(&self, from: &str, to: &str) -> Option<String> {
-        if self.url.starts_with("https://") {
-            Some(format!(
-                "https://{}/{}/{}/compare/{from}...{to}",
-                self.host, self.owner, self.repo
-            ))
-        } else {
-            None
+        if !self.url.starts_with("https://") {
+            return None;
         }
+        // spec: CLI-188 - suppress for known non-GitHub URL shapes
+        let host_lower = self.host.to_ascii_lowercase();
+        if host_lower.contains("gitlab") || host_lower.contains("bitbucket") {
+            return None;
+        }
+        Some(format!(
+            "https://{}/{}/{}/compare/{from}...{to}",
+            self.host, self.owner, self.repo
+        ))
     }
 
     /// The SSH clone URL (`git@host:owner/repo`) for this source's identity.
@@ -389,8 +397,8 @@ impl Registry {
 
 #[cfg(test)]
 mod tests {
-    // spec: CLI-11 (repo spec parsing), CLI-61 (compare url), CLI-176 (compare url for any https host)
-    // spec: STO-13 (identity), STO-18 (pin serde round-trip)
+    // spec: CLI-11 (repo spec parsing), CLI-61 (compare url), CLI-176 (compare url github shape)
+    // spec: CLI-188 (gitlab/bitbucket suppression), STO-13 (identity), STO-18 (pin serde round-trip)
     use super::*;
 
     #[test]
@@ -547,12 +555,35 @@ mod tests {
             ghes.compare_url("deadbeef", "cafebabe").as_deref(),
             Some("https://github.example.com/acme/tools/compare/deadbeef...cafebabe")
         );
-        // Also verify a non-GitHub corporate forge host
+        // Also verify a non-GitHub corporate forge host (neutral hostname -> GitHub shape)
         let corp = parse_spec("https://git.corp.internal/devtools/scripts").unwrap();
         assert_eq!(
             corp.compare_url("old", "new").as_deref(),
             Some("https://git.corp.internal/devtools/scripts/compare/old...new")
         );
+    }
+
+    // spec: CLI-188
+    #[test]
+    fn compare_url_gitlab_hosts_yield_none() {
+        // gitlab.com and a self-hosted instance both use /-/compare/, not /compare/
+        let gl = parse_spec("https://gitlab.com/org/project").unwrap();
+        assert_eq!(gl.compare_url("aaaa", "bbbb"), None, "gitlab.com");
+
+        let self_hosted = parse_spec("https://gitlab.corp.example.com/org/project").unwrap();
+        assert_eq!(
+            self_hosted.compare_url("aaaa", "bbbb"),
+            None,
+            "self-hosted gitlab"
+        );
+    }
+
+    // spec: CLI-188
+    #[test]
+    fn compare_url_bitbucket_hosts_yield_none() {
+        // bitbucket.org uses /branches/compare/, not /compare/
+        let bb = parse_spec("https://bitbucket.org/org/repo").unwrap();
+        assert_eq!(bb.compare_url("aaaa", "bbbb"), None, "bitbucket.org");
     }
 
     #[test]

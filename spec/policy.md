@@ -79,12 +79,33 @@ normatively. Source identity is `host/owner/repo` (see storage.md).
   `github.com/acme/*` matches every repo under `acme`).
 - `POL-11` With `[sources].lock = true`, `meld` refuses any repo whose identity
   does not match `allow` (`SourceNotAllowed`); nothing is cloned or registered.
+  The check fires before any git network call: the source identity is derived
+  from the parsed repo spec alone, so no clone is needed and no egress occurs
+  for a refused source (POL-36).
+- `POL-36` The allow/lock refusal (POL-11) is enforced before any git network
+  contact or directory creation. Only the pinned check (POL-20) remains
+  post-clone because it requires reading the source's `mind.toml`. A refused
+  source leaves no clone or intermediate staging directory on disk.
 - `POL-12` When `lock` is true (POL-13), `learn`, `sync`, and `upgrade` operate
   only on sources whose identity matches `allow`. A source already in the registry
   that is no longer allowed is reported and skipped, not updated or installed from.
   With `lock` off, `allow` is advisory and these verbs are not restricted.
 - `POL-13` With `lock` absent or false, `allow` is advisory: a non-matching
   `meld` is warned about but not refused. `lock` is the enforcement switch.
+- `POL-37` When `meld` returns `SourceNotAllowed` (POL-11), the effective policy
+  file path is printed to stderr as a hint so a developer behind a locked policy
+  can locate the file that refused them.
+- `POL-56` When `[sources].allow-local = false`, a local-path meld (identity
+  prefixed `local/`, derived from an absolute path or `./`/`../` relative path)
+  and a `file://` remote meld are refused under a locked policy (`lock = true`)
+  regardless of `allow` patterns. The refusal names `allow-local = false` as the
+  reason (distinct from the `SourceNotAllowed` pattern-miss message) and prints
+  the policy file path as a hint (same POL-37 hint mechanism). With `lock`
+  absent or false, `allow-local` has no effect regardless of its value.
+- `POL-57` `[sources].allow-local = true` is the default and preserves the
+  existing behavior: local-path and `file://` melds still require an `allow`
+  pattern match when `lock = true` (POL-11 applies). Absent `allow-local` is
+  equivalent to `allow-local = true`.
 
 ## Require pinned
 
@@ -127,6 +148,74 @@ normatively. Source identity is `host/owner/repo` (see storage.md).
   normally. If any provisioning entry failed, `sync` exits non-zero after all
   sources have been synced, reporting the combined count of provisioning and
   per-source sync failures.
+- `POL-35` When an auto-meld provisioning entry fails after `meld_recursive` has
+  already pushed sources into the in-memory registry, the registry is rolled back
+  to its pre-entry state before the soft-fail handler records the error. This
+  prevents a subsequent `registry.save` from persisting a partial or failed entry
+  alongside successfully provisioned ones.
+- `POL-55` When an already-registered source's recorded pin differs from the
+  `auto_meld` entry's declared pin, `sync` treats the discrepancy as pin drift
+  and updates the recorded pin to the declared value; the subsequent per-source
+  sync fetch for that source lands the new ref. The re-pin is reported in the
+  sync output as `re-pinned <name> <old> -> <new>`. The declared pin was already
+  validated by `validate_ref_value` at policy parse time (POL-33), so no
+  re-validation is performed here. A failure during reconciliation is handled as
+  a provisioning error per POL-34 (soft-fail: warn, record, continue, non-zero
+  exit). An entry whose recorded pin already equals the declared pin is left
+  unchanged. This supersedes the unconditional idempotency of POL-32: that rule's
+  "already melded at the declared pin is left unchanged" wording now applies only
+  when the recorded and declared pins match.
+- `POL-58` An `[[sources.auto_meld]]` entry may declare `install = true` (boolean,
+  default `false`). When `true`, after the source ends the sync registered -- by
+  fresh provisioning, same-pin idempotent confirmation (POL-32), or pin-drift
+  reconciliation (POL-55) -- `sync` installs every item the source offers headlessly
+  (equivalent to `mind learn '<source>#*' --yes`). Repeat syncs are idempotent:
+  already-installed items are skipped so no reinstall occurs. When `false` or absent,
+  `sync` registers the source only and installs nothing; this is the default and
+  preserves the existing behavior.
+- `POL-59` Build hooks for items installed via the POL-58 pass are skipped by
+  default, following the standard non-TTY skip path (HOOK-72). Setting
+  `run-build-hooks = true` on the auto_meld entry enables them, equivalent to
+  `--dangerously-skip-build-hook-check`. Install hooks follow the same non-TTY
+  path: they are not prompted and are skipped in a non-interactive context.
+- `POL-60` Per-item install failures during the POL-58 pass are soft-failed in the
+  same manner as provisioning failures (POL-34): each failed item is warned about on
+  stderr (naming the entry and the item key), recorded, and installation continues
+  for the remaining items and sources. Any item install failure causes `sync` to
+  exit non-zero, combined with provisioning failures in the total reported.
+
+## Schema evolution and min-mind-version
+
+- `POL-61` The policy file may declare an optional top-level key
+  `min-mind-version = "X.Y"` (or `"X.Y.Z"`) naming the minimum `mind` version the
+  policy requires. When present it is checked BEFORE the strict `deny_unknown_fields`
+  parse (POL-5): a permissive intermediate deserialization reads `min-mind-version`
+  and ignores all other keys, the version comparison runs, and only on success does
+  the strict parse proceed. The ordering ensures an old binary that does not yet know
+  a new key still sees the version error rather than an opaque unknown-field error.
+- `POL-62` If the declared `min-mind-version` exceeds the running binary version,
+  `mind` returns `InvalidPolicy` naming the policy file path with the message:
+  "managed policy requires mind >= <X.Y.Z>, running <current>; upgrade mind". This
+  replaces the opaque unknown-field failure for schema-skew scenarios (see DSC-40
+  for the same gate on source `mind.toml` files; POL-5 for the fail-closed rule).
+- `POL-63` A `min-mind-version` value that is not a valid dotted-numeric version
+  string (e.g. `"not-a-version"`, `""`, `"1.x"`) is a hard policy-parse error
+  (fail closed, consistent with POL-5). Format validation mirrors the source-side
+  `min-mind-version` check (DSC-40).
+
+## Policy file security
+
+- `POL-64` On unix, when loading the SYSTEM policy file, `mind` checks the file
+  and its parent directory for unsafe ownership or permissions. If either the policy
+  file or its parent dir is group/world-writable (mode bits 0o022) or owned by a
+  non-root uid (uid != 0), `mind` emits a warning to stderr naming the path and the
+  problem (e.g. "warning: managed policy <path> is group/world-writable; a local
+  user could alter enforced policy. chown root and chmod 644."). The warning is
+  never a refusal: the policy loads and enforces regardless, so a misprovisioned
+  fleet stays functional while the misconfiguration is visible.
+- `POL-65` The permission check (POL-64) is skipped when the policy was located
+  via `$MIND_POLICY_FILE` (that path is user-trust by definition) and is a no-op
+  on non-unix platforms.
 
 ## Lobe lock
 
@@ -162,6 +251,18 @@ normatively. Source identity is `host/owner/repo` (see storage.md).
 - `POL-54` `[binary].self-update = true` is identical to the absent key: `evolve`
   is allowed to any version. It exists so a policy file can explicitly re-enable
   updates after a `false` entry in a layered deployment.
+- `POL-66` The policy pin is an upper bound for `evolve`, not a fleet-version
+  enforcement mechanism. When the running binary version is strictly above the
+  policy pin (the `PinnedBelowCurrent` case: IT distributed a binary newer than
+  the pin), `evolve` and `evolve --check` print a human-readable warning to stdout
+  stating that the running version differs from the policy pin and that the pin
+  does not downgrade (e.g. "warning: running <running> differs from the managed
+  policy pin <pin>; the policy pin is an upper bound and does not downgrade").
+  The warning is printed only in human mode; the `--json` path emits no warning
+  text on stdout (the structured `outcome` field, e.g. `not-downgrading`, is the
+  machine-readable detection hook for fleet skew monitoring). The exit code is
+  unchanged (0) -- this is a visibility warning, not an error, and must not break
+  an `evolve` invocation in a cron job.
 
 ## Validation (`mind review --policy`)
 
