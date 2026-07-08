@@ -45,11 +45,13 @@ maintained by hand.
 | `learn <item>` | copy item to the store, symlink into each agent home (lobe) |
 | `forget <item>` | remove symlink + store copy |
 | `sync [--upgrade]` | fetch every source, refresh recorded commit (`--upgrade` then runs an upgrade pass) |
-| `upgrade [item]` | report each installed item's hash/commit delta, prompt, then re-link the changed ones |
+| `upgrade [item]` | report each installed item's hash/commit delta, prompt, then re-link the changed ones (syncs involved sources first; `--no-sync` opts out) |
 | `evolve [--check] [--version V]` | update the `mind` binary itself to the latest release (or a pinned version) |
 | `recall [--sources] [item]` | what's installed / source list / item details (marks out-of-date items) |
-| `probe [query]` | search melded catalogs |
+| `probe [query]` | search melded catalogs (interactive TUI by default; `--no-tui` for plain output) |
+| `review <repo>` | author/consumer-side source validation: report a source's declared hooks and risky references before melding (`--fix` rewrites; `--policy` checks against managed policy) |
 | `introspect [--fix]` | report drift, broken symlinks, unsynced sources (`--fix` recreates missing links) |
+| `init-source [dir]` | maintainer scaffolder: generate a `mind.toml`, report the intra-source reference graph, add `{{ns:}}` templating |
 | `absorb <item> [--to PATH]` | claim an unmanaged lobe item into a managed source, then install it |
 | `dump [--whole-sources]` | write a super-source `mind.toml` reproducing the melded + installed state |
 | `config show` / `config lobes ...` | view config / manage agent homes (lobes); a lobe may carry a `kinds` filter limiting which item kinds link there; `--preset <name>` adds a non-Claude harness lobe (gemini/codex/universal); `detect` auto-detects installed harnesses and prompts |
@@ -57,18 +59,44 @@ maintained by hand.
 
 ## Layout
 
-- `src/error.rs` - structured errors (`thiserror`). No `anyhow`; every fallible
-  path returns `MindError` so callers and tests can match the exact failure.
-- `src/paths.rs` - `~/.mind` and `~/.claude` roots (overridable via `MIND_HOME` /
-  `CLAUDE_HOME`, which the tests rely on for isolation).
+Grouped by concern. Each verb starts in `commands.rs` (or `dump.rs`/`review.rs`)
+and fans out to the modules below.
+
+CLI surface and output:
+- `src/cli.rs` - clap command/flag definitions (the `Command` enum). Doc comments here are the `--help` text.
+- `src/commands.rs` - the per-verb implementations (one function per CLI verb).
+- `src/main.rs` - entrypoint: parse, acquire the lock, dispatch (`match cli.command`) to `commands.rs`, map errors to exit codes.
+- `src/render.rs` - output context: color, Unicode glyphs, and the `--json` emitter.
+- `src/sanitize.rs` - ANSI/control/bidi stripping for source-derived strings (shared by CLI and TUI).
+- `src/tui/` - the interactive `probe` TUI (`app`, `event`, `render`, `tree`, `preview`, ...).
+
+Sources and discovery:
 - `src/source.rs` - repo-spec parsing + the melded-source registry (`sources.json`).
-- `src/catalog.rs` - scans sources for `skills/<n>/SKILL.md`, `agents/<n>.md`, `rules/<n>.md`, `tools/<n>/`.
-- `src/manifest.rs` - installed-item manifest (`manifest.json`), keyed `kind:name`.
-- `src/resolve.rs` - item-ref parsing (`name`, `skill:name`, `owner/repo#name`) + resolution.
+- `src/catalog.rs` - convention scan for `skills/<n>/SKILL.md`, `agents/<n>.md`, `rules/<n>.md`, `tools/<n>/`.
 - `src/frontmatter.rs` - minimal reader for an item's leading `--- ... ---` block (descriptions).
 - `src/mindfile.rs` - the optional `mind.toml` a source repo may ship to declare inventory.
-- `src/install.rs`, `src/git.rs`, `src/hash.rs` - copy/link, the git CLI wrapper, content hashing.
-- `src/commands.rs` - one function per CLI verb.
+- `src/plugin_manifest.rs` - Claude plugin manifests (`.claude-plugin/marketplace.json`) read as a source.
+- `src/resolve.rs` - item-ref parsing (`name`, `skill:name`, `owner/repo#name`) + resolution.
+- `src/namespace.rs` - source prefixing and `{{ns:}}` reference expansion.
+- `src/deps.rs` - within-source dependency resolution + the installed-item dependency graph.
+
+Install, lifecycle, and state:
+- `src/install.rs` - transactional copy into the store + symlink into each lobe; `{{ns:}}` expansion.
+- `src/manifest.rs` - installed-item manifest (`manifest.json`), keyed `kind:name`, with the file registry.
+- `src/hook.rs` - source/item install, build, and uninstall hooks (the safety-prompted shell commands).
+- `src/unmanaged.rs` - lobe items `mind` did not install (surfaced in `recall`/`probe`, removable via `forget`).
+- `src/hash.rs` - content hashing (drift detection). `src/git.rs` - the git CLI wrapper.
+- `src/selfupdate.rs` - `evolve`: in-place upgrade of the `mind` binary.
+- `src/scaffold.rs` - pure helpers for `init-source` scaffolding.
+
+Foundations and cross-cutting:
+- `src/error.rs` - structured errors (`thiserror`). No `anyhow`; every fallible path returns `MindError`.
+- `src/paths.rs` - `~/.mind` and `~/.claude` roots (overridable via `MIND_HOME` / `CLAUDE_HOME`, used for test isolation).
+- `src/config.rs` - user config at `~/.mind/config.toml` (lobes, default lobe, `absorb-to`).
+- `src/lock.rs` - advisory file-lock + atomic registry writes guarding all persisted state.
+- `src/policy.rs` - enterprise managed policy (trusted sources, pins, lobe lock, self-update control).
+- `src/dump.rs` - `dump`: emit a pinned super-source `mind.toml` from the installed set.
+- `src/review.rs` - `review`: author/consumer-side source validation.
 
 ## Inventory & discovery
 
@@ -190,11 +218,15 @@ automation, say so explicitly and explain why.
 
 - Pure logic (spec/ref parsing, hashing, URL building) -> unit tests in the
   module's `#[cfg(test)]` block.
-- CLI behavior -> integration tests in `tests/cli.rs`, which drive the real
-  binary (`env!("CARGO_BIN_EXE_mind")`) against a hermetic fixture: a local git
-  repo melded by filesystem path, with `MIND_HOME`/`CLAUDE_HOME` pointed at a
-  temp dir. No network. Add new CLI assertions here next to the existing ones.
-  `Sandbox::from_example(<name>)` drives a shipped `examples/<name>` the same way.
+- CLI behavior -> integration tests in `tests/`, which drive the real binary
+  (`env!("CARGO_BIN_EXE_mind")`) against a hermetic fixture: a local git repo
+  melded by filesystem path, with `MIND_HOME`/`CLAUDE_HOME` pointed at a temp
+  dir. No network. `tests/cli.rs` holds the general assertions; topical suites
+  live in siblings (`cli_absorb.rs`, `cli_dump.rs`, `cli_lobes.rs`,
+  `cli_install_items.rs`, `cli_build_hooks.rs`, `review_hooks.rs`,
+  `item_lifecycle.rs`, ...). Add a new assertion to the matching topical file, or
+  to `cli.rs` if none fits. `Sandbox::from_example(<name>)` drives a shipped
+  `examples/<name>` the same way.
 
 Run everything with `cargo test`.
 
