@@ -555,6 +555,21 @@ only appear at meld or install time. It is read-only and installs nothing.
   for a source that deliberately installs to a fixed location. The `{{self}}`
   self-resource case (CLI-145), which a hook does not populate, keeps its
   fragile-not-broken wording.
+- `CLI-190` `review` reports, as an advisory `unshipped-tooling` finding, a `tool`
+  whose entrypoint resolves in the author's working tree only through a file git
+  does not track, so the tool ships without that file and `{{tools:name}}`
+  references to it break on a clone/remote meld though they resolve locally. It
+  checks the resolved entrypoint script and, when present, the tool's `TOOL.md`
+  (which declares the `bin`), and names each untracked file. It applies only to a
+  local working-tree target that is a git repository: a remote/clone target
+  already contains only what ships, so the discrepancy cannot arise there (a
+  genuinely-missing entrypoint is a plain `bad-reference`, CLI-135), and a non-repo
+  local dir cannot be assessed for shippability. A tool with a per-item build hook
+  (HOOK-70) is skipped -- its entrypoint is generated in staging, so its absence
+  from git is intentional. Advisory, and `--fix` never touches it: committing the
+  file or adding a build hook is the author's decision. This is the working-tree
+  counterpart of the install-time entrypoint `BadReference` (tooling.md TOOL-17),
+  caught before a push rather than at a consumer's meld.
 
 ## introspect
 
