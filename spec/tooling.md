@@ -114,6 +114,17 @@ the recorded content hash is of the source (token) form.
   tilde syntax (`Bash(~/.mind/store/**)`) that an absolute path would not match.
   When the store root is not under home (a `MIND_HOME` pointing elsewhere) or the
   home directory cannot be determined, the token expands to the absolute path.
+- `TOOL-17` A `{{tools:name}}` `BadReference` (TOOL-12) names its specific cause,
+  so a maintainer can tell a typo from a tool whose entrypoint failed to resolve.
+  A referent that matches no sibling tool -- a miss, or a name that is a non-tool
+  sibling -- reports "does not match any item", the wording every other reference
+  miss uses. A referent that names a real sibling tool with no resolvable `bin`
+  (TOOL-5) instead reports that the tool has no resolvable entrypoint. The cause
+  rides on both the install-time error and the `review` `bad-reference` finding
+  (CLI-135). The common trigger for the entrypoint case is a `TOOL.md` that
+  declares the `bin` but is gitignored or unadded, so it resolves in the author's
+  working tree yet is absent from a clone; `review` catches that ahead of time as
+  a distinct advisory (CLI-190).
 
 Because every token expands under `~/.mind/store`, an item's invocations of its
 tooling share one stable path prefix regardless of agent home or prefix, so a

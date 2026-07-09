@@ -88,6 +88,33 @@ impl std::fmt::Display for ItemKind {
     }
 }
 
+/// Why a path-reference token failed to resolve, so a [`MindError::BadReference`]
+/// (and the `review` `bad-reference` finding) can name the specific cause instead
+/// of one blanket message. The two causes read very differently to a maintainer:
+/// a genuine typo/miss versus a real tool whose entrypoint just did not ship
+/// (tooling.md TOOL-17).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BadRefReason {
+    /// The referent names no matching sibling item (a miss, or a cross-kind
+    /// ambiguity with no qualifier).
+    NoMatch,
+    /// A `{{tools:name}}` referent names a real sibling tool, but that tool has
+    /// no resolvable entrypoint (`bin`): no `TOOL.md`/`mind.toml` `bin` and no
+    /// convention entrypoint file present in the source (tooling.md TOOL-5).
+    ToolNoBin,
+}
+
+impl std::fmt::Display for BadRefReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BadRefReason::NoMatch => f.write_str("does not match any item"),
+            BadRefReason::ToolNoBin => {
+                f.write_str("names a tool with no resolvable entrypoint (bin)")
+            }
+        }
+    }
+}
+
 /// Format a conflicts list for display in error messages.
 ///
 /// Each tuple is `(kind, effective_name, existing_source)`. Used by the
@@ -238,11 +265,15 @@ pub enum MindError {
     )]
     LinkOccupied { path: String },
 
-    #[error("{item}: reference {referent} does not match any item in source '{in_source}'")]
+    #[error("{item}: reference {referent} {reason} in source '{in_source}'")]
     BadReference {
         item: String,
         /// The offending token as written, e.g. `{{ns:foo}}` or `{{tools:bar}}`.
         referent: String,
+        /// Why it did not resolve, so the message names the specific cause
+        /// (TOOL-17). A `NoMatch` keeps the historical "does not match any item"
+        /// wording.
+        reason: BadRefReason,
         in_source: String,
     },
 

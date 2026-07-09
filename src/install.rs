@@ -17,6 +17,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::catalog::CatalogItem;
+use crate::error::BadRefReason::NoMatch;
 use crate::error::{ItemKind, MindError, Result};
 use crate::hash::hash_path;
 use crate::manifest::InstalledItem;
@@ -480,18 +481,20 @@ fn expand_references(
 
     // DEP-6: validate every `requires` entry before touching any file. A bad
     // entry here aborts the staged install (the live copy is still untouched).
-    let bad_ref = |referent: String| MindError::BadReference {
+    let bad_ref = |referent: String, reason: crate::error::BadRefReason| MindError::BadReference {
         item: item.key(),
         referent,
+        reason,
         in_source: item.source.clone(),
     };
+    // A `requires` entry that fails to resolve is a plain miss (NoMatch).
+    let bad_requires = |entry: &str| bad_ref(format!("requires: {entry}"), NoMatch);
     for entry in &item.requires {
         // spec: DEP-6
-        let r = crate::resolve::parse_item_ref(entry)
-            .map_err(|_| bad_ref(format!("requires: {entry}")))?;
+        let r = crate::resolve::parse_item_ref(entry).map_err(|_| bad_requires(entry))?;
         // Source-qualified entries cross sources, which is forbidden (DEP-5).
         if r.source.is_some() {
-            return Err(bad_ref(format!("requires: {entry}")));
+            return Err(bad_requires(entry));
         }
         // Resolve against siblings by bare name, narrowing by kind (DEP-5).
         let matches: Vec<&CatalogItem> = siblings
@@ -500,7 +503,7 @@ fn expand_references(
             .collect();
         if matches.is_empty() || matches.len() > 1 && r.kind.is_none() {
             // Zero matches (typo/unknown) or ambiguous bare name (DEP-6).
-            return Err(bad_ref(format!("requires: {entry}")));
+            return Err(bad_requires(entry));
         }
     }
 
@@ -519,8 +522,9 @@ fn expand_references(
             continue;
         }
         let expanded = namespace::expand(&content, &item.prefix, &names, &bare_names)
-            .map_err(|name| bad_ref(format!("{{{{ns:{name}}}}}")))?;
-        let expanded = namespace::expand_paths(&expanded, &ctx).map_err(&bad_ref)?;
+            .map_err(|name| bad_ref(format!("{{{{ns:{name}}}}}"), NoMatch))?;
+        let expanded = namespace::expand_paths(&expanded, &ctx)
+            .map_err(|(referent, reason)| bad_ref(referent, reason))?;
         std::fs::write(&file, expanded).map_err(|e| MindError::io(&file, e))?;
     }
     Ok(())

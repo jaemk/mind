@@ -383,6 +383,35 @@ pub fn is_repo(dir: &Path) -> bool {
     .is_ok()
 }
 
+/// Whether git tracks `file` in the repo at `repo`, i.e. whether the file would
+/// appear in a fresh clone. Used by `review` to catch tooling that resolves in
+/// the author's working tree but is gitignored/unadded and so ships broken
+/// (CLI-190). Returns `true` (treat as shippable, do not flag) when `repo` is not
+/// a git repository, git is unavailable, or the paths cannot be resolved, so the
+/// check only ever fires on a real, assessable repo.
+pub fn is_tracked(repo: &Path, file: &Path) -> bool {
+    if !is_repo(repo) {
+        return true;
+    }
+    // Resolve both to absolute and take the repo-relative path as the pathspec,
+    // so a relative `repo`/`file` (e.g. `mind review ./src`) is not misread
+    // relative to git's own working directory. `file` must exist on disk (callers
+    // only ask about present files), so canonicalize succeeds.
+    let (Ok(repo_abs), Ok(file_abs)) = (repo.canonicalize(), file.canonicalize()) else {
+        return true;
+    };
+    let Ok(rel) = file_abs.strip_prefix(&repo_abs) else {
+        return true;
+    };
+    // `ls-files --error-unmatch` exits 0 iff the path is tracked.
+    run(
+        &repo_abs.to_string_lossy(),
+        Some(&repo_abs),
+        &["ls-files", "--error-unmatch", "--", &rel.to_string_lossy()],
+    )
+    .is_ok()
+}
+
 /// Stage all changes under `dir` (`git add -A`).
 pub fn add_all(dir: &Path) -> Result<()> {
     run(&dir.to_string_lossy(), Some(dir), &["add", "-A"])?;

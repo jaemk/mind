@@ -1040,6 +1040,7 @@ fn meld_recursive(
                         MindError::BadReference {
                             item: format!("install-items in '{super_source_name}'"),
                             referent: item_ref.clone(),
+                            reason: crate::error::BadRefReason::NoMatch,
                             in_source: spec.name.clone(),
                         }
                     })?;
@@ -1052,6 +1053,7 @@ fn meld_recursive(
                         return Err(MindError::BadReference {
                             item: format!("install-items in '{super_source_name}'"),
                             referent: item_ref.clone(),
+                            reason: crate::error::BadRefReason::NoMatch,
                             in_source: spec.name.clone(),
                         });
                     }

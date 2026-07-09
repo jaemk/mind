@@ -360,9 +360,10 @@ enum Token {
     Path(String),
     /// Not a path token (e.g. `{{ns:...}}` or a stray `{{`): leave it verbatim.
     Passthrough,
-    /// A path token whose referent does not resolve (miss, ambiguous, or a tool
-    /// with no entrypoint).
-    Bad,
+    /// A path token whose referent does not resolve, tagged with why (miss vs. a
+    /// real tool with no entrypoint) so the caller can report the specific cause
+    /// (TOOL-17).
+    Bad(crate::error::BadRefReason),
 }
 
 /// Expand the path tokens `{{self}}`, `{{tools:name}}`, and `{{path:ref}}` in
@@ -373,7 +374,10 @@ enum Token {
 /// offending token text when a path token's referent does not resolve, so the
 /// caller can report it. Whitespace inside a token is trimmed; an unterminated
 /// token (no closing `}}`) leaves the remainder verbatim, mirroring [`expand`].
-pub fn expand_paths(content: &str, ctx: &PathCtx) -> Result<String, String> {
+pub fn expand_paths(
+    content: &str,
+    ctx: &PathCtx,
+) -> Result<String, (String, crate::error::BadRefReason)> {
     let mut out = String::with_capacity(content.len());
     let mut rest = content;
     while let Some(pos) = rest.find("{{") {
@@ -390,9 +394,10 @@ pub fn expand_paths(content: &str, ctx: &PathCtx) -> Result<String, String> {
                 out.push_str(&p);
                 rest = &after[end + 2..];
             }
-            Token::Bad => {
-                // Report the token exactly as written, including the braces.
-                return Err(rest[pos..pos + 2 + end + 2].to_string());
+            Token::Bad(reason) => {
+                // Report the token exactly as written, including the braces, with
+                // the specific reason it failed (TOOL-17).
+                return Err((rest[pos..pos + 2 + end + 2].to_string(), reason));
             }
             Token::Passthrough => {
                 // Leave the `{{` verbatim and resume scanning just after it, so a
@@ -425,9 +430,11 @@ fn resolve_token(inner: &str, ctx: &PathCtx) -> Token {
                         .to_string_lossy()
                         .into_owned(),
                 ),
-                None => Token::Bad,
+                // The tool exists but has no resolvable entrypoint: a distinct
+                // cause from a plain miss (TOOL-17).
+                None => Token::Bad(crate::error::BadRefReason::ToolNoBin),
             },
-            None => Token::Bad,
+            None => Token::Bad(crate::error::BadRefReason::NoMatch),
         };
     }
     if let Some(reference) = inner.strip_prefix("path:") {
@@ -435,7 +442,7 @@ fn resolve_token(inner: &str, ctx: &PathCtx) -> Token {
         let (want_kind, name) = match reference.split_once(':') {
             Some((k, n)) => match crate::error::ItemKind::parse(k) {
                 Some(kind) => (Some(kind), n.trim()),
-                None => return Token::Bad,
+                None => return Token::Bad(crate::error::BadRefReason::NoMatch),
             },
             None => (None, reference),
         };
@@ -446,7 +453,7 @@ fn resolve_token(inner: &str, ctx: &PathCtx) -> Token {
         return match (hits.next(), hits.next()) {
             (Some(s), None) => Token::Path(ctx.store_path(s.kind, name)),
             // No match, or ambiguous across kinds without a qualifier.
-            _ => Token::Bad,
+            _ => Token::Bad(crate::error::BadRefReason::NoMatch),
         };
     }
     Token::Passthrough
@@ -1408,28 +1415,29 @@ mod tests {
 
     #[test]
     fn tools_token_errors_on_missing_or_binless_or_non_tool() {
-        // spec: TOOL-12
+        // spec: TOOL-12 TOOL-17
+        use crate::error::BadRefReason::{NoMatch, ToolNoBin};
         let store = Path::new("/m/store");
         let none = None;
-        // No such sibling.
+        // No such sibling: a plain miss.
         let c = ctx(store, &none, ItemKind::Skill, "review", &[]);
         assert_eq!(
             expand_paths("{{tools:nope}}", &c),
-            Err("{{tools:nope}}".to_string())
+            Err(("{{tools:nope}}".to_string(), NoMatch))
         );
-        // A tool with no resolvable bin.
+        // A tool with no resolvable bin: the distinct ToolNoBin cause (TOOL-17).
         let binless = vec![psib(ItemKind::Tool, "x", None)];
         let c = ctx(store, &none, ItemKind::Skill, "review", &binless);
         assert_eq!(
             expand_paths("{{tools:x}}", &c),
-            Err("{{tools:x}}".to_string())
+            Err(("{{tools:x}}".to_string(), ToolNoBin))
         );
-        // A sibling of that name exists but is not a tool.
+        // A sibling of that name exists but is not a tool: a miss, not ToolNoBin.
         let not_tool = vec![psib(ItemKind::Skill, "x", None)];
         let c = ctx(store, &none, ItemKind::Skill, "review", &not_tool);
         assert_eq!(
             expand_paths("{{tools:x}}", &c),
-            Err("{{tools:x}}".to_string())
+            Err(("{{tools:x}}".to_string(), NoMatch))
         );
     }
 
@@ -1465,7 +1473,10 @@ mod tests {
         let c = ctx(store, &none, ItemKind::Skill, "self", &sibs);
         assert_eq!(
             expand_paths("{{path:x}}", &c),
-            Err("{{path:x}}".to_string())
+            Err((
+                "{{path:x}}".to_string(),
+                crate::error::BadRefReason::NoMatch
+            ))
         );
         // A kind qualifier disambiguates.
         assert_eq!(
@@ -1475,7 +1486,10 @@ mod tests {
         // A miss is an error.
         assert_eq!(
             expand_paths("{{path:none}}", &c),
-            Err("{{path:none}}".to_string())
+            Err((
+                "{{path:none}}".to_string(),
+                crate::error::BadRefReason::NoMatch
+            ))
         );
     }
 

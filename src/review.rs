@@ -595,13 +595,19 @@ fn run_checks(
             // `{{ns:}}` in it is misplaced (NS-24).
             let is_md = file.extension().and_then(|e| e.to_str()) == Some("md");
             // Check 8: path-reference tokens that do not resolve (hard, CLI-135).
-            if let Err(token) = crate::namespace::expand_paths(&content, &ctx) {
+            if let Err((token, reason)) = crate::namespace::expand_paths(&content, &ctx) {
+                // Name the specific cause (TOOL-17): a plain miss keeps the
+                // historical "does not resolve to any sibling" wording; a real
+                // tool with an unresolvable entrypoint says so.
+                let detail = match reason {
+                    crate::error::BadRefReason::ToolNoBin => {
+                        "names a tool with no resolvable entrypoint (bin)"
+                    }
+                    crate::error::BadRefReason::NoMatch => "does not resolve to any sibling",
+                };
                 hard.push(Finding::hard(
                     "bad-reference",
-                    format!(
-                        "{}: {token} does not resolve to any sibling in this source",
-                        item.key()
-                    ),
+                    format!("{}: {token} {detail} in this source", item.key()),
                 ));
             }
             // Check 9: hardcoded install paths that should be tokens (advisory,
@@ -684,6 +690,52 @@ fn run_checks(
 
     // Check 12: helper scripts duplicated across items (advisory, CLI-144).
     advisory.extend(duplicate_tooling_findings(&items));
+
+    // Check 13: a tool whose entrypoint resolves only through a file git does not
+    // track, so `{{tools:name}}` works in the author's tree but breaks on a clone
+    // (advisory, CLI-190). Only meaningful for a local working-tree target: a
+    // remote/clone target already contains only what ships, so the discrepancy
+    // cannot exist there and a genuinely-missing entrypoint surfaces as a plain
+    // bad-reference (CLI-135) instead.
+    if is_local {
+        for item in &items {
+            if item.kind != crate::error::ItemKind::Tool {
+                continue;
+            }
+            // Only tools with a resolvable entrypoint can be referenced by
+            // `{{tools:name}}`; a tool nothing runs need not resolve a bin (TOOL-5).
+            let Some(bin) = item.resolved_bin() else {
+                continue;
+            };
+            // A per-item build hook produces the entrypoint in staging (HOOK-70),
+            // so its absence from git is intentional, not a defect.
+            if item.build.is_some() {
+                continue;
+            }
+            // The files that must ship for `{{tools:name}}` to resolve on a clone:
+            // the entrypoint script, and the `TOOL.md` that declares its `bin`.
+            // Flag only files present on disk (the gitignored/unadded case); a
+            // file that does not exist at all is a different, already-local defect.
+            let mut untracked: Vec<String> = Vec::new();
+            for rel in [bin.as_str(), "TOOL.md"] {
+                let file = item.path.join(rel);
+                if file.is_file() && !crate::git::is_tracked(source_dir, &file) {
+                    untracked.push(rel.to_string());
+                }
+            }
+            if !untracked.is_empty() {
+                advisory.push(Finding::advisory(
+                    "unshipped-tooling",
+                    format!(
+                        "{}: git does not track {}; the file resolves this tool's entrypoint in your working tree but is absent from a clone, so {{{{tools:{}}}}} references break on a remote meld. Commit it (or produce it with a build hook).",
+                        item.key(),
+                        untracked.join(", "),
+                        item.name
+                    ),
+                ));
+            }
+        }
+    }
 
     // Fix (CLI-138): rewrite the local working copy in place. Local-path target
     // only; a registry selector or repo spec is refused with nothing changed.
@@ -2345,6 +2397,174 @@ mod tests {
             f.message.contains("detect"),
             "names the tool: {}",
             f.message
+        );
+    }
+
+    /// A `{{tools:x}}` referent that names a real tool with no resolvable
+    /// entrypoint reports the ToolNoBin cause, distinct from a plain miss.
+    /// spec: TOOL-17
+    #[test]
+    fn bad_reference_names_tool_no_bin_cause() {
+        let tmp = TmpDir::new();
+        let source_dir = tmp.path().join("src");
+        // A tool dir with no bin file and no TOOL.md: resolved_bin is None.
+        write_file(&source_dir.join("tools/x/notes.txt"), "not an entrypoint\n");
+        write_file(
+            &source_dir.join("skills/review/SKILL.md"),
+            "---\ndescription: review\n---\n# review\n\n```\n{{tools:x}} .\n```\n",
+        );
+        let paths = paths_for(tmp.path());
+        let result = run_checks(&paths, &source_dir, None, false, true).unwrap();
+        let f = result
+            .hard
+            .iter()
+            .find(|f| f.kind == "bad-reference")
+            .expect("expected a bad-reference hard finding");
+        assert!(
+            f.message.contains("no resolvable entrypoint"),
+            "names the ToolNoBin cause: {}",
+            f.message
+        );
+
+        // A plain miss keeps the historical "does not resolve to any sibling"
+        // wording, so only the entrypoint case reads differently.
+        write_file(
+            &source_dir.join("skills/review/SKILL.md"),
+            "---\ndescription: review\n---\n# review\n\n```\n{{tools:nope}} .\n```\n",
+        );
+        let result = run_checks(&paths, &source_dir, None, false, true).unwrap();
+        let f = result
+            .hard
+            .iter()
+            .find(|f| f.kind == "bad-reference")
+            .expect("expected a bad-reference hard finding for the miss");
+        assert!(
+            f.message.contains("does not resolve to any sibling"),
+            "a miss keeps the historical wording: {}",
+            f.message
+        );
+    }
+
+    /// Build a git repo at `source_dir`, committing everything not gitignored.
+    fn git_commit_all(source_dir: &Path) {
+        run_git(source_dir, &["-c", "init.defaultBranch=main", "init", "-q"]);
+        run_git(source_dir, &["config", "user.email", "t@t"]);
+        run_git(source_dir, &["config", "user.name", "t"]);
+        run_git(source_dir, &["add", "-A"]);
+        run_git(source_dir, &["commit", "-qm", "initial"]);
+    }
+
+    /// A tool whose `bin`-declaring `TOOL.md` is gitignored resolves in the
+    /// author's working tree but is absent from a clone: review flags it as
+    /// `unshipped-tooling`, and the token itself is not a hard bad-reference
+    /// (it resolves locally).
+    /// spec: CLI-190
+    #[test]
+    fn unshipped_tooling_flags_gitignored_toolmd() {
+        let tmp = TmpDir::new();
+        let source_dir = tmp.path().join("src");
+        write_file(
+            &source_dir.join("tools/detect/detect.sh"),
+            "#!/bin/sh\necho hi\n",
+        );
+        write_file(
+            &source_dir.join("tools/detect/TOOL.md"),
+            "---\ndescription: detect\nbin: detect.sh\n---\n# detect\n",
+        );
+        write_file(
+            &source_dir.join("skills/review/SKILL.md"),
+            "---\ndescription: review\n---\n# review\n\n```\n{{tools:detect}} .\n```\n",
+        );
+        // Gitignore TOOL.md so `git add -A` skips it: it stays untracked, exactly
+        // the works-locally-breaks-on-clone case.
+        write_file(&source_dir.join(".gitignore"), "TOOL.md\n");
+        git_commit_all(&source_dir);
+
+        let paths = paths_for(tmp.path());
+        let result = run_checks(&paths, &source_dir, None, false, true).unwrap();
+        assert!(
+            !result.hard.iter().any(|f| f.kind == "bad-reference"),
+            "token resolves locally, so no hard bad-reference: {:?}",
+            result.hard
+        );
+        let f = result
+            .advisory
+            .iter()
+            .find(|f| f.kind == "unshipped-tooling")
+            .expect("expected an unshipped-tooling advisory");
+        assert!(
+            f.message.contains("TOOL.md") && f.message.contains("detect"),
+            "names the untracked file and tool: {}",
+            f.message
+        );
+    }
+
+    /// When the tool's files are all git-tracked, nothing ships broken and there
+    /// is no unshipped-tooling finding.
+    /// spec: CLI-190
+    #[test]
+    fn unshipped_tooling_silent_when_tracked() {
+        let tmp = TmpDir::new();
+        let source_dir = tmp.path().join("src");
+        write_file(
+            &source_dir.join("tools/detect/detect.sh"),
+            "#!/bin/sh\necho hi\n",
+        );
+        write_file(
+            &source_dir.join("tools/detect/TOOL.md"),
+            "---\ndescription: detect\nbin: detect.sh\n---\n# detect\n",
+        );
+        write_file(
+            &source_dir.join("skills/review/SKILL.md"),
+            "---\ndescription: review\n---\n# review\n\n```\n{{tools:detect}} .\n```\n",
+        );
+        // No gitignore: `git add -A` tracks TOOL.md and the script.
+        git_commit_all(&source_dir);
+
+        let paths = paths_for(tmp.path());
+        let result = run_checks(&paths, &source_dir, None, false, true).unwrap();
+        assert!(
+            !result
+                .advisory
+                .iter()
+                .any(|f| f.kind == "unshipped-tooling"),
+            "all files tracked, so no unshipped-tooling: {:?}",
+            result.advisory
+        );
+    }
+
+    /// The check is scoped to a local working-tree target: a remote/clone target
+    /// (is_local = false) already contains only what ships, so it is skipped even
+    /// when the working tree it was cloned from would gitignore the file.
+    /// spec: CLI-190
+    #[test]
+    fn unshipped_tooling_skipped_for_non_local_target() {
+        let tmp = TmpDir::new();
+        let source_dir = tmp.path().join("src");
+        write_file(
+            &source_dir.join("tools/detect/detect.sh"),
+            "#!/bin/sh\necho hi\n",
+        );
+        write_file(
+            &source_dir.join("tools/detect/TOOL.md"),
+            "---\ndescription: detect\nbin: detect.sh\n---\n# detect\n",
+        );
+        write_file(
+            &source_dir.join("skills/review/SKILL.md"),
+            "---\ndescription: review\n---\n# review\n",
+        );
+        write_file(&source_dir.join(".gitignore"), "TOOL.md\n");
+        git_commit_all(&source_dir);
+
+        let paths = paths_for(tmp.path());
+        let result = run_checks(&paths, &source_dir, None, false, false).unwrap();
+        assert!(
+            !result
+                .advisory
+                .iter()
+                .any(|f| f.kind == "unshipped-tooling"),
+            "non-local target must skip the shippability check: {:?}",
+            result.advisory
         );
     }
 
