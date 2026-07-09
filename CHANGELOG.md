@@ -6,6 +6,34 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-07-09
+
+### Added
+
+- `review` `unshipped-tooling` advisory: flags anything that resolves in the
+  author's working tree but is git-untracked, so it is absent from a clone and
+  breaks on a remote meld though it works locally. It covers a tool's entrypoint
+  script or its `TOOL.md` (CLI-190), any item's `{{self}}/...` or `{{path:...}}/...`
+  bundled files (CLI-191), and an authoritative `mind.toml` that declares the
+  source's inventory (CLI-193).
+- `review` `ns-tool-reference` advisory: a `{{ns:name}}` whose only match is a
+  store-only tool. A tool's bare name is not runnable, so this is the silent
+  failure mode of a `{{tools:name}}` written as `{{ns:name}}`; the advisory points
+  at `{{tools:name}}` / `{{path:tool:name}}` instead (CLI-192).
+
+### Changed
+
+- Bad-reference errors name their specific cause instead of the blanket "does not
+  match any item": a `{{tools:name}}` naming a tool with no resolvable entrypoint
+  (TOOL-17), a `{{path:ref}}` that is an under-qualified cross-kind ambiguity
+  rather than a miss (TOOL-18), and an install-time `requires` entry that is
+  malformed, cross-source, or ambiguous (DEP-7). The install-time message now
+  matches the cause `review` reports.
+- A malformed `plugin.json` / `marketplace.json` reports an error naming the
+  actual file, instead of mislabeling it "mind.toml at ...".
+- A `mind.toml` hook-event error names the offending item or section, not just
+  the file.
+
 ## [0.15.0] - 2026-07-07
 
 ### Added
@@ -780,7 +808,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovery, frontmatter descriptions, transactional install/upgrade/uninstall
   with a file registry, and a tag-driven release pipeline with a Homebrew tap.
 
-[Unreleased]: https://github.com/jaemk/mind/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/jaemk/mind/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/jaemk/mind/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/jaemk/mind/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/jaemk/mind/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/jaemk/mind/compare/v0.12.0...v0.13.0
