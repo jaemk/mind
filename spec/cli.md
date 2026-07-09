@@ -570,6 +570,37 @@ only appear at meld or install time. It is read-only and installs nothing.
   file or adding a build hook is the author's decision. This is the working-tree
   counterpart of the install-time entrypoint `BadReference` (tooling.md TOOL-17),
   caught before a push rather than at a consumer's meld.
+- `CLI-191` `review` extends the `unshipped-tooling` advisory (CLI-190) to any
+  item's bundled files, not just a tool's entrypoint: a file addressed by a
+  `{{self}}/...` or `{{path:[kind:]name}}/...` reference (tooling.md TOOL-10/TOOL-11)
+  that is present in the author's working tree but git does not track is flagged,
+  because the whole item directory is copied on a local meld (picking up the
+  gitignored file) while a clone contains only tracked files, so the reference
+  resolves locally and breaks on a remote meld. It names the untracked file and
+  the token that addresses it. A token with no `/`-path remainder addresses the
+  item directory itself, not a specific file, and is not checked. Local
+  working-tree git target only and `--fix` never touches it, exactly as CLI-190.
+  A file that does not exist at all is a plain `bad-reference` handled elsewhere,
+  not this advisory.
+- `CLI-192` `review` reports, as an advisory `ns-tool-reference` finding, a
+  `{{ns:name}}` reference (namespacing.md) whose only matching sibling is a `tool`.
+  A tool is store-only (tooling.md TOOL-3), reached by `{{tools:name}}` for its
+  entrypoint or `{{path:tool:name}}` for its directory; its bare name is not a
+  runnable path and is never linked into an agent home, so a `{{ns:tool}}` expands
+  to a name that resolves to nothing at runtime -- the silent failure mode of a
+  `{{tools:}}` mistyped or "fixed" into a `{{ns:}}`. It fires only when the name
+  matches no non-tool sibling, so a genuine skill/agent/rule reference that merely
+  shares a name with a tool is not flagged. It applies to any target (a
+  wrong-token content smell, not a shippability check).
+- `CLI-193` `review` reports, as an advisory `unshipped-tooling` finding, an
+  authoritative `mind.toml` (one declaring `[[items]]` or `[discover]` globs, so it
+  turns off convention scanning) that git does not track. A linked local source
+  reads even an untracked/gitignored `mind.toml` live (CLI-27), so its declared
+  inventory, prefix, and bins apply to the author's working tree yet are absent
+  from a clone, which falls back to convention discovery or a different item set --
+  the source-wide form of the working-tree-vs-clone discrepancy. A metadata-only
+  `[source]` block changes no discovery and is not flagged. Local working-tree git
+  target only.
 
 ## introspect
 

@@ -742,6 +742,105 @@ fn run_checks(
         }
     }
 
+    // Check 14: a bundled file addressed by a `{{self}}/...` or `{{path:...}}/...`
+    // reference that git does not track (advisory, CLI-191). Generalizes the
+    // tool-entrypoint check (CLI-190) to any item's referenced bundled files: the
+    // whole item directory is copied on a local meld (picking up gitignored
+    // files), but a clone contains only tracked files, so the reference resolves
+    // locally and breaks on a remote meld. Local working-tree target only, same
+    // rationale as CLI-190.
+    if is_local {
+        let source_items: Vec<&CatalogItem> =
+            items.iter().filter(|it| it.source == source_name).collect();
+        let mut seen: HashSet<(String, PathBuf)> = HashSet::new();
+        for item in &items {
+            for file in item_files(item) {
+                let Ok(content) = std::fs::read_to_string(&file) else {
+                    continue;
+                };
+                for (token, target) in referenced_source_files(&content, item, &source_items) {
+                    if !target.is_file() || crate::git::is_tracked(source_dir, &target) {
+                        continue;
+                    }
+                    if !seen.insert((item.key(), target.clone())) {
+                        continue;
+                    }
+                    let shown = target
+                        .strip_prefix(source_dir)
+                        .unwrap_or(&target)
+                        .to_string_lossy()
+                        .into_owned();
+                    advisory.push(Finding::advisory(
+                        "unshipped-tooling",
+                        format!(
+                            "{}: git does not track {shown}, referenced as {token}; it resolves in your working tree but is absent from a clone, so the reference breaks on a remote meld. Commit it.",
+                            item.key(),
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+
+    // Check 15: a `{{ns:name}}` reference whose only matching sibling is a tool
+    // (advisory, CLI-192). A tool is store-only, reached by `{{tools:name}}` (its
+    // entrypoint) or `{{path:tool:name}}` (its dir); its bare name is not runnable
+    // and nothing links it into an agent home, so `{{ns:tool}}` expands to a name
+    // that resolves to nothing at runtime -- almost always a `{{tools:}}` mistyped
+    // as `{{ns:}}`. Fires only when the name matches no non-tool sibling, so a
+    // genuine skill/agent/rule reference that merely shares a name with a tool is
+    // not flagged. Not git-scoped: it is a wrong-token smell on any target.
+    {
+        let source_items: Vec<&CatalogItem> =
+            items.iter().filter(|it| it.source == source_name).collect();
+        for item in &items {
+            let mut flagged: HashSet<String> = HashSet::new();
+            for file in item_files(item) {
+                let Ok(content) = std::fs::read_to_string(&file) else {
+                    continue;
+                };
+                for name in crate::namespace::referenced_names(&content) {
+                    let is_tool = source_items
+                        .iter()
+                        .any(|s| s.name == name && s.kind == crate::error::ItemKind::Tool);
+                    let is_non_tool = source_items
+                        .iter()
+                        .any(|s| s.name == name && s.kind != crate::error::ItemKind::Tool);
+                    if is_tool && !is_non_tool && flagged.insert(name.clone()) {
+                        advisory.push(Finding::advisory(
+                            "ns-tool-reference",
+                            format!(
+                                "{}: {{{{ns:{name}}}}} names the tool '{name}' by its bare name; a tool is store-only and its bare name resolves to nothing runnable -- use {{{{tools:{name}}}}} for its entrypoint or {{{{path:tool:{name}}}}} for its directory.",
+                                item.key(),
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    // Check 16: an authoritative mind.toml that git does not track (advisory,
+    // CLI-193). A linked local source reads even an untracked/gitignored mind.toml
+    // live (CLI-27), so its declared inventory/prefix/bins apply to the working
+    // tree yet are absent from a clone, which falls back to convention discovery
+    // (or a different item set). Only meaningful when the mind.toml is
+    // authoritative (declares [[items]]/[discover] globs); a metadata-only
+    // [source] block changes no discovery, so its absence is harmless. Local
+    // working-tree target only.
+    if is_local
+        && let Some(mf) = &mindfile
+        && mf.is_authoritative()
+    {
+        let toml = source_dir.join("mind.toml");
+        if toml.is_file() && !crate::git::is_tracked(source_dir, &toml) {
+            advisory.push(Finding::advisory(
+                "unshipped-tooling",
+                "mind.toml: git does not track it, but it declares this source's inventory; it applies to your working tree yet is absent from a clone, so a remote meld discovers a different item set. Commit it.".to_string(),
+            ));
+        }
+    }
+
     // Fix (CLI-138): rewrite the local working copy in place. Local-path target
     // only; a registry selector or repo spec is refused with nothing changed.
     let mut fixed: Vec<String> = Vec::new();
@@ -907,6 +1006,71 @@ pub(crate) fn item_files(item: &CatalogItem) -> Vec<PathBuf> {
     } else {
         vec![item.path.clone()]
     }
+}
+
+/// The path remainder that follows a closing `}}` in text, as an item-relative
+/// path, or `None` when the token is not immediately followed by a `/`-rooted
+/// path. Captures the run of path characters after the `/`, stopping at
+/// whitespace or a shell/markdown delimiter and trimming trailing sentence
+/// punctuation, so `{{self}}/resources/pr.py.` yields `resources/pr.py`.
+fn path_remainder(after_close: &str) -> Option<String> {
+    let rest = after_close.strip_prefix('/')?;
+    let end = rest
+        .find(|c: char| c.is_whitespace() || "`\"'()[]{}<>|;,:".contains(c))
+        .unwrap_or(rest.len());
+    let seg = rest[..end].trim_end_matches(['.', '-', '_', '/']);
+    if seg.is_empty() {
+        None
+    } else {
+        Some(seg.to_string())
+    }
+}
+
+/// Every bundled file addressed by a `{{self}}/...` or `{{path:[kind:]name}}/...`
+/// reference in `content`, as `(token as written, resolved source file)`. Used to
+/// catch a gitignored bundled file that resolves in the author's working tree but
+/// is absent from a clone (CLI-191). A token with no `/`-path remainder addresses
+/// the item directory itself, not a specific file, and is skipped. `{{path:...}}`
+/// is resolved against `source_items` (same-source siblings).
+fn referenced_source_files(
+    content: &str,
+    item: &CatalogItem,
+    source_items: &[&CatalogItem],
+) -> Vec<(String, PathBuf)> {
+    let mut out = Vec::new();
+    let mut rest = content;
+    while let Some(pos) = rest.find("{{") {
+        let after = &rest[pos + 2..];
+        let Some(end) = after.find("}}") else { break };
+        let inner = after[..end].trim();
+        let tail = &after[end + 2..];
+        rest = tail;
+        let Some(remainder) = path_remainder(tail) else {
+            continue;
+        };
+        // The directory the token addresses: the item's own dir (`{{self}}`) or a
+        // named same-source sibling's dir (`{{path:[kind:]name}}`).
+        let base: Option<PathBuf> = if inner == "self" {
+            Some(item.path.clone())
+        } else if let Some(reference) = inner.strip_prefix("path:") {
+            let reference = reference.trim();
+            let (want_kind, name) = match reference.split_once(':') {
+                Some((k, n)) => (crate::error::ItemKind::parse(k), n.trim()),
+                None => (None, reference),
+            };
+            source_items
+                .iter()
+                .find(|s| s.name == name && want_kind.is_none_or(|k| s.kind == k))
+                .map(|s| s.path.clone())
+        } else {
+            None
+        };
+        if let Some(base) = base {
+            let token = format!("{{{{{inner}}}}}/{remainder}");
+            out.push((token, base.join(&remainder)));
+        }
+    }
+    out
 }
 
 /// Recursively collect every file under `dir`.
@@ -2570,6 +2734,165 @@ mod tests {
                 .any(|f| f.kind == "unshipped-tooling"),
             "non-local target must skip the shippability check: {:?}",
             result.advisory
+        );
+    }
+
+    /// A skill's bundled `{{self}}/resources/x` file that git does not track
+    /// resolves in the working tree but is absent from a clone: `review` flags it
+    /// as `unshipped-tooling` and names the file and the token. This is the
+    /// non-tool generalization of CLI-190.
+    /// spec: CLI-191
+    #[test]
+    fn unshipped_tooling_flags_gitignored_self_resource() {
+        let tmp = TmpDir::new();
+        let source_dir = tmp.path().join("src");
+        write_file(
+            &source_dir.join("skills/review/SKILL.md"),
+            "---\ndescription: review\n---\n# review\n\nRun `{{self}}/resources/pr.py` to open a PR.\n",
+        );
+        write_file(
+            &source_dir.join("skills/review/resources/pr.py"),
+            "print('pr')\n",
+        );
+        // Gitignore the bundled resource so `git add -A` skips it (a bare pattern
+        // matches the file at any depth).
+        write_file(&source_dir.join(".gitignore"), "pr.py\n");
+        git_commit_all(&source_dir);
+
+        let paths = paths_for(tmp.path());
+        let result = run_checks(&paths, &source_dir, None, false, true).unwrap();
+        let f = result
+            .advisory
+            .iter()
+            .find(|f| f.kind == "unshipped-tooling")
+            .expect("expected an unshipped-tooling advisory for the bundled resource");
+        assert!(
+            f.message.contains("pr.py") && f.message.contains("{{self}}/resources/pr.py"),
+            "names the untracked file and the token: {}",
+            f.message
+        );
+
+        // Silent when the resource is tracked.
+        let tmp2 = TmpDir::new();
+        let source_dir2 = tmp2.path().join("src");
+        write_file(
+            &source_dir2.join("skills/review/SKILL.md"),
+            "---\ndescription: review\n---\n# review\n\nRun `{{self}}/resources/pr.py`.\n",
+        );
+        write_file(
+            &source_dir2.join("skills/review/resources/pr.py"),
+            "print('pr')\n",
+        );
+        git_commit_all(&source_dir2);
+        let paths2 = paths_for(tmp2.path());
+        let result2 = run_checks(&paths2, &source_dir2, None, false, true).unwrap();
+        assert!(
+            !result2
+                .advisory
+                .iter()
+                .any(|f| f.kind == "unshipped-tooling"),
+            "tracked resource must not be flagged: {:?}",
+            result2.advisory
+        );
+    }
+
+    /// A `{{ns:name}}` reference whose only matching sibling is a tool is an
+    /// advisory `ns-tool-reference`: a tool's bare name is not runnable, so it is
+    /// the silent failure mode of a `{{tools:}}` written as `{{ns:}}`. A name that
+    /// also matches a non-tool sibling is not flagged.
+    /// spec: CLI-192
+    #[test]
+    fn ns_reference_to_a_tool_is_advisory() {
+        let tmp = TmpDir::new();
+        let source_dir = tmp.path().join("src");
+        write_file(&source_dir.join("tools/detect/detect"), "#!/bin/sh\n");
+        write_file(
+            &source_dir.join("skills/review/SKILL.md"),
+            "---\ndescription: review\n---\n# review\n\nRun {{ns:detect}} first.\n",
+        );
+        let paths = paths_for(tmp.path());
+        let result = run_checks(&paths, &source_dir, None, false, true).unwrap();
+        let f = result
+            .advisory
+            .iter()
+            .find(|f| f.kind == "ns-tool-reference")
+            .expect("expected an ns-tool-reference advisory");
+        assert!(
+            f.message.contains("detect") && f.message.contains("{{tools:detect}}"),
+            "names the tool and the correct token: {}",
+            f.message
+        );
+
+        // A name shared by a non-tool sibling is a legitimate `{{ns:}}` and is not
+        // flagged: add an agent also named `detect`.
+        write_file(
+            &source_dir.join("agents/detect.md"),
+            "---\ndescription: detect agent\n---\n# detect\n",
+        );
+        let result = run_checks(&paths, &source_dir, None, false, true).unwrap();
+        assert!(
+            !result
+                .advisory
+                .iter()
+                .any(|f| f.kind == "ns-tool-reference"),
+            "a name shared with a non-tool sibling must not be flagged: {:?}",
+            result.advisory
+        );
+    }
+
+    /// An authoritative `mind.toml` (declares `[[items]]`) that git does not track
+    /// applies to the working tree but is absent from a clone, so `review` flags
+    /// it. A tracked one, or a metadata-only one, is silent.
+    /// spec: CLI-193
+    #[test]
+    fn unshipped_tooling_flags_gitignored_authoritative_mindtoml() {
+        let tmp = TmpDir::new();
+        let source_dir = tmp.path().join("src");
+        write_file(
+            &source_dir.join("guidelines/style.md"),
+            "---\ndescription: style\n---\n# style\n",
+        );
+        write_file(
+            &source_dir.join("mind.toml"),
+            "[source]\ndescription = \"lib\"\n\n[[items]]\nkind = \"rule\"\nname = \"style\"\npath = \"guidelines/style.md\"\n",
+        );
+        write_file(&source_dir.join(".gitignore"), "mind.toml\n");
+        git_commit_all(&source_dir);
+
+        let paths = paths_for(tmp.path());
+        let result = run_checks(&paths, &source_dir, None, false, true).unwrap();
+        let f = result
+            .advisory
+            .iter()
+            .find(|f| f.kind == "unshipped-tooling" && f.message.contains("mind.toml"))
+            .expect("expected an unshipped-tooling advisory for the untracked mind.toml");
+        assert!(
+            f.message.contains("inventory"),
+            "explains the discovery discrepancy: {}",
+            f.message
+        );
+
+        // Tracked authoritative mind.toml: silent.
+        let tmp2 = TmpDir::new();
+        let source_dir2 = tmp2.path().join("src");
+        write_file(
+            &source_dir2.join("guidelines/style.md"),
+            "---\ndescription: style\n---\n# style\n",
+        );
+        write_file(
+            &source_dir2.join("mind.toml"),
+            "[source]\ndescription = \"lib\"\n\n[[items]]\nkind = \"rule\"\nname = \"style\"\npath = \"guidelines/style.md\"\n",
+        );
+        git_commit_all(&source_dir2);
+        let paths2 = paths_for(tmp2.path());
+        let result2 = run_checks(&paths2, &source_dir2, None, false, true).unwrap();
+        assert!(
+            !result2
+                .advisory
+                .iter()
+                .any(|f| f.kind == "unshipped-tooling" && f.message.contains("mind.toml")),
+            "tracked mind.toml must not be flagged: {:?}",
+            result2.advisory
         );
     }
 
