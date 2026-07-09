@@ -487,23 +487,32 @@ fn expand_references(
         reason,
         in_source: item.source.clone(),
     };
-    // A `requires` entry that fails to resolve is a plain miss (NoMatch).
-    let bad_requires = |entry: &str| bad_ref(format!("requires: {entry}"), NoMatch);
+    // A `requires` entry that fails to resolve names the specific cause (DEP-7),
+    // mirroring what `review` reports, so the install-time error is not the blunt
+    // "does not match any item" for a ref that in fact crosses sources, is
+    // malformed, or is merely ambiguous.
+    let bad_requires = |entry: &str, reason| bad_ref(format!("requires: {entry}"), reason);
     for entry in &item.requires {
-        // spec: DEP-6
-        let r = crate::resolve::parse_item_ref(entry).map_err(|_| bad_requires(entry))?;
+        // spec: DEP-6 DEP-7
+        use crate::error::BadRefReason::{AmbiguousKind, CrossSource, InvalidRef};
+        let r =
+            crate::resolve::parse_item_ref(entry).map_err(|_| bad_requires(entry, InvalidRef))?;
         // Source-qualified entries cross sources, which is forbidden (DEP-5).
         if r.source.is_some() {
-            return Err(bad_requires(entry));
+            return Err(bad_requires(entry, CrossSource));
         }
         // Resolve against siblings by bare name, narrowing by kind (DEP-5).
         let matches: Vec<&CatalogItem> = siblings
             .iter()
             .filter(|s| s.name == r.name && r.kind.is_none_or(|k| s.kind == k))
             .collect();
-        if matches.is_empty() || matches.len() > 1 && r.kind.is_none() {
-            // Zero matches (typo/unknown) or ambiguous bare name (DEP-6).
-            return Err(bad_requires(entry));
+        if matches.is_empty() {
+            // A genuine typo/unknown item (DEP-6).
+            return Err(bad_requires(entry, NoMatch));
+        }
+        if matches.len() > 1 && r.kind.is_none() {
+            // A bare name matching several kinds without a qualifier (DEP-6).
+            return Err(bad_requires(entry, AmbiguousKind));
         }
     }
 

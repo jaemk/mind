@@ -596,14 +596,19 @@ fn run_checks(
             let is_md = file.extension().and_then(|e| e.to_str()) == Some("md");
             // Check 8: path-reference tokens that do not resolve (hard, CLI-135).
             if let Err((token, reason)) = crate::namespace::expand_paths(&content, &ctx) {
-                // Name the specific cause (TOOL-17): a plain miss keeps the
-                // historical "does not resolve to any sibling" wording; a real
-                // tool with an unresolvable entrypoint says so.
+                // Name the specific cause (TOOL-17/TOOL-18): a plain miss keeps the
+                // historical "does not resolve to any sibling" wording; a real tool
+                // with an unresolvable entrypoint or an under-qualified cross-kind
+                // ambiguity says so.
+                use crate::error::BadRefReason::*;
                 let detail = match reason {
-                    crate::error::BadRefReason::ToolNoBin => {
-                        "names a tool with no resolvable entrypoint (bin)"
-                    }
-                    crate::error::BadRefReason::NoMatch => "does not resolve to any sibling",
+                    ToolNoBin => "names a tool with no resolvable entrypoint (bin)",
+                    NoMatch => "does not resolve to any sibling",
+                    AmbiguousKind => "is ambiguous across kinds; add a kind qualifier",
+                    // CrossSource/InvalidRef are `requires`-only (DEP-7); a path
+                    // token never yields them, but keep the match exhaustive.
+                    CrossSource => "crosses sources; a requires entry is intra-source only",
+                    InvalidRef => "is not a valid item ref",
                 };
                 hard.push(Finding::hard(
                     "bad-reference",

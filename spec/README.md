@@ -86,6 +86,8 @@ and verified.
 | `tool` item kind: store-only installable, referenced not discovered | done | [tooling.md](tooling.md) (TOOL-1..7) |
 | Path-reference tokens `{{self}}` / `{{tools:name}}` / `{{path:ref}}` | done | [tooling.md](tooling.md) (TOOL-10..16) |
 | `{{tools:name}}` `BadReference` names its cause (a miss vs. a tool with no resolvable bin) | done | [tooling.md](tooling.md) (TOOL-17) |
+| `{{path:ref}}` `BadReference` names its cause (a miss vs. an under-qualified cross-kind ambiguity) | done | [tooling.md](tooling.md) (TOOL-18) |
+| `requires` install-time `BadReference` names its cause (malformed / cross-source / ambiguous / miss) | done | [dependencies.md](dependencies.md) (DEP-7) |
 | `review` `unshipped-tooling`: a tool whose entrypoint resolves only via a git-untracked file (works locally, breaks on clone) | done | CLI-190 |
 | Item build hooks: per-item `build`, staging-time, transactional | done | [install-hooks.md](install-hooks.md) (HOOK-70..73) |
 | Per-item install/uninstall hooks: host side effects at install/removal, re-run on upgrade | done | [install-hooks.md](install-hooks.md) (HOOK-80..85) |

@@ -15521,6 +15521,63 @@ fn learn_requires_typo_is_bad_reference_error() {
 }
 
 #[test]
+fn learn_requires_bad_reference_names_specific_cause() {
+    // spec: DEP-7
+    // The install-time BadReference for a bad `requires` entry names its specific
+    // cause, not the blanket "does not match any item": a source-qualified entry
+    // says it crosses sources, and a bare name ambiguous across kinds says so.
+
+    // Cross-source: an `owner/repo#...` entry is forbidden (DEP-5) and must read
+    // as crossing sources, not as a miss.
+    let xs = Sandbox::bare("req-crosssource");
+    xs.write_and_commit(
+        "skills/main/SKILL.md",
+        "---\nname: main\ndescription: Main\nrequires: other/repo#agent:helper\n---\n# main\n",
+    );
+    xs.write_and_commit("rules/style.md", "---\ndescription: style\n---\n# style\n");
+    assert!(xs.mind(&["meld", &xs.source_spec()]).success, "meld failed");
+    let r = xs.mind(&["learn", "skill:main", "--yes"]);
+    assert!(
+        !r.success,
+        "cross-source requires must fail: {} {}",
+        r.stdout, r.stderr
+    );
+    let combined = format!("{} {}", r.stdout, r.stderr);
+    assert!(
+        combined.contains("crosses sources"),
+        "must name the cross-source cause, not a blanket miss: {combined}"
+    );
+
+    // Ambiguous across kinds: a bare name matching both a skill and an agent with
+    // no `kind:` qualifier must read as ambiguous, not as a miss.
+    let am = Sandbox::bare("req-ambiguous");
+    am.write_and_commit(
+        "skills/main/SKILL.md",
+        "---\nname: main\ndescription: Main\nrequires: dup\n---\n# main\n",
+    );
+    am.write_and_commit(
+        "skills/dup/SKILL.md",
+        "---\nname: dup\ndescription: Dup skill\n---\n# dup\n",
+    );
+    am.write_and_commit(
+        "agents/dup.md",
+        "---\nname: dup\ndescription: Dup agent\n---\n# dup\n",
+    );
+    assert!(am.mind(&["meld", &am.source_spec()]).success, "meld failed");
+    let r = am.mind(&["learn", "skill:main", "--yes"]);
+    assert!(
+        !r.success,
+        "ambiguous requires must fail: {} {}",
+        r.stdout, r.stderr
+    );
+    let combined = format!("{} {}", r.stdout, r.stderr);
+    assert!(
+        combined.contains("ambiguous across kinds"),
+        "must name the ambiguity cause, not a blanket miss: {combined}"
+    );
+}
+
+#[test]
 fn learn_requires_resolves_against_own_source_not_a_sibling_source() {
     // spec: DEP-5 DEP-6
     // A `requires` entry is intra-source (DEP-5): it must resolve against the

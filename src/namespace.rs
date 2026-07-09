@@ -452,8 +452,11 @@ fn resolve_token(inner: &str, ctx: &PathCtx) -> Token {
             .filter(|s| s.name == name && want_kind.is_none_or(|k| s.kind == k));
         return match (hits.next(), hits.next()) {
             (Some(s), None) => Token::Path(ctx.store_path(s.kind, name)),
-            // No match, or ambiguous across kinds without a qualifier.
-            _ => Token::Bad(crate::error::BadRefReason::NoMatch),
+            // Two matches (only possible for a bare `{{path:name}}` with no
+            // qualifier) is a distinct cause from a plain miss (TOOL-18).
+            (Some(_), Some(_)) => Token::Bad(crate::error::BadRefReason::AmbiguousKind),
+            // No match at all.
+            (None, _) => Token::Bad(crate::error::BadRefReason::NoMatch),
         };
     }
     Token::Passthrough
@@ -1462,7 +1465,7 @@ mod tests {
 
     #[test]
     fn path_token_ambiguity_errors_unless_kind_qualified() {
-        // spec: TOOL-11
+        // spec: TOOL-11 TOOL-18
         let store = Path::new("/m/store");
         let none = None;
         // A skill and an agent share the bare name `x`.
@@ -1471,11 +1474,13 @@ mod tests {
             psib(ItemKind::Agent, "x", None),
         ];
         let c = ctx(store, &none, ItemKind::Skill, "self", &sibs);
+        // Ambiguous across kinds without a qualifier: a distinct cause from a
+        // plain miss (TOOL-18). The referent does match -- it is under-qualified.
         assert_eq!(
             expand_paths("{{path:x}}", &c),
             Err((
                 "{{path:x}}".to_string(),
-                crate::error::BadRefReason::NoMatch
+                crate::error::BadRefReason::AmbiguousKind
             ))
         );
         // A kind qualifier disambiguates.
@@ -1483,7 +1488,7 @@ mod tests {
             expand_paths("{{path:agent:x}}", &c).unwrap(),
             "/m/store/agent/x"
         );
-        // A miss is an error.
+        // A miss keeps the NoMatch wording, distinct from the ambiguity above.
         assert_eq!(
             expand_paths("{{path:none}}", &c),
             Err((

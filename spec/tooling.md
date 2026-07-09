@@ -125,6 +125,14 @@ the recorded content hash is of the source (token) form.
   declares the `bin` but is gitignored or unadded, so it resolves in the author's
   working tree yet is absent from a clone; `review` catches that ahead of time as
   a distinct advisory (CLI-190).
+- `TOOL-18` A `{{path:ref}}` (TOOL-11) `BadReference` likewise names its cause. A
+  bare `{{path:name}}` that matches more than one sibling across kinds with no
+  `kind:` qualifier reports "is ambiguous across kinds; add a kind qualifier"
+  rather than "does not match any item" -- the referent does match, it is just
+  under-qualified, so the miss wording would send a maintainer looking for a
+  missing item that exists. A referent that matches nothing keeps the miss
+  wording. The cause rides on both the install-time error and the `review`
+  `bad-reference` finding (CLI-135), the same threading as TOOL-17.
 
 Because every token expands under `~/.mind/store`, an item's invocations of its
 tooling share one stable path prefix regardless of agent home or prefix, so a

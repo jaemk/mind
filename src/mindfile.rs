@@ -238,7 +238,7 @@ impl ItemDecl {
     /// (`resolved_item_hooks`), which prepends those scalars ahead of this
     /// result.
     fn resolved_item_array_hooks(&self, toml_path: &std::path::Path) -> Result<Vec<ResolvedHook>> {
-        resolve_hook_array(&self.hooks, toml_path)
+        resolve_hook_array(&self.hooks, toml_path, &format!("item '{}'", self.name))
     }
 }
 
@@ -246,10 +246,18 @@ impl ItemDecl {
 /// in declaration order. Used by `MindToml::resolved_hooks`,
 /// `ItemDecl::resolved_item_array_hooks`, and `NestedSource::resolved_hooks`.
 ///
+/// `location` names the `mind.toml` section the hooks belong to (e.g. `item
+/// 'style'`, `[source]`, `nested source 'owner/repo'`) so a hook error localizes
+/// which declaration is at fault instead of just naming the file.
+///
 /// Rules: default event is Install; "uninstall" maps to Uninstall; any other
 /// event string is a `MindToml` error. Empty/whitespace `run` entries are
 /// silently dropped (HOOK-3). `run` is trimmed before storing.
-fn resolve_hook_array(hooks: &[Hook], toml_path: &std::path::Path) -> Result<Vec<ResolvedHook>> {
+fn resolve_hook_array(
+    hooks: &[Hook],
+    toml_path: &std::path::Path,
+    location: &str,
+) -> Result<Vec<ResolvedHook>> {
     let mut out: Vec<ResolvedHook> = Vec::new();
     for hook in hooks {
         let run = hook.run.trim();
@@ -262,7 +270,9 @@ fn resolve_hook_array(hooks: &[Hook], toml_path: &std::path::Path) -> Result<Vec
             Some(e) => {
                 return Err(MindError::MindToml {
                     path: toml_path.to_path_buf(),
-                    msg: format!("unknown hook event '{e}'; expected 'install' or 'uninstall'"),
+                    msg: format!(
+                        "{location}: unknown hook event '{e}'; expected 'install' or 'uninstall'"
+                    ),
                 });
             }
         };
@@ -463,7 +473,11 @@ impl NestedSource {
     /// entries are silently dropped (HOOK-3). There is no legacy
     /// `[source].install` fold-in here; that is a MindToml-only concern.
     pub fn resolved_hooks(&self, toml_path: &std::path::Path) -> Result<Vec<ResolvedHook>> {
-        resolve_hook_array(&self.hooks, toml_path)
+        resolve_hook_array(
+            &self.hooks,
+            toml_path,
+            &format!("nested source '{}'", self.source),
+        )
     }
 }
 
@@ -667,7 +681,7 @@ impl MindToml {
         }
 
         // HOOK-51: [[hooks]] entries in declaration order.
-        out.extend(resolve_hook_array(&self.hooks, toml_path)?);
+        out.extend(resolve_hook_array(&self.hooks, toml_path, "[source]")?);
 
         Ok(out)
     }
@@ -1364,6 +1378,9 @@ mod tests {
                     msg.contains("install") && msg.contains("uninstall"),
                     "names the legal set: {msg}"
                 );
+                // The message localizes which [[items]] declaration is at fault,
+                // not just the file, so a multi-item mind.toml is diagnosable.
+                assert!(msg.contains("helper"), "names the offending item: {msg}");
             }
             other => panic!("expected MindError::MindToml, got: {other:?}"),
         }

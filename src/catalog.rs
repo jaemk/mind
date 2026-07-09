@@ -3286,8 +3286,8 @@ mod plugin_tests {
         let mut items = Vec::new();
         let err = scan_source(&paths, &source, &mut items).unwrap_err();
         assert!(
-            matches!(err, MindError::MindToml { .. }),
-            "malformed plugin.json must propagate as MindToml error (MKT-9): {err:?}"
+            matches!(err, MindError::Manifest { .. }),
+            "malformed plugin.json must propagate as a Manifest error (MKT-9): {err:?}"
         );
     }
 

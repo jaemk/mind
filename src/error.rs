@@ -88,20 +88,32 @@ impl std::fmt::Display for ItemKind {
     }
 }
 
-/// Why a path-reference token failed to resolve, so a [`MindError::BadReference`]
-/// (and the `review` `bad-reference` finding) can name the specific cause instead
-/// of one blanket message. The two causes read very differently to a maintainer:
-/// a genuine typo/miss versus a real tool whose entrypoint just did not ship
-/// (tooling.md TOOL-17).
+/// Why a path-reference token or `requires` entry failed to resolve, so a
+/// [`MindError::BadReference`] (and the `review` `bad-reference` finding) can name
+/// the specific cause instead of one blanket message. The causes read very
+/// differently to a maintainer -- a genuine typo/miss, a real tool whose
+/// entrypoint just did not ship, a name that is ambiguous across kinds, a
+/// forbidden cross-source ref, or a malformed ref -- and conflating them sends a
+/// debugging session down the wrong trail (tooling.md TOOL-17/TOOL-18,
+/// dependencies.md DEP-7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BadRefReason {
-    /// The referent names no matching sibling item (a miss, or a cross-kind
-    /// ambiguity with no qualifier).
+    /// The referent names no matching sibling item (a plain miss).
     NoMatch,
     /// A `{{tools:name}}` referent names a real sibling tool, but that tool has
     /// no resolvable entrypoint (`bin`): no `TOOL.md`/`mind.toml` `bin` and no
     /// convention entrypoint file present in the source (tooling.md TOOL-5).
     ToolNoBin,
+    /// The referent (a bare `{{path:name}}` or a bare `requires` name) matches
+    /// more than one sibling across kinds and carries no `kind:` qualifier to
+    /// disambiguate (tooling.md TOOL-18, dependencies.md DEP-7).
+    AmbiguousKind,
+    /// A `requires` entry is source-qualified (`owner/repo#name`); `requires` is
+    /// intra-source only and never crosses sources (dependencies.md DEP-5/DEP-7).
+    CrossSource,
+    /// A `requires` entry is not a parseable item ref at all (dependencies.md
+    /// DEP-7).
+    InvalidRef,
 }
 
 impl std::fmt::Display for BadRefReason {
@@ -111,6 +123,13 @@ impl std::fmt::Display for BadRefReason {
             BadRefReason::ToolNoBin => {
                 f.write_str("names a tool with no resolvable entrypoint (bin)")
             }
+            BadRefReason::AmbiguousKind => {
+                f.write_str("is ambiguous across kinds; add a kind qualifier")
+            }
+            BadRefReason::CrossSource => {
+                f.write_str("crosses sources; a requires entry is intra-source only")
+            }
+            BadRefReason::InvalidRef => f.write_str("is not a valid item ref"),
         }
     }
 }
@@ -178,6 +197,14 @@ pub enum MindError {
 
     #[error("mind.toml at {path}: {msg}")]
     MindToml { path: PathBuf, msg: String },
+
+    /// A non-`mind.toml` source manifest (a Claude `plugin.json` /
+    /// `marketplace.json`) that is malformed or schema-invalid. Kept distinct from
+    /// [`MindError::MindToml`] so the message names the actual file rather than
+    /// mislabeling a JSON manifest as "mind.toml at ..."; `{path}` and the caller's
+    /// `{msg}` (which already names the file kind) carry the specifics.
+    #[error("{path}: {msg}")]
+    Manifest { path: PathBuf, msg: String },
 
     #[error(
         "'{spec}' is not a valid repo spec (expected 'owner/repo', a github shorthand, or a git URL)"
@@ -505,6 +532,7 @@ impl MindError {
             MindError::UnknownPreset { .. } => "unknown-preset",
             MindError::LobeTargetRequired => "lobe-target-required",
             MindError::MindToml { .. } => "mind-toml",
+            MindError::Manifest { .. } => "manifest",
             MindError::InvalidRepoSpec { .. } => "invalid-repo-spec",
             MindError::InvalidItemRef { .. } => "invalid-item-ref",
             MindError::ReservedPrefix { .. } => "reserved-prefix",

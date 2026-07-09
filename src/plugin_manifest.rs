@@ -104,7 +104,7 @@ pub struct PluginManifest {
 
 /// Load and validate `.claude-plugin/plugin.json` from `path`.
 ///
-/// Returns `MindError::MindToml` when:
+/// Returns `MindError::Manifest` when:
 /// - the JSON is malformed
 /// - `name` is absent or empty/whitespace-only
 ///
@@ -112,12 +112,12 @@ pub struct PluginManifest {
 pub fn load_plugin_manifest(path: &Path) -> Result<PluginManifest> {
     let text = std::fs::read_to_string(path).map_err(|e| MindError::io(path, e))?;
     let manifest: PluginManifest =
-        serde_json::from_str(&text).map_err(|e| MindError::MindToml {
+        serde_json::from_str(&text).map_err(|e| MindError::Manifest {
             path: path.to_path_buf(),
             msg: format!("invalid plugin.json: {e}"),
         })?;
     if manifest.name.trim().is_empty() {
-        return Err(MindError::MindToml {
+        return Err(MindError::Manifest {
             path: path.to_path_buf(),
             msg: "plugin.json: 'name' must be a non-empty string".to_string(),
         });
@@ -300,11 +300,11 @@ enum RawSource {
 /// - Any pin/ref value found in an external source object is checked by
 ///   `git::validate_ref_value` (MKT-9/DSC-66).
 ///
-/// Returns `MindError::MindToml` (or a bubbled variant) on any validation
+/// Returns `MindError::Manifest` (or a bubbled variant) on any validation
 /// failure. I/O failures return `MindError::Io`.
 pub fn load_marketplace_manifest(path: &Path) -> Result<MarketplaceManifest> {
     let text = std::fs::read_to_string(path).map_err(|e| MindError::io(path, e))?;
-    let raw: RawMarketplace = serde_json::from_str(&text).map_err(|e| MindError::MindToml {
+    let raw: RawMarketplace = serde_json::from_str(&text).map_err(|e| MindError::Manifest {
         path: path.to_path_buf(),
         msg: format!("invalid marketplace.json: {e}"),
     })?;
@@ -313,9 +313,9 @@ pub fn load_marketplace_manifest(path: &Path) -> Result<MarketplaceManifest> {
     for entry in raw.plugins {
         // spec: MKT-9 — a marketplace entry's name is required and must be
         // non-empty; an absent or whitespace-only name disables namespacing and
-        // is rejected with the same MindToml class as load_plugin_manifest uses.
+        // is rejected with the same Manifest class as load_plugin_manifest uses.
         if entry.name.trim().is_empty() {
-            return Err(MindError::MindToml {
+            return Err(MindError::Manifest {
                 path: path.to_path_buf(),
                 msg: "marketplace.json: entry 'name' must be a non-empty string".to_string(),
             });
@@ -324,7 +324,7 @@ pub fn load_marketplace_manifest(path: &Path) -> Result<MarketplaceManifest> {
         // Validate each skills path (MKT-9: same safe-path rule as in-repo source paths).
         for skill_path in &entry.skills {
             if !is_safe_manifest_path(skill_path) {
-                return Err(MindError::MindToml {
+                return Err(MindError::Manifest {
                     path: path.to_path_buf(),
                     msg: format!(
                         "marketplace.json: skills path {:?} is unsafe (absolute, \
@@ -380,7 +380,7 @@ fn resolve_string_source(s: String, manifest_path: &Path) -> Result<PluginSource
 
     // In-repo relative path: validate with the safe-path rule (MKT-9).
     if !is_safe_manifest_path(&s) {
-        return Err(MindError::MindToml {
+        return Err(MindError::Manifest {
             path: manifest_path.to_path_buf(),
             msg: format!(
                 "marketplace.json: in-repo plugin path {:?} is unsafe (absolute, \
@@ -428,7 +428,7 @@ fn is_external_string(s: &str) -> bool {
 /// Extract an external spec string from a source object.
 ///
 /// Priority: `url` field > `repo` field (treated as owner/repo shorthand).
-/// Returns `MindError::MindToml` if neither key is present or has a string value.
+/// Returns `MindError::Manifest` if neither key is present or has a string value.
 fn extract_external_spec(obj: &HashMap<String, Value>, manifest_path: &Path) -> Result<String> {
     if let Some(Value::String(url)) = obj.get("url") {
         return Ok(url.clone());
@@ -436,7 +436,7 @@ fn extract_external_spec(obj: &HashMap<String, Value>, manifest_path: &Path) -> 
     if let Some(Value::String(repo)) = obj.get("repo") {
         return Ok(repo.clone());
     }
-    Err(MindError::MindToml {
+    Err(MindError::Manifest {
         path: manifest_path.to_path_buf(),
         msg: "marketplace.json: external source object must have a 'url' or 'repo' field"
             .to_string(),
@@ -626,7 +626,7 @@ mod tests {
         let path = write_temp(r#"{"version":"1.0","description":"no name"}"#, "pm-noname");
         let err = load_plugin_manifest(&path).unwrap_err();
         match err {
-            MindError::MindToml { msg, .. } => {
+            MindError::Manifest { msg, .. } => {
                 assert!(
                     msg.contains("plugin.json") || msg.contains("name") || msg.contains("missing"),
                     "error must mention the problem: {msg}"
@@ -642,7 +642,7 @@ mod tests {
         let path = write_temp(r#"{"name":""}"#, "pm-emptyname");
         let err = load_plugin_manifest(&path).unwrap_err();
         match err {
-            MindError::MindToml { msg, .. } => {
+            MindError::Manifest { msg, .. } => {
                 assert!(msg.contains("name"), "error must mention 'name': {msg}");
             }
             other => panic!("expected MindToml, got: {other:?}"),
@@ -655,7 +655,7 @@ mod tests {
         let path = write_temp(r#"{"name":"   "}"#, "pm-wsname");
         let err = load_plugin_manifest(&path).unwrap_err();
         assert!(
-            matches!(err, MindError::MindToml { .. }),
+            matches!(err, MindError::Manifest { .. }),
             "whitespace-only name must be MindToml error: {err:?}"
         );
         let _ = std::fs::remove_file(&path);
@@ -666,7 +666,7 @@ mod tests {
         let path = write_temp(r#"{not valid json"#, "pm-badjson");
         let err = load_plugin_manifest(&path).unwrap_err();
         match err {
-            MindError::MindToml { msg, .. } => {
+            MindError::Manifest { msg, .. } => {
                 assert!(
                     msg.contains("plugin.json"),
                     "error should mention plugin.json: {msg}"
@@ -674,6 +674,19 @@ mod tests {
             }
             other => panic!("expected MindToml for malformed JSON, got: {other:?}"),
         }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A malformed `plugin.json` error must render naming the actual file, not
+    /// mislabel it as "mind.toml at ..." (the old `MindError::MindToml` Display).
+    #[test]
+    fn plugin_manifest_error_display_names_the_real_file() {
+        let path = write_temp(r#"{not valid json"#, "pm-display");
+        let msg = load_plugin_manifest(&path).unwrap_err().to_string();
+        assert!(
+            msg.contains("plugin.json") && !msg.contains("mind.toml"),
+            "must name plugin.json and not claim mind.toml: {msg}"
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -818,7 +831,7 @@ mod tests {
         let path = write_temp(&json, "mkt-unsafe");
         let err = load_marketplace_manifest(&path).unwrap_err();
         match err {
-            MindError::MindToml { msg, .. } => {
+            MindError::Manifest { msg, .. } => {
                 assert!(
                     msg.contains("unsafe") || msg.contains("..") || msg.contains("escape"),
                     "error must describe the safety violation: {msg}"
@@ -837,7 +850,7 @@ mod tests {
         let path = write_temp(&json, "mkt-abs");
         let err = load_marketplace_manifest(&path).unwrap_err();
         assert!(
-            matches!(err, MindError::MindToml { .. }),
+            matches!(err, MindError::Manifest { .. }),
             "absolute in-repo path must be MindToml error: {err:?}"
         );
         let _ = std::fs::remove_file(&path);
@@ -885,7 +898,7 @@ mod tests {
         let path = write_temp(r#"{not json"#, "mkt-badjson");
         let err = load_marketplace_manifest(&path).unwrap_err();
         assert!(
-            matches!(err, MindError::MindToml { .. }),
+            matches!(err, MindError::Manifest { .. }),
             "malformed JSON must be MindToml error: {err:?}"
         );
         let _ = std::fs::remove_file(&path);
@@ -958,7 +971,7 @@ mod tests {
         let path = write_temp(&json, "mkt-obj-bad");
         let err = load_marketplace_manifest(&path).unwrap_err();
         assert!(
-            matches!(err, MindError::MindToml { .. }),
+            matches!(err, MindError::Manifest { .. }),
             "object source without url/repo must be MindToml: {err:?}"
         );
         let _ = std::fs::remove_file(&path);
@@ -987,7 +1000,7 @@ mod tests {
         let path = write_temp(&json, "mkt-emptyname");
         let err = load_marketplace_manifest(&path).unwrap_err();
         match err {
-            MindError::MindToml { msg, .. } => {
+            MindError::Manifest { msg, .. } => {
                 assert!(msg.contains("name"), "error must mention 'name': {msg}");
             }
             other => panic!("expected MindToml for empty entry name, got: {other:?}"),
@@ -1005,7 +1018,7 @@ mod tests {
         let path = write_temp(&json, "mkt-wsname");
         let err = load_marketplace_manifest(&path).unwrap_err();
         assert!(
-            matches!(err, MindError::MindToml { .. }),
+            matches!(err, MindError::Manifest { .. }),
             "whitespace-only entry name must be MindToml error: {err:?}"
         );
         let _ = std::fs::remove_file(&path);

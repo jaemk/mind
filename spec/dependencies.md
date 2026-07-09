@@ -57,6 +57,16 @@ identified by stable identity `(source, kind, bare_name)` (see namespacing.md).
   an ambiguous bare name, or a source-qualified ref) is an error (`BadReference`)
   at install, the same validation a `{{ns:}}` token receives. `review` (CLI-131)
   reports an unresolved `requires` entry as a hard error.
+- `DEP-7` The install-time `BadReference` for a bad `requires` entry names its
+  specific cause, not the blanket "does not match any item": a malformed ref
+  reports it "is not a valid item ref", a source-qualified ref "crosses sources; a
+  requires entry is intra-source only" (DEP-5), a bare name matching several kinds
+  without a qualifier "is ambiguous across kinds; add a kind qualifier", and only a
+  genuine miss keeps "does not match any item". This mirrors the causes `review`
+  already distinguishes (CLI-131), so the install error and the review finding
+  agree instead of the install path collapsing all four into one wording. It is
+  the `requires` counterpart of the `{{tools:name}}` cause split (tooling.md
+  TOOL-17).
 
 ## When resolution applies
 
