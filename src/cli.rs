@@ -13,6 +13,19 @@
 
 use clap::{Parser, Subcommand, ValueEnum};
 
+/// The lifecycle event for `mind hooks run --event`.
+// spec: CLI-195
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum HookEventArg {
+    /// Run install hooks (default). Valid for source and item targets.
+    Install,
+    /// Run uninstall hooks. Valid for source and item targets.
+    Uninstall,
+    /// Re-install the item through the transactional build path (stage, build,
+    /// swap). Valid for item targets only; a source has no build hook.
+    Build,
+}
+
 use crate::error::ItemKind;
 
 /// An item kind as accepted on the command line (`--kind skill|agent|rule|tool`).
@@ -494,6 +507,22 @@ pub enum Command {
     /// Print the mind man page (roff) to stdout.
     Man,
 
+    /// Run or list a source's or item's hooks on demand, outside the
+    /// meld/learn/forget/upgrade flows.
+    ///
+    /// Lets you run hooks that were skipped earlier, re-run a hook whose effect
+    /// was later lost (a deleted build output or side effect), or re-run an
+    /// install or uninstall whose prior run failed for a transient reason.
+    ///
+    /// Subcommands:
+    ///   `hooks run <target>`  -- run hooks with the same disclosure+consent model
+    ///   `hooks list <target>` -- list declared hooks without running any
+    // spec: CLI-194 CLI-195 CLI-196
+    Hooks {
+        #[command(subcommand)]
+        action: HooksCmd,
+    },
+
     /// Write a super-source `mind.toml` reproducing the current melded and
     /// installed state so melding the output recreates the same source set.
     ///
@@ -588,5 +617,71 @@ pub enum LobesCmd {
     Remove {
         /// The configured directory to drop.
         path: String,
+    },
+}
+
+/// Subcommands of `mind hooks`.
+// spec: CLI-194 CLI-195 CLI-196
+#[derive(Debug, Subcommand)]
+pub enum HooksCmd {
+    /// Run a source's or item's hooks on demand, outside meld/learn/forget/upgrade.
+    ///
+    /// `<target>` is a source selector (e.g. `repo`, `owner/repo`, or a glob
+    /// like `'*'`) or an item ref `<source>#<item>` (e.g. `agents#skill:scan`).
+    /// A ref that matches several sources or items runs each in turn.
+    ///
+    /// For a source target with `--event install` (the default), only *pending*
+    /// hooks run by default -- those that never ran or did not run at the current
+    /// commit. `--force` re-runs every install hook regardless. For an item
+    /// target, hooks always run (item hooks carry no recorded run state).
+    ///
+    /// Every hook goes through the same disclosure and consent prompt as an
+    /// automatic run; it is never more silently than meld/learn would run it.
+    // spec: CLI-194 CLI-195
+    Run {
+        /// The hook target: a source selector (e.g. `repo`, `owner/repo`, `'*'`)
+        /// or an item ref `<source>#<item>` (e.g. `agents#skill:scan`).
+        target: String,
+
+        /// The lifecycle event to run (default: install).
+        ///
+        /// `install` and `uninstall` are valid for source and item targets.
+        /// `build` is valid only for an item target and re-installs the item
+        /// through the transactional path (stage, expand, build, swap), leaving
+        /// the existing copy untouched if the build fails.
+        #[arg(long, value_enum, default_value = "install")]
+        event: HookEventArg,
+
+        /// For a source install run: re-run every install hook even if it was
+        /// already recorded at the current commit (for lost outputs or transient
+        /// failures), mirroring `meld --force`.
+        #[arg(long)]
+        force: bool,
+
+        /// Run install hooks without the safety prompt. This executes arbitrary
+        /// code from the source; only use it for a source you trust. Without this
+        /// flag, a non-TTY run skips install hooks and prints a note.
+        #[arg(long)]
+        dangerously_skip_install_hook_check: bool,
+
+        /// Run the item build hook without the safety prompt when `--event build`
+        /// is given. This executes arbitrary code; only use it for a source
+        /// you trust.
+        #[arg(long)]
+        dangerously_skip_build_hook_check: bool,
+    },
+
+    /// List the hooks for a source or item without running any.
+    ///
+    /// For a source target, shows all hooks declared in the source's `mind.toml`
+    /// with their event, required/optional flag, and command; for source install
+    /// hooks, also shows whether the hook is pending and the commit it last ran
+    /// at. Also lists any hooks declared by the source's installed items.
+    ///
+    /// For an item ref `<source>#<item>`, shows only that item's hooks.
+    // spec: CLI-196
+    List {
+        /// The hook target: a source selector or `<source>#<item>` item ref.
+        target: String,
     },
 }

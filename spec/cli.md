@@ -369,6 +369,32 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   nothing pending and changes nothing (CLI-64); it is not an error (this is where
   `upgrade` differs from `forget`, whose no-match glob is `NotInstalled`, CLI-41).
 
+## hooks
+
+- `CLI-194` `mind hooks run <target>` runs a melded source's hooks -- or a
+  named item's hooks -- on demand, outside the meld/learn/forget/upgrade flows, so a
+  user can run hooks they earlier skipped (HOOK-21/22/72/83), re-run a hook whose
+  effect was later lost (a deleted build output or side effect), or re-run an install
+  or uninstall whose prior run failed transiently. Every hook it runs goes through the
+  same disclosure and consent prompt as an automatic run (HOOK-100); it never runs a
+  hook more silently than meld/learn would, and a required hook's failure or abort is a
+  non-zero exit (HOOK-53). `<target>` is a source ref (the source's own hooks,
+  HOOK-101) or an item ref `<source>#<item>` (that item's hooks, HOOK-102); a ref that
+  matches several sources or items runs each in turn.
+- `CLI-195` `mind hooks run` selects the lifecycle event with `--event
+  <install|uninstall|build>` (default `install`). `install` and `uninstall` are valid
+  for a source or an item target; `build` is valid only for an item target (a source
+  has no build hook, HOOK-103). For a source install run, only *pending* install hooks
+  run by default (HOOK-55); `--force` also re-runs install hooks already recorded at
+  the current commit (HOOK-101). The `--dangerously-skip-install-hook-check` and
+  `--dangerously-skip-build-hook-check` flags apply as they do to the automatic flows
+  (HOOK-23/74).
+- `CLI-196` `mind hooks list <target>` lists the hooks in effect for a source
+  and its installed items -- each hook's event, required/optional flag, command, and,
+  for a recorded source install hook, whether it is pending and the commit it last ran
+  at -- without running anything (HOOK-104). It is the read-only companion to `hooks
+  run` and the detail behind the `recall --sources` hook marker (HOOK-58).
+
 ## recall
 
 - `CLI-70` `recall` (no argument, alias: `status`) is a status view of everything `mind` manages:

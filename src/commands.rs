@@ -275,6 +275,9 @@ fn run_install_hooks(
                 None
             }
         });
+        // spec: HOOK-24 - show a browse URL pinned to the disclosed commit
+        // when the source has a GitHub-shaped https remote.
+        let browse_url = source.browse_url(&commit);
         let disclosure = crate::hook::hook_disclosure_text(
             h.label(),
             h.optional,
@@ -284,6 +287,7 @@ fn run_install_hooks(
             &clone_path,
             &h.run,
             declared_override.as_deref(),
+            browse_url.as_deref(),
         );
 
         match crate::hook::decide(&disclosure, h.optional, dangerously_skip)? {
@@ -1916,6 +1920,8 @@ fn run_uninstall_hooks(
             (Some(note), Some(cmd)) if h.run == cmd => Some(note.as_str()),
             _ => None,
         };
+        // spec: HOOK-24 - show a browse URL pinned to the disclosed commit.
+        let browse_url = registry.sources[idx].browse_url(&commit);
         let disclosure = crate::hook::hook_disclosure_text(
             h.label(),
             h.optional,
@@ -1925,6 +1931,7 @@ fn run_uninstall_hooks(
             &clone_path,
             &h.run,
             declared_override,
+            browse_url.as_deref(),
         );
 
         match crate::hook::decide(&disclosure, h.optional, dangerously_skip_hook_check)? {
@@ -5002,6 +5009,8 @@ fn rerun_source_hooks(
                 }
                 false
             } else {
+                // spec: HOOK-24 - show a browse URL pinned to the disclosed commit.
+                let browse_url = source.browse_url(&commit);
                 let disclosure = crate::hook::disclosure_text(
                     &source.name,
                     &pin_desc,
@@ -5009,6 +5018,7 @@ fn rerun_source_hooks(
                     &clone_path,
                     &cmd,
                     None,
+                    browse_url.as_deref(),
                 );
                 // Abort is treated as Skip here (the source is already registered,
                 // per the HOOK-11 note).

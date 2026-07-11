@@ -82,6 +82,17 @@ CLI-17).
 - `HOOK-23` `--dangerously-skip-install-hook-check` runs the hook without
   prompting, and is what enables hooks in non-interactive use. The flag name is
   deliberately explicit about the risk.
+- `HOOK-24` The consent disclosure (HOOK-20) makes both ways to inspect
+  the code one action away. It labels the on-disk clone path as its own line (the
+  path HOOK-20 already shows), so the user can open the working tree that will run
+  locally, and it adds a version-control browse URL pinned to the disclosed commit,
+  so the user can read the exact code in the forge without cloning. The URL is
+  derived with the same host rules as the compare URL (CLI-176, CLI-188): an https
+  GitHub-shaped host yields `https://<host>/<owner>/<repo>/tree/<commit>`; a host
+  whose name contains "gitlab" or "bitbucket", an SSH remote, and a local or
+  `file://` source yield no URL (only the clone path is shown, since no correct web
+  link exists for them). The browse URL is source-derived text and is sanitized on
+  the consent surface exactly as the other disclosure fields are (HOOK-91).
 - `HOOK-91` All source-derived text included in the hook consent disclosure
   (identity, pin description, commit, clone path, hook command, declared
   command) is sanitized -- ANSI escape sequences, C0/DEL/C1 control characters,
@@ -342,6 +353,57 @@ the item is in place and is for host side effects.
   has been removed and before the clone and registry entry are dropped (the
   multi-item confirmation, CLI-42, still gates all of it). The end-to-end flow is
   `source.install -> item.install* ... item.uninstall* -> source.uninstall`.
+
+## Running hooks on demand (`mind hooks run`)
+
+Status: done. Hooks normally run as a step of another verb: install hooks at
+`meld`/`upgrade` (HOOK-10/11), uninstall hooks at `unmeld` (HOOK-54), and item
+hooks at `learn`/`forget`/`upgrade` (HOOK-73/81/82). That leaves no way to run a
+hook the user earlier skipped, to re-run a hook whose effect was later lost (a
+deleted build output or side effect), or to re-run an install or uninstall whose
+prior run failed for a transient reason -- short of a full re-meld or reinstall.
+`mind hooks run` fills that gap: it runs a source's or an item's hooks on demand,
+outside the surrounding verb, under the same consent model.
+
+- `HOOK-100` `mind hooks run <target>` executes hooks on demand, outside the
+  meld/learn/forget/upgrade flows. It reuses those flows' machinery unchanged: the
+  disclosure (HOOK-20, sanitized per HOOK-91), the consent prompt (three-way for a
+  required hook, two-way for an optional, build, or item hook, HOOK-52/72/83), the
+  non-TTY skip (HOOK-22/72/83), and the `--dangerously-skip-install-hook-check` /
+  `--dangerously-skip-build-hook-check` bypasses (HOOK-23/74). It is therefore
+  neither more nor less guarded than an automatic run. A hook's non-zero exit is a
+  hard stop with the same contract as an automatic run (HOOK-53); a required hook's
+  failure or abort is a non-zero exit for the command.
+- `HOOK-101` A source target runs the source's `[[hooks]]` for the selected event
+  (`--event`, CLI-195; default `install`) in declaration order in the clone
+  (HOOK-50/54). For the install event, by default only *pending* install hooks run
+  -- a hook that never ran or whose recorded run-commit differs from the source's
+  current commit (HOOK-55) -- so a plain `mind hooks run <source>` runs exactly the
+  install hooks a skip or an added hook left outstanding. `--force` runs every
+  install hook of the source regardless of its recorded commit (the lost-output or
+  transient-failure case), mirroring `meld --force` (HOOK-60). Each install hook
+  that runs updates its recorded run-commit exactly as an automatic run does
+  (HOOK-55); uninstall hooks stay unrecorded (they fire only here and at `unmeld`).
+- `HOOK-102` An item target (`<source>#<item>`) runs that item's install or
+  uninstall hooks (HOOK-80/86) for the selected event, in place: with the working
+  directory set to the item's installed store location (HOOK-81), against the
+  current store copy, with no reinstall. Item hooks carry no recorded run-state
+  (HOOK-84), so the selected hooks always run, subject to consent. `hooks run`
+  requires the target item to be installed; running against an item that is not
+  installed is an error naming it (there is no store copy to run against).
+- `HOOK-103` `--event build` is valid only for an item target and re-runs the
+  item's build hook (HOOK-70). Because a build hook is staging-bound and its output
+  must land in the store transactionally (HOOK-71), `hooks run --event build`
+  re-installs the item through the normal transactional path (stage, expand, build,
+  swap; LIFE-1/LIFE-4) rather than running the build command against the live store
+  copy, so a failed rebuild leaves the existing copy untouched. This is the
+  supported way to rebuild an item whose build output was deleted or corrupted.
+- `HOOK-104` `mind hooks list <target>` reports the hooks in effect for a source
+  (and its installed items) without running any: per hook, its event, its
+  required/optional flag, its command, and -- for a recorded source install hook
+  (HOOK-55) -- whether it is pending and the commit it last ran at. It is the
+  read-only companion to `hooks run` and the detail view behind the `recall
+  --sources` hook marker (HOOK-58).
 
 ## Managed-policy composition (research needed)
 

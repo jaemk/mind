@@ -157,6 +157,9 @@ const ALLOWLIST: &[&str] = &[
     // of the gate is unit-tested in src/render.rs (it needs a real PTY headlessly).
     // CLI-162 (--verbose global flag) is cited from unit tests in src/main.rs
     // and integration tests in tests/cli.rs.
+    //   `mind hooks run` / `hooks list` (HOOK-100..104, CLI-194..196) are now
+    //   implemented and cited from tests/cli_hooks.rs and unit tests in
+    //   src/main.rs, src/resolve.rs, and src/hooks_cmd.rs.
 ];
 
 #[test]

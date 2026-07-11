@@ -52,6 +52,7 @@ pub fn disclosure_text(
     clone_path: &str,
     command: &str,
     declared_override: Option<&str>,
+    browse_url: Option<&str>,
 ) -> String {
     // Sanitize identity for the header line; disclosure_body sanitizes all body
     // fields independently (HOOK-91).
@@ -67,6 +68,7 @@ pub fn disclosure_text(
         clone_path,
         command,
         declared_override,
+        browse_url,
     ));
     out
 }
@@ -185,6 +187,7 @@ pub fn hook_disclosure_text(
     clone_path: &str,
     command: &str,
     declared_override: Option<&str>,
+    browse_url: Option<&str>,
 ) -> String {
     // Sanitize label for the header and "Hook:" lines; disclosure_body
     // sanitizes identity and the remaining body fields independently (HOOK-91).
@@ -208,6 +211,7 @@ pub fn hook_disclosure_text(
         clone_path,
         command,
         declared_override,
+        browse_url,
     ));
     out
 }
@@ -217,7 +221,8 @@ pub fn hook_disclosure_text(
 /// `hook_disclosure_text` (which prepends a different header then calls this).
 ///
 /// All source-derived fields are sanitized (ANSI/control/bidi stripped) before
-/// being included in the returned string (HOOK-91).
+/// being included in the returned string (HOOK-91). When `browse_url` is
+/// `Some`, a `Browse:` line is emitted after `Clone:` (HOOK-24).
 fn disclosure_body(
     identity: &str,
     pin_desc: &str,
@@ -225,6 +230,7 @@ fn disclosure_body(
     clone_path: &str,
     command: &str,
     declared_override: Option<&str>,
+    browse_url: Option<&str>,
 ) -> String {
     // Sanitize all source-derived fields: ANSI escapes, C0/DEL/C1 control
     // characters, and bidi-override code points are stripped so a malicious
@@ -239,6 +245,9 @@ fn disclosure_body(
     let declared_override_owned: Option<String> =
         declared_override.map(crate::sanitize::strip_ansi);
     let declared_override = declared_override_owned.as_deref();
+    // spec: HOOK-24, HOOK-91 - browse URL is source-derived and must be sanitized.
+    let browse_url_owned: Option<String> = browse_url.map(crate::sanitize::strip_ansi);
+    let browse_url = browse_url_owned.as_deref();
 
     let mut out = String::new();
 
@@ -257,6 +266,13 @@ fn disclosure_body(
     out.push_str("  Clone:     ");
     out.push_str(&clone_path);
     out.push('\n');
+
+    // spec: HOOK-24 - emit Browse: line only when a URL is available.
+    if let Some(url) = browse_url {
+        out.push_str("  Browse:    ");
+        out.push_str(url);
+        out.push('\n');
+    }
 
     if let Some(declared) = declared_override {
         out.push_str("  Declared:  ");
@@ -657,6 +673,7 @@ mod tests {
             "/home/user/.mind/sources/github.com/acme/tools",
             "make install",
             None,
+            None,
         );
         assert!(
             text.starts_with("====== hook: github.com/acme/tools ======\n"),
@@ -673,6 +690,7 @@ mod tests {
             "abc1234",
             "/home/user/.mind/sources/github.com/acme/tools",
             "make install",
+            None,
             None,
         );
         assert!(text.contains("github.com/acme/tools"), "missing identity");
@@ -696,6 +714,7 @@ mod tests {
             "/tmp/clone",
             "./user-custom.sh",
             Some("make install"),
+            None,
         );
         // Both commands must appear.
         assert!(text.contains("make install"), "missing declared command");
@@ -722,6 +741,7 @@ mod tests {
             "/tmp/clone",
             "make install",
             None,
+            None,
         );
         assert!(
             !text.contains("replaces"),
@@ -741,14 +761,14 @@ mod tests {
         let clone_path = "/home/user/.mind/sources/github.com/acme/tools";
         let command = "make install";
 
-        let via_fn = disclosure_text(identity, pin_desc, commit, clone_path, command, None);
+        let via_fn = disclosure_text(identity, pin_desc, commit, clone_path, command, None, None);
 
         let mut expected = String::new();
         expected.push_str("====== hook: ");
         expected.push_str(identity);
         expected.push_str(" ======\n");
         expected.push_str(&disclosure_body(
-            identity, pin_desc, commit, clone_path, command, None,
+            identity, pin_desc, commit, clone_path, command, None, None,
         ));
 
         assert_eq!(
@@ -775,6 +795,7 @@ mod tests {
             "/tmp/clone",
             ansi_command,
             None,
+            None,
         );
         assert!(
             !text.contains('\x1b'),
@@ -799,6 +820,7 @@ mod tests {
             "/tmp/clone",
             ansi_command,
             None,
+            None,
         );
         assert!(
             !text2.contains('\x1b'),
@@ -820,10 +842,34 @@ mod tests {
             "/tmp/clone",
             ansi_command,
             Some("\x1b[32m malicious_decl \x1b[0m"),
+            None,
         );
         assert!(
             !text3.contains('\x1b'),
             "disclosure with override must not contain raw ESC byte; got: {text3:?}"
+        );
+
+        // spec: HOOK-91 - browse URL is also source-derived and must be sanitized.
+        let ansi_browse_url = "\x1b[34mhttps://github.com/evil/repo/tree/abc\u{202E}1234\x1b[0m";
+        let text4 = disclosure_text(
+            "github.com/evil/repo",
+            "main",
+            "abc1234",
+            "/tmp/clone",
+            "make install",
+            None,
+            Some(ansi_browse_url),
+        );
+        assert!(
+            !text4.contains('\x1b'),
+            "disclosure with browse_url must not contain raw ESC byte; got: {text4:?}"
+        );
+        assert!(
+            !text4.chars().any(|c| matches!(
+                c,
+                '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+            )),
+            "disclosure with browse_url must not contain bidi-override code points; got: {text4:?}"
         );
     }
 
@@ -845,6 +891,7 @@ mod tests {
             clone_path,
             command,
             Some(declared),
+            None,
         );
 
         let mut expected = String::new();
@@ -858,11 +905,98 @@ mod tests {
             clone_path,
             command,
             Some(declared),
+            None,
         ));
 
         assert_eq!(
             via_fn, expected,
             "disclosure_text with override must equal header + disclosure_body"
+        );
+    }
+
+    // spec: HOOK-24
+    // The Browse: line must appear in the disclosure when Some and be absent
+    // when None, and must never appear when the URL was stripped to empty.
+    #[test]
+    fn disclosure_browse_url_line_present_when_some_absent_when_none() {
+        // With a URL: Browse: line must appear.
+        let with_url = disclosure_text(
+            "github.com/acme/tools",
+            "main",
+            "abc1234",
+            "/tmp/clone",
+            "make install",
+            None,
+            Some("https://github.com/acme/tools/tree/abc1234"),
+        );
+        assert!(
+            with_url.contains("Browse:"),
+            "disclosure must contain Browse: line when browse_url is Some; got: {with_url}"
+        );
+        assert!(
+            with_url.contains("https://github.com/acme/tools/tree/abc1234"),
+            "disclosure must contain the browse URL; got: {with_url}"
+        );
+
+        // Without a URL: Browse: line must not appear.
+        let without_url = disclosure_text(
+            "github.com/acme/tools",
+            "main",
+            "abc1234",
+            "/tmp/clone",
+            "make install",
+            None,
+            None,
+        );
+        assert!(
+            !without_url.contains("Browse:"),
+            "disclosure must not contain Browse: line when browse_url is None; got: {without_url}"
+        );
+    }
+
+    // spec: HOOK-24
+    // The Browse: line is positioned immediately after the Clone: line (HOOK-24:
+    // the browse URL is added alongside the clone path). Assert ordering, not
+    // just presence: a regression that emitted Browse before Clone, or after the
+    // command/WARNING block, would still pass a bare `contains` check.
+    #[test]
+    fn disclosure_browse_line_positioned_after_clone() {
+        let text = disclosure_text(
+            "github.com/acme/tools",
+            "main",
+            "abc1234",
+            "/home/user/.mind/sources/github.com/acme/tools",
+            "make install",
+            None,
+            Some("https://github.com/acme/tools/tree/abc1234"),
+        );
+
+        let clone_at = text.find("  Clone:     ").expect("Clone line present");
+        let browse_at = text.find("  Browse:    ").expect("Browse line present");
+        assert!(
+            browse_at > clone_at,
+            "Browse: line must come after Clone: line; got: {text}"
+        );
+
+        // Nothing but the two field lines may sit between them: Browse must
+        // immediately follow the Clone line (Clone value has no embedded newline
+        // in this fixture), so the text between the Clone label and the Browse
+        // label contains exactly one newline.
+        let between = &text[clone_at..browse_at];
+        assert_eq!(
+            between.matches('\n').count(),
+            1,
+            "Browse: must be the line immediately after Clone:; got between: {between:?}"
+        );
+
+        // And the Browse line must precede the WARNING/command consent block.
+        let warn_at = text
+            .find("WARNING")
+            .or_else(|| text.find("make install"))
+            .expect("consent block present");
+        assert!(
+            browse_at < warn_at,
+            "Browse: line must precede the command/WARNING consent block; got: {text}"
         );
     }
 
@@ -879,6 +1013,7 @@ mod tests {
             "abc1234",
             "/tmp/clone",
             "make install",
+            None,
             None,
         );
         assert!(
@@ -898,6 +1033,7 @@ mod tests {
             "abc1234",
             "/tmp/clone",
             "make install",
+            None,
             None,
         );
         assert!(text.contains("Build step"), "missing label");
@@ -920,6 +1056,7 @@ mod tests {
             "/tmp/clone",
             "setup.sh",
             None,
+            None,
         );
         assert!(text.contains("setup.sh"), "missing label/command");
         assert!(text.contains("required"), "missing required marker");
@@ -939,6 +1076,7 @@ mod tests {
             "/tmp/clone",
             "./user-custom.sh",
             Some("make install"),
+            None,
         );
         assert!(text.contains("make install"), "missing declared command");
         assert!(

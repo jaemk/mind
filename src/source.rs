@@ -179,6 +179,31 @@ impl Source {
         ))
     }
 
+    /// A browser URL to view the tree at a specific commit, for the hook
+    /// consent disclosure (HOOK-24).
+    ///
+    /// Uses the same host guard as `compare_url` (spec: CLI-176, CLI-188):
+    /// https remotes on GitHub-shaped hosts (not gitlab/bitbucket) return
+    /// `https://<host>/<owner>/<repo>/tree/<commit>`. SSH remotes and local
+    /// paths return `None` because there is no web host to link to.
+    ///
+    /// Hosts whose name contains "gitlab" or "bitbucket" (case-insensitive)
+    /// also return `None` (CLI-188); those use a different URL shape.
+    pub fn browse_url(&self, commit: &str) -> Option<String> {
+        // spec: HOOK-24 - same host guard as compare_url (CLI-176, CLI-188)
+        if !self.url.starts_with("https://") {
+            return None;
+        }
+        let host_lower = self.host.to_ascii_lowercase();
+        if host_lower.contains("gitlab") || host_lower.contains("bitbucket") {
+            return None;
+        }
+        Some(format!(
+            "https://{}/{}/{}/tree/{commit}",
+            self.host, self.owner, self.repo
+        ))
+    }
+
     /// The SSH clone URL (`git@host:owner/repo`) for this source's identity.
     pub fn ssh_url(&self) -> String {
         format!("git@{}:{}/{}", self.host, self.owner, self.repo)
@@ -600,6 +625,133 @@ mod tests {
         assert_eq!(local.compare_url("aaaa", "bbbb"), None);
         let file_url = parse_spec("file:///home/james/dev/agents").unwrap();
         assert_eq!(file_url.compare_url("aaaa", "bbbb"), None);
+    }
+
+    // ---- browse_url (HOOK-24) ----
+    //
+    // Same host guard as compare_url (CLI-176, CLI-188): https GitHub-shaped
+    // hosts yield a /tree/<commit> URL; gitlab/bitbucket, SSH, and local paths
+    // yield None.
+
+    // spec: HOOK-24
+    #[test]
+    fn browse_url_github_com_produces_tree_link() {
+        let gh = parse_spec("foo/bar").unwrap();
+        assert_eq!(
+            gh.browse_url("abc1234").as_deref(),
+            Some("https://github.com/foo/bar/tree/abc1234")
+        );
+    }
+
+    // spec: HOOK-24
+    #[test]
+    fn browse_url_ghes_host_produces_same_shape() {
+        // GitHub Enterprise Server and neutral forge hosts use the same /tree/ shape.
+        let ghes = parse_spec("https://github.example.com/acme/tools").unwrap();
+        assert_eq!(
+            ghes.browse_url("deadbeef").as_deref(),
+            Some("https://github.example.com/acme/tools/tree/deadbeef")
+        );
+        let corp = parse_spec("https://git.corp.internal/devtools/scripts").unwrap();
+        assert_eq!(
+            corp.browse_url("cafebabe").as_deref(),
+            Some("https://git.corp.internal/devtools/scripts/tree/cafebabe")
+        );
+    }
+
+    // spec: HOOK-24
+    #[test]
+    fn browse_url_gitlab_hosts_yield_none() {
+        let gl = parse_spec("https://gitlab.com/org/project").unwrap();
+        assert_eq!(gl.browse_url("abc1234"), None, "gitlab.com");
+
+        let self_hosted = parse_spec("https://gitlab.corp.example.com/org/project").unwrap();
+        assert_eq!(
+            self_hosted.browse_url("abc1234"),
+            None,
+            "self-hosted gitlab"
+        );
+    }
+
+    // spec: HOOK-24
+    #[test]
+    fn browse_url_bitbucket_hosts_yield_none() {
+        let bb = parse_spec("https://bitbucket.org/org/repo").unwrap();
+        assert_eq!(bb.browse_url("abc1234"), None, "bitbucket.org");
+    }
+
+    // spec: HOOK-24
+    #[test]
+    fn browse_url_ssh_remote_yields_none() {
+        let ssh = parse_spec("git@github.com:foo/bar.git").unwrap();
+        assert_eq!(ssh.browse_url("abc1234"), None);
+    }
+
+    // spec: HOOK-24
+    #[test]
+    fn browse_url_local_path_yields_none() {
+        let local = parse_spec("/home/james/dev/agents").unwrap();
+        assert_eq!(local.browse_url("abc1234"), None);
+        let file_url = parse_spec("file:///home/james/dev/agents").unwrap();
+        assert_eq!(file_url.browse_url("abc1234"), None);
+    }
+
+    // spec: HOOK-24
+    // End-to-end: a real github-shaped Source's derived browse_url, fed through
+    // the real consent-disclosure builder, must render the exact commit-pinned
+    // `Browse:` line. This closes the seam the isolated unit tests leave open:
+    // browse_url derivation is tested against a Source, and disclosure_text is
+    // tested against a hardcoded URL string, but nothing proves the value that
+    // browse_url actually produces is the value the disclosure renders.
+    #[test]
+    fn browse_url_renders_pinned_tree_line_in_consent_disclosure() {
+        let gh = parse_spec("foo/bar").unwrap();
+        let commit = "abc1234";
+        let url = gh.browse_url(commit);
+        assert_eq!(
+            url.as_deref(),
+            Some("https://github.com/foo/bar/tree/abc1234"),
+            "precondition: github source derives a tree URL"
+        );
+
+        let text = crate::hook::disclosure_text(
+            "github.com/foo/bar",
+            "main",
+            commit,
+            "/home/user/.mind/sources/github.com/foo/bar",
+            "make install",
+            None,
+            url.as_deref(),
+        );
+        assert!(
+            text.contains("  Browse:    https://github.com/foo/bar/tree/abc1234\n"),
+            "consent disclosure must render the derived commit-pinned browse line; got: {text}"
+        );
+    }
+
+    // spec: HOOK-24
+    // The mirror of the above for a source that yields no browse URL: a local
+    // path's `None` must flow through the disclosure builder and suppress the
+    // Browse line entirely (only the clone path is shown).
+    #[test]
+    fn browse_url_none_suppresses_browse_line_in_consent_disclosure() {
+        let local = parse_spec("/home/james/dev/agents").unwrap();
+        let url = local.browse_url("abc1234");
+        assert_eq!(url, None, "precondition: local path derives no browse URL");
+
+        let text = crate::hook::disclosure_text(
+            "/home/james/dev/agents",
+            "local",
+            "abc1234",
+            "/home/james/dev/agents",
+            "make install",
+            None,
+            url.as_deref(),
+        );
+        assert!(
+            !text.contains("Browse:"),
+            "a None browse_url must suppress the Browse line end-to-end; got: {text}"
+        );
     }
 
     #[test]
