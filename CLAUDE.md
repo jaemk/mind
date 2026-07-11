@@ -46,6 +46,7 @@ maintained by hand.
 | `forget <item>` | remove symlink + store copy |
 | `sync [--upgrade]` | fetch every source, refresh recorded commit (`--upgrade` then runs an upgrade pass) |
 | `upgrade [item]` | report each installed item's hash/commit delta, prompt, then re-link the changed ones (syncs involved sources first; `--no-sync` opts out) |
+| `hooks run <target>` / `hooks list <target>` | run a source's or an item's hooks on demand (outside meld/learn/forget/upgrade), or list the hooks in effect; reuses the meld/learn consent machinery |
 | `evolve [--check] [--version V]` | update the `mind` binary itself to the latest release (or a pinned version) |
 | `recall [--sources] [item]` | what's installed / source list / item details (marks out-of-date items) |
 | `probe [query]` | search melded catalogs (interactive TUI by default; `--no-tui` for plain output) |

@@ -6,6 +6,29 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `mind hooks run <target>` runs a source's or an item's hooks on demand, outside
+  the meld/learn/forget/upgrade flows, reusing the same disclosure and consent
+  machinery: run a hook you earlier skipped, re-run one whose effect was lost, or
+  retry one that failed transiently. A source install run executes only pending
+  install hooks by default (`--force` runs all); an item target (`owner/repo#item`)
+  runs the item's install/uninstall hooks in place, and `--event build` rebuilds
+  the item through the transactional install path so a failed rebuild leaves the
+  existing copy untouched. `mind hooks list <target>` reports the hooks in effect
+  -- each hook's event, required/optional flag, command, and the pending/last-ran
+  state of recorded install hooks -- without running any (HOOK-100..104,
+  CLI-194, CLI-195, CLI-196).
+
+### Changed
+
+- The hook consent disclosure now shows a version-control browse URL pinned to the
+  disclosed commit alongside the on-disk clone path, so the exact code a hook will
+  run can be read in the forge or locally before approving. The URL is derived with
+  the same host rules as the compare URL (GitHub-shaped `https` remotes only; no
+  URL for GitLab/Bitbucket hosts, SSH remotes, or local/`file://` sources) and is
+  sanitized like the other consent fields (HOOK-24).
+
 ## [0.16.0] - 2026-07-09
 
 ### Added

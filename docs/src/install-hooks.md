@@ -41,6 +41,13 @@ non-TTY context (CI, scripts) the hook is skipped and a note is printed;
 declared install hook with `--install-hook` is announced in the prompt, which
 shows both the declared and the overriding command.
 
+The disclosure also shows a version-control browse URL pinned to the disclosed
+commit alongside the on-disk clone path, so you can read the exact code that will
+run either locally or in the forge before approving. The URL is produced only for
+GitHub-shaped `https` remotes; a GitLab or Bitbucket host, an SSH remote, or a
+local/`file://` source shows the clone path alone (no correct web link exists for
+those).
+
 ## Re-runs
 
 A skipped hook is recorded and re-offered by `mind upgrade`, so you can run it
@@ -62,12 +69,54 @@ run / skip; a non-TTY `unmeld` skips them and notes it. `unmeld --uninstall-hook
 reused deliberately). A required uninstall hook that fails or is aborted leaves
 the source melded.
 
+## Running hooks on demand
+
+Hooks normally run as a step of another verb: install hooks at `meld`/`upgrade`,
+uninstall hooks at `unmeld`, and item hooks at `learn`/`forget`/`upgrade`.
+`mind hooks run` runs them outside those flows, so you can run a hook you earlier
+skipped, re-run one whose effect was later lost (a deleted build output or side
+effect), or retry one that failed transiently, without a full re-meld or
+reinstall. Every hook it runs goes through the same disclosure and consent prompt
+as an automatic run.
+
+```
+mind hooks run <source>                     # the source's pending install hooks
+mind hooks run <source> --force             # every install hook, even already-run ones
+mind hooks run <source> --event uninstall   # the source's uninstall hooks
+mind hooks run <source>#<item>              # an installed item's install hooks
+mind hooks run <source>#<item> --event build  # rebuild the item (transactional)
+mind hooks list <source>                    # list hooks in effect, run nothing
+```
+
+`<target>` is a source selector (the source's own `[[hooks]]`) or an
+`owner/repo#item` ref (that item's hooks); a ref that matches several sources or
+items runs each in turn. `--event` selects the lifecycle event (`install`,
+`uninstall`, or `build`); `build` is valid only for an item target.
+
+For a source install run, only *pending* install hooks run by default (a hook
+that never ran, was skipped, or whose recorded commit is behind the source's
+current commit); `--force` re-runs every install hook regardless. An item target
+runs the item's hooks in place against its installed store copy and requires the
+item to be installed. `--event build` rebuilds the item through the normal
+transactional install path, so a failed rebuild leaves the existing copy
+untouched.
+
+The `--dangerously-skip-install-hook-check` and `--dangerously-skip-build-hook-check`
+flags apply exactly as they do to the automatic flows: without them a non-TTY run
+skips the hooks, and a required hook's failure or abort is a non-zero exit.
+
+`mind hooks list <target>` reports the hooks in effect for a source and its
+installed items -- each hook's event, required/optional flag, and command, and for
+a recorded source install hook whether it is pending and the commit it last ran at
+-- without running any. It is the read-only companion to `hooks run`.
+
 ## Visibility
 
 `recall --sources` marks a source that carries hooks with a count-aware token in
 its status bracket (e.g. `1 hook` or `3 hooks`). `mind review <repo>` lists every
 declared hook (install and uninstall), showing each hook's command, event, and
-whether it is required or optional.
+whether it is required or optional. `mind hooks list <target>` shows the same
+detail plus the pending/last-ran state of recorded install hooks.
 
 `[source].install` is deprecated in favor of the `[[hooks]]` form. See
 [The mind.toml file](mind-toml.md) for the schema and
