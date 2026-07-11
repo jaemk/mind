@@ -508,14 +508,12 @@ fn canonical_install_path(path: &str) -> Option<String> {
         r
     } else if let Some(r) = path.strip_prefix("${HOME}/") {
         r
-    } else if let Some(r) = path
-        .strip_prefix("/home/")
-        .or_else(|| path.strip_prefix("/Users/"))
-    {
+    } else {
+        let r = path
+            .strip_prefix("/home/")
+            .or_else(|| path.strip_prefix("/Users/"))?;
         // Drop the `<user>` segment of an absolute home path.
         r.split_once('/').map(|(_user, rest)| rest)?
-    } else {
-        return None;
     };
     if rest.starts_with(".mind/store/")
         || rest.starts_with(".claude/")
@@ -546,15 +544,13 @@ fn parse_install_path(path: &str) -> Option<(crate::error::ItemKind, String, Str
         let mut it = rest.splitn(2, '/');
         let kind = crate::error::ItemKind::parse(it.next()?)?;
         (kind, it.next()?.to_string())
-    } else if let Some(rest) = path
-        .strip_prefix("~/.claude/")
-        .or_else(|| path.strip_prefix("~/.agents/"))
-    {
+    } else {
+        let rest = path
+            .strip_prefix("~/.claude/")
+            .or_else(|| path.strip_prefix("~/.agents/"))?;
         let mut it = rest.splitn(2, '/');
         let kind = crate::error::ItemKind::from_dir(it.next()?)?;
         (kind, it.next()?.to_string())
-    } else {
-        return None;
     };
     let (kind, tail) = after_kind;
     let mut seg = tail.splitn(2, '/');
