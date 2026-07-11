@@ -144,6 +144,8 @@ and verified.
 | Frontmatter reader strips a leading UTF-8 BOM | done | DSC-23 |
 | `compare_url` suppressed for gitlab/bitbucket hosts (GitHub-shaped link was wrong for those forges) | done | CLI-188 |
 | `introspect --json` includes `"schema": 1`; shape is `{"schema":1,"issues":[...],"sources":N,"items":N}` | done | CLI-189 |
+| Hook consent disclosure adds a commit-pinned version-control browse URL alongside the labeled on-disk clone path | done | HOOK-24 |
+| `mind hooks run` / `hooks list`: run or inspect a source's and items' hooks on demand (rerun skipped/failed/lost hooks) | done | [install-hooks.md](install-hooks.md) (HOOK-100..104), CLI-194, CLI-195, CLI-196 |
 
 ## Documents
 

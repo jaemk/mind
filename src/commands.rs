@@ -275,6 +275,9 @@ fn run_install_hooks(
                 None
             }
         });
+        // spec: HOOK-24 - show a browse URL pinned to the disclosed commit
+        // when the source has a GitHub-shaped https remote.
+        let browse_url = source.browse_url(&commit);
         let disclosure = crate::hook::hook_disclosure_text(
             h.label(),
             h.optional,
@@ -284,6 +287,7 @@ fn run_install_hooks(
             &clone_path,
             &h.run,
             declared_override.as_deref(),
+            browse_url.as_deref(),
         );
 
         match crate::hook::decide(&disclosure, h.optional, dangerously_skip)? {
@@ -1070,108 +1074,101 @@ fn meld_recursive(
     if !is_authoritative
         && let Some(marketplace_path) = plugin_manifest::find_marketplace_manifest(&dir)
     {
-        match plugin_manifest::load_marketplace_manifest(&marketplace_path) {
-            Ok(manifest) => {
-                for entry in manifest.into_entries() {
-                    // MKT-14: in-repo plugins are catalog items of the parent source
-                    // (handled by catalog::scan_source_at); only external entries
-                    // need a recursive sub-meld here.
-                    if matches!(entry.source, plugin_manifest::PluginSource::InRepo { .. }) {
-                        continue; // spec: MKT-14
-                    }
-                    // belt-and-suspenders: into_entries() already validates
-                    // in-repo paths, so this is a redundant safety check.
-                    if let plugin_manifest::PluginSource::InRepo { ref path } = entry.source
-                        && !plugin_manifest::is_safe_manifest_path(path)
+        let manifest = plugin_manifest::load_marketplace_manifest(&marketplace_path)?;
+        for entry in manifest.into_entries() {
+            // MKT-14: in-repo plugins are catalog items of the parent source
+            // (handled by catalog::scan_source_at); only external entries
+            // need a recursive sub-meld here.
+            if matches!(entry.source, plugin_manifest::PluginSource::InRepo { .. }) {
+                continue; // spec: MKT-14
+            }
+            // belt-and-suspenders: into_entries() already validates
+            // in-repo paths, so this is a redundant safety check.
+            if let plugin_manifest::PluginSource::InRepo { ref path } = entry.source
+                && !plugin_manifest::is_safe_manifest_path(path)
+            {
+                return Err(MindError::MindToml {
+                    path: marketplace_path.clone(),
+                    msg: format!("marketplace.json: in-repo plugin path {:?} is unsafe", path),
+                });
+            }
+            let repo_spec = marketplace_entry_spec(&entry, &dir);
+            let entry_name = entry.name.clone();
+            let entry_version = entry.version;
+            let entry_description = entry.description;
+            // Recurse exactly like [discover].sources: cycle-safe
+            // via visited, no consumer pin or roots, no install hook.
+            match meld_recursive(
+                paths,
+                registry,
+                &repo_spec,
+                Some(entry_name.clone()),
+                vec![],
+                false,
+                None,  // no consumer pin
+                false, // nested, not top-level
+                visited,
+                policy,
+                None, // no install hook override
+                dangerously_skip_hook_check,
+                prefer_ssh,
+                false, // marketplace nested sources inherit non-interactive
+                None,  // no curator config
+                skipped,
+            ) {
+                Ok(n) => {
+                    added += n;
+                    // MKT-8: marketplace entry fields are authoritative
+                    // over the sub-source's own plugin.json. After the
+                    // recursive meld, find the just-registered sub-source
+                    // by its computed name and overwrite any fields the
+                    // entry supplies (entry wins when both supply a value).
+                    if let Ok(sub_spec) = parse_spec(&repo_spec)
+                        && let Some(sub) = registry
+                            .sources
+                            .iter_mut()
+                            .find(|s| s.name == sub_spec.name)
                     {
-                        return Err(MindError::MindToml {
-                            path: marketplace_path.clone(),
-                            msg: format!(
-                                "marketplace.json: in-repo plugin path {:?} is unsafe",
-                                path
-                            ),
-                        });
-                    }
-                    let repo_spec = marketplace_entry_spec(&entry, &dir);
-                    let entry_name = entry.name.clone();
-                    let entry_version = entry.version;
-                    let entry_description = entry.description;
-                    // Recurse exactly like [discover].sources: cycle-safe
-                    // via visited, no consumer pin or roots, no install hook.
-                    match meld_recursive(
-                        paths,
-                        registry,
-                        &repo_spec,
-                        Some(entry_name.clone()),
-                        vec![],
-                        false,
-                        None,  // no consumer pin
-                        false, // nested, not top-level
-                        visited,
-                        policy,
-                        None, // no install hook override
-                        dangerously_skip_hook_check,
-                        prefer_ssh,
-                        false, // marketplace nested sources inherit non-interactive
-                        None,  // no curator config
-                        skipped,
-                    ) {
-                        Ok(n) => {
-                            added += n;
-                            // MKT-8: marketplace entry fields are authoritative
-                            // over the sub-source's own plugin.json. After the
-                            // recursive meld, find the just-registered sub-source
-                            // by its computed name and overwrite any fields the
-                            // entry supplies (entry wins when both supply a value).
-                            if let Ok(sub_spec) = parse_spec(&repo_spec)
-                                && let Some(sub) = registry
-                                    .sources
-                                    .iter_mut()
-                                    .find(|s| s.name == sub_spec.name)
-                            {
-                                // Always tag as ClaudeMarketplace regardless of
-                                // what the sub-source's own plugin.json says.
-                                sub.origin = Some(ManifestOrigin::ClaudeMarketplace);
-                                if entry_version.is_some() {
-                                    sub.plugin_version = entry_version;
-                                }
-                                if entry_description.is_some() {
-                                    sub.description = entry_description.map(|d| strip_ansi(&d));
-                                }
-                            }
+                        // Always tag as ClaudeMarketplace regardless of
+                        // what the sub-source's own plugin.json says.
+                        sub.origin = Some(ManifestOrigin::ClaudeMarketplace);
+                        if entry_version.is_some() {
+                            sub.plugin_version = entry_version;
                         }
-                        Err(e) if git::is_auth_failure(&e) => {
-                            // No on_auth_failure is defined for marketplace
-                            // entries (no curator config); an auth failure
-                            // propagates as a generic error.
-                            return Err(e);
-                        }
-                        // spec: DSC-79 -- a non-auth clone failure of a marketplace
-                        // sub-source is skipped with a warning, mirroring the
-                        // [discover].sources loop above.
-                        Err(e) => {
-                            let sub_name = parse_spec(&repo_spec)
-                                .map(|s| s.name)
-                                .unwrap_or_else(|_| entry_name.clone());
-                            // spec: DSC-79/DSC-70 -- a failure after the sub-source is
-                            // already registered originates from a descendant; propagate.
-                            if registry.find(&sub_name).is_some() {
-                                return Err(e);
-                            }
-                            for line in clone_failure_lines(&sub_name, &e) {
-                                eprintln!("{line}");
-                            }
-                            skipped.push(SkippedEntry {
-                                source: sub_name,
-                                reason: "clone_failure".into(),
-                            });
-                            nested_clone_failures += 1;
-                            continue;
+                        if entry_description.is_some() {
+                            sub.description = entry_description.map(|d| strip_ansi(&d));
                         }
                     }
                 }
+                Err(e) if git::is_auth_failure(&e) => {
+                    // No on_auth_failure is defined for marketplace
+                    // entries (no curator config); an auth failure
+                    // propagates as a generic error.
+                    return Err(e);
+                }
+                // spec: DSC-79 -- a non-auth clone failure of a marketplace
+                // sub-source is skipped with a warning, mirroring the
+                // [discover].sources loop above.
+                Err(e) => {
+                    let sub_name = parse_spec(&repo_spec)
+                        .map(|s| s.name)
+                        .unwrap_or_else(|_| entry_name.clone());
+                    // spec: DSC-79/DSC-70 -- a failure after the sub-source is
+                    // already registered originates from a descendant; propagate.
+                    if registry.find(&sub_name).is_some() {
+                        return Err(e);
+                    }
+                    for line in clone_failure_lines(&sub_name, &e) {
+                        eprintln!("{line}");
+                    }
+                    skipped.push(SkippedEntry {
+                        source: sub_name,
+                        reason: "clone_failure".into(),
+                    });
+                    nested_clone_failures += 1;
+                    continue;
+                }
             }
-            Err(e) => return Err(e),
         }
     }
 
@@ -1916,6 +1913,8 @@ fn run_uninstall_hooks(
             (Some(note), Some(cmd)) if h.run == cmd => Some(note.as_str()),
             _ => None,
         };
+        // spec: HOOK-24 - show a browse URL pinned to the disclosed commit.
+        let browse_url = registry.sources[idx].browse_url(&commit);
         let disclosure = crate::hook::hook_disclosure_text(
             h.label(),
             h.optional,
@@ -1925,6 +1924,7 @@ fn run_uninstall_hooks(
             &clone_path,
             &h.run,
             declared_override,
+            browse_url.as_deref(),
         );
 
         match crate::hook::decide(&disclosure, h.optional, dangerously_skip_hook_check)? {
@@ -5002,6 +5002,8 @@ fn rerun_source_hooks(
                 }
                 false
             } else {
+                // spec: HOOK-24 - show a browse URL pinned to the disclosed commit.
+                let browse_url = source.browse_url(&commit);
                 let disclosure = crate::hook::disclosure_text(
                     &source.name,
                     &pin_desc,
@@ -5009,6 +5011,7 @@ fn rerun_source_hooks(
                     &clone_path,
                     &cmd,
                     None,
+                    browse_url.as_deref(),
                 );
                 // Abort is treated as Skip here (the source is already registered,
                 // per the HOOK-11 note).

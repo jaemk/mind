@@ -489,6 +489,21 @@ pub enum MindError {
         found: u32,
         supported: u32,
     },
+
+    /// HOOK-103: `--event build` is valid only for an item target; a source has
+    /// no build hook. Checked before running anything.
+    // spec: HOOK-103 CLI-195
+    #[error(
+        "--event build is valid only for an item target (a source has no build hook); use <source>#<item> to target an item"
+    )]
+    BuildEventRequiresItemTarget,
+
+    /// HOOK-100: a required hook was aborted by the user at the three-way prompt
+    /// during `mind hooks run`. The command exits non-zero; any hooks that ran
+    /// earlier in the same session are not rolled back.
+    // spec: HOOK-100
+    #[error("hook '{label}' was aborted by user; not running remaining hooks")]
+    HookAborted { label: String },
 }
 
 fn status_suffix(status: Option<ExitStatus>) -> String {
@@ -577,6 +592,8 @@ impl MindError {
             MindError::DigestMismatch { .. } => "digest-mismatch",
             MindError::SelfUpdatePolicy { .. } => "self-update-policy",
             MindError::StateTooNew { .. } => "state-too-new",
+            MindError::BuildEventRequiresItemTarget => "build-event-requires-item-target",
+            MindError::HookAborted { .. } => "hook-aborted",
         }
     }
 }
@@ -951,6 +968,16 @@ mod tests {
         assert_eq!(MindError::GitNotFound.kind(), "git-not-found");
         assert_eq!(MindError::ReleaseAssetEmpty.kind(), "release-asset-empty");
         assert_eq!(MindError::LobeTargetRequired.kind(), "lobe-target-required");
+        // spec: HOOK-103 CLI-195 -- the two `hooks run` error variants carry
+        // stable slugs.
+        assert_eq!(
+            MindError::BuildEventRequiresItemTarget.kind(),
+            "build-event-requires-item-target"
+        );
+        assert_eq!(
+            MindError::HookAborted { label: "h".into() }.kind(),
+            "hook-aborted"
+        );
 
         // Every slug must be non-empty and kebab-case (lowercase, hyphens only).
         let samples: &[(&str, &MindError)] = &[

@@ -567,6 +567,7 @@ fn run_build_hook(
             &staging.to_string_lossy(),
             build,
             None,
+            None, // no browse URL for per-item build hooks (HOOK-24: local path only)
         );
         matches!(
             crate::hook::prompt_choice_optional(&disclosure)?,
@@ -634,6 +635,7 @@ fn run_item_hook(
             &cwd.to_string_lossy(),
             cmd,
             None,
+            None, // no browse URL for per-item lifecycle hooks (HOOK-24: local path only)
         );
         matches!(
             crate::hook::prompt_choice_optional(&disclosure)?,

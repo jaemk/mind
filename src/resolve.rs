@@ -14,6 +14,35 @@ pub struct ItemRef {
     pub source: Option<String>,
 }
 
+/// A parsed hook target: either a source selector or an item ref.
+///
+/// The rule is simple: if the raw string contains `#`, it is an item ref
+/// (`<source>#<item>`); otherwise it is a source selector. Source selectors may
+/// carry glob metacharacters (`*`, `?`, `[..]`) to match multiple sources.
+// spec: CLI-194
+#[derive(Debug)]
+pub enum HookTarget {
+    /// A source selector (no `#` in the raw target string). May be a glob.
+    Source(String),
+    /// An item ref `<source>#<item>` (contains `#`). Parsed via
+    /// [`parse_item_ref`]; the source part acts as a filter and may itself be a
+    /// glob.
+    Item(ItemRef),
+}
+
+/// Parse a hook target string, distinguishing a source selector (no `#`) from
+/// an `<source>#<item>` item ref (contains `#`). Used by `mind hooks run` and
+/// `mind hooks list` to decide what the target addresses.
+// spec: CLI-194
+pub fn parse_hook_target(target: &str) -> Result<HookTarget> {
+    let target = target.trim();
+    if target.contains('#') {
+        Ok(HookTarget::Item(parse_item_ref(target)?))
+    } else {
+        Ok(HookTarget::Source(target.to_string()))
+    }
+}
+
 /// Parse one of: `name`, `skill:name`, `agent:name`, `rule:name`, `owner/repo#name`.
 pub fn parse_item_ref(raw: &str) -> Result<ItemRef> {
     let raw = raw.trim();
@@ -294,6 +323,79 @@ mod tests {
     // spec: CLI-1, CLI-2, CLI-3, CLI-4, CLI-5, CLI-31 (item ref parsing, resolution, selection)
     use super::*;
     use std::path::PathBuf;
+
+    // ---- parse_hook_target ----
+
+    // spec: CLI-194
+    #[test]
+    fn parse_hook_target_no_hash_is_source() {
+        // A bare name, an owner/repo pair, and a full host/owner/repo are all
+        // source selectors when they contain no `#`.
+        let t = parse_hook_target("agents").unwrap();
+        assert!(matches!(t, HookTarget::Source(s) if s == "agents"));
+
+        let t = parse_hook_target("owner/repo").unwrap();
+        assert!(matches!(t, HookTarget::Source(s) if s == "owner/repo"));
+
+        let t = parse_hook_target("github.com/owner/repo").unwrap();
+        assert!(matches!(t, HookTarget::Source(s) if s == "github.com/owner/repo"));
+    }
+
+    // spec: CLI-194
+    #[test]
+    fn parse_hook_target_glob_source() {
+        // Glob metacharacters with no `#` remain a source selector.
+        let t = parse_hook_target("*").unwrap();
+        assert!(matches!(t, HookTarget::Source(s) if s == "*"));
+
+        let t = parse_hook_target("owner/*").unwrap();
+        assert!(matches!(t, HookTarget::Source(s) if s == "owner/*"));
+    }
+
+    // spec: CLI-194
+    #[test]
+    fn parse_hook_target_with_hash_is_item() {
+        // Bare item ref: source="agents", name="scan", kind=None.
+        let t = parse_hook_target("agents#scan").unwrap();
+        match t {
+            HookTarget::Item(r) => {
+                assert_eq!(r.source.as_deref(), Some("agents"));
+                assert_eq!(r.name, "scan");
+                assert_eq!(r.kind, None);
+            }
+            HookTarget::Source(_) => panic!("expected Item"),
+        }
+
+        // Kind-qualified item ref.
+        let t = parse_hook_target("owner/repo#skill:scan").unwrap();
+        match t {
+            HookTarget::Item(r) => {
+                assert_eq!(r.source.as_deref(), Some("owner/repo"));
+                assert_eq!(r.kind, Some(ItemKind::Skill));
+                assert_eq!(r.name, "scan");
+            }
+            HookTarget::Source(_) => panic!("expected Item"),
+        }
+
+        // Glob item ref.
+        let t = parse_hook_target("agents#*").unwrap();
+        match t {
+            HookTarget::Item(r) => {
+                assert_eq!(r.source.as_deref(), Some("agents"));
+                assert_eq!(r.name, "*");
+            }
+            HookTarget::Source(_) => panic!("expected Item"),
+        }
+    }
+
+    // spec: CLI-194
+    #[test]
+    fn parse_hook_target_invalid_item_ref_errors() {
+        // A hash with an empty repo part is invalid.
+        assert!(parse_hook_target("#item").is_err());
+        // A hash with a bad kind (empty name after kind) is invalid.
+        assert!(parse_hook_target("repo#skill:").is_err());
+    }
 
     fn cat(kind: ItemKind, name: &str, source: &str) -> CatalogItem {
         CatalogItem {

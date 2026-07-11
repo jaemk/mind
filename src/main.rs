@@ -9,6 +9,7 @@ mod frontmatter;
 mod git;
 mod hash;
 mod hook;
+mod hooks_cmd;
 mod install;
 mod lock;
 mod manifest;
@@ -31,7 +32,7 @@ use std::io::IsTerminal;
 
 use clap::Parser;
 
-use cli::{Cli, Command, ConfigCmd, LobesCmd};
+use cli::{Cli, Command, ConfigCmd, HooksCmd, LobesCmd};
 use error::Result;
 use paths::Paths;
 
@@ -114,6 +115,11 @@ fn lock_mode(command: &Command, json: bool) -> LockMode {
         | Command::Upgrade { .. }
         | Command::Absorb { .. }
         | Command::Introspect { fix: true, .. }
+        // hooks run mutates sources.json (recorded run-commits) and, for --event
+        // build, the store; it needs the exclusive lock (spec: HOOK-101/HOOK-103).
+        | Command::Hooks {
+            action: HooksCmd::Run { .. },
+        }
         | Command::Config {
             action:
                 ConfigCmd::Lobes {
@@ -132,6 +138,10 @@ fn lock_mode(command: &Command, json: bool) -> LockMode {
         | Command::Review { .. }
         | Command::Introspect { fix: false, .. }
         | Command::Dump { .. }
+        // hooks list is read-only: it reports but never runs or records anything.
+        | Command::Hooks {
+            action: HooksCmd::List { .. },
+        }
         | Command::Config {
             action:
                 ConfigCmd::Show
@@ -472,6 +482,23 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             to,
             force,
         } => commands::absorb(paths, &item_ref, to, force, yes),
+        Command::Hooks { action } => match action {
+            HooksCmd::Run {
+                target,
+                event,
+                force,
+                dangerously_skip_install_hook_check,
+                dangerously_skip_build_hook_check,
+            } => hooks_cmd::run(
+                paths,
+                &target,
+                event,
+                force,
+                dangerously_skip_install_hook_check,
+                dangerously_skip_build_hook_check,
+            ),
+            HooksCmd::List { target } => hooks_cmd::list(paths, &target),
+        },
         Command::Dump {
             output,
             whole_sources,
@@ -603,6 +630,111 @@ mod tests {
         // spec: STO-40 STO-41
         assert_eq!(mode_of(&["mind", "completions", "bash"]), LockMode::None);
         assert_eq!(mode_of(&["mind", "man"]), LockMode::None);
+    }
+
+    /// `hooks run` takes the exclusive lock (it mutates sources.json recorded
+    /// run-commits and, for --event build, the store). `hooks list` is read-only
+    /// and takes the shared lock.
+    // spec: HOOK-100 HOOK-101 HOOK-103 CLI-194 CLI-195 CLI-196
+    #[test]
+    fn hooks_run_exclusive_list_shared() {
+        assert_eq!(
+            mode_of(&["mind", "hooks", "run", "agents"]),
+            LockMode::Exclusive,
+            "hooks run must take the exclusive lock"
+        );
+        assert_eq!(
+            mode_of(&["mind", "hooks", "run", "agents", "--event", "install"]),
+            LockMode::Exclusive,
+        );
+        assert_eq!(
+            mode_of(&[
+                "mind",
+                "hooks",
+                "run",
+                "agents#skill:scan",
+                "--event",
+                "build"
+            ]),
+            LockMode::Exclusive,
+        );
+        assert_eq!(
+            mode_of(&["mind", "hooks", "list", "agents"]),
+            LockMode::Shared,
+            "hooks list must take the shared lock"
+        );
+    }
+
+    /// `hooks run --event` accepts install, uninstall, build value variants and
+    /// parses correctly. Force, dangerously-skip flags parse as expected.
+    // spec: CLI-195
+    #[test]
+    fn hooks_run_flags_parse() {
+        use cli::HookEventArg;
+        // Default event is install.
+        let cli = Cli::try_parse_from(["mind", "hooks", "run", "agents"])
+            .expect("bare hooks run should parse");
+        match cli.command {
+            Command::Hooks {
+                action:
+                    HooksCmd::Run {
+                        target,
+                        event,
+                        force,
+                        dangerously_skip_install_hook_check,
+                        dangerously_skip_build_hook_check,
+                    },
+            } => {
+                assert_eq!(target, "agents");
+                assert_eq!(event, HookEventArg::Install);
+                assert!(!force);
+                assert!(!dangerously_skip_install_hook_check);
+                assert!(!dangerously_skip_build_hook_check);
+            }
+            other => panic!("expected HooksCmd::Run, got {other:?}"),
+        }
+
+        // --event build parses.
+        let cli = Cli::try_parse_from([
+            "mind",
+            "hooks",
+            "run",
+            "agents#skill:scan",
+            "--event",
+            "build",
+            "--force",
+            "--dangerously-skip-install-hook-check",
+            "--dangerously-skip-build-hook-check",
+        ])
+        .expect("hooks run with all flags should parse");
+        match cli.command {
+            Command::Hooks {
+                action:
+                    HooksCmd::Run {
+                        event,
+                        force,
+                        dangerously_skip_install_hook_check,
+                        dangerously_skip_build_hook_check,
+                        ..
+                    },
+            } => {
+                assert_eq!(event, HookEventArg::Build);
+                assert!(force);
+                assert!(dangerously_skip_install_hook_check);
+                assert!(dangerously_skip_build_hook_check);
+            }
+            other => panic!("expected HooksCmd::Run, got {other:?}"),
+        }
+
+        // hooks list parses.
+        let cli = Cli::try_parse_from(["mind", "hooks", "list", "owner/repo"])
+            .expect("hooks list should parse");
+        match cli.command {
+            Command::Hooks {
+                action: HooksCmd::List { target },
+            } => assert_eq!(target, "owner/repo"),
+            other => panic!("expected HooksCmd::List, got {other:?}"),
+        }
     }
 
     /// `review` with no `<target>` and no `--policy` is a valid invocation: it
