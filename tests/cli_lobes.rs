@@ -2377,13 +2377,12 @@ fn link_project_json_reports_mutation() {
     );
 }
 
-// HARN-12: `--snapshot` with `--json` still performs the freeze without crashing.
-// Per HARN-12 the snapshot output contract is the prose "wrote N frozen skill(s)"
-// line (there is no JSON mutation schema defined for snapshot), so this asserts the
-// freeze happened and no managed lobe was registered rather than a JSON shape.
+// HARN-14: `--snapshot --json` emits a machine-readable MutationResult (action
+// lobe-add, outcome snapshot, count + installed keys), freezes the files, and
+// registers no managed lobe.
 #[test]
-fn snapshot_json_still_freezes_and_registers_no_lobe() {
-    // spec: HARN-12
+fn snapshot_json_reports_frozen_result() {
+    // spec: HARN-14
     let sb = Sandbox::new();
     assert!(sb.mind(&["meld", &sb.source_spec()]).success);
     assert!(sb.mind(&["learn", "review"]).success, "learn skill");
@@ -2395,7 +2394,32 @@ fn snapshot_json_still_freezes_and_registers_no_lobe() {
     let r = sb.mind(&["link-project", &proj_str, "--snapshot", "--json"]);
     assert!(r.success, "snapshot --json failed: {}", r.stderr);
 
-    // The freeze happened: a real (non-symlink) skill dir exists.
+    // The JSON is a well-formed snapshot MutationResult.
+    let v = parse_json(&r.stdout);
+    assert_eq!(v["schema"], 1, "schema version: {}", r.stdout);
+    assert_eq!(v["action"], "lobe-add", "action: {}", r.stdout);
+    assert_eq!(v["outcome"], "snapshot", "outcome: {}", r.stdout);
+    assert_eq!(v["count"], 1, "one item frozen: {}", r.stdout);
+    let installed: Vec<&str> = v["installed"]
+        .as_array()
+        .expect("installed array")
+        .iter()
+        .map(|k| k.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        installed,
+        vec!["skill:review"],
+        "installed keys: {}",
+        r.stdout
+    );
+    let ws_path = proj.join(".windsurf").to_string_lossy().into_owned();
+    assert_eq!(
+        v["target"], ws_path,
+        "target is the lobe path: {}",
+        r.stdout
+    );
+
+    // The freeze actually happened: a real (non-symlink) skill dir exists.
     let skill_dir = proj.join(".windsurf/skills/review");
     let md = std::fs::symlink_metadata(&skill_dir).expect("frozen skill dir must exist");
     assert!(
@@ -2406,7 +2430,6 @@ fn snapshot_json_still_freezes_and_registers_no_lobe() {
     // No managed lobe registered (snapshot never writes a config entry).
     let listed = sb.mind(&["config", "lobes", "list", "--json"]);
     let lv = parse_json(&listed.stdout);
-    let ws_path = proj.join(".windsurf").to_string_lossy().into_owned();
     assert!(
         !lv["lobes"]
             .as_array()
@@ -2416,6 +2439,63 @@ fn snapshot_json_still_freezes_and_registers_no_lobe() {
         "snapshot must not register a managed lobe even under --json: {}",
         listed.stdout
     );
+}
+
+// HARN-14: `--snapshot --json` with nothing installed reports outcome `no-op`,
+// count 0, and an empty installed list.
+#[test]
+fn snapshot_json_no_items_reports_no_op() {
+    // spec: HARN-14
+    let sb = Sandbox::new();
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+
+    let proj = sb.base.join("emptysnap");
+    std::fs::create_dir_all(&proj).unwrap();
+    let proj_str = proj.to_string_lossy().into_owned();
+
+    let r = sb.mind(&["link-project", &proj_str, "--snapshot", "--json"]);
+    assert!(r.success, "empty snapshot --json failed: {}", r.stderr);
+    let v = parse_json(&r.stdout);
+    assert_eq!(v["outcome"], "no-op", "outcome: {}", r.stdout);
+    assert_eq!(v["count"], 0, "count zero: {}", r.stdout);
+    assert!(
+        v["installed"].as_array().is_none_or(|a| a.is_empty()),
+        "installed empty: {}",
+        r.stdout
+    );
+}
+
+// HARN-14: `config lobes remove --snapshot --json` reports outcome `detached`
+// with the frozen link count; a plain remove stays `removed` with no count.
+#[test]
+fn remove_snapshot_json_reports_detached_count() {
+    // spec: HARN-14
+    let sb = Sandbox::new();
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    assert!(sb.mind(&["learn", "review"]).success, "learn skill");
+
+    let proj = sb.base.join("detachjson");
+    std::fs::create_dir_all(&proj).unwrap();
+    let proj_str = proj.to_string_lossy().into_owned();
+    assert!(
+        sb.mind(&["link-project", &proj_str, "--yes"]).success,
+        "managed link-project"
+    );
+    let ws_path = proj.join(".windsurf").to_string_lossy().into_owned();
+
+    let r = sb.mind(&[
+        "config",
+        "lobes",
+        "remove",
+        &ws_path,
+        "--snapshot",
+        "--json",
+    ]);
+    assert!(r.success, "remove --snapshot --json failed: {}", r.stderr);
+    let v = parse_json(&r.stdout);
+    assert_eq!(v["action"], "lobe-remove", "action: {}", r.stdout);
+    assert_eq!(v["outcome"], "detached", "outcome: {}", r.stdout);
+    assert_eq!(v["count"], 1, "one link frozen: {}", r.stdout);
 }
 
 // HARN-12: `--snapshot` when nothing is installed is a no-op note, not an error,

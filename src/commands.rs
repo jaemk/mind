@@ -6301,6 +6301,7 @@ pub fn lobe_add_resolved(
         let manifest = Manifest::load(paths)?;
         let agent_homes = paths.agent_homes()?;
         let mut copied = 0usize;
+        let mut frozen_keys: Vec<String> = Vec::new();
         for item in manifest.items.values() {
             // Respect the lobe's kinds filter.
             if !lobe.admits(item.kind) {
@@ -6340,6 +6341,21 @@ pub fn lobe_add_resolved(
             }
             install::copy_recursive(&store_src, &dst)?;
             copied += 1;
+            frozen_keys.push(item.key());
+        }
+        // spec: HARN-14 -- machine-readable snapshot result under --json, in place
+        // of the prose lines. `outcome` is `snapshot` when anything was frozen,
+        // else `no-op`; `count` and `installed` (sorted keys) report what was written.
+        if out.json {
+            frozen_keys.sort();
+            let mut result = MutationResult::new(
+                "lobe-add",
+                &path_str,
+                if copied == 0 { "no-op" } else { "snapshot" },
+            );
+            result.count = Some(copied);
+            result.installed = frozen_keys;
+            return print_json(&result);
         }
         if copied == 0 {
             println!("note: no installed items to snapshot into {path_str}");
@@ -6481,6 +6497,7 @@ pub fn lobe_remove(paths: &Paths, path: &str, snapshot: bool) -> Result<()> {
         });
     }
 
+    let mut frozen_count: Option<usize> = None;
     if snapshot {
         // HARN-12: freeze symlinks confined under the lobe before dropping the entry.
         let lobe_path = std::path::Path::new(path);
@@ -6516,6 +6533,7 @@ pub fn lobe_remove(paths: &Paths, path: &str, snapshot: bool) -> Result<()> {
             item.links = new_links;
         }
         manifest.save(paths)?;
+        frozen_count = Some(frozen);
         if !out.json {
             println!("frozen {frozen} link(s) in {path} to real files");
         }
@@ -6523,7 +6541,19 @@ pub fn lobe_remove(paths: &Paths, path: &str, snapshot: bool) -> Result<()> {
 
     cfg.save(paths)?;
     if out.json {
-        return print_json(&MutationResult::new("lobe-remove", path, "removed"));
+        // spec: HARN-14 -- a plain remove is `removed`; a `--snapshot` detach is
+        // `detached` with `count` = the number of links frozen.
+        let mut result = MutationResult::new(
+            "lobe-remove",
+            path,
+            if frozen_count.is_some() {
+                "detached"
+            } else {
+                "removed"
+            },
+        );
+        result.count = frozen_count;
+        return print_json(&result);
     }
     println!("{} removed lobe {path}", out.ok());
     Ok(())

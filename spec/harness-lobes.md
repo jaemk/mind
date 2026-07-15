@@ -142,6 +142,16 @@ per-rule files. Rules stay Claude-only here; an `AGENTS.md`-writer is out of sco
   the store content, the link is stripped from the manifest, and the config entry is
   removed.
 
+- `HARN-14` Under `--json`, a snapshot emits a machine-readable [`MutationResult`]
+  (CLI-153, schema 1) instead of the prose lines. `config lobes add --snapshot`
+  (and `link-project --snapshot`) emits `action = "lobe-add"`, `target` = the lobe
+  path, `outcome = "snapshot"` when at least one item was frozen (else `"no-op"`),
+  `count` = the number of items frozen, and `installed` = their `kind:name` keys
+  (sorted). `config lobes remove <path> --snapshot` emits `action = "lobe-remove"`,
+  `outcome = "detached"`, and `count` = the number of links frozen (a plain remove
+  keeps `outcome = "removed"` with no `count`). The advisory git/gitignore notes are
+  suppressed under `--json`.
+
 - `HARN-13` `introspect` reports a configured lobe whose parent directory does not
   exist (`!lobe.reachable()`) as a `vanished-lobe` finding. `introspect --fix`
   additionally prunes the entry from `config.lobes` and strips its links from every
