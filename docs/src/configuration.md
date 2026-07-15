@@ -2,9 +2,12 @@
 
 ## Agent homes (lobes)
 
-`learn` links items into every configured agent home (a *lobe*). Each item is
-linked under its kind subdirectory: `skills/`, `agents/`, `rules/`. The default
-lobe is `~/.claude`. Configure more in `~/.mind/config.toml`:
+`learn` links items into every configured install-target directory (a *lobe*).
+A lobe is any directory mind links items into -- a global agent home such as
+`~/.claude` or `~/.gemini/config`, or a project subdirectory such as `.windsurf`
+inside a project root. Each item is linked under its kind subdirectory: `skills/`,
+`agents/`, `rules/`. The default lobe is `~/.claude`. Configure more in
+`~/.mind/config.toml`:
 
 ```toml
 lobes = ["~/.claude", "~/.config/some-other-agent"]
@@ -52,29 +55,57 @@ Per-harness path table:
 | Claude Code | `~/.claude/skills/<n>/SKILL.md` | `~/.claude/agents/<n>.md` | `~/.claude` |
 | Gemini CLI / Antigravity | `~/.gemini/config/skills/` | - | `~/.gemini/config` |
 | Codex CLI | `~/.agents/skills/` | (subagents) | `~/.agents` |
-| Windsurf | `~/.windsurf/skills/` | - | `~/.windsurf` |
+| Windsurf | `<project>/.windsurf/skills/` | - | `<project>/.windsurf` |
 
 `~/.agents` is a vendor-neutral alias: Codex reads it as its user skills path, so
 one `~/.agents` lobe serves Codex and any harness that follows the same convention.
 
+Windsurf has no global skills directory; it reads skills only from a project's
+`.windsurf/skills/` folder. A Windsurf lobe is therefore a project lobe, not a
+global one. Use `mind link-project` (or `mind config lobes add . --preset windsurf`)
+in a project root to register one. Windsurf is detected via `~/.codeium/windsurf`;
+see the Presets section below for how `config lobes detect` handles it.
+
 ### Presets
 
-`mind config lobes add --preset <name>` adds a lobe with the preset's path and
-`kinds` in one step. Presets:
+`mind config lobes add [<dir>] --preset <name>` adds a lobe at the preset's target
+path with its `kinds` filter in one step. `--preset` and a base `<dir>` are
+composable:
 
-| preset | path | kinds |
-|--------|------|-------|
+| preset | target path | kinds |
+|--------|-------------|-------|
 | `gemini` | `~/.gemini/config` | skill |
 | `codex` | `~/.agents` | skill |
 | `universal` | `~/.agents` | skill |
-| `windsurf` | `~/.windsurf` | skill |
+| `windsurf` | `<dir>/.windsurf` (default: `<cwd>/.windsurf`) | skill |
 
-Example:
+`gemini`, `codex`, and `universal` target a fixed global path. `windsurf` is
+project-scoped: `mind config lobes add --preset windsurf` (no `<dir>`) targets the
+current directory.
+
+Additional flags for `config lobes add`:
+
+- `--subdir <rel>` - target an arbitrary subdirectory under `<dir>` (e.g.
+  `--subdir .cursor` for a Cursor project directory) instead of the preset's default.
+- `--snapshot` - materialize a one-time frozen copy (real files, not symlinks) into
+  the target and do not register a lobe. A snapshot is not managed: no
+  auto-propagation on future `mind learn`, and the copied files are committable to
+  the repo. Managed lobes use symlinks into `~/.mind/store` and should be gitignored.
+- `--force` - overwrite a colliding foreign file at the target path.
+
+Examples:
 
 ```
 mind config lobes add --preset gemini
 # + added gemini lobe ~/.gemini/config [skill]
+
+mind config lobes add . --preset windsurf
+# + added windsurf lobe ./.windsurf [skill]
 ```
+
+`mind config lobes remove <path> [--snapshot]` unregisters a lobe. `--snapshot`
+detaches a managed lobe: it replaces the managed symlinks with frozen real-file
+copies and then unregisters the lobe.
 
 > **Note (migration):** The `gemini` preset path changed from `~/.gemini` to
 > `~/.gemini/config` in a previous release. If you added this preset earlier, your
@@ -87,11 +118,31 @@ mind config lobes add --preset gemini
 `mind config lobes detect` detects which known harness homes exist on the machine
 and reports the matching presets it could add. It never mutates config on its own:
 it only adds a lobe with `--yes` or an interactive TTY confirm. `--json` emits the
-detection result as structured JSON (HARN-5).
+detection result as structured JSON (HARN-5). Windsurf is detected via
+`~/.codeium/windsurf`; because Windsurf is project-scoped, `detect` prints guidance
+to run `mind link-project` in the project root rather than auto-adding a lobe.
 
 `mind config lobes list` shows the `kinds` filter for each lobe (e.g.
 `~/.gemini/config [skill]`); a lobe with no filter shows just the path. `mind
 config show` uses the same format.
+
+### link-project
+
+`mind link-project [<dir>] [--preset <name>] [--subdir <rel>] [--snapshot] [--force]`
+is a convenience alias for `config lobes add`, with `<dir>` defaulting to the current
+directory and `--preset` defaulting to `windsurf`. Running it in a project root links
+installed skills into `./.windsurf/skills/` and registers a managed lobe so future
+`mind learn` fans new skills into it automatically:
+
+```
+cd ~/projects/myapp
+mind link-project
+# + added windsurf lobe ./.windsurf [skill]
+```
+
+Managed lobes use symlinks into `~/.mind/store`; add `.windsurf/` to the project's
+`.gitignore`. Use `--snapshot` to materialize real-file copies instead (committable
+to the repo without gitignoring).
 
 ### Frontmatter portability
 

@@ -5863,7 +5863,66 @@ pub fn introspect(paths: &Paths, fix: bool, json: bool) -> Result<()> {
     // HARN-8: `--fix` may create new lobe links; record whether we mutated the
     // manifest so it is saved once after the loop.
     let mut manifest_dirty = false;
+
+    // HARN-13: check for vanished lobes (configured lobes whose parent dir is
+    // gone) before computing all_lobes, so --fix can prune them from config and
+    // the subsequent relink loop sees only live lobes.
+    // spec: HARN-13
+    {
+        let cfg_result = Config::load(paths);
+        if let Ok(mut cfg) = cfg_result {
+            if !cfg.lobes.is_empty() {
+                let mut pruned = false;
+                for entry in &cfg.lobes {
+                    let lobe = crate::paths::Lobe {
+                        path: std::path::PathBuf::from(entry.path()),
+                        kinds: entry.kinds().map(|ks| ks.to_vec()),
+                    };
+                    if !lobe.reachable() {
+                        issues.push(Issue {
+                            kind: "vanished-lobe",
+                            target: entry.path().to_string(),
+                            message: format!(
+                                "lobe '{}' parent dir is gone; \
+                                 run `mind introspect --fix` to prune it",
+                                entry.path()
+                            ),
+                        });
+                        if fix {
+                            // Strip manifest links confined under this lobe.
+                            let lobe_pb = std::path::PathBuf::from(entry.path());
+                            for item in manifest.items.values_mut() {
+                                let before = item.links.len();
+                                item.links
+                                    .retain(|l| !std::path::Path::new(l).starts_with(&lobe_pb));
+                                if item.links.len() != before {
+                                    manifest_dirty = true;
+                                }
+                            }
+                            pruned = true;
+                        }
+                    }
+                }
+                if fix && pruned {
+                    cfg.lobes.retain(|e| {
+                        let lobe = crate::paths::Lobe {
+                            path: std::path::PathBuf::from(e.path()),
+                            kinds: e.kinds().map(|ks| ks.to_vec()),
+                        };
+                        lobe.reachable()
+                    });
+                    cfg.save(paths)?;
+                    repaired.push("pruned vanished lobe(s) from config".to_string());
+                }
+            }
+        }
+    }
+
     let all_lobes = paths.agent_homes()?;
+    // For HARN-8 checks, only consider lobes whose parent dir still exists (skip
+    // vanished lobes so they don't generate spurious missing-lobe-link findings).
+    let live_lobes: Vec<crate::paths::Lobe> =
+        all_lobes.into_iter().filter(|l| l.reachable()).collect();
 
     for s in &registry.sources {
         if !s.clone_dir(paths).join(".git").is_dir() {
@@ -5909,20 +5968,21 @@ pub fn introspect(paths: &Paths, fix: bool, json: bool) -> Result<()> {
         // admits its kind. A link that is in the manifest but not on disk is
         // already handled above (missing-link). This checks for lobes that were
         // added after the item was installed -- the link would be absent from
-        // both the manifest and disk.
+        // both the manifest and disk. Use live_lobes so vanished lobes don't
+        // generate spurious missing-lobe-link findings (HARN-13).
         let link_rel = it
             .links
             .iter()
             .find_map(|link_str| {
                 let link = std::path::Path::new(link_str);
-                all_lobes
+                live_lobes
                     .iter()
                     .find_map(|lobe| link.strip_prefix(&lobe.path).ok())
                     .map(|rel| rel.to_string_lossy().into_owned())
             })
             .or_else(|| paths.default_link_rel(it.kind, &it.name));
         if let Some(rel) = link_rel {
-            for lobe in &all_lobes {
+            for lobe in &live_lobes {
                 if !lobe.admits(it.kind) {
                     continue;
                 }
@@ -6197,8 +6257,27 @@ fn candidates_to_lobes(
         .collect()
 }
 
-/// `mind config lobes add <path>` — add an agent home by path.
-pub fn lobe_add(paths: &Paths, path: &str, yes: bool) -> Result<()> {
+/// Unified add path for `config lobes add` and `link-project`.
+///
+/// Calls `resolve_lobe(base, preset, subdir)` to get `(lobe, preset_opt)`.
+///
+/// - snapshot=true: materialize frozen real-file copies of admitted items into
+///   the lobe path; do NOT register a config entry (HARN-12).
+/// - snapshot=false (default): register the lobe in config, preserve HARN-9
+///   claude_home, run the HARN-7 backfill offer, print gitignore guidance for
+///   a project lobe (HARN-11).
+// spec: HARN-10 HARN-11 HARN-12
+pub fn lobe_add_resolved(
+    paths: &Paths,
+    base: Option<&str>,
+    preset: Option<&str>,
+    subdir: Option<&str>,
+    snapshot: bool,
+    force: bool,
+    yes: bool,
+) -> Result<()> {
+    use crate::paths::{Scope, resolve_lobe};
+
     let out = crate::render::ctx();
     // POL-40: a lobe lock pins the effective agent homes; refuse and change
     // nothing. Load the policy first so the refusal precedes any config write.
@@ -6207,13 +6286,90 @@ pub fn lobe_add(paths: &Paths, path: &str, yes: bool) -> Result<()> {
     {
         return Err(lobes_locked_error("add"));
     }
-    paths.ensure_config()?;
-    let mut cfg = Config::load(paths)?;
-    if cfg.lobes.iter().any(|e| e.path() == path) {
-        if out.json {
-            return print_json(&MutationResult::new("lobe-add", path, "no-op"));
+
+    // When a preset name is given, validate it up-front via `preset_lobe`
+    // (fast path for unknown-preset errors before any config write). The full
+    // `resolve_lobe` call below re-uses the same lookup and handles `base`.
+    if let Some(name) = preset {
+        Paths::preset_lobe(name)?; // validate; result discarded, resolve_lobe handles base
+    }
+    let (lobe, preset_opt) = resolve_lobe(base, preset, subdir)?;
+    let path_str = lobe.path.to_string_lossy().into_owned();
+
+    if snapshot {
+        // HARN-12: snapshot mode -- write frozen real-file copies, no config entry.
+        let manifest = Manifest::load(paths)?;
+        let agent_homes = paths.agent_homes()?;
+        let mut copied = 0usize;
+        for item in manifest.items.values() {
+            // Respect the lobe's kinds filter.
+            if !lobe.admits(item.kind) {
+                continue;
+            }
+            // Determine the relative link path (mirrors link_into_new_lobes).
+            let link_rel = item
+                .links
+                .iter()
+                .find_map(|link_str| {
+                    let link = std::path::Path::new(link_str);
+                    agent_homes
+                        .iter()
+                        .find_map(|h| link.strip_prefix(&h.path).ok())
+                        .map(|rel| rel.to_string_lossy().into_owned())
+                })
+                .or_else(|| paths.default_link_rel(item.kind, &item.name));
+            let link_rel = match link_rel {
+                Some(r) => r,
+                None => continue,
+            };
+            let dst = lobe.path.join(&link_rel);
+            let store_src = paths.mind_home.join(&item.store);
+            // Collision check (mirrors LIFE-41).
+            if std::fs::symlink_metadata(&dst).is_ok() {
+                if !force {
+                    return Err(MindError::LinkOccupied {
+                        path: dst.to_string_lossy().into_owned(),
+                    });
+                }
+                // Force: remove the existing target before copying.
+                if dst.is_dir() {
+                    std::fs::remove_dir_all(&dst).map_err(|e| MindError::io(&dst, e))?;
+                } else {
+                    std::fs::remove_file(&dst).map_err(|e| MindError::io(&dst, e))?;
+                }
+            }
+            install::copy_recursive(&store_src, &dst)?;
+            copied += 1;
         }
-        println!("{} lobe already configured: {path}", out.available());
+        if copied == 0 {
+            println!("note: no installed items to snapshot into {path_str}");
+        } else {
+            println!("wrote {copied} frozen skill(s) to {path_str}");
+            // Advisory: if the target is not inside a git repo, suggest committing.
+            let is_git = lobe.path.join(".git").exists()
+                || lobe.path.parent().is_some_and(|p| p.join(".git").exists());
+            if !is_git {
+                println!(
+                    "note: {path_str} does not appear to be a git repo; \
+                     commit the frozen copies to version-control them"
+                );
+            }
+        }
+        return Ok(());
+    }
+
+    // Managed (non-snapshot) path: register in config, backfill, gitignore note.
+    paths.ensure_config()?;
+    let entry = crate::config::LobeEntry {
+        path: path_str.clone(),
+        kinds: lobe.kinds.clone(),
+    };
+    let mut cfg = Config::load(paths)?;
+    if cfg.lobes.iter().any(|e| e.path() == path_str) {
+        if out.json {
+            return print_json(&MutationResult::new("lobe-add", &path_str, "no-op"));
+        }
+        println!("{} lobe already configured: {path_str}", out.available());
         return Ok(());
     }
     // spec: HARN-9 -- preserve the implicit claude_home default when this is
@@ -6221,75 +6377,45 @@ pub fn lobe_add(paths: &Paths, path: &str, yes: bool) -> Result<()> {
     // by the configured list and new installs no longer reach ~/.claude.
     if cfg.lobes.is_empty() {
         let ch = paths.claude_home.to_string_lossy().into_owned();
-        if ch.as_str() != path {
-            cfg.lobes.push(crate::config::LobeEntry::bare(&ch));
-        }
-    }
-    cfg.lobes.push(crate::config::LobeEntry::bare(path));
-    cfg.save(paths)?;
-    if out.json {
-        backfill_new_lobes(
-            paths,
-            &[crate::paths::Lobe::all_kinds(std::path::PathBuf::from(
-                path,
-            ))],
-            yes,
-        )?;
-        return print_json(&MutationResult::new("lobe-add", path, "added"));
-    }
-    println!("{} added lobe {path}", out.ok());
-    backfill_new_lobes(
-        paths,
-        &[crate::paths::Lobe::all_kinds(std::path::PathBuf::from(
-            path,
-        ))],
-        yes,
-    )?;
-    Ok(())
-}
-
-/// `mind config lobes add --preset <name>` — add a known harness preset's lobe
-/// (its parent path and `kinds` filter) (HARN-4).
-pub fn lobe_add_preset(paths: &Paths, name: &str, yes: bool) -> Result<()> {
-    let out = crate::render::ctx();
-    // POL-40: refuse under a lobe lock before validating or writing anything.
-    if let Some(policy) = Policy::load()?
-        && policy.lobes_lock()
-    {
-        return Err(lobes_locked_error("add"));
-    }
-    // Resolve (and validate) the preset before touching config.
-    let lobe = Paths::preset_lobe(name)?;
-    let path = lobe.path.to_string_lossy().into_owned();
-    let entry = crate::config::LobeEntry {
-        path: path.clone(),
-        kinds: lobe.kinds.clone(),
-    };
-    paths.ensure_config()?;
-    let mut cfg = Config::load(paths)?;
-    if cfg.lobes.iter().any(|e| e.path() == path) {
-        if out.json {
-            return print_json(&MutationResult::new("lobe-add", &path, "no-op"));
-        }
-        println!("{} lobe already configured: {path}", out.available());
-        return Ok(());
-    }
-    // spec: HARN-9
-    if cfg.lobes.is_empty() {
-        let ch = paths.claude_home.to_string_lossy().into_owned();
-        if ch.as_str() != path {
+        if ch.as_str() != path_str {
             cfg.lobes.push(crate::config::LobeEntry::bare(&ch));
         }
     }
     cfg.lobes.push(entry.clone());
     cfg.save(paths)?;
+
+    // Determine if this is a project-scoped lobe for gitignore guidance.
+    let is_project_scope =
+        preset_opt.is_some_and(|p| p.scope == Scope::Project) || subdir.is_some();
+
     if out.json {
         backfill_new_lobes(paths, std::slice::from_ref(&lobe), yes)?;
-        return print_json(&MutationResult::new("lobe-add", &path, "added"));
+        return print_json(&MutationResult::new("lobe-add", &path_str, "added"));
     }
-    println!("{} added {name} lobe {}", out.ok(), format_lobe(&entry));
+    // Human output: print the added lobe, then gitignore guidance for project lobes.
+    match preset_opt {
+        Some(p) => {
+            println!("{} added {} lobe {}", out.ok(), p.name, format_lobe(&entry));
+        }
+        None => {
+            println!("{} added lobe {}", out.ok(), format_lobe(&entry));
+        }
+    }
+    if is_project_scope {
+        let skills_dir = lobe.path.join("skills");
+        println!(
+            "note: {}/  contains symlinks into ~/.mind/store; \
+             add it to .gitignore so the symlinks are not committed",
+            skills_dir.display()
+        );
+    }
     backfill_new_lobes(paths, std::slice::from_ref(&lobe), yes)?;
     Ok(())
+}
+
+/// `mind config lobes add <path>` — add an agent home by path.
+pub fn lobe_add(paths: &Paths, path: &str, yes: bool) -> Result<()> {
+    lobe_add_resolved(paths, Some(path), None, None, false, false, yes)
 }
 
 /// `mind config lobes list` — list configured agent homes, with each lobe's
@@ -6330,8 +6456,13 @@ fn show_override_note(env_set: bool, lobes_locked: bool) -> bool {
     env_set && !lobes_locked
 }
 
-/// `mind config lobes remove <path>` — drop an agent home.
-pub fn lobe_remove(paths: &Paths, path: &str) -> Result<()> {
+/// `mind config lobes remove <path> [--snapshot]` — drop an agent home.
+///
+/// With `--snapshot` (HARN-12): for each manifest item whose recorded link is
+/// confined under the lobe path, replace the symlink with a frozen real-file copy
+/// of the store content, strip the link from the manifest, then drop the config
+/// entry.
+pub fn lobe_remove(paths: &Paths, path: &str, snapshot: bool) -> Result<()> {
     let out = crate::render::ctx();
     // POL-40: a lobe lock pins the effective agent homes; refuse and change
     // nothing.
@@ -6349,6 +6480,47 @@ pub fn lobe_remove(paths: &Paths, path: &str) -> Result<()> {
             path: path.to_string(),
         });
     }
+
+    if snapshot {
+        // HARN-12: freeze symlinks confined under the lobe before dropping the entry.
+        let lobe_path = std::path::Path::new(path);
+        let mut manifest = Manifest::load(paths)?;
+        let mut frozen = 0usize;
+        for item in manifest.items.values_mut() {
+            let mut new_links = Vec::new();
+            for link_str in &item.links {
+                let link = std::path::Path::new(link_str);
+                // Only process links confined under this lobe.
+                if !link.starts_with(lobe_path) {
+                    new_links.push(link_str.clone());
+                    continue;
+                }
+                // Replace the symlink with a frozen real-file copy.
+                let store_src = paths.mind_home.join(&item.store);
+                // Remove the existing symlink (or whatever is there).
+                if std::fs::symlink_metadata(link).is_ok() {
+                    if link.is_dir() && !link.is_symlink() {
+                        std::fs::remove_dir_all(link).map_err(|e| MindError::io(link, e))?;
+                    } else {
+                        std::fs::remove_file(link).map_err(|e| MindError::io(link, e))?;
+                    }
+                }
+                install::copy_recursive(&store_src, link)?;
+                frozen += 1;
+                // The link path stays the same (now a real file/dir); keep it
+                // in the manifest as a record of the on-disk location, but it
+                // is no longer a mind-managed symlink. We strip it so a later
+                // `forget` does not try to remove it (the user owns the copy).
+                // (HARN-12: strip from manifest.)
+            }
+            item.links = new_links;
+        }
+        manifest.save(paths)?;
+        if !out.json {
+            println!("frozen {frozen} link(s) in {path} to real files");
+        }
+    }
+
     cfg.save(paths)?;
     if out.json {
         return print_json(&MutationResult::new("lobe-remove", path, "removed"));
@@ -6358,11 +6530,14 @@ pub fn lobe_remove(paths: &Paths, path: &str) -> Result<()> {
 }
 
 /// `mind config lobes detect` — detect installed harness homes and offer to add
-/// their presets (HARN-5). Detection itself never mutates config: it adds the
-/// detected lobes only with `--yes` (or, on a TTY, after a confirm prompt).
-/// Without a TTY and without `--yes`, it reports only. Honors the POL-40 lobe
-/// lock and dedups against the already-configured lobes.
+/// their presets (HARN-5). Global presets (gemini, codex, universal) are
+/// offered for auto-add with confirmation or `--yes`. Project-scoped presets
+/// (windsurf) are never auto-added; detection prints guidance to run
+/// `mind link-project [--preset <name>]` inside a project directory instead.
+/// Honors the POL-40 lobe lock and dedups against the already-configured lobes.
 pub fn lobe_detect(paths: &Paths, yes: bool) -> Result<()> {
+    use crate::paths::{Scope, lookup_preset};
+
     let out = crate::render::ctx();
     // POL-40: refuse under a lobe lock before reporting or writing anything.
     if let Some(policy) = Policy::load()?
@@ -6393,14 +6568,26 @@ pub fn lobe_detect(paths: &Paths, yes: bool) -> Result<()> {
         ));
     }
 
-    // Decide whether to mutate. With --yes, add unconditionally. Without it, a
-    // TTY gets a confirm prompt; a non-TTY reports only (HARN-5).
-    let do_add = if candidates.is_empty() {
+    // Split candidates: global presets are offered for auto-add; project-scoped
+    // presets (windsurf) get guidance only -- the project dir is not known here.
+    // spec: HARN-5
+    type LobePair = (&'static str, crate::config::LobeEntry);
+    let (global_candidates, project_candidates): (Vec<LobePair>, Vec<LobePair>) =
+        candidates.into_iter().partition(|(name, _)| {
+            lookup_preset(name)
+                .ok()
+                .is_none_or(|p| p.scope == Scope::Global)
+        });
+
+    // Decide whether to mutate global candidates. With --yes, add
+    // unconditionally. Without it, a TTY gets a confirm prompt; a non-TTY
+    // reports only (HARN-5).
+    let do_add = if global_candidates.is_empty() {
         false
     } else if yes {
         true
     } else if crate::hook::is_tty() {
-        let names: Vec<String> = candidates
+        let names: Vec<String> = global_candidates
             .iter()
             .map(|(n, e)| format!("{n} ({})", format_lobe(e)))
             .collect();
@@ -6410,41 +6597,63 @@ pub fn lobe_detect(paths: &Paths, yes: bool) -> Result<()> {
     };
 
     if out.json {
-        let detected_json: Vec<serde_json::Value> = candidates
+        let detected_json: Vec<serde_json::Value> = global_candidates
             .iter()
+            .chain(project_candidates.iter())
             .map(|(name, entry)| {
+                let scope = lookup_preset(name)
+                    .ok()
+                    .map(|p| match p.scope {
+                        Scope::Global => "global",
+                        Scope::Project => "project",
+                    })
+                    .unwrap_or("global");
                 serde_json::json!({
                     "preset": name,
                     "path": entry.path(),
                     "kinds": entry.kinds().map(|ks| {
                         ks.iter().map(|k| k.as_str()).collect::<Vec<_>>()
                     }),
+                    "scope": scope,
                 })
+            })
+            .collect();
+        let guidance: Vec<String> = project_candidates
+            .iter()
+            .map(|(name, _)| {
+                format!(
+                    "run `mind link-project --preset {name}` inside a project \
+                     directory to link skills there"
+                )
             })
             .collect();
         if do_add {
             // spec: HARN-9
             if cfg.lobes.is_empty() {
                 let ch = paths.claude_home.to_string_lossy().into_owned();
-                if !candidates.iter().any(|(_, e)| e.path() == ch.as_str()) {
+                if !global_candidates
+                    .iter()
+                    .any(|(_, e)| e.path() == ch.as_str())
+                {
                     cfg.lobes.push(crate::config::LobeEntry::bare(&ch));
                 }
             }
-            for (_, entry) in &candidates {
+            for (_, entry) in &global_candidates {
                 cfg.lobes.push(entry.clone());
             }
             cfg.save(paths)?;
-            let new_lobes = candidates_to_lobes(&candidates);
+            let new_lobes = candidates_to_lobes(&global_candidates);
             backfill_new_lobes(paths, &new_lobes, yes)?;
         }
         return print_json(&serde_json::json!({
             "action": "lobe-detect",
             "detected": detected_json,
             "added": do_add,
+            "guidance": guidance,
         }));
     }
 
-    if candidates.is_empty() {
+    if global_candidates.is_empty() && project_candidates.is_empty() {
         println!("{} no new harness homes detected", out.bullet());
         return Ok(());
     }
@@ -6453,23 +6662,35 @@ pub fn lobe_detect(paths: &Paths, yes: bool) -> Result<()> {
         // spec: HARN-9
         if cfg.lobes.is_empty() {
             let ch = paths.claude_home.to_string_lossy().into_owned();
-            if !candidates.iter().any(|(_, e)| e.path() == ch.as_str()) {
+            if !global_candidates
+                .iter()
+                .any(|(_, e)| e.path() == ch.as_str())
+            {
                 cfg.lobes.push(crate::config::LobeEntry::bare(&ch));
             }
         }
-        for (name, entry) in &candidates {
+        for (name, entry) in &global_candidates {
             cfg.lobes.push(entry.clone());
             println!("{} added {name} lobe {}", out.ok(), format_lobe(entry));
         }
         cfg.save(paths)?;
-        let new_lobes = candidates_to_lobes(&candidates);
+        let new_lobes = candidates_to_lobes(&global_candidates);
         backfill_new_lobes(paths, &new_lobes, yes)?;
-    } else {
+    } else if !global_candidates.is_empty() {
         println!("{} detected harness home(s):", out.bullet());
-        for (name, entry) in &candidates {
+        for (name, entry) in &global_candidates {
             println!("  {} {name}: {}", out.dim("·"), format_lobe(entry));
         }
         println!("re-run with --yes to add them");
+    }
+
+    // Project-scoped presets: always print guidance, never auto-add.
+    for (name, _) in &project_candidates {
+        println!(
+            "{} detected {name}: run `mind link-project --preset {name}` \
+             inside a project directory to link skills there",
+            out.bullet()
+        );
     }
     Ok(())
 }

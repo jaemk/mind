@@ -514,6 +514,41 @@ pub enum Command {
         action: ConfigCmd,
     },
 
+    /// Link installed skills into a project's harness skills directory.
+    ///
+    /// A shorthand for `config lobes add [dir] --preset <name>`. The project
+    /// directory `dir` defaults to the current working directory; `--preset`
+    /// defaults to `windsurf` (lobe at `<dir>/.windsurf`, skill-only). Existing
+    /// installed skills are linked (or, with `--snapshot`, copied as real files)
+    /// into the project dir immediately.
+    ///
+    /// For a managed (non-snapshot) add, gitignore guidance is printed: the skills
+    /// directory contains symlinks into `~/.mind/store` and should be gitignored so
+    /// the symlinks are not committed.
+    // spec: CLI-198 HARN-11
+    #[command(name = "link-project")]
+    LinkProject {
+        /// Project directory to link into (default: current working directory).
+        dir: Option<String>,
+
+        /// Harness preset to use (default: windsurf).
+        #[arg(long, value_name = "NAME")]
+        preset: Option<String>,
+
+        /// Lobe subdirectory under the project dir instead of the preset default.
+        /// Conflicts with `--preset`.
+        #[arg(long, value_name = "REL", conflicts_with = "preset")]
+        subdir: Option<String>,
+
+        /// Write frozen real-file copies instead of registering a managed lobe.
+        #[arg(long)]
+        snapshot: bool,
+
+        /// Overwrite a colliding target in snapshot mode.
+        #[arg(short = 'f', long)]
+        force: bool,
+    },
+
     /// Print a shell completion script to stdout.
     Completions {
         /// Shell to generate completions for.
@@ -612,15 +647,42 @@ pub enum ConfigCmd {
 #[derive(Debug, Subcommand)]
 pub enum LobesCmd {
     /// Add an agent home, by path or by a `--preset <name>` harness preset.
+    ///
+    /// With `--preset`, the lobe path is `[base]/preset.rel_path`. For a global
+    /// preset (gemini, codex, universal) the default base is `~`; for a project
+    /// preset (windsurf) the default base is cwd. An explicit positional `base`
+    /// overrides the default. With `--subdir <REL>` (no preset), the lobe path is
+    /// `[base]/<REL>` with a skill-only kinds filter; base defaults to cwd.
+    // spec: HARN-10 CLI-199
     Add {
-        /// Directory to link items into (a leading `~` is expanded at use).
-        /// Mutually exclusive with `--preset`; give exactly one.
+        /// Base directory for the lobe. With `--preset`, the lobe lives at
+        /// `base/preset.rel_path`; with `--subdir`, at `base/<REL>`; as a bare
+        /// argument, the lobe IS the directory (all kinds, no filter). A leading
+        /// `~` is expanded. Omitting this for a project preset defaults to cwd;
+        /// omitting it without any flag is `LobeTargetRequired`.
         path: Option<String>,
 
-        /// Add a known harness preset (gemini, codex, universal, windsurf): its parent
-        /// path and kinds filter.
-        #[arg(long, value_name = "NAME", conflicts_with = "path")]
+        /// Add a known harness preset (gemini, codex, universal, windsurf).
+        /// Resolves the lobe path and kinds filter from the preset definition.
+        /// May be combined with a positional base directory.
+        #[arg(long, value_name = "NAME")]
         preset: Option<String>,
+
+        /// Lobe subdirectory under the base (or cwd when base is omitted).
+        /// The lobe path is `base/<REL>` with a skill-only kinds filter.
+        /// Conflicts with `--preset`.
+        #[arg(long, value_name = "REL", conflicts_with = "preset")]
+        subdir: Option<String>,
+
+        /// Write frozen real-file copies of installed items instead of
+        /// registering a managed lobe. No config entry is created. A colliding
+        /// target blocks the copy unless `--force` is also given.
+        #[arg(long)]
+        snapshot: bool,
+
+        /// Overwrite a colliding target in snapshot mode.
+        #[arg(short = 'f', long)]
+        force: bool,
     },
 
     /// List configured agent homes.
@@ -634,6 +696,15 @@ pub enum LobesCmd {
     Remove {
         /// The configured directory to drop.
         path: String,
+
+        /// Before removing the config entry, convert symlinks confined under
+        /// this lobe to frozen real-file copies of the store content (detach
+        /// mode). The links are stripped from the manifest and the entry is
+        /// dropped from config. Without this flag, symlinks are left in place
+        /// and the lobe is simply unregistered.
+        // spec: HARN-12 CLI-199
+        #[arg(long)]
+        snapshot: bool,
     },
 }
 

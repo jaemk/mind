@@ -709,6 +709,23 @@ matching presets (opt-in; nothing is added without confirmation). Both are
 covered by HARN-4 and HARN-5; see harness-lobes.md for the preset names, paths,
 and per-harness `kinds` defaults.
 
+- `CLI-198` `link-project [dir] [--preset <name>] [--subdir <rel>] [--snapshot]
+  [--force]` is a shorthand for `config lobes add` aimed at a project directory.
+  `dir` defaults to cwd; `--preset` defaults to `windsurf`. It is subject to the
+  same HARN-7 backfill contract and the same HARN-9 claude_home preservation as
+  `config lobes add`. For a managed add, gitignore guidance is printed (the skills
+  dir contains symlinks into `~/.mind/store`). `--snapshot` writes frozen real-file
+  copies instead of registering a lobe (HARN-12). The command takes the exclusive
+  lock (STO-41).
+- `CLI-199` `config lobes add` is extended with three new optional flags: `--subdir
+  <REL>` (the lobe path is `base/<REL>`, `kinds = [skill]`; conflicts with
+  `--preset`), `--snapshot` (write frozen copies, no config entry; HARN-12), and
+  `--force` (overwrite a colliding target in snapshot mode). `--preset` no longer
+  conflicts with the positional base path: `config lobes add <dir> --preset
+  windsurf` resolves the lobe as `<dir>/.windsurf`. `config lobes remove` gains
+  `--snapshot` (convert symlinks to frozen copies before dropping the config entry;
+  HARN-12).
+
 ## completions / man
 
 - `CLI-120` `completions <shell>` writes a shell completion script for the named

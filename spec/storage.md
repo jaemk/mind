@@ -43,6 +43,10 @@ The on-disk layout and the two persisted JSON files.
   `config lobes add --preset <name>` (HARN-4) or the auto-detect-and-prompt path
   `config lobes detect` (HARN-5). See harness-lobes.md for the preset path table
   and per-harness `kinds` defaults.
+  Note: a lobe may be a global agent home directory (e.g. `~/.gemini/config`) or
+  a project-scoped subdirectory (e.g. `<project>/.windsurf`); both are unified as
+  "any install-target directory". See STO-56 for the reachability gate that
+  governs project-scoped lobes.
 - `STO-15` When `~/.mind/config.toml` does not exist, it is created with the
   default lobe (the `$CLAUDE_HOME` override if set, else `~/.claude`) on first
   use (any command that sets up the layout, or any `config` command).
@@ -185,6 +189,16 @@ prevent the lost-update and torn-read races a plain read-modify-write would allo
 - `STO-51` A `StateTooNew` error names the file (`"sources.json"` or
   `"manifest.json"`), the version found, and the highest version supported, and
   advises the user to upgrade mind.
+
+## Per-project lobes
+
+- `STO-56` A lobe receives links only while its parent directory exists (the
+  reachability gate). The leaf `skills/` directory is created on link, but a
+  missing parent is never fabricated: a moved or deleted project lobe contributes
+  no links and is not recreated by `introspect --fix`. The gate is checked at
+  write sites (install fan-out, `link_into_new_lobes`, `relink`) and not inside
+  `agent_homes()`, which returns the complete configured list so uninstall
+  confinement and `~/.claude` auto-create-on-link remain correct.
 
 ## Errors
 

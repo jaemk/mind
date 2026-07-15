@@ -57,52 +57,97 @@ impl Lobe {
             Some(kinds) => kinds.contains(&kind),
         }
     }
+
+    /// Whether this lobe's parent directory exists (STO-56). Returns `true` when
+    /// the lobe has no parent (e.g. a root path) so it is treated as always
+    /// reachable. A global home like `~/.claude` always has a parent (`~`) that
+    /// exists; a project lobe like `<project>/.windsurf` requires `<project>` to
+    /// be present.
+    ///
+    /// This gate must NOT be applied inside `agent_homes()` -- uninstall
+    /// confinement and `~/.claude` auto-create-on-link both depend on the full
+    /// list. Apply it only at write sites (install fan-out, `link_into_new_lobes`,
+    /// `relink`).
+    // spec: STO-56
+    pub(crate) fn reachable(&self) -> bool {
+        self.path.parent().is_none_or(|p| p.exists())
+    }
+}
+
+/// Whether a lobe is global (linked under a harness home directory) or
+/// project-scoped (linked under a per-project subdirectory).
+///
+/// Global lobes are auto-addable by `config lobes detect` when their marker is
+/// found. Project-scoped lobes require an explicit project directory; detect
+/// surfaces them so the caller can print guidance, but does not auto-add them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    /// The lobe lives under a user-wide home directory (e.g. `~/.gemini/config`).
+    Global,
+    /// The lobe lives under a per-project directory (e.g. `<project>/.windsurf`).
+    Project,
 }
 
 /// A known harness preset (HARN-4): the lobe path (relative to the detection
 /// base / home) and the kinds it admits. `marker_rel` is the on-disk signal
 /// [`detect_homes`] checks to decide the harness is installed.
+#[derive(Debug)]
 pub struct Preset {
     /// The preset name used on the CLI (`--preset <name>`).
     pub name: &'static str,
-    /// The lobe parent directory, relative to home (e.g. `.gemini`).
+    /// The lobe subdirectory, relative to the base directory (e.g. `.gemini/config`
+    /// for Gemini). For a `Global` preset, the base is `~`; for a `Project` preset,
+    /// the base is the project directory supplied by the caller.
     pub rel_path: &'static str,
     /// The kinds this preset's lobe admits.
     pub kinds: &'static [ItemKind],
     /// The directory whose presence signals this harness is installed, relative
-    /// to the detection base (e.g. `.gemini` for Gemini, `.codex` for Codex).
+    /// to the detection base (e.g. `.gemini` for Gemini, `.codex` for Codex,
+    /// `.codeium/windsurf` for Windsurf).
     pub marker_rel: &'static str,
+    /// Whether this preset is global (linked under a shared harness home) or
+    /// project-scoped (linked under a per-project directory).
+    pub scope: Scope,
 }
 
 /// The harness presets (HARN-4). Detection signals (HARN-5):
 /// - `gemini`: `~/.gemini` exists (Gemini CLI / Antigravity shared home; lobe is `~/.gemini/config`).
 /// - `codex`: `~/.codex` exists (Codex CLI's home; it reads `~/.agents`).
 /// - `universal`: `~/.agents` exists (the vendor-neutral alias dir itself).
-/// - `windsurf`: `~/.windsurf` exists (Windsurf IDE; lobe is `~/.windsurf`).
+/// - `windsurf`: `~/.codeium/windsurf` exists (Windsurf IDE's real global config home;
+///   lobe is `<project>/.windsurf`, project-scoped because Windsurf discovers skills
+///   only at `<project>/.windsurf/skills/<name>/SKILL.md`, not from a global dir).
 pub const PRESETS: &[Preset] = &[
     Preset {
         name: "gemini",
         rel_path: ".gemini/config",
         kinds: &[ItemKind::Skill],
         marker_rel: ".gemini",
+        scope: Scope::Global,
     },
     Preset {
         name: "codex",
         rel_path: ".agents",
         kinds: &[ItemKind::Skill],
         marker_rel: ".codex",
+        scope: Scope::Global,
     },
     Preset {
         name: "universal",
         rel_path: ".agents",
         kinds: &[ItemKind::Skill],
         marker_rel: ".agents",
+        scope: Scope::Global,
     },
     Preset {
         name: "windsurf",
         rel_path: ".windsurf",
         kinds: &[ItemKind::Skill],
-        marker_rel: ".windsurf",
+        // The real Windsurf global config home is ~/.codeium/windsurf, not ~/.windsurf.
+        // Detection checks for the real global home so it fires when Windsurf is installed,
+        // not on an arbitrary ~/.windsurf dir. (spec: STO-56)
+        marker_rel: ".codeium/windsurf",
+        scope: Scope::Project,
     },
 ];
 
@@ -316,15 +361,15 @@ impl Paths {
         }
     }
 
-    /// The lobe a `--preset <name>` resolves to (HARN-4): the preset's parent
+    /// The lobe a `--preset <name>` resolves to (HARN-4): the preset's lobe
     /// path (with `~` expanded to absolute, STO-16) and its kinds filter. Errors
     /// with [`MindError::UnknownPreset`] on a bad name.
+    ///
+    /// For `Global` presets the base is the home directory (`~`). For `Project`
+    /// presets the base is the current working directory (a project-local lobe).
     pub fn preset_lobe(name: &str) -> Result<Lobe> {
-        let preset = lookup_preset(name)?;
-        Ok(Lobe {
-            path: absolute_home(&format!("~/{}", preset.rel_path))?,
-            kinds: Some(preset.kinds.to_vec()),
-        })
+        let (lobe, _preset) = resolve_lobe(None, Some(name), None)?;
+        Ok(lobe)
     }
 
     /// The base directory detection scans under (HARN-5): `$MIND_DETECT_HOME` if
@@ -468,6 +513,96 @@ fn dedup_lobes(lobes: Vec<Lobe>) -> Vec<Lobe> {
         .into_iter()
         .filter(|l| seen.insert(l.path.clone()))
         .collect()
+}
+
+/// Resolve a lobe from the combination of an optional base directory, an
+/// optional harness preset name, and an optional relative subdirectory.
+///
+/// This is the single resolution entry point for `config lobes add` and the
+/// planned `link-project` command. Three dispatch cases:
+///
+/// - **preset given** (`preset.is_some()`): subdir and kinds come from the
+///   preset. `base` provides the root; when absent it defaults to `~` for a
+///   [`Scope::Global`] preset or the cwd for a [`Scope::Project`] preset. The
+///   resolved lobe path is `base / preset.rel_path`.
+///
+/// - **`subdir` given, no preset**: `base` defaults to the cwd when absent.
+///   The resolved lobe path is `base / subdir`. kinds = `[Skill]`.
+///
+/// - **neither preset nor subdir** (bare path add): the lobe path is `base`
+///   (required; if also absent, returns `MindError::LobeTargetRequired`).
+///   kinds = None (all kinds).
+///
+/// In all cases the resolved path is made absolute (STO-16).
+///
+/// When `base` is explicitly given and that path does not exist, returns
+/// `MindError::LobeBaseMissing` (STO-56). The home directory is not statted.
+// spec: STO-16
+// spec: STO-56
+pub(crate) fn resolve_lobe(
+    base: Option<&str>,
+    preset: Option<&str>,
+    subdir: Option<&str>,
+) -> Result<(Lobe, Option<&'static Preset>)> {
+    // Helper: check that an explicit base directory exists before using it.
+    // We skip the stat when the expanded path is the home directory (always
+    // present, and the caller may legitimately supply "~").
+    let check_base = |base_str: &str| -> Result<PathBuf> {
+        let expanded = expand_home(base_str);
+        let home = dirs::home_dir();
+        let is_home = home.as_deref().is_some_and(|h| expanded == h);
+        if !is_home && !expanded.exists() {
+            return Err(MindError::LobeBaseMissing { path: expanded });
+        }
+        make_absolute(expanded)
+    };
+
+    if let Some(name) = preset {
+        // --- Case 1: preset given ---
+        let p = lookup_preset(name)?;
+        let base_path: PathBuf = match base {
+            Some(b) => check_base(b)?,
+            None => match p.scope {
+                Scope::Global => make_absolute(home()?)?,
+                Scope::Project => {
+                    make_absolute(std::env::current_dir().map_err(|e| MindError::io(".", e))?)?
+                }
+            },
+        };
+        let lobe_path = make_absolute(base_path.join(p.rel_path))?;
+        Ok((
+            Lobe {
+                path: lobe_path,
+                kinds: Some(p.kinds.to_vec()),
+            },
+            Some(p),
+        ))
+    } else if let Some(rel) = subdir {
+        // --- Case 2: subdir given, no preset ---
+        let base_path: PathBuf = match base {
+            Some(b) => check_base(b)?,
+            None => make_absolute(std::env::current_dir().map_err(|e| MindError::io(".", e))?)?,
+        };
+        let lobe_path = make_absolute(base_path.join(rel))?;
+        Ok((
+            Lobe {
+                path: lobe_path,
+                kinds: Some(vec![ItemKind::Skill]),
+            },
+            None,
+        ))
+    } else {
+        // --- Case 3: neither preset nor subdir (bare path add) ---
+        match base {
+            Some(b) => {
+                // Stat the given base (it IS the lobe, not a container).
+                let expanded = expand_home(b);
+                let lobe_path = make_absolute(expanded)?;
+                Ok((Lobe::all_kinds(lobe_path), None))
+            }
+            None => Err(MindError::LobeTargetRequired),
+        }
+    }
 }
 
 /// `mkdir -p` that tags failures with the offending path.
@@ -1325,17 +1460,26 @@ mod tests {
         let gemini = lookup_preset("gemini").unwrap();
         assert_eq!(gemini.rel_path, ".gemini/config");
         assert_eq!(gemini.kinds, &[ItemKind::Skill]);
+        assert_eq!(gemini.scope, Scope::Global);
 
         let codex = lookup_preset("codex").unwrap();
         assert_eq!(codex.rel_path, ".agents");
         assert_eq!(codex.kinds, &[ItemKind::Skill]);
+        assert_eq!(codex.scope, Scope::Global);
 
         assert_eq!(lookup_preset("universal").unwrap().rel_path, ".agents");
+        assert_eq!(lookup_preset("universal").unwrap().scope, Scope::Global);
 
         let windsurf = lookup_preset("windsurf").unwrap();
         assert_eq!(windsurf.rel_path, ".windsurf");
         assert_eq!(windsurf.kinds, &[ItemKind::Skill]);
+        // Windsurf is project-scoped: it discovers skills only per-project.
+        assert_eq!(windsurf.scope, Scope::Project);
+        // Windsurf's detection marker is the real global config home, not .windsurf.
+        assert_eq!(windsurf.marker_rel, ".codeium/windsurf");
 
+        // preset_lobe("windsurf") returns the cwd/.windsurf lobe (Project scope,
+        // no explicit base -> defaults to cwd).
         let ws_lobe = Paths::preset_lobe("windsurf").unwrap();
         assert!(
             ws_lobe.path.is_absolute(),
@@ -1373,6 +1517,8 @@ mod tests {
 
     // HARN-5: detect_homes reports a preset only when its marker dir exists under
     // the detection base ($MIND_DETECT_HOME), and reports the lobe under that base.
+    // Windsurf's marker changed from `.windsurf` to `.codeium/windsurf` (the real
+    // Windsurf global config home); its lobe subdir stays `.windsurf`.
     #[test]
     fn detect_homes_reports_existing_marker_dirs() {
         // spec: HARN-5
@@ -1381,9 +1527,10 @@ mod tests {
         let base = std::env::temp_dir().join(format!("mind-detect-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         // Create .gemini and .agents but NOT .codex/.gemini/config.
+        // Windsurf's detection marker is now .codeium/windsurf (not .windsurf).
         std::fs::create_dir_all(base.join(".gemini")).unwrap();
         std::fs::create_dir_all(base.join(".agents")).unwrap();
-        std::fs::create_dir_all(base.join(".windsurf")).unwrap();
+        std::fs::create_dir_all(base.join(".codeium/windsurf")).unwrap();
 
         // SAFETY: ENV_LOCK is held.
         unsafe {
@@ -1415,13 +1562,54 @@ mod tests {
             Some([ItemKind::Skill].as_slice())
         );
 
+        // Windsurf detected via .codeium/windsurf marker; lobe subdir is still .windsurf.
         assert!(
             names.contains(&"windsurf"),
-            "windsurf marker exists: {names:?}"
+            "windsurf .codeium/windsurf marker exists: {names:?}"
         );
         let (_, ws_lobe) = detected.iter().find(|(n, _)| *n == "windsurf").unwrap();
         assert_eq!(ws_lobe.path, base.join(".windsurf"));
         assert_eq!(ws_lobe.kinds.as_deref(), Some([ItemKind::Skill].as_slice()));
+
+        // .windsurf alone is no longer the windsurf marker; windsurf must NOT be
+        // double-detected.
+        assert_eq!(
+            names.iter().filter(|n| **n == "windsurf").count(),
+            1,
+            "windsurf must appear exactly once in detected list"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // HARN-5 / windsurf: a bare `.windsurf` directory (without `.codeium/windsurf`)
+    // no longer triggers windsurf detection after the marker change.
+    #[test]
+    fn detect_homes_windsurf_requires_codeium_marker_not_bare_windsurf_dir() {
+        // spec: HARN-5
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let base = std::env::temp_dir().join(format!("mind-detect-ws-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        // Create .windsurf but NOT .codeium/windsurf.
+        std::fs::create_dir_all(base.join(".windsurf")).unwrap();
+
+        // SAFETY: ENV_LOCK is held.
+        unsafe {
+            std::env::set_var("MIND_DETECT_HOME", &base);
+        }
+        let detected = Paths::detect_homes();
+        // SAFETY: ENV_LOCK is held.
+        unsafe {
+            std::env::remove_var("MIND_DETECT_HOME");
+        }
+        let detected = detected.unwrap();
+
+        let names: Vec<&str> = detected.iter().map(|(n, _)| *n).collect();
+        assert!(
+            !names.contains(&"windsurf"),
+            "bare .windsurf dir must no longer trigger windsurf detection (marker is .codeium/windsurf): {names:?}"
+        );
 
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -1551,5 +1739,228 @@ mod tests {
             universal.kinds.as_deref(),
             Some([ItemKind::Skill].as_slice())
         );
+    }
+
+    // ---- resolve_lobe + Lobe::reachable tests --------------------------------
+
+    // resolve_lobe: a Global preset with no explicit base resolves under home (~).
+    #[test]
+    fn resolve_lobe_global_preset_defaults_to_home() {
+        // spec: STO-16
+        // spec: HARN-4
+        let (lobe, preset) = resolve_lobe(None, Some("gemini"), None).unwrap();
+        assert!(
+            lobe.path.is_absolute(),
+            "path must be absolute: {:?}",
+            lobe.path
+        );
+        assert!(
+            lobe.path.ends_with(".gemini/config"),
+            "gemini lobe must be at home/.gemini/config: {:?}",
+            lobe.path
+        );
+        assert_eq!(
+            lobe.kinds.as_deref(),
+            Some([ItemKind::Skill].as_slice()),
+            "gemini lobe must be skill-only"
+        );
+        let p = preset.expect("gemini must return a preset");
+        assert_eq!(p.name, "gemini");
+        assert_eq!(p.scope, Scope::Global);
+    }
+
+    // resolve_lobe: a Project preset with no explicit base defaults to cwd.
+    #[test]
+    fn resolve_lobe_project_preset_defaults_to_cwd() {
+        // spec: STO-16
+        // spec: HARN-4
+        let (lobe, preset) = resolve_lobe(None, Some("windsurf"), None).unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        assert!(
+            lobe.path.is_absolute(),
+            "path must be absolute: {:?}",
+            lobe.path
+        );
+        assert_eq!(
+            lobe.path,
+            cwd.join(".windsurf"),
+            "windsurf lobe with no base must resolve to cwd/.windsurf"
+        );
+        assert_eq!(lobe.kinds.as_deref(), Some([ItemKind::Skill].as_slice()));
+        let p = preset.expect("windsurf must return a preset");
+        assert_eq!(p.scope, Scope::Project);
+    }
+
+    // resolve_lobe: an explicit base overrides the default for a Global preset.
+    #[test]
+    fn resolve_lobe_preset_with_explicit_base() {
+        // spec: STO-16
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let base_dir =
+            std::env::temp_dir().join(format!("mind-rl-base-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&base_dir).unwrap();
+
+        let (lobe, preset) =
+            resolve_lobe(Some(base_dir.to_str().unwrap()), Some("gemini"), None).unwrap();
+        assert_eq!(
+            lobe.path,
+            base_dir.join(".gemini/config"),
+            "explicit base must override the home default for gemini"
+        );
+        let p = preset.unwrap();
+        assert_eq!(p.name, "gemini");
+
+        let _ = std::fs::remove_dir_all(&base_dir);
+    }
+
+    // resolve_lobe: --subdir without a preset uses the cwd as default base.
+    #[test]
+    fn resolve_lobe_subdir_defaults_base_to_cwd() {
+        // spec: STO-16
+        let (lobe, preset) = resolve_lobe(None, None, Some(".windsurf")).unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            lobe.path,
+            cwd.join(".windsurf"),
+            "--subdir with no base must use cwd"
+        );
+        assert_eq!(
+            lobe.kinds.as_deref(),
+            Some([ItemKind::Skill].as_slice()),
+            "--subdir lobe must be skill-only"
+        );
+        assert!(
+            preset.is_none(),
+            "--subdir with no preset returns None preset"
+        );
+    }
+
+    // resolve_lobe: --subdir with an explicit base joins base/subdir.
+    #[test]
+    fn resolve_lobe_subdir_with_explicit_base() {
+        // spec: STO-16
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let base_dir = std::env::temp_dir().join(format!("mind-rl-sub-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&base_dir).unwrap();
+
+        let (lobe, _) =
+            resolve_lobe(Some(base_dir.to_str().unwrap()), None, Some(".myharness")).unwrap();
+        assert_eq!(lobe.path, base_dir.join(".myharness"));
+        assert_eq!(lobe.kinds.as_deref(), Some([ItemKind::Skill].as_slice()));
+
+        let _ = std::fs::remove_dir_all(&base_dir);
+    }
+
+    // resolve_lobe: bare path add -- just a base, no preset or subdir.
+    #[test]
+    fn resolve_lobe_bare_path_add() {
+        // spec: STO-16
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let lobe_dir =
+            std::env::temp_dir().join(format!("mind-rl-bare-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&lobe_dir).unwrap();
+
+        let (lobe, preset) = resolve_lobe(Some(lobe_dir.to_str().unwrap()), None, None).unwrap();
+        assert_eq!(
+            lobe.path, lobe_dir,
+            "bare path add must use base as the lobe path"
+        );
+        assert_eq!(lobe.kinds, None, "bare path add must be all-kinds");
+        assert!(preset.is_none());
+
+        let _ = std::fs::remove_dir_all(&lobe_dir);
+    }
+
+    // resolve_lobe: no base, no preset, no subdir -> LobeTargetRequired.
+    #[test]
+    fn resolve_lobe_no_args_returns_lobe_target_required() {
+        // spec: STO-16
+        let err = resolve_lobe(None, None, None).unwrap_err();
+        assert!(
+            matches!(err, MindError::LobeTargetRequired),
+            "no base/preset/subdir must be LobeTargetRequired: {err:?}"
+        );
+    }
+
+    // resolve_lobe: explicit base that does not exist -> LobeBaseMissing.
+    #[test]
+    fn resolve_lobe_missing_base_returns_lobe_base_missing() {
+        // spec: STO-56
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let missing =
+            std::env::temp_dir().join(format!("mind-rl-missing-{}-{n}", std::process::id()));
+        // Do NOT create missing.
+        let err =
+            resolve_lobe(Some(missing.to_str().unwrap()), Some("windsurf"), None).unwrap_err();
+        assert!(
+            matches!(err, MindError::LobeBaseMissing { .. }),
+            "nonexistent explicit base must be LobeBaseMissing: {err:?}"
+        );
+        // Also for --subdir with a missing base.
+        let err2 = resolve_lobe(Some(missing.to_str().unwrap()), None, Some(".ws")).unwrap_err();
+        assert!(
+            matches!(err2, MindError::LobeBaseMissing { .. }),
+            "--subdir with nonexistent base must be LobeBaseMissing: {err2:?}"
+        );
+    }
+
+    // Lobe::reachable: true when the parent exists, false when it doesn't.
+    #[test]
+    fn lobe_reachable_true_when_parent_exists() {
+        // spec: STO-56
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let base = std::env::temp_dir().join(format!("mind-reach-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+
+        // base exists -> lobe at base/.windsurf: parent (base) exists -> reachable.
+        let lobe = Lobe {
+            path: base.join(".windsurf"),
+            kinds: Some(vec![ItemKind::Skill]),
+        };
+        assert!(
+            lobe.reachable(),
+            "lobe is reachable when its parent dir exists (STO-56)"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn lobe_reachable_false_when_parent_missing() {
+        // spec: STO-56
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let vanished = std::env::temp_dir().join(format!("mind-gone-{}-{n}", std::process::id()));
+        // Do NOT create vanished.
+        let lobe = Lobe {
+            path: vanished.join(".windsurf"),
+            kinds: Some(vec![ItemKind::Skill]),
+        };
+        assert!(
+            !lobe.reachable(),
+            "lobe is unreachable when its parent dir is missing (STO-56)"
+        );
+    }
+
+    #[test]
+    fn lobe_reachable_global_home_always_reachable() {
+        // spec: STO-56
+        // A global home like ~/.claude always has a parent (~) that exists.
+        let home = dirs::home_dir().expect("home dir must exist in test env");
+        let claude = home.join(".claude");
+        let lobe = Lobe::all_kinds(claude);
+        assert!(
+            lobe.reachable(),
+            "global home lobe parent (~) always exists (STO-56)"
+        );
+    }
+
+    // resolve_lobe: windsurf scope is Project; gemini/codex/universal are Global.
+    #[test]
+    fn preset_scope_assignments() {
+        // spec: HARN-4
+        assert_eq!(lookup_preset("gemini").unwrap().scope, Scope::Global);
+        assert_eq!(lookup_preset("codex").unwrap().scope, Scope::Global);
+        assert_eq!(lookup_preset("universal").unwrap().scope, Scope::Global);
+        assert_eq!(lookup_preset("windsurf").unwrap().scope, Scope::Project);
     }
 }

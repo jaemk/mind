@@ -115,6 +115,9 @@ fn lock_mode(command: &Command, json: bool) -> LockMode {
         | Command::Upgrade { .. }
         | Command::Absorb { .. }
         | Command::Introspect { fix: true, .. }
+        // link-project mutates config and symlinks (or writes snapshot files).
+        // spec: CLI-198
+        | Command::LinkProject { .. }
         // hooks run mutates sources.json (recorded run-commits) and, for --event
         // build, the store; it needs the exclusive lock (spec: HOOK-101/HOOK-103).
         | Command::Hooks {
@@ -468,18 +471,52 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
         Command::Config { action } => match action {
             ConfigCmd::Show => commands::config_show(paths),
             ConfigCmd::Lobes { action } => match action {
-                LobesCmd::Add { path, preset } => match (path, preset) {
-                    (None, Some(name)) => commands::lobe_add_preset(paths, &name, yes),
-                    (Some(p), None) => commands::lobe_add(paths, &p, yes),
-                    // clap's `conflicts_with` rejects supplying both.
-                    (Some(_), Some(_)) => unreachable!("path and --preset conflict"),
-                    (None, None) => Err(crate::error::MindError::LobeTargetRequired),
-                },
+                LobesCmd::Add {
+                    path,
+                    preset,
+                    subdir,
+                    snapshot,
+                    force,
+                } => commands::lobe_add_resolved(
+                    paths,
+                    path.as_deref(),
+                    preset.as_deref(),
+                    subdir.as_deref(),
+                    snapshot,
+                    force,
+                    yes,
+                ),
                 LobesCmd::List => commands::lobe_list(paths),
                 LobesCmd::Detect => commands::lobe_detect(paths, yes),
-                LobesCmd::Remove { path } => commands::lobe_remove(paths, &path),
+                LobesCmd::Remove { path, snapshot } => {
+                    commands::lobe_remove(paths, &path, snapshot)
+                }
             },
         },
+        Command::LinkProject {
+            dir,
+            preset,
+            subdir,
+            snapshot,
+            force,
+        } => {
+            // Default preset is windsurf (spec: HARN-11 CLI-198).
+            let preset_name = preset.as_deref().unwrap_or("windsurf");
+            let (effective_preset, effective_subdir) = if subdir.is_some() {
+                (None, subdir.as_deref())
+            } else {
+                (Some(preset_name), None)
+            };
+            commands::lobe_add_resolved(
+                paths,
+                dir.as_deref(),
+                effective_preset,
+                effective_subdir,
+                snapshot,
+                force,
+                yes,
+            )
+        }
         Command::Absorb {
             item_ref,
             to,

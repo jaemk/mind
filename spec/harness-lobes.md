@@ -24,10 +24,15 @@ mind links a skill as `<lobe>/skills/<name>` and an agent as
 | Claude Code | `~/.claude/skills/<n>/SKILL.md` | `~/.claude/agents/<n>.md` | `~/.claude` |
 | Gemini CLI / Antigravity | `~/.gemini/config/skills/` | - | `~/.gemini/config` |
 | Codex CLI | `~/.agents/skills/` (native user path; `$CODEX_HOME` toggles, not discovery) | (subagents) | `~/.agents` |
-| Windsurf | `~/.windsurf/skills/` | - | `~/.windsurf` |
+| Windsurf | `<project>/.windsurf/skills/` | - | `<project>/.windsurf` |
 
 `~/.agents/` is the emerging vendor-neutral alias: Codex reads it as its user
 skills path and the standard installer targets it.
+
+Windsurf is project-scoped: it has no global skills home, discovering skills only
+from a project's `.windsurf/skills/`. Its lobe is therefore a project subdirectory
+added via `link-project` (HARN-11), not a global home; its machine marker for
+detection is `~/.codeium/windsurf` (HARN-5).
 
 `rules` (`rules/<name>.md`) have no cross-tool directory equivalent: the analog is
 a single concatenated context file (`AGENTS.md` / `GEMINI.md`), not a directory of
@@ -51,14 +56,23 @@ per-rule files. Rules stay Claude-only here; an `AGENTS.md`-writer is out of sco
 - `HARN-4` `config lobes add --preset <name>` adds a lobe with the preset's parent
   path and `kinds`. Presets: `gemini` (`~/.gemini/config`, skill -- detected by the
   presence of `~/.gemini`), `codex` (`~/.agents`, skill), `universal` (`~/.agents`,
-  skill), `windsurf` (`~/.windsurf`, skill -- detected by the presence of
-  `~/.windsurf`). A preset honors the `CLAUDE_HOME`-style overrides where applicable and
-  resolves `~`/relative paths to absolute (STO-16).
+  skill), `windsurf` (`<project>/.windsurf`, skill, project-scoped -- detected by
+  the presence of `~/.codeium/windsurf`). Global presets (`gemini`, `codex`,
+  `universal`) resolve the lobe path under `~`; project presets (`windsurf`) resolve
+  under the current working directory when no explicit base is given. A preset
+  honors the `CLAUDE_HOME`-style overrides where applicable and resolves
+  `~`/relative paths to absolute (STO-16). `--preset` may be combined with a
+  positional base directory: the lobe path is then `base/preset.rel_path` instead
+  of the default root.
 - `HARN-5` Adding non-Claude lobes is opt-in by auto-detect-and-prompt: a setup
   path detects which known harness dirs exist on the machine and offers to add the
-  matching presets, but never adds one without confirmation. The default lobe set
-  is unchanged (`~/.claude` only, STO-14/STO-15); detection never mutates config on
-  its own.
+  matching presets. For global presets (`gemini`, `codex`, `universal`), the
+  detected lobe is added after confirmation (or immediately with `--yes`). For
+  project-scoped presets (`windsurf`), detection never auto-adds a lobe because the
+  project directory is not known at detect time; instead, guidance is printed to run
+  `mind link-project [--preset windsurf]` inside a project directory. The default
+  lobe set is unchanged (`~/.claude` only, STO-14/STO-15); detection never mutates
+  config for project-scoped presets.
 - `HARN-6` mind links the skill/agent files verbatim. Frontmatter portability
   across harnesses (e.g. Gemini's `mcp_*` tool-permission wildcards vs Claude's
   `tools:` schema) is the author's responsibility; mind does not rewrite
@@ -97,6 +111,43 @@ per-rule files. Rules stay Claude-only here; an `AGENTS.md`-writer is out of sco
   (no separate confirmation or output line). It is excluded from the HARN-7
   backfill offer because it was already the effective home before the command ran;
   only the newly-configured lobes receive the backfill.
+
+- `HARN-10` `config lobes add` accepts an optional positional base directory
+  alongside `--preset`; when given, the lobe path is `base/preset.rel_path`
+  regardless of the preset's default scope root. `--subdir <REL>` (conflicts with
+  `--preset`) resolves the lobe path as `base/<REL>` with a `[Skill]` kinds filter;
+  `base` defaults to cwd when omitted. Both forms route through the unified
+  `resolve_lobe` call. A missing explicit base returns `LobeBaseMissing`; no base
+  and no preset and no subdir returns `LobeTargetRequired`.
+
+- `HARN-11` `link-project [dir] [--preset <name>] [--subdir <rel>] [--snapshot]
+  [--force]` is a shorthand for `config lobes add` targeting a project directory.
+  `dir` defaults to cwd; `--preset` defaults to `windsurf`. For a managed
+  (non-snapshot) add the same HARN-7 backfill contract applies: `--yes` backfills
+  immediately, non-TTY without `--yes` prints the `introspect --fix` note. Gitignore
+  guidance is printed for a newly added project lobe (the skills dir contains
+  symlinks into `~/.mind/store` and should be gitignored).
+
+- `HARN-12` `--snapshot` on `config lobes add` (or `link-project`) writes frozen
+  real-file copies of installed items whose kind the resolved lobe admits, instead of
+  registering a managed lobe. For each admitted item, the store directory is copied
+  recursively to `<lobe>/<link_rel>` (real files, not symlinks). A colliding target
+  that was not placed by mind blocks the copy unless `--force` is given. No config
+  entry is written. On completion, "wrote N frozen skill(s) to <path>" is printed;
+  if the target directory does not appear to be inside a git repo, an advisory note
+  is printed recommending the copies be committed. Nothing-installed is a no-op note,
+  not an error. `config lobes remove <path> --snapshot` detaches a managed lobe by
+  converting its symlinks to frozen copies: for each manifest item link confined
+  under the lobe path, the symlink is replaced with a recursive real-file copy of
+  the store content, the link is stripped from the manifest, and the config entry is
+  removed.
+
+- `HARN-13` `introspect` reports a configured lobe whose parent directory does not
+  exist (`!lobe.reachable()`) as a `vanished-lobe` finding. `introspect --fix`
+  additionally prunes the entry from `config.lobes` and strips its links from every
+  manifest item's `links` list. Vanished lobes are checked before the missing-link
+  and missing-lobe-link loops so that a removed project directory does not produce
+  spurious repair errors for the links that lived inside it.
 
 ## Documentation map
 

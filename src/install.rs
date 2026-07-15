@@ -91,14 +91,17 @@ pub fn install(
         .clone()
         .or_else(|| paths.default_link_rel(kind, &link_name));
     let store_root = paths.store_dir();
-    // Only link into lobes whose `kinds` admit this item's kind (HARN-2/HARN-3).
-    // A lobe that excludes the kind contributes no link and is not an error, so
-    // the recorded manifest `links` reflect exactly the admitted lobes.
+    // Only link into lobes whose `kinds` admit this item's kind (HARN-2/HARN-3)
+    // and whose parent directory exists (STO-56: the reachability gate). A lobe
+    // that excludes the kind or whose parent is absent contributes no link and is
+    // not an error, so the recorded manifest `links` reflect exactly the lobes
+    // that were active at install time.
+    // spec: STO-56
     let planned_links: Vec<std::path::PathBuf> = match &link_rel {
         Some(rel) => paths
             .agent_homes()?
             .iter()
-            .filter(|home| home.admits(kind))
+            .filter(|home| home.admits(kind) && home.reachable())
             .map(|home| home.path.join(rel))
             .collect(),
         None => Vec::new(),
@@ -310,14 +313,28 @@ fn is_confined_under_any(path: &Path, roots: &[&Path]) -> bool {
 /// store copy. Returns the number of links repaired. Used by `introspect --fix`.
 /// If the store copy itself is gone there is nothing to link to, so it repairs
 /// nothing (that is drift for `upgrade`/`learn` to resolve, not a re-link).
+///
+/// Links belonging to an unreachable lobe (STO-56: the lobe's parent directory
+/// no longer exists) are skipped: a vanished project should not be recreated.
 pub fn relink(paths: &Paths, item: &InstalledItem) -> Result<usize> {
     let store = paths.mind_home.join(&item.store);
     if !store.exists() {
         return Ok(0);
     }
+    // spec: STO-56 -- skip links whose lobe parent is gone.
+    let agent_homes = paths.agent_homes()?;
     let mut fixed = 0;
-    for link in &item.links {
-        let link = Path::new(link);
+    for link_str in &item.links {
+        let link = Path::new(link_str);
+        // Determine if this link belongs to a reachable lobe. If it is not under
+        // any configured lobe path, assume reachable (fallback preserves behavior).
+        let reachable = agent_homes
+            .iter()
+            .find(|lobe| link.starts_with(&lobe.path))
+            .is_none_or(|lobe| lobe.reachable());
+        if !reachable {
+            continue;
+        }
         if std::fs::symlink_metadata(link).is_err() {
             ensure_link(&store, link)?;
             fixed += 1;
@@ -739,7 +756,10 @@ pub(crate) fn remove_path(path: &Path) -> Result<()> {
 /// directory, a regular file, or a symlink. A symlink anywhere in the tree is
 /// rejected with an `Io` error carrying the offending path, so a crafted source
 /// cannot exfiltrate secrets or cause unbounded recursion via a directory cycle.
-fn copy_recursive(src: &Path, dst: &Path) -> Result<()> {
+///
+/// Exported as `pub(crate)` so the surface shard's `--snapshot` frozen-copy can
+/// reuse this implementation without duplicating the symlink-rejection logic.
+pub(crate) fn copy_recursive(src: &Path, dst: &Path) -> Result<()> {
     let meta = std::fs::symlink_metadata(src).map_err(|e| MindError::io(src, e))?;
     if meta.file_type().is_symlink() {
         return Err(MindError::io(
@@ -787,9 +807,135 @@ fn symlink(target: &Path, link: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use crate::error::ItemKind;
+    use crate::paths::Lobe;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     static N: AtomicU32 = AtomicU32::new(0);
+
+    // ---- STO-56: reachability gate -------------------------------------------
+
+    /// `Lobe::reachable()` returns true when the parent dir exists, false when it
+    /// does not. This is the primitive the install-time filter and relink use.
+    ///
+    /// `link_into_new_lobes` (backfill on explicit lobe-add) intentionally does
+    /// NOT apply the reachability gate: it is an explicit user action, and
+    /// `ensure_link` creates intermediate dirs. The gate applies at install-time
+    /// (`planned_links`) and at `relink` (introspect --fix must not recreate links
+    /// in vanished projects).
+    #[test]
+    fn lobe_reachable_gate_covers_planned_links_and_relink() {
+        // spec: STO-56
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let base = std::env::temp_dir().join(format!("mind-reach-gate-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+
+        let existing_parent = base.join("existing-project");
+        std::fs::create_dir_all(&existing_parent).unwrap();
+        let reachable_lobe = Lobe {
+            path: existing_parent.join(".windsurf"),
+            kinds: Some(vec![ItemKind::Skill]),
+        };
+        assert!(
+            reachable_lobe.reachable(),
+            "lobe is reachable when parent exists"
+        );
+
+        let gone_parent = base.join("vanished-project");
+        // Deliberately do NOT create gone_parent.
+        let unreachable_lobe = Lobe {
+            path: gone_parent.join(".windsurf"),
+            kinds: Some(vec![ItemKind::Skill]),
+        };
+        assert!(
+            !unreachable_lobe.reachable(),
+            "lobe is unreachable when parent is missing (STO-56)"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `relink` must skip a link that belongs to a configured but unreachable lobe
+    /// (its parent directory has been deleted). The link stays unrepaired and no
+    /// error is returned. The reachable lobe's link IS repaired.
+    #[cfg(unix)]
+    #[test]
+    fn relink_skips_link_in_unreachable_lobe() {
+        // spec: STO-56
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let base =
+            std::env::temp_dir().join(format!("mind-reach-relink-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+
+        let mind_home = base.join("mind");
+        let claude_home = base.join("claude");
+        std::fs::create_dir_all(&mind_home).unwrap();
+        std::fs::create_dir_all(&claude_home).unwrap();
+
+        // Write a store directory for the item.
+        let store_rel = "store/skill/myskill";
+        let store_path = mind_home.join(store_rel);
+        std::fs::create_dir_all(&store_path).unwrap();
+        std::fs::write(store_path.join("SKILL.md"), b"# My Skill\n").unwrap();
+
+        // A project lobe whose parent does NOT exist (vanished project).
+        let vanished_project = base.join("vanished");
+        let project_lobe = vanished_project.join(".windsurf");
+        let project_link = project_lobe.join("skills").join("myskill");
+
+        // Write a config that includes the project lobe (unreachable: its parent
+        // vanished_project does not exist).
+        let cfg = format!(
+            "lobes = [\"{claude}\", \"{project}\"]\n",
+            claude = claude_home.display(),
+            project = project_lobe.display(),
+        );
+        std::fs::write(mind_home.join("config.toml"), cfg.as_bytes()).unwrap();
+
+        let paths = crate::paths::Paths {
+            mind_home: mind_home.clone(),
+            claude_home: claude_home.clone(),
+        };
+
+        // The installed item has recorded links under both lobes; neither link
+        // currently exists (they were broken). relink should repair the one under
+        // claude_home (reachable) but skip the one under the project lobe (gone).
+        let claude_link = claude_home.join("skills").join("myskill");
+
+        let item = InstalledItem {
+            kind: ItemKind::Skill,
+            name: "myskill".to_string(),
+            bare_name: "myskill".to_string(),
+            source: "local/test".to_string(),
+            commit: "abc".to_string(),
+            hash: "deadbeef".to_string(),
+            store: store_rel.to_string(),
+            links: vec![
+                claude_link.to_string_lossy().into_owned(),
+                project_link.to_string_lossy().into_owned(),
+            ],
+            description: None,
+        };
+
+        let fixed = relink(&paths, &item).unwrap();
+        // Only the claude_home link should have been repaired; the project link is
+        // skipped because the project lobe is unreachable (STO-56).
+        assert_eq!(
+            fixed, 1,
+            "relink must repair exactly 1 link (claude_home); project lobe must be skipped (STO-56)"
+        );
+        assert!(
+            claude_link.exists() || std::fs::symlink_metadata(&claude_link).is_ok(),
+            "claude_home link must have been created by relink"
+        );
+        assert!(
+            !project_link.exists(),
+            "project lobe link must not be created for an unreachable lobe (STO-56)"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     fn tool_item(build: &str, path: std::path::PathBuf) -> CatalogItem {
         CatalogItem {

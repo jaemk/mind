@@ -511,6 +511,14 @@ pub enum MindError {
     // spec: HOOK-100
     #[error("hook '{label}' was aborted by user; not running remaining hooks")]
     HookAborted { label: String },
+
+    /// STO-56: the base directory for a project-scoped lobe does not exist.
+    /// Returned by `resolve_lobe` when an explicit `base` is given but the
+    /// directory is absent, so mind refuses to fabricate a path into a
+    /// nonexistent project.
+    // spec: STO-56
+    #[error("lobe base directory does not exist: {}", path.display())]
+    LobeBaseMissing { path: PathBuf },
 }
 
 fn status_suffix(status: Option<ExitStatus>) -> String {
@@ -602,6 +610,7 @@ impl MindError {
             MindError::StateTooNew { .. } => "state-too-new",
             MindError::BuildEventRequiresItemTarget => "build-event-requires-item-target",
             MindError::HookAborted { .. } => "hook-aborted",
+            MindError::LobeBaseMissing { .. } => "lobe-base-missing",
         }
     }
 }
@@ -1012,6 +1021,25 @@ mod tests {
                 "slug must be lowercase kebab-case: {slug}"
             );
         }
+    }
+
+    // spec: STO-56
+    #[test]
+    fn lobe_base_missing_displays_path() {
+        // LobeBaseMissing must name the missing path in its message and carry the
+        // correct kind slug ("lobe-base-missing").
+        let path = std::path::PathBuf::from("/nonexistent/myproject");
+        let e = MindError::LobeBaseMissing { path: path.clone() };
+        let msg = e.to_string();
+        assert!(
+            msg.contains("/nonexistent/myproject"),
+            "must include the path: {msg}"
+        );
+        assert!(
+            msg.contains("does not exist"),
+            "must say directory does not exist: {msg}"
+        );
+        assert_eq!(e.kind(), "lobe-base-missing", "kind slug must be stable");
     }
 
     #[test]

@@ -137,7 +137,7 @@ fn dispatch(paths: &Paths, kind: ActionKind) -> Result<()> {
         // `yes: true` so backfill applies without prompting on stdin in the TUI.
         ActionKind::LobeAdd { path } => commands::lobe_add(paths, &path, true)?,
         // spec: TUI-23 CLI-113
-        ActionKind::LobeRemove { path } => commands::lobe_remove(paths, &path)?,
+        ActionKind::LobeRemove { path } => commands::lobe_remove(paths, &path, false)?,
         // SetNamespace is intercepted by activate_dialog and opens the namespace-
         // input overlay; it never reaches the executor (TUI-53).
         // spec: TUI-53
