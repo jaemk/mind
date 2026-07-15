@@ -1763,6 +1763,10 @@ fn link_project_defaults_to_cwd() {
     let sb = Sandbox::new();
     let proj = sb.base.join("proj-cwd");
     std::fs::create_dir_all(&proj).unwrap();
+    // Canonicalize: link-project records the cwd as `current_dir()` reports it,
+    // which macOS resolves through the /var -> /private/var symlink. Compare
+    // against the same canonical form so the path string matches on every OS.
+    let proj = std::fs::canonicalize(&proj).unwrap();
 
     // Run link-project with cwd = proj and no positional dir argument.
     let r = sb.run_cwd(&["link-project"], &[], Some(&proj));
