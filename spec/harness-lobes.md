@@ -112,7 +112,7 @@ Places that explain lobes / agent homes and reference this feature.
 - `docs/src/commands.md`: extend the `config lobes` row with `--preset` and the
   detected-home prompt.
 - `docs/src/quickstart.md` and `README.md`: the "install one into each agent home"
-  lines should mention that homes can be Gemini/Codex/Antigravity, not just Claude.
+  lines should mention that homes can be Gemini/Codex/Windsurf/Antigravity, not just Claude.
 - `docs/src/introduction.md` (mental model) and `docs/src/troubleshooting.md`: a
   note on cross-harness homes and the rules-are-Claude-only / frontmatter-portability
   caveats (HARN-3, HARN-6).

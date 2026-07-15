@@ -189,7 +189,9 @@ pub enum MindError {
     #[error("'{kind}' is not a valid item kind (expected one of: skill, agent, rule, tool)")]
     UnknownKind { kind: String },
 
-    #[error("'{name}' is not a known lobe preset (expected one of: gemini, codex, universal)")]
+    #[error(
+        "'{name}' is not a known lobe preset (expected one of: gemini, codex, universal, windsurf)"
+    )]
     UnknownPreset { name: String },
 
     #[error("`config lobes add` needs a path or `--preset <name>`")]
@@ -629,11 +631,12 @@ mod tests {
         }
         .to_string();
         assert!(unknown_preset.contains("emacs"), "{unknown_preset}");
-        // spec: HARN-4 -- only the three real presets (gemini, codex, universal).
+        // spec: HARN-4 -- the real presets (gemini, codex, universal, windsurf).
         assert!(
             unknown_preset.contains("gemini")
                 && unknown_preset.contains("codex")
-                && unknown_preset.contains("universal"),
+                && unknown_preset.contains("universal")
+                && unknown_preset.contains("windsurf"),
             "UnknownPreset must list the valid presets: {unknown_preset}"
         );
         assert!(

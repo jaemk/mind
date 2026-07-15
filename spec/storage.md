@@ -39,7 +39,7 @@ The on-disk layout and the two persisted JSON files.
   `~/.mind/config.toml`, else `[claude root]`. A leading `~` is expanded. An
   unknown key in `config.toml` is an error (`Toml`).
   Note: each lobe entry may carry a `kinds` filter (HARN-1). Non-Claude lobe
-  presets (gemini, codex, universal) are added via
+  presets (gemini, codex, universal, windsurf) are added via
   `config lobes add --preset <name>` (HARN-4) or the auto-detect-and-prompt path
   `config lobes detect` (HARN-5). See harness-lobes.md for the preset path table
   and per-harness `kinds` defaults.
