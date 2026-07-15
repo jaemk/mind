@@ -92,6 +92,10 @@ pub enum Command {
         ///
         /// - Any git URL:  `https://example.com/repo.git`
         ///
+        /// - Item link:    `https://host/owner/repo/tree/<ref>/<path>` (or the
+        ///   `blob/.../SKILL.md` form): registers a single-item source offering
+        ///   just that skill
+        ///
         /// Defaults to the current directory (`.`) when omitted.
         repo: Option<String>,
 
@@ -123,6 +127,16 @@ pub enum Command {
         /// Persisted on the source and used by later scans and sync.
         #[arg(long = "root", value_name = "DIR")]
         roots: Vec<String>,
+
+        /// Add convention-scan roots that compose with the source's own
+        /// discovery (repeatable): a plugin/marketplace manifest or an
+        /// authoritative mind.toml keeps its items and each added root is
+        /// convention-scanned in addition, so items the source does not
+        /// declare become installable. Unlike --root, this does not override
+        /// or suppress anything. Persisted on the source and used by later
+        /// scans and sync.
+        #[arg(long = "add-root", value_name = "DIR")]
+        add_roots: Vec<String>,
 
         /// Force-enable flat skill discovery: skills are bare-name directories at
         /// each scan root, with no `skills/` container. Turns the layout on for a
@@ -256,6 +270,9 @@ pub enum Command {
     #[command(visible_alias = "install")]
     Learn {
         /// Item ref or glob: `name`, `skill:name`, `owner/repo#name`, `'review*'`, `'*'`.
+        /// Also accepts a deep tree/blob URL to one skill
+        /// (`https://host/owner/repo/tree/<ref>/<path>`): the repo registers as a
+        /// single-item source and the skill installs in one step.
         item: String,
 
         /// Install every item of the source named by the ref. Shorthand for the

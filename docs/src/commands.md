@@ -96,10 +96,10 @@ anything; `evolve` updates the `mind` binary itself.
 
 | command | does |
 |---------|------|
-| `mind meld [<repo>] [--register-only] [--yes] [-f\|--force] [-r\|--recursive] [-N\|--namespace <ns>] [--flat-skills] [--root <dir>] [--follow-branch <branch> \| --pin-tag <tag> \| --pin-ref <commit>] [--install-hook <cmd>] [--dangerously-skip-install-hook-check] [--dangerously-skip-build-hook-check]` | clone and register a source (default `.`), then prompt to install its items (`--register-only` registers without installing; `--yes` installs without prompting; `-f`/`--force` overwrites conflicting non-mind link targets; `-r`/`--recursive` offers to install items from every nested source a super-source curates). Re-melding an already-melded source installs any missing items, else shows each item's install state and commit |
+| `mind meld [<repo>] [--register-only] [--yes] [-f\|--force] [-r\|--recursive] [-N\|--namespace <ns>] [--flat-skills] [--root <dir>] [--add-root <dir>] [--follow-branch <branch> \| --pin-tag <tag> \| --pin-ref <commit>] [--install-hook <cmd>] [--dangerously-skip-install-hook-check] [--dangerously-skip-build-hook-check]` | clone and register a source (default `.`), then prompt to install its items (`--register-only` registers without installing; `--yes` installs without prompting; `-f`/`--force` overwrites conflicting non-mind link targets; `-r`/`--recursive` offers to install items from every nested source a super-source curates). `--root` replaces the scan roots; `--add-root` adds roots that compose with the source's own discovery (a `marketplace.json`/`plugin.json` or an authoritative `mind.toml` keeps its items and the added roots are scanned in addition, see [Claude plugin marketplaces](marketplace.md#installing-items-the-manifest-does-not-list)). `<repo>` may also be a deep `tree`/`blob` URL to one skill (an [item link](#item-links-install-one-skill-by-url)). Re-melding an already-melded source installs any missing items, else shows each item's install state and commit |
 | `mind init-source [<path>] [--template] [-N\|--namespace <ns>] [--marketplace] [--flat-skills]` | scaffold `mind.toml` + report references; `--template` rewrites bare refs as `{{ns:}}` (maintainer); `-N`/`--namespace` sets `[source].namespace` in the scaffold; `--marketplace` emits a `.claude-plugin/` marketplace scaffold; `--flat-skills` uses a flat skill layout |
 | `mind unmeld <name> [--keep-items] [--yes] [--uninstall-hook <cmd>] [--dangerously-skip-install-hook-check]` | uninstall every item the source installed and drop the source (`--keep-items` skips the uninstall step) |
-| `mind learn [--yes] [-f\|--force] [-n\|--dry-run] [--all] [--dangerously-skip-install-hook-check] [--dangerously-skip-build-hook-check] <item>` | install a skill/agent/rule/tool (glob installs many); a partial selection also pulls in the source siblings it references. `--force` overwrites a conflicting non-mind link target (without it, a conflict prompts on a TTY); `--all` installs every item of the named source (shorthand for `<source>#*`); `-n`/`--dry-run` previews the dependency closure without installing anything |
+| `mind learn [--yes] [-f\|--force] [-n\|--dry-run] [--all] [--dangerously-skip-install-hook-check] [--dangerously-skip-build-hook-check] <item>` | install a skill/agent/rule/tool (glob installs many); a partial selection also pulls in the source siblings it references. `<item>` may also be a deep `tree`/`blob` URL to one skill in a repo: the repo registers as a single-item [item link](#item-links-install-one-skill-by-url) and the skill installs in the same step. `--force` overwrites a conflicting non-mind link target (without it, a conflict prompts on a TTY); `--all` installs every item of the named source (shorthand for `<source>#*`); `-n`/`--dry-run` previews the dependency closure without installing anything |
 | `mind forget [--yes] [-f\|--force] [--unmanaged] [--dangerously-skip-install-hook-check] [<item>]` (alias `unlearn`) | remove an installed item (glob removes many; a multi-match glob confirms first, `--yes` skips). `--unmanaged` scopes removal to unmanaged lobe items only; with no `<item>`, removes every unmanaged item across all lobes. `-f`/`--force` skips the dependents confirmation when the item being removed has dependents. `--dangerously-skip-install-hook-check` runs uninstall hooks without the safety prompt |
 | `mind sync [--upgrade] [--dangerously-skip-install-hook-check] [--dangerously-skip-build-hook-check]` | refresh every source clone; use `upgrade` to also upgrade items. `--upgrade` is deprecated sugar for `sync` followed by `upgrade` (the two hook-check flags are valid only with `--upgrade`) |
 | `mind upgrade [--yes] [--no-sync] [--dangerously-skip-install-hook-check] [--dangerously-skip-build-hook-check] [item]` | fetch each involved source, then upgrade installed items to their latest version (re-runs install hooks on sources that advance); `--no-sync` skips the fetch step |
@@ -176,6 +176,34 @@ mind forget 'owner/repo#*'
 ```
 
 Spec: CLI-31, CLI-41, CLI-65.
+
+## Item links: install one skill by URL
+
+Paste the URL of a skill directory (or its `SKILL.md`) straight from GitHub or
+GitLab and `learn` installs just that skill:
+
+```
+mind learn https://github.com/owner/repo/tree/main/skills/foo
+mind learn https://github.com/owner/repo/blob/main/skills/foo/SKILL.md
+```
+
+The repo registers as its own single-item source instance with the identity
+`host/owner/repo#<path>`: it clones, syncs, and upgrades like any source, but
+offers exactly the linked skill. Several links into the same repo (and a plain
+meld of it) coexist as separate sources. The URL's ref supplies the pin: a
+branch name follows that branch, a 40-hex commit pins it.
+
+Because the consumer names the exact path, the link bypasses the repo's
+declared inventory: it reaches a skill an authoritative `mind.toml` or a
+`.claude-plugin/marketplace.json` does not list (see
+[Claude plugin marketplaces](marketplace.md#installing-items-the-manifest-does-not-list)).
+
+`mind meld <url>` accepts the same form and follows the standard meld flow
+(`--register-only`, `--namespace`, pin flags). `forget` of the skill leaves the
+instance registered and hints at `mind unmeld <identity>` to drop it. A local
+repo is addressable through `file:///path/to/repo/tree/<branch>/<path>`.
+
+Spec: [spec/item-link.md](https://github.com/jaemk/mind/blob/main/spec/item-link.md).
 
 ## Filtering with --kind and --source
 

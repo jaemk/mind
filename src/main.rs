@@ -202,6 +202,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             repo,
             alias,
             roots,
+            add_roots,
             flat_skills,
             follow_branch,
             pin_tag,
@@ -246,6 +247,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
                     &repo,
                     alias,
                     roots,
+                    add_roots,
                     flat_skills,
                     follow_branch,
                     pin_tag,
@@ -326,27 +328,28 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             dangerously_skip_install_hook_check,
             dangerously_skip_build_hook_check,
         } => {
+            let flow = commands::InstallFlow {
+                yes,
+                clobber: if force {
+                    commands::Clobber::Force
+                } else {
+                    commands::Clobber::Prompt
+                },
+                dangerously_skip: dangerously_skip_install_hook_check,
+                dangerously_skip_build: dangerously_skip_build_hook_check,
+            };
+            // spec: LNK-6 -- a deep tree/blob URL one-shots: register the
+            // item-link instance, then install its skill.
+            if item.contains("://") {
+                return commands::learn_link(paths, &item, dry_run, flow);
+            }
             // CLI-36: `--all` rewrites the ref into the `<source>#*` selector.
             let item = if all {
                 resolve::all_selector(&item)?
             } else {
                 item
             };
-            commands::learn(
-                paths,
-                &item,
-                dry_run,
-                commands::InstallFlow {
-                    yes,
-                    clobber: if force {
-                        commands::Clobber::Force
-                    } else {
-                        commands::Clobber::Prompt
-                    },
-                    dangerously_skip: dangerously_skip_install_hook_check,
-                    dangerously_skip_build: dangerously_skip_build_hook_check,
-                },
-            )
+            commands::learn(paths, &item, dry_run, flow)
         }
         Command::Forget {
             item,

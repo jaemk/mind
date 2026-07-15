@@ -67,6 +67,10 @@ The on-disk layout and the two persisted JSON files.
   (repo-root-relative directories, see DSC-51). Persisted at meld and not changed
   by `sync`. Absent means convention discovery uses `[source].roots` or the repo
   root (DSC-50).
+- `STO-55` A source records an optional `add_roots`: the consumer `--add-root`
+  roots (repo-root-relative directories, see DSC-84) that compose with the
+  source's authoritative discovery layer. Persisted at meld and not changed by
+  `sync`. Absent means no additional roots.
 - `STO-44` A source records an optional `flat_skills` boolean: the consumer
   `--flat-skills` override (see DSC-75). Persisted at meld and not changed by
   `sync`. Absent or false means convention discovery uses `[source].flat-skills`

@@ -52,7 +52,9 @@ pub fn parse_item_ref(raw: &str) -> Result<ItemRef> {
 
     // Source-qualified: owner/repo#name (or repo#name). The selector is kept
     // verbatim and matched in `resolve` against the full name or the basename.
-    if let Some((repo_part, name_part)) = raw.split_once('#') {
+    // Split at the LAST '#': an item-link source's own identity carries a
+    // '#<path>' suffix (LNK-4), so `<link-source>#<name>` has two.
+    if let Some((repo_part, name_part)) = raw.rsplit_once('#') {
         let selector = repo_part.trim();
         if selector.is_empty() {
             return Err(invalid());

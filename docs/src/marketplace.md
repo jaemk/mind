@@ -87,6 +87,36 @@ the marketplace overrides the plugin manifest).
 The post-meld `probe` hint and the `sync` re-walk apply to a marketplace exactly
 as they do to any super-source.
 
+## Installing items the manifest does not list
+
+A `marketplace.json` often lists a curated subset of what the repo actually
+contains. Two ways to reach the rest:
+
+**Compose extra scan roots: `meld --add-root <dir>` (repeatable).** The
+manifest keeps defining its items and each added root is convention-scanned in
+addition, so unlisted skills under those directories become installable:
+
+```
+mind meld owner/marketplace-repo --add-root community --add-root experimental
+```
+
+Each added root is scanned in both skill layouts at once (the `skills/`
+container and flat bare-name directories), plus `agents/`, `rules/`, and
+`tools/`. An item both the manifest and an added root contribute is offered
+once, under the manifest's namespace. Unlike `--root` (which replaces the scan
+layout and suppresses the manifest), `--add-root` never suppresses anything; it
+also composes with an authoritative `mind.toml`. The roots persist on the
+source and apply to later scans and `sync`.
+
+**Link one skill directly.** Paste the skill's `tree`/`blob` URL; the manifest
+does not gate it because you named the exact path:
+
+```
+mind learn https://github.com/owner/marketplace-repo/tree/main/community/foo
+```
+
+See [item links](commands.md#item-links-install-one-skill-by-url).
+
 ## Precedence: when a plugin manifest is used
 
 The plugin-manifest layer slots alongside the [other discovery

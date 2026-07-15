@@ -6,6 +6,26 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `meld --add-root <dir>` (repeatable): convention-scan roots that compose with
+  the source's own discovery instead of replacing it. A `marketplace.json` /
+  `plugin.json` or an authoritative `mind.toml` keeps defining its items and
+  each added root is scanned in addition (both skill layouts at once, plus
+  agents/rules/tools), so items the source does not declare become installable.
+  Overlapping paths de-duplicate with the manifest entry winning its namespace
+  (DSC-84..86, MKT-17, STO-55, CLI-197).
+- Item links: `mind learn <url>` with a deep `tree`/`blob` URL to one skill
+  (`https://host/owner/repo/tree/<ref>/<path>`, the `blob/.../SKILL.md` form,
+  the GitLab `/-/` variants, or `file://` for a local repo) registers the repo
+  as a single-item source instance with identity `host/owner/repo#<path>` and
+  installs that skill in one step. The link bypasses the repo's declared
+  inventory (a marketplace manifest or authoritative `mind.toml` does not gate
+  it), the URL ref supplies the pin (branch follows, 40-hex commit pins), and
+  several links into the same repo coexist alongside a plain meld of it.
+  `meld <url>` registers through the standard flow; a `[discover].sources`
+  entry may also be a link (spec/item-link.md, LNK-1..12).
+
 ## [0.17.0] - 2026-07-11
 
 ### Added

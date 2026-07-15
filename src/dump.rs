@@ -154,6 +154,16 @@ fn build_entries(
     let mut entries = Vec::with_capacity(registry.sources.len());
 
     for source in &registry.sources {
+        // spec: LNK-13 -- emitting an item-link instance as a reconstructed
+        // deep-URL entry is not implemented yet; skip it with a note rather
+        // than emitting a whole-repo entry that over-installs.
+        if source.item_path.is_some() {
+            eprintln!(
+                "note: skipping item link {} (dump does not yet emit item links)",
+                source.name
+            );
+            continue;
+        }
         let entry = build_entry(paths, source, manifest, whole_sources)?;
         entries.push(entry);
     }
@@ -332,6 +342,8 @@ mod tests {
             pin: crate::source::Pin::default(),
             roots: None,
             flat_skills: false,
+            add_roots: None,
+            item_path: None,
             origin: None,
             plugin_version: None,
             install_hooks: vec![],

@@ -21492,3 +21492,248 @@ fn no_sources_melded_phrasing_probe() {
         r.stdout
     );
 }
+
+// ---------------------------------------------------------------------------
+// meld --add-root: compose extra convention roots with the authoritative
+// discovery layer (DSC-84..86, MKT-17, STO-55, CLI-197)
+// ---------------------------------------------------------------------------
+
+/// A source with a marketplace.json listing one in-repo plugin, plus skills
+/// under `community/` the manifest does not list (one flat, one containered).
+fn marketplace_with_unlisted_community() -> Sandbox {
+    let sb = Sandbox::bare("mkt-addroot");
+    sb.write_and_commit(
+        ".claude-plugin/marketplace.json",
+        r#"{"name":"Cat","plugins":[{"name":"kit","source":"./plugins/kit"}]}"#,
+    );
+    sb.write_and_commit(
+        "plugins/kit/skills/foo/SKILL.md",
+        "---\ndescription: listed skill\n---\n# foo\n",
+    );
+    sb.write_and_commit(
+        "community/extra/SKILL.md",
+        "---\ndescription: unlisted flat skill\n---\n# extra\n",
+    );
+    sb.write_and_commit(
+        "community/skills/bonus/SKILL.md",
+        "---\ndescription: unlisted containered skill\n---\n# bonus\n",
+    );
+    sb
+}
+
+#[test]
+fn add_root_composes_with_marketplace_manifest() {
+    // spec: DSC-84 MKT-17 STO-55 CLI-197
+    // --add-root does not suppress the manifest (contrast --root, MKT-15): the
+    // manifest's items stay offered and the added root's unlisted skills (both
+    // layouts) are offered alongside them. The roots persist on the source
+    // (STO-55): probe is a separate process, so seeing the items proves the
+    // scan re-reads them from sources.json.
+    let sb = marketplace_with_unlisted_community();
+    let spec = sb.source_spec();
+    let r = sb.mind(&["meld", &spec, "--add-root", "community", "--register-only"]);
+    assert!(r.success, "meld failed: {} {}", r.stdout, r.stderr);
+    // MKT-17: the MKT-15 suppression note must NOT fire for --add-root.
+    let combined = format!("{}\n{}", r.stdout, r.stderr);
+    assert!(
+        !combined.contains("manifest's plugin components are ignored"),
+        "--add-root must not suppress the manifest: {combined}"
+    );
+
+    let probe = sb.mind(&["probe"]);
+    assert!(
+        probe.stdout.contains("skill:kit:foo"),
+        "manifest item must stay offered under its plugin namespace: {}",
+        probe.stdout
+    );
+    assert!(
+        probe.stdout.contains("skill:extra"),
+        "unlisted flat skill under the added root must be offered: {}",
+        probe.stdout
+    );
+    assert!(
+        probe.stdout.contains("skill:bonus"),
+        "unlisted containered skill under the added root must be offered: {}",
+        probe.stdout
+    );
+
+    // The composed items install through the normal learn path.
+    let r = sb.mind(&["learn", "extra"]);
+    assert!(r.success, "learn extra failed: {} {}", r.stdout, r.stderr);
+    assert!(
+        sb.claude_home.join("skills/extra").exists(),
+        "add-root skill must link into the lobe"
+    );
+}
+
+#[test]
+fn add_root_items_carry_source_prefix_not_plugin_prefix() {
+    // spec: DSC-86
+    // An explicit --namespace layers over the manifest's per-plugin prefix
+    // (MKT-13) while an add-root item gets only the source prefix.
+    let sb = marketplace_with_unlisted_community();
+    let spec = sb.source_spec();
+    let r = sb.mind(&[
+        "meld",
+        &spec,
+        "--namespace",
+        "jk",
+        "--add-root",
+        "community",
+        "--register-only",
+    ]);
+    assert!(r.success, "meld failed: {} {}", r.stdout, r.stderr);
+
+    let probe = sb.mind(&["probe"]);
+    assert!(
+        probe.stdout.contains("skill:jk:kit:foo"),
+        "manifest item must carry outer + per-plugin prefix: {}",
+        probe.stdout
+    );
+    assert!(
+        probe.stdout.contains("skill:jk:extra"),
+        "add-root item must carry only the source prefix: {}",
+        probe.stdout
+    );
+    assert!(
+        !probe.stdout.contains("skill:jk:kit:extra"),
+        "add-root item must not inherit a per-plugin prefix: {}",
+        probe.stdout
+    );
+}
+
+#[test]
+fn add_root_composes_with_authoritative_mind_toml() {
+    // spec: DSC-84
+    // An authoritative mind.toml ignores --root (DSC-52) but composes with
+    // --add-root: the declared item and the added root's skill are both
+    // offered, with no ignored note.
+    let sb = Sandbox::bare("auth-addroot");
+    sb.write_and_commit(
+        "mind.toml",
+        "[[items]]\nkind = \"skill\"\nname = \"declared\"\npath = \"lib/declared\"\n",
+    );
+    sb.write_and_commit(
+        "lib/declared/SKILL.md",
+        "---\ndescription: declared skill\n---\n# declared\n",
+    );
+    sb.write_and_commit(
+        "extra/skills/undeclared/SKILL.md",
+        "---\ndescription: undeclared skill\n---\n# undeclared\n",
+    );
+    let spec = sb.source_spec();
+    let r = sb.mind(&["meld", &spec, "--add-root", "extra", "--register-only"]);
+    assert!(r.success, "meld failed: {} {}", r.stdout, r.stderr);
+    let combined = format!("{}\n{}", r.stdout, r.stderr);
+    assert!(
+        !combined.contains("--add-root is ignored") && !combined.contains("is ignored"),
+        "--add-root must not be ignored for an authoritative mind.toml: {combined}"
+    );
+
+    let probe = sb.mind(&["probe"]);
+    assert!(
+        probe.stdout.contains("skill:declared"),
+        "declared item must stay offered: {}",
+        probe.stdout
+    );
+    assert!(
+        probe.stdout.contains("skill:undeclared"),
+        "add-root skill must compose with the authoritative inventory: {}",
+        probe.stdout
+    );
+}
+
+#[test]
+fn add_root_extends_plain_convention_scan() {
+    // spec: DSC-84
+    // On a plain convention source, --add-root extends the effective root set:
+    // the repo root's items and the added root's items are unioned.
+    let sb = Sandbox::new();
+    sb.write_and_commit(
+        "community/skills/side/SKILL.md",
+        "---\ndescription: side skill\n---\n# side\n",
+    );
+    let spec = sb.source_spec();
+    let r = sb.mind(&["meld", &spec, "--add-root", "community", "--register-only"]);
+    assert!(r.success, "meld failed: {} {}", r.stdout, r.stderr);
+    let probe = sb.mind(&["probe"]);
+    assert!(
+        probe.stdout.contains("skill:review") && probe.stdout.contains("skill:side"),
+        "repo-root and add-root items must union: {}",
+        probe.stdout
+    );
+}
+
+#[test]
+fn add_root_dedups_paths_the_manifest_already_contributed() {
+    // spec: DSC-85
+    // An added root that overlaps the manifest's in-repo plugin discovers the
+    // same on-disk skill; the manifest entry wins (it keeps the per-plugin
+    // namespace) and no duplicate or bare-name copy is offered.
+    let sb = marketplace_with_unlisted_community();
+    let spec = sb.source_spec();
+    let r = sb.mind(&[
+        "meld",
+        &spec,
+        "--add-root",
+        "plugins/kit",
+        "--register-only",
+    ]);
+    assert!(r.success, "meld failed: {} {}", r.stdout, r.stderr);
+
+    let probe = sb.mind(&["probe"]);
+    assert!(
+        probe.stdout.contains("skill:kit:foo"),
+        "the manifest entry must win the overlap: {}",
+        probe.stdout
+    );
+    assert!(
+        !probe.stdout.contains("skill:foo\n") && probe.stdout.matches("foo").count() == 1,
+        "the overlapping skill must not be offered twice / bare: {}",
+        probe.stdout
+    );
+}
+
+#[test]
+fn add_root_distinct_path_collision_is_duplicate_item() {
+    // spec: DSC-85
+    // A different on-disk path colliding on (kind, effective name) with a
+    // base-layer item is a DuplicateItem error at meld.
+    let sb = Sandbox::new(); // convention fixture ships skills/review
+    sb.write_and_commit(
+        "extra/skills/review/SKILL.md",
+        "---\ndescription: colliding skill\n---\n# review\n",
+    );
+    let spec = sb.source_spec();
+    let r = sb.mind(&["meld", &spec, "--add-root", "extra", "--register-only"]);
+    assert!(
+        !r.success,
+        "colliding add-root item must fail the meld: {}",
+        r.stdout
+    );
+    assert!(
+        r.stderr.contains("review"),
+        "the DuplicateItem error must name the item: {}",
+        r.stderr
+    );
+}
+
+#[test]
+fn add_root_invalid_root_is_error() {
+    // spec: DSC-84 -- the InvalidRoot rules match --root.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    let r = sb.mind(&[
+        "meld",
+        &spec,
+        "--add-root",
+        "no-such-dir",
+        "--register-only",
+    ]);
+    assert!(!r.success, "a missing add-root dir must fail: {}", r.stdout);
+    assert!(
+        r.stderr.contains("scan root") && r.stderr.contains("no-such-dir"),
+        "the InvalidRoot error must name the root: {}",
+        r.stderr
+    );
+}

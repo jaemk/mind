@@ -64,6 +64,16 @@ an independent store and link into the host's discovery location.
   or a `[discover].sources`-only file per MKT-16). Suppression is scoped to the
   immediate source's item layer; it does not disable the curator layer (MKT-16).
 
+- `MKT-17` `meld --add-root <dir>` (DSC-84) composes with a `.claude-plugin/`
+  manifest instead of suppressing it: the manifest keeps defining the immediate
+  source's items (MKT-2/MKT-14) and each added root is convention-scanned in
+  addition, so a consumer can install items that exist in the repo but are not
+  listed in the manifest. `--add-root` is therefore NOT one of the MKT-15
+  own-item directives and the MKT-15 suppression note is not printed for it.
+  Items an added root and the manifest both contribute (the same on-disk path)
+  de-duplicate with the manifest entry winning (DSC-85); add-root items carry no
+  per-plugin namespace (DSC-86).
+
 - `MKT-16` A co-present `mind.toml`'s `[discover].sources` (DSC-38) composes with
   the manifest rather than suppressing it. `[discover].sources` curates OTHER
   repos; it does not redefine the immediate source's items, so it is not one of

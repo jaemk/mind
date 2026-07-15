@@ -40,9 +40,9 @@ maintained by hand.
 
 | command | does |
 |---------|------|
-| `meld <repo>` | clone a source repo and register it |
+| `meld <repo>` | clone a source repo and register it; `--add-root <dir>` composes extra convention scan roots with the source's own discovery (a plugin manifest or authoritative mind.toml keeps its items, DSC-84); `<repo>` may be a deep tree/blob skill URL (an item link, spec/item-link.md) |
 | `unmeld <name>` | drop a source |
-| `learn <item>` | copy item to the store, symlink into each agent home (lobe) |
+| `learn <item>` | copy item to the store, symlink into each agent home (lobe); `learn <url>` with a deep tree/blob skill URL registers the repo as a single-item source instance (`host/owner/repo#path`) and installs that skill in one step |
 | `forget <item>` | remove symlink + store copy |
 | `sync [--upgrade]` | fetch every source, refresh recorded commit (`--upgrade` then runs an upgrade pass) |
 | `upgrade [item]` | report each installed item's hash/commit delta, prompt, then re-link the changed ones (syncs involved sources first; `--no-sync` opts out) |
@@ -118,6 +118,12 @@ Three layers, in precedence order:
    *authoritative*: convention scanning is turned off and only what it lists is
    offered. Use it for export control, non-standard / monorepo layouts, custom
    link targets, and repo-level metadata.
+
+Two consumer-side escapes reach items the authoritative layer does not list:
+`meld --add-root <dir>` composes extra convention scan roots with the layer
+(DSC-84..86, MKT-17), and an item link (a deep tree/blob skill URL given to
+`learn`/`meld`) installs one skill as its own single-item source instance,
+bypassing the inventory entirely (spec/item-link.md).
 
 ```toml
 [source]

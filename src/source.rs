@@ -96,6 +96,20 @@ pub struct Source {
     /// `[source].flat-skills` or the `skills/` container (DSC-74).
     #[serde(default)]
     pub flat_skills: bool,
+    /// Consumer-supplied additive scan roots from `meld --add-root` (STO-55,
+    /// DSC-84): convention-scanned in addition to whatever discovery layer is
+    /// authoritative for the source (a plugin manifest, an authoritative
+    /// mind.toml, or the ordinary convention scan). Persisted at meld and not
+    /// changed by sync. None means no additional roots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub add_roots: Option<Vec<String>>,
+    /// The item path of an item-link source instance (LNK-4): the skill
+    /// directory's repo-root-relative path parsed from a deep tree/blob URL.
+    /// When set, the source's identity (`name`) carries a `#<path>` suffix and
+    /// its catalog is exactly that one skill (LNK-7). None for an ordinary
+    /// source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_path: Option<String>,
     /// The manifest origin of this source's items (MKT-10), when they came from
     /// a Claude plugin manifest (`.claude-plugin/plugin.json` or
     /// `marketplace.json`). `None` for a convention- or `mind.toml`-discovered
@@ -130,6 +144,13 @@ impl Source {
     /// Whether this is a local-path source (`host == "local"`).
     pub fn is_local(&self) -> bool {
         self.host == "local"
+    }
+
+    /// The base repo identity `host/owner/repo`, without an item-link `#path`
+    /// suffix. Equal to `name` for an ordinary source. This is what managed
+    /// policy allowlists match against (LNK-11).
+    pub fn base_identity(&self) -> String {
+        format!("{}/{}/{}", self.host, self.owner, self.repo)
     }
 
     /// Whether this source is read live from its working tree rather than a clone
@@ -277,6 +298,29 @@ pub fn parse_spec(spec: &str) -> Result<Source> {
     if local.is_some() || spec.starts_with('/') || spec.starts_with("./") || spec.starts_with("../")
     {
         let path = local.unwrap_or(spec);
+        // Item link on a local repo (LNK-1): only the explicit `file://` form
+        // is checked for a tree/blob marker, so a bare path that happens to
+        // contain such a directory name stays a plain repo spec.
+        if local.is_some()
+            && let Some((repo_part, marker, rest)) = split_link_marker(path)
+        {
+            let (pin, item_path) = parse_link_tail(spec, marker, rest)?;
+            let mut comps = repo_part.trim_end_matches('/').rsplit('/');
+            let repo_raw = comps.next().filter(|s| !s.is_empty()).ok_or_else(invalid)?;
+            let repo = repo_raw.strip_suffix(".git").unwrap_or(repo_raw);
+            let owner = comps
+                .next()
+                .filter(|s| !s.is_empty() && *s != "." && *s != "..")
+                .unwrap_or("local");
+            let mut source = make_source("local", owner, repo, repo_part.to_string());
+            // spec: LNK-4 -- extended identity; the pin makes this a cloned
+            // snapshot (never a linked working tree), so lifecycle matches a
+            // remote link instance.
+            source.name = format!("{}#{item_path}", source.name);
+            source.item_path = Some(item_path);
+            source.pin = pin;
+            return Ok(source);
+        }
         let mut comps = path.trim_end_matches('/').rsplit('/');
         let repo_raw = comps.next().filter(|s| !s.is_empty()).ok_or_else(invalid)?;
         let repo = repo_raw.strip_suffix(".git").unwrap_or(repo_raw);
@@ -297,6 +341,12 @@ pub fn parse_spec(spec: &str) -> Result<Source> {
     // URL form: scheme://host/owner/repo(.git)
     if let Some((scheme, rest)) = spec.split_once("://") {
         let (host, path) = rest.split_once('/').ok_or_else(invalid)?;
+        // Item link (LNK-1): a deep URL with a tree/blob segment naming one
+        // skill inside the repo. Checked before the plain owner/repo shape,
+        // which rejects any extra path segments.
+        if let Some(source) = parse_item_link(spec, scheme, host, path)? {
+            return Ok(source);
+        }
         let (owner, repo) = split_owner_repo(path).ok_or_else(invalid)?;
         let url = format!("{scheme}://{host}/{owner}/{repo}");
         return Ok(make_source(host, &owner, &repo, url));
@@ -307,6 +357,89 @@ pub fn parse_spec(spec: &str) -> Result<Source> {
     let (owner, repo) = split_owner_repo(bare).ok_or_else(invalid)?;
     let url = format!("https://github.com/{owner}/{repo}");
     Ok(make_source("github.com", &owner, &repo, url))
+}
+
+/// Split a spec's path at the first tree/blob marker (LNK-1). Returns
+/// `(before, "tree"|"blob", after)`; the GitLab `/-/tree/` and `/-/blob/`
+/// forms match at a smaller index than their embedded short forms, so the
+/// earliest match is always the right one.
+fn split_link_marker(s: &str) -> Option<(&str, &'static str, &str)> {
+    const MARKERS: [(&str, &str); 4] = [
+        ("/-/tree/", "tree"),
+        ("/-/blob/", "blob"),
+        ("/tree/", "tree"),
+        ("/blob/", "blob"),
+    ];
+    MARKERS
+        .iter()
+        .filter_map(|(pat, kind)| s.find(pat).map(|idx| (idx, pat.len(), *kind)))
+        .min_by_key(|&(idx, _, _)| idx)
+        .map(|(idx, len, kind)| (&s[..idx], kind, &s[idx + len..]))
+}
+
+/// Parse the `<ref>/<path>` tail after a tree/blob marker (LNK-1, LNK-3,
+/// LNK-10): the pin from the single ref segment and the validated skill
+/// directory path.
+fn parse_link_tail(spec: &str, marker: &str, rest: &str) -> Result<(Pin, String)> {
+    let invalid = || MindError::InvalidRepoSpec {
+        spec: spec.to_string(),
+    };
+    // spec: LNK-3 -- the ref is the single segment after tree/blob.
+    let mut segs = rest.trim_matches('/').split('/');
+    let r = segs.next().filter(|s| !s.is_empty()).ok_or_else(invalid)?;
+    // spec: LNK-1 -- a blob link must end in /SKILL.md (the skill directory is
+    // its parent); a tree link naming the SKILL.md directly is also accepted.
+    let mut parts: Vec<&str> = segs.collect();
+    if parts.last() == Some(&"SKILL.md") {
+        parts.pop();
+    } else if marker == "blob" {
+        return Err(invalid());
+    }
+    if parts.is_empty() || parts.iter().any(|p| p.is_empty()) {
+        return Err(invalid());
+    }
+    let item_path = parts.join("/");
+    // spec: LNK-10 -- safe relative path and a valid git ref value, rejected
+    // before any clone.
+    if !crate::plugin_manifest::is_safe_manifest_path(&item_path)
+        || crate::git::validate_ref_value(r).is_err()
+    {
+        return Err(invalid());
+    }
+    // spec: LNK-3 -- a 40-hex ref pins the commit; anything else follows that
+    // branch. Lifted into the standard pin resolution by meld.
+    let pin = if r.len() == 40 && r.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Pin::Ref(r.to_string())
+    } else {
+        Pin::FollowBranch(r.to_string())
+    };
+    Ok((pin, item_path))
+}
+
+/// Parse the path part of a forge URL as an item link (LNK-1..4):
+/// `owner/repo/tree/<ref>/<path>`, `owner/repo/blob/<ref>/<path>/SKILL.md`,
+/// and the GitLab `owner/repo/-/tree|blob/...` variants. Returns `Ok(None)`
+/// when the path carries no tree/blob marker (a plain repo URL); a marker that
+/// does not complete to a valid link is `InvalidRepoSpec` (LNK-2).
+fn parse_item_link(spec: &str, scheme: &str, host: &str, path: &str) -> Result<Option<Source>> {
+    // spec: LNK-1 -- strip a query string / fragment pasted from a browser.
+    let path = path.split(['?', '#']).next().unwrap_or(path);
+    let Some((repo_part, marker, rest)) = split_link_marker(path) else {
+        return Ok(None);
+    };
+    let invalid = || MindError::InvalidRepoSpec {
+        spec: spec.to_string(),
+    };
+    let (owner, repo) = split_owner_repo(repo_part).ok_or_else(invalid)?;
+    let (pin, item_path) = parse_link_tail(spec, marker, rest)?;
+    let url = format!("{scheme}://{host}/{owner}/{repo}");
+    let mut source = make_source(host, &owner, &repo, url);
+    // spec: LNK-4 -- the extended identity keeps instances from the same repo
+    // (and a plain meld of it) distinct; the clone path follows the name.
+    source.name = format!("{}#{item_path}", source.name);
+    source.item_path = Some(item_path);
+    source.pin = pin;
+    Ok(Some(source))
 }
 
 fn split_owner_repo(path: &str) -> Option<(String, String)> {
@@ -334,6 +467,8 @@ fn make_source(host: &str, owner: &str, repo: &str, url: String) -> Source {
         pin: Pin::default(),
         roots: None,
         flat_skills: false,
+        add_roots: None,
+        item_path: None,
         origin: None,
         plugin_version: None,
         install_hooks: Vec::new(),
@@ -462,6 +597,117 @@ mod tests {
     fn parses_github_prefix() {
         let s = parse_spec("github:foo/bar").unwrap();
         assert_eq!(s.url, "https://github.com/foo/bar");
+    }
+
+    // ---- item links (LNK-1..4, LNK-10) ----
+
+    // spec: LNK-1 LNK-3 LNK-4
+    #[test]
+    fn parses_github_tree_link() {
+        let s = parse_spec("https://github.com/o/r/tree/main/skills/foo").unwrap();
+        assert_eq!(s.name, "github.com/o/r#skills/foo");
+        assert_eq!(s.url, "https://github.com/o/r");
+        assert_eq!(s.item_path.as_deref(), Some("skills/foo"));
+        assert_eq!(s.pin, Pin::FollowBranch("main".into()));
+        assert_eq!(s.base_identity(), "github.com/o/r");
+    }
+
+    // spec: LNK-1
+    #[test]
+    fn parses_blob_link_and_strips_skill_md() {
+        let s = parse_spec("https://github.com/o/r/blob/main/skills/foo/SKILL.md").unwrap();
+        assert_eq!(s.item_path.as_deref(), Some("skills/foo"));
+        // A tree link naming the SKILL.md directly is also accepted.
+        let t = parse_spec("https://github.com/o/r/tree/main/skills/foo/SKILL.md").unwrap();
+        assert_eq!(t.item_path.as_deref(), Some("skills/foo"));
+        // A blob link NOT ending in SKILL.md is invalid, not a repo spec.
+        assert!(parse_spec("https://github.com/o/r/blob/main/skills/foo").is_err());
+    }
+
+    // spec: LNK-1
+    #[test]
+    fn parses_gitlab_dash_link_forms() {
+        let s = parse_spec("https://gitlab.com/o/r/-/tree/main/skills/foo").unwrap();
+        assert_eq!(s.name, "gitlab.com/o/r#skills/foo");
+        let b = parse_spec("https://gitlab.com/o/r/-/blob/v2/skills/foo/SKILL.md").unwrap();
+        assert_eq!(b.pin, Pin::FollowBranch("v2".into()));
+    }
+
+    // spec: LNK-1
+    #[test]
+    fn link_query_and_fragment_are_stripped() {
+        let s =
+            parse_spec("https://github.com/o/r/blob/main/skills/foo/SKILL.md?plain=1#L10").unwrap();
+        assert_eq!(s.item_path.as_deref(), Some("skills/foo"));
+    }
+
+    // spec: LNK-3
+    #[test]
+    fn link_forty_hex_ref_pins_the_commit() {
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        let s = parse_spec(&format!("https://github.com/o/r/tree/{sha}/skills/foo")).unwrap();
+        assert_eq!(s.pin, Pin::Ref(sha.into()));
+    }
+
+    // spec: LNK-2
+    #[test]
+    fn link_marker_without_a_valid_tail_is_invalid_repo_spec() {
+        // No item path after the ref.
+        assert!(matches!(
+            parse_spec("https://github.com/o/r/tree/main"),
+            Err(MindError::InvalidRepoSpec { .. })
+        ));
+        // No ref at all.
+        assert!(matches!(
+            parse_spec("https://github.com/o/r/tree/"),
+            Err(MindError::InvalidRepoSpec { .. })
+        ));
+    }
+
+    // spec: LNK-10
+    #[test]
+    fn link_unsafe_path_or_ref_is_rejected_at_parse() {
+        // `..` in the item path.
+        assert!(matches!(
+            parse_spec("https://github.com/o/r/tree/main/../../etc"),
+            Err(MindError::InvalidRepoSpec { .. })
+        ));
+        // A git-range ref value.
+        assert!(matches!(
+            parse_spec("https://github.com/o/r/tree/a..b/skills/foo"),
+            Err(MindError::InvalidRepoSpec { .. })
+        ));
+        // A leading-dash (option-shaped) ref value.
+        assert!(matches!(
+            parse_spec("https://github.com/o/r/tree/-evil/skills/foo"),
+            Err(MindError::InvalidRepoSpec { .. })
+        ));
+    }
+
+    // spec: LNK-1 LNK-4
+    #[test]
+    fn file_link_is_a_pinned_local_instance() {
+        let s = parse_spec("file:///home/me/dev/agents/tree/main/skills/foo").unwrap();
+        assert_eq!(s.host, "local");
+        assert_eq!(s.name, "local/dev/agents#skills/foo");
+        assert_eq!(s.url, "/home/me/dev/agents");
+        assert_eq!(s.item_path.as_deref(), Some("skills/foo"));
+        assert_eq!(s.pin, Pin::FollowBranch("main".into()));
+        // The pin means it is a cloned snapshot, never a linked working tree.
+        assert!(!s.is_linked());
+        // A BARE local path is never marker-parsed: a repo dir literally named
+        // `tree/main/...` stays a plain repo spec.
+        let plain = parse_spec("/home/me/dev/agents/tree/main/skills/foo").unwrap();
+        assert!(plain.item_path.is_none());
+        assert_eq!(plain.repo, "foo");
+    }
+
+    // spec: LNK-1
+    #[test]
+    fn plain_repo_url_is_not_an_item_link() {
+        let s = parse_spec("https://github.com/o/r").unwrap();
+        assert!(s.item_path.is_none());
+        assert_eq!(s.pin, Pin::DefaultBranch);
     }
 
     #[test]

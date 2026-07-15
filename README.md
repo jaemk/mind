@@ -73,6 +73,19 @@ mind probe                              # browse available items (interactive)
 mind learn <item>                       # install a specific item
 ```
 
+A pasted skill URL installs just that skill, managed like any source:
+
+```
+mind learn https://github.com/owner/repo/tree/main/skills/foo
+```
+
+A repo whose `marketplace.json` lists only some of its skills can be melded
+with extra scan roots composed in:
+
+```
+mind meld owner/repo --add-root community --add-root experimental
+```
+
 Agent homes can be Claude Code, Gemini CLI, Codex CLI, or Antigravity -- not just
 `~/.claude`. See
 [configuration](https://jaemk.github.io/mind/guide/configuration.html#cross-harness-lobes)

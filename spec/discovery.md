@@ -310,6 +310,44 @@ subdirectories instead.
   `[[items]]` declarations: two entries with the same kind and name in a
   `mind.toml` are a `DuplicateItem` error.
 
+## Additive roots
+
+`--root` replaces a source's discovery layout (DSC-51) and, on a manifest
+source, suppresses the manifest (MKT-15). A consumer who wants the declared
+inventory AND more - a marketplace catalog that lists only a subset of the
+repo's skills, an authoritative `mind.toml` that exports only some items -
+needs roots that compose instead of replace.
+
+- `DSC-84` `meld --add-root <dir>` (repeatable) adds convention scan roots that
+  compose with whatever discovery layer is authoritative for the source instead
+  of replacing or suppressing it. Each added root is convention-scanned in both
+  skill layouts at once - the `skills/` container (DSC-10) and flat bare-name
+  directories (DSC-74) - since the `SKILL.md` anchor disambiguates them and a
+  `--flat-skills` override would suppress a manifest (MKT-15); agent, rule, and
+  tool discovery under the root is the DSC-11..13 convention. The results union
+  with the layer's items: a `.claude-plugin/` manifest's items
+  (MKT-2/MKT-14, see MKT-17), an authoritative `mind.toml`'s declared items
+  (DSC-3), or the ordinary convention scan (where the added roots simply extend
+  the effective root set, DSC-50/DSC-51). Unlike `--root`, `--add-root` is not
+  an own-item layout override: it does not suppress a manifest (it is not in
+  the MKT-15 directive set) and it is not ignored for an authoritative
+  `mind.toml` (contrast DSC-52). The roots are persisted on the source (STO-55)
+  and applied by later scans and `sync`. Validation matches `--root`: a value
+  that is absolute, escapes the clone, or is not a directory in the clone is
+  `InvalidRoot`.
+- `DSC-85` De-duplication and collisions for added roots: an add-root item
+  whose on-disk path is already contributed by the authoritative layer (e.g. a
+  marketplace in-repo plugin's skill directory that also sits under an added
+  root) is skipped - the authoritative entry wins, keeping its namespace and
+  metadata. After the union, the uniqueness rule applies to the source's whole
+  offering by (kind, effective name): a distinct-path collision between an
+  add-root item and an authoritative-layer item, or between two add-root items
+  (DSC-53), is a `DuplicateItem` error.
+- `DSC-86` Add-root items are ordinary convention items: bare names derived
+  from the layout, with the source's effective prefix (alias or
+  `[source].namespace`) applied at install. A manifest's per-plugin namespace
+  (MKT-5/MKT-8) does not reach them.
+
 ## Flat skill layout
 
 By default a skill is a directory under a `skills/` container (DSC-10). A source

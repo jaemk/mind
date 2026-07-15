@@ -40,6 +40,7 @@ pub fn meld(
     repo: &str,
     alias: Option<String>,
     roots: Vec<String>,
+    add_roots: Vec<String>,
     flat_skills: bool,
     follow_branch: Option<String>,
     pin_tag: Option<String>,
@@ -70,6 +71,7 @@ pub fn meld(
         repo,
         alias,
         roots,
+        add_roots,
         flat_skills,
         consumer_pin,
         true,
@@ -112,6 +114,11 @@ pub fn maybe_probe_hint(paths: &Paths, repo: &str) -> Result<()> {
     let Some(source) = registry.find(&name) else {
         return Ok(());
     };
+    // spec: LNK-8 -- an item-link instance adopts no curator layer, so the
+    // browse hint would be misleading.
+    if source.item_path.is_some() {
+        return Ok(());
+    }
     let clone_dir = source.clone_dir(paths);
     let curates = MindToml::load(&clone_dir)?
         .and_then(|m| m.discover)
@@ -365,6 +372,7 @@ fn meld_recursive(
     repo: &str,
     alias: Option<String>,
     roots: Vec<String>,
+    add_roots: Vec<String>,
     flat_skills: bool,
     consumer_pin: Option<Pin>,
     top_level: bool,
@@ -391,8 +399,20 @@ fn meld_recursive(
     // before the cycle guard so the recorded URL is the one we actually clone.
     source.prefer_ssh(prefer_ssh);
 
-    // Cycle guard: don't process the same URL twice in one meld run.
-    if !visited.insert(source.url.clone()) {
+    // spec: LNK-3 -- an item link carries its pin in the URL ref; lift it so
+    // the standard pin resolution below can layer a consumer flag over it and
+    // the pre-pin code sees the default (a link is never a linked local tree).
+    let url_pin = if source.item_path.is_some() && source.pin != Pin::DefaultBranch {
+        Some(std::mem::replace(&mut source.pin, Pin::DefaultBranch))
+    } else {
+        None
+    };
+
+    // Cycle guard: don't process the same source twice in one meld run. Keyed
+    // on identity + URL: item-link instances share their repo's URL but are
+    // distinct sources (LNK-4), while a same-name re-spec still reaches the
+    // registry check below for its "already melded" warning.
+    if !visited.insert(format!("{}|{}", source.name, source.url)) {
         return Ok(0);
     }
 
@@ -433,7 +453,9 @@ fn meld_recursive(
     // The pinned check (POL-20) stays post-clone because it needs the effective
     // pin, which may come from the source's mind.toml (read after the clone).
     if let Some(policy) = policy {
-        let identity = source.name.clone();
+        // spec: LNK-11 -- allowlist matching uses the base repo identity, so a
+        // policy that allows the repo allows links into it.
+        let identity = source.base_identity();
 
         // spec: POL-56 -- when allow-local is false under a lock, local-path
         // and file:// melds are refused regardless of allow patterns. This check
@@ -535,8 +557,11 @@ fn meld_recursive(
         .map(|m| m.source.pin_directive(&toml_path))
         .transpose()?
         .flatten();
+    // spec: LNK-3 -- an item link's URL ref sits between the curator's pin and
+    // the repo's own [source] directive.
     let effective_pin = consumer_pin
         .or(curated_pin)
+        .or(url_pin)
         .or(directive_pin)
         .unwrap_or(Pin::DefaultBranch);
 
@@ -688,6 +713,14 @@ fn meld_recursive(
         // flat-skills governs convention discovery, applied only because the gated
         // source has no mind.toml of its own (so it cannot be authoritative).
         source.flat_skills = true;
+    }
+
+    // spec: DSC-84 / STO-55 -- persist the consumer's --add-root roots. They
+    // compose with whatever layer is authoritative (manifest, authoritative
+    // mind.toml, or convention), so unlike --root there is no ignored/suppressed
+    // note to print. Root validation happens in the scan (InvalidRoot).
+    if !add_roots.is_empty() {
+        source.add_roots = Some(add_roots);
     }
 
     // Scan before registering. If the source is rejected here (e.g. the
@@ -902,7 +935,9 @@ fn meld_recursive(
     // [source].description has not already set it (DSC-32 precedence). Strings
     // from the manifest are passed through strip_ansi to prevent terminal injection
     // (MKT-9/DSC-69).
-    if !is_authoritative {
+    // An item-link instance bypasses any plugin manifest (LNK-7), so it never
+    // records a manifest origin.
+    if !is_authoritative && source.item_path.is_none() {
         if let Some(plugin_path) = plugin_manifest::find_plugin_manifest(&dir) {
             source.origin = Some(ManifestOrigin::ClaudePlugin);
             if let Ok(pm) = plugin_manifest::load_plugin_manifest(&plugin_path) {
@@ -921,6 +956,9 @@ fn meld_recursive(
     // Capture the super-source name before moving `source` into the registry,
     // so DSC-63 error messages can reference it.
     let super_source_name = source.name.clone();
+    // spec: LNK-8 -- an item-link instance registers no nested sources: the
+    // [discover].sources and marketplace-external walks below are skipped.
+    let is_link = source.item_path.is_some();
     registry.sources.push(source);
 
     let mut added = 1;
@@ -930,6 +968,7 @@ fn meld_recursive(
     let mut nested_clone_failures = 0usize;
     if let Some(nested) = mindfile
         .as_ref()
+        .filter(|_| !is_link) // spec: LNK-8
         .and_then(|m| m.discover.as_ref())
         .map(|d| &d.sources)
     {
@@ -956,6 +995,7 @@ fn meld_recursive(
                 &entry.source,
                 entry.effective_alias(), // spec: DSC-78 — prefer `namespace`, fall back to `as`
                 vec![],                  // no consumer roots for nested sources
+                vec![],                  // no consumer --add-root for nested sources
                 false, // no consumer --flat-skills for nested sources (curator config supplies it)
                 None,  // no consumer pin for nested sources
                 false,
@@ -1072,6 +1112,7 @@ fn meld_recursive(
     // same [discover].sources machinery. This is an additive pass that runs after
     // the mind.toml nested-source loop above.
     if !is_authoritative
+        && !is_link // spec: LNK-8
         && let Some(marketplace_path) = plugin_manifest::find_marketplace_manifest(&dir)
     {
         let manifest = plugin_manifest::load_marketplace_manifest(&marketplace_path)?;
@@ -1103,6 +1144,7 @@ fn meld_recursive(
                 registry,
                 &repo_spec,
                 Some(entry_name.clone()),
+                vec![],
                 vec![],
                 false,
                 None,  // no consumer pin
@@ -2372,6 +2414,38 @@ pub struct InstallFlow {
     pub dangerously_skip_build: bool,
 }
 
+/// `mind learn <url>` (LNK-6): the one-shot form for an item link. Registers
+/// the link instance when it is not yet melded, exactly as `meld <url>` would
+/// (clone, hook consent, prompts), then installs its skill through the
+/// standard learn path (the source-qualified `<instance>#*` selector).
+pub fn learn_link(paths: &Paths, url: &str, dry_run: bool, flow: InstallFlow) -> Result<()> {
+    let spec = parse_spec(url)?;
+    if spec.item_path.is_none() {
+        // A plain repo URL names a source, not an item.
+        return Err(MindError::InvalidItemRef {
+            name: url.to_string(),
+        });
+    }
+    if !is_melded(paths, url)? {
+        // spec: LNK-6 -- same registration as `meld <url> --register-only`;
+        // the direct install below replaces the CLI-23 offer.
+        meld(
+            paths,
+            url,
+            None,
+            vec![],
+            vec![],
+            false,
+            None,
+            None,
+            None,
+            None,
+            flow.dangerously_skip,
+        )?;
+    }
+    learn(paths, &format!("{}#*", spec.name), dry_run, flow)
+}
+
 pub fn learn(paths: &Paths, item_ref: &str, dry_run: bool, flow: InstallFlow) -> Result<()> {
     let InstallFlow {
         yes,
@@ -2998,6 +3072,10 @@ pub fn install_curated_sources(
         let Some(source) = registry.find(&name) else {
             continue;
         };
+        // spec: LNK-8 -- an item-link instance curates nothing.
+        if source.item_path.is_some() {
+            continue;
+        }
         let nested = MindToml::load(&source.clone_dir(paths))?
             .and_then(|m| m.discover)
             .map(|d| d.sources)
@@ -3120,6 +3198,10 @@ pub(crate) fn install_curated_sources_for_json(
         let Some(source) = registry.find(&name) else {
             continue;
         };
+        // spec: LNK-8 -- an item-link instance curates nothing.
+        if source.item_path.is_some() {
+            continue;
+        }
         let nested = MindToml::load(&source.clone_dir(paths))?
             .and_then(|m| m.discover)
             .map(|d| d.sources)
@@ -3643,6 +3725,7 @@ pub fn absorb(
             &dest_spec,
             None,
             vec![],
+            vec![],
             false,
             None,
             None,
@@ -3990,6 +4073,7 @@ pub fn forget(
     }
 
     let mut removed: Vec<String> = Vec::new();
+    let mut removed_sources: HashSet<String> = HashSet::new();
     for key in keys {
         let item = manifest.items.remove(&key).expect("key from manifest");
         let uninstall_hooks: Vec<&crate::mindfile::ResolvedHook> =
@@ -4007,12 +4091,26 @@ pub fn forget(
             manifest.save(paths)?;
             return Err(e);
         }
+        removed_sources.insert(item.source.clone());
         removed.push(key.clone());
         if !out.json {
             println!("{} forgot {key}", out.ok());
         }
     }
     manifest.save(paths)?;
+    // spec: LNK-5 -- a forget that empties an item-link instance leaves it
+    // registered; point at `unmeld` to drop the source itself.
+    for src_name in &removed_sources {
+        if registry
+            .find(src_name)
+            .is_some_and(|s| s.item_path.is_some())
+            && !manifest.items.values().any(|it| &it.source == src_name)
+        {
+            eprintln!(
+                "hint: item link {src_name} has nothing installed; run `mind unmeld '{src_name}'` to drop it"
+            );
+        }
+    }
     if out.json {
         let mut result = MutationResult::new("forget", item_ref, "removed");
         result.removed = removed;
@@ -4216,6 +4314,7 @@ pub fn sync(
                     &mut registry,
                     &am.repo,
                     None,
+                    vec![],
                     vec![],
                     false, // no consumer --flat-skills for an auto-melded source
                     Some(am.pin.clone()),
@@ -4434,6 +4533,11 @@ pub fn sync(
         }
         let mut nested: Vec<NestedTodo> = Vec::new();
         for s in &registry.sources {
+            // spec: LNK-8 -- an item-link instance curates nothing; its repo's
+            // [discover].sources is not walked.
+            if s.item_path.is_some() {
+                continue;
+            }
             let clone_dir = s.clone_dir(paths);
             let toml_path = clone_dir.join("mind.toml");
             let Some(mt) = MindToml::load(&clone_dir).ok().flatten() else {
@@ -4466,6 +4570,11 @@ pub fn sync(
         // are not already registered. Additive only: a removed entry stays registered
         // (removal is an explicit `unmeld`). Cycle-safe via the visited set below.
         for s in &registry.sources {
+            // spec: LNK-8 -- an item-link instance's marketplace manifest (if
+            // its repo ships one) is bypassed, not re-walked.
+            if s.item_path.is_some() {
+                continue;
+            }
             let clone_dir = s.clone_dir(paths);
             // An authoritative mind.toml suppresses the marketplace manifest (MKT-2).
             let is_authoritative_source = MindToml::load(&clone_dir)
@@ -4504,9 +4613,14 @@ pub fn sync(
             }
         }
 
-        // Seed the cycle guard with every registered URL so an existing source is
-        // skipped without a clone attempt.
-        let mut visited: HashSet<String> = registry.sources.iter().map(|s| s.url.clone()).collect();
+        // Seed the cycle guard with every registered source so an existing one
+        // is skipped without a clone attempt (same identity+URL key as
+        // meld_recursive).
+        let mut visited: HashSet<String> = registry
+            .sources
+            .iter()
+            .map(|s| format!("{}|{}", s.name, s.url))
+            .collect();
         let mut discovered = 0usize;
         for todo in nested {
             if let Ok(s) = parse_spec(&todo.spec)
@@ -4523,6 +4637,7 @@ pub fn sync(
                 &mut registry,
                 &todo.spec,
                 todo.alias,
+                vec![],
                 vec![],
                 false, // no consumer --flat-skills on a sync re-walk (curator config supplies it)
                 None,

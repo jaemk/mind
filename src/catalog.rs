@@ -218,6 +218,72 @@ pub(crate) fn scan_source_at(
         .or_else(|| mindfile.as_ref().and_then(|m| m.source.prefix.clone()))
         .filter(|p| !p.is_empty());
 
+    // spec: LNK-7 -- an item-link instance's catalog is exactly the linked
+    // skill. The repo's declared inventory (an authoritative mind.toml, a
+    // .claude-plugin/ manifest) does not gate it; the DSC-40 version gate and
+    // the [source] metadata handled above still apply.
+    if let Some(item_path) = &source.item_path {
+        return scan_item_link(clone_root, source, &prefix, item_path, out);
+    }
+
+    let base_start = out.len();
+    scan_source_layers(clone_root, source, &mindfile, &prefix, out)?;
+    // spec: DSC-84 -- the consumer's --add-root roots compose with whatever
+    // layer the match above found authoritative.
+    scan_add_roots(clone_root, source, &prefix, base_start, out)
+}
+
+/// Catalog an item-link source instance (LNK-7): the one skill directory at
+/// `item_path`. The path was validated at parse (LNK-10); the confinement
+/// re-check here guards a hand-edited sources.json.
+fn scan_item_link(
+    clone_root: &Path,
+    source: &Source,
+    prefix: &Option<String>,
+    item_path: &str,
+    out: &mut Vec<CatalogItem>,
+) -> Result<()> {
+    let not_a_skill = || MindError::LinkNotASkill {
+        source_name: source.name.clone(),
+        path: item_path.to_string(),
+    };
+    if !plugin_manifest::is_safe_manifest_path(item_path) {
+        return Err(not_a_skill());
+    }
+    let skill_dir = clone_root.join(item_path);
+    let canon = skill_dir
+        .canonicalize()
+        .unwrap_or_else(|_| skill_dir.clone());
+    let canon_root = clone_root
+        .canonicalize()
+        .unwrap_or_else(|_| clone_root.to_path_buf());
+    if !canon.starts_with(&canon_root) {
+        return Err(not_a_skill());
+    }
+    let skill_md = skill_dir.join("SKILL.md");
+    if !(skill_dir.is_dir() && skill_md.is_file()) {
+        return Err(not_a_skill());
+    }
+    out.push(make_item(
+        source,
+        prefix,
+        ItemKind::Skill,
+        skill_dir,
+        &skill_md,
+    ));
+    Ok(())
+}
+
+/// Scan the authoritative discovery layer for a source: an authoritative
+/// `mind.toml` (DSC-3), a `.claude-plugin/` manifest (MKT-2/MKT-14), or the
+/// convention scan (DSC-10..13), in that precedence.
+fn scan_source_layers(
+    clone_root: &Path,
+    source: &Source,
+    mindfile: &Option<MindToml>,
+    prefix: &Option<String>,
+    out: &mut Vec<CatalogItem>,
+) -> Result<()> {
     match mindfile {
         Some(mt) if mt.is_authoritative() => {
             // spec: DSC-52 — authoritative mind.toml ignores scan roots entirely;
@@ -227,7 +293,7 @@ pub(crate) fn scan_source_at(
             let mut seen: std::collections::HashSet<(crate::error::ItemKind, String)> =
                 std::collections::HashSet::new();
             for decl in &mt.items {
-                let item = from_decl(clone_root, source, &prefix, decl)?;
+                let item = from_decl(clone_root, source, prefix, decl)?;
                 let key = (item.kind, item.name.clone());
                 if !seen.insert(key.clone()) {
                     return Err(MindError::DuplicateItem {
@@ -239,11 +305,11 @@ pub(crate) fn scan_source_at(
                 out.push(item);
             }
             if let Some(discover) = &mt.discover {
-                scan_globs(clone_root, source, &prefix, discover, out)?;
+                scan_globs(clone_root, source, prefix, discover, out)?;
             }
             Ok(())
         }
-        ref mt => {
+        mt => {
             // MKT-15: an own-item scan layout means the repo's own items are
             // defined through convention at a chosen layout, so a co-present
             // `.claude-plugin/` manifest's own-item layer is suppressed and
@@ -338,7 +404,7 @@ pub(crate) fn scan_source_at(
                     clone_root,
                     source,
                     manifest,
-                    &prefix,
+                    prefix,
                     has_explicit_prefix,
                     out,
                 )?;
@@ -359,34 +425,7 @@ pub(crate) fn scan_source_at(
             // Validate each root: must exist as a directory inside the clone and
             // must not be absolute or escape the clone via `..`.
             for r in &effective_roots {
-                if std::path::Path::new(r).is_absolute() {
-                    return Err(MindError::InvalidRoot {
-                        source_name: source.name.clone(),
-                        root: r.clone(),
-                    });
-                }
-                let full = clone_root.join(r);
-                // Reject paths that try to escape via `..`.
-                if !full
-                    .canonicalize()
-                    .unwrap_or_else(|_| full.clone())
-                    .starts_with(
-                        clone_root
-                            .canonicalize()
-                            .unwrap_or_else(|_| clone_root.to_path_buf()),
-                    )
-                {
-                    return Err(MindError::InvalidRoot {
-                        source_name: source.name.clone(),
-                        root: r.clone(),
-                    });
-                }
-                if !full.is_dir() {
-                    return Err(MindError::InvalidRoot {
-                        source_name: source.name.clone(),
-                        root: r.clone(),
-                    });
-                }
+                validate_scan_root(clone_root, r, &source.name)?;
             }
 
             // spec: DSC-74 — resolve the effective flat-skills setting: the
@@ -400,7 +439,7 @@ pub(crate) fn scan_source_at(
             let pre_scan_len = out.len();
             for r in &effective_roots {
                 let scan_root = clone_root.join(r);
-                scan_convention(&scan_root, source, &prefix, flat_skills, out)?;
+                scan_convention(&scan_root, source, prefix, flat_skills, out)?;
             }
             // Check for duplicates among items contributed by this source.
             let new_items = &out[pre_scan_len..];
@@ -419,6 +458,99 @@ pub(crate) fn scan_source_at(
             Ok(())
         }
     }
+}
+
+/// Validate a convention scan root: not absolute, inside the clone (no `..`
+/// escape, including via symlinks), and an existing directory. Shared by the
+/// effective-roots scan (DSC-52) and the `--add-root` scan (DSC-84).
+fn validate_scan_root(clone_root: &Path, root: &str, source_name: &str) -> Result<()> {
+    let invalid = || MindError::InvalidRoot {
+        source_name: source_name.to_string(),
+        root: root.to_string(),
+    };
+    if Path::new(root).is_absolute() {
+        return Err(invalid());
+    }
+    let full = clone_root.join(root);
+    // Reject paths that try to escape via `..`.
+    if !full
+        .canonicalize()
+        .unwrap_or_else(|_| full.clone())
+        .starts_with(
+            clone_root
+                .canonicalize()
+                .unwrap_or_else(|_| clone_root.to_path_buf()),
+        )
+    {
+        return Err(invalid());
+    }
+    if !full.is_dir() {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+/// Convention-scan the consumer's `--add-root` roots and union the results
+/// with the items the authoritative layer contributed (DSC-84..86, MKT-17).
+///
+/// Each added root is scanned in BOTH skill layouts at once - the `skills/`
+/// container (DSC-10) and flat bare-name directories (DSC-74) - since the
+/// SKILL.md anchor disambiguates them and a `--flat-skills` override cannot be
+/// combined with composition (it suppresses a plugin manifest, MKT-15). Agent,
+/// rule, and tool discovery under each root is the usual convention.
+fn scan_add_roots(
+    clone_root: &Path,
+    source: &Source,
+    prefix: &Option<String>,
+    base_start: usize,
+    out: &mut Vec<CatalogItem>,
+) -> Result<()> {
+    let Some(add_roots) = source.add_roots.as_ref().filter(|r| !r.is_empty()) else {
+        return Ok(());
+    };
+    // spec: DSC-84 -- the InvalidRoot rules match --root.
+    for r in add_roots {
+        validate_scan_root(clone_root, r, &source.name)?;
+    }
+    let canon = |p: &Path| -> PathBuf { p.canonicalize().unwrap_or_else(|_| p.to_path_buf()) };
+    let base_paths: std::collections::HashSet<PathBuf> =
+        out[base_start..].iter().map(|it| canon(&it.path)).collect();
+    let add_start = out.len();
+    for r in add_roots {
+        let root = clone_root.join(r);
+        // Flat pass (skills as bare child dirs) plus agents/rules/tools ...
+        scan_convention(&root, source, prefix, true, out)?;
+        // ... and the containered skills/ pass. The two cannot overlap: a
+        // `skills` child dir is only a flat skill if it holds a direct
+        // SKILL.md, in which case it has no skill subdirs of its own.
+        let skills_dir = root.join(ItemKind::Skill.dir());
+        for entry in read_dir_opt(&skills_dir)? {
+            let skill_md = entry.join("SKILL.md");
+            if entry.is_dir() && skill_md.is_file() {
+                out.push(make_item(source, prefix, ItemKind::Skill, entry, &skill_md));
+            }
+        }
+    }
+    // spec: DSC-85 -- drop add-root items the authoritative layer already
+    // contributed (same on-disk path); the layer's entry wins, keeping its
+    // namespace and metadata.
+    let mut added: Vec<CatalogItem> = out.split_off(add_start);
+    added.retain(|it| !base_paths.contains(&canon(&it.path)));
+    out.extend(added);
+    // spec: DSC-85 -- (kind, effective name) uniqueness across the source's
+    // whole offering (authoritative layer + added roots).
+    let mut seen: std::collections::HashSet<(ItemKind, String)> = std::collections::HashSet::new();
+    for item in &out[base_start..] {
+        let key = (item.kind, item.effective_name());
+        if !seen.insert(key.clone()) {
+            return Err(MindError::DuplicateItem {
+                source_name: source.name.clone(),
+                kind: key.0,
+                name: key.1,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Build a catalog item from an explicit `[[items]]` declaration.
@@ -813,6 +945,8 @@ mod lifecycle_tests {
             pin: Pin::default(),
             roots: None,
             flat_skills: false,
+            add_roots: None,
+            item_path: None,
             origin: None,
             plugin_version: None,
             install_hooks: Vec::new(),
@@ -1575,6 +1709,8 @@ mod tests {
             pin: Pin::default(),
             roots: None,
             flat_skills: false,
+            add_roots: None,
+            item_path: None,
             origin: None,
             plugin_version: None,
             install_hooks: Vec::new(),
@@ -2927,6 +3063,8 @@ mod plugin_tests {
             pin: Pin::default(),
             roots: None,
             flat_skills: false,
+            add_roots: None,
+            item_path: None,
             origin: None,
             plugin_version: None,
             install_hooks: Vec::new(),

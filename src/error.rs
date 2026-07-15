@@ -334,6 +334,11 @@ pub enum MindError {
     InvalidRoot { source_name: String, root: String },
 
     #[error(
+        "source '{source_name}': linked path '{path}' is not a skill directory in the clone (no SKILL.md)"
+    )]
+    LinkNotASkill { source_name: String, path: String },
+
+    #[error(
         "source '{source_name}': {kind} '{name}' appears under more than one scan root; roots must not yield the same item"
     )]
     DuplicateItem {
@@ -569,6 +574,7 @@ impl MindError {
             MindError::GitNotFound => "git-not-found",
             MindError::ConflictingPin { .. } => "conflicting-pin",
             MindError::InvalidRoot { .. } => "invalid-root",
+            MindError::LinkNotASkill { .. } => "link-not-a-skill",
             MindError::DuplicateItem { .. } => "duplicate-item",
             MindError::ReviewFailed { .. } => "review-failed",
             MindError::SourceNotAllowed { .. } => "source-not-allowed",

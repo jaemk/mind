@@ -146,6 +146,9 @@ and verified.
 | `introspect --json` includes `"schema": 1`; shape is `{"schema":1,"issues":[...],"sources":N,"items":N}` | done | CLI-189 |
 | Hook consent disclosure adds a commit-pinned version-control browse URL alongside the labeled on-disk clone path | done | HOOK-24 |
 | `mind hooks run` / `hooks list`: run or inspect a source's and items' hooks on demand (rerun skipped/failed/lost hooks) | done | [install-hooks.md](install-hooks.md) (HOOK-100..104), CLI-194, CLI-195, CLI-196 |
+| `meld --add-root`: compose extra convention roots with a manifest or authoritative source (install items a `marketplace.json` does not list) | done | DSC-84, DSC-85, DSC-86, MKT-17, STO-55, CLI-197 |
+| Item links: `learn`/`meld` a deep `tree`/`blob` skill URL as a single-item source instance (`host/owner/repo#path` identity, duplicates coexist) | done | [item-link.md](item-link.md) (LNK-1..12) |
+| Item links in `dump`: emit a link instance as a reconstructed deep-URL source entry | planned | LNK-13 |
 
 ## Documents
 
@@ -180,6 +183,10 @@ and verified.
 - [harness-lobes.md](harness-lobes.md) - cross-harness lobes: link skills and
   agents into non-Claude agent homes (Gemini CLI, Codex CLI, Antigravity) via a
   per-lobe `kinds` filter and detected-home presets.
+- [item-link.md](item-link.md) - item links: a deep `tree`/`blob` URL to one
+  skill inside a repo, consumed as its own single-item source instance with an
+  extended `host/owner/repo#path` identity; several links into the same repo
+  coexist as separate sources.
 - [marketplace.md](marketplace.md) - consume Claude Code's native plugin manifests
   (`.claude-plugin/marketplace.json`, `plugin.json`) as a discovery source so a
   repo published for the built-in plugin system melds without re-packaging; the

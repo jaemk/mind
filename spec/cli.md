@@ -71,6 +71,12 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 - `CLI-16` `meld --root <dir>` (repeatable) sets the source's scan roots,
   overriding any `[source].roots` (DSC-51). The roots are persisted on the source
   (STO-17). A root that is not a directory in the clone is `InvalidRoot`.
+- `CLI-197` `meld --add-root <dir>` (repeatable) adds convention scan roots that
+  compose with the source's authoritative discovery layer instead of replacing
+  it (DSC-84): a `.claude-plugin/` manifest or an authoritative `mind.toml`
+  keeps its items and each added root is convention-scanned in addition. The
+  roots are persisted on the source (STO-55). A value that is not a directory in
+  the clone is `InvalidRoot`.
 - `CLI-158` `meld --flat-skills` force-enables flat skill discovery for the
   source: skills are bare-name directories at a scan root, with no `skills/`
   container (DSC-74). The flag is one-directional (no `--no-flat-skills`): it turns
