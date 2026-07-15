@@ -25,7 +25,7 @@ Items are discovered by convention (the paths above) or declared in a
 
 **Lobe.** An agent home `mind` links items into: the directory holding
 `skills/`, `agents/`, and `rules/`. The default lobe is `~/.claude`; you can add
-Gemini, Codex, Antigravity, or any directory, each with an optional per-kind
+Gemini, Codex, Windsurf, Antigravity, or any directory, each with an optional per-kind
 filter (see [Configuration](configuration.md)). The `gemini` preset (path
 `~/.gemini/config`) covers both Gemini CLI and the Antigravity IDE. Users of the
 Antigravity CLI who previously used an `antigravity-cli` preset should configure a
@@ -109,7 +109,7 @@ anything; `evolve` updates the `mind` binary itself.
 | `mind probe [query] [--kind K] [--source S] [--json] [--no-tui]` | browse and search items (interactive TUI on a terminal) |
 | `mind review <target> [-N\|--namespace <ns>]` / `mind review --policy <path>` | validate a source for publishing, or validate a managed policy file (read-only) |
 | `mind introspect [--fix] [--json]` | report drift and broken links (optionally repair) |
-| `mind config show` / `mind config lobes add [<path> \| --preset <name>]\|list\|remove <path>\|detect [--yes] [--json]` | view config and manage agent homes (lobes). `add --preset <name>` adds a preset lobe with a preconfigured path and kinds filter (presets: `gemini`, `codex`, `universal`). `detect` reports which known harness homes exist on the machine and offers to add their presets; adds only with `--yes` or an interactive TTY confirm; `--json` emits detection results as structured JSON. `config lobes list` and `config show` include the kinds filter for each lobe, e.g. `~/.gemini/config [skill]`. See [Configuration](configuration.md) for the preset table and per-harness path details. |
+| `mind config show` / `mind config lobes add [<path> \| --preset <name>]\|list\|remove <path>\|detect [--yes] [--json]` | view config and manage agent homes (lobes). `add --preset <name>` adds a preset lobe with a preconfigured path and kinds filter (presets: `gemini`, `codex`, `universal`, `windsurf`). `detect` reports which known harness homes exist on the machine and offers to add their presets; adds only with `--yes` or an interactive TTY confirm; `--json` emits detection results as structured JSON. `config lobes list` and `config show` include the kinds filter for each lobe, e.g. `~/.gemini/config [skill]`. See [Configuration](configuration.md) for the preset table and per-harness path details. |
 | `mind dump [--output <path>] [--whole-sources]` | write a super-source `mind.toml` reproducing the current melded and installed state (to stdout or `--output <path>`); each source is pinned to its recorded commit; item-filtered by default (`--whole-sources` emits `install = true` for every source regardless of install count) |
 | `mind absorb <ref> [--to <path>] [-f\|--force]` | claim a single unmanaged lobe item into a version-controlled source and install it as a managed item; `--to` sets the destination (see [absorb](absorb.md) for full destination precedence); `--force` overwrites a `kind:name` collision at the destination |
 | `mind completions <shell>` / `mind man` | shell completions / man page |

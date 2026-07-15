@@ -24,6 +24,7 @@ mind links a skill as `<lobe>/skills/<name>` and an agent as
 | Claude Code | `~/.claude/skills/<n>/SKILL.md` | `~/.claude/agents/<n>.md` | `~/.claude` |
 | Gemini CLI / Antigravity | `~/.gemini/config/skills/` | - | `~/.gemini/config` |
 | Codex CLI | `~/.agents/skills/` (native user path; `$CODEX_HOME` toggles, not discovery) | (subagents) | `~/.agents` |
+| Windsurf | `~/.windsurf/skills/` | - | `~/.windsurf` |
 
 `~/.agents/` is the emerging vendor-neutral alias: Codex reads it as its user
 skills path and the standard installer targets it.
@@ -50,7 +51,8 @@ per-rule files. Rules stay Claude-only here; an `AGENTS.md`-writer is out of sco
 - `HARN-4` `config lobes add --preset <name>` adds a lobe with the preset's parent
   path and `kinds`. Presets: `gemini` (`~/.gemini/config`, skill -- detected by the
   presence of `~/.gemini`), `codex` (`~/.agents`, skill), `universal` (`~/.agents`,
-  skill). A preset honors the `CLAUDE_HOME`-style overrides where applicable and
+  skill), `windsurf` (`~/.windsurf`, skill -- detected by the presence of
+  `~/.windsurf`). A preset honors the `CLAUDE_HOME`-style overrides where applicable and
   resolves `~`/relative paths to absolute (STO-16).
 - `HARN-5` Adding non-Claude lobes is opt-in by auto-detect-and-prompt: a setup
   path detects which known harness dirs exist on the machine and offers to add the

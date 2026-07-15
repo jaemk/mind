@@ -52,6 +52,7 @@ Per-harness path table:
 | Claude Code | `~/.claude/skills/<n>/SKILL.md` | `~/.claude/agents/<n>.md` | `~/.claude` |
 | Gemini CLI / Antigravity | `~/.gemini/config/skills/` | - | `~/.gemini/config` |
 | Codex CLI | `~/.agents/skills/` | (subagents) | `~/.agents` |
+| Windsurf | `~/.windsurf/skills/` | - | `~/.windsurf` |
 
 `~/.agents` is a vendor-neutral alias: Codex reads it as its user skills path, so
 one `~/.agents` lobe serves Codex and any harness that follows the same convention.
@@ -66,6 +67,7 @@ one `~/.agents` lobe serves Codex and any harness that follows the same conventi
 | `gemini` | `~/.gemini/config` | skill |
 | `codex` | `~/.agents` | skill |
 | `universal` | `~/.agents` | skill |
+| `windsurf` | `~/.windsurf` | skill |
 
 Example:
 

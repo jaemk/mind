@@ -18,7 +18,7 @@
 //! them at temp dirs: `MIND_HOME`, `CLAUDE_HOME`, `MIND_AGENT_HOMES`.
 //!
 //! A lobe is the parent of `skills/` / `agents/` / `rules/`; the default is
-//! `~/.claude`, but a lobe may be any harness home (Gemini, Codex, Antigravity)
+//! `~/.claude`, but a lobe may be any harness home (Gemini, Codex, Windsurf, Antigravity)
 //! because the skill/agent layouts double as the cross-tool conventions
 //! (spec/harness-lobes.md). A lobe may carry a `kinds` filter (HARN-1): only
 //! items of a listed kind link into it. The [`PRESETS`] table maps a harness name
@@ -78,6 +78,7 @@ pub struct Preset {
 /// - `gemini`: `~/.gemini` exists (Gemini CLI / Antigravity shared home; lobe is `~/.gemini/config`).
 /// - `codex`: `~/.codex` exists (Codex CLI's home; it reads `~/.agents`).
 /// - `universal`: `~/.agents` exists (the vendor-neutral alias dir itself).
+/// - `windsurf`: `~/.windsurf` exists (Windsurf IDE; lobe is `~/.windsurf`).
 pub const PRESETS: &[Preset] = &[
     Preset {
         name: "gemini",
@@ -96,6 +97,12 @@ pub const PRESETS: &[Preset] = &[
         rel_path: ".agents",
         kinds: &[ItemKind::Skill],
         marker_rel: ".agents",
+    },
+    Preset {
+        name: "windsurf",
+        rel_path: ".windsurf",
+        kinds: &[ItemKind::Skill],
+        marker_rel: ".windsurf",
     },
 ];
 
@@ -1325,6 +1332,18 @@ mod tests {
 
         assert_eq!(lookup_preset("universal").unwrap().rel_path, ".agents");
 
+        let windsurf = lookup_preset("windsurf").unwrap();
+        assert_eq!(windsurf.rel_path, ".windsurf");
+        assert_eq!(windsurf.kinds, &[ItemKind::Skill]);
+
+        let ws_lobe = Paths::preset_lobe("windsurf").unwrap();
+        assert!(
+            ws_lobe.path.is_absolute(),
+            "preset path must be absolute (STO-16)"
+        );
+        assert!(ws_lobe.path.ends_with(".windsurf"));
+        assert_eq!(ws_lobe.kinds.as_deref(), Some([ItemKind::Skill].as_slice()));
+
         // Removed presets are unknown.
         assert!(matches!(
             lookup_preset("antigravity"),
@@ -1364,6 +1383,7 @@ mod tests {
         // Create .gemini and .agents but NOT .codex/.gemini/config.
         std::fs::create_dir_all(base.join(".gemini")).unwrap();
         std::fs::create_dir_all(base.join(".agents")).unwrap();
+        std::fs::create_dir_all(base.join(".windsurf")).unwrap();
 
         // SAFETY: ENV_LOCK is held.
         unsafe {
@@ -1394,6 +1414,14 @@ mod tests {
             gemini_lobe.kinds.as_deref(),
             Some([ItemKind::Skill].as_slice())
         );
+
+        assert!(
+            names.contains(&"windsurf"),
+            "windsurf marker exists: {names:?}"
+        );
+        let (_, ws_lobe) = detected.iter().find(|(n, _)| *n == "windsurf").unwrap();
+        assert_eq!(ws_lobe.path, base.join(".windsurf"));
+        assert_eq!(ws_lobe.kinds.as_deref(), Some([ItemKind::Skill].as_slice()));
 
         let _ = std::fs::remove_dir_all(&base);
     }

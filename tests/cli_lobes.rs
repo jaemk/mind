@@ -507,6 +507,32 @@ fn preset_add_codex() {
     assert_eq!(kinds, vec!["skill"], "codex kinds");
 }
 
+// HARN-4: the windsurf preset adds its specific parent path and kinds end-to-end
+// through the CLI. windsurf is skill-only.
+#[test]
+fn preset_add_windsurf() {
+    // spec: HARN-4
+    let sb = Sandbox::new();
+    let added = sb.mind(&["config", "lobes", "add", "--preset", "windsurf"]);
+    assert!(added.success, "windsurf add failed: {}", added.stderr);
+
+    let listed = sb.mind(&["config", "lobes", "list", "--json"]);
+    let v = parse_json(&listed.stdout);
+    let entry = v["lobes"]
+        .as_array()
+        .expect("lobes array")
+        .iter()
+        .find(|l| l["path"].as_str().is_some_and(|p| p.ends_with(".windsurf")))
+        .unwrap_or_else(|| panic!("a .windsurf lobe entry for windsurf: {}", listed.stdout));
+    let kinds: Vec<&str> = entry["kinds"]
+        .as_array()
+        .expect("kinds array")
+        .iter()
+        .map(|k| k.as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, vec!["skill"], "windsurf kinds");
+}
+
 // HARN-2: a kinds-filtered lobe survives the item lifecycle. Install a skill
 // (admitted everywhere) and a rule (Claude-only) into a [skill]-only lobe plus
 // the all-kinds Claude lobe, then:

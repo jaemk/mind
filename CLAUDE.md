@@ -55,7 +55,7 @@ maintained by hand.
 | `init-source [dir]` | maintainer scaffolder: generate a `mind.toml`, report the intra-source reference graph, add `{{ns:}}` templating |
 | `absorb <item> [--to PATH]` | claim an unmanaged lobe item into a managed source, then install it |
 | `dump [--whole-sources]` | write a super-source `mind.toml` reproducing the melded + installed state |
-| `config show` / `config lobes ...` | view config / manage agent homes (lobes); a lobe may carry a `kinds` filter limiting which item kinds link there; `--preset <name>` adds a non-Claude harness lobe (gemini/codex/universal); `detect` auto-detects installed harnesses and prompts |
+| `config show` / `config lobes ...` | view config / manage agent homes (lobes); a lobe may carry a `kinds` filter limiting which item kinds link there; `--preset <name>` adds a non-Claude harness lobe (gemini/codex/universal/windsurf); `detect` auto-detects installed harnesses and prompts |
 | `completions <shell>` / `man` | shell completion script / roff man page |
 
 ## Layout

@@ -108,7 +108,7 @@ and verified.
 | Rename `[discover].sources` alias key to `namespace`; `as` stays as backward-compat alias; `dump` emits canonical `namespace =` | done | DSC-78 |
 | TUI: keep the highlighted row in the middle two-thirds (scroll margin) | done | TUI-16 |
 | TUI: Enter opens a details dialog with the node's valid actions | done | TUI-26 |
-| Cross-harness lobes: per-lobe `kinds` filter, non-Claude home presets (Gemini/Codex/Antigravity), auto-detect-and-prompt | done | [harness-lobes.md](harness-lobes.md) (HARN-1..6) |
+| Cross-harness lobes: per-lobe `kinds` filter, non-Claude home presets (Gemini/Codex/Windsurf/Antigravity), auto-detect-and-prompt | done | [harness-lobes.md](harness-lobes.md) (HARN-1..6) |
 | Consume Claude plugin marketplaces: `.claude-plugin/marketplace.json` + `plugin.json` read as a discovery source, own store+symlink install unchanged | done | [marketplace.md](marketplace.md) (MKT-1..11) |
 | Marketplace + curator compose: a co-present `mind.toml` `[discover].sources` layers on a `.claude-plugin/` manifest; `roots`/`flat-skills`/`[[items]]`/`[discover]` globs suppress the manifest's own-item layer | done | MKT-15, MKT-16 |
 | Graceful degradation of nested non-auth clone failures (skip + curator-empty guard) | done | DSC-79, DSC-80 |
