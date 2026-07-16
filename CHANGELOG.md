@@ -6,6 +6,35 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-07-15
+
+### Added
+
+- Project-scoped lobes: a lobe may be any install-target directory, a global
+  agent home or a project subdirectory. `mind config lobes add [<dir>] --preset
+  <name>` now combines `--preset` with a base path (previously exclusive), and
+  `--subdir <rel>` targets an arbitrary harness subdir under the base (skill-only).
+  A registered project lobe is managed like any other, so a later `mind learn`
+  fans new skills into it and `forget`/`upgrade`/`introspect` maintain its links.
+  A lobe receives links only while its parent directory exists, so a moved or
+  deleted project contributes nothing and is never recreated; `introspect --fix`
+  prunes a vanished lobe from config and the manifest (HARN-10, HARN-13, STO-56).
+- `mind link-project [<dir>]`: shorthand for `config lobes add` targeting a
+  project, with `<dir>` defaulting to the current directory and `--preset` to
+  `windsurf` (HARN-11, CLI-198).
+- `--snapshot` on `config lobes add` / `link-project` writes a one-time frozen
+  real-file copy of the installed skills into the target and registers no lobe
+  (committable, no auto-propagation); `config lobes remove <path> --snapshot`
+  detaches a managed target by converting its symlinks to frozen copies before
+  unregistering. Under `--json` a snapshot emits a machine-readable result
+  (`outcome` `snapshot`/`no-op` with `count` and frozen keys; `detached` with
+  `count` on remove) (HARN-12, HARN-14, CLI-199).
+- `windsurf` preset for the Windsurf editor. It is project-scoped: Windsurf reads
+  skills only from a project's `.windsurf/skills/`, so `config lobes add --preset
+  windsurf` (or `link-project`) targets a project directory, and `config lobes
+  detect` recognizes an installed Windsurf via `~/.codeium/windsurf` and prints
+  `link-project` guidance instead of adding a global lobe (HARN-4, HARN-5).
+
 ## [0.18.0] - 2026-07-15
 
 ### Added
@@ -855,7 +884,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovery, frontmatter descriptions, transactional install/upgrade/uninstall
   with a file registry, and a tag-driven release pipeline with a Homebrew tap.
 
-[Unreleased]: https://github.com/jaemk/mind/compare/v0.18.0...HEAD
+[Unreleased]: https://github.com/jaemk/mind/compare/v0.19.0...HEAD
+[0.19.0]: https://github.com/jaemk/mind/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/jaemk/mind/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/jaemk/mind/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/jaemk/mind/compare/v0.15.0...v0.16.0
