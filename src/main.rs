@@ -207,6 +207,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             roots,
             add_roots,
             flat_skills,
+            pin,
             follow_branch,
             pin_tag,
             pin_ref,
@@ -217,6 +218,10 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             recursive,
             force,
         } => {
+            // spec: CLI-17, CLI-200..202 -- fold the pin flag (and deprecated
+            // aliases) into one request; more than one is a structured
+            // ConflictingPin error rather than a clap usage string.
+            let pin = commands::parse_pin_flags(pin, follow_branch, pin_tag, pin_ref)?;
             // CLI-25: no repo argument (or an explicit `.`/`./`) melds the
             // current directory. Resolve it to an absolute path so `parse_spec`
             // derives a sensible `local/<parent>/<dir>` identity.
@@ -252,9 +257,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
                     roots,
                     add_roots,
                     flat_skills,
-                    follow_branch,
-                    pin_tag,
-                    pin_ref,
+                    pin,
                     install_hook,
                     dangerously_skip_install_hook_check,
                 )?;
@@ -326,6 +329,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
         Command::Learn {
             item,
             all,
+            pin,
             dry_run,
             force,
             dangerously_skip_install_hook_check,
@@ -342,9 +346,17 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
                 dangerously_skip_build: dangerously_skip_build_hook_check,
             };
             // spec: LNK-6 -- a deep tree/blob URL one-shots: register the
-            // item-link instance, then install its skill.
+            // item-link instance, then install its skill. spec: CLI-200 -- `--pin`
+            // freezes the link's ref while registering.
             if item.contains("://") {
-                return commands::learn_link(paths, &item, dry_run, flow);
+                return commands::learn_link(paths, &item, pin, dry_run, flow);
+            }
+            // spec: CLI-200 -- `--pin` only applies to a deep-link URL; for a
+            // plain item ref (an already-melded source) it is a no-op, noted here.
+            if pin {
+                eprintln!(
+                    "note: --pin is ignored for '{item}'; it applies only to a deep tree/blob URL"
+                );
             }
             // CLI-36: `--all` rewrites the ref into the `<source>#*` selector.
             let item = if all {

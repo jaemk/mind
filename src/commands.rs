@@ -42,17 +42,10 @@ pub fn meld(
     roots: Vec<String>,
     add_roots: Vec<String>,
     flat_skills: bool,
-    follow_branch: Option<String>,
-    pin_tag: Option<String>,
-    pin_ref: Option<String>,
+    pin: PinRequest,
     install_hook: Option<String>,
     dangerously_skip_install_hook_check: bool,
 ) -> Result<MeldSummary> {
-    // Resolve the consumer-supplied pin flags into a single Pin. The flags are
-    // independent at the clap layer, so more than one surfaces here as the
-    // structured `ConflictingPin` error (CLI-17) rather than a clap usage string.
-    let consumer_pin = resolve_pin_flags(follow_branch, pin_tag, pin_ref)?;
-
     paths.ensure_layout()?;
     // POL-3: the managed policy is authoritative over user intent. Load it once
     // (Err = invalid policy, fail closed via `?`; None = unmanaged, inert).
@@ -73,7 +66,7 @@ pub fn meld(
         roots,
         add_roots,
         flat_skills,
-        consumer_pin,
+        pin,
         true,
         &mut visited,
         policy.as_ref(),
@@ -134,51 +127,88 @@ pub fn maybe_probe_hint(paths: &Paths, repo: &str) -> Result<()> {
     Ok(())
 }
 
-/// Parse the three optional pin CLI flags into a single `Option<Pin>`.
-/// More than one set flag is a `ConflictingPin` error (CLI-17). The flags are
-/// kept independent at the clap layer so this structured error is what the user
-/// sees, rather than a clap usage string.
+/// A consumer's pin intent from the `meld` CLI flags (CLI-17, CLI-200..202),
+/// before it is resolved against the source. Kept distinct from [`Pin`] because a
+/// freeze (`--pin`) resolves to a concrete commit only after the checkout.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum PinRequest {
+    /// No consumer pin flag; the lower-precedence layers decide (DSC-41, LNK-3).
+    #[default]
+    None,
+    /// Freeze to an immutable commit (CLI-200). `Some(ref)` (`--pin <ref>`)
+    /// resolves and freezes that branch/tag/commit; `None` (`--pin HEAD`) freezes
+    /// the floating tip the lower layers selected.
+    Freeze(Option<String>),
+    /// Track a moving point (CLI-201, from `--pin branch=`/`--pin tag=`): a
+    /// `FollowBranch` or `Tag`, or `DefaultBranch` via a lower-precedence layer.
+    Follow(Pin),
+}
+
+/// Parse the pin CLI flags into a single [`PinRequest`] (CLI-17, CLI-200..202).
+/// Accepts the current `--pin` flag plus the deprecated
+/// `--follow-branch`/`--pin-tag`/`--pin-ref` aliases; more than one set flag is a
+/// `ConflictingPin` error. The flags are kept independent at the clap layer so
+/// this structured error is what the user sees, rather than a clap usage string.
 ///
-/// Each supplied value is validated with [`crate::git::validate_ref_value`] so
-/// a leading-dash value like `--pin-tag=-x` is rejected with `InvalidRef`
-/// before it can reach any git subprocess (DSC-66).
-fn resolve_pin_flags(
+/// Each supplied ref value is validated with [`crate::git::validate_ref_value`] so
+/// a leading-dash value is rejected with `InvalidRef` before it can reach any git
+/// subprocess (DSC-66).
+pub fn parse_pin_flags(
+    pin: Option<String>,
     follow_branch: Option<String>,
     pin_tag: Option<String>,
     pin_ref: Option<String>,
-) -> Result<Option<Pin>> {
-    match (follow_branch, pin_tag, pin_ref) {
-        (None, None, None) => Ok(None),
-        (Some(b), None, None) => {
-            crate::git::validate_ref_value(&b)?;
-            Ok(Some(Pin::FollowBranch(b)))
-        }
-        (None, Some(t), None) => {
-            crate::git::validate_ref_value(&t)?;
-            Ok(Some(Pin::Tag(t)))
-        }
-        (None, None, Some(r)) => {
-            crate::git::validate_ref_value(&r)?;
-            Ok(Some(Pin::Ref(r)))
-        }
-        (b, t, r) => {
-            // More than one is set; name the first two for the error.
-            let mut names = Vec::new();
-            if b.is_some() {
-                names.push("--follow-branch");
-            }
-            if t.is_some() {
-                names.push("--pin-tag");
-            }
-            if r.is_some() {
-                names.push("--pin-ref");
-            }
-            Err(MindError::ConflictingPin {
-                first: names[0].to_string(),
-                second: names[1].to_string(),
-            })
-        }
+) -> Result<PinRequest> {
+    // Collect the set flags as (flag-name, request) so at-most-one is enforced
+    // uniformly across `--pin` and the deprecated aliases (CLI-202).
+    let mut set: Vec<(&str, PinRequest)> = Vec::new();
+    if let Some(v) = pin {
+        set.push(("--pin", parse_pin_value(v)?));
     }
+    if let Some(b) = follow_branch {
+        crate::git::validate_ref_value(&b)?;
+        set.push(("--follow-branch", PinRequest::Follow(Pin::FollowBranch(b))));
+    }
+    if let Some(t) = pin_tag {
+        crate::git::validate_ref_value(&t)?;
+        set.push(("--pin-tag", PinRequest::Follow(Pin::Tag(t))));
+    }
+    if let Some(r) = pin_ref {
+        crate::git::validate_ref_value(&r)?;
+        set.push(("--pin-ref", PinRequest::Freeze(Some(r))));
+    }
+    if set.len() > 1 {
+        return Err(MindError::ConflictingPin {
+            first: set[0].0.to_string(),
+            second: set[1].0.to_string(),
+        });
+    }
+    Ok(set.into_iter().next().map_or(PinRequest::None, |(_, r)| r))
+}
+
+/// Parse the required `--pin` value into a [`PinRequest`] (CLI-200, CLI-201).
+/// `HEAD` freezes the resolved tip to its commit; `branch=<name>` / `tag=<name>`
+/// follow a branch / moving tag; anything else is a ref (tag/sha/branch) that is
+/// resolved and frozen. A value carrying an unrecognized `key=` form is a
+/// `BadPinSpec` usage error so a mistyped key (e.g. `brnach=x`) is not silently
+/// treated as a ref name.
+fn parse_pin_value(value: String) -> Result<PinRequest> {
+    if value == "HEAD" {
+        return Ok(PinRequest::Freeze(None));
+    }
+    if let Some(name) = value.strip_prefix("branch=") {
+        crate::git::validate_ref_value(name)?;
+        return Ok(PinRequest::Follow(Pin::FollowBranch(name.to_string())));
+    }
+    if let Some(name) = value.strip_prefix("tag=") {
+        crate::git::validate_ref_value(name)?;
+        return Ok(PinRequest::Follow(Pin::Tag(name.to_string())));
+    }
+    if value.contains('=') {
+        return Err(MindError::BadPinSpec { value });
+    }
+    crate::git::validate_ref_value(&value)?;
+    Ok(PinRequest::Freeze(Some(value)))
 }
 
 /// A short human description of a `Pin` for the hook disclosure (HOOK-20).
@@ -374,7 +404,7 @@ fn meld_recursive(
     roots: Vec<String>,
     add_roots: Vec<String>,
     flat_skills: bool,
-    consumer_pin: Option<Pin>,
+    consumer_pin: PinRequest,
     top_level: bool,
     visited: &mut HashSet<String>,
     policy: Option<&Policy>,
@@ -548,30 +578,46 @@ fn meld_recursive(
         Vec::new()
     };
 
-    // Step 2: resolve the effective pin (CLI-17, DSC-41, DSC-65):
-    //   consumer flag > curator pin (DSC-65, authoritative) >
-    //   [source] directive > DefaultBranch.
+    // Step 2: resolve the pin (CLI-17, DSC-41, DSC-65, CLI-200..202).
+    // Lower-precedence layers select a floating base point:
+    //   curator pin (DSC-65, authoritative) > item-link URL ref (LNK-3) >
+    //   [source] directive (DSC-41) > DefaultBranch.
     let toml_path = dir.join("mind.toml");
     let directive_pin = mindfile
         .as_ref()
         .map(|m| m.source.pin_directive(&toml_path))
         .transpose()?
         .flatten();
-    // spec: LNK-3 -- an item link's URL ref sits between the curator's pin and
-    // the repo's own [source] directive.
-    let effective_pin = consumer_pin
-        .or(curated_pin)
+    let base_pin = curated_pin
         .or(url_pin)
         .or(directive_pin)
         .unwrap_or(Pin::DefaultBranch);
 
-    // spec: POL-20 -- pinned check stays post-clone because it needs the
-    // effective pin, which may come from the source's mind.toml.
+    // The consumer flag layers over the base: `--pin branch=`/`tag=` overrides the
+    // point (follow), a `--pin` freeze value fixes a point to its current commit
+    // (CLI-200/201). `checkout_pin` is what we actually check out; `freeze` records
+    // whether the resolved commit is then persisted as an immutable ref.
+    //   - `--pin HEAD` freezes the base the lower layers chose;
+    //   - `--pin <ref>` names its own point (branch, tag, or sha), checked out via
+    //     the ref path (`git checkout <ref>` accepts all three) and frozen.
+    let (checkout_pin, freeze) = match consumer_pin {
+        PinRequest::None => (base_pin, false),
+        PinRequest::Follow(p) => (p, false),
+        PinRequest::Freeze(Some(r)) => (Pin::Ref(r), true),
+        PinRequest::Freeze(None) => (base_pin, true),
+    };
+
+    // spec: POL-20 -- pinned check stays post-clone because it needs the effective
+    // pin, which may come from the source's mind.toml. Evaluated on the FINAL
+    // persisted kind: a `--pin` freeze persists a ref, so it satisfies
+    // require-pinned even when the point it freezes is an otherwise-floating branch.
+    let persisted_unpinned =
+        !freeze && matches!(checkout_pin, Pin::DefaultBranch | Pin::FollowBranch(_));
     if let Some(policy) = policy {
         let identity = source.name.clone();
-        if policy.pinned() && matches!(effective_pin, Pin::DefaultBranch | Pin::FollowBranch(_)) {
+        if policy.pinned() && persisted_unpinned {
             // POL-20: pinned policy forbids a floating branch (default branch or
-            // --follow-branch); only a tag/ref pin is permitted.
+            // follow-branch); only a tag / ref / frozen pin is permitted.
             if !is_local {
                 let _ = std::fs::remove_dir_all(&dir);
             }
@@ -579,16 +625,16 @@ fn meld_recursive(
         }
     }
 
-    // Step 3: if the effective pin is not DefaultBranch, the source is a clone at
+    // Step 3: if the checkout point is not DefaultBranch, the source is a clone at
     // that point -- including a *pinned local* source, which is snapshotted into
     // the sources tree (so pinning still works) WITHOUT touching the working tree.
     // A pin that does not resolve is a `Git` error that must leave nothing behind
     // (CLI-18); the clone target is always under the sources tree, never the user's
     // working tree.
-    if effective_pin != Pin::DefaultBranch {
+    if checkout_pin != Pin::DefaultBranch {
         // Setting the pin makes `clone_dir` resolve to the sources-tree path even
         // for a local source.
-        source.pin = effective_pin.clone();
+        source.pin = checkout_pin.clone();
         let target = source.clone_dir(paths);
         if target.exists() {
             std::fs::remove_dir_all(&target).map_err(|e| MindError::io(&target, e))?;
@@ -596,7 +642,7 @@ fn meld_recursive(
         if let Some(parent) = target.parent() {
             crate::paths::mkdir_p(parent)?;
         }
-        if let Err(e) = git::clone_at(&source.url, &target, &effective_pin) {
+        if let Err(e) = git::clone_at(&source.url, &target, &checkout_pin) {
             let _ = std::fs::remove_dir_all(&target);
             // spec: CLI-177, CLI-178, CLI-180 -- apply the same top-level clone
             // error handling (lead with stderr, auth/proxy hints, strip store path)
@@ -616,15 +662,51 @@ fn meld_recursive(
         source.description = mindfile.as_ref().and_then(|m| m.source.description.clone());
     }
 
-    source.pin = effective_pin;
-    // A linked (no-pin) local source records its working-tree HEAD (best-effort; a
-    // non-git local dir simply records no commit). Everything else records the
-    // cloned commit.
-    source.commit = if source.is_linked() {
+    // Resolve the recorded commit at the checkout point. A linked (no-pin) local
+    // source records its working-tree HEAD (best-effort; a non-git local dir
+    // simply records no commit). Everything else records the cloned commit. A
+    // freeze always needs a concrete commit, so it never takes the best-effort path.
+    let linked_default = is_local && checkout_pin == Pin::DefaultBranch && !freeze;
+    let commit = if linked_default {
         git::head_commit(&source.url, &dir).ok()
     } else {
         Some(git::head_commit(&source.url, &dir)?)
     };
+
+    // Step 4: a freeze persists the resolved commit as an immutable ref (CLI-200).
+    // When the frozen point is a *local* source's default branch, Step 3 did not
+    // clone (the working tree was read live), so snapshot it into the sources tree
+    // now -- a ref-pinned local source is a clone, never a live working tree (CLI-27).
+    let final_pin = if freeze {
+        let sha = commit.clone().expect("a freeze reads a concrete commit");
+        let ref_pin = Pin::Ref(sha);
+        if is_local && checkout_pin == Pin::DefaultBranch {
+            source.pin = ref_pin.clone();
+            let target = source.clone_dir(paths);
+            if target.exists() {
+                std::fs::remove_dir_all(&target).map_err(|e| MindError::io(&target, e))?;
+            }
+            if let Some(parent) = target.parent() {
+                crate::paths::mkdir_p(parent)?;
+            }
+            // spec: CLI-18 -- a failed snapshot must leave nothing behind, same as
+            // the Step-3 clone. The source (local) is not a network remote, so the
+            // top-level stderr/auth handling does not apply here.
+            if let Err(e) = git::clone_at(&source.url, &target, &ref_pin) {
+                let _ = std::fs::remove_dir_all(&target);
+                return Err(e);
+            }
+            dir = target;
+            mindfile = MindToml::load(&dir)?;
+            source.description = mindfile.as_ref().and_then(|m| m.source.description.clone());
+        }
+        ref_pin
+    } else {
+        checkout_pin
+    };
+
+    source.pin = final_pin;
+    source.commit = commit;
 
     // Persist the consumer's --root override (STO-17, DSC-51).
     // DSC-52: if --root is given for an authoritative source, print a note.
@@ -997,7 +1079,7 @@ fn meld_recursive(
                 vec![],                  // no consumer roots for nested sources
                 vec![],                  // no consumer --add-root for nested sources
                 false, // no consumer --flat-skills for nested sources (curator config supplies it)
-                None,  // no consumer pin for nested sources
+                PinRequest::None, // no consumer pin for nested sources
                 false,
                 visited,
                 policy,
@@ -1147,8 +1229,8 @@ fn meld_recursive(
                 vec![],
                 vec![],
                 false,
-                None,  // no consumer pin
-                false, // nested, not top-level
+                PinRequest::None, // no consumer pin
+                false,            // nested, not top-level
                 visited,
                 policy,
                 None, // no install hook override
@@ -2418,7 +2500,13 @@ pub struct InstallFlow {
 /// the link instance when it is not yet melded, exactly as `meld <url>` would
 /// (clone, hook consent, prompts), then installs its skill through the
 /// standard learn path (the source-qualified `<instance>#*` selector).
-pub fn learn_link(paths: &Paths, url: &str, dry_run: bool, flow: InstallFlow) -> Result<()> {
+pub fn learn_link(
+    paths: &Paths,
+    url: &str,
+    pin: bool,
+    dry_run: bool,
+    flow: InstallFlow,
+) -> Result<()> {
     let spec = parse_spec(url)?;
     if spec.item_path.is_none() {
         // A plain repo URL names a source, not an item.
@@ -2427,6 +2515,13 @@ pub fn learn_link(paths: &Paths, url: &str, dry_run: bool, flow: InstallFlow) ->
         });
     }
     if !is_melded(paths, url)? {
+        // spec: CLI-200, LNK-3 -- `--pin` freezes the link's branch ref to its
+        // current commit; without it the instance tracks the URL's ref.
+        let pin_req = if pin {
+            PinRequest::Freeze(None)
+        } else {
+            PinRequest::None
+        };
         // spec: LNK-6 -- same registration as `meld <url> --register-only`;
         // the direct install below replaces the CLI-23 offer.
         meld(
@@ -2436,9 +2531,7 @@ pub fn learn_link(paths: &Paths, url: &str, dry_run: bool, flow: InstallFlow) ->
             vec![],
             vec![],
             false,
-            None,
-            None,
-            None,
+            pin_req,
             None,
             flow.dangerously_skip,
         )?;
@@ -3727,9 +3820,7 @@ pub fn absorb(
             vec![],
             vec![],
             false,
-            None,
-            None,
-            None,
+            PinRequest::None,
             None,
             false,
         );
@@ -4317,7 +4408,7 @@ pub fn sync(
                     vec![],
                     vec![],
                     false, // no consumer --flat-skills for an auto-melded source
-                    Some(am.pin.clone()),
+                    PinRequest::Follow(am.pin.clone()), // POL-55: apply the policy pin verbatim
                     false, // skip (not error) if a same-URL entry is already present
                     &mut visited,
                     Some(policy),
@@ -4640,7 +4731,7 @@ pub fn sync(
                 vec![],
                 vec![],
                 false, // no consumer --flat-skills on a sync re-walk (curator config supplies it)
-                None,
+                PinRequest::None,
                 false,
                 &mut visited,
                 policy.as_ref(),

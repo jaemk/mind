@@ -98,10 +98,10 @@ anything; `evolve` updates the `mind` binary itself.
 
 | command | does |
 |---------|------|
-| `mind meld [<repo>] [--register-only] [--yes] [-f\|--force] [-r\|--recursive] [-N\|--namespace <ns>] [--flat-skills] [--root <dir>] [--add-root <dir>] [--follow-branch <branch> \| --pin-tag <tag> \| --pin-ref <commit>] [--install-hook <cmd>] [--dangerously-skip-install-hook-check] [--dangerously-skip-build-hook-check]` | clone and register a source (default `.`), then prompt to install its items (`--register-only` registers without installing; `--yes` installs without prompting; `-f`/`--force` overwrites conflicting non-mind link targets; `-r`/`--recursive` offers to install items from every nested source a super-source curates). `--root` replaces the scan roots; `--add-root` adds roots that compose with the source's own discovery (a `marketplace.json`/`plugin.json` or an authoritative `mind.toml` keeps its items and the added roots are scanned in addition, see [Claude plugin marketplaces](marketplace.md#installing-items-the-manifest-does-not-list)). `<repo>` may also be a deep `tree`/`blob` URL to one skill (an [item link](#item-links-install-one-skill-by-url)). Re-melding an already-melded source installs any missing items, else shows each item's install state and commit |
+| `mind meld [<repo>] [--register-only] [--yes] [-f\|--force] [-r\|--recursive] [-N\|--namespace <ns>] [--flat-skills] [--root <dir>] [--add-root <dir>] [--pin <HEAD\|ref\|branch=NAME\|tag=NAME>] [--install-hook <cmd>] [--dangerously-skip-install-hook-check] [--dangerously-skip-build-hook-check]` | clone and register a source (default `.`), then prompt to install its items (`--register-only` registers without installing; `--yes` installs without prompting; `-f`/`--force` overwrites conflicting non-mind link targets; `-r`/`--recursive` offers to install items from every nested source a super-source curates). `--pin` sets the version tracked (see [Pinning a source version](#pinning-a-source-version)). `--root` replaces the scan roots; `--add-root` adds roots that compose with the source's own discovery (a `marketplace.json`/`plugin.json` or an authoritative `mind.toml` keeps its items and the added roots are scanned in addition, see [Claude plugin marketplaces](marketplace.md#installing-items-the-manifest-does-not-list)). `<repo>` may also be a deep `tree`/`blob` URL to one skill (an [item link](#item-links-install-one-skill-by-url)). Re-melding an already-melded source installs any missing items, else shows each item's install state and commit |
 | `mind init-source [<path>] [--template] [-N\|--namespace <ns>] [--marketplace] [--flat-skills]` | scaffold `mind.toml` + report references; `--template` rewrites bare refs as `{{ns:}}` (maintainer); `-N`/`--namespace` sets `[source].namespace` in the scaffold; `--marketplace` emits a `.claude-plugin/` marketplace scaffold; `--flat-skills` uses a flat skill layout |
 | `mind unmeld <name> [--keep-items] [--yes] [--uninstall-hook <cmd>] [--dangerously-skip-install-hook-check]` | uninstall every item the source installed and drop the source (`--keep-items` skips the uninstall step) |
-| `mind learn [--yes] [-f\|--force] [-n\|--dry-run] [--all] [--dangerously-skip-install-hook-check] [--dangerously-skip-build-hook-check] <item>` | install a skill/agent/rule/tool (glob installs many); a partial selection also pulls in the source siblings it references. `<item>` may also be a deep `tree`/`blob` URL to one skill in a repo: the repo registers as a single-item [item link](#item-links-install-one-skill-by-url) and the skill installs in the same step. `--force` overwrites a conflicting non-mind link target (without it, a conflict prompts on a TTY); `--all` installs every item of the named source (shorthand for `<source>#*`); `-n`/`--dry-run` previews the dependency closure without installing anything |
+| `mind learn [--yes] [-f\|--force] [-n\|--dry-run] [--all] [--pin] [--dangerously-skip-install-hook-check] [--dangerously-skip-build-hook-check] <item>` | install a skill/agent/rule/tool (glob installs many); a partial selection also pulls in the source siblings it references. `<item>` may also be a deep `tree`/`blob` URL to one skill in a repo: the repo registers as a single-item [item link](#item-links-install-one-skill-by-url) and the skill installs in the same step. `--force` overwrites a conflicting non-mind link target (without it, a conflict prompts on a TTY); `--all` installs every item of the named source (shorthand for `<source>#*`); `--pin` freezes a deep-link URL to the ref's current commit (ignored for a plain ref); `-n`/`--dry-run` previews the dependency closure without installing anything |
 | `mind forget [--yes] [-f\|--force] [--unmanaged] [--dangerously-skip-install-hook-check] [<item>]` (alias `unlearn`) | remove an installed item (glob removes many; a multi-match glob confirms first, `--yes` skips). `--unmanaged` scopes removal to unmanaged lobe items only; with no `<item>`, removes every unmanaged item across all lobes. `-f`/`--force` skips the dependents confirmation when the item being removed has dependents. `--dangerously-skip-install-hook-check` runs uninstall hooks without the safety prompt |
 | `mind sync [--upgrade] [--dangerously-skip-install-hook-check] [--dangerously-skip-build-hook-check]` | refresh every source clone; use `upgrade` to also upgrade items. `--upgrade` is deprecated sugar for `sync` followed by `upgrade` (the two hook-check flags are valid only with `--upgrade`) |
 | `mind upgrade [--yes] [--no-sync] [--dangerously-skip-install-hook-check] [--dangerously-skip-build-hook-check] [item]` | fetch each involved source, then upgrade installed items to their latest version (re-runs install hooks on sources that advance); `--no-sync` skips the fetch step |
@@ -144,6 +144,58 @@ Each primary verb has a visible alias for users familiar with conventional packa
 > **Note (migration):** `--link-only` on `meld` is now `--register-only`; `--unlink-only` on `unmeld` is now `--keep-items`. The old spellings continue to work as hidden deprecated aliases. The `config target` and `unmeld detach` aliases are removed.
 
 > **Note (migration):** `upgrade` now syncs the involved sources before computing deltas (equivalent to running `sync` then `upgrade` on those sources). Pass `--no-sync` to skip the fetch step and get the old behavior. `sync --upgrade` is kept as deprecated sugar but `upgrade` alone is the preferred form.
+
+## Pinning a source version
+
+`meld --pin <value>` records how a source tracks upstream. The value is required
+and decides freeze vs follow:
+
+| value | effect |
+|-------|--------|
+| `HEAD` | freeze the current resolved tip to its commit (immutable) |
+| `<tag\|sha\|branch>` | resolve that ref to its current commit and freeze it |
+| `branch=<name>` | follow that branch (floating; `sync` advances it) |
+| `tag=<name>` | follow that tag (re-points on `sync` if it moves) |
+
+A freeze records an immutable `ref` that `sync` never moves. Freezing a branch or
+tag snapshots its current tip; it does not keep tracking it. With no `--pin`, a
+source follows the remote default branch.
+
+> **Common mistake:** `--pin stable` and `--pin branch=stable` are different.
+> `--pin stable` takes a one-time snapshot of `stable` (frozen; `sync` never
+> updates it); `--pin branch=stable` tracks the branch (floating; `sync` advances
+> it). Use the `branch=` form to keep following a branch.
+
+```
+# Freeze the current tip.
+mind meld owner/repo --pin HEAD
+
+# Freeze a specific point: a tag, a commit sha, or a branch's current tip.
+mind meld owner/repo --pin v2.0
+mind meld owner/repo --pin a1b2c3d4e5f6...
+mind meld owner/repo --pin release-branch
+
+# Follow a moving point. sync advances these to the tip on each run.
+mind meld owner/repo --pin branch=stable
+mind meld owner/repo --pin tag=latest
+```
+
+A `--pin` value overrides the repo's `[source]` pin directive (see
+[The mind.toml file](mind-toml.md)). `--pin` requires a value, so a bare `--pin`
+is a usage error rather than silently consuming the next argument.
+
+For a deep-link URL, `learn --pin` (a bare flag on `learn`) freezes the link's ref
+to its current commit in the same step:
+
+```
+# Without --pin the link follows the branch in the URL; with it the link is
+# frozen at that branch's current commit.
+mind learn https://github.com/owner/repo/tree/main/skills/foo --pin
+```
+
+> **Note (migration):** the old `--follow-branch <b>` / `--pin-tag <t>` /
+> `--pin-ref <c>` flags map to `--pin branch=<b>` / `--pin tag=<t>` / `--pin <c>`.
+> They still work as hidden deprecated aliases.
 
 ## probe
 
@@ -194,7 +246,9 @@ The repo registers as its own single-item source instance with the identity
 `host/owner/repo#<path>`: it clones, syncs, and upgrades like any source, but
 offers exactly the linked skill. Several links into the same repo (and a plain
 meld of it) coexist as separate sources. The URL's ref supplies the pin: a
-branch name follows that branch, a 40-hex commit pins it.
+branch name follows that branch, a 40-hex commit pins it. Add `--pin` (a bare flag
+on `learn`) to freeze a branch-ref link at the branch's current commit (see
+[Pinning a source version](#pinning-a-source-version)).
 
 Because the consumer names the exact path, the link bypasses the repo's
 declared inventory: it reaches a skill an authoritative `mind.toml` or a

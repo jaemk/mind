@@ -162,9 +162,14 @@ write to.
 ### Require pinned
 
 With `[sources].pinned = true`, every `meld` must resolve to a tag or ref pin
-(`--pin-tag` / `--pin-ref`, or a `[source]` pin directive that resolves to a tag
-or ref); a floating branch (`--follow-branch` or the default branch) is refused
-(`UnpinnedSourceForbidden`) (POL-20).
+(`--pin <ref>`, `--pin tag=<name>`, or a `[source]` pin directive that resolves to
+a tag or ref); a floating branch (`--pin branch=<name>` or the default branch) is
+refused (`UnpinnedSourceForbidden`) (POL-20).
+
+Note that a `tag=<name>` pin is accepted but is still a *moving* ref: `sync`
+re-points it if the upstream tag is moved. Only `--pin <ref>` (which freezes a
+resolved commit) is truly immutable, so `pinned = true` alone does not guarantee a
+source is frozen to one commit.
 
 With `pinned = true`, every `[sources].auto_meld` entry must declare a `tag` or
 `ref`. A policy whose `auto_meld` contains an unpinned entry or a `follow_branch`

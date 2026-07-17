@@ -1139,6 +1139,28 @@ fn learn_installs_and_creates_symlink() {
 }
 
 #[test]
+fn learn_pin_on_a_plain_ref_is_ignored_with_a_note() {
+    // spec: CLI-200 - `--pin` applies only to a deep-link URL; for a plain item
+    // ref it is a no-op and prints a note, but the install still proceeds.
+    let sb = melded();
+    let r = sb.mind(&["learn", "review", "--pin"]);
+    assert!(
+        r.success,
+        "learn --pin on a plain ref should still install: {}",
+        r.stderr
+    );
+    assert!(
+        r.stderr.contains("--pin is ignored"),
+        "expected the ignored-pin note on stderr, got: {}",
+        r.stderr
+    );
+    assert!(
+        sb.claude_home.join("skills/review").exists(),
+        "the skill must still be installed despite the ignored --pin"
+    );
+}
+
+#[test]
 fn learn_force_overwrites_a_conflicting_target() {
     // spec: CLI-35, LIFE-41
     let sb = melded();
@@ -7299,6 +7321,342 @@ fn meld_two_pin_flags_is_conflicting_pin_error() {
         sources.stdout.contains("no sources melded"),
         "nothing should be registered after a conflict error: {}",
         sources.stdout
+    );
+}
+
+// ---- reworked pin CLI: single `--pin` verb (CLI-200, CLI-201, CLI-202) -------
+
+#[test]
+fn meld_pin_head_freezes_default_tip() {
+    // spec: CLI-200, CLI-18 - `--pin HEAD` freezes the resolved floating tip
+    // (the default branch here) to its current commit as an immutable ref.
+    let (sb, _sha_v1, sha_v2) = make_pinnable_repo("pintest-pin-head");
+    let spec = sb.source_spec();
+
+    let r = sb.mind(&["meld", &spec, "--pin", "HEAD"]);
+    assert!(r.success, "meld --pin HEAD: {}", r.stderr);
+
+    let commit = read_source_commit(&sb);
+    assert_eq!(commit, sha_v2, "--pin HEAD should freeze the main tip");
+
+    let pin_json = read_source_pin_json(&sb);
+    assert!(
+        pin_json.contains("\"ref\""),
+        "--pin HEAD should persist a ref pin: {pin_json}"
+    );
+    assert!(
+        pin_json.contains(&sha_v2),
+        "the frozen ref should be the tip sha: {pin_json}"
+    );
+}
+
+#[test]
+fn meld_pin_requires_a_value() {
+    // spec: CLI-200 - `--pin` takes a required value; a valueless `--pin` is a
+    // clap usage error. Requiring a value is what removes the optional-value
+    // positional-swallow footgun (there is no bare form to consume the next arg).
+    let (sb, _sha_v1, _sha_v2) = make_pinnable_repo("pintest-pin-noval");
+    let spec = sb.source_spec();
+
+    let r = sb.mind(&["meld", &spec, "--pin"]);
+    assert!(!r.success, "valueless --pin must be a usage error");
+    let sources = sb.mind(&["recall", "--sources"]);
+    assert!(
+        sources.stdout.contains("no sources melded"),
+        "nothing registered after a valueless --pin: {}",
+        sources.stdout
+    );
+}
+
+#[test]
+fn meld_pin_empty_branch_name_is_invalid_ref() {
+    // spec: CLI-201 - `--pin branch=` (empty name) reaches validate_ref_value and
+    // is rejected, not silently taken as a follow-branch of "".
+    let (sb, _sha_v1, _sha_v2) = make_pinnable_repo("pintest-pin-emptybranch");
+    let spec = sb.source_spec();
+
+    let r = sb.mind(&["meld", &spec, "--pin", "branch="]);
+    assert!(!r.success, "an empty branch name must fail");
+    assert_eq!(
+        source_count(&sb),
+        0,
+        "nothing registered after an empty branch name"
+    );
+}
+
+#[test]
+fn meld_pin_abbreviated_sha_freezes_that_commit() {
+    // spec: CLI-200 - a bare ref that is an abbreviated sha resolves and freezes
+    // to the full commit, same as a 40-hex sha.
+    let (sb, sha_v1, _sha_v2) = make_pinnable_repo("pintest-pin-shortsha");
+    let spec = sb.source_spec();
+
+    let short = &sha_v1[..8];
+    let r = sb.mind(&["meld", &spec, "--pin", short]);
+    assert!(r.success, "meld --pin <short-sha>: {}", r.stderr);
+
+    let commit = read_source_commit(&sb);
+    assert_eq!(
+        commit, sha_v1,
+        "short sha should resolve to the full commit"
+    );
+    let pin_json = read_source_pin_json(&sb);
+    assert!(
+        pin_json.contains("\"ref\"") && pin_json.contains(&sha_v1),
+        "a short-sha freeze should persist the full-sha ref: {pin_json}"
+    );
+}
+
+#[test]
+fn meld_pin_branch_value_freezes_that_branch_tip() {
+    // spec: CLI-200 - `--pin <branch>` resolves the branch to its current commit
+    // and freezes it (a snapshot, not a follow).
+    let (sb, sha_v1, _sha_v2) = make_pinnable_repo("pintest-pin-branch");
+    let spec = sb.source_spec();
+
+    let r = sb.mind(&["meld", &spec, "--pin", "stable"]);
+    assert!(r.success, "meld --pin stable: {}", r.stderr);
+
+    let commit = read_source_commit(&sb);
+    assert_eq!(commit, sha_v1, "--pin stable should freeze stable's tip");
+
+    let pin_json = read_source_pin_json(&sb);
+    assert!(
+        pin_json.contains("\"ref\""),
+        "--pin <branch> should persist a ref, not follow-branch: {pin_json}"
+    );
+    assert!(
+        pin_json.contains(&sha_v1),
+        "the frozen ref should be stable's sha: {pin_json}"
+    );
+}
+
+#[test]
+fn meld_pin_tag_value_freezes_tag_commit() {
+    // spec: CLI-200 - `--pin <tag>` resolves the tag to its current commit and
+    // persists it as a ref (the resolved sha, NOT the literal tag name, so a later
+    // upstream re-point of the tag does not move this source).
+    let (sb, sha_v1, _sha_v2) = make_pinnable_repo("pintest-pin-tagval");
+    let spec = sb.source_spec();
+
+    let r = sb.mind(&["meld", &spec, "--pin", "v1.0"]);
+    assert!(r.success, "meld --pin v1.0: {}", r.stderr);
+
+    let commit = read_source_commit(&sb);
+    assert_eq!(commit, sha_v1, "--pin v1.0 should freeze the tag's commit");
+
+    let pin_json = read_source_pin_json(&sb);
+    assert!(
+        pin_json.contains("\"ref\""),
+        "--pin <tag> should persist a ref, not a tag pin: {pin_json}"
+    );
+    assert!(
+        pin_json.contains(&sha_v1) && !pin_json.contains("v1.0"),
+        "the ref value must be the resolved sha, not the literal tag: {pin_json}"
+    );
+}
+
+#[test]
+fn meld_pin_sha_value_is_exact_ref() {
+    // spec: CLI-200 - `--pin <sha>` freezes that exact commit.
+    let (sb, sha_v1, _sha_v2) = make_pinnable_repo("pintest-pin-sha");
+    let spec = sb.source_spec();
+
+    let r = sb.mind(&["meld", &spec, "--pin", &sha_v1]);
+    assert!(r.success, "meld --pin <sha>: {}", r.stderr);
+
+    let commit = read_source_commit(&sb);
+    assert_eq!(commit, sha_v1, "--pin <sha> should record that sha");
+
+    let pin_json = read_source_pin_json(&sb);
+    assert!(
+        pin_json.contains("\"ref\"") && pin_json.contains(&sha_v1),
+        "--pin <sha> should persist a ref at that sha: {pin_json}"
+    );
+}
+
+#[test]
+fn meld_pin_head_freezes_the_directive_selected_branch() {
+    // spec: CLI-200 - `--pin HEAD` freezes the point the lower-precedence layers
+    // chose (here a `[source]` follow-branch directive), not the default branch:
+    // it changes float->freeze, it does not change the branch selection.
+    let (sb, sha_v1, _sha_v2) = make_pinnable_repo("pintest-pin-directive");
+    sb.write_and_commit("mind.toml", "[source]\nfollow-branch = \"stable\"\n");
+    let spec = sb.source_spec();
+
+    let r = sb.mind(&["meld", &spec, "--pin", "HEAD"]);
+    assert!(r.success, "meld --pin HEAD over directive: {}", r.stderr);
+
+    let commit = read_source_commit(&sb);
+    assert_eq!(
+        commit, sha_v1,
+        "--pin HEAD should freeze stable's tip (the directive's branch)"
+    );
+    let pin_json = read_source_pin_json(&sb);
+    assert!(
+        pin_json.contains("\"ref\""),
+        "the frozen directive branch should persist as a ref: {pin_json}"
+    );
+}
+
+#[test]
+fn meld_pin_branch_equals_tracks_branch() {
+    // spec: CLI-201 - `--pin branch=<name>` tracks that branch (float).
+    let (sb, sha_v1, _sha_v2) = make_pinnable_repo("pintest-follow-branch-spec");
+    let spec = sb.source_spec();
+
+    let r = sb.mind(&["meld", &spec, "--pin", "branch=stable"]);
+    assert!(r.success, "meld --pin branch=stable: {}", r.stderr);
+
+    let commit = read_source_commit(&sb);
+    assert_eq!(commit, sha_v1, "--pin branch=stable records stable's tip");
+    let pin_json = read_source_pin_json(&sb);
+    assert!(
+        pin_json.contains("follow-branch") && pin_json.contains("stable"),
+        "pin should be follow-branch=stable: {pin_json}"
+    );
+}
+
+#[test]
+fn meld_pin_tag_equals_tracks_moving_tag() {
+    // spec: CLI-201 - `--pin tag=<name>` records a tag pin (moving tag).
+    let (sb, sha_v1, _sha_v2) = make_pinnable_repo("pintest-follow-tag-spec");
+    let spec = sb.source_spec();
+
+    let r = sb.mind(&["meld", &spec, "--pin", "tag=v1.0"]);
+    assert!(r.success, "meld --pin tag=v1.0: {}", r.stderr);
+
+    let commit = read_source_commit(&sb);
+    assert_eq!(commit, sha_v1, "--pin tag=v1.0 records the tag's commit");
+    let pin_json = read_source_pin_json(&sb);
+    assert!(
+        pin_json.contains("\"tag\"") && pin_json.contains("v1.0"),
+        "pin should be tag=v1.0: {pin_json}"
+    );
+}
+
+#[test]
+fn meld_pin_bad_key_is_usage_error() {
+    // spec: CLI-201 - a value with an unrecognized `key=` form is a BadPinSpec
+    // error, so a mistyped key is not silently treated as a ref name.
+    let (sb, _sha_v1, _sha_v2) = make_pinnable_repo("pintest-pin-badkey");
+    let spec = sb.source_spec();
+
+    let r = sb.mind(&["meld", &spec, "--pin", "brnach=stable"]);
+    assert!(!r.success, "an unrecognized --pin key must fail");
+    assert!(
+        r.stderr.contains("invalid --pin value"),
+        "expected the BadPinSpec error, got: {}",
+        r.stderr
+    );
+    let sources = sb.mind(&["recall", "--sources"]);
+    assert!(
+        sources.stdout.contains("no sources melded"),
+        "nothing registered after a bad --pin value: {}",
+        sources.stdout
+    );
+}
+
+#[test]
+fn meld_pin_frozen_branch_does_not_advance_on_sync() {
+    // spec: CLI-200, CLI-55 - a `--pin <branch>` freeze records a ref, so a later
+    // upstream commit on that branch does NOT move the source on sync (the
+    // freeze-vs-follow distinction, proven behaviorally at the meld level).
+    let (sb, sha_v1, _sha_v2) = make_pinnable_repo("pintest-pin-frozen-sync");
+    let spec = sb.source_spec();
+
+    let r = sb.mind(&["meld", &spec, "--pin", "stable"]);
+    assert!(r.success, "meld --pin stable: {}", r.stderr);
+    assert_eq!(read_source_commit(&sb), sha_v1, "frozen at stable's tip");
+
+    // Advance the stable branch upstream, then sync.
+    git(&sb.source, &["checkout", "-q", "stable"]);
+    write(
+        &sb.source.join("agents/dev.md"),
+        "---\nname: dev\ndescription: dev agent v3\n---\n# dev v3\n",
+    );
+    git(&sb.source, &["commit", "-aqm", "stable moves"]);
+    git(&sb.source, &["checkout", "-q", "main"]);
+
+    assert!(sb.mind(&["sync"]).success, "sync should succeed");
+    assert_eq!(
+        read_source_commit(&sb),
+        sha_v1,
+        "a frozen ref must not advance when its branch moves"
+    );
+}
+
+#[test]
+fn meld_pin_freeze_satisfies_require_pinned_policy() {
+    // spec: CLI-200, POL-20 - a `--pin <branch>` freeze persists a ref, so it is
+    // accepted under a `require-pinned` policy even though the point it freezes is
+    // an otherwise-floating branch (which a bare follow would be refused for).
+    let (sb, sha_v1, _sha_v2) = make_pinnable_repo("pintest-pin-policy");
+    let policy = write_policy(
+        &sb,
+        "[sources]\npinned = true\nlock = true\nallow = [\"local/*/pintest-pin-policy\"]\n",
+    );
+    let spec = sb.source_spec();
+
+    // A plain follow of a branch is refused under require-pinned...
+    let refused = sb.mind_env(
+        &["meld", &spec, "--pin", "branch=stable"],
+        &[("MIND_POLICY_FILE", policy.as_str())],
+    );
+    assert!(
+        !refused.success,
+        "following a branch must be refused under require-pinned: {}",
+        refused.stdout
+    );
+    assert!(
+        refused.stderr.contains("must be pinned"),
+        "refusal should be the require-pinned one, got: {}",
+        refused.stderr
+    );
+    assert_eq!(source_count(&sb), 0, "nothing registered on refusal");
+
+    // ...but freezing that same branch is accepted (it persists a ref).
+    let r = sb.mind_env(
+        &["meld", &spec, "--pin", "stable"],
+        &[("MIND_POLICY_FILE", policy.as_str())],
+    );
+    assert!(
+        r.success,
+        "a --pin freeze must satisfy require-pinned: {}",
+        r.stderr
+    );
+    assert_eq!(read_source_commit(&sb), sha_v1);
+    let pin_json = read_source_pin_json(&sb);
+    assert!(
+        pin_json.contains("\"ref\""),
+        "the accepted pin must be a ref: {pin_json}"
+    );
+}
+
+#[test]
+fn meld_deprecated_aliases_map_and_conflict() {
+    // spec: CLI-202 - the deprecated `--pin-ref` alias still freezes a commit,
+    // and mixing a deprecated alias with `--pin` is still ConflictingPin.
+    let (sb, sha_v1, _sha_v2) = make_pinnable_repo("pintest-deprecated-alias");
+    let spec = sb.source_spec();
+
+    let r = sb.mind(&["meld", &spec, "--pin-ref", &sha_v1]);
+    assert!(r.success, "deprecated --pin-ref: {}", r.stderr);
+    let pin_json = read_source_pin_json(&sb);
+    assert!(
+        pin_json.contains("\"ref\"") && pin_json.contains(&sha_v1),
+        "--pin-ref should still persist a ref: {pin_json}"
+    );
+
+    // A deprecated alias plus `--pin` counts toward the at-most-one rule.
+    let (sb2, _s1, _s2) = make_pinnable_repo("pintest-deprecated-conflict");
+    let spec2 = sb2.source_spec();
+    let r2 = sb2.mind(&["meld", &spec2, "--pin", "HEAD", "--follow-branch", "main"]);
+    assert!(!r2.success, "--pin with a deprecated alias must conflict");
+    assert!(
+        r2.stderr.contains("conflicting pin flags"),
+        "expected ConflictingPin, got: {}",
+        r2.stderr
     );
 }
 

@@ -106,20 +106,31 @@ pub enum Command {
         #[arg(short = 'N', long = "namespace", alias = "as", value_name = "PREFIX")]
         alias: Option<String>,
 
-        /// Track a named branch (overrides the repo's [source] pin directive).
-        /// At most one of --follow-branch, --pin-tag, --pin-ref may be given;
-        /// more than one is an error.
-        #[arg(long, value_name = "BRANCH")]
+        /// Set the version this source tracks (overrides the repo's [source] pin
+        /// directive). Takes one required value. `HEAD` freezes the current
+        /// resolved tip (the point that would otherwise be melded) to its commit.
+        /// A bare `<tag|sha|branch>` resolves that ref to its current commit and
+        /// freezes it (a snapshot, not a track). `branch=<name>` follows that
+        /// branch (floating; `sync` advances it); `tag=<name>` follows that tag
+        /// (re-points on `sync` if it moves). With no `--pin`, the repo's
+        /// `[source]` pin directive (else the remote default branch) applies.
+        // spec: CLI-200, CLI-201
+        #[arg(long, value_name = "HEAD|REF|branch=NAME|tag=NAME")]
+        pin: Option<String>,
+
+        /// Deprecated: use `--pin branch=<name>`.
+        // spec: CLI-202
+        #[arg(long, value_name = "BRANCH", hide = true)]
         follow_branch: Option<String>,
 
-        /// Fix to a tag (overrides the repo's [source] pin directive).
-        /// At most one of --follow-branch, --pin-tag, --pin-ref may be given.
-        #[arg(long, value_name = "TAG")]
+        /// Deprecated: use `--pin tag=<name>`.
+        // spec: CLI-202
+        #[arg(long, value_name = "TAG", hide = true)]
         pin_tag: Option<String>,
 
-        /// Fix to a specific commit (overrides the repo's [source] pin directive).
-        /// At most one of --follow-branch, --pin-tag, --pin-ref may be given.
-        #[arg(long, value_name = "COMMIT")]
+        /// Deprecated: use `--pin <commit>`.
+        // spec: CLI-202
+        #[arg(long, value_name = "COMMIT", hide = true)]
         pin_ref: Option<String>,
 
         /// Set the source's convention-scan roots to one or more repo-root-relative
@@ -279,6 +290,16 @@ pub enum Command {
         /// `<source>#*` selector; rejected if the ref already has a `#` selector.
         #[arg(long)]
         all: bool,
+
+        /// For a deep tree/blob URL, freeze the link's branch ref to its current
+        /// commit when registering the single-item source, so the instance is an
+        /// immutable snapshot instead of tracking the branch. This is a bare flag
+        /// (unlike `meld --pin`, which takes a value): the ref comes from the URL.
+        /// Ignored (with a note) for a non-URL item ref, which names an
+        /// already-melded source.
+        // spec: CLI-200
+        #[arg(long)]
+        pin: bool,
 
         /// Show what would be installed without installing anything.
         #[arg(short = 'n', long = "dry-run")]

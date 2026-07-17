@@ -745,9 +745,7 @@ mod tests {
             vec![],
             vec![],
             false,
-            None,
-            None,
-            None,
+            crate::commands::PinRequest::None,
             None,
             false,
         )
@@ -845,9 +843,7 @@ mod tests {
             vec![],
             vec![],
             false,
-            None,
-            None,
-            None,
+            crate::commands::PinRequest::None,
             None,
             false,
         )
@@ -1018,9 +1014,7 @@ mod tests {
             vec![],
             vec![],
             false,
-            None,
-            None,
-            None,
+            crate::commands::PinRequest::None,
             None,
             false,
         )

@@ -348,6 +348,33 @@ fn sha_link_pins_and_does_not_follow() {
 }
 
 #[test]
+fn learn_pin_freezes_a_branch_link() {
+    // spec: CLI-200, LNK-3
+    // `learn <branch-link> --pin` freezes the link's branch ref to its current
+    // commit, so an upstream edit does not reach the installed skill through
+    // sync + upgrade (the branch-following default would, cf.
+    // branch_link_upgrades_with_the_branch).
+    let sb = Sandbox::new();
+    let r = sb.mind(&["learn", &sb.link("tree/main/skills/review"), "--pin"]);
+    assert!(
+        r.success,
+        "pinned link learn failed: {} {}",
+        r.stdout, r.stderr
+    );
+    sb.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\ndescription: Review the diff for bugs\n---\n# review skill\nedited\n",
+    );
+    assert!(sb.mind(&["sync"]).success);
+    assert!(sb.mind(&["upgrade", "--yes"]).success);
+    let installed = std::fs::read_to_string(sb.claude_home.join("skills/review/SKILL.md")).unwrap();
+    assert!(
+        !installed.contains("edited"),
+        "a --pin frozen branch link must not follow the branch: {installed}"
+    );
+}
+
+#[test]
 fn unmeld_link_instance_uninstalls_its_skill() {
     // spec: LNK-5
     let sb = Sandbox::new();

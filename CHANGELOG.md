@@ -6,6 +6,21 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Reworked `meld` version pinning into a single `--pin <value>` flag (value
+  required). `--pin HEAD` freezes the current resolved tip to its commit;
+  `--pin <tag|sha|branch>` resolves that ref and freezes it; `--pin branch=<name>`
+  follows a branch and `--pin tag=<name>` follows a moving tag. With no `--pin`, a
+  source follows the remote default branch. The old `--follow-branch` /
+  `--pin-tag` / `--pin-ref` flags remain as hidden deprecated aliases mapping to
+  `--pin branch=` / `--pin tag=` / `--pin <ref>` (CLI-200, CLI-201, CLI-202).
+
+### Added
+
+- `learn <url> --pin` freezes a deep-link's branch ref to its current commit when
+  registering the single-item source, instead of tracking the branch.
+
 ## [0.19.0] - 2026-07-15
 
 ### Added

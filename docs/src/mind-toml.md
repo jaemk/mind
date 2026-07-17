@@ -72,8 +72,8 @@ roots = ["packages"]                     # scan under these dirs, not the repo r
   unattended). Deprecated in favor of a `[[hooks]]` install entry below; still
   parsed, but new sources should use `[[hooks]]`.
 - **`follow-branch` / `pin-tag` / `pin-ref`**: how `sync` tracks upstream. Declare
-  at most one; two is an error. A consumer `meld --follow-branch|--pin-tag|--pin-ref`
-  overrides it.
+  at most one; two is an error. A consumer `meld --pin` overrides it (see
+  [Pinning a source version](commands.md#pinning-a-source-version)).
 - **`roots`**: convention discovery scans under each listed directory instead of
   the repo root, for a monorepo or subtree layout. Ignored when the file is
   authoritative (`[[items]]`/`[discover]` paths are always repo-root-relative).
@@ -198,8 +198,8 @@ has no `mind.toml` of its own:
 - **`follow-branch`** / **`pin-tag`** / **`pin-ref`**: curator-supplied pin
   directive for the nested source. Declare at most one; two is an error. `sync`
   uses whichever is set, the same as if the source had declared it in its own
-  `[source]` table (DSC-41). A consumer's explicit `meld --follow-branch`,
-  `--pin-tag`, or `--pin-ref` still overrides this.
+  `[source]` table (DSC-41). A consumer's explicit `meld --pin` still overrides
+  this.
 - **`roots`**: convention scan roots for the nested source, for a monorepo or
   subtree layout (DSC-50).
 - **`[[discover.sources.hooks]]`**: one or more hooks to run for the nested

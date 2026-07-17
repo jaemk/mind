@@ -327,10 +327,13 @@ pub enum MindError {
     #[error("git executable not found on PATH; install git to meld and sync sources")]
     GitNotFound,
 
-    #[error(
-        "conflicting pin flags: {first} and {second} cannot both be given; supply at most one of --follow-branch, --pin-tag, --pin-ref"
-    )]
+    #[error("conflicting pin flags: {first} and {second} cannot both be given; supply at most one")]
     ConflictingPin { first: String, second: String },
+
+    #[error(
+        "invalid --pin value '{value}': expected HEAD, a ref (tag/sha/branch), 'branch=<name>', or 'tag=<name>'"
+    )]
+    BadPinSpec { value: String },
 
     #[error("source '{source_name}': scan root '{root}' is not a directory in the clone")]
     InvalidRoot { source_name: String, root: String },
@@ -583,6 +586,7 @@ impl MindError {
             MindError::CuratorAllNestedFailed { .. } => "curator-all-nested-failed",
             MindError::GitNotFound => "git-not-found",
             MindError::ConflictingPin { .. } => "conflicting-pin",
+            MindError::BadPinSpec { .. } => "bad-pin-spec",
             MindError::InvalidRoot { .. } => "invalid-root",
             MindError::LinkNotASkill { .. } => "link-not-a-skill",
             MindError::DuplicateItem { .. } => "duplicate-item",

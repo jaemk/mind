@@ -5,7 +5,7 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 | command | role |
 |---------|------|
 | `probe [query] [--no-tui]` | interactive browser (default); catalog listing with `--no-tui`/`--json` |
-| `meld [<repo>] [--register-only] [--yes] [-N\|--namespace <prefix>] [--root <dir>] [--flat-skills] [--follow-branch\|--pin-tag\|--pin-ref <ref>]` | connect a source (default `.`), then install its items |
+| `meld [<repo>] [--register-only] [--yes] [-N\|--namespace <prefix>] [--root <dir>] [--flat-skills] [--pin <HEAD\|ref\|branch=NAME\|tag=NAME>]` | connect a source (default `.`), then install its items |
 | `init-source [<path>] [--template] [--marketplace] [--flat-skills] [-N\|--namespace <prefix>]` | scaffold `mind.toml` + detect references (maintainer) |
 | `unmeld <name\|glob> [--keep-items] [--yes] [--uninstall-hook <cmd>] [--dangerously-skip-install-hook-check]` | disconnect a source (or all sources matching a glob) and uninstall its items (`--keep-items` leaves them) |
 | `learn <item> [--dangerously-skip-install-hook-check]` (alias: `install`) | install |
@@ -85,15 +85,39 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   kind only; agent, rule, and tool discovery are unaffected. It is persisted on the
   source (STO-44). For an authoritative `mind.toml` it is ignored with a note
   (DSC-76).
-- `CLI-17` `meld` accepts at most one of `--follow-branch <branch>`,
-  `--pin-tag <tag>`, `--pin-ref <commit>`; supplying more than one is
-  `ConflictingPin`. The chosen pin is persisted on the source (STO-18). With none
-  given, the source's `[source]` pin directive (DSC-41) applies, else the default
-  is `--follow-branch` tracking the remote default branch.
-- `CLI-18` `meld` clones at the pinned point: `--pin-tag` / `--pin-ref` check out
-  that tag / commit; `--follow-branch` tracks the named branch (default the remote
-  default branch). The recorded commit is the resolved HEAD of that point. A pin
-  that does not resolve in the remote is a `Git` error and nothing is registered.
+- `CLI-17` `meld` takes at most one pin flag: `--pin` (with a required value) or a
+  deprecated alias (CLI-202). Supplying more than one (two aliases, or `--pin` plus
+  an alias) is `ConflictingPin`. The chosen pin is persisted on the source
+  (STO-18). With no pin flag, the source's `[source]` pin directive (DSC-41)
+  applies, else the default is following the remote default branch. `--pin`
+  requires a value, so there is no bare-flag form that could ambiguously consume
+  the following positional argument.
+- `CLI-18` `meld` clones at the pinned point and records the resolved HEAD commit.
+  A `follow` pin (`default-branch` / `follow-branch` / `tag`) checks out that
+  branch or tag; a `ref` pin checks out the commit. For a `--pin` value that
+  freezes (`HEAD` or a bare ref, CLI-200), the point is first checked out to
+  resolve its current commit, which is then persisted as a `ref` pin. A pin that
+  does not resolve in the remote is a `Git` error and nothing is registered.
+- `CLI-200` `--pin <value>` where the value freezes to an immutable `ref` pin:
+  `--pin HEAD` freezes the current resolved tip (the point that would otherwise be
+  melded: the remote default branch, a deep-link branch ref (LNK-3), or a
+  `[source]` directive) to its current commit sha. `--pin <ref>` (a bare tag name,
+  sha, or branch name) resolves `<ref>` to its current commit and freezes that.
+  Freezing a branch or tag snapshots its current tip; it does not track it. On
+  `learn`, `--pin` is a bare flag that freezes a deep-link URL's ref (LNK-3); for a
+  plain (non-URL) item ref it is a no-op and prints a note, and the install still
+  proceeds.
+- `CLI-201` `--pin branch=<name>` and `--pin tag=<name>` record a floating pin:
+  `branch=<name>` tracks that branch (`follow-branch`); `tag=<name>` tracks that
+  tag (`tag`), which re-points on sync if the upstream tag moves (CLI-55). A value
+  carrying an unrecognized `key=` form (anything but `branch=` or `tag=`) is a
+  `BadPinSpec` usage error, so a mistyped key is not silently taken as a ref name.
+- `CLI-202` The former `--follow-branch <branch>`, `--pin-tag <tag>`, and
+  `--pin-ref <commit>` flags remain as hidden deprecated aliases mapping onto the
+  new model: `--pin branch=<branch>`, `--pin tag=<tag>`, and `--pin <commit>`
+  respectively. They are accepted for one release and count toward the
+  at-most-one-pin rule (CLI-17), so mixing a deprecated alias with `--pin` is
+  `ConflictingPin`.
 - `CLI-19` An explicit `git@host:owner/repo` (or `ssh://`) spec clones over SSH
   using the user's key/agent, with no username/password prompt. With `ssh = true`
   in `~/.mind/config.toml`, `meld` (and `sync` auto-meld) also rewrites an https
@@ -142,9 +166,8 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   registry entry (and, by default, its installed items) but leaves the working
   tree, and a failed `meld` never touches it. `sync` does not fetch or reset a
   linked source (it only re-reads its HEAD); a deleted working tree is a per-source
-  sync error (CLI-54). A pinned local source (`--follow-branch`/`--pin-tag`/
-  `--pin-ref` or a `[source]` directive) is instead cloned as a snapshot at the
-  pin, so pinning still works.
+  sync error (CLI-54). A pinned local source (any `--pin` or a `[source]`
+  directive) is instead cloned as a snapshot at the pin, so pinning still works.
 
 - `CLI-159` `meld --namespace <prefix>` sets the source's namespace, opting the
   source into prefixing (with no flag and no `[source].prefix`, items install bare,

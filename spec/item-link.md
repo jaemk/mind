@@ -32,12 +32,14 @@ same repo, and a plain meld of that repo, coexist as separate sources.
   curate individual skills. A URL with a `tree`/`blob` segment that does not
   parse as an item link is `InvalidRepoSpec`.
 - `LNK-3` The `<ref>` segment supplies the instance's pin: a 40-hex ref is a
-  commit pin (as `--pin-ref`), anything else follows that branch (as
-  `--follow-branch`). An explicit consumer pin flag (CLI-17) overrides the
+  commit pin (as `--pin <sha>`), anything else follows that branch (as
+  `--pin branch=<name>`). An explicit consumer pin flag (CLI-17) overrides the
   URL's ref; the URL's ref overrides the repo's `[source]` pin directive
-  (DSC-41). The ref is a single path segment: a branch name containing `/` is
-  not representable in a link (the first segment after `tree`/`blob` is taken
-  as the ref); meld the repo with `--follow-branch` instead.
+  (DSC-41). `learn <url> --pin` (a bare flag on `learn`, CLI-200) freezes the link's
+  branch ref to its current commit, so a branch-ref link can be snapshotted in one
+  step. The ref is a single path segment: a branch name containing `/` is not
+  representable in a link (the first segment after `tree`/`blob` is taken as the
+  ref); meld the repo with `--pin branch=<name>` instead.
 
 ## Identity and lifecycle
 
