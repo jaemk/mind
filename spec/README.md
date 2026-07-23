@@ -129,6 +129,7 @@ and verified.
 | Managed-policy permission warning: warn when the system policy file or its parent dir is group/world-writable or not root-owned; skipped for `$MIND_POLICY_FILE` | done | POL-64, POL-65 |
 | Managed-policy pin skew warning: when running binary is above the policy pin, print a human-only warning that the pin is an upper bound and does not downgrade; `--json` outcome is the machine hook | done | POL-66 |
 | `evolve`/install.sh network fetch timeouts (`MIND_HTTP_TIMEOUT_SECS`) | done | STO-52 |
+| `evolve` GitHub API auth: send `GITHUB_TOKEN`/`GH_TOKEN` as a bearer header on `api.github.com` to escape the unauthenticated per-IP 403 rate limit | done | STO-57 |
 | Actionable git-failure hints: auth (SSH/config/helper), proxy (407); clone errors lead with stderr, detail behind `--verbose`; `learn` typo points at `probe` | done | CLI-177, CLI-178, CLI-179, CLI-180 |
 | `--json` error envelope on stdout (`{"schema":1,"error":{"kind","message"}}`); stable per-variant `kind`; clap usage errors stay text | done | CLI-181, CLI-182, CLI-183 |
 | `-n` reserved for `--dry-run`; `-N` short for `--namespace`; `probe --no-tui` long-only | done | CLI-163, CLI-164, TUI-54 |

@@ -599,6 +599,59 @@ pub(crate) fn wget_file_args(url: &str, dest: &str, timeout_secs: u64) -> Vec<St
     ]
 }
 
+/// Whether a URL targets the GitHub REST API host. Only `api.github.com` is
+/// rate-limited per source IP for unauthenticated callers; the release-artifact
+/// and SHA256SUMS downloads live on `github.com` / the CDN and are not.
+fn is_github_api_url(url: &str) -> bool {
+    url.starts_with("https://api.github.com/")
+}
+
+/// A GitHub token from the environment, if set: `GITHUB_TOKEN` first, then
+/// `GH_TOKEN` (matching the `gh` CLI), first non-empty wins. Trailing whitespace
+/// is trimmed so a token read from a file with a trailing newline still forms a
+/// valid header.
+fn github_token() -> Option<String> {
+    for var in ["GITHUB_TOKEN", "GH_TOKEN"] {
+        if let Ok(v) = std::env::var(var) {
+            let v = v.trim();
+            if !v.is_empty() {
+                return Some(v.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// The extra curl args authenticating a GitHub REST API request (STO-57).
+///
+/// Returns `-H "Authorization: Bearer <token>"` only when a non-empty token is
+/// present AND the URL targets `api.github.com`, so the token is never forwarded
+/// to the artifact CDN on a cross-host redirect. Pure (token passed in) so the
+/// arg vector is unit-testable without touching the environment or a process.
+// spec: STO-57
+pub(crate) fn curl_auth_args(url: &str, token: Option<&str>) -> Vec<String> {
+    match token {
+        Some(t) if !t.is_empty() && is_github_api_url(url) => {
+            vec!["-H".into(), format!("Authorization: Bearer {t}")]
+        }
+        _ => vec![],
+    }
+}
+
+/// The extra wget args authenticating a GitHub REST API request (STO-57).
+///
+/// The wget counterpart to `curl_auth_args`: a single `--header=...` arg (the
+/// inline form matching the other wget builders here) gated to `api.github.com`.
+// spec: STO-57
+pub(crate) fn wget_auth_args(url: &str, token: Option<&str>) -> Vec<String> {
+    match token {
+        Some(t) if !t.is_empty() && is_github_api_url(url) => {
+            vec![format!("--header=Authorization: Bearer {t}")]
+        }
+        _ => vec![],
+    }
+}
+
 /// Append a proxy-setup hint when the failure reason looks like a proxy error.
 ///
 /// Matches HTTP 407 responses and "Could not resolve proxy" messages that curl
@@ -629,14 +682,19 @@ fn maybe_proxy_hint(reason: &str) -> String {
 /// Fetch a URL to a string via curl or wget, mirroring install.sh's secure flags.
 fn fetch_to_string(url: &str) -> Result<String> {
     let timeout = http_timeout_secs();
+    let token = github_token();
     let output = if have("curl") {
+        let mut args = curl_string_args(url, timeout);
+        args.extend(curl_auth_args(url, token.as_deref()));
         Command::new("curl")
-            .args(curl_string_args(url, timeout))
+            .args(args)
             .output()
             .map_err(|e| MindError::io("curl", e))?
     } else if have("wget") {
+        let mut args = wget_string_args(url, timeout);
+        args.extend(wget_auth_args(url, token.as_deref()));
         Command::new("wget")
-            .args(wget_string_args(url, timeout))
+            .args(args)
             .output()
             .map_err(|e| MindError::io("wget", e))?
     } else {
@@ -659,14 +717,19 @@ fn fetch_to_string(url: &str) -> Result<String> {
 fn fetch_to_file(url: &str, dest: &Path) -> Result<()> {
     let timeout = http_timeout_secs();
     let dest_str = dest.to_string_lossy();
+    let token = github_token();
     let status = if have("curl") {
+        let mut args = curl_file_args(url, &dest_str, timeout);
+        args.extend(curl_auth_args(url, token.as_deref()));
         Command::new("curl")
-            .args(curl_file_args(url, &dest_str, timeout))
+            .args(args)
             .status()
             .map_err(|e| MindError::io("curl", e))?
     } else if have("wget") {
+        let mut args = wget_file_args(url, &dest_str, timeout);
+        args.extend(wget_auth_args(url, token.as_deref()));
         Command::new("wget")
-            .args(wget_file_args(url, &dest_str, timeout))
+            .args(args)
             .status()
             .map_err(|e| MindError::io("wget", e))?
     } else {
@@ -791,6 +854,71 @@ mod tests {
         assert!(
             args.contains(&"https://example.com/file.tar.gz".to_string()),
             "URL must be in file-fetch args: {args:?}"
+        );
+    }
+
+    // ---- STO-57: GitHub API auth header --------------------------------------
+
+    #[test]
+    // spec: STO-57
+    fn auth_args_add_bearer_header_for_api_host() {
+        // A token present + an api.github.com URL -> the bearer header is added.
+        let curl = curl_auth_args(
+            "https://api.github.com/repos/jaemk/mind/releases/latest",
+            Some("tok123"),
+        );
+        assert_eq!(
+            curl,
+            vec!["-H".to_string(), "Authorization: Bearer tok123".to_string()],
+            "curl must send the bearer header on the API host: {curl:?}"
+        );
+        let wget = wget_auth_args(
+            "https://api.github.com/repos/jaemk/mind/releases/latest",
+            Some("tok123"),
+        );
+        assert_eq!(
+            wget,
+            vec!["--header=Authorization: Bearer tok123".to_string()],
+            "wget must send the bearer header on the API host: {wget:?}"
+        );
+    }
+
+    #[test]
+    // spec: STO-57
+    fn auth_args_never_leak_token_to_non_api_hosts() {
+        // The token must NOT be attached to the artifact CDN download, so it is
+        // not forwarded across a cross-host redirect.
+        let url = "https://github.com/jaemk/mind/releases/download/v1.2.3/mind-1.2.3-x.tar.gz";
+        assert!(
+            curl_auth_args(url, Some("tok123")).is_empty(),
+            "curl must not send a token to github.com"
+        );
+        assert!(
+            wget_auth_args(url, Some("tok123")).is_empty(),
+            "wget must not send a token to github.com"
+        );
+    }
+
+    #[test]
+    // spec: STO-57
+    fn auth_args_empty_without_a_token() {
+        // No token (or an empty one) -> the request is byte-for-byte unchanged.
+        let url = "https://api.github.com/repos/jaemk/mind/releases/latest";
+        assert!(
+            curl_auth_args(url, None).is_empty(),
+            "no token -> no curl header"
+        );
+        assert!(
+            wget_auth_args(url, None).is_empty(),
+            "no token -> no wget header"
+        );
+        assert!(
+            curl_auth_args(url, Some("")).is_empty(),
+            "empty token -> no curl header"
+        );
+        assert!(
+            wget_auth_args(url, Some("")).is_empty(),
+            "empty token -> no wget header"
         );
     }
 

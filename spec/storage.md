@@ -178,6 +178,18 @@ prevent the lost-update and torn-read races a plain read-modify-write would allo
   sequences or Unicode bidi override characters to spoof terminal output. The
   sanitization is applied before the proxy-hint logic so the reason field and any
   appended hint are both free of hostile control sequences.
+- `STO-57` The `evolve` GitHub REST API fetch (the release-latest lookup on
+  `api.github.com`) sends an `Authorization: Bearer <token>` header when a token is
+  present in the environment: `GITHUB_TOKEN` first, else `GH_TOKEN` (matching the
+  `gh` CLI), first non-empty (after trimming surrounding whitespace) wins. This
+  moves the caller out of GitHub's unauthenticated per-IP rate limit (60/hr, shared
+  across a NAT egress and easily exhausted on a workplace network, where the API
+  returns HTTP 403) into the authenticated 5000/hr tier. The header is applied ONLY
+  to `api.github.com` requests, never to the release-artifact or `SHA256SUMS`
+  download on the `github.com` / CDN host, so the token is not forwarded across a
+  cross-host redirect. With no token set, the request is byte-for-byte unchanged.
+  The header args are built by pure helpers (`curl_auth_args`, `wget_auth_args`)
+  and are unit-testable without touching the environment or spawning a process.
 
 ## Schema versions
 

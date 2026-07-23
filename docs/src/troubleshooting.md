@@ -57,6 +57,14 @@
   the corporate CA must be in the system trust store (or `wgetrc`); prefer having
   `curl` installed. See [Restricted networks and
   enterprise](enterprise.md#custom-ca--tls-intercepting-proxy).
+- `evolve` fails with a 403 from `https://api.github.com/repos/.../releases/latest`.
+  This is GitHub's unauthenticated REST API rate limit (60 requests/hour per source
+  IP), which a shared workplace egress IP exhausts quickly. Set `GITHUB_TOKEN` (or
+  `GH_TOKEN`) to any GitHub token; `evolve` sends it as a bearer header on the API
+  request, moving you into the authenticated 5000/hour tier. The token is only sent
+  to `api.github.com`, never to the artifact download. As a stopgap without a token,
+  `mind evolve --version <v>` resolves the target from the flag and skips the API
+  call entirely.
 - A private-repo `meld` fails to authenticate. mind uses your existing git auth:
   configure a git credential helper for HTTPS, or meld the SSH form
   (`git@host:owner/repo`, or `ssh = true` in `~/.mind/config.toml`) with a key in

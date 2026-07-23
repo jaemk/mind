@@ -6,6 +6,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `evolve` sends `GITHUB_TOKEN` (or `GH_TOKEN`) as a bearer header on its
+  `api.github.com` release lookup, so a shared workplace egress IP no longer hits
+  GitHub's unauthenticated 60/hour per-IP rate limit and its 403. The token is
+  applied only to the API host, never to the artifact download (STO-57).
+
 ## [0.20.0] - 2026-07-17
 
 ### Changed
