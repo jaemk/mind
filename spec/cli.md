@@ -47,20 +47,25 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   a full git URL (`https://host/owner/repo[.git]`), an SSH form
   (`git@host:owner/repo[.git]`), and a local path or `file://` URL. A spec that
   parses to none of these is an error (`InvalidRepoSpec`).
-- `CLI-12` Re-melding a repo whose source name is already registered is not an
-  error and does not re-clone or re-register. It ensures the source's items are
-  installed: if any are missing it installs them (the default-install flow,
-  CLI-23, honoring `--yes` and the non-TTY note). When nothing remains to install
-  (or with `--link-only`) it prints a status of the source's items: each item's
-  effective name, whether it is installed, and the commit it was installed from,
-  flagging items whose commit lags the source. Items are matched by stable
-  identity (source, kind, bare name), so a prefix change does not lose them.
+- `CLI-12` Re-melding a repo whose source identity is already registered is not
+  an error and does not re-clone or re-register. The identity includes the
+  consumer alias (STO-58), so a re-meld is `meld` of a `(repo, alias)` that
+  already exists; a differing `--as` is a fresh meld of a new instance, not a
+  re-meld. It ensures the source's items are installed: if any are missing it
+  installs them (the default-install flow, CLI-23, honoring `--yes` and the
+  non-TTY note). When nothing remains to install (or with `--link-only`) it
+  prints a status of the source's items: each item's effective name, whether it
+  is installed, and the commit it was installed from, flagging items whose commit
+  lags the source. Items are matched by stable identity (source, kind, bare name).
 - `CLI-13` `--as <prefix>` sets the source's namespace, overriding any
-  `[source].prefix`. It is persisted and is not changed by `sync`. Given on a
-  re-meld of an already-melded source (CLI-12), `--as` changes the source's
-  prefix and renames its installed items to the new effective names (the upgrade
-  rename, matched by stable identity), re-expanding intra-source `{{ns:}}`
-  references to those names. `--as ''` removes the prefix.
+  `[source].prefix`. It is persisted and is not changed by `sync`. A `--as`
+  prefix is an identity alias (STO-58): `meld <repo> --as <prefix>` denotes the
+  instance `host/owner/repo@<prefix>`, which coexists with a bare meld of the same
+  repo and with other aliases of it. It is never an in-place re-prefixing of a
+  differently-aliased instance. To change an instance's prefix, edit it in the
+  probe TUI (TUI-53, allowed only while no items are installed, CLI-161), or
+  `unmeld` it and `meld` again with the new `--as`. `--as ''` removes the prefix
+  (the bare `host/owner/repo` identity).
 - `CLI-14` After melding, if a prefix is in effect and `--verbose` is in effect
   (CLI-162), unguarded prose references to siblings are reported as warnings (see
   namespacing.md NS-20). Without `--verbose` the warnings are suppressed. Warnings
@@ -176,12 +181,16 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   rename (`--namespace` aliasing `--as`, CLI-133). `--namespace ''` removes the
   prefix (the explicit no-prefix override of a declared `[source].prefix`, as
   `--as ''` did, CLI-13). As of CLI-163, the short form is `-N` (uppercase).
-- `CLI-161` On a re-meld (CLI-12) of a source that already has installed items, a
-  `--namespace` that differs from the source's current namespace is an error
-  naming the installed items and directing the user to `forget` them first; the
-  namespace is unchanged and nothing is renamed. When the source has no installed
-  items the new namespace is applied and persisted (NS-30). This revises CLI-13,
-  which renamed installed items in place on such a re-meld.
+- `CLI-161` Changing a registered source's namespace in place (the TUI
+  source-details editor, TUI-53, via `set_source_namespace`) is allowed only
+  while no items from the source are installed; a change requested while items
+  are installed is an error naming those items and directing the user to `forget`
+  them first, with the namespace unchanged (NS-30). This changes the source's
+  effective display prefix (`alias`), not its identity: the identity alias
+  (`as_alias`, STO-58) is fixed at meld, so an in-place namespace change never
+  renames the source or relocates its clone. To make a repo a distinct instance
+  under a new prefix, `meld` it with a different `--as` (CLI-13), which registers
+  a separate `@<alias>` instance.
 - Cross-source collision detection (namespacing.md NS-43/44/45): after catalog
   discovery and before install, `meld` checks incoming skills, rules, and tools
   against already-installed items from other sources. An incoming item whose
@@ -238,8 +247,13 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 ## unmeld
 
 - `CLI-20` `unmeld <name>` removes the source's clone and registry entry. `name`
-  is the full `host/owner/repo` or an unambiguous trailing suffix (e.g. `repo` or
-  `owner/repo`); an unknown name is `SourceNotFound` and an ambiguous suffix is
+  is the full identity (`host/owner/repo`, plus the `@<alias>` suffix for an
+  identity-aliased instance, STO-58) or an unambiguous trailing suffix (e.g.
+  `repo`, `owner/repo`, or `repo@<alias>`). The `@<alias>` is part of the
+  identity, so a bare suffix reaches only the un-aliased instance: with both a
+  bare `repo` and a `repo@jk` melded, `unmeld repo` targets only the bare one and
+  `unmeld repo@jk` the aliased one (use a glob, CLI-28, to remove several at
+  once). An unknown name is `SourceNotFound` and an ambiguous suffix is
   `AmbiguousSource`. The former visible alias `detach` is removed and is now a
   usage error (CLI-172).
 - `CLI-21` `unmeld <name>` by default uninstalls every item installed from the

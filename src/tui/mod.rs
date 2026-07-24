@@ -1050,7 +1050,9 @@ mod tests {
             Some("jk".to_string()),
         );
 
-        // The alias is persisted to sources.json.
+        // The display prefix is persisted to sources.json. The source's identity
+        // (name) is unchanged: the TUI editor sets the display prefix, not the
+        // identity alias (STO-58).
         let reg = crate::source::Registry::load(&paths).unwrap();
         let src = reg.find(&source_name).expect("source present");
         assert_eq!(

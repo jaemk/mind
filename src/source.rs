@@ -75,10 +75,25 @@ pub struct Source {
     /// Repo description from its `mind.toml [source]`, if any.
     #[serde(default)]
     pub description: Option<String>,
-    /// Consumer-chosen namespace from `meld --as`, if any. Overrides the repo's
-    /// own `[source].prefix`. Persisted (never changed by `sync`).
+    /// The effective consumer namespace prefix (the display prefix applied to
+    /// item names). Set from `meld --as`, a curated entry's `as`/`namespace`, a
+    /// marketplace entry name, an accepted `[source].prefix`, or a collision
+    /// prompt. Overrides the repo's own `[source].prefix`. Persisted (never
+    /// changed by `sync`). This is NOT the source's identity; see `as_alias`.
     #[serde(default)]
     pub alias: Option<String>,
+    /// The identity alias (STO-58): the namespace declared BEFORE the clone -
+    /// the consumer `--as`, a curated `[discover].sources` `as`/`namespace`, or a
+    /// marketplace entry name. It is the part of the alias that discriminates one
+    /// source instance of a repo from another, so it (not the display `alias`)
+    /// feeds the `@<alias>` identity suffix (STO-58) and the per-instance clone
+    /// path (STO-59). `None` for a bare meld, and for a source whose only prefix
+    /// is an accepted `[source].prefix` or a collision-resolved prefix (those are
+    /// decided after the clone and are display-only). Absent in older
+    /// sources.json deserializes as `None`, so a legacy source keeps its bare
+    /// identity and existing clone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub as_alias: Option<String>,
     /// The version pin (STO-18). Persisted at meld and not changed by sync.
     /// Absent in older sources.json files deserializes as `DefaultBranch`.
     #[serde(default)]
@@ -147,10 +162,50 @@ impl Source {
     }
 
     /// The base repo identity `host/owner/repo`, without an item-link `#path`
-    /// suffix. Equal to `name` for an ordinary source. This is what managed
-    /// policy allowlists match against (LNK-11).
+    /// or consumer-alias `@alias` suffix. Equal to `name` for an ordinary,
+    /// unaliased source. This is what managed policy allowlists match against
+    /// (LNK-11) and what the compare/browse URLs derive from (CLI-176).
     pub fn base_identity(&self) -> String {
         format!("{}/{}/{}", self.host, self.owner, self.repo)
+    }
+
+    /// The canonical identity `name` derived from this source's parts (STO-13,
+    /// STO-58, LNK-4): `host/owner/repo`, plus a `#<item_path>` suffix for an
+    /// item-link instance, plus a trailing `@<alias>` segment for a consumer
+    /// prefix. `@<alias>` is always last, so it composes with `#<path>` as
+    /// `host/owner/repo#<path>@<alias>`.
+    pub fn compute_name(&self) -> String {
+        let mut n = self.base_identity();
+        if let Some(p) = &self.item_path {
+            n.push('#');
+            n.push_str(p);
+        }
+        if let Some(a) = &self.as_alias
+            && !a.is_empty()
+        {
+            n.push('@');
+            n.push_str(a);
+        }
+        n
+    }
+
+    /// Recompute `name` from the source's parts (`host/owner/repo`, item_path,
+    /// identity alias). Idempotent.
+    pub fn refresh_name(&mut self) {
+        self.name = self.compute_name();
+    }
+
+    /// Set the identity alias (STO-58) - the pre-clone `--as`/curated-`as`/
+    /// marketplace-entry namespace - and update the identity `name`. The same
+    /// value seeds the effective display prefix (`alias`); a later post-clone
+    /// override (an accepted `[source].prefix` or a collision prompt) may change
+    /// `alias` without touching identity. `Some("")` is the explicit no-prefix
+    /// override: it adds no `@` suffix, so the identity is the bare
+    /// `host/owner/repo` (equal to an unaliased meld).
+    pub fn apply_alias(&mut self, alias: Option<String>) {
+        self.as_alias = alias.clone();
+        self.alias = alias;
+        self.refresh_name();
     }
 
     /// Whether this source is read live from its working tree rather than a clone
@@ -168,11 +223,22 @@ impl Source {
         if self.is_linked() {
             return PathBuf::from(&self.url);
         }
+        // spec: STO-59 -- an instance with an identity alias clones under
+        // `<repo>@<alias>` so instances of the same repo pinned to different
+        // branches hold independent checkouts. The identity alias is known before
+        // the clone, so the clone lands at this path directly. A bare source, and
+        // a source whose only prefix is a post-clone display prefix (an accepted
+        // `[source].prefix` or a collision-resolved prefix), is unchanged at
+        // `<repo>` (STO-11).
+        let leaf = match &self.as_alias {
+            Some(a) if !a.is_empty() => format!("{}@{a}", self.repo),
+            _ => self.repo.clone(),
+        };
         paths
             .sources_dir()
             .join(&self.host)
             .join(&self.owner)
-            .join(&self.repo)
+            .join(leaf)
     }
 
     /// A browser URL to compare two commits, for `mind upgrade` output.
@@ -464,6 +530,7 @@ fn make_source(host: &str, owner: &str, repo: &str, url: String) -> Source {
         commit: None,
         description: None,
         alias: None,
+        as_alias: None,
         pin: Pin::default(),
         roots: None,
         flat_skills: false,
@@ -1434,6 +1501,76 @@ mod tests {
             }
             other => panic!("expected StateTooNew, got {other:?}"),
         }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn compute_name_composes_item_link_and_alias() {
+        // spec: STO-58 LNK-4 -- `@<alias>` is always the trailing segment and
+        // composes with an item-link `#<path>` as `host/owner/repo#<path>@<alias>`.
+        let mut s = parse_spec("github:acme/agents").unwrap();
+        assert_eq!(s.compute_name(), "github.com/acme/agents");
+        s.apply_alias(Some("jk".into()));
+        assert_eq!(s.name, "github.com/acme/agents@jk");
+        // An empty alias is the no-prefix override: it adds no `@` suffix.
+        s.apply_alias(Some(String::new()));
+        assert_eq!(s.name, "github.com/acme/agents");
+        assert_eq!(s.alias.as_deref(), Some(""));
+
+        let mut link = parse_spec("https://github.com/acme/agents/tree/main/skills/foo").unwrap();
+        assert_eq!(link.name, "github.com/acme/agents#skills/foo");
+        link.apply_alias(Some("jk".into()));
+        assert_eq!(link.name, "github.com/acme/agents#skills/foo@jk");
+        assert_eq!(link.base_identity(), "github.com/acme/agents");
+    }
+
+    #[test]
+    fn clone_dir_is_per_instance_for_an_alias() {
+        // spec: STO-59 -- an aliased instance clones under `<repo>@<alias>`; an
+        // unaliased source (and an empty-alias override) is unchanged at `<repo>`.
+        let (base, paths) = tmp_paths_src();
+        let mut s = parse_spec("github:acme/agents").unwrap();
+        let bare = s.clone_dir(&paths);
+        assert!(bare.ends_with("github.com/acme/agents"));
+        s.apply_alias(Some("jk".into()));
+        assert!(s.clone_dir(&paths).ends_with("github.com/acme/agents@jk"));
+        s.apply_alias(Some(String::new()));
+        assert_eq!(s.clone_dir(&paths), bare, "empty alias keeps the bare path");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn legacy_display_alias_keeps_bare_identity_and_clone() {
+        // spec: STO-58 STO-59 -- a source registered before `as_alias` existed has
+        // only the display `alias` and no `as_alias`, so it is NOT an identity
+        // instance: its `name` stays bare and its clone stays at the bare path (no
+        // migration, no relocation), preserving pre-feature behavior and keeping
+        // its manifest `source` linkage intact.
+        let (base, paths) = tmp_paths_src();
+        std::fs::write(
+            base.join("sources.json"),
+            r#"{"version":1,"sources":[{"name":"github.com/acme/agents","url":"https://github.com/acme/agents","host":"github.com","owner":"acme","repo":"agents","alias":"jk"}]}"#,
+        )
+        .unwrap();
+        let bare = paths
+            .sources_dir()
+            .join("github.com")
+            .join("acme")
+            .join("agents");
+        std::fs::create_dir_all(&bare).unwrap();
+        std::fs::write(bare.join("marker"), "x").unwrap();
+
+        let reg = Registry::load(&paths).expect("load");
+        let s = &reg.sources[0];
+        assert_eq!(s.name, "github.com/acme/agents", "identity stays bare");
+        assert_eq!(s.alias.as_deref(), Some("jk"), "display prefix preserved");
+        assert_eq!(s.as_alias, None, "no identity alias for a legacy source");
+        assert_eq!(
+            s.clone_dir(&paths),
+            bare,
+            "clone stays at the bare path (no relocation)"
+        );
+        assert!(bare.join("marker").exists());
         let _ = std::fs::remove_dir_all(&base);
     }
 }

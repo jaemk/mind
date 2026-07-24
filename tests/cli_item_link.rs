@@ -288,6 +288,50 @@ fn link_instances_and_a_plain_meld_coexist() {
 }
 
 #[test]
+fn item_link_composes_with_a_consumer_alias() {
+    // spec: STO-58 LNK-4 -- `--namespace` composes with an item link: the
+    // instance identity is `host/owner/repo#<path>@<alias>` and its skill installs
+    // under the prefix, coexisting with an unaliased link into the same path.
+    let sb = Sandbox::new();
+    assert!(
+        sb.mind(&["learn", &sb.link("tree/main/skills/review")])
+            .success,
+        "bare link install"
+    );
+    assert!(
+        sb.claude_home.join("skills/review").exists(),
+        "unprefixed link skill installs"
+    );
+
+    let r = sb.mind(&[
+        "meld",
+        &sb.link("tree/main/skills/review"),
+        "--namespace",
+        "jk",
+        "--yes",
+    ]);
+    assert!(r.success, "aliased link meld: {} {}", r.stdout, r.stderr);
+    assert!(
+        sb.claude_home.join("skills/jk:review").exists(),
+        "aliased link installs its skill under the prefix"
+    );
+    assert!(
+        sb.claude_home.join("skills/review").exists(),
+        "the bare link's skill survives"
+    );
+    let sources = sb.mind(&["recall", "--sources"]).stdout;
+    assert!(
+        sources.contains("#skills/review@jk"),
+        "the aliased link identity must be visible: {sources}"
+    );
+    assert_eq!(
+        source_count(&sb),
+        2,
+        "the bare and aliased link instances coexist"
+    );
+}
+
+#[test]
 fn link_without_skill_md_is_an_error_and_registers_nothing() {
     // spec: LNK-7
     let sb = Sandbox::new();

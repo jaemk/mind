@@ -196,8 +196,10 @@ manifest, and store.
   source will install under (its effective prefix: the consumer `--namespace` alias,
   else `[source].prefix`, else none; NS-1). When none of the source's items are
   installed, the namespace is editable in the dialog (an input field), and the
-  edited value is persisted as the source alias before the Install-all action runs
-  (NS-30). When any of the source's items are installed the namespace is shown
+  edited value is persisted as the source's display prefix (`alias`) before the
+  Install-all action runs (NS-30). This edits the display prefix only, not the
+  source's identity alias (STO-58), so it never renames the source or relocates
+  its clone. When any of the source's items are installed the namespace is shown
   read-only with a note that it is locked until those items are forgotten (NS-30,
   CLI-161).
 - `TUI-54` `probe --no-tui` is long-only; its former short `-n` is removed (CLI-164,

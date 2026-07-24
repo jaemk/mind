@@ -35,7 +35,8 @@ and verified.
 | `--verbose`/`-v` global flag; gates unguarded-ref warning | done | CLI-162 |
 | Namespace separator is `:` (reserved kind words rejected; ref parser disambiguates; old `-` installs rename on upgrade) | done | NS-25, NS-26, NS-27 |
 | `meld`/`review` `--namespace`/`-n` flag (renames `--as`, still a hidden alias) | done | CLI-159 |
-| Namespace mutable only until items install; changing it after requires forget-first (revises in-place rename) | done | NS-30, CLI-161 |
+| Namespace mutable only until items install; changing it after requires forget-first (in-place change renames identity + relocates clone) | done | NS-30, CLI-161 |
+| Identity alias (pre-clone `--as`/curated-`as`/marketplace-entry) is part of source identity: melds a distinct `host/owner/repo@<alias>` instance (composes with item-link `#<path>`), coexisting with the bare repo and other aliases at independent pins/clones; a post-clone display prefix (accepted `[source].prefix`/collision) is not identity | done | STO-58, STO-59 |
 | Agents not namespaced: an agent links under its bare frontmatter `name` (the harness keys agents by frontmatter, not filename); same-named agents across sources are a detected collision | done | NS-40, NS-41, NS-42 |
 | TUI: show + edit a source's install namespace in the details dialog (editable until items installed) | done | TUI-53 |
 | Transactional install, upgrade, rename, uninstall, drift | done | [lifecycle.md](lifecycle.md) |

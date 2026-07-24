@@ -54,8 +54,13 @@ pub fn meld(
     let prefer_ssh = Config::load(paths)?.ssh;
     let mut registry = Registry::load(paths)?;
     let mut visited = HashSet::new();
+    // spec: STO-58 -- the reported identity includes the consumer alias, so the
+    // deferred JSON install and the caller's post-meld steps target this instance.
     let source_name = parse_spec(repo)
-        .map(|s| s.name)
+        .map(|mut s| {
+            s.apply_alias(alias.clone());
+            s.name
+        })
         .unwrap_or_else(|_| repo.to_string());
     let mut meld_skipped: Vec<SkippedEntry> = Vec::new();
     let added = meld_recursive(
@@ -95,16 +100,13 @@ pub fn meld(
 /// DSC-56: after melding a source that curates other sources (`[discover].sources`),
 /// point the user at `mind probe` to browse what is now available. No-op for a
 /// source with no nested sources, and silent under `--json`.
-pub fn maybe_probe_hint(paths: &Paths, repo: &str) -> Result<()> {
+pub fn maybe_probe_hint(paths: &Paths, source_name: &str) -> Result<()> {
     let out = crate::render::ctx();
     if out.json {
         return Ok(());
     }
-    let Ok(name) = parse_spec(repo).map(|s| s.name) else {
-        return Ok(());
-    };
     let registry = Registry::load(paths)?;
-    let Some(source) = registry.find(&name) else {
+    let Some(source) = registry.find(source_name) else {
         return Ok(());
     };
     // spec: LNK-8 -- an item-link instance adopts no curator layer, so the
@@ -423,7 +425,11 @@ fn meld_recursive(
     if let Some(a) = &alias {
         crate::namespace::validate_prefix(a)?;
     }
-    source.alias = alias;
+    // spec: STO-58 -- the alias is part of the source identity, so applying it
+    // folds `@<alias>` into `name` (composing with an item-link `#<path>`). This
+    // is what makes `meld <repo> --as <prefix>` a distinct instance that coexists
+    // with the bare repo and with other aliases.
+    source.apply_alias(alias);
     // CLI-19: rewrite an https remote to its SSH form when SSH is preferred, so
     // the clone uses the user's key (no https username/password prompt). Done
     // before the cycle guard so the recorded URL is the one we actually clone.
@@ -1094,8 +1100,14 @@ fn meld_recursive(
                 // DSC-68/DSC-69: an auth failure is governed by on-auth-failure
                 // when present; without it, it stays a generic git error.
                 Err(e) if git::is_auth_failure(&e) => {
+                    // spec: STO-58 -- the nested source registers under its
+                    // effective alias, so resolve its identity with that alias to
+                    // match the DSC-70 "already registered" guard correctly.
                     let entry_name = parse_spec(&entry.source)
-                        .map(|s| s.name)
+                        .map(|mut s| {
+                            s.apply_alias(entry.effective_alias());
+                            s.name
+                        })
                         .unwrap_or_else(|_| entry.source.clone());
                     // spec: DSC-70 -- on-auth-failure only covers the entry's own
                     // clone failure. If the entry is already in the registry, it
@@ -1127,8 +1139,14 @@ fn meld_recursive(
                 // not-found, etc.) of a nested entry is skipped with a warning
                 // rather than hard-failing the whole meld.
                 Err(e) => {
+                    // spec: STO-58 -- the nested source registers under its
+                    // effective alias, so resolve its identity with that alias to
+                    // match the DSC-70 "already registered" guard correctly.
                     let entry_name = parse_spec(&entry.source)
-                        .map(|s| s.name)
+                        .map(|mut s| {
+                            s.apply_alias(entry.effective_alias());
+                            s.name
+                        })
                         .unwrap_or_else(|_| entry.source.clone());
                     // spec: DSC-79/DSC-70 -- if the entry is already registered it
                     // cloned fine and the error came from a descendant; propagate
@@ -1156,7 +1174,13 @@ fn meld_recursive(
             // at meld, not a silent skip.
             if let Some(refs) = &entry.install_items
                 && !refs.is_empty()
-                && let Ok(spec) = parse_spec(&entry.source)
+                && let Ok(mut spec) = parse_spec(&entry.source)
+                // spec: STO-58 -- the nested source is registered under its
+                // effective alias; resolve against that identity to find it.
+                && {
+                    spec.apply_alias(entry.effective_alias());
+                    true
+                }
                 && let Some(nested_src) = registry.find(&spec.name)
             {
                 let nested_items = catalog::scan(paths, &single(nested_src))?;
@@ -1247,7 +1271,13 @@ fn meld_recursive(
                     // recursive meld, find the just-registered sub-source
                     // by its computed name and overwrite any fields the
                     // entry supplies (entry wins when both supply a value).
-                    if let Ok(sub_spec) = parse_spec(&repo_spec)
+                    if let Ok(mut sub_spec) = parse_spec(&repo_spec)
+                        && {
+                            // spec: STO-58 -- the sub-source was melded under the
+                            // entry name as its alias, so its identity is `@<name>`.
+                            sub_spec.apply_alias(Some(entry_name.clone()));
+                            true
+                        }
                         && let Some(sub) = registry
                             .sources
                             .iter_mut()
@@ -1274,8 +1304,13 @@ fn meld_recursive(
                 // sub-source is skipped with a warning, mirroring the
                 // [discover].sources loop above.
                 Err(e) => {
+                    // spec: STO-58 -- the sub-source registers under the entry
+                    // name as its alias, so resolve its identity with that alias.
                     let sub_name = parse_spec(&repo_spec)
-                        .map(|s| s.name)
+                        .map(|mut s| {
+                            s.apply_alias(Some(entry_name.clone()));
+                            s.name
+                        })
                         .unwrap_or_else(|_| entry_name.clone());
                     // spec: DSC-79/DSC-70 -- a failure after the sub-source is
                     // already registered originates from a descendant; propagate.
@@ -2514,7 +2549,7 @@ pub fn learn_link(
             name: url.to_string(),
         });
     }
-    if !is_melded(paths, url)? {
+    if !is_melded(paths, url, None)? {
         // spec: CLI-200, LNK-3 -- `--pin` freezes the link's branch ref to its
         // current commit; without it the instance tracks the URL's ref.
         let pin_req = if pin {
@@ -2814,26 +2849,12 @@ fn learn_collecting(paths: &Paths, item_ref: &str, flow: InstallFlow) -> Result<
     }
 }
 
-/// After a `meld`, offer to install the newly melded source's items (CLI-23).
-/// This is the interactive form of `learn '<source>#*'`: it previews the items
-/// that would be installed and prompts, then installs the whole source on a yes.
-/// `--link-only` skips this entirely (the caller does not invoke it). A source
-/// with no installable items (e.g. a curated super-source) is a no-op.
-///
-/// With `yes`, it installs without prompting (and in a non-TTY context). Without
-/// `yes` in a non-TTY context it installs nothing and prints how to install
-/// later, mirroring the install-hook non-TTY behavior (HOOK-22): a scripted meld
-/// stays register-only unless `--yes` is given.
-// spec: CLI-23
-pub fn install_melded_source(paths: &Paths, repo: &str, flow: InstallFlow) -> Result<()> {
-    install_source_items(paths, &parse_spec(repo)?.name, flow)
-}
-
 /// Run the post-meld auto-install flow (CLI-23) for one registered source by its
 /// name: preview and prompt to install its items (`<source>#*`), or install
 /// directly under `--yes`. Used for the top-level source and, via
 /// `install_curated_sources`, for nested sources installed with `--recursive`
 /// (DSC-55) or a curator `install = true` (DSC-58).
+// spec: CLI-23
 pub fn install_source_items(paths: &Paths, source_name: &str, flow: InstallFlow) -> Result<()> {
     let item_ref = format!("{source_name}#*");
 
@@ -3035,9 +3056,22 @@ pub fn install_provisioned_items(
     failures
 }
 
-/// True when the repo spec resolves to an already-registered source.
-pub fn is_melded(paths: &Paths, repo: &str) -> Result<bool> {
-    let name = parse_spec(repo)?.name;
+/// The registry identity for a repo spec under a consumer alias (STO-58):
+/// `host/owner/repo[#path]` plus a trailing `@<alias>`. This is the key
+/// `is_melded`/`remeld` look up, so `--as <prefix>` selects (or creates) the
+/// `host/owner/repo@<prefix>` instance rather than the bare repo. `Some("")`
+/// (the `--as ''` no-prefix override) resolves to the bare identity, so it names
+/// the same instance as `None`.
+pub fn instance_name(repo: &str, alias: Option<&str>) -> Result<String> {
+    let mut source = parse_spec(repo)?;
+    source.apply_alias(alias.map(str::to_string));
+    Ok(source.name)
+}
+
+/// True when the repo spec, under the given consumer alias, resolves to an
+/// already-registered source instance (STO-58).
+pub fn is_melded(paths: &Paths, repo: &str, alias: Option<&str>) -> Result<bool> {
+    let name = instance_name(repo, alias)?;
     Ok(Registry::load(paths)?.find(&name).is_some())
 }
 
@@ -3063,20 +3097,13 @@ pub fn remeld(
         ..
     } = flow;
     let out = crate::render::ctx();
-    let source_name = parse_spec(repo)?.name;
+    // spec: STO-58/CLI-12 -- a re-meld targets the specific instance named by the
+    // repo spec plus the consumer alias. `is_melded` used the same identity to
+    // route here, so the alias matches this instance and is not a re-prefixing
+    // (CLI-13): `--as` denoting a different alias would have been a fresh meld.
+    let source_name = instance_name(repo, alias.as_deref())?;
     if !out.json {
         println!("{} {source_name} is already melded", out.bullet());
-    }
-
-    // CLI-161/NS-30: an explicit `--namespace` (or deprecated `--as`) on a
-    // re-meld sets the source's namespace, but only while no items are
-    // installed. If items are installed and the alias differs, return an error
-    // naming them and directing the user to `forget` them first.
-    if alias.is_some() {
-        set_source_namespace(paths, &source_name, alias)?;
-        if !out.json {
-            println!("prefix updated; no installed items to rename");
-        }
     }
 
     // HOOK-60: re-offer the source's install hooks that have not run at the
@@ -3120,7 +3147,7 @@ pub fn remeld(
             Err(e) => return Err(e),
         };
         if to_install > 0 {
-            install_melded_source(paths, repo, flow)?;
+            install_source_items(paths, &source_name, flow)?;
             // Install the curated chain: every nested source with `--recursive`
             // (DSC-55), or just the curator's `install = true` entries (DSC-58).
             // The nested sources are already registered, so nothing re-registers.
@@ -3174,9 +3201,13 @@ pub fn install_curated_sources(
             .map(|d| d.sources)
             .unwrap_or_default();
         for ns in nested {
-            let Ok(spec) = parse_spec(&ns.source) else {
+            let Ok(mut spec) = parse_spec(&ns.source) else {
                 continue;
             };
+            // spec: STO-58 -- the nested source was melded under this entry's
+            // effective alias (DSC-78), so its registered identity carries the
+            // `@<alias>` suffix; resolve against that, not the bare name.
+            spec.apply_alias(ns.effective_alias());
             if !visited.insert(spec.name.clone()) {
                 continue; // already seen (cycle guard / diamond dedup)
             }
@@ -3237,7 +3268,10 @@ fn marketplace_subsources(
     let mut out = Vec::new();
     for entry in plugin_manifest::load_marketplace_manifest(&mp)?.into_entries() {
         let in_repo = matches!(entry.source, plugin_manifest::PluginSource::InRepo { .. });
-        if let Ok(spec) = parse_spec(&marketplace_entry_spec(&entry, &clone)) {
+        if let Ok(mut spec) = parse_spec(&marketplace_entry_spec(&entry, &clone)) {
+            // spec: STO-58/MKT-8 -- an external entry was melded under the entry
+            // name as its alias, so its registered identity carries `@<name>`.
+            spec.apply_alias(Some(entry.name.clone()));
             out.push((spec, in_repo));
         }
     }
@@ -3300,9 +3334,11 @@ pub(crate) fn install_curated_sources_for_json(
             .map(|d| d.sources)
             .unwrap_or_default();
         for ns in nested {
-            let Ok(spec) = parse_spec(&ns.source) else {
+            let Ok(mut spec) = parse_spec(&ns.source) else {
                 continue;
             };
+            // spec: STO-58 -- resolve the nested source under its effective alias.
+            spec.apply_alias(ns.effective_alias());
             if !visited.insert(spec.name.clone()) {
                 continue;
             }
@@ -3441,12 +3477,16 @@ fn source_status(paths: &Paths, source_name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Set (or clear) the namespace alias for a source, enforcing the mutability
-/// lock (NS-30/CLI-161): the alias may only change while no items from the
-/// source are installed. If items are installed and the requested alias differs
-/// from the current one, returns `NamespaceLocked` listing those items. When
-/// the alias is unchanged nothing is written. Called by `remeld` and exported
-/// for the TUI source-details dialog (TUI-53).
+/// Set (or clear) the namespace prefix for a source, enforcing the mutability
+/// lock (NS-30/CLI-161): the prefix may only change while no items from the
+/// source are installed. If items are installed and the requested prefix differs
+/// from the current one, returns `NamespaceLocked` listing those items. When the
+/// prefix is unchanged nothing is written. Exported for the TUI source-details
+/// dialog (TUI-53).
+///
+/// This changes the source's effective display prefix (`alias`), not its identity
+/// (STO-58): the identity alias (`as_alias`) is fixed at meld, so this never
+/// renames the source or relocates its clone.
 pub fn set_source_namespace(
     paths: &Paths,
     source_name: &str,
@@ -3812,7 +3852,7 @@ pub fn absorb(
 
     // 3. ABS-1: meld the destination if not yet registered.
     let dest_spec = dest_path.to_string_lossy().into_owned();
-    if !is_melded(paths, &dest_spec)? {
+    if !is_melded(paths, &dest_spec, None)? {
         let meld_err = meld(
             paths,
             &dest_spec,
@@ -4714,7 +4754,13 @@ pub fn sync(
             .collect();
         let mut discovered = 0usize;
         for todo in nested {
-            if let Ok(s) = parse_spec(&todo.spec)
+            // spec: STO-58 -- resolve the nested source under its effective alias
+            // so an already-registered aliased instance is recognized.
+            if let Ok(mut s) = parse_spec(&todo.spec)
+                && {
+                    s.apply_alias(todo.alias.clone());
+                    true
+                }
                 && registry.find(&s.name).is_some()
             {
                 continue;
@@ -4723,6 +4769,7 @@ pub fn sync(
             // on-auth-failure the same way as the nested-source loop in
             // meld_recursive. Without on-auth-failure, the error propagates
             // as a generic git error (hard failure).
+            let todo_alias = todo.alias.clone();
             match meld_recursive(
                 paths,
                 &mut registry,
@@ -4744,8 +4791,13 @@ pub fn sync(
             ) {
                 Ok(n) => discovered += n,
                 Err(e) if git::is_auth_failure(&e) => {
+                    // spec: STO-58 -- match the aliased identity the nested source
+                    // registers under.
                     let entry_name = parse_spec(&todo.spec)
-                        .map(|s| s.name)
+                        .map(|mut s| {
+                            s.apply_alias(todo_alias.clone());
+                            s.name
+                        })
                         .unwrap_or_else(|_| todo.spec.clone());
                     // spec: DSC-70 -- on-auth-failure only covers the entry's own
                     // clone failure. If the entry is already in the registry, it
@@ -4774,8 +4826,13 @@ pub fn sync(
                 // the sync re-walk. No curator-empty guard here: the source is already
                 // melded, so DSC-80 does not apply.
                 Err(e) => {
+                    // spec: STO-58 -- match the aliased identity the nested source
+                    // registers under.
                     let entry_name = parse_spec(&todo.spec)
-                        .map(|s| s.name)
+                        .map(|mut s| {
+                            s.apply_alias(todo_alias.clone());
+                            s.name
+                        })
                         .unwrap_or_else(|_| todo.spec.clone());
                     if registry.find(&entry_name).is_some() {
                         return Err(e);
@@ -7965,7 +8022,7 @@ mod tests {
     /// persist a registry holding exactly it.
     fn seed_source(paths: &Paths, repo: &str, alias: Option<&str>) -> String {
         let mut src = crate::source::parse_spec(&format!("github:acme/{repo}")).unwrap();
-        src.alias = alias.map(|s| s.to_string());
+        src.apply_alias(alias.map(|s| s.to_string()));
         let name = src.name.clone();
         let registry = crate::source::Registry { sources: vec![src] };
         registry.save(paths).expect("save registry");

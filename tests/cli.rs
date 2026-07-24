@@ -680,48 +680,114 @@ fn remeld_of_an_installed_source_shows_item_status() {
 }
 
 #[test]
-fn remeld_namespace_change_locked_when_items_installed() {
-    // spec: CLI-13 CLI-161 NS-30 - a re-meld with --namespace that differs from
-    // the current namespace is refused when items are installed, naming the
-    // installed items and directing the user to forget them first.
+fn meld_as_different_prefix_creates_coexisting_instance() {
+    // spec: STO-58 STO-59 - melding the same repo under a different --namespace is
+    // a distinct instance (host/owner/repo@jk), not an in-place re-prefix (CLI-13):
+    // it coexists with the bare meld, with its own registry entry. Its skill
+    // installs under the new prefix alongside the unprefixed one. Agents are not
+    // namespaced (NS-40), so the prefixed instance is registered and its skill is
+    // learned explicitly rather than auto-installing the colliding `dev` agent.
     let sb = Sandbox::new();
     let spec = sb.source_spec();
     assert!(
         sb.mind(&["meld", &spec, "--yes"]).success,
-        "initial meld+install"
+        "initial bare meld+install"
     );
     assert!(
         sb.claude_home.join("skills/review").exists(),
-        "item installs unprefixed first"
+        "unprefixed skill installs first"
     );
 
-    // Attempting to change the namespace while items are installed must fail.
-    let r = sb.mind(&["meld", &spec, "--namespace", "jk", "--yes"]);
+    // A second meld under a distinct prefix registers a coexisting instance
+    // instead of locking or re-prefixing the existing one.
+    let r = sb.mind(&["meld", &spec, "--namespace", "jk", "--register-only"]);
     assert!(
-        !r.success,
-        "re-meld --namespace with installed items must fail: {} {}",
+        r.success,
+        "second meld under a new prefix must succeed: {} {}",
         r.stdout, r.stderr
     );
+    let srcs = sb.mind(&["recall", "--sources"]).stdout;
     assert!(
-        r.stderr.contains("namespace") || r.stderr.contains("installed"),
-        "error must mention namespace lock: {}",
-        r.stderr
+        srcs.contains("@jk"),
+        "the prefixed instance must be registered under its @jk identity: {srcs}"
     );
-    // The old unprefixed link must be untouched.
+    // Both registry entries coexist: the bare source is still listed, not
+    // replaced by the aliased one. The bare identity substring appears twice -
+    // once bare, once inside the `@jk` line.
+    let base = sb.base_name();
+    assert!(
+        srcs.matches(&format!("local/{base}/agents")).count() >= 2,
+        "both the bare and @jk source instances must be listed: {srcs}"
+    );
+
+    // Install the prefixed instance's skill; it coexists with the unprefixed one.
+    let l = sb.mind(&["learn", "jk:review"]);
+    assert!(
+        l.success,
+        "learn the prefixed skill: {} {}",
+        l.stdout, l.stderr
+    );
     assert!(
         sb.claude_home.join("skills/review").exists(),
-        "existing unprefixed link must survive the refused re-meld"
+        "the unprefixed skill survives"
     );
-    // The prefixed link must NOT have been created.
     assert!(
-        std::fs::symlink_metadata(sb.claude_home.join("skills/jk:review")).is_err(),
-        "the prefixed link must not exist after a refused re-meld"
+        sb.claude_home.join("skills/jk:review").exists(),
+        "the prefixed instance installs its skill alongside"
     );
-    let recall = sb.mind(&["recall"]).stdout;
+}
+
+#[test]
+fn as_instances_get_independent_clone_dirs() {
+    // spec: STO-59 - two identity-aliased instances of the same repo clone to
+    // distinct per-instance paths (`<repo>@<alias>`), so they hold independent
+    // checkouts rather than sharing one working tree. A pin forces a local source
+    // to be cloned (CLI-27) rather than read live from its working tree, so the
+    // per-instance clone dirs actually materialize on disk.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
     assert!(
-        !recall.contains("jk:review"),
-        "recall must still show the original unprefixed name: {recall}"
+        sb.mind(&[
+            "meld",
+            &spec,
+            "--as",
+            "dev",
+            "--pin",
+            "HEAD",
+            "--register-only"
+        ])
+        .success,
+        "first aliased pinned meld"
     );
+    assert!(
+        sb.mind(&[
+            "meld",
+            &spec,
+            "--as",
+            "test",
+            "--pin",
+            "HEAD",
+            "--register-only"
+        ])
+        .success,
+        "second aliased pinned meld"
+    );
+    let base = sb.base_name();
+    let dev_clone = sb
+        .mind_home
+        .join(format!("sources/local/{base}/agents@dev"));
+    let test_clone = sb
+        .mind_home
+        .join(format!("sources/local/{base}/agents@test"));
+    assert!(
+        dev_clone.join("skills/review/SKILL.md").exists(),
+        "the @dev instance has its own clone at {dev_clone:?}"
+    );
+    assert!(
+        test_clone.join("skills/review/SKILL.md").exists(),
+        "the @test instance has its own clone at {test_clone:?}"
+    );
+    assert_ne!(dev_clone, test_clone, "the two clones are distinct dirs");
 }
 
 #[test]
@@ -3124,31 +3190,45 @@ fn review_namespace_flag_evaluates_under_prefix() {
 }
 
 #[test]
-fn remeld_namespace_change_allowed_when_no_items_installed() {
-    // spec: NS-30 CLI-161 - when no items are installed from the source,
-    // re-melding with a different --namespace updates the persisted alias.
+fn meld_namespace_on_bare_source_forks_a_new_instance() {
+    // spec: STO-58 CLI-13 - melding an already-melded (bare, link-only) repo with
+    // a --namespace does NOT re-prefix the bare source in place; it registers a
+    // distinct `@jk` instance that coexists with it. (Changing a source's prefix
+    // in place is the TUI editor's job, NS-30/CLI-161/TUI-53.)
     let sb = Sandbox::new();
     let spec = sb.source_spec();
 
-    // Meld with --link-only so no items are installed.
+    // Meld bare with --link-only so no items are installed.
     assert!(
         sb.mind(&["meld", &spec, "--link-only"]).success,
         "initial link-only meld"
     );
 
-    // Re-meld with a new namespace: must succeed and persist the alias.
-    let r = sb.mind(&["meld", &spec, "--namespace", "jk"]);
+    // A second meld with a namespace forks a coexisting instance.
+    let r = sb.mind(&["meld", &spec, "--namespace", "jk", "--link-only"]);
     assert!(
         r.success,
-        "re-meld --namespace with no installed items must succeed: {} {}",
+        "meld --namespace on a bare source must succeed: {} {}",
         r.stdout, r.stderr
     );
 
-    // The new prefix must be reflected in the catalog.
+    // Two registry entries now exist: the bare source and the @jk instance.
+    let srcs = sb.mind(&["recall", "--sources"]).stdout;
+    let base = sb.base_name();
+    assert!(
+        srcs.contains(&format!("local/{base}/agents@jk")),
+        "the @jk instance must be registered: {srcs}"
+    );
+    assert!(
+        srcs.matches(&format!("local/{base}/agents")).count() >= 2,
+        "the bare source must still coexist with @jk: {srcs}"
+    );
+
+    // The @jk instance's catalog exposes the prefixed name.
     let probe = sb.mind(&["probe"]);
     assert!(
         probe.stdout.contains("skill:jk:review"),
-        "probe must show the new prefixed name: {}",
+        "probe must show the @jk instance's prefixed name: {}",
         probe.stdout
     );
 }

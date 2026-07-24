@@ -59,14 +59,47 @@ The on-disk layout and the two persisted JSON files.
 
 - `STO-10` Each source records: `name`, `url`, `host`, `owner`, `repo`, `commit`
   (last synced, or absent), `description` (from `mind.toml`, optional), `alias`
-  (consumer `--as`, optional).
+  (the effective display prefix - `--as`, a curated `as`/`namespace`, a
+  marketplace entry name, an accepted `[source].prefix`, or a collision prompt;
+  optional), and `as_alias` (the identity alias, STO-58: the subset of `alias`
+  known before the clone; optional, absent for a bare meld or a display-only
+  prefix).
 - `STO-11` A source's clone lives at `sources/<host>/<owner>/<repo>`. For local or
   `file://` specs, host is `local` and owner is the path's parent directory.
 - `STO-12` A missing registry file is treated as an empty registry.
 - `STO-13` A source's identity is its `name`, `host/owner/repo` (equal to its
-  clone path under `sources/`). Repos that share a basename, or even an
-  `owner/repo` across different hosts, are distinct sources and coexist in one
-  registry.
+  clone path under `sources/`, absent an alias or item-link suffix; see STO-58).
+  Repos that share a basename, or even an `owner/repo` across different hosts,
+  are distinct sources and coexist in one registry.
+- `STO-58` The *identity alias* is part of a source's identity. It is the
+  namespace declared BEFORE the clone: the consumer `--as <alias>` (STO-10), a
+  curated `[discover].sources` entry's `as`/`namespace` (DSC-78), or a marketplace
+  entry name (MKT-8). A source with an identity alias carries a trailing
+  `@<alias>` segment on its `name` (`host/owner/repo@<alias>`), composing with an
+  item-link `#<path>` suffix (LNK-4) as `host/owner/repo#<path>@<alias>` (`@<alias>`
+  is always last). So a bare meld of a repo, and one or more identity-aliased melds
+  of the same repo under distinct aliases, are distinct registry entries that
+  coexist with independent pins, commits, clones, and lifecycles - the mechanism a
+  consumer uses to track several branches or versions of one source side by side,
+  each installing its items under its own prefix. Two melds that resolve to the
+  same `host/owner/repo@<alias>` identity are the same instance (a re-meld, CLI-12).
+  A prefix decided AFTER the clone - an accepted `[source].prefix` (CLI-24) or a
+  collision-resolved prefix (NS-44) - is a display prefix only (STO-10 `alias`),
+  NOT an identity alias: it changes the effective item names but leaves the
+  identity and clone at the bare `host/owner/repo`. Managed-policy allowlist
+  matching and the compare/browse URLs use the base `host/owner/repo` identity
+  (POL-11, LNK-11, CLI-176), never the `@<alias>` form. A source recorded before
+  the identity alias existed has only a display `alias` and no identity alias, so
+  it keeps its bare identity (no migration, no clone relocation, no change to its
+  manifest `source` linkage).
+- `STO-59` A source with an identity alias (STO-58) clones at
+  `sources/<host>/<owner>/<repo>@<alias>` (the alias is a single safe path
+  component, NS-28, so the leaf is filesystem-safe), giving each instance an
+  independent checkout so instances pinned to different branches do not share a
+  working tree. Because the identity alias is known before the clone, the clone
+  lands at this path directly. A source with no identity alias - a bare meld, or
+  one whose only prefix is a post-clone display prefix - clones at
+  `sources/<host>/<owner>/<repo>` (STO-11).
 - `STO-17` A source records an optional `roots`: the consumer `--root` override
   (repo-root-relative directories, see DSC-51). Persisted at meld and not changed
   by `sync`. Absent means convention discovery uses `[source].roots` or the repo

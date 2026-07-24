@@ -238,9 +238,13 @@ in a staging directory first; the previous version is moved to a backup and only
 dropped after the swap succeeds. A failure at any point restores the previous
 version from backup (LIFE-1..4).
 
-A prefix change (adding or removing `--namespace <prefix>` on a source) causes `upgrade`
-to report `rename old -> new` and is handled the same way: the new name is
-installed before the old one is removed (LIFE-14). This is normal, not an error.
+When an installed item's effective name changes (for example the one-time
+`-`->`:` namespace-separator migration), `upgrade` reports `rename old -> new`
+and handles it the same way: the new name is installed before the old one is
+removed (LIFE-14). This is normal, not an error. Note that adding `--namespace
+<prefix>` (or `--as`) to an already-melded repo does not rename it: a `--as`
+prefix is part of the source's identity, so a different `--as` melds a distinct
+`host/owner/repo@<prefix>` instance that coexists with the original.
 
 For diagnosing a failed install or broken links, see
 [Troubleshooting](troubleshooting.md).

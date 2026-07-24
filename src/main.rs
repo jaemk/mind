@@ -245,9 +245,14 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
                 dangerously_skip: dangerously_skip_install_hook_check,
                 dangerously_skip_build: dangerously_skip_build_hook_check,
             };
+            // spec: STO-58 -- the alias is part of the source identity, so the
+            // instance a re-meld/install targets is `host/owner/repo@<alias>`.
+            // Computed before `alias` is moved into meld/remeld.
+            let source_ident =
+                commands::instance_name(&repo, alias.as_deref()).unwrap_or_else(|_| repo.clone());
             // CLI-12: re-melding an already-melded source is not an error; it
             // ensures the items are installed, else reports their status.
-            if commands::is_melded(paths, &repo)? {
+            if commands::is_melded(paths, &repo, alias.as_deref())? {
                 commands::remeld(paths, &repo, alias, register_only, flow, recursive)?;
             } else {
                 let meld_sum = commands::meld(
@@ -275,22 +280,21 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
                             flow,
                         )?;
                         // Also walk the curated chain silently (DSC-54/55/58).
-                        if let Ok(top) = crate::source::parse_spec(&repo) {
-                            let curated = commands::install_curated_sources_for_json(
-                                paths, &top.name, recursive, flow,
-                            )?;
-                            inst.extend(curated);
-                        }
+                        let curated = commands::install_curated_sources_for_json(
+                            paths,
+                            &source_ident,
+                            recursive,
+                            flow,
+                        )?;
+                        inst.extend(curated);
                         commands::emit_meld_json_result(meld_sum, inst, pend)?;
                     } else {
-                        commands::install_melded_source(paths, &repo, flow)?;
+                        commands::install_source_items(paths, &source_ident, flow)?;
                         // DSC-54 installs only the top-level source by default. Walk the
                         // curated chain and install each nested source the curator
                         // flagged `install = true` (DSC-58), or every nested source with
                         // `--recursive` (DSC-55).
-                        if let Ok(top) = crate::source::parse_spec(&repo) {
-                            commands::install_curated_sources(paths, &top.name, recursive, flow)?;
-                        }
+                        commands::install_curated_sources(paths, &source_ident, recursive, flow)?;
                     }
                 } else if json {
                     // register-only + json: register only, emit the meld result now.
@@ -298,7 +302,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
                 }
             }
             // DSC-56: suggest `mind probe` after melding a curated super-source.
-            commands::maybe_probe_hint(paths, &repo)
+            commands::maybe_probe_hint(paths, &source_ident)
         }
         Command::InitSource {
             path,

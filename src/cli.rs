@@ -100,8 +100,11 @@ pub enum Command {
         repo: Option<String>,
 
         /// Namespace every item from this source under this prefix
-        /// (overrides the repo's own `[source].prefix`). `--as` is a
-        /// hidden deprecated alias for backwards compatibility.
+        /// (overrides the repo's own `[source].prefix`). The prefix is part of
+        /// the source's identity: melding an already-melded repo under a
+        /// different prefix registers a distinct `host/owner/repo@<prefix>`
+        /// instance that coexists with the original, rather than re-prefixing it.
+        /// `--as` is a hidden deprecated alias for backwards compatibility.
         // spec: CLI-163 - short moved to -N (uppercase); -n is reserved for --dry-run.
         #[arg(short = 'N', long = "namespace", alias = "as", value_name = "PREFIX")]
         alias: Option<String>,

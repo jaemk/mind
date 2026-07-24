@@ -44,11 +44,17 @@ same repo, and a plain meld of that repo, coexist as separate sources.
 ## Identity and lifecycle
 
 - `LNK-4` An item-link source's identity is `host/owner/repo#<path>`, where
-  `<path>` is the skill directory's repo-root-relative path. Its clone lives at
-  `sources/<identity>` (STO-11 extended). Instances from the same repo, and a
-  plain meld of `host/owner/repo`, are distinct registry entries with
-  independent clones, pins, commits, and lifecycles. Re-melding an identical
-  link follows the CLI-12 re-meld flow.
+  `<path>` is the skill directory's repo-root-relative path. An identity alias
+  composes as a trailing `@<alias>` segment (STO-58): `host/owner/repo#<path>@<alias>`.
+  Instances from the same repo, and a plain meld of `host/owner/repo`, are
+  distinct registry entries with independent pins, commits, and lifecycles.
+  Re-melding an identical link follows the CLI-12 re-meld flow. The `#<path>` is
+  not part of the clone leaf (STO-59 keys only on the `@<alias>`): a non-aliased
+  link shares its clone `sources/<host>/<owner>/<repo>` with a plain meld of the
+  repo and with other non-aliased links into it, so only an `@<alias>` instance
+  gets an independent checkout. Two non-aliased instances of one repo pinned to
+  different refs therefore contend over one working tree; give each an `--as`
+  alias to separate them.
 - `LNK-5` `sync`, `upgrade`, `introspect`, `recall`, and `unmeld` treat the
   instance as an ordinary source: `sync` fetches per its pin (CLI-55),
   `upgrade` compares source content hash and commit, `unmeld` uninstalls its

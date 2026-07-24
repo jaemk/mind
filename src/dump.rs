@@ -339,6 +339,7 @@ mod tests {
             commit: commit.map(str::to_string),
             description: None,
             alias: None,
+            as_alias: None,
             pin: crate::source::Pin::default(),
             roots: None,
             flat_skills: false,

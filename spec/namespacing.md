@@ -159,17 +159,20 @@ The ID below extends the namespacing rules above. Namespacing stays opt-in: with
 no `--namespace` (NS-1, CLI-159) and no `[source].prefix`, a source's items
 install under their bare names (NS-2).
 
-- `NS-30` A source's namespace (set by `--namespace`, NS-1/CLI-159) is mutable
-  only while none of its items are installed: a `--link-only` meld (CLI-23), or a
-  super-source whose nested sources are registered but not installed. Re-melding
-  such a source with a different `--namespace` updates the persisted alias. Once
-  any of the source's items are installed the namespace is locked: changing it
-  requires forgetting the source's installed items first. A re-meld that would
-  change the namespace of a source with installed items is refused with guidance to
-  uninstall first (CLI-161), not applied as an in-place rename. This supersedes
-  CLI-13's rename of installed items. It is distinct from the one-time `-`->`:`
-  separator migration (NS-27), which `upgrade` applies to already-installed items
-  without a namespace change.
+- `NS-30` A registered source's namespace (its display prefix, set by
+  `--namespace`, NS-1/CLI-159) is changeable in place (the TUI source-details
+  editor, TUI-53) only while none of its items are installed: a `--link-only`
+  meld (CLI-23), or a super-source whose nested sources are registered but not
+  installed. Once any of the source's items are installed the namespace is locked:
+  changing it requires forgetting the source's installed items first. A requested
+  change on a source with installed items is refused with guidance to uninstall
+  first (CLI-161), not applied as an in-place rename. This changes the effective
+  display prefix only; it does not change the source's identity or relocate its
+  clone (the identity alias is fixed at meld, STO-58). Melding the same repo under
+  a different `--namespace` is a distinct instance, not a namespace change
+  (CLI-13). This is distinct from the one-time `-`->`:` separator migration
+  (NS-27), which `upgrade` applies to already-installed items without a namespace
+  change.
 
 ## Reference tokens
 
