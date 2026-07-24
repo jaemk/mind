@@ -6,12 +6,29 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-07-23
+
 ### Added
 
+- Per-instance source aliasing: melding the same repo again under a different
+  `--namespace`/`--as` prefix now registers a separate `host/owner/repo@<prefix>`
+  instance that coexists with the original, each with its own version pin,
+  recorded commit, clone, and installed items. The prefix composes with an
+  item-link path as `host/owner/repo#<path>@<prefix>`. So one repo can be melded
+  several times under distinct prefixes and their items install side by side
+  (STO-58, STO-59).
 - `evolve` sends `GITHUB_TOKEN` (or `GH_TOKEN`) as a bearer header on its
   `api.github.com` release lookup, so a shared workplace egress IP no longer hits
   GitHub's unauthenticated 60/hour per-IP rate limit and its 403. The token is
   applied only to the API host, never to the artifact download (STO-57).
+
+### Changed
+
+- `meld <repo> --namespace <prefix>` on an already-melded repo now forks a new
+  aliased instance instead of re-prefixing the existing source in place.
+  Changing a melded source's prefix in place is now the TUI source-editor's job,
+  and stays subject to the mutability lock (no change while items are installed;
+  CLI-13, CLI-161, NS-30, TUI-53).
 
 ## [0.20.0] - 2026-07-17
 
@@ -908,7 +925,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovery, frontmatter descriptions, transactional install/upgrade/uninstall
   with a file registry, and a tag-driven release pipeline with a Homebrew tap.
 
-[Unreleased]: https://github.com/jaemk/mind/compare/v0.20.0...HEAD
+[Unreleased]: https://github.com/jaemk/mind/compare/v0.21.0...HEAD
+[0.21.0]: https://github.com/jaemk/mind/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/jaemk/mind/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/jaemk/mind/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/jaemk/mind/compare/v0.17.0...v0.18.0
