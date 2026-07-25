@@ -1,6 +1,10 @@
 [package]
 name = "mind-cli"
-version = "0.21.0"
+# Between releases `main` carries a `-dev` pre-release suffix, so a binary built
+# from `main` is distinguishable from the released one (`mind --version`, bug
+# reports, `evolve --check`). The release bump drops the suffix; the tag-match
+# check in .github/workflows/release.yml enforces that before a tag is pushed.
+version = "0.22.0-dev"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
@@ -11,7 +15,7 @@ documentation = "https://jaemk.github.io/mind/"
 readme = "README.md"
 keywords = ["agent", "ai", "cli", "automation", "tooling"]
 categories = ["command-line-utilities", "development-tools"]
-exclude = [".github", "spec/", "docs/"]
+exclude = [".github", "docs/", ".claude"]
 
 [[bin]]
 name = "mind"

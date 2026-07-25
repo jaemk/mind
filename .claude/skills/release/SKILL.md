@@ -90,23 +90,31 @@ gh run watch "$(gh run list --workflow=release.yml --limit=1 --json databaseId -
 # or: gh run list --workflow=release.yml --limit=3
 ```
 
-The workflow has three jobs, in order:
+The workflow has five jobs:
 
-1. `build` (matrix): builds `--release --locked` for `aarch64-apple-darwin`,
-   `aarch64-unknown-linux-gnu`, and `x86_64-unknown-linux-gnu`, and uploads each
-   `mind-<version>-<target>.tar.gz` as an artifact. A `--locked` failure here
-   means step 3 was skipped; fix `Cargo.lock` and re-tag.
-2. `release`: downloads the artifacts and creates the GitHub Release with all
-   three tarballs (`fail_on_unmatched_files: true`, so a missing target fails the
-   job).
-3. `formula`: regenerates `Formula/mind.rb` from the tarball checksums via
-   `resources/update-formula.sh` and commits it back to `main` as the
-   `github-actions[bot]`.
+1. `ci` and `ci-macos` (parallel): re-run `make ci` on Linux and macOS at the
+   tagged commit, gating everything downstream.
+2. `build` (matrix, needs `ci` + `ci-macos`): builds `--release --locked` for
+   `aarch64-apple-darwin`, `aarch64-unknown-linux-gnu`,
+   `x86_64-unknown-linux-gnu`, and the musl legs `aarch64-unknown-linux-musl` and
+   `x86_64-unknown-linux-musl` (statically linked, glibc-version-independent;
+   used by `install.sh`). Uploads each `mind-<version>-<target>.tar.gz` as an
+   artifact and attests build provenance for it. A `--locked` failure here means
+   `Cargo.lock` is stale; fix it and re-tag.
+3. `release` (needs `build`): downloads the artifacts, generates `SHA256SUMS`,
+   and runs `gh release create` with every tarball plus `SHA256SUMS`; a missing
+   target's glob would fail the command, so the job fails closed on a partial
+   matrix.
+4. `publish` (needs `release`): publishes to crates.io via trusted publishing
+   (OIDC, `rust-lang/crates-io-auth-action`, no stored token), then regenerates
+   `Formula/mind.rb` from the tarball checksums via `resources/update-formula.sh`
+   and commits it back to `main` as `github-actions[bot]`.
 
 ### 8. Verify the published release
 
 ```bash
-gh release view "v<version>"            # three .tar.gz assets attached
+gh release view "v<version>"            # five .tar.gz assets attached
+cargo info mind-cli                     # crates.io has the new version
 git pull                                # pick up the bot's formula commit
 grep -n 'version\|sha256' Formula/mind.rb   # points at the new version
 ```

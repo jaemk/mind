@@ -5,9 +5,17 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -22,6 +30,7 @@ jobs:
 
   check-macos:
     runs-on: macos-14
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -29,3 +38,31 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
       - run: make ci
+
+  # Compiles against the minimum supported Rust version declared in
+  # Cargo.toml's `rust-version`, so a change that needs a newer compiler
+  # feature is caught here instead of by a user on an older toolchain.
+  # Keep the pinned toolchain below in step with Cargo.toml `rust-version`.
+  msrv:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.85
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --all-targets
+
+  # Advisory database scan of the dependency tree (RustSec). Informational on
+  # the check-run it creates; does not fail the job for a forked PR that
+  # cannot write checks (GITHUB_TOKEN is read-only there).
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      checks: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

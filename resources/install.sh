@@ -44,11 +44,14 @@ fetch_to() {
 	fi
 }
 
-# Map uname to a release target triple.
+# Map uname to a release target triple. Linux prefers the musl leg: it is
+# statically linked, so it runs on any glibc version (Ubuntu 22.04, Debian 12,
+# RHEL 9, Amazon Linux 2, ...) instead of requiring whatever glibc the build
+# runner shipped.
 os="$(uname -s)"
 arch="$(uname -m)"
 case "$os" in
-Linux) os_part="unknown-linux-gnu" ;;
+Linux) os_part="unknown-linux-musl" ;;
 Darwin) os_part="apple-darwin" ;;
 *) err "unsupported OS: $os (must build from source)" ;;
 esac
@@ -87,7 +90,10 @@ fetch_to "$url" "$tmp/$asset" || err "download failed: $url"
 sums_url="https://github.com/${REPO}/releases/download/v${version}/SHA256SUMS"
 echo "mind-install: downloading SHA256SUMS"
 fetch_to "$sums_url" "$tmp/SHA256SUMS" || err "could not download SHA256SUMS"
-expected="$(grep "  ${asset}$" "$tmp/SHA256SUMS" | awk '{print $1}')"
+# Exact match on the filename field (awk field splitting, not a grep regex),
+# so a `.` in the asset name (e.g. the version) is never a metacharacter and a
+# same-prefix asset name can never match.
+expected="$(awk -v f="$asset" '$2 == f { print $1 }' "$tmp/SHA256SUMS")"
 [ -n "$expected" ] || err "SHA256SUMS has no entry for ${asset}"
 if command -v sha256sum >/dev/null 2>&1; then
 	actual="$(sha256sum "$tmp/$asset" | awk '{print $1}')"
@@ -99,12 +105,29 @@ fi
 [ "$expected" = "$actual" ] || err "checksum mismatch for ${asset}: expected ${expected}, got ${actual}"
 echo "mind-install: checksum OK"
 
+# Soft-verify GitHub build provenance attestation when `gh` is available. This
+# confirms the artifact was built by the release workflow (not just that it is
+# byte-identical to a possibly-substituted SHA256SUMS entry); it never fails
+# the install when `gh` is absent or the check itself errors.
+if command -v gh >/dev/null 2>&1; then
+	if gh attestation verify "$tmp/$asset" --repo "$REPO" >/dev/null 2>&1; then
+		echo "mind-install: build provenance verified"
+	else
+		echo "mind-install: build provenance could not be verified (continuing)" >&2
+	fi
+fi
+
 tar -xzf "$tmp/$asset" -C "$tmp" || err "could not extract $asset"
 [ -f "$tmp/mind" ] || err "archive did not contain a 'mind' binary"
 
-mkdir -p "$INSTALL_DIR"
-install -m 0755 "$tmp/mind" "$INSTALL_DIR/mind" 2>/dev/null \
-	|| { cp "$tmp/mind" "$INSTALL_DIR/mind" && chmod 0755 "$INSTALL_DIR/mind"; }
+mkdir -p "$INSTALL_DIR" || err "could not create install directory: ${INSTALL_DIR}"
+if command -v install >/dev/null 2>&1 && install -m 0755 "$tmp/mind" "$INSTALL_DIR/mind" 2>/dev/null; then
+	:
+elif cp "$tmp/mind" "$INSTALL_DIR/mind" 2>/dev/null && chmod 0755 "$INSTALL_DIR/mind" 2>/dev/null; then
+	:
+else
+	err "could not write to ${INSTALL_DIR}; check permissions or set MIND_INSTALL_DIR to a writable directory"
+fi
 
 echo "mind-install: installed mind ${version} to ${INSTALL_DIR}/mind"
 case ":${PATH}:" in

@@ -105,3 +105,50 @@ fn each_version_compare_link_chains_to_the_next_older_version() {
         "the oldest version [{oldest}] must be a releases/tag link"
     );
 }
+
+/// The check `cargo_pkg_version_has_a_changelog_section` enforces: does `text`
+/// carry a `## [version]` section? Extracted so the exact regression this
+/// guards against (a version bump that forgot to rename `[Unreleased]`) can be
+/// exercised directly against a synthetic document below, without mutating
+/// Cargo.toml.
+fn has_section_for(text: &str, version: &str) -> bool {
+    section_names(text).iter().any(|s| s == version)
+}
+
+#[test]
+fn missing_version_section_is_detected() {
+    // The regression this guards against: Cargo.toml was bumped to a new
+    // version, but CHANGELOG.md's top section is still `[Unreleased]`, so
+    // there is no `## [0.99.0]` section yet.
+    let text = "# Changelog\n\n## [Unreleased]\n\n### Added\n\n- something\n\n\
+                ## [0.21.0] - 2026-07-23\n";
+    assert!(!has_section_for(text, "0.99.0"));
+    assert!(has_section_for(text, "0.21.0"));
+}
+
+#[test]
+fn cargo_pkg_version_has_a_changelog_section() {
+    let text = changelog();
+    let version = env!("CARGO_PKG_VERSION");
+    // A pre-release version (`0.22.0-dev`) is the between-releases state of
+    // `main`: it exists so a build from `main` is distinguishable from the last
+    // release, and its changes are still accumulating under `[Unreleased]`.
+    // There is nothing to match until the release bump drops the suffix, which
+    // is exactly when this guard has to bite.
+    if version.contains('-') {
+        assert!(
+            has_section_for(&text, "Unreleased"),
+            "a pre-release version must accumulate its changes under \
+             '## [Unreleased]'"
+        );
+        return;
+    }
+    assert!(
+        has_section_for(&text, version),
+        "CHANGELOG.md has no '## [{version}]' section matching Cargo.toml's \
+         version; a version bump must rename '## [Unreleased]' to \
+         '## [{version}] - YYYY-MM-DD' in the same change (see \
+         .claude/skills/release/SKILL.md), so `make ci` catches this before a \
+         tag is pushed rather than after the release matrix runs"
+    );
+}

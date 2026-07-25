@@ -1,6 +1,7 @@
 name: canary
 
-# Daily layout-drift canary: melds jaemk/mind for real and probes the catalog.
+# Daily layout-drift canary: melds jaemk/mind for real and probes the catalog,
+# including the two curated nested sources it discovers.
 # This job runs independently of the release pipeline; failures are visible
 # (workflow shows red) but do not block releases.
 on:
@@ -8,9 +9,17 @@ on:
     - cron: "0 8 * * *"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: canary
+  cancel-in-progress: false
+
 jobs:
   flagship-meld:
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -24,6 +33,22 @@ jobs:
         run: |
           mkdir -p "$MIND_HOME" "$CLAUDE_HOME"
           ./target/release/mind meld jaemk/mind
-          ./target/release/mind recall --sources | grep -q 'jaemk/mind' \
-            || { echo "canary: jaemk/mind not found in recall --sources" >&2; exit 1; }
-          ./target/release/mind probe
+
+          sources_json="$(./target/release/mind recall --sources --json)"
+          echo "$sources_json" | jq -e '[.items[].name] | index("github.com/jaemk/mind")' >/dev/null \
+            || { echo "canary: github.com/jaemk/mind not found in recall --sources" >&2; exit 1; }
+          # The two curated nested sources mind.toml discovers (DSC-38); if
+          # either goes missing the flagship meld no longer offers the curated
+          # catalog it exists to demonstrate.
+          echo "$sources_json" | jq -e '[.items[].name] | index("github.com/anthropics/skills")' >/dev/null \
+            || { echo "canary: github.com/anthropics/skills not found in recall --sources" >&2; exit 1; }
+          echo "$sources_json" | jq -e '[.items[].name] | index("github.com/ComposioHQ/awesome-claude-skills")' >/dev/null \
+            || { echo "canary: github.com/ComposioHQ/awesome-claude-skills not found in recall --sources" >&2; exit 1; }
+
+          # A floor, not an exact count: the catalog grows over time, but a
+          # collapse to near-zero means discovery broke on one of the sources.
+          item_count="$(./target/release/mind probe --json | jq '.items | length')"
+          if [ "$item_count" -lt 20 ]; then
+            echo "canary: probe --json returned only $item_count item(s), expected at least 20" >&2
+            exit 1
+          fi
