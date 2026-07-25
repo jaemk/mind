@@ -202,18 +202,26 @@ has no `mind.toml` of its own:
   this.
 - **`roots`**: convention scan roots for the nested source, for a monorepo or
   subtree layout (DSC-50).
+- **`add-roots`**: extra convention scan roots that compose with the nested
+  source's own discovery, the curator-side form of `meld --add-root` (DSC-84).
 - **`[[discover.sources.hooks]]`**: one or more hooks to run for the nested
   source. Each entry has the same shape as a source's own `[[hooks]]` entry: a
   required `run` field, and optional `name`, `optional`, and `event` fields. They
   run under the same disclosure and safety prompt as the source's own hooks
   (including the non-TTY skip and `--dangerously-skip-install-hook-check`).
 
-These fields apply ONLY when the nested source ships no `mind.toml`. If the
-nested source has a `mind.toml`, that file is authoritative for its pin, roots,
-and hooks, and the curator-supplied values are ignored (a warning is emitted). The
-gate is whole-file: a nested `mind.toml`, even one that does not declare a
-pin/roots/hooks, suppresses all three. `namespace` and `install` are unaffected;
-they always apply.
+`roots`, `add-roots`, `flat-skills`, and the hooks apply ONLY when the nested
+source ships no `mind.toml`. If the nested source has one, that file is
+authoritative for its own discovery and hooks and the curator-supplied values
+are ignored (a warning is emitted). The gate is whole-file: a nested
+`mind.toml`, even one declaring none of them, suppresses all four. `add-roots`
+is gated even though the consumer-side `meld --add-root` is not, so a curator
+cannot reach past a nested source's authoritative export control on the
+consumer's behalf (DSC-88).
+
+The pin directive is NOT gated: it is authoritative whether or not the nested
+source ships a `mind.toml`, overriding that source's own `[source]` pin
+(DSC-65). `namespace` and `install` are likewise unaffected; they always apply.
 
 ```toml
 # Adopt a source that has no mind.toml: supply config it lacks.

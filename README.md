@@ -1,5 +1,6 @@
 # mind
 
+[![ci](https://github.com/jaemk/mind/actions/workflows/ci.yml/badge.svg)](https://github.com/jaemk/mind/actions/workflows/ci.yml)
 [![docs](https://img.shields.io/badge/docs-jaemk.github.io%2Fmind-blue)](https://jaemk.github.io/mind/)
 [![release](https://img.shields.io/github/v/release/jaemk/mind)](https://github.com/jaemk/mind/releases/latest)
 [![crates.io](https://img.shields.io/crates/v/mind-cli)](https://crates.io/crates/mind-cli)
@@ -45,8 +46,8 @@ brew trust jaemk/mind
 brew install mind
 ```
 
-Bottles are provided for Apple Silicon macOS (arm64) and x86_64 Linux. Intel
-macOS is not covered; use `cargo install mind-cli` instead.
+Bottles are provided for Apple Silicon macOS (arm64) and Linux (x86_64 and
+aarch64). Intel macOS is not covered; use `cargo install mind-cli` instead.
 
 Linux and macOS with the Rust toolchain:
 
@@ -63,6 +64,7 @@ pinning, target-dir overrides, and platform details.
 ```
 mind meld owner/repo   # clone and prompt to install items
 mind recall            # list what's installed
+mind unmeld owner/repo # drop the source and uninstall what it installed
 ```
 
 `meld` presents available items and prompts to install. To register without
@@ -99,7 +101,8 @@ The [documentation](https://jaemk.github.io/mind/) is the full reference: the
 [install hooks](https://jaemk.github.io/mind/guide/install-hooks.html),
 [authoring a source](https://jaemk.github.io/mind/guide/authoring.html), and
 [troubleshooting](https://jaemk.github.io/mind/guide/troubleshooting.html). The
-[spec/](spec/) directory is the normative behavioral spec.
+[spec/](https://github.com/jaemk/mind/tree/main/spec) directory is the normative
+behavioral spec.
 
 ## Develop
 

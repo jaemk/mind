@@ -5,6 +5,16 @@
 Meld a source and install its items:
 
 ```
+mind meld jaemk/mind   # clone this repo, prompt to install its items
+mind recall            # list what's installed
+```
+
+`mind meld jaemk/mind` registers the `hello-mind` example skill plus two
+curated sources it points at, `anthropics/skills` and
+`ComposioHQ/awesome-claude-skills`, without installing their items. Melding
+any other repo works the same way:
+
+```
 mind meld owner/repo   # clone and prompt to install items
 mind recall            # list what's installed
 ```
@@ -19,16 +29,21 @@ mind learn <item>                       # install a specific item
 mind recall                             # list what's installed
 ```
 
-Agent homes can be Claude Code, Gemini CLI, Codex CLI, or Antigravity -- not just
-`~/.claude`. See [Configuration](configuration.md#cross-harness-lobes) for the
-per-harness path table and preset commands.
+Agent homes can be Claude Code, Gemini CLI, Codex CLI, Antigravity, or Windsurf
+-- not just `~/.claude`. Run `mind config lobes detect` to find which of these
+are installed and add matching lobes (Windsurf is project-scoped, so it gets a
+`mind link-project` hint instead of an auto-added lobe). See
+[Configuration](configuration.md#cross-harness-lobes) for the per-harness path
+table and preset commands.
 
-For a self-contained first run with no remote, use the bundled starter source (a
-plain convention layout, see
+To try mind's install flow against a source you can inspect and edit freely,
+clone the repo and meld the bundled starter example (a plain convention
+layout, see
 [examples/starter/](https://github.com/jaemk/mind/tree/main/examples/starter)):
 
 ```
-cp -r examples/starter /tmp/starter
+git clone --depth 1 https://github.com/jaemk/mind /tmp/mind-repo
+cp -r /tmp/mind-repo/examples/starter /tmp/starter
 cd /tmp/starter && git init -q && git add -A && git commit -qm init
 mind meld /tmp/starter   # prompts to install; confirm to install all three
 mind recall

@@ -13,10 +13,12 @@ error.
 curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/jaemk/mind/main/resources/install.sh | sh
 ```
 
-Downloads the release binary for your platform (x86_64 Linux or aarch64 macOS)
-and installs it to `~/.local/bin`. The script verifies the download against the
-published `SHA256SUMS` asset before extracting. Override the target dir with
-`MIND_INSTALL_DIR` or pin a version with `MIND_VERSION`:
+Downloads the release binary for your platform (x86_64 or aarch64 Linux, or
+aarch64 macOS) and installs it to `~/.local/bin`. On Linux it fetches the
+`musl` build, which is statically linked and runs on any glibc version (Ubuntu
+22.04, Debian 12, RHEL 9, Amazon Linux 2, and newer). The script verifies the
+download against the published `SHA256SUMS` asset before extracting. Override
+the target dir with `MIND_INSTALL_DIR` or pin a version with `MIND_VERSION`:
 
 ```
 curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/jaemk/mind/main/resources/install.sh \
@@ -34,8 +36,9 @@ brew install mind
 ```
 
 The repo is not named `homebrew-mind`, so the tap needs its clone URL. Homebrew
-bottles are provided for Apple Silicon macOS (arm64) and x86_64 Linux. Intel
-macOS is not covered by the tap; use `cargo install mind-cli` instead (see below).
+bottles are provided for Apple Silicon macOS (arm64) and Linux (x86_64 and
+aarch64, glibc-linked). Intel macOS is not covered by the tap; use
+`cargo install mind-cli` instead (see below).
 
 > **Note (migration):** Earlier versions of this page said Intel macOS should use
 > the tap. That instruction was wrong: no Intel macOS bottle exists. Use
@@ -57,12 +60,29 @@ on Windows. On Windows, run `mind` under WSL (Windows Subsystem for Linux).
 
 ## Updating
 
-> **Note:** if you are running mind 0.13.0, do not run `mind evolve` -- it
-> deadlocks and hangs. Reinstall from scratch using the install script, Homebrew
-> (`brew upgrade mind`), or `cargo install mind-cli` before using `evolve`.
-
 `mind evolve` updates the binary itself to the latest release. It reports the
 target version and prompts before downloading, unless `--yes` is given (`--check`
 reports without changing anything, `--version <v>` pins a target). It uses the
 same download path as the install script and verifies the `SHA256SUMS` asset
 before swapping in the new binary.
+
+## Uninstall
+
+Remove installed items and sources first, then the binary.
+
+- `mind forget <item>` removes one installed item: its store copy
+  (`~/.mind/store/<kind>/<name>`) and its symlink in every lobe. `mind forget
+  --unmanaged` also removes lobe items mind did not install (with no `<item>`,
+  every unmanaged item across all lobes).
+- `mind unmeld <name>` drops a melded source and uninstalls the items it
+  installed; `--keep-items` drops the source without touching installed items.
+- `rm -rf ~/.mind` (or the `MIND_HOME` override) removes the store, source
+  clones, manifest, registry, and config -- everything mind tracks on disk.
+  `forget`/`unmeld` the items you want cleaned up first: deleting `~/.mind`
+  leaves lobe symlinks dangling, and `mind introspect` on a lobe with no
+  `~/.mind` reports every link as broken.
+- Remove the `mind` binary itself:
+  - Install script: delete it from `~/.local/bin/mind`, or from
+    `$MIND_INSTALL_DIR/mind` if you overrode the target directory.
+  - Homebrew: `brew uninstall mind`.
+  - `cargo install`: `cargo uninstall mind-cli`.

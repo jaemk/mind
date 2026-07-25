@@ -8,9 +8,9 @@ every source and item, and the interactive front end for the rest of the CLI
 ## Opening it
 
 - `mind probe` with no opt-out launches the TUI. It requires a TTY on stdout.
-- It falls back to the non-interactive catalog listing when `--no-tui` (short
-  `-n`) is given, when `--json` is given, or when stdout is not a terminal (piped
-  or redirected).
+- It falls back to the non-interactive catalog listing when `--no-tui` is
+  given, when `--json` is given, or when stdout is not a terminal (piped or
+  redirected).
 - The `query`, `--kind`, and `--source` arguments apply in both modes. In the
   listing they filter it; in the TUI they seed the initial search and filter
   state.
@@ -91,8 +91,12 @@ through the normal confirm-and-execute path.
 - For an item: its kind, source, the commit when installed, and the description.
   It offers Install when the item is not installed, else Forget.
 - For a source: its name and installed/available item counts, and Install all
-  available items, Uninstall all installed items, and Unmeld. An action is
-  omitted when it would do nothing.
+  available items, Uninstall all installed items, and Unmeld. While the source
+  has no installed items, a **Set namespace** action is also offered: it opens
+  an input for a namespace prefix, so items later install as `<prefix>:<name>`.
+  It disappears once any item from the source is installed (a source's prefix
+  locks once items are installed). An action is omitted when it would do
+  nothing.
 
 In the dialog, `j` / `k` move the highlight, `Enter` or `y` runs the highlighted
 action, and `Esc`, `q`, or `n` dismisses without acting. On a group header, kind

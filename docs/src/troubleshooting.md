@@ -10,7 +10,8 @@
   <repo> --namespace <prefix>`, so its items install as `<prefix>:<name>`. See
   [examples/namespacing/](https://github.com/jaemk/mind/tree/main/examples/namespacing).
 - Where things live: see [Configuration](configuration.md#paths). Override the
-  roots with `MIND_HOME` and `CLAUDE_HOME`.
+  roots with `MIND_HOME` and `MIND_DEFAULT_LOBE` (`CLAUDE_HOME` is a legacy
+  alias for the latter and is still read).
 - Before publishing a source, run `mind review <path>` to check its `mind.toml`,
   item kinds, `{{ns:}}` references, and pin directive. See
   [Authoring a source](authoring.md).
