@@ -39,8 +39,12 @@ pub enum Decision {
 /// Silicon is published) and any other OS/arch combination.
 pub fn target_triple(os: &str, arch: &str) -> Result<&'static str> {
     match (os, arch) {
-        ("linux", "x86_64") => Ok("x86_64-unknown-linux-gnu"),
-        ("linux", "aarch64") => Ok("aarch64-unknown-linux-gnu"),
+        // Linux resolves to the statically linked musl artifact, matching
+        // resources/install.sh: the gnu build carries the glibc floor of the
+        // runner that produced it, so it fails to start on older
+        // distributions after the download has already reported success.
+        ("linux", "x86_64") => Ok("x86_64-unknown-linux-musl"),
+        ("linux", "aarch64") => Ok("aarch64-unknown-linux-musl"),
         ("macos", "aarch64") => Ok("aarch64-apple-darwin"),
         _ => Err(MindError::UnsupportedPlatform {
             os: os.to_string(),
@@ -485,13 +489,23 @@ static MKTEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 /// the principled hardening is to verify a published release digest/signature
 /// after download (out of scope here).
 fn mktemp_dir() -> Result<std::path::PathBuf> {
+    mktemp_dir_prefixed("mind-evolve")
+}
+
+/// Like `mktemp_dir`, but with a caller-chosen name prefix instead of the
+/// hardcoded `mind-evolve` used by the download/auth-config paths. Shared with
+/// `tui::action`'s stdout-capture file (TUI-61), which needs the identical
+/// exclusive-create + 0700 scheme but under its own `mind-tui-capture` prefix so
+/// the two features' temp dirs stay visually distinguishable on disk.
+// spec: TUI-61
+pub(crate) fn mktemp_dir_prefixed(prefix: &str) -> Result<std::path::PathBuf> {
     let pid = std::process::id();
     let seq = MKTEMP_SEQ.fetch_add(1, Ordering::Relaxed);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .subsec_nanos();
-    let base = std::env::temp_dir().join(format!("mind-evolve-{pid}-{nanos}-{seq}"));
+    let base = std::env::temp_dir().join(format!("{prefix}-{pid}-{nanos}-{seq}"));
     // Exclusive creation: fails if the path already exists.
     std::fs::create_dir(&base).map_err(|e| MindError::io(&base, e))?;
     // 0700: only the owning process can enter or read the directory.
@@ -606,17 +620,52 @@ fn is_github_api_url(url: &str) -> bool {
     url.starts_with("https://api.github.com/")
 }
 
-/// A GitHub token from the environment, if set: `GITHUB_TOKEN` first, then
-/// `GH_TOKEN` (matching the `gh` CLI), first non-empty wins. Trailing whitespace
-/// is trimmed so a token read from a file with a trailing newline still forms a
-/// valid header.
+/// Whether `token` is safe to embed in a curl `--config` file (STO-61) or a
+/// `Authorization:` header value.
+///
+/// Rejects:
+/// - any control character (including `\n`/`\r`): the config file is
+///   `key = "value"` lines, one directive per line, so an embedded newline lets
+///   the token inject additional curl directives (e.g. `output = ...` or
+///   `url = ...`) that curl will honor -- B10.
+/// - `"` and `\`: curl's config quoted-string syntax does not get escaping
+///   applied when the token is interpolated in, so either character could
+///   break out of the quoted value -- C20.
+///
+/// Pure (no I/O) so it is unit-testable without touching the environment.
+// spec: STO-62
+pub(crate) fn is_safe_token(token: &str) -> bool {
+    !token.chars().any(|c| c.is_control()) && !token.contains('"') && !token.contains('\\')
+}
+
+/// A GitHub token from the environment, if set AND safe to use: `GITHUB_TOKEN`
+/// first, then `GH_TOKEN` (matching the `gh` CLI), first non-empty *and safe*
+/// wins. Trailing whitespace is trimmed so a token read from a file with a
+/// trailing newline still forms a valid header.
+///
+/// A candidate that fails `is_safe_token` (B10: an embedded control character,
+/// `"`, or `\`) is skipped rather than used, with a warning on stderr -- evolve
+/// fails CLOSED (no auth header) instead of forwarding an unsafe value into the
+/// curl config file or an HTTP header. This is deliberately non-fatal: a
+/// malformed `GITHUB_TOKEN` (e.g. a CI expression that expanded wrong) should
+/// degrade the request to unauthenticated, not abort the whole `evolve`.
+// spec: STO-62
 fn github_token() -> Option<String> {
     for var in ["GITHUB_TOKEN", "GH_TOKEN"] {
         if let Ok(v) = std::env::var(var) {
             let v = v.trim();
-            if !v.is_empty() {
-                return Some(v.to_string());
+            if v.is_empty() {
+                continue;
             }
+            if !is_safe_token(v) {
+                eprintln!(
+                    "warning: ${var} contains characters unsafe for evolve's authenticated \
+                     GitHub API request (a control character, '\"', or '\\'); proceeding \
+                     without authentication"
+                );
+                continue;
+            }
+            return Some(v.to_string());
         }
     }
     None
@@ -677,6 +726,26 @@ fn write_curl_auth_config(content: &str) -> Result<std::path::PathBuf> {
     Ok(path)
 }
 
+/// `write_curl_auth_config`, degraded (C19): a failure to write the temp auth
+/// config file (a read-only or full `TMPDIR`, e.g.) warns on stderr and
+/// returns `None` instead of propagating, so `evolve` falls back to an
+/// unauthenticated request rather than hard-failing outright. The
+/// unauthenticated request still works below GitHub's per-IP rate limit, so
+/// this is strictly better than aborting.
+// spec: STO-62
+fn write_curl_auth_config_or_warn(content: &str) -> Option<std::path::PathBuf> {
+    match write_curl_auth_config(content) {
+        Ok(p) => Some(p),
+        Err(e) => {
+            eprintln!(
+                "warning: could not write the temporary auth config file for the \
+                 authenticated GitHub API request ({e}); proceeding without authentication"
+            );
+            None
+        }
+    }
+}
+
 /// Best-effort removal of the auth config file and its temp directory (STO-61),
 /// so the token-bearing file does not linger after the API call.
 fn remove_curl_auth_config(path: &Path) {
@@ -733,11 +802,11 @@ fn fetch_to_string(url: &str) -> Result<String> {
     let token = github_token();
     let output = if have("curl") {
         let mut args = curl_string_args(url, timeout);
-        // spec: STO-61 -- pass the bearer token via a 0600 --config file, never argv.
-        let auth_cfg = match curl_auth_config_content(url, token.as_deref()) {
-            Some(content) => Some(write_curl_auth_config(&content)?),
-            None => None,
-        };
+        // spec: STO-61 STO-62 -- pass the bearer token via a 0600 --config file,
+        // never argv; a write failure degrades to unauthenticated (C19) rather
+        // than failing the whole fetch.
+        let auth_cfg = curl_auth_config_content(url, token.as_deref())
+            .and_then(|content| write_curl_auth_config_or_warn(&content));
         if let Some(ref p) = auth_cfg {
             args.extend(curl_auth_args(Some(&p.to_string_lossy())));
         }
@@ -779,11 +848,11 @@ fn fetch_to_file(url: &str, dest: &Path) -> Result<()> {
     let token = github_token();
     let status = if have("curl") {
         let mut args = curl_file_args(url, &dest_str, timeout);
-        // spec: STO-61 -- pass the bearer token via a 0600 --config file, never argv.
-        let auth_cfg = match curl_auth_config_content(url, token.as_deref()) {
-            Some(content) => Some(write_curl_auth_config(&content)?),
-            None => None,
-        };
+        // spec: STO-61 STO-62 -- pass the bearer token via a 0600 --config file,
+        // never argv; a write failure degrades to unauthenticated (C19) rather
+        // than failing the whole fetch.
+        let auth_cfg = curl_auth_config_content(url, token.as_deref())
+            .and_then(|content| write_curl_auth_config_or_warn(&content));
         if let Some(ref p) = auth_cfg {
             args.extend(curl_auth_args(Some(&p.to_string_lossy())));
         }
@@ -989,6 +1058,133 @@ mod tests {
     }
 
     #[test]
+    // spec: STO-62
+    fn is_safe_token_rejects_control_chars_and_quote_backslash() {
+        // A clean token is safe.
+        assert!(is_safe_token("ghp_abcDEF1234567890"));
+        // An embedded newline could inject an extra curl config directive
+        // (B10): reject.
+        assert!(!is_safe_token("tok123\noutput = /tmp/pwned"));
+        assert!(!is_safe_token("tok123\r\nurl = https://evil.example/"));
+        // Any other control character (e.g. a bare CR or a NUL byte) is rejected too.
+        assert!(!is_safe_token("tok\x00123"));
+        assert!(!is_safe_token("tok\x1b[31m123"));
+        // `"` and `\` are not escaped by the config file's quoted-string syntax
+        // (C20): reject either.
+        assert!(!is_safe_token("tok\"123"));
+        assert!(!is_safe_token("tok\\123"));
+        // Empty string has no unsafe characters, so it is "safe" by this
+        // predicate; callers gate on non-empty separately.
+        assert!(is_safe_token(""));
+    }
+
+    #[test]
+    // spec: STO-62
+    fn github_token_rejects_unsafe_env_value_and_falls_back() {
+        // spec: STO-62 -- an unsafe GITHUB_TOKEN is skipped (fail closed) and
+        // GH_TOKEN is tried next; with neither safe, the result is None (no
+        // auth), never a propagated error.
+        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let orig_gh = std::env::var("GITHUB_TOKEN").ok();
+        let orig_gh2 = std::env::var("GH_TOKEN").ok();
+
+        // SAFETY: ENV_LOCK (the crate-wide shared lock, C18) is held for the
+        // duration of every mutation and read below.
+        unsafe {
+            std::env::set_var("GITHUB_TOKEN", "tok123\noutput = /tmp/pwned");
+            std::env::remove_var("GH_TOKEN");
+        }
+        assert_eq!(
+            github_token(),
+            None,
+            "an unsafe GITHUB_TOKEN with no valid fallback must yield no token, not an error"
+        );
+
+        unsafe {
+            std::env::set_var("GITHUB_TOKEN", "tok123\noutput = /tmp/pwned");
+            std::env::set_var("GH_TOKEN", "goodtoken456");
+        }
+        assert_eq!(
+            github_token(),
+            Some("goodtoken456".to_string()),
+            "an unsafe GITHUB_TOKEN must fall through to a safe GH_TOKEN"
+        );
+
+        unsafe {
+            std::env::set_var("GITHUB_TOKEN", "cleantoken789");
+            std::env::remove_var("GH_TOKEN");
+        }
+        assert_eq!(
+            github_token(),
+            Some("cleantoken789".to_string()),
+            "a safe token must still be returned unchanged"
+        );
+
+        // Restore.
+        unsafe {
+            match orig_gh {
+                Some(v) => std::env::set_var("GITHUB_TOKEN", v),
+                None => std::env::remove_var("GITHUB_TOKEN"),
+            }
+            match orig_gh2 {
+                Some(v) => std::env::set_var("GH_TOKEN", v),
+                None => std::env::remove_var("GH_TOKEN"),
+            }
+        }
+        drop(guard);
+    }
+
+    #[test]
+    // spec: STO-62
+    fn write_curl_auth_config_or_warn_degrades_on_write_failure() {
+        // C19 -- when the auth config file cannot be written (simulated here by
+        // pointing content-writing at a path that cannot exist: a parent that is
+        // actually a regular file, so `create_dir` inside `mktemp_dir` fails
+        // because TMPDIR itself is unusable), the degraded wrapper must return
+        // None (fail OPEN to an unauthenticated request) rather than the caller
+        // propagating a hard error.
+        //
+        // We cannot easily force TMPDIR-level failures hermetically without
+        // mutating global env (which every other evolve test also touches), so
+        // this test drives the always-failing branch directly via a full
+        // TMPDIR override, restoring it immediately after.
+        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let orig_tmpdir = std::env::var("TMPDIR").ok();
+
+        let n = MKTEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let blocked_path = std::env::temp_dir().join(format!(
+            "mind-evolve-blocked-tmpdir-{}-{n}",
+            std::process::id()
+        ));
+        // Create a REGULAR FILE at the path we are about to point TMPDIR at, so
+        // `create_dir` for any path under it fails with NotADirectory/Exists.
+        std::fs::write(&blocked_path, b"not a directory").expect("seed blocking file");
+
+        // SAFETY: ENV_LOCK is held for the duration of this mutation and the
+        // call below.
+        unsafe {
+            std::env::set_var("TMPDIR", &blocked_path);
+        }
+
+        let result = write_curl_auth_config_or_warn("header = \"Authorization: Bearer x\"\n");
+
+        // SAFETY: ENV_LOCK is still held.
+        unsafe {
+            match &orig_tmpdir {
+                Some(v) => std::env::set_var("TMPDIR", v),
+                None => std::env::remove_var("TMPDIR"),
+            }
+        }
+        drop(guard);
+        let _ = std::fs::remove_file(&blocked_path);
+
+        assert!(
+            result.is_none(),
+            "a temp-dir write failure must degrade to None (unauthenticated), not panic/error: {result:?}"
+        );
+    }
+
+    #[test]
     // spec: STO-61
     fn curl_argv_uses_config_flag_and_never_carries_the_token() {
         // The built curl arg vector references the auth config file via --config
@@ -1043,6 +1239,22 @@ mod tests {
             mode, 0o600,
             "auth config file must be mode 0600, got {mode:o}"
         );
+        // spec: STO-61 -- the config file lives inside a FRESH 0700 temp
+        // directory (`mktemp_dir`), not merely a 0600 file dropped into a
+        // shared/world-traversable temp dir: without this, `remove_curl_auth_config`
+        // wiping only the file (not the dir) would still be tested, but the 0700
+        // isolation of the directory itself would go unverified.
+        let dir = path.parent().expect("config file must have a parent dir");
+        let dir_meta = std::fs::metadata(dir).expect("temp dir must exist");
+        assert!(
+            dir_meta.is_dir(),
+            "the auth config's parent must be a directory"
+        );
+        let dir_mode = dir_meta.permissions().mode() & 0o777;
+        assert_eq!(
+            dir_mode, 0o700,
+            "the auth config's temp directory must be mode 0700, got {dir_mode:o}"
+        );
         // The file content carries the header (curl reads it), proving the token
         // lives in the 0600 file rather than on argv.
         let on_disk = std::fs::read_to_string(&path).expect("must read config back");
@@ -1054,6 +1266,10 @@ mod tests {
         assert!(
             !path.exists(),
             "remove_curl_auth_config must delete the file"
+        );
+        assert!(
+            !dir.exists(),
+            "remove_curl_auth_config must also remove the temp directory"
         );
     }
 
@@ -1094,10 +1310,15 @@ mod tests {
     }
 
     /// Serializes tests that mutate process-wide env vars (`PATH`,
-    /// `GITHUB_TOKEN`/`GH_TOKEN`) so they don't race each other. No other test
-    /// in this module spawns a real `curl`/`wget` process or reads these vars,
-    /// so this only needs to guard against re-entrant runs of the same test.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// `GITHUB_TOKEN`/`GH_TOKEN`) so they don't race each other. This is the
+    /// crate-wide lock defined in `src/paths.rs` (C18): `set_var`/`remove_var`
+    /// soundness is process-wide, not module-wide, and `src/paths.rs` and
+    /// `src/commands.rs` mutate their own overlapping set of env vars
+    /// (`MIND_AGENT_HOMES`, `MIND_POLICY_FILE`, `MIND_HOME`, `CLAUDE_HOME`, ...)
+    /// in the same multithreaded test binary, some via a spawned `git`, which
+    /// snapshots `environ`. Using one shared lock here instead of a
+    /// module-local one closes that gap.
+    use crate::paths::ENV_LOCK;
 
     /// Write an executable fake `curl` at `dir/curl` that records its argv (one
     /// arg per line) to `capture_path` and always exits non-zero (simulating a
@@ -1597,11 +1818,11 @@ mod tests {
     fn target_triple_maps_supported_platforms() {
         assert_eq!(
             target_triple("linux", "x86_64").unwrap(),
-            "x86_64-unknown-linux-gnu"
+            "x86_64-unknown-linux-musl"
         );
         assert_eq!(
             target_triple("linux", "aarch64").unwrap(),
-            "aarch64-unknown-linux-gnu"
+            "aarch64-unknown-linux-musl"
         );
         assert_eq!(
             target_triple("macos", "aarch64").unwrap(),
@@ -1610,6 +1831,8 @@ mod tests {
     }
 
     #[test]
+    // spec: CLI-142 -- a platform with no published artifact is an error and
+    // nothing is changed.
     fn target_triple_rejects_intel_macos_and_unknown_arch() {
         // Intel macOS has no published artifact (mirrors install.sh).
         match target_triple("macos", "x86_64") {
@@ -1632,6 +1855,9 @@ mod tests {
     }
 
     #[test]
+    // spec: CLI-142 -- the artifact name shape `mind-<version>-<target>.tar.gz`
+    // is what resources/install.sh and the Homebrew formula resolve, so every
+    // install path lands on the same binary.
     fn asset_url_matches_install_sh_shape() {
         assert_eq!(
             asset_url("0.3.0", "x86_64-unknown-linux-gnu"),

@@ -296,17 +296,25 @@ impl Policy {
         }
     }
 
-    /// Does `identity` match an `allow` pattern? `identity` may be a bare base
-    /// identity (`host/owner/repo`) or an extended instance identity carrying an
-    /// item-link `#path` and/or a consumer `@alias` suffix
-    /// (`host/owner/repo#path@alias`, see `Source::compute_name`); it is
-    /// truncated to its base identity before matching, so every call site
-    /// matches on the same `host/owner/repo` form regardless of which extended
-    /// form it happens to pass (POL-67). `*` matches within a single path
-    /// segment (POL-10). The `allow` patterns themselves are never truncated.
+    /// Does `identity` match an `allow` pattern? `*` matches within a single
+    /// path segment (POL-10).
+    ///
+    /// This is a verbatim matcher: it does not interpret, normalize, or
+    /// truncate what it is given. Callers must pass the *base* identity
+    /// `host/owner/repo` (`Source::base_identity`), never an extended instance
+    /// identity carrying an item-link `#path` or consumer `@alias` suffix
+    /// (POL-67).
+    ///
+    /// Deriving the base here by scanning for the first `#`/`@` would be a
+    /// policy bypass (POL-68): those markers are suffixes only by convention,
+    /// and nothing stops a `host`, `owner`, or `repo` from containing them, so
+    /// a directory named `blessed@evil` would truncate to an allowed
+    /// `blessed`. The base identity is instead always taken structurally from
+    /// the `Source`'s own fields, which cannot carry a marker in a position
+    /// that matters (CLI-204 rejects `@`/`#` in `host`, and `owner` and `repo`
+    /// are single segments either way).
     pub fn allow_matches(&self, identity: &str) -> bool {
-        let base = base_identity_of(identity);
-        self.allow.iter().any(|p| glob_match(p, base))
+        self.allow.iter().any(|p| glob_match(p, identity))
     }
 
     /// Enforce the internal invariants. Every `auto_meld` entry has a tag/ref when
@@ -345,8 +353,10 @@ impl Policy {
                 // spec (e.g. `acme/baseline`) validates against a host-qualified
                 // pattern (e.g. `github.com/acme/*`). A repo that does not parse is
                 // itself invalid.
+                // spec: POL-67 -- the base identity, taken structurally from the
+                // parsed source rather than by scanning `name` for a suffix.
                 let identity = crate::source::parse_spec(&am.repo)
-                    .map(|s| s.name)
+                    .map(|s| s.base_identity())
                     .map_err(|_| MindError::InvalidPolicy {
                         path: path.display().to_string(),
                         reason: format!("auto_meld entry '{}' is not a valid repo spec", am.repo),
@@ -615,25 +625,6 @@ fn parse_str(text: &str, path: &Path) -> Result<Policy> {
     Ok(policy)
 }
 
-/// Truncate an extended source identity (`host/owner/repo#path@alias`, see
-/// `Source::compute_name`) to its base `host/owner/repo` form, at the first of
-/// either the item-link `#path` marker or the consumer `@alias` marker (POL-67).
-/// The alias marker always follows the path marker when both are present
-/// (`#path@alias`), so truncating at whichever marker occurs first is
-/// equivalent to truncating at `#` when present, else at `@`; an `@` occurring
-/// inside the path segment (after a `#`) is already excluded because `#` is
-/// found first. A bare base identity with neither marker is returned unchanged
-/// (idempotent).
-fn base_identity_of(identity: &str) -> &str {
-    let end = match (identity.find('#'), identity.find('@')) {
-        (Some(h), Some(a)) => h.min(a),
-        (Some(h), None) => h,
-        (None, Some(a)) => a,
-        (None, None) => identity.len(),
-    };
-    &identity[..end]
-}
-
 /// Match `identity` against an `allow` pattern where `*` matches within a single
 /// `/`-separated segment and does not cross a `/` (POL-10). Segments must align
 /// one-to-one; each pattern segment is matched against the corresponding identity
@@ -803,50 +794,129 @@ allow = ["github.com/acme/*", "github.example.com/platform/agents"]
     // one inside the path segment itself), and a bare base identity (no-op,
     // idempotent). The allow pattern itself is never truncated.
     // spec: POL-67
+    // spec: POL-68
     #[test]
-    fn allow_matches_truncates_extended_identity_to_base() {
+    fn extended_instance_identities_match_via_structural_base_identity() {
         let text = r#"
 [sources]
 allow = ["github.com/acme/*"]
 "#;
         let p = parse(text).unwrap();
 
-        // Bare base identity: unchanged, matches as before.
-        assert!(p.allow_matches("github.com/acme/repo"));
+        // Every extended instance form of an allowed repo reduces, through
+        // `Source::base_identity`, to the same base identity the bare meld
+        // matches on. This is the pairing production code uses; `allow_matches`
+        // itself never sees the extended form.
+        let base = crate::source::parse_spec("github:acme/repo").unwrap();
+        assert_eq!(base.name, "github.com/acme/repo");
+        assert!(p.allow_matches(&base.base_identity()));
 
-        // Only an `@alias` suffix.
-        assert!(p.allow_matches("github.com/acme/repo@myalias"));
+        let mut aliased = crate::source::parse_spec("github:acme/repo").unwrap();
+        aliased.apply_alias(Some("myalias".into()));
+        assert_eq!(aliased.name, "github.com/acme/repo@myalias");
+        assert!(p.allow_matches(&aliased.base_identity()));
 
-        // Only a `#path` suffix (item-link instance).
-        assert!(p.allow_matches("github.com/acme/repo#skills/foo"));
+        let link =
+            crate::source::parse_spec("https://github.com/acme/repo/tree/main/skills/foo").unwrap();
+        assert_eq!(link.name, "github.com/acme/repo#skills/foo");
+        assert!(p.allow_matches(&link.base_identity()));
 
-        // Both, composed as `#path@alias` (path first, alias last).
-        assert!(p.allow_matches("github.com/acme/repo#skills/foo@myalias"));
+        let mut composed =
+            crate::source::parse_spec("https://github.com/acme/repo/tree/main/skills/foo").unwrap();
+        composed.apply_alias(Some("myalias".into()));
+        assert_eq!(composed.name, "github.com/acme/repo#skills/foo@myalias");
+        assert!(p.allow_matches(&composed.base_identity()));
 
-        // An `@` appearing inside the `#path` segment itself must not matter:
-        // truncation at the first marker (`#`) already strips it along with
-        // everything after, including any embedded `@`.
-        assert!(p.allow_matches("github.com/acme/repo#skills/foo@bar/baz"));
-
-        // A repo genuinely outside the allowlist is still refused, extended
-        // suffixes and all -- truncation must not accidentally widen matching.
-        assert!(!p.allow_matches("github.com/other/repo"));
-        assert!(!p.allow_matches("github.com/other/repo#skills/foo"));
-        assert!(!p.allow_matches("github.com/other/repo@myalias"));
+        // A repo genuinely outside the allowlist is refused in every form.
+        let other = crate::source::parse_spec("github:other/repo").unwrap();
+        assert!(!p.allow_matches(&other.base_identity()));
+        let mut other_aliased = crate::source::parse_spec("github:other/repo").unwrap();
+        other_aliased.apply_alias(Some("myalias".into()));
+        assert!(!p.allow_matches(&other_aliased.base_identity()));
     }
 
-    // POL-67: the `allow` patterns themselves are never truncated -- only the
-    // identity argument passed through `allow_matches` is. `glob_match` is the
-    // shared low-level matcher both use; it performs no truncation of either
-    // argument itself, so a literal `#`/`@` in a pattern (or, hypothetically,
-    // an already-truncated caller-supplied identity) is matched character-for-
-    // character, not specially stripped. (Since `allow_matches` always
-    // truncates its identity argument before calling `glob_match`, a pattern
-    // containing a literal `#`/`@` can never match through `allow_matches` --
-    // there is no way to construct an untruncated identity there -- so this is
-    // exercised directly against `glob_match`, the seam where truncation is
-    // deliberately absent.)
-    // spec: POL-67
+    // POL-68: `allow_matches` is a verbatim matcher. Passing it an extended
+    // instance identity does NOT match the base pattern -- the truncation it
+    // used to perform is gone, because a string scan for the first `#`/`@`
+    // cannot tell a suffix marker from the same character inside an `owner` or
+    // `repo`. Callers must pass `Source::base_identity()`; a caller that forgets
+    // fails closed (refuses) rather than open.
+    // spec: POL-68
+    #[test]
+    fn allow_matches_is_verbatim_and_never_truncates() {
+        // An exact pattern, so nothing can match by wildcard coincidence.
+        let text = r#"
+[sources]
+allow = ["github.com/acme/repo"]
+"#;
+        let p = parse(text).unwrap();
+        assert!(p.allow_matches("github.com/acme/repo"));
+        assert!(!p.allow_matches("github.com/acme/repo@myalias"));
+        assert!(!p.allow_matches("github.com/acme/repo#skills/foo"));
+        assert!(!p.allow_matches("github.com/acme/repo#skills/foo@myalias"));
+        // Note that a wildcard pattern over the repo segment
+        // (`github.com/acme/*`) does match `repo@myalias`, because `@` is an
+        // ordinary character inside a segment. That is correct and is exactly
+        // why the base identity must be chosen by the caller rather than
+        // guessed at here: `*` is the policy author's explicit decision to
+        // admit any repo under `acme`, including one whose name contains `@`.
+        let wild = parse(
+            r#"
+[sources]
+allow = ["github.com/acme/*"]
+"#,
+        )
+        .unwrap();
+        assert!(wild.allow_matches("github.com/acme/repo@myalias"));
+        // But a `#path` suffix adds a segment, so it never matches a
+        // three-segment pattern.
+        assert!(!wild.allow_matches("github.com/acme/repo#skills/foo"));
+    }
+
+    // POL-68: the bypass the structural derivation closes. A source whose
+    // `repo` legitimately contains `@` must not reduce to a shorter, allowed
+    // identity, and one that matches an `allow` entry verbatim must not be
+    // refused. Both are driven through `parse_spec` so the identity is built
+    // exactly as production builds it.
+    // spec: POL-68
+    #[test]
+    fn marker_bearing_repo_names_neither_widen_nor_narrow_the_allowlist() {
+        let p = parse(
+            r#"
+[sources]
+allow = ["local/parent/blessed"]
+"#,
+        )
+        .unwrap();
+        // A directory named `blessed@evil` is a different repo, not the allowed
+        // one with a consumer alias: it must be refused.
+        let evil = crate::source::parse_spec("/src/parent/blessed@evil").unwrap();
+        assert_eq!(evil.repo, "blessed@evil");
+        assert_eq!(evil.base_identity(), "local/parent/blessed@evil");
+        assert!(!p.allow_matches(&evil.base_identity()));
+        // The genuinely allowed repo still matches.
+        let ok = crate::source::parse_spec("/src/parent/blessed").unwrap();
+        assert!(p.allow_matches(&ok.base_identity()));
+
+        // And an `owner` containing `@` matches a wildcard pattern over that
+        // segment rather than being truncated away.
+        let p2 = parse(
+            r#"
+[sources]
+allow = ["local/*/agents"]
+"#,
+        )
+        .unwrap();
+        let versioned = crate::source::parse_spec("/src/proj@v2/agents").unwrap();
+        assert_eq!(versioned.owner, "proj@v2");
+        assert!(p2.allow_matches(&versioned.base_identity()));
+    }
+
+    // POL-68: `glob_match`, the shared low-level matcher, treats `#`/`@` as
+    // ordinary characters in both arguments. Nothing in the matching path
+    // ascribes meaning to them, so an `allow` pattern naming a literal marker
+    // matches only an identity carrying the same literal marker.
+    // spec: POL-68
     #[test]
     fn glob_match_performs_no_truncation_itself() {
         assert!(glob_match(
@@ -863,40 +933,14 @@ allow = ["github.com/acme/*"]
         ));
     }
 
-    // POL-67: `base_identity_of` directly, exercising the truncation seam at
-    // its own boundary independent of glob matching.
-    // spec: POL-67
-    #[test]
-    fn base_identity_of_truncation_seam() {
-        assert_eq!(
-            base_identity_of("github.com/acme/repo"),
-            "github.com/acme/repo"
-        );
-        assert_eq!(
-            base_identity_of("github.com/acme/repo@alias"),
-            "github.com/acme/repo"
-        );
-        assert_eq!(
-            base_identity_of("github.com/acme/repo#skills/foo"),
-            "github.com/acme/repo"
-        );
-        assert_eq!(
-            base_identity_of("github.com/acme/repo#skills/foo@alias"),
-            "github.com/acme/repo"
-        );
-        // Empty string is its own base identity (no markers to find).
-        assert_eq!(base_identity_of(""), "");
-    }
-
-    // POL-31/POL-67: validate_at's lock-vs-auto_meld check routes through
-    // allow_matches, so it inherits the same truncation. A parsed auto_meld
-    // identity is ordinarily a bare base identity (auto_meld entries do not
-    // carry link/alias suffixes), so this confirms the shared path stays
-    // correct for the common case after the truncation change.
-    // spec: POL-67
+    // POL-31/POL-68: validate_at's lock-vs-auto_meld check matches on the
+    // parsed source's structural base identity, the same form every runtime
+    // gate uses, so a shorthand auto_meld entry validates against a
+    // host-qualified pattern.
+    // spec: POL-68
     // spec: POL-31
     #[test]
-    fn lock_requires_auto_meld_in_allow_still_works_after_truncation_change() {
+    fn lock_matches_auto_meld_on_structural_base_identity() {
         let text = r#"
 [sources]
 lock = true
@@ -1782,8 +1826,14 @@ follow_branch = "main"
     // spec: POL-62
     #[test]
     fn min_mind_version_equal_to_current_is_accepted() {
+        // `min-mind-version` must be dotted numeric (DSC-40), and between
+        // releases the running binary carries a `-dev` pre-release suffix, so
+        // compare against the numeric base of the running version rather than
+        // the raw string. A `-dev` build satisfies its own base version:
+        // `version_at_least` parses the suffixed component as 0.
         let current = env!("CARGO_PKG_VERSION");
-        let text = format!("min-mind-version = \"{current}\"\n[sources]\nlock = true\n");
+        let base = current.split('-').next().unwrap();
+        let text = format!("min-mind-version = \"{base}\"\n[sources]\nlock = true\n");
         parse_str(&text, Path::new("test-policy.toml"))
             .expect("version == running binary must be accepted");
     }

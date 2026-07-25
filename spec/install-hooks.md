@@ -418,6 +418,33 @@ outside the surrounding verb, under the same consent model.
   from a link instance (the identity's own embedded `#` composes with the
   item-ref split, since the split is on the LAST `#`).
 
+  A `#`-carrying target string can exactly match a registered source's
+  identity AND, under the ordinary `#`-split reading of that same string, also
+  name an installed item -- e.g. a link instance whose linked skill sits at a
+  single top-level path segment `foo` has identity `host/owner/repo#foo`,
+  spelled identically to item `foo` in a plain-melded source
+  `host/owner/repo`. Which reading is meant then depends on registry state
+  invisible to the caller (whether that link instance happens to be melded),
+  so resolving it silently either way would change a script's meaning as a
+  side effect of an unrelated meld. `hooks run`/`hooks list` therefore report
+  this specific case as `AmbiguousHookTarget`, naming the ambiguous string and
+  the item(s) it also matches, rather than picking the source (or the item) as
+  a winner. Two escapes disambiguate explicitly and always take priority over
+  both the exact-identity check and the ambiguity check, so they work whether
+  or not a given target happens to collide:
+  - A leading `source:` prefix (e.g. `source:host/owner/repo#foo`) always
+    forces the source reading; the prefix is stripped before the rest of
+    target resolution runs.
+  - A kind-qualified item ref (`<source>#<kind>:<name>`, e.g.
+    `host/owner/repo#skill:foo`) always forces the item reading: it never
+    equals a registered source's exact identity (an identity carries no
+    `kind:` segment), so it falls through to the ordinary `#`-split item-ref
+    parsing unconditionally.
+
+  A target with no `#` at all is never ambiguous: the CLI-194 heuristic reads
+  it as a source selector unconditionally, so it is never read as an item ref
+  in `hooks run`/`hooks list` regardless of registry state.
+
 ## Managed-policy composition (research needed)
 
 Install hooks are arbitrary code execution, which is exactly what an enterprise

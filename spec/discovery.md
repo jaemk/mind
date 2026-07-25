@@ -178,8 +178,9 @@ run = "make build"
   nested source that the source itself would normally declare in its own
   `mind.toml`: a pin directive (exactly one of `follow-branch = "<branch>"`,
   `pin-tag = "<tag>"`, or `pin-ref = "<commit>"`, per DSC-41), `roots = [...]`
-  (convention scan roots, DSC-50), `flat-skills = true` (flat skill layout,
-  DSC-74; see DSC-77), and one or more hooks as a
+  (convention scan roots, DSC-50), `add-roots = [...]` (additive convention
+  scan roots, DSC-84; gated like `roots`, see DSC-88), `flat-skills = true`
+  (flat skill layout, DSC-74; see DSC-77), and one or more hooks as a
   `[[discover.sources.hooks]]` array-of-tables (the `[[hooks]]` shape, HOOK-50).
   Declaring more than one pin directive on an entry is a `MindToml` error, the
   same one-of rule a `[source]` section follows (DSC-41). This lets a curator add
@@ -187,16 +188,16 @@ run = "make build"
   one with custom build requirements or a monorepo layout, without forking it,
   and lets a generated super-source pin each source to a reproducible revision
   (DSC-65, DUMP-1).
-- `DSC-60` The curator-supplied `roots`, `flat-skills`, and `hooks` (DSC-59)
-  apply only when the nested source ships no `mind.toml` of its own. When the
-  nested source has a `mind.toml`, that file is authoritative for its roots,
-  flat-skills, and hooks and the curator-supplied values are ignored (a warning is
-  emitted, since the source has onboarded). The gate is whole-file: a nested
-  `mind.toml`, even one that does not declare roots/flat-skills/hooks, suppresses
-  all three. The curator-supplied pin is NOT gated: it
-  is authoritative regardless of the nested `mind.toml` (DSC-65). `as` (DSC-39)
-  and `install` (DSC-58) are registry/consumer concerns and are likewise
-  unaffected by this gate; they always apply.
+- `DSC-60` The curator-supplied `roots`, `add-roots` (DSC-88), `flat-skills`, and
+  `hooks` (DSC-59) apply only when the nested source ships no `mind.toml` of its
+  own. When the nested source has a `mind.toml`, that file is authoritative for
+  its roots, add-roots, flat-skills, and hooks and the curator-supplied values
+  are ignored (a warning is emitted, since the source has onboarded). The gate is
+  whole-file: a nested `mind.toml`, even one that does not declare
+  roots/add-roots/flat-skills/hooks, suppresses all four. The curator-supplied
+  pin is NOT gated: it is authoritative regardless of the nested `mind.toml`
+  (DSC-65). `as` (DSC-39) and `install` (DSC-58) are registry/consumer concerns
+  and are likewise unaffected by this gate; they always apply.
 - `DSC-61` A curator-supplied entry behaves as if the source had declared the
   same in its own `mind.toml`: when applied (the DSC-60 gate permits, i.e. the
   nested source ships no `mind.toml`), `roots` governs convention discovery
@@ -209,13 +210,28 @@ run = "make build"
 - `DSC-65` A pin directive on a `[discover].sources` entry (DSC-59) is
   authoritative: it sets the nested source's pin whether or not the source ships
   its own `mind.toml`, overriding the source's own `[source]` pin directive
-  (DSC-41). It is exempt from the DSC-60 fallback gate, which governs only `roots`,
-  `flat-skills`, and `hooks`; a nested entry that supplies only a pin (no gated
-  roots/flat-skills/hooks) does not trigger the DSC-60 "ignored" warning. The precedence is: a consumer's direct
-  top-level `meld` pin flag wins (DSC-41), then the entry's pin directive, then the
+  (DSC-41). It is exempt from the DSC-60 fallback gate, which governs only
+  `roots`, `add-roots`, `flat-skills`, and `hooks`; a nested entry that supplies
+  only a pin (no gated roots/add-roots/flat-skills/hooks) does not trigger the
+  DSC-60 "ignored" warning. The precedence is: a consumer's direct top-level
+  `meld` pin flag wins (DSC-41), then the entry's pin directive, then the
   source's own `[source]` pin directive, then the default branch. `dump` relies on
   this to reproduce each melded source at its recorded commit by emitting a
   per-entry `pin-ref` (DUMP-1, DUMP-4).
+- `DSC-88` A `[discover].sources` entry's `add-roots` (DSC-59, mirroring the
+  consumer `--add-root` flag, DSC-84) is gated by DSC-60 exactly like `roots`,
+  `flat-skills`, and hooks: it applies only when the nested source ships no
+  `mind.toml` of its own, and is otherwise ignored with the DSC-60 warning. A
+  direct consumer `--add-root` (DSC-84) is never gated, and the asymmetry is
+  deliberate: a consumer melding a source directly makes their own
+  export-control decision for their own install, while a curator's entry acts on
+  a nested source on the consumer's behalf. Ungated, a curator could set
+  `add-roots = ["."]` on an entry for a source whose author shipped an
+  authoritative `mind.toml` exporting a subset of its items (DSC-3), reaching
+  every item the author did not export, and installing all of them when the
+  entry is also `install = true` (DSC-58). `dump` emits a nested entry's
+  `add-roots` as it emits `roots` (DUMP-11), so re-melding a generated
+  super-source applies the same gate.
 - `DSC-54` Melding a super-source (one whose `mind.toml` lists `[discover].sources`)
   registers the whole nested chain (DSC-38), but the post-meld auto-install flow
   (CLI-23) runs only over the super-source's OWN items (`<source>#*`) plus any
@@ -348,15 +364,27 @@ needs roots that compose instead of replace.
   from the layout, with the source's effective prefix (alias or
   `[source].namespace`) applied at install. A manifest's per-plugin namespace
   (MKT-5/MKT-8) does not reach them.
-- `DSC-87` Two added roots can surface the SAME on-disk item through different
-  scan mechanisms (e.g. `--add-root . --add-root skills`, where the `.` root
-  finds `skills/foo` via the `skills/` container pass and the `skills` root
-  finds the same directory via the flat-skills pass). This is a same-path
-  overlap, not a name collision: among the items an add-root scan itself
-  contributes, only the first occurrence of a given canonical on-disk path is
-  kept and later duplicates are silently dropped, before the DSC-85
-  (kind, effective-name) uniqueness check runs. `DuplicateItem` is reserved for
-  a same-name collision between items at distinct on-disk paths.
+- `DSC-87` Two added roots can surface the SAME on-disk item AS THE SAME KIND
+  through different scan mechanisms (e.g. `--add-root . --add-root skills`,
+  where the `.` root finds `skills/foo` as a Skill via the `skills/` container
+  pass and the `skills` root finds the same directory as a Skill via the
+  flat-skills pass). This is a same-path overlap, not a name collision: among
+  the items an add-root scan itself contributes, only the first occurrence of a
+  given (kind, canonical on-disk path) pair is kept and later duplicates are
+  silently dropped, before the DSC-85 (kind, effective-name) uniqueness check
+  runs. `DuplicateItem` is reserved for a same-name collision between items at
+  distinct on-disk paths.
+- `DSC-89` The DSC-87 dedup key is `(kind, canonical path)`, not the path alone:
+  a single on-disk path can contribute up to one item PER KIND. This matters for
+  a directory that qualifies as more than one kind at once -- a `tools/<name>/`
+  directory needs no anchor file (DSC-13), so one that also carries a
+  `SKILL.md` is both a valid Tool and a valid Skill. With `--add-root .
+  --add-root tools`, the `.` root's tools/ pass finds it as a Tool and the
+  `tools` root's flat-skills pass finds the same directory as a Skill: two
+  DIFFERENT kinds at the same path, so DSC-87 does not apply to this pair and
+  both survive (each still subject to the DSC-85 (kind, effective-name)
+  uniqueness check independently). Keying DSC-87 on path alone (pre-DSC-89)
+  silently dropped whichever kind's scan pass ran second.
 
 ## Flat skill layout
 
@@ -518,19 +546,31 @@ field lets the curator opt in to named handling.
 
 ## Accepted risks
 
-Metadata reads during discovery (`mind.toml`, `SKILL.md`, the agent and rule
-`.md` files, and a `.claude-plugin/plugin.json` manifest) are not size-capped, and
-TOML nesting depth is not bounded. A source author could ship a multi-gigabyte
-`SKILL.md` or a deeply nested `mind.toml` to make `mind` allocate heavily while
-scanning that source. This is a self-inflicted denial of service: the operator
-chose to meld that source, no privilege boundary is crossed, and the exposure is
-a crash of the current invocation only, not a persistent or remote compromise.
-Unbounded manifest reads are the norm for this class of tool (e.g. `cargo` does
-not cap `Cargo.toml`/crate-file reads either). The cost of a fixed cap (a false
-ceiling that could someday reject a legitimately large skill) is judged higher
-than the benefit at the current adoption scale. The
-decision is to accept the risk and revisit if melding untrusted third-party
-sources at scale becomes common. Recorded so the point stops recurring in review.
+- `DSC-90` No file read from a melded source tree is size-capped, and TOML
+  nesting depth is not bounded. This covers every read of source-controlled
+  content, not only discovery metadata: `mind.toml`, `SKILL.md`, the agent and
+  rule `.md` files, and a `.claude-plugin/plugin.json` manifest during
+  discovery; every file in an item tree during `{{ns:}}` expansion at install;
+  the unguarded-reference scan; `review`; the TUI preview; and content hashing.
+  A source author could ship a multi-gigabyte `SKILL.md` or a deeply nested
+  `mind.toml` to make `mind` allocate heavily while scanning or installing that
+  source.
+
+  This is a self-inflicted denial of service: the operator chose to meld that
+  source, no privilege boundary is crossed, and the exposure is a crash of the
+  current invocation only, not a persistent or remote compromise. Unbounded
+  manifest reads are the norm for this class of tool (`cargo` does not cap
+  `Cargo.toml` or crate-file reads either). The cost of a fixed cap, a false
+  ceiling that could someday reject a legitimately large skill, is judged higher
+  than the benefit at the current adoption scale. The decision is to accept the
+  risk and revisit if melding untrusted third-party sources at scale becomes
+  common.
+
+  Normative content: `mind` does not cap these reads. A change that adds a cap
+  is a behavior change and must update this entry. Recorded with an ID, indexed
+  from the feature table, and referenced from `SECURITY.md`, because the prior
+  unlabeled version of this note was missed by a reviewer looking for exactly
+  it.
 
 ## `[source].namespace`
 

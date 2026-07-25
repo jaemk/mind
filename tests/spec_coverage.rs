@@ -17,7 +17,13 @@ const ALLOWLIST: &[&str] = &[
     // Storage layout and JSON schema invariants, exercised by every test that
     // reads/writes the registry or manifest, or installs an item.
     "STO-1", "STO-3", "STO-10", "STO-11", "STO-12", "STO-20", "STO-21", "STO-22", "STO-23",
-    "STO-30", "STO-31",
+    "STO-30",
+    // An accepted risk, not a behavior: it states that `mind` does NOT cap the
+    // size of files read from a source tree. Asserting the absence of a cap
+    // would mean allocating a file large enough to matter, which is exactly the
+    // cost the decision declines to pay. Carries an ID so the decision is
+    // findable and so a future cap is recognizable as a behavior change.
+    "DSC-90",
     // Lifecycle invariants covered indirectly: swap mechanics, idempotent
     // reinstall, removing an absent path. (LIFE-15, the source-content hash
     // basis, is now cited by example_drift_upgrade.)
@@ -85,14 +91,17 @@ const ALLOWLIST: &[&str] = &[
     //   same native curl/wget downloader as resources/install.sh (no external
     //   crate). The pure logic (platform triple, version compare/decision, the
     //   --check report) is cited from src/selfupdate.rs and tests/cli.rs
-    //   (CLI-140, CLI-141). The network download (CLI-142) and the binary swap
-    //   (CLI-143) need a real release and a writable install path, so they cannot
-    //   run headlessly and stay allowlisted.
-    "CLI-142", "CLI-143",
-    //   evolve locking (STO-46) is cited from src/selfupdate.rs: the lock
-    //   acquisition site carries the citation; the serialization behavior itself
-    //   needs two concurrent processes and a real binary swap, so it has no
-    //   dedicated headless test.
+    //   (CLI-140, CLI-141). CLI-142 is artifact *selection*, which is pure and
+    //   is now cited from the asset-name and unsupported-platform tests. The
+    //   binary swap (CLI-143) needs a real release and a writable install path,
+    //   so it cannot run headlessly and stays allowlisted.
+    "CLI-143",
+    //   evolve locking (STO-46): the serialization behavior needs two concurrent
+    //   processes and a real binary swap, so it has no headless test. The lock
+    //   acquisition site in src/selfupdate.rs carries a `// spec:` comment for
+    //   the reader, but a production-code comment is not coverage, so the
+    //   decision is recorded here.
+    "STO-46",
     //   install hooks (source-declared or user-supplied build command gated by a
     //   safety prompt; see spec/install-hooks.md) is fully cited: the core
     //   (parse/resolve/disclosure/run) from src/hook.rs, the data/error/parse
@@ -242,20 +251,45 @@ fn defined_ids() -> BTreeSet<String> {
     out
 }
 
-/// IDs cited in `src/` and `tests/` via `// spec:` comments, excluding this file.
-/// Only text after a `// spec:` marker is scanned, so incidental tokens like
-/// "UTF-8" in prose are not mistaken for IDs.
+/// IDs cited from TEST code via `// spec:` comments. Only text after a
+/// `// spec:` marker is scanned, so incidental tokens like "UTF-8" in prose are
+/// not mistaken for IDs.
+///
+/// A citation only counts when it sits in test code: everything under `tests/`,
+/// and the `#[cfg(test)]` regions of `src/`. A `// spec:` comment on production
+/// code documents the implementation site, which is useful, but it asserts
+/// nothing, so counting it would let an ID satisfy the gate with no test behind
+/// it and without the ALLOWLIST decision this gate exists to force.
 fn cited_ids() -> BTreeSet<String> {
     const MARKER: &str = "// spec:";
     let mut out = BTreeSet::new();
-    let mut sources = files_with_ext(&root().join("src"), "rs");
-    sources.extend(files_with_ext(&root().join("tests"), "rs"));
-    for f in sources {
+    let mut sources: Vec<(std::path::PathBuf, bool)> = files_with_ext(&root().join("src"), "rs")
+        .into_iter()
+        .map(|f| (f, true))
+        .collect();
+    sources.extend(
+        files_with_ext(&root().join("tests"), "rs")
+            .into_iter()
+            .map(|f| (f, false)),
+    );
+    for (f, tests_only) in sources {
         if f.file_name().is_some_and(|n| n == "spec_coverage.rs") {
             continue; // don't count the ALLOWLIST literals as citations
         }
         let text = std::fs::read_to_string(&f).unwrap();
-        for line in text.lines() {
+        // In `src/`, a citation counts only from the first `#[cfg(test)]` on.
+        // Test modules are conventionally last in a file here, so this is a
+        // simple and stable rule; a file with no test module contributes
+        // nothing.
+        let scanned = if tests_only {
+            match text.find("#[cfg(test)]") {
+                Some(i) => &text[i..],
+                None => continue,
+            }
+        } else {
+            text.as_str()
+        };
+        for line in scanned.lines() {
             if let Some(idx) = line.find(MARKER) {
                 for tok in id_tokens(&line[idx + MARKER.len()..]) {
                     out.insert(tok);

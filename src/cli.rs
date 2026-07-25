@@ -48,12 +48,17 @@ impl KindArg {
     }
 }
 
+// spec: CLI-207 -- with no arguments, print full help to stdout and exit 0
+// (clap's default for a required subcommand with no arguments is a usage
+// error on stderr at exit 2). `command` stays a required (non-Option) enum:
+// bare `mind` still does not launch the TUI (TUI-1/TUI-2), it prints help.
 #[derive(Debug, Parser)]
 #[command(
     name = "mind",
     version,
     about = "A manager for agent tooling: skills, agents, rules, and tools.",
-    propagate_version = true
+    propagate_version = true,
+    arg_required_else_help = true
 )]
 pub struct Cli {
     /// Emit machine-readable JSON instead of formatted text.
@@ -117,7 +122,10 @@ pub enum Command {
         /// branch (floating; `sync` advances it); `tag=<name>` follows that tag
         /// (re-points on `sync` if it moves). With no `--pin`, the repo's
         /// `[source]` pin directive (else the remote default branch) applies.
-        // spec: CLI-200, CLI-201
+        /// Only takes effect at the meld that registers the source: passing it
+        /// against an already-melded source is ignored (a note lists it and
+        /// points at `unmeld` + `meld` to re-pin, CLI-206).
+        // spec: CLI-200, CLI-201, CLI-206
         #[arg(long, value_name = "HEAD|REF|branch=NAME|tag=NAME")]
         pin: Option<String>,
 
@@ -138,7 +146,10 @@ pub enum Command {
 
         /// Set the source's convention-scan roots to one or more repo-root-relative
         /// directories (repeatable). Overrides `[source].roots` in mind.toml.
-        /// Persisted on the source and used by later scans and sync.
+        /// Persisted on the source and used by later scans and sync. Only takes
+        /// effect at the meld that registers the source: passing it against an
+        /// already-melded source is ignored (a note lists it and points at
+        /// `unmeld` + `meld` to change it, CLI-206).
         #[arg(long = "root", value_name = "DIR")]
         roots: Vec<String>,
 
@@ -148,7 +159,9 @@ pub enum Command {
         /// convention-scanned in addition, so items the source does not
         /// declare become installable. Unlike --root, this does not override
         /// or suppress anything. Persisted on the source and used by later
-        /// scans and sync.
+        /// scans and sync. Only takes effect at the meld that registers the
+        /// source: passing it against an already-melded source is ignored (a
+        /// note lists it and points at `unmeld` + `meld` to change it, CLI-206).
         #[arg(long = "add-root", value_name = "DIR")]
         add_roots: Vec<String>,
 
@@ -158,7 +171,10 @@ pub enum Command {
         /// disable a source's declared flat layout. Applies to skills only (agent,
         /// rule, and tool discovery are unaffected) and to convention discovery
         /// only (ignored for an authoritative `mind.toml`). Persisted on the source
-        /// and used by later scans and sync.
+        /// and used by later scans and sync. Only takes effect at the meld that
+        /// registers the source: passing it against an already-melded source is
+        /// ignored (a note lists it and points at `unmeld` + `meld` to change it,
+        /// CLI-206).
         #[arg(long)]
         flat_skills: bool,
 
@@ -168,7 +184,9 @@ pub enum Command {
         /// skip it but still install the source, or abort and install nothing.
         /// Overriding a declared `[source].install` is shown loudly in that
         /// prompt. Use `mind review <repo>` to see a source's declared hook
-        /// before melding.
+        /// before melding. Only takes effect at the meld that registers the
+        /// source: passing it against an already-melded source is ignored (a
+        /// note lists it and points at `unmeld` + `meld` to change it, CLI-206).
         #[arg(long, value_name = "CMD")]
         install_hook: Option<String>,
 
@@ -633,7 +651,8 @@ pub enum Command {
     /// The destination source is resolved from, in precedence order:
     ///   1. `--to <path>` (this flag) takes precedence over all others
     ///   2. `MIND_ABSORB_TO` environment variable
-    ///   3. `absorb_to` key in `~/.mind/config.toml`
+    ///   3. `absorb-to` key in `~/.mind/config.toml` (the legacy `absorb_to`
+    ///      spelling is still read)
     ///
     /// If none of these is set and the run is interactive, `absorb` prompts for
     /// a destination and offers `~/.mind/personal` as the built-in default,
@@ -648,7 +667,7 @@ pub enum Command {
         item_ref: String,
 
         /// Destination source directory. Takes precedence over `MIND_ABSORB_TO`
-        /// and the `absorb_to` key in `config.toml`.
+        /// and the `absorb-to` key in `config.toml`.
         #[arg(long, value_name = "PATH")]
         to: Option<String>,
 

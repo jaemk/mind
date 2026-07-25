@@ -9,7 +9,9 @@ use crate::error::{MindError, Result};
 use crate::manifest::{InstalledItem, Manifest};
 use crate::mindfile::{HookEvent, MindToml, ResolvedHook};
 use crate::paths::Paths;
-use crate::resolve::{HookTarget, parse_hook_target, select_installed, source_matches_glob};
+use crate::resolve::{
+    HookTarget, parse_hook_target, parse_item_ref, select_installed, source_matches_glob,
+};
 use crate::source::{Pin, RecordedHook, Registry, Source};
 
 // ---------------------------------------------------------------------------
@@ -69,15 +71,60 @@ pub fn list(paths: &Paths, target: &str) -> Result<()> {
 /// parse as an item ref that matches nothing (`NotInstalled`), leaving the
 /// instance's source-level hooks unreachable by name. When `target` (trimmed)
 /// equals some registered source's `name` exactly, it is read as a source
-/// target regardless of the `#` it carries. Any other string -- including a
-/// plain `source#item` that does not name a registered source, and the
-/// triple-`#` `<link-identity>#<item>` form for an item inside a link
-/// instance -- falls back to [`parse_hook_target`] unchanged.
+/// target regardless of the `#` it carries -- UNLESS that same string, read as
+/// an ordinary `<source>#<item>` ref, also names an installed item (e.g. a
+/// link instance whose skill sits at a single top-level path segment, so its
+/// identity `host/owner/repo#foo` is spelled identically to item `foo` in
+/// source `host/owner/repo`). That is a genuine ambiguity -- which reading is
+/// meant depends on registry state the caller cannot see -- so it is reported
+/// as [`MindError::AmbiguousHookTarget`] rather than silently picking one
+/// side. Two escapes disambiguate explicitly and always take priority over
+/// both the exact-match check and the ambiguity check:
+/// - A leading `source:` prefix always forces the source reading (e.g.
+///   `source:host/owner/repo#foo`), stripped before the rest of resolution.
+/// - A kind-qualified item ref (`<source>#<kind>:<name>`, e.g.
+///   `host/owner/repo#skill:foo`) never equals a registered source's exact
+///   identity (identities carry no `kind:` segment), so it always falls
+///   through to [`parse_hook_target`] and resolves as that item.
+///
+/// Any other string -- including a plain `source#item` that does not name a
+/// registered source, and the triple-`#` `<link-identity>#<item>` form for an
+/// item inside a link instance -- falls back to [`parse_hook_target`] unchanged.
 // spec: HOOK-105
 fn resolve_hook_target(paths: &Paths, target: &str) -> Result<HookTarget> {
     let trimmed = target.trim();
+
+    // spec: HOOK-105 -- the explicit source-targeting escape: skip both the
+    // exact-match and ambiguity checks entirely.
+    if let Some(rest) = trimmed.strip_prefix("source:") {
+        return Ok(HookTarget::Source(rest.trim().to_string()));
+    }
+
     let registry = Registry::load(paths)?;
-    if registry.sources.iter().any(|s| s.name == trimmed) {
+    let source_match = registry.sources.iter().any(|s| s.name == trimmed);
+
+    // spec: HOOK-105 -- only a `#`-carrying string can collide with the
+    // item-ref reading; a target with no `#` is unambiguously a source
+    // selector under the CLI-194 heuristic and is never read as an item here.
+    if source_match
+        && trimmed.contains('#')
+        && let Ok(item_ref) = parse_item_ref(trimmed)
+    {
+        let manifest = Manifest::load(paths)?;
+        let matches = select_installed(&manifest.items, &item_ref);
+        if !matches.is_empty() {
+            let item_forms: Vec<String> = matches
+                .iter()
+                .map(|it| format!("{}#{}:{}", it.source, it.kind.as_str(), it.name))
+                .collect();
+            return Err(MindError::AmbiguousHookTarget {
+                target: trimmed.to_string(),
+                item_forms,
+            });
+        }
+    }
+
+    if source_match {
         return Ok(HookTarget::Source(trimmed.to_string()));
     }
     parse_hook_target(target)

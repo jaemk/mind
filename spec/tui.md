@@ -12,8 +12,8 @@ the lock it takes per action is defined in storage.md (STO-40, STO-41).
 ## Entry and modes
 
 - `TUI-1` `mind probe` with no opt-out launches the interactive TUI. It is the
-  primary interactive entry point, also reached by bare `mind` (no subcommand).
-  Launching the TUI requires a TTY on stdout.
+  primary interactive entry point. Launching the TUI requires a TTY on stdout.
+  (Bare `mind`, with no subcommand, does NOT launch the TUI; see TUI-2.)
 - `TUI-2` `probe` falls back to the non-interactive catalog listing (CLI-80..85)
   when any of these holds: `--no-tui` is given, `--json` is given, or stdout is not
   a TTY (piped or redirected). The `query`, `--kind`, and `--source` arguments
@@ -214,3 +214,16 @@ manifest, and store.
   display sites, DSC-69 / MKT-9) before being stored in the `Snapshot`. This
   prevents terminal injection from catalog-controlled content on the TUI's
   default interactive surface, including during destructive-action confirms.
+- `TUI-61` The stdout-capture file `with_captured_stdout` uses to keep a mutating
+  action's verb output off the alternate screen (TUI-24) is created with the same
+  exclusive-create scheme as the `evolve` download/auth-config temp files
+  (STO-45, STO-61): an unpredictably-named, mode-0700 temp directory
+  (`mktemp_dir_prefixed("mind-tui-capture")`, `create_dir` not `create_dir_all`)
+  holding a file opened with `create_new(true)` and mode 0600. A predictable path
+  opened with plain `create(true).truncate(true)` (the pre-fix behavior) lets a
+  local attacker who pre-creates that path as a symlink get the symlink target
+  truncated and overwritten the next time any user on the host runs a capturing
+  TUI action, and `remove_file` afterward unlinks only the symlink, leaving the
+  target's damage in place. `create_new` refuses to open through a pre-existing
+  path (symlink or otherwise), so the write never follows an attacker-planted
+  symlink.

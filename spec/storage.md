@@ -108,6 +108,15 @@ The on-disk layout and the two persisted JSON files.
   signal that a coexisting instance (a second clone, STO-59) was created rather
   than an existing source's display prefix being changed. Suppressed under
   `--json`.
+- `STO-63` The STO-60 note names the actual registered `name`(s) of the
+  pre-existing instance(s) sharing the base identity, not the bare
+  `host/owner/repo` itself. The bare base identity is not necessarily a
+  resolvable source: if every pre-existing instance carries an identity alias
+  (e.g. melding a repo first as `@a` then as `@b`, with no bare instance ever
+  registered), the bare base never appears in the registry and naming it would
+  point at a name `unmeld` (or any other verb) cannot resolve. With exactly one
+  pre-existing instance the note reads "the existing `<name>` remains"; with more
+  than one it reads "the existing instances `<name1>, <name2>` remain".
 - `STO-17` A source records an optional `roots`: the consumer `--root` override
   (repo-root-relative directories, see DSC-51). Persisted at meld and not changed
   by `sync`. Absent means convention discovery uses `[source].roots` or the repo
@@ -243,6 +252,32 @@ prevent the lost-update and torn-read races a plain read-modify-write would allo
   form. The config-file content and the `--config` arg are built by pure helpers
   (`curl_auth_config_content`, `curl_auth_args`) so they are unit-testable
   without spawning a process.
+- `STO-62` `evolve`'s GitHub token handling fails CLOSED and OPEN, never hard:
+  - **Fails closed on an unsafe token (B10).** A candidate token (`GITHUB_TOKEN`
+    then `GH_TOKEN`) is rejected -- and the next candidate tried, else no
+    authentication -- if it contains a control character (a `\n` could inject
+    an additional `key = value` directive, such as `output = ...` or
+    `url = ...`, into the curl `--config` file from STO-61) or a `"` / `\`
+    (unescaped by the config file's quoted-string syntax, so either could break
+    out of the quoted header value). A warning is printed to stderr naming which
+    env var was rejected; the request proceeds unauthenticated rather than
+    `evolve` erroring out over a malformed token.
+  - **Fails open on a temp-file write failure (C19).** If writing the STO-61
+    auth config file fails (e.g. a read-only or full `TMPDIR`), `evolve` warns
+    on stderr and proceeds with an unauthenticated request instead of
+    propagating the error. An unauthenticated request still succeeds below
+    GitHub's per-IP rate limit, so degrading is strictly better than turning a
+    working `evolve` into a hard failure over an unrelated temp-dir problem.
+  - **Residual exposure (accepted).** The 0600 file inside its 0700 temp
+    directory (STO-61) is removed on both the success and failure branch of the
+    curl invocation, but a `SIGINT` (or `kill -9`) arriving during the API call
+    itself skips that cleanup and can leave the token-bearing file on disk. This
+    is not fully mitigated: `mind` adds no signal handler for it. The exposure
+    window is bounded by the directory's 0700 mode (no other user can read it)
+    and by the file being written fresh per invocation inside a per-process,
+    unpredictably-named directory (STO-61) rather than a shared/reused path, so
+    the residual risk is an orphaned file surviving until the temp dir is
+    reaped, not a cross-user read or a predictable target.
 
 ## Schema versions
 

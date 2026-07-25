@@ -107,19 +107,31 @@ normatively. Source identity is `host/owner/repo` (see storage.md).
   pattern match when `lock = true` (POL-11 applies). Absent `allow-local` is
   equivalent to `allow-local = true`.
 - `POL-67` `allow`/`lock` matching (POL-10..13) is always performed on the base
-  `host/owner/repo` identity: an item-link `#path` suffix and/or a consumer
-  `@alias` suffix (composed as `host/owner/repo#path@alias`, see
-  `Source::compute_name`, storage.md) are stripped before matching against
-  `allow`, regardless of which extended form the caller passes. This holds for
-  every verb that consults the allowlist -- `meld` (POL-11), `learn`, `sync`
-  (including auto-meld provisioning, POL-30..35), `upgrade`'s disposition
+  `host/owner/repo` identity, never on an extended instance identity carrying an
+  item-link `#path` and/or consumer `@alias` suffix (composed as
+  `host/owner/repo#path@alias`, see `Source::compute_name`, storage.md). This
+  holds for every verb that consults the allowlist -- `meld` (POL-11), `learn`,
+  `sync` (including auto-meld provisioning, POL-30..35), `upgrade`'s disposition
   check, and install-hook gating -- so a locked policy's decision to admit a
   repo carries forward to every item-link and/or aliased instance of that repo
   at every later lifecycle step, not just at the initial `meld`. Generalizes
-  LNK-11 (previously stated only for the `meld` call site) to the whole
-  lifecycle by moving the truncation into `allow_matches` itself, so no call
-  site needs to remember to strip suffixes. The `allow` patterns themselves are
-  never truncated: only the identity being matched against them is.
+  LNK-11, previously stated only for the `meld` call site, to the whole
+  lifecycle. The `allow` patterns themselves are never altered: only the
+  identity being matched against them is chosen.
+- `POL-68` The base identity used for POL-67 matching is derived *structurally*,
+  from the source's own `host`, `owner`, and `repo` fields
+  (`Source::base_identity`), and never by scanning an identity string for the
+  first `#`/`@` marker. `#` and `@` are suffix markers only by convention:
+  `owner` and `repo` may legitimately contain them (a local path such as
+  `/src/proj@v2/agents`), so a string scan both admits a source it must not (a
+  directory named `blessed@evil` truncating to an allowed `blessed`) and refuses
+  one it must (`local/proj@v2/agents` against a verbatim `allow` entry). A call
+  site holding only a recorded source *name* (an installed item's `source`, an
+  install target's `source`) resolves it through the registry to recover the
+  structural base identity, and fails closed -- matching the recorded name
+  verbatim, which no base pattern admits -- when no registered source has that
+  name. `Policy::allow_matches` itself is a verbatim matcher that performs no
+  truncation or normalization of its argument.
 
 ## Require pinned
 

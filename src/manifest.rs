@@ -137,6 +137,22 @@ mod tests {
         (base, paths)
     }
 
+    // STO-31: a malformed manifest is a `Json` error naming the file, not a
+    // silent empty manifest (which would read as "nothing installed" and let a
+    // later save drop every recorded item). Normal tests only ever write valid
+    // JSON, so this branch needs a hand-built document to reach.
+    // spec: STO-31
+    #[test]
+    fn malformed_manifest_json_is_a_json_error_naming_the_file() {
+        let (base, paths) = tmp_paths();
+        std::fs::write(base.join("manifest.json"), "{\"items\": [ truncated").unwrap();
+        match Manifest::load(&paths) {
+            Err(MindError::Json { what, .. }) => assert_eq!(what, "manifest.json"),
+            other => panic!("expected a Json error naming manifest.json, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn manifest_missing_version_is_treated_as_one() {
         // spec: STO-50 -- a manifest.json with no "version" field must be read

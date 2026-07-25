@@ -364,6 +364,11 @@ struct CuratedConfig {
     /// The curator `roots`, if set (an explicit empty list is preserved).
     /// Gated by DSC-60: only applied when the nested source has no mind.toml.
     roots: Option<Vec<String>>,
+    /// The curator `add-roots` (DSC-88), if set. Gated by DSC-60/DSC-88: only
+    /// applied when the nested source has no mind.toml of its own, same as
+    /// `roots` -- an authoritative nested manifest is an export-control
+    /// decision (DSC-60) and a curator's `add-roots` must not bypass it.
+    add_roots: Option<Vec<String>>,
     /// The curator `flat-skills` (DSC-77). Gated by DSC-60: only applied when the
     /// nested source has no mind.toml of its own.
     flat_skills: bool,
@@ -373,11 +378,15 @@ struct CuratedConfig {
 }
 
 impl CuratedConfig {
-    /// Whether any DSC-60-GATED values (roots or hooks) are present, so the
-    /// "ignored" warning is warranted when the nested source has its own
-    /// `mind.toml`. The pin is NOT gated (DSC-65) and does NOT participate.
+    /// Whether any DSC-60-GATED values (roots, add-roots, or hooks) are
+    /// present, so the "ignored" warning is warranted when the nested source
+    /// has its own `mind.toml`. The pin is NOT gated (DSC-65) and does NOT
+    /// participate.
     fn has_gated_values(&self) -> bool {
-        self.roots.is_some() || self.flat_skills || !self.hooks.is_empty()
+        self.roots.is_some()
+            || self.add_roots.is_some()
+            || self.flat_skills
+            || !self.hooks.is_empty()
     }
 }
 
@@ -564,6 +573,7 @@ fn meld_recursive(
     let curated = curated.unwrap_or(CuratedConfig {
         pin: None,
         roots: None,
+        add_roots: None,
         flat_skills: false,
         hooks: Vec::new(),
     });
@@ -571,10 +581,11 @@ fn meld_recursive(
     // The curator pin is always extracted (DSC-65: authoritative, not gated).
     let curated_pin = curated.pin.clone();
     if !apply_curated && curated.has_gated_values() {
-        // spec: DSC-60 — warn only when gated fields (roots/hooks) are present
-        // and suppressed. A pin-only entry must NOT trigger this warning.
+        // spec: DSC-60/DSC-88 — warn only when gated fields (roots/add-roots/
+        // flat-skills/hooks) are present and suppressed. A pin-only entry must
+        // NOT trigger this warning.
         eprintln!(
-            "warning: {} ships its own mind.toml; curator-supplied roots/flat-skills/hooks are ignored",
+            "warning: {} ships its own mind.toml; curator-supplied roots/add-roots/flat-skills/hooks are ignored",
             source.name
         );
     }
@@ -806,9 +817,18 @@ fn meld_recursive(
     // spec: DSC-84 / STO-55 -- persist the consumer's --add-root roots. They
     // compose with whatever layer is authoritative (manifest, authoritative
     // mind.toml, or convention), so unlike --root there is no ignored/suppressed
-    // note to print. Root validation happens in the scan (InvalidRoot).
+    // note to print for a direct consumer `--add-root`. Root validation happens
+    // in the scan (InvalidRoot).
     if !add_roots.is_empty() {
         source.add_roots = Some(add_roots);
+    } else if apply_curated && curated.add_roots.is_some() {
+        // spec: DSC-88 -- unlike a direct consumer `--add-root`, a CURATOR's
+        // `add-roots` (from a `[discover].sources` entry) is gated by DSC-60
+        // exactly like `roots`/`flat-skills`/hooks: it composes only when the
+        // nested source has no `mind.toml` of its own. Without this gate a
+        // curator could reach into a nested source's authoritative export list
+        // (DSC-3) and surface everything it deliberately did not export.
+        source.add_roots = curated.add_roots.clone();
     }
 
     // Scan before registering. If the source is rejected here (e.g. the
@@ -961,12 +981,42 @@ fn meld_recursive(
     warn_unguarded_references(&items);
     warn_agent_collisions(paths, &items); // spec: NS-41 advisory
     if !out.json {
-        println!(
-            "{} melded {} ({} item(s))",
-            out.ok(),
-            source.name,
-            items.len()
-        );
+        // spec: CLI-205 -- a top-level meld that discovers zero items by
+        // convention scanning gets a non-success glyph plus explicit guidance
+        // (the convention paths and the escapes), rather than a "0 item(s))"
+        // line that reads identically to a legitimate empty source. Suppressed
+        // for a nested/curated meld (noise the caller doesn't control), an
+        // authoritative mind.toml (roots/--add-root/--flat-skills don't apply
+        // there, DSC-52/76), a pure super-source that only curates other
+        // sources (zero own items is expected), and a plugin/marketplace
+        // manifest source (which has its own guidance path above).
+        let curates_other_sources = mindfile
+            .as_ref()
+            .and_then(|m| m.discover.as_ref())
+            .is_some_and(|d| !d.sources.is_empty());
+        let has_manifest = plugin_manifest::find_plugin_manifest(&dir).is_some()
+            || plugin_manifest::find_marketplace_manifest(&dir).is_some();
+        if items.is_empty()
+            && top_level
+            && !is_authoritative
+            && !curates_other_sources
+            && !has_manifest
+        {
+            println!("{} melded {} (0 item(s))", out.warn(), source.name);
+            println!(
+                "  no items found by convention scanning \
+                 (skills/<name>/SKILL.md, agents/<name>.md, rules/<name>.md, \
+                 tools/<name>/); if your layout differs, use --root <dir>, \
+                 --add-root <dir>, or --flat-skills"
+            );
+        } else {
+            println!(
+                "{} melded {} ({} item(s))",
+                out.ok(),
+                source.name,
+                items.len()
+            );
+        }
         // spec: STO-60 -- when this meld forks a NEW aliased instance (STO-58) of
         // a repo that already has one or more melded instances, say so plainly:
         // the trailing `@<alias>` is otherwise the sole signal that a coexisting
@@ -976,9 +1026,27 @@ fn meld_recursive(
         // a genuine fork.
         if source.as_alias.as_deref().is_some_and(|a| !a.is_empty()) {
             let base = source.base_identity();
-            if registry.sources.iter().any(|s| s.base_identity() == base) {
+            // spec: STO-63 -- name the actual registered instance(s) sharing this
+            // base identity, not the bare base itself: when every pre-existing
+            // instance is aliased, the bare `host/owner/repo` never appears in the
+            // registry and is not a name `unmeld` (or anything else) can resolve.
+            let existing: Vec<&str> = registry
+                .sources
+                .iter()
+                .filter(|s| s.base_identity() == base)
+                .map(|s| s.name.as_str())
+                .collect();
+            if !existing.is_empty() {
+                let (subject, verb) = if existing.len() == 1 {
+                    (format!("the existing {}", existing[0]), "remains")
+                } else {
+                    (
+                        format!("the existing instances {}", existing.join(", ")),
+                        "remain",
+                    )
+                };
                 println!(
-                    "note: registered a new instance {}; the existing {base} remains",
+                    "note: registered a new instance {}; {subject} {verb}",
                     source.name
                 );
             }
@@ -1088,6 +1156,14 @@ fn meld_recursive(
             let curated = CuratedConfig {
                 pin: entry.pin_directive(&toml_path)?,
                 roots: entry.roots.clone(),
+                // spec: DSC-88 -- a curator/dump entry's add-roots is GATED
+                // (DSC-60), same as roots/flat-skills/hooks: it must not reach
+                // into a nested source that ships its own mind.toml and bypass
+                // its authoritative export list (DSC-3). Routed through
+                // `CuratedConfig` (not the consumer `--add-root` slot) so
+                // `meld_recursive` applies it only when the nested source has
+                // no `mind.toml` of its own.
+                add_roots: entry.add_roots.clone(),
                 flat_skills: entry.flat_skills,
                 hooks: entry.resolved_hooks(&toml_path)?,
             };
@@ -1099,10 +1175,8 @@ fn meld_recursive(
                 &entry.source,
                 entry.effective_alias(), // spec: DSC-78 — prefer `namespace`, fall back to `as`
                 vec![],                  // no consumer roots for nested sources
-                // spec: DUMP-11 -- a curator/dump entry's add-roots thread through the
-                // consumer --add-root slot (add-root composes unconditionally, DSC-84).
-                entry.add_roots.clone().unwrap_or_default(),
-                false, // no consumer --flat-skills for nested sources (curator config supplies it)
+                vec![], // spec: DSC-88 -- no consumer add-root; curator's add-roots is gated above
+                false,  // no consumer --flat-skills for nested sources (curator config supplies it)
                 PinRequest::None, // no consumer pin for nested sources
                 false,
                 visited,
@@ -2622,6 +2696,29 @@ pub fn learn(paths: &Paths, item_ref: &str, dry_run: bool, flow: InstallFlow) ->
             if sources > 0 {
                 eprintln!("hint: run `mind probe {query}` to search available items");
             }
+            // spec: CLI-208 -- a query that names (exactly, or as an
+            // unambiguous trailing suffix, CLI-5) an already-melded source is a
+            // common miss: `learn <source-name>` reads like `meld`'s `<repo>`
+            // argument (`install` -- the alias for `learn` -- reinforces the
+            // habit), but `learn` resolves ITEM names, not source names. Point
+            // at `--all`, which is what the user almost certainly wanted,
+            // rather than dead-ending on "no item matches". Not printed under
+            // `--json` (matches the CLI-179 hint above, which is also
+            // stderr-only and not part of the JSON contract).
+            if let Ok(reg) = Registry::load(paths) {
+                let matching: Vec<&str> = reg
+                    .sources
+                    .iter()
+                    .map(|s| s.name.as_str())
+                    .filter(|name| source_matches(name, query))
+                    .collect();
+                if let [only] = matching.as_slice() {
+                    eprintln!(
+                        "hint: '{query}' names the melded source {only}; run \
+                         `mind learn --all {query}` to install all of its items"
+                    );
+                }
+            }
         }
         e
     })?;
@@ -2693,7 +2790,7 @@ pub fn learn(paths: &Paths, item_ref: &str, dry_run: bool, flow: InstallFlow) ->
         // source identity is no longer allowed; install from the rest.
         if let Some(policy) = policy.as_ref()
             && policy.lock()
-            && !policy.allow_matches(&target.source)
+            && !policy.allow_matches(&policy_identity(&registry, &target.source))
         {
             if !out.json {
                 println!(
@@ -2832,7 +2929,7 @@ fn learn_collecting(paths: &Paths, item_ref: &str, flow: InstallFlow) -> Result<
     for target in &closure {
         if let Some(policy) = policy.as_ref()
             && policy.lock()
-            && !policy.allow_matches(&target.source)
+            && !policy.allow_matches(&policy_identity(&registry, &target.source))
         {
             continue; // policy-blocked items are silently skipped in collect mode
         }
@@ -3110,7 +3207,13 @@ pub fn is_melded(paths: &Paths, repo: &str, alias: Option<&str>) -> Result<bool>
 /// are missing just as a fresh meld does (CLI-23), and otherwise (or with
 /// `--link-only`) prints a status of the source's items and the commit each is
 /// installed at.
-// spec: CLI-12
+///
+/// `ignored_flags` names the discovery/pin CLI flags the caller passed on this
+/// invocation (`--root`, `--add-root`, `--flat-skills`, `--pin`,
+/// `--install-hook`) that a re-meld does not apply (CLI-206): a re-meld never
+/// re-clones or re-registers, so none of them can take effect. When non-empty,
+/// a one-line note lists them so they are not silently dropped.
+// spec: CLI-12, CLI-206
 pub fn remeld(
     paths: &Paths,
     repo: &str,
@@ -3118,6 +3221,7 @@ pub fn remeld(
     link_only: bool,
     flow: InstallFlow,
     recursive: bool,
+    ignored_flags: &[&str],
 ) -> Result<()> {
     // `yes` rides inside `flow` for the install calls; remeld itself only needs
     // the clobber (hook force-rerun) and the dangerously-skip flag.
@@ -3134,6 +3238,20 @@ pub fn remeld(
     let source_name = instance_name(repo, alias.as_deref())?;
     if !out.json {
         println!("{} {source_name} is already melded", out.bullet());
+        // spec: CLI-206 -- a re-meld does not re-clone or re-register, so any
+        // discovery/pin flag on this invocation is a silent no-op without this
+        // note (mirrors the CLI-203 note pattern for `learn <url> --pin`).
+        if !ignored_flags.is_empty() {
+            let flags = ignored_flags.join(", ");
+            let plural = ignored_flags.len() != 1;
+            println!(
+                "note: {flags} ignored; {source_name} is already melded (re-melding \
+                 does not change a source's discovery/pin configuration). To apply \
+                 {}, run `mind unmeld {source_name}` then `mind meld` again with {}.",
+                if plural { "them" } else { "it" },
+                if plural { "the flags" } else { "the flag" }
+            );
+        }
     }
 
     // HOOK-60: re-offer the source's install hooks that have not run at the
@@ -4580,7 +4698,7 @@ pub fn sync(
         // is no longer allowed; report and skip it (the rest still sync).
         if let Some(policy) = policy.as_ref()
             && policy.lock()
-            && !policy.allow_matches(&source.name)
+            && !policy.allow_matches(&source.base_identity())
         {
             if !out.json {
                 println!(
@@ -4686,10 +4804,6 @@ pub fn sync(
         struct NestedTodo {
             spec: String,
             alias: Option<String>,
-            /// spec: DUMP-11 -- the entry's `add-roots`, threaded to the nested
-            /// meld as the consumer `--add-root` override so a re-walk composes
-            /// the same extra convention roots a fresh meld would.
-            add_roots: Vec<String>,
             curated: CuratedConfig,
             /// Auth-failure policy for this entry (DSC-68). Carried so the re-walk
             /// loop can handle auth failures the same way as meld (DSC-68 requires
@@ -4715,6 +4829,10 @@ pub fn sync(
                 let curated = CuratedConfig {
                     pin: ns.pin_directive(&toml_path)?,
                     roots: ns.roots.clone(),
+                    // spec: DSC-88 -- gated by DSC-60 exactly like `roots`, so a
+                    // re-walk applies the same gate a fresh meld would; it is
+                    // NOT threaded as a consumer `--add-root` override anymore.
+                    add_roots: ns.add_roots.clone(),
                     flat_skills: ns.flat_skills,
                     hooks: ns.resolved_hooks(&toml_path)?,
                 };
@@ -4725,7 +4843,6 @@ pub fn sync(
                 nested.push(NestedTodo {
                     spec: ns.source,
                     alias: ns_alias,
-                    add_roots: ns.add_roots.clone().unwrap_or_default(),
                     curated,
                     on_auth_failure: ns.on_auth_failure,
                 });
@@ -4768,11 +4885,11 @@ pub fn sync(
                 nested.push(NestedTodo {
                     spec: repo_spec,
                     alias: Some(entry.name),
-                    // A marketplace entry carries no consumer add-root override.
-                    add_roots: vec![],
+                    // A marketplace entry carries no curator add-root override.
                     curated: CuratedConfig {
                         pin: None,
                         roots: None,
+                        add_roots: None,
                         flat_skills: false,
                         hooks: Vec::new(),
                     },
@@ -4813,8 +4930,8 @@ pub fn sync(
                 &todo.spec,
                 todo.alias,
                 vec![],
-                todo.add_roots, // spec: DUMP-11 -- re-walk composes the entry's add-roots
-                false, // no consumer --flat-skills on a sync re-walk (curator config supplies it)
+                vec![], // spec: DSC-88 -- add-roots is gated; carried via todo.curated below
+                false,  // no consumer --flat-skills on a sync re-walk (curator config supplies it)
                 PinRequest::None,
                 false,
                 &mut visited,
@@ -5088,7 +5205,7 @@ fn upgrade_inner(
     let mut pending: Vec<Upgrade> = Vec::new();
 
     for installed in manifest.items.values() {
-        match upgrade_item_disposition(installed, filter.as_ref(), policy.as_ref()) {
+        match upgrade_item_disposition(installed, filter.as_ref(), policy.as_ref(), &registry) {
             // Out of the scoped selection: silent skip, no output.
             UpgradeDisposition::OutOfScope => continue,
             // POL-12: in-scope but the source is no longer allowed by the locked
@@ -5252,7 +5369,7 @@ fn rerun_source_hooks(
         // report and skip it, exactly as the per-item loop does.
         if let Some(policy) = policy
             && policy.lock()
-            && !policy.allow_matches(&source.name)
+            && !policy.allow_matches(&source.base_identity())
         {
             if !json_mode() {
                 println!(
@@ -5352,6 +5469,26 @@ enum UpgradeDisposition {
     Consider,
 }
 
+/// The identity to match a *recorded* source name against the managed policy
+/// allowlist (spec: POL-67).
+///
+/// A name recorded on an installed item or an install target is an instance
+/// identity, which may carry an item-link `#path` and/or a consumer `@alias`
+/// suffix. The allowlist matches the base `host/owner/repo`, and the only
+/// sound way to recover that from a name is structurally, through the
+/// registered source itself; scanning the string for the first `#`/`@` is a
+/// policy bypass (POL-68).
+///
+/// A name with no registered source has no structural base identity, so it is
+/// returned unchanged and will simply fail to match (fail closed). That state
+/// means an installed item outlived its source, which `introspect` reports.
+fn policy_identity(registry: &Registry, source_name: &str) -> String {
+    registry
+        .find(source_name)
+        .map(|s| s.base_identity())
+        .unwrap_or_else(|| source_name.to_string())
+}
+
 /// Decide an installed item's `upgrade` disposition. The item-ref filter is
 /// applied first (POL-12 ordering fix): a scoped `upgrade <item>` must not emit
 /// policy-skip lines for sources the user never selected. The policy block is
@@ -5360,6 +5497,7 @@ fn upgrade_item_disposition(
     installed: &crate::manifest::InstalledItem,
     filter: Option<&crate::resolve::ItemRef>,
     policy: Option<&Policy>,
+    registry: &Registry,
 ) -> UpgradeDisposition {
     if let Some(f) = filter
         && !crate::resolve::installed_matches_glob(installed, f)
@@ -5368,7 +5506,7 @@ fn upgrade_item_disposition(
     }
     if let Some(policy) = policy
         && policy.lock()
-        && !policy.allow_matches(&installed.source)
+        && !policy.allow_matches(&policy_identity(registry, &installed.source))
     {
         return UpgradeDisposition::PolicyBlocked;
     }
@@ -7100,8 +7238,11 @@ mod tests {
     use super::*;
     use crate::error::ItemKind;
     use crate::manifest::InstalledItem;
+    // The env lock is crate-wide, not per-module: `std::env::set_var` soundness
+    // is a process-wide property, and these tests share a binary with the
+    // env-mutating tests in `paths.rs` and `selfupdate.rs`.
+    use crate::paths::ENV_LOCK;
     use std::path::PathBuf;
-    use std::sync::Mutex;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     static COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -7359,11 +7500,6 @@ mod tests {
         assert!(!parse_confirm("NO", true));
     }
 
-    /// Serialize every test that mutates process-global env vars
-    /// (`MIND_POLICY_FILE`, `MIND_AGENT_HOMES`). Env is process-wide, so these
-    /// tests cannot run concurrently.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
     /// Write `policy_toml` to a temp file and point `$MIND_POLICY_FILE` at it,
     /// also clearing `$MIND_AGENT_HOMES` so the outer env never bleeds in.
     /// Returns the held env guard (drop last) and the base temp dir.
@@ -7482,6 +7618,18 @@ mod tests {
 
     // ---- F3: POL-12 scoped-upgrade skip ordering -----------------------------
 
+    /// A registry holding exactly the given repo specs, so
+    /// `upgrade_item_disposition` can resolve a recorded source name to its
+    /// structural base identity (POL-68) the way it does in production.
+    fn registry_of(specs: &[&str]) -> Registry {
+        Registry {
+            sources: specs
+                .iter()
+                .map(|s| crate::source::parse_spec(s).unwrap())
+                .collect(),
+        }
+    }
+
     // spec: POL-12
     // A scoped `upgrade <item>` must apply the item-ref filter before the policy
     // skip, so an out-of-scope item from a disallowed source produces no skip
@@ -7505,24 +7653,80 @@ mod tests {
         let other = item("unwanted", "github.com/them/blocked-src");
 
         let filter = parse_item_ref("wanted").unwrap();
+        let registry = registry_of(&["me/allowed-src", "them/blocked-src"]);
 
         // Out-of-scope item: silently skipped, never reported as PolicyBlocked.
         assert_eq!(
-            upgrade_item_disposition(&other, Some(&filter), Some(&policy)),
+            upgrade_item_disposition(&other, Some(&filter), Some(&policy), &registry),
             UpgradeDisposition::OutOfScope,
             "POL-12: an unselected item must not be policy-skipped (no skip line)"
         );
         // The selected, allowed item is considered for upgrade.
         assert_eq!(
-            upgrade_item_disposition(&selected, Some(&filter), Some(&policy)),
+            upgrade_item_disposition(&selected, Some(&filter), Some(&policy), &registry),
             UpgradeDisposition::Consider,
         );
 
         // Sanity: with no scope filter, the disallowed item IS policy-blocked
         // (the existing unscoped behavior is preserved).
         assert_eq!(
-            upgrade_item_disposition(&other, None, Some(&policy)),
+            upgrade_item_disposition(&other, None, Some(&policy), &registry),
             UpgradeDisposition::PolicyBlocked,
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // POL-68: an installed item records its source as an *instance* identity,
+    // which may carry an item-link `#path` and/or `@alias` suffix. The
+    // disposition check must resolve that name through the registry to the
+    // structural base identity, so a locked policy that admitted the repo keeps
+    // admitting its instances, while an unregistered name fails closed.
+    // spec: POL-68
+    #[test]
+    fn upgrade_disposition_resolves_instance_names_to_base_identity() {
+        let policy_toml = concat!(
+            "[sources]\n",
+            "lock = true\n",
+            "allow = [\"github.com/me/allowed-src\"]\n",
+        );
+        let (_guard, base) = with_policy(policy_toml);
+        let policy = Policy::load().unwrap().expect("policy should load");
+
+        // A link instance and an aliased instance of the allowed repo, both
+        // registered under their extended identities.
+        let mut registry = Registry::default();
+        let link =
+            crate::source::parse_spec("https://github.com/me/allowed-src/tree/main/skills/foo")
+                .unwrap();
+        assert_eq!(link.name, "github.com/me/allowed-src#skills/foo");
+        let mut aliased = crate::source::parse_spec("me/allowed-src").unwrap();
+        aliased.apply_alias(Some("fork".into()));
+        assert_eq!(aliased.name, "github.com/me/allowed-src@fork");
+        let link_name = link.name.clone();
+        let aliased_name = aliased.name.clone();
+        registry.sources.push(link);
+        registry.sources.push(aliased);
+
+        for name in [&link_name, &aliased_name] {
+            assert_eq!(
+                upgrade_item_disposition(&item("foo", name), None, Some(&policy), &registry),
+                UpgradeDisposition::Consider,
+                "{name}: an instance of an allowed repo stays allowed"
+            );
+        }
+
+        // An item whose source is not registered has no structural base
+        // identity to recover, so it is refused rather than guessed at.
+        assert_eq!(
+            upgrade_item_disposition(
+                &item("foo", "github.com/me/allowed-src#skills/foo"),
+                None,
+                Some(&policy),
+                &Registry::default()
+            ),
+            UpgradeDisposition::PolicyBlocked,
+            "an unregistered instance name fails closed"
         );
 
         let _ = std::fs::remove_dir_all(&base);
@@ -7544,9 +7748,10 @@ mod tests {
 
         let selected = item("blocked-item", "github.com/them/blocked-src");
         let filter = parse_item_ref("blocked-item").unwrap();
+        let registry = registry_of(&["me/allowed-src", "them/blocked-src"]);
 
         assert_eq!(
-            upgrade_item_disposition(&selected, Some(&filter), Some(&policy)),
+            upgrade_item_disposition(&selected, Some(&filter), Some(&policy), &registry),
             UpgradeDisposition::PolicyBlocked,
             "a selected item from a disallowed source is still reported"
         );

@@ -152,6 +152,19 @@ and verified.
 | `meld --add-root`: compose extra convention roots with a manifest or authoritative source (install items a `marketplace.json` does not list); `dump` round-trips the recorded add-roots | done | DSC-84, DSC-85, DSC-86, DSC-87, MKT-17, STO-55, CLI-197, DUMP-11 |
 | Item links: `learn`/`meld` a deep `tree`/`blob` skill URL as a single-item source instance (`host/owner/repo#path` identity, duplicates coexist); a malformed link tail reports the expected URL shapes | done | [item-link.md](item-link.md) (LNK-1..12, LNK-14, LNK-15) |
 | Item links in `dump`: emit a link instance as a reconstructed deep-URL source entry | planned | LNK-13 |
+| Repo-spec identity parts (`host`, `owner`, `repo`) must each be a single safe path component; refused at parse time before any clone or delete | done | CLI-204 |
+| TUI stdout capture writes to an exclusively created 0600 file in a 0700 temp dir, not a predictable create-and-truncate path | done | TUI-61 |
+| `evolve` token safety: a token carrying characters that would inject curl config directives is refused (no auth header), and a temp-config write failure degrades to an unauthenticated request | done | STO-62 |
+| A zero-item `meld` names the convention paths it scanned and the `--root`/`--add-root`/`--flat-skills` escapes, instead of reporting success with `(0 item(s))` | done | CLI-205 |
+| A re-meld notes which discovery and pin flags it ignored, instead of dropping them silently | done | CLI-206 |
+| Bare `mind` prints help on stdout at exit 0 | done | CLI-207 |
+| `learn <source-name>` hints at `learn --all <source>` when the query names a melded source rather than an item | done | CLI-208 |
+| The fork note names the pre-existing instances by their registered identities, which are the handles `unmeld` accepts | done | STO-63 |
+| A curator's `add-roots` on a `[discover].sources` entry is gated like `roots`, so it cannot override a nested source's authoritative export control | done | DSC-88 |
+| Add-root de-duplication keys on (kind, path), so one directory can still contribute both a tool and a skill | done | DSC-89 |
+| `hooks run`/`hooks list` error on a target that matches both a registered source and an installed item, with escapes for each reading | done | HOOK-105 |
+| Accepted risk: files read from a source tree are not size-capped | done | DSC-90 |
+| Managed-policy allowlist matching derives the base identity structurally from the source's fields, never by scanning an identity string for a `#`/`@` marker | done | POL-68 |
 
 ## Documents
 

@@ -38,10 +38,11 @@ and the manifest are defined in [storage.md](storage.md).
   `dump` emits `add-roots = [...]` on that source's `[discover].sources` entry,
   so re-melding the output composes the same extra convention roots (DSC-84) and
   reoffers the items an added root contributes. This mirrors DUMP-4: only the
-  recorded consumer override is emitted, and re-melding threads it through as the
-  nested source's `--add-root` override (add-root always composes, so unlike
-  `roots` it is not gated by DSC-60). A source without recorded add-roots emits no
-  `add-roots` key.
+  recorded consumer override is emitted. Re-melding the generated super-source
+  applies the emitted `add-roots` as a CURATOR value on that entry (DSC-59),
+  gated by DSC-60/DSC-88 exactly like `roots`: it composes only when the nested
+  source has no `mind.toml` of its own. A source without recorded add-roots
+  emits no `add-roots` key.
 - `DUMP-7` The emitted file is a valid super-source (it parses under DSC-3 and the
   strictness of DSC-30) that declares only `[discover].sources` and no items of its
   own, so melding it registers the chain and installs per the per-entry directive

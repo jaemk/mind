@@ -66,8 +66,12 @@ impl Lobe {
     ///
     /// This gate must NOT be applied inside `agent_homes()` -- uninstall
     /// confinement and `~/.claude` auto-create-on-link both depend on the full
-    /// list. Apply it only at write sites (install fan-out, `link_into_new_lobes`,
-    /// `relink`).
+    /// list. Apply it only at the reachability-sensitive write sites (the install
+    /// fan-out's `planned_links` and `relink`). It is intentionally NOT checked at
+    /// `link_into_new_lobes`: that path backfills links into a newly added lobe
+    /// (e.g. a preset base such as `base/.gemini/config`) whose parent may not
+    /// exist yet, so gating there would suppress the very links it exists to
+    /// create (STO-56).
     // spec: STO-56
     pub(crate) fn reachable(&self) -> bool {
         self.path.parent().is_none_or(|p| p.exists())
@@ -610,17 +614,30 @@ pub fn mkdir_p(path: &Path) -> Result<()> {
     std::fs::create_dir_all(path).map_err(|e| MindError::io(path, e))
 }
 
+/// Crate-wide lock serializing every test (in any module) that mutates a
+/// process-global environment variable (`MIND_POLICY_FILE`, `MIND_AGENT_HOMES`,
+/// `MIND_HOME`, `CLAUDE_HOME`, `GITHUB_TOKEN`, `GH_TOKEN`, `PATH`, ...).
+///
+/// `std::env::set_var`/`remove_var` soundness is process-wide, not
+/// module-wide: this crate's test binary runs `src/paths.rs`, `src/commands.rs`,
+/// and `src/selfupdate.rs` tests concurrently on multiple threads, and several
+/// of them spawn a real `git`/`curl` child process, which snapshots `environ` at
+/// spawn time. A per-module lock only protects a module's tests against
+/// themselves, not against a concurrently running test in a different module
+/// that is also mutating env vars — that is unsound in the general case even
+/// though it has not been observed to misbehave. Hoisting a single lock here
+/// (rather than one static per module) makes every env-mutating test in the
+/// crate serialize against every other one. Test-only (`#[cfg(test)]`): it must
+/// never be reachable from non-test code.
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     static COUNTER: AtomicU32 = AtomicU32::new(0);
-
-    /// Serialize all tests that touch process-global env vars (`MIND_POLICY_FILE`,
-    /// `MIND_AGENT_HOMES`, `MIND_HOME`, `CLAUDE_HOME`).
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn absolute_home_resolves_relative_paths() {
@@ -1939,6 +1956,91 @@ mod tests {
             !lobe.reachable(),
             "lobe is unreachable when its parent dir is missing (STO-56)"
         );
+    }
+
+    /// STO-56 explicitly carves `link_into_new_lobes` OUT of the reachability
+    /// gate: it is the HARN-7/HARN-8 backfill path that runs when a lobe is
+    /// newly added (e.g. `config lobes add` or a preset base such as
+    /// `base/.gemini/config`), and at that moment the lobe's parent may not
+    /// exist yet -- gating there would suppress the very links the backfill
+    /// exists to create. This is a unit test (not an integration test in
+    /// `tests/`) because `link_into_new_lobes` is a `pub fn` in `src/install.rs`
+    /// (a module this shard does not own) and the crate ships no `[lib]`
+    /// target, so an integration test in `tests/` can only drive the compiled
+    /// `mind` binary as a subprocess -- it has no way to call a Rust function
+    /// directly. Any test in this single-binary crate can call another
+    /// module's `pub`/`pub(crate)` items via `crate::...` without editing that
+    /// module, so this unit test (here, in `src/paths.rs`, which owns
+    /// `Lobe::reachable`) is the reachable option that requires no edit to
+    /// `install.rs`.
+    #[test]
+    fn link_into_new_lobes_links_into_a_lobe_with_a_missing_parent() {
+        // spec: STO-56
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let base =
+            std::env::temp_dir().join(format!("mind-link-new-lobes-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+
+        let mind_home = base.join("mind");
+        mkdir_p(&mind_home).unwrap();
+        // A real store copy for the item to be symlinked from.
+        let store_rel = "store/skill/greet";
+        let store_abs = mind_home.join(store_rel);
+        std::fs::create_dir_all(&store_abs).unwrap();
+        std::fs::write(store_abs.join("SKILL.md"), "---\ndescription: greet\n---\n").unwrap();
+
+        let paths = Paths {
+            mind_home: mind_home.clone(),
+            claude_home: base.join("claude-unused"),
+        };
+
+        let item = crate::manifest::InstalledItem {
+            kind: ItemKind::Skill,
+            name: "greet".to_string(),
+            bare_name: "greet".to_string(),
+            source: "test-source".to_string(),
+            commit: "deadbeef".to_string(),
+            hash: "abc123".to_string(),
+            store: store_rel.to_string(),
+            links: vec![], // empty: link_rel falls back to default_link_rel
+            description: None,
+        };
+
+        // A lobe whose PARENT directory does not exist -- freshly added, not yet
+        // materialized on disk (e.g. a project that has not run `mkdir .windsurf`
+        // yet, or a preset base backfill).
+        let missing_parent = base.join("not-yet-created");
+        let lobe = Lobe::all_kinds(missing_parent.join(".windsurf"));
+        assert!(
+            !lobe.reachable(),
+            "sanity: the lobe's parent must genuinely be missing for this test"
+        );
+
+        let (created, failed) = crate::install::link_into_new_lobes(&paths, &item, &[lobe]);
+
+        assert!(
+            failed.is_empty(),
+            "link_into_new_lobes must not fail when the lobe's parent is missing \
+             (STO-56 explicitly excludes this call site from the reachability gate): {failed:?}"
+        );
+        assert_eq!(
+            created.len(),
+            1,
+            "exactly one link must be created: {created:?}"
+        );
+        let expected = missing_parent.join(".windsurf/skills/greet");
+        assert_eq!(
+            created[0], expected,
+            "created link must be at the expected path"
+        );
+        assert!(
+            expected.symlink_metadata().is_ok(),
+            "the symlink must actually exist on disk at {expected:?} -- a regression that \
+             added the STO-56 gate to link_into_new_lobes would silently create nothing here \
+             while this whole test suite otherwise stays green (HARN-7 preset backfill)"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

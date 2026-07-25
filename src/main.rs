@@ -30,14 +30,26 @@ mod unmanaged;
 
 use std::io::IsTerminal;
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 
 use cli::{Cli, Command, ConfigCmd, HooksCmd, LobesCmd};
 use error::Result;
 use paths::Paths;
 
 fn main() -> std::process::ExitCode {
-    let cli = Cli::parse();
+    // spec: CLI-207 -- bare `mind` prints help on stdout and exits 0.
+    // `arg_required_else_help` alone is not enough: clap renders the resulting
+    // `DisplayHelpOnMissingArgumentOrSubcommand` to stderr and exits 2, which
+    // is the usage-error shape, not the "here is what this tool does" shape a
+    // first-time user typing `mind` should get.
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) if e.kind() == clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => {
+            print!("{}", Cli::command().render_help());
+            return std::process::ExitCode::SUCCESS;
+        }
+        Err(e) => e.exit(),
+    };
     // Capture the json flag before `cli` is moved into `run`. Clap's parse
     // succeeded at this point, so cli.json is trustworthy.
     let json = cli.json;
@@ -253,7 +265,34 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             // CLI-12: re-melding an already-melded source is not an error; it
             // ensures the items are installed, else reports their status.
             if commands::is_melded(paths, &repo, alias.as_deref())? {
-                commands::remeld(paths, &repo, alias, register_only, flow, recursive)?;
+                // spec: CLI-206 -- name every discovery/pin flag this
+                // invocation carries; remeld() cannot apply any of them (it
+                // never re-clones or re-registers) and reports so explicitly.
+                let mut ignored_flags: Vec<&str> = Vec::new();
+                if !roots.is_empty() {
+                    ignored_flags.push("--root");
+                }
+                if !add_roots.is_empty() {
+                    ignored_flags.push("--add-root");
+                }
+                if flat_skills {
+                    ignored_flags.push("--flat-skills");
+                }
+                if pin != commands::PinRequest::None {
+                    ignored_flags.push("--pin");
+                }
+                if install_hook.is_some() {
+                    ignored_flags.push("--install-hook");
+                }
+                commands::remeld(
+                    paths,
+                    &repo,
+                    alias,
+                    register_only,
+                    flow,
+                    recursive,
+                    &ignored_flags,
+                )?;
             } else {
                 let meld_sum = commands::meld(
                     paths,

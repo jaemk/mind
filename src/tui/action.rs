@@ -22,7 +22,6 @@ use crate::tui::data::{self, Snapshot};
 /// process-global stdout fd, so two captures must never overlap. The TUI runs
 /// actions one at a time, but the unit tests run concurrently.
 static CAPTURE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-static CAPTURE_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 /// Execute a confirmed action under an exclusive lock, returning a fresh
 /// snapshot and a one-line summary of the verb's output. The verb prints to
@@ -158,6 +157,48 @@ fn summary_line(captured: &str) -> String {
         .to_string()
 }
 
+/// Open the stdout-capture file at `path` (TUI-61): `create_new` refuses to
+/// open through ANY pre-existing path -- a plain pre-created file or a symlink
+/// a local attacker planted there -- unlike the old `create(true).truncate(true)`
+/// pattern, which would silently follow a symlink and truncate whatever it
+/// pointed at. Mode 0600: owner read/write only, so the captured verb output
+/// (which can include filesystem paths and item names) is never group- or
+/// world-readable while the fd is briefly open. Split out from
+/// `with_captured_stdout` so the open call is directly unit-testable
+/// (mirroring the STO-61 `write_curl_auth_config` test) without needing to
+/// intercept the stdout-redirect machinery around it.
+// spec: TUI-61
+#[cfg(unix)]
+fn open_capture_file(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+}
+
+/// Create the stdout-capture file: an exclusively-created, mode-0600 file
+/// inside a fresh, exclusively-created, mode-0700 temp directory
+/// (`mktemp_dir_prefixed`, the same scheme `evolve` uses for its
+/// download/auth-config temp files, STO-45/STO-61). Returns `None` if
+/// creation fails for any reason; the caller then runs the action without
+/// capturing rather than erroring out over it (capture is a display nicety,
+/// not something worth failing a verb over).
+// spec: TUI-61
+#[cfg(unix)]
+fn create_capture_file() -> Option<std::fs::File> {
+    let dir = crate::selfupdate::mktemp_dir_prefixed("mind-tui-capture").ok()?;
+    let path = dir.join("capture");
+    let file = open_capture_file(&path).ok();
+    if file.is_some() {
+        let _ = std::fs::remove_file(&path); // unlink now; the open fd keeps it alive
+    }
+    let _ = std::fs::remove_dir(&dir); // best-effort; the fd keeps the file's data alive
+    file
+}
+
 /// Run `f` with the process stdout redirected to a capture buffer, returning its
 /// result and whatever it wrote (TUI-24). The dup2 mutates the process-global
 /// stdout fd, so the whole sequence is serialized and the original fd is always
@@ -183,18 +224,12 @@ fn with_captured_stdout<R>(f: impl FnOnce() -> R) -> (R, String) {
     // Serialize: the redirect below is a process-global side effect.
     let _serialize = CAPTURE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
-    let seq = CAPTURE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!("mind-tui-capture-{}-{seq}", std::process::id()));
-    let Ok(mut file) = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&path)
-    else {
+    // spec: TUI-61 -- see `create_capture_file`/`open_capture_file`: an
+    // exclusive-create in a fresh 0700 temp dir, never a predictable path
+    // opened with plain create+truncate.
+    let Some(mut file) = create_capture_file() else {
         return (f(), String::new()); // capture unavailable: run as-is
     };
-    let _ = std::fs::remove_file(&path); // unlink now; the open fd keeps it alive
 
     let _ = std::io::stdout().flush();
     let saved = unsafe { libc::dup(libc::STDOUT_FILENO) };
@@ -228,6 +263,64 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    #[test]
+    // spec: TUI-61
+    fn create_capture_file_is_owner_only_0600() {
+        // Mirrors the STO-61 `curl_auth_config_file_is_owner_only_0600` test:
+        // the stdout-capture file must be mode 0600 (owner read/write only),
+        // not the umask-default mode the old `create(true).truncate(true)` open
+        // (with no explicit `.mode(..)`) would have produced.
+        use std::os::unix::fs::PermissionsExt;
+        let file = create_capture_file().expect("must create a capture file");
+        let meta = file.metadata().expect("fstat the still-open capture file");
+        let mode = meta.permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "stdout-capture file must be mode 0600, got {mode:o}"
+        );
+    }
+
+    #[test]
+    // spec: TUI-61
+    fn open_capture_file_refuses_a_preexisting_symlink() {
+        // B9 -- a local attacker who pre-creates the capture path as a symlink
+        // must NOT get the symlink's target opened, truncated, and overwritten.
+        // `open_capture_file` uses `create_new`, which refuses to open through
+        // ANY pre-existing path (symlink or otherwise); the pre-fix code used
+        // `create(true).truncate(true)` with no `create_new`, which WOULD have
+        // followed the symlink and truncated the victim file this test plants.
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let base = std::env::temp_dir().join(format!(
+            "mind-tui-capture-symlink-test-{}-{n}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&base).expect("create scratch dir");
+
+        let victim = base.join("victim-target");
+        let victim_content = b"attacker must not see this truncated";
+        std::fs::write(&victim, victim_content).expect("seed victim file");
+
+        let capture_path = base.join("capture");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&victim, &capture_path).expect("plant symlink");
+
+        let result = open_capture_file(&capture_path);
+        assert!(
+            result.is_err(),
+            "open_capture_file must refuse to open through a pre-existing symlink, \
+             not silently follow it: {result:?}"
+        );
+
+        let victim_after = std::fs::read(&victim).expect("victim file must still exist");
+        assert_eq!(
+            victim_after, victim_content,
+            "the symlink target must be untouched -- a create+truncate open would have \
+             truncated it to empty"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     /// A temp base dir that removes itself on drop, so each test self-cleans
     /// even when an assertion panics (Drop runs during unwinding). Derefs to the

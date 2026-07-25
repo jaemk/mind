@@ -31,8 +31,19 @@ same repo, and a plain meld of that repo, coexist as separate sources.
   `learn` (LNK-6), and a `[discover].sources` entry (DSC-38), so a curator can
   curate individual skills. A URL with a `tree`/`blob` segment whose tail fails
   to complete as a valid item link is `BadItemLink` (LNK-14), not the generic
-  `InvalidRepoSpec`; a malformed `owner/repo` portion ahead of the marker
-  still reports `InvalidRepoSpec` regardless of the marker.
+  `InvalidRepoSpec`. For a remote URL (the `scheme://host/owner/repo/...`
+  branch), this holds only once the `owner/repo` portion ahead of the marker
+  itself parses: a malformed `owner/repo` there still reports
+  `InvalidRepoSpec` regardless of the marker or the tail, since owner/repo
+  splitting runs before the tail is parsed. The local `file://` branch parses
+  in the opposite order -- the `<ref>/<path>` tail is parsed before the
+  `owner/repo` portion is sliced off the remaining path -- so with no usable
+  repo path at all ahead of the marker (e.g. `file:///tree/main`), a broken
+  tail still reports `BadItemLink` rather than falling through to
+  `InvalidRepoSpec`. This is a real behavioral difference between the two
+  branches, not just wording; pinned by
+  `file_link_bad_tail_with_no_repo_ahead_of_marker_is_still_bad_item_link` and
+  `github_malformed_owner_repo_wins_over_bad_tail` in `src/source.rs`.
 - `LNK-3` The `<ref>` segment supplies the instance's pin: a 40-hex ref is a
   commit pin (as `--pin <sha>`), anything else follows that branch (as
   `--pin branch=<name>`). An explicit consumer pin flag (CLI-17) overrides the

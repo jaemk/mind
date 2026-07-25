@@ -408,6 +408,121 @@ fn learn_refuses_item_link_instance_of_a_repo_outside_the_allowlist() {
     );
 }
 
+// --- POL-68: the base identity is structural, not a string scan ------------
+//
+// `#` and `@` are suffix markers only by convention: `owner` and `repo` may
+// legitimately contain them (CLI-204 rejects them only in `host`). Deriving the
+// base identity by scanning for the first marker therefore both admits a repo
+// it must not and refuses one it must. Both directions are driven end-to-end
+// here through the real binary, since the whole point is that the string form
+// and the structural form disagree.
+
+#[test]
+fn meld_refuses_a_repo_whose_name_merely_starts_with_an_allowed_name() {
+    // spec: POL-68
+    // A directory named `blessed@evil` is a different repo, not the allowed
+    // `blessed` with a consumer alias. Under a lock it must be refused. A
+    // first-marker string scan truncates its identity to the allowed
+    // `local/<owner>/blessed` and admits it, at meld time and at every later
+    // gate.
+    let sb = Sandbox::bare("blessed@evil");
+    sb.write_and_commit(
+        "skills/x/SKILL.md",
+        "---\ndescription: x skill\n---\n# x skill\n",
+    );
+    let policy = sb.write_policy("[sources]\nlock = true\nallow = [\"local/*/blessed\"]\n");
+    let spec = sb.source_spec();
+
+    let meld = sb.mind_env(
+        &["meld", &spec, "--register-only"],
+        &[("MIND_POLICY_FILE", policy.as_str())],
+    );
+    assert!(
+        !meld.success,
+        "a repo named `blessed@evil` must not be admitted by an allowlist naming `blessed`: {} {}",
+        meld.stdout, meld.stderr
+    );
+    assert!(
+        meld.stderr.contains(SOURCE_NOT_ALLOWED),
+        "expected a SourceNotAllowed refusal in stderr: {}",
+        meld.stderr
+    );
+}
+
+#[test]
+fn meld_admits_a_repo_whose_owner_segment_contains_a_marker() {
+    // spec: POL-68
+    // The other direction: an owner directory legitimately named `proj@v2`
+    // matches a wildcard over that segment. A first-marker string scan
+    // truncates `local/proj@v2/agents` to the two-segment `local/proj`, which
+    // matches no three-segment pattern, so the meld is refused with a message
+    // naming an identity the policy does allow.
+    let sb = Sandbox::bare("proj@v2/agents");
+    sb.write_and_commit(
+        "skills/x/SKILL.md",
+        "---\ndescription: x skill\n---\n# x skill\n",
+    );
+    let policy = sb.write_policy("[sources]\nlock = true\nallow = [\"local/*/agents\"]\n");
+    let spec = sb.source_spec();
+
+    let meld = sb.mind_env(
+        &["meld", &spec, "--register-only"],
+        &[("MIND_POLICY_FILE", policy.as_str())],
+    );
+    assert!(
+        meld.success,
+        "an owner segment containing `@` must still match a wildcard over that segment: {} {}",
+        meld.stdout, meld.stderr
+    );
+
+    // And it stays admitted at the later lifecycle gates, not just at meld.
+    let sync = sb.mind_env(&["sync"], &[("MIND_POLICY_FILE", policy.as_str())]);
+    assert!(
+        !sync.stdout.contains(NOT_PERMITTED) && !sync.stderr.contains(NOT_PERMITTED),
+        "sync must not skip an admitted source: {} {}",
+        sync.stdout,
+        sync.stderr
+    );
+}
+
+// --- CLI-204: unsafe identity parts are refused before any clone ------------
+
+#[test]
+fn meld_refuses_a_traversing_ssh_host_before_touching_the_filesystem() {
+    // spec: CLI-204
+    // The ssh form splits only on the first `:`, so `host` absorbs whatever
+    // precedes it. A traversing host would be joined into the clone path, which
+    // `meld` deletes with `remove_dir_all` before cloning, and would forge extra
+    // identity segments for policy matching. Refused at parse time, so nothing
+    // on disk is touched.
+    // The clone path is `<mind_home>/sources/<host>/<owner>/<repo>`, so a host
+    // of `../../canary` lands the whole path on `<base>/canary/owner/repo`.
+    // That directory is populated here, so an unvalidated host would delete it
+    // outright: `meld` calls `remove_dir_all` on an existing clone dir before
+    // cloning.
+    let sb = Sandbox::new();
+    let victim = sb.base.join("canary").join("owner").join("repo");
+    write(&victim.join("keep.txt"), "do not delete\n");
+
+    let meld = sb.mind_env(&["meld", "git@../../canary:owner/repo"], &[]);
+    assert!(
+        victim.join("keep.txt").exists(),
+        "the traversed directory outside the sources tree was deleted: {} {}",
+        meld.stdout,
+        meld.stderr
+    );
+    assert!(
+        !meld.success,
+        "a traversing ssh host must be refused: {} {}",
+        meld.stdout, meld.stderr
+    );
+    assert!(
+        meld.stderr.contains("is not a usable repo spec") && meld.stderr.contains("host"),
+        "expected an UnsafeRepoSpec refusal naming the host part: {}",
+        meld.stderr
+    );
+}
+
 // --- POL-67: the install-hook gate site (HOOK-11's rerun_source_hooks) -----
 //
 // `rerun_source_hooks` (src/commands.rs) gates on

@@ -22,6 +22,15 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 | `completions <shell>` | print a shell completion script |
 | `man` | print the roff man page |
 
+- `CLI-207` `mind` with no arguments (no verb, no global flag) prints the full
+  `--help` text to stdout and exits 0. `command` (the verb) is a required, not
+  `Option`al, field, so this is clap's `arg_required_else_help` behavior, not a
+  subcommand default: bare `mind` still does not launch the interactive `probe`
+  TUI (tui.md TUI-1/TUI-2 stay true -- only `probe` launches it). Without this,
+  a required subcommand with no arguments is a clap usage error: 0 bytes on
+  stdout, a usage string on stderr, exit 2, which is a poor first command for a
+  new install to type.
+
 ## Item refs
 
 - `CLI-1` An item ref is one of: `name`, `skill:name`, `agent:name`, `rule:name`,
@@ -43,10 +52,37 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 - `CLI-10` `meld <repo>` parses the repo spec, clones it under the sources tree,
   records the current commit, reads `[source].description` from `mind.toml` if
   present, and adds it to the registry.
+- `CLI-205` A top-level `meld` that discovers zero items gets a non-success
+  glyph and an explicit guidance line instead of a `melded <repo> (0 item(s))`
+  line that reads identically to a legitimate empty source. The guidance names
+  the convention paths (`skills/<name>/SKILL.md`, `agents/<name>.md`,
+  `rules/<name>.md`, `tools/<name>/`) and the three escapes (`--root <dir>`,
+  `--add-root <dir>`, `--flat-skills`), matching `init-source`'s zero-item
+  message. Suppressed for: a nested/curated meld (not the caller's decision to
+  act on), an authoritative `mind.toml` (`--root`/`--add-root`/`--flat-skills`
+  either don't apply or are ignored there, DSC-52/DSC-76), a pure super-source
+  that only curates other sources via `[discover].sources` (zero own items is
+  expected, not a discovery failure), and a `.claude-plugin/` plugin or
+  marketplace manifest source (which has its own guidance path, MKT-15).
+  Suppressed under `--json`; the JSON result shape is unchanged.
 - `CLI-11` Accepted repo specs: `owner/repo` and `github:owner/repo` (github.com),
   a full git URL (`https://host/owner/repo[.git]`), an SSH form
   (`git@host:owner/repo[.git]`), and a local path or `file://` URL. A spec that
   parses to none of these is an error (`InvalidRepoSpec`).
+- `CLI-204` Each of the `host`, `owner`, and `repo` parts a spec parses to must
+  be a single safe path component, or the spec is refused (`UnsafeRepoSpec`,
+  naming the offending part). A part is refused when it is empty, is `.` or
+  `..`, contains `/` or `\`, or contains a control character; `host` also
+  refuses `@` and `#`. Those three parts are load-bearing twice: joined with `/`
+  they are the source identity (STO-13), which managed policy matches segment by
+  segment (POL-10, POL-67, POL-68), and joined as directory components they are
+  the clone path (STO-11), which `meld` deletes and re-clones. Without the check
+  the SSH form, which splits only on the first `:`, admits a `host` such as
+  `../../elsewhere` or `evil/host@x`: the first escapes the sources tree at
+  `remove_dir_all` time, the second forges extra identity segments. `@` and `#`
+  remain legal in `owner` and `repo`, where a local path may legitimately carry
+  them (`/src/proj@v2/agents`); they are safe there because allowlist matching
+  is structural (POL-68), not a scan for those markers.
 - `CLI-12` Re-melding a repo whose source identity is already registered is not
   an error and does not re-clone or re-register. The identity includes the
   consumer alias (STO-58), so a re-meld is `meld` of a `(repo, alias)` that
@@ -57,6 +93,15 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   prints a status of the source's items: each item's effective name, whether it
   is installed, and the commit it was installed from, flagging items whose commit
   lags the source. Items are matched by stable identity (source, kind, bare name).
+- `CLI-206` A re-meld (CLI-12) never re-clones or re-registers, so `--root`,
+  `--add-root`, `--flat-skills`, `--pin` (and its deprecated aliases), and
+  `--install-hook` cannot take effect on it: they are set only at the meld that
+  first registers a source (DSC-51/STO-17, DSC-84/STO-55, DSC-75/STO-44,
+  CLI-17/STO-18, HOOK-20). When any of these flags is given against an
+  already-melded source, a one-line stderr-suppressed-under-`--json` note lists
+  exactly which flags were ignored and directs the user to `mind unmeld <source>`
+  then `mind meld` again to apply them, so the drop is not silent. Follows the
+  CLI-203 note pattern.
 - `CLI-13` `--as <prefix>` sets the source's namespace, overriding any
   `[source].prefix`. It is persisted and is not changed by `sync`. A `--as`
   prefix is an identity alias (STO-58): `meld <repo> --as <prefix>` denotes the
@@ -337,6 +382,16 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   `mind sync` is not mentioned because syncing cannot surface an item that does not
   exist in any melded source; only browsing with `probe` can confirm what is
   available.
+- `CLI-208` When `learn <name>` finds no item matching the query (`ItemNotFound`)
+  and the query names -- exactly, or as an unambiguous trailing suffix (the same
+  match rule as a source qualifier, CLI-5) -- exactly one already-melded source, a
+  second stderr hint (alongside CLI-179) names that source and points at
+  `mind learn --all <name>` to install all of its items. `learn <source-name>`
+  reads like `meld`'s `<repo>` argument, and `install` (the `learn` alias) trains
+  exactly that habit, so this is the most common way a query resolves to a source
+  rather than an item. Suppressed under `--json`, matching the CLI-179 hint. Not
+  printed when the query matches zero or more than one melded source (an ambiguous
+  suffix is not a case this hint disambiguates).
 
 ## forget
 
@@ -719,9 +774,14 @@ release artifacts as the install script and the Homebrew formula.
   binary. A platform with no published artifact is an error and nothing is changed.
 - `CLI-143` The replacement is atomic: the new binary is downloaded and verified,
   then swapped for the running executable, so any failure leaves the existing
-  binary intact. A Homebrew-managed install is upgraded with `brew upgrade` instead;
-  `evolve` replaces the binary it runs from and does not coordinate with a
-  package manager.
+  binary intact. `evolve` replaces whatever binary it runs from and does not
+  detect or coordinate with a package manager: there is no Homebrew (or other)
+  special case in the code, and a Cellar binary is user-writable on macOS, so
+  `evolve` will happily replace a brew-managed `mind`, which the next
+  `brew upgrade` then replaces again. Recommending `brew upgrade` for a
+  brew-managed install is install-path guidance, not behavior, and lives in
+  docs/src/install.md. A target path that is not writable is
+  `TargetNotWritable` and nothing is changed.
 - `CLI-147` `evolve` never downgrades the binary. When `--version V` is given
   explicitly and V is strictly below the running version, `evolve` exits 0 without
   downloading anything and reports that the pinned version is below the running

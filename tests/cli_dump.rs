@@ -1375,12 +1375,18 @@ fn dump_roundtrips_add_root_items() {
 }
 
 #[test]
-fn dump_add_root_survives_authoritative_mindtoml_round_trip() {
-    // spec: DUMP-11 — add-roots must round-trip even when the source ALSO
-    // carries an authoritative mind.toml. DSC-84 says add-root always composes
-    // with whatever discovery layer is authoritative (including an
-    // authoritative mind.toml's declared [[items]]), so both the declared item
-    // and the add-root-contributed item must survive dump + re-meld.
+fn dump_add_root_over_authoritative_mindtoml_emits_but_is_gated_on_reroundtrip() {
+    // spec: DUMP-11, DSC-88 — a DIRECT `meld --add-root` composes with an
+    // authoritative mind.toml (DSC-84: unlike `--root`, it is never gated for
+    // the consumer who melds the source themselves), and `dump` still emits
+    // the recorded `add-roots` for provenance (DUMP-11). But once the value is
+    // re-melded as a NESTED super-source entry, it is a CURATOR value (DSC-59)
+    // and DSC-60/DSC-88 gate it: the nested source (addroot-auth-src) ships its
+    // own mind.toml, so the curator-supplied add-roots is ignored with a
+    // warning on re-meld, and only the authoritatively-declared item survives
+    // the round trip. This is the DSC-88 fix: a curator's add-roots must not
+    // reach into a nested source's authoritative export list and surface items
+    // its author did not export.
     let sb = Sandbox::bare("addroot-auth-src");
     // Authoritative mind.toml: declaring [[items]] turns off plain convention
     // scanning for the source's own root (DSC-30).
@@ -1429,8 +1435,8 @@ fn dump_add_root_survives_authoritative_mindtoml_round_trip() {
     let dump_text = std::fs::read_to_string(&dump_path).expect("read dump");
     assert!(
         dump_text.contains("add-roots") && dump_text.contains("contrib"),
-        "dump must emit add-roots even when the source also has an \
-         authoritative mind.toml: {dump_text}"
+        "dump must still emit the recorded add-roots even when the source also \
+         has an authoritative mind.toml (DUMP-11 provenance): {dump_text}"
     );
 
     git_init(&super_dir);
@@ -1452,16 +1458,25 @@ fn dump_add_root_survives_authoritative_mindtoml_round_trip() {
     let ro = String::from_utf8_lossy(&remeld.stdout).into_owned();
     let re = String::from_utf8_lossy(&remeld.stderr).into_owned();
     assert!(remeld.status.success(), "remeld failed: {ro} {re}");
+    // spec: DSC-60 — the nested entry's add-roots is gated (DSC-88) because
+    // addroot-auth-src ships its own mind.toml; the warning names it ignored.
+    assert!(
+        re.contains("mind.toml") && re.contains("ignored"),
+        "re-melding the dumped super-source must warn that the nested entry's \
+         curator-supplied add-roots is ignored (DSC-60/DSC-88): {re}"
+    );
 
     assert!(
         fresh_claude.join("skills/core").exists(),
         "the authoritative item must install in the reproduced env: {fresh_claude:?}"
     );
     assert!(
-        fresh_claude.join("skills/addon").exists(),
-        "the add-root item must install in the reproduced env, proving \
-         add-roots round-tripped alongside an authoritative mind.toml: \
-         {fresh_claude:?}"
+        !fresh_claude.join("skills/addon").exists(),
+        "the add-root item must NOT install in the reproduced env: once \
+         re-melded as a nested super-source entry, its add-roots is a curator \
+         value gated by DSC-60/DSC-88 because the nested source ships its own \
+         mind.toml -- it must not bypass that source's authoritative export \
+         list: {fresh_claude:?}"
     );
 }
 

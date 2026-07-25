@@ -378,7 +378,7 @@ pub fn parse_spec(spec: &str) -> Result<Source> {
                 .next()
                 .filter(|s| !s.is_empty() && *s != "." && *s != "..")
                 .unwrap_or("local");
-            let mut source = make_source("local", owner, repo, repo_part.to_string());
+            let mut source = make_source(spec, "local", owner, repo, repo_part.to_string())?;
             // spec: LNK-4 -- extended identity; the pin makes this a cloned
             // snapshot (never a linked working tree), so lifecycle matches a
             // remote link instance.
@@ -394,14 +394,14 @@ pub fn parse_spec(spec: &str) -> Result<Source> {
             .next()
             .filter(|s| !s.is_empty() && *s != "." && *s != "..")
             .unwrap_or("local");
-        return Ok(make_source("local", owner, repo, path.to_string()));
+        return make_source(spec, "local", owner, repo, path.to_string());
     }
 
     // SSH form: git@host:owner/repo(.git)
     if let Some(rest) = spec.strip_prefix("git@") {
         let (host, path) = rest.split_once(':').ok_or_else(invalid)?;
         let (owner, repo) = split_owner_repo(path).ok_or_else(invalid)?;
-        return Ok(make_source(host, &owner, &repo, spec.to_string()));
+        return make_source(spec, host, &owner, &repo, spec.to_string());
     }
 
     // URL form: scheme://host/owner/repo(.git)
@@ -415,14 +415,14 @@ pub fn parse_spec(spec: &str) -> Result<Source> {
         }
         let (owner, repo) = split_owner_repo(path).ok_or_else(invalid)?;
         let url = format!("{scheme}://{host}/{owner}/{repo}");
-        return Ok(make_source(host, &owner, &repo, url));
+        return make_source(spec, host, &owner, &repo, url);
     }
 
     // github: prefix shorthand
     let bare = spec.strip_prefix("github:").unwrap_or(spec);
     let (owner, repo) = split_owner_repo(bare).ok_or_else(invalid)?;
     let url = format!("https://github.com/{owner}/{repo}");
-    Ok(make_source("github.com", &owner, &repo, url))
+    make_source(spec, "github.com", &owner, &repo, url)
 }
 
 /// Split a spec's path at the first tree/blob marker (LNK-1). Returns
@@ -511,7 +511,7 @@ fn parse_item_link(spec: &str, scheme: &str, host: &str, path: &str) -> Result<O
     let (owner, repo) = split_owner_repo(repo_part).ok_or_else(invalid)?;
     let (pin, item_path) = parse_link_tail(spec, marker, rest)?;
     let url = format!("{scheme}://{host}/{owner}/{repo}");
-    let mut source = make_source(host, &owner, &repo, url);
+    let mut source = make_source(spec, host, &owner, &repo, url)?;
     // spec: LNK-4 -- the extended identity keeps instances from the same repo
     // (and a plain meld of it) distinct; the clone path follows the name.
     source.name = format!("{}#{item_path}", source.name);
@@ -530,8 +530,62 @@ fn split_owner_repo(path: &str) -> Option<(String, String)> {
     Some((owner.to_string(), repo.to_string()))
 }
 
-fn make_source(host: &str, owner: &str, repo: &str, url: String) -> Source {
-    Source {
+/// Reject a `host`, `owner`, or `repo` part that is not a single safe path
+/// component (spec: CLI-204).
+///
+/// These three parts are load-bearing twice over: they are joined with `/` to
+/// form the source identity (STO-13), which managed policy matches segment by
+/// segment (POL-10, POL-67), and they are joined as directory components to
+/// form the clone path (STO-11), which is deleted and re-cloned by `meld`. A
+/// part containing `/` would silently add identity segments and path
+/// components; `.`/`..` would escape the sources tree; a control character
+/// would corrupt any output that echoes the identity. None of these can occur
+/// in a real forge identity, and the ssh branch of [`parse_spec`] splits only
+/// on the first `:`, so without this check `git@evil/host@x:o/r` parses with a
+/// `host` of `evil/host@x`.
+///
+/// `@` and `#` are deliberately allowed in `owner`/`repo`: a local path may
+/// legitimately contain them (`/src/proj@v2/agents`), and they are safe because
+/// allowlist matching is structural rather than a string scan for those markers
+/// (POL-67). They are rejected in `host`, where they cannot legitimately occur
+/// and where `@` is what makes the ssh form ambiguous.
+fn validate_identity_part(
+    spec: &str,
+    part: &'static str,
+    value: &str,
+    reject_markers: bool,
+) -> Result<()> {
+    let bad = |reason: &'static str| MindError::UnsafeRepoSpec {
+        spec: spec.to_string(),
+        part,
+        value: value.to_string(),
+        reason,
+    };
+    if value.is_empty() {
+        return Err(bad("is empty"));
+    }
+    if value == "." || value == ".." {
+        return Err(bad("is a relative path component"));
+    }
+    if value.contains('/') || value.contains('\\') {
+        return Err(bad("contains a path separator"));
+    }
+    if value.contains(|c: char| c.is_control()) {
+        return Err(bad("contains a control character"));
+    }
+    if reject_markers && value.contains(['@', '#']) {
+        return Err(bad("contains '@' or '#'"));
+    }
+    Ok(())
+}
+
+fn make_source(spec: &str, host: &str, owner: &str, repo: &str, url: String) -> Result<Source> {
+    // spec: CLI-204 -- validate before constructing, so no Source with an
+    // unsafe identity part is ever built, persisted, or used as a clone path.
+    validate_identity_part(spec, "host", host, true)?;
+    validate_identity_part(spec, "owner", owner, false)?;
+    validate_identity_part(spec, "repo", repo, false)?;
+    Ok(Source {
         // Identity is `host/owner/repo` (matching the clone path), so repos that
         // share a basename or even an owner/repo across hosts stay distinct.
         name: format!("{host}/{owner}/{repo}"),
@@ -553,7 +607,7 @@ fn make_source(host: &str, owner: &str, repo: &str, url: String) -> Source {
         install_hooks: Vec::new(),
         install_hook: None,
         install_hook_commit: None,
-    }
+    })
 }
 
 /// The persisted registry of melded sources.
@@ -982,12 +1036,60 @@ mod tests {
 
     #[test]
     fn parses_local_path() {
-        let s = parse_spec("/home/james/dev/agents").unwrap();
+        let s = parse_spec("/home/user/dev/agents").unwrap();
         assert_eq!(s.host, "local");
         assert_eq!(s.owner, "dev"); // parent directory becomes the owner
         assert_eq!(s.repo, "agents");
         assert_eq!(s.name, "local/dev/agents");
-        assert_eq!(s.url, "/home/james/dev/agents");
+        assert_eq!(s.url, "/home/user/dev/agents");
+    }
+
+    // CLI-204: the `host`, `owner`, and `repo` parts are both identity segments
+    // and clone-path components, so a part that is not a single safe path
+    // component is refused at parse time. The SSH form is the sharp edge: it
+    // splits only on the first `:`, so without the check `host` absorbs
+    // arbitrary path and marker characters.
+    // spec: CLI-204
+    #[test]
+    fn rejects_unsafe_identity_parts() {
+        let cases = [
+            // A traversing host escapes the sources tree at clone/remove time.
+            ("git@../../elsewhere:owner/repo", "host"),
+            ("git@..:owner/repo", "host"),
+            // A host with a `/` forges extra identity segments.
+            ("git@evil/host:owner/repo", "host"),
+            // A host with `@` is what makes the ssh form ambiguous.
+            ("git@github.com/acme/agents@x:o/r", "host"),
+            ("git@evil#frag:owner/repo", "host"),
+            // A traversing owner escapes one level up.
+            ("github:../x", "owner"),
+            // A traversing repo, via a local path.
+            ("/src/parent/..", "repo"),
+        ];
+        for (spec, part) in cases {
+            match parse_spec(spec) {
+                Err(MindError::UnsafeRepoSpec { part: p, .. }) => {
+                    assert_eq!(p, part, "{spec}: wrong part named")
+                }
+                other => panic!("{spec}: expected UnsafeRepoSpec on {part}, got {other:?}"),
+            }
+        }
+    }
+
+    // CLI-204: `@` and `#` stay legal in `owner`/`repo`, where a local path may
+    // legitimately carry them. They are safe there because allowlist matching is
+    // structural (POL-68) rather than a scan for those markers, and because
+    // neither adds an identity segment or a path component.
+    // spec: CLI-204
+    #[test]
+    fn markers_are_allowed_in_owner_and_repo() {
+        let s = parse_spec("/src/proj@v2/agents").unwrap();
+        assert_eq!(s.owner, "proj@v2");
+        assert_eq!(s.base_identity(), "local/proj@v2/agents");
+
+        let s = parse_spec("/src/parent/blessed@evil").unwrap();
+        assert_eq!(s.repo, "blessed@evil");
+        assert_eq!(s.base_identity(), "local/parent/blessed@evil");
     }
 
     #[test]
@@ -1121,9 +1223,9 @@ mod tests {
     #[test]
     fn compare_url_local_path_yields_none() {
         // (d) local/file paths have no web host to link to
-        let local = parse_spec("/home/james/dev/agents").unwrap();
+        let local = parse_spec("/home/user/dev/agents").unwrap();
         assert_eq!(local.compare_url("aaaa", "bbbb"), None);
-        let file_url = parse_spec("file:///home/james/dev/agents").unwrap();
+        let file_url = parse_spec("file:///home/user/dev/agents").unwrap();
         assert_eq!(file_url.compare_url("aaaa", "bbbb"), None);
     }
 
@@ -1190,9 +1292,9 @@ mod tests {
     // spec: HOOK-24
     #[test]
     fn browse_url_local_path_yields_none() {
-        let local = parse_spec("/home/james/dev/agents").unwrap();
+        let local = parse_spec("/home/user/dev/agents").unwrap();
         assert_eq!(local.browse_url("abc1234"), None);
-        let file_url = parse_spec("file:///home/james/dev/agents").unwrap();
+        let file_url = parse_spec("file:///home/user/dev/agents").unwrap();
         assert_eq!(file_url.browse_url("abc1234"), None);
     }
 
@@ -1235,15 +1337,15 @@ mod tests {
     // Browse line entirely (only the clone path is shown).
     #[test]
     fn browse_url_none_suppresses_browse_line_in_consent_disclosure() {
-        let local = parse_spec("/home/james/dev/agents").unwrap();
+        let local = parse_spec("/home/user/dev/agents").unwrap();
         let url = local.browse_url("abc1234");
         assert_eq!(url, None, "precondition: local path derives no browse URL");
 
         let text = crate::hook::disclosure_text(
-            "/home/james/dev/agents",
+            "/home/user/dev/agents",
             "local",
             "abc1234",
-            "/home/james/dev/agents",
+            "/home/user/dev/agents",
             "make install",
             None,
             url.as_deref(),
@@ -1631,6 +1733,22 @@ mod tests {
 
     use std::sync::atomic::{AtomicU32, Ordering};
     static SRC_N: AtomicU32 = AtomicU32::new(0);
+
+    // STO-31: a malformed registry is a `Json` error naming the file, not a
+    // silent empty registry (which would look like "no sources melded" and
+    // invite an overwrite of the real file). Normal tests only ever write valid
+    // JSON, so this branch needs a hand-built document to reach.
+    // spec: STO-31
+    #[test]
+    fn malformed_sources_json_is_a_json_error_naming_the_file() {
+        let (base, paths) = tmp_paths_src();
+        std::fs::write(base.join("sources.json"), "{ not json at all").unwrap();
+        match Registry::load(&paths) {
+            Err(MindError::Json { what, .. }) => assert_eq!(what, "sources.json"),
+            other => panic!("expected a Json error naming sources.json, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     fn tmp_paths_src() -> (std::path::PathBuf, Paths) {
         let n = SRC_N.fetch_add(1, Ordering::SeqCst);

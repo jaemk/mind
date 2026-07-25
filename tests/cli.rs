@@ -342,6 +342,178 @@ fn meld_registers_source_and_lists_items() {
 }
 
 #[test]
+fn meld_of_a_source_declaring_no_hooks_runs_and_discloses_none() {
+    // spec: HOOK-3 - a source with no `[source].install` and no `--install-hook`
+    // must run no hook and show no hook disclosure or consent prompt. The
+    // fixture ships no `mind.toml` at all, which is the common case: melding an
+    // arbitrary repo must never be an arbitrary-code-execution decision unless
+    // the source or the consumer explicitly asked for one.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    let r = sb.mind(&["meld", &spec, "--register-only"]);
+    assert!(r.success, "meld failed: {} {}", r.stdout, r.stderr);
+    let out = format!("{}{}", r.stdout, r.stderr);
+    for marker in ["hook", "Hook", "would run", "run this command"] {
+        assert!(
+            !out.contains(marker),
+            "a source declaring no hooks must not mention `{marker}`: {out}"
+        );
+    }
+}
+
+#[test]
+fn meld_with_zero_discovered_items_reports_guidance() {
+    // spec: CLI-205 - B7: a top-level meld of a repo with no items discoverable
+    // by convention scanning must say so explicitly, naming the convention
+    // paths and the escapes, with a non-success glyph, rather than reading
+    // identically to a legitimate empty source (`melded X (0 item(s))`).
+    let sb = Sandbox::bare("zero-item-repo");
+    let spec = sb.source_spec();
+    let r = sb.mind(&["meld", &spec]);
+    assert!(
+        r.success,
+        "a zero-item meld is not a hard error: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stdout.contains("(0 item(s))"),
+        "must still report the 0 item(s) count: {}",
+        r.stdout
+    );
+    // ASCII fallback in this non-TTY harness (CLI-151): `!` is the warning
+    // glyph, `+` is the success glyph (CLI-152). The zero-item line must use
+    // the warning glyph, not the success one.
+    assert!(
+        r.stdout.contains("! melded"),
+        "a zero-item meld must use the warning glyph, not the success one: {}",
+        r.stdout
+    );
+    for hint in [
+        "skills/<name>/SKILL.md",
+        "agents/<name>.md",
+        "rules/<name>.md",
+        "tools/<name>/",
+        "--root",
+        "--add-root",
+        "--flat-skills",
+    ] {
+        assert!(
+            r.stdout.contains(hint),
+            "guidance must mention `{hint}`: {}",
+            r.stdout
+        );
+    }
+}
+
+#[test]
+fn meld_with_add_root_discovering_items_suppresses_zero_item_note() {
+    // spec: CLI-205 - the guidance from the previous test is exactly the fix
+    // for the repro in the finding: the escape it names (`--add-root`) turns
+    // the same zero-item repo into a normal, successful meld.
+    let sb = Sandbox::bare("addroot-fixes-zero");
+    sb.write_and_commit(
+        ".claude/skills/foo/SKILL.md",
+        "---\nname: foo\ndescription: foo\n---\n# foo\n",
+    );
+    let spec = sb.source_spec();
+    let r = sb.mind(&["meld", &spec, "--add-root", ".claude"]);
+    assert!(
+        r.success,
+        "meld --add-root failed: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stdout.contains("(1 item(s))") && r.stdout.contains("+ melded"),
+        "with --add-root discovering the item, the note must not fire: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn remeld_notes_the_discovery_and_pin_flags_it_ignored() {
+    // spec: CLI-206 - a re-meld never re-clones or re-registers, so the
+    // discovery and pin flags cannot take effect. Silently dropping them is the
+    // worse failure: the flag help reads as though they are settable later, and
+    // there is no `pin` verb, so a user re-pinning an existing source otherwise
+    // gets no command that works and no error saying so.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    let first = sb.mind(&["meld", &spec, "--register-only"]);
+    assert!(first.success, "first meld failed: {}", first.stderr);
+
+    let again = sb.mind(&[
+        "meld",
+        &spec,
+        "--register-only",
+        "--add-root",
+        ".claude",
+        "--pin",
+        "HEAD",
+    ]);
+    assert!(
+        again.success,
+        "a re-meld is not an error: {} {}",
+        again.stdout, again.stderr
+    );
+    assert!(
+        again.stdout.contains("--add-root") && again.stdout.contains("--pin"),
+        "the note must name each ignored flag: {}",
+        again.stdout
+    );
+    assert!(
+        again.stdout.contains("ignored") && again.stdout.contains("unmeld"),
+        "the note must say they were ignored and what to do instead: {}",
+        again.stdout
+    );
+
+    // A re-meld carrying none of those flags stays quiet.
+    let quiet = sb.mind(&["meld", &spec, "--register-only"]);
+    assert!(
+        !quiet.stdout.contains("ignored"),
+        "a re-meld with no discovery/pin flags must print no note: {}",
+        quiet.stdout
+    );
+}
+
+#[test]
+fn bare_mind_prints_help_on_stdout_and_exits_zero() {
+    // spec: CLI-207 - the first command a new user types. A required subcommand
+    // with no arguments is otherwise a clap usage error: nothing on stdout, a
+    // usage string on stderr, exit 2.
+    let sb = Sandbox::new();
+    let r = sb.mind(&[]);
+    assert!(
+        r.success,
+        "bare `mind` must exit 0: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stdout.contains("Usage") && r.stdout.contains("meld"),
+        "bare `mind` must print help on stdout: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn learn_of_a_source_name_hints_at_learn_all() {
+    // spec: CLI-208 - `learn <source-name>` is a common miss: it reads like
+    // `meld`'s `<repo>` argument, and the `install` alias trains that habit.
+    // The plain ItemNotFound dead-ends without naming `--all`, which is what
+    // the user wanted.
+    let sb = melded();
+    // The identity is `local/<base_name>/agents`; `agents` is the unambiguous
+    // trailing suffix a user would actually type.
+    let source = format!("local/{}/agents", sb.base_name());
+    let r = sb.mind(&["learn", &source]);
+    assert!(!r.success, "learn of a source name is still an error");
+    assert!(
+        r.stderr.contains("--all") && r.stderr.contains(&source),
+        "the hint must name the source and `learn --all`: {}",
+        r.stderr
+    );
+}
+
+#[test]
 fn meld_yes_installs_all_source_items() {
     // spec: CLI-23 - `meld --yes` registers the source and installs all of its
     // items without prompting (so it works in this non-TTY harness too).
@@ -11893,7 +12065,10 @@ fn evolve_policy_pin_equal_to_running_no_skew_warning() {
     // spec: POL-66 -- when pin == running, the decision is UpToDate, not
     // PinnedBelowCurrent, so no skew warning is emitted.
     let sb = Sandbox::new();
-    let current = env!("CARGO_PKG_VERSION");
+    // A policy pin must be dotted numeric, and between releases the running
+    // binary carries a `-dev` pre-release suffix, so pin the numeric base. A
+    // `-dev` build compares equal to its own base version.
+    let current = env!("CARGO_PKG_VERSION").split('-').next().unwrap();
     let policy = write_policy(&sb, &format!("[binary]\nself-update = \"{current}\"\n"));
 
     let r = sb.mind_env(
@@ -15304,6 +15479,99 @@ fn curator_values_ignored_with_warning_when_nested_has_mind_toml() {
     assert!(
         !json.contains("touch curated-hookran"),
         "the curator hook command must not be recorded when suppressed: {json}"
+    );
+}
+
+#[test]
+fn curator_add_roots_applied_when_nested_has_no_mind_toml() {
+    // spec: DSC-88 -- a curator's `add-roots` on a `[discover].sources` entry
+    // composes with an un-onboarded nested source's convention discovery,
+    // exactly like `roots`/`flat-skills`/hooks (DSC-59/DSC-61), when the nested
+    // source ships no mind.toml of its own.
+    let nested = Sandbox::bare("addroot-widgets");
+    nested.write_and_commit(
+        "skills/base/SKILL.md",
+        "---\nname: base\ndescription: base skill\n---\n# base\n",
+    );
+    // Only reachable via the curator's add-roots entry.
+    nested.write_and_commit(
+        "contrib/skills/addon/SKILL.md",
+        "---\nname: addon\ndescription: add-root contributed skill\n---\n# addon\n",
+    );
+    let registry = Sandbox::bare("addroot-registry");
+    registry.write_and_commit(
+        "mind.toml",
+        &format!(
+            "[[discover.sources]]\nsource = \"{}\"\nadd-roots = [\"contrib\"]\n",
+            nested.source_spec()
+        ),
+    );
+    let spec = registry.source_spec();
+    let r = registry.mind(&["meld", &spec]);
+    assert!(r.success, "meld should succeed: {} {}", r.stdout, r.stderr);
+
+    let probe = registry.mind(&["probe"]).stdout;
+    assert!(
+        probe.contains("skill:base"),
+        "the base item (plain convention scan) must be discovered: {probe}"
+    );
+    assert!(
+        probe.contains("skill:addon"),
+        "curator add-roots must apply when the nested source has no mind.toml: {probe}"
+    );
+}
+
+#[test]
+fn curator_add_roots_ignored_with_warning_when_nested_has_mind_toml() {
+    // spec: DSC-60 DSC-88 -- a curator-supplied `add-roots` on a nested source
+    // that ships its own mind.toml must be GATED exactly like
+    // roots/flat-skills/hooks, not composed unconditionally (contrast the
+    // direct-consumer `meld --add-root`, DSC-84, which is never gated). Without
+    // this gate a curator could reach an item its author deliberately did not
+    // export via an authoritative mind.toml (DSC-3): this is the C16 fix. A
+    // metadata-only (non-authoritative) mind.toml is enough to trip the
+    // whole-file DSC-60 gate; convention scanning still finds `base`.
+    let nested = Sandbox::bare("addroot-onboarded");
+    nested.write_and_commit(
+        "skills/base/SKILL.md",
+        "---\nname: base\ndescription: base skill\n---\n# base\n",
+    );
+    nested.write_and_commit(
+        "contrib/skills/addon/SKILL.md",
+        "---\nname: addon\ndescription: add-root contributed skill\n---\n# addon\n",
+    );
+    nested.write_and_commit("mind.toml", "[source]\ndescription = \"onboarded\"\n");
+
+    let registry = Sandbox::bare("addroot-registry-gated");
+    registry.write_and_commit(
+        "mind.toml",
+        &format!(
+            "[[discover.sources]]\nsource = \"{}\"\nadd-roots = [\"contrib\"]\n",
+            nested.source_spec()
+        ),
+    );
+    let spec = registry.source_spec();
+    let r = registry.mind(&["meld", &spec]);
+    assert!(r.success, "meld should succeed: {} {}", r.stdout, r.stderr);
+
+    // DSC-60: a warning fires because add-roots is a gated field and is present.
+    assert!(
+        r.stderr.contains("ships its own mind.toml")
+            && r.stderr.contains("ignored")
+            && r.stderr.contains("onboarded"),
+        "a DSC-60 warning must be emitted naming the onboarded source: {}",
+        r.stderr
+    );
+
+    let probe = registry.mind(&["probe"]).stdout;
+    assert!(
+        probe.contains("skill:base"),
+        "the base item (plain convention scan) must still be discovered: {probe}"
+    );
+    assert!(
+        !probe.contains("skill:addon"),
+        "curator add-roots must be gated (ignored) when the nested source ships \
+         its own mind.toml: {probe}"
     );
 }
 

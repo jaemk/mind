@@ -183,7 +183,10 @@ pub enum MindError {
         source: toml::ser::Error,
     },
 
-    #[error("'{path}' is not a configured agent home (lobe)")]
+    // Names the next command, mirroring `ItemNotFound`'s house style (CLI-179).
+    #[error(
+        "'{path}' is not a configured agent home (lobe); run 'mind config lobes list' to see configured lobes"
+    )]
     UnknownLobe { path: String },
 
     #[error("'{kind}' is not a valid item kind (expected one of: skill, agent, rule, tool)")]
@@ -212,6 +215,23 @@ pub enum MindError {
         "'{spec}' is not a valid repo spec (expected 'owner/repo', a github shorthand, or a git URL)"
     )]
     InvalidRepoSpec { spec: String },
+
+    /// CLI-204: a repo spec that parses structurally but whose `host`, `owner`,
+    /// or `repo` part is not a single safe path component. Those three parts are
+    /// both the source's identity segments and its clone-path components, so a
+    /// part carrying `/`, `..`, or a control character would break identity
+    /// segmentation (and therefore allowlist matching, POL-67) and escape the
+    /// sources tree. Kept distinct from [`MindError::InvalidRepoSpec`] so the
+    /// message names the offending part rather than the whole spec.
+    #[error(
+        "'{spec}' is not a usable repo spec: its {part} part '{value}' {reason}; each of host, owner, and repo must be a single path component"
+    )]
+    UnsafeRepoSpec {
+        spec: String,
+        part: &'static str,
+        value: String,
+        reason: &'static str,
+    },
 
     /// LNK-1/LNK-2: a URL that carries a `tree`/`blob` link marker (so it is
     /// unambiguously an attempted item link, not a plain repo spec) but whose
@@ -253,7 +273,10 @@ pub enum MindError {
     #[error("source '{name}' is already melded (from {url})")]
     SourceExists { name: String, url: String },
 
-    #[error("no source named '{name}' is melded")]
+    // Names the next command, mirroring `ItemNotFound`'s house style (CLI-179).
+    #[error(
+        "no source named '{name}' is melded; run 'mind recall --sources' to list melded sources"
+    )]
     SourceNotFound { name: String },
 
     #[error("'{pattern}' is not a valid glob selector: {source}")]
@@ -534,6 +557,28 @@ pub enum MindError {
     // spec: STO-56
     #[error("lobe base directory does not exist: {}", path.display())]
     LobeBaseMissing { path: PathBuf },
+
+    /// HOOK-105: a `hooks run`/`hooks list` target string exactly names both a
+    /// registered source identity (an item-link instance's own `host/owner/repo#path`
+    /// identity, LNK-4, when the linked skill sits at a single top-level path
+    /// segment) and, under the ordinary `<source>#<item>` reading of that same
+    /// string, an installed item. Resolving silently either way depends on
+    /// registry state invisible to the caller, so this is reported instead of a
+    /// silent pick. `item_forms` are the kind-qualified refs
+    /// (`<source>#<kind>:<name>`) that unambiguously target each matching item;
+    /// a `source:<target>` prefix unambiguously targets the source.
+    // spec: HOOK-105
+    #[error(
+        "'{target}' is ambiguous: it names both the registered source '{target}' and installed item(s) matching the same string; \
+         to target the source, run `mind hooks run 'source:{target}'`; to target an item, use a kind-qualified ref, e.g. `mind hooks run '{}'`",
+        item_forms.first().cloned().unwrap_or_default()
+    )]
+    AmbiguousHookTarget {
+        target: String,
+        /// The kind-qualified `<source>#<kind>:<name>` ref for each installed
+        /// item the target string also names.
+        item_forms: Vec<String>,
+    },
 }
 
 fn status_suffix(status: Option<ExitStatus>) -> String {
@@ -579,6 +624,7 @@ impl MindError {
             MindError::MindToml { .. } => "mind-toml",
             MindError::Manifest { .. } => "manifest",
             MindError::InvalidRepoSpec { .. } => "invalid-repo-spec",
+            MindError::UnsafeRepoSpec { .. } => "unsafe-repo-spec",
             MindError::BadItemLink { .. } => "bad-item-link",
             MindError::InvalidItemRef { .. } => "invalid-item-ref",
             MindError::ReservedPrefix { .. } => "reserved-prefix",
@@ -628,6 +674,7 @@ impl MindError {
             MindError::BuildEventRequiresItemTarget => "build-event-requires-item-target",
             MindError::HookAborted { .. } => "hook-aborted",
             MindError::LobeBaseMissing { .. } => "lobe-base-missing",
+            MindError::AmbiguousHookTarget { .. } => "ambiguous-hook-target",
         }
     }
 }
@@ -913,6 +960,35 @@ mod tests {
         );
     }
 
+    // U37: SourceNotFound must name the next command, mirroring ItemNotFound's
+    // house style (CLI-179), so a typo'd source name points somewhere useful.
+    #[test]
+    fn source_not_found_hints_recall_sources() {
+        let e = MindError::SourceNotFound {
+            name: "jaemk/minds".into(),
+        }
+        .to_string();
+        assert!(e.contains("jaemk/minds"), "must include the name: {e}");
+        assert!(
+            e.contains("mind recall --sources"),
+            "must hint the exact next command: {e}"
+        );
+    }
+
+    // U37: UnknownLobe must likewise name the next command.
+    #[test]
+    fn unknown_lobe_hints_config_lobes_list() {
+        let e = MindError::UnknownLobe {
+            path: "/no/such/lobe".into(),
+        }
+        .to_string();
+        assert!(e.contains("/no/such/lobe"), "must include the path: {e}");
+        assert!(
+            e.contains("mind config lobes list"),
+            "must hint the exact next command: {e}"
+        );
+    }
+
     #[test]
     fn link_occupied_includes_force_hint() {
         // spec: LIFE-41 -- the `--force` remedy must be surfaced in the error.
@@ -1066,6 +1142,36 @@ mod tests {
             "must say directory does not exist: {msg}"
         );
         assert_eq!(e.kind(), "lobe-base-missing", "kind slug must be stable");
+    }
+
+    // spec: HOOK-105
+    #[test]
+    fn ambiguous_hook_target_names_both_disambiguated_forms() {
+        // The message must name the ambiguous target string once as the source
+        // form (prefixed with `source:`) and once as a kind-qualified item ref,
+        // so a reader can copy either escape directly.
+        let e = MindError::AmbiguousHookTarget {
+            target: "local/base/repo#dev".into(),
+            item_forms: vec!["local/base/repo#skill:dev".into()],
+        };
+        let msg = e.to_string();
+        assert!(
+            msg.contains("local/base/repo#dev"),
+            "must name the ambiguous target: {msg}"
+        );
+        assert!(
+            msg.contains("source:local/base/repo#dev"),
+            "must name the source-targeting escape: {msg}"
+        );
+        assert!(
+            msg.contains("local/base/repo#skill:dev"),
+            "must name the kind-qualified item escape: {msg}"
+        );
+        assert_eq!(
+            e.kind(),
+            "ambiguous-hook-target",
+            "kind slug must be stable"
+        );
     }
 
     #[test]

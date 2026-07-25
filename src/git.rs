@@ -116,6 +116,14 @@ pub fn is_proxy_failure(err: &MindError) -> bool {
 pub fn auth_hint_lines(ssh_url: &str) -> Vec<String> {
     // spec: CLI-177
     vec![
+        // spec: CLI-177 -- GitHub (and most forges) answer an unauthenticated
+        // request for a missing, private, or mistyped repo with the same
+        // credential prompt as a real auth failure, so `is_auth_failure` cannot
+        // tell the two apart. Lead with this note so a typo'd repo name is not
+        // sent straight into SSH-key setup before checking the simpler cause.
+        "note: this can also mean the repo does not exist, is private, or the name is \
+         misspelled -- double check the identity first"
+            .to_string(),
         "hint: authentication failed; to use SSH:".to_string(),
         format!("  mind meld {ssh_url}"),
         "  or set `ssh = true` in ~/.mind/config.toml to always prefer SSH for HTTPS remotes"
@@ -1332,6 +1340,42 @@ mod tests {
             combined.contains("credential helper"),
             "credential helper mention must appear in auth hint: {combined}"
         );
+    }
+
+    // spec: CLI-177 -- U33: GitHub answers an unauthenticated request for a
+    // missing, private, or mistyped repo with the same credential prompt as a
+    // real auth failure, so this note must come BEFORE the SSH/credential
+    // remedies, not just appear somewhere in the hint.
+    #[test]
+    fn auth_hint_lines_lead_with_not_found_or_misspelled_note_before_remedies() {
+        let lines = auth_hint_lines("git@github.com:owner/private");
+        let combined = lines.join("\n");
+        assert!(
+            combined.contains("does not exist") && combined.contains("misspelled"),
+            "must note the repo may not exist / be misspelled: {combined}"
+        );
+        assert!(
+            combined.contains("private"),
+            "must note the repo may be private: {combined}"
+        );
+
+        // Ordering: the not-found/misspelled note appears before the first SSH
+        // remedy line, so a reader hits the cheaper check first.
+        let note_pos = combined
+            .find("does not exist")
+            .expect("note must be present");
+        let ssh_pos = combined
+            .find("git@github.com:owner/private")
+            .expect("SSH remedy must be present");
+        assert!(
+            note_pos < ssh_pos,
+            "the not-found/misspelled note must precede the SSH remedy: {combined}"
+        );
+
+        // The original three remedies are all still present and unchanged.
+        assert!(combined.contains("to use SSH"), "{combined}");
+        assert!(combined.contains("ssh = true"), "{combined}");
+        assert!(combined.contains("credential helper"), "{combined}");
     }
 
     #[test]

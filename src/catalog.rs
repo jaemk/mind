@@ -536,14 +536,22 @@ fn scan_add_roots(
     // namespace and metadata.
     let mut added: Vec<CatalogItem> = out.split_off(add_start);
     added.retain(|it| !base_paths.contains(&canon(&it.path)));
-    // spec: DSC-87 -- two add-root passes can surface the SAME on-disk item
-    // (e.g. `--add-root . --add-root skills` both finding `skills/foo`, one via
-    // the skills/ container pass and one via the flat-skills pass). That is a
-    // same-path overlap, not a name collision, so keep exactly one entry per
-    // canonical path among the added items rather than letting both survive to
-    // the (kind, effective-name) uniqueness check below and error out.
-    let mut seen_add_paths: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
-    added.retain(|it| seen_add_paths.insert(canon(&it.path)));
+    // spec: DSC-87/DSC-89 -- two add-root passes can surface the SAME on-disk
+    // item AS THE SAME KIND (e.g. `--add-root . --add-root skills` both finding
+    // `skills/foo` as a Skill, one via the skills/ container pass and one via
+    // the flat-skills pass). That is a same-(kind, path) overlap, not a name
+    // collision, so keep exactly one entry per (kind, canonical path) among the
+    // added items rather than letting both survive to the (kind, effective-name)
+    // uniqueness check below and error out. The key includes `kind` (DSC-89): a
+    // single on-disk path can legitimately contribute up to one item PER KIND --
+    // e.g. `tools/foo/` (a Tool, no anchor file required) that also carries a
+    // `SKILL.md` (a Skill) surfaces as both when reached by different add-roots
+    // (`--add-root .` finds it via the tools/ pass, `--add-root tools` finds it
+    // via the flat-skills pass); keying on path alone would silently drop
+    // whichever kind lost the race.
+    let mut seen_add_paths: std::collections::HashSet<(ItemKind, PathBuf)> =
+        std::collections::HashSet::new();
+    added.retain(|it| seen_add_paths.insert((it.kind, canon(&it.path))));
     out.extend(added);
     // spec: DSC-85 -- (kind, effective name) uniqueness across the source's
     // whole offering (authoritative layer + added roots).
@@ -3009,6 +3017,65 @@ mod tests {
             foos.len(),
             1,
             "overlapping add-roots surfacing the same on-disk item must dedupe to one entry: {items:?}"
+        );
+    }
+
+    #[test]
+    fn add_roots_same_path_different_kind_surfaces_both_items() {
+        // spec: DSC-89 -- a single on-disk path can contribute up to one item PER
+        // KIND. `tools/foo/` needs no anchor file (DSC-13), so a tools directory
+        // that also carries a `SKILL.md` is both a valid Tool and a valid Skill.
+        // With `--add-root . --add-root tools`, the "." root's tools/ pass finds
+        // it as a Tool and the "tools" root's flat-skills pass finds the SAME
+        // directory as a Skill: two DIFFERENT kinds at the same path, so the
+        // DSC-87 same-path dedup must NOT collapse them into one -- both must
+        // survive. (Pre-DSC-89, keying the dedup on path alone silently dropped
+        // whichever kind's scan pass ran second.)
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let clone = base.join("sources/local/test/repo");
+        write_file(
+            &clone.join("tools/foo/SKILL.md"),
+            "---\ndescription: foo\n---\n# foo\n",
+        );
+        write_file(
+            &clone.join("guidelines/style.md"),
+            "---\ndescription: style\n---\n# style\n",
+        );
+        // Authoritative mind.toml (an unrelated declared item) so the base layer
+        // does not itself discover tools/foo via ordinary convention scanning;
+        // it is reachable only through the two add-roots passes.
+        write_file(
+            &clone.join("mind.toml"),
+            concat!(
+                "[[items]]\n",
+                "kind = \"rule\"\n",
+                "name = \"style\"\n",
+                "path = \"guidelines/style.md\"\n",
+            ),
+        );
+
+        let paths = paths_for(base);
+        let mut source = make_source_for(&clone);
+        source.add_roots = Some(vec![".".to_string(), "tools".to_string()]);
+
+        let mut items = Vec::new();
+        scan_source(&paths, &source, &mut items).unwrap();
+
+        let foo_tool = items
+            .iter()
+            .any(|i| i.kind == ItemKind::Tool && i.name == "foo");
+        let foo_skill = items
+            .iter()
+            .any(|i| i.kind == ItemKind::Skill && i.name == "foo");
+        assert!(
+            foo_tool,
+            "the tools/ pass must still surface foo as a Tool: {items:?}"
+        );
+        assert!(
+            foo_skill,
+            "the flat-skills pass over the `tools` add-root must still surface \
+             foo as a Skill, alongside the Tool at the same path: {items:?}"
         );
     }
 

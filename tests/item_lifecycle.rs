@@ -1217,10 +1217,21 @@ fn meld_fork_third_instance_also_prints_new_instance_note() {
         "second fork meld failed: {} {}",
         fork2.stdout, fork2.stderr
     );
+    // spec: STO-63 -- with two prior instances the note names both, so it reads
+    // "instances <a>, <b> remain" rather than the singular "<a> remains", and
+    // the names it prints are the registered identities, which are the handles
+    // `unmeld` accepts. Naming the bare `host/owner/repo` would point at a name
+    // that need not be registered at all.
     assert!(
-        fork2.stdout.contains("registered a new instance") && fork2.stdout.contains("remains"),
+        fork2.stdout.contains("registered a new instance") && fork2.stdout.contains("remain"),
         "a THIRD instance (second fork, with two prior instances already \
          registered) must also print the note: {}",
+        fork2.stdout
+    );
+    assert!(
+        fork2.stdout.contains("fork-one"),
+        "the note must name the actual registered instances, which are the \
+         handles `unmeld` accepts: {}",
         fork2.stdout
     );
 }

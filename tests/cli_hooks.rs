@@ -1318,6 +1318,286 @@ fn hooks_list_link_instance_identity_with_surrounding_whitespace_still_matches()
 }
 
 // ---------------------------------------------------------------------------
+// HOOK-105: genuine ambiguity between a registered source identity and the
+// item-ref reading of the same string, and its two disambiguation escapes.
+// ---------------------------------------------------------------------------
+
+/// When a target string exactly matches BOTH a registered source's identity
+/// AND, under the ordinary `#`-split heuristic, an installed item, `hooks
+/// list` must error naming both disambiguated forms rather than silently
+/// picking the source the way the exact-match check alone would.
+#[test]
+fn hooks_target_exactly_matching_source_and_item_errors_ambiguous() {
+    // spec: HOOK-105
+    let sb = Sandbox::new("amb-src");
+    // A root-level skill directory `dev/SKILL.md`, declared via an explicit
+    // mind.toml item so its bare (and effective) name is exactly `dev` --
+    // matching the basename a link straight into the same root-level path
+    // carries as its own identity suffix.
+    sb.write_and_commit(
+        "mind.toml",
+        concat!(
+            "[[items]]\n",
+            "kind = \"skill\"\n",
+            "name = \"dev\"\n",
+            "path = \"dev\"\n",
+        ),
+    );
+    sb.write_and_commit("dev/SKILL.md", "---\ndescription: dev skill\n---\n# dev\n");
+
+    // Register the link instance FIRST (register-only, nothing installed yet),
+    // so the NS-43 cross-source collision check has nothing to conflict with:
+    // its identity is exactly "local/<base>/amb-src#dev" -- spelled
+    // identically to the item-ref reading of that string (source
+    // "local/<base>/amb-src", item "dev").
+    let r = sb.mind(&["meld", &sb.link("tree/main/dev"), "--register-only"]);
+    assert!(r.success, "link meld: {}\n{}", r.stdout, r.stderr);
+
+    // Now plain meld + install: registers source "local/<base>/amb-src" with
+    // skill:dev installed under it. No collision yet (the link installed
+    // nothing), so this succeeds even non-interactively.
+    let r = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(r.success, "meld: {}", r.stderr);
+    // The link instance also offers its own catalog item named `dev` (LNK-7),
+    // so a bare `learn dev` would itself be ambiguous across the two sources;
+    // qualify by source so this installs from the PLAIN source only.
+    let r = sb.mind(&[
+        "learn",
+        "amb-src#dev",
+        "--dangerously-skip-install-hook-check",
+    ]);
+    assert!(r.success, "learn: {}", r.stderr);
+
+    let ambiguous = sb.link_identity("dev");
+
+    let r = sb.mind(&["hooks", "list", &ambiguous]);
+    assert!(
+        !r.success,
+        "an exact source/item collision must error, not silently resolve: {}\n{}",
+        r.stdout, r.stderr
+    );
+    let combined = format!("{}{}", r.stdout, r.stderr);
+    assert!(
+        combined.contains("ambiguous"),
+        "must say ambiguous: {combined}"
+    );
+    assert!(
+        combined.contains(&ambiguous),
+        "must name the ambiguous target: {combined}"
+    );
+    assert!(
+        combined.contains(&format!("source:{ambiguous}")),
+        "must name the source-targeting escape: {combined}"
+    );
+    assert!(
+        combined.contains("skill:dev"),
+        "must name the kind-qualified item escape: {combined}"
+    );
+
+    // `hooks run` (not just `hooks list`) must also refuse the ambiguous
+    // target rather than picking a winner.
+    let r = sb.mind(&[
+        "hooks",
+        "run",
+        "--event",
+        "install",
+        "--dangerously-skip-install-hook-check",
+        &ambiguous,
+    ]);
+    assert!(
+        !r.success,
+        "hooks run must also refuse the ambiguous target: {}\n{}",
+        r.stdout, r.stderr
+    );
+}
+
+/// The same identity-colliding setup as above, but WITHOUT installing the
+/// colliding item: the target then matches only the registered source, and
+/// resolves as a source exactly as before HOOK-105's ambiguity check existed
+/// (the ambiguity check must not fire when there is no actual collision).
+#[test]
+fn hooks_target_source_only_match_resolves_as_source() {
+    // spec: HOOK-105
+    let sb = Sandbox::new("src-only");
+    sb.write_and_commit(
+        "mind.toml",
+        concat!(
+            "[[hooks]]\n",
+            "name = \"root setup\"\n",
+            "run = \"echo root-setup-ran\"\n",
+            "event = \"install\"\n",
+        ),
+    );
+    sb.write_and_commit("dev/SKILL.md", "---\ndescription: dev skill\n---\n# dev\n");
+
+    // Only the link instance is registered; the repo's plain source is never
+    // melded, so no item named `dev` is ever installed anywhere.
+    let r = sb.mind(&["learn", &sb.link("tree/main/dev")]);
+    assert!(r.success, "learn <url>: {}\n{}", r.stdout, r.stderr);
+
+    let identity = sb.link_identity("dev");
+    let r = sb.mind(&["hooks", "list", &identity]);
+    assert!(
+        r.success,
+        "an unambiguous exact source match must still resolve as a source: {}\n{}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stdout.contains("source:"),
+        "must be read as a source target: {}",
+        r.stdout
+    );
+}
+
+/// A target containing `#` that does not exactly name any registered source
+/// (so it can never collide) but does resolve to an installed item is read as
+/// an item, exactly as before HOOK-105.
+#[test]
+fn hooks_target_item_only_match_resolves_as_item() {
+    // spec: HOOK-105
+    let sb = Sandbox::new("item-only");
+    sb.write_and_commit(
+        "mind.toml",
+        concat!(
+            "[[items]]\n",
+            "kind = \"skill\"\n",
+            "name = \"widget\"\n",
+            "path = \"skills/widget\"\n",
+            "install = \"echo widget-installed\"\n",
+        ),
+    );
+    sb.write_and_commit(
+        "skills/widget/SKILL.md",
+        "---\ndescription: widget\n---\n# widget\n",
+    );
+    let r = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(r.success, "meld: {}", r.stderr);
+    let r = sb.mind(&["learn", "widget", "--dangerously-skip-install-hook-check"]);
+    assert!(r.success, "learn: {}", r.stderr);
+
+    // "item-only#widget" is not the registered source's identity (that is
+    // just "item-only"), so it can only resolve as an item ref.
+    let r = sb.mind(&["hooks", "list", "item-only#widget"]);
+    assert!(
+        r.success,
+        "must resolve as an item ref: {}\n{}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stdout.contains("item:"),
+        "must be read as an item target: {}",
+        r.stdout
+    );
+}
+
+/// The kind-qualified escape (`<source>#<kind>:<name>`) disambiguates toward
+/// the item even when the plain form of the same target is ambiguous: it
+/// never equals a registered source's exact identity (identities carry no
+/// `kind:` segment), so it always falls through to ordinary item-ref parsing.
+#[test]
+fn hooks_target_kind_qualified_escape_forces_item_resolution() {
+    // spec: HOOK-105
+    let sb = Sandbox::new("amb-kind-esc");
+    sb.write_and_commit(
+        "mind.toml",
+        concat!(
+            "[[items]]\n",
+            "kind = \"skill\"\n",
+            "name = \"dev\"\n",
+            "path = \"dev\"\n",
+            "install = \"echo dev-installed\"\n",
+        ),
+    );
+    sb.write_and_commit("dev/SKILL.md", "---\ndescription: dev skill\n---\n# dev\n");
+
+    let r = sb.mind(&["meld", &sb.link("tree/main/dev"), "--register-only"]);
+    assert!(r.success, "link meld: {}\n{}", r.stdout, r.stderr);
+    let r = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(r.success, "meld: {}", r.stderr);
+    // Qualify by source: the link instance also offers a catalog item named
+    // `dev` (LNK-7), so a bare `learn dev` would itself be ambiguous.
+    let r = sb.mind(&[
+        "learn",
+        "amb-kind-esc#dev",
+        "--dangerously-skip-install-hook-check",
+    ]);
+    assert!(r.success, "learn: {}", r.stderr);
+
+    // The plain identity string is ambiguous (as pinned above); the
+    // kind-qualified form is not, since it never matches a registered source.
+    let source_part = format!(
+        "local/{}/{}",
+        sb.base.file_name().unwrap().to_string_lossy(),
+        sb.source.file_name().unwrap().to_string_lossy(),
+    );
+    let escaped = format!("{source_part}#skill:dev");
+
+    let r = sb.mind(&["hooks", "list", &escaped]);
+    assert!(
+        r.success,
+        "the kind-qualified escape must resolve unambiguously: {}\n{}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stdout.contains("item:"),
+        "must be read as an item target: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("echo dev-installed") || r.stdout.contains("dev-installed"),
+        "must list the installed item's own hook: {}",
+        r.stdout
+    );
+}
+
+/// The `source:` escape disambiguates toward the source even when the plain
+/// form of the same target is ambiguous: it always forces the source reading,
+/// bypassing both the exact-match check and the ambiguity check.
+#[test]
+fn hooks_target_source_prefix_escape_forces_source_resolution() {
+    // spec: HOOK-105
+    let sb = Sandbox::new("amb-src-esc");
+    sb.write_and_commit(
+        "mind.toml",
+        concat!(
+            "[[items]]\n",
+            "kind = \"skill\"\n",
+            "name = \"dev\"\n",
+            "path = \"dev\"\n",
+        ),
+    );
+    sb.write_and_commit("dev/SKILL.md", "---\ndescription: dev skill\n---\n# dev\n");
+
+    let r = sb.mind(&["meld", &sb.link("tree/main/dev"), "--register-only"]);
+    assert!(r.success, "link meld: {}\n{}", r.stdout, r.stderr);
+    let r = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(r.success, "meld: {}", r.stderr);
+    // Qualify by source: the link instance also offers a catalog item named
+    // `dev` (LNK-7), so a bare `learn dev` would itself be ambiguous.
+    let r = sb.mind(&[
+        "learn",
+        "amb-src-esc#dev",
+        "--dangerously-skip-install-hook-check",
+    ]);
+    assert!(r.success, "learn: {}", r.stderr);
+
+    let identity = sb.link_identity("dev");
+    let escaped = format!("source:{identity}");
+
+    let r = sb.mind(&["hooks", "list", &escaped]);
+    assert!(
+        r.success,
+        "the source: escape must resolve unambiguously: {}\n{}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stdout.contains("source:"),
+        "must be read as a source target: {}",
+        r.stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Helper functions
 // ---------------------------------------------------------------------------
 
