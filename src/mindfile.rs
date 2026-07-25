@@ -377,6 +377,13 @@ pub struct NestedSource {
     /// the repo root.
     #[serde(default)]
     pub roots: Option<Vec<String>>,
+    /// Curator-supplied `--add-root` convention roots (STO-55, DUMP-11): extra
+    /// roots that compose with the nested source's discovery layer. Unlike
+    /// `roots`, these are NOT gated by DSC-60 (add-root always composes, DSC-84);
+    /// they are threaded to the nested meld as the consumer `--add-root` override.
+    /// Emitted by `mind dump` (DUMP-11).
+    #[serde(rename = "add-roots", default)]
+    pub add_roots: Option<Vec<String>>,
     /// Curator-supplied flat skill layout (DSC-77): when true, the nested source
     /// uses the flat skill layout (DSC-74). Like `roots`, gated by DSC-60: applied
     /// only when the nested source ships no `mind.toml` of its own.
@@ -1582,6 +1589,7 @@ mod tests {
             pin_tag: None,
             pin_ref: None,
             roots: None,
+            add_roots: None,
             hooks: vec![],
             flat_skills: false,
             on_auth_failure: None,
@@ -1605,6 +1613,7 @@ mod tests {
             pin_tag: None,
             pin_ref: None,
             roots: None,
+            add_roots: None,
             hooks: vec![],
             flat_skills: false,
             on_auth_failure: None,
@@ -1752,6 +1761,7 @@ mod tests {
             pin_tag: None,
             pin_ref: None,
             roots: None,
+            add_roots: None,
             hooks: vec![Hook {
                 run: "array-only".into(),
                 name: None,
@@ -1782,6 +1792,7 @@ mod tests {
                 pin_tag: None,
                 pin_ref: None,
                 roots: None,
+                add_roots: None,
                 hooks: vec![],
                 flat_skills: false,
                 on_auth_failure: None,
@@ -1966,6 +1977,7 @@ mod tests {
             pin_tag: None,
             pin_ref: None,
             roots: None,
+            add_roots: None,
             hooks: vec![],
             flat_skills: false,
             on_auth_failure: None,
@@ -2003,6 +2015,7 @@ mod tests {
             pin_tag: None,
             pin_ref: None,
             roots: None,
+            add_roots: None,
             hooks: vec![],
             flat_skills: false,
             on_auth_failure: None,
@@ -2027,6 +2040,7 @@ mod tests {
             pin_tag: None,
             pin_ref: None,
             roots: None,
+            add_roots: None,
             hooks: vec![],
             flat_skills: false,
             on_auth_failure: None,
@@ -2221,6 +2235,7 @@ mod tests {
             pin_tag: None,
             pin_ref: None,
             roots: None,
+            add_roots: None,
             hooks: vec![],
             flat_skills: false,
             on_auth_failure: None,
@@ -2245,6 +2260,7 @@ mod tests {
             pin_tag: Some("-evil".into()),
             pin_ref: None,
             roots: None,
+            add_roots: None,
             hooks: vec![],
             flat_skills: false,
             on_auth_failure: None,
@@ -2269,6 +2285,7 @@ mod tests {
             pin_tag: None,
             pin_ref: Some("--depth=1".into()),
             roots: None,
+            add_roots: None,
             hooks: vec![],
             flat_skills: false,
             on_auth_failure: None,
@@ -2293,6 +2310,7 @@ mod tests {
             pin_tag: None,
             pin_ref: None,
             roots: None,
+            add_roots: None,
             hooks: vec![],
             flat_skills: false,
             on_auth_failure: None,
@@ -2317,6 +2335,7 @@ mod tests {
             pin_tag: None,
             pin_ref: Some("main..HEAD".into()),
             roots: None,
+            add_roots: None,
             hooks: vec![],
             flat_skills: false,
             on_auth_failure: None,
@@ -2341,6 +2360,7 @@ mod tests {
             pin_tag: None,
             pin_ref: Some("cafebabecafebabecafebabecafebabecafebabe".into()),
             roots: None,
+            add_roots: None,
             hooks: vec![],
             flat_skills: false,
             on_auth_failure: None,
@@ -2564,6 +2584,7 @@ mod tests {
             pin_tag: None,
             pin_ref: None,
             roots: None,
+            add_roots: None,
             flat_skills: false,
             hooks: vec![],
             on_auth_failure: Some(OnAuthFailure {

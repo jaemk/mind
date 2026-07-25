@@ -244,7 +244,10 @@ and handles it the same way: the new name is installed before the old one is
 removed (LIFE-14). This is normal, not an error. Note that adding `--namespace
 <prefix>` (or `--as`) to an already-melded repo does not rename it: a `--as`
 prefix is part of the source's identity, so a different `--as` melds a distinct
-`host/owner/repo@<prefix>` instance that coexists with the original.
+`host/owner/repo@<prefix>` instance that coexists with the original. That
+`host/owner/repo@<prefix>` identity is also the handle for addressing this
+instance later, e.g. `mind unmeld host/owner/repo@<prefix>` or `mind upgrade
+host/owner/repo@<prefix>`.
 
 For diagnosing a failed install or broken links, see
 [Troubleshooting](troubleshooting.md).

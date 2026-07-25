@@ -167,6 +167,16 @@ goes through an intercepting proxy you do not fully trust, the correct posture i
 `self-update = false` combined with IT-distributed binaries delivered through a
 separately audited channel.
 
+**`GITHUB_TOKEN`/`GH_TOKEN` visibility on shared hosts.** `evolve` sends
+`GITHUB_TOKEN` (or `GH_TOKEN`) as a bearer header on `api.github.com` requests
+(see [Troubleshooting](troubleshooting.md) for why you'd set one). With curl,
+the header is passed via a private (mode `0600`) config file, not the command
+line. The `wget` fallback (used only when `curl` is absent) has no equivalent,
+so it passes the header on the command line, where it is briefly visible to
+other local users via the process table (e.g. `ps`, `/proc/<pid>/cmdline`) for
+the duration of the API call. On shared hosts, prefer curl over wget when a
+token is set.
+
 ## Air-gapped and api-blocked installs
 
 When only `github.com` is allowlisted and `api.github.com` is blocked, pin the

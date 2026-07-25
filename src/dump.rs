@@ -61,6 +61,13 @@ struct DumpEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     roots: Option<Vec<String>>,
 
+    /// Consumer `--add-root` roots (STO-55, DUMP-11): emitted as `add-roots = [...]`
+    /// when the source recorded them at meld time, so re-melding the output composes
+    /// the same extra convention roots and reoffers the items they contribute.
+    /// Absent when none. Mirrors how `roots` (DUMP-4) is emitted.
+    #[serde(rename = "add-roots", skip_serializing_if = "Option::is_none")]
+    add_roots: Option<Vec<String>>,
+
     /// Flat skill layout (DUMP-10): emitted as `flat-skills = true` when flat
     /// discovery is in effect for the source (the consumer override STO-44 or the
     /// source's own `[source].flat-skills`, DSC-74). Absent otherwise. Mirrors how
@@ -189,6 +196,12 @@ fn build_entry(
     // spec: DUMP-4 — scan roots recorded at meld time (STO-17).
     let roots = source.roots.clone();
 
+    // spec: DUMP-11 — the consumer `--add-root` roots recorded at meld time
+    // (STO-55). Emitted so re-melding the output composes the same extra
+    // convention roots and reoffers the items an added root contributes. Like
+    // `roots` (DUMP-4), only the recorded consumer override is emitted.
+    let add_roots = source.add_roots.clone();
+
     // spec: DUMP-10 — emit flat-skills from the STO-44 consumer override only,
     // exactly mirroring how `roots` (DUMP-4) emits `source.roots` and NOT the
     // source's own `[source].flat-skills`. A source's own flat-skills is re-read
@@ -215,6 +228,7 @@ fn build_entry(
         source: source_spec,
         namespace: effective_alias,
         roots,
+        add_roots,
         flat_skills,
         pin_ref,
         install,
@@ -381,6 +395,7 @@ mod tests {
             source: "/some/path".into(),
             namespace: None,
             roots: None,
+            add_roots: None,
             flat_skills: None,
             pin_ref: None,
             install: Some(true),
@@ -415,6 +430,7 @@ mod tests {
             source: "/some/path".into(),
             namespace: None,
             roots: None,
+            add_roots: None,
             flat_skills: None,
             pin_ref: None,
             install: Some(false),
@@ -454,6 +470,7 @@ mod tests {
             source: "/some/path".into(),
             namespace: None,
             roots: None,
+            add_roots: None,
             flat_skills: None,
             pin_ref: None,
             install: None,
@@ -499,6 +516,7 @@ mod tests {
             source: "/some/path".into(),
             namespace: None,
             roots: None,
+            add_roots: None,
             flat_skills: None,
             pin_ref: None,
             install: Some(false),
@@ -536,6 +554,7 @@ mod tests {
                         source: "/path/to/repo".into(),
                         namespace: Some("pfx".into()),
                         roots: Some(vec!["packages".into()]),
+                        add_roots: Some(vec!["extra".into()]),
                         flat_skills: Some(true),
                         pin_ref: Some("deadbeefdeadbeef1234".into()),
                         install: Some(true),
@@ -545,6 +564,7 @@ mod tests {
                         source: "https://github.com/owner/repo".into(),
                         namespace: None,
                         roots: None,
+                        add_roots: None,
                         flat_skills: None,
                         pin_ref: None,
                         install: None,
@@ -572,6 +592,18 @@ mod tests {
         assert!(e0.install, "first entry: install must be true");
         assert_eq!(e0.namespace.as_deref(), Some("pfx"));
         assert_eq!(e0.roots.as_deref(), Some(&["packages".to_string()][..]));
+        // spec: DUMP-11 — add-roots round-trips: emitted as `add-roots = ["extra"]`
+        // and parses back onto NestedSource.add_roots on the first entry, while the
+        // second entry (no add-roots) parses back None.
+        assert!(
+            text.contains("add-roots = [\"extra\"]"),
+            "must emit add-roots for a source with recorded --add-root roots: {text}"
+        );
+        assert_eq!(
+            e0.add_roots.as_deref(),
+            Some(&["extra".to_string()][..]),
+            "first entry: add_roots must round-trip"
+        );
         // spec: DUMP-10 — flat-skills round-trips: emitted as `flat-skills = true`
         // and parses back as NestedSource.flat_skills on the first entry, while the
         // second entry (no flat layout) parses back false.
@@ -593,6 +625,11 @@ mod tests {
         assert!(
             !e1.flat_skills,
             "second entry: flat_skills must parse back false (no key emitted)"
+        );
+        // spec: DUMP-11 — second entry has no add-roots, so it parses back None.
+        assert!(
+            e1.add_roots.is_none(),
+            "second entry: add_roots must be None (no key emitted)"
         );
         let items = e1
             .install_items
@@ -638,6 +675,7 @@ mod tests {
             source: "/a/b".into(),
             namespace: None,
             roots: None,
+            add_roots: None,
             flat_skills: None,
             pin_ref: Some("deadbeefdeadbeef".into()),
             install: Some(true),
@@ -647,6 +685,7 @@ mod tests {
             source: "/a/b".into(),
             namespace: None,
             roots: None,
+            add_roots: None,
             flat_skills: None,
             pin_ref: None,
             install: Some(false),
@@ -736,6 +775,7 @@ mod tests {
             source: "/a/b".into(),
             namespace: None,
             roots: None,
+            add_roots: None,
             flat_skills: None,
             pin_ref: None,
             install: Some(true),
@@ -775,6 +815,7 @@ mod tests {
             source: "/a/b".into(),
             namespace: Some("pfx".into()),
             roots: None,
+            add_roots: None,
             flat_skills: None,
             pin_ref: None,
             install: Some(true),

@@ -565,6 +565,10 @@ pub enum Command {
         subdir: Option<String>,
 
         /// Write frozen real-file copies instead of registering a managed lobe.
+        ///
+        /// The copies are real files, not managed by mind: they are committable to
+        /// the repo, but a later `mind learn` does not propagate into them (no
+        /// auto-propagation). Managed (non-snapshot) lobes use symlinks instead.
         #[arg(long)]
         snapshot: bool,
 

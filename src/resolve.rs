@@ -33,6 +33,14 @@ pub enum HookTarget {
 /// Parse a hook target string, distinguishing a source selector (no `#`) from
 /// an `<source>#<item>` item ref (contains `#`). Used by `mind hooks run` and
 /// `mind hooks list` to decide what the target addresses.
+///
+/// This is the `#`-split heuristic only; it does not know about the registry.
+/// An item-link instance's own source identity carries a `#<path>` suffix
+/// (LNK-4), so its exact identity string would otherwise parse here as an item
+/// ref matching nothing. The caller (`hooks_cmd::resolve_hook_target`) checks
+/// for an exact match against a registered source identity BEFORE falling
+/// back to this function, so that case resolves as a source target (HOOK-105).
+/// This function stays a pure string-shape parser.
 // spec: CLI-194
 pub fn parse_hook_target(target: &str) -> Result<HookTarget> {
     let target = target.trim();

@@ -100,6 +100,14 @@ The on-disk layout and the two persisted JSON files.
   lands at this path directly. A source with no identity alias - a bare meld, or
   one whose only prefix is a post-clone display prefix - clones at
   `sources/<host>/<owner>/<repo>` (STO-11).
+- `STO-60` When a `meld` forks a NEW identity-aliased instance (STO-58) of a repo
+  that already has one or more melded instances (any registry entry sharing the
+  same base `host/owner/repo`), `meld` prints an explicit one-line note that a new
+  instance was registered and the existing one remains, in addition to the
+  `melded <name>@<alias>` line. The trailing `@<alias>` is otherwise the only
+  signal that a coexisting instance (a second clone, STO-59) was created rather
+  than an existing source's display prefix being changed. Suppressed under
+  `--json`.
 - `STO-17` A source records an optional `roots`: the consumer `--root` override
   (repo-root-relative directories, see DSC-51). Persisted at meld and not changed
   by `sync`. Absent means convention discovery uses `[source].roots` or the repo
@@ -223,6 +231,18 @@ prevent the lost-update and torn-read races a plain read-modify-write would allo
   cross-host redirect. With no token set, the request is byte-for-byte unchanged.
   The header args are built by pure helpers (`curl_auth_args`, `wget_auth_args`)
   and are unit-testable without touching the environment or spawning a process.
+- `STO-61` For curl, `evolve` passes the `Authorization: Bearer <token>` header
+  via a `--config` file rather than on argv, so the token is not exposed in
+  `/proc/<pid>/cmdline` to a local co-tenant during the brief API call. The
+  header is written as `header = "Authorization: Bearer <token>"` to a temp file
+  created mode 0600 inside a fresh 0700 temp directory (the same directory scheme
+  as the download, STO-45), curl is invoked with `--config <file>`, and the file
+  is removed (best effort) after the invocation. The `api.github.com`-only host
+  gating is unchanged (STO-57): the config file is written only for an
+  `api.github.com` URL with a non-empty token. wget keeps the `--header=...` argv
+  form. The config-file content and the `--config` arg are built by pure helpers
+  (`curl_auth_config_content`, `curl_auth_args`) so they are unit-testable
+  without spawning a process.
 
 ## Schema versions
 
@@ -241,9 +261,13 @@ prevent the lost-update and torn-read races a plain read-modify-write would allo
   reachability gate). The leaf `skills/` directory is created on link, but a
   missing parent is never fabricated: a moved or deleted project lobe contributes
   no links and is not recreated by `introspect --fix`. The gate is checked at
-  write sites (install fan-out, `link_into_new_lobes`, `relink`) and not inside
-  `agent_homes()`, which returns the complete configured list so uninstall
-  confinement and `~/.claude` auto-create-on-link remain correct.
+  the reachability-sensitive write sites (the install fan-out's `planned_links`
+  and `relink`) and not inside `agent_homes()`, which returns the complete
+  configured list so uninstall confinement and `~/.claude` auto-create-on-link
+  remain correct. It is intentionally NOT checked at `link_into_new_lobes`: that
+  path backfills links into a newly added lobe (e.g. a preset base such as
+  `base/.gemini/config`) whose parent may not exist yet, so gating there would
+  suppress the very links it exists to create.
 
 ## Errors
 

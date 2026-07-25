@@ -213,6 +213,18 @@ pub enum MindError {
     )]
     InvalidRepoSpec { spec: String },
 
+    /// LNK-1/LNK-2: a URL that carries a `tree`/`blob` link marker (so it is
+    /// unambiguously an attempted item link, not a plain repo spec) but whose
+    /// tail fails to parse as one. Kept distinct from [`MindError::InvalidRepoSpec`]
+    /// so the message names the two link shapes instead of telling a user who
+    /// pasted a real forge URL that it is not a valid URL at all (`reason`
+    /// carries the specific defect: missing ref, missing skill path, a `blob`
+    /// link not ending in `/SKILL.md`, or an unsafe path/ref value).
+    #[error(
+        "'{url}' is not a valid item-link URL ({reason}); expected '<repo-url>/tree/<ref>/<skill-dir>' or '<repo-url>/blob/<ref>/<skill-dir>/SKILL.md' (GitLab's '/-/tree/' and '/-/blob/' forms also work)"
+    )]
+    BadItemLink { url: String, reason: String },
+
     #[error(
         "'{name}' is not a valid item ref (expected 'name', 'skill:name', 'agent:name', 'rule:name', or 'owner/repo#name')"
     )]
@@ -567,6 +579,7 @@ impl MindError {
             MindError::MindToml { .. } => "mind-toml",
             MindError::Manifest { .. } => "manifest",
             MindError::InvalidRepoSpec { .. } => "invalid-repo-spec",
+            MindError::BadItemLink { .. } => "bad-item-link",
             MindError::InvalidItemRef { .. } => "invalid-item-ref",
             MindError::ReservedPrefix { .. } => "reserved-prefix",
             MindError::UnsafePrefix { .. } => "unsafe-prefix",
@@ -999,6 +1012,15 @@ mod tests {
         assert_eq!(
             MindError::HookAborted { label: "h".into() }.kind(),
             "hook-aborted"
+        );
+        // spec: LNK-14 -- the malformed-item-link error carries a stable slug.
+        assert_eq!(
+            MindError::BadItemLink {
+                url: "u".into(),
+                reason: "r".into()
+            }
+            .kind(),
+            "bad-item-link"
         );
 
         // Every slug must be non-empty and kebab-case (lowercase, hyphens only).

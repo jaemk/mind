@@ -34,6 +34,14 @@ and the manifest are defined in [storage.md](storage.md).
   re-reads from its `mind.toml` when the output is re-melded, so emitting it here
   would be redundant and would trip the DSC-60 gate on re-meld). A source without
   the override emits no `flat-skills` key.
+- `DUMP-11` When a source carries the consumer `--add-root` roots (STO-55),
+  `dump` emits `add-roots = [...]` on that source's `[discover].sources` entry,
+  so re-melding the output composes the same extra convention roots (DSC-84) and
+  reoffers the items an added root contributes. This mirrors DUMP-4: only the
+  recorded consumer override is emitted, and re-melding threads it through as the
+  nested source's `--add-root` override (add-root always composes, so unlike
+  `roots` it is not gated by DSC-60). A source without recorded add-roots emits no
+  `add-roots` key.
 - `DUMP-7` The emitted file is a valid super-source (it parses under DSC-3 and the
   strictness of DSC-30) that declares only `[discover].sources` and no items of its
   own, so melding it registers the chain and installs per the per-entry directive

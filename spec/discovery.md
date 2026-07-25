@@ -342,11 +342,21 @@ needs roots that compose instead of replace.
   metadata. After the union, the uniqueness rule applies to the source's whole
   offering by (kind, effective name): a distinct-path collision between an
   add-root item and an authoritative-layer item, or between two add-root items
-  (DSC-53), is a `DuplicateItem` error.
+  at DISTINCT on-disk paths (DSC-53), is a `DuplicateItem` error. A same-path
+  overlap between two add-root items de-duplicates instead (DSC-87).
 - `DSC-86` Add-root items are ordinary convention items: bare names derived
   from the layout, with the source's effective prefix (alias or
   `[source].namespace`) applied at install. A manifest's per-plugin namespace
   (MKT-5/MKT-8) does not reach them.
+- `DSC-87` Two added roots can surface the SAME on-disk item through different
+  scan mechanisms (e.g. `--add-root . --add-root skills`, where the `.` root
+  finds `skills/foo` via the `skills/` container pass and the `skills` root
+  finds the same directory via the flat-skills pass). This is a same-path
+  overlap, not a name collision: among the items an add-root scan itself
+  contributes, only the first occurrence of a given canonical on-disk path is
+  kept and later duplicates are silently dropped, before the DSC-85
+  (kind, effective-name) uniqueness check runs. `DuplicateItem` is reserved for
+  a same-name collision between items at distinct on-disk paths.
 
 ## Flat skill layout
 
@@ -508,14 +518,17 @@ field lets the curator opt in to named handling.
 
 ## Accepted risks
 
-Metadata reads during discovery (`mind.toml`, `SKILL.md`, and the agent and rule
-`.md` files) are not size-capped, and TOML nesting depth is not bounded. A source
-author could ship a multi-gigabyte `SKILL.md` or a deeply nested `mind.toml` to
-make `mind` allocate heavily while scanning that source. This is a self-inflicted
-denial of service: the operator chose to meld that source, no privilege boundary
-is crossed, and the only party harmed is the operator who melded a hostile repo.
-The cost of a fixed cap (a false ceiling that could someday reject a legitimately
-large skill) is judged higher than the benefit at the current adoption scale. The
+Metadata reads during discovery (`mind.toml`, `SKILL.md`, the agent and rule
+`.md` files, and a `.claude-plugin/plugin.json` manifest) are not size-capped, and
+TOML nesting depth is not bounded. A source author could ship a multi-gigabyte
+`SKILL.md` or a deeply nested `mind.toml` to make `mind` allocate heavily while
+scanning that source. This is a self-inflicted denial of service: the operator
+chose to meld that source, no privilege boundary is crossed, and the exposure is
+a crash of the current invocation only, not a persistent or remote compromise.
+Unbounded manifest reads are the norm for this class of tool (e.g. `cargo` does
+not cap `Cargo.toml`/crate-file reads either). The cost of a fixed cap (a false
+ceiling that could someday reject a legitimately large skill) is judged higher
+than the benefit at the current adoption scale. The
 decision is to accept the risk and revisit if melding untrusted third-party
 sources at scale becomes common. Recorded so the point stops recurring in review.
 

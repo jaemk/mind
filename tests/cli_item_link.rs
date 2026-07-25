@@ -564,6 +564,113 @@ fn policy_allowlist_matches_the_base_repo_identity() {
 }
 
 #[test]
+fn learn_blob_url_not_ending_in_skill_md_reports_bad_item_link() {
+    // spec: LNK-14
+    // A blob URL that does not end in /SKILL.md carries a tree/blob marker,
+    // so it is an attempted item link that failed to parse: the error must
+    // name the expected shapes, not the generic invalid-repo-spec message.
+    let sb = Sandbox::new();
+    let url = sb.link("blob/main/skills/review");
+    let r = sb.mind(&["learn", &url]);
+    assert!(!r.success, "a malformed blob link must fail: {}", r.stdout);
+    assert!(
+        r.stderr.contains(&url),
+        "the error must name the offending URL: {}",
+        r.stderr
+    );
+    assert!(
+        r.stderr.contains("tree/<ref>") && r.stderr.contains("blob/<ref>"),
+        "the error must name the expected link shapes: {}",
+        r.stderr
+    );
+    assert!(
+        !r.stderr.contains("not a valid repo spec"),
+        "the error must not fall back to the generic repo-spec message: {}",
+        r.stderr
+    );
+    assert_eq!(source_count(&sb), 0, "nothing registered on failure");
+}
+
+#[test]
+fn learn_tree_url_with_no_path_reports_bad_item_link() {
+    // spec: LNK-14
+    // A tree URL missing its skill-directory path is likewise an attempted
+    // item link that failed to parse.
+    let sb = Sandbox::new();
+    let url = sb.link("tree/main");
+    let r = sb.mind(&["learn", &url]);
+    assert!(!r.success, "a pathless tree link must fail: {}", r.stdout);
+    assert!(
+        r.stderr.contains(&url),
+        "the error must name the offending URL: {}",
+        r.stderr
+    );
+    assert!(
+        r.stderr.contains("tree/<ref>") && r.stderr.contains("blob/<ref>"),
+        "the error must name the expected link shapes: {}",
+        r.stderr
+    );
+    assert!(
+        !r.stderr.contains("not a valid repo spec"),
+        "the error must not fall back to the generic repo-spec message: {}",
+        r.stderr
+    );
+    assert_eq!(source_count(&sb), 0, "nothing registered on failure");
+}
+
+#[test]
+fn meld_plain_bad_spec_keeps_the_generic_invalid_repo_spec_message() {
+    // spec: LNK-14
+    // A bad spec with no tree/blob marker at all is not an attempted item
+    // link, so it must keep reporting the generic invalid-repo-spec message,
+    // unaffected by the LNK-14 routing. `meld` (unlike `learn`, which only
+    // parses a spec as a repo/link when it contains "://") always parses its
+    // argument through the same repo-spec parser (source.rs::parse_spec).
+    let sb = Sandbox::new();
+    let r = sb.mind(&["meld", "notarealspec"]);
+    assert!(!r.success, "a malformed spec must fail: {}", r.stdout);
+    assert!(
+        r.stderr.contains("not a valid repo spec"),
+        "a marker-less bad spec must keep the generic message: {}",
+        r.stderr
+    );
+    assert_eq!(source_count(&sb), 0, "nothing registered on failure");
+}
+
+#[test]
+fn json_error_envelope_kind_is_bad_item_link() {
+    // spec: LNK-14, CLI-181, CLI-182
+    // Under --json, a malformed item-link URL (tree/blob marker present, tail
+    // fails to parse) must emit the standard error envelope
+    // {"schema":1,"error":{"kind":"bad-item-link","message":"..."}} on stdout,
+    // not the generic "invalid-repo-spec" kind.
+    let sb = Sandbox::new();
+    let url = sb.link("tree/main");
+    let r = sb.mind(&["learn", &url, "--json"]);
+    assert!(!r.success, "a pathless tree link must fail: {}", r.stdout);
+    let v: serde_json::Value = serde_json::from_str(r.stdout.trim())
+        .unwrap_or_else(|e| panic!("stdout is not valid JSON ({e}): {:?}", r.stdout));
+    assert_eq!(v["schema"], 1, "schema must be 1: {}", r.stdout);
+    let err = &v["error"];
+    assert_eq!(
+        err["kind"], "bad-item-link",
+        "kind must be bad-item-link, not the generic invalid-repo-spec: {}",
+        r.stdout
+    );
+    let msg = err["message"].as_str().unwrap_or("");
+    assert!(
+        msg.contains(&url),
+        "message must name the offending URL: {msg}"
+    );
+    assert!(
+        !r.stderr.contains("error:"),
+        "main error handler must not write to stderr under --json: {}",
+        r.stderr
+    );
+    assert_eq!(source_count(&sb), 0, "nothing registered on failure");
+}
+
+#[test]
 fn dump_skips_link_instances_with_a_note() {
     // spec: LNK-13
     // Emitting a reconstructed deep-URL entry is planned; until then dump

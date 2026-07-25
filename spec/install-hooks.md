@@ -404,6 +404,19 @@ outside the surrounding verb, under the same consent model.
   (HOOK-55) -- whether it is pending and the commit it last ran at. It is the
   read-only companion to `hooks run` and the detail view behind the `recall
   --sources` hook marker (HOOK-58).
+- `HOOK-105` Before applying the `#`-split heuristic (source selector vs.
+  `<source>#<item>` item ref), `hooks run`/`hooks list` check whether the whole
+  target string, trimmed, exactly matches a registered source's identity. When
+  it does, the target is a source target even though it contains `#`. This
+  covers an item-link instance (LNK-4), whose own identity is
+  `host/owner/repo#<path>`: without this check the exact identity parses as an
+  item ref that matches no installed item (`NotInstalled`), leaving the
+  instance's source-level hooks reachable only through an over-broad trailing
+  glob. A target that does not exactly match any registered source identity
+  keeps the ordinary `#`-split behavior: a plain `source#item` resolves as an
+  item ref, and so does the `<link-identity>#<item>` form for an item installed
+  from a link instance (the identity's own embedded `#` composes with the
+  item-ref split, since the split is on the LAST `#`).
 
 ## Managed-policy composition (research needed)
 

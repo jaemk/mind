@@ -1289,6 +1289,277 @@ fn dump_token_dependency_item_is_in_install_items() {
 }
 
 // ---------------------------------------------------------------------------
+// DUMP-11: dump round-trips --add-root so re-melding reoffers add-root items
+// ---------------------------------------------------------------------------
+
+#[test]
+fn dump_roundtrips_add_root_items() {
+    // spec: DUMP-11 — a source melded with `--add-root <dir>` offers items the
+    // added root contributes (items outside the default convention scan). dump
+    // must emit `add-roots` so re-melding the super-source in a fresh home
+    // rediscovers and installs those same items. The add-root item is only
+    // reachable via the extra root, so its presence after re-meld proves the
+    // add-roots survived the dump.
+    let sb = Sandbox::bare("addroot-src");
+    // A base item at the repo root (found by the default convention scan).
+    sb.write_and_commit(
+        "skills/base/SKILL.md",
+        "---\nname: base\ndescription: Base skill\n---\n# base\n",
+    );
+    // An item only reachable via the extra root `contrib` (NOT found by the
+    // default root scan; only the --add-root pass discovers it).
+    sb.write_and_commit(
+        "contrib/skills/addon/SKILL.md",
+        "---\nname: addon\ndescription: Add-root contributed skill\n---\n# addon\n",
+    );
+
+    // Meld with --add-root and install every offered item (base + addon).
+    let meld = sb.mind(&["meld", &sb.source_spec(), "--add-root", "contrib", "--yes"]);
+    assert!(
+        meld.success,
+        "meld --add-root failed: {} {}",
+        meld.stdout, meld.stderr
+    );
+
+    // Dump to a super-source mind.toml.
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let super_dir = sb.base.join(format!("addroot-super-{n}"));
+    std::fs::create_dir_all(&super_dir).expect("create super dir");
+    let dump_path = super_dir.join("mind.toml");
+    let dump_path_str = dump_path.to_string_lossy().into_owned();
+    let dr = sb.mind(&["dump", "--output", &dump_path_str]);
+    assert!(dr.success, "dump failed: {} {}", dr.stdout, dr.stderr);
+
+    let dump_text = std::fs::read_to_string(&dump_path).expect("read dump");
+    assert!(
+        dump_text.contains("add-roots"),
+        "dump must emit add-roots for an --add-root source: {dump_text}"
+    );
+    assert!(
+        dump_text.contains("contrib"),
+        "dump must record the `contrib` add-root: {dump_text}"
+    );
+
+    // Re-meld the super-source into a fresh environment.
+    git_init(&super_dir);
+    let super_spec = super_dir.to_string_lossy().into_owned();
+    let fresh_base = sb.base.join(format!("addroot-fresh-{n}"));
+    std::fs::create_dir_all(&fresh_base).expect("fresh base");
+    let fresh_mind = fresh_base.join("mind");
+    let fresh_claude = fresh_base.join("claude");
+
+    let remeld = Command::new(env!("CARGO_BIN_EXE_mind"))
+        .args(["meld", &super_spec, "--yes"])
+        .env("MIND_HOME", &fresh_mind)
+        .env("CLAUDE_HOME", &fresh_claude)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null())
+        .output()
+        .expect("run remeld");
+    let ro = String::from_utf8_lossy(&remeld.stdout).into_owned();
+    let re = String::from_utf8_lossy(&remeld.stderr).into_owned();
+    assert!(remeld.status.success(), "remeld failed: {ro} {re}");
+
+    // The base item installs, and the add-root-contributed item installs too:
+    // the latter is only discoverable because the dumped add-roots were applied.
+    assert!(
+        fresh_claude.join("skills/base").exists(),
+        "the base skill must install in the reproduced env: {fresh_claude:?}"
+    );
+    assert!(
+        fresh_claude.join("skills/addon").exists(),
+        "the add-root contributed skill must install in the reproduced env \
+         (proves dump round-tripped --add-root): {fresh_claude:?}"
+    );
+}
+
+#[test]
+fn dump_add_root_survives_authoritative_mindtoml_round_trip() {
+    // spec: DUMP-11 — add-roots must round-trip even when the source ALSO
+    // carries an authoritative mind.toml. DSC-84 says add-root always composes
+    // with whatever discovery layer is authoritative (including an
+    // authoritative mind.toml's declared [[items]]), so both the declared item
+    // and the add-root-contributed item must survive dump + re-meld.
+    let sb = Sandbox::bare("addroot-auth-src");
+    // Authoritative mind.toml: declaring [[items]] turns off plain convention
+    // scanning for the source's own root (DSC-30).
+    sb.write_and_commit(
+        "mind.toml",
+        "[[items]]\nkind = \"skill\"\nname = \"core\"\npath = \"skills/core\"\n",
+    );
+    sb.write_and_commit(
+        "skills/core/SKILL.md",
+        "---\nname: core\ndescription: Authoritative core skill\n---\n# core\n",
+    );
+    // Only reachable via --add-root: not listed in [[items]], and ordinary
+    // convention scanning of the repo root is suppressed by the authoritative
+    // mind.toml.
+    sb.write_and_commit(
+        "contrib/skills/addon/SKILL.md",
+        "---\nname: addon\ndescription: Add-root contributed skill\n---\n# addon\n",
+    );
+
+    let meld = sb.mind(&["meld", &sb.source_spec(), "--add-root", "contrib", "--yes"]);
+    assert!(
+        meld.success,
+        "meld --add-root over an authoritative mind.toml failed: {} {}",
+        meld.stdout, meld.stderr
+    );
+    assert!(
+        sb.claude_home.join("skills/core").exists(),
+        "the authoritative item must install: {:?}",
+        sb.claude_home
+    );
+    assert!(
+        sb.claude_home.join("skills/addon").exists(),
+        "the add-root item must install alongside the authoritative item \
+         (DSC-84): {:?}",
+        sb.claude_home
+    );
+
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let super_dir = sb.base.join(format!("addroot-auth-super-{n}"));
+    std::fs::create_dir_all(&super_dir).expect("create super dir");
+    let dump_path = super_dir.join("mind.toml");
+    let dump_path_str = dump_path.to_string_lossy().into_owned();
+    let dr = sb.mind(&["dump", "--output", &dump_path_str]);
+    assert!(dr.success, "dump failed: {} {}", dr.stdout, dr.stderr);
+
+    let dump_text = std::fs::read_to_string(&dump_path).expect("read dump");
+    assert!(
+        dump_text.contains("add-roots") && dump_text.contains("contrib"),
+        "dump must emit add-roots even when the source also has an \
+         authoritative mind.toml: {dump_text}"
+    );
+
+    git_init(&super_dir);
+    let super_spec = super_dir.to_string_lossy().into_owned();
+    let fresh_base = sb.base.join(format!("addroot-auth-fresh-{n}"));
+    std::fs::create_dir_all(&fresh_base).expect("fresh base");
+    let fresh_mind = fresh_base.join("mind");
+    let fresh_claude = fresh_base.join("claude");
+
+    let remeld = Command::new(env!("CARGO_BIN_EXE_mind"))
+        .args(["meld", &super_spec, "--yes"])
+        .env("MIND_HOME", &fresh_mind)
+        .env("CLAUDE_HOME", &fresh_claude)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null())
+        .output()
+        .expect("run remeld");
+    let ro = String::from_utf8_lossy(&remeld.stdout).into_owned();
+    let re = String::from_utf8_lossy(&remeld.stderr).into_owned();
+    assert!(remeld.status.success(), "remeld failed: {ro} {re}");
+
+    assert!(
+        fresh_claude.join("skills/core").exists(),
+        "the authoritative item must install in the reproduced env: {fresh_claude:?}"
+    );
+    assert!(
+        fresh_claude.join("skills/addon").exists(),
+        "the add-root item must install in the reproduced env, proving \
+         add-roots round-tripped alongside an authoritative mind.toml: \
+         {fresh_claude:?}"
+    );
+}
+
+#[test]
+fn dump_emits_no_add_roots_key_when_source_has_none() {
+    // spec: DUMP-11 — a source melded WITHOUT --add-root must emit no
+    // `add-roots` key at all (end-to-end, not just the unit-level DumpEntry
+    // serialization check).
+    let sb = Sandbox::new("no-add-root-src");
+    let meld = sb.mind(&["meld", &sb.source_spec(), "--yes"]);
+    assert!(
+        meld.success,
+        "plain meld (no --add-root) failed: {} {}",
+        meld.stdout, meld.stderr
+    );
+
+    let dr = sb.mind(&["dump"]);
+    assert!(dr.success, "dump failed: {} {}", dr.stdout, dr.stderr);
+    assert!(
+        !dr.stdout.contains("add-roots"),
+        "dump must emit no add-roots key for a source with none recorded: {}",
+        dr.stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// DUMP-11: the sync re-walk path threads a newly-discovered nested entry's
+// add-roots into the nested meld (mirrors the meld-time threading).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn dump_sync_rewalk_threads_add_roots_into_newly_registered_nested_source() {
+    // spec: DUMP-11 — when a super-source's mind.toml is updated (after its
+    // initial meld) to list a new nested entry carrying `add-roots`, `sync`'s
+    // DSC-57 re-walk must thread that entry's add-roots into the nested meld,
+    // exactly as a fresh top-level meld of a [[discover.sources]] entry would.
+    // Verified by dumping the registry after sync and checking the newly
+    // registered nested source's entry carries `add-roots` (round-tripping
+    // through the persisted `Source.add_roots`, DUMP-11/STO-55).
+    let nested = Sandbox::bare("rewalk-nested");
+    nested.write_and_commit(
+        "skills/base/SKILL.md",
+        "---\nname: base\ndescription: Base skill\n---\n# base\n",
+    );
+    // Only reachable via the add-root the re-walked entry will carry.
+    nested.write_and_commit(
+        "extra-contrib/skills/addon/SKILL.md",
+        "---\nname: addon\ndescription: Add-root contributed skill\n---\n# addon\n",
+    );
+    let nested_spec = nested.source_spec();
+
+    // T starts with no [[discover.sources]] entries, so its initial meld
+    // registers only T itself.
+    let t = Sandbox::bare("rewalk-super");
+    let initial = t.mind(&["meld", &t.source_spec(), "--yes"]);
+    assert!(
+        initial.success,
+        "initial meld of the super-source failed: {} {}",
+        initial.stdout, initial.stderr
+    );
+    let sources_after_meld = t.mind(&["recall", "--sources"]).stdout;
+    assert!(
+        !sources_after_meld.contains("rewalk-nested"),
+        "the nested source must not be registered before it is declared: {sources_after_meld}"
+    );
+
+    // T is a linked local source (no pin), so `sync` reads its live working
+    // tree: update it, without re-melding, to declare the nested source with
+    // add-roots.
+    let toml = format!(
+        "[[discover.sources]]\nsource = \"{nested_spec}\"\nadd-roots = [\"extra-contrib\"]\n"
+    );
+    t.write_and_commit("mind.toml", &toml);
+
+    let sync = t.mind(&["sync"]);
+    assert!(
+        sync.success,
+        "sync re-walk failed: {} {}",
+        sync.stdout, sync.stderr
+    );
+    let sources_after_sync = t.mind(&["recall", "--sources"]).stdout;
+    assert!(
+        sources_after_sync.contains("rewalk-nested"),
+        "sync's re-walk must register the newly-declared nested source: {sources_after_sync}"
+    );
+
+    let dr = t.mind(&["dump"]);
+    assert!(dr.success, "dump failed: {} {}", dr.stdout, dr.stderr);
+    assert!(
+        dr.stdout.contains("add-roots") && dr.stdout.contains("extra-contrib"),
+        "dump must show add-roots on the nested source sync's re-walk \
+         registered, proving the re-walk threaded the entry's add-roots into \
+         the nested meld: {}",
+        dr.stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Lock-mode: dump takes the Shared lock (read-only)
 // ---------------------------------------------------------------------------
 

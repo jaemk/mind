@@ -918,3 +918,357 @@ fn init_source_with_prefix_emits_the_unguarded_reference_advisory() {
         "the unguarded-reference advisory line must name the referencing item 'dev': {advisory_line}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// CLI-203: `learn <url> --pin` on an already-melded link prints a note that
+// --pin was ignored, rather than silently dropping the flag.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn learn_url_pin_on_already_melded_link_prints_ignored_note() {
+    // spec: CLI-203 — the first `learn <url>` registers the link instance; a
+    // second `learn <url> --pin` finds it already melded, so the meld+pin step
+    // is skipped. `learn` must say --pin was ignored (already melded) instead of
+    // silently doing nothing, and the install still succeeds (exit 0).
+    let sb = Sandbox::new("pin-note-src");
+    sb.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\nname: review\ndescription: Review skill\n---\n# review\n",
+    );
+    let url = format!("file://{}/tree/main/skills/review", sb.source_spec());
+
+    // First learn: registers the link instance and installs the skill.
+    let first = sb.mind(&["learn", &url]);
+    assert!(
+        first.success,
+        "first `learn <url>` failed: {} {}",
+        first.stdout, first.stderr
+    );
+    assert!(
+        sb.claude_home.join("skills/review").exists(),
+        "the linked skill must install on first learn"
+    );
+
+    // Second learn with --pin: the instance is already melded, so --pin is a
+    // no-op that must be announced.
+    let second = sb.mind(&["learn", &url, "--pin"]);
+    assert!(
+        second.success,
+        "second `learn <url> --pin` must still exit 0: {} {}",
+        second.stdout, second.stderr
+    );
+    let combined = format!("{}{}", second.stdout, second.stderr);
+    assert!(
+        combined.contains("--pin") && combined.contains("already melded"),
+        "a second `learn <url> --pin` must note that --pin was ignored because \
+         the instance is already melded: {combined}"
+    );
+}
+
+#[test]
+fn learn_url_pin_note_suppressed_under_json() {
+    // spec: CLI-203 — the note is suppressed under --json (consistent with the
+    // neighboring meld notes), so machine consumers see clean output.
+    let sb = Sandbox::new("pin-note-json-src");
+    sb.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\nname: review\ndescription: Review skill\n---\n# review\n",
+    );
+    let url = format!("file://{}/tree/main/skills/review", sb.source_spec());
+
+    let first = sb.mind(&["learn", &url]);
+    assert!(
+        first.success,
+        "first learn failed: {} {}",
+        first.stdout, first.stderr
+    );
+
+    let second = sb.mind(&["--json", "learn", &url, "--pin"]);
+    assert!(
+        second.success,
+        "second `--json learn <url> --pin` must exit 0: {} {}",
+        second.stdout, second.stderr
+    );
+    assert!(
+        !second.stdout.contains("already melded"),
+        "the --pin-ignored note must be suppressed under --json (stdout): {}",
+        second.stdout
+    );
+}
+
+#[test]
+fn learn_url_pin_first_learn_never_prints_ignored_note() {
+    // spec: CLI-203 — the note fires only when the instance is ALREADY melded.
+    // A first-ever `learn <url> --pin` registers and freezes the link (CLI-200)
+    // through the normal meld+pin path; it must not print the "--pin ignored"
+    // note, since the flag was honored, not dropped.
+    let sb = Sandbox::new("pin-note-first-src");
+    sb.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\nname: review\ndescription: Review skill\n---\n# review\n",
+    );
+    let url = format!("file://{}/tree/main/skills/review", sb.source_spec());
+
+    let first = sb.mind(&["learn", &url, "--pin"]);
+    assert!(
+        first.success,
+        "first `learn <url> --pin` failed: {} {}",
+        first.stdout, first.stderr
+    );
+    let combined = format!("{}{}", first.stdout, first.stderr);
+    assert!(
+        !combined.contains("already melded"),
+        "a first-ever `learn <url> --pin` must not claim --pin was ignored \
+         (it was honored at registration): {combined}"
+    );
+    assert!(
+        sb.claude_home.join("skills/review").exists(),
+        "the linked skill must still install on a pinned first learn"
+    );
+}
+
+#[test]
+fn learn_url_pin_after_alias_only_meld_registers_coexisting_bare_instance() {
+    // spec: LNK-15 STO-58 — an aliased link instance
+    // (`.../review#skills/review@myalias`) and the bare instance of the SAME
+    // `<path>` (`.../review#skills/review`) are distinct, coexisting registry
+    // entries (LNK-4, STO-58's per-instance model applied to links). So
+    // `learn <url> --pin` after `meld <url> --as myalias` checks membership
+    // under the BARE identity it is melding as (no alias here), finds it
+    // unregistered, and registers a new, coexisting bare instance rather than
+    // reusing or being blocked by the differently-aliased one. This is the
+    // normal coexistence model, not a collision, so no CLI-203
+    // "already melded" note is printed, and the aliased instance's pin and
+    // items are left untouched.
+    let sb = Sandbox::new("alias-coexist-src");
+    sb.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\nname: review\ndescription: Review skill\n---\n# review\n",
+    );
+    let url = format!("file://{}/tree/main/skills/review", sb.source_spec());
+
+    // Meld under an identity alias only (no bare instance registered).
+    let aliased = sb.mind(&["meld", &url, "--as", "myalias", "--yes"]);
+    assert!(
+        aliased.success,
+        "aliased meld failed: {} {}",
+        aliased.stdout, aliased.stderr
+    );
+    assert!(
+        sb.claude_home.join("skills/myalias:review").exists(),
+        "the aliased instance must install its item under the alias prefix"
+    );
+
+    // `learn <url> --pin`: the bare identity is not registered, so this
+    // registers a NEW, coexisting bare instance and honors --pin on it.
+    let learn = sb.mind(&["learn", &url, "--pin"]);
+    assert!(
+        learn.success,
+        "`learn <url> --pin` failed: {} {}",
+        learn.stdout, learn.stderr
+    );
+    let combined = format!("{}{}", learn.stdout, learn.stderr);
+    assert!(
+        !combined.contains("already melded"),
+        "registering a new coexisting bare instance must NOT print the \
+         CLI-203 already-melded note (--pin was honored on the new \
+         registration): {combined}"
+    );
+
+    // Both instances are now registered side by side.
+    let sources = sb.mind(&["recall", "--sources"]).stdout;
+    assert!(
+        sources.contains("#skills/review@myalias"),
+        "the aliased instance must remain registered: {sources}"
+    );
+    assert!(
+        sources.contains("#skills/review")
+            && !sources
+                .lines()
+                .filter(|l| l.contains("#skills/review") && !l.contains("@myalias"))
+                .collect::<Vec<_>>()
+                .is_empty(),
+        "a distinct, coexisting bare instance must also be registered: {sources}"
+    );
+
+    // Both instances' items are installed independently; the aliased item is
+    // untouched by the bare instance's registration.
+    assert!(
+        sb.claude_home.join("skills/myalias:review").exists(),
+        "the aliased instance's item must remain installed and untouched"
+    );
+    assert!(
+        sb.claude_home.join("skills/review").exists(),
+        "the new bare instance's item must be installed"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// STO-60: forking a second identity-aliased instance of an already-melded repo
+// prints an explicit note that a new instance was registered.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn meld_fork_of_already_melded_repo_prints_new_instance_note() {
+    // spec: STO-60 — a bare meld registers `local/<base>/<repo>`; a second meld
+    // with `--as fork` registers the distinct instance `...@fork` (STO-58). The
+    // second meld must print an explicit note that a new instance was registered
+    // and the existing one remains, so the `@fork` suffix is not the only signal.
+    let sb = Sandbox::new("fork-src");
+    sb.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\nname: review\ndescription: Review skill\n---\n# review\n",
+    );
+    let spec = sb.source_spec();
+
+    // Bare meld: the base instance.
+    let base = sb.mind(&["meld", &spec, "--link-only"]);
+    assert!(
+        base.success,
+        "bare meld failed: {} {}",
+        base.stdout, base.stderr
+    );
+    assert!(
+        !base.stdout.contains("registered a new instance"),
+        "the first (bare) meld must NOT print the fork note: {}",
+        base.stdout
+    );
+
+    // Fork: an identity-aliased instance of the same repo.
+    let fork = sb.mind(&["meld", &spec, "--as", "fork", "--link-only"]);
+    assert!(
+        fork.success,
+        "fork meld --as failed: {} {}",
+        fork.stdout, fork.stderr
+    );
+    assert!(
+        fork.stdout.contains("registered a new instance") && fork.stdout.contains("remains"),
+        "forking a second aliased instance must print the new-instance note: {}",
+        fork.stdout
+    );
+}
+
+#[test]
+fn meld_fork_note_suppressed_under_json() {
+    // spec: STO-60 — the fork note is suppressed under --json.
+    let sb = Sandbox::new("fork-json-src");
+    sb.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\nname: review\ndescription: Review skill\n---\n# review\n",
+    );
+    let spec = sb.source_spec();
+
+    let base = sb.mind(&["meld", &spec, "--link-only"]);
+    assert!(
+        base.success,
+        "bare meld failed: {} {}",
+        base.stdout, base.stderr
+    );
+
+    let fork = sb.mind(&["--json", "meld", &spec, "--as", "fork", "--link-only"]);
+    assert!(
+        fork.success,
+        "fork meld --json failed: {} {}",
+        fork.stdout, fork.stderr
+    );
+    assert!(
+        !fork.stdout.contains("registered a new instance"),
+        "the fork note must be suppressed under --json: {}",
+        fork.stdout
+    );
+}
+
+#[test]
+fn meld_fork_third_instance_also_prints_new_instance_note() {
+    // spec: STO-60 — the note must fire for EVERY new aliased instance beyond
+    // the first, not just the second (guards against an off-by-one, e.g. a
+    // guard that only checks "exactly one prior instance" instead of "at least
+    // one"). base -> fork-one -> fork-two: both fork-one and fork-two must
+    // print the note.
+    let sb = Sandbox::new("fork-third-src");
+    sb.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\nname: review\ndescription: Review skill\n---\n# review\n",
+    );
+    let spec = sb.source_spec();
+
+    let base = sb.mind(&["meld", &spec, "--link-only"]);
+    assert!(
+        base.success,
+        "bare meld failed: {} {}",
+        base.stdout, base.stderr
+    );
+
+    let fork1 = sb.mind(&["meld", &spec, "--as", "fork-one", "--link-only"]);
+    assert!(
+        fork1.success,
+        "first fork meld failed: {} {}",
+        fork1.stdout, fork1.stderr
+    );
+    assert!(
+        fork1.stdout.contains("registered a new instance"),
+        "the second instance overall (first fork) must print the note: {}",
+        fork1.stdout
+    );
+
+    let fork2 = sb.mind(&["meld", &spec, "--as", "fork-two", "--link-only"]);
+    assert!(
+        fork2.success,
+        "second fork meld failed: {} {}",
+        fork2.stdout, fork2.stderr
+    );
+    assert!(
+        fork2.stdout.contains("registered a new instance") && fork2.stdout.contains("remains"),
+        "a THIRD instance (second fork, with two prior instances already \
+         registered) must also print the note: {}",
+        fork2.stdout
+    );
+}
+
+#[test]
+fn learn_url_second_item_link_instance_without_alias_does_not_print_fork_note() {
+    // spec: STO-60 — the note is scoped to a NEW *aliased* instance. Two
+    // different item-link instances of the SAME repo (different `#path`, both
+    // un-aliased) share `base_identity()`, but neither carries an `as_alias`,
+    // so registering the second must NOT print the fork note even though the
+    // registry already holds a same-base entry.
+    let sb = Sandbox::new("link-no-alias-src");
+    sb.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\nname: review\ndescription: Review skill\n---\n# review\n",
+    );
+    sb.write_and_commit(
+        "skills/dev/SKILL.md",
+        "---\nname: dev\ndescription: Dev skill\n---\n# dev\n",
+    );
+    let url_a = format!("file://{}/tree/main/skills/review", sb.source_spec());
+    let url_b = format!("file://{}/tree/main/skills/dev", sb.source_spec());
+
+    let first = sb.mind(&["learn", &url_a]);
+    assert!(
+        first.success,
+        "first item-link learn failed: {} {}",
+        first.stdout, first.stderr
+    );
+    assert!(
+        !first.stdout.contains("registered a new instance"),
+        "the first item-link instance must not print the fork note: {}",
+        first.stdout
+    );
+
+    // A second, un-aliased item-link instance of the SAME base repo (different
+    // #path): base_identity() matches the first, but as_alias is None on both,
+    // so no fork note.
+    let second = sb.mind(&["learn", &url_b]);
+    assert!(
+        second.success,
+        "second item-link learn failed: {} {}",
+        second.stdout, second.stderr
+    );
+    assert!(
+        !second.stdout.contains("registered a new instance"),
+        "a second un-aliased item-link instance of the same repo must NOT \
+         print the fork note (it has no @alias): {}",
+        second.stdout
+    );
+}

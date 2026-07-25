@@ -29,8 +29,10 @@ same repo, and a plain meld of that repo, coexist as separate sources.
   CLI-27 pinned-local flow), never a live-read working tree.
 - `LNK-2` An item link is accepted anywhere a repo spec (CLI-11) is: `meld`,
   `learn` (LNK-6), and a `[discover].sources` entry (DSC-38), so a curator can
-  curate individual skills. A URL with a `tree`/`blob` segment that does not
-  parse as an item link is `InvalidRepoSpec`.
+  curate individual skills. A URL with a `tree`/`blob` segment whose tail fails
+  to complete as a valid item link is `BadItemLink` (LNK-14), not the generic
+  `InvalidRepoSpec`; a malformed `owner/repo` portion ahead of the marker
+  still reports `InvalidRepoSpec` regardless of the marker.
 - `LNK-3` The `<ref>` segment supplies the instance's pin: a 40-hex ref is a
   commit pin (as `--pin <sha>`), anything else follows that branch (as
   `--pin branch=<name>`). An explicit consumer pin flag (CLI-17) overrides the
@@ -40,6 +42,18 @@ same repo, and a plain meld of that repo, coexist as separate sources.
   step. The ref is a single path segment: a branch name containing `/` is not
   representable in a link (the first segment after `tree`/`blob` is taken as the
   ref); meld the repo with `--pin branch=<name>` instead.
+- `LNK-14` A spec whose path carries a `tree`/`blob` link marker (LNK-1) is
+  unambiguously an attempted item link, so once the `owner/repo` portion ahead
+  of the marker parses, every failure in its `<ref>/<path>` tail reports
+  `BadItemLink`, never the generic `InvalidRepoSpec`: a missing ref, a missing
+  skill path, a `blob` link not ending in `/SKILL.md`, and an unsafe path or
+  ref value (LNK-10) all take this branch. The message names the offending URL
+  and the two expected shapes, `<repo-url>/tree/<ref>/<skill-dir>` and
+  `<repo-url>/blob/<ref>/<skill-dir>/SKILL.md` (plus the GitLab `/-/tree/` and
+  `/-/blob/` spellings), instead of the generic repo-spec message, so a user
+  who pasted a real forge URL is told what shape a link needs rather than that
+  the URL is invalid. A spec with no `tree`/`blob` marker at all is not an
+  attempted link and keeps reporting `InvalidRepoSpec` unchanged.
 
 ## Identity and lifecycle
 
@@ -61,6 +75,19 @@ same repo, and a plain meld of that repo, coexist as separate sources.
   item (CLI-21). `forget` of the instance's skill leaves the instance
   registered; when the instance has no installed items left, `forget` prints a
   hint to `mind unmeld <identity>`.
+- `LNK-15` The identity-alias suffix (STO-58) distinguishes link instances of
+  the SAME `<path>` exactly as it distinguishes any other source instance: a
+  bare link `host/owner/repo#<path>` and an aliased link
+  `host/owner/repo#<path>@<alias>` are distinct registry entries that coexist,
+  each with its own clone (STO-59 for the aliased one), pin, and installed
+  items, untouched by the other's lifecycle. Consequently `learn <url>`
+  (LNK-6), with or without `--pin`, checks membership under the SPECIFIC
+  alias it is melding as (here, none): if the repo has only been melded under
+  a DIFFERENT alias (or no alias at all when the new call supplies one), the
+  bare identity is not yet registered, so `learn` registers it as a new,
+  coexisting instance rather than reusing or being blocked by the
+  differently-aliased one. This is not a collision: it is the normal STO-58
+  per-instance model applied to links.
 
 ## Install
 

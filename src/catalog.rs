@@ -536,6 +536,14 @@ fn scan_add_roots(
     // namespace and metadata.
     let mut added: Vec<CatalogItem> = out.split_off(add_start);
     added.retain(|it| !base_paths.contains(&canon(&it.path)));
+    // spec: DSC-87 -- two add-root passes can surface the SAME on-disk item
+    // (e.g. `--add-root . --add-root skills` both finding `skills/foo`, one via
+    // the skills/ container pass and one via the flat-skills pass). That is a
+    // same-path overlap, not a name collision, so keep exactly one entry per
+    // canonical path among the added items rather than letting both survive to
+    // the (kind, effective-name) uniqueness check below and error out.
+    let mut seen_add_paths: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    added.retain(|it| seen_add_paths.insert(canon(&it.path)));
     out.extend(added);
     // spec: DSC-85 -- (kind, effective name) uniqueness across the source's
     // whole offering (authoritative layer + added roots).
@@ -2952,6 +2960,308 @@ mod tests {
         assert!(
             matches[0].ends_with("SKILL.md"),
             "matched the wrong file: {matches:?}"
+        );
+    }
+
+    #[test]
+    fn overlapping_add_roots_same_canonical_item_dedupes_instead_of_erroring() {
+        // spec: DSC-87 -- two --add-root roots surfacing the same on-disk skill
+        // (e.g. `--add-root . --add-root skills`, where the "." pass finds it via
+        // the skills/ container and the "skills" pass finds it via the flat-skills
+        // scan) must de-duplicate to a single catalog entry rather than raising
+        // DuplicateItem. An authoritative mind.toml (declaring an unrelated item)
+        // keeps the base layer from also picking up skills/foo via convention.
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let clone = base.join("sources/local/test/repo");
+        write_file(
+            &clone.join("skills/foo/SKILL.md"),
+            "---\ndescription: foo\n---\n# foo\n",
+        );
+        write_file(
+            &clone.join("guidelines/style.md"),
+            "---\ndescription: style\n---\n# style\n",
+        );
+        // Authoritative mind.toml: declares one unrelated item so the base layer
+        // does not itself discover skills/foo via convention scanning.
+        write_file(
+            &clone.join("mind.toml"),
+            concat!(
+                "[[items]]\n",
+                "kind = \"rule\"\n",
+                "name = \"style\"\n",
+                "path = \"guidelines/style.md\"\n",
+            ),
+        );
+
+        let paths = paths_for(base);
+        let mut source = make_source_for(&clone);
+        source.add_roots = Some(vec![".".to_string(), "skills".to_string()]);
+
+        let mut items = Vec::new();
+        scan_source(&paths, &source, &mut items).unwrap();
+
+        let foos: Vec<_> = items
+            .iter()
+            .filter(|i| i.kind == ItemKind::Skill && i.name == "foo")
+            .collect();
+        assert_eq!(
+            foos.len(),
+            1,
+            "overlapping add-roots surfacing the same on-disk item must dedupe to one entry: {items:?}"
+        );
+    }
+
+    #[test]
+    fn distinct_path_name_collision_between_add_root_items_still_errors() {
+        // spec: DSC-85 -- a same-(kind, effective-name) collision between two
+        // add-root items at DISTINCT on-disk paths remains a DuplicateItem error;
+        // only a same-canonical-path overlap (DSC-87) de-duplicates.
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let clone = base.join("sources/local/test/repo");
+        // Two distinct on-disk skill directories that both resolve to the bare
+        // name "foo": one flat at the repo root, one flat under "nested".
+        write_file(
+            &clone.join("foo/SKILL.md"),
+            "---\ndescription: foo at root\n---\n# foo\n",
+        );
+        write_file(
+            &clone.join("nested/foo/SKILL.md"),
+            "---\ndescription: foo nested\n---\n# foo\n",
+        );
+        write_file(
+            &clone.join("guidelines/style.md"),
+            "---\ndescription: style\n---\n# style\n",
+        );
+        write_file(
+            &clone.join("mind.toml"),
+            concat!(
+                "[[items]]\n",
+                "kind = \"rule\"\n",
+                "name = \"style\"\n",
+                "path = \"guidelines/style.md\"\n",
+            ),
+        );
+
+        let paths = paths_for(base);
+        let mut source = make_source_for(&clone);
+        source.add_roots = Some(vec![".".to_string(), "nested".to_string()]);
+
+        let mut items = Vec::new();
+        let err = scan_source(&paths, &source, &mut items).unwrap_err();
+        assert!(
+            matches!(err, MindError::DuplicateItem { .. }),
+            "a distinct-path name collision must still error as DuplicateItem: {err}"
+        );
+    }
+
+    #[test]
+    fn overlapping_add_roots_dedup_keeps_first_occurrence_with_correct_metadata() {
+        // spec: DSC-87 -- the same-path overlap dedup must not just drop down to
+        // one entry; the surviving entry must be the genuine item (right kind,
+        // bare name, on-disk path, and frontmatter-derived description), not a
+        // corrupted or empty stand-in produced by the dedup bookkeeping.
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let clone = base.join("sources/local/test/repo");
+        write_file(
+            &clone.join("skills/foo/SKILL.md"),
+            "---\ndescription: the real foo\n---\n# foo\n",
+        );
+        write_file(
+            &clone.join("guidelines/style.md"),
+            "---\ndescription: style\n---\n# style\n",
+        );
+        write_file(
+            &clone.join("mind.toml"),
+            concat!(
+                "[[items]]\n",
+                "kind = \"rule\"\n",
+                "name = \"style\"\n",
+                "path = \"guidelines/style.md\"\n",
+            ),
+        );
+
+        let paths = paths_for(base);
+        let mut source = make_source_for(&clone);
+        // "." finds skills/foo via the skills/ container pass; "skills" finds the
+        // same directory via the flat-skills pass. First occurrence (from ".")
+        // must be the one kept.
+        source.add_roots = Some(vec![".".to_string(), "skills".to_string()]);
+
+        let mut items = Vec::new();
+        scan_source(&paths, &source, &mut items).unwrap();
+
+        let foos: Vec<_> = items
+            .iter()
+            .filter(|i| i.kind == ItemKind::Skill && i.name == "foo")
+            .collect();
+        assert_eq!(
+            foos.len(),
+            1,
+            "expected exactly one deduped item: {items:?}"
+        );
+        let kept = foos[0];
+        assert_eq!(kept.kind, ItemKind::Skill);
+        assert_eq!(kept.name, "foo");
+        let canon_kept = kept.path.canonicalize().unwrap();
+        let canon_expected = clone.join("skills/foo").canonicalize().unwrap();
+        assert_eq!(
+            canon_kept, canon_expected,
+            "the kept item's on-disk path must be the real skills/foo directory: {kept:?}"
+        );
+        assert_eq!(
+            kept.description.as_deref(),
+            Some("the real foo"),
+            "the kept item must carry the real item's frontmatter description, not a \
+             corrupted/empty stand-in: {kept:?}"
+        );
+    }
+
+    #[test]
+    fn three_add_roots_overlapping_same_canonical_path_dedup_to_one() {
+        // spec: DSC-87 -- the dedup must hold for more than two overlapping
+        // add-roots: three different roots that all resolve to the same on-disk
+        // skill directory still collapse to a single catalog entry rather than
+        // erroring on the third occurrence.
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let clone = base.join("sources/local/test/repo");
+        write_file(
+            &clone.join("skills/foo/SKILL.md"),
+            "---\ndescription: foo\n---\n# foo\n",
+        );
+        write_file(
+            &clone.join("guidelines/style.md"),
+            "---\ndescription: style\n---\n# style\n",
+        );
+        write_file(
+            &clone.join("mind.toml"),
+            concat!(
+                "[[items]]\n",
+                "kind = \"rule\"\n",
+                "name = \"style\"\n",
+                "path = \"guidelines/style.md\"\n",
+            ),
+        );
+
+        let paths = paths_for(base);
+        let mut source = make_source_for(&clone);
+        // "." -> skills/ container pass finds skills/foo.
+        // "skills" -> flat pass finds skills/foo directly.
+        // "./skills" -> a lexically distinct root string that canonicalizes to
+        // the very same directory as "skills", found again via the flat pass.
+        source.add_roots = Some(vec![
+            ".".to_string(),
+            "skills".to_string(),
+            "./skills".to_string(),
+        ]);
+
+        let mut items = Vec::new();
+        scan_source(&paths, &source, &mut items).unwrap();
+
+        let foos: Vec<_> = items
+            .iter()
+            .filter(|i| i.kind == ItemKind::Skill && i.name == "foo")
+            .collect();
+        assert_eq!(
+            foos.len(),
+            1,
+            "three add-roots overlapping on the same canonical path must dedupe to \
+             exactly one entry: {items:?}"
+        );
+    }
+
+    #[test]
+    fn symlinked_add_root_resolving_to_same_canonical_path_dedups() {
+        // spec: DSC-87 -- two add-roots that reach the same on-disk item through
+        // a symlink (rather than through a different scan mechanism, as in the
+        // container-vs-flat case above) must still dedupe by canonical path.
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let clone = base.join("sources/local/test/repo");
+        write_file(
+            &clone.join("skills/foo/SKILL.md"),
+            "---\ndescription: foo\n---\n# foo\n",
+        );
+        write_file(
+            &clone.join("guidelines/style.md"),
+            "---\ndescription: style\n---\n# style\n",
+        );
+        write_file(
+            &clone.join("mind.toml"),
+            concat!(
+                "[[items]]\n",
+                "kind = \"rule\"\n",
+                "name = \"style\"\n",
+                "path = \"guidelines/style.md\"\n",
+            ),
+        );
+        // "mirror" is a symlink to "skills", so `mirror/foo` and `skills/foo`
+        // are the same file on disk once canonicalized.
+        std::os::unix::fs::symlink(clone.join("skills"), clone.join("mirror")).unwrap();
+
+        let paths = paths_for(base);
+        let mut source = make_source_for(&clone);
+        source.add_roots = Some(vec!["skills".to_string(), "mirror".to_string()]);
+
+        let mut items = Vec::new();
+        scan_source(&paths, &source, &mut items).unwrap();
+
+        let foos: Vec<_> = items
+            .iter()
+            .filter(|i| i.kind == ItemKind::Skill && i.name == "foo")
+            .collect();
+        assert_eq!(
+            foos.len(),
+            1,
+            "a symlinked add-root resolving to the same canonical path as another \
+             add-root must dedupe to one entry, not error or double-count: {items:?}"
+        );
+    }
+
+    #[test]
+    fn add_root_item_colliding_with_authoritative_declared_item_at_distinct_path_errors() {
+        // spec: DSC-85 -- an add-root item that collides on (kind, effective name)
+        // with an item the AUTHORITATIVE mind.toml `[[items]]` layer declared (not
+        // just a base convention-scanned item) at a genuinely distinct on-disk path
+        // must still be a DuplicateItem error; only a same-canonical-path overlap
+        // among add-root items themselves (DSC-87) de-duplicates.
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let clone = base.join("sources/local/test/repo");
+        // Authoritative declaration: skill "foo" at declared/foo.
+        write_file(
+            &clone.join("declared/foo/SKILL.md"),
+            "---\ndescription: declared foo\n---\n# foo\n",
+        );
+        write_file(
+            &clone.join("mind.toml"),
+            concat!(
+                "[[items]]\n",
+                "kind = \"skill\"\n",
+                "name = \"foo\"\n",
+                "path = \"declared/foo\"\n",
+            ),
+        );
+        // Add-root item: a DISTINCT on-disk skill directory that also bares the
+        // name "foo" via the skills/ container convention.
+        write_file(
+            &clone.join("extra/skills/foo/SKILL.md"),
+            "---\ndescription: extra foo\n---\n# foo\n",
+        );
+
+        let paths = paths_for(base);
+        let mut source = make_source_for(&clone);
+        source.add_roots = Some(vec!["extra".to_string()]);
+
+        let mut items = Vec::new();
+        let err = scan_source(&paths, &source, &mut items).unwrap_err();
+        assert!(
+            matches!(err, MindError::DuplicateItem { ref name, .. } if name == "foo"),
+            "an add-root item colliding by name with an authoritative [[items]] \
+             declaration at a distinct path must still error as DuplicateItem: {err}"
         );
     }
 

@@ -296,10 +296,17 @@ impl Policy {
         }
     }
 
-    /// Does `identity` (a `host/owner/repo` string) match an `allow` pattern?
-    /// `*` matches within a single path segment (POL-10).
+    /// Does `identity` match an `allow` pattern? `identity` may be a bare base
+    /// identity (`host/owner/repo`) or an extended instance identity carrying an
+    /// item-link `#path` and/or a consumer `@alias` suffix
+    /// (`host/owner/repo#path@alias`, see `Source::compute_name`); it is
+    /// truncated to its base identity before matching, so every call site
+    /// matches on the same `host/owner/repo` form regardless of which extended
+    /// form it happens to pass (POL-67). `*` matches within a single path
+    /// segment (POL-10). The `allow` patterns themselves are never truncated.
     pub fn allow_matches(&self, identity: &str) -> bool {
-        self.allow.iter().any(|p| glob_match(p, identity))
+        let base = base_identity_of(identity);
+        self.allow.iter().any(|p| glob_match(p, base))
     }
 
     /// Enforce the internal invariants. Every `auto_meld` entry has a tag/ref when
@@ -608,6 +615,25 @@ fn parse_str(text: &str, path: &Path) -> Result<Policy> {
     Ok(policy)
 }
 
+/// Truncate an extended source identity (`host/owner/repo#path@alias`, see
+/// `Source::compute_name`) to its base `host/owner/repo` form, at the first of
+/// either the item-link `#path` marker or the consumer `@alias` marker (POL-67).
+/// The alias marker always follows the path marker when both are present
+/// (`#path@alias`), so truncating at whichever marker occurs first is
+/// equivalent to truncating at `#` when present, else at `@`; an `@` occurring
+/// inside the path segment (after a `#`) is already excluded because `#` is
+/// found first. A bare base identity with neither marker is returned unchanged
+/// (idempotent).
+fn base_identity_of(identity: &str) -> &str {
+    let end = match (identity.find('#'), identity.find('@')) {
+        (Some(h), Some(a)) => h.min(a),
+        (Some(h), None) => h,
+        (None, Some(a)) => a,
+        (None, None) => identity.len(),
+    };
+    &identity[..end]
+}
+
 /// Match `identity` against an `allow` pattern where `*` matches within a single
 /// `/`-separated segment and does not cross a `/` (POL-10). Segments must align
 /// one-to-one; each pattern segment is matched against the corresponding identity
@@ -765,6 +791,120 @@ allow = ["github.com/acme/*", "github.example.com/platform/agents"]
         assert!(!p.allow_matches("gitlab.com/acme/repo"));
         // The exact pattern does not match a sibling repo.
         assert!(!p.allow_matches("github.example.com/platform/other"));
+    }
+
+    // POL-67: allow_matches truncates an extended source identity
+    // (`host/owner/repo#path@alias`, see `Source::compute_name`) to its base
+    // `host/owner/repo` form before matching, at the first of either the
+    // `#path` or `@alias` marker, so an item-link instance and/or an aliased
+    // instance of an allowed repo match the same allow pattern as the bare
+    // repo. Covers: only `@alias`, only `#path`, both (`#path@alias`, where
+    // truncation at the first marker `#` also strips any later `@`, including
+    // one inside the path segment itself), and a bare base identity (no-op,
+    // idempotent). The allow pattern itself is never truncated.
+    // spec: POL-67
+    #[test]
+    fn allow_matches_truncates_extended_identity_to_base() {
+        let text = r#"
+[sources]
+allow = ["github.com/acme/*"]
+"#;
+        let p = parse(text).unwrap();
+
+        // Bare base identity: unchanged, matches as before.
+        assert!(p.allow_matches("github.com/acme/repo"));
+
+        // Only an `@alias` suffix.
+        assert!(p.allow_matches("github.com/acme/repo@myalias"));
+
+        // Only a `#path` suffix (item-link instance).
+        assert!(p.allow_matches("github.com/acme/repo#skills/foo"));
+
+        // Both, composed as `#path@alias` (path first, alias last).
+        assert!(p.allow_matches("github.com/acme/repo#skills/foo@myalias"));
+
+        // An `@` appearing inside the `#path` segment itself must not matter:
+        // truncation at the first marker (`#`) already strips it along with
+        // everything after, including any embedded `@`.
+        assert!(p.allow_matches("github.com/acme/repo#skills/foo@bar/baz"));
+
+        // A repo genuinely outside the allowlist is still refused, extended
+        // suffixes and all -- truncation must not accidentally widen matching.
+        assert!(!p.allow_matches("github.com/other/repo"));
+        assert!(!p.allow_matches("github.com/other/repo#skills/foo"));
+        assert!(!p.allow_matches("github.com/other/repo@myalias"));
+    }
+
+    // POL-67: the `allow` patterns themselves are never truncated -- only the
+    // identity argument passed through `allow_matches` is. `glob_match` is the
+    // shared low-level matcher both use; it performs no truncation of either
+    // argument itself, so a literal `#`/`@` in a pattern (or, hypothetically,
+    // an already-truncated caller-supplied identity) is matched character-for-
+    // character, not specially stripped. (Since `allow_matches` always
+    // truncates its identity argument before calling `glob_match`, a pattern
+    // containing a literal `#`/`@` can never match through `allow_matches` --
+    // there is no way to construct an untruncated identity there -- so this is
+    // exercised directly against `glob_match`, the seam where truncation is
+    // deliberately absent.)
+    // spec: POL-67
+    #[test]
+    fn glob_match_performs_no_truncation_itself() {
+        assert!(glob_match(
+            "github.com/acme/repo@pinned",
+            "github.com/acme/repo@pinned"
+        ));
+        assert!(!glob_match(
+            "github.com/acme/repo@pinned",
+            "github.com/acme/repo"
+        ));
+        assert!(glob_match(
+            "github.com/acme/repo#skills/foo",
+            "github.com/acme/repo#skills/foo"
+        ));
+    }
+
+    // POL-67: `base_identity_of` directly, exercising the truncation seam at
+    // its own boundary independent of glob matching.
+    // spec: POL-67
+    #[test]
+    fn base_identity_of_truncation_seam() {
+        assert_eq!(
+            base_identity_of("github.com/acme/repo"),
+            "github.com/acme/repo"
+        );
+        assert_eq!(
+            base_identity_of("github.com/acme/repo@alias"),
+            "github.com/acme/repo"
+        );
+        assert_eq!(
+            base_identity_of("github.com/acme/repo#skills/foo"),
+            "github.com/acme/repo"
+        );
+        assert_eq!(
+            base_identity_of("github.com/acme/repo#skills/foo@alias"),
+            "github.com/acme/repo"
+        );
+        // Empty string is its own base identity (no markers to find).
+        assert_eq!(base_identity_of(""), "");
+    }
+
+    // POL-31/POL-67: validate_at's lock-vs-auto_meld check routes through
+    // allow_matches, so it inherits the same truncation. A parsed auto_meld
+    // identity is ordinarily a bare base identity (auto_meld entries do not
+    // carry link/alias suffixes), so this confirms the shared path stays
+    // correct for the common case after the truncation change.
+    // spec: POL-67
+    // spec: POL-31
+    #[test]
+    fn lock_requires_auto_meld_in_allow_still_works_after_truncation_change() {
+        let text = r#"
+[sources]
+lock = true
+allow = ["github.com/acme/*"]
+[[sources.auto_meld]]
+repo = "acme/baseline"
+"#;
+        assert!(parse(text).is_ok());
     }
 
     // POL-10: a partial-segment `*` matches within the segment only.

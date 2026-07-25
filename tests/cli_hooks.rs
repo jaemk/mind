@@ -10,6 +10,9 @@
 //!   HOOK-102: item-level hooks (install/uninstall) run at the store location
 //!   HOOK-103: --event build re-installs transactionally; error on source target
 //!   HOOK-104: hooks list reports declared hooks without running them
+//!   HOOK-105: an exact match against a registered source identity (including
+//!             an item-link instance's `#path` identity) resolves as a source
+//!             target ahead of the `#`-split item-ref heuristic
 //!   CLI-194:  `hooks` verb and target parsing (source vs. item ref)
 //!   CLI-195:  `hooks run` with --event and --force flags
 //!   CLI-196:  `hooks list` subcommand
@@ -79,6 +82,21 @@ impl Sandbox {
 
     fn source_spec(&self) -> String {
         self.source.to_string_lossy().into_owned()
+    }
+
+    /// A `file://` item link into this sandbox's source repo (LNK-1).
+    fn link(&self, tail: &str) -> String {
+        format!("file://{}/{tail}", self.source.to_string_lossy())
+    }
+
+    /// The registered identity of an item-link instance for `path` (LNK-4):
+    /// `local/<base>/<repo>#<path>`.
+    fn link_identity(&self, path: &str) -> String {
+        format!(
+            "local/{}/{}#{path}",
+            self.base.file_name().unwrap().to_string_lossy(),
+            self.source.file_name().unwrap().to_string_lossy(),
+        )
     }
 }
 
@@ -952,6 +970,350 @@ fn hooks_run_build_failure_leaves_live_copy_untouched() {
         sentinel.exists(),
         "the prior build output must survive a failed rebuild: {}",
         sentinel.display()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// HOOK-105: exact-source-identity precedence over the `#`-split heuristic --
+// reaches an item-link instance's source-level hooks by its own `#<path>`
+// identity, and leaves ordinary item-ref resolution (including the triple-`#`
+// form for an item inside a link instance) unregressed.
+// ---------------------------------------------------------------------------
+
+/// `hooks list <link-instance-identity>` -- where the identity itself carries
+/// a `#<path>` suffix (LNK-4) -- reaches the instance's SOURCE-level hooks
+/// declared in the linked repo's root `mind.toml`, instead of being misread as
+/// an item ref (`source=local/.../repo`, `name=<path>`) that matches nothing.
+#[test]
+fn hooks_list_link_instance_identity_reaches_source_hooks() {
+    // spec: HOOK-105
+    let sb = Sandbox::new("link-repo");
+    sb.write_and_commit(
+        "mind.toml",
+        concat!(
+            "[[hooks]]\n",
+            "name = \"link setup\"\n",
+            "run = \"echo link-setup-ran\"\n",
+            "event = \"install\"\n",
+        ),
+    );
+    sb.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\ndescription: review skill\n---\n# review\n",
+    );
+
+    // Register the item-link instance (LNK-6): `learn <url>` registers and
+    // installs the single linked skill; the instance's own identity is
+    // `local/<base>/<repo>#skills/review` (LNK-4).
+    let r = sb.mind(&["learn", &sb.link("tree/main/skills/review")]);
+    assert!(r.success, "learn <url> failed: {}\n{}", r.stdout, r.stderr);
+
+    let identity = sb.link_identity("skills/review");
+
+    // Before HOOK-105, this target would be misparsed as an item ref
+    // (source="local/base/repo", name="skills/review") matching no installed
+    // item, and error NotInstalled.
+    let r = sb.mind(&["hooks", "list", &identity]);
+    assert!(
+        r.success,
+        "hooks list <link-identity> should reach the source target: {}\n{}",
+        r.stdout, r.stderr
+    );
+    let out = r.stdout;
+    assert!(
+        out.contains("source:"),
+        "should be read as a source target, not an item ref: {out}"
+    );
+    assert!(
+        out.contains("link setup") || out.contains("echo link-setup-ran"),
+        "the instance's declared source hook must be listed: {out}"
+    );
+}
+
+/// A plain `<source>#<item>` target that does NOT exactly match any
+/// registered source identity still resolves as an item ref: the HOOK-105
+/// exact-match check must not swallow ordinary item targets.
+#[test]
+fn hooks_list_plain_source_hash_item_still_resolves_as_item() {
+    // spec: HOOK-105
+    let sb = Sandbox::new("plain-src");
+    sb.write_and_commit(
+        "mind.toml",
+        concat!(
+            "[[items]]\n",
+            "kind = \"skill\"\n",
+            "name = \"widget\"\n",
+            "path = \"skills/widget\"\n",
+            "install = \"echo widget-installed\"\n",
+        ),
+    );
+    sb.write_and_commit(
+        "skills/widget/SKILL.md",
+        "---\ndescription: widget\n---\n# widget\n",
+    );
+
+    let r = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(r.success, "meld: {}", r.stderr);
+    let r = sb.mind(&["learn", "widget", "--dangerously-skip-install-hook-check"]);
+    assert!(r.success, "learn: {}", r.stderr);
+
+    // "plain-src#widget" is not itself a registered source identity (the
+    // registered source's identity is just "plain-src"), so it must resolve
+    // as an item ref, exactly as before HOOK-105.
+    let r = sb.mind(&["hooks", "list", "plain-src#widget"]);
+    assert!(
+        r.success,
+        "hooks list <source>#<item> must still resolve as an item ref: {}\n{}",
+        r.stdout, r.stderr
+    );
+    let out = r.stdout;
+    assert!(
+        out.contains("item:"),
+        "should be read as an item target, not a source: {out}"
+    );
+    assert!(
+        out.contains("echo widget-installed") || out.contains("widget-installed"),
+        "the item's install hook should be listed: {out}"
+    );
+}
+
+/// The triple-`#` form `<link-identity>#<item>` (the link instance's own
+/// `#<path>` identity plus the item-ref separator) still resolves as an item
+/// ref for that item, not as the source: HOOK-105's exact-match check only
+/// fires when the WHOLE target matches a registered source identity, so
+/// appending `#<item>` to it must fall through to ordinary item-ref parsing.
+#[test]
+fn hooks_list_item_inside_link_instance_still_resolves_as_item() {
+    // spec: HOOK-105
+    let sb = Sandbox::new("link-item-repo");
+    sb.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\ndescription: review skill\n---\n# review\n",
+    );
+    let r = sb.mind(&["learn", &sb.link("tree/main/skills/review")]);
+    assert!(r.success, "learn <url> failed: {}\n{}", r.stdout, r.stderr);
+
+    let identity = sb.link_identity("skills/review");
+    let target = format!("{identity}#review");
+
+    let r = sb.mind(&["hooks", "list", &target]);
+    assert!(
+        r.success,
+        "hooks list <link-identity>#<item> should resolve as an item ref: {}\n{}",
+        r.stdout, r.stderr
+    );
+    let out = r.stdout;
+    assert!(
+        out.contains("item:"),
+        "should be read as an item target, not a source: {out}"
+    );
+}
+
+/// `hooks run` (not just `hooks list`) against a link-instance identity also
+/// reaches and executes the instance's SOURCE-level hooks. `resolve_hook_target`
+/// (HOOK-105) is shared by both entry points, but only `list` was exercised
+/// above; this confirms `run` actually resolves AND runs the hook rather than
+/// just resolving to the right branch.
+#[test]
+fn hooks_run_link_instance_identity_reaches_and_runs_source_hooks() {
+    // spec: HOOK-105
+    let sb = Sandbox::new("link-run-repo");
+    sb.write_and_commit(
+        "mind.toml",
+        concat!(
+            "[[hooks]]\n",
+            "name = \"link setup\"\n",
+            "run = \"touch link-setup.sentinel\"\n",
+            "event = \"install\"\n",
+        ),
+    );
+    sb.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\ndescription: review skill\n---\n# review\n",
+    );
+
+    let r = sb.mind(&["learn", &sb.link("tree/main/skills/review")]);
+    assert!(r.success, "learn <url> failed: {}\n{}", r.stdout, r.stderr);
+
+    let identity = sb.link_identity("skills/review");
+
+    // Before HOOK-105, this would be misparsed as an item ref
+    // (source="local/.../repo", name="skills/review") and error NotInstalled,
+    // never reaching the source-level hook runner.
+    let r = sb.mind(&[
+        "hooks",
+        "run",
+        "--event",
+        "install",
+        "--dangerously-skip-install-hook-check",
+        &identity,
+    ]);
+    assert!(
+        r.success,
+        "hooks run <link-identity> should run the source's install hook: {}\n{}",
+        r.stdout, r.stderr
+    );
+
+    // A link instance is always a cloned snapshot (never a linked working
+    // tree, per LNK-4), so the hook ran in the source's clone under
+    // mind_home/sources/, not sb.source itself.
+    let sentinel = find_sentinel(&sb.mind_home, "link-setup.sentinel");
+    assert!(
+        sentinel.is_some(),
+        "the instance's install hook should have run in its clone dir: {}\n{}",
+        r.stdout,
+        r.stderr
+    );
+}
+
+/// The triple-`#` composed form also resolves correctly through `hooks run`,
+/// not just `hooks list`: it must run against the ITEM (using its installed
+/// store location, HOOK-102), not be misread as the link instance's source.
+#[test]
+fn hooks_run_item_inside_link_instance_resolves_as_item_not_source() {
+    // spec: HOOK-105
+    let sb = Sandbox::new("link-item-run-repo");
+    sb.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\ndescription: review skill\n---\n# review\n",
+    );
+    let r = sb.mind(&["learn", &sb.link("tree/main/skills/review")]);
+    assert!(r.success, "learn <url> failed: {}\n{}", r.stdout, r.stderr);
+
+    let identity = sb.link_identity("skills/review");
+    let target = format!("{identity}#review");
+
+    let r = sb.mind(&["hooks", "run", "--event", "install", &target]);
+    assert!(
+        r.success,
+        "hooks run <link-identity>#<item> should resolve and run as an item ref: {}\n{}",
+        r.stdout, r.stderr
+    );
+    let out = r.stdout;
+    // The item declares no install hooks, so the item-hook runner's "no hooks
+    // declared" note names the ITEM key, confirming item resolution (not a
+    // source run, which would print "running install hook ... for <source>"
+    // or "no install hooks declared for source ...").
+    assert!(
+        out.contains("no install hooks declared for skill:review"),
+        "should resolve to the installed item skill:review, not the source: {out}"
+    );
+    assert!(
+        !out.contains("no install hooks declared for source"),
+        "must not be misread as a source target: {out}"
+    );
+}
+
+/// An `@alias`-suffixed source identity (no `#`, STO-58) as a `hooks`/`hooks
+/// list` target resolves as a source. `@alias` carries no `#`, so the ordinary
+/// no-`#`-is-source heuristic already covers it, but the exact-match check
+/// added for HOOK-105 runs unconditionally first: this confirms it still finds
+/// the aliased identity and does not regress this pre-existing case.
+#[test]
+fn hooks_list_alias_suffixed_source_identity_resolves_as_source() {
+    // spec: HOOK-105
+    let sb = Sandbox::new("alias-src");
+    sb.write_and_commit(
+        "mind.toml",
+        concat!(
+            "[[hooks]]\n",
+            "name = \"alias setup\"\n",
+            "run = \"echo alias-setup-ran\"\n",
+            "event = \"install\"\n",
+        ),
+    );
+
+    let r = sb.mind(&["meld", "--namespace", "jk", &sb.source_spec()]);
+    assert!(r.success, "meld --namespace: {}\n{}", r.stdout, r.stderr);
+
+    let identity = format!(
+        "local/{}/{}@jk",
+        sb.base.file_name().unwrap().to_string_lossy(),
+        sb.source.file_name().unwrap().to_string_lossy(),
+    );
+
+    let r = sb.mind(&["hooks", "list", &identity]);
+    assert!(
+        r.success,
+        "hooks list <alias-identity> should resolve as a source: {}\n{}",
+        r.stdout, r.stderr
+    );
+    let out = r.stdout;
+    assert!(
+        out.contains("source:"),
+        "should be read as a source target: {out}"
+    );
+    assert!(
+        out.contains("alias setup") || out.contains("echo alias-setup-ran"),
+        "the aliased source's declared hook must be listed: {out}"
+    );
+}
+
+/// A target that contains `#` but matches NO registered source (by exact
+/// string or by the ordinary split) and names no installed item still takes
+/// the ordinary item-ref error path -- a clean `NotInstalled`/`ItemNotFound`
+/// failure, not a panic and not a misreported "source not found".
+#[test]
+fn hooks_list_unknown_hash_target_errors_cleanly_as_item_not_found() {
+    // spec: HOOK-105
+    let sb = Sandbox::new("unknown-hash-src");
+    let r = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(r.success, "meld: {}", r.stderr);
+
+    let r = sb.mind(&["hooks", "list", "totally/unknown-repo#ghost-item"]);
+    assert!(
+        !r.success,
+        "an unresolvable #-target must fail, not succeed: {}\n{}",
+        r.stdout, r.stderr
+    );
+    let combined = format!("{}{}", r.stdout, r.stderr);
+    assert!(
+        combined.contains("not installed") || combined.contains("no item matches"),
+        "should be the ordinary item-ref error, not a source-not-found misreport: {combined}"
+    );
+    assert!(!combined.contains("panic"), "must not panic: {combined}");
+}
+
+/// Leading/trailing whitespace around a link-instance identity target is
+/// trimmed before the exact-match check (HOOK-105 spec: "the whole target
+/// string, trimmed"), so it still resolves as a source.
+#[test]
+fn hooks_list_link_instance_identity_with_surrounding_whitespace_still_matches() {
+    // spec: HOOK-105
+    let sb = Sandbox::new("ws-link-repo");
+    sb.write_and_commit(
+        "mind.toml",
+        concat!(
+            "[[hooks]]\n",
+            "name = \"link setup\"\n",
+            "run = \"echo link-setup-ran\"\n",
+            "event = \"install\"\n",
+        ),
+    );
+    sb.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\ndescription: review skill\n---\n# review\n",
+    );
+    let r = sb.mind(&["learn", &sb.link("tree/main/skills/review")]);
+    assert!(r.success, "learn <url> failed: {}\n{}", r.stdout, r.stderr);
+
+    let identity = sb.link_identity("skills/review");
+    let padded = format!("  {identity}\t\n");
+
+    let r = sb.mind(&["hooks", "list", &padded]);
+    assert!(
+        r.success,
+        "hooks list <padded link-identity> should still resolve as a source: {}\n{}",
+        r.stdout, r.stderr
+    );
+    let out = r.stdout;
+    assert!(
+        out.contains("source:"),
+        "whitespace-padded exact identity should still be read as a source target: {out}"
+    );
+    assert!(
+        out.contains("link setup") || out.contains("echo link-setup-ran"),
+        "the instance's declared source hook must be listed: {out}"
     );
 }
 

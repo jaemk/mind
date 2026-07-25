@@ -6,6 +6,64 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Policy allowlist matching now strips a `#<path>` (item-link) or `@<prefix>`
+  (alias) identity suffix before comparing against `allow` patterns, so an
+  instance admitted at meld time is no longer skipped by `sync`, `upgrade`, and
+  install-hook gating under a locked allowlist. Previously no writable `allow`
+  pattern could admit it after meld (POL-67).
+- `mind hooks run` / `hooks list` now resolve a target that exactly matches a
+  registered source identity as that source, even when the identity contains
+  `#` (an item-link instance's own identity), instead of parsing it as an item
+  ref that matches nothing. An item-link instance's source-level hooks are now
+  addressable by its own identity, not only via an over-broad glob (HOOK-105).
+- `mind dump` now emits an `add-roots` key for a source melded with
+  `--add-root`, and the emitted super-source threads it through nested melds,
+  so re-melding a dump no longer silently drops items an added root
+  contributed (DUMP-11).
+- A deep `tree`/`blob` URL whose tail is not a valid item link (a `blob` URL
+  not ending in `/SKILL.md`, a `tree` URL with no skill path) now reports a
+  specific error naming the URL and the two expected link shapes, instead of
+  the generic "not a valid repo spec" (LNK-14).
+- Two `--add-root` roots that surface the same on-disk item through different
+  scan passes now de-duplicate instead of erroring `DuplicateItem`; the error
+  remains for a genuine same-name collision at distinct paths (DSC-87).
+
+### Changed
+
+- `meld` prints an explicit note when a differing `--namespace` forks a new
+  coexisting instance of an already-melded repo (STO-60). `learn <url> --pin`
+  on an already-melded link prints a note that the pin was ignored instead of
+  silently dropping it (CLI-203).
+
+### Security
+
+- `evolve` now passes the `GITHUB_TOKEN`/`GH_TOKEN` bearer header to curl via
+  a private 0600 config file instead of the command line, so it is no longer
+  visible in the process table. The `wget` fallback still passes it on the
+  command line; the shared-host exposure difference is now documented
+  (STO-61).
+
+### Documentation
+
+- Enterprise guide: added a `GITHUB_TOKEN`/`GH_TOKEN` visibility note for
+  shared hosts, covering the curl-vs-wget token exposure difference (STO-61).
+- Policy reference: documented that allow/lock matching runs against the base
+  `host/owner/repo` identity, stripping a `#path` or `@prefix` suffix, so an
+  item-link or aliased instance inherits its repo's allow decision (POL-67).
+- Commands reference and configuration guide: documented the `@<prefix>` and
+  `#<path>` instance selectors for `unmeld`, `upgrade`, and `recall`, and the
+  `meld --namespace` fork-a-new-instance behavior (STO-60).
+- Configuration guide and `link-project --snapshot` help text: state the
+  frozen-copy caveat that a snapshot is not updated by a later `mind learn`.
+- Introduction: added Windsurf to the harness list, noting it is
+  project-scoped.
+- Spec: corrected STO-56 (`link_into_new_lobes` is intentionally not
+  reachability-gated); added LNK-15, recording that a bare and an aliased
+  link instance of the same path coexist; reworded the accepted-risks note to
+  record that unbounded metadata reads are the norm for this class of tool.
+
 ## [0.21.0] - 2026-07-23
 
 ### Added

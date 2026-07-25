@@ -622,19 +622,67 @@ fn github_token() -> Option<String> {
     None
 }
 
-/// The extra curl args authenticating a GitHub REST API request (STO-57).
+/// The curl auth config-file content authenticating a GitHub REST API request
+/// (STO-61).
 ///
-/// Returns `-H "Authorization: Bearer <token>"` only when a non-empty token is
-/// present AND the URL targets `api.github.com`, so the token is never forwarded
-/// to the artifact CDN on a cross-host redirect. Pure (token passed in) so the
-/// arg vector is unit-testable without touching the environment or a process.
-// spec: STO-57
-pub(crate) fn curl_auth_args(url: &str, token: Option<&str>) -> Vec<String> {
+/// Returns `Some("header = \"Authorization: Bearer <token>\"\n")` only when a
+/// non-empty token is present AND the URL targets `api.github.com` (the same
+/// host gating as before, STO-57), so the token is never forwarded to the
+/// artifact CDN on a cross-host redirect. The header is delivered to curl via a
+/// 0600 `--config` file rather than on argv (STO-61), so it is not exposed in
+/// `/proc/<pid>/cmdline` to a local co-tenant during the brief API call. Pure
+/// (token passed in) so it is unit-testable without touching the environment.
+// spec: STO-61
+pub(crate) fn curl_auth_config_content(url: &str, token: Option<&str>) -> Option<String> {
     match token {
         Some(t) if !t.is_empty() && is_github_api_url(url) => {
-            vec!["-H".into(), format!("Authorization: Bearer {t}")]
+            Some(format!("header = \"Authorization: Bearer {t}\"\n"))
         }
-        _ => vec![],
+        _ => None,
+    }
+}
+
+/// The extra curl args pointing at the auth config file (STO-61).
+///
+/// When an auth config file was written (a token present AND the URL targets
+/// `api.github.com`; see `curl_auth_config_content`), returns `--config <path>`;
+/// otherwise empty. The token itself never appears here, so it stays off argv.
+/// Pure (path passed in) so the arg vector is unit-testable.
+// spec: STO-61
+pub(crate) fn curl_auth_args(config_path: Option<&str>) -> Vec<String> {
+    match config_path {
+        Some(p) => vec!["--config".into(), p.into()],
+        None => vec![],
+    }
+}
+
+/// Write the curl auth config (STO-61) to a 0600-mode file inside a fresh 0700
+/// temp directory, returning the file path. The caller removes it (best-effort)
+/// after the fetch via `remove_curl_auth_config`. The file is created write-only
+/// to the owner (`create_new` + `mode(0o600)`) so the bearer token it carries is
+/// never group- or world-readable while curl reads it.
+fn write_curl_auth_config(content: &str) -> Result<std::path::PathBuf> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let dir = mktemp_dir()?;
+    let path = dir.join("curl-auth.cfg");
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .map_err(|e| MindError::io(&path, e))?;
+    f.write_all(content.as_bytes())
+        .map_err(|e| MindError::io(&path, e))?;
+    Ok(path)
+}
+
+/// Best-effort removal of the auth config file and its temp directory (STO-61),
+/// so the token-bearing file does not linger after the API call.
+fn remove_curl_auth_config(path: &Path) {
+    let _ = std::fs::remove_file(path);
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::remove_dir(dir);
     }
 }
 
@@ -685,11 +733,22 @@ fn fetch_to_string(url: &str) -> Result<String> {
     let token = github_token();
     let output = if have("curl") {
         let mut args = curl_string_args(url, timeout);
-        args.extend(curl_auth_args(url, token.as_deref()));
-        Command::new("curl")
+        // spec: STO-61 -- pass the bearer token via a 0600 --config file, never argv.
+        let auth_cfg = match curl_auth_config_content(url, token.as_deref()) {
+            Some(content) => Some(write_curl_auth_config(&content)?),
+            None => None,
+        };
+        if let Some(ref p) = auth_cfg {
+            args.extend(curl_auth_args(Some(&p.to_string_lossy())));
+        }
+        let result = Command::new("curl")
             .args(args)
             .output()
-            .map_err(|e| MindError::io("curl", e))?
+            .map_err(|e| MindError::io("curl", e));
+        if let Some(ref p) = auth_cfg {
+            remove_curl_auth_config(p);
+        }
+        result?
     } else if have("wget") {
         let mut args = wget_string_args(url, timeout);
         args.extend(wget_auth_args(url, token.as_deref()));
@@ -720,11 +779,22 @@ fn fetch_to_file(url: &str, dest: &Path) -> Result<()> {
     let token = github_token();
     let status = if have("curl") {
         let mut args = curl_file_args(url, &dest_str, timeout);
-        args.extend(curl_auth_args(url, token.as_deref()));
-        Command::new("curl")
+        // spec: STO-61 -- pass the bearer token via a 0600 --config file, never argv.
+        let auth_cfg = match curl_auth_config_content(url, token.as_deref()) {
+            Some(content) => Some(write_curl_auth_config(&content)?),
+            None => None,
+        };
+        if let Some(ref p) = auth_cfg {
+            args.extend(curl_auth_args(Some(&p.to_string_lossy())));
+        }
+        let result = Command::new("curl")
             .args(args)
             .status()
-            .map_err(|e| MindError::io("curl", e))?
+            .map_err(|e| MindError::io("curl", e));
+        if let Some(ref p) = auth_cfg {
+            remove_curl_auth_config(p);
+        }
+        result?
     } else if have("wget") {
         let mut args = wget_file_args(url, &dest_str, timeout);
         args.extend(wget_auth_args(url, token.as_deref()));
@@ -857,41 +927,37 @@ mod tests {
         );
     }
 
-    // ---- STO-57: GitHub API auth header --------------------------------------
+    // ---- STO-57 / STO-61: GitHub API auth header -----------------------------
 
     #[test]
-    // spec: STO-57
-    fn auth_args_add_bearer_header_for_api_host() {
-        // A token present + an api.github.com URL -> the bearer header is added.
-        let curl = curl_auth_args(
-            "https://api.github.com/repos/jaemk/mind/releases/latest",
-            Some("tok123"),
-        );
+    // spec: STO-57 STO-61
+    fn auth_config_content_for_api_host_and_wget_header() {
+        // A token present + an api.github.com URL -> curl gets config-file content
+        // carrying the bearer header, and wget still gets the inline --header arg.
+        let url = "https://api.github.com/repos/jaemk/mind/releases/latest";
+        let content = curl_auth_config_content(url, Some("tok123"))
+            .expect("curl config content must be produced on the API host");
         assert_eq!(
-            curl,
-            vec!["-H".to_string(), "Authorization: Bearer tok123".to_string()],
-            "curl must send the bearer header on the API host: {curl:?}"
+            content, "header = \"Authorization: Bearer tok123\"\n",
+            "curl config content must carry the bearer header in curl config syntax: {content:?}"
         );
-        let wget = wget_auth_args(
-            "https://api.github.com/repos/jaemk/mind/releases/latest",
-            Some("tok123"),
-        );
+        let wget = wget_auth_args(url, Some("tok123"));
         assert_eq!(
             wget,
             vec!["--header=Authorization: Bearer tok123".to_string()],
-            "wget must send the bearer header on the API host: {wget:?}"
+            "wget must send the bearer header on the API host (argv form): {wget:?}"
         );
     }
 
     #[test]
-    // spec: STO-57
-    fn auth_args_never_leak_token_to_non_api_hosts() {
+    // spec: STO-57 STO-61
+    fn auth_never_leaks_token_to_non_api_hosts() {
         // The token must NOT be attached to the artifact CDN download, so it is
         // not forwarded across a cross-host redirect.
         let url = "https://github.com/jaemk/mind/releases/download/v1.2.3/mind-1.2.3-x.tar.gz";
         assert!(
-            curl_auth_args(url, Some("tok123")).is_empty(),
-            "curl must not send a token to github.com"
+            curl_auth_config_content(url, Some("tok123")).is_none(),
+            "curl must not build an auth config for github.com"
         );
         assert!(
             wget_auth_args(url, Some("tok123")).is_empty(),
@@ -900,26 +966,229 @@ mod tests {
     }
 
     #[test]
-    // spec: STO-57
-    fn auth_args_empty_without_a_token() {
+    // spec: STO-57 STO-61
+    fn auth_empty_without_a_token() {
         // No token (or an empty one) -> the request is byte-for-byte unchanged.
         let url = "https://api.github.com/repos/jaemk/mind/releases/latest";
         assert!(
-            curl_auth_args(url, None).is_empty(),
-            "no token -> no curl header"
+            curl_auth_config_content(url, None).is_none(),
+            "no token -> no curl auth config"
         );
         assert!(
             wget_auth_args(url, None).is_empty(),
             "no token -> no wget header"
         );
         assert!(
-            curl_auth_args(url, Some("")).is_empty(),
-            "empty token -> no curl header"
+            curl_auth_config_content(url, Some("")).is_none(),
+            "empty token -> no curl auth config"
         );
         assert!(
             wget_auth_args(url, Some("")).is_empty(),
             "empty token -> no wget header"
         );
+    }
+
+    #[test]
+    // spec: STO-61
+    fn curl_argv_uses_config_flag_and_never_carries_the_token() {
+        // The built curl arg vector references the auth config file via --config
+        // and never contains the token or an -H Authorization header on argv, so
+        // /proc/<pid>/cmdline cannot leak the token.
+        let path = "/run/mind-evolve-x/curl-auth.cfg";
+        let mut args = curl_string_args(
+            "https://api.github.com/repos/jaemk/mind/releases/latest",
+            15,
+        );
+        args.extend(curl_auth_args(Some(path)));
+        let cfg = args
+            .iter()
+            .position(|a| a == "--config")
+            .expect("curl args must include --config");
+        assert_eq!(
+            args[cfg + 1],
+            path,
+            "the config-file path must follow --config"
+        );
+        assert!(
+            !args.iter().any(|a| a.contains("tok123")),
+            "the token must never appear on curl argv: {args:?}"
+        );
+        assert!(
+            !args
+                .iter()
+                .any(|a| a == "-H" || a.starts_with("Authorization:")),
+            "curl argv must not carry an -H Authorization header: {args:?}"
+        );
+        // No auth config path -> no --config arg at all.
+        assert!(
+            curl_auth_args(None).is_empty(),
+            "no config path -> no --config arg"
+        );
+    }
+
+    #[test]
+    // spec: STO-61
+    fn curl_auth_config_file_is_owner_only_0600() {
+        // The written auth config file must be mode 0600 (owner read/write only)
+        // so the bearer token it holds is not group- or world-readable.
+        let content = curl_auth_config_content(
+            "https://api.github.com/repos/jaemk/mind/releases/latest",
+            Some("tok123"),
+        )
+        .expect("content must be produced");
+        let path = write_curl_auth_config(&content).expect("must write the auth config");
+        let meta = std::fs::metadata(&path).expect("config file must exist");
+        let mode = meta.permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "auth config file must be mode 0600, got {mode:o}"
+        );
+        // The file content carries the header (curl reads it), proving the token
+        // lives in the 0600 file rather than on argv.
+        let on_disk = std::fs::read_to_string(&path).expect("must read config back");
+        assert!(
+            on_disk.contains("Authorization: Bearer tok123"),
+            "the auth config file must carry the bearer header: {on_disk:?}"
+        );
+        remove_curl_auth_config(&path);
+        assert!(
+            !path.exists(),
+            "remove_curl_auth_config must delete the file"
+        );
+    }
+
+    #[test]
+    // spec: STO-61
+    fn curl_file_argv_uses_config_flag_and_never_carries_the_token() {
+        // Mirrors `curl_argv_uses_config_flag_and_never_carries_the_token` but
+        // for the fetch_to_file arg builder (`curl_file_args`), so the
+        // file-download path (used for the release archive and SHA256SUMS,
+        // `download_and_swap`) is covered too, not just the string-fetch path
+        // (used for the GitHub API JSON response).
+        let path = "/run/mind-evolve-y/curl-auth.cfg";
+        let mut args = curl_file_args(
+            "https://api.github.com/repos/jaemk/mind/releases/latest",
+            "/tmp/dest-file",
+            15,
+        );
+        args.extend(curl_auth_args(Some(path)));
+        let cfg = args
+            .iter()
+            .position(|a| a == "--config")
+            .expect("curl file-fetch args must include --config");
+        assert_eq!(
+            args[cfg + 1],
+            path,
+            "the config-file path must follow --config"
+        );
+        assert!(
+            !args.iter().any(|a| a.contains("tok123")),
+            "the token must never appear on curl file-fetch argv: {args:?}"
+        );
+        assert!(
+            !args
+                .iter()
+                .any(|a| a == "-H" || a.starts_with("Authorization:")),
+            "curl file-fetch argv must not carry an -H Authorization header: {args:?}"
+        );
+    }
+
+    /// Serializes tests that mutate process-wide env vars (`PATH`,
+    /// `GITHUB_TOKEN`/`GH_TOKEN`) so they don't race each other. No other test
+    /// in this module spawns a real `curl`/`wget` process or reads these vars,
+    /// so this only needs to guard against re-entrant runs of the same test.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Write an executable fake `curl` at `dir/curl` that records its argv (one
+    /// arg per line) to `capture_path` and always exits non-zero (simulating a
+    /// curl failure) without touching the network.
+    fn write_fake_failing_curl(dir: &Path, capture_path: &Path) {
+        let script_path = dir.join("curl");
+        let script = format!(
+            "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done > {:?}\nexit 7\n",
+            capture_path
+        );
+        std::fs::write(&script_path, script).expect("write fake curl");
+        let mut perms = std::fs::metadata(&script_path)
+            .expect("stat fake curl")
+            .permissions();
+        perms.set_mode(0o700);
+        std::fs::set_permissions(&script_path, perms).expect("chmod fake curl");
+    }
+
+    #[test]
+    // spec: STO-61
+    fn fetch_to_string_removes_auth_config_file_even_when_curl_fails() {
+        // The auth config file is written before invoking curl and removed
+        // right after (`remove_curl_auth_config`), unconditionally on the
+        // Result -- i.e. even when curl itself fails. This drives the real
+        // `fetch_to_string` private function against a fake, always-failing
+        // `curl` on PATH (never touching the network) and verifies (a) the
+        // fetch reports failure, (b) the config file curl was pointed at via
+        // `--config` no longer exists afterward, and (c) the token never
+        // appeared on curl's argv.
+        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let n = MKTEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let scratch =
+            std::env::temp_dir().join(format!("mind-evolve-fake-curl-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&scratch).expect("create scratch dir");
+        let capture_path = scratch.join("argv-capture.txt");
+        write_fake_failing_curl(&scratch, &capture_path);
+
+        let orig_path = std::env::var("PATH").unwrap_or_default();
+        let orig_gh_token = std::env::var("GITHUB_TOKEN").ok();
+        let orig_gh_token2 = std::env::var("GH_TOKEN").ok();
+        let new_path = format!("{}:{orig_path}", scratch.display());
+        // SAFETY: ENV_LOCK is held for the duration of the mutation below, and
+        // no other test in this module reads/writes PATH, GITHUB_TOKEN, or
+        // GH_TOKEN, or spawns a real curl/wget process.
+        unsafe {
+            std::env::set_var("PATH", &new_path);
+            std::env::set_var("GITHUB_TOKEN", "tok123");
+            std::env::remove_var("GH_TOKEN");
+        }
+
+        let result = fetch_to_string("https://api.github.com/repos/jaemk/mind/releases/latest");
+
+        // Restore env immediately, before any assertion can panic and leave
+        // the process env corrupted for later tests.
+        // SAFETY: ENV_LOCK is still held.
+        unsafe {
+            std::env::set_var("PATH", &orig_path);
+            match orig_gh_token {
+                Some(v) => std::env::set_var("GITHUB_TOKEN", v),
+                None => std::env::remove_var("GITHUB_TOKEN"),
+            }
+            match orig_gh_token2 {
+                Some(v) => std::env::set_var("GH_TOKEN", v),
+                None => std::env::remove_var("GH_TOKEN"),
+            }
+        }
+        drop(guard);
+
+        assert!(
+            result.is_err(),
+            "the fake curl exits non-zero, so fetch_to_string must report failure"
+        );
+
+        let argv = std::fs::read_to_string(&capture_path).expect("read captured argv");
+        let lines: Vec<&str> = argv.lines().collect();
+        let cfg_idx = lines
+            .iter()
+            .position(|a| *a == "--config")
+            .expect("curl must have been invoked with --config: {lines:?}");
+        let cfg_path = std::path::PathBuf::from(lines[cfg_idx + 1]);
+        assert!(
+            !cfg_path.exists(),
+            "the auth config file must be removed even though curl failed: {cfg_path:?}"
+        );
+        assert!(
+            !lines.iter().any(|a| a.contains("tok123")),
+            "the token must never appear on curl's argv: {lines:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&scratch);
     }
 
     #[test]

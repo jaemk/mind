@@ -125,6 +125,14 @@ path, or a `file://` URL gets identity `local/<parent-dir>/<repo>` where
 allow a mirror directory under lock, add a pattern like `local/mirrors/*` to
 `allow`.
 
+**Item-link and alias instances.** An item-link instance's identity carries a
+`#<path>` suffix (`host/owner/repo#skills/foo`), and an `@<prefix>` alias
+instance's identity carries an `@<prefix>` suffix (`host/owner/repo@jk`).
+Allow/lock matching strips both suffixes before comparing, so it always runs
+against the bare `host/owner/repo` identity. A link or alias instance
+therefore inherits its repo's allow decision, and an `allow` pattern never
+needs to name a `#path` or `@prefix` suffix.
+
 `[sources].lock` is the enforcement switch:
 
 - With `lock = true`, `meld` refuses any repo whose identity does not match

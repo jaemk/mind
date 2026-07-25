@@ -123,6 +123,12 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   respectively. They are accepted for one release and count toward the
   at-most-one-pin rule (CLI-17), so mixing a deprecated alias with `--pin` is
   `ConflictingPin`.
+- `CLI-203` `learn <url> --pin` freezes the link instance's ref only at
+  meld/registration (CLI-200, LNK-3). When the link is already melded, the
+  meld+pin step is skipped, so `--pin` has no effect; `learn` prints a one-line
+  note that `--pin` was ignored because the instance is already melded, rather
+  than dropping the flag silently. The install still proceeds. Suppressed under
+  `--json`.
 - `CLI-19` An explicit `git@host:owner/repo` (or `ssh://`) spec clones over SSH
   using the user's key/agent, with no username/password prompt. With `ssh = true`
   in `~/.mind/config.toml`, `meld` (and `sync` auto-meld) also rewrites an https

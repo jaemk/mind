@@ -967,6 +967,22 @@ fn meld_recursive(
             source.name,
             items.len()
         );
+        // spec: STO-60 -- when this meld forks a NEW aliased instance (STO-58) of
+        // a repo that already has one or more melded instances, say so plainly:
+        // the trailing `@<alias>` is otherwise the sole signal that a coexisting
+        // instance (a second clone) was registered rather than an existing
+        // source's prefix being changed. The registry does not yet contain this
+        // source (pushed below), so a prior entry sharing the base identity means
+        // a genuine fork.
+        if source.as_alias.as_deref().is_some_and(|a| !a.is_empty()) {
+            let base = source.base_identity();
+            if registry.sources.iter().any(|s| s.base_identity() == base) {
+                println!(
+                    "note: registered a new instance {}; the existing {base} remains",
+                    source.name
+                );
+            }
+        }
     }
 
     // MKT-4: for a single-plugin source, report any unsupported component kinds
@@ -1083,7 +1099,9 @@ fn meld_recursive(
                 &entry.source,
                 entry.effective_alias(), // spec: DSC-78 — prefer `namespace`, fall back to `as`
                 vec![],                  // no consumer roots for nested sources
-                vec![],                  // no consumer --add-root for nested sources
+                // spec: DUMP-11 -- a curator/dump entry's add-roots thread through the
+                // consumer --add-root slot (add-root composes unconditionally, DSC-84).
+                entry.add_roots.clone().unwrap_or_default(),
                 false, // no consumer --flat-skills for nested sources (curator config supplies it)
                 PinRequest::None, // no consumer pin for nested sources
                 false,
@@ -2570,6 +2588,18 @@ pub fn learn_link(
             None,
             flow.dangerously_skip,
         )?;
+    } else if pin {
+        // spec: CLI-203 -- the link instance is already melded, so the meld+pin
+        // step is skipped; `--pin` only takes effect at meld/registration time.
+        // Say so rather than silently dropping the flag (suppressed under --json,
+        // consistent with the neighboring meld notes).
+        let out = crate::render::ctx();
+        if !out.json {
+            println!(
+                "note: --pin ignored; {} is already melded (pin applies only at meld time)",
+                spec.name
+            );
+        }
     }
     learn(paths, &format!("{}#*", spec.name), dry_run, flow)
 }
@@ -4656,6 +4686,10 @@ pub fn sync(
         struct NestedTodo {
             spec: String,
             alias: Option<String>,
+            /// spec: DUMP-11 -- the entry's `add-roots`, threaded to the nested
+            /// meld as the consumer `--add-root` override so a re-walk composes
+            /// the same extra convention roots a fresh meld would.
+            add_roots: Vec<String>,
             curated: CuratedConfig,
             /// Auth-failure policy for this entry (DSC-68). Carried so the re-walk
             /// loop can handle auth failures the same way as meld (DSC-68 requires
@@ -4691,6 +4725,7 @@ pub fn sync(
                 nested.push(NestedTodo {
                     spec: ns.source,
                     alias: ns_alias,
+                    add_roots: ns.add_roots.clone().unwrap_or_default(),
                     curated,
                     on_auth_failure: ns.on_auth_failure,
                 });
@@ -4733,6 +4768,8 @@ pub fn sync(
                 nested.push(NestedTodo {
                     spec: repo_spec,
                     alias: Some(entry.name),
+                    // A marketplace entry carries no consumer add-root override.
+                    add_roots: vec![],
                     curated: CuratedConfig {
                         pin: None,
                         roots: None,
@@ -4776,7 +4813,7 @@ pub fn sync(
                 &todo.spec,
                 todo.alias,
                 vec![],
-                vec![],
+                todo.add_roots, // spec: DUMP-11 -- re-walk composes the entry's add-roots
                 false, // no consumer --flat-skills on a sync re-walk (curator config supplies it)
                 PinRequest::None,
                 false,
@@ -8117,6 +8154,35 @@ mod tests {
             reg.sources[0].alias.as_deref(),
             Some("jk"),
             "the new alias must be persisted"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn set_source_namespace_never_sets_identity_alias() {
+        // spec: STO-60 -- the fork note's guard checks ONLY `Source.as_alias`
+        // (the pre-clone identity alias, STO-58), never the display `alias`.
+        // `set_source_namespace` is the same kind of *display-only* prefix
+        // mutation as an accepted `[source].prefix` (see its doc comment: "this
+        // changes the source's effective display prefix (`alias`), not its
+        // identity"). This locks in that `as_alias` stays untouched when the
+        // display alias changes, so a source that only ever received a display
+        // prefix can never spuriously satisfy the STO-60 fork-note guard
+        // (`source.as_alias.as_deref().is_some_and(|a| !a.is_empty())`), no
+        // matter how many other instances of the same repo are registered.
+        let (paths, base) = ns_paths();
+        let name = seed_source(&paths, "agents", None);
+        set_source_namespace(&paths, &name, Some("jk".into())).expect("set namespace");
+        let reg = Registry::load(&paths).unwrap();
+        assert_eq!(
+            reg.sources[0].alias.as_deref(),
+            Some("jk"),
+            "the display alias must change"
+        );
+        assert_eq!(
+            reg.sources[0].as_alias, None,
+            "the identity alias must stay None: a display-prefix-only change \
+             must never satisfy the STO-60 fork-note guard"
         );
         let _ = std::fs::remove_dir_all(&base);
     }

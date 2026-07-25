@@ -446,31 +446,41 @@ fn split_link_marker(s: &str) -> Option<(&str, &'static str, &str)> {
 /// Parse the `<ref>/<path>` tail after a tree/blob marker (LNK-1, LNK-3,
 /// LNK-10): the pin from the single ref segment and the validated skill
 /// directory path.
+///
+/// A marker (`tree`/`blob`) was already found in `spec` by the caller, so any
+/// failure here is an attempted item link that did not parse, not a plain
+/// repo spec: every error is [`MindError::BadItemLink`] (LNK-14), never
+/// [`MindError::InvalidRepoSpec`].
 fn parse_link_tail(spec: &str, marker: &str, rest: &str) -> Result<(Pin, String)> {
-    let invalid = || MindError::InvalidRepoSpec {
-        spec: spec.to_string(),
+    let bad = |reason: &str| MindError::BadItemLink {
+        url: spec.to_string(),
+        reason: reason.to_string(),
     };
     // spec: LNK-3 -- the ref is the single segment after tree/blob.
     let mut segs = rest.trim_matches('/').split('/');
-    let r = segs.next().filter(|s| !s.is_empty()).ok_or_else(invalid)?;
+    let r = segs
+        .next()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| bad("missing a ref (branch, tag, or commit) after tree/blob"))?;
     // spec: LNK-1 -- a blob link must end in /SKILL.md (the skill directory is
     // its parent); a tree link naming the SKILL.md directly is also accepted.
     let mut parts: Vec<&str> = segs.collect();
     if parts.last() == Some(&"SKILL.md") {
         parts.pop();
     } else if marker == "blob" {
-        return Err(invalid());
+        return Err(bad("a blob link must end in /SKILL.md"));
     }
     if parts.is_empty() || parts.iter().any(|p| p.is_empty()) {
-        return Err(invalid());
+        return Err(bad("missing the skill directory path after the ref"));
     }
     let item_path = parts.join("/");
     // spec: LNK-10 -- safe relative path and a valid git ref value, rejected
     // before any clone.
-    if !crate::plugin_manifest::is_safe_manifest_path(&item_path)
-        || crate::git::validate_ref_value(r).is_err()
-    {
-        return Err(invalid());
+    if !crate::plugin_manifest::is_safe_manifest_path(&item_path) {
+        return Err(bad("the skill path is not a safe repo-relative path"));
+    }
+    if crate::git::validate_ref_value(r).is_err() {
+        return Err(bad("the ref is not a valid git ref"));
     }
     // spec: LNK-3 -- a 40-hex ref pins the commit; anything else follows that
     // branch. Lifted into the standard pin resolution by meld.
@@ -486,7 +496,9 @@ fn parse_link_tail(spec: &str, marker: &str, rest: &str) -> Result<(Pin, String)
 /// `owner/repo/tree/<ref>/<path>`, `owner/repo/blob/<ref>/<path>/SKILL.md`,
 /// and the GitLab `owner/repo/-/tree|blob/...` variants. Returns `Ok(None)`
 /// when the path carries no tree/blob marker (a plain repo URL); a marker that
-/// does not complete to a valid link is `InvalidRepoSpec` (LNK-2).
+/// does not complete to a valid link is `BadItemLink` (LNK-2, LNK-14). The
+/// owner/repo split before the marker is a malformed repo spec regardless of
+/// the marker, so it stays `InvalidRepoSpec`.
 fn parse_item_link(spec: &str, scheme: &str, host: &str, path: &str) -> Result<Option<Source>> {
     // spec: LNK-1 -- strip a query string / fragment pasted from a browser.
     let path = path.split(['?', '#']).next().unwrap_or(path);
@@ -716,39 +728,214 @@ mod tests {
         assert_eq!(s.pin, Pin::Ref(sha.into()));
     }
 
-    // spec: LNK-2
+    // spec: LNK-2 LNK-14
     #[test]
-    fn link_marker_without_a_valid_tail_is_invalid_repo_spec() {
+    fn link_marker_without_a_valid_tail_is_bad_item_link() {
         // No item path after the ref.
         assert!(matches!(
             parse_spec("https://github.com/o/r/tree/main"),
-            Err(MindError::InvalidRepoSpec { .. })
+            Err(MindError::BadItemLink { .. })
         ));
         // No ref at all.
         assert!(matches!(
             parse_spec("https://github.com/o/r/tree/"),
+            Err(MindError::BadItemLink { .. })
+        ));
+        // The message names the expected shapes and the offending URL.
+        let err = parse_spec("https://github.com/o/r/tree/main").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("tree/<ref>"), "{msg}");
+        assert!(msg.contains("blob/<ref>"), "{msg}");
+        assert!(
+            msg.contains("https://github.com/o/r/tree/main"),
+            "message must include the offending URL: {msg}"
+        );
+    }
+
+    // spec: LNK-2
+    #[test]
+    fn a_plain_non_link_bad_spec_stays_invalid_repo_spec() {
+        // No tree/blob marker at all: this is not an attempted item link, so
+        // it must keep the generic repo-spec message, not BadItemLink.
+        assert!(matches!(
+            parse_spec("https://github.com/"),
             Err(MindError::InvalidRepoSpec { .. })
         ));
     }
 
-    // spec: LNK-10
+    // spec: LNK-10 LNK-14
     #[test]
     fn link_unsafe_path_or_ref_is_rejected_at_parse() {
         // `..` in the item path.
         assert!(matches!(
             parse_spec("https://github.com/o/r/tree/main/../../etc"),
-            Err(MindError::InvalidRepoSpec { .. })
+            Err(MindError::BadItemLink { .. })
         ));
         // A git-range ref value.
         assert!(matches!(
             parse_spec("https://github.com/o/r/tree/a..b/skills/foo"),
-            Err(MindError::InvalidRepoSpec { .. })
+            Err(MindError::BadItemLink { .. })
         ));
         // A leading-dash (option-shaped) ref value.
         assert!(matches!(
             parse_spec("https://github.com/o/r/tree/-evil/skills/foo"),
+            Err(MindError::BadItemLink { .. })
+        ));
+    }
+
+    // spec: LNK-14
+    #[test]
+    fn gitlab_dash_link_bad_tail_is_bad_item_link() {
+        // The GitLab `/-/tree/` and `/-/blob/` spellings must route the same
+        // set of tail failures to BadItemLink as the plain `/tree/`/`/blob/`
+        // forms do.
+        // Missing ref entirely.
+        assert!(matches!(
+            parse_spec("https://gitlab.com/o/r/-/tree/"),
+            Err(MindError::BadItemLink { .. })
+        ));
+        // Ref present, no skill path.
+        assert!(matches!(
+            parse_spec("https://gitlab.com/o/r/-/tree/main"),
+            Err(MindError::BadItemLink { .. })
+        ));
+        // Blob link not ending in /SKILL.md.
+        assert!(matches!(
+            parse_spec("https://gitlab.com/o/r/-/blob/main/skills/foo"),
+            Err(MindError::BadItemLink { .. })
+        ));
+        // Unsafe (`..`) path component.
+        assert!(matches!(
+            parse_spec("https://gitlab.com/o/r/-/tree/main/../etc"),
+            Err(MindError::BadItemLink { .. })
+        ));
+        // The message still names the GitLab URL and the expected shapes.
+        let err = parse_spec("https://gitlab.com/o/r/-/tree/main").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("https://gitlab.com/o/r/-/tree/main"),
+            "message must include the offending URL: {msg}"
+        );
+        assert!(
+            msg.contains("tree/<ref>") && msg.contains("blob/<ref>"),
+            "{msg}"
+        );
+    }
+
+    // spec: LNK-14
+    #[test]
+    fn file_link_bad_tail_is_bad_item_link() {
+        // The local `file://` link form must route the same tail failures to
+        // BadItemLink as a remote forge URL.
+        assert!(matches!(
+            parse_spec("file:///home/me/dev/agents/tree/main"),
+            Err(MindError::BadItemLink { .. })
+        ));
+        assert!(matches!(
+            parse_spec("file:///home/me/dev/agents/tree/"),
+            Err(MindError::BadItemLink { .. })
+        ));
+        assert!(matches!(
+            parse_spec("file:///home/me/dev/agents/blob/main/skills/foo"),
+            Err(MindError::BadItemLink { .. })
+        ));
+        assert!(matches!(
+            parse_spec("file:///home/me/dev/agents/tree/main/../../etc"),
+            Err(MindError::BadItemLink { .. })
+        ));
+        let err = parse_spec("file:///home/me/dev/agents/tree/main").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("file:///home/me/dev/agents/tree/main"),
+            "message must include the offending URL: {msg}"
+        );
+    }
+
+    // spec: LNK-2 LNK-14
+    #[test]
+    fn file_link_bad_tail_with_no_repo_ahead_of_marker_is_still_bad_item_link() {
+        // Ordering finding: for a remote URL, a malformed owner/repo ahead of
+        // the marker is checked BEFORE the tail (LNK-2's "regardless of the
+        // marker" carve-out), so it stays InvalidRepoSpec even when the tail
+        // is also broken (see `github_malformed_owner_repo_wins_over_bad_tail`
+        // below). The local file:// branch parses the tail FIRST (source.rs
+        // parse_spec's local-link block calls parse_link_tail before slicing
+        // owner/repo out of repo_part), so with NO repo path at all ahead of
+        // the marker, a broken tail still reports BadItemLink rather than
+        // falling through to InvalidRepoSpec. This pins the current (order-
+        // dependent) behavior; if the two branches are ever unified this test
+        // should be revisited.
+        assert!(matches!(
+            parse_spec("file:///tree/main"),
+            Err(MindError::BadItemLink { .. })
+        ));
+    }
+
+    // spec: LNK-2
+    #[test]
+    fn github_malformed_owner_repo_wins_over_bad_tail() {
+        // Mirror of the file:// case above for the remote-URL branch: when
+        // BOTH the owner/repo portion ahead of the marker is malformed AND the
+        // tail is broken, LNK-2 says the malformed-owner/repo error wins
+        // (InvalidRepoSpec), not BadItemLink.
+        assert!(matches!(
+            parse_spec("https://github.com/only-one-segment/tree/main"),
             Err(MindError::InvalidRepoSpec { .. })
         ));
+    }
+
+    // spec: LNK-1
+    #[test]
+    fn uppercase_tree_segment_is_not_a_link_marker() {
+        // The marker match is exact-case; an uppercase `/TREE/` segment is not
+        // recognized, so this is not treated as an attempted item link at all.
+        // With the extra path segments present, `owner/repo` parsing then
+        // rejects it as a malformed repo spec (a slash inside what would be
+        // the repo component), keeping the generic message per LNK-14's last
+        // sentence ("no marker at all... keeps reporting InvalidRepoSpec").
+        let err = parse_spec("https://github.com/o/r/TREE/main/skills/foo").unwrap_err();
+        assert!(
+            matches!(err, MindError::InvalidRepoSpec { .. }),
+            "uppercase TREE must not be treated as a link marker: {err:?}"
+        );
+    }
+
+    // spec: LNK-1 LNK-3
+    #[test]
+    fn doubled_slash_after_marker_absorbs_into_the_ref_not_an_error() {
+        // A doubled slash right after the marker (`/tree//skills/foo`) is not
+        // reported as "missing ref": `parse_link_tail` trims ALL leading
+        // slashes off the tail before splitting on `/`, so the doubled slash
+        // collapses and the first non-empty segment (`skills`) is taken as the
+        // ref, leaving `foo` as the item path. This documents the actual
+        // (surprising) parse rather than asserting an error, since the code
+        // structurally cannot distinguish this from a single slash.
+        let s = parse_spec("https://github.com/o/r/tree//skills/foo").unwrap();
+        assert_eq!(s.pin, Pin::FollowBranch("skills".into()));
+        assert_eq!(s.item_path.as_deref(), Some("foo"));
+    }
+
+    // spec: LNK-1 LNK-14
+    #[test]
+    fn query_and_fragment_noise_is_stripped_before_tail_validation_too() {
+        // The query/fragment strip (LNK-1) happens before the tail is
+        // validated, not just on the success path: a bad tail wrapped in
+        // `?plain=1#L10` noise must still be diagnosed as BadItemLink, not
+        // silently swallowed into a differently-shaped (and differently
+        // erroring) spec.
+        assert!(matches!(
+            parse_spec("https://github.com/o/r/tree/main?plain=1#L10"),
+            Err(MindError::BadItemLink { .. })
+        ));
+        let err = parse_spec("https://github.com/o/r/blob/main/skills/foo?plain=1").unwrap_err();
+        assert!(matches!(err, MindError::BadItemLink { .. }));
+        // The reported url echoes the caller's original spec verbatim
+        // (including the query string): only the internal marker/tail search
+        // strips it, not the message.
+        assert!(
+            err.to_string().contains("?plain=1"),
+            "the reported url is the original spec verbatim: {err}"
+        );
     }
 
     // spec: LNK-1 LNK-4

@@ -1,7 +1,7 @@
 //! `mind hooks run` and `mind hooks list` -- on-demand hook execution and
 //! inspection, outside the meld/learn/forget/upgrade flows.
 //!
-//! spec: HOOK-100..104, CLI-194..196
+//! spec: HOOK-100..105, CLI-194..196
 
 use crate::catalog::CatalogItem;
 use crate::cli::HookEventArg;
@@ -20,7 +20,7 @@ use crate::source::{Pin, RecordedHook, Registry, Source};
 ///
 /// Reuses the same disclosure + consent + run machinery as the automatic flows,
 /// so it is neither more nor less guarded (HOOK-100).
-// spec: HOOK-100 HOOK-101 HOOK-102 HOOK-103 CLI-194 CLI-195
+// spec: HOOK-100 HOOK-101 HOOK-102 HOOK-103 CLI-194 CLI-195 HOOK-105
 pub fn run(
     paths: &Paths,
     target: &str,
@@ -29,7 +29,7 @@ pub fn run(
     dangerously_skip_install: bool,
     dangerously_skip_build: bool,
 ) -> Result<()> {
-    match parse_hook_target(target)? {
+    match resolve_hook_target(paths, target)? {
         HookTarget::Source(selector) => {
             // spec: HOOK-103 CLI-195 - --event build is invalid for a source target.
             if event == HookEventArg::Build {
@@ -52,12 +52,35 @@ pub fn run(
 /// For a source target, lists the source's hooks (with pending/last-ran info
 /// for install hooks) and the hooks of its installed items. For an item ref,
 /// lists only that item's hooks.
-// spec: HOOK-104 CLI-196
+// spec: HOOK-104 CLI-196 HOOK-105
 pub fn list(paths: &Paths, target: &str) -> Result<()> {
-    match parse_hook_target(target)? {
+    match resolve_hook_target(paths, target)? {
         HookTarget::Source(selector) => list_source_hooks(paths, &selector),
         HookTarget::Item(item_ref) => list_item_hooks(paths, &item_ref),
     }
+}
+
+/// Resolve a `hooks run`/`hooks list` target string, preferring an exact match
+/// against a registered source identity over [`parse_hook_target`]'s `#`-split
+/// heuristic (C11).
+///
+/// An item-link instance's own source identity carries a `#<path>` suffix
+/// (LNK-4), so the exact identity string contains `#` and would otherwise
+/// parse as an item ref that matches nothing (`NotInstalled`), leaving the
+/// instance's source-level hooks unreachable by name. When `target` (trimmed)
+/// equals some registered source's `name` exactly, it is read as a source
+/// target regardless of the `#` it carries. Any other string -- including a
+/// plain `source#item` that does not name a registered source, and the
+/// triple-`#` `<link-identity>#<item>` form for an item inside a link
+/// instance -- falls back to [`parse_hook_target`] unchanged.
+// spec: HOOK-105
+fn resolve_hook_target(paths: &Paths, target: &str) -> Result<HookTarget> {
+    let trimmed = target.trim();
+    let registry = Registry::load(paths)?;
+    if registry.sources.iter().any(|s| s.name == trimmed) {
+        return Ok(HookTarget::Source(trimmed.to_string()));
+    }
+    parse_hook_target(target)
 }
 
 // ---------------------------------------------------------------------------

@@ -36,7 +36,7 @@ and verified.
 | Namespace separator is `:` (reserved kind words rejected; ref parser disambiguates; old `-` installs rename on upgrade) | done | NS-25, NS-26, NS-27 |
 | `meld`/`review` `--namespace`/`-n` flag (renames `--as`, still a hidden alias) | done | CLI-159 |
 | Namespace mutable only until items install; changing it after requires forget-first (in-place change renames identity + relocates clone) | done | NS-30, CLI-161 |
-| Identity alias (pre-clone `--as`/curated-`as`/marketplace-entry) is part of source identity: melds a distinct `host/owner/repo@<alias>` instance (composes with item-link `#<path>`), coexisting with the bare repo and other aliases at independent pins/clones; a post-clone display prefix (accepted `[source].prefix`/collision) is not identity | done | STO-58, STO-59 |
+| Identity alias (pre-clone `--as`/curated-`as`/marketplace-entry) is part of source identity: melds a distinct `host/owner/repo@<alias>` instance (composes with item-link `#<path>`), coexisting with the bare repo and other aliases at independent pins/clones; a post-clone display prefix (accepted `[source].prefix`/collision) is not identity; forking a new instance prints an explicit note | done | STO-58, STO-59, STO-60 |
 | Agents not namespaced: an agent links under its bare frontmatter `name` (the harness keys agents by frontmatter, not filename); same-named agents across sources are a detected collision | done | NS-40, NS-41, NS-42 |
 | TUI: show + edit a source's install namespace in the details dialog (editable until items installed) | done | TUI-53 |
 | Transactional install, upgrade, rename, uninstall, drift | done | [lifecycle.md](lifecycle.md) |
@@ -59,7 +59,7 @@ and verified.
 | Shell completions + man page | done | CLI-120, CLI-121 |
 | Scan roots: `[source].roots` + `meld --root` (monorepo/subtree sources) | done | DSC-50, DSC-51, DSC-52, DSC-53, STO-17, CLI-16 |
 | Flat skill layout: `[source].flat-skills` + `meld --flat-skills` + per-entry `[[discover.sources]]` flag (skill dirs at a root, no `skills/` container); `dump` propagates it | done | DSC-74, DSC-75, DSC-76, DSC-77, STO-44, CLI-158, DUMP-10 |
-| Version pinning: single `--pin` (`HEAD`/ref freeze, `branch=`/`tag=` follow) + deprecated `--follow-branch`/`--pin-tag`/`--pin-ref` aliases + `[source]` directive | done | DSC-41, STO-18, CLI-17, CLI-18, CLI-200, CLI-201, CLI-202, CLI-55 |
+| Version pinning: single `--pin` (`HEAD`/ref freeze, `branch=`/`tag=` follow) + deprecated `--follow-branch`/`--pin-tag`/`--pin-ref` aliases + `[source]` directive + `learn <url> --pin` note when already melded | done | DSC-41, STO-18, CLI-17, CLI-18, CLI-200, CLI-201, CLI-202, CLI-203, CLI-55 |
 | `review` verb: author-side source validation | done | CLI-130, CLI-131, CLI-132, CLI-133 |
 | `review` flags path tokens + hardcoded paths + bare tool refs + misplaced `{{ns:}}`; `--fix` rewrites | done | CLI-135, CLI-136, CLI-137, CLI-138, CLI-139, CLI-145, NS-24 |
 | `review`/`init-source` flag helper scripts duplicated across items (`duplicate-tooling`) | done | CLI-144, INIT-7 |
@@ -130,7 +130,7 @@ and verified.
 | Managed-policy permission warning: warn when the system policy file or its parent dir is group/world-writable or not root-owned; skipped for `$MIND_POLICY_FILE` | done | POL-64, POL-65 |
 | Managed-policy pin skew warning: when running binary is above the policy pin, print a human-only warning that the pin is an upper bound and does not downgrade; `--json` outcome is the machine hook | done | POL-66 |
 | `evolve`/install.sh network fetch timeouts (`MIND_HTTP_TIMEOUT_SECS`) | done | STO-52 |
-| `evolve` GitHub API auth: send `GITHUB_TOKEN`/`GH_TOKEN` as a bearer header on `api.github.com` to escape the unauthenticated per-IP 403 rate limit | done | STO-57 |
+| `evolve` GitHub API auth: send `GITHUB_TOKEN`/`GH_TOKEN` as a bearer header on `api.github.com` to escape the unauthenticated per-IP 403 rate limit; curl gets the header via a 0600 `--config` file, not argv | done | STO-57, STO-61 |
 | Actionable git-failure hints: auth (SSH/config/helper), proxy (407); clone errors lead with stderr, detail behind `--verbose`; `learn` typo points at `probe` | done | CLI-177, CLI-178, CLI-179, CLI-180 |
 | `--json` error envelope on stdout (`{"schema":1,"error":{"kind","message"}}`); stable per-variant `kind`; clap usage errors stay text | done | CLI-181, CLI-182, CLI-183 |
 | `-n` reserved for `--dry-run`; `-N` short for `--namespace`; `probe --no-tui` long-only | done | CLI-163, CLI-164, TUI-54 |
@@ -148,9 +148,9 @@ and verified.
 | `compare_url` suppressed for gitlab/bitbucket hosts (GitHub-shaped link was wrong for those forges) | done | CLI-188 |
 | `introspect --json` includes `"schema": 1`; shape is `{"schema":1,"issues":[...],"sources":N,"items":N}` | done | CLI-189 |
 | Hook consent disclosure adds a commit-pinned version-control browse URL alongside the labeled on-disk clone path | done | HOOK-24 |
-| `mind hooks run` / `hooks list`: run or inspect a source's and items' hooks on demand (rerun skipped/failed/lost hooks) | done | [install-hooks.md](install-hooks.md) (HOOK-100..104), CLI-194, CLI-195, CLI-196 |
-| `meld --add-root`: compose extra convention roots with a manifest or authoritative source (install items a `marketplace.json` does not list) | done | DSC-84, DSC-85, DSC-86, MKT-17, STO-55, CLI-197 |
-| Item links: `learn`/`meld` a deep `tree`/`blob` skill URL as a single-item source instance (`host/owner/repo#path` identity, duplicates coexist) | done | [item-link.md](item-link.md) (LNK-1..12) |
+| `mind hooks run` / `hooks list`: run or inspect a source's and items' hooks on demand (rerun skipped/failed/lost hooks); a target matching a registered source identity resolves as a source even when it contains `#` | done | [install-hooks.md](install-hooks.md) (HOOK-100..105), CLI-194, CLI-195, CLI-196 |
+| `meld --add-root`: compose extra convention roots with a manifest or authoritative source (install items a `marketplace.json` does not list); `dump` round-trips the recorded add-roots | done | DSC-84, DSC-85, DSC-86, DSC-87, MKT-17, STO-55, CLI-197, DUMP-11 |
+| Item links: `learn`/`meld` a deep `tree`/`blob` skill URL as a single-item source instance (`host/owner/repo#path` identity, duplicates coexist); a malformed link tail reports the expected URL shapes | done | [item-link.md](item-link.md) (LNK-1..12, LNK-14, LNK-15) |
 | Item links in `dump`: emit a link instance as a reconstructed deep-URL source entry | planned | LNK-13 |
 
 ## Documents
