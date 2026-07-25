@@ -8,11 +8,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- Policy allowlist matching now strips a `#<path>` (item-link) or `@<prefix>`
-  (alias) identity suffix before comparing against `allow` patterns, so an
-  instance admitted at meld time is no longer skipped by `sync`, `upgrade`, and
-  install-hook gating under a locked allowlist. Previously no writable `allow`
-  pattern could admit it after meld (POL-67).
+- Policy allowlist matching now compares the base `host/owner/repo` identity at
+  every gate, so an instance admitted at meld time is no longer skipped by
+  `sync`, `upgrade`, and install-hook gating under a locked allowlist.
+  Previously no writable `allow` pattern could admit an item-link (`#<path>`) or
+  alias (`@<prefix>`) instance after meld (POL-67).
+- A source whose `owner` or `repo` legitimately contains `@` or `#`, such as a
+  local path under `proj@v2/`, is no longer refused by a locked allowlist entry
+  that matches it verbatim (POL-68).
+- `mind evolve` no longer fails outright when the curl config file holding the
+  GitHub token cannot be written; it proceeds unauthenticated (STO-62).
 - `mind hooks run` / `hooks list` now resolve a target that exactly matches a
   registered source identity as that source, even when the identity contains
   `#` (an item-link instance's own identity), instead of parsing it as an item
@@ -30,8 +35,52 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   scan passes now de-duplicate instead of erroring `DuplicateItem`; the error
   remains for a genuine same-name collision at distinct paths (DSC-87).
 
+### Added
+
+- `SECURITY.md` (reporting channel, trust model), `CONTRIBUTING.md`,
+  `CODE_OF_CONDUCT.md`, issue and pull-request templates, and a `dependabot.yml`
+  covering both `cargo` and `github-actions`.
+- Linux release artifacts for `x86_64-unknown-linux-musl` and
+  `aarch64-unknown-linux-musl`. `install.sh` and `evolve` now prefer the musl
+  build, which starts on distributions older than the build runner's glibc; the
+  gnu artifacts remain for the Homebrew formula.
+- Build provenance attestation on release artifacts, soft-verified by
+  `install.sh` when `gh` is available.
+- CI jobs for the declared MSRV and for RustSec advisories.
+
 ### Changed
 
+- A top-level `meld` that discovers zero items now says what it scanned and how
+  to reach items elsewhere in the repo, naming the convention paths and
+  `--root`/`--add-root`/`--flat-skills`, instead of reporting success with
+  `(0 item(s))` (CLI-205).
+- A re-meld now notes which of `--root`, `--add-root`, `--flat-skills`, `--pin`,
+  and `--install-hook` it ignored and what to do instead. Those flags apply only
+  at the meld that first registers a source, and were previously dropped
+  silently (CLI-206).
+- Bare `mind` prints help on stdout and exits 0, instead of a clap usage error
+  on stderr with exit 2 (CLI-207).
+- `learn <name>` hints at `mind learn --all <name>` when the query names a
+  melded source rather than an item (CLI-208).
+- The fork note names the pre-existing instances by their registered
+  identities. It previously named the bare `host/owner/repo`, which is not
+  necessarily a registered source and so was not a handle `unmeld` accepts
+  (STO-63).
+- `hooks run`/`hooks list` error on a target that matches both a registered
+  source identity and an installed item, naming both disambiguated forms, rather
+  than silently resolving to the source. `source:<target>` forces the source
+  reading and `<source>#<kind>:<name>` forces the item reading (HOOK-105).
+- A git auth failure now leads with the possibility that the repo does not
+  exist, is private, or is misspelled, before the SSH and credential-helper
+  remedies. GitHub answers an unauthenticated request for a missing repo with a
+  credential prompt, so a typo'd repo was reported purely as an auth problem.
+- `SourceNotFound` and `UnknownLobe` name the command that lists the valid
+  values, matching `ItemNotFound`.
+- `install.sh` reports an explicit error when the install directory is not
+  writable, instead of exiting silently with no binary, and matches the
+  checksum line exactly rather than by an unanchored pattern.
+- `spec/` is included in the published crate, so `cargo test` works against an
+  unpacked `.crate`; `.claude` is excluded.
 - `meld` prints an explicit note when a differing `--namespace` forks a new
   coexisting instance of an already-melded repo (STO-60). `learn <url> --pin`
   on an already-melded link prints a note that the pin was ignored instead of
@@ -39,6 +88,25 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Security
 
+- A repo spec is now refused when the `host`, `owner`, or `repo` it parses to is
+  not a single safe path component (empty, `.`/`..`, containing `/` or a control
+  character; `host` also rejects `@` and `#`). Those parts are joined into both
+  the source identity and the clone path, and the SSH form splits only on the
+  first `:`, so `git@../../elsewhere:owner/repo` resolved the clone path outside
+  the sources tree, which `meld` deletes before cloning. A melded repo could
+  reach this through a nested `[[discover.sources]]` entry, with no per-entry
+  consent, and again on every `sync` (CLI-204).
+- Managed-policy allowlist matching derives the base identity structurally from
+  the source's own fields rather than by scanning the identity for the first
+  `#`/`@`. `owner` and `repo` may legitimately contain those characters, so a
+  string scan admitted a repo named `blessed@evil` under a locked allowlist
+  naming `blessed` (POL-68).
+- `evolve` refuses a `GITHUB_TOKEN`/`GH_TOKEN` containing characters that would
+  inject directives into the generated curl config file (STO-62).
+- The TUI's stdout capture file is created exclusively in a 0700 temp directory
+  with mode 0600, instead of being created and truncated at a predictable path
+  in the shared temp dir, where a pre-planted symlink redirected the write
+  (TUI-61).
 - `evolve` now passes the `GITHUB_TOKEN`/`GH_TOKEN` bearer header to curl via
   a private 0600 config file instead of the command line, so it is no longer
   visible in the process table. The `wget` fallback still passes it on the
@@ -50,8 +118,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Enterprise guide: added a `GITHUB_TOKEN`/`GH_TOKEN` visibility note for
   shared hosts, covering the curl-vs-wget token exposure difference (STO-61).
 - Policy reference: documented that allow/lock matching runs against the base
-  `host/owner/repo` identity, stripping a `#path` or `@prefix` suffix, so an
-  item-link or aliased instance inherits its repo's allow decision (POL-67).
+  `host/owner/repo` identity, so an item-link or aliased instance inherits its
+  repo's allow decision (POL-67).
 - Commands reference and configuration guide: documented the `@<prefix>` and
   `#<path>` instance selectors for `unmeld`, `upgrade`, and `recall`, and the
   `meld --namespace` fork-a-new-instance behavior (STO-60).
