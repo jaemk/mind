@@ -1039,7 +1039,11 @@ fn learn_url_pin_after_alias_only_meld_registers_coexisting_bare_instance() {
     // reusing or being blocked by the differently-aliased one. This is the
     // normal coexistence model, not a collision, so no CLI-203
     // "already melded" note is printed, and the aliased instance's pin and
-    // items are left untouched.
+    // items are left untouched. LNK-15 also claims the two instances'
+    // LIFECYCLES are independent, not just that they coexist: below, after
+    // both are registered, a `sync` proves pinning one (the bare instance,
+    // frozen via `learn --pin`) does not affect the other's tracking (the
+    // aliased instance, still following `main`).
     let sb = Sandbox::new("alias-coexist-src");
     sb.write_and_commit(
         "skills/review/SKILL.md",
@@ -1100,6 +1104,61 @@ fn learn_url_pin_after_alias_only_meld_registers_coexisting_bare_instance() {
     assert!(
         sb.claude_home.join("skills/review").exists(),
         "the new bare instance's item must be installed"
+    );
+
+    // spec: LNK-15 -- coexistence is only half of LNK-15's claim; the other
+    // half is that the two instances' LIFECYCLES are independent: pinning one
+    // (the bare instance was frozen by `learn --pin`, CLI-200) must not affect
+    // the other's tracking (the aliased instance still follows `main`, having
+    // been melded with no `--pin`). Prove it observably: advance the source's
+    // `main` branch, `sync`, and confirm the frozen bare instance's recorded
+    // commit does NOT move while the still-following aliased instance's does.
+    let sources_json = |sb: &Sandbox| -> serde_json::Value {
+        let r = sb.mind(&["recall", "--sources", "--json"]);
+        assert!(r.success, "recall --sources --json failed: {}", r.stderr);
+        serde_json::from_str(&r.stdout).expect("recall --sources --json must be valid JSON")
+    };
+    let find_commit = |env: &serde_json::Value, name_contains: &str, exclude: &str| -> String {
+        env["items"]
+            .as_array()
+            .expect("items array")
+            .iter()
+            .find(|s| {
+                let n = s["name"].as_str().unwrap_or("");
+                n.contains(name_contains) && (exclude.is_empty() || !n.contains(exclude))
+            })
+            .unwrap_or_else(|| panic!("no source with name containing {name_contains:?}"))["commit"]
+            .as_str()
+            .expect("commit must be a string")
+            .to_string()
+    };
+
+    let before = sources_json(&sb);
+    let bare_commit_before = find_commit(&before, "#skills/review", "@myalias");
+    let aliased_commit_before = find_commit(&before, "#skills/review@myalias", "");
+
+    // Advance the source repo past both instances' registration point.
+    sb.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\nname: review\ndescription: Review skill v2\n---\n# review\n",
+    );
+
+    let sync = sb.mind(&["sync"]);
+    assert!(sync.success, "sync failed: {} {}", sync.stdout, sync.stderr);
+
+    let after = sources_json(&sb);
+    let bare_commit_after = find_commit(&after, "#skills/review", "@myalias");
+    let aliased_commit_after = find_commit(&after, "#skills/review@myalias", "");
+
+    assert_eq!(
+        bare_commit_before, bare_commit_after,
+        "the frozen (--pin) bare instance's commit must not move on sync, \
+         regardless of the aliased instance's own sync"
+    );
+    assert_ne!(
+        aliased_commit_before, aliased_commit_after,
+        "the unpinned aliased instance must still advance to the new commit \
+         on sync, unaffected by the other instance's pin"
     );
 }
 

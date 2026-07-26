@@ -132,6 +132,16 @@ normatively. Source identity is `host/owner/repo` (see storage.md).
   verbatim, which no base pattern admits -- when no registered source has that
   name. `Policy::allow_matches` itself is a verbatim matcher that performs no
   truncation or normalization of its argument.
+- `POL-69` `upgrade`'s disposition check (POL-67/POL-68) reports a locked-policy
+  refusal for an installed item whose recorded source name matches NO
+  registered source as its own outcome, distinct from a registered-but-refused
+  source: the skip line says the source is not registered (not currently
+  melded) and points at `mind introspect`, rather than the
+  `SourceNotAllowed`-style "not permitted by the managed policy's allowlist"
+  wording, which would misattribute the cause. The item is still not upgraded
+  either way (POL-68's fail-closed behavior is unchanged): only the reported
+  reason differs, so the operator is not sent looking at the allowlist for a
+  source that was simply unmelded.
 
 ## Require pinned
 

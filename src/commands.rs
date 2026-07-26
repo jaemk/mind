@@ -213,6 +213,23 @@ fn parse_pin_value(value: String) -> Result<PinRequest> {
     Ok(PinRequest::Freeze(Some(value)))
 }
 
+/// Resolve a consumer `--pin` request against the lower-precedence base point
+/// (CLI-17, CLI-200..202): what a bare `--pin HEAD` freezes. `meld_recursive`
+/// passes the curator/link/directive-resolved base (Step 2); `repin_source`
+/// (CLI-209) passes the source's currently recorded pin, so a re-meld's
+/// `--pin HEAD` freezes whatever the source is pinned/following today.
+/// `checkout_pin` is what gets checked out; `freeze` is whether the resolved
+/// commit is then persisted as an immutable `ref` pin instead of `checkout_pin`
+/// itself.
+fn resolve_checkout_pin(consumer_pin: PinRequest, base_pin: Pin) -> (Pin, bool) {
+    match consumer_pin {
+        PinRequest::None => (base_pin, false),
+        PinRequest::Follow(p) => (p, false),
+        PinRequest::Freeze(Some(r)) => (Pin::Ref(r), true),
+        PinRequest::Freeze(None) => (base_pin, true),
+    }
+}
+
 /// A short human description of a `Pin` for the hook disclosure (HOOK-20).
 /// Shared by `meld_recursive` and `upgrade` so both render the pin the same way.
 fn pin_description(pin: &Pin) -> String {
@@ -581,11 +598,24 @@ fn meld_recursive(
     // The curator pin is always extracted (DSC-65: authoritative, not gated).
     let curated_pin = curated.pin.clone();
     if !apply_curated && curated.has_gated_values() {
-        // spec: DSC-60/DSC-88 — warn only when gated fields (roots/add-roots/
-        // flat-skills/hooks) are present and suppressed. A pin-only entry must
-        // NOT trigger this warning.
+        // spec: DSC-60/DSC-88 — warn only when gated fields (roots/
+        // add-roots/flat-skills/hooks) are present and suppressed. A pin-only
+        // entry must NOT trigger this warning. `add-roots` specifically has a
+        // consumer-side escape (`meld --add-root`, DSC-84) that is NOT gated,
+        // so a curator's suppressed `add-roots` need not silently install
+        // fewer items than before: point the consumer at applying it
+        // themselves.
+        let add_root_hint = if curated.add_roots.is_some() {
+            format!(
+                "; to apply add-roots yourself, run `mind meld {} --add-root <dir>` \
+                 (that flag is not gated by a nested mind.toml)",
+                source.name
+            )
+        } else {
+            String::new()
+        };
         eprintln!(
-            "warning: {} ships its own mind.toml; curator-supplied roots/add-roots/flat-skills/hooks are ignored",
+            "warning: {} ships its own mind.toml; curator-supplied roots/add-roots/flat-skills/hooks are ignored{add_root_hint}",
             source.name
         );
     }
@@ -617,12 +647,7 @@ fn meld_recursive(
     //   - `--pin HEAD` freezes the base the lower layers chose;
     //   - `--pin <ref>` names its own point (branch, tag, or sha), checked out via
     //     the ref path (`git checkout <ref>` accepts all three) and frozen.
-    let (checkout_pin, freeze) = match consumer_pin {
-        PinRequest::None => (base_pin, false),
-        PinRequest::Follow(p) => (p, false),
-        PinRequest::Freeze(Some(r)) => (Pin::Ref(r), true),
-        PinRequest::Freeze(None) => (base_pin, true),
-    };
+    let (checkout_pin, freeze) = resolve_checkout_pin(consumer_pin, base_pin);
 
     // spec: POL-20 -- pinned check stays post-clone because it needs the effective
     // pin, which may come from the source's mind.toml. Evaluated on the FINAL
@@ -3208,12 +3233,18 @@ pub fn is_melded(paths: &Paths, repo: &str, alias: Option<&str>) -> Result<bool>
 /// `--link-only`) prints a status of the source's items and the commit each is
 /// installed at.
 ///
-/// `ignored_flags` names the discovery/pin CLI flags the caller passed on this
-/// invocation (`--root`, `--add-root`, `--flat-skills`, `--pin`,
-/// `--install-hook`) that a re-meld does not apply (CLI-206): a re-meld never
-/// re-clones or re-registers, so none of them can take effect. When non-empty,
-/// a one-line note lists them so they are not silently dropped.
-// spec: CLI-12, CLI-206
+/// `pin` is the caller's `--pin` request (`PinRequest::None` if the flag was
+/// not given): unlike the other discovery flags, a re-meld DOES honor it
+/// (CLI-209) by re-pinning the source before the hook-rerun/install passes
+/// below, so they act on the possibly-new commit.
+///
+/// `ignored_flags` names the discovery CLI flags the caller passed on this
+/// invocation (`--root`, `--add-root`, `--flat-skills`, `--install-hook`) that
+/// a re-meld does not apply (CLI-206): they change what gets discovered, which
+/// only happens at the meld that first registers a source. When non-empty, a
+/// one-line note lists them so they are not silently dropped.
+// spec: CLI-12, CLI-206, CLI-209
+#[allow(clippy::too_many_arguments)]
 pub fn remeld(
     paths: &Paths,
     repo: &str,
@@ -3222,6 +3253,7 @@ pub fn remeld(
     flow: InstallFlow,
     recursive: bool,
     ignored_flags: &[&str],
+    pin: PinRequest,
 ) -> Result<()> {
     // `yes` rides inside `flow` for the install calls; remeld itself only needs
     // the clobber (hook force-rerun) and the dangerously-skip flag.
@@ -3238,20 +3270,27 @@ pub fn remeld(
     let source_name = instance_name(repo, alias.as_deref())?;
     if !out.json {
         println!("{} {source_name} is already melded", out.bullet());
-        // spec: CLI-206 -- a re-meld does not re-clone or re-register, so any
-        // discovery/pin flag on this invocation is a silent no-op without this
+        // spec: CLI-206 -- a re-meld does not re-clone or re-register, so a
+        // discovery flag on this invocation is a silent no-op without this
         // note (mirrors the CLI-203 note pattern for `learn <url> --pin`).
         if !ignored_flags.is_empty() {
             let flags = ignored_flags.join(", ");
             let plural = ignored_flags.len() != 1;
             println!(
                 "note: {flags} ignored; {source_name} is already melded (re-melding \
-                 does not change a source's discovery/pin configuration). To apply \
+                 does not change a source's discovery configuration). To apply \
                  {}, run `mind unmeld {source_name}` then `mind meld` again with {}.",
                 if plural { "them" } else { "it" },
                 if plural { "the flags" } else { "the flag" }
             );
         }
+    }
+
+    // spec: CLI-209 -- honor `--pin` on a re-meld by re-pinning the source,
+    // before the hook-rerun/install passes below so they see the (possibly
+    // new) commit.
+    if pin != PinRequest::None {
+        repin_source(paths, &source_name, pin)?;
     }
 
     // HOOK-60: re-offer the source's install hooks that have not run at the
@@ -3313,6 +3352,147 @@ pub fn remeld(
         return print_json(&MutationResult::new("meld", &source_name, "already-melded"));
     }
     source_status(paths, &source_name)
+}
+
+/// Re-pin an already-registered source (CLI-209): resolve the caller's
+/// `--pin` request against the source's currently recorded pin (the base
+/// point a bare `--pin HEAD` freezes, via `resolve_checkout_pin` -- the same
+/// resolution `meld_recursive` performs at a first meld), re-check-out the
+/// existing clone at the resolved point (or, for a source that is still
+/// linked -- local and never pinned -- clone a fresh snapshot into the
+/// sources tree, mirroring `meld_recursive`'s Step 3/4, so the live working
+/// tree is never touched), and record the resolved pin and commit.
+///
+/// Transactional in the same spirit as `meld_recursive` (CLI-18): every git
+/// operation runs BEFORE any field on the registered `Source` is mutated or
+/// the registry is saved, so a resolution/clone failure (a bad ref, a network
+/// error) leaves the source's pin, commit, and clone dir exactly as they
+/// were. The POL-11/POL-20 allowlist and require-pinned gates are
+/// re-evaluated here exactly as they are at a first meld, so a source whose
+/// identity fell out of policy since it was melded cannot be silently
+/// re-pinned around the gate.
+fn repin_source(paths: &Paths, source_name: &str, pin: PinRequest) -> Result<()> {
+    let out = crate::render::ctx();
+    // spec: POL-3 -- load once; Err = invalid policy (fail closed via `?`),
+    // None = unmanaged, inert.
+    let policy = Policy::load()?;
+    let mut registry = Registry::load(paths)?;
+    let Some(source) = registry.find(source_name) else {
+        // The caller only invokes this after confirming the source is
+        // registered (`is_melded`); nothing to do if it vanished underneath.
+        return Ok(());
+    };
+
+    // spec: CLI-209/POL-11 -- the allowlist gate applies to a re-pin exactly
+    // as it does at a first meld (meld_recursive's POL-36 check).
+    if let Some(policy) = policy.as_ref() {
+        let identity = source.base_identity();
+        let allowed = policy.allow_matches(&identity);
+        if policy.lock() && !allowed {
+            if let Some(path) = effective_policy_path() {
+                // spec: POL-37
+                eprintln!("hint: managed policy at {path}");
+            }
+            return Err(MindError::SourceNotAllowed { identity });
+        }
+        if !policy.lock() && !allowed {
+            // POL-13: with lock off, allow is advisory; warn but proceed.
+            eprintln!(
+                "warning: source '{identity}' is not in the managed policy's allowlist (advisory; not enforced because [sources].lock is false)"
+            );
+        }
+    }
+
+    let old_pin = source.pin.clone();
+    let old_commit = source.commit.clone();
+    let url = source.url.clone();
+    let is_local = source.is_local();
+
+    let (checkout_pin, freeze) = resolve_checkout_pin(pin, old_pin.clone());
+
+    // spec: CLI-209/POL-20 -- the require-pinned gate applies identically to a
+    // re-pin: a floating point (default/follow-branch) is forbidden unless the
+    // request freezes it.
+    let persisted_unpinned =
+        !freeze && matches!(checkout_pin, Pin::DefaultBranch | Pin::FollowBranch(_));
+    if let Some(policy) = policy.as_ref()
+        && policy.pinned()
+        && persisted_unpinned
+    {
+        return Err(MindError::UnpinnedSourceForbidden {
+            identity: source_name.to_string(),
+        });
+    }
+
+    // The target clone dir for a PINNED instance of this source. Stable
+    // regardless of which specific pin is in effect (the sources-tree leaf
+    // depends only on the identity alias, STO-59), so it can be computed
+    // before the checkout runs. Force `is_linked() == false` on the probe so
+    // a currently-linked local source's target resolves to the sources-tree
+    // clone path, not its live working tree (mirrors meld_recursive Step 3);
+    // a first-time local pin therefore clones a NEW directory rather than
+    // touching the working tree the (still-linked) `url` points at.
+    let mut probe = source.clone();
+    if is_local {
+        probe.pin = Pin::Ref(String::new());
+    }
+    let target = probe.clone_dir(paths);
+
+    // Resolve/check out at the new point WITHOUT mutating the registered
+    // `Source` yet (CLI-18): a failure here leaves `pin`/`commit`/the clone
+    // exactly as they were.
+    if target.join(".git").is_dir() {
+        git::sync_to_pin(&url, &target, &checkout_pin)?;
+    } else {
+        // First pin on a linked local source (or a missing clone dir): clone
+        // fresh; the live working tree at `url` is never touched.
+        if target.exists() {
+            std::fs::remove_dir_all(&target).map_err(|e| MindError::io(&target, e))?;
+        }
+        if let Some(parent) = target.parent() {
+            crate::paths::mkdir_p(parent)?;
+        }
+        if let Err(e) = git::clone_at(&url, &target, &checkout_pin) {
+            let _ = std::fs::remove_dir_all(&target);
+            return Err(e);
+        }
+    }
+    let resolved_commit = git::head_commit(&url, &target)?;
+    // spec: CLI-200 -- a freeze always persists the resolved commit as an
+    // immutable ref, same as a first meld's freeze (Step 4).
+    let final_pin = if freeze {
+        Pin::Ref(resolved_commit.clone())
+    } else {
+        checkout_pin
+    };
+    let changed = old_pin != final_pin || old_commit.as_deref() != Some(resolved_commit.as_str());
+
+    // Only now, after the checkout succeeded, persist the result.
+    let Some(source) = registry.sources.iter_mut().find(|s| s.name == source_name) else {
+        return Ok(());
+    };
+    source.pin = final_pin.clone();
+    source.commit = Some(resolved_commit);
+    source.description = MindToml::load(&target)?.and_then(|m| m.source.description);
+    registry.save(paths)?;
+
+    if !out.json {
+        if changed {
+            println!(
+                "{} re-pinned {source_name} {} -> {}",
+                out.ok(),
+                pin_description(&old_pin),
+                pin_description(&final_pin),
+            );
+        } else {
+            println!(
+                "{} {source_name} already pinned to {}",
+                out.bullet(),
+                pin_description(&final_pin),
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Install the items of the registered sources a super-source curates, walking
@@ -5223,6 +5403,21 @@ fn upgrade_inner(
                 }
                 continue;
             }
+            // spec: POL-69 -- the item's recorded source isn't registered at
+            // all (it was unmelded, or never melded under that name); say so
+            // instead of the misleading "not permitted by the allowlist",
+            // and point at `introspect` to diagnose the drift.
+            UpgradeDisposition::SourceNotRegistered => {
+                if !out.json {
+                    println!(
+                        "{} skipping {} from {}: source is not registered (not currently melded); run `mind introspect` to check for drift",
+                        out.warn(),
+                        installed.key(),
+                        installed.source
+                    );
+                }
+                continue;
+            }
             UpgradeDisposition::Consider => {}
         }
         // Match on stable identity (source, kind, bare_name) so a prefix change
@@ -5465,6 +5660,12 @@ enum UpgradeDisposition {
     /// In scope, but its source is barred by the locked policy allowlist
     /// (POL-12): print a skip line.
     PolicyBlocked,
+    /// In scope, under a locked policy, but its recorded source name matches
+    /// no registered source at all (spec: POL-69): print a skip line that
+    /// says so, distinct from `PolicyBlocked`. The item is still not
+    /// upgraded (fail closed, POL-68), but the reason is that the source was
+    /// unmelded, not that it fell outside the allowlist.
+    SourceNotRegistered,
     /// In scope and permitted: consider it for an upgrade.
     Consider,
 }
@@ -5506,9 +5707,18 @@ fn upgrade_item_disposition(
     }
     if let Some(policy) = policy
         && policy.lock()
-        && !policy.allow_matches(&policy_identity(registry, &installed.source))
     {
-        return UpgradeDisposition::PolicyBlocked;
+        // spec: POL-69 -- distinguish "no registered source has this name"
+        // (POL-68's fail-closed fallback: no base pattern can admit the
+        // recorded name verbatim) from "a registered source's base identity
+        // is outside the allowlist". Both still refuse the upgrade, but only
+        // the latter is actually a policy-allowlist decision.
+        if registry.find(&installed.source).is_none() {
+            return UpgradeDisposition::SourceNotRegistered;
+        }
+        if !policy.allow_matches(&policy_identity(registry, &installed.source)) {
+            return UpgradeDisposition::PolicyBlocked;
+        }
     }
     UpgradeDisposition::Consider
 }
@@ -7717,7 +7927,10 @@ mod tests {
         }
 
         // An item whose source is not registered has no structural base
-        // identity to recover, so it is refused rather than guessed at.
+        // identity to recover, so it is refused rather than guessed at. It is
+        // reported as SourceNotRegistered (POL-69), not PolicyBlocked: the
+        // source simply is not melded any more, which is a different fact
+        // than "outside the allowlist".
         assert_eq!(
             upgrade_item_disposition(
                 &item("foo", "github.com/me/allowed-src#skills/foo"),
@@ -7725,8 +7938,54 @@ mod tests {
                 Some(&policy),
                 &Registry::default()
             ),
+            UpgradeDisposition::SourceNotRegistered,
+            "an unregistered instance name fails closed, distinctly from a policy block"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // spec: POL-69
+    // A recorded source name that resolves to NO registered source (e.g. the
+    // source was unmelded after the item was installed) must be reported
+    // distinctly from PolicyBlocked: the fail-closed refusal still applies
+    // (POL-68), but the reason is that the source is not registered, not that
+    // a registered source's identity fell outside the allowlist.
+    #[test]
+    fn upgrade_disposition_distinguishes_unregistered_source_from_policy_block() {
+        let policy_toml = concat!(
+            "[sources]\n",
+            "lock = true\n",
+            "allow = [\"github.com/me/allowed-src\"]\n",
+        );
+        let (_guard, base) = with_policy(policy_toml);
+        let policy = Policy::load().unwrap().expect("policy should load");
+
+        // A registered, but disallowed, source: PolicyBlocked.
+        let registry = registry_of(&["me/allowed-src", "them/blocked-src"]);
+        assert_eq!(
+            upgrade_item_disposition(
+                &item("foo", "github.com/them/blocked-src"),
+                None,
+                Some(&policy),
+                &registry,
+            ),
             UpgradeDisposition::PolicyBlocked,
-            "an unregistered instance name fails closed"
+            "a registered source outside the allowlist is PolicyBlocked"
+        );
+
+        // A source name with NO registered source at all (unmelded, or never
+        // melded under that name): SourceNotRegistered, not PolicyBlocked,
+        // even though both still refuse the upgrade.
+        assert_eq!(
+            upgrade_item_disposition(
+                &item("foo", "github.com/gone/unmelded-src"),
+                None,
+                Some(&policy),
+                &registry,
+            ),
+            UpgradeDisposition::SourceNotRegistered,
+            "an item whose source is not registered must not be reported as PolicyBlocked"
         );
 
         let _ = std::fs::remove_dir_all(&base);

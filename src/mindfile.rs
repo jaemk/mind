@@ -614,33 +614,37 @@ impl MindToml {
     /// the field, when present, must be a dotted purely-numeric version string.
     pub fn load(root: &Path) -> Result<Option<MindToml>> {
         let file = root.join("mind.toml");
-        match std::fs::read_to_string(&file) {
-            Ok(text) => {
-                let parsed: MindToml = toml::from_str(&text).map_err(|e| MindError::Toml {
-                    path: file.clone(),
-                    source: e,
-                })?;
-                // spec: DSC-40 — validate format of min-mind-version at parse time.
-                if let Some(v) = &parsed.source.min_mind_version {
-                    validate_version_string(v, "min-mind-version", &file)?;
-                }
-                // spec: NS-25 — a declared `[source].prefix` that is a reserved
-                // item-kind word is rejected at load, before it can reach the
-                // effective-prefix resolution.
-                if let Some(p) = &parsed.source.prefix {
-                    crate::namespace::validate_prefix(p)?;
-                }
-                // spec: DSC-81 — validate [discover] glob patterns at parse time:
-                // reject absolute patterns and patterns with `..` components before
-                // they can reach `glob_paths` and the filesystem.
-                if let Some(discover) = &parsed.discover {
-                    validate_discover_patterns(discover, &file)?;
-                }
-                Ok(Some(parsed))
+        // spec: DSC-91 -- size-capped read: refuses an oversized mind.toml with
+        // MindError::MetadataTooLarge before allocating the whole file, instead
+        // of the earlier unconditional `std::fs::read_to_string`.
+        let text = match crate::error::read_capped_metadata(&file) {
+            Ok(text) => text,
+            Err(MindError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(None);
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(MindError::io(&file, e)),
+            Err(err) => return Err(err),
+        };
+        let parsed: MindToml = toml::from_str(&text).map_err(|e| MindError::Toml {
+            path: file.clone(),
+            source: e,
+        })?;
+        // spec: DSC-40 — validate format of min-mind-version at parse time.
+        if let Some(v) = &parsed.source.min_mind_version {
+            validate_version_string(v, "min-mind-version", &file)?;
         }
+        // spec: NS-25 — a declared `[source].prefix` that is a reserved
+        // item-kind word is rejected at load, before it can reach the
+        // effective-prefix resolution.
+        if let Some(p) = &parsed.source.prefix {
+            crate::namespace::validate_prefix(p)?;
+        }
+        // spec: DSC-81 — validate [discover] glob patterns at parse time:
+        // reject absolute patterns and patterns with `..` components before
+        // they can reach `glob_paths` and the filesystem.
+        if let Some(discover) = &parsed.discover {
+            validate_discover_patterns(discover, &file)?;
+        }
+        Ok(Some(parsed))
     }
 
     /// Whether this file takes over item discovery (vs. leaving it to
@@ -925,6 +929,63 @@ mod tests {
             .expect("normal prefix must load")
             .expect("file exists");
         assert_eq!(mt.source.prefix.as_deref(), Some("jk"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- DSC-91: capped mind.toml read --------------------------------------
+
+    #[test]
+    fn normal_sized_mind_toml_is_unaffected_by_the_cap() {
+        // spec: DSC-91
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("mind-dsc91-ok-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("mind.toml"),
+            "[source]\ndescription = \"a perfectly normal source\"\n",
+        )
+        .unwrap();
+        let mt = MindToml::load(&dir)
+            .expect("normal-sized mind.toml must load fine")
+            .expect("file exists");
+        assert_eq!(
+            mt.source.description.as_deref(),
+            Some("a perfectly normal source")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn oversized_mind_toml_is_refused_naming_the_file() {
+        // spec: DSC-91
+        // A mind.toml at (limit + 1) bytes is refused with MetadataTooLarge
+        // naming the file, instead of being parsed (and failing later with a
+        // confusing Toml parse error) or silently truncated. Built as a sparse
+        // file so the test does not itself allocate the whole oversized buffer.
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("mind-dsc91-big-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let toml_path = dir.join("mind.toml");
+        let file = std::fs::File::create(&toml_path).unwrap();
+        file.set_len(crate::error::METADATA_SIZE_LIMIT + 1).unwrap();
+        drop(file);
+        let err = MindToml::load(&dir).expect_err("oversized mind.toml must be refused");
+        match &err {
+            MindError::MetadataTooLarge { path, .. } => {
+                assert_eq!(path, &toml_path, "error must name the offending file");
+            }
+            other => panic!("expected MetadataTooLarge, got: {other:?}"),
+        }
+        assert!(
+            err.to_string().contains(&toml_path.display().to_string()),
+            "error message must name the file: {err}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

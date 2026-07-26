@@ -544,33 +544,68 @@ field lets the curator opt in to named handling.
   whose name contains a path separator or NUL is rejected at discovery time,
   consistent with how `[[items]]` names are validated (DSC-71).
 
+## Metadata size cap
+
+- `DSC-91` Every read of a source-controlled **metadata** file is size-capped at
+  a fixed ceiling (`METADATA_SIZE_LIMIT` in `src/error.rs`, currently 8 MiB),
+  shared by every metadata reader through one helper
+  (`error::read_capped_metadata`) so the limit and the refusal are defined
+  exactly once. "Metadata" here means the hand-authored files a maintainer
+  edits directly to describe a source or an item, not the item's own content:
+  `mind.toml` (`mindfile::MindToml::load`), an item's frontmatter block read
+  from `SKILL.md`/`TOOL.md`/an agent or rule `.md` file
+  (`frontmatter::description_capped`/`file_field_capped`, used by
+  `catalog::build_item` for every field it derives from an item's meta file:
+  description, `install`/`uninstall`, `bin`/`build`, `requires`), and a Claude
+  plugin manifest (`.claude-plugin/plugin.json` /
+  `.claude-plugin/marketplace.json`, `plugin_manifest::load_plugin_manifest` /
+  `load_marketplace_manifest`).
+
+  The read is refused, with `MindError::MetadataTooLarge` naming the file and
+  the limit, before the file is read in full: the underlying helper reads at
+  most `METADATA_SIZE_LIMIT + 1` bytes via `Read::take`, so an oversized file's
+  cost to `mind` is bounded by the cap rather than by the file's actual size. A
+  file at or below the cap is read and behaves exactly as before; the cap does
+  not otherwise change parsing or validation. An absent file is unaffected (a
+  metadata reader that already treats "file not found" as "absent", e.g. an
+  optional `mind.toml` or an optional `TOOL.md`, keeps that behavior; only the
+  new size-cap failure is a hard error).
+
+  8 MiB is chosen because these are hand-authored text files: the largest
+  `mind.toml`/`SKILL.md` in this repo's own examples is a few KB, and any
+  legitimate metadata file is expected to stay well under 100 KB. 8 MiB sits
+  orders of magnitude above that while still bounding how much memory a single
+  melded source can force `mind` to allocate while scanning or installing it:
+  narrow enough to matter, wide enough that no real-world metadata file is
+  expected to ever approach it.
+
 ## Accepted risks
 
-- `DSC-90` No file read from a melded source tree is size-capped, and TOML
-  nesting depth is not bounded. This covers every read of source-controlled
-  content, not only discovery metadata: `mind.toml`, `SKILL.md`, the agent and
-  rule `.md` files, and a `.claude-plugin/plugin.json` manifest during
-  discovery; every file in an item tree during `{{ns:}}` expansion at install;
-  the unguarded-reference scan; `review`; the TUI preview; and content hashing.
-  A source author could ship a multi-gigabyte `SKILL.md` or a deeply nested
-  `mind.toml` to make `mind` allocate heavily while scanning or installing that
-  source.
+- `DSC-90` Beyond the metadata cap (DSC-91), no other read of source-controlled
+  content is size-capped, and TOML nesting depth is not bounded. This covers
+  every read of an item's own *content* (as opposed to the metadata describing
+  it): every file in an item tree during `{{ns:}}` expansion at install; the
+  unguarded-reference scan; `review`; the TUI preview; and content hashing. A
+  source author could ship a multi-gigabyte file inside a skill's directory, or
+  a deeply nested `mind.toml` table structure, to make `mind` allocate heavily
+  while installing or reviewing that source.
 
   This is a self-inflicted denial of service: the operator chose to meld that
   source, no privilege boundary is crossed, and the exposure is a crash of the
-  current invocation only, not a persistent or remote compromise. Unbounded
-  manifest reads are the norm for this class of tool (`cargo` does not cap
-  `Cargo.toml` or crate-file reads either). The cost of a fixed cap, a false
-  ceiling that could someday reject a legitimately large skill, is judged higher
-  than the benefit at the current adoption scale. The decision is to accept the
+  current invocation only, not a persistent or remote compromise. The cost of a
+  fixed cap on arbitrary item content, a false ceiling that could someday
+  reject a legitimately large file inside a skill, is judged higher than the
+  benefit at the current adoption scale. The decision is to accept the residual
   risk and revisit if melding untrusted third-party sources at scale becomes
   common.
 
-  Normative content: `mind` does not cap these reads. A change that adds a cap
-  is a behavior change and must update this entry. Recorded with an ID, indexed
-  from the feature table, and referenced from `SECURITY.md`, because the prior
-  unlabeled version of this note was missed by a reviewer looking for exactly
-  it.
+  Normative content: `mind` does not cap these reads, and does not bound TOML
+  nesting depth. A change that adds a cap to any of them is a behavior change
+  and must update this entry (and, if it narrows the scope further, split out
+  another `DSC-9x` the way DSC-91 was split out of this one). Recorded with an
+  ID, indexed from the feature table, and referenced from `SECURITY.md`,
+  because the prior unlabeled version of this note was missed by a reviewer
+  looking for exactly it.
 
 ## `[source].namespace`
 

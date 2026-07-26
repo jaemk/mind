@@ -489,6 +489,49 @@ mod tests {
         assert!(!source_matches(full, "bob/agents"));
     }
 
+    // STO-64: `source_matches` treats `@` as an ordinary character in the
+    // suffix it compares (it only splits on `/`), so an `<repo>@<alias>`-style
+    // selector like `unmeld foo@bar` still matches by trailing-suffix, exactly
+    // as any other selector does -- this function's own semantics are
+    // unchanged by the CLI-204/STO-64 tightening. What DID change is at the
+    // identity-construction layer (`source::validate_identity_part`): before
+    // STO-64, `host/owner/foo@bar` could be produced two ways -- a repo
+    // literally named `foo@bar` (unaliased), or repo `foo` melded `--as bar`
+    // -- so the string a selector matches against was not reliably tied to
+    // one meaning. `repo` can no longer contain `@`, so this suffix form is
+    // now producible only via an identity alias, making a selector like
+    // `foo@bar` an unambiguous reference to that aliased instance. Driven
+    // through real `Source` construction (`parse_spec` + `apply_alias`), not
+    // a hand-built string, so the identity is built exactly as production
+    // builds it.
+    // spec: STO-64
+    #[test]
+    fn at_suffixed_selector_matches_only_the_aliased_instance_and_is_unambiguous() {
+        let mut aliased = crate::source::parse_spec("https://forge.example.com/owner/foo")
+            .expect("plain repo must parse");
+        aliased.apply_alias(Some("bar".into()));
+        assert_eq!(aliased.name, "forge.example.com/owner/foo@bar");
+
+        // The selector `foo@bar` (as `unmeld foo@bar` would parse it) matches
+        // the aliased instance's full name by trailing-suffix, same as any
+        // other bare-name selector.
+        assert!(source_matches(&aliased.name, "foo@bar"));
+        // A different alias does not match.
+        let mut other = crate::source::parse_spec("https://forge.example.com/owner/foo").unwrap();
+        other.apply_alias(Some("baz".into()));
+        assert!(!source_matches(&other.name, "foo@bar"));
+
+        // STO-64 pins that no OTHER construction path can produce this same
+        // suffix: a repo literally named `foo@bar` is refused at parse time
+        // (see `source::tests::at_and_hash_are_rejected_in_repo`), so
+        // `foo@bar` can only ever resolve to the identity-aliased instance,
+        // never collide with an unaliased repo of that literal name.
+        assert!(matches!(
+            crate::source::parse_spec("https://forge.example.com/owner/foo@bar"),
+            Err(crate::error::MindError::UnsafeRepoSpec { .. })
+        ));
+    }
+
     // spec: CLI-28, CLI-86
     #[test]
     fn source_glob_matches_full_id_and_suffix_forms() {

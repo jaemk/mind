@@ -99,6 +99,17 @@ same repo, and a plain meld of that repo, coexist as separate sources.
   coexisting instance rather than reusing or being blocked by the
   differently-aliased one. This is not a collision: it is the normal STO-58
   per-instance model applied to links.
+- `LNK-16` A link's `<path>` may not contain `@` or `#`; a link URL whose skill
+  path carries either is a `BadItemLink`. This is STO-64's rule one segment
+  over. A link instance's identity is `host/owner/repo#<path>`, and an identity
+  alias appends `@<alias>` to the whole identity (STO-58), so an unaliased link
+  to `skills/foo@bar` and an `@bar`-aliased link to `skills/foo` would compute
+  the same identity and, per STO-59, the same clone directory; a `#` would put a
+  second marker into an identity that is split on the first one. Refusing both
+  at parse time keeps a link identity decomposable back into the parts it was
+  built from. Note that `#` reaches the path only through the `file://` form: a
+  remote URL is truncated at its first `#` as a pasted browser fragment (LNK-1)
+  before the path is taken, so `.../skills/foo#bar` links to `skills/foo`.
 
 ## Install
 

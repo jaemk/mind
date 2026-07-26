@@ -270,7 +270,7 @@ fn scan_item_link(
         ItemKind::Skill,
         skill_dir,
         &skill_md,
-    ));
+    )?);
     Ok(())
 }
 
@@ -527,7 +527,13 @@ fn scan_add_roots(
         for entry in read_dir_opt(&skills_dir)? {
             let skill_md = entry.join("SKILL.md");
             if entry.is_dir() && skill_md.is_file() {
-                out.push(make_item(source, prefix, ItemKind::Skill, entry, &skill_md));
+                out.push(make_item(
+                    source,
+                    prefix,
+                    ItemKind::Skill,
+                    entry,
+                    &skill_md,
+                )?);
             }
         }
     }
@@ -636,7 +642,7 @@ fn from_decl(
     // authoritative list for the `mind.toml` path; the scalar fields below stay
     // populated for the HOOK-85 disclosure.
     let hooks = decl.resolved_item_hooks(&root.join("mind.toml"))?;
-    Ok(build_item(
+    build_item(
         source,
         prefix,
         kind,
@@ -652,7 +658,7 @@ fn from_decl(
             uninstall: decl.uninstall.clone(),
             hooks: Some(hooks),
         },
-    ))
+    )
 }
 
 /// True when `name` is a single safe path component (DSC-71): non-empty, not `.`
@@ -692,11 +698,14 @@ fn is_safe_link_rel(rel: &str) -> bool {
 /// file frontmatter, but only for a tool (a `TOOL.md`). Other kinds declare
 /// these only via `mind.toml` `[[items]]`, so frontmatter is not consulted.
 /// An empty or whitespace-only value is treated as absent (HOOK-3).
-fn lifecycle_frontmatter(kind: ItemKind, meta: &Path, key: &str) -> Option<String> {
+///
+/// spec: DSC-91 -- the read is size-capped; an oversized meta file surfaces as
+/// `MindError::MetadataTooLarge` rather than being read in full.
+fn lifecycle_frontmatter(kind: ItemKind, meta: &Path, key: &str) -> Result<Option<String>> {
     if kind != ItemKind::Tool {
-        return None;
+        return Ok(None);
     }
-    nonempty(frontmatter::file_field(meta, key))
+    Ok(nonempty(frontmatter::file_field_capped(meta, key)?))
 }
 
 /// Trim a value and treat an empty/whitespace-only string as absent (HOOK-3).
@@ -706,11 +715,21 @@ fn nonempty(v: Option<String>) -> Option<String> {
 
 /// Resolve a tool's `bin`/`build`: an explicit `mind.toml` value wins, else the
 /// `TOOL.md` frontmatter value. Always `None` for a non-tool kind.
-fn tool_field(kind: ItemKind, explicit: Option<String>, meta: &Path, key: &str) -> Option<String> {
+///
+/// spec: DSC-91 -- the frontmatter fallback read is size-capped.
+fn tool_field(
+    kind: ItemKind,
+    explicit: Option<String>,
+    meta: &Path,
+    key: &str,
+) -> Result<Option<String>> {
     if kind != ItemKind::Tool {
-        return None;
+        return Ok(None);
     }
-    explicit.or_else(|| frontmatter::file_field(meta, key))
+    match explicit {
+        Some(v) => Ok(Some(v)),
+        None => frontmatter::file_field_capped(meta, key),
+    }
 }
 
 /// Field overrides from a `[[items]]` declaration. Every field is empty for
@@ -735,6 +754,11 @@ struct ItemOverrides {
 /// The single `CatalogItem` constructor: it applies the override-then-frontmatter
 /// fallback policy once, so convention discovery and `[[items]]` declarations
 /// share one definition of how each field is resolved.
+///
+/// spec: DSC-91 -- every frontmatter read this performs on `meta` is
+/// size-capped; an oversized meta file (`SKILL.md`/`TOOL.md`/agent/rule `.md`)
+/// fails the scan with `MindError::MetadataTooLarge` instead of being read in
+/// full.
 fn build_item(
     source: &Source,
     prefix: &Option<String>,
@@ -743,13 +767,18 @@ fn build_item(
     path: PathBuf,
     meta: &Path,
     ov: ItemOverrides,
-) -> CatalogItem {
+) -> Result<CatalogItem> {
     // HOOK-80: a `mind.toml` install/uninstall is valid on any kind; a tool's
     // TOOL.md may also carry one in frontmatter. An empty value is absent. These
     // scalar fields stay populated for the HOOK-85 disclosure, alongside `hooks`.
-    let install = nonempty(ov.install).or_else(|| lifecycle_frontmatter(kind, meta, "install"));
-    let uninstall =
-        nonempty(ov.uninstall).or_else(|| lifecycle_frontmatter(kind, meta, "uninstall"));
+    let install = match nonempty(ov.install) {
+        Some(v) => Some(v),
+        None => lifecycle_frontmatter(kind, meta, "install")?,
+    };
+    let uninstall = match nonempty(ov.uninstall) {
+        Some(v) => Some(v),
+        None => lifecycle_frontmatter(kind, meta, "uninstall")?,
+    };
     // HOOK-86: the full resolved hook list in execution order. On the `mind.toml`
     // path the caller supplies it via `ItemDecl::resolved_item_hooks` (scalar
     // shorthand folded ahead of the `[[items.hooks]]` array). On the
@@ -775,24 +804,28 @@ fn build_item(
     });
     // DEP-4: read the `requires:` frontmatter scalar and split on whitespace.
     // This is always read from `meta` regardless of kind; absent or empty -> empty Vec.
-    let requires: Vec<String> = frontmatter::file_field(meta, "requires")
+    let requires: Vec<String> = frontmatter::file_field_capped(meta, "requires")?
         .map(|s| s.split_whitespace().map(str::to_owned).collect())
         .unwrap_or_default();
-    CatalogItem {
+    let description = match ov.description {
+        Some(d) => Some(d),
+        None => frontmatter::description_capped(meta)?,
+    };
+    Ok(CatalogItem {
         kind,
         name,
         source: source.name.clone(),
         prefix: prefix.clone(),
         path,
-        description: ov.description.or_else(|| frontmatter::description(meta)),
+        description,
         link_rel: ov.link,
-        bin: tool_field(kind, ov.bin, meta, "bin"),
-        build: tool_field(kind, ov.build, meta, "build"),
+        bin: tool_field(kind, ov.bin, meta, "bin")?,
+        build: tool_field(kind, ov.build, meta, "build")?,
         install,
         uninstall,
         requires,
         hooks,
-    }
+    })
 }
 
 /// Discover items by glob, relative to the repo root. Nested `sources` are
@@ -813,7 +846,7 @@ fn scan_globs(
                 ItemKind::Skill,
                 dir.to_path_buf(),
                 &skill_md,
-            ));
+            )?);
         }
     }
     for (kind, globs) in [
@@ -821,14 +854,14 @@ fn scan_globs(
         (ItemKind::Rule, &discover.rules),
     ] {
         for md in resolve_globs(root, globs, kind)? {
-            out.push(make_item(source, prefix, kind, md.clone(), &md));
+            out.push(make_item(source, prefix, kind, md.clone(), &md)?);
         }
     }
     // Tool globs match the tool directory itself; its `TOOL.md` (if any) is the
     // metadata source.
     for dir in resolve_globs(root, &discover.tools, ItemKind::Tool)? {
         let meta = dir.join("TOOL.md");
-        out.push(make_item(source, prefix, ItemKind::Tool, dir, &meta));
+        out.push(make_item(source, prefix, ItemKind::Tool, dir, &meta)?);
     }
     Ok(())
 }
@@ -871,7 +904,13 @@ fn scan_convention(
     for entry in read_dir_opt(&skills_dir)? {
         let skill_md = entry.join("SKILL.md");
         if entry.is_dir() && skill_md.is_file() {
-            out.push(make_item(source, prefix, ItemKind::Skill, entry, &skill_md));
+            out.push(make_item(
+                source,
+                prefix,
+                ItemKind::Skill,
+                entry,
+                &skill_md,
+            )?);
         }
     }
 
@@ -879,7 +918,7 @@ fn scan_convention(
         let kind_dir = root.join(kind.dir());
         for entry in read_dir_opt(&kind_dir)? {
             if entry.is_file() && entry.extension().is_some_and(|e| e == "md") {
-                out.push(make_item(source, prefix, kind, entry.clone(), &entry));
+                out.push(make_item(source, prefix, kind, entry.clone(), &entry)?);
             }
         }
     }
@@ -891,7 +930,7 @@ fn scan_convention(
     for entry in read_dir_opt(&tools_dir)? {
         if entry.is_dir() {
             let meta = entry.join("TOOL.md");
-            out.push(make_item(source, prefix, ItemKind::Tool, entry, &meta));
+            out.push(make_item(source, prefix, ItemKind::Tool, entry, &meta)?);
         }
     }
     Ok(())
@@ -899,13 +938,16 @@ fn scan_convention(
 
 /// Build a [`CatalogItem`], deriving its bare name from the path and its
 /// description from `meta_file`'s frontmatter, then applying the prefix.
+///
+/// spec: DSC-91 -- bubbles a size-cap failure from `build_item`'s capped
+/// frontmatter reads.
 fn make_item(
     source: &Source,
     prefix: &Option<String>,
     kind: ItemKind,
     path: PathBuf,
     meta: &Path,
-) -> CatalogItem {
+) -> Result<CatalogItem> {
     let bare = match kind {
         // Directory-shaped items take the directory name; file items the stem.
         ItemKind::Skill | ItemKind::Tool => file_name(&path),
@@ -1335,7 +1377,13 @@ fn scan_plugin_components(
     for entry in read_dir_opt(&skills_dir)? {
         let skill_md = entry.join("SKILL.md");
         if entry.is_dir() && skill_md.is_file() {
-            out.push(make_item(source, prefix, ItemKind::Skill, entry, &skill_md));
+            out.push(make_item(
+                source,
+                prefix,
+                ItemKind::Skill,
+                entry,
+                &skill_md,
+            )?);
         }
     }
     // Agents: agents/<name>.md at the plugin root (DSC-11, MKT-3).
@@ -1349,7 +1397,7 @@ fn scan_plugin_components(
                 ItemKind::Agent,
                 entry.clone(),
                 &entry,
-            ));
+            )?);
         }
     }
     Ok(())
@@ -1471,7 +1519,7 @@ fn scan_marketplace_in_repo_plugins(
                         ItemKind::Skill,
                         skill_dir,
                         &skill_md,
-                    ));
+                    )?);
                 }
             }
         } else {
@@ -1486,7 +1534,7 @@ fn scan_marketplace_in_repo_plugins(
                         ItemKind::Skill,
                         entry_path,
                         &skill_md,
-                    ));
+                    )?);
                 }
             }
         }
@@ -1501,7 +1549,7 @@ fn scan_marketplace_in_repo_plugins(
                     ItemKind::Agent,
                     agent_path.clone(),
                     &agent_path,
-                ));
+                )?);
             }
         }
     }

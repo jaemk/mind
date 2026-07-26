@@ -265,9 +265,9 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             // CLI-12: re-melding an already-melded source is not an error; it
             // ensures the items are installed, else reports their status.
             if commands::is_melded(paths, &repo, alias.as_deref())? {
-                // spec: CLI-206 -- name every discovery/pin flag this
-                // invocation carries; remeld() cannot apply any of them (it
-                // never re-clones or re-registers) and reports so explicitly.
+                // spec: CLI-206 -- name every discovery flag this invocation
+                // carries; remeld() cannot apply any of them (it never
+                // re-clones or re-registers) and reports so explicitly.
                 let mut ignored_flags: Vec<&str> = Vec::new();
                 if !roots.is_empty() {
                     ignored_flags.push("--root");
@@ -278,12 +278,12 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
                 if flat_skills {
                     ignored_flags.push("--flat-skills");
                 }
-                if pin != commands::PinRequest::None {
-                    ignored_flags.push("--pin");
-                }
                 if install_hook.is_some() {
                     ignored_flags.push("--install-hook");
                 }
+                // spec: CLI-209 -- unlike the discovery flags above, `--pin`
+                // IS honored on a re-meld: it re-pins the source instead of
+                // being a silent no-op.
                 commands::remeld(
                     paths,
                     &repo,
@@ -292,6 +292,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
                     flow,
                     recursive,
                     &ignored_flags,
+                    pin,
                 )?;
             } else {
                 let meld_sum = commands::meld(

@@ -122,10 +122,11 @@ pub enum Command {
         /// branch (floating; `sync` advances it); `tag=<name>` follows that tag
         /// (re-points on `sync` if it moves). With no `--pin`, the repo's
         /// `[source]` pin directive (else the remote default branch) applies.
-        /// Only takes effect at the meld that registers the source: passing it
-        /// against an already-melded source is ignored (a note lists it and
-        /// points at `unmeld` + `meld` to re-pin, CLI-206).
-        // spec: CLI-200, CLI-201, CLI-206
+        /// Unlike the discovery flags below, this ALSO takes effect against an
+        /// already-melded source: a re-meld with `--pin` re-pins it, re-checking
+        /// out the clone if the resolved commit differs and reporting what
+        /// changed (CLI-209).
+        // spec: CLI-200, CLI-201, CLI-209
         #[arg(long, value_name = "HEAD|REF|branch=NAME|tag=NAME")]
         pin: Option<String>,
 

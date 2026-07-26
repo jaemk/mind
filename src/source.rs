@@ -479,6 +479,16 @@ fn parse_link_tail(spec: &str, marker: &str, rest: &str) -> Result<(Pin, String)
     if !crate::plugin_manifest::is_safe_manifest_path(&item_path) {
         return Err(bad("the skill path is not a safe repo-relative path"));
     }
+    // spec: LNK-16 -- the same collision STO-64 closes for `repo`, one segment
+    // over. A link instance's identity is `host/owner/repo#<item_path>`, and an
+    // identity alias appends `@<alias>` to the whole thing, so an unaliased link
+    // to `skills/foo@bar` and an `@bar`-aliased link to `skills/foo` would
+    // compute the same identity. `#` would likewise produce a second marker.
+    if item_path.contains(['@', '#']) {
+        return Err(bad(
+            "the skill path may not contain '@' or '#'; they are identity markers",
+        ));
+    }
     if crate::git::validate_ref_value(r).is_err() {
         return Err(bad("the ref is not a valid git ref"));
     }
@@ -531,7 +541,7 @@ fn split_owner_repo(path: &str) -> Option<(String, String)> {
 }
 
 /// Reject a `host`, `owner`, or `repo` part that is not a single safe path
-/// component (spec: CLI-204).
+/// component (spec: CLI-204, STO-64).
 ///
 /// These three parts are load-bearing twice over: they are joined with `/` to
 /// form the source identity (STO-13), which managed policy matches segment by
@@ -544,16 +554,24 @@ fn split_owner_repo(path: &str) -> Option<(String, String)> {
 /// on the first `:`, so without this check `git@evil/host@x:o/r` parses with a
 /// `host` of `evil/host@x`.
 ///
-/// `@` and `#` are deliberately allowed in `owner`/`repo`: a local path may
-/// legitimately contain them (`/src/proj@v2/agents`), and they are safe because
-/// allowlist matching is structural rather than a string scan for those markers
-/// (POL-67). They are rejected in `host`, where they cannot legitimately occur
-/// and where `@` is what makes the ssh form ambiguous.
+/// `@`/`#` legality is per-part, not a blanket rule (STO-64):
+/// - `host`: both rejected. Neither can legitimately occur in a real forge
+///   host, and `@` is what makes the ssh form ambiguous.
+/// - `owner`: `#` rejected, `@` allowed. A local path may legitimately carry
+///   `@` (`/src/proj@v2/agents`), and it collides with nothing: the `@<alias>`
+///   identity suffix (STO-58) only ever appends to `repo`. `#` would land
+///   before the repo segment and confuse `#`-splitting in item refs
+///   (`resolve.rs::parse_item_ref`) and hook targets (`CLI-194`).
+/// - `repo`: both rejected. `@<alias>` (STO-58/STO-59) and the item-link
+///   `#<path>` marker both append directly to `repo` in both the identity and
+///   the clone-dir leaf, so a `repo` containing either character can collide
+///   with a distinct, unrelated source's identity and clone path (STO-64).
 fn validate_identity_part(
     spec: &str,
     part: &'static str,
     value: &str,
-    reject_markers: bool,
+    reject_at: bool,
+    reject_hash: bool,
 ) -> Result<()> {
     let bad = |reason: &'static str| MindError::UnsafeRepoSpec {
         spec: spec.to_string(),
@@ -573,18 +591,25 @@ fn validate_identity_part(
     if value.contains(|c: char| c.is_control()) {
         return Err(bad("contains a control character"));
     }
-    if reject_markers && value.contains(['@', '#']) {
+    if reject_at && reject_hash && value.contains(['@', '#']) {
         return Err(bad("contains '@' or '#'"));
+    }
+    if reject_at && value.contains('@') {
+        return Err(bad("contains '@'"));
+    }
+    if reject_hash && value.contains('#') {
+        return Err(bad("contains '#'"));
     }
     Ok(())
 }
 
 fn make_source(spec: &str, host: &str, owner: &str, repo: &str, url: String) -> Result<Source> {
-    // spec: CLI-204 -- validate before constructing, so no Source with an
-    // unsafe identity part is ever built, persisted, or used as a clone path.
-    validate_identity_part(spec, "host", host, true)?;
-    validate_identity_part(spec, "owner", owner, false)?;
-    validate_identity_part(spec, "repo", repo, false)?;
+    // spec: CLI-204 STO-64 -- validate before constructing, so no Source with
+    // an unsafe identity part is ever built, persisted, or used as a clone
+    // path.
+    validate_identity_part(spec, "host", host, true, true)?;
+    validate_identity_part(spec, "owner", owner, false, true)?;
+    validate_identity_part(spec, "repo", repo, true, true)?;
     Ok(Source {
         // Identity is `host/owner/repo` (matching the clone path), so repos that
         // share a basename or even an owner/repo across hosts stay distinct.
@@ -1076,20 +1101,156 @@ mod tests {
         }
     }
 
-    // CLI-204: `@` and `#` stay legal in `owner`/`repo`, where a local path may
-    // legitimately carry them. They are safe there because allowlist matching is
-    // structural (POL-68) rather than a scan for those markers, and because
-    // neither adds an identity segment or a path component.
+    // CLI-204/STO-64: `@` stays legal in `owner` only. A local path may
+    // legitimately carry it there (`/src/proj@v2/agents`), and it collides with
+    // nothing: the `@<alias>` identity suffix (STO-58) only ever appends to
+    // `repo`, never `owner`. This is the case that motivated allowing the
+    // character at all, so it must not regress.
     // spec: CLI-204
+    // spec: STO-64
     #[test]
-    fn markers_are_allowed_in_owner_and_repo() {
+    fn at_marker_is_allowed_in_owner_only() {
         let s = parse_spec("/src/proj@v2/agents").unwrap();
         assert_eq!(s.owner, "proj@v2");
         assert_eq!(s.base_identity(), "local/proj@v2/agents");
+    }
 
-        let s = parse_spec("/src/parent/blessed@evil").unwrap();
-        assert_eq!(s.repo, "blessed@evil");
-        assert_eq!(s.base_identity(), "local/parent/blessed@evil");
+    // LNK-16: the same collision one segment over. A link identity is
+    // `host/owner/repo#<item_path>` and an alias appends `@<alias>` to the whole
+    // thing, so an unaliased link to `skills/foo@bar` and an `@bar`-aliased link
+    // to `skills/foo` would compute the same identity and clone dir.
+    // spec: LNK-16
+    #[test]
+    fn at_and_hash_are_rejected_in_an_item_link_path() {
+        // `@` is reachable in both link forms.
+        for url in [
+            "https://github.com/acme/repo/tree/main/skills/foo@bar",
+            "file:///src/acme/repo/tree/main/skills/foo@bar",
+        ] {
+            match parse_spec(url) {
+                Err(MindError::BadItemLink { reason, .. }) => assert!(
+                    reason.contains("identity markers"),
+                    "{url}: reason should name the marker rule, got {reason:?}"
+                ),
+                other => panic!("{url}: expected BadItemLink, got {other:?}"),
+            }
+        }
+        // `#` reaches `item_path` only through the `file://` form: a remote URL
+        // strips everything from the first `#` as a pasted browser fragment
+        // (LNK-1), so it never becomes part of the path.
+        match parse_spec("file:///src/acme/repo/tree/main/skills/foo#bar") {
+            Err(MindError::BadItemLink { .. }) => {}
+            other => panic!("expected BadItemLink for a `#` in a local link path, got {other:?}"),
+        }
+        let stripped = parse_spec("https://github.com/acme/repo/tree/main/skills/foo#bar").unwrap();
+        assert_eq!(
+            stripped.name, "github.com/acme/repo#skills/foo",
+            "a remote URL's fragment is stripped, not smuggled into the path"
+        );
+
+        // A path free of markers is still accepted.
+        let ok = parse_spec("https://github.com/acme/repo/tree/main/skills/foo").unwrap();
+        assert_eq!(ok.name, "github.com/acme/repo#skills/foo");
+    }
+
+    // STO-64: `@` and `#` are now rejected in `repo` -- both collide with an
+    // identity suffix (`@<alias>`, STO-58) and/or the clone-dir leaf (STO-59),
+    // and `#` also collides with the item-link marker (LNK-4). Driven through
+    // `parse_spec` so the identity is built exactly as production builds it.
+    // spec: STO-64
+    #[test]
+    fn at_and_hash_are_rejected_in_repo() {
+        match parse_spec("/src/parent/blessed@evil") {
+            Err(MindError::UnsafeRepoSpec { part, value, .. }) => {
+                assert_eq!(part, "repo");
+                assert_eq!(value, "blessed@evil");
+            }
+            other => panic!("expected UnsafeRepoSpec on repo, got {other:?}"),
+        }
+        match parse_spec("/src/parent/blessed#evil") {
+            Err(MindError::UnsafeRepoSpec { part, value, .. }) => {
+                assert_eq!(part, "repo");
+                assert_eq!(value, "blessed#evil");
+            }
+            other => panic!("expected UnsafeRepoSpec on repo, got {other:?}"),
+        }
+        // Same via the SSH form, where repo is the segment after the ':owner/'.
+        match parse_spec("git@github.com:owner/blessed@evil") {
+            Err(MindError::UnsafeRepoSpec { part, .. }) => assert_eq!(part, "repo"),
+            other => panic!("expected UnsafeRepoSpec on repo, got {other:?}"),
+        }
+    }
+
+    // STO-64: `#` is now rejected in `owner` too -- it would land before the
+    // repo segment and confuse `#`-splitting in item refs and hook targets.
+    // spec: STO-64
+    #[test]
+    fn hash_is_rejected_in_owner() {
+        match parse_spec("github:evil#owner/repo") {
+            Err(MindError::UnsafeRepoSpec { part, value, .. }) => {
+                assert_eq!(part, "owner");
+                assert_eq!(value, "evil#owner");
+            }
+            other => panic!("expected UnsafeRepoSpec on owner, got {other:?}"),
+        }
+    }
+
+    // STO-64: the regression this tightening closes. Before the fix, `repo`
+    // permitted `@`/`#`, so a repo directory literally named `foo@bar` (an
+    // unaliased meld) and a repo `foo` melded with an identity alias `bar`
+    // (`meld --as bar`) produced the exact SAME `compute_name()` identity
+    // (`local/<owner>/foo@bar`) AND the exact same `clone_dir()` leaf
+    // (`foo@bar`) -- two genuinely different sources would collide in the
+    // registry (the second treated as a re-meld of the first) and share one
+    // clone on disk. This test pins the fix: the two no longer coincide,
+    // because the literal `@` in the directory name is now refused before a
+    // `Source` is ever built.
+    // spec: STO-64
+    #[test]
+    fn distinct_sources_no_longer_collide_on_repo_at_alias_suffix() {
+        let (base, paths) = tmp_paths_src();
+
+        // A remote repo whose name literally contains `@bar` (host != "local",
+        // so clone_dir takes the cloned-tree branch rather than the linked
+        // working-tree shortcut, engaging the same identity/clone-leaf code
+        // as the `--as bar` case below).
+        let literal = parse_spec("https://forge.example.com/owner/foo@bar");
+        // An ordinary repo `foo`, meant to be melded with `--as bar` (which
+        // appends `@bar` to build the SAME identity/clone leaf the literal
+        // repo name would have produced, had it been allowed through).
+        let mut aliased =
+            parse_spec("https://forge.example.com/owner/foo").expect("plain repo must parse");
+        aliased.apply_alias(Some("bar".into()));
+
+        match literal {
+            Err(MindError::UnsafeRepoSpec { part, .. }) => {
+                assert_eq!(
+                    part, "repo",
+                    "a literal `@` in the repo name must be refused as an unsafe repo part"
+                );
+            }
+            Ok(s) => panic!(
+                "unfixed behavior: a repo named `foo@bar` parsed successfully to identity \
+                 {:?} (clone dir {:?}), colliding with the aliased instance's identity {:?} \
+                 (clone dir {:?}) -- this is the exact collision STO-64 closes",
+                s.compute_name(),
+                s.clone_dir(&paths),
+                aliased.compute_name(),
+                aliased.clone_dir(&paths)
+            ),
+            other => panic!("expected UnsafeRepoSpec on repo, got {other:?}"),
+        }
+
+        // The aliased instance itself is unaffected: it still builds the
+        // `@bar`-suffixed identity and clone leaf normally.
+        assert_eq!(aliased.compute_name(), "forge.example.com/owner/foo@bar");
+        assert!(
+            aliased
+                .clone_dir(&paths)
+                .ends_with("forge.example.com/owner/foo@bar")
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

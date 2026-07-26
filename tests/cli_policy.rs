@@ -420,11 +420,15 @@ fn learn_refuses_item_link_instance_of_a_repo_outside_the_allowlist() {
 #[test]
 fn meld_refuses_a_repo_whose_name_merely_starts_with_an_allowed_name() {
     // spec: POL-68
+    // spec: STO-64
     // A directory named `blessed@evil` is a different repo, not the allowed
-    // `blessed` with a consumer alias. Under a lock it must be refused. A
-    // first-marker string scan truncates its identity to the allowed
-    // `local/<owner>/blessed` and admits it, at meld time and at every later
-    // gate.
+    // `blessed` with a consumer alias, and must never be admitted by an
+    // allowlist naming `blessed`. Two independent layers now stop it, and this
+    // asserts the outer one end to end: STO-64 refuses a repo name carrying the
+    // alias marker at parse time, before the allowlist is consulted at all. The
+    // inner layer (POL-68: matching never truncates an identity down to a
+    // shorter allowed one) is asserted directly in src/policy.rs, since it is
+    // no longer reachable through a real meld.
     let sb = Sandbox::bare("blessed@evil");
     sb.write_and_commit(
         "skills/x/SKILL.md",
@@ -443,8 +447,8 @@ fn meld_refuses_a_repo_whose_name_merely_starts_with_an_allowed_name() {
         meld.stdout, meld.stderr
     );
     assert!(
-        meld.stderr.contains(SOURCE_NOT_ALLOWED),
-        "expected a SourceNotAllowed refusal in stderr: {}",
+        meld.stderr.contains("is not a usable repo spec") && meld.stderr.contains("repo"),
+        "expected the parse-time refusal naming the repo part: {}",
         meld.stderr
     );
 }
@@ -614,5 +618,89 @@ fn upgrade_reruns_install_hook_for_admitted_alias_instance_under_locked_allowlis
         "RAN\nRAN\n",
         "the install hook must have re-run on upgrade, proving the hook-gate site \
          admitted the aliased instance rather than silently skipping it"
+    );
+}
+
+// --- CLI-209: a re-meld's `--pin` re-pins an already-registered source, and
+// the meld-time policy gates (POL-11 allowlist, POL-20 require-pinned) apply
+// to that re-pin exactly as they do at a first meld. ------------------------
+
+#[test]
+fn remeld_pin_honors_require_pinned_policy() {
+    // spec: CLI-209, POL-20 - a re-meld's `--pin branch=<name>` would persist a
+    // floating follow-branch pin, which `[sources].pinned = true` forbids
+    // (POL-20); the re-pin path must refuse it exactly like a first meld does,
+    // not silently apply it because the source is already registered.
+    let sb = Sandbox::new();
+    git(&sb.source, &["tag", "v1.0"]);
+    git(&sb.source, &["branch", "stable"]);
+    let spec = sb.source_spec();
+    let policy =
+        sb.write_policy("[sources]\npinned = true\nlock = true\nallow = [\"local/*/agents\"]\n");
+
+    // First meld satisfies require-pinned via a tag freeze.
+    let first = sb.mind_env(
+        &["meld", &spec, "--register-only", "--pin", "v1.0"],
+        &[("MIND_POLICY_FILE", policy.as_str())],
+    );
+    assert!(
+        first.success,
+        "first meld: {} {}",
+        first.stdout, first.stderr
+    );
+
+    let r = sb.mind_env(
+        &["meld", &spec, "--register-only", "--pin", "branch=stable"],
+        &[("MIND_POLICY_FILE", policy.as_str())],
+    );
+    assert!(
+        !r.success,
+        "a re-pin to a floating branch must be refused under require-pinned: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr.contains("must be pinned"),
+        "expected the require-pinned refusal, got: {}",
+        r.stderr
+    );
+}
+
+#[test]
+fn remeld_pin_refused_when_source_falls_outside_locked_allowlist() {
+    // spec: CLI-209, POL-11 - the allowlist gate applies to a re-pin exactly
+    // as it does at a first meld: a source whose identity is no longer in a
+    // (now-locked, or since-narrowed) allowlist must not be silently re-pinned
+    // around the gate.
+    let sb = Sandbox::new();
+    git(&sb.source, &["tag", "v1.0"]);
+    let spec = sb.source_spec();
+
+    let allowed = sb.write_policy("[sources]\nlock = true\nallow = [\"local/*/agents\"]\n");
+    let first = sb.mind_env(
+        &["meld", &spec, "--register-only"],
+        &[("MIND_POLICY_FILE", allowed.as_str())],
+    );
+    assert!(
+        first.success,
+        "first meld: {} {}",
+        first.stdout, first.stderr
+    );
+
+    // The allowlist is narrowed to no longer admit this source.
+    let narrowed =
+        sb.write_policy("[sources]\nlock = true\nallow = [\"local/*/some-other-repo\"]\n");
+    let r = sb.mind_env(
+        &["meld", &spec, "--register-only", "--pin", "v1.0"],
+        &[("MIND_POLICY_FILE", narrowed.as_str())],
+    );
+    assert!(
+        !r.success,
+        "a re-pin of a source dropped from the locked allowlist must be refused: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr.contains(SOURCE_NOT_ALLOWED),
+        "expected the SourceNotAllowed refusal, got: {}",
+        r.stderr
     );
 }

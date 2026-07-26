@@ -19,10 +19,13 @@ const ALLOWLIST: &[&str] = &[
     "STO-1", "STO-3", "STO-10", "STO-11", "STO-12", "STO-20", "STO-21", "STO-22", "STO-23",
     "STO-30",
     // An accepted risk, not a behavior: it states that `mind` does NOT cap the
-    // size of files read from a source tree. Asserting the absence of a cap
-    // would mean allocating a file large enough to matter, which is exactly the
-    // cost the decision declines to pay. Carries an ID so the decision is
-    // findable and so a future cap is recognizable as a behavior change.
+    // size of the ITEM CONTENT it reads from a source tree ({{ns:}} expansion,
+    // the reference scan, `review`, the TUI preview, hashing). Metadata reads
+    // are no longer in scope here: they are capped by DSC-91, which has real
+    // tests. Asserting the absence of a cap would mean allocating a file large
+    // enough to matter, which is exactly the cost the decision declines to pay.
+    // Carries an ID so the decision is findable and so a future cap is
+    // recognizable as a behavior change.
     "DSC-90",
     // Lifecycle invariants covered indirectly: swap mechanics, idempotent
     // reinstall, removing an absent path. (LIFE-15, the source-content hash

@@ -108,9 +108,13 @@ pub struct PluginManifest {
 /// - the JSON is malformed
 /// - `name` is absent or empty/whitespace-only
 ///
-/// Returns `MindError::Io` for I/O failures.
+/// Returns `MindError::Io` for I/O failures, or `MindError::MetadataTooLarge`
+/// (DSC-91) when the file is at or above the metadata size cap.
 pub fn load_plugin_manifest(path: &Path) -> Result<PluginManifest> {
-    let text = std::fs::read_to_string(path).map_err(|e| MindError::io(path, e))?;
+    // spec: DSC-91 -- size-capped read: refuses an oversized plugin.json before
+    // allocating the whole file, instead of the earlier unconditional
+    // `std::fs::read_to_string`.
+    let text = crate::error::read_capped_metadata(path)?;
     let manifest: PluginManifest =
         serde_json::from_str(&text).map_err(|e| MindError::Manifest {
             path: path.to_path_buf(),
@@ -303,7 +307,8 @@ enum RawSource {
 /// Returns `MindError::Manifest` (or a bubbled variant) on any validation
 /// failure. I/O failures return `MindError::Io`.
 pub fn load_marketplace_manifest(path: &Path) -> Result<MarketplaceManifest> {
-    let text = std::fs::read_to_string(path).map_err(|e| MindError::io(path, e))?;
+    // spec: DSC-91 -- size-capped read, matching load_plugin_manifest.
+    let text = crate::error::read_capped_metadata(path)?;
     let raw: RawMarketplace = serde_json::from_str(&text).map_err(|e| MindError::Manifest {
         path: path.to_path_buf(),
         msg: format!("invalid marketplace.json: {e}"),
@@ -715,6 +720,58 @@ mod tests {
         assert_eq!(m.name, "rich-plugin");
         assert_eq!(m.version.as_deref(), Some("0.1.0"));
         assert_eq!(m.description.as_deref(), Some("A rich plugin"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // ---- DSC-91: capped manifest reads --------------------------------------
+
+    #[test]
+    fn plugin_manifest_oversized_file_is_refused_naming_it() {
+        // spec: DSC-91
+        // A plugin.json at (limit + 1) bytes is refused with MetadataTooLarge
+        // naming the file. Built as a sparse file so the test does not itself
+        // allocate the whole oversized buffer.
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let path =
+            std::env::temp_dir().join(format!("mind-pm-oversized-{}-{n}.json", std::process::id()));
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(crate::error::METADATA_SIZE_LIMIT + 1).unwrap();
+        drop(file);
+        let err = load_plugin_manifest(&path).expect_err("oversized plugin.json must be refused");
+        match &err {
+            MindError::MetadataTooLarge { path: p, .. } => {
+                assert_eq!(p, &path, "error must name the offending file");
+            }
+            other => panic!("expected MetadataTooLarge, got: {other:?}"),
+        }
+        assert!(
+            err.to_string().contains(&path.display().to_string()),
+            "error message must name the file: {err}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn marketplace_manifest_oversized_file_is_refused_naming_it() {
+        // spec: DSC-91
+        // A marketplace.json at (limit + 1) bytes is refused with
+        // MetadataTooLarge naming the file, same as load_plugin_manifest.
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let path = std::env::temp_dir().join(format!(
+            "mind-mkt-oversized-{}-{n}.json",
+            std::process::id()
+        ));
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(crate::error::METADATA_SIZE_LIMIT + 1).unwrap();
+        drop(file);
+        let err = load_marketplace_manifest(&path)
+            .expect_err("oversized marketplace.json must be refused");
+        match &err {
+            MindError::MetadataTooLarge { path: p, .. } => {
+                assert_eq!(p, &path, "error must name the offending file");
+            }
+            other => panic!("expected MetadataTooLarge, got: {other:?}"),
+        }
         let _ = std::fs::remove_file(&path);
     }
 

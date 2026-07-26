@@ -72,17 +72,20 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 - `CLI-204` Each of the `host`, `owner`, and `repo` parts a spec parses to must
   be a single safe path component, or the spec is refused (`UnsafeRepoSpec`,
   naming the offending part). A part is refused when it is empty, is `.` or
-  `..`, contains `/` or `\`, or contains a control character; `host` also
-  refuses `@` and `#`. Those three parts are load-bearing twice: joined with `/`
-  they are the source identity (STO-13), which managed policy matches segment by
-  segment (POL-10, POL-67, POL-68), and joined as directory components they are
-  the clone path (STO-11), which `meld` deletes and re-clones. Without the check
-  the SSH form, which splits only on the first `:`, admits a `host` such as
-  `../../elsewhere` or `evil/host@x`: the first escapes the sources tree at
-  `remove_dir_all` time, the second forges extra identity segments. `@` and `#`
-  remain legal in `owner` and `repo`, where a local path may legitimately carry
-  them (`/src/proj@v2/agents`); they are safe there because allowlist matching
-  is structural (POL-68), not a scan for those markers.
+  `..`, contains `/` or `\`, or contains a control character. Those three parts
+  are load-bearing twice: joined with `/` they are the source identity (STO-13),
+  which managed policy matches segment by segment (POL-10, POL-67, POL-68), and
+  joined as directory components they are the clone path (STO-11), which `meld`
+  deletes and re-clones. Without the check the SSH form, which splits only on
+  the first `:`, admits a `host` such as `../../elsewhere` or `evil/host@x`: the
+  first escapes the sources tree at `remove_dir_all` time, the second forges
+  extra identity segments. `@`/`#` legality is per-part (STO-64): `host` refuses
+  both; `owner` refuses `#` (it would sit before the repo segment and confuse
+  `#`-splitting in item refs and hook targets) but allows `@` (a local path may
+  legitimately carry it, `/src/proj@v2/agents`, and it collides with nothing
+  there, since the `@<alias>` identity suffix, STO-58, only ever appends to
+  `repo`); `repo` refuses both `@` (collides with that alias suffix and with the
+  clone-dir leaf, STO-59) and `#` (collides with the item-link marker, LNK-4).
 - `CLI-12` Re-melding a repo whose source identity is already registered is not
   an error and does not re-clone or re-register. The identity includes the
   consumer alias (STO-58), so a re-meld is `meld` of a `(repo, alias)` that
@@ -94,14 +97,35 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   is installed, and the commit it was installed from, flagging items whose commit
   lags the source. Items are matched by stable identity (source, kind, bare name).
 - `CLI-206` A re-meld (CLI-12) never re-clones or re-registers, so `--root`,
-  `--add-root`, `--flat-skills`, `--pin` (and its deprecated aliases), and
-  `--install-hook` cannot take effect on it: they are set only at the meld that
-  first registers a source (DSC-51/STO-17, DSC-84/STO-55, DSC-75/STO-44,
-  CLI-17/STO-18, HOOK-20). When any of these flags is given against an
-  already-melded source, a one-line stderr-suppressed-under-`--json` note lists
-  exactly which flags were ignored and directs the user to `mind unmeld <source>`
-  then `mind meld` again to apply them, so the drop is not silent. Follows the
-  CLI-203 note pattern.
+  `--add-root`, `--flat-skills`, and `--install-hook` cannot take effect on it:
+  they are discovery/hook-setup flags set only at the meld that first
+  registers a source (DSC-51/STO-17, DSC-84/STO-55, DSC-75/STO-44, HOOK-20).
+  `--pin` is NOT in this list (see CLI-209: a re-meld honors it). When any of
+  these remaining flags is given against an already-melded source, a one-line
+  stderr-suppressed-under-`--json` note lists exactly which flags were ignored
+  and directs the user to `mind unmeld <source>` then `mind meld` again to
+  apply them, so the drop is not silent. Follows the CLI-203 note pattern.
+- `CLI-209` A re-meld (CLI-12) carrying `--pin` re-pins the already-registered
+  source, unlike the CLI-206 discovery/hook flags: it resolves the pin request
+  (CLI-200/CLI-201) against the source's currently recorded pin (the base
+  point a bare `--pin HEAD` freezes, so it freezes whatever the source is
+  pinned/following today rather than needing an `unmeld`/`meld` round trip),
+  re-checks-out the existing clone at the resolved point (or, for a source
+  that is still linked -- local and never pinned -- clones a fresh snapshot
+  into the sources tree, same as a first meld's Step 3/4, so the live working
+  tree is never touched), and records the resolved pin and commit. Reports
+  `re-pinned <old> -> <new>` when the pin or commit changed, or that the
+  source is already pinned to the resolved point when the request is a no-op
+  (re-pinning to the value already recorded, with no upstream movement).
+  Resolution/checkout failure (a bad ref, a network error) is a `Git` error
+  that leaves the source's pin, commit, and clone dir exactly as they were
+  (CLI-18) -- every git operation runs before any field on the registered
+  source is mutated or the registry is saved. The POL-11 allowlist and POL-20
+  require-pinned gates apply to the re-pin exactly as they do at a first meld,
+  so a source that fell out of policy since it was melded cannot be silently
+  re-pinned around the gate. Installed items whose content moved with the
+  commit are then reported out of date by `recall`/`upgrade` exactly as any
+  other upstream change is (CLI-75/LIFE-11).
 - `CLI-13` `--as <prefix>` sets the source's namespace, overriding any
   `[source].prefix`. It is persisted and is not changed by `sync`. A `--as`
   prefix is an identity alias (STO-58): `meld <repo> --as <prefix>` denotes the

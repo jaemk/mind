@@ -4,11 +4,61 @@
 //! We deliberately avoid stringly-typed errors (e.g. `anyhow`) so callers and
 //! tests can match on the precise failure and so messages stay consistent.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 
 /// The crate-wide result type.
 pub type Result<T> = std::result::Result<T, MindError>;
+
+/// Size cap for a source-controlled metadata file read during discovery: a
+/// `mind.toml`, an item's frontmatter block (`SKILL.md`/agent/rule `.md`), or a
+/// Claude plugin/marketplace manifest (`.claude-plugin/plugin.json` /
+/// `marketplace.json`). DSC-91.
+///
+/// These are hand-authored text files a maintainer edits directly; the largest
+/// legitimate one in this repo's own examples is a few KB. 8 MiB is chosen as a
+/// generous ceiling that sits orders of magnitude above any real metadata file
+/// while still bounding how much memory a single melded source can force `mind`
+/// to allocate while scanning or installing it. This cap covers metadata reads
+/// ONLY -- item content (an item tree's `{{ns:}}` expansion at install, the
+/// unguarded-reference scan, `review`, the TUI preview, and content hashing)
+/// stays uncapped (see spec/discovery.md DSC-90).
+pub const METADATA_SIZE_LIMIT: u64 = 8 * 1024 * 1024;
+
+/// Read `path` into a `String`, refusing (with [`MindError::MetadataTooLarge`])
+/// a file at or above [`METADATA_SIZE_LIMIT`] bytes -- WITHOUT first allocating
+/// the whole file. Reads at most `METADATA_SIZE_LIMIT + 1` bytes via
+/// `Read::take`, so an oversized file's cost is bounded by the cap, not by its
+/// actual size.
+///
+/// Shared by every metadata reader (`mindfile.rs`, `frontmatter.rs`,
+/// `plugin_manifest.rs`) so the limit and the error are defined exactly once.
+/// A non-UTF-8 file surfaces as a plain [`MindError::Io`] (matching
+/// `std::fs::read_to_string`'s behavior); other I/O failures (e.g. not found)
+/// also surface as `MindError::Io`, leaving the caller to decide how to treat
+/// them (several metadata readers treat a NotFound source as "absent", not an
+/// error).
+pub fn read_capped_metadata(path: &Path) -> Result<String> {
+    use std::io::Read as _;
+
+    let file = std::fs::File::open(path).map_err(|e| MindError::io(path, e))?;
+    let mut buf = Vec::new();
+    file.take(METADATA_SIZE_LIMIT + 1)
+        .read_to_end(&mut buf)
+        .map_err(|e| MindError::io(path, e))?;
+    if buf.len() as u64 > METADATA_SIZE_LIMIT {
+        return Err(MindError::MetadataTooLarge {
+            path: path.to_path_buf(),
+            limit: METADATA_SIZE_LIMIT,
+        });
+    }
+    String::from_utf8(buf).map_err(|e| {
+        MindError::io(
+            path,
+            std::io::Error::new(std::io::ErrorKind::InvalidData, e),
+        )
+    })
+}
 
 /// The item kinds `mind` knows how to install.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -210,6 +260,18 @@ pub enum MindError {
     /// `{msg}` (which already names the file kind) carry the specifics.
     #[error("{path}: {msg}")]
     Manifest { path: PathBuf, msg: String },
+
+    /// DSC-91: a hand-authored source-controlled metadata file (`mind.toml`, an
+    /// item's frontmatter block, or a Claude plugin/marketplace manifest)
+    /// exceeded [`METADATA_SIZE_LIMIT`]. Refused before the whole file is read
+    /// into memory (see [`read_capped_metadata`]).
+    #[error(
+        "{path} exceeds the {} MiB size cap for a hand-authored metadata file (mind.toml, an \
+         item's frontmatter, or a plugin/marketplace manifest); trim the file, or move large \
+         content out of it, and try again",
+        limit / (1024 * 1024)
+    )]
+    MetadataTooLarge { path: PathBuf, limit: u64 },
 
     #[error(
         "'{spec}' is not a valid repo spec (expected 'owner/repo', a github shorthand, or a git URL)"
@@ -623,6 +685,7 @@ impl MindError {
             MindError::LobeTargetRequired => "lobe-target-required",
             MindError::MindToml { .. } => "mind-toml",
             MindError::Manifest { .. } => "manifest",
+            MindError::MetadataTooLarge { .. } => "metadata-too-large",
             MindError::InvalidRepoSpec { .. } => "invalid-repo-spec",
             MindError::UnsafeRepoSpec { .. } => "unsafe-repo-spec",
             MindError::BadItemLink { .. } => "bad-item-link",
@@ -1202,6 +1265,82 @@ mod tests {
         assert!(
             mismatch.contains("conflicts"),
             "must say 'conflicts': {mismatch}"
+        );
+    }
+
+    // ---- DSC-91: shared metadata size cap ----------------------------------
+
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static CAP_N: AtomicU32 = AtomicU32::new(0);
+
+    fn cap_tmp(label: &str) -> PathBuf {
+        let n = CAP_N.fetch_add(1, Ordering::SeqCst);
+        std::env::temp_dir().join(format!("mind-metacap-{}-{label}-{n}", std::process::id()))
+    }
+
+    #[test]
+    fn read_capped_metadata_reads_a_normal_file() {
+        // spec: DSC-91
+        let path = cap_tmp("ok");
+        std::fs::write(&path, "hello metadata").unwrap();
+        let text = read_capped_metadata(&path).expect("small file must read fine");
+        assert_eq!(text, "hello metadata");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn read_capped_metadata_refuses_an_oversized_file_naming_it() {
+        // spec: DSC-91
+        // A file at (limit + 1) bytes must be refused with MetadataTooLarge
+        // naming the path and the limit. Built as a sparse file (`set_len`) so
+        // the test itself never allocates/writes METADATA_SIZE_LIMIT bytes.
+        let path = cap_tmp("big");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(METADATA_SIZE_LIMIT + 1).unwrap();
+        drop(file);
+        let err = read_capped_metadata(&path).expect_err("oversized file must be refused");
+        match &err {
+            MindError::MetadataTooLarge { path: p, limit } => {
+                assert_eq!(p, &path, "error must name the offending file");
+                assert_eq!(*limit, METADATA_SIZE_LIMIT, "error must name the limit");
+            }
+            other => panic!("expected MetadataTooLarge, got: {other:?}"),
+        }
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&path.display().to_string()),
+            "message must name the file: {msg}"
+        );
+        assert!(msg.contains("8 MiB"), "message must name the limit: {msg}");
+        assert!(
+            msg.contains("trim") || msg.contains("move"),
+            "message must say what to do: {msg}"
+        );
+        assert_eq!(err.kind(), "metadata-too-large", "kind slug must be stable");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn read_capped_metadata_a_file_exactly_at_the_limit_is_accepted() {
+        // spec: DSC-91 -- the cap is exclusive: exactly `limit` bytes must pass.
+        let path = cap_tmp("exact");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(METADATA_SIZE_LIMIT).unwrap();
+        drop(file);
+        let text = read_capped_metadata(&path).expect("a file exactly at the cap must be OK");
+        assert_eq!(text.len() as u64, METADATA_SIZE_LIMIT);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn read_capped_metadata_missing_file_is_plain_io_error() {
+        // spec: DSC-91 -- a nonexistent file surfaces as a plain Io error, not
+        // MetadataTooLarge, so callers that treat "absent" specially still can.
+        let path = cap_tmp("missing");
+        let err = read_capped_metadata(&path).unwrap_err();
+        assert!(
+            matches!(err, MindError::Io { .. }),
+            "missing file must be a plain Io error: {err:?}"
         );
     }
 }

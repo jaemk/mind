@@ -117,6 +117,26 @@ The on-disk layout and the two persisted JSON files.
   point at a name `unmeld` (or any other verb) cannot resolve. With exactly one
   pre-existing instance the note reads "the existing `<name>` remains"; with more
   than one it reads "the existing instances `<name1>, <name2>` remain".
+- `STO-64` `@`/`#` legality in `host`/`owner`/`repo` (CLI-204) is per-part, not a
+  blanket rule, because each character's danger is a specific downstream
+  collision, not general hygiene:
+  - `repo` rejects both `@` and `#`. The identity alias suffix (STO-58) and the
+    per-instance clone-dir leaf (STO-59) both append `@<alias>` directly to
+    `repo`, and the item-link marker (LNK-4) appends `#<path>` the same way. A
+    `repo` value that itself contains `@` or `#` can therefore coincide with
+    the identity AND the clone path of a genuinely different, unrelated
+    instance: a repo directory literally named `foo@bar` (melded unaliased)
+    and repo `foo` melded with an identity alias `bar` (`meld --as bar`) would
+    both build the identity `host/owner/foo@bar` and clone at the same
+    `foo@bar` leaf, so the second meld would be read back as a re-meld of the
+    first (CLI-12) and the two would share one clone on disk.
+  - `owner` rejects `#` (new) but keeps `@` legal. `#` in `owner` would place
+    the item-link marker before the repo segment, confusing `#`-splitting in
+    item refs (`owner/repo#name`) and hook targets (CLI-194). `@` collides
+    with nothing in `owner`: the `@<alias>` suffix (STO-58) only ever appends
+    to `repo`, never `owner`, so an owner directory legitimately named with an
+    `@` (e.g. `/src/proj@v2/agents`) stays admitted.
+  - `host` rejects both, unchanged from CLI-204's original statement.
 - `STO-17` A source records an optional `roots`: the consumer `--root` override
   (repo-root-relative directories, see DSC-51). Persisted at meld and not changed
   by `sync`. Absent means convention discovery uses `[source].roots` or the repo

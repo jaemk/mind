@@ -156,14 +156,19 @@ and verified.
 | TUI stdout capture writes to an exclusively created 0600 file in a 0700 temp dir, not a predictable create-and-truncate path | done | TUI-61 |
 | `evolve` token safety: a token carrying characters that would inject curl config directives is refused (no auth header), and a temp-config write failure degrades to an unauthenticated request | done | STO-62 |
 | A zero-item `meld` names the convention paths it scanned and the `--root`/`--add-root`/`--flat-skills` escapes, instead of reporting success with `(0 item(s))` | done | CLI-205 |
-| A re-meld notes which discovery and pin flags it ignored, instead of dropping them silently | done | CLI-206 |
+| A re-meld notes which discovery flags it ignored, instead of dropping them silently | done | CLI-206 |
+| `meld --pin` on an already-melded source re-pins it: resolves against the current pin, re-checks-out the clone if the commit differs, records the new pin and commit | done | CLI-209 |
+| `upgrade` reports an item whose recorded source is not registered distinctly from one blocked by the allowlist | done | POL-69 |
+| Per-part `@`/`#` legality in `host`/`owner`/`repo`, closing an identity and clone-path collision between a repo named `foo@bar` and repo `foo` aliased `@bar` | done | STO-64, CLI-204 |
+| An item link's path may not carry `@` or `#`, closing the same collision one segment over | done | LNK-16 |
+| Metadata reads (`mind.toml`, item frontmatter, plugin and marketplace manifests) are size-capped at 8 MiB | done | DSC-91 |
 | Bare `mind` prints help on stdout at exit 0 | done | CLI-207 |
 | `learn <source-name>` hints at `learn --all <source>` when the query names a melded source rather than an item | done | CLI-208 |
 | The fork note names the pre-existing instances by their registered identities, which are the handles `unmeld` accepts | done | STO-63 |
 | A curator's `add-roots` on a `[discover].sources` entry is gated like `roots`, so it cannot override a nested source's authoritative export control | done | DSC-88 |
 | Add-root de-duplication keys on (kind, path), so one directory can still contribute both a tool and a skill | done | DSC-89 |
 | `hooks run`/`hooks list` error on a target that matches both a registered source and an installed item, with escapes for each reading | done | HOOK-105 |
-| Accepted risk: files read from a source tree are not size-capped | done | DSC-90 |
+| Accepted risk: item content read from a source tree, beyond the capped metadata, is not size-capped | done | DSC-90 |
 | Managed-policy allowlist matching derives the base identity structurally from the source's fields, never by scanning an identity string for a `#`/`@` marker | done | POL-68 |
 
 ## Documents

@@ -93,6 +93,20 @@ impl Sandbox {
         write_file(&self.source.join(rel), contents);
         git_commit(&self.source);
     }
+
+    /// Write a `len`-byte sparse file under the source repo and commit it.
+    /// Used to build an oversized metadata fixture (DSC-91) without the test
+    /// itself allocating a `len`-byte buffer: `File::set_len` creates the file
+    /// at the requested size on disk (a hole, materialized as zero bytes on
+    /// read) rather than writing `len` bytes from memory.
+    fn write_sparse_and_commit(&self, rel: &str, len: u64) {
+        let path = self.source.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(len).unwrap();
+        drop(file);
+        git_commit(&self.source);
+    }
 }
 
 impl Drop for Sandbox {
@@ -694,5 +708,123 @@ fn install_items_governs_when_present_regardless_of_install_flag() {
     assert!(
         registry.claude_home.join("skills/special").exists(),
         "skill:special from nested-b (install = true) must be installed"
+    );
+}
+
+// ----- DSC-91: metadata size cap -----
+//
+// Mirrors the documented cap in src/error.rs (`METADATA_SIZE_LIMIT`, 8 MiB):
+// this integration suite hardcodes the same number rather than importing the
+// binary's internal constant (an integration test only has the compiled
+// binary to drive, not the crate's internals). If the cap is ever tuned, this
+// constant needs a matching update.
+const METADATA_SIZE_LIMIT: u64 = 8 * 1024 * 1024;
+
+#[test]
+fn dsc91_oversized_mind_toml_refused_at_meld() {
+    // spec: DSC-91 — an oversized mind.toml is refused at meld, naming the file.
+    let registry = Sandbox::bare("dsc91-big-mindtoml");
+    registry.write_sparse_and_commit("mind.toml", METADATA_SIZE_LIMIT + 1);
+
+    let r = registry.mind(&["meld", &registry.source_spec()]);
+    assert!(!r.success, "meld with an oversized mind.toml must fail");
+    let combined = format!("{}{}", r.stdout, r.stderr);
+    assert!(
+        combined.contains("mind.toml"),
+        "error must name mind.toml: {combined}"
+    );
+    assert!(
+        combined.contains("MiB"),
+        "error must name the size cap: {combined}"
+    );
+}
+
+#[test]
+fn dsc91_normal_mind_toml_is_unaffected_by_the_cap() {
+    // spec: DSC-91 — a normal-sized mind.toml melds exactly as before the cap.
+    let registry = Sandbox::bare("dsc91-ok-mindtoml");
+    registry.write_and_commit(
+        "mind.toml",
+        "[source]\ndescription = \"a perfectly normal source\"\n",
+    );
+
+    let r = registry.mind(&["meld", &registry.source_spec()]);
+    assert!(
+        r.success,
+        "meld with a normal-sized mind.toml must succeed: {} {}",
+        r.stdout, r.stderr
+    );
+}
+
+#[test]
+fn dsc91_oversized_skill_frontmatter_refused_at_meld() {
+    // spec: DSC-91 — an oversized SKILL.md is refused at meld, naming the file.
+    let registry = Sandbox::bare("dsc91-big-skill");
+    registry.write_sparse_and_commit("skills/huge/SKILL.md", METADATA_SIZE_LIMIT + 1);
+
+    let r = registry.mind(&["meld", &registry.source_spec()]);
+    assert!(
+        !r.success,
+        "meld with an oversized SKILL.md frontmatter must fail"
+    );
+    let combined = format!("{}{}", r.stdout, r.stderr);
+    assert!(
+        combined.contains("SKILL.md"),
+        "error must name SKILL.md: {combined}"
+    );
+    assert!(
+        combined.contains("MiB"),
+        "error must name the size cap: {combined}"
+    );
+}
+
+#[test]
+fn dsc91_normal_skill_frontmatter_is_unaffected_by_the_cap() {
+    // spec: DSC-91 — a normal-sized skill melds exactly as before the cap.
+    let registry = Sandbox::bare("dsc91-ok-skill");
+    registry.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\nname: review\ndescription: Review the diff\n---\n# review\n",
+    );
+
+    let r = registry.mind(&["meld", &registry.source_spec()]);
+    assert!(
+        r.success,
+        "meld with a normal-sized SKILL.md must succeed: {} {}",
+        r.stdout, r.stderr
+    );
+}
+
+#[test]
+fn dsc91_oversized_plugin_manifest_refused_at_meld() {
+    // spec: DSC-91 — an oversized .claude-plugin/plugin.json is refused at
+    // meld, naming the file.
+    let registry = Sandbox::bare("dsc91-big-plugin");
+    registry.write_sparse_and_commit(".claude-plugin/plugin.json", METADATA_SIZE_LIMIT + 1);
+
+    let r = registry.mind(&["meld", &registry.source_spec()]);
+    assert!(!r.success, "meld with an oversized plugin.json must fail");
+    let combined = format!("{}{}", r.stdout, r.stderr);
+    assert!(
+        combined.contains("plugin.json"),
+        "error must name plugin.json: {combined}"
+    );
+    assert!(
+        combined.contains("MiB"),
+        "error must name the size cap: {combined}"
+    );
+}
+
+#[test]
+fn dsc91_normal_plugin_manifest_is_unaffected_by_the_cap() {
+    // spec: DSC-91 — a normal-sized plugin.json melds exactly as before the cap.
+    let registry = Sandbox::bare("dsc91-ok-plugin");
+    registry.write_and_commit(".claude-plugin/plugin.json", "{\"name\":\"myplugin\"}\n");
+
+    let r = registry.mind(&["meld", &registry.source_spec()]);
+    assert!(
+        r.success,
+        "meld with a normal-sized plugin.json must succeed: {} {}",
+        r.stdout, r.stderr
     );
 }

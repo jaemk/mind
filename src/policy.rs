@@ -879,8 +879,12 @@ allow = ["github.com/acme/*"]
     // refused. Both are driven through `parse_spec` so the identity is built
     // exactly as production builds it.
     // spec: POL-68
+    // spec: STO-64
     #[test]
-    fn marker_bearing_repo_names_neither_widen_nor_narrow_the_allowlist() {
+    fn marker_bearing_identities_neither_widen_nor_narrow_the_allowlist() {
+        // The widening direction is now closed twice over. STO-64 refuses a
+        // `repo` carrying `@` at parse time, so the `blessed@evil` shape can no
+        // longer reach the allowlist at all; this asserts that outer layer.
         let p = parse(
             r#"
 [sources]
@@ -888,18 +892,22 @@ allow = ["local/parent/blessed"]
 "#,
         )
         .unwrap();
-        // A directory named `blessed@evil` is a different repo, not the allowed
-        // one with a consumer alias: it must be refused.
-        let evil = crate::source::parse_spec("/src/parent/blessed@evil").unwrap();
-        assert_eq!(evil.repo, "blessed@evil");
-        assert_eq!(evil.base_identity(), "local/parent/blessed@evil");
-        assert!(!p.allow_matches(&evil.base_identity()));
+        assert!(
+            crate::source::parse_spec("/src/parent/blessed@evil").is_err(),
+            "a repo name carrying the alias marker is refused before matching"
+        );
         // The genuinely allowed repo still matches.
         let ok = crate::source::parse_spec("/src/parent/blessed").unwrap();
         assert!(p.allow_matches(&ok.base_identity()));
+        // And the inner layer stands on its own: even handed the identity
+        // directly, verbatim matching does not truncate it down to the allowed
+        // one. This is what keeps POL-68 load-bearing if a marker ever becomes
+        // reachable in an identity segment again.
+        assert!(!p.allow_matches("local/parent/blessed@evil"));
 
-        // And an `owner` containing `@` matches a wildcard pattern over that
-        // segment rather than being truncated away.
+        // The narrowing direction is still reachable and must not regress: an
+        // `owner` legitimately containing `@` stays legal (STO-64) and matches a
+        // wildcard over that segment rather than being truncated away.
         let p2 = parse(
             r#"
 [sources]

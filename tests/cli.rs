@@ -430,12 +430,14 @@ fn meld_with_add_root_discovering_items_suppresses_zero_item_note() {
 }
 
 #[test]
-fn remeld_notes_the_discovery_and_pin_flags_it_ignored() {
+fn remeld_notes_the_discovery_flags_it_ignored() {
     // spec: CLI-206 - a re-meld never re-clones or re-registers, so the
-    // discovery and pin flags cannot take effect. Silently dropping them is the
-    // worse failure: the flag help reads as though they are settable later, and
-    // there is no `pin` verb, so a user re-pinning an existing source otherwise
-    // gets no command that works and no error saying so.
+    // discovery flags cannot take effect. Silently dropping them is the worse
+    // failure: the flag help reads as though they are settable later, so a
+    // user changing them on an existing source otherwise gets no command that
+    // works and no error saying so. `--pin` is deliberately excluded here: a
+    // re-meld DOES honor it (CLI-209, see the `remeld_pin_*` tests below), so
+    // it must not appear in this ignored-flags note.
     let sb = Sandbox::new();
     let spec = sb.source_spec();
     let first = sb.mind(&["meld", &spec, "--register-only"]);
@@ -447,8 +449,7 @@ fn remeld_notes_the_discovery_and_pin_flags_it_ignored() {
         "--register-only",
         "--add-root",
         ".claude",
-        "--pin",
-        "HEAD",
+        "--flat-skills",
     ]);
     assert!(
         again.success,
@@ -456,7 +457,7 @@ fn remeld_notes_the_discovery_and_pin_flags_it_ignored() {
         again.stdout, again.stderr
     );
     assert!(
-        again.stdout.contains("--add-root") && again.stdout.contains("--pin"),
+        again.stdout.contains("--add-root") && again.stdout.contains("--flat-skills"),
         "the note must name each ignored flag: {}",
         again.stdout
     );
@@ -465,12 +466,17 @@ fn remeld_notes_the_discovery_and_pin_flags_it_ignored() {
         "the note must say they were ignored and what to do instead: {}",
         again.stdout
     );
+    assert!(
+        !again.stdout.contains("--pin"),
+        "the ignored-flags note must not name --pin now that a re-meld honors it (CLI-209): {}",
+        again.stdout
+    );
 
     // A re-meld carrying none of those flags stays quiet.
     let quiet = sb.mind(&["meld", &spec, "--register-only"]);
     assert!(
         !quiet.stdout.contains("ignored"),
-        "a re-meld with no discovery/pin flags must print no note: {}",
+        "a re-meld with no discovery flags must print no note: {}",
         quiet.stdout
     );
 }
@@ -7882,6 +7888,185 @@ fn meld_pin_freeze_satisfies_require_pinned_policy() {
     assert!(
         pin_json.contains("\"ref\""),
         "the accepted pin must be a ref: {pin_json}"
+    );
+}
+
+// --- CLI-209: a re-meld carrying `--pin` re-pins the already-registered
+// source, unlike the CLI-206 discovery flags (which stay no-ops). ---------
+
+#[test]
+fn remeld_pin_repins_to_a_tag_and_changes_recorded_commit() {
+    // spec: CLI-209 - a re-meld's `--pin` resolves the new pin, re-checks-out
+    // the clone (here the resolved commit differs from the recorded one --
+    // this is also the "first pin on a still-linked local source" transition,
+    // since `make_pinnable_repo`'s first meld below carries no --pin), and
+    // records the new pin and commit, reporting the change.
+    let (sb, sha_v1, sha_v2) = make_pinnable_repo("pintest-remeld-tag");
+    let spec = sb.source_spec();
+
+    let first = sb.mind(&["meld", &spec, "--register-only"]);
+    assert!(first.success, "first meld failed: {}", first.stderr);
+    assert_eq!(
+        read_source_commit(&sb),
+        sha_v2,
+        "an unpinned meld records the default branch tip"
+    );
+
+    let r = sb.mind(&["meld", &spec, "--register-only", "--pin", "v1.0"]);
+    assert!(
+        r.success,
+        "re-meld --pin v1.0 failed: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stdout.contains("re-pinned"),
+        "the source must report the re-pin: {}",
+        r.stdout
+    );
+    // `--pin` must not ALSO be named on the CLI-206 ignored-flags note: it is
+    // honored now (CLI-209), not dropped.
+    assert!(
+        !r.stdout.contains("--pin"),
+        "--pin must not appear in an ignored-flags note now that it is honored: {}",
+        r.stdout
+    );
+    assert_eq!(
+        read_source_commit(&sb),
+        sha_v1,
+        "the re-pin must record the tag's commit, not the prior default-branch tip"
+    );
+    let pin_json = read_source_pin_json(&sb);
+    assert!(
+        pin_json.contains("\"ref\"") && pin_json.contains(&sha_v1),
+        "a --pin <ref> freeze must persist a ref pin at the resolved commit: {pin_json}"
+    );
+}
+
+#[test]
+fn remeld_pin_to_the_same_value_is_a_noop() {
+    // spec: CLI-209 - re-pinning to the value already recorded (no upstream
+    // movement) is a no-op: the recorded pin/commit are unchanged and the
+    // source reports that it is already pinned there rather than "re-pinned".
+    let (sb, sha_v1, _sha_v2) = make_pinnable_repo("pintest-remeld-noop");
+    let spec = sb.source_spec();
+
+    let first = sb.mind(&["meld", &spec, "--register-only", "--pin", "v1.0"]);
+    assert!(first.success, "first meld failed: {}", first.stderr);
+    assert_eq!(read_source_commit(&sb), sha_v1);
+
+    let r = sb.mind(&["meld", &spec, "--register-only", "--pin", "v1.0"]);
+    assert!(
+        r.success,
+        "re-pin to the same tag failed: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stdout.contains("already pinned"),
+        "re-pinning to the already-recorded value must say so: {}",
+        r.stdout
+    );
+    assert!(
+        !r.stdout.contains("re-pinned"),
+        "re-pinning to the already-recorded value must not report a change: {}",
+        r.stdout
+    );
+    assert_eq!(
+        read_source_commit(&sb),
+        sha_v1,
+        "a no-op re-pin must not change the recorded commit"
+    );
+}
+
+#[test]
+fn remeld_pin_bad_value_fails_without_corrupting_source() {
+    // spec: CLI-209 - a re-pin resolution/checkout failure (a nonexistent ref)
+    // must leave the source's recorded pin/commit exactly as they were: every
+    // git operation runs before any registry field is mutated or the registry
+    // is saved.
+    let (sb, _sha_v1, sha_v2) = make_pinnable_repo("pintest-remeld-bad-pin");
+    let spec = sb.source_spec();
+
+    let first = sb.mind(&["meld", &spec, "--register-only"]);
+    assert!(first.success, "first meld failed: {}", first.stderr);
+    assert_eq!(read_source_commit(&sb), sha_v2);
+    let pin_before = read_source_pin_json(&sb);
+
+    let r = sb.mind(&[
+        "meld",
+        &spec,
+        "--register-only",
+        "--pin",
+        "does-not-exist-anywhere",
+    ]);
+    assert!(
+        !r.success,
+        "a re-pin to a nonexistent ref must fail: {} {}",
+        r.stdout, r.stderr
+    );
+    assert_eq!(
+        read_source_commit(&sb),
+        sha_v2,
+        "a failed re-pin must not change the recorded commit"
+    );
+    assert_eq!(
+        read_source_pin_json(&sb),
+        pin_before,
+        "a failed re-pin must not change the recorded pin"
+    );
+    assert_eq!(source_count(&sb), 1, "the source must remain registered");
+}
+
+#[test]
+fn remeld_pin_marks_installed_items_out_of_date_when_commit_moves() {
+    // spec: CLI-209 - a re-meld's `--pin` re-checks-out the source's clone at
+    // the resolved commit; `recall`/`upgrade` already detect drift by
+    // comparing an installed item's recorded hash against the source's
+    // current content (CLI-75/LIFE-11), so once the pin moves the commit
+    // forward, an item whose content changed there is reported out of date
+    // exactly as any other upstream change is -- no separate mechanism is
+    // needed.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    let r = sb.mind(&["meld", &spec, "--yes"]);
+    assert!(r.success, "meld failed: {} {}", r.stdout, r.stderr);
+
+    // Fresh install: not out of date yet.
+    let fresh = sb.mind(&["recall", "skill:review"]);
+    assert!(
+        !fresh.stdout.contains("out of date"),
+        "a fresh install must not be out of date: {}",
+        fresh.stdout
+    );
+
+    // Advance the source with a real commit (the item installed from the
+    // prior commit is now behind).
+    sb.edit_source();
+
+    // Re-meld with `--pin HEAD`: freezes the (now-advanced) default branch
+    // tip.
+    let r = sb.mind(&["meld", &spec, "--pin", "HEAD"]);
+    assert!(
+        r.success,
+        "re-meld --pin HEAD failed: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stdout.contains("re-pinned"),
+        "the source must report a re-pin (the commit moved): {}",
+        r.stdout
+    );
+
+    let after = sb.mind(&["recall", "skill:review"]);
+    assert!(
+        after.success,
+        "recall failed: {} {}",
+        after.stdout, after.stderr
+    );
+    assert!(
+        after.stdout.contains("out of date"),
+        "the installed item must be reported out of date after the pin moved \
+         the source's recorded commit: {}",
+        after.stdout
     );
 }
 
@@ -15450,6 +15635,15 @@ fn curator_values_ignored_with_warning_when_nested_has_mind_toml() {
         "a DSC-60 warning must be emitted naming the onboarded source: {}",
         r.stderr
     );
+    // This curator entry has no `add-roots`, so the actionable add-roots hint
+    // must not be appended (it would be misleading advice for a suppression
+    // caused by `roots`/hooks, not `add-roots`).
+    assert!(
+        !r.stderr.contains("--add-root"),
+        "no add-roots hint should be printed when the curator entry set no \
+         add-roots: {}",
+        r.stderr
+    );
 
     let json = read_sources_json(&registry);
     // DSC-65: the curator follow-branch IS now applied (authoritative). The nested
@@ -15560,6 +15754,19 @@ fn curator_add_roots_ignored_with_warning_when_nested_has_mind_toml() {
             && r.stderr.contains("ignored")
             && r.stderr.contains("onboarded"),
         "a DSC-60 warning must be emitted naming the onboarded source: {}",
+        r.stderr
+    );
+    // The suppression of a curator's `add-roots` can silently install fewer
+    // items than before; the warning must be actionable, not just a notice:
+    // it names `add-roots` explicitly and points at the un-gated consumer
+    // escape (`meld --add-root`, DSC-84) that reaches the same items.
+    assert!(
+        r.stderr.contains("add-roots")
+            && r.stderr.contains("mind meld")
+            && r.stderr.contains("--add-root")
+            && r.stderr.contains("not gated"),
+        "the DSC-60 warning must tell the consumer they can apply add-roots \
+         themselves with `mind meld <source> --add-root <dir>`: {}",
         r.stderr
     );
 

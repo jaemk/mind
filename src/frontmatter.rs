@@ -24,15 +24,34 @@
 
 use std::path::Path;
 
-/// Read the top-level `description` from a file's frontmatter, if present.
-pub fn description(file: &Path) -> Option<String> {
-    file_field(file, "description")
-}
+use crate::error::{MindError, Result};
 
 /// Read a top-level scalar `key` from a file's frontmatter, if present.
 pub fn file_field(file: &Path, key: &str) -> Option<String> {
     let text = std::fs::read_to_string(file).ok()?;
     field(&text, key)
+}
+
+/// Read the top-level `description` from a file's frontmatter, size-capped
+/// (DSC-91). See [`file_field_capped`].
+pub fn description_capped(file: &Path) -> Result<Option<String>> {
+    file_field_capped(file, "description")
+}
+
+/// Read a top-level scalar `key` from a file's frontmatter, refusing a file at
+/// or above [`crate::error::METADATA_SIZE_LIMIT`] with
+/// [`MindError::MetadataTooLarge`] (DSC-91) instead of the plain-`Option`
+/// tolerance [`file_field`] uses for every read failure. An absent file (or any
+/// other I/O failure besides the size cap) still yields `Ok(None)`, matching
+/// `file_field`'s existing "unreadable -> None" behavior; only the new
+/// size-cap failure mode is a hard error.
+pub fn file_field_capped(file: &Path, key: &str) -> Result<Option<String>> {
+    let text = match crate::error::read_capped_metadata(file) {
+        Ok(text) => text,
+        Err(err @ MindError::MetadataTooLarge { .. }) => return Err(err),
+        Err(_) => return Ok(None),
+    };
+    Ok(field(&text, key))
 }
 
 /// Extract a top-level scalar `key` from the leading frontmatter block.
@@ -543,5 +562,59 @@ mod tests {
         // spec: DSC-23 -- files without a BOM must still be parsed correctly.
         let t = "---\ndescription: no bom\n---\n";
         assert_eq!(field(t, "description").as_deref(), Some("no bom"));
+    }
+
+    // ---- DSC-91: capped frontmatter reads -----------------------------------
+
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static N: AtomicU32 = AtomicU32::new(0);
+
+    fn tmp(label: &str) -> std::path::PathBuf {
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        std::env::temp_dir().join(format!("mind-fm-cap-{}-{label}-{n}.md", std::process::id()))
+    }
+
+    #[test]
+    fn description_capped_reads_a_normal_file() {
+        // spec: DSC-91
+        let path = tmp("ok");
+        std::fs::write(&path, "---\ndescription: normal size\n---\n").unwrap();
+        let result = description_capped(&path).expect("normal file must not error");
+        assert_eq!(result.as_deref(), Some("normal size"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn description_capped_refuses_an_oversized_file() {
+        // spec: DSC-91
+        // A SKILL.md-style frontmatter file at (limit + 1) bytes is refused with
+        // MetadataTooLarge naming the file, instead of being silently truncated
+        // or read in full. Built as a sparse file so the test does not itself
+        // allocate the whole oversized buffer.
+        let path = tmp("big");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(crate::error::METADATA_SIZE_LIMIT + 1).unwrap();
+        drop(file);
+        let err = description_capped(&path).expect_err("oversized frontmatter must be refused");
+        match &err {
+            crate::error::MindError::MetadataTooLarge { path: p, .. } => {
+                assert_eq!(p, &path, "error must name the offending file");
+            }
+            other => panic!("expected MetadataTooLarge, got: {other:?}"),
+        }
+        assert!(
+            err.to_string().contains(&path.display().to_string()),
+            "error message must name the file: {err}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn file_field_capped_missing_file_yields_none_not_error() {
+        // spec: DSC-91 -- an absent file is still `Ok(None)`, matching
+        // `file_field`'s existing tolerance; only the size cap is a hard error.
+        let path = tmp("missing");
+        let result = file_field_capped(&path, "description").expect("absent file is not an error");
+        assert_eq!(result, None);
     }
 }
