@@ -671,10 +671,12 @@ fn json_error_envelope_kind_is_bad_item_link() {
 }
 
 #[test]
-fn dump_skips_link_instances_with_a_note() {
+fn dump_emits_a_reconstructed_link_entry_not_a_skip_note() {
     // spec: LNK-13
-    // Emitting a reconstructed deep-URL entry is planned; until then dump
-    // skips the instance and says so, rather than emitting a whole-repo entry.
+    // `dump` now emits a reconstructed deep-URL entry for a link instance
+    // (round-tripped in tests/cli_dump.rs), rather than skipping it with a
+    // note. This pins that basic behavior from the item-link side: the entry
+    // is present and no "skipping item link" note is printed.
     let sb = Sandbox::new();
     assert!(
         sb.mind(&["learn", &sb.link("tree/main/skills/review")])
@@ -683,13 +685,13 @@ fn dump_skips_link_instances_with_a_note() {
     let r = sb.mind(&["dump"]);
     assert!(r.success, "dump failed: {} {}", r.stdout, r.stderr);
     assert!(
-        r.stderr.contains("skipping item link"),
-        "dump must note the skipped link: {}",
+        !r.stderr.contains("skipping item link"),
+        "dump must no longer skip an item-link instance: {}",
         r.stderr
     );
     assert!(
-        !r.stdout.contains("#skills/review"),
-        "no entry may be emitted for the link instance: {}",
+        r.stdout.contains("skills/review"),
+        "an entry reconstructing the link instance must be emitted: {}",
         r.stdout
     );
 }

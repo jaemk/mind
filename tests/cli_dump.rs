@@ -71,6 +71,12 @@ impl Sandbox {
         self.source.to_string_lossy().into_owned()
     }
 
+    /// A `file://` item-link URL into this sandbox's source repo (item-link.md
+    /// LNK-1), e.g. `sb.link("tree/main/skills/review")`.
+    fn link(&self, tail: &str) -> String {
+        format!("file://{}/{tail}", self.source.to_string_lossy())
+    }
+
     fn mind(&self, args: &[&str]) -> Run {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_mind"));
         cmd.args(args)
@@ -157,6 +163,16 @@ fn git_move_tag(dir: &Path, tag: &str) {
         .status()
         .expect("run git tag -f");
     assert!(status.success(), "git tag -f {tag} in {dir:?}");
+}
+
+/// The HEAD commit sha of `dir`.
+fn git_head(dir: &Path) -> String {
+    let out = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(dir)
+        .output()
+        .expect("git rev-parse");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -1647,5 +1663,278 @@ fn dump_json_flag_prints_stderr_note() {
             && (r.stderr.contains("does not apply") || r.stderr.contains("TOML")),
         "dump --json must print a note to stderr: '{}'",
         r.stderr
+    );
+}
+
+// ---------------------------------------------------------------------------
+// LNK-13: dump emits an item-link instance as a reconstructed deep-URL entry,
+// and re-melding that entry reproduces the same instance identity, pinned
+// commit, and installed item.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn dump_roundtrips_bare_link_instance() {
+    // spec: LNK-13 — a bare (unaliased) item-link instance is emitted as a
+    // `tree/<commit>/<path>` entry, not skipped. Re-melding it in a fresh
+    // home installs the SAME skill from the SAME instance identity, pinned
+    // to the exact commit recorded at dump time (not a later revision of the
+    // linked skill).
+    let sb = Sandbox::new("link-src");
+    let learn = sb.mind(&["learn", &sb.link("tree/main/skills/review")]);
+    assert!(
+        learn.success,
+        "learn <url> failed: {} {}",
+        learn.stdout, learn.stderr
+    );
+    let dumped_commit = git_head(&sb.source);
+
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let super_dir = sb.base.join(format!("link-super-{n}"));
+    std::fs::create_dir_all(&super_dir).expect("create super dir");
+    let dump_path = super_dir.join("mind.toml");
+    let dump_path_str = dump_path.to_string_lossy().into_owned();
+    let dr = sb.mind(&["dump", "--output", &dump_path_str]);
+    assert!(dr.success, "dump failed: {} {}", dr.stdout, dr.stderr);
+    assert!(
+        !dr.stderr.contains("skipping item link"),
+        "dump must no longer skip an item-link instance: {}",
+        dr.stderr
+    );
+
+    let dump_text = std::fs::read_to_string(&dump_path).expect("read dump");
+    assert!(
+        dump_text.contains("/tree/"),
+        "dump must emit a reconstructed tree/<ref>/<path> link URL: {dump_text}"
+    );
+    assert!(
+        dump_text.contains("skills/review"),
+        "dump must reconstruct the recorded item path: {dump_text}"
+    );
+    assert!(
+        dump_text.contains("pin-ref"),
+        "dump must pin the link entry with pin-ref like every other entry: {dump_text}"
+    );
+    assert!(
+        dump_text.contains(&dumped_commit),
+        "dump must pin the reconstructed link to the recorded commit: {dump_text}"
+    );
+
+    // Advance the linked skill's content AFTER the dump. A commit-exact
+    // reproduction must NOT pick this up.
+    sb.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\nname: review\ndescription: Review skill CHANGED AFTER DUMP\n---\n# review v2\n",
+    );
+
+    git_init(&super_dir);
+    let super_spec = super_dir.to_string_lossy().into_owned();
+    let fresh_base = sb.base.join(format!("link-fresh-{n}"));
+    std::fs::create_dir_all(&fresh_base).expect("fresh base");
+    let fresh_mind = fresh_base.join("mind");
+    let fresh_claude = fresh_base.join("claude");
+
+    let remeld = Command::new(env!("CARGO_BIN_EXE_mind"))
+        .args(["meld", &super_spec, "--yes"])
+        .env("MIND_HOME", &fresh_mind)
+        .env("CLAUDE_HOME", &fresh_claude)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null())
+        .output()
+        .expect("run remeld");
+    let ro = String::from_utf8_lossy(&remeld.stdout).into_owned();
+    let re = String::from_utf8_lossy(&remeld.stderr).into_owned();
+    assert!(remeld.status.success(), "remeld failed: {ro} {re}");
+
+    // The same item installed from the same instance identity...
+    let installed = fresh_claude.join("skills/review/SKILL.md");
+    assert!(
+        installed.exists(),
+        "the linked skill must be installed in the reproduced env: {fresh_claude:?}"
+    );
+    // ...at the SAME commit: the content dated after the dump must be absent.
+    let content = std::fs::read_to_string(&installed).expect("read reinstalled SKILL.md");
+    assert!(
+        !content.contains("CHANGED AFTER DUMP"),
+        "reproduced install must pin to the dumped commit, not a later revision: {content}"
+    );
+    assert!(
+        content.contains("Review skill"),
+        "reproduced install must carry the pre-dump content: {content}"
+    );
+
+    // Same instance identity (unaliased `#skills/review`, no trailing `@`).
+    let sources = Command::new(env!("CARGO_BIN_EXE_mind"))
+        .args(["recall", "--sources"])
+        .env("MIND_HOME", &fresh_mind)
+        .env("CLAUDE_HOME", &fresh_claude)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null())
+        .output()
+        .expect("run recall --sources");
+    let sources_out = String::from_utf8_lossy(&sources.stdout).into_owned();
+    assert!(
+        sources_out.contains("#skills/review"),
+        "the reproduced instance must carry the same link identity: {sources_out}"
+    );
+}
+
+#[test]
+fn dump_roundtrips_aliased_link_instance() {
+    // spec: LNK-13 — an item-link instance melded with a consumer namespace
+    // (`--namespace fork`) re-melds as the SAME `host/owner/repo#path@fork`
+    // instance: the emitted `namespace` field must carry the recorded
+    // IDENTITY alias, not just a display prefix.
+    let sb = Sandbox::new("link-alias-src");
+    let meld = sb.mind(&[
+        "meld",
+        &sb.link("tree/main/skills/review"),
+        "--namespace",
+        "fork",
+        "--yes",
+    ]);
+    assert!(
+        meld.success,
+        "aliased link meld failed: {} {}",
+        meld.stdout, meld.stderr
+    );
+    assert!(
+        sb.claude_home.join("skills/fork:review").exists(),
+        "the aliased link's skill must install under the prefix"
+    );
+
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let super_dir = sb.base.join(format!("link-alias-super-{n}"));
+    std::fs::create_dir_all(&super_dir).expect("create super dir");
+    let dump_path = super_dir.join("mind.toml");
+    let dump_path_str = dump_path.to_string_lossy().into_owned();
+    let dr = sb.mind(&["dump", "--output", &dump_path_str]);
+    assert!(dr.success, "dump failed: {} {}", dr.stdout, dr.stderr);
+
+    let dump_text = std::fs::read_to_string(&dump_path).expect("read dump");
+    assert!(
+        dump_text.contains("namespace = \"fork\""),
+        "dump must emit the identity alias as namespace on the link entry: {dump_text}"
+    );
+
+    git_init(&super_dir);
+    let super_spec = super_dir.to_string_lossy().into_owned();
+    let fresh_base = sb.base.join(format!("link-alias-fresh-{n}"));
+    std::fs::create_dir_all(&fresh_base).expect("fresh base");
+    let fresh_mind = fresh_base.join("mind");
+    let fresh_claude = fresh_base.join("claude");
+
+    let remeld = Command::new(env!("CARGO_BIN_EXE_mind"))
+        .args(["meld", &super_spec, "--yes"])
+        .env("MIND_HOME", &fresh_mind)
+        .env("CLAUDE_HOME", &fresh_claude)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null())
+        .output()
+        .expect("run remeld");
+    let ro = String::from_utf8_lossy(&remeld.stdout).into_owned();
+    let re = String::from_utf8_lossy(&remeld.stderr).into_owned();
+    assert!(remeld.status.success(), "remeld failed: {ro} {re}");
+
+    assert!(
+        fresh_claude.join("skills/fork:review").exists(),
+        "the reproduced env must install the skill under the SAME alias prefix: {fresh_claude:?}"
+    );
+
+    let sources = Command::new(env!("CARGO_BIN_EXE_mind"))
+        .args(["recall", "--sources"])
+        .env("MIND_HOME", &fresh_mind)
+        .env("CLAUDE_HOME", &fresh_claude)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null())
+        .output()
+        .expect("run recall --sources");
+    let sources_out = String::from_utf8_lossy(&sources.stdout).into_owned();
+    assert!(
+        sources_out.contains("#skills/review@fork"),
+        "the reproduced instance must carry the SAME aliased identity: {sources_out}"
+    );
+}
+
+#[test]
+fn dump_link_and_ordinary_source_together_roundtrip() {
+    // spec: LNK-13 — a dump mixing an item-link instance and an ordinary
+    // melded source emits both, and re-melding reproduces both installs.
+    let sb = Sandbox::new("link-mixed-src");
+    let learn = sb.mind(&["learn", &sb.link("tree/main/skills/review")]);
+    assert!(
+        learn.success,
+        "learn <url> failed: {} {}",
+        learn.stdout, learn.stderr
+    );
+
+    // A second, ordinary source repo, melded (not linked) alongside the link.
+    let other_source = sb.base.join("other-src");
+    write_file(
+        &other_source.join("skills/helper/SKILL.md"),
+        "---\nname: helper\ndescription: Helper skill\n---\n# helper\n",
+    );
+    git_init(&other_source);
+    let other_spec = other_source.to_string_lossy().into_owned();
+    let meld_other = sb.mind(&["meld", &other_spec, "--yes"]);
+    assert!(
+        meld_other.success,
+        "ordinary meld failed: {} {}",
+        meld_other.stdout, meld_other.stderr
+    );
+
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let super_dir = sb.base.join(format!("link-mixed-super-{n}"));
+    std::fs::create_dir_all(&super_dir).expect("create super dir");
+    let dump_path = super_dir.join("mind.toml");
+    let dump_path_str = dump_path.to_string_lossy().into_owned();
+    let dr = sb.mind(&["dump", "--output", &dump_path_str]);
+    assert!(dr.success, "dump failed: {} {}", dr.stdout, dr.stderr);
+    assert!(
+        !dr.stderr.contains("skipping item link"),
+        "dump must not skip the item-link instance: {}",
+        dr.stderr
+    );
+
+    let dump_text = std::fs::read_to_string(&dump_path).expect("read dump");
+    assert!(
+        dump_text.contains("/tree/") && dump_text.contains("skills/review"),
+        "dump must emit the reconstructed link entry: {dump_text}"
+    );
+    assert!(
+        dump_text.contains(&other_spec),
+        "dump must also emit the ordinary source entry: {dump_text}"
+    );
+
+    git_init(&super_dir);
+    let super_spec = super_dir.to_string_lossy().into_owned();
+    let fresh_base = sb.base.join(format!("link-mixed-fresh-{n}"));
+    std::fs::create_dir_all(&fresh_base).expect("fresh base");
+    let fresh_mind = fresh_base.join("mind");
+    let fresh_claude = fresh_base.join("claude");
+
+    let remeld = Command::new(env!("CARGO_BIN_EXE_mind"))
+        .args(["meld", &super_spec, "--yes"])
+        .env("MIND_HOME", &fresh_mind)
+        .env("CLAUDE_HOME", &fresh_claude)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null())
+        .output()
+        .expect("run remeld");
+    let ro = String::from_utf8_lossy(&remeld.stdout).into_owned();
+    let re = String::from_utf8_lossy(&remeld.stderr).into_owned();
+    assert!(remeld.status.success(), "remeld failed: {ro} {re}");
+
+    assert!(
+        fresh_claude.join("skills/review").exists(),
+        "the link instance's skill must install in the reproduced env: {fresh_claude:?}"
+    );
+    assert!(
+        fresh_claude.join("skills/helper").exists(),
+        "the ordinary source's skill must also install in the reproduced env: {fresh_claude:?}"
     );
 }

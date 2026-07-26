@@ -53,6 +53,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `dump` now emits an item-link instance as a deep `tree` URL rebuilt from its
+  recorded parts and pinned by `pin-ref`, instead of skipping it with a note. A
+  skill installed from a pasted URL is reproduced by melding the dump, including
+  an aliased instance and a `file://` link (LNK-13).
+- `evolve` names the resolved target triple in its report and `--json` output
+  before downloading, so the Linux gnu to musl artifact change is visible up
+  front. The existing keys are unchanged; `target_triple` is added (STO-65).
 - `meld --pin` on an already-melded source now re-pins it, rather than printing
   that the flag was ignored. It resolves the pin against the source's current
   one, re-checks-out the clone when the commit differs, and records the new pin
@@ -104,6 +111,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Security
 
+- `evolve` verifies the downloaded archive's build-provenance attestation with
+  `gh attestation verify` when `gh` is on PATH, after the checksum check and
+  before extraction. An absent `gh` or a tooling failure (no `attestation`
+  subcommand, no network, auth required) proceeds; a genuine verification
+  failure aborts and leaves the running binary in place. This is deliberately
+  stricter than `install.sh`, which never blocks: `gh` reports a substituted
+  artifact with the same "no attestations found" wording it uses for an artifact
+  that was never attested, so treating that as benign would defeat the check for
+  the case it exists to catch. No released version this can download predates
+  attestation, since the download runs only when the target is newer than the
+  running binary (STO-66).
 - Metadata read from a source is now size-capped at 8 MiB: `mind.toml`, item
   frontmatter, and Claude plugin and marketplace manifests. An oversized file is
   refused naming the file and the limit, and is never fully read into memory.

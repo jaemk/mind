@@ -154,9 +154,28 @@ same repo, and a plain meld of that repo, coexist as separate sources.
   under its full `#`-suffixed identity. Compare and browse URLs (CLI-176,
   HOOK-24) derive from the base repo and keep their host-gated shapes.
 
-## Planned
+## Reproduction
 
-- `LNK-13` (planned) `dump` emits a link instance as a `[discover].sources`
-  entry whose `source` is a deep URL reconstructed from the base URL, the
-  recorded pin, and the item path, so a dumped super-source reproduces link
-  installs. Until implemented, `dump` skips link instances with a note.
+- `LNK-13` `dump` emits a link instance as a `[discover].sources` entry: its
+  `source` is a `tree/<ref>/<path>` deep URL reconstructed from the recorded
+  `host`/`owner`/`repo` (a `file://`-prefixed path for a local instance,
+  matching LNK-1's local form) and `item_path`, with the recorded commit as
+  the `<ref>` segment. The entry also carries `pin-ref = <commit>` (dump.md
+  DUMP-1/DUMP-4), the SAME commit as the URL's own ref: `pin-ref` is what
+  actually pins the reproduction (a curator pin outranks an item link's own
+  URL-ref pin, DSC-65 over LNK-3), and the URL's ref exists to keep the URL
+  syntactically complete (a `tree`/`blob` link always needs one) and in
+  agreement with `pin-ref` rather than a possibly-since-moved branch tip. The
+  entry's `namespace` carries the recorded identity alias (`as_alias`,
+  STO-58), not a display-only prefix, so re-melding reproduces the exact
+  `host/owner/repo#path@alias` instance (LNK-4) an aliased link was
+  registered under; an unaliased link emits no `namespace` and, on re-meld,
+  naturally re-reads the repo's own `[source].prefix` (if any) exactly as the
+  original meld did. `roots`/`add-roots`/`flat-skills` are never emitted for
+  a link entry: a link instance's catalog is exactly its one skill (LNK-7),
+  so convention scan roots do not apply to it. A link instance always has a
+  recorded commit once registered (LNK-3/LNK-4: its checkout point is never
+  the default branch, so `meld`/`learn`/`sync` always resolve and record one
+  before it is added to the registry); the only way `dump` cannot reconstruct
+  the entry is a hand-edited registry with a missing commit, in which case
+  `dump` skips the instance with a note rather than emit an unpinned entry.

@@ -580,6 +580,17 @@ pub enum MindError {
         actual: String,
     },
 
+    /// STO-66: `gh attestation verify` ran and reported the downloaded release
+    /// archive does not carry a valid, matching build-provenance attestation.
+    /// The swap is aborted and the existing binary is left in place.
+    #[error(
+        "build provenance verification failed for the downloaded release archive: {reason}; \
+         evolve is aborting without replacing the running binary. If this release predates \
+         build-provenance attestations, install it another way (resources/install.sh or a \
+         manual download) instead of `mind evolve`"
+    )]
+    AttestationVerificationFailed { reason: String },
+
     /// POL-52/POL-53: `evolve` was refused or redirected by the managed policy.
     /// The `detail` field carries the human-readable reason: "self-update is
     /// disabled by the managed policy" for the disabled case (POL-52), or the
@@ -732,6 +743,7 @@ impl MindError {
             MindError::SkillCollision { .. } => "skill-collision",
             MindError::UnsafeName { .. } => "unsafe-name",
             MindError::DigestMismatch { .. } => "digest-mismatch",
+            MindError::AttestationVerificationFailed { .. } => "attestation-verification-failed",
             MindError::SelfUpdatePolicy { .. } => "self-update-policy",
             MindError::StateTooNew { .. } => "state-too-new",
             MindError::BuildEventRequiresItemTarget => "build-event-requires-item-target",
@@ -1084,6 +1096,24 @@ mod tests {
             e.contains("https://example.com/mind-0.1.0.tar.gz"),
             "must include URL: {e}"
         );
+    }
+
+    #[test]
+    fn attestation_verification_failed_names_reason_and_kind() {
+        // spec: STO-66
+        let e = MindError::AttestationVerificationFailed {
+            reason: "no attestations found".into(),
+        };
+        let msg = e.to_string();
+        assert!(
+            msg.contains("no attestations found"),
+            "must include the reason: {msg}"
+        );
+        assert!(
+            msg.contains("aborting"),
+            "must say evolve is aborting: {msg}"
+        );
+        assert_eq!(e.kind(), "attestation-verification-failed");
     }
 
     #[test]

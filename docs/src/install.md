@@ -61,10 +61,20 @@ on Windows. On Windows, run `mind` under WSL (Windows Subsystem for Linux).
 ## Updating
 
 `mind evolve` updates the binary itself to the latest release. It reports the
-target version and prompts before downloading, unless `--yes` is given (`--check`
+target version and the resolved target triple (the exact artifact it would
+fetch) and prompts before downloading, unless `--yes` is given (`--check`
 reports without changing anything, `--version <v>` pins a target). It uses the
 same download path as the install script and verifies the `SHA256SUMS` asset
 before swapping in the new binary.
+
+If a `gh` binary is on `PATH`, `evolve` also verifies the downloaded archive's
+build-provenance attestation (`gh attestation verify`) before swapping. Without
+`gh`, this step is skipped and `evolve` proceeds as it always has. Unlike
+`install.sh` (which never blocks on this check), `evolve` aborts the swap,
+leaving the existing binary in place, when `gh` runs the check and reports the
+artifact does not verify; it still proceeds, with a note, when `gh` itself
+could not complete the check (no network, or a `gh` build without the
+`attestation` subcommand).
 
 ## Uninstall
 

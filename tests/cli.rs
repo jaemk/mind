@@ -11913,6 +11913,66 @@ fn evolve_check_at_current_version_reports_up_to_date() {
 }
 
 #[test]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn evolve_check_reports_resolved_target_triple() {
+    // spec: STO-65
+    // Linux release artifacts changed from gnu to musl; `--check` must surface
+    // the resolved target triple in the human-readable report, before any
+    // download happens, so that swap is visible rather than silent. Fully
+    // offline (an explicit --version bypasses the GitHub API).
+    let sb = Sandbox::new();
+    let r = sb.mind(&["evolve", "--check", "--version", "9.9.9"]);
+    assert!(
+        r.success,
+        "evolve --check --version 9.9.9 should succeed: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stdout.contains("x86_64-unknown-linux-musl"),
+        "expected the resolved musl target triple in the --check report: {}",
+        r.stdout
+    );
+    // The existing wording must still be present unchanged.
+    assert!(
+        r.stdout.contains("9.9.9") && r.stdout.contains("available"),
+        "existing report wording must be preserved: {}",
+        r.stdout
+    );
+}
+
+#[test]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn evolve_check_json_includes_target_triple_key() {
+    // spec: STO-65
+    // Under --json, the target triple is exposed as an ADDITIONAL
+    // `target_triple` key; the existing `action`/`target`/`outcome` keys must
+    // be unchanged (not renamed), since --json consumers depend on them.
+    let sb = Sandbox::new();
+    let r = sb.mind(&["evolve", "--check", "--version", "9.9.9", "--json"]);
+    assert!(
+        r.success,
+        "evolve --check --version 9.9.9 --json should succeed: {} {}",
+        r.stdout, r.stderr
+    );
+    let v: serde_json::Value = serde_json::from_str(r.stdout.trim()).unwrap_or_else(|e| {
+        panic!(
+            "evolve --check --json stdout must be valid JSON ({e}): {}",
+            r.stdout
+        )
+    });
+    assert_eq!(
+        v.get("target_triple").and_then(|t| t.as_str()),
+        Some("x86_64-unknown-linux-musl"),
+        "target_triple must be the resolved musl artifact: {}",
+        r.stdout
+    );
+    // Existing keys must be present and unchanged (not renamed).
+    assert_eq!(v.get("action").and_then(|a| a.as_str()), Some("evolve"));
+    assert_eq!(v.get("target").and_then(|t| t.as_str()), Some("9.9.9"));
+    assert_eq!(v.get("outcome").and_then(|o| o.as_str()), Some("available"));
+}
+
+#[test]
 fn help_lists_upgrade_evolve_and_self_update_alias() {
     // Confirm clap renders both subcommands. `self-update` is now a visible alias
     // for `evolve` (CLI-172) and must appear in --help.

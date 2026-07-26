@@ -43,6 +43,9 @@ and the manifest are defined in [storage.md](storage.md).
   gated by DSC-60/DSC-88 exactly like `roots`: it composes only when the nested
   source has no `mind.toml` of its own. A source without recorded add-roots
   emits no `add-roots` key.
+- `DUMP-1`/`DUMP-4` describe an ordinary melded source. A melded item-link
+  instance (item-link.md LNK-4) is dumped as a differently-shaped entry: see
+  item-link.md LNK-13 for the reconstructed deep-URL entry it emits instead.
 - `DUMP-7` The emitted file is a valid super-source (it parses under DSC-3 and the
   strictness of DSC-30) that declares only `[discover].sources` and no items of its
   own, so melding it registers the chain and installs per the per-entry directive

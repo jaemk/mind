@@ -93,6 +93,17 @@ mind hooks list <source>                    # list hooks in effect, run nothing
 items runs each in turn. `--event` selects the lifecycle event (`install`,
 `uninstall`, or `build`); `build` is valid only for an item target.
 
+An item-link instance's own identity is `owner/repo#<path>` (see
+[Item links](commands.md#item-links-install-one-skill-by-url)), which is spelled
+the same way as "item `<path>` in source `owner/repo`". When a target matches
+both a registered source and an installed item, `mind` refuses it rather than
+picking one, and names both disambiguated forms. Force either reading:
+
+```
+mind hooks run source:<target>              # the source's own hooks
+mind hooks run <source>#<kind>:<name>       # that item's hooks
+```
+
 For a source install run, only *pending* install hooks run by default (a hook
 that never ran, was skipped, or whose recorded commit is behind the source's
 current commit); `--force` re-runs every install hook regardless. An item target

@@ -215,6 +215,57 @@ prevent the lost-update and torn-read races a plain read-modify-write would allo
   sums file that has no entry for the archive, is a `DigestMismatch` error and
   the archive is not extracted. Version-pinned `evolve` (`--version V`) verifies
   the pinned release's `SHA256SUMS`.
+- `STO-65` `evolve --check` (and the run path's equivalent report) names the
+  resolved release target triple (`target_triple`, e.g.
+  `x86_64-unknown-linux-musl`) alongside the version comparison, so the exact
+  artifact that would be fetched is visible before any network call -- e.g. a
+  change in artifact resolution (the Linux legs moved from a `gnu` to a `musl`
+  build) is caught at `--check` time rather than discovered after the swap.
+  Each existing human-readable message keeps its exact original wording as a
+  prefix, with `-- target <triple>` appended. Under `--json`, the same value is
+  exposed as an additional `target_triple` key; the existing `action`, `target`
+  (the version), and `outcome` keys are unchanged -- `--json` consumers depend
+  on those names, so a new field is added rather than any key renamed.
+- `STO-66` `evolve`'s download path soft-verifies the downloaded release
+  archive's GitHub build-provenance attestation (`actions/attest-build-provenance`)
+  via `gh attestation verify <archive> --repo jaemk/mind` when a `gh` binary is
+  present on PATH, mirroring `resources/install.sh`'s `gh attestation verify`
+  step. The check runs after the `SHA256SUMS` digest check (STO-47) and before
+  extraction, inside the same transactional download-and-swap step (STO-46): a
+  failure here leaves the existing binary untouched, exactly like every other
+  failure in that step.
+  - `gh` absent from PATH: `evolve` proceeds silently, with no note, matching
+    install.sh's `if command -v gh` gate exactly.
+  - `gh` present but the check could not be attempted (a `gh` build with no
+    `attestation` subcommand, or a network-level failure reaching GitHub, e.g. DNS
+    or connection failure) -- classified as a TOOLING error, not a statement
+    about the artifact: `evolve` proceeds with a note and does not block.
+  - `gh` present, the check ran, and it reported a positive result: `evolve`
+    proceeds and prints a confirmation.
+  - `gh` present, the check ran, and it reported the artifact does NOT verify
+    (no matching attestation for the digest, a signer/repo mismatch, or an
+    explicit signature failure): `evolve` aborts with `AttestationVerificationFailed`
+    before extraction, leaving the existing binary in place.
+  - **Difference from `resources/install.sh`:** install.sh treats every
+    `gh attestation verify` failure, for any reason, as "could not be verified,
+    continuing" (fully soft, never blocks). `evolve` is deliberately narrower:
+    the failure classification above treats "no attestations found" (the
+    message `gh` also uses for the ordinary, benign case of an artifact
+    predating provenance attestations) as a GENUINE failure that aborts, not a
+    tooling error that proceeds. This is intentional, not an oversight: an
+    attacker who substitutes the release artifact cannot forge a validly signed
+    attestation for the new digest, so a substituted artifact surfaces through
+    the exact same "no attestations found" wording as a merely-absent
+    attestation -- there is no way to tell the two apart from `gh`'s output.
+    Treating that ambiguous case as a pass-through tooling error (as install.sh
+    does) would defeat the entire point of the check for the one case it exists
+    to catch, so `evolve` fails closed on it instead.
+  - Failing closed does not strand anyone on a release that predates
+    provenance: the download step is reached only on `Decision::Update`
+    (CLI-147 refuses a downgrade without downloading), and a release older than
+    provenance is by construction older than any binary carrying this check, so
+    it never reaches the verification. Every version this check can download is
+    one the release workflow attested.
 - `STO-48` `evolve` takes NO outer command lock (its `lock_mode` is `None`). It
   acquires the global exclusive lock itself inside the download-and-swap step
   (STO-46), only after the network-free decision/prompt phase, and `evolve

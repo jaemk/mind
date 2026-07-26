@@ -102,7 +102,7 @@ struct DumpEntry {
 /// - `whole_sources` - when true, emit `install = true` for every source
 ///   regardless of what is actually installed (DUMP-3)
 pub fn run(paths: &Paths, output: Option<PathBuf>, whole_sources: bool) -> Result<()> {
-    // spec: DUMP-1 DUMP-2 DUMP-3 DUMP-4 DUMP-5 DUMP-6 DUMP-7 DUMP-8 DUMP-9
+    // spec: DUMP-1 DUMP-2 DUMP-3 DUMP-4 DUMP-5 DUMP-6 DUMP-7 DUMP-8 DUMP-9 LNK-13
 
     // DUMP-9: dump always writes TOML; --json has no effect on the output format.
     // Print a note to stderr so the caller is not confused by the TOML output.
@@ -161,14 +161,29 @@ fn build_entries(
     let mut entries = Vec::with_capacity(registry.sources.len());
 
     for source in &registry.sources {
-        // spec: LNK-13 -- emitting an item-link instance as a reconstructed
-        // deep-URL entry is not implemented yet; skip it with a note rather
-        // than emitting a whole-repo entry that over-installs.
+        // spec: LNK-13 -- an item-link instance is dumped as a reconstructed
+        // deep-URL entry rather than the generic per-source shape (DUMP-1/
+        // DUMP-4), since a link's `source` spec is not the repo URL alone.
         if source.item_path.is_some() {
-            eprintln!(
-                "note: skipping item link {} (dump does not yet emit item links)",
-                source.name
-            );
+            match build_link_entry(paths, source, manifest, whole_sources)? {
+                Some(entry) => entries.push(entry),
+                None => {
+                    // Defensive only: every link instance registered through
+                    // the normal meld/learn/sync paths always has a recorded
+                    // commit (LNK-3/LNK-4 -- the checkout point is never
+                    // DefaultBranch for a link, so `meld_recursive` always
+                    // resolves and records one). A hand-edited registry could
+                    // still lack one; without a commit there is no ref to
+                    // build a syntactically valid deep URL from, so skip with
+                    // a note rather than emit an unpinned (and therefore
+                    // non-reproducing) link entry.
+                    eprintln!(
+                        "note: skipping item link {} (no recorded commit to pin the \
+                         reconstructed URL to)",
+                        source.name
+                    );
+                }
+            }
             continue;
         }
         let entry = build_entry(paths, source, manifest, whole_sources)?;
@@ -176,6 +191,81 @@ fn build_entries(
     }
 
     Ok(entries)
+}
+
+/// Build a `[[discover.sources]]` entry for an item-link source instance
+/// (LNK-13).
+///
+/// Reconstructs a deep tree URL that [`crate::source::parse_spec`] accepts as
+/// an item link (item-link.md LNK-1) from the recorded `host`/`owner`/`repo`/
+/// `item_path`, with the recorded commit as the URL's `<ref>` segment. Emits
+/// `pin-ref = <commit>` alongside it, exactly like every other dump entry
+/// (DUMP-1/DUMP-4/DSC-65): the pin-ref is the entry's authoritative pin
+/// (curator pin outranks an item link's own URL-ref pin, DSC-65 over LNK-3),
+/// so it is what actually pins the reproduction; the URL's ref segment is set
+/// to the SAME commit so the two never disagree, and so the URL is
+/// syntactically complete (a `tree`/`blob` link always requires a ref
+/// segment) even before `pin-ref` is applied.
+///
+/// The `namespace` field carries the recorded IDENTITY alias (`as_alias`,
+/// STO-58) rather than the display-only effective prefix that ordinary
+/// entries emit (DUMP-4's `effective_prefix`): a link's alias is part of its
+/// identity (`host/owner/repo#path@alias`, LNK-4), so re-melding must apply
+/// the SAME alias value to `apply_alias` for the identity to round-trip. When
+/// no identity alias was recorded, `namespace` is omitted and the source's
+/// own `[source].prefix` (if any) is picked back up naturally when the link
+/// entry is re-melded, exactly as it was at the original meld.
+///
+/// `roots`/`add-roots`/`flat-skills` are never emitted for a link entry: an
+/// item-link instance's catalog is exactly its one skill (LNK-7), so
+/// convention scan roots play no part in it.
+fn build_link_entry(
+    paths: &Paths,
+    source: &Source,
+    manifest: &Manifest,
+    whole_sources: bool,
+) -> Result<Option<DumpEntry>> {
+    let Some(url) = build_link_url(source) else {
+        return Ok(None);
+    };
+
+    let (install, install_items) = if whole_sources {
+        (Some(true), None)
+    } else {
+        compute_install_directive(paths, source, manifest)?
+    };
+
+    Ok(Some(DumpEntry {
+        source: url,
+        namespace: source.as_alias.clone(),
+        roots: None,
+        add_roots: None,
+        flat_skills: None,
+        pin_ref: source.commit.clone(),
+        install,
+        install_items,
+    }))
+}
+
+/// Reconstruct a deep item-link URL from a source's recorded `host`/`owner`/
+/// `repo`/`item_path` and its recorded commit (LNK-13). Returns `None` when
+/// the source has no `item_path` or no recorded commit.
+///
+/// Always uses the `tree/<ref>/<path>` shape (never `blob/.../SKILL.md`):
+/// `parse_link_tail` (source.rs) accepts a `tree` link naming the skill
+/// directory directly, so there is no need to reconstruct the `blob` +
+/// trailing `/SKILL.md` alternative. A local (`host == "local"`) source's
+/// `url` field holds a bare filesystem path (no `file://` prefix, stripped at
+/// parse time), so the `file://` scheme is re-added here to reach the local
+/// link branch of `parse_spec`.
+fn build_link_url(source: &Source) -> Option<String> {
+    let item_path = source.item_path.as_deref()?;
+    let commit = source.commit.as_deref()?;
+    if source.is_local() {
+        Some(format!("file://{}/tree/{commit}/{item_path}", source.url))
+    } else {
+        Some(format!("{}/tree/{commit}/{item_path}", source.url))
+    }
 }
 
 /// Build one `[[discover.sources]]` entry for a single melded source.
@@ -871,5 +961,133 @@ mod tests {
             toml::from_str(&text).unwrap_or_else(|e| panic!("empty-registry doc must parse: {e}"));
         let disc = back.discover.expect("must have [discover]");
         assert!(disc.sources.is_empty(), "sources must be empty");
+    }
+
+    // ----- LNK-13: item-link entry reconstruction -----
+
+    /// Helper: a minimal item-link `Source` (mirrors what `parse_spec` builds
+    /// for a deep tree/blob URL). `host = "local"` and `url` a bare path
+    /// reproduces the local `file://` link shape; any other host reproduces a
+    /// remote forge link.
+    fn make_link_source(
+        host: &str,
+        owner: &str,
+        repo: &str,
+        url: &str,
+        item_path: &str,
+        commit: Option<&str>,
+    ) -> Source {
+        let mut s = make_source(&format!("{host}/{owner}/{repo}"), url, commit);
+        s.host = host.to_string();
+        s.owner = owner.to_string();
+        s.repo = repo.to_string();
+        s.item_path = Some(item_path.to_string());
+        s
+    }
+
+    const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    #[test]
+    fn link_url_reconstructs_and_reparses_for_a_remote_source() {
+        // spec: LNK-13 — a remote item-link source's recorded fields
+        // reconstruct a `tree/<commit>/<path>` URL that `parse_spec` accepts
+        // back as the SAME item-link identity (host/owner/repo#path).
+        let source = make_link_source(
+            "github.com",
+            "acme",
+            "repo",
+            "https://github.com/acme/repo",
+            "skills/foo",
+            Some(SHA),
+        );
+        let url = build_link_url(&source).expect("commit + item_path present");
+        assert_eq!(
+            url,
+            format!("https://github.com/acme/repo/tree/{SHA}/skills/foo")
+        );
+        let reparsed = crate::source::parse_spec(&url)
+            .unwrap_or_else(|e| panic!("reconstructed link URL must reparse: {e}"));
+        assert_eq!(reparsed.name, "github.com/acme/repo#skills/foo");
+        assert_eq!(reparsed.item_path.as_deref(), Some("skills/foo"));
+        assert_eq!(reparsed.pin, crate::source::Pin::Ref(SHA.to_string()));
+    }
+
+    #[test]
+    fn link_url_reconstructs_and_reparses_for_a_local_file_source() {
+        // spec: LNK-13 — a local (`file://`) link source round-trips too: the
+        // reconstructed URL re-adds the `file://` scheme the bare `url` field
+        // was stripped of at parse time, and reparses to the same identity.
+        let source = make_link_source(
+            "local",
+            "dev",
+            "agents",
+            "/home/me/dev/agents",
+            "skills/foo",
+            Some(SHA),
+        );
+        let url = build_link_url(&source).expect("commit + item_path present");
+        assert_eq!(
+            url,
+            format!("file:///home/me/dev/agents/tree/{SHA}/skills/foo")
+        );
+        let reparsed = crate::source::parse_spec(&url)
+            .unwrap_or_else(|e| panic!("reconstructed file link URL must reparse: {e}"));
+        assert_eq!(reparsed.host, "local");
+        assert_eq!(reparsed.name, "local/dev/agents#skills/foo");
+        assert_eq!(reparsed.url, "/home/me/dev/agents");
+        assert_eq!(reparsed.item_path.as_deref(), Some("skills/foo"));
+    }
+
+    #[test]
+    fn link_url_is_none_without_a_recorded_commit() {
+        // spec: LNK-13 — no commit means no ref to build a valid URL from;
+        // build_link_url reports None so the caller emits the skip note
+        // rather than a broken/unpinned entry.
+        let source = make_link_source(
+            "github.com",
+            "acme",
+            "repo",
+            "https://github.com/acme/repo",
+            "skills/foo",
+            None,
+        );
+        assert!(
+            build_link_url(&source).is_none(),
+            "no recorded commit must yield None, not a guessed ref"
+        );
+    }
+
+    #[test]
+    fn link_entry_namespace_carries_the_identity_alias_not_the_display_prefix() {
+        // spec: LNK-13 — the emitted `namespace` for a link entry must be the
+        // recorded IDENTITY alias (`as_alias`, STO-58), not the general
+        // `effective_prefix()` used for ordinary sources: only `as_alias` is
+        // what `apply_alias` needs fed back in to reproduce
+        // `host/owner/repo#path@alias` on re-meld. Here `alias` and
+        // `as_alias` are deliberately set to DIFFERENT values, mimicking a
+        // post-clone display-prefix override (STO-58's carve-out) applying on
+        // top of a `--as` identity alias: the entry must still carry the
+        // identity one, not the display one.
+        let mut source = make_link_source(
+            "github.com",
+            "acme",
+            "repo",
+            "https://github.com/acme/repo",
+            "skills/foo",
+            Some(SHA),
+        );
+        source.as_alias = Some("fork".into());
+        source.alias = Some("displayonly".into());
+
+        let url = build_link_url(&source).unwrap();
+        assert_eq!(source.commit.clone(), Some(SHA.to_string()));
+        // Directly exercise the field the entry would carry (namespace), the
+        // same value `build_link_entry` assigns.
+        assert_eq!(source.as_alias.as_deref(), Some("fork"));
+        // Reparsing the URL plus applying that alias reproduces the exact
+        // instance identity the source was originally registered under.
+        let mut reparsed = crate::source::parse_spec(&url).unwrap();
+        reparsed.apply_alias(source.as_alias.clone());
+        assert_eq!(reparsed.name, "github.com/acme/repo#skills/foo@fork");
     }
 }

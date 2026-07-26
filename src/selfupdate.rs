@@ -109,18 +109,30 @@ pub fn decision(current: &str, target: &str, explicit: bool) -> Decision {
 /// The one-line status `--check` (and the run path) reports: the running version,
 /// the target, and whether an update is pending. Pure so it is unit-testable
 /// without touching the network.
-// spec: CLI-141
-fn check_report(current: &str, target: &str, decision: &Decision) -> String {
+///
+/// `triple` is the resolved release target triple (`target_triple`) -- the exact
+/// artifact `evolve` would fetch. It is appended as a trailing `-- target
+/// <triple>` clause so the wording of each existing branch stays byte-for-byte
+/// intact as a prefix (STO-65): the release artifacts recently changed from gnu
+/// to musl on Linux, so surfacing which artifact is about to be downloaded,
+/// before anything is fetched, lets a stale-glibc concern be caught at `--check`
+/// time instead of after the swap.
+// spec: CLI-141 STO-65
+fn check_report(current: &str, target: &str, decision: &Decision, triple: &str) -> String {
     match decision {
         Decision::UpToDate => {
-            format!("mind {current} is up to date (latest is {target})")
+            format!("mind {current} is up to date (latest is {target}) -- target {triple}")
         }
         Decision::Update => {
-            format!("mind {current} -> {target} available; run `mind evolve` to update")
+            format!(
+                "mind {current} -> {target} available; run `mind evolve` to update -- target {triple}"
+            )
         }
         // spec: CLI-147
         Decision::PinnedBelowCurrent => {
-            format!("pinned {target} is below the running {current}; not downgrading")
+            format!(
+                "pinned {target} is below the running {current}; not downgrading -- target {triple}"
+            )
         }
     }
 }
@@ -214,13 +226,16 @@ pub fn run(check: bool, yes: bool, mut version: Option<String>) -> Result<()> {
                 Decision::Update => "available",
                 Decision::PinnedBelowCurrent => "not-downgrading",
             };
-            return print_evolve_json(&target_version, outcome);
+            return print_evolve_json(&target_version, outcome, target);
         }
         let marker = match d {
             Decision::UpToDate | Decision::PinnedBelowCurrent => out.ok(),
             Decision::Update => out.warn(),
         };
-        println!("{marker} {}", check_report(current, &target_version, &d));
+        println!(
+            "{marker} {}",
+            check_report(current, &target_version, &d, target)
+        );
         // spec: POL-66 -- when running is above the policy pin, warn that the pin is
         // an upper bound and does not downgrade. Human mode only; --json already
         // returned above.
@@ -236,7 +251,7 @@ pub fn run(check: bool, yes: bool, mut version: Option<String>) -> Result<()> {
     match d {
         Decision::UpToDate => {
             if out.json {
-                return print_evolve_json(&target_version, "up-to-date");
+                return print_evolve_json(&target_version, "up-to-date", target);
             }
             println!("{} mind {current} is already up to date", out.ok());
             return Ok(());
@@ -245,12 +260,12 @@ pub fn run(check: bool, yes: bool, mut version: Option<String>) -> Result<()> {
         // do NOT download or replace the binary.
         Decision::PinnedBelowCurrent => {
             if out.json {
-                return print_evolve_json(&target_version, "not-downgrading");
+                return print_evolve_json(&target_version, "not-downgrading", target);
             }
             println!(
                 "{} {}",
                 out.ok(),
-                check_report(current, &target_version, &d)
+                check_report(current, &target_version, &d, target)
             );
             // spec: POL-66 -- when running is above the policy pin, warn that the pin
             // is an upper bound and does not downgrade. Human mode only; --json already
@@ -273,14 +288,19 @@ pub fn run(check: bool, yes: bool, mut version: Option<String>) -> Result<()> {
     }
 
     let url = asset_url(&target_version, target);
-    download_and_swap(&url, current, &target_version)
+    download_and_swap(&url, current, &target_version, target)
 }
 
 /// Emit the structured `evolve` result (CLI-153) under `--json`.
-fn print_evolve_json(version: &str, outcome: &str) -> Result<()> {
+///
+/// `target_triple` adds the `target_triple` key (STO-65) alongside the existing
+/// `action`/`target`/`outcome` keys, which are never renamed: `--json` consumers
+/// already depend on those names.
+fn print_evolve_json(version: &str, outcome: &str, target_triple: &str) -> Result<()> {
     crate::render::print_json(&serde_json::json!({
         "action": "evolve",
         "target": version,
+        "target_triple": target_triple,
         "outcome": outcome,
     }))
 }
@@ -316,13 +336,125 @@ pub fn sha256_hex(data: &[u8]) -> String {
         .collect()
 }
 
+/// The result of a soft build-provenance verification attempt (STO-66).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum AttestationOutcome {
+    /// `gh attestation verify` succeeded: the archive matches a valid, signed
+    /// build-provenance attestation published by the release repo.
+    Verified,
+    /// `gh` could not even attempt the verification -- an old `gh` with no
+    /// `attestation` subcommand, or a network-level failure reaching GitHub --
+    /// which is not a statement about the artifact itself. Carries the
+    /// (sanitized) reason for the human-readable note.
+    ToolingError(String),
+    /// `gh` ran the check and reported the artifact does NOT verify: no
+    /// matching attestation, a signer/repo mismatch, or an explicit signature
+    /// failure. Deliberately fail-closed (see `is_gh_tooling_error`):
+    /// "no attestations found" is `gh`'s output both for "this release
+    /// predates build-provenance attestations" and for "this artifact was
+    /// substituted", and the two are not distinguishable from its output, so
+    /// both must abort rather than silently trusting an unverified artifact.
+    GenuineFailure(String),
+}
+
+/// The `gh` argv that verifies a downloaded archive's build-provenance
+/// attestation against the release repo (STO-66), matching
+/// `resources/install.sh`'s `gh attestation verify "$tmp/$asset" --repo "$REPO"`.
+/// Pure (no I/O) so it is unit-testable without spawning a process.
+pub(crate) fn gh_attestation_verify_args(archive_path: &str, repo: &str) -> Vec<String> {
+    vec![
+        "attestation".into(),
+        "verify".into(),
+        archive_path.into(),
+        "--repo".into(),
+        repo.into(),
+    ]
+}
+
+/// Classify `gh attestation verify`'s (sanitized) stderr as a TOOLING problem --
+/// `gh` itself could not run the check -- rather than a verification result
+/// (STO-66).
+///
+/// Deliberately narrow: anything not matched here is treated as a genuine
+/// verification failure and aborts the swap. The interesting failure mode (a
+/// substituted artifact has no valid attestation) surfaces through the exact
+/// same "no attestations found" / HTTP-404 wording that `gh` also uses for a
+/// merely-absent attestation (confirmed empirically: querying a real, unmodified
+/// artifact's digest under the wrong repo, and querying a tampered artifact's
+/// digest under the correct repo, both produce the same class of "not found"
+/// message). There is no reliable way to tell those two cases apart from `gh`'s
+/// output, so the ambiguity fails CLOSED here rather than silently passing an
+/// unverifiable artifact through.
+pub(crate) fn is_gh_tooling_error(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    const TOOLING_MARKERS: &[&str] = &[
+        // Old `gh` with no `attestation verify` subcommand/flag.
+        "unknown command",
+        "unknown flag",
+        // Network-level failures reaching the GitHub API -- `gh` never got an
+        // answer to verify against, so this says nothing about the artifact.
+        "dial tcp",
+        "no such host",
+        "connection refused",
+        "i/o timeout",
+        "context deadline exceeded",
+        "tls handshake",
+        "certificate signed by unknown authority",
+        // Auth required (e.g. a private repo, or an org policy) -- `gh` could
+        // not even ask the question.
+        "gh auth login",
+    ];
+    TOOLING_MARKERS.iter().any(|m| lower.contains(m))
+}
+
+/// Soft-verify a downloaded archive's build-provenance attestation (STO-66),
+/// mirroring `resources/install.sh`'s `gh attestation verify` step.
+///
+/// `gh_cmd` is the command name to invoke: `"gh"` in production. Tests point it
+/// at a name that resolves to nothing (simulating "`gh` absent" deterministically,
+/// without needing to hide the real `gh` from PATH) or at a fake script placed
+/// first on PATH (simulating a specific `gh` outcome), mirroring the fake-curl
+/// pattern used elsewhere in this file.
+///
+/// Returns `None` when `gh_cmd` is not on PATH: evolve proceeds silently,
+/// exactly like install.sh's `if command -v gh` gate (no note printed for a
+/// plain absence, only for a `gh` that ran but could not complete the check).
+fn attestation_step(gh_cmd: &str, archive: &Path) -> Option<AttestationOutcome> {
+    if !have(gh_cmd) {
+        return None;
+    }
+    let archive_str = archive.to_string_lossy();
+    let args = gh_attestation_verify_args(&archive_str, REPO);
+    let output = match Command::new(gh_cmd).args(&args).output() {
+        Ok(o) => o,
+        // A spawn failure after `have()` reported present (e.g. a TOCTOU race,
+        // or a `gh` that is on PATH but not executable) is itself a tooling
+        // problem, not a statement about the artifact.
+        Err(e) => return Some(AttestationOutcome::ToolingError(e.to_string())),
+    };
+    if output.status.success() {
+        return Some(AttestationOutcome::Verified);
+    }
+    let stderr = crate::sanitize::strip_ansi(String::from_utf8_lossy(&output.stderr).trim());
+    if is_gh_tooling_error(&stderr) {
+        Some(AttestationOutcome::ToolingError(stderr))
+    } else {
+        Some(AttestationOutcome::GenuineFailure(stderr))
+    }
+}
+
 /// Download the release archive, extract it, and atomically swap the new binary
 /// for the running executable. Imperative and network-touching; the swap is
 /// atomic so any failure leaves the existing binary intact.
 ///
 /// Holds the global exclusive lock (STO-46) for the entire download-and-swap
 /// step so two concurrent `mind evolve` invocations cannot race.
-fn download_and_swap(url: &str, current: &str, target_version: &str) -> Result<()> {
+fn download_and_swap(
+    url: &str,
+    current: &str,
+    target_version: &str,
+    target_triple: &str,
+) -> Result<()> {
     // spec: STO-46 -- hold the exclusive lock for the entire download-and-swap.
     let paths = crate::paths::Paths::resolve()?;
     let mut lock = crate::lock::open(&paths)?;
@@ -367,6 +499,31 @@ fn download_and_swap(url: &str, current: &str, target_version: &str) -> Result<(
         });
     }
 
+    // spec: STO-66 -- soft-verify the archive's build-provenance attestation
+    // when `gh` is available, before extraction/swap. Absent `gh`, or a
+    // tooling error, proceeds with (at most) a note; a genuine verification
+    // failure aborts before anything is extracted or swapped.
+    match attestation_step("gh", &archive) {
+        None => {}
+        Some(AttestationOutcome::Verified) => {
+            if !out.json {
+                println!("{} build provenance verified", out.ok());
+            }
+        }
+        Some(AttestationOutcome::ToolingError(reason)) => {
+            if !out.json {
+                println!(
+                    "{} build provenance could not be verified ({reason}); continuing",
+                    out.warn()
+                );
+            }
+        }
+        Some(AttestationOutcome::GenuineFailure(reason)) => {
+            let _ = std::fs::remove_dir_all(&tmp);
+            return Err(MindError::AttestationVerificationFailed { reason });
+        }
+    }
+
     // Extract the archive into the temp dir.
     let status = Command::new("tar")
         .arg("-xzf")
@@ -395,7 +552,7 @@ fn download_and_swap(url: &str, current: &str, target_version: &str) -> Result<(
     result?;
 
     if out.json {
-        return print_evolve_json(target_version, "updated");
+        return print_evolve_json(target_version, "updated", target_triple);
     }
     println!("{} updated mind {current} -> {target_version}", out.ok());
     Ok(())
@@ -1938,14 +2095,14 @@ mod tests {
         // decision over an explicit target version: no network is consulted.
         let pending = decision("0.2.0", "0.3.0", false);
         assert_eq!(pending, Decision::Update);
-        let report = check_report("0.2.0", "0.3.0", &pending);
+        let report = check_report("0.2.0", "0.3.0", &pending, "x86_64-unknown-linux-musl");
         assert!(report.contains("0.2.0"), "report: {report}");
         assert!(report.contains("0.3.0"), "report: {report}");
         assert!(report.contains("available"), "report: {report}");
 
         let current = decision("0.3.0", "0.3.0", false);
         assert_eq!(current, Decision::UpToDate);
-        let report = check_report("0.3.0", "0.3.0", &current);
+        let report = check_report("0.3.0", "0.3.0", &current, "x86_64-unknown-linux-musl");
         assert!(report.contains("up to date"), "report: {report}");
     }
 
@@ -1955,7 +2112,7 @@ mod tests {
         // The report for PinnedBelowCurrent must name both versions and say
         // "not downgrading" -- it must NOT say "up to date".
         let d = Decision::PinnedBelowCurrent;
-        let report = check_report("0.3.0", "0.1.0", &d);
+        let report = check_report("0.3.0", "0.1.0", &d, "x86_64-unknown-linux-musl");
         assert!(report.contains("0.1.0"), "pinned version missing: {report}");
         assert!(
             report.contains("0.3.0"),
@@ -1977,7 +2134,7 @@ mod tests {
         // When the running and target versions are equal, "up to date" regardless
         // of explicit; tests the UpToDate arm of check_report directly.
         let d = Decision::UpToDate;
-        let report = check_report("0.3.0", "0.3.0", &d);
+        let report = check_report("0.3.0", "0.3.0", &d, "x86_64-unknown-linux-musl");
         assert!(report.contains("up to date"), "report: {report}");
         assert!(
             !report.contains("not downgrading"),
@@ -2182,5 +2339,346 @@ mod tests {
             url,
             "https://github.com/jaemk/mind/releases/download/v1.2.3/SHA256SUMS"
         );
+    }
+
+    // ---- STO-65: target triple visible before download ------------------------
+
+    #[test]
+    // spec: STO-65
+    fn check_report_includes_the_target_triple_in_every_branch() {
+        // The resolved artifact target triple must be visible in the --check
+        // report BEFORE anything is downloaded, in all three decision branches,
+        // without disturbing the existing wording (each existing assertion in
+        // check_report_reflects_the_decision_without_network /
+        // check_report_pinned_below_says_not_downgrading /
+        // check_report_up_to_date_when_equal must still hold).
+        let triple = "x86_64-unknown-linux-musl";
+
+        let update = decision("0.2.0", "0.3.0", false);
+        let report = check_report("0.2.0", "0.3.0", &update, triple);
+        assert!(
+            report.contains(triple),
+            "Update report must include the target triple: {report}"
+        );
+        assert!(
+            report.contains("available"),
+            "Update report must keep the existing wording: {report}"
+        );
+
+        let up_to_date = decision("0.3.0", "0.3.0", false);
+        let report = check_report("0.3.0", "0.3.0", &up_to_date, triple);
+        assert!(
+            report.contains(triple),
+            "UpToDate report must include the target triple: {report}"
+        );
+        assert!(
+            report.contains("up to date"),
+            "UpToDate report must keep the existing wording: {report}"
+        );
+
+        let pinned_below = Decision::PinnedBelowCurrent;
+        let report = check_report("0.3.0", "0.1.0", &pinned_below, triple);
+        assert!(
+            report.contains(triple),
+            "PinnedBelowCurrent report must include the target triple: {report}"
+        );
+        assert!(
+            report.contains("not downgrading"),
+            "PinnedBelowCurrent report must keep the existing wording: {report}"
+        );
+    }
+
+    #[test]
+    // spec: STO-65
+    fn check_report_target_triple_distinguishes_musl_from_gnu() {
+        // The whole point: a gnu -> musl artifact swap must be visible in the
+        // report text, not just silently resolved. A musl triple must not read
+        // as a gnu triple and vice versa.
+        let musl_report = check_report(
+            "0.2.0",
+            "0.3.0",
+            &Decision::Update,
+            "x86_64-unknown-linux-musl",
+        );
+        assert!(musl_report.contains("musl"), "{musl_report}");
+        assert!(!musl_report.contains("gnu"), "{musl_report}");
+
+        let gnu_report = check_report(
+            "0.2.0",
+            "0.3.0",
+            &Decision::Update,
+            "x86_64-unknown-linux-gnu",
+        );
+        assert!(gnu_report.contains("gnu"), "{gnu_report}");
+    }
+
+    // The --json shape (the `target_triple` key added alongside the existing
+    // `action`/`target`/`outcome` keys, none renamed) is covered end-to-end at
+    // the CLI level in tests/cli.rs (`evolve_check_json_includes_target_triple_key`),
+    // which drives the real binary and the real `print_evolve_json`, rather than
+    // here: `print_evolve_json` writes straight to stdout via
+    // `crate::render::print_json`, so a src/ unit test cannot observe its output
+    // without capturing process stdout.
+
+    // ---- STO-66: soft build-provenance verification ---------------------------
+
+    #[test]
+    // spec: STO-66
+    fn gh_attestation_verify_args_builds_expected_argv() {
+        let args = gh_attestation_verify_args("/tmp/mind-0.3.0-x86_64.tar.gz", "jaemk/mind");
+        assert_eq!(
+            args,
+            vec![
+                "attestation".to_string(),
+                "verify".to_string(),
+                "/tmp/mind-0.3.0-x86_64.tar.gz".to_string(),
+                "--repo".to_string(),
+                "jaemk/mind".to_string(),
+            ],
+            "argv must match `gh attestation verify <archive> --repo <repo>`: {args:?}"
+        );
+    }
+
+    #[test]
+    // spec: STO-66
+    fn is_gh_tooling_error_classifies_known_tooling_markers() {
+        assert!(
+            is_gh_tooling_error("Error: unknown command \"attestation\" for \"gh\""),
+            "an unsupported subcommand (old gh) must classify as a tooling error"
+        );
+        assert!(
+            is_gh_tooling_error(
+                "Get \"https://api.github.com/...\": dial tcp: lookup api.github.com: no such host"
+            ),
+            "a DNS/network failure must classify as a tooling error"
+        );
+        assert!(
+            is_gh_tooling_error("Error: connection refused"),
+            "a connection-refused failure must classify as a tooling error"
+        );
+        assert!(
+            is_gh_tooling_error(
+                "To use GitHub CLI in a GitHub Actions workflow, run: gh auth login"
+            ),
+            "an auth-required message must classify as a tooling error"
+        );
+        // Case-insensitive.
+        assert!(is_gh_tooling_error("DIAL TCP: CONNECTION REFUSED"));
+    }
+
+    #[test]
+    // spec: STO-66
+    fn is_gh_tooling_error_does_not_classify_no_attestations_found_as_tooling() {
+        // The critical negative case: "no attestations found" (and the raw HTTP
+        // 404 wording gh also surfaces for the identical underlying condition)
+        // must NOT be treated as a tooling error, because it is exactly the
+        // signal a substituted artifact would also produce (the attacker cannot
+        // forge a valid signed attestation for a different digest). Treating it
+        // as a pass-through tooling error would defeat the entire check.
+        assert!(
+            !is_gh_tooling_error("Error: no attestations found"),
+            "'no attestations found' must be a genuine failure, not a tooling error"
+        );
+        assert!(
+            !is_gh_tooling_error(
+                "Error: HTTP 404: Not Found (https://api.github.com/repos/jaemk/mind/attestations/sha256:deadbeef)"
+            ),
+            "an HTTP 404 from the attestations endpoint must be a genuine failure, not a tooling error"
+        );
+    }
+
+    /// Write an executable fake `gh` at `dir/gh` that records its argv (one arg
+    /// per line, skipping the leading `attestation verify <path>` positional
+    /// args' exact values are still captured) to `capture_path`, then exits with
+    /// `exit_code` after printing `stderr_msg` to stderr. Mirrors
+    /// `write_fake_failing_curl`.
+    fn write_fake_gh(dir: &Path, capture_path: &Path, exit_code: i32, stderr_msg: &str) {
+        let script_path = dir.join("gh");
+        let script = format!(
+            "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done > {:?}\nprintf '%s' {:?} >&2\nexit {exit_code}\n",
+            capture_path, stderr_msg
+        );
+        std::fs::write(&script_path, script).expect("write fake gh");
+        let mut perms = std::fs::metadata(&script_path)
+            .expect("stat fake gh")
+            .permissions();
+        perms.set_mode(0o700);
+        std::fs::set_permissions(&script_path, perms).expect("chmod fake gh");
+    }
+
+    #[test]
+    // spec: STO-66
+    fn attestation_step_returns_none_when_gh_is_absent() {
+        // A command name that resolves to nothing simulates "gh absent"
+        // deterministically, without needing to hide the real `gh` (which is
+        // present on this machine's PATH) from the process. No PATH mutation,
+        // no ENV_LOCK needed.
+        let archive = std::env::temp_dir().join("mind-evolve-attest-none-does-not-exist.tar.gz");
+        assert_eq!(
+            attestation_step("mind-no-such-gh-xyzzy", &archive),
+            None,
+            "attestation_step must return None (skip silently) when gh is absent"
+        );
+    }
+
+    #[test]
+    // spec: STO-66
+    fn attestation_step_verified_with_fake_gh_success() {
+        // A fake `gh` that exits 0 must yield Verified, and must have been
+        // invoked with the expected `attestation verify <archive> --repo
+        // jaemk/mind` argv (proving the wiring end-to-end, not just the pure
+        // arg builder in isolation).
+        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let n = MKTEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let scratch =
+            std::env::temp_dir().join(format!("mind-evolve-fake-gh-ok-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&scratch).expect("create scratch dir");
+        let capture_path = scratch.join("argv-capture.txt");
+        write_fake_gh(&scratch, &capture_path, 0, "");
+
+        let orig_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{orig_path}", scratch.display());
+        // SAFETY: ENV_LOCK is held for the duration of the mutation below.
+        unsafe {
+            std::env::set_var("PATH", &new_path);
+        }
+
+        let archive = scratch.join("mind-0.3.0-x86_64.tar.gz");
+        std::fs::write(&archive, b"fake archive").expect("seed fake archive");
+        let result = attestation_step("gh", &archive);
+
+        // SAFETY: ENV_LOCK is still held.
+        unsafe {
+            std::env::set_var("PATH", &orig_path);
+        }
+        drop(guard);
+
+        assert_eq!(
+            result,
+            Some(AttestationOutcome::Verified),
+            "an exit-0 gh must yield Verified"
+        );
+
+        let argv = std::fs::read_to_string(&capture_path).expect("read captured argv");
+        let lines: Vec<&str> = argv.lines().collect();
+        assert_eq!(
+            lines,
+            vec![
+                "attestation",
+                "verify",
+                archive.to_string_lossy().as_ref(),
+                "--repo",
+                "jaemk/mind",
+            ],
+            "gh must be invoked with the expected argv: {lines:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    // spec: STO-66
+    fn attestation_step_tooling_error_with_fake_gh_network_failure() {
+        // A fake `gh` that exits non-zero with a recognizably network-level
+        // stderr must classify as ToolingError, so evolve proceeds with a note
+        // rather than aborting -- gh never got to ask the question.
+        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let n = MKTEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let scratch = std::env::temp_dir().join(format!(
+            "mind-evolve-fake-gh-tooling-{}-{n}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&scratch).expect("create scratch dir");
+        let capture_path = scratch.join("argv-capture.txt");
+        write_fake_gh(
+            &scratch,
+            &capture_path,
+            1,
+            "dial tcp: lookup api.github.com: no such host",
+        );
+
+        let orig_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{orig_path}", scratch.display());
+        // SAFETY: ENV_LOCK is held for the duration of the mutation below.
+        unsafe {
+            std::env::set_var("PATH", &new_path);
+        }
+
+        let archive = scratch.join("mind-0.3.0-x86_64.tar.gz");
+        std::fs::write(&archive, b"fake archive").expect("seed fake archive");
+        let result = attestation_step("gh", &archive);
+
+        // SAFETY: ENV_LOCK is still held.
+        unsafe {
+            std::env::set_var("PATH", &orig_path);
+        }
+        drop(guard);
+
+        match result {
+            Some(AttestationOutcome::ToolingError(reason)) => {
+                assert!(
+                    reason.contains("no such host"),
+                    "reason must carry gh's stderr: {reason}"
+                );
+            }
+            other => panic!("expected Some(ToolingError(_)), got {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    // spec: STO-66
+    fn attestation_step_genuine_failure_with_fake_gh_no_attestations_aborts() {
+        // A fake `gh` that exits non-zero reporting "no attestations found"
+        // must classify as GenuineFailure -- the exact case that must abort the
+        // swap rather than pass through, since it is indistinguishable (from
+        // gh's output) from a substituted artifact.
+        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let n = MKTEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let scratch = std::env::temp_dir().join(format!(
+            "mind-evolve-fake-gh-fail-{}-{n}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&scratch).expect("create scratch dir");
+        let capture_path = scratch.join("argv-capture.txt");
+        write_fake_gh(&scratch, &capture_path, 1, "Error: no attestations found");
+
+        let orig_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{orig_path}", scratch.display());
+        // SAFETY: ENV_LOCK is held for the duration of the mutation below.
+        unsafe {
+            std::env::set_var("PATH", &new_path);
+        }
+
+        let archive = scratch.join("mind-0.3.0-x86_64.tar.gz");
+        std::fs::write(&archive, b"fake archive").expect("seed fake archive");
+        let result = attestation_step("gh", &archive);
+
+        // SAFETY: ENV_LOCK is still held.
+        unsafe {
+            std::env::set_var("PATH", &orig_path);
+        }
+        drop(guard);
+
+        match result {
+            Some(AttestationOutcome::GenuineFailure(reason)) => {
+                assert!(
+                    reason.contains("no attestations found"),
+                    "reason must carry gh's stderr: {reason}"
+                );
+                // Mirror what download_and_swap does with this outcome: it must
+                // map to AttestationVerificationFailed, which aborts (returns
+                // Err) rather than proceeding to extraction/swap.
+                let mapped = MindError::AttestationVerificationFailed { reason };
+                assert_eq!(mapped.kind(), "attestation-verification-failed");
+            }
+            other => panic!("expected Some(GenuineFailure(_)), got {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&scratch);
     }
 }

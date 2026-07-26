@@ -151,7 +151,7 @@ and verified.
 | `mind hooks run` / `hooks list`: run or inspect a source's and items' hooks on demand (rerun skipped/failed/lost hooks); a target matching a registered source identity resolves as a source even when it contains `#` | done | [install-hooks.md](install-hooks.md) (HOOK-100..105), CLI-194, CLI-195, CLI-196 |
 | `meld --add-root`: compose extra convention roots with a manifest or authoritative source (install items a `marketplace.json` does not list); `dump` round-trips the recorded add-roots | done | DSC-84, DSC-85, DSC-86, DSC-87, MKT-17, STO-55, CLI-197, DUMP-11 |
 | Item links: `learn`/`meld` a deep `tree`/`blob` skill URL as a single-item source instance (`host/owner/repo#path` identity, duplicates coexist); a malformed link tail reports the expected URL shapes | done | [item-link.md](item-link.md) (LNK-1..12, LNK-14, LNK-15) |
-| Item links in `dump`: emit a link instance as a reconstructed deep-URL source entry | planned | LNK-13 |
+| Item links in `dump`: emit a link instance as a reconstructed deep-URL source entry | done | LNK-13 |
 | Repo-spec identity parts (`host`, `owner`, `repo`) must each be a single safe path component; refused at parse time before any clone or delete | done | CLI-204 |
 | TUI stdout capture writes to an exclusively created 0600 file in a 0700 temp dir, not a predictable create-and-truncate path | done | TUI-61 |
 | `evolve` token safety: a token carrying characters that would inject curl config directives is refused (no auth header), and a temp-config write failure degrades to an unauthenticated request | done | STO-62 |
@@ -162,6 +162,8 @@ and verified.
 | Per-part `@`/`#` legality in `host`/`owner`/`repo`, closing an identity and clone-path collision between a repo named `foo@bar` and repo `foo` aliased `@bar` | done | STO-64, CLI-204 |
 | An item link's path may not carry `@` or `#`, closing the same collision one segment over | done | LNK-16 |
 | Metadata reads (`mind.toml`, item frontmatter, plugin and marketplace manifests) are size-capped at 8 MiB | done | DSC-91 |
+| `evolve` names the resolved release target triple before downloading, so a gnu to musl artifact change is visible up front | done | STO-65 |
+| `evolve` verifies the downloaded archive's build-provenance attestation with `gh` when present: a genuine verification failure aborts the swap, a tooling error or absent `gh` proceeds | done | STO-66 |
 | Bare `mind` prints help on stdout at exit 0 | done | CLI-207 |
 | `learn <source-name>` hints at `learn --all <source>` when the query names a melded source rather than an item | done | CLI-208 |
 | The fork note names the pre-existing instances by their registered identities, which are the handles `unmeld` accepts | done | STO-63 |
