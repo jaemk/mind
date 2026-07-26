@@ -266,6 +266,14 @@ prevent the lost-update and torn-read races a plain read-modify-write would allo
     provenance is by construction older than any binary carrying this check, so
     it never reaches the verification. Every version this check can download is
     one the release workflow attested.
+  - **Accepted risk:** the tooling-error classification is a hand-curated list
+    of `gh` output markers, so a `gh` version that words a tooling failure
+    differently is read as a genuine failure and aborts an upgrade that should
+    have proceeded. That is the safe direction (fail closed, with a message
+    naming the reason), and widening the list on speculation would trade a
+    refused upgrade for a missed substitution. The decision is to leave the list
+    as it stands and widen it against a real report rather than a hypothetical
+    one. Recorded so it is not re-raised as a finding.
 - `STO-48` `evolve` takes NO outer command lock (its `lock_mode` is `None`). It
   acquires the global exclusive lock itself inside the download-and-swap step
   (STO-46), only after the network-free decision/prompt phase, and `evolve

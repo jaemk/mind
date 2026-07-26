@@ -241,6 +241,21 @@ automation, say so explicitly and explain why.
 
 Run everything with `cargo test`.
 
+## No network without asking
+
+Work in this repo is hermetic by default, and that applies to the whole task,
+not just to the tests. Do not make a network call - cloning a real remote,
+hitting an API, `gh` anything - without asking first, and say so in your report
+if you do. This holds for a subagent too: a brief that is silent about the
+network means no network, and a brief that bans it "in tests" bans it
+everywhere. Investigating real-world behavior is a legitimate reason to want a
+live call, so ask; the answer is often yes, and the disclosure is what matters.
+
+Everything routine already has a hermetic path: `cargo test` builds local git
+repos in temp dirs, `scripts/probe.sh` drives a shipped `examples/<name>` in a
+throwaway home, and an external command is faked by putting a stub earlier on
+`PATH` (see the fake `curl`/`gh` tests in `src/selfupdate.rs`).
+
 To capture real CLI output for docs without a permission prompt, this repo ships
 a gitignored `scripts/probe.sh` (recreated from the `hermetic-verify` skill) that
 melds a shipped example in a throwaway isolated home, e.g.
