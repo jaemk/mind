@@ -303,24 +303,52 @@ fn cited_ids() -> BTreeSet<String> {
     out
 }
 
-/// Extract maximal `[A-Za-z0-9-]` runs that look like spec IDs.
+/// Extract the LEADING run of spec IDs after the `// spec:` marker.
+///
+/// Only the ids at the head of the comment count, stopping at the first token
+/// that is not one. A citation line reads `// spec: ID[, ID...] optional prose`,
+/// and the prose routinely mentions other IDs for context ("HOOK-51 (HOOK-3
+/// generalized)"). Crediting those would let an ID satisfy the coverage gate on
+/// the strength of a passing mention in a test that asserts something else,
+/// which is how HOOK-3 came to have a citation and no test.
+///
+/// Tokens are whitespace-separated and may carry a trailing `,` or `;`. A token
+/// wrapped in anything else (a parenthesis, a backtick) is prose, so it stops
+/// the run.
 fn id_tokens(text: &str) -> Vec<String> {
     let mut out = Vec::new();
-    let mut cur = String::new();
-    for c in text.chars() {
-        if c.is_ascii_alphanumeric() || c == '-' {
-            cur.push(c);
+    for raw in text.split_whitespace() {
+        let tok = raw.trim_end_matches([',', ';']);
+        if is_id(tok) {
+            out.push(tok.to_string());
         } else {
-            if is_id(&cur) {
-                out.push(cur.clone());
-            }
-            cur.clear();
+            break;
         }
     }
-    if is_id(&cur) {
-        out.push(cur);
-    }
     out
+}
+
+#[test]
+fn id_tokens_takes_the_leading_run_only() {
+    let ids = |s: &str| id_tokens(s);
+    // The ordinary forms: one id, several, with or without commas.
+    assert_eq!(ids(" CLI-10"), ["CLI-10"]);
+    assert_eq!(ids(" CLI-10 CLI-72"), ["CLI-10", "CLI-72"]);
+    assert_eq!(ids(" CLI-10, CLI-72"), ["CLI-10", "CLI-72"]);
+    // Prose after the ids is not scanned, so an id named for context does not
+    // become a citation. This is the HOOK-3 case: the test asserts HOOK-51 and
+    // merely mentions HOOK-3.
+    assert_eq!(
+        ids(" HOOK-51 (HOOK-3 generalized): blank run entries are skipped"),
+        ["HOOK-51"]
+    );
+    assert_eq!(
+        ids(" CLI-11 (repo spec parsing), CLI-61 (compare url)"),
+        ["CLI-11"]
+    );
+    // A leading non-id stops the run immediately.
+    assert_eq!(ids(" see CLI-10").len(), 0);
+    assert_eq!(ids("").len(), 0);
 }
 
 fn files_with_ext(dir: &Path, ext: &str) -> Vec<PathBuf> {
