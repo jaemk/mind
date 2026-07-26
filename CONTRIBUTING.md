@@ -24,6 +24,12 @@ mandatory for features" section before adding or changing behavior. In short:
   neither cited by a test nor listed in its `ALLOWLIST` (with a reason), and
   if a test cites an ID the spec does not define. `make ci`/`make ci-local`
   runs it.
+- Only a citation in TEST code counts: everything under `tests/`, and the
+  `#[cfg(test)]` regions of `src/`. A `// spec:` comment on production code is
+  useful to a reader and you are welcome to write one, but it asserts nothing,
+  so the gate ignores it. If a behavior genuinely cannot be exercised
+  headlessly, put the ID in the `ALLOWLIST` with the real reason instead of
+  leaving a comment on the implementation.
 - A feature addition is not complete until spec/ documents it (new IDs) and
   the feature-status row in spec/README.md reflects reality (`done` only when
   implemented and tested), in the same change as the code.

@@ -13,9 +13,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `sync`, `upgrade`, and install-hook gating under a locked allowlist.
   Previously no writable `allow` pattern could admit an item-link (`#<path>`) or
   alias (`@<prefix>`) instance after meld (POL-67).
-- A source whose `owner` or `repo` legitimately contains `@` or `#`, such as a
-  local path under `proj@v2/`, is no longer refused by a locked allowlist entry
-  that matches it verbatim (POL-68).
+- A source whose `owner` legitimately contains `@`, such as a local path under
+  `proj@v2/`, is no longer refused by a locked allowlist entry that matches it
+  verbatim (POL-68).
+- `upgrade` now reports an installed item whose recorded source is no longer
+  registered as exactly that, instead of claiming the managed policy's allowlist
+  refused it. It is still not upgraded (POL-69).
 - `mind evolve` no longer fails outright when the curl config file holding the
   GitHub token cannot be written; it proceeds unauthenticated (STO-62).
 - `mind hooks run` / `hooks list` now resolve a target that exactly matches a
@@ -50,6 +53,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- `meld --pin` on an already-melded source now re-pins it, rather than printing
+  that the flag was ignored. It resolves the pin against the source's current
+  one, re-checks-out the clone when the commit differs, and records the new pin
+  and commit; a failure to resolve or clone leaves the source untouched. There
+  was previously no command that re-pinned a source (CLI-209).
+- `meld` refuses a repo spec whose `repo` part contains `@` or `#`, or whose
+  `owner` contains `#`. A repo literally named `foo@bar` and the repo `foo`
+  melded as `@bar` computed the same identity and the same clone directory, so
+  the second was treated as a re-meld of the first and the two shared one clone.
+  `@` stays legal in `owner`, where it collides with nothing (STO-64). The same
+  rule applies to an item link's path (LNK-16).
+- A curator's suppressed `add-roots` is now named in the DSC-60 warning, with a
+  pointer to the un-gated consumer-side `meld --add-root` (DSC-88).
 - A top-level `meld` that discovers zero items now says what it scanned and how
   to reach items elsewhere in the repo, naming the convention paths and
   `--root`/`--add-root`/`--flat-skills`, instead of reporting success with
@@ -88,6 +104,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Security
 
+- Metadata read from a source is now size-capped at 8 MiB: `mind.toml`, item
+  frontmatter, and Claude plugin and marketplace manifests. An oversized file is
+  refused naming the file and the limit, and is never fully read into memory.
+  Item content (`{{ns:}}` expansion, the reference scan, `review`, the TUI
+  preview, hashing) stays uncapped by decision (DSC-90, DSC-91).
 - A repo spec is now refused when the `host`, `owner`, or `repo` it parses to is
   not a single safe path component (empty, `.`/`..`, containing `/` or a control
   character; `host` also rejects `@` and `#`). Those parts are joined into both

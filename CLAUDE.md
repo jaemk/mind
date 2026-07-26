@@ -15,7 +15,11 @@ change.
 fails when a defined spec ID is neither cited by a test nor listed in its
 ALLOWLIST, and when a test cites an ID that the spec does not define. So a new
 spec ID forces a coverage decision - add a citing test or an allowlist entry with
-a reason - and a test cannot cite an undocumented behavior. CI is
+a reason - and a test cannot cite an undocumented behavior. Only citations in
+test code count: everything under `tests/`, plus the `#[cfg(test)]` regions of
+`src/`. A `// spec:` comment on production code documents the implementation
+site and is fine to write, but it asserts nothing, so it does not satisfy the
+gate. CI is
 `.github/workflows/ci.yml` (runs `make ci`: fmt-check + clippy + test). Locally,
 use `make ci-local` (alias: `make check`): it runs the same clippy + test gate
 but formats in place (`cargo fmt`) instead of `fmt-check`, so one command both

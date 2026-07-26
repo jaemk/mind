@@ -39,13 +39,19 @@ Decide the new `X.Y.Z` from that list (see the SemVer note above).
 
 ### 3. Bump the version
 
-Edit `Cargo.toml` `[package].version` to the new `X.Y.Z`, then sync the lockfile
+Between releases `main` carries a pre-release version (`X.Y.Z-dev`) so a build
+from `main` is distinguishable from the released binary. Drop the suffix here:
+edit `Cargo.toml` `[package].version` to the new `X.Y.Z`, then sync the lockfile
 so `Cargo.lock`'s `mind` entry matches (the release build uses `--locked`, so a
 stale lock fails CI):
 
 ```bash
 cargo build        # rewrites Cargo.lock's mind version
 ```
+
+`tests/changelog.rs` only requires a matching `## [X.Y.Z]` section once the
+`-dev` suffix is gone, so this bump is what arms that check. Step 9 puts the
+next `-dev` version back.
 
 ### 4. Update the changelog
 
@@ -121,6 +127,23 @@ grep -n 'version\|sha256' Formula/mind.rb   # points at the new version
 
 Optionally smoke-test the install path (`resources/install.sh`, or
 `brew upgrade mind` from the tap).
+
+### 9. Put `main` back on a `-dev` version
+
+Bump `Cargo.toml` to the next patch version with a `-dev` suffix (after
+`0.22.0`, use `0.22.1-dev`), sync the lockfile, and add a fresh
+`## [Unreleased]` heading to `CHANGELOG.md`:
+
+```bash
+cargo build                             # rewrites Cargo.lock
+git add Cargo.toml Cargo.lock CHANGELOG.md
+git commit -m "back to dev"
+git push
+```
+
+Without this, a binary built from `main` reports the released version, so
+`mind --version` in a bug report and `evolve --check` cannot tell a release from
+unreleased work. The exact next number does not matter; step 3 sets the real one.
 
 ## Notes
 
