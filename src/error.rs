@@ -273,8 +273,13 @@ pub enum MindError {
     )]
     MetadataTooLarge { path: PathBuf, limit: u64 },
 
+    /// CLI-215: this message previously omitted the local-path forms
+    /// `parse_spec` has always accepted (a bare `/abs/path`, `./rel/path`,
+    /// `../rel/path`, or `file:///abs/path`), even though `mind review --help`
+    /// documents them as a valid `<target>`. Naming them here closes that gap.
     #[error(
-        "'{spec}' is not a valid repo spec (expected 'owner/repo', a github shorthand, or a git URL)"
+        "'{spec}' is not a valid repo spec (expected 'owner/repo', a github shorthand, a git URL, \
+         or a local path: '/abs/path', './rel/path', '../rel/path', or 'file:///abs/path')"
     )]
     InvalidRepoSpec { spec: String },
 
@@ -666,6 +671,40 @@ pub enum MindError {
         /// item the target string also names.
         item_forms: Vec<String>,
     },
+
+    /// CLI-212/CLI-213: a linked local source's (`Source::is_linked`) working
+    /// tree has vanished since it was melded - a relocated or deleted `/tmp`
+    /// fixture, or a `cd` past a relative clean-up. Raised by
+    /// `catalog::scan_source` before `MindToml::load`'s generic
+    /// NotFound-as-absent handling or a convention-scan `InvalidRoot` obscure
+    /// the real cause with a less actionable message. The whole-registry walk
+    /// (`catalog::scan`) catches exactly this variant and degrades (warns on
+    /// stderr, keeps going with the sources that DID scan) so one dead linked
+    /// source does not take down `recall`/`probe`/`learn`; a targeted
+    /// single-source scan (`meld`, a fresh clone) still hard-fails on it since
+    /// in practice a just-cloned directory cannot itself be gone.
+    // spec: CLI-212 CLI-213
+    #[error(
+        "source '{source_name}': linked working tree '{path}' is gone; run 'mind unmeld \
+         {source_name}' to drop it, or restore the directory"
+    )]
+    LinkedSourceGone { source_name: String, path: String },
+
+    /// HOOK-107: a `hooks run <target>` invocation found at least one hook
+    /// that existed and needed running, but EVERY one of them was skipped for
+    /// want of consent (no terminal, and `--dangerously-skip-install-hook-check`
+    /// not given) - so the run did nothing, silently, in the state where a
+    /// provisioning script most needs to know it. A run with nothing to do (no
+    /// hooks declared, or every install hook already ran at the current
+    /// commit) is unaffected and stays exit 0; only "there was work and
+    /// consent was unavailable" is this error.
+    // spec: HOOK-107
+    #[error(
+        "hooks run '{target}': {skipped} hook(s) had work to do but were skipped for want of \
+         consent (not a terminal); re-run with 'mind hooks run {target} \
+         --dangerously-skip-install-hook-check' to run them unattended"
+    )]
+    HooksNotRun { target: String, skipped: usize },
 }
 
 fn status_suffix(status: Option<ExitStatus>) -> String {
@@ -765,6 +804,8 @@ impl MindError {
             MindError::LobeBaseMissing { .. } => "lobe-base-missing",
             MindError::UnsafeClonePath { .. } => "unsafe-clone-path",
             MindError::AmbiguousHookTarget { .. } => "ambiguous-hook-target",
+            MindError::LinkedSourceGone { .. } => "linked-source-gone",
+            MindError::HooksNotRun { .. } => "hooks-not-run",
         }
     }
 }
@@ -1206,6 +1247,26 @@ mod tests {
             .kind(),
             "bad-item-link"
         );
+        // spec: CLI-212 CLI-213 -- a gone linked source's clone carries its own
+        // stable slug, distinct from the generic scan failures.
+        assert_eq!(
+            MindError::LinkedSourceGone {
+                source_name: "s".into(),
+                path: "p".into(),
+            }
+            .kind(),
+            "linked-source-gone"
+        );
+        // spec: HOOK-107 -- "ran nothing because consent was unavailable"
+        // carries its own stable slug, distinct from HookAborted.
+        assert_eq!(
+            MindError::HooksNotRun {
+                target: "t".into(),
+                skipped: 1,
+            }
+            .kind(),
+            "hooks-not-run"
+        );
 
         // Every slug must be non-empty and kebab-case (lowercase, hyphens only).
         let samples: &[(&str, &MindError)] = &[
@@ -1231,6 +1292,61 @@ mod tests {
                 "slug must be lowercase kebab-case: {slug}"
             );
         }
+    }
+
+    // spec: CLI-212 CLI-213
+    #[test]
+    fn linked_source_gone_names_source_and_remedy() {
+        // The message must name the source, the vanished path, and the exact
+        // `unmeld` remedy so it is directly actionable.
+        let e = MindError::LinkedSourceGone {
+            source_name: "local/tmp/starter".into(),
+            path: "/tmp/starter".into(),
+        };
+        let msg = e.to_string();
+        assert!(
+            msg.contains("local/tmp/starter"),
+            "must name the source: {msg}"
+        );
+        assert!(msg.contains("/tmp/starter"), "must name the path: {msg}");
+        assert!(
+            msg.contains("mind unmeld local/tmp/starter"),
+            "must give the copy-pasteable unmeld remedy: {msg}"
+        );
+    }
+
+    // spec: HOOK-107
+    #[test]
+    fn hooks_not_run_names_target_count_and_remedy() {
+        let e = MindError::HooksNotRun {
+            target: "myrepo".into(),
+            skipped: 2,
+        };
+        let msg = e.to_string();
+        assert!(msg.contains("myrepo"), "must name the target: {msg}");
+        assert!(msg.contains('2'), "must name the skipped count: {msg}");
+        assert!(
+            msg.contains("mind hooks run myrepo --dangerously-skip-install-hook-check"),
+            "must give the copy-pasteable remedy: {msg}"
+        );
+    }
+
+    // spec: CLI-215
+    #[test]
+    fn invalid_repo_spec_names_local_path_forms() {
+        // mind review --help documents local-path forms as an accepted target;
+        // the error naming the accepted spec shapes must not omit them.
+        let e = MindError::InvalidRepoSpec {
+            spec: "bogus".into(),
+        };
+        let msg = e.to_string();
+        assert!(msg.contains("./rel/path"), "must mention './': {msg}");
+        assert!(msg.contains("../rel/path"), "must mention '../': {msg}");
+        assert!(
+            msg.contains("/abs/path"),
+            "must mention an absolute path: {msg}"
+        );
+        assert!(msg.contains("file://"), "must mention 'file://': {msg}");
     }
 
     // spec: STO-56

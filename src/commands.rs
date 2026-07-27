@@ -6478,7 +6478,14 @@ pub fn introspect(paths: &Paths, fix: bool, json: bool) -> Result<()> {
     // HARN-13: check for vanished lobes (configured lobes whose parent dir is
     // gone) before computing all_lobes, so --fix can prune them from config and
     // the subsequent relink loop sees only live lobes.
+    //
     // spec: HARN-13
+    // spec: HARN-18 -- a vanished-lobe finding that this same `--fix` run repairs
+    // (prunes from config) must not also be counted as an outstanding issue: track
+    // the targets actually pruned and drop their findings below, so the exit
+    // summary counts only what remains.
+    let mut repaired_vanished_lobes: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
     {
         let cfg_result = Config::load(paths);
         if let Ok(mut cfg) = cfg_result {
@@ -6511,6 +6518,7 @@ pub fn introspect(paths: &Paths, fix: bool, json: bool) -> Result<()> {
                                 }
                             }
                             pruned = true;
+                            repaired_vanished_lobes.insert(entry.path().to_string());
                         }
                     }
                 }
@@ -6527,6 +6535,13 @@ pub fn introspect(paths: &Paths, fix: bool, json: bool) -> Result<()> {
                 }
             }
         }
+    }
+    // spec: HARN-18 -- drop each vanished-lobe finding this run repaired, so it
+    // is not both reported as fixed (above) and counted as an outstanding issue.
+    if !repaired_vanished_lobes.is_empty() {
+        issues.retain(|i| {
+            !(i.kind == "vanished-lobe" && repaired_vanished_lobes.contains(&i.target))
+        });
     }
 
     let all_lobes = paths.agent_homes()?;
@@ -6605,8 +6620,11 @@ pub fn introspect(paths: &Paths, fix: bool, json: bool) -> Result<()> {
                     continue;
                 }
                 if fix {
+                    // HARN-17: `introspect --fix` has no `--force` flag, so a
+                    // foreign file at the target is reported (below), never
+                    // clobbered.
                     let (created, errs) =
-                        install::link_into_new_lobes(paths, it, std::slice::from_ref(lobe));
+                        install::link_into_new_lobes(paths, it, std::slice::from_ref(lobe), false);
                     if !created.is_empty() {
                         it.links.extend(
                             created
@@ -6809,37 +6827,26 @@ fn format_lobe(entry: &crate::config::LobeEntry) -> String {
 }
 
 /// Backfill all installed items into `new_lobes`. Called after a lobe is added
-/// so existing items also land in the new home. With `yes = true`, applies
-/// unconditionally; otherwise prompts on a TTY or defers to `introspect --fix`
-/// in non-TTY / JSON mode (HARN-8).
-fn backfill_new_lobes(paths: &Paths, new_lobes: &[crate::paths::Lobe], yes: bool) -> Result<()> {
+/// so existing items also land in the new home.
+///
+/// spec: HARN-17 -- for a lobe registered in fan-out mode (today's only mode),
+/// this runs unconditionally in every invocation mode (`--yes`, an interactive
+/// TTY, a non-interactive non-TTY context, and `--json`): it never prompts and
+/// never defers to `introspect --fix`. A pre-existing foreign file at a backfill
+/// target is never clobbered unless `force` is set: `link_into_new_lobes` guards
+/// each target with the same `ensure_unoccupied` check used at install time
+/// (LIFE-41), and a blocked target surfaces as an ordinary failure (naming the
+/// `--force` remedy) in the `errs` list printed below as a warning, rather than
+/// overwriting it.
+fn backfill_new_lobes(paths: &Paths, new_lobes: &[crate::paths::Lobe], force: bool) -> Result<()> {
     let out = crate::render::ctx();
     let mut manifest = Manifest::load(paths)?;
     if manifest.items.is_empty() {
         return Ok(());
     }
 
-    let do_backfill = if yes {
-        true
-    } else if !out.json && crate::hook::is_tty() {
-        confirm_default_yes(&format!(
-            "Link {} installed item(s) into {} new lobe(s)?",
-            manifest.items.len(),
-            new_lobes.len()
-        ))?
-    } else if !out.json {
-        println!("note: run `mind introspect --fix` to link installed items into new lobe(s)");
-        return Ok(());
-    } else {
-        return Ok(());
-    };
-
-    if !do_backfill {
-        return Ok(());
-    }
-
     for item in manifest.items.values_mut() {
-        let (created, errs) = install::link_into_new_lobes(paths, item, new_lobes);
+        let (created, errs) = install::link_into_new_lobes(paths, item, new_lobes, force);
         item.links.extend(
             created
                 .into_iter()
@@ -6885,7 +6892,10 @@ pub fn lobe_add_resolved(
     subdir: Option<&str>,
     snapshot: bool,
     force: bool,
-    yes: bool,
+    // Retained for call-site compatibility (main.rs dispatches positionally);
+    // no longer read here. The HARN-7 backfill is unconditional in every mode
+    // (HARN-17), so a confirmation flag no longer gates it.
+    _yes: bool,
 ) -> Result<()> {
     use crate::paths::{Scope, resolve_lobe};
 
@@ -6986,6 +6996,18 @@ pub fn lobe_add_resolved(
     }
 
     // Managed (non-snapshot) path: register in config, backfill, gitignore note.
+    //
+    // spec: HARN-15 -- create the resolved lobe path on disk immediately, before
+    // it is recorded in config. A preset base (e.g. `--preset gemini` before
+    // Gemini CLI is installed) may not exist yet; the whole point of registering
+    // a lobe ahead of its harness is that the lobe becomes reachable (STO-56) the
+    // moment it is registered, so the HARN-17 backfill lands, the HARN-11
+    // gitignore note names a real directory, and `introspect --fix` does not
+    // treat it as vanished (HARN-13) and prune it on the next run. This does NOT
+    // relax `resolve_lobe`'s existing `LobeBaseMissing` guard on an EXPLICIT base
+    // (HARN-10): a base directory the user mistyped is still refused above,
+    // before this point is ever reached.
+    crate::paths::mkdir_p(&lobe.path)?;
     paths.ensure_config()?;
     let entry = crate::config::LobeEntry {
         path: path_str.clone(),
@@ -7016,7 +7038,7 @@ pub fn lobe_add_resolved(
         preset_opt.is_some_and(|p| p.scope == Scope::Project) || subdir.is_some();
 
     if out.json {
-        backfill_new_lobes(paths, std::slice::from_ref(&lobe), yes)?;
+        backfill_new_lobes(paths, std::slice::from_ref(&lobe), force)?;
         return print_json(&MutationResult::new("lobe-add", &path_str, "added"));
     }
     // Human output: print the added lobe, then gitignore guidance for project lobes.
@@ -7036,7 +7058,7 @@ pub fn lobe_add_resolved(
             skills_dir.display()
         );
     }
-    backfill_new_lobes(paths, std::slice::from_ref(&lobe), yes)?;
+    backfill_new_lobes(paths, std::slice::from_ref(&lobe), force)?;
     Ok(())
 }
 
@@ -7284,7 +7306,9 @@ pub fn lobe_detect(paths: &Paths, yes: bool) -> Result<()> {
             }
             cfg.save(paths)?;
             let new_lobes = candidates_to_lobes(&global_candidates);
-            backfill_new_lobes(paths, &new_lobes, yes)?;
+            // HARN-17: unconditional backfill; no --force plumbing for `detect`,
+            // so a foreign target is reported (never clobbered).
+            backfill_new_lobes(paths, &new_lobes, false)?;
         }
         return print_json(&serde_json::json!({
             "action": "lobe-detect",
@@ -7316,7 +7340,9 @@ pub fn lobe_detect(paths: &Paths, yes: bool) -> Result<()> {
         }
         cfg.save(paths)?;
         let new_lobes = candidates_to_lobes(&global_candidates);
-        backfill_new_lobes(paths, &new_lobes, yes)?;
+        // HARN-17: unconditional backfill; no --force plumbing for `detect`, so a
+        // foreign target is reported (never clobbered).
+        backfill_new_lobes(paths, &new_lobes, false)?;
     } else if !global_candidates.is_empty() {
         println!("{} detected harness home(s):", out.bullet());
         for (name, entry) in &global_candidates {

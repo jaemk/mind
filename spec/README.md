@@ -180,6 +180,20 @@ and verified.
 | `install.sh` Linux artifact resolution: musl preferred, one fallback to gnu, because the script is served from `main` but resolves against the latest release | done | STO-71 |
 | `introspect` reports a per-source scan failure as an issue and completes the run | done | CLI-210 |
 | `upgrade` reports a source it could not scan instead of reporting everything up to date | done | CLI-211 |
+| A local-path spec is made absolute before the source is constructed; identity derives from the absolute path | done | STO-72 |
+| `Registry::load` migrates a relative local url to absolute when it resolves to an existing directory, rewriting `url` only, never `name` | done | STO-73 |
+| A nested `[discover].sources` relative local path resolves against the declaring `mind.toml`'s directory | done | DSC-92 |
+| The whole-registry catalog scan skips an unscannable source with a warning and completes on the partial catalog; a targeted single-source scan and `dump` still error | done | CLI-212 |
+| A linked source whose working tree is gone is reported with an unmeld-or-restore message | done | CLI-213 |
+| `review` treats a target naming an existing directory as a local path regardless of prefix, and notes the reading when it is also a valid owner/repo | done | CLI-214 |
+| `InvalidRepoSpec` names the local-path forms; an owner/repo spec shadowed by an existing directory gets a note before any clone | done | CLI-215 |
+| A hook skipped for want of a terminal states the cause and the exact `hooks run` remedy | done | HOOK-106 |
+| `hooks run` that ran nothing because consent was unavailable summarizes and exits non-zero; nothing-to-do stays exit 0 | done | HOOK-107 |
+| Registering a lobe creates its directory, so a preset for an uninstalled harness is reachable immediately | done | HARN-15 |
+| An install fan-out that skips an unreachable lobe says so once per run, naming both remedies | done | HARN-16 |
+| Registering a fan-out-mode lobe links every admitted installed item into it immediately; an occupied foreign target is reported with the `--force` remedy, not clobbered | done | HARN-17 |
+| `introspect --fix` re-filters findings after repair; a lobe pruned in the same run is not also reported outstanding | done | HARN-18 |
+| Selective lobe mode: items install into a lobe only when explicitly targeted, rather than by global fan-out | planned | HARN-19 |
 
 ## Documents
 

@@ -150,7 +150,15 @@ const ALLOWLIST: &[&str] = &[
     //   (auto-detect-and-prompt) from src/paths.rs + tests/cli_lobes.rs, and
     //   HARN-6 (verbatim link, no frontmatter rewrite) from tests/cli_lobes.rs.
     //   HARN-7 (backfill on lobe-add), HARN-8 (introspect --fix missing-lobe
-    //   coverage), and HARN-9 are cited from tests/cli_lobes.rs.
+    //   coverage), and HARN-9 are cited from tests/cli_lobes.rs. HARN-15 (create
+    //   the resolved lobe path immediately), HARN-16 (one-time unreachable-lobe
+    //   note), HARN-17 (unconditional fan-out backfill, with the foreign-target
+    //   guard), and HARN-18 (a repaired vanished-lobe finding is dropped from
+    //   introspect's exit summary) are also cited from tests/cli_lobes.rs.
+    //   HARN-19 (planned): a selective/local lobe mode, distinct from today's
+    //   fan-out mode, is recorded ahead of implementation; not yet built, so it
+    //   has no citing test. See spec/README.md feature status.
+    "HARN-19",
     //   cross-source skill/rule/tool collision detection: NS-43 (detection) and
     //   NS-45 (non-interactive error) are now implemented and cited from
     //   src/error.rs and src/commands.rs. NS-44 (interactive TTY prompt, prompt

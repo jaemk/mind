@@ -165,10 +165,28 @@ pub(crate) fn matches_query(item: &CatalogItem, query: &str) -> bool {
 }
 
 /// Scan every melded source for installable items.
+///
+/// A source whose linked working tree has vanished
+/// ([`MindError::LinkedSourceGone`]) is skipped with a stderr warning rather
+/// than aborting the whole walk (CLI-212, CLI-213): the one dead source no
+/// longer takes down `recall`/`probe`/`learn` for every other source. Every
+/// other scan failure (a version gate, a bad `--root`, a duplicate item, ...)
+/// still aborts the whole call exactly as before -- this is a narrow
+/// degradation for the one failure mode a user cannot fix by re-running the
+/// same command. A targeted single-source scan (`meld`'s or `learn`'s own
+/// fresh clone, via a one-source registry) is unaffected in practice: the
+/// directory it just cloned into cannot itself be gone.
 pub fn scan(paths: &Paths, registry: &Registry) -> Result<Vec<CatalogItem>> {
     let mut items = Vec::new();
     for source in &registry.sources {
-        scan_source(paths, source, &mut items)?;
+        if let Err(e) = scan_source(paths, source, &mut items) {
+            // spec: CLI-212 CLI-213
+            if matches!(e, MindError::LinkedSourceGone { .. }) {
+                eprintln!("warning: {e}");
+                continue;
+            }
+            return Err(e);
+        }
     }
     Ok(items)
 }
@@ -190,6 +208,17 @@ pub(crate) fn scan_source_at(
     out: &mut Vec<CatalogItem>,
 ) -> Result<()> {
     let clone_root = clone_root.as_ref();
+    // spec: CLI-212 -- a linked source's working tree can vanish after meld (a
+    // relocated or deleted /tmp fixture, a `cd` past a relative clean-up).
+    // Detect it here, before `MindToml::load`'s NotFound-as-absent handling or
+    // a convention-scan `InvalidRoot` obscure the real cause with a less
+    // actionable message.
+    if source.is_linked() && !clone_root.is_dir() {
+        return Err(MindError::LinkedSourceGone {
+            source_name: source.name.clone(),
+            path: clone_root.display().to_string(),
+        });
+    }
     let mindfile = MindToml::load(clone_root)?;
 
     // Reject a source that requires a newer `mind` than the one running, rather
@@ -1925,6 +1954,96 @@ mod tests {
         assert!(
             matches!(err, MindError::DuplicateItem { ref name, .. } if name == "review"),
             "expected DuplicateItem: {err}"
+        );
+    }
+
+    // ---- CLI-212/CLI-213: a linked source whose clone dir has vanished ----
+
+    // spec: CLI-212
+    #[test]
+    fn scan_source_reports_linked_source_gone_when_clone_dir_is_missing() {
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        // Never created: this source's linked working tree is "gone".
+        let clone = base.join("sources/local/test/repo");
+
+        let paths = paths_for(base);
+        let source = make_source_for(&clone);
+        let mut items = Vec::new();
+        let err = scan_source(&paths, &source, &mut items).unwrap_err();
+        match err {
+            MindError::LinkedSourceGone {
+                ref source_name,
+                ref path,
+            } => {
+                assert_eq!(source_name, "local/test/repo");
+                assert!(
+                    path.contains("repo"),
+                    "path must name the vanished dir: {path}"
+                );
+            }
+            other => panic!("expected LinkedSourceGone, got {other:?}"),
+        }
+    }
+
+    // spec: CLI-212 CLI-213
+    #[test]
+    fn scan_degrades_past_a_gone_linked_source_and_keeps_the_rest() {
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let paths = paths_for(base);
+
+        // Source A: a real clone with one item.
+        let clone_a = base.join("sources/local/a/repo");
+        write_file(
+            &clone_a.join("skills/alpha/SKILL.md"),
+            "---\ndescription: alpha\n---\n# alpha\n",
+        );
+        let mut source_a = make_source_for(&clone_a);
+        source_a.name = "local/a/repo".to_string();
+        source_a.owner = "a".to_string();
+
+        // Source B: a linked source whose clone dir was never created.
+        let clone_b = base.join("sources/local/b/repo");
+        let mut source_b = make_source_for(&clone_b);
+        source_b.name = "local/b/repo".to_string();
+        source_b.owner = "b".to_string();
+
+        let registry = Registry {
+            sources: vec![source_a, source_b],
+        };
+        let items = scan(&paths, &registry).expect(
+            "scan() must degrade past the gone linked source, not hard-fail the whole call",
+        );
+        let names: Vec<_> = items.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["alpha"],
+            "the gone source must be skipped and the good source's items kept: {names:?}"
+        );
+    }
+
+    // spec: CLI-212
+    // The narrowness of the degradation: any OTHER scan failure (here, a bad
+    // --root) still aborts the whole `scan()` call exactly as before.
+    #[test]
+    fn scan_still_hard_fails_on_a_non_gone_scan_error() {
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let clone = base.join("sources/local/test/repo");
+        write_file(&clone.join("README.md"), "hi");
+
+        let paths = paths_for(base);
+        let mut source = make_source_for(&clone);
+        source.roots = Some(vec!["does-not-exist".to_string()]);
+
+        let registry = Registry {
+            sources: vec![source],
+        };
+        let err = scan(&paths, &registry).unwrap_err();
+        assert!(
+            matches!(err, MindError::InvalidRoot { .. }),
+            "a non-LinkedSourceGone failure must still abort scan(): {err}"
         );
     }
 

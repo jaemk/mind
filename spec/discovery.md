@@ -147,6 +147,21 @@ run = "make build"
   past). Each source in the transitive set is therefore processed at most once.
 - `DSC-39` A `[discover].sources` entry may set `as = "<prefix>"` to impose a
   namespace on that nested source (equivalent to `meld --as`).
+- `DSC-92` A `[discover].sources` entry's `source` spec is parsed exactly like a
+  `meld` argument (DSC-38), so it may itself be a local-path spec (`./rel/path`
+  or `../rel/path`). When it is, `MindToml::load` rewrites that relative path to
+  an absolute one against the DIRECTORY IT READ THE `mind.toml` FROM, not
+  against whatever directory the consumer running `meld`/`sync` happens to be
+  in. Without this, a curated entry like `source = "../explicit"` (the shape
+  `examples/super-source/mind.toml` uses) resolves relative to the consumer's
+  cwd - almost never the curator's intended sibling directory - so the same
+  super-source melds a different (or no) nested source depending on where the
+  consumer happens to be standing. Fixed at the read site (`MindToml::load`
+  itself knows the directory it read from) rather than at each use site, so it
+  covers every caller uniformly: `meld`'s initial curated-source walk, `sync`'s
+  DSC-57 re-walk, and `dump`'s reconstruction all resolve nested local sources
+  against the same, correct base with no per-caller change needed. An absolute
+  nested `source` (or a remote spec) is unaffected.
 - `DSC-58` A `[discover].sources` entry may set `install = true` (default false)
   to recommend that nested source for install: melding the super-source offers its
   items via the same preview-and-prompt as the top-level source (CLI-23, honoring

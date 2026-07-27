@@ -72,7 +72,10 @@ It is read-only except for creating an absent `mind.toml` and, with
 
 `mind review <target>` validates a source for publishing without changing
 anything (`--fix` is the one exception). `<target>` is a melded source name, a
-local path, or a repo spec; with no target it reviews the current directory.
+local path, or a repo spec; with no target it reviews the current directory. A
+target naming an existing directory is always read as that local path, even
+when it also looks like a valid `owner/repo` spec, so the same relative path
+`init-source` scaffolded works unchanged with `review` (CLI-214, CLI-215).
 
 Findings are **hard** (non-zero exit) or **advisory**:
 

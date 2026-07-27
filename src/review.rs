@@ -162,8 +162,9 @@ pub fn dispatch_policy(path: &Path) -> crate::error::Result<()> {
 /// temp-dir guard that removes the cloned directory when dropped. The guard is
 /// `Some` only for remote-spec targets.
 ///
-/// Precedence: exact/suffix registry match > local path > remote spec.
-/// spec: CLI-130
+/// Precedence: exact/suffix registry match > existing local directory > remote
+/// spec.
+/// spec: CLI-130 CLI-214
 ///
 /// The trailing `bool` is `true` only for a local working-tree path: the one
 /// target kind `--fix` (CLI-138) may rewrite. A registry selector resolves to
@@ -178,6 +179,27 @@ fn resolve_target(
     // This covers both the melded-selector case and the "owner/repo" ambiguity.
     if let Some(dir) = try_registry_match(paths, target)? {
         return Ok((dir, None, false));
+    }
+
+    // spec: CLI-214 -- a target naming an EXISTING directory is reviewed as
+    // that local path regardless of what it would otherwise parse as. Without
+    // this, a two-segment relative path like `skills/greet` parses as an
+    // `owner/repo` remote spec (`parse_spec` only recognizes `/`, `./`, `../`,
+    // or `file://` as local) and shallow-clones it from github.com -- a
+    // surprise network call for a directory the user meant literally.
+    // `review` is read-only, so nothing is persisted by taking this branch.
+    // Checked between the registry match and `parse_spec`, not inside it:
+    // `parse_spec` itself must NOT globally prefer an existing directory (a
+    // `meld` persists an identity and clone path, and preferring cwd there
+    // would make a repo whose name matches a local dir change meaning with
+    // the caller's cwd).
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    if let Some(dir) = crate::source::resolve_local_dir(&cwd, target) {
+        if let Some(note) = shadow_note(target) {
+            eprintln!("{note}");
+        }
+        let _ = alias; // alias is applied at check time, not here
+        return Ok((dir, None, true));
     }
 
     // Parse as a spec (local path or remote).
@@ -211,6 +233,26 @@ fn resolve_target(
 
     git::clone(&source.url, &tmp)?;
     Ok((tmp, Some(guard), false))
+}
+
+/// The advisory note printed when `target` is read as a local directory
+/// (CLI-214) but ALSO parses as a valid remote repo spec, so the ambiguity is
+/// visible and the escape to force the remote reading is spelled out.
+/// Returns `None` when `target` does not also parse as a remote spec (the
+/// common case: no ambiguity to report), including when it is itself a `/`,
+/// `./`, `../`, or `file://` local-path spec (those already mean "this local
+/// path" unambiguously). Pure: `parse_spec` touches no disk or network.
+/// spec: CLI-214
+fn shadow_note(target: &str) -> Option<String> {
+    let remote = parse_spec(target).ok()?;
+    if remote.host == "local" {
+        return None;
+    }
+    Some(format!(
+        "note: '{target}' is also a valid repo spec, but a directory named '{target}' exists \
+         here, so it is reviewed as that local path; to review the remote repo instead, use \
+         'mind review github:{target}'"
+    ))
 }
 
 /// Look up `target` as a registry selector. Returns the clone dir if found.
@@ -1215,6 +1257,61 @@ mod tests {
 
         let result = try_registry_match(&paths, "owner/nonexistent").unwrap();
         assert!(result.is_none(), "no match should give None");
+    }
+
+    // --- CLI-214: an existing directory wins over owner/repo parsing --------
+
+    /// `resolve_target` reads an existing directory as a local path even when
+    /// the same string would otherwise parse as `owner/repo` (a two-segment
+    /// relative path). This exercises the wiring end to end for an existing
+    /// directory; the ambiguity-detection helper is verified in isolation by
+    /// `shadow_note_*` below so a test never has to drive the actual remote
+    /// (clone) branch to prove the local reading is correct.
+    /// spec: CLI-214
+    #[test]
+    fn resolve_target_prefers_an_existing_absolute_directory() {
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let dir = base.join("owner").join("repo");
+        std::fs::create_dir_all(&dir).unwrap();
+        let paths = paths_for(base);
+
+        let (resolved, guard, is_local) =
+            resolve_target(&paths, &dir.to_string_lossy(), &None).unwrap();
+        assert_eq!(resolved, dir);
+        assert!(is_local, "an existing directory must resolve as local");
+        assert!(
+            guard.is_none(),
+            "a local directory carries no temp-dir guard"
+        );
+    }
+
+    /// The pure ambiguity-note helper: fires when the target ALSO parses as a
+    /// valid remote repo spec, naming both the target and the escape to force
+    /// the remote reading.
+    /// spec: CLI-214
+    #[test]
+    fn shadow_note_fires_when_target_also_parses_as_owner_repo() {
+        let note = shadow_note("skills/greet").expect("must note the ambiguity");
+        assert!(
+            note.contains("skills/greet"),
+            "must name the target: {note}"
+        );
+        assert!(
+            note.contains("mind review github:skills/greet"),
+            "must name the escape to force the remote reading: {note}"
+        );
+    }
+
+    /// No note when the target does not also parse as a remote spec: an
+    /// explicit local-path form (`./`, `../`, `/`, `file://`) already means
+    /// "this local path" unambiguously, so there is nothing to disambiguate.
+    /// spec: CLI-214
+    #[test]
+    fn shadow_note_absent_for_an_explicit_local_path_form() {
+        assert_eq!(shadow_note("./skills/greet"), None);
+        assert_eq!(shadow_note("/abs/path"), None);
+        assert_eq!(shadow_note("../skills/greet"), None);
     }
 
     // --- hard vs advisory classification (CLI-132) ---

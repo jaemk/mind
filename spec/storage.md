@@ -250,6 +250,40 @@ The on-disk layout and the two persisted JSON files.
   authority reaches `git clone` unescaped. An authority with no `@` at all (the
   ordinary `ssh://host/owner/repo` form) is unaffected: it parses exactly as
   before this rule existed.
+- `STO-72` A local-path repo spec (`/abs/path`, `./rel/path`, `../rel/path`, or
+  the local branch of a `file://` item link) is resolved to an absolute path
+  BEFORE `owner`/`repo` are derived from it, and that absolute form - not the
+  spec as typed - is what is persisted into `Source.url`. Resolution joins the
+  process's current working directory onto a relative spec, then resolves
+  `.`/`..` path components LEXICALLY (string manipulation only: no
+  `canonicalize`, no filesystem stat beyond reading the cwd itself), so
+  `parse_spec` stays stat-free and still works for a path that does not exist
+  yet. Without this, a relative spec's literal `.`/`..` segment reached the
+  owner-directory derivation (which filters `.` and `..`, falling back to the
+  `local` placeholder), so `./foo` produced the wrong `local/local/foo`
+  identity instead of naming the real parent directory as owner; and the
+  literal relative string, recorded verbatim into `url`, stopped resolving to
+  the melded directory after any later `cd` (the clone path for a linked local
+  source, CLI-27, is `url` itself). Because resolution happens first, an
+  input like `/a/b/..` never reaches identity derivation carrying a literal
+  `..` segment at all: it resolves to `/a` first, so the identity is built
+  from a real, traversal-free path component - a strictly safer outcome than
+  refusing the syntax after the fact.
+- `STO-73` `Registry::load` migrates a local source's relative `url` to an
+  absolute form, using the same resolution `STO-72` applies at parse time,
+  once the process cwd is known. This covers a source melded before STO-72
+  existed, or a hand-edited registry, that still carries a literal relative
+  path. The rewrite happens ONLY when the resolved absolute path currently
+  exists as a directory: when it does not, the recorded `url` is left exactly
+  as written, so the "linked source is gone" finding (CLI-212, CLI-213) can
+  name what the user actually typed rather than a confusing absolutized guess
+  for a path that was never real to begin with. Only `url` is ever rewritten,
+  never `name`: a source's `name` is the manifest's back-reference key
+  (STO-22), and rewriting it would orphan every item installed from that
+  source. The rewrite is in-memory only at load time; it is written back to
+  disk the next time `Registry::save` runs (e.g. as part of the same
+  command's normal write-back), the same as any other in-memory registry
+  mutation (mirroring STO-68's revalidation).
 
 ## Manifest (manifest.json)
 

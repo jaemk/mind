@@ -14,7 +14,9 @@
 //! Uninstall is driven by the per-item file registry recorded in the manifest
 //! (`store` + `links`), so it removes exactly what was installed.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use crate::catalog::CatalogItem;
 use crate::error::BadRefReason::NoMatch;
@@ -95,15 +97,23 @@ pub fn install(
     // and whose parent directory exists (STO-56: the reachability gate). A lobe
     // that excludes the kind or whose parent is absent contributes no link and is
     // not an error, so the recorded manifest `links` reflect exactly the lobes
-    // that were active at install time.
+    // that were active at install time. A skipped unreachable lobe prints a
+    // one-time note (HARN-16) naming both remedies, deduplicated per process so a
+    // multi-item `learn`/`meld` does not repeat it for every item.
     // spec: STO-56
+    // spec: HARN-16
     let planned_links: Vec<std::path::PathBuf> = match &link_rel {
-        Some(rel) => paths
-            .agent_homes()?
-            .iter()
-            .filter(|home| home.admits(kind) && home.reachable())
-            .map(|home| home.path.join(rel))
-            .collect(),
+        Some(rel) => {
+            let mut planned = Vec::new();
+            for home in paths.agent_homes()?.iter().filter(|home| home.admits(kind)) {
+                if home.reachable() {
+                    planned.push(home.path.join(rel));
+                } else {
+                    note_unreachable_lobe_once(&home.path);
+                }
+            }
+            planned
+        }
         None => Vec::new(),
     };
     if !force {
@@ -348,10 +358,17 @@ pub fn relink(paths: &Paths, item: &InstalledItem) -> Result<usize> {
 /// prefixes; falls back to `paths.default_link_rel`. Returns the paths
 /// successfully created and (path, error) pairs for failures.
 /// Does NOT update the manifest — the caller records created paths into item.links.
+///
+/// spec: HARN-17 -- unless `force` is set, each target is guarded by the same
+/// `ensure_unoccupied` check the install path uses (LIFE-41): a pre-existing
+/// foreign file or directory is never clobbered. A blocked target is reported
+/// via the ordinary `LinkOccupied` failure (naming the `--force` remedy) in the
+/// returned `failed` list, exactly like any other link failure.
 pub fn link_into_new_lobes(
     paths: &Paths,
     item: &InstalledItem,
     new_lobes: &[crate::paths::Lobe],
+    force: bool,
 ) -> (
     Vec<std::path::PathBuf>,
     Vec<(std::path::PathBuf, MindError)>,
@@ -373,6 +390,7 @@ pub fn link_into_new_lobes(
     };
 
     let store = paths.mind_home.join(&item.store);
+    let store_root = paths.store_dir();
     for lobe in new_lobes {
         if !lobe.admits(item.kind) {
             continue;
@@ -380,6 +398,10 @@ pub fn link_into_new_lobes(
         let expected = lobe.path.join(&link_rel);
         let expected_str = expected.to_string_lossy().into_owned();
         if item.links.iter().any(|l| l == &expected_str) {
+            continue;
+        }
+        if !force && let Err(e) = ensure_unoccupied(&store_root, &expected) {
+            failed.push((expected, e));
             continue;
         }
         match ensure_link(&store, &expected) {
@@ -419,6 +441,31 @@ fn maybe_stash_foreign(store_root: &Path, link: &Path, stash: &Path) -> Result<b
     }
     rename(link, stash)?;
     Ok(true)
+}
+
+/// Lobe paths already reported unreachable this process (HARN-16), so the note
+/// is printed once per lobe rather than once per skipped item.
+static WARNED_UNREACHABLE_LOBES: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+
+/// Print a one-time (per-process) note when a configured lobe is skipped at
+/// install time because its parent directory does not exist (STO-56/HARN-16).
+/// Names both remedies: create the missing directory (making the lobe
+/// reachable), or drop the lobe from config with `mind config lobes remove
+/// <path>`. Deduplicated by lobe path so a multi-item `learn`/`meld` prints it
+/// once, not once per affected item.
+fn note_unreachable_lobe_once(path: &Path) {
+    let seen = WARNED_UNREACHABLE_LOBES.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut seen = seen
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if seen.insert(path.to_path_buf()) {
+        println!(
+            "note: lobe '{}' is unreachable (its parent directory does not exist); \
+             create the missing directory, or run `mind config lobes remove {}` to drop it",
+            path.display(),
+            path.display()
+        );
+    }
 }
 
 /// Refuse to install over a link target that mind does not own. A target is

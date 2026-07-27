@@ -8,6 +8,28 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A local-path source is now recorded as an absolute path, so melding by a
+  relative path and then working from another directory no longer breaks the
+  source. An existing relative path is migrated to absolute on load when it
+  still resolves to an existing directory (STO-72, STO-73).
+- A source whose linked working tree is gone is now reported and skipped by
+  the commands that list the catalog (`recall`, `probe`, `introspect`,
+  `upgrade`) instead of failing the whole command. Naming such a source
+  directly still errors (CLI-212, CLI-213).
+- A relative local path in a curated mind.toml's `[discover].sources` now
+  resolves against the directory that declares it, not the consumer's working
+  directory (DSC-92).
+- `review` now accepts any target naming an existing directory, so a bare or
+  two-segment relative path is reviewed locally instead of being treated as
+  owner/repo and cloned (CLI-214, CLI-215).
+- Registering a lobe now creates its directory and links the already-installed
+  items into it, so `link-project` and `config lobes add --preset` no longer
+  register a lobe that silently never receives anything (HARN-15, HARN-17).
+- `introspect --fix` no longer reports a lobe it pruned in the same run as an
+  outstanding issue (HARN-18).
+- `hooks run` that could not run anything because it had no terminal now names
+  the cause and the exact command to run it unattended, and exits non-zero
+  instead of reporting success (HOOK-106, HOOK-107).
 - Policy allowlist matching now compares the base `host/owner/repo` identity at
   every gate, so an instance admitted at meld time is no longer skipped by
   `sync`, `upgrade`, and install-hook gating under a locked allowlist.

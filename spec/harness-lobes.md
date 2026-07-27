@@ -79,16 +79,16 @@ per-rule files. Rules stay Claude-only here; an `AGENTS.md`-writer is out of sco
   frontmatter to fit a target harness. This is an explicit non-goal.
 
 - `HARN-7` After `config lobes add` (including `--preset`) or `config lobes
-  detect` successfully adds one or more lobes, mind offers to backfill
-  already-installed items into the new lobe(s): in interactive mode it prompts
-  ("Link N installed items into the new lobe(s)?"); `--yes` backfills
-  automatically without prompting; in non-interactive mode without `--yes` it
-  prints a note suggesting `mind introspect --fix` and skips the backfill. The
-  backfill is the same per-item link operation as `learn`, subject to the same
-  `kinds` filter (HARN-1), clobber guard (LIFE-41), and manifest update (HARN-2).
-  A lobe that was already present before the command runs is not backfilled (only
-  newly-added lobes receive the offer); items that fail to link into a new lobe
-  are reported individually and do not abort the rest of the backfill.
+  detect` successfully adds one or more lobes, mind backfills already-installed
+  items into the new lobe(s). For a lobe registered in fan-out mode (today's only
+  mode; HARN-19 records a planned selective mode), this backfill is
+  unconditional in every invocation mode -- see HARN-17 for the exact guarantee
+  and its foreign-target safety. The backfill is the same per-item link
+  operation as `learn`, subject to the same `kinds` filter (HARN-1) and manifest
+  update (HARN-2). A lobe that was already present before the command runs is
+  not backfilled (only newly-added lobes receive the offer); items that fail to
+  link into a new lobe are reported individually and do not abort the rest of
+  the backfill.
 
 - `HARN-8` `introspect --fix` (CLI-91) also repairs missing lobe coverage: for
   each installed item and each configured lobe whose `kinds` admits the item's
@@ -158,6 +158,53 @@ per-rule files. Rules stay Claude-only here; an `AGENTS.md`-writer is out of sco
   manifest item's `links` list. Vanished lobes are checked before the missing-link
   and missing-lobe-link loops so that a removed project directory does not produce
   spurious repair errors for the links that lived inside it.
+
+- `HARN-15` `config lobes add` (and `link-project`, which shares its
+  implementation) creates the resolved lobe path on disk (`mkdir -p`) immediately
+  after resolving it and before the config entry is written, in the managed
+  (non-snapshot) path. This applies even when the lobe's parent does not exist yet
+  (e.g. `--preset gemini` before Gemini CLI is installed): the whole point of
+  registering a lobe ahead of its harness is that it becomes reachable (STO-56) the
+  moment it is registered, so the HARN-17 backfill lands, the HARN-11 gitignore
+  note names a real directory, and `introspect --fix` does not treat it as
+  vanished (HARN-13) and prune it on the next run. This does not relax
+  `resolve_lobe`'s existing `LobeBaseMissing` check on an EXPLICIT base directory
+  (HARN-10): a base the user mistyped is still refused before this point is
+  reached; only the resolved lobe path itself (the base joined with the
+  preset/subdir) is created.
+
+- `HARN-16` When the per-item install fan-out skips a configured lobe because it
+  is unreachable (STO-56), it prints a one-time note naming both remedies: create
+  the lobe's missing directory, or remove the lobe from config (`mind config
+  lobes remove <path>`). The note is deduplicated once per process, not once per
+  item, so a multi-item `learn` or `meld` with several affected items does not
+  repeat it.
+
+- `HARN-17` For a lobe registered in fan-out mode (today's only mode; HARN-19
+  records a planned selective mode), the HARN-7 backfill of already-installed
+  items runs unconditionally in every invocation mode: `--yes`, an interactive
+  TTY, a non-interactive non-TTY context, and `--json`. It never prompts and
+  never defers to `introspect --fix`. A pre-existing foreign file at a backfill
+  target is never clobbered: the same `ensure_unoccupied` guard used at install
+  time (LIFE-41) applies unless the caller passes `force`; a blocked target is
+  reported as an ordinary failure (the `LinkOccupied` error, naming the `--force`
+  remedy) in the same per-item failed list already printed as a warning, so a
+  clobber-prone backfill does not silently overwrite user content.
+
+- `HARN-18` `introspect --fix`'s exit summary counts only issues that remain
+  after the fix pass: a `vanished-lobe` finding (HARN-13) that was pruned in the
+  same run is dropped from the reported issues (and so from the exit summary and
+  issue count), rather than being both reported as repaired ("pruned vanished
+  lobe(s) from config") and counted as an outstanding issue.
+
+- `HARN-19` (planned) A selective lobe mode, distinct from today's fan-out mode
+  (HARN-17's only mode), in which items are installed into a lobe only when
+  explicitly targeted (e.g. a `--local` flag on `learn`/`meld`) rather than
+  automatically fanned into every configured lobe. Detecting that the current
+  invocation runs inside a registered project lobe lets the CLI offer a
+  local-vs-global choice. Motivation: project-scoped skills for harnesses like
+  Windsurf, where fanning every installed item into every project is not always
+  wanted. Not implemented.
 
 ## Documentation map
 

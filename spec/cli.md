@@ -503,6 +503,28 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   is never reported as fully up to date (CLI-64) while any source could not be
   checked, even when no OTHER pending upgrade exists -- an unscannable source is
   itself an actionable condition, not silence.
+- `CLI-212` A linked local source (`Source::is_linked`, CLI-27) whose working
+  tree has vanished since it was melded (the docs' own `/tmp` recipe with no
+  teardown, or a repo directory a user deleted) is a `LinkedSourceGone` error
+  naming the source and the missing path, with the exact `mind unmeld <name>`
+  remedy, raised by `catalog::scan_source` before a less specific error (a
+  convention-scan `InvalidRoot`, or `MindToml::load` silently treating the
+  missing directory as "no mind.toml") could obscure the real cause.
+- `CLI-213` Listing every source's catalog (`recall`, `probe`, `learn`'s item
+  resolution) degrades past a single `LinkedSourceGone` source (CLI-212)
+  instead of hard-failing the whole call: the dead source is skipped with a
+  warning on stderr, and the sources that DID scan are still shown/searched/
+  resolved against. Every OTHER scan failure (a version gate, a bad `--root`, a
+  duplicate item, ...) still aborts the whole call exactly as before; this is a
+  narrow degradation for the one failure mode a user cannot fix by re-running
+  the same command. `meld`'s own scan of the source it just cloned, and
+  `dump`'s reconstruction, are unaffected: both still hard-fail on any scan
+  error, including this one -- a partial dump is worse than none, and naming a
+  specific broken source (rather than merely listing everything) should still
+  surface the problem plainly. `introspect` (CLI-210) and `upgrade` (CLI-211)
+  already scan per-source independently, so they surface `LinkedSourceGone` as
+  their existing `source-scan-failed`/unscannable-source finding with no
+  further change.
 
 ## hooks
 
@@ -617,6 +639,35 @@ only appear at meld or install time. It is read-only and installs nothing.
   local path, a repo spec (the forms accepted by `meld`, CLI-11; cloned to a temp
   area for the check), or the selector of an already-melded source (matched like
   `unmeld`, CLI-20).
+- `CLI-214` Between the registry-selector match and repo-spec parsing, `review`
+  checks whether `<target>` names an EXISTING directory (resolved against the
+  cwd) and, if so, reviews it as that local path regardless of what the string
+  would otherwise parse as. This closes a disagreement with `init-source`
+  (which takes a bare `PATH` and always treats it as a directory): without
+  this check, a two-segment relative path like `skills/greet` parses as
+  `owner/repo` (`meld`'s repo-spec grammar recognizes only `/abs/path`,
+  `./rel/path`, `../rel/path`, or `file://` as local) and `review`
+  shallow-clones it from `github.com` -- a surprise network call for a
+  directory the user meant literally. `review` is read-only, so taking this
+  branch persists nothing. When `<target>` ALSO parses as a valid remote repo
+  spec, `review` prints a note naming which reading it took and the exact
+  command to force the remote one instead (`mind review github:<target>`).
+  `parse_spec` itself is NOT changed to prefer an existing directory
+  globally: `meld` persists an identity and a clone path from it, and a repo
+  whose name happens to match a local directory must not silently change
+  meaning depending on the caller's cwd (contrast CLI-215, which only warns).
+- `CLI-215` `parse_spec`'s bare `owner/repo` / `github:owner/repo` branch
+  prints a stderr note, before any clone, when the given spec ALSO names an
+  existing directory relative to the cwd, pointing at the `./` form that would
+  mean the directory instead (e.g. `mind meld skills/greet` warns and then
+  still melds `github.com/skills/greet`, naming `./skills/greet` as the
+  local-path alternative). This does not change which reading `parse_spec`
+  takes; it is advisory only, so a script relying on the remote reading is
+  unaffected, while an interactive user gets a chance to notice the ambiguity
+  before the clone runs. `MindError::InvalidRepoSpec`'s message also names the
+  local-path forms it previously omitted (`/abs/path`, `./rel/path`,
+  `../rel/path`, `file:///abs/path`), matching what `mind review --help` (and
+  now CLI-214) already document as accepted.
 - `CLI-26` `review` with no `<target>` (or an explicit `.`/`./`) validates the
   current directory, so a maintainer can `mind review` in their repo. It is the
   read-only counterpart to `init-source` (init-source.md). `--policy` is the

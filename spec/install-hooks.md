@@ -444,6 +444,36 @@ outside the surrounding verb, under the same consent model.
   A target with no `#` at all is never ambiguous: the CLI-194 heuristic reads
   it as a source selector unconditionally, so it is never read as an item ref
   in `hooks run`/`hooks list` regardless of registry state.
+- `HOOK-106` When `hooks run` skips a source hook because the run is non-TTY
+  (HOOK-22) rather than because a user interactively declined it, the skip
+  note names both the cause and the exact remedy instead of stating only the
+  bare consequence: `note: skipped <event> hook '<label>' for <source> (not a
+  terminal); re-run with 'mind hooks run <source>
+  --dangerously-skip-install-hook-check' to run it unattended`. `<source>` is
+  substituted with the actual target, so the printed command is
+  copy-pasteable with no placeholder to fill in. An interactive decline (the
+  user is on a TTY and answered no/skip) keeps the plain `skipped ... hook ...
+  for ...` note: there is no "cause" to name when the user made an active
+  choice.
+- `HOOK-107` `hooks run <target>` on a source target counts, across every
+  matched source, how many hooks for the selected event EXISTED (were
+  actually considered: not filtered out as already-up-to-date at the current
+  commit, HOOK-101), how many of those RAN, and how many were SKIPPED
+  specifically for want of consent (the HOOK-106 non-TTY case, not an
+  interactive decline). When at least one hook existed, none ran, and at
+  least one was skipped for want of consent, `hooks run` returns
+  `MindError::HooksNotRun` (naming the target and the skipped count) instead
+  of the silent exit 0 a non-TTY invocation previously produced -- the
+  provisioning-script case U43 identifies, where "ran nothing" and "skipped
+  everything because there was no terminal to ask" are indistinguishable
+  under a bare exit code. A run with nothing to do -- no hooks declared for
+  the event, or every install hook already recorded at the current commit --
+  is unaffected and stays exit 0: only the specific "there was work, and
+  consent was unavailable for all of it" case is an error. A required hook's
+  interactive abort (HOOK-100) is unaffected; it already reports
+  `HookAborted`. This also gives `hooks run --json` non-empty output on the
+  no-op path (CLI-181's structured error envelope), where it previously
+  produced zero bytes at exit 0.
 
 ## Managed-policy composition (research needed)
 

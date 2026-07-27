@@ -293,11 +293,14 @@ fn hooks_run_build_event_on_source_target_errors() {
 // hooks run -- source target, install event (HOOK-100 / HOOK-101)
 // ---------------------------------------------------------------------------
 
-/// In non-TTY, `hooks run --event install <source>` skips hooks and exits 0.
-/// (HOOK-22: non-TTY always skips; this is not an error for optional hooks.)
+/// In non-TTY, `hooks run --event install <source>` skips the hook, but
+/// because there WAS a hook to run and consent was unavailable for it (not a
+/// terminal), the command is now a non-zero exit naming the cause and the
+/// exact `--dangerously-skip-install-hook-check` remedy (HOOK-106/HOOK-107),
+/// not a silent exit 0 (U43).
 #[test]
 fn hooks_run_source_install_skips_in_non_tty() {
-    // spec: HOOK-100 HOOK-101
+    // spec: HOOK-100 HOOK-101 HOOK-106 HOOK-107
     let sb = Sandbox::new("src-skip");
     sb.write_and_commit(
         "mind.toml",
@@ -311,18 +314,42 @@ fn hooks_run_source_install_skips_in_non_tty() {
     let r = sb.mind(&["meld", &sb.source_spec()]);
     assert!(r.success, "meld: {}", r.stderr);
 
-    // stdin is null (non-TTY): hook is skipped, command exits 0.
+    // The registered source identity is `local/<base-name>/src-skip`, not the
+    // bare "src-skip" selector typed on the command line.
+    let identity = format!(
+        "local/{}/src-skip",
+        sb.base.file_name().unwrap().to_string_lossy()
+    );
+
+    // stdin is null (non-TTY): the hook is skipped, and the run is now an
+    // error since it had work to do and consent was unavailable for it.
     let r = sb.mind(&["hooks", "run", "--event", "install", "src-skip"]);
     assert!(
-        r.success,
-        "non-TTY skip should exit 0: {}\n{}",
+        !r.success,
+        "a non-TTY skip with a hook that existed must be a non-zero exit: {}\n{}",
         r.stdout, r.stderr
     );
-    // Output should note the skip.
     let out = r.stdout;
+    // Output should note the skip, the cause, and the exact remedy.
     assert!(
         out.contains("skipped") || out.contains("skip"),
         "should mention skip in non-TTY: {out}"
+    );
+    assert!(
+        out.contains("not a terminal"),
+        "should name the cause: {out}"
+    );
+    assert!(
+        out.contains(&format!(
+            "mind hooks run {identity} --dangerously-skip-install-hook-check"
+        )),
+        "should print the exact copy-pasteable remedy: {out}"
+    );
+    // The error itself also names the target and the reason.
+    assert!(
+        r.stderr.contains("skipped for want of consent"),
+        "should surface the HooksNotRun error: {}",
+        r.stderr
     );
 }
 
@@ -468,10 +495,12 @@ fn hooks_run_source_install_force_reruns_hook() {
 // hooks run -- source target, uninstall event (HOOK-100)
 // ---------------------------------------------------------------------------
 
-/// In non-TTY, `hooks run --event uninstall <source>` skips and exits 0.
+/// In non-TTY, `hooks run --event uninstall <source>` skips the hook, and
+/// (like the install case) is now a non-zero exit since a hook existed and
+/// consent was unavailable for it (HOOK-107).
 #[test]
 fn hooks_run_source_uninstall_skips_in_non_tty() {
-    // spec: HOOK-100
+    // spec: HOOK-100 HOOK-107
     let sb = Sandbox::new("src-unskip");
     sb.write_and_commit(
         "mind.toml",
@@ -487,9 +516,14 @@ fn hooks_run_source_uninstall_skips_in_non_tty() {
 
     let r = sb.mind(&["hooks", "run", "--event", "uninstall", "src-unskip"]);
     assert!(
-        r.success,
-        "uninstall non-TTY skip should exit 0: {}\n{}",
+        !r.success,
+        "uninstall non-TTY skip with a hook that existed must be a non-zero exit: {}\n{}",
         r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr.contains("skipped for want of consent"),
+        "should surface the HooksNotRun error: {}",
+        r.stderr
     );
 }
 
@@ -799,7 +833,7 @@ fn hooks_run_item_glob_runs_each_matched_item() {
 /// a later bypassed run still offers and executes it.
 #[test]
 fn hooks_run_source_install_skip_stays_pending() {
-    // spec: HOOK-101 HOOK-55
+    // spec: HOOK-101 HOOK-55 HOOK-107
     let sb = Sandbox::new("skip-pending");
     sb.write_and_commit(
         "mind.toml",
@@ -813,9 +847,16 @@ fn hooks_run_source_install_skip_stays_pending() {
     let r = sb.mind(&["meld", &sb.source_spec()]);
     assert!(r.success, "meld: {}", r.stderr);
 
-    // First run in non-TTY: the hook is skipped (records ran_at = None).
+    // First run in non-TTY: the hook is skipped (records ran_at = None). The
+    // run itself is now a non-zero exit (HOOK-107: a hook existed and consent
+    // was unavailable), but the skip-records-no-commit behavior under test
+    // still happens before that error is returned.
     let r = sb.mind(&["hooks", "run", "--event", "install", "skip-pending"]);
-    assert!(r.success, "skip run: {}\n{}", r.stdout, r.stderr);
+    assert!(
+        !r.success,
+        "a non-TTY skip with a hook that existed must be a non-zero exit: {}\n{}",
+        r.stdout, r.stderr
+    );
     assert!(
         !sb.source.join("ran.sentinel").exists(),
         "a skipped hook must not have executed"
@@ -837,6 +878,58 @@ fn hooks_run_source_install_skip_stays_pending() {
     assert!(
         sb.source.join("ran.sentinel").exists(),
         "a skipped install hook stays pending and runs on a later bypassed run"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// HOOK-107: "ran nothing" is an error only when consent was unavailable for
+// hooks that actually existed. "Nothing to do" (no hooks declared, or every
+// hook already ran at the current commit) stays exit 0.
+// ---------------------------------------------------------------------------
+
+/// A non-TTY `hooks run` where the install hook already ran at the current
+/// commit has NOTHING to do (HOOK-101's pending filter excludes it before
+/// consent is ever asked), so it stays exit 0 even with no
+/// `--dangerously-skip-install-hook-check` -- unlike the pending case in
+/// `hooks_run_source_install_skips_in_non_tty`, which is now an error.
+#[test]
+fn hooks_run_source_install_already_ran_non_tty_stays_exit_zero() {
+    // spec: HOOK-107 HOOK-101
+    let sb = Sandbox::new("already-ran-quiet");
+    sb.write_and_commit(
+        "mind.toml",
+        concat!(
+            "[[hooks]]\n",
+            "name = \"setup\"\n",
+            "run = \"echo setup-ran\"\n",
+            "event = \"install\"\n",
+        ),
+    );
+    let r = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(r.success, "meld: {}", r.stderr);
+
+    // Run it once via the bypass so it is recorded at the current commit.
+    let r = sb.mind(&[
+        "hooks",
+        "run",
+        "--event",
+        "install",
+        "--dangerously-skip-install-hook-check",
+        "already-ran-quiet",
+    ]);
+    assert!(
+        r.success,
+        "first (bypassed) run: {}\n{}",
+        r.stdout, r.stderr
+    );
+
+    // A second, non-TTY run with no bypass: the hook is already up to date, so
+    // there is nothing to do -- this must stay exit 0, not HooksNotRun.
+    let r = sb.mind(&["hooks", "run", "--event", "install", "already-ran-quiet"]);
+    assert!(
+        r.success,
+        "a run with nothing to do must stay exit 0 even in non-TTY: {}\n{}",
+        r.stdout, r.stderr
     );
 }
 

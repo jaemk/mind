@@ -161,6 +161,16 @@ fn run_source_hooks(
 
     let mut registry_dirty = false;
 
+    // spec: HOOK-107 -- count hooks that existed (were actually considered: not
+    // already-up-to-date and not "no hooks declared"), how many of those ran,
+    // and how many were skipped specifically for want of consent (a non-TTY
+    // run, not an interactive decline). A `hooks run` that had work to do but
+    // could not get consent for any of it is reported as an error rather than
+    // a silent exit 0 (U43).
+    let mut existed: usize = 0;
+    let mut ran: usize = 0;
+    let mut skipped_for_consent: usize = 0;
+
     for idx in indices {
         let source = &registry.sources[idx];
         let clone_dir = source.clone_dir(paths);
@@ -206,6 +216,7 @@ fn run_source_hooks(
             {
                 continue;
             }
+            existed += 1;
 
             let disclosure = crate::hook::hook_disclosure_text(
                 h.label(),
@@ -221,6 +232,7 @@ fn run_source_hooks(
 
             match crate::hook::decide(&disclosure, h.optional, dangerously_skip)? {
                 crate::hook::HookAct::Run => {
+                    ran += 1;
                     println!(
                         "running {event_name} hook '{}' for {}",
                         h.label(),
@@ -243,11 +255,25 @@ fn run_source_hooks(
                     }
                 }
                 crate::hook::HookAct::Skip => {
-                    println!(
-                        "note: skipped {event_name} hook '{}' for {}",
-                        h.label(),
-                        source_name
-                    );
+                    // spec: HOOK-106 -- when the skip was for want of consent (a
+                    // non-TTY run), name the cause and print the exact,
+                    // copy-pasteable command to re-run it unattended, instead of
+                    // a bare note that says nothing about why or what to do.
+                    if !crate::hook::is_tty() {
+                        skipped_for_consent += 1;
+                        println!(
+                            "note: skipped {event_name} hook '{}' for {source_name} (not a \
+                             terminal); re-run with 'mind hooks run {source_name} \
+                             --dangerously-skip-install-hook-check' to run it unattended",
+                            h.label()
+                        );
+                    } else {
+                        println!(
+                            "note: skipped {event_name} hook '{}' for {}",
+                            h.label(),
+                            source_name
+                        );
+                    }
                     // spec: HOOK-101 -- even a skipped install hook is recorded
                     // (with ran_at = None) so repeat runs know it was offered.
                     if hook_event == HookEvent::Install {
@@ -271,6 +297,19 @@ fn run_source_hooks(
     if registry_dirty {
         registry.save(paths)?;
     }
+
+    // spec: HOOK-107 -- there was work to do, and none of it could get consent
+    // (every hook that existed was skipped for want of a terminal). A run with
+    // nothing to do (no hooks declared, or every install hook already ran at
+    // the current commit) stays exit 0; only this specific "had work, no
+    // consent available" case is an error.
+    if existed > 0 && ran == 0 && skipped_for_consent > 0 {
+        return Err(MindError::HooksNotRun {
+            target: selector.to_string(),
+            skipped: skipped_for_consent,
+        });
+    }
+
     Ok(())
 }
 

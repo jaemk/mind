@@ -81,3 +81,13 @@
   will link correctly but those keys may be ignored or produce a warning in the
   target harness. Adapt the frontmatter for the target harness by hand (HARN-6).
   See [Configuration](configuration.md#frontmatter-portability).
+- A melded local source's directory was moved or deleted. Commands that list
+  the catalog (`recall`, `probe`, `introspect`, `upgrade`) now warn and
+  continue instead of failing outright. Run `mind recall --sources` to find
+  the source's name, then `mind unmeld <name>` to drop it, or restore the
+  directory at its original path (CLI-213).
+- A lobe was added for a harness that is not installed yet (e.g. `config lobes
+  add --preset gemini` before Gemini CLI exists). This now works: the target
+  directory is created and already-installed items are linked into it
+  immediately (HARN-15, HARN-17). If an older config still has a lobe whose
+  directory or parent is unreachable, `mind introspect --fix` prunes it.

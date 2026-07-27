@@ -1,6 +1,6 @@
 //! Melded sources: the GitHub (or arbitrary git) repos `mind` pulls items from.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -467,14 +467,20 @@ pub fn parse_spec(spec: &str) -> Result<Source> {
             && let Some((repo_part, marker, rest)) = split_link_marker(path)
         {
             let (pin, item_path) = parse_link_tail(spec, marker, rest)?;
-            let mut comps = repo_part.trim_end_matches('/').rsplit('/');
+            // spec: STO-72 -- absolutize BEFORE identity derivation, so a
+            // relative local repo path resolves against the real cwd instead of
+            // `.`/`..` landing in the owner segment (which produced the wrong
+            // `local/local/<repo>` identity for a spec like `./foo`) and so the
+            // recorded `url` still resolves after a later `cd`.
+            let abs_repo_part = absolutize(repo_part);
+            let mut comps = abs_repo_part.trim_end_matches('/').rsplit('/');
             let repo_raw = comps.next().filter(|s| !s.is_empty()).ok_or_else(invalid)?;
             let repo = repo_raw.strip_suffix(".git").unwrap_or(repo_raw);
             let owner = comps
                 .next()
                 .filter(|s| !s.is_empty() && *s != "." && *s != "..")
                 .unwrap_or("local");
-            let mut source = make_source(spec, "local", owner, repo, repo_part.to_string())?;
+            let mut source = make_source(spec, "local", owner, repo, abs_repo_part.clone())?;
             // spec: LNK-4 -- extended identity; the pin makes this a cloned
             // snapshot (never a linked working tree), so lifecycle matches a
             // remote link instance.
@@ -483,14 +489,16 @@ pub fn parse_spec(spec: &str) -> Result<Source> {
             source.pin = pin;
             return Ok(source);
         }
-        let mut comps = path.trim_end_matches('/').rsplit('/');
+        // spec: STO-72 -- same absolutization for the bare local-path branch.
+        let abs_path = absolutize(path);
+        let mut comps = abs_path.trim_end_matches('/').rsplit('/');
         let repo_raw = comps.next().filter(|s| !s.is_empty()).ok_or_else(invalid)?;
         let repo = repo_raw.strip_suffix(".git").unwrap_or(repo_raw);
         let owner = comps
             .next()
             .filter(|s| !s.is_empty() && *s != "." && *s != "..")
             .unwrap_or("local");
-        return make_source(spec, "local", owner, repo, path.to_string());
+        return make_source(spec, "local", owner, repo, abs_path.clone());
     }
 
     // SSH form: git@host:owner/repo(.git)
@@ -547,8 +555,133 @@ pub fn parse_spec(spec: &str) -> Result<Source> {
     // github: prefix shorthand
     let bare = spec.strip_prefix("github:").unwrap_or(spec);
     let (owner, repo) = split_owner_repo(bare).ok_or_else(invalid)?;
+    // spec: CLI-215 -- warn BEFORE any clone when this owner/repo-shaped spec
+    // also names an existing directory relative to the cwd. A two-segment
+    // relative path like `skills/greet` is easy to type meaning "the directory
+    // right here"; without this note the first sign of the misreading is a
+    // surprise network clone. This does not change which reading `parse_spec`
+    // takes here (still the remote spec, always) -- it only names the
+    // ambiguity and the `./` form that means the directory instead.
+    if let Ok(cwd) = std::env::current_dir()
+        && local_dir_shadow(&cwd, bare)
+    {
+        eprintln!(
+            "note: '{bare}' is also a directory here; to meld/review it as a local path instead \
+             of a remote repo, use './{bare}'"
+        );
+    }
     let url = format!("https://github.com/{owner}/{repo}");
     make_source(spec, "github.com", &owner, &repo, url)
+}
+
+/// Resolve a local-path repo spec to an absolute path before it is persisted
+/// (STO-72): join the current working directory when `path` is relative, then
+/// resolve `.`/`..` components LEXICALLY -- no `canonicalize`, no disk access
+/// beyond reading the cwd, so `parse_spec` stays stat-free and still works for
+/// a path that does not exist yet. Without this, a relative spec like `./foo`
+/// derived its owner from the literal string (`.` filtered out, falling back
+/// to the `local` placeholder), producing the wrong `local/local/foo`
+/// identity; and after a later `cd`, the same relative string recorded in
+/// `Source::url` no longer resolves to the melded directory at all (U40).
+fn absolutize(path: &str) -> String {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    absolutize_against(&cwd, path)
+}
+
+/// Whether `spec` is the RELATIVE local-path form of a repo spec (`./rel/path`
+/// or `../rel/path`), as opposed to an already-absolute local path or a remote
+/// spec. Used by `mindfile::MindToml::load` (DSC-92) to find a curated
+/// `[discover].sources` entry's `source` that needs rewriting against the
+/// mind.toml's own directory rather than the consumer's cwd.
+pub(crate) fn is_relative_local_spec(spec: &str) -> bool {
+    spec.starts_with("./") || spec.starts_with("../")
+}
+
+/// Pure half of [`absolutize`]: join `path` onto `base` unless it is already
+/// absolute, then resolve `.`/`..` components lexically. Independently
+/// testable against an explicit directory, with no cwd dependency. `pub(crate)`
+/// so `mindfile::MindToml::load` can resolve a nested `[discover].sources`
+/// entry's relative local path against the mind.toml's own directory (DSC-92),
+/// not the consumer's cwd.
+pub(crate) fn absolutize_against(base: &Path, path: &str) -> String {
+    let p = Path::new(path);
+    let joined = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        base.join(p)
+    };
+    lexically_normalize(&joined)
+}
+
+/// Resolve `.`/`..` path components without touching the filesystem (no
+/// `canonicalize`, no symlink resolution, no existence check): a `..` with
+/// nothing to cancel (past the root, or at the very start of a relative path)
+/// is kept as-is since there is nothing lexically available to pop.
+fn lexically_normalize(path: &Path) -> String {
+    use std::path::Component;
+    let mut out: Vec<Component> = Vec::new();
+    for comp in path.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => match out.last() {
+                Some(Component::Normal(_)) => {
+                    out.pop();
+                }
+                _ => out.push(comp),
+            },
+            other => out.push(other),
+        }
+    }
+    let mut result = PathBuf::new();
+    for c in &out {
+        result.push(c);
+    }
+    if result.as_os_str().is_empty() {
+        result.push(".");
+    }
+    result.to_string_lossy().into_owned()
+}
+
+/// Whether `spec` resolves to an existing directory when joined onto `base`
+/// (unless `spec` is already absolute). The shared local-directory detection
+/// behind `review`'s CLI-214 local-path preference and `parse_spec`'s CLI-215
+/// shadow note. Pure: no cwd read, no network, so callers' logic is
+/// independently testable against an explicit temp directory.
+pub(crate) fn resolve_local_dir(base: &Path, spec: &str) -> Option<PathBuf> {
+    let p = Path::new(spec);
+    let joined = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        base.join(p)
+    };
+    joined.is_dir().then_some(joined)
+}
+
+/// Whether `spec` shadows an existing directory relative to `base` (CLI-215).
+pub(crate) fn local_dir_shadow(base: &Path, spec: &str) -> bool {
+    resolve_local_dir(base, spec).is_some()
+}
+
+/// Migrate a local source's relative `url` to an absolute form (STO-73), once
+/// the process cwd is known: a source melded before STO-72 (or a hand-edited
+/// registry) may still carry a literal relative path. Only rewritten when the
+/// absolutized path resolves to an EXISTING directory right now: if it does
+/// not, the path is left exactly as recorded, so the "linked source is gone"
+/// finding (CLI-212/CLI-213) names what the user actually typed rather than a
+/// confusing absolutized guess. Only `url` is rewritten, never `name`:
+/// identity is the manifest's back-reference key, and renaming it would orphan
+/// every installed item. Returns whether a rewrite happened.
+fn migrate_relative_local_url(base: &Path, src: &mut Source) -> bool {
+    if !src.is_local() || Path::new(&src.url).is_absolute() {
+        return false;
+    }
+    let abs = absolutize_against(base, &src.url);
+    if Path::new(&abs).is_dir() {
+        src.url = abs;
+        true
+    } else {
+        false
+    }
 }
 
 /// Split a spec's path at the first tree/blob marker (LNK-1). Returns
@@ -829,6 +962,15 @@ impl Registry {
                 // spec: STO-68 -- drop (not hard-error) any entry that fails
                 // revalidation, warning on stderr.
                 reg.sources = revalidate_sources(reg.sources, |msg| eprintln!("{msg}"));
+                // spec: STO-73 -- migrate a relative local `url` to an absolute
+                // form when it still resolves, so a later `cd` cannot make an
+                // already-registered local source unreachable (U40). Rewrites
+                // `url` only, and only in memory here; it persists the next
+                // time `Registry::save` runs, same as any other mutation.
+                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                for src in &mut reg.sources {
+                    migrate_relative_local_url(&cwd, src);
+                }
                 Ok(reg)
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Registry::default()),
@@ -1311,8 +1453,6 @@ mod tests {
             ("git@evil#frag:owner/repo", "host"),
             // A traversing owner escapes one level up.
             ("github:../x", "owner"),
-            // A traversing repo, via a local path.
-            ("/src/parent/..", "repo"),
         ];
         for (spec, part) in cases {
             match parse_spec(spec) {
@@ -1322,6 +1462,84 @@ mod tests {
                 other => panic!("{spec}: expected UnsafeRepoSpec on {part}, got {other:?}"),
             }
         }
+    }
+
+    // STO-72: a traversing local path used to reach `rejects_unsafe_identity_parts`
+    // above (`/src/parent/..` derived a literal `repo = ".."`, refused by
+    // CLI-204). Absolutizing BEFORE identity derivation resolves the `..`
+    // lexically first, so the derived `repo` is the real final path component
+    // and is never `..` in the first place: this is a strictly safer outcome
+    // (no traversal syntax ever reaches identity derivation at all), not a
+    // regression of CLI-204's protection.
+    // spec: STO-72
+    #[test]
+    fn absolutize_resolves_parent_dir_lexically_before_identity_derivation() {
+        let s = parse_spec("/src/parent/..").expect(
+            "STO-72: the '..' is resolved away before repo/owner derivation, so this now parses",
+        );
+        assert_eq!(s.url, "/src", "the '..' must be resolved lexically");
+        assert_eq!(s.repo, "src");
+    }
+
+    // spec: STO-72
+    #[test]
+    fn absolutize_against_joins_relative_paths_onto_the_given_base() {
+        let base = Path::new("/some/base/dir");
+        assert_eq!(
+            absolutize_against(base, "./foo"),
+            "/some/base/dir/foo",
+            "a './' path joins onto base"
+        );
+        assert_eq!(
+            absolutize_against(base, "../foo"),
+            "/some/base/foo",
+            "a '../' path resolves one level up from base"
+        );
+        assert_eq!(
+            absolutize_against(base, "/abs/path"),
+            "/abs/path",
+            "an already-absolute path is left unchanged (base is not joined)"
+        );
+        assert_eq!(
+            absolutize_against(base, "a/./b/../c"),
+            "/some/base/dir/a/c",
+            "internal '.'/'..' components are resolved too"
+        );
+    }
+
+    // spec: STO-72
+    #[test]
+    fn absolutize_against_keeps_a_leading_parent_dir_with_nothing_to_cancel() {
+        // A '..' at the very start of an absolute path has nothing to pop
+        // against (the root itself), so it is kept rather than panicking or
+        // silently discarded; the caller (parse_spec) then fails cleanly at the
+        // "repo is empty" check rather than escaping anywhere.
+        let base = Path::new("/");
+        assert_eq!(absolutize_against(base, "../.."), "/../..");
+    }
+
+    // STO-72: the regression fix's own headline example -- a relative `./foo`
+    // spec must derive its owner from the REAL parent directory (whatever the
+    // test process's actual cwd happens to be), not the literal `.` in the
+    // spec string collapsing to the `local` placeholder (`local/local/foo`).
+    // Reads (never mutates) the real cwd, so this is safe under parallel tests.
+    // spec: STO-72
+    #[test]
+    fn relative_dot_slash_local_path_does_not_double_the_local_owner() {
+        let cwd = std::env::current_dir().expect("must read cwd");
+        let parent_name = cwd
+            .file_name()
+            .expect("cwd must have a basename")
+            .to_string_lossy()
+            .into_owned();
+        let s = parse_spec("./foo").expect("a relative local path must still parse");
+        assert_eq!(s.repo, "foo");
+        assert_eq!(
+            s.owner, parent_name,
+            "owner must be the real parent directory name, not the 'local' placeholder"
+        );
+        assert_eq!(s.name, format!("local/{parent_name}/foo"));
+        assert_eq!(s.url, cwd.join("foo").to_string_lossy());
     }
 
     // CLI-204/STO-64: `@` stays legal in `owner` only. A local path may
@@ -2508,6 +2726,147 @@ mod tests {
             "clone stays at the bare path (no relocation)"
         );
         assert!(bare.join("marker").exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ---- STO-73: Registry::load migrates a relative local url ----
+
+    // spec: STO-73
+    #[test]
+    fn migrate_relative_local_url_rewrites_only_when_it_resolves() {
+        let (base, _paths) = tmp_paths_src();
+        let real_dir = base.join("real");
+        std::fs::create_dir_all(&real_dir).unwrap();
+
+        // A relative url that DOES resolve to a real directory gets rewritten.
+        let mut resolves = parse_spec(&real_dir.to_string_lossy()).unwrap();
+        let name_before = resolves.name.clone();
+        resolves.url = "real".to_string();
+        let rewritten = migrate_relative_local_url(&base, &mut resolves);
+        assert!(rewritten, "a resolving relative url must be rewritten");
+        assert_eq!(resolves.url, real_dir.to_string_lossy());
+        assert_eq!(
+            resolves.name, name_before,
+            "the migration must never rewrite name, only url"
+        );
+
+        // A relative url that does NOT resolve is left exactly as recorded.
+        let mut ghost = parse_spec("/home/user/dev/agents").unwrap();
+        ghost.url = "does-not-exist".to_string();
+        let name_before = ghost.name.clone();
+        let rewritten = migrate_relative_local_url(&base, &mut ghost);
+        assert!(
+            !rewritten,
+            "a non-resolving relative url must not be rewritten"
+        );
+        assert_eq!(ghost.url, "does-not-exist");
+        assert_eq!(ghost.name, name_before, "name must never be rewritten");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // spec: STO-73
+    #[test]
+    fn migrate_relative_local_url_is_a_noop_for_remote_and_absolute_sources() {
+        let (base, _paths) = tmp_paths_src();
+
+        // A remote source is never touched (not local).
+        let mut remote = parse_spec("acme/agents").unwrap();
+        let remote_url_before = remote.url.clone();
+        assert!(!migrate_relative_local_url(&base, &mut remote));
+        assert_eq!(remote.url, remote_url_before);
+
+        // An already-absolute local url is left alone (nothing to migrate).
+        let mut abs = parse_spec("/already/absolute").unwrap();
+        let abs_url_before = abs.url.clone();
+        assert!(!migrate_relative_local_url(&base, &mut abs));
+        assert_eq!(abs.url, abs_url_before);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // spec: STO-73
+    // End-to-end through `Registry::load`: a hand-written sources.json carrying
+    // a local source with a RELATIVE url that resolves against the real
+    // process cwd is rewritten to the absolute form in memory. Constructs the
+    // resolving relative path as `../<unique>` against the real cwd so the
+    // fixture directory lands next to (not inside) the crate's own working
+    // tree, and cleans it up unconditionally.
+    #[test]
+    fn registry_load_migrates_a_resolving_relative_local_url() {
+        let cwd = std::env::current_dir().expect("must read cwd");
+        let unique = format!(
+            "mind-sto73-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let target_abs = cwd.parent().expect("cwd must have a parent").join(&unique);
+        std::fs::create_dir_all(&target_abs).unwrap();
+        let relative = format!("../{unique}");
+
+        let (base, paths) = tmp_paths_src();
+        let sources_json = format!(
+            r#"{{"version":1,"sources":[{{"name":"local/a/b","url":{:?},"host":"local","owner":"a","repo":"b"}}]}}"#,
+            relative
+        );
+        std::fs::write(base.join("sources.json"), sources_json).unwrap();
+
+        let reg = Registry::load(&paths).expect("load must succeed");
+        assert_eq!(reg.sources.len(), 1);
+        assert_eq!(
+            reg.sources[0].url,
+            target_abs.to_string_lossy(),
+            "a resolving relative url must be migrated to its absolute form"
+        );
+        assert_eq!(
+            reg.sources[0].name, "local/a/b",
+            "name (identity) must never be rewritten by the migration"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+        let _ = std::fs::remove_dir_all(&target_abs);
+    }
+
+    // ---- CLI-214/CLI-215: shared local-directory shadow detection ----
+
+    // spec: CLI-214 CLI-215
+    #[test]
+    fn resolve_local_dir_finds_an_existing_relative_directory_against_base() {
+        let (base, _paths) = tmp_paths_src();
+        let nested = base.join("skills").join("greet");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        assert_eq!(
+            resolve_local_dir(&base, "skills/greet"),
+            Some(nested.clone())
+        );
+        assert_eq!(
+            resolve_local_dir(&base, "skills/does-not-exist"),
+            None,
+            "a non-existent path must not be reported as a directory"
+        );
+        // An absolute spec is checked as-is, not joined onto base.
+        assert_eq!(
+            resolve_local_dir(&base, &nested.to_string_lossy()),
+            Some(nested.clone())
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // spec: CLI-215
+    #[test]
+    fn local_dir_shadow_is_true_only_when_resolve_local_dir_finds_something() {
+        let (base, _paths) = tmp_paths_src();
+        let nested = base.join("owner").join("repo");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        assert!(local_dir_shadow(&base, "owner/repo"));
+        assert!(!local_dir_shadow(&base, "owner/nonexistent"));
+
         let _ = std::fs::remove_dir_all(&base);
     }
 }

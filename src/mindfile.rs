@@ -624,7 +624,7 @@ impl MindToml {
             }
             Err(err) => return Err(err),
         };
-        let parsed: MindToml = toml::from_str(&text).map_err(|e| MindError::Toml {
+        let mut parsed: MindToml = toml::from_str(&text).map_err(|e| MindError::Toml {
             path: file.clone(),
             source: e,
         })?;
@@ -643,6 +643,26 @@ impl MindToml {
         // they can reach `glob_paths` and the filesystem.
         if let Some(discover) = &parsed.discover {
             validate_discover_patterns(discover, &file)?;
+        }
+        // spec: DSC-92 -- a curated `[discover].sources` entry's relative local
+        // `source` (`./rel/path`, `../rel/path`) is resolved against the
+        // directory THIS mind.toml was read from, not against whatever
+        // directory the consumer running `meld`/`sync` happens to be in.
+        // Fixed here (the one read site) rather than at each use site, so it
+        // covers meld's curated-source walk, sync's re-walk, and dump
+        // uniformly. `root` itself is absolutized first in case a caller
+        // passed a relative root.
+        if let Some(discover) = &mut parsed.discover {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let root_abs = std::path::PathBuf::from(crate::source::absolutize_against(
+                &cwd,
+                &root.to_string_lossy(),
+            ));
+            for ns in &mut discover.sources {
+                if crate::source::is_relative_local_spec(&ns.source) {
+                    ns.source = crate::source::absolutize_against(&root_abs, &ns.source);
+                }
+            }
         }
         Ok(Some(parsed))
     }
@@ -808,6 +828,80 @@ mod tests {
             );
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+
+    // spec: DSC-92
+    #[test]
+    fn nested_relative_local_source_resolves_against_the_mind_toml_directory_not_cwd() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let base = std::env::temp_dir().join(format!("mind-dsc92-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let curator = base.join("curator");
+        let sibling = base.join("explicit");
+        std::fs::create_dir_all(&curator).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+        std::fs::write(
+            curator.join("mind.toml"),
+            "[discover]\nsources = [{ source = \"../explicit\" }]\n",
+        )
+        .unwrap();
+
+        let mt = MindToml::load(&curator)
+            .expect("must parse")
+            .expect("file exists");
+        let ns = &mt
+            .discover
+            .as_ref()
+            .expect("must declare [discover]")
+            .sources[0];
+        assert_eq!(
+            ns.source,
+            sibling.to_string_lossy(),
+            "the relative nested source must resolve against the mind.toml's own directory \
+             ({curator:?}), not the test process's cwd"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // spec: DSC-92
+    #[test]
+    fn nested_absolute_or_remote_source_is_left_unchanged() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("mind-dsc92-noop-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("mind.toml"),
+            "[discover]\nsources = [\
+             { source = \"owner/repo\" }, \
+             { source = \"/already/absolute\" }\
+             ]\n",
+        )
+        .unwrap();
+
+        let mt = MindToml::load(&dir)
+            .expect("must parse")
+            .expect("file exists");
+        let sources = &mt
+            .discover
+            .as_ref()
+            .expect("must declare [discover]")
+            .sources;
+        assert_eq!(
+            sources[0].source, "owner/repo",
+            "a remote spec is untouched"
+        );
+        assert_eq!(
+            sources[1].source, "/already/absolute",
+            "an already-absolute local path is untouched"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

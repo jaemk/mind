@@ -2016,7 +2016,7 @@ mod tests {
             "sanity: the lobe's parent must genuinely be missing for this test"
         );
 
-        let (created, failed) = crate::install::link_into_new_lobes(&paths, &item, &[lobe]);
+        let (created, failed) = crate::install::link_into_new_lobes(&paths, &item, &[lobe], false);
 
         assert!(
             failed.is_empty(),

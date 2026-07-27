@@ -695,6 +695,75 @@ fn local_source_is_read_from_its_working_tree() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// U40 / CLI-212 / CLI-213: a linked source whose working tree vanishes after
+// meld must degrade the listing verbs, not take the whole command down.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn recall_degrades_past_a_vanished_linked_source_instead_of_hard_failing() {
+    // spec: CLI-212 CLI-213
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    assert!(sb.mind(&["meld", &spec, "--register-only"]).success);
+
+    // Melded directory goes away (the docs' own /tmp recipe, no teardown).
+    std::fs::remove_dir_all(&sb.source).unwrap();
+
+    // Before this fix: recall hard-fails (exit 1) on the gone source. After:
+    // it degrades, warning on stderr and still reporting the source is melded.
+    let r = sb.mind(&["recall"]);
+    assert!(
+        r.success,
+        "recall must degrade past a vanished linked source, not hard-fail: {}\n{}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr.contains("gone") || r.stderr.contains("unmeld"),
+        "must warn about the vanished source with an actionable hint: {}",
+        r.stderr
+    );
+
+    // recall --sources still lists it (unaffected by the scan failure).
+    let sources = sb.mind(&["recall", "--sources"]);
+    assert!(sources.success);
+    assert!(
+        sources.stdout.contains("agents"),
+        "the source itself must still be listed: {}",
+        sources.stdout
+    );
+
+    // probe (the plain non-TUI fallback under a non-TTY stdin) also degrades.
+    let p = sb.mind(&["probe"]);
+    assert!(
+        p.success,
+        "probe must degrade past a vanished linked source: {}\n{}",
+        p.stdout, p.stderr
+    );
+}
+
+#[test]
+fn introspect_reports_a_vanished_linked_source_as_an_issue_not_a_hard_error() {
+    // spec: CLI-212 -- introspect's existing CLI-210 per-source loop picks up
+    // LinkedSourceGone for free, with no commands.rs change needed.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    assert!(sb.mind(&["meld", &spec, "--register-only"]).success);
+    std::fs::remove_dir_all(&sb.source).unwrap();
+
+    let r = sb.mind(&["introspect"]);
+    assert!(
+        r.success,
+        "introspect must not hard-fail: {}\n{}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stdout.contains("gone") || r.stdout.contains("unmeld"),
+        "introspect must report the vanished source as an actionable issue: {}",
+        r.stdout
+    );
+}
+
 #[test]
 fn init_source_reports_refs_scaffolds_toml_and_templates() {
     // spec: INIT-1, INIT-2, INIT-3, INIT-4, INIT-5, INIT-6
