@@ -37,6 +37,22 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Two `--add-root` roots that surface the same on-disk item through different
   scan passes now de-duplicate instead of erroring `DuplicateItem`; the error
   remains for a genuine same-name collision at distinct paths (DSC-87).
+- `ssh://user@host/owner/repo` parses again. The identity host now strips a
+  userinfo prefix (split on the last `@`) before validation; it was refused by
+  the identity-part validation added earlier this cycle (STO-67).
+- `install.sh` now falls back to the `gnu` Linux artifact when the `musl` asset
+  is unavailable, so it still works against a release that predates the musl
+  build legs (STO-71).
+- `introspect` now reports a source it cannot scan as an issue and completes
+  the run, instead of aborting; `upgrade` names such a source instead of
+  reporting everything up to date (CLI-210, CLI-211).
+- `dump` now reconstructs an item-link URL from the recorded
+  `host`/`owner`/`repo`, instead of from the source's `url` (which an
+  SSH-preferring config rewrites), so a dump taken with `ssh = true` re-melds
+  instead of aborting the super-source meld (LNK-13).
+- Each item-link instance now gets its own clone directory, so two links from
+  one repo at different refs no longer clobber each other's checkout, and
+  `unmeld` of one no longer breaks the other (STO-70).
 
 ### Added
 
@@ -134,7 +150,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   first `:`, so `git@../../elsewhere:owner/repo` resolved the clone path outside
   the sources tree, which `meld` deletes before cloning. A melded repo could
   reach this through a nested `[[discover.sources]]` entry, with no per-entry
-  consent, and again on every `sync` (CLI-204).
+  consent, and again on every `sync` (CLI-204). The `host` rule also refused
+  the standard `ssh://user@host/owner/repo` spelling; the identity host now
+  strips a userinfo prefix (split on the last `@`) before validation,
+  restoring it, while the full authority is still used for the clone url
+  (STO-67).
+- Clone paths are now confined to the sources dir before any destructive or
+  clone operation, and `Registry::load` revalidates identity parts, the
+  identity alias, and pin values on load, dropping an offending entry with a
+  warning rather than failing. A stale entry written by an older version could
+  otherwise direct a delete outside `~/.mind` (STO-68, STO-69).
 - Managed-policy allowlist matching derives the base identity structurally from
   the source's own fields rather than by scanning the identity for the first
   `#`/`@`. `owner` and `repo` may legitimately contain those characters, so a

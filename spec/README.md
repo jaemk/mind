@@ -172,6 +172,14 @@ and verified.
 | `hooks run`/`hooks list` error on a target that matches both a registered source and an installed item, with escapes for each reading | done | HOOK-105 |
 | Accepted risk: item content read from a source tree, beyond the capped metadata, is not size-capped | done | DSC-90 |
 | Managed-policy allowlist matching derives the base identity structurally from the source's fields, never by scanning an identity string for a `#`/`@` marker | done | POL-68 |
+| Managed-policy `allow`/`lock` matching is always performed on the base `host/owner/repo` identity, never on an extended instance identity carrying an item-link `#path` and/or consumer `@alias` suffix | done | POL-67 |
+| `ssh://user@host/owner/repo` parses: the identity host strips a userinfo prefix (split on the last `@`), the full authority is preserved in the clone url for the ssh scheme; userinfo is refused for `http`/`https` so a credential is never persisted into `sources.json` or emitted by `dump` | done | STO-67 |
+| `Registry::load` revalidates identity parts, the identity alias, and pin values, dropping an offending entry with a warning rather than failing | done | STO-68 |
+| Clone-path confinement: a destructive or clone operation refuses a resolved clone path that escapes the sources dir | done | STO-69 |
+| Per-instance clone dir for item links: the clone leaf mirrors the identity, so link instances at different refs hold independent checkouts | done | STO-70 |
+| `install.sh` Linux artifact resolution: musl preferred, one fallback to gnu, because the script is served from `main` but resolves against the latest release | done | STO-71 |
+| `introspect` reports a per-source scan failure as an issue and completes the run | done | CLI-210 |
+| `upgrade` reports a source it could not scan instead of reporting everything up to date | done | CLI-211 |
 
 ## Documents
 

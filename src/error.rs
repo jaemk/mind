@@ -631,6 +631,20 @@ pub enum MindError {
     #[error("lobe base directory does not exist: {}", path.display())]
     LobeBaseMissing { path: PathBuf },
 
+    /// STO-69: a source's clone path (`Source::clone_dir`) resolves outside the
+    /// managed sources tree, or through a `..` component -- e.g. a hand-edited
+    /// or corrupted `sources.json` entry with a traversing `host`/`owner`/`repo`
+    /// part. Refused before any filesystem mutation (clone or delete) is
+    /// attempted at that path, so a stale/tampered registry entry cannot make
+    /// `mind` write or remove content outside `~/.mind/sources`. Not raised for
+    /// a linked local source (`Source::is_linked`), whose "clone dir" is the
+    /// user's own working tree by design.
+    // spec: STO-69
+    #[error(
+        "refusing to use clone path '{path}' for source '{identity}': it resolves outside the managed sources tree"
+    )]
+    UnsafeClonePath { path: PathBuf, identity: String },
+
     /// HOOK-105: a `hooks run`/`hooks list` target string exactly names both a
     /// registered source identity (an item-link instance's own `host/owner/repo#path`
     /// identity, LNK-4, when the linked skill sits at a single top-level path
@@ -749,6 +763,7 @@ impl MindError {
             MindError::BuildEventRequiresItemTarget => "build-event-requires-item-target",
             MindError::HookAborted { .. } => "hook-aborted",
             MindError::LobeBaseMissing { .. } => "lobe-base-missing",
+            MindError::UnsafeClonePath { .. } => "unsafe-clone-path",
             MindError::AmbiguousHookTarget { .. } => "ambiguous-hook-target",
         }
     }
@@ -1235,6 +1250,32 @@ mod tests {
             "must say directory does not exist: {msg}"
         );
         assert_eq!(e.kind(), "lobe-base-missing", "kind slug must be stable");
+    }
+
+    // spec: STO-69
+    #[test]
+    fn unsafe_clone_path_names_path_and_identity() {
+        // The message must name both the offending resolved path and the
+        // source identity it belongs to, and carry the stable
+        // "unsafe-clone-path" kind slug.
+        let e = MindError::UnsafeClonePath {
+            path: PathBuf::from("/home/user/evil"),
+            identity: "../../victim".into(),
+        };
+        let msg = e.to_string();
+        assert!(
+            msg.contains("/home/user/evil"),
+            "must include the offending path: {msg}"
+        );
+        assert!(
+            msg.contains("../../victim"),
+            "must include the source identity: {msg}"
+        );
+        assert!(
+            msg.contains("sources tree"),
+            "must say it resolves outside the sources tree: {msg}"
+        );
+        assert_eq!(e.kind(), "unsafe-clone-path", "kind slug must be stable");
     }
 
     // spec: HOOK-105

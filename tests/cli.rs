@@ -6472,6 +6472,96 @@ fn introspect_json_emits_report() {
 }
 
 #[test]
+fn introspect_survives_a_source_scan_failure_and_still_reports_the_healthy_source() {
+    // spec: CLI-210 -- a source `introspect` cannot scan (here: its clone/
+    // working tree vanished) must not abort the whole run: the run completes,
+    // reports a `source-scan-failed` issue naming the broken source, AND still
+    // computes findings for the healthy source from the partial catalog (a
+    // `drifted` finding, CLI-90, which requires the healthy source's items to
+    // have actually been scanned).
+    let sb = melded();
+    assert!(sb.mind(&["learn", "review"]).success);
+
+    // A second local source, melded then broken by deleting its working tree
+    // (it is an unpinned local source, so `clone_dir` IS the working tree).
+    let broken = Sandbox::bare("broken-src");
+    broken.write_and_commit(
+        "skills/x/SKILL.md",
+        "---\nname: x\ndescription: x skill\n---\n# x\n",
+    );
+    assert!(sb.mind(&["meld", &broken.source_spec()]).success);
+    std::fs::remove_dir_all(&broken.source).unwrap();
+
+    // Drift the healthy source so a `drifted` finding is expected too.
+    sb.edit_source();
+
+    let r = sb.mind(&["introspect", "--json"]);
+    let v: serde_json::Value =
+        serde_json::from_str(&r.stdout).expect("introspect must still emit valid JSON");
+    let issues = v["issues"].as_array().expect("issues must be an array");
+
+    let scan_failed = issues
+        .iter()
+        .find(|i| i["kind"] == "source-scan-failed")
+        .unwrap_or_else(|| panic!("must report source-scan-failed: {}", r.stdout));
+    assert!(
+        scan_failed["target"]
+            .as_str()
+            .unwrap()
+            .contains("broken-src"),
+        "source-scan-failed must name the broken source: {}",
+        r.stdout
+    );
+
+    assert!(
+        issues
+            .iter()
+            .any(|i| i["kind"] == "drifted" && i["target"] == "skill:review"),
+        "the healthy source's drift must still be reported: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn upgrade_names_an_unscannable_source_instead_of_only_up_to_date() {
+    // spec: CLI-211 -- when a source cannot be scanned and no other item has a
+    // pending upgrade, `upgrade` must not silently report "everything is up
+    // to date": it must name the source that could not be checked.
+    let sb = melded();
+    assert!(sb.mind(&["learn", "review"]).success);
+
+    let broken = Sandbox::bare("broken-src-2");
+    broken.write_and_commit(
+        "skills/x/SKILL.md",
+        "---\nname: x\ndescription: x skill\n---\n# x\n",
+    );
+    assert!(sb.mind(&["meld", &broken.source_spec()]).success);
+    std::fs::remove_dir_all(&broken.source).unwrap();
+
+    let r = sb.mind(&["upgrade", "--yes"]);
+    let combined = format!("{}{}", r.stdout, r.stderr);
+    assert!(
+        !r.stdout
+            .trim()
+            .eq_ignore_ascii_case("everything is up to date"),
+        "must not silently report only up to date: stdout={}",
+        r.stdout
+    );
+    assert!(
+        combined.contains("broken-src-2"),
+        "must name the unscannable source: stdout={} stderr={}",
+        r.stdout,
+        r.stderr
+    );
+    assert!(
+        combined.contains("sync") || combined.contains("introspect"),
+        "must point at a way to diagnose the source: stdout={} stderr={}",
+        r.stdout,
+        r.stderr
+    );
+}
+
+#[test]
 fn completions_emit_a_shell_script() {
     // spec: CLI-120
     let sb = Sandbox::new();

@@ -73,13 +73,20 @@ same repo, and a plain meld of that repo, coexist as separate sources.
   composes as a trailing `@<alias>` segment (STO-58): `host/owner/repo#<path>@<alias>`.
   Instances from the same repo, and a plain meld of `host/owner/repo`, are
   distinct registry entries with independent pins, commits, and lifecycles.
-  Re-melding an identical link follows the CLI-12 re-meld flow. The `#<path>` is
-  not part of the clone leaf (STO-59 keys only on the `@<alias>`): a non-aliased
-  link shares its clone `sources/<host>/<owner>/<repo>` with a plain meld of the
-  repo and with other non-aliased links into it, so only an `@<alias>` instance
-  gets an independent checkout. Two non-aliased instances of one repo pinned to
-  different refs therefore contend over one working tree; give each an `--as`
-  alias to separate them.
+  Re-melding an identical link follows the CLI-12 re-meld flow. The `#<path>` IS
+  part of the clone leaf (STO-70: an item-link instance's leaf encodes its
+  `item_path`, not just its `@<alias>`), so every link instance -- aliased or
+  not -- gets its own independent checkout, distinct from a plain meld of the
+  repo and from every other link into it. Only a genuinely bare instance (no
+  `item_path`, no `@<alias>`) can ever share the plain `sources/<host>/<owner>/<repo>`
+  clone, and by construction there is at most one such instance per identity
+  (a second bare meld of the same repo is a re-meld, CLI-12, not a second
+  instance), so in practice nothing shares a checkout post-STO-70. (Before
+  STO-70, the `#<path>` was NOT part of the leaf, so every non-aliased link
+  into a repo, and a plain meld of it, all shared one clone; two non-aliased
+  links pinned to different refs would contend over that one working tree,
+  each re-clone silently discarding the others' checkout. STO-70's migration
+  note applies to any instance registered under that older behavior.)
 - `LNK-5` `sync`, `upgrade`, `introspect`, `recall`, and `unmeld` treat the
   instance as an ordinary source: `sync` fetches per its pin (CLI-55),
   `upgrade` compares source content hash and commit, `unmeld` uninstalls its
@@ -90,8 +97,10 @@ same repo, and a plain meld of that repo, coexist as separate sources.
   the SAME `<path>` exactly as it distinguishes any other source instance: a
   bare link `host/owner/repo#<path>` and an aliased link
   `host/owner/repo#<path>@<alias>` are distinct registry entries that coexist,
-  each with its own clone (STO-59 for the aliased one), pin, and installed
-  items, untouched by the other's lifecycle. Consequently `learn <url>`
+  each with its own clone (STO-70: the `item_path` alone is now enough to earn
+  an independent checkout, so both the bare and the aliased instance here get
+  one), pin, and installed items, untouched by the other's lifecycle.
+  Consequently `learn <url>`
   (LNK-6), with or without `--pin`, checks membership under the SPECIFIC
   alias it is melding as (here, none): if the repo has only been melded under
   a DIFFERENT alias (or no alias at all when the new call supplies one), the
@@ -179,3 +188,9 @@ same repo, and a plain meld of that repo, coexist as separate sources.
   before it is added to the registry); the only way `dump` cannot reconstruct
   the entry is a hand-edited registry with a missing commit, in which case
   `dump` skips the instance with a note rather than emit an unpinned entry.
+  The reconstructed URL is always the `https://` form built from the recorded
+  `host`/`owner`/`repo`, never the source's own `url` field: `prefer_ssh`
+  (DSC-66) may have rewritten `url` to the `git@host:owner/repo` SSH form
+  after the meld, and that form cannot express a `tree/<ref>/<path>` link
+  suffix, so `dump` always derives the link URL from the identity parts
+  rather than echoing `url` verbatim.

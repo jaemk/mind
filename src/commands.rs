@@ -241,6 +241,32 @@ fn pin_description(pin: &Pin) -> String {
     }
 }
 
+/// Resolve a source's clone directory (`Source::clone_dir`) and confine it to
+/// the managed sources tree before any caller mutates it (clone, re-clone, or
+/// `remove_dir_all`). STO-69: a stale or hand-tampered `sources.json` entry
+/// (e.g. `host`/`owner`/`repo` parts containing `..`) must not let `mind`
+/// write or delete outside `~/.mind/sources`. Mirrors the confinement check
+/// `install.rs` already applies to a manifest's store/link paths (LIFE-44).
+///
+/// A linked local source (`Source::is_linked`) is exempt: its "clone dir" is
+/// the user's own working tree by design (CLI-27), not a path under the
+/// sources tree, so it is returned unchecked.
+// spec: STO-69
+fn clone_dir_checked(paths: &Paths, source: &crate::source::Source) -> Result<std::path::PathBuf> {
+    let dir = source.clone_dir(paths);
+    if source.is_linked() {
+        return Ok(dir);
+    }
+    if install::is_confined_under(&dir, &paths.sources_dir()) {
+        Ok(dir)
+    } else {
+        Err(MindError::UnsafeClonePath {
+            path: dir,
+            identity: source.name.clone(),
+        })
+    }
+}
+
 /// Whether `upgrade` should re-offer a source's install hooks (HOOK-11, HOOK-55):
 /// any recorded install hook whose `ran_at` differs from the source's current
 /// commit (never ran, or the source advanced past the run commit).
@@ -497,7 +523,7 @@ fn meld_recursive(
     // `source.pin` is still the default here, so `clone_dir` resolves a local
     // source to its working tree. A consumer/directive pin (resolved below) can
     // still switch a local source to a cloned snapshot.
-    let mut dir = source.clone_dir(paths);
+    let mut dir = clone_dir_checked(paths, &source)?;
     let is_local = source.is_local();
 
     if !out.json {
@@ -677,7 +703,7 @@ fn meld_recursive(
         // Setting the pin makes `clone_dir` resolve to the sources-tree path even
         // for a local source.
         source.pin = checkout_pin.clone();
-        let target = source.clone_dir(paths);
+        let target = clone_dir_checked(paths, &source)?;
         if target.exists() {
             std::fs::remove_dir_all(&target).map_err(|e| MindError::io(&target, e))?;
         }
@@ -724,7 +750,7 @@ fn meld_recursive(
         let ref_pin = Pin::Ref(sha);
         if is_local && checkout_pin == Pin::DefaultBranch {
             source.pin = ref_pin.clone();
-            let target = source.clone_dir(paths);
+            let target = clone_dir_checked(paths, &source)?;
             if target.exists() {
                 std::fs::remove_dir_all(&target).map_err(|e| MindError::io(&target, e))?;
             }
@@ -2402,7 +2428,7 @@ fn unmeld_one(
 
         let source = registry.sources.remove(idx);
         // A local source's directory is the user's working tree -- never delete it.
-        let dir = source.clone_dir(paths);
+        let dir = clone_dir_checked(paths, &source)?;
         if !source.is_linked() && dir.exists() {
             std::fs::remove_dir_all(&dir).map_err(|e| MindError::io(&dir, e))?;
         }
@@ -2516,7 +2542,7 @@ fn unmeld_one(
 
     let source = registry.sources.remove(idx);
     // A local source's directory is the user's working tree -- never delete it.
-    let dir = source.clone_dir(paths);
+    let dir = clone_dir_checked(paths, &source)?;
     if !source.is_linked() && dir.exists() {
         std::fs::remove_dir_all(&dir).map_err(|e| MindError::io(&dir, e))?;
     }
@@ -3436,7 +3462,7 @@ fn repin_source(paths: &Paths, source_name: &str, pin: PinRequest) -> Result<()>
     if is_local {
         probe.pin = Pin::Ref(String::new());
     }
-    let target = probe.clone_dir(paths);
+    let target = clone_dir_checked(paths, &probe)?;
 
     // Resolve/check out at the new point WITHOUT mutating the registered
     // `Source` yet (CLI-18): a failure here leaves `pin`/`commit`/the clone
@@ -4889,12 +4915,13 @@ pub fn sync(
             }
             continue;
         }
-        let dir = source.clone_dir(paths);
         if !out.json {
             print!("{} syncing {} ... ", out.bullet(), source.name);
             let _ = std::io::stdout().flush();
         }
         let refreshed = (|| -> Result<(String, bool, Option<String>)> {
+            // spec: STO-69 -- validate before any fetch/clone/delete touches it.
+            let dir = clone_dir_checked(paths, source)?;
             // A linked (no-pin) local source is its live working tree (CLI-27):
             // there is nothing to fetch and the tree is never touched. Just re-read
             // its HEAD (best effort) and description. A pinned local source is a
@@ -5246,8 +5273,9 @@ fn sync_sources_for_upgrade(
         if !should_sync(&source.name) {
             continue;
         }
-        let dir = source.clone_dir(paths);
         let refreshed = (|| -> Result<(String, bool)> {
+            // spec: STO-69 -- validate before any fetch/clone/delete touches it.
+            let dir = clone_dir_checked(paths, source)?;
             if source.is_linked() {
                 if !dir.is_dir() {
                     return Err(MindError::NotADirectory {
@@ -5381,7 +5409,27 @@ fn upgrade_inner(
         policy.as_ref(),
     )?;
 
-    let catalog = catalog::scan(paths, &registry)?;
+    // spec: CLI-211 -- a source that cannot be scanned (missing clone, or any
+    // other per-source scan failure) must not silently drop its items out of
+    // the delta computation and leave the run reporting "up to date". Scan
+    // each source independently, name every one that failed, and remember
+    // them so the final report cannot claim everything is up to date while a
+    // source was never actually checked.
+    let mut catalog: Vec<CatalogItem> = Vec::new();
+    let mut unscannable: Vec<String> = Vec::new();
+    for s in &registry.sources {
+        if let Err(e) = catalog::scan_source(paths, s, &mut catalog) {
+            unscannable.push(s.name.clone());
+            if !out.json {
+                let safe_e = strip_ansi(&e.to_string());
+                eprintln!(
+                    "{} could not check {}: {safe_e}; run `mind sync` or `mind introspect` to diagnose",
+                    out.warn(),
+                    s.name
+                );
+            }
+        }
+    }
     let mut pending: Vec<Upgrade> = Vec::new();
 
     for installed in manifest.items.values() {
@@ -5451,6 +5499,22 @@ fn upgrade_inner(
     let target = item_ref.unwrap_or("all");
 
     if pending.is_empty() {
+        // spec: CLI-211 -- an unscannable source makes "up to date" a lie: the
+        // items it would have contributed were never compared. Report the
+        // sources that could not be checked instead of the plain up-to-date line.
+        if !unscannable.is_empty() {
+            if out.json {
+                let mut result = MutationResult::new("upgrade", target, "incomplete");
+                result.count = Some(unscannable.len());
+                return print_json(&result);
+            }
+            println!(
+                "no pending upgrades among the source(s) that could be checked; {} source(s) could not be checked: {}",
+                unscannable.len(),
+                unscannable.join(", ")
+            );
+            return Ok(());
+        }
         if out.json {
             return print_json(&MutationResult::new("upgrade", target, "up-to-date"));
         }
@@ -6389,9 +6453,23 @@ struct Issue {
 /// `upgrade`. `--json` emits the findings as JSON on stdout.
 pub fn introspect(paths: &Paths, fix: bool, json: bool) -> Result<()> {
     let registry = Registry::load(paths)?;
-    let catalog = catalog::scan(paths, &registry)?;
     let mut manifest = Manifest::load(paths)?;
     let mut issues: Vec<Issue> = Vec::new();
+    // spec: CLI-210 -- a source whose clone is missing or otherwise unscannable
+    // (e.g. an item-link instance whose linked path vanished) must not abort
+    // the whole run: scan each source independently, report the failure as a
+    // "source-scan-failed" issue, and keep going with a partial catalog built
+    // from the sources that DID scan successfully.
+    let mut catalog: Vec<CatalogItem> = Vec::new();
+    for s in &registry.sources {
+        if let Err(e) = catalog::scan_source(paths, s, &mut catalog) {
+            issues.push(Issue {
+                kind: "source-scan-failed",
+                target: s.name.clone(),
+                message: format!("source '{}' could not be scanned: {e}", s.name),
+            });
+        }
+    }
     let mut repaired: Vec<String> = Vec::new();
     // HARN-8: `--fix` may create new lobe links; record whether we mutated the
     // manifest so it is saved once after the loop.
@@ -8893,5 +8971,78 @@ mod tests {
             !out.contains('\x1b'),
             "no ANSI escape bytes must appear in the output: {out}"
         );
+    }
+
+    // ----- STO-69: clone-path confinement -----
+
+    /// Build a `Source` directly (bypassing `parse_spec`'s own validation) so a
+    /// traversing `host`/`owner`/`repo` part -- the shape a stale or
+    /// hand-tampered `sources.json` entry could carry -- reaches
+    /// `clone_dir_checked` exactly as it would from `Registry::load`.
+    fn raw_source(host: &str, owner: &str, repo: &str) -> crate::source::Source {
+        crate::source::Source {
+            name: format!("{host}/{owner}/{repo}"),
+            url: "https://example.com/evil".into(),
+            host: host.into(),
+            owner: owner.into(),
+            repo: repo.into(),
+            commit: None,
+            description: None,
+            alias: None,
+            as_alias: None,
+            pin: Pin::DefaultBranch,
+            roots: None,
+            flat_skills: false,
+            add_roots: None,
+            item_path: None,
+            origin: None,
+            plugin_version: None,
+            install_hooks: Vec::new(),
+            install_hook: None,
+            install_hook_commit: None,
+        }
+    }
+
+    #[test]
+    fn clone_dir_checked_rejects_a_traversing_host_part() {
+        // spec: STO-69 -- a `..` host segment resolves `clone_dir` outside the
+        // sources tree; `clone_dir_checked` must refuse it with
+        // `UnsafeClonePath` before any caller can clone into or delete it.
+        let (paths, base) = ns_paths();
+        let source = raw_source("..", "..", "victim");
+        let err = clone_dir_checked(&paths, &source).expect_err("traversing host must be refused");
+        match err {
+            MindError::UnsafeClonePath { identity, .. } => {
+                assert_eq!(identity, source.name);
+            }
+            other => panic!("expected UnsafeClonePath, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn clone_dir_checked_rejects_a_traversing_repo_part() {
+        // spec: STO-69 -- same guard, the `..` on the `repo` segment instead
+        // (host/owner both structurally safe, single-component values).
+        let (paths, base) = ns_paths();
+        let source = raw_source("github.com", "acme", "../../victim");
+        let err = clone_dir_checked(&paths, &source).expect_err("traversing repo must be refused");
+        assert_eq!(err.kind(), "unsafe-clone-path");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn clone_dir_checked_accepts_a_well_formed_source() {
+        // spec: STO-69 -- an ordinary source's clone dir stays confined under
+        // the sources tree and must be accepted.
+        let (paths, base) = ns_paths();
+        let source = raw_source("github.com", "acme", "agents");
+        let dir = clone_dir_checked(&paths, &source).expect("well-formed source must be accepted");
+        assert!(
+            dir.starts_with(paths.sources_dir()),
+            "accepted clone dir must be under the sources tree: {}",
+            dir.display()
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

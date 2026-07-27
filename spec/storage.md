@@ -67,6 +67,25 @@ The on-disk layout and the two persisted JSON files.
 - `STO-11` A source's clone lives at `sources/<host>/<owner>/<repo>`. For local or
   `file://` specs, host is `local` and owner is the path's parent directory.
 - `STO-12` A missing registry file is treated as an empty registry.
+- `STO-68` `Registry::load` revalidates every entry it reads, not just its
+  schema version (STO-50): each entry's `host`/`owner`/`repo` are re-checked
+  with the same per-part rules `make_source` applies at parse time (CLI-204),
+  its `as_alias` (when present) is re-checked with `validate_prefix` (NS-25,
+  NS-28, NS-29), and its pin value (when the pin carries one - `follow-branch`,
+  `tag`, or `ref`; `default-branch` has none) is re-checked with
+  `git::validate_ref_value` (DSC-66). This closes the gap a schema-version
+  check alone leaves open: an entry can be structurally valid JSON at the
+  current schema version while carrying a value an older, looser `parse_spec`
+  accepted and a newer one would refuse (e.g. 0.21.0's parser accepted
+  `repo: ".."`). A failing entry is DROPPED from the in-memory registry, not
+  treated as a load error: hard-erroring would brick every `mind` verb for a
+  user who happens to be carrying such a stale entry, whereas dropping it
+  degrades gracefully to "that one source is gone, everything else still
+  works." Each drop prints one warning to stderr naming `sources.json`, the
+  dropped entry's `name`, and which part failed. The drop is not written back
+  immediately; it becomes permanent the next time `Registry::save` runs (e.g.
+  as part of the same command's normal write-back), same as any other
+  in-memory registry mutation.
 - `STO-13` A source's identity is its `name`, `host/owner/repo` (equal to its
   clone path under `sources/`, absent an alias or item-link suffix; see STO-58).
   Repos that share a basename, or even an `owner/repo` across different hosts,
@@ -97,9 +116,69 @@ The on-disk layout and the two persisted JSON files.
   component, NS-28, so the leaf is filesystem-safe), giving each instance an
   independent checkout so instances pinned to different branches do not share a
   working tree. Because the identity alias is known before the clone, the clone
-  lands at this path directly. A source with no identity alias - a bare meld, or
-  one whose only prefix is a post-clone display prefix - clones at
-  `sources/<host>/<owner>/<repo>` (STO-11).
+  lands at this path directly. A source with no identity alias AND no item_path -
+  a bare meld, or one whose only prefix is a post-clone display prefix - clones at
+  `sources/<host>/<owner>/<repo>` (STO-11) and is the only case that can ever
+  share a checkout with another instance (see STO-70 for the item-path leg,
+  which also contributes to the leaf and therefore also gets an independent
+  checkout).
+- `STO-69` A destructive or clone-then-use filesystem operation on a source's
+  clone path (`Source::clone_dir`) - a fresh clone, a re-clone that first
+  removes the existing directory, or `unmeld`'s cleanup - refuses to proceed
+  when the resolved path escapes the managed sources tree: either it contains a
+  `ParentDir` (`..`) path component, or, after that check, it does not start
+  with `paths.sources_dir()`. The refusal is a structured error naming the
+  offending path and the source's identity, raised before any filesystem
+  mutation is attempted at that path. This guards a hand-edited or corrupted
+  `sources.json` entry (e.g. a `host`/`owner`/`repo` part containing `..`) from
+  making `mind` write or delete content outside `~/.mind/sources` - the
+  registry-level counterpart to `STO-68`'s revalidation, for the specific
+  destructive operations that touch disk at the clone path. The check is
+  **lexical** (component/prefix inspection of the path string), not a
+  filesystem-resolved (canonicalized) check: a symlink planted inside the
+  sources tree that points outside it is therefore out of scope of this check
+  and is not caught by it. A linked local source (`Source::is_linked`) is
+  exempt: its "clone dir" is the user's own working tree by design (CLI-27),
+  not a path under the sources tree, so confining it here would be both
+  incorrect and unnecessary.
+- `STO-70` The clone-dir leaf (STO-11, STO-59) also incorporates a source's
+  `item_path` (LNK-4) when it has one, not just its identity alias, so that an
+  item-link instance always gets an independent checkout: two item-link
+  instances into the same repo at different paths, and a plain (non-link) meld
+  of that repo, previously all resolved to the identical
+  `sources/<host>/<owner>/<repo>` clone path, so re-melding a second link
+  deleted-and-reprovisioned the first link's (or the plain meld's) checkout out
+  from under it, and `unmeld` of either broke every other instance sharing that
+  clone. The full leaf formula, combining STO-59's alias suffix with the
+  item-path segment:
+  - `<repo>` - no item_path, no alias (STO-11, unchanged).
+  - `<repo>@<alias>` - alias only (STO-59, unchanged).
+  - `<repo>#<enc>` - item_path only.
+  - `<repo>#<enc>@<alias>` - both.
+
+  `<enc>` percent-encodes `item_path`: `%` to `%25` first, then `/` to `%2F`.
+  This is injective (so two distinct item_paths can never collide on the same
+  encoded segment) and stays human-readable in a directory listing; no other
+  character needs escaping because an item_path can never itself contain `@`,
+  `#`, a `..` component, or NUL (LNK-10, LNK-16). If the encoded leaf would
+  exceed 120 bytes, the encoded segment is replaced with the 16-hex FNV of
+  `item_path` (`hash::hash_str`) instead, so an unusually deep or long skill
+  path still produces a short, filesystem-safe, and still-deterministic leaf.
+
+  **Migration.** Existing clones are never relocated to match the new formula:
+  doing so could steal the shared directory out from under whichever registry
+  entry legitimately still owns `sources/<host>/<owner>/<repo>` (a plain,
+  non-link meld of the same repo, if one is registered). Instead, a source
+  instance registered before this change simply now resolves to a leaf that
+  has never been cloned there; the existing `.git`-absent branches already
+  present in `sync` and `upgrade` re-clone it fresh at the new, isolated path,
+  and `introspect` reports it as no-clone in the interim (exactly as it would
+  for a source that had never synced). The old shared directory itself is not
+  cleaned up by this change; it stays owned by the bare (non-aliased,
+  non-linked) instance if one is registered at that identity, or is simply
+  orphaned disk usage if every instance that used to share it was a link
+  instance (an `introspect`/manual cleanup concern, not something this change
+  addresses).
 - `STO-60` When a `meld` forks a NEW identity-aliased instance (STO-58) of a repo
   that already has one or more melded instances (any registry entry sharing the
   same base `host/owner/repo`), `meld` prints an explicit one-line note that a new
@@ -153,6 +232,24 @@ The on-disk layout and the two persisted JSON files.
   and value (see DSC-41, CLI-17). Persisted at meld and not changed by `sync`. The
   implicit default when unset is `follow-branch` tracking the remote default
   branch.
+- `STO-67` `ssh://` userinfo handling in the URL form of `parse_spec` (CLI-19):
+  the authority (the segment between `scheme://` and the first `/`) may carry a
+  userinfo prefix, `user@host`. It is split on the LAST `@`, not the first, so a
+  host containing no `@` of its own splits unambiguously. The part after the
+  split is the identity `host` (validated with the same rules as any other host,
+  CLI-204) and feeds the source's identity (`host/owner/repo`, STO-13) and clone
+  path (STO-11); the FULL authority, userinfo included, is what is written into
+  `url`, so `git clone` still authenticates as that user. This applies only to
+  scheme `ssh`. Any other scheme (`http`, `https`, and anything else) refuses an
+  embedded userinfo outright as `UnsafeRepoSpec` (part `host`, value the full
+  authority, reason naming the credential): an http(s) credential in the URL
+  would otherwise be persisted verbatim into `sources.json` and echoed back by
+  `dump`, unlike an ssh userinfo which is never itself a secret (SSH auth is
+  keyed, not password-in-URL). The userinfo itself is validated for empty value
+  and control characters before it is trusted into `url`, since the whole
+  authority reaches `git clone` unescaped. An authority with no `@` at all (the
+  ordinary `ssh://host/owner/repo` form) is unaffected: it parses exactly as
+  before this rule existed.
 
 ## Manifest (manifest.json)
 
@@ -226,6 +323,24 @@ prevent the lost-update and torn-read races a plain read-modify-write would allo
   exposed as an additional `target_triple` key; the existing `action`, `target`
   (the version), and `outcome` keys are unchanged -- `--json` consumers depend
   on those names, so a new field is added rather than any key renamed.
+- `STO-71` `resources/install.sh`'s Linux artifact resolution prefers the musl
+  release leg (statically linked, so it runs on any glibc, STO-65's rationale)
+  and falls back to the gnu leg exactly once if the musl asset download fails.
+  This fallback exists because of a specific consistency gap install.sh sits
+  in: the script itself is served and fetched straight off the `main` branch
+  (`raw.githubusercontent.com/.../main/resources/install.sh`), but the
+  *version* it installs is resolved separately, from the latest published
+  GitHub release. Those two can disagree about which artifact legs exist for
+  that version - `main` can already build (and this script can already know
+  how to request) a target whose musl leg the latest release does not carry
+  yet, if the musl leg was added to the build matrix after that release was
+  cut. Without the fallback, running the always-current installer against an
+  artifact-matrix-stale release would hard-fail with a 404 on the musl asset;
+  with it, the script degrades to the gnu asset, which every published release
+  carries, and installation still succeeds. The fallback triggers only on
+  Linux and only when the failed asset was the musl one (so it fires exactly
+  once, never loops), and prints a note naming the version and the fallback
+  before retrying.
 - `STO-66` `evolve`'s download path soft-verifies the downloaded release
   archive's GitHub build-provenance attestation (`actions/attest-build-provenance`)
   via `gh attestation verify <archive> --repo jaemk/mind` when a `gh` binary is

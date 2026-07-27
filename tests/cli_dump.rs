@@ -1860,6 +1860,102 @@ fn dump_roundtrips_aliased_link_instance() {
 }
 
 #[test]
+fn dump_roundtrips_link_instance_with_ssh_config_set() {
+    // spec: LNK-13 — C32: with `ssh = true` set in config, `dump` must still
+    // emit a re-meldable deep-URL entry for an item-link instance. Before the
+    // fix, `build_link_url` reconstructed the URL from `source.url`, which
+    // `prefer_ssh` rewrites to the `git@host:owner/repo` form for a non-local
+    // remote; that SSH-form string does not reparse as an item link, so the
+    // dump would abort the WHOLE re-meld. `prefer_ssh` is a no-op for a local
+    // source (host == "local", as this sandbox's link always is), so this
+    // exercises the code path end-to-end under the same config that triggers
+    // the bug for a remote link, proving the ssh setting no longer corrupts
+    // (or otherwise interferes with) the reconstructed URL.
+    let sb = Sandbox::new("link-ssh-src");
+    write_file(&sb.mind_home.join("config.toml"), "ssh = true\n");
+    let learn = sb.mind(&["learn", &sb.link("tree/main/skills/review")]);
+    assert!(
+        learn.success,
+        "learn <url> failed under ssh=true config: {} {}",
+        learn.stdout, learn.stderr
+    );
+    let dumped_commit = git_head(&sb.source);
+
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let super_dir = sb.base.join(format!("link-ssh-super-{n}"));
+    std::fs::create_dir_all(&super_dir).expect("create super dir");
+    let dump_path = super_dir.join("mind.toml");
+    let dump_path_str = dump_path.to_string_lossy().into_owned();
+    let dr = sb.mind(&["dump", "--output", &dump_path_str]);
+    assert!(dr.success, "dump failed: {} {}", dr.stdout, dr.stderr);
+    assert!(
+        !dr.stderr.contains("skipping item link"),
+        "dump must not skip the item-link instance under ssh=true: {}",
+        dr.stderr
+    );
+
+    let dump_text = std::fs::read_to_string(&dump_path).expect("read dump");
+    assert!(
+        !dump_text.contains("git@"),
+        "the reconstructed link URL must never be the SSH form (not re-meldable as a link): \
+         {dump_text}"
+    );
+    assert!(
+        dump_text.contains("/tree/") && dump_text.contains("skills/review"),
+        "dump must emit a reconstructed tree/<ref>/<path> link URL: {dump_text}"
+    );
+    assert!(
+        dump_text.contains(&dumped_commit),
+        "dump must pin the reconstructed link to the recorded commit: {dump_text}"
+    );
+
+    git_init(&super_dir);
+    let super_spec = super_dir.to_string_lossy().into_owned();
+    let fresh_base = sb.base.join(format!("link-ssh-fresh-{n}"));
+    std::fs::create_dir_all(&fresh_base).expect("fresh base");
+    let fresh_mind = fresh_base.join("mind");
+    let fresh_claude = fresh_base.join("claude");
+
+    let remeld = Command::new(env!("CARGO_BIN_EXE_mind"))
+        .args(["meld", &super_spec, "--yes"])
+        .env("MIND_HOME", &fresh_mind)
+        .env("CLAUDE_HOME", &fresh_claude)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null())
+        .output()
+        .expect("run remeld");
+    let ro = String::from_utf8_lossy(&remeld.stdout).into_owned();
+    let re = String::from_utf8_lossy(&remeld.stderr).into_owned();
+    assert!(
+        remeld.status.success(),
+        "remeld of the ssh=true dump must succeed: {ro} {re}"
+    );
+
+    let installed = fresh_claude.join("skills/review/SKILL.md");
+    assert!(
+        installed.exists(),
+        "the linked skill must be installed in the reproduced env: {fresh_claude:?}"
+    );
+
+    // Same instance identity (unaliased `#skills/review`, no trailing `@`).
+    let sources = Command::new(env!("CARGO_BIN_EXE_mind"))
+        .args(["recall", "--sources"])
+        .env("MIND_HOME", &fresh_mind)
+        .env("CLAUDE_HOME", &fresh_claude)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null())
+        .output()
+        .expect("run recall --sources");
+    let sources_out = String::from_utf8_lossy(&sources.stdout).into_owned();
+    assert!(
+        sources_out.contains("#skills/review"),
+        "the reproduced instance must carry the same link identity: {sources_out}"
+    );
+}
+
+#[test]
 fn dump_link_and_ordinary_source_together_roundtrip() {
     // spec: LNK-13 — a dump mixing an item-link instance and an ordinary
     // melded source emits both, and re-melding reproduces both installs.

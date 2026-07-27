@@ -29,6 +29,20 @@ impl Fnv {
     }
 }
 
+/// Hash an arbitrary string, returning its 16-hex-digit FNV-1a digest.
+///
+/// Used where a value needs to be folded down to a short, fixed-length,
+/// filesystem-safe token rather than embedded verbatim -- e.g. the
+/// clone-dir leaf falls back to this when the readable, percent-encoded
+/// `item_path` segment would push the leaf past a safe length (STO-70).
+/// Not cryptographic (see the module doc); only needs to be stable and
+/// collision-resistant enough for that purpose.
+pub(crate) fn hash_str(s: &str) -> String {
+    let mut h = Fnv::new();
+    h.write(s.as_bytes());
+    h.finish_hex()
+}
+
 /// Hash an item path: a single file, or a directory hashed recursively.
 ///
 /// Symlinks are never followed (LIFE-34): a symlink entry is hashed by its
@@ -147,6 +161,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         TmpDir(dir)
+    }
+
+    // spec: STO-70
+    #[test]
+    fn hash_str_is_stable_16_hex_and_distinguishes_input() {
+        let a = hash_str("skills/foo");
+        let b = hash_str("skills/foo");
+        let c = hash_str("skills/bar");
+        assert_eq!(a, b, "hash_str must be deterministic for the same input");
+        assert_ne!(a, c, "distinct inputs must (in practice) hash differently");
+        assert_eq!(a.len(), 16, "hash_str must return a 16-hex-digit digest");
+        assert!(
+            a.chars().all(|ch| ch.is_ascii_hexdigit()),
+            "hash_str digest must be pure hex: {a}"
+        );
     }
 
     #[test]

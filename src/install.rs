@@ -296,7 +296,7 @@ pub fn uninstall(paths: &Paths, item: &InstalledItem) -> Result<()> {
 /// true AND the path contains no `..` components (which could defeat the
 /// component-by-component check on some edge cases where canonicalization has
 /// not been performed). (LIFE-44)
-fn is_confined_under(path: &Path, root: &Path) -> bool {
+pub(crate) fn is_confined_under(path: &Path, root: &Path) -> bool {
     use std::path::Component;
     if path.components().any(|c| c == Component::ParentDir) {
         return false;

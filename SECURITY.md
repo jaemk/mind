@@ -36,14 +36,21 @@ meld a source you do not control:
   out to two well-audited tools with a small, reviewable argument surface
   instead of pulling in roughly 80 transitive crates of an HTTP stack, for a
   tool whose entire risk surface is supply chain.
-- **Reads from a source tree are not size-capped.** No file `mind` reads from a
-  melded source has a size or nesting-depth limit: discovery metadata
-  (`mind.toml`, `SKILL.md`, agent and rule files, plugin manifests), every file
-  in an item tree during `{{ns:}}` expansion at install, the reference scan,
-  `review`, the TUI preview, and content hashing. A source could ship an
-  oversized or deeply nested file to make `mind` allocate heavily while scanning
-  or installing it. This is self-inflicted (you chose to meld that source) and
-  bounded to the current invocation; the reasoning is recorded as `DSC-90` in
+- **Discovery metadata reads are size-capped.** `mind.toml`, item frontmatter
+  (`SKILL.md`/`TOOL.md`, agent and rule `.md` files), and Claude plugin and
+  marketplace manifests are capped at 8 MiB. An oversized file is refused,
+  naming the file and the limit, and is never fully read into memory: the
+  reader takes at most cap-plus-one bytes, so the cost of an oversized file is
+  bounded by the cap rather than by the file itself. Recorded as `DSC-91` in
+  [spec/discovery.md](spec/discovery.md).
+- **Item content reads are not size-capped.** Beyond the metadata cap above, no
+  other read of source-controlled content has a size or nesting-depth limit:
+  every file in an item tree during `{{ns:}}` expansion at install, the
+  reference scan, `review`, the TUI preview, and content hashing. A source
+  could ship an oversized or deeply nested file to make `mind` allocate
+  heavily while scanning or installing it. This is self-inflicted (you chose
+  to meld that source) and bounded to the current invocation; the reasoning is
+  recorded as `DSC-90` in
   [spec/discovery.md](spec/discovery.md#accepted-risks). Reports on this are
   welcome but will likely be closed as accepted risk.
 

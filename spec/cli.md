@@ -496,6 +496,13 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   matches no installed item -- or matches only items already up to date -- reports
   nothing pending and changes nothing (CLI-64); it is not an error (this is where
   `upgrade` differs from `forget`, whose no-match glob is `NotInstalled`, CLI-41).
+- `CLI-211` A source `upgrade` cannot scan (its clone is missing, or scanning it
+  otherwise fails, e.g. an item-link instance whose linked path vanished) does not
+  silently drop out of the delta computation: `upgrade` prints a warning naming the
+  source and pointing at `mind sync` / `mind introspect` to diagnose it, and the run
+  is never reported as fully up to date (CLI-64) while any source could not be
+  checked, even when no OTHER pending upgrade exists -- an unscannable source is
+  itself an actionable condition, not silence.
 
 ## hooks
 
@@ -776,6 +783,11 @@ only appear at meld or install time. It is read-only and installs nothing.
   where `sources` and `items` are integer counts, not arrays. This field is
   additive; existing consumers keying on `issues`, `sources`, or `items` are
   unaffected.
+- `CLI-210` A source `introspect` cannot scan (its clone is missing, or scanning
+  it otherwise fails, e.g. an item-link instance whose linked path vanished) does
+  not abort the run: `introspect` scans each source independently, reports the
+  failure as a `source-scan-failed` issue naming the source, and completes with
+  the findings computed from the sources that DID scan successfully (CLI-90/92).
 
 ## evolve
 

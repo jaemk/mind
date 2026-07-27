@@ -258,13 +258,28 @@ fn build_link_entry(
 /// `url` field holds a bare filesystem path (no `file://` prefix, stripped at
 /// parse time), so the `file://` scheme is re-added here to reach the local
 /// link branch of `parse_spec`.
+///
+/// Built from the structural `host`/`owner`/`repo` fields, NOT `source.url`:
+/// `url` is rewritten to the SSH form (`git@host:owner/repo`) whenever the
+/// consumer has `ssh = true` in their config (`Source::prefer_ssh`), and that
+/// SSH form is not a shape `parse_spec`'s item-link branch accepts, so
+/// building from it would emit a URL that fails to re-meld (C32). A remote
+/// link is therefore always reconstructed as `https://{host}/{owner}/{repo}`
+/// regardless of the recorded `url`'s scheme; a consumer with `ssh = true`
+/// still gets it rewritten to SSH again on re-meld via the same
+/// `prefer_ssh` pass, so nothing is lost by emitting https here.
 fn build_link_url(source: &Source) -> Option<String> {
     let item_path = source.item_path.as_deref()?;
     let commit = source.commit.as_deref()?;
     if source.is_local() {
+        // A local source's `url` is a bare filesystem path (never rewritten
+        // by prefer_ssh), so it is still safe to build from directly here.
         Some(format!("file://{}/tree/{commit}/{item_path}", source.url))
     } else {
-        Some(format!("{}/tree/{commit}/{item_path}", source.url))
+        Some(format!(
+            "https://{}/{}/{}/tree/{commit}/{item_path}",
+            source.host, source.owner, source.repo
+        ))
     }
 }
 
@@ -1036,6 +1051,39 @@ mod tests {
         assert_eq!(reparsed.name, "local/dev/agents#skills/foo");
         assert_eq!(reparsed.url, "/home/me/dev/agents");
         assert_eq!(reparsed.item_path.as_deref(), Some("skills/foo"));
+    }
+
+    #[test]
+    fn link_url_uses_https_even_when_recorded_url_is_ssh_form() {
+        // spec: LNK-13 — when the consumer has `ssh = true` in config,
+        // `prefer_ssh` rewrites the recorded `url` on the source to the SSH
+        // form (`git@host:owner/repo`), but `parse_spec`'s SSH branch never
+        // routes through the item-link parser, so an SSH-form URL is not
+        // re-meldable as a link. build_link_url must ignore `source.url` and
+        // build from the structural host/owner/repo fields instead, always
+        // emitting https, so the reconstructed URL reparses to the SAME
+        // item-link identity (C32).
+        let source = make_link_source(
+            "github.com",
+            "o",
+            "r",
+            "git@github.com:o/r",
+            "skills/foo",
+            Some(SHA),
+        );
+        let url = build_link_url(&source).expect("commit + item_path present");
+        assert_eq!(
+            url,
+            format!("https://github.com/o/r/tree/{SHA}/skills/foo"),
+            "must build from host/owner/repo, not the SSH-rewritten url: {url}"
+        );
+        let reparsed = crate::source::parse_spec(&url)
+            .unwrap_or_else(|e| panic!("reconstructed https link URL must reparse: {e}"));
+        assert_eq!(reparsed.host, "github.com");
+        assert_eq!(reparsed.owner, "o");
+        assert_eq!(reparsed.repo, "r");
+        assert_eq!(reparsed.item_path.as_deref(), Some("skills/foo"));
+        assert_eq!(reparsed.name, "github.com/o/r#skills/foo");
     }
 
     #[test]

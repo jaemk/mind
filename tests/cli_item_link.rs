@@ -671,6 +671,155 @@ fn json_error_envelope_kind_is_bad_item_link() {
 }
 
 #[test]
+fn link_instances_at_different_refs_keep_independent_commits_after_sync() {
+    // spec: STO-70
+    // Two links into the SAME repo at different item paths, pinned to
+    // DIFFERENT branches, must not clobber each other's clone. This is the
+    // C31 bug: before STO-70, `clone_dir` ignored `item_path`, so both
+    // instances (and a plain meld of the repo) resolved to the identical
+    // clone directory; syncing one instance's branch checkout onto that
+    // shared directory would silently discard the other's. The existing
+    // `link_instances_and_a_plain_meld_coexist` test above uses `tree/main`
+    // for both links, so even under the old bug both instances would read
+    // identical content post-clobber and the bug stayed invisible; pinning
+    // the two instances to DIFFERENT branches with DIFFERENT content makes a
+    // clobber observable.
+    let sb = Sandbox::new(); // skills/review, skills/extra on `main`.
+    git(&sb.source, &["checkout", "-b", "other"]);
+    sb.write_and_commit(
+        "skills/extra/SKILL.md",
+        "---\ndescription: A second skill\n---\n# extra skill\non the other branch\n",
+    );
+    git(&sb.source, &["checkout", "main"]);
+
+    // review is pinned to `main`; extra is pinned to `other`.
+    assert!(
+        sb.mind(&["learn", &sb.link("tree/main/skills/review")])
+            .success
+    );
+    assert!(
+        sb.mind(&["learn", &sb.link("tree/other/skills/extra")])
+            .success
+    );
+
+    let extra_initial =
+        std::fs::read_to_string(sb.claude_home.join("skills/extra/SKILL.md")).unwrap();
+    assert!(
+        extra_initial.contains("on the other branch"),
+        "extra must install from `other`'s content: {extra_initial}"
+    );
+
+    // Diverge both branches further, independently.
+    git(&sb.source, &["checkout", "main"]);
+    sb.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\ndescription: Review the diff for bugs\n---\n# review skill\nmain edit\n",
+    );
+    git(&sb.source, &["checkout", "other"]);
+    sb.write_and_commit(
+        "skills/extra/SKILL.md",
+        "---\ndescription: A second skill\n---\n# extra skill\nother edit\n",
+    );
+    git(&sb.source, &["checkout", "main"]);
+
+    assert!(sb.mind(&["sync"]).success, "sync must succeed");
+    let up = sb.mind(&["upgrade", "--yes"]);
+    assert!(up.success, "upgrade failed: {} {}", up.stdout, up.stderr);
+
+    let review_final =
+        std::fs::read_to_string(sb.claude_home.join("skills/review/SKILL.md")).unwrap();
+    let extra_final =
+        std::fs::read_to_string(sb.claude_home.join("skills/extra/SKILL.md")).unwrap();
+    assert!(
+        review_final.contains("main edit"),
+        "review must reflect main's own edit: {review_final}"
+    );
+    assert!(
+        !review_final.contains("other edit"),
+        "review must not be clobbered by other's content: {review_final}"
+    );
+    assert!(
+        extra_final.contains("other edit"),
+        "extra must reflect other's own edit: {extra_final}"
+    );
+    assert!(
+        !extra_final.contains("main edit"),
+        "extra must not be clobbered by main's content: {extra_final}"
+    );
+}
+
+#[test]
+fn unmeld_of_one_link_instance_leaves_the_others_clone_and_skill_intact() {
+    // spec: STO-70
+    // Before STO-70, two non-aliased link instances into the same repo shared
+    // one clone directory; `unmeld`'s cleanup of one instance's clone would
+    // remove that shared directory out from under the other, breaking its
+    // installed skill and any future sync of it.
+    let sb = Sandbox::new();
+    assert!(
+        sb.mind(&["learn", &sb.link("tree/main/skills/review")])
+            .success
+    );
+    assert!(
+        sb.mind(&["learn", &sb.link("tree/main/skills/extra")])
+            .success
+    );
+
+    let name_review = sb.link_name("skills/review");
+    let r = sb.mind(&["unmeld", &name_review, "--yes"]);
+    assert!(r.success, "unmeld failed: {} {}", r.stdout, r.stderr);
+
+    // The unmelded instance's skill is gone...
+    assert!(
+        !sb.claude_home.join("skills/review").exists(),
+        "the unmelded instance's skill must be uninstalled"
+    );
+    // ...but the surviving instance's skill and registration are untouched.
+    assert!(
+        sb.claude_home.join("skills/extra").exists(),
+        "the surviving instance's installed skill must remain"
+    );
+    let extra_content =
+        std::fs::read_to_string(sb.claude_home.join("skills/extra/SKILL.md")).unwrap();
+    assert!(extra_content.contains("A second skill"));
+
+    let sources = sb.mind(&["recall", "--sources"]).stdout;
+    assert!(
+        sources.contains("#skills/extra"),
+        "the surviving instance must stay registered: {sources}"
+    );
+    assert!(
+        !sources.contains("#skills/review"),
+        "the unmelded instance must be gone: {sources}"
+    );
+
+    // The surviving instance's clone directory itself -- keyed on its own
+    // encoded item_path, per the STO-70 leaf formula -- must still be present
+    // on disk.
+    let survivor_clone = sb
+        .mind_home
+        .join("sources")
+        .join("local")
+        .join(sb.base.file_name().unwrap())
+        .join(format!(
+            "{}#skills%2Fextra",
+            sb.source.file_name().unwrap().to_string_lossy()
+        ));
+    assert!(
+        survivor_clone.join(".git").is_dir(),
+        "the surviving instance's own clone dir must remain: {survivor_clone:?}"
+    );
+
+    // And it must still be fully usable: a further sync succeeds.
+    let r2 = sb.mind(&["sync"]);
+    assert!(
+        r2.success,
+        "sync after unmeld must still succeed: {} {}",
+        r2.stdout, r2.stderr
+    );
+}
+
+#[test]
 fn dump_emits_a_reconstructed_link_entry_not_a_skip_note() {
     // spec: LNK-13
     // `dump` now emits a reconstructed deep-URL entry for a link instance

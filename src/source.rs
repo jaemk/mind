@@ -223,17 +223,13 @@ impl Source {
         if self.is_linked() {
             return PathBuf::from(&self.url);
         }
-        // spec: STO-59 -- an instance with an identity alias clones under
-        // `<repo>@<alias>` so instances of the same repo pinned to different
-        // branches hold independent checkouts. The identity alias is known before
-        // the clone, so the clone lands at this path directly. A bare source, and
-        // a source whose only prefix is a post-clone display prefix (an accepted
-        // `[source].prefix` or a collision-resolved prefix), is unchanged at
-        // `<repo>` (STO-11).
-        let leaf = match &self.as_alias {
-            Some(a) if !a.is_empty() => format!("{}@{a}", self.repo),
-            _ => self.repo.clone(),
-        };
+        // spec: STO-59 STO-70 -- see `clone_dir_leaf` for the full leaf
+        // formula (repo, item_path, and identity alias each contribute).
+        let leaf = clone_dir_leaf(
+            &self.repo,
+            self.item_path.as_deref(),
+            self.as_alias.as_deref(),
+        );
         paths
             .sources_dir()
             .join(&self.host)
@@ -341,6 +337,106 @@ impl Source {
             .filter(|h| h.ran_at.is_none() || h.ran_at.as_deref() != current)
             .collect()
     }
+
+    /// Re-run the same validation `parse_spec` applies at construction time
+    /// against this (already persisted) source's `host`/`owner`/`repo`,
+    /// `as_alias`, and pin ref value (STO-68). `sources.json` can carry an
+    /// entry written by an older binary that predates a tightened rule (e.g.
+    /// 0.21.0's `parse_spec` accepted `repo: ".."`), so `Registry::load` calls
+    /// this on every entry rather than trusting the file blindly. On failure,
+    /// returns the offending part's label alongside the underlying error's
+    /// message (not the error itself: `MindError` is large, and the caller
+    /// only ever formats this into a warning string), so the caller can drop
+    /// the entry and warn naming exactly which part was unsafe.
+    fn revalidate(&self) -> std::result::Result<(), (&'static str, String)> {
+        // spec: STO-68 -- same per-part rules `make_source` applies (CLI-204).
+        validate_identity_part(&self.name, "host", &self.host, true, true)
+            .map_err(|e| ("host", e.to_string()))?;
+        validate_identity_part(&self.name, "owner", &self.owner, false, true)
+            .map_err(|e| ("owner", e.to_string()))?;
+        validate_identity_part(&self.name, "repo", &self.repo, true, true)
+            .map_err(|e| ("repo", e.to_string()))?;
+        if let Some(alias) = &self.as_alias {
+            crate::namespace::validate_prefix(alias).map_err(|e| ("as_alias", e.to_string()))?;
+        }
+        let pin_value = match &self.pin {
+            Pin::DefaultBranch => None,
+            Pin::FollowBranch(v) | Pin::Tag(v) | Pin::Ref(v) => Some(v.as_str()),
+        };
+        if let Some(v) = pin_value {
+            crate::git::validate_ref_value(v).map_err(|e| ("pin", e.to_string()))?;
+        }
+        Ok(())
+    }
+}
+
+/// The clone-dir leaf under `sources/<host>/<owner>/` (STO-11, STO-59, STO-70).
+///
+/// Mirrors the full instance identity, `repo#<item_path>@<alias>`, so that
+/// every distinct identity gets its own leaf and therefore its own
+/// independent checkout:
+/// - `repo`                          -- no item_path, no alias (STO-11).
+/// - `repo@<alias>`                  -- alias only (STO-59).
+/// - `repo#<enc>`                    -- item_path only (STO-70).
+/// - `repo#<enc>@<alias>`            -- both (STO-70).
+///
+/// `<enc>` is `item_path` with `%` percent-encoded to `%25` and then `/` to
+/// `%2F` (`encode_item_path_segment`): injective, human-readable, and
+/// filesystem-safe (an item path can never contain `@`, `#`, `..`, or NUL,
+/// LNK-10/LNK-16, so those need no escaping). If the encoded leaf would
+/// exceed 120 bytes, the encoded segment is replaced with the 16-hex FNV of
+/// `item_path` (`crate::hash::hash_str`) instead, keeping the leaf short
+/// while still being deterministic per `item_path`.
+fn clone_dir_leaf(repo: &str, item_path: Option<&str>, alias: Option<&str>) -> String {
+    let alias_suffix = match alias {
+        Some(a) if !a.is_empty() => format!("@{a}"),
+        _ => String::new(),
+    };
+    let Some(item_path) = item_path else {
+        return format!("{repo}{alias_suffix}");
+    };
+    let encoded = encode_item_path_segment(item_path);
+    let leaf = format!("{repo}#{encoded}{alias_suffix}");
+    if leaf.len() > 120 {
+        let hashed = crate::hash::hash_str(item_path);
+        format!("{repo}#{hashed}{alias_suffix}")
+    } else {
+        leaf
+    }
+}
+
+/// Percent-encode `%` (as `%25`) then `/` (as `%2F`) in an item path, for
+/// embedding it as a single filesystem-safe path component (STO-70). `%`
+/// must be encoded first so a literal `%2F` already present in the input
+/// (impossible today since `/` itself is not escaped elsewhere, but kept for
+/// robustness) does not get double-decoded.
+fn encode_item_path_segment(item_path: &str) -> String {
+    item_path.replace('%', "%25").replace('/', "%2F")
+}
+
+/// Revalidate every source (STO-68), dropping (never hard-erroring) any entry
+/// that fails and reporting each drop through `warn` once, with a message
+/// naming `sources.json`, the entry's name, and the offending part. Pure and
+/// independently testable; [`Registry::load`] wires `warn` to a stderr
+/// `eprintln!`. Dropping rather than failing the whole load matters: an entry
+/// that was valid under an older, looser `parse_spec` must not brick every
+/// `mind` verb for a user who happens to be carrying it -- the drop is
+/// persisted the next time `Registry::save` runs.
+fn revalidate_sources(sources: Vec<Source>, mut warn: impl FnMut(&str)) -> Vec<Source> {
+    sources
+        .into_iter()
+        .filter_map(|src| match src.revalidate() {
+            Ok(()) => Some(src),
+            Err((part, e)) => {
+                warn(&format!(
+                    "warning: sources.json: dropping source '{}': its {part} part failed \
+                     validation ({e})",
+                    src.name
+                ));
+                None
+            }
+        })
+        .collect()
 }
 
 /// Parse a user-supplied repo spec into a [`Source`] (without touching disk).
@@ -404,17 +500,47 @@ pub fn parse_spec(spec: &str) -> Result<Source> {
         return make_source(spec, host, &owner, &repo, spec.to_string());
     }
 
-    // URL form: scheme://host/owner/repo(.git)
+    // URL form: scheme://authority/owner/repo(.git)
     if let Some((scheme, rest)) = spec.split_once("://") {
-        let (host, path) = rest.split_once('/').ok_or_else(invalid)?;
+        let (authority, path) = rest.split_once('/').ok_or_else(invalid)?;
+        // spec: STO-67 -- an `ssh://` authority may carry a userinfo prefix
+        // (`user@host`, e.g. `ssh://git@github.com/...`). Split on the LAST
+        // `@` so the identity `host` is separated from the userinfo, while
+        // `url` keeps the FULL authority (userinfo included) so `git clone`
+        // still authenticates. Any other scheme refuses an embedded
+        // credential outright: it would otherwise be persisted verbatim into
+        // sources.json and echoed back by `dump`.
+        let (userinfo, host) = match authority.rsplit_once('@') {
+            Some((info, h)) => (Some(info), h),
+            None => (None, authority),
+        };
+        if let Some(info) = userinfo {
+            if scheme != "ssh" {
+                return Err(MindError::UnsafeRepoSpec {
+                    spec: spec.to_string(),
+                    part: "host",
+                    value: authority.to_string(),
+                    reason: "embeds a credential (userinfo before '@'); a credential must not \
+                             be persisted into sources.json or echoed back by dump",
+                });
+            }
+            if info.is_empty() || info.contains(|c: char| c.is_control()) {
+                return Err(MindError::UnsafeRepoSpec {
+                    spec: spec.to_string(),
+                    part: "host",
+                    value: authority.to_string(),
+                    reason: "the ssh userinfo is empty or contains a control character",
+                });
+            }
+        }
         // Item link (LNK-1): a deep URL with a tree/blob segment naming one
         // skill inside the repo. Checked before the plain owner/repo shape,
         // which rejects any extra path segments.
-        if let Some(source) = parse_item_link(spec, scheme, host, path)? {
+        if let Some(source) = parse_item_link(spec, scheme, host, authority, path)? {
             return Ok(source);
         }
         let (owner, repo) = split_owner_repo(path).ok_or_else(invalid)?;
-        let url = format!("{scheme}://{host}/{owner}/{repo}");
+        let url = format!("{scheme}://{authority}/{owner}/{repo}");
         return make_source(spec, host, &owner, &repo, url);
     }
 
@@ -509,7 +635,17 @@ fn parse_link_tail(spec: &str, marker: &str, rest: &str) -> Result<(Pin, String)
 /// does not complete to a valid link is `BadItemLink` (LNK-2, LNK-14). The
 /// owner/repo split before the marker is a malformed repo spec regardless of
 /// the marker, so it stays `InvalidRepoSpec`.
-fn parse_item_link(spec: &str, scheme: &str, host: &str, path: &str) -> Result<Option<Source>> {
+///
+/// `host` is the identity host (userinfo already stripped, STO-67); `authority`
+/// is the full authority (userinfo included, e.g. `git@host`) used to build
+/// `url` so an ssh link clone still authenticates.
+fn parse_item_link(
+    spec: &str,
+    scheme: &str,
+    host: &str,
+    authority: &str,
+    path: &str,
+) -> Result<Option<Source>> {
     // spec: LNK-1 -- strip a query string / fragment pasted from a browser.
     let path = path.split(['?', '#']).next().unwrap_or(path);
     let Some((repo_part, marker, rest)) = split_link_marker(path) else {
@@ -520,7 +656,7 @@ fn parse_item_link(spec: &str, scheme: &str, host: &str, path: &str) -> Result<O
     };
     let (owner, repo) = split_owner_repo(repo_part).ok_or_else(invalid)?;
     let (pin, item_path) = parse_link_tail(spec, marker, rest)?;
-    let url = format!("{scheme}://{host}/{owner}/{repo}");
+    let url = format!("{scheme}://{authority}/{owner}/{repo}");
     let mut source = make_source(spec, host, &owner, &repo, url)?;
     // spec: LNK-4 -- the extended identity keeps instances from the same repo
     // (and a plain meld of it) distinct; the clone path follows the name.
@@ -665,9 +801,11 @@ fn default_version() -> u32 {
 impl Registry {
     /// Load the registry, returning an empty one if the file does not exist.
     ///
-    /// Checks the schema version (STO-50) and migrates any legacy
+    /// Checks the schema version (STO-50), migrates any legacy
     /// `install_hook`/`install_hook_commit` pairs into `install_hooks`
-    /// transparently on load (HOOK-55).
+    /// transparently on load (HOOK-55), and revalidates every entry's
+    /// identity/prefix/pin fields, dropping (and warning about) any that fail
+    /// under the current, possibly-tightened rules (STO-68).
     pub fn load(paths: &Paths) -> Result<Self> {
         let file = paths.sources_file();
         match std::fs::read(&file) {
@@ -688,6 +826,9 @@ impl Registry {
                 for src in &mut reg.sources {
                     src.migrate_legacy_hook();
                 }
+                // spec: STO-68 -- drop (not hard-error) any entry that fails
+                // revalidation, warning on stderr.
+                reg.sources = revalidate_sources(reg.sources, |msg| eprintln!("{msg}"));
                 Ok(reg)
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Registry::default()),
@@ -1057,6 +1198,88 @@ mod tests {
         assert_eq!(s.host, "github.com");
         assert_eq!(s.owner, "foo");
         assert_eq!(s.repo, "bar");
+    }
+
+    // ---- ssh:// userinfo (STO-67) ----
+
+    // spec: STO-67 CLI-19
+    #[test]
+    fn ssh_url_with_userinfo_keeps_it_in_url_but_not_identity() {
+        let s = parse_spec("ssh://git@github.com/acme/agents").unwrap();
+        assert_eq!(s.host, "github.com");
+        assert_eq!(s.owner, "acme");
+        assert_eq!(s.repo, "agents");
+        assert_eq!(s.name, "github.com/acme/agents");
+        assert_eq!(s.url, "ssh://git@github.com/acme/agents");
+    }
+
+    // spec: STO-67
+    #[test]
+    fn ssh_url_with_userinfo_on_a_non_github_host() {
+        let s = parse_spec("ssh://git@ghe.corp/team/agents.git").unwrap();
+        assert_eq!(s.host, "ghe.corp");
+        assert_eq!(s.owner, "team");
+        assert_eq!(s.repo, "agents");
+        assert_eq!(s.name, "ghe.corp/team/agents");
+        assert_eq!(s.url, "ssh://git@ghe.corp/team/agents");
+    }
+
+    // spec: STO-67
+    #[test]
+    fn ssh_url_without_userinfo_still_parses() {
+        let s = parse_spec("ssh://host/o/r").unwrap();
+        assert_eq!(s.host, "host");
+        assert_eq!(s.owner, "o");
+        assert_eq!(s.repo, "r");
+        assert_eq!(s.url, "ssh://host/o/r");
+    }
+
+    // spec: STO-67
+    #[test]
+    fn https_url_with_userinfo_is_refused() {
+        let err = parse_spec("https://token@host/o/r").unwrap_err();
+        match err {
+            MindError::UnsafeRepoSpec {
+                part,
+                value,
+                reason,
+                ..
+            } => {
+                assert_eq!(part, "host");
+                assert_eq!(value, "token@host");
+                assert!(
+                    reason.contains("credential"),
+                    "reason must name the credential: {reason}"
+                );
+            }
+            other => panic!("expected UnsafeRepoSpec naming host, got {other:?}"),
+        }
+    }
+
+    // spec: STO-67 LNK-1 LNK-4
+    #[test]
+    fn ssh_item_link_keeps_userinfo_in_url() {
+        let s = parse_spec("ssh://git@host/o/r/tree/main/skills/foo").unwrap();
+        assert_eq!(s.name, "host/o/r#skills/foo");
+        assert_eq!(s.url, "ssh://git@host/o/r");
+        assert_eq!(s.item_path.as_deref(), Some("skills/foo"));
+        assert_eq!(s.base_identity(), "host/o/r");
+    }
+
+    // spec: STO-67
+    #[test]
+    fn ssh_userinfo_control_character_is_rejected() {
+        let err = parse_spec("ssh://git\u{7}@host/o/r").unwrap_err();
+        match err {
+            MindError::UnsafeRepoSpec { part, reason, .. } => {
+                assert_eq!(part, "host");
+                assert!(
+                    reason.contains("control character"),
+                    "reason must name the control character: {reason}"
+                );
+            }
+            other => panic!("expected UnsafeRepoSpec naming host, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1970,6 +2193,101 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    // ---- Registry::load revalidation (STO-68) ----
+
+    // spec: STO-68
+    #[test]
+    fn revalidate_sources_drops_offending_entry_and_warns_naming_the_part() {
+        let mut bad = parse_spec("acme/victim").unwrap();
+        bad.host = "..".to_string();
+        bad.owner = "..".to_string();
+        bad.repo = "victim".to_string();
+        bad.name = "../../victim".to_string();
+        let name_before = bad.name.clone();
+
+        let mut warnings: Vec<String> = Vec::new();
+        let kept = revalidate_sources(vec![bad], |msg| warnings.push(msg.to_string()));
+
+        assert!(kept.is_empty(), "the offending entry must be dropped");
+        assert_eq!(warnings.len(), 1, "exactly one warning must be emitted");
+        assert!(
+            warnings[0].contains("sources.json"),
+            "warning must name sources.json: {}",
+            warnings[0]
+        );
+        assert!(
+            warnings[0].contains(&name_before),
+            "warning must name the entry: {}",
+            warnings[0]
+        );
+        assert!(
+            warnings[0].contains("host"),
+            "warning must name the offending part (host, checked first): {}",
+            warnings[0]
+        );
+    }
+
+    // spec: STO-68
+    #[test]
+    fn revalidate_sources_keeps_valid_entries_and_warns_for_none() {
+        let good = parse_spec("acme/agents").unwrap();
+        let mut warnings: Vec<String> = Vec::new();
+        let kept = revalidate_sources(vec![good], |msg| warnings.push(msg.to_string()));
+        assert_eq!(kept.len(), 1, "a valid entry must be kept");
+        assert!(warnings.is_empty(), "no warning for a valid entry");
+    }
+
+    // spec: STO-68
+    #[test]
+    fn revalidate_rejects_unsafe_as_alias_and_pin_ref() {
+        // An as_alias that would fail validate_prefix (path traversal).
+        let mut aliased = parse_spec("acme/agents").unwrap();
+        aliased.as_alias = Some("../evil".to_string());
+        assert!(
+            aliased.revalidate().is_err(),
+            "an unsafe as_alias must fail revalidation"
+        );
+
+        // A pin ref value that would fail git::validate_ref_value (a leading
+        // dash looks like a git option).
+        let mut pinned = parse_spec("acme/agents").unwrap();
+        pinned.pin = Pin::FollowBranch("-evil".to_string());
+        assert!(
+            pinned.revalidate().is_err(),
+            "an unsafe pin ref value must fail revalidation"
+        );
+
+        // A DefaultBranch pin (no value) always passes the pin check.
+        let default_pin = parse_spec("acme/agents").unwrap();
+        assert!(default_pin.revalidate().is_ok());
+    }
+
+    // spec: STO-68
+    // The `Registry::load` end-to-end path: a hand-written sources.json
+    // carrying an entry that predates the CLI-204 tightening (a `host` of
+    // `".."`) must load successfully with that entry dropped, not fail the
+    // whole load and not carry the offending entry through.
+    #[test]
+    fn registry_load_drops_a_pre_existing_unsafe_entry() {
+        let (base, paths) = tmp_paths_src();
+        std::fs::write(
+            base.join("sources.json"),
+            r#"{"version":1,"sources":[
+                {"name":"../../victim","url":"https://x/y/victim","host":"..","owner":"..","repo":"victim"},
+                {"name":"github.com/acme/agents","url":"https://github.com/acme/agents","host":"github.com","owner":"acme","repo":"agents"}
+            ]}"#,
+        )
+        .unwrap();
+        let reg = Registry::load(&paths).expect("load must succeed despite the bad entry");
+        assert_eq!(
+            reg.sources.len(),
+            1,
+            "the unsafe entry must be dropped, the safe one kept: {reg:?}"
+        );
+        assert_eq!(reg.sources[0].name, "github.com/acme/agents");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn compute_name_composes_item_link_and_alias() {
         // spec: STO-58 LNK-4 -- `@<alias>` is always the trailing segment and
@@ -2002,6 +2320,159 @@ mod tests {
         assert!(s.clone_dir(&paths).ends_with("github.com/acme/agents@jk"));
         s.apply_alias(Some(String::new()));
         assert_eq!(s.clone_dir(&paths), bare, "empty alias keeps the bare path");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ---- per-instance clone dir for item links (STO-70) ----
+
+    // spec: STO-70
+    #[test]
+    fn clone_dir_leaf_bare_shape_unchanged() {
+        assert_eq!(clone_dir_leaf("agents", None, None), "agents");
+        // An empty alias is the explicit no-prefix override; same as None.
+        assert_eq!(clone_dir_leaf("agents", None, Some("")), "agents");
+    }
+
+    // spec: STO-70 STO-59
+    #[test]
+    fn clone_dir_leaf_alias_only_shape_unchanged() {
+        assert_eq!(clone_dir_leaf("agents", None, Some("jk")), "agents@jk");
+    }
+
+    // spec: STO-70
+    #[test]
+    fn clone_dir_leaf_item_path_only_shape() {
+        assert_eq!(
+            clone_dir_leaf("agents", Some("skills/foo"), None),
+            "agents#skills%2Ffoo"
+        );
+    }
+
+    // spec: STO-70
+    #[test]
+    fn clone_dir_leaf_item_path_and_alias_shape() {
+        assert_eq!(
+            clone_dir_leaf("agents", Some("skills/foo"), Some("jk")),
+            "agents#skills%2Ffoo@jk"
+        );
+    }
+
+    // spec: STO-70
+    #[test]
+    fn clone_dir_leaf_distinguishes_two_item_paths_from_each_other_and_from_bare() {
+        // This is the exact collision C31/STO-70 closes: before the fix these
+        // three all resolved to the identical `agents` leaf.
+        let a = clone_dir_leaf("agents", Some("skills/a"), None);
+        let b = clone_dir_leaf("agents", Some("skills/b"), None);
+        let bare = clone_dir_leaf("agents", None, None);
+        assert_ne!(a, b, "two distinct item_paths must not share a leaf");
+        assert_ne!(
+            a, bare,
+            "an item-link leaf must not collide with the bare leaf"
+        );
+        assert_ne!(
+            b, bare,
+            "an item-link leaf must not collide with the bare leaf"
+        );
+    }
+
+    // spec: STO-70
+    #[test]
+    fn clone_dir_leaf_percent_encodes_slash_and_percent_injectively() {
+        // `/` -> `%2F`.
+        assert_eq!(
+            clone_dir_leaf("r", Some("a/b"), None),
+            "r#a%2Fb",
+            "slash must be percent-encoded"
+        );
+        // A literal `%` in the (already-restricted) item_path is encoded first,
+        // so it cannot be misread as the start of one of our own escapes.
+        assert_eq!(
+            clone_dir_leaf("r", Some("a%b"), None),
+            "r#a%25b",
+            "percent must itself be percent-encoded"
+        );
+        // The leaf never contains a bare `/`, keeping it a single path
+        // component (the whole point of encoding it).
+        let leaf = clone_dir_leaf("r", Some("a/b/c"), None);
+        assert!(!leaf.contains('/'), "encoded leaf must have no '/': {leaf}");
+    }
+
+    // spec: STO-70
+    #[test]
+    fn clone_dir_leaf_falls_back_to_a_hash_past_the_length_threshold() {
+        let short_path = "skills/foo";
+        let short_leaf = clone_dir_leaf("agents", Some(short_path), None);
+        assert!(
+            short_leaf.contains(short_path.replace('/', "%2F").as_str()),
+            "a short item_path must stay readably encoded: {short_leaf}"
+        );
+
+        // A very long item_path pushes the leaf past 120 bytes.
+        let long_path = format!("skills/{}", "x".repeat(200));
+        let long_leaf = clone_dir_leaf("agents", Some(&long_path), None);
+        assert!(
+            long_leaf.len() <= 120,
+            "an over-length leaf must fall back to a short hash: {} bytes",
+            long_leaf.len()
+        );
+        assert!(
+            !long_leaf.contains("xxxx"),
+            "the fallback must not embed the readable path: {long_leaf}"
+        );
+        assert!(
+            long_leaf.starts_with("agents#"),
+            "the fallback must keep the repo#-prefix shape: {long_leaf}"
+        );
+
+        // The hash fallback is deterministic per item_path.
+        let long_leaf_again = clone_dir_leaf("agents", Some(&long_path), None);
+        assert_eq!(
+            long_leaf, long_leaf_again,
+            "the hash fallback must be stable for the same item_path"
+        );
+
+        // And an alias still composes onto the hash fallback.
+        let long_leaf_aliased = clone_dir_leaf("agents", Some(&long_path), Some("jk"));
+        assert!(
+            long_leaf_aliased.ends_with("@jk"),
+            "an alias must still append onto the hash fallback: {long_leaf_aliased}"
+        );
+    }
+
+    // spec: STO-70
+    // End-to-end through `Source::clone_dir`, not just the pure leaf helper:
+    // two item-link instances from the SAME repo (as would be created by
+    // `parse_spec` on two different `tree/<ref>/<path>` URLs) resolve to
+    // distinct clone paths, and neither collides with a plain meld of the
+    // repo.
+    #[test]
+    fn clone_dir_end_to_end_distinguishes_link_instances_and_plain_meld() {
+        let (base, paths) = tmp_paths_src();
+        let link_a = parse_spec("https://github.com/o/r/tree/main/skills/a").unwrap();
+        let link_b = parse_spec("https://github.com/o/r/tree/main/skills/b").unwrap();
+        let plain = parse_spec("https://github.com/o/r").unwrap();
+
+        let dir_a = link_a.clone_dir(&paths);
+        let dir_b = link_b.clone_dir(&paths);
+        let dir_plain = plain.clone_dir(&paths);
+
+        assert_ne!(
+            dir_a, dir_b,
+            "two link instances must not share a clone dir"
+        );
+        assert_ne!(
+            dir_a, dir_plain,
+            "a link instance must not share a clone dir with a plain meld"
+        );
+        assert_ne!(
+            dir_b, dir_plain,
+            "a link instance must not share a clone dir with a plain meld"
+        );
+        assert!(
+            dir_plain.ends_with("github.com/o/r"),
+            "plain meld unaffected: {dir_plain:?}"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 

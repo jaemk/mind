@@ -83,8 +83,29 @@ url="https://github.com/${REPO}/releases/download/v${version}/${asset}"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
+# Compatibility rule (STO-71): this script is served from `main` (see README.md
+# / docs/src/install.md / docs/landing/index.html, all fetching it from
+# raw.githubusercontent.com/.../main/resources/install.sh) but it resolves the
+# version to install from the latest GitHub RELEASE, not from main. Those two
+# can disagree about which asset legs exist: main may already build a target
+# whose musl leg the latest published release does not carry yet. So this
+# script must resolve against the latest release's actual asset set, never
+# assume it matches whatever main currently builds.
 echo "mind-install: downloading ${asset}"
-fetch_to "$url" "$tmp/$asset" || err "download failed: $url"
+if ! fetch_to "$url" "$tmp/$asset"; then
+	# The musl leg may not exist on the latest release yet (see the
+	# compatibility rule above). On Linux only, fall back to the gnu leg, which
+	# every published release carries, and retry once before giving up.
+	if [ "$os" = "Linux" ] && [ "$target" = "${arch_part}-unknown-linux-musl" ]; then
+		echo "mind-install: musl asset unavailable for ${version}, retrying with gnu"
+		target="${arch_part}-unknown-linux-gnu"
+		asset="mind-${version}-${target}.tar.gz"
+		url="https://github.com/${REPO}/releases/download/v${version}/${asset}"
+		fetch_to "$url" "$tmp/$asset" || err "download failed: $url"
+	else
+		err "download failed: $url"
+	fi
+fi
 
 # Verify the tarball against the published checksums.
 sums_url="https://github.com/${REPO}/releases/download/v${version}/SHA256SUMS"
