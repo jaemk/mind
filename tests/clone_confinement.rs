@@ -233,3 +233,95 @@ fn sync_leaves_traversal_victim_intact_shape_dotted_owner_repo() {
     let _ = env.mind(&["sync"]);
     assert_victim_intact(&marker, contents, "sync shape2");
 }
+
+// ---- STO-68: Registry::load drops a stale entry rather than bricking mind ---
+//
+// STO-68's whole point is graceful degradation: "hard-erroring would brick
+// every `mind` verb for a user who happens to be carrying such a stale entry".
+// Only the in-process `Registry::load` was driven; nothing proved the CLI verbs
+// a user would actually reach for still work, warn, and hide the dropped entry.
+
+/// A registry whose FIRST entry carries the exact value STO-68 names as its
+/// motivating example (0.21.0's parser accepted `repo: ".."`), plus one healthy
+/// entry that must survive.
+const STALE_DOTDOT_REPO_REGISTRY: &str = r#"{
+  "version": 1,
+  "sources": [
+    {
+      "name": "example.com/acme/..",
+      "url": "https://example.com/acme/x",
+      "host": "example.com",
+      "owner": "acme",
+      "repo": ".."
+    },
+    {
+      "name": "github.com/acme/agents",
+      "url": "https://github.com/acme/agents",
+      "host": "github.com",
+      "owner": "acme",
+      "repo": "agents"
+    }
+  ]
+}"#;
+
+#[test]
+fn a_stale_dotdot_repo_entry_is_dropped_with_a_warning_and_does_not_brick_the_cli() {
+    // spec: STO-68
+    let env = Env::new("stale-repo");
+    env.write_sources_json(STALE_DOTDOT_REPO_REGISTRY);
+
+    let r = env.mind(&["recall", "--sources"]);
+    assert!(
+        r.success,
+        "a stale entry must not brick a read-only verb: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr.contains("sources.json") && r.stderr.contains("repo"),
+        "the warning must name sources.json and the offending part: {}",
+        r.stderr
+    );
+    assert!(
+        r.stderr.contains("example.com/acme/.."),
+        "the warning must name the dropped entry: {}",
+        r.stderr
+    );
+    assert!(
+        !r.stdout.contains("example.com"),
+        "the dropped entry must not be listed as a melded source: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("github.com/acme/agents"),
+        "the healthy entry must survive: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn the_drop_is_not_written_back_until_a_verb_saves_the_registry() {
+    // spec: STO-68 -- "The drop is not written back immediately; it becomes
+    // permanent the next time `Registry::save` runs". A read-only verb must
+    // leave sources.json byte-identical (the file is the only remaining record
+    // of the entry), and a mutating verb must persist the drop.
+    let env = Env::new("stale-persist");
+    env.write_sources_json(STALE_DOTDOT_REPO_REGISTRY);
+    let file = env.mind_home.join("sources.json");
+
+    assert!(env.mind(&["recall", "--sources"]).success);
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        STALE_DOTDOT_REPO_REGISTRY,
+        "a read-only verb must not rewrite sources.json"
+    );
+
+    // `unmeld` of the surviving entry saves the registry, making the drop
+    // permanent as a side effect.
+    let u = env.mind(&["unmeld", "github.com/acme/agents", "--unlink-only"]);
+    assert!(u.success, "unmeld failed: {} {}", u.stdout, u.stderr);
+    let after = std::fs::read_to_string(&file).unwrap();
+    assert!(
+        !after.contains("\"repo\": \"..\"") && !after.contains("\"repo\":\"..\""),
+        "the drop must be persisted by the next registry save: {after}"
+    );
+}

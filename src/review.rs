@@ -1314,6 +1314,55 @@ mod tests {
         assert_eq!(shadow_note("../skills/greet"), None);
     }
 
+    /// The `file://` form is the fourth explicit local-path spelling the doc
+    /// comment names, and it is the one that goes through a DIFFERENT
+    /// `parse_spec` branch than `./`, `../`, and `/` (the `strip_prefix` leg).
+    /// It must also produce no note.
+    /// spec: CLI-214
+    #[test]
+    fn shadow_note_absent_for_the_file_url_local_form() {
+        assert_eq!(shadow_note("file:///abs/path"), None);
+        assert_eq!(
+            shadow_note("file:///abs/path/tree/main/skills/greet"),
+            None,
+            "a local item-link URL is still a local reading, so there is no ambiguity to report"
+        );
+    }
+
+    /// A target that does not parse as a repo spec at all yields no note: the
+    /// helper must not fabricate an ambiguity (nor panic) for a string that has
+    /// no remote reading to be ambiguous WITH. `shadow_note` is reached only
+    /// after the directory already exists, so this is the "a directory with an
+    /// unusual name" case, e.g. `mind review 'my notes'`.
+    /// spec: CLI-214
+    #[test]
+    fn shadow_note_absent_when_the_target_has_no_remote_reading() {
+        assert_eq!(shadow_note("my notes"), None);
+        assert_eq!(shadow_note(""), None);
+        assert_eq!(
+            shadow_note("a/b/c/d"),
+            None,
+            "too many segments to be an owner/repo spec"
+        );
+    }
+
+    /// The ambiguity is not limited to the bare `owner/repo` shape: any target
+    /// that parses to a non-local host shadows a remote reading, including the
+    /// explicit `github:` and `git@host:owner/repo` spellings.
+    /// spec: CLI-214
+    #[test]
+    fn shadow_note_fires_for_other_remote_spellings_too() {
+        for target in ["github:owner/repo", "git@host:owner/repo"] {
+            let note = shadow_note(target)
+                .unwrap_or_else(|| panic!("{target} has a remote reading and must be noted"));
+            assert!(note.contains(target), "must name the target: {note}");
+            assert!(
+                note.contains("reviewed as that local path"),
+                "must say which reading it took: {note}"
+            );
+        }
+    }
+
     // --- hard vs advisory classification (CLI-132) ---
 
     /// A source with all valid items and descriptions has no findings at all.

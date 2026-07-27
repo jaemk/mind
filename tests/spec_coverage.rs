@@ -16,8 +16,7 @@ use std::path::{Path, PathBuf};
 const ALLOWLIST: &[&str] = &[
     // Storage layout and JSON schema invariants, exercised by every test that
     // reads/writes the registry or manifest, or installs an item.
-    "STO-1", "STO-3", "STO-10", "STO-11", "STO-12", "STO-20", "STO-21", "STO-22", "STO-23",
-    "STO-30",
+    "STO-1", "STO-3", "STO-10", "STO-12", "STO-20", "STO-21", "STO-22", "STO-23", "STO-30",
     // An accepted risk, not a behavior: it states that `mind` does NOT cap the
     // size of the ITEM CONTENT it reads from a source tree ({{ns:}} expansion,
     // the reference scan, `review`, the TUI preview, hashing). Metadata reads

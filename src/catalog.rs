@@ -1986,6 +1986,47 @@ mod tests {
         }
     }
 
+    // spec: CLI-212
+    // The PRECEDENCE clause: "raised ... BEFORE a less specific error (a
+    // convention-scan `InvalidRoot`, or `MindToml::load` silently treating the
+    // missing directory as 'no mind.toml') could obscure the real cause". Both
+    // obscuring paths are reachable for the same vanished directory, and
+    // neither was driven -- so nothing distinguished "the check exists" from
+    // "the check runs early enough to matter".
+    #[test]
+    fn linked_source_gone_wins_over_the_less_specific_scan_errors() {
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let paths = paths_for(base);
+        let clone = base.join("sources/local/test/repo"); // never created
+
+        // (a) With a `--root` override set, a directory-based scan of a missing
+        // root would report `InvalidRoot`, which names a root the user never
+        // typed wrong instead of the real cause.
+        let mut rooted = make_source_for(&clone);
+        rooted.roots = Some(vec!["packages/agents".to_string()]);
+        let mut items = Vec::new();
+        assert!(
+            matches!(
+                scan_source(&paths, &rooted, &mut items).unwrap_err(),
+                MindError::LinkedSourceGone { .. }
+            ),
+            "a vanished working tree must not be reported as an InvalidRoot"
+        );
+
+        // (b) Without any root override, `MindToml::load` treats the missing
+        // directory as "no mind.toml" and the convention scan would simply find
+        // nothing -- a silent, empty, successful scan. It must be the error
+        // instead.
+        let plain = make_source_for(&clone);
+        let mut items = Vec::new();
+        assert!(
+            scan_source(&paths, &plain, &mut items).is_err(),
+            "a vanished working tree must not scan as a healthy source with no items"
+        );
+        assert!(items.is_empty());
+    }
+
     // spec: CLI-212 CLI-213
     #[test]
     fn scan_degrades_past_a_gone_linked_source_and_keeps_the_rest() {

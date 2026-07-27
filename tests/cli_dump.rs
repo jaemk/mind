@@ -647,6 +647,132 @@ fn dump_roundtrip_remeld_reproduces_install_set() {
     );
 }
 
+#[test]
+fn dump_of_a_curator_with_a_relative_nested_source_reproduces_it_absolutely() {
+    // spec: DSC-92 DUMP-1 -- the third caller DSC-92 says the read-site fix
+    // covers. `dump` reconstructs `[discover].sources` from the REGISTRY, so
+    // what has to hold is that a curator whose own `mind.toml` declared a
+    // relative `../nested` melds into a registry entry carrying the ABSOLUTE
+    // resolution, and therefore dumps to an entry that re-melds from any cwd.
+    // A dump emitting the curator's literal `../nested` would reproduce a
+    // different (or no) source in the fresh environment.
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let curator = Sandbox::bare("dsc92-curator");
+    let nested = curator.base.join("nested-lib");
+    write_file(
+        &nested.join("skills/greet/SKILL.md"),
+        "---\nname: greet\ndescription: Greet skill\n---\n# greet\n",
+    );
+    git_init(&nested);
+    curator.write_and_commit(
+        "mind.toml",
+        "[[discover.sources]]\nsource = \"../nested-lib\"\ninstall = true\n",
+    );
+
+    let meld = curator.mind(&["meld", &curator.source_spec(), "--yes"]);
+    assert!(
+        meld.success,
+        "melding the curator must succeed: {} {}",
+        meld.stdout, meld.stderr
+    );
+    assert!(
+        curator.claude_home.join("skills/greet").exists(),
+        "the relative nested source's item must be installed: {:?}",
+        curator.claude_home
+    );
+
+    let super_dir = curator.base.join(format!("dsc92-super-{n}"));
+    std::fs::create_dir_all(&super_dir).expect("create super dir");
+    let dump_path = super_dir.join("mind.toml");
+    let dump_path_str = dump_path.to_string_lossy().into_owned();
+    let dr = curator.mind(&["dump", "--output", &dump_path_str]);
+    assert!(dr.success, "dump failed: {} {}", dr.stdout, dr.stderr);
+
+    let text = std::fs::read_to_string(&dump_path).expect("read dump");
+    assert!(
+        text.contains(&nested.to_string_lossy().into_owned()),
+        "the nested source must be dumped by its absolute path: {text}"
+    );
+    assert!(
+        !text.contains("\"../nested-lib\""),
+        "a cwd-relative nested spec must never be emitted: {text}"
+    );
+
+    let _ = n;
+}
+
+#[test]
+#[ignore = "known limitation: a cloned curator's relative nested source resolves inside the \
+            sources tree, so a dump naming that curator is not reproducible"]
+fn dump_of_a_curator_with_a_relative_nested_source_remelds_in_a_fresh_home() {
+    // KNOWN LIMITATION (pre-dates DSC-92, and DSC-92 does not close it).
+    // DSC-92 resolves a `[discover].sources` relative path against "the
+    // directory it read the mind.toml from". For a LINKED local curator that is
+    // the user's working tree and `../nested` finds the real sibling. But a
+    // curator reached through a dump is CLONED (dump emits `pin-ref`), so its
+    // mind.toml is read from `<mind_home>/sources/<host>/<owner>/<repo>` and
+    // `../nested` resolves to a sibling inside the managed sources tree that was
+    // never cloned. The nested clone then fails and, for a curator with no items
+    // of its own, DSC-80 turns that into a hard `CuratorAllNestedFailed`, so the
+    // whole reproduction aborts -- even though the dump ALSO carries a correct
+    // absolute entry for that same nested source (asserted by the test above).
+    // The curator's own re-walk reaches the broken relative reading first.
+    //
+    // Un-ignore when either the re-walk skips a curator entry the dump already
+    // pins absolutely, or a cloned curator's relative nested source is dropped
+    // with a warning instead of failing the meld.
+    // spec: DSC-92 DUMP-7
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let curator = Sandbox::bare("dsc92-remeld-curator");
+    let nested = curator.base.join("nested-lib");
+    write_file(
+        &nested.join("skills/greet/SKILL.md"),
+        "---\nname: greet\ndescription: Greet skill\n---\n# greet\n",
+    );
+    git_init(&nested);
+    curator.write_and_commit(
+        "mind.toml",
+        "[[discover.sources]]\nsource = \"../nested-lib\"\ninstall = true\n",
+    );
+    assert!(
+        curator
+            .mind(&["meld", &curator.source_spec(), "--yes"])
+            .success
+    );
+
+    let super_dir = curator.base.join(format!("dsc92-remeld-super-{n}"));
+    std::fs::create_dir_all(&super_dir).expect("create super dir");
+    let dump_path = super_dir.join("mind.toml");
+    let dump_path_str = dump_path.to_string_lossy().into_owned();
+    assert!(curator.mind(&["dump", "--output", &dump_path_str]).success);
+
+    git_init(&super_dir);
+    let super_spec = super_dir.to_string_lossy().into_owned();
+    let fresh_base = curator.base.join(format!("dsc92-remeld-fresh-{n}"));
+    std::fs::create_dir_all(&fresh_base).expect("fresh base");
+    let fresh_mind = fresh_base.join("mind");
+    let fresh_claude = fresh_base.join("claude");
+    let remeld = Command::new(env!("CARGO_BIN_EXE_mind"))
+        .args(["meld", &super_spec, "--yes"])
+        .env("MIND_HOME", &fresh_mind)
+        .env("CLAUDE_HOME", &fresh_claude)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null())
+        .output()
+        .expect("run remeld");
+    assert!(
+        remeld.status.success(),
+        "re-meld of the dump must succeed: {} {}",
+        String::from_utf8_lossy(&remeld.stdout),
+        String::from_utf8_lossy(&remeld.stderr)
+    );
+    assert!(
+        fresh_claude.join("skills/greet").exists(),
+        "the nested source's item must be reproduced: {fresh_claude:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // DUMP-1 / DSC-65: pin-ref in the dump output pins to the exact commit
 // ---------------------------------------------------------------------------

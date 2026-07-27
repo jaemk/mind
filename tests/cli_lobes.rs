@@ -3006,3 +3006,804 @@ fn lobe_remove_snapshot_multiple_items_keeps_store() {
 
     let _ = std::fs::remove_dir_all(&base);
 }
+
+// ---------------------------------------------------------------------------
+// Independent certification of HARN-15..18 (commit 34ff13d). The tests below
+// target the branches the implementation's own tests do not discriminate.
+// ---------------------------------------------------------------------------
+
+// HARN-15: the lobe directory is created by the ADD itself, not as a side effect
+// of the HARN-17 backfill.
+//
+// This is the discriminating case for the mkdir_p: with items installed, the
+// backfill's `ensure_link` does `mkdir_p(link.parent())`, which creates the lobe
+// dir on its way to `<lobe>/skills/<name>`. So a test that installs an item
+// first cannot tell "the add created the dir" from "the backfill created it",
+// and stays green even if the HARN-15 mkdir_p is deleted. With an EMPTY manifest
+// the backfill returns immediately and the only thing that can create the
+// directory is the HARN-15 mkdir_p.
+#[test]
+fn harn15_lobe_add_creates_the_dir_with_nothing_installed() {
+    // spec: HARN-15
+    let sb = Sandbox::new();
+    sb.write_config(&format!("lobes = [\"{}\"]\n", sb.claude_home.display()));
+
+    let new_lobe = sb.base.join("empty-manifest-lobe");
+    assert!(
+        std::fs::symlink_metadata(&new_lobe).is_err(),
+        "sanity: the lobe path must not exist before the add"
+    );
+    let new_lobe_str = new_lobe.to_string_lossy().into_owned();
+
+    let added = sb.mind(&["config", "lobes", "add", &new_lobe_str]);
+    assert!(added.success, "lobe add failed: {}", added.stderr);
+
+    assert!(
+        new_lobe.is_dir(),
+        "HARN-15: registering a lobe must create its directory even when there \
+         is nothing to backfill (nothing else can create it): {}",
+        added.stdout
+    );
+
+    // And the freshly created lobe must be reachable, so a following
+    // `introspect --fix` does not prune it as vanished (HARN-13).
+    let intro = sb.mind(&["introspect", "--fix", "--json"]);
+    assert!(intro.success, "introspect --fix failed: {}", intro.stderr);
+    let iv = parse_json(&intro.stdout);
+    assert!(
+        !iv["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["kind"].as_str() == Some("vanished-lobe")),
+        "a lobe created at add time must not be reported vanished: {}",
+        intro.stdout
+    );
+    assert!(
+        new_lobe.is_dir(),
+        "the lobe dir must survive an `introspect --fix` pass"
+    );
+}
+
+// HARN-15 boundary: creating the RESOLVED lobe path must not relax the
+// LobeBaseMissing guard (HARN-10) on an EXPLICIT base. A mistyped base is still
+// refused, and the refusal creates nothing at all: neither the base, nor the
+// preset/subdir path under it, nor a config entry.
+#[test]
+fn harn15_missing_explicit_base_is_refused_and_creates_nothing() {
+    // spec: HARN-15
+    // spec: HARN-10
+    let sb = Sandbox::new();
+    sb.write_config(&format!("lobes = [\"{}\"]\n", sb.claude_home.display()));
+
+    let missing = sb.base.join("no-such-base");
+    let missing_str = missing.to_string_lossy().into_owned();
+
+    // Three entry points share `resolve_lobe`; all three must refuse.
+    for args in [
+        vec![
+            "config",
+            "lobes",
+            "add",
+            &missing_str,
+            "--preset",
+            "windsurf",
+        ],
+        vec![
+            "config",
+            "lobes",
+            "add",
+            &missing_str,
+            "--subdir",
+            ".cursor",
+        ],
+        vec!["link-project", &missing_str],
+    ] {
+        let r = sb.mind(&args);
+        assert!(!r.success, "a missing explicit base must fail: {args:?}");
+        assert!(
+            std::fs::symlink_metadata(&missing).is_err(),
+            "HARN-15 must not create a mistyped BASE directory ({args:?}): {}",
+            r.stderr
+        );
+    }
+
+    // Nothing was registered either.
+    let listed = sb.mind(&["config", "lobes", "list", "--json"]);
+    let v = parse_json(&listed.stdout);
+    assert!(
+        !v["lobes"].as_array().unwrap().iter().any(|l| l["path"]
+            .as_str()
+            .is_some_and(|p| p.contains("no-such-base"))),
+        "a refused add must leave no config entry behind: {}",
+        listed.stdout
+    );
+}
+
+// HARN-15 is scoped to the MANAGED path: `--snapshot` registers no lobe, so it
+// must not create the target directory either. A snapshot with nothing to freeze
+// leaves the filesystem exactly as it found it.
+#[test]
+fn harn15_snapshot_add_creates_no_lobe_dir_and_no_config_entry() {
+    // spec: HARN-15
+    // spec: HARN-12
+    let sb = Sandbox::new();
+    sb.write_config(&format!("lobes = [\"{}\"]\n", sb.claude_home.display()));
+
+    let snap = sb.base.join("snapshot-target");
+    let snap_str = snap.to_string_lossy().into_owned();
+
+    let r = sb.mind(&["config", "lobes", "add", &snap_str, "--snapshot"]);
+    assert!(r.success, "snapshot add failed: {}", r.stderr);
+    assert!(
+        std::fs::symlink_metadata(&snap).is_err(),
+        "HARN-15's mkdir is confined to the managed path; --snapshot must not \
+         create the target dir: {}",
+        r.stdout
+    );
+
+    let listed = sb.mind(&["config", "lobes", "list", "--json"]);
+    let v = parse_json(&listed.stdout);
+    assert!(
+        !v["lobes"].as_array().unwrap().iter().any(|l| l["path"]
+            .as_str()
+            .is_some_and(|p| p.contains("snapshot-target"))),
+        "--snapshot must register no config entry: {}",
+        listed.stdout
+    );
+}
+
+// HARN-16: the note is deduplicated PER LOBE PATH, not globally. Two unreachable
+// lobes must produce two notes (one each), and each must name BOTH remedies. A
+// dedup keyed on a single bool would print one note and swallow the second
+// lobe's; the existing single-lobe test cannot see that.
+#[test]
+fn harn16_note_is_per_lobe_and_names_both_remedies() {
+    // spec: HARN-16
+    let sb = Sandbox::new();
+    let gone_a = sb.base.join("gone-a").join(".windsurf");
+    let gone_b = sb.base.join("gone-b").join(".windsurf");
+    sb.write_config(&format!(
+        "lobes = [\"{}\", \"{}\", \"{}\"]\n",
+        sb.claude_home.display(),
+        gone_a.display(),
+        gone_b.display()
+    ));
+
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    // Two items in one invocation: 4 (item, lobe) skips, but only 2 notes.
+    let learn = sb.mind(&["learn", "*"]);
+    assert!(learn.success, "learn failed: {}", learn.stderr);
+
+    assert_eq!(
+        learn.stdout.matches("is unreachable").count(),
+        2,
+        "HARN-16: one note per unreachable LOBE (2 lobes x 2 items = 2 notes): {}",
+        learn.stdout
+    );
+    for lobe in [&gone_a, &gone_b] {
+        let s = lobe.to_string_lossy().into_owned();
+        assert_eq!(
+            learn
+                .stdout
+                .matches(&format!("lobe '{s}' is unreachable"))
+                .count(),
+            1,
+            "each unreachable lobe must be named exactly once: {}",
+            learn.stdout
+        );
+    }
+    assert!(
+        learn.stdout.contains("create the missing directory"),
+        "the note must name the create-the-directory remedy: {}",
+        learn.stdout
+    );
+    assert!(
+        learn.stdout.contains("config lobes remove"),
+        "the note must name the drop-the-lobe remedy: {}",
+        learn.stdout
+    );
+
+    // Nothing was linked into either unreachable lobe, and the manifest records
+    // no link there (the note is advisory, not a repair).
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(sb.mind_home.join("manifest.json")).unwrap())
+            .unwrap();
+    let a = gone_a.to_string_lossy().into_owned();
+    assert!(
+        !manifest["items"]["skill:review"]["links"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|l| l.as_str().is_some_and(|s| s.starts_with(&a))),
+        "an unreachable lobe must contribute no manifest link: {manifest:#?}"
+    );
+}
+
+// HARN-16 x a kinds filter: a lobe that does not admit the item's kind is
+// filtered out BEFORE the reachability check, so installing a rule must not
+// warn about an unreachable SKILL-ONLY lobe (that lobe would never have
+// received the rule even if it were reachable).
+#[test]
+fn harn16_no_note_for_an_unreachable_lobe_that_excludes_the_kind() {
+    // spec: HARN-16
+    let sb = Sandbox::new();
+    let gone = sb.base.join("gone-skillonly").join(".windsurf");
+    sb.write_config(&format!(
+        "lobes = [\"{}\", {{ path = \"{}\", kinds = [\"skill\"] }}]\n",
+        sb.claude_home.display(),
+        gone.display()
+    ));
+
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    let learn = sb.mind(&["learn", "style"]); // a RULE
+    assert!(learn.success, "learn rule failed: {}", learn.stderr);
+    assert!(
+        !learn.stdout.contains("is unreachable"),
+        "a skill-only lobe is excluded by the kinds filter before the \
+         reachability check, so installing a rule must not warn: {}",
+        learn.stdout
+    );
+}
+
+// HARN-17: `--force` is the ONLY way past the foreign-target guard, and it does
+// get past it. Without --force the same command leaves the file alone (covered
+// by harn17_backfill_reports_foreign_target_without_clobbering); with --force the
+// target becomes mind's symlink and the manifest records it.
+#[test]
+fn harn17_force_overrides_the_foreign_target_guard() {
+    // spec: HARN-17
+    let sb = Sandbox::new();
+    sb.write_config(&format!("lobes = [\"{}\"]\n", sb.claude_home.display()));
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    assert!(sb.mind(&["learn", "review"]).success, "learn skill");
+
+    let new_lobe = sb.base.join("forced-lobe");
+    std::fs::create_dir_all(new_lobe.join("skills")).unwrap();
+    let foreign_target = new_lobe.join("skills/review");
+    std::fs::write(&foreign_target, b"not managed by mind").unwrap();
+
+    let new_lobe_str = new_lobe.to_string_lossy().into_owned();
+    let added = sb.mind(&["config", "lobes", "add", "--force", &new_lobe_str]);
+    assert!(added.success, "forced lobe add failed: {}", added.stderr);
+    assert!(
+        !added.stdout.contains("could not link"),
+        "--force must not report a blocked target: {}",
+        added.stdout
+    );
+
+    let md = std::fs::symlink_metadata(&foreign_target).unwrap();
+    assert!(
+        md.file_type().is_symlink(),
+        "--force must replace the foreign file with mind's symlink"
+    );
+    let target = std::fs::read_link(&foreign_target).unwrap();
+    assert!(
+        target.starts_with(sb.mind_home.join("store")),
+        "the forced link must point into the store: {target:?}"
+    );
+
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(sb.mind_home.join("manifest.json")).unwrap())
+            .unwrap();
+    let expected = foreign_target.to_string_lossy().into_owned();
+    assert!(
+        manifest["items"]["skill:review"]["links"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|l| l.as_str() == Some(expected.as_str())),
+        "a forced link must be recorded in the manifest: {manifest:#?}"
+    );
+}
+
+// HARN-17: a blocked target must not corrupt the manifest and must not abort the
+// rest of the backfill. One item is blocked by a foreign file; the other item
+// must still be linked, the blocked link must NOT be recorded (recording it
+// would make `forget` delete the user's file and `introspect` believe the item
+// is covered), and the pre-existing link must survive.
+#[test]
+fn harn17_blocked_backfill_keeps_manifest_honest_and_continues() {
+    // spec: HARN-17
+    let sb = Sandbox::new();
+    sb.write_config(&format!("lobes = [\"{}\"]\n", sb.claude_home.display()));
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    assert!(sb.mind(&["learn", "review"]).success, "learn skill");
+    assert!(sb.mind(&["learn", "style"]).success, "learn rule");
+
+    let new_lobe = sb.base.join("partial-lobe");
+    std::fs::create_dir_all(new_lobe.join("skills")).unwrap();
+    let foreign_target = new_lobe.join("skills/review");
+    let foreign_content = b"user content, not mind's";
+    std::fs::write(&foreign_target, foreign_content).unwrap();
+
+    let new_lobe_str = new_lobe.to_string_lossy().into_owned();
+    let added = sb.mind(&["config", "lobes", "add", &new_lobe_str]);
+    assert!(
+        added.success,
+        "a blocked target is a warning, not a failure: {}",
+        added.stderr
+    );
+
+    // The foreign file is untouched.
+    assert_eq!(
+        std::fs::read(&foreign_target).unwrap(),
+        foreign_content,
+        "the foreign file's content must be untouched"
+    );
+
+    // The OTHER item still landed: one blocked target does not abort the pass.
+    let rule_link = new_lobe.join("rules/style.md");
+    assert!(
+        std::fs::symlink_metadata(&rule_link).is_ok(),
+        "a blocked target for one item must not stop the next item from linking: {}",
+        added.stdout
+    );
+
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(sb.mind_home.join("manifest.json")).unwrap())
+            .unwrap();
+    let blocked = foreign_target.to_string_lossy().into_owned();
+    let skill_links: Vec<&str> = manifest["items"]["skill:review"]["links"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l.as_str().unwrap())
+        .collect();
+    assert!(
+        !skill_links.contains(&blocked.as_str()),
+        "a link that was NOT created must never be recorded: {skill_links:?}"
+    );
+    assert!(
+        skill_links
+            .iter()
+            .any(|l| l.starts_with(&sb.claude_home.to_string_lossy().into_owned())),
+        "the pre-existing claude_home link must survive the partial backfill: {skill_links:?}"
+    );
+    let rule_links: Vec<&str> = manifest["items"]["rule:style"]["links"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l.as_str().unwrap())
+        .collect();
+    let rule_link_str = rule_link.to_string_lossy().into_owned();
+    assert!(
+        rule_links.contains(&rule_link_str.as_str()),
+        "the link that WAS created must be recorded: {rule_links:?}"
+    );
+
+    // The gap is visible to introspect (it is a real missing-lobe-link), and a
+    // following `introspect --fix` still refuses to clobber the foreign file.
+    let intro = sb.mind(&["introspect", "--json"]);
+    let iv = parse_json(&intro.stdout);
+    assert!(
+        iv["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["kind"].as_str() == Some("missing-lobe-link")
+                && i["target"].as_str() == Some("skill:review")),
+        "the blocked link must surface as a missing-lobe-link finding: {}",
+        intro.stdout
+    );
+    let fixed = sb.mind(&["introspect", "--fix"]);
+    assert!(fixed.success, "introspect --fix failed: {}", fixed.stderr);
+    assert_eq!(
+        std::fs::read(&foreign_target).unwrap(),
+        foreign_content,
+        "`introspect --fix` has no --force, so it must not clobber the file either"
+    );
+}
+
+// HARN-17: a foreign SYMLINK (pointing outside the store) is guarded exactly like
+// a regular file. `ensure_unoccupied` treats "ours" as "a symlink into the store
+// root", so a symlink to anywhere else is the user's and must survive.
+#[test]
+fn harn17_foreign_symlink_at_target_is_not_followed_or_replaced() {
+    // spec: HARN-17
+    let sb = Sandbox::new();
+    sb.write_config(&format!("lobes = [\"{}\"]\n", sb.claude_home.display()));
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    assert!(sb.mind(&["learn", "review"]).success, "learn skill");
+
+    let elsewhere = sb.base.join("user-owned-review");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let new_lobe = sb.base.join("symlinked-lobe");
+    std::fs::create_dir_all(new_lobe.join("skills")).unwrap();
+    let target = new_lobe.join("skills/review");
+    std::os::unix::fs::symlink(&elsewhere, &target).unwrap();
+
+    let new_lobe_str = new_lobe.to_string_lossy().into_owned();
+    let added = sb.mind(&["config", "lobes", "add", &new_lobe_str]);
+    assert!(added.success, "lobe add failed: {}", added.stderr);
+
+    assert_eq!(
+        std::fs::read_link(&target).unwrap(),
+        elsewhere,
+        "a symlink that does not point into the store is the user's and must \
+         be left pointing where it pointed: {}",
+        added.stdout
+    );
+    assert!(
+        added.stdout.contains("--force"),
+        "the blocked target must be reported with the --force remedy: {}",
+        added.stdout
+    );
+}
+
+// HARN-17 at the `config lobes detect` call site, which has no `--force` to
+// plumb and passes `false`: a detected lobe whose target is already occupied by
+// a foreign file must be reported, never clobbered. `detect --yes` is the one
+// backfill entry point a user can trigger without naming a path, so a clobber
+// here would be the least expected.
+#[test]
+fn harn17_detect_backfill_does_not_clobber_a_foreign_target() {
+    // spec: HARN-17
+    let sb = Sandbox::new();
+    sb.write_config(&format!("lobes = [\"{}\"]\n", sb.claude_home.display()));
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    assert!(sb.mind(&["learn", "review"]).success, "learn skill");
+
+    // A detection base with a `.gemini` marker, and a foreign file exactly where
+    // the gemini lobe would link the installed skill.
+    let detect_home = sb.base.join("detect-foreign");
+    let lobe = detect_home.join(".gemini/config");
+    std::fs::create_dir_all(lobe.join("skills")).unwrap();
+    let foreign_target = lobe.join("skills/review");
+    let foreign_content = b"user content in the gemini home";
+    std::fs::write(&foreign_target, foreign_content).unwrap();
+
+    let detect_str = detect_home.to_string_lossy().into_owned();
+    let r = sb.mind_env(
+        &["config", "lobes", "detect", "--yes"],
+        &[("MIND_DETECT_HOME", &detect_str)],
+    );
+    assert!(r.success, "detect --yes failed: {}", r.stderr);
+
+    let md = std::fs::symlink_metadata(&foreign_target).unwrap();
+    assert!(
+        !md.file_type().is_symlink(),
+        "detect's backfill must not turn a foreign file into a symlink"
+    );
+    assert_eq!(
+        std::fs::read(&foreign_target).unwrap(),
+        foreign_content,
+        "detect's backfill must leave foreign content untouched"
+    );
+    assert!(
+        r.stdout.contains("--force"),
+        "the blocked target must be reported with the --force remedy: {}",
+        r.stdout
+    );
+
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(sb.mind_home.join("manifest.json")).unwrap())
+            .unwrap();
+    let blocked = foreign_target.to_string_lossy().into_owned();
+    assert!(
+        !manifest["items"]["skill:review"]["links"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|l| l.as_str() == Some(blocked.as_str())),
+        "a link that was not created must not be recorded: {manifest:#?}"
+    );
+}
+
+// HARN-15 failure mode: the lobe path already exists as a FILE, so the mkdir_p
+// cannot succeed. The add must fail cleanly and BEFORE the config is written --
+// the mkdir_p runs ahead of `cfg.save`, so a half-registered lobe pointing at a
+// file can never be persisted -- and the user's file must be left alone.
+#[test]
+fn harn15_lobe_path_occupied_by_a_file_fails_without_registering() {
+    // spec: HARN-15
+    let sb = Sandbox::new();
+    sb.write_config(&format!("lobes = [\"{}\"]\n", sb.claude_home.display()));
+
+    let occupied = sb.base.join("a-file-not-a-lobe");
+    std::fs::write(&occupied, b"i am a file").unwrap();
+    let occupied_str = occupied.to_string_lossy().into_owned();
+
+    let r = sb.mind(&["config", "lobes", "add", &occupied_str]);
+    assert!(
+        !r.success,
+        "a lobe path occupied by a file must fail, not silently register: {}",
+        r.stdout
+    );
+    assert_eq!(
+        std::fs::read(&occupied).unwrap(),
+        b"i am a file",
+        "the user's file must be untouched"
+    );
+
+    let listed = sb.mind(&["config", "lobes", "list", "--json"]);
+    let v = parse_json(&listed.stdout);
+    assert!(
+        !v["lobes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|l| l["path"].as_str() == Some(occupied_str.as_str())),
+        "a failed mkdir must leave no config entry: {}",
+        listed.stdout
+    );
+}
+
+// HARN-17: the backfill has no interactive branch left at all.
+//
+// The TTY arm of HARN-17 ("an interactive TTY ... never prompts") cannot be
+// driven from an integration test: `hook::is_tty()` reads
+// `std::io::stdin().is_terminal()` and has no env seam, and the test harness
+// gives the child a pipe. What CAN be asserted is the structural fact that
+// makes all three invocation modes identical: `backfill_new_lobes` contains no
+// TTY check, no confirmation prompt, and no `introspect --fix` deferral, so
+// there is no branch for a terminal to select. Re-introducing any of them fails
+// this test.
+#[test]
+fn harn17_backfill_has_no_interactive_or_deferral_branch() {
+    // spec: HARN-17
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/commands.rs"),
+    )
+    .expect("read src/commands.rs");
+    let start = src
+        .find("fn backfill_new_lobes(")
+        .expect("backfill_new_lobes must exist in src/commands.rs");
+    let body = &src[start..];
+    let end = body.find("\n}\n").expect("end of backfill_new_lobes");
+    let body = &body[..end];
+    // Anchor: prove the slice really is the function body, so the negative
+    // assertions below cannot pass vacuously on an empty or mis-sliced range.
+    assert!(
+        body.contains("link_into_new_lobes"),
+        "the sliced body must be backfill_new_lobes itself:\n{body}"
+    );
+
+    for forbidden in [
+        "is_tty",
+        "confirm_default_yes",
+        "confirm(",
+        "introspect --fix",
+    ] {
+        assert!(
+            !body.contains(forbidden),
+            "HARN-17: the backfill must be unconditional in every mode, but its \
+             body mentions `{forbidden}`:\n{body}"
+        );
+    }
+}
+
+// HARN-18: dropping the repaired finding must drop ONLY that finding. The
+// implementation's own test asserts an empty issue list on an otherwise-clean
+// run, which a blanket `issues.clear()` regression would also satisfy. Here a
+// second, genuinely unrepaired issue is present: it must survive, and the
+// vanished-lobe finding must not.
+#[test]
+fn harn18_repaired_finding_is_dropped_without_hiding_the_rest() {
+    // spec: HARN-18
+    let sb = Sandbox::new();
+    let proj = sb.base.join("harn18-mixed");
+    std::fs::create_dir_all(&proj).unwrap();
+    let proj_str = proj.to_string_lossy().into_owned();
+
+    assert!(sb.mind(&["link-project", &proj_str]).success);
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    assert!(
+        sb.mind(&["learn", "review", "--yes"]).success,
+        "learn skill"
+    );
+
+    let ws_path = proj.join(".windsurf").to_string_lossy().into_owned();
+
+    // Issue 1 (repairable in this run): the project directory vanishes.
+    std::fs::remove_dir_all(&proj).unwrap();
+    // Issue 2, raised BEFORE the HARN-18 filter runs (a broken mind.toml makes
+    // the source unscannable): this is the finding a blanket "clear everything"
+    // regression would swallow, since the filter sits between it and the rest.
+    std::fs::write(sb.source.join("mind.toml"), "this is not = = valid toml\n").unwrap();
+    // Issue 3, raised AFTER the filter (the installed item drifts from its
+    // source), which `introspect --fix` reports but never silently upgrades.
+    std::fs::write(
+        sb.source.join("skills/review/SKILL.md"),
+        "---\nname: review\ndescription: Review the diff for bugs\n---\n# review skill (edited)\n",
+    )
+    .unwrap();
+
+    let r = sb.mind(&["introspect", "--fix", "--json"]);
+    assert!(r.success, "introspect --fix failed: {}", r.stderr);
+    let v = parse_json(&r.stdout);
+    let issues = v["issues"].as_array().expect("issues array");
+
+    assert!(
+        !issues
+            .iter()
+            .any(|i| i["kind"].as_str() == Some("vanished-lobe")
+                && i["target"].as_str() == Some(ws_path.as_str())),
+        "HARN-18: the lobe pruned in this run must not also be reported: {}",
+        r.stdout
+    );
+    assert!(
+        issues
+            .iter()
+            .any(|i| i["kind"].as_str() == Some("source-scan-failed")),
+        "HARN-18 drops only the REPAIRED finding; a finding raised BEFORE the \
+         filter must survive it: {}",
+        r.stdout
+    );
+
+    // The human summary counts exactly the surviving issues, and still reports
+    // the repair.
+    let sb2 = Sandbox::new();
+    let proj2 = sb2.base.join("harn18-mixed-text");
+    std::fs::create_dir_all(&proj2).unwrap();
+    let proj2_str = proj2.to_string_lossy().into_owned();
+    assert!(sb2.mind(&["link-project", &proj2_str]).success);
+    assert!(sb2.mind(&["meld", &sb2.source_spec()]).success);
+    assert!(
+        sb2.mind(&["learn", "review", "--yes"]).success,
+        "learn skill"
+    );
+    std::fs::remove_dir_all(&proj2).unwrap();
+    std::fs::write(sb2.source.join("mind.toml"), "this is not = = valid toml\n").unwrap();
+
+    let text = sb2.mind(&["introspect", "--fix"]);
+    assert!(text.success, "{}", text.stderr);
+    assert!(
+        text.stdout.contains("pruned vanished lobe(s) from config"),
+        "the repair must still be reported: {}",
+        text.stdout
+    );
+    assert!(
+        text.stdout.contains("issue(s) found"),
+        "a run with a surviving issue must still report a count: {}",
+        text.stdout
+    );
+    assert!(
+        !text.stdout.contains("parent dir is gone"),
+        "the repaired vanished-lobe line must not be printed as outstanding: {}",
+        text.stdout
+    );
+}
+
+// HARN-18 boundary: without `--fix` nothing is repaired, so nothing may be
+// dropped. The vanished-lobe finding must still be reported AND counted. This
+// pins that the HARN-18 filter is gated on the repair actually happening; a
+// regression that filtered unconditionally would silently hide a real problem.
+#[test]
+fn harn18_without_fix_the_vanished_lobe_is_still_counted() {
+    // spec: HARN-18
+    let sb = Sandbox::new();
+    let proj = sb.base.join("harn18-nofix");
+    std::fs::create_dir_all(&proj).unwrap();
+    let proj_str = proj.to_string_lossy().into_owned();
+
+    assert!(sb.mind(&["link-project", &proj_str]).success);
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    assert!(
+        sb.mind(&["learn", "review", "--yes"]).success,
+        "learn skill"
+    );
+    std::fs::remove_dir_all(&proj).unwrap();
+
+    let r = sb.mind(&["introspect"]);
+    assert!(r.success, "introspect failed: {}", r.stderr);
+    assert!(
+        r.stdout.contains("parent dir is gone"),
+        "without --fix the vanished lobe must be reported: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("issue(s) found"),
+        "without --fix the vanished lobe must be COUNTED: {}",
+        r.stdout
+    );
+}
+
+// HARN-16 under `--json`: the one-time unreachable-lobe note goes to stdout via
+// a bare `println!`, with no render-context check. `learn --json` must still
+// emit a single JSON document on stdout, or every machine consumer breaks the
+// moment a configured lobe becomes unreachable.
+//
+// KNOWN DEFECT (ignored, not a coverage gap): src/install.rs
+// `note_unreachable_lobe_once` prints with an unguarded `println!`, so with an
+// unreachable lobe configured, `mind learn <item> --json` emits
+//   note: lobe '...' is unreachable ...
+//   { "schema": 1, "action": "learn", ... }
+// and stdout no longer parses as JSON. Guard the note on
+// `crate::render::ctx().json` (or route it to stderr) and un-ignore this test.
+#[test]
+#[ignore = "known defect: the HARN-16 note is printed unguarded and corrupts --json stdout"]
+fn harn16_unreachable_note_keeps_json_stdout_parseable() {
+    // spec: HARN-16
+    let sb = Sandbox::new();
+    let gone = sb.base.join("gone-json").join(".windsurf");
+    sb.write_config(&format!(
+        "lobes = [\"{}\", \"{}\"]\n",
+        sb.claude_home.display(),
+        gone.display()
+    ));
+
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    let learn = sb.mind(&["learn", "review", "--json"]);
+    assert!(learn.success, "learn --json failed: {}", learn.stderr);
+    assert!(
+        serde_json::from_str::<serde_json::Value>(learn.stdout.trim()).is_ok(),
+        "stdout under --json must be a single JSON document; the HARN-16 note \
+         must be suppressed or routed to stderr: {}",
+        learn.stdout
+    );
+}
+
+// HARN-17 under `--json`: a blocked backfill target prints a `could not link
+// ...` line through `println!` before the JSON result object, so the same
+// stdout-purity question applies to the foreign-target path.
+//
+// KNOWN DEFECT (ignored, not a coverage gap): src/commands.rs
+// `backfill_new_lobes` prints each failure with an unguarded `println!`, and
+// `lobe_add_resolved` calls it BEFORE `print_json`, so
+// `mind config lobes add --json <lobe with a foreign target>` emits
+//   ! could not link ...: ... already exists and is not managed by mind ...
+//   { "schema": 1, "action": "lobe-add", ... }
+// and stdout no longer parses as JSON. This is the exact path HARN-17 added
+// (unconditional backfill under --json), so the guard and the JSON pollution
+// arrived together. Same fix as the HARN-16 note: suppress under `out.json` or
+// route to stderr.
+#[test]
+#[ignore = "known defect: the HARN-17 blocked-target warning corrupts --json stdout"]
+fn harn17_blocked_backfill_keeps_json_stdout_parseable() {
+    // spec: HARN-17
+    let sb = Sandbox::new();
+    sb.write_config(&format!("lobes = [\"{}\"]\n", sb.claude_home.display()));
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    assert!(sb.mind(&["learn", "review"]).success, "learn skill");
+
+    let new_lobe = sb.base.join("json-blocked-lobe");
+    std::fs::create_dir_all(new_lobe.join("skills")).unwrap();
+    std::fs::write(new_lobe.join("skills/review"), b"user content").unwrap();
+    let new_lobe_str = new_lobe.to_string_lossy().into_owned();
+
+    let added = sb.mind(&["config", "lobes", "add", "--json", &new_lobe_str]);
+    assert!(added.success, "lobe add --json failed: {}", added.stderr);
+    assert!(
+        serde_json::from_str::<serde_json::Value>(added.stdout.trim()).is_ok(),
+        "stdout under --json must be a single JSON document; the blocked-target \
+         warning must be suppressed or routed to stderr: {}",
+        added.stdout
+    );
+}
+
+// HARN-19 honesty check (deliberately cites no spec ID: HARN-19 is ALLOWLISTed
+// in tests/spec_coverage.rs as planned-and-unimplemented, and a citation would
+// fail that gate's "remove now-cited IDs from ALLOWLIST" assertion).
+//
+// Guards the claim the allowlist entry and the `planned` status row rest on: no
+// selective/local lobe mode exists. If someone builds one, this test fails and
+// forces the spec status + allowlist to be updated with it.
+#[test]
+fn selective_lobe_mode_is_still_unimplemented() {
+    let sb = Sandbox::new();
+    for verb in ["learn", "meld"] {
+        let help = sb.mind(&[verb, "--help"]);
+        assert!(help.success, "{verb} --help failed: {}", help.stderr);
+        assert!(
+            !help.stdout.contains("--local"),
+            "a `--local` (selective-mode) flag on `{verb}` would make the \
+             planned status of the selective lobe mode wrong: {}",
+            help.stdout
+        );
+    }
+
+    let readme = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("spec/README.md"),
+    )
+    .expect("read spec/README.md");
+    let row = readme
+        .lines()
+        .find(|l| l.contains("HARN-19"))
+        .expect("spec/README.md must carry a HARN-19 feature-status row");
+    assert!(
+        row.contains("| planned |"),
+        "the HARN-19 status row must say `planned` while no selective mode \
+         exists: {row}"
+    );
+}

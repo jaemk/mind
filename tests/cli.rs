@@ -764,6 +764,575 @@ fn introspect_reports_a_vanished_linked_source_as_an_issue_not_a_hard_error() {
     );
 }
 
+/// Run `mind` with BOTH a working directory and extra environment variables.
+/// `Sandbox::mind_cwd` sets only the cwd and `Sandbox::mind_env` only the env;
+/// the CLI-215 shadow-note test needs a cwd (to shadow the spec) and a stubbed
+/// `git` on PATH (so the clone that follows the note can never reach a remote).
+fn mind_in(sb: &Sandbox, args: &[&str], cwd: &Path, envs: &[(&str, &str)]) -> Run {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_mind"));
+    cmd.args(args)
+        .current_dir(cwd)
+        .env("MIND_HOME", &sb.mind_home)
+        .env("CLAUDE_HOME", &sb.claude_home)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null());
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().expect("run mind");
+    Run {
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        success: out.status.success(),
+    }
+}
+
+#[test]
+fn recall_still_lists_the_healthy_sources_items_when_another_source_is_gone() {
+    // spec: CLI-213 -- "the sources that DID scan are still shown/searched/
+    // resolved against". The existing degradation tests register exactly ONE
+    // source (the gone one), so they cannot tell "degraded past it" apart from
+    // "returned nothing at all". Here a healthy source's items must still be
+    // listed after the broken source is skipped.
+    let sb = melded(); // healthy `agents` source: review, dev, style.
+    let broken = Sandbox::bare("gone-src");
+    broken.write_and_commit(
+        "skills/ghost/SKILL.md",
+        "---\nname: ghost\ndescription: ghost skill\n---\n# ghost\n",
+    );
+    assert!(
+        sb.mind(&["meld", &broken.source_spec(), "--register-only"])
+            .success
+    );
+    std::fs::remove_dir_all(&broken.source).unwrap();
+
+    let r = sb.mind(&["recall"]);
+    assert!(r.success, "recall must degrade: {} {}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("review") && r.stdout.contains("dev"),
+        "the healthy source's items must still be listed: {}",
+        r.stdout
+    );
+    assert!(
+        !r.stdout.contains("ghost"),
+        "the gone source contributes nothing: {}",
+        r.stdout
+    );
+    assert!(
+        r.stderr.contains("gone-src"),
+        "the warning must name the skipped source: {}",
+        r.stderr
+    );
+
+    // `probe <query>` searches the partial catalog rather than reporting an
+    // empty index.
+    let p = sb.mind(&["probe", "review", "--no-tui"]);
+    assert!(p.success, "probe must degrade: {} {}", p.stdout, p.stderr);
+    assert!(
+        p.stdout.contains("review"),
+        "probe must still search the sources that did scan: {}",
+        p.stdout
+    );
+}
+
+#[test]
+fn learn_still_resolves_an_item_when_another_source_is_gone() {
+    // spec: CLI-213 -- `learn`'s item resolution is named explicitly in the
+    // spec as one of the three degrading call sites, and nothing drove it: a
+    // dead source must not make every OTHER source's items unlearnable.
+    let sb = melded();
+    let broken = Sandbox::bare("gone-for-learn");
+    broken.write_and_commit(
+        "skills/ghost/SKILL.md",
+        "---\nname: ghost\ndescription: ghost skill\n---\n# ghost\n",
+    );
+    assert!(
+        sb.mind(&["meld", &broken.source_spec(), "--register-only"])
+            .success
+    );
+    std::fs::remove_dir_all(&broken.source).unwrap();
+
+    let r = sb.mind(&["learn", "review"]);
+    assert!(
+        r.success,
+        "learn must still resolve items from the healthy source: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        sb.claude_home.join("skills/review/SKILL.md").exists(),
+        "the item must actually be installed"
+    );
+}
+
+#[test]
+fn dump_still_hard_fails_on_a_vanished_linked_source() {
+    // spec: CLI-213 -- "`dump`'s reconstruction is unaffected: it still
+    // hard-fails on any scan error, including this one -- a partial dump is
+    // worse than none". The degradation added to `catalog::scan` must not have
+    // leaked into `dump`, which uses `catalog::scan_source` per source.
+    let sb = melded();
+    assert!(sb.mind(&["learn", "review"]).success);
+    std::fs::remove_dir_all(&sb.source).unwrap();
+
+    let out_path = sb.base.join("dumped.toml");
+    let out_str = out_path.to_string_lossy().into_owned();
+    let r = sb.mind(&["dump", "--output", &out_str]);
+    assert!(
+        !r.success,
+        "dump must refuse a partial reproduction: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        format!("{}{}", r.stdout, r.stderr).contains("gone"),
+        "dump must name the vanished working tree as the cause: stdout={} stderr={}",
+        r.stdout,
+        r.stderr
+    );
+    assert!(
+        !out_path.exists(),
+        "no partial dump file may be left behind: {out_path:?}"
+    );
+}
+
+#[test]
+fn meld_of_a_nonexistent_local_path_still_hard_fails_and_registers_nothing() {
+    // spec: CLI-213 -- "`meld`'s own scan of the source it just cloned is
+    // unaffected: it still hard-fails on any scan error, including this one".
+    // `meld` scans through `catalog::scan` (with a one-source registry), which
+    // is the function that now DEGRADES on `LinkedSourceGone`, so the claim
+    // rests entirely on meld never reaching that state. This pins the guard:
+    // a local path that is not a directory is refused before the scan, so the
+    // degradation cannot turn a typo'd `mind meld ./tpyo` into a silently
+    // registered empty source.
+    let sb = Sandbox::bare("meld-guard");
+    let missing = sb.base.join("no-such-dir").to_string_lossy().into_owned();
+    let r = sb.mind(&["meld", &missing]);
+    assert!(
+        !r.success,
+        "meld of a nonexistent local path must fail: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr.contains("not a directory"),
+        "the error must name the cause: {}",
+        r.stderr
+    );
+    let sources = sb.mind(&["recall", "--sources"]);
+    assert!(
+        !sources.stdout.contains("no-such-dir"),
+        "nothing may be registered: {}",
+        sources.stdout
+    );
+}
+
+#[test]
+#[ignore = "PRODUCTION DEFECT: meld's source_status degrades a vanished source into '0 item(s)', \
+            contradicting CLI-213 ('meld's own scan still hard-fails on any scan error, \
+            including this one')"]
+fn remelding_a_vanished_linked_source_names_it_rather_than_reporting_zero_items() {
+    // PRODUCTION DEFECT, src/commands.rs:3772 (`source_status`):
+    //     let items = catalog::scan(paths, &single(source))?;
+    // `catalog::scan` is the function CLI-212/CLI-213 changed to DEGRADE past a
+    // `LinkedSourceGone` source, and `source_status` is reached from `meld` (the
+    // already-melded branch, src/commands.rs:3380). CLI-213 states that
+    // "`meld`'s own scan of the source it just cloned ... still hard-fail[s] on
+    // any scan error, including this one", but it does not: re-melding a source
+    // whose working tree has vanished prints
+    //     * local/<owner>/agents is already melded
+    //     * local/<owner>/agents: 0 item(s) (source @ <sha>)
+    // and exits 0, describing a dead source as a healthy source that happens to
+    // offer nothing. (The stderr warning IS emitted, but stdout contradicts it
+    // and the exit status says success.) A user re-melding to check on a source
+    // is told everything is fine.
+    //
+    // Fix: `source_status` should call `catalog::scan_source` (which does not
+    // degrade), like `dump` does, so naming a source directly still errors.
+    // Un-ignore when it does.
+    // spec: CLI-212 CLI-213
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    assert!(sb.mind(&["meld", &spec, "--register-only"]).success);
+    std::fs::remove_dir_all(&sb.source).unwrap();
+
+    let r = sb.mind(&["meld", &spec, "--register-only"]);
+    let combined = format!("{}{}", r.stdout, r.stderr);
+    assert!(
+        combined.contains("gone") || combined.contains("not a directory"),
+        "re-melding a vanished source must name the vanished working tree rather than \
+         reporting a healthy source with no items: stdout={} stderr={}",
+        r.stdout,
+        r.stderr
+    );
+    assert!(
+        !r.stdout.contains("0 item(s)"),
+        "a vanished source must not be reported as an empty but healthy source: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn a_relative_local_meld_keeps_working_after_the_caller_moves() {
+    // spec: STO-72 STO-73 -- U40's headline symptom. `mind meld ./agents` run
+    // from the parent directory used to record the literal `./agents` into
+    // `Source.url`; every later command run from anywhere else then looked for
+    // `./agents` relative to ITS own cwd and found nothing. The absolute form
+    // must be persisted at parse time, so the source stays resolvable from any
+    // directory.
+    let sb = Sandbox::new();
+    let r = sb.mind_cwd(&["meld", "./agents", "--register-only"], &sb.base);
+    assert!(
+        r.success,
+        "a relative local meld must succeed: {} {}",
+        r.stdout, r.stderr
+    );
+
+    // The persisted url is absolute, not the literal './agents'.
+    let sources_json = std::fs::read_to_string(sb.mind_home.join("sources.json")).unwrap();
+    assert!(
+        sources_json.contains(&sb.source.to_string_lossy().into_owned()),
+        "the absolute path must be recorded: {sources_json}"
+    );
+    assert!(
+        !sources_json.contains("\"./agents\""),
+        "the literal relative spec must not be persisted: {sources_json}"
+    );
+    // ...and the identity names the real parent directory, not the `local`
+    // placeholder that a literal `.` segment used to collapse to.
+    assert!(
+        !sources_json.contains("\"local/local/agents\""),
+        "the owner must be the real parent dir, not the 'local' placeholder: {sources_json}"
+    );
+
+    // Run every later command from a DIFFERENT directory: the source still
+    // resolves and its items are still installable.
+    let elsewhere = sb.mind_home.clone();
+    let recall = sb.mind_cwd(&["recall"], &elsewhere);
+    assert!(
+        recall.success && recall.stdout.contains("review"),
+        "the source must still be readable from another cwd: {} {}",
+        recall.stdout,
+        recall.stderr
+    );
+    assert!(
+        !recall.stderr.contains("gone"),
+        "the source must not be reported as a vanished working tree: {}",
+        recall.stderr
+    );
+    let learn = sb.mind_cwd(&["learn", "review"], &elsewhere);
+    assert!(
+        learn.success,
+        "learn from another cwd must succeed: {} {}",
+        learn.stdout, learn.stderr
+    );
+    assert!(sb.claude_home.join("skills/review/SKILL.md").exists());
+}
+
+#[test]
+fn review_reads_a_relative_two_segment_directory_as_a_local_path() {
+    // spec: CLI-214 -- the headline case. `skills/greet` parses as the remote
+    // spec `owner/repo`, so without the existing-directory check `review`
+    // shallow-clones it from github.com. The unit coverage passes an ABSOLUTE
+    // directory, which never had that ambiguity; only a relative two-segment
+    // path exercises the branch the spec is about. A stub `git` that refuses
+    // every https clone keeps a regression here from reaching the network.
+    let sb = Sandbox::bare("cli214");
+    let fake_dir = fake_git_bin_dir(&sb.base);
+    let new_path = prepend_path(&fake_dir);
+    let workdir = sb.base.join("workdir");
+    write(
+        &workdir.join("skills/greet/SKILL.md"),
+        "---\nname: greet\ndescription: Greet the user\n---\n# greet\n",
+    );
+
+    let r = mind_in(
+        &sb,
+        &["review", "skills/greet"],
+        &workdir,
+        &[("PATH", &new_path)],
+    );
+    assert!(
+        r.success,
+        "review of an existing relative directory must succeed locally: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        !format!("{}{}", r.stdout, r.stderr).contains("Authentication failed"),
+        "review must not have attempted a clone: {} {}",
+        r.stdout,
+        r.stderr
+    );
+    assert!(
+        r.stderr.contains("reviewed as that local path")
+            && r.stderr.contains("mind review github:skills/greet"),
+        "review must say which reading it took and how to force the remote one: {}",
+        r.stderr
+    );
+    assert_no_review_temp(&sb.mind_home);
+}
+
+#[test]
+#[ignore = "known defect: review emits parse_spec's CLI-215 note, which contradicts the CLI-214 note"]
+fn review_of_a_shadowed_directory_emits_only_the_note_for_the_reading_it_took() {
+    // KNOWN DEFECT (src/review.rs `shadow_note` -> src/source.rs `parse_spec`):
+    // `shadow_note` builds its message by calling `parse_spec`, whose bare
+    // `owner/repo` branch itself prints the CLI-215 note when the spec shadows
+    // a local directory. So `mind review skills/greet` prints BOTH, and
+    // CLI-215's line ("to meld/review it as a local path instead of a remote
+    // repo, use './skills/greet'") tells the user to do the thing `review` has
+    // already done, immediately before the CLI-214 line says so. Neither spec
+    // statement is violated in isolation, which is why this is ignored rather
+    // than red; un-ignore when `shadow_note` stops routing through the
+    // note-printing parse.
+    // spec: CLI-214 CLI-215
+    let sb = Sandbox::bare("cli214-notes");
+    let fake_dir = fake_git_bin_dir(&sb.base);
+    let new_path = prepend_path(&fake_dir);
+    let workdir = sb.base.join("workdir");
+    write(
+        &workdir.join("skills/greet/SKILL.md"),
+        "---\nname: greet\ndescription: Greet the user\n---\n# greet\n",
+    );
+
+    let r = mind_in(
+        &sb,
+        &["review", "skills/greet"],
+        &workdir,
+        &[("PATH", &new_path)],
+    );
+    assert!(
+        r.stderr.contains("reviewed as that local path"),
+        "the CLI-214 note must be present: {}",
+        r.stderr
+    );
+    assert!(
+        !r.stderr.contains("use './skills/greet'"),
+        "the CLI-215 note contradicts the reading review actually took: {}",
+        r.stderr
+    );
+}
+
+#[test]
+fn review_registry_selector_still_beats_a_same_named_local_directory() {
+    // spec: CLI-214 -- "BETWEEN the registry-selector match and repo-spec
+    // parsing". The ordering is load-bearing and untested: if the
+    // existing-directory check ran first, `mind review agents` in a directory
+    // that happens to contain an unrelated `agents/` folder would silently
+    // review the wrong tree instead of the melded source of that name.
+    let sb = melded(); // registers `local/<base>/agents`, selector `agents`.
+    // A decoy directory of the same name whose `mind.toml` is malformed, so
+    // reviewing IT is a hard error. The melded source has no mind.toml and
+    // reviews clean, making the two readings trivially distinguishable by exit
+    // status alone.
+    let decoy = sb.base.join("decoy");
+    write(
+        &decoy.join("agents/mind.toml"),
+        "this is not = = toml {{{\n",
+    );
+    write(
+        &decoy.join("agents/skills/impostor/SKILL.md"),
+        "---\nname: impostor\ndescription: not the melded source\n---\n# impostor\n",
+    );
+
+    let r = mind_in(&sb, &["review", "agents"], &decoy, &[]);
+    assert!(
+        r.success,
+        "the registry match must win over the same-named local directory (reviewing the decoy \
+         would hard-fail on its malformed mind.toml): {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        !format!("{}{}", r.stdout, r.stderr).contains("impostor"),
+        "the decoy's items must never be reviewed: {} {}",
+        r.stdout,
+        r.stderr
+    );
+
+    // The decoy IS reachable, just not by the registry selector: naming it as
+    // an explicit relative path takes the CLI-214 local reading and hard-fails.
+    let d = mind_in(&sb, &["review", "./agents"], &decoy, &[]);
+    assert!(
+        !d.success,
+        "control: the decoy directory really is a broken source: {} {}",
+        d.stdout, d.stderr
+    );
+}
+
+#[test]
+fn meld_notes_a_shadowing_local_directory_before_it_clones() {
+    // spec: CLI-215 -- `parse_spec`'s bare `owner/repo` branch warns, BEFORE
+    // any clone, that the spec also names a directory here, and still takes the
+    // remote reading. Only the pure `local_dir_shadow` helper was covered; the
+    // note itself (emitted from inside `parse_spec`) was not. The stub `git`
+    // fails every https clone, so the remote reading this test proves `meld`
+    // still takes never leaves the machine.
+    let sb = Sandbox::bare("cli215");
+    let fake_dir = fake_git_bin_dir(&sb.base);
+    let new_path = prepend_path(&fake_dir);
+    let workdir = sb.base.join("workdir");
+    write(
+        &workdir.join("skills/greet/SKILL.md"),
+        "---\nname: greet\ndescription: Greet the user\n---\n# greet\n",
+    );
+
+    let r = mind_in(
+        &sb,
+        &["meld", "skills/greet"],
+        &workdir,
+        &[("PATH", &new_path)],
+    );
+    assert!(
+        r.stderr.contains("is also a directory here") && r.stderr.contains("'./skills/greet'"),
+        "meld must note the shadowing directory and the './' form: {}",
+        r.stderr
+    );
+    // The reading is unchanged: it still tries the REMOTE repo (which the stub
+    // git refuses), and nothing local is registered as a side effect.
+    assert!(
+        !r.success,
+        "the remote reading must still be taken (and fail against the stub git): {} {}",
+        r.stdout, r.stderr
+    );
+    let sources = sb.mind(&["recall", "--sources"]);
+    assert!(
+        !sources.stdout.contains("greet"),
+        "nothing may be registered from the failed remote reading: {}",
+        sources.stdout
+    );
+}
+
+#[test]
+fn meld_prints_no_shadow_note_when_no_such_directory_exists() {
+    // spec: CLI-215 -- the note is conditional on the directory existing. A
+    // note printed unconditionally would be noise on every ordinary
+    // `mind meld owner/repo`, so the negative case is part of the statement.
+    let sb = Sandbox::bare("cli215-quiet");
+    let fake_dir = fake_git_bin_dir(&sb.base);
+    let new_path = prepend_path(&fake_dir);
+    let workdir = sb.base.join("empty-workdir");
+    std::fs::create_dir_all(&workdir).unwrap();
+
+    let r = mind_in(
+        &sb,
+        &["meld", "skills/greet"],
+        &workdir,
+        &[("PATH", &new_path)],
+    );
+    assert!(
+        !r.stderr.contains("is also a directory here"),
+        "no shadow note when nothing is shadowed: {}",
+        r.stderr
+    );
+}
+
+// ---------------------------------------------------------------------------
+// DSC-92: a curated `[discover].sources` entry's relative local path resolves
+// against the curator's own directory, end to end through meld and sync.
+// ---------------------------------------------------------------------------
+
+/// Build a git repo at `dir` holding one skill named `skill`.
+fn nested_repo(dir: &Path, skill: &str) {
+    write(
+        &dir.join(format!("skills/{skill}/SKILL.md")),
+        &format!("---\nname: {skill}\ndescription: {skill} skill\n---\n# {skill}\n"),
+    );
+    git(dir, &["-c", "init.defaultBranch=main", "init", "-q"]);
+    git(dir, &["config", "user.email", "t@t"]);
+    git(dir, &["config", "user.name", "t"]);
+    git(dir, &["add", "-A"]);
+    git(dir, &["commit", "-qm", "initial"]);
+}
+
+#[test]
+fn meld_resolves_a_curated_relative_nested_source_against_the_curator_not_the_cwd() {
+    // spec: DSC-92 -- the only coverage was a direct `MindToml::load` unit
+    // test; nothing proved the rewrite reaches the real `meld` walk. The
+    // curator declares `source = "../explicit"` (the shape
+    // examples/super-source ships) and the meld runs from a cwd that is NOT the
+    // curator's parent, so a cwd-relative resolution finds nothing and the
+    // nested source is silently never registered.
+    let sb = Sandbox::bare("curator");
+    nested_repo(&sb.base.join("explicit"), "greet");
+    sb.write_and_commit(
+        "mind.toml",
+        "[[discover.sources]]\nsource = \"../explicit\"\n",
+    );
+
+    // Stand somewhere whose PARENT is not the curator's parent, so a
+    // cwd-relative reading of `../explicit` cannot accidentally land on the
+    // right directory. (A cwd of `<base>/anything` would: `../explicit` from
+    // there is `<base>/explicit` by coincidence.)
+    let elsewhere = sb.base.join("far/away");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    assert!(
+        !elsewhere.join("../explicit").is_dir(),
+        "the decoy cwd must not resolve '../explicit' to anything"
+    );
+    let spec = sb.source_spec();
+    let r = sb.mind_cwd(&["meld", &spec, "--register-only"], &elsewhere);
+    assert!(
+        r.success,
+        "melding the curator must succeed: {} {}",
+        r.stdout, r.stderr
+    );
+
+    let sources = sb.mind(&["recall", "--sources"]);
+    assert!(
+        sources.stdout.contains("explicit"),
+        "the relative nested source must be registered even though the consumer stood elsewhere: \
+         {}\nmeld stderr: {}",
+        sources.stdout,
+        r.stderr
+    );
+    // ...and it is the curator's real sibling, so its item is discoverable.
+    let recall = sb.mind(&["recall"]);
+    assert!(
+        recall.stdout.contains("greet"),
+        "the nested source's item must be offered: {}",
+        recall.stdout
+    );
+}
+
+#[test]
+fn sync_rewalk_resolves_a_newly_curated_relative_nested_source_against_the_curator() {
+    // spec: DSC-92 DSC-57 -- the second of the three call sites the statement
+    // says the read-site fix covers "with no per-caller change needed": a
+    // nested entry added to the curator AFTER the initial meld is picked up by
+    // `sync`'s re-walk, and must resolve against the curator too.
+    let sb = Sandbox::bare("curator-sync");
+    nested_repo(&sb.base.join("first"), "alpha");
+    sb.write_and_commit("mind.toml", "[[discover.sources]]\nsource = \"../first\"\n");
+
+    // See the meld test above: the cwd's parent must not be the curator's
+    // parent, or a cwd-relative reading of `../second` would land correctly by
+    // coincidence and the test would pass with the DSC-92 rewrite removed.
+    let elsewhere = sb.base.join("far/away");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let spec = sb.source_spec();
+    assert!(
+        sb.mind_cwd(&["meld", &spec, "--register-only"], &elsewhere)
+            .success
+    );
+
+    // Curator gains a second relative nested source.
+    nested_repo(&sb.base.join("second"), "beta");
+    sb.write_and_commit(
+        "mind.toml",
+        "[[discover.sources]]\nsource = \"../first\"\n[[discover.sources]]\nsource = \"../second\"\n",
+    );
+
+    let s = sb.mind_cwd(&["sync"], &elsewhere);
+    assert!(s.success, "sync must succeed: {} {}", s.stdout, s.stderr);
+
+    let sources = sb.mind(&["recall", "--sources"]).stdout;
+    assert!(
+        sources.contains("second"),
+        "sync's re-walk must register the newly curated relative nested source: {sources}\n\
+         sync stdout: {}",
+        s.stdout
+    );
+}
+
 #[test]
 fn init_source_reports_refs_scaffolds_toml_and_templates() {
     // spec: INIT-1, INIT-2, INIT-3, INIT-4, INIT-5, INIT-6
@@ -9871,6 +10440,16 @@ fn config_lobes_add_refused_when_lobes_locked() {
     let sb = Sandbox::named("agents");
     let policy = write_policy(&sb, "[lobes]\nlock = true\ntargets = [\"~/.claude\"]\n");
 
+    // The candidate lobe lives INSIDE the sandbox, not at a shared `/tmp` path.
+    // HARN-15 made `config lobes add` create the lobe directory; today the
+    // POL-40 refusal returns before that `mkdir_p`, but relying on that ordering
+    // would leave a real directory outside the sandbox the moment the order
+    // changes. The assertion below also proves the refusal happened before the
+    // create, which the shared path could not distinguish from "someone else
+    // made it".
+    let candidate = sb.base.join("refused-lobe");
+    let candidate_str = candidate.to_string_lossy().into_owned();
+
     // Snapshot the lobe list before the refused add.
     let before = sb.mind_env(
         &["config", "lobes", "list"],
@@ -9879,7 +10458,7 @@ fn config_lobes_add_refused_when_lobes_locked() {
     assert!(before.success, "list before: {}", before.stderr);
 
     let r = sb.mind_env(
-        &["config", "lobes", "add", "/tmp/some-home"],
+        &["config", "lobes", "add", &candidate_str],
         &[("MIND_POLICY_FILE", policy.as_str())],
     );
     assert!(!r.success, "locked lobes add must be refused: {}", r.stdout);
@@ -9888,6 +10467,11 @@ fn config_lobes_add_refused_when_lobes_locked() {
         "refusal should be explained: {}",
         r.stderr
     );
+    assert!(
+        !candidate.exists(),
+        "a refused lobe must not have its directory created (HARN-15 runs only \
+         after the POL-40 check): {candidate:?}"
+    );
 
     // The lobe list is unchanged: the path was not added.
     let after = sb.mind_env(
@@ -9895,7 +10479,7 @@ fn config_lobes_add_refused_when_lobes_locked() {
         &[("MIND_POLICY_FILE", policy.as_str())],
     );
     assert!(
-        !after.stdout.contains("/tmp/some-home"),
+        !after.stdout.contains(&candidate_str),
         "the refused lobe must not appear: {}",
         after.stdout
     );

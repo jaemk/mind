@@ -1424,6 +1424,138 @@ mod tests {
         }
     }
 
+    // spec: STO-67
+    // The "split on the LAST `@`" clause, driven with an authority that has
+    // MORE than one `@`: a userinfo that itself contains an `@` (an email-shaped
+    // login, e.g. `user@corp.example`) must not be mistaken for the host. A
+    // first-`@` split would yield host `corp.example@git.host`, which then fails
+    // host validation (`@` is refused in `host`, STO-64); a last-`@` split
+    // yields the real host.
+    #[test]
+    fn ssh_authority_splits_on_the_last_at_not_the_first() {
+        let s = parse_spec("ssh://user@corp.example@git.host/o/r").unwrap();
+        assert_eq!(
+            s.host, "git.host",
+            "the host is the part after the LAST '@'"
+        );
+        assert_eq!(s.name, "git.host/o/r");
+        assert_eq!(
+            s.url, "ssh://user@corp.example@git.host/o/r",
+            "the FULL authority (both '@'s) must stay in url so git clone authenticates"
+        );
+    }
+
+    // spec: STO-67
+    // The "empty userinfo" leg of the userinfo validation. Only the control
+    // character leg was previously driven.
+    #[test]
+    fn ssh_empty_userinfo_is_rejected() {
+        let err = parse_spec("ssh://@host/o/r").unwrap_err();
+        match err {
+            MindError::UnsafeRepoSpec {
+                part,
+                value,
+                reason,
+                ..
+            } => {
+                assert_eq!(part, "host");
+                assert_eq!(value, "@host", "value is the FULL authority");
+                assert!(
+                    reason.contains("empty"),
+                    "reason must name the empty userinfo: {reason}"
+                );
+            }
+            other => panic!("expected UnsafeRepoSpec naming host, got {other:?}"),
+        }
+    }
+
+    // spec: STO-67 CLI-204
+    // "The part after the split is the identity host (validated with the same
+    // rules as any other host, CLI-204)": the userinfo split must not become a
+    // bypass of host validation. Each case is a host that CLI-204/STO-64
+    // refuses, reached only through the ssh-userinfo branch.
+    #[test]
+    fn ssh_host_after_userinfo_is_still_validated_like_any_other_host() {
+        for (spec, expect_reason) in [
+            // An empty host (`ssh://git@/o/r`) after a legal userinfo.
+            ("ssh://git@/o/r", "is empty"),
+            // `#` is refused in host (STO-64).
+            ("ssh://git@ho#st/o/r", "'#'"),
+            // A path separator cannot appear in a single host component.
+            ("ssh://git@ho\\st/o/r", "contains a path separator"),
+            // A traversing host component.
+            ("ssh://git@../o/r", "is a relative path component"),
+        ] {
+            match parse_spec(spec) {
+                Err(MindError::UnsafeRepoSpec { part, reason, .. }) => {
+                    assert_eq!(part, "host", "{spec} must be refused on the host part");
+                    assert!(
+                        reason.contains(expect_reason),
+                        "{spec}: reason must be {expect_reason:?}, got {reason:?}"
+                    );
+                }
+                other => panic!("{spec} must be refused as an unsafe host, got {other:?}"),
+            }
+        }
+    }
+
+    // spec: STO-67 STO-11
+    // "feeds the source's identity and clone path (STO-11)": the userinfo must
+    // never reach disk as a directory name.
+    #[test]
+    fn ssh_userinfo_never_reaches_the_clone_path() {
+        let (base, paths) = tmp_paths_src();
+        let s = parse_spec("ssh://git@git.host/o/r").unwrap();
+        let dir = s.clone_dir(&paths);
+        let shown = dir.display().to_string();
+        assert!(
+            !shown.contains("git@"),
+            "the clone path must not embed the userinfo: {shown}"
+        );
+        assert!(
+            dir.ends_with("git.host/o/r"),
+            "clone path must be sources/<host>/<owner>/<repo>: {shown}"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // spec: STO-67
+    // The credential refusal must fire for EVERY non-ssh scheme, and it must
+    // fire BEFORE the item-link branch: a deep URL carrying a token is the most
+    // likely way a credential would be pasted in, and it must not slip through
+    // as a `BadItemLink` (or worse, be accepted).
+    #[test]
+    fn non_ssh_userinfo_is_refused_for_every_scheme_including_deep_links() {
+        for spec in [
+            "https://token@host/o/r",
+            "http://user:pw@host/o/r",
+            "git://token@host/o/r",
+            // Deep item-link URLs: refused before parse_item_link runs.
+            "https://token@host/o/r/tree/main/skills/foo",
+            "http://user:pw@host/o/r/blob/main/skills/foo/SKILL.md",
+        ] {
+            match parse_spec(spec) {
+                Err(MindError::UnsafeRepoSpec {
+                    part,
+                    value,
+                    reason,
+                    ..
+                }) => {
+                    assert_eq!(part, "host", "{spec}");
+                    assert!(
+                        value.contains('@'),
+                        "{spec}: value must be the full authority, got {value:?}"
+                    );
+                    assert!(
+                        reason.contains("credential"),
+                        "{spec}: reason must name the credential, got {reason:?}"
+                    );
+                }
+                other => panic!("{spec} must be refused as an embedded credential, got {other:?}"),
+            }
+        }
+    }
+
     #[test]
     fn parses_local_path() {
         let s = parse_spec("/home/user/dev/agents").unwrap();
@@ -1540,6 +1672,64 @@ mod tests {
         );
         assert_eq!(s.name, format!("local/{parent_name}/foo"));
         assert_eq!(s.url, cwd.join("foo").to_string_lossy());
+    }
+
+    // spec: STO-72
+    // The `../rel/path` leg of the same rule (only `./foo` was driven). A
+    // `../` spec is the one that most obviously breaks after a `cd`, and its
+    // owner must come from the real grandparent directory -- again never the
+    // `local` placeholder that the literal `..` segment used to collapse to.
+    #[test]
+    fn relative_parent_dir_local_path_derives_owner_from_the_real_grandparent() {
+        let cwd = std::env::current_dir().expect("must read cwd");
+        let parent = cwd.parent().expect("cwd must have a parent");
+        let grandparent_name = parent
+            .file_name()
+            .expect("parent must have a basename")
+            .to_string_lossy()
+            .into_owned();
+        let s = parse_spec("../foo").expect("a '../' local path must parse");
+        assert_eq!(s.repo, "foo");
+        assert_eq!(
+            s.owner, grandparent_name,
+            "owner must be the real grandparent directory, not the 'local' placeholder"
+        );
+        assert_eq!(s.name, format!("local/{grandparent_name}/foo"));
+        assert_eq!(
+            s.url,
+            parent.join("foo").to_string_lossy(),
+            "the persisted url must be the absolute resolution, not the literal '../foo'"
+        );
+    }
+
+    // spec: STO-72 LNK-4
+    // The third form STO-72 names: "the local branch of a `file://` item link".
+    // This branch has its OWN absolutize call (a separate code path from the
+    // bare local-path branch), and nothing drove it: a relative `file://` link
+    // must persist an absolute `url` and derive its owner from the real parent,
+    // while still carrying the item-link identity suffix.
+    #[test]
+    fn relative_file_url_item_link_is_absolutized_before_identity_derivation() {
+        let cwd = std::env::current_dir().expect("must read cwd");
+        let parent_name = cwd
+            .file_name()
+            .expect("cwd must have a basename")
+            .to_string_lossy()
+            .into_owned();
+        let s = parse_spec("file://./foo/tree/main/skills/greet")
+            .expect("a relative file:// item link must parse");
+        assert_eq!(s.repo, "foo");
+        assert_eq!(
+            s.owner, parent_name,
+            "owner must be the real parent directory, not the 'local' placeholder"
+        );
+        assert_eq!(s.name, format!("local/{parent_name}/foo#skills/greet"));
+        assert_eq!(s.item_path.as_deref(), Some("skills/greet"));
+        assert_eq!(
+            s.url,
+            cwd.join("foo").to_string_lossy(),
+            "the link's repo url must be absolutized, not the literal './foo'"
+        );
     }
 
     // CLI-204/STO-64: `@` stays legal in `owner` only. A local path may
@@ -2506,6 +2696,94 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    // spec: STO-68
+    // STO-68's own headline example is `repo: ".."` (what 0.21.0's parser let
+    // through), and the warning must name the part that actually failed. The
+    // existing coverage only ever fails on `host`, which is the FIRST part
+    // checked, so it cannot tell "names the offending part" apart from "always
+    // says host". Each case here makes exactly ONE part bad.
+    #[test]
+    fn revalidate_names_whichever_single_part_is_unsafe() {
+        for (part, mutate) in [
+            (
+                "host",
+                (|s: &mut Source| s.host = "..".to_string()) as fn(&mut Source),
+            ),
+            ("owner", |s: &mut Source| s.owner = "ow#ner".to_string()),
+            ("repo", |s: &mut Source| s.repo = "..".to_string()),
+            ("as_alias", |s: &mut Source| {
+                s.as_alias = Some("../evil".to_string())
+            }),
+            ("pin", |s: &mut Source| {
+                s.pin = Pin::Tag("--upload-pack=evil".to_string())
+            }),
+        ] {
+            let mut src = parse_spec("acme/agents").unwrap();
+            mutate(&mut src);
+            let mut warnings: Vec<String> = Vec::new();
+            let kept = revalidate_sources(vec![src], |m| warnings.push(m.to_string()));
+            assert!(kept.is_empty(), "a bad {part} must drop the entry");
+            assert_eq!(warnings.len(), 1, "one warning per dropped entry ({part})");
+            assert!(
+                warnings[0].contains(&format!("its {part} part")),
+                "the warning must name the {part} part, got: {}",
+                warnings[0]
+            );
+        }
+    }
+
+    // spec: STO-68
+    // Two bad entries drop independently and warn once EACH (the spec says
+    // "each drop prints one warning"), and a good entry between them survives.
+    #[test]
+    fn revalidate_sources_warns_once_per_dropped_entry_and_keeps_the_survivors() {
+        let mut bad_a = parse_spec("acme/agents").unwrap();
+        bad_a.repo = "..".to_string();
+        bad_a.name = "a/bad".to_string();
+        let good = parse_spec("acme/good").unwrap();
+        let mut bad_b = parse_spec("acme/agents").unwrap();
+        bad_b.owner = "..".to_string();
+        bad_b.name = "b/bad".to_string();
+
+        let mut warnings: Vec<String> = Vec::new();
+        let kept = revalidate_sources(vec![bad_a, good, bad_b], |m| warnings.push(m.to_string()));
+        assert_eq!(kept.len(), 1, "only the valid entry survives");
+        assert_eq!(kept[0].name, "github.com/acme/good");
+        assert_eq!(warnings.len(), 2, "one warning per drop: {warnings:?}");
+        assert!(warnings.iter().any(|w| w.contains("a/bad")));
+        assert!(warnings.iter().any(|w| w.contains("b/bad")));
+    }
+
+    // spec: STO-68
+    // "The drop is not written back immediately": `Registry::load` must not
+    // rewrite sources.json as a side effect of dropping. Losing an entry is
+    // recoverable only while the file on disk still holds it, so a read-only
+    // verb must leave the file byte-identical.
+    #[test]
+    fn registry_load_does_not_rewrite_sources_json_when_it_drops_an_entry() {
+        let (base, paths) = tmp_paths_src();
+        let file = base.join("sources.json");
+        let raw = r#"{"version":1,"sources":[
+            {"name":"../../victim","url":"https://x/y/victim","host":"..","owner":"..","repo":"victim"}
+        ]}"#;
+        std::fs::write(&file, raw).unwrap();
+        let reg = Registry::load(&paths).expect("load must succeed");
+        assert!(reg.sources.is_empty(), "the entry is dropped in memory");
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            raw,
+            "load must not write the drop back to disk; it becomes permanent only on the next save"
+        );
+        // ...and it does become permanent on the next `save`.
+        reg.save(&paths).expect("save must succeed");
+        let after = std::fs::read_to_string(&file).unwrap();
+        assert!(
+            !after.contains("victim"),
+            "the drop must be persisted by the next save: {after}"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn compute_name_composes_item_link_and_alias() {
         // spec: STO-58 LNK-4 -- `@<alias>` is always the trailing segment and
@@ -2659,6 +2937,53 @@ mod tests {
     }
 
     // spec: STO-70
+    // The exact threshold. "If the encoded leaf WOULD EXCEED 120 bytes" -- so
+    // 120 stays readable and 121 flips to the hash. Only a 200-char path (far
+    // past the edge) was previously driven, which passes under an off-by-one
+    // in either direction.
+    #[test]
+    fn clone_dir_leaf_length_threshold_is_exclusive_at_120_bytes() {
+        // Leaf shape is `r#<encoded>`: 1 (repo) + 1 ('#') + encoded.len().
+        // With an item_path of plain ASCII (no '/' or '%'), encoded.len() ==
+        // item_path.len(), so a path of N chars yields a leaf of N + 2.
+        let at_limit = "x".repeat(118);
+        let leaf = clone_dir_leaf("r", Some(&at_limit), None);
+        assert_eq!(leaf.len(), 120);
+        assert_eq!(
+            leaf,
+            format!("r#{at_limit}"),
+            "a leaf of exactly 120 bytes must stay readable, not hash"
+        );
+
+        let over_limit = "x".repeat(119);
+        let leaf = clone_dir_leaf("r", Some(&over_limit), None);
+        assert_eq!(
+            leaf,
+            format!("r#{}", crate::hash::hash_str(&over_limit)),
+            "121 bytes exceeds the limit and must fall back to the hash"
+        );
+    }
+
+    // spec: STO-70
+    // "This is injective (so two distinct item_paths can never collide on the
+    // same encoded segment)". The dangerous pair is a path containing a literal
+    // `%2F` versus one containing a real `/`: encoding `%` FIRST is what keeps
+    // them apart. Encoding `/` first would map both to `a%2Fb`, so two distinct
+    // item-link instances would share one checkout again -- exactly the C31 bug
+    // STO-70 exists to close.
+    #[test]
+    fn clone_dir_leaf_encoding_is_injective_for_the_percent_slash_collision_pair() {
+        let with_slash = clone_dir_leaf("r", Some("a/b"), None);
+        let with_literal_escape = clone_dir_leaf("r", Some("a%2Fb"), None);
+        assert_eq!(with_slash, "r#a%2Fb");
+        assert_eq!(with_literal_escape, "r#a%252Fb");
+        assert_ne!(
+            with_slash, with_literal_escape,
+            "'a/b' and 'a%2Fb' are distinct item paths and must not share a leaf"
+        );
+    }
+
+    // spec: STO-70
     // End-to-end through `Source::clone_dir`, not just the pure leaf helper:
     // two item-link instances from the SAME repo (as would be created by
     // `parse_spec` on two different `tree/<ref>/<path>` URLs) resolve to
@@ -2781,6 +3106,29 @@ mod tests {
         let abs_url_before = abs.url.clone();
         assert!(!migrate_relative_local_url(&base, &mut abs));
         assert_eq!(abs.url, abs_url_before);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // spec: STO-73
+    // "ONLY when the resolved absolute path currently exists as a DIRECTORY".
+    // The existing coverage tests "does not exist"; this tests "exists but is
+    // not a directory", the case a plain `.exists()` check would get wrong. A
+    // file is not a source working tree, so migrating to it would replace a
+    // wrong-but-honest recorded path with a wrong-and-absolutized one, exactly
+    // what STO-73 says not to do.
+    #[test]
+    fn migrate_relative_local_url_does_not_rewrite_when_the_target_is_a_file() {
+        let (base, _paths) = tmp_paths_src();
+        std::fs::write(base.join("not-a-dir"), "x").unwrap();
+
+        let mut src = parse_spec("/home/user/dev/agents").unwrap();
+        src.url = "not-a-dir".to_string();
+        assert!(
+            !migrate_relative_local_url(&base, &mut src),
+            "a relative url resolving to a FILE must not be migrated"
+        );
+        assert_eq!(src.url, "not-a-dir", "the recorded url must be left as-is");
 
         let _ = std::fs::remove_dir_all(&base);
     }

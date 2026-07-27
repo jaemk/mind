@@ -904,6 +904,90 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // spec: DSC-92
+    // The `./rel/path` leg (only `../explicit` was driven), EVERY entry in the
+    // list (not just the first), and the fields the rewrite must leave alone.
+    // A loop that rewrote only `sources[0]` would pass the existing coverage.
+    #[test]
+    fn every_relative_nested_source_is_rewritten_and_sibling_fields_are_preserved() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let base = std::env::temp_dir().join(format!("mind-dsc92-many-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let curator = base.join("curator");
+        std::fs::create_dir_all(&curator).unwrap();
+        std::fs::write(
+            curator.join("mind.toml"),
+            "[discover]\nsources = [\
+             { source = \"owner/repo\" }, \
+             { source = \"./inner/one\", namespace = \"one\", install = true }, \
+             { source = \"../sibling/two\" }\
+             ]\n",
+        )
+        .unwrap();
+
+        let mt = MindToml::load(&curator)
+            .expect("must parse")
+            .expect("file exists");
+        let sources = &mt
+            .discover
+            .as_ref()
+            .expect("must declare [discover]")
+            .sources;
+
+        assert_eq!(sources[0].source, "owner/repo", "remote entry untouched");
+        assert_eq!(
+            sources[1].source,
+            curator.join("inner/one").to_string_lossy(),
+            "a './' entry resolves against the mind.toml's directory"
+        );
+        assert_eq!(
+            sources[2].source,
+            base.join("sibling/two").to_string_lossy(),
+            "a later '../' entry must be rewritten too, not just the first entry"
+        );
+        // The rewrite touches `source` only.
+        assert_eq!(sources[1].namespace.as_deref(), Some("one"));
+        assert!(sources[1].install, "install flag must survive the rewrite");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // spec: DSC-92
+    // The rewrite is purely lexical (it mirrors STO-72's stat-free resolution),
+    // so it applies even when the target does not exist yet. Gating it on
+    // existence would silently leave a cwd-relative spec in place for a nested
+    // source that is simply not checked out yet, which is the same bug in a
+    // quieter form: the failure would then name a path relative to wherever the
+    // consumer stood.
+    #[test]
+    fn a_relative_nested_source_is_rewritten_even_when_the_target_does_not_exist() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let curator =
+            std::env::temp_dir().join(format!("mind-dsc92-ghost-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&curator);
+        std::fs::create_dir_all(&curator).unwrap();
+        std::fs::write(
+            curator.join("mind.toml"),
+            "[discover]\nsources = [{ source = \"./never-created\" }]\n",
+        )
+        .unwrap();
+
+        let mt = MindToml::load(&curator)
+            .expect("must parse")
+            .expect("file exists");
+        assert_eq!(
+            mt.discover.as_ref().unwrap().sources[0].source,
+            curator.join("never-created").to_string_lossy(),
+            "the rewrite must not be gated on the target existing"
+        );
+
+        let _ = std::fs::remove_dir_all(&curator);
+    }
+
     #[test]
     fn version_comparison_orders_dotted_components() {
         // spec: DSC-40

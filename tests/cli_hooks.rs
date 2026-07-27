@@ -34,6 +34,9 @@ struct Run {
     stdout: String,
     stderr: String,
     success: bool,
+    /// The process exit code, so a test can pin CLI-175's "1 for a runtime
+    /// error" rather than settling for "not zero".
+    code: Option<i32>,
 }
 
 impl Sandbox {
@@ -71,6 +74,7 @@ impl Sandbox {
             stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
             success: out.status.success(),
+            code: out.status.code(),
         }
     }
 
@@ -1691,8 +1695,623 @@ fn hooks_target_source_prefix_escape_forces_source_resolution() {
 }
 
 // ---------------------------------------------------------------------------
+// HOOK-107 x CLI-181/CLI-182: the structured error envelope for the
+// "ran nothing because consent was unavailable" case. HOOK-107 explicitly
+// claims this gives `hooks run --json` non-empty output on the no-op path, but
+// no test drove `--json` on that path.
+// ---------------------------------------------------------------------------
+
+/// `mind --json hooks run` on the HOOK-107 path emits the CLI-181 envelope on
+/// stdout with the stable `hooks-not-run` kind slug (CLI-182), and exits with
+/// code 1 exactly (CLI-175), not merely "non-zero".
+#[test]
+fn hooks_run_hooks_not_run_emits_json_error_envelope() {
+    // spec: HOOK-107 CLI-181 CLI-182
+    let sb = Sandbox::new("json-not-run");
+    sb.write_and_commit(
+        "mind.toml",
+        concat!(
+            "[[hooks]]\n",
+            "name = \"setup\"\n",
+            "run = \"echo setup-ran\"\n",
+            "event = \"install\"\n",
+        ),
+    );
+    let r = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(r.success, "meld: {}", r.stderr);
+
+    let r = sb.mind(&[
+        "--json",
+        "hooks",
+        "run",
+        "--event",
+        "install",
+        "json-not-run",
+    ]);
+    assert!(
+        !r.success,
+        "the HOOK-107 path must fail under --json too: {}\n{}",
+        r.stdout, r.stderr
+    );
+    assert_eq!(
+        r.code,
+        Some(1),
+        "a MindError must exit 1 (CLI-175), not another non-zero code: {}\n{}",
+        r.stdout,
+        r.stderr
+    );
+
+    let envelope = json_envelope(&r.stdout);
+    assert_eq!(
+        envelope["schema"], 1,
+        "envelope must carry schema 1: {envelope}"
+    );
+    assert_eq!(
+        envelope["error"]["kind"], "hooks-not-run",
+        "the stable per-variant kind slug must be emitted: {envelope}"
+    );
+    let message = envelope["error"]["message"]
+        .as_str()
+        .unwrap_or_else(|| panic!("message must be a string: {envelope}"));
+    assert!(
+        message.contains("skipped for want of consent"),
+        "the envelope message must be the full Display text: {message}"
+    );
+    assert!(
+        message.contains("--dangerously-skip-install-hook-check"),
+        "the envelope message must carry the remedy: {message}"
+    );
+    assert!(
+        message.contains("json-not-run"),
+        "the envelope message must name the target: {message}"
+    );
+}
+
+/// CLI-181 says nothing is written to stderr on the JSON error path. The
+/// HOOK-107 error must honor that: a `--json` consumer reading stderr for a
+/// failure reason gets nothing, by design.
+#[test]
+fn hooks_run_hooks_not_run_json_writes_nothing_to_stderr() {
+    // spec: HOOK-107 CLI-181
+    let sb = Sandbox::new("json-stderr");
+    sb.write_and_commit(
+        "mind.toml",
+        concat!(
+            "[[hooks]]\n",
+            "name = \"setup\"\n",
+            "run = \"echo setup-ran\"\n",
+            "event = \"install\"\n",
+        ),
+    );
+    let r = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(r.success, "meld: {}", r.stderr);
+
+    let r = sb.mind(&[
+        "--json",
+        "hooks",
+        "run",
+        "--event",
+        "install",
+        "json-stderr",
+    ]);
+    assert!(!r.success, "must fail: {}\n{}", r.stdout, r.stderr);
+    assert_eq!(
+        r.stderr.trim(),
+        "",
+        "CLI-181: nothing is written to stderr on the JSON error path: {:?}",
+        r.stderr
+    );
+}
+
+/// DEFECT (not fixed here, so this test is ignored): under `--json`, the
+/// HOOK-106 skip note is still `println!`d to stdout ahead of the CLI-181
+/// envelope, so `mind --json hooks run <src>` emits
+/// `note: skipped install hook ...` followed by the JSON object. Stdout is
+/// therefore NOT a parseable JSON document, and the obvious consumer
+/// (`mind --json hooks run x | jq .error.kind`) fails with a parse error even
+/// though CLI-181 promises a machine-readable stdout envelope.
+/// `hooks_cmd.rs` has no `--json` awareness at all (the flag is never threaded
+/// into `hooks_cmd::run`), so every note it prints lands on stdout.
+/// Un-ignore once the note is suppressed (or routed to stderr) under `--json`.
+#[test]
+#[ignore = "known defect: the HOOK-106 skip note pollutes --json stdout ahead of the CLI-181 envelope"]
+fn hooks_run_json_stdout_is_only_the_envelope() {
+    // spec: HOOK-107 CLI-181
+    let sb = Sandbox::new("json-pure");
+    sb.write_and_commit(
+        "mind.toml",
+        concat!(
+            "[[hooks]]\n",
+            "name = \"setup\"\n",
+            "run = \"echo setup-ran\"\n",
+            "event = \"install\"\n",
+        ),
+    );
+    let r = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(r.success, "meld: {}", r.stderr);
+
+    let r = sb.mind(&["--json", "hooks", "run", "--event", "install", "json-pure"]);
+    assert!(!r.success, "must fail: {}\n{}", r.stdout, r.stderr);
+    serde_json::from_str::<serde_json::Value>(r.stdout.trim()).unwrap_or_else(|e| {
+        panic!(
+            "stdout under --json must parse as a single JSON document ({e}): {:?}",
+            r.stdout
+        )
+    });
+}
+
+// ---------------------------------------------------------------------------
+// HOOK-107 boundaries: the exact predicate is `existed > 0 && ran == 0 &&
+// skipped_for_consent > 0`, accumulated across every matched source. Each
+// factor gets a test that fails if that factor is dropped.
+// ---------------------------------------------------------------------------
+
+/// `--force` turns a hook that had "nothing to do" into work: an already-ran
+/// install hook is reconsidered, skipped for want of a terminal, and the run
+/// must now be a HOOK-107 error. This is the exact boundary between
+/// `hooks_run_source_install_already_ran_non_tty_stays_exit_zero` (exit 0) and
+/// an error, and it turns on `--force` alone.
+#[test]
+fn hooks_run_force_on_already_ran_hook_in_non_tty_is_hooks_not_run() {
+    // spec: HOOK-107 HOOK-101 CLI-195
+    let sb = Sandbox::new("force-not-run");
+    sb.write_and_commit(
+        "mind.toml",
+        concat!(
+            "[[hooks]]\n",
+            "name = \"setup\"\n",
+            "run = \"echo setup-ran\"\n",
+            "event = \"install\"\n",
+        ),
+    );
+    let r = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(r.success, "meld: {}", r.stderr);
+
+    // Record it at the current commit via the bypass.
+    let r = sb.mind(&[
+        "hooks",
+        "run",
+        "--event",
+        "install",
+        "--dangerously-skip-install-hook-check",
+        "force-not-run",
+    ]);
+    assert!(r.success, "bypassed run: {}\n{}", r.stdout, r.stderr);
+
+    // Without --force this is a no-op that exits 0 (pinned elsewhere). With
+    // --force the hook is considered again, so there IS work, and a non-TTY
+    // run cannot consent to it.
+    let r = sb.mind(&[
+        "hooks",
+        "run",
+        "--event",
+        "install",
+        "--force",
+        "force-not-run",
+    ]);
+    assert!(
+        !r.success,
+        "--force reconsiders an already-ran hook, so a non-TTY run has work it \
+         cannot consent to and must be a HOOK-107 error: {}\n{}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr.contains("1 hook(s) had work to do"),
+        "must report exactly the one reconsidered hook: {}",
+        r.stderr
+    );
+}
+
+/// The skipped count in the HOOK-107 error is a real count, not a constant:
+/// two pending hooks in one source produce `2 hook(s)`, and each gets its own
+/// HOOK-106 note.
+#[test]
+fn hooks_run_hooks_not_run_counts_every_skipped_hook() {
+    // spec: HOOK-106 HOOK-107
+    let sb = Sandbox::new("count-two");
+    sb.write_and_commit(
+        "mind.toml",
+        concat!(
+            "[[hooks]]\n",
+            "name = \"first\"\n",
+            "run = \"echo one\"\n",
+            "event = \"install\"\n",
+            "\n",
+            "[[hooks]]\n",
+            "name = \"second\"\n",
+            "run = \"echo two\"\n",
+            "event = \"install\"\n",
+        ),
+    );
+    let r = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(r.success, "meld: {}", r.stderr);
+
+    let r = sb.mind(&["hooks", "run", "--event", "install", "count-two"]);
+    assert!(!r.success, "must fail: {}\n{}", r.stdout, r.stderr);
+    assert!(
+        r.stderr.contains("2 hook(s) had work to do"),
+        "the skipped count must be the real number of skipped hooks: {}",
+        r.stderr
+    );
+    // HOOK-106: every skipped hook gets its own cause-and-remedy note.
+    let notes = r
+        .stdout
+        .lines()
+        .filter(|l| l.contains("not a terminal"))
+        .count();
+    assert_eq!(
+        notes, 2,
+        "each skipped hook must get its own HOOK-106 note: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("'first'") && r.stdout.contains("'second'"),
+        "each note must name its own hook label: {}",
+        r.stdout
+    );
+}
+
+/// A source that declares only an UNINSTALL hook has nothing to do for
+/// `--event install`: the event filter empties the hook list before anything is
+/// counted, so this stays exit 0. If `existed` were incremented from the
+/// unfiltered hook list, this would wrongly become a HOOK-107 error.
+#[test]
+fn hooks_run_install_event_ignores_an_uninstall_only_source_and_exits_zero() {
+    // spec: HOOK-107 CLI-195
+    let sb = Sandbox::new("uninstall-only");
+    sb.write_and_commit(
+        "mind.toml",
+        concat!(
+            "[[hooks]]\n",
+            "name = \"teardown\"\n",
+            "run = \"echo teardown\"\n",
+            "event = \"uninstall\"\n",
+        ),
+    );
+    let r = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(r.success, "meld: {}", r.stderr);
+
+    let r = sb.mind(&["hooks", "run", "--event", "install", "uninstall-only"]);
+    assert!(
+        r.success,
+        "an uninstall-only source has no install work, so --event install stays \
+         exit 0: {}\n{}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stdout.contains("no install hooks declared"),
+        "should note the absence for the selected event: {}",
+        r.stdout
+    );
+}
+
+/// The HOOK-107 counters accumulate across a fan-out selector. With one source
+/// whose hook already ran (nothing to do) and one with a pending hook, the run
+/// errors and reports exactly ONE skipped hook -- the no-op source must
+/// contribute nothing to either counter.
+#[test]
+fn hooks_run_glob_counts_only_the_source_with_pending_work() {
+    // spec: HOOK-107 CLI-194
+    let sb = Sandbox::new("glob-mixed-a");
+    sb.write_and_commit(
+        "mind.toml",
+        concat!(
+            "[[hooks]]\n",
+            "name = \"a-setup\"\n",
+            "run = \"echo a\"\n",
+            "event = \"install\"\n",
+        ),
+    );
+    let src_b = sb.base.join("glob-mixed-b");
+    init_source_repo(
+        &src_b,
+        concat!(
+            "[[hooks]]\n",
+            "name = \"b-setup\"\n",
+            "run = \"echo b\"\n",
+            "event = \"install\"\n",
+        ),
+    );
+
+    let r = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(r.success, "meld a: {}\n{}", r.stdout, r.stderr);
+    let r = sb.mind(&["meld", src_b.to_string_lossy().as_ref()]);
+    assert!(r.success, "meld b: {}\n{}", r.stdout, r.stderr);
+
+    // Retire source A's hook only: it now has nothing to do.
+    let r = sb.mind(&[
+        "hooks",
+        "run",
+        "--event",
+        "install",
+        "--dangerously-skip-install-hook-check",
+        "glob-mixed-a",
+    ]);
+    assert!(r.success, "retire a: {}\n{}", r.stdout, r.stderr);
+
+    let r = sb.mind(&["hooks", "run", "--event", "install", "*"]);
+    assert!(
+        !r.success,
+        "a fan-out with one pending source must be a HOOK-107 error: {}\n{}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr.contains("1 hook(s) had work to do"),
+        "only source b's hook had work; source a must not be counted: {}",
+        r.stderr
+    );
+    // Only source b's hook is noted as skipped.
+    assert!(
+        r.stdout.contains("'b-setup'"),
+        "source b's pending hook must be noted: {}",
+        r.stdout
+    );
+    assert!(
+        !r.stdout.contains("'a-setup'"),
+        "source a's retired hook must never be offered, so it cannot be noted \
+         as skipped: {}",
+        r.stdout
+    );
+}
+
+/// A fan-out where EVERY matched source has nothing to do stays exit 0, even
+/// though the selector matched several sources: `existed` stays 0 across the
+/// whole walk.
+#[test]
+fn hooks_run_glob_with_nothing_to_do_anywhere_stays_exit_zero() {
+    // spec: HOOK-107 CLI-194
+    let sb = Sandbox::new("glob-quiet-a");
+    // Source a declares no hooks at all.
+    let src_b = sb.base.join("glob-quiet-b");
+    init_source_repo(
+        &src_b,
+        concat!(
+            "[[hooks]]\n",
+            "name = \"b-setup\"\n",
+            "run = \"echo b\"\n",
+            "event = \"install\"\n",
+        ),
+    );
+
+    let r = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(r.success, "meld a: {}\n{}", r.stdout, r.stderr);
+    let r = sb.mind(&["meld", src_b.to_string_lossy().as_ref()]);
+    assert!(r.success, "meld b: {}\n{}", r.stdout, r.stderr);
+
+    // Retire source b's only hook; source a never had one.
+    let r = sb.mind(&[
+        "hooks",
+        "run",
+        "--event",
+        "install",
+        "--dangerously-skip-install-hook-check",
+        "glob-quiet-b",
+    ]);
+    assert!(r.success, "retire b: {}\n{}", r.stdout, r.stderr);
+
+    let r = sb.mind(&["hooks", "run", "--event", "install", "*"]);
+    assert!(
+        r.success,
+        "no source had work, so the fan-out must stay exit 0: {}\n{}",
+        r.stdout, r.stderr
+    );
+}
+
+/// A run that DID execute its hooks is never a HOOK-107 error even though
+/// hooks existed: `ran > 0` clears the predicate. Pins that the bypass path
+/// cannot regress into reporting a failure.
+#[test]
+fn hooks_run_with_bypass_never_reports_hooks_not_run() {
+    // spec: HOOK-107
+    let sb = Sandbox::new("bypass-clean");
+    sb.write_and_commit(
+        "mind.toml",
+        concat!(
+            "[[hooks]]\n",
+            "name = \"setup\"\n",
+            "run = \"echo setup\"\n",
+            "event = \"install\"\n",
+        ),
+    );
+    let r = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(r.success, "meld: {}", r.stderr);
+
+    let r = sb.mind(&[
+        "hooks",
+        "run",
+        "--event",
+        "install",
+        "--dangerously-skip-install-hook-check",
+        "bypass-clean",
+    ]);
+    assert!(r.success, "bypassed run: {}\n{}", r.stdout, r.stderr);
+    assert!(
+        !r.stdout.contains("not a terminal") && !r.stderr.contains("want of consent"),
+        "a bypassed run consents to every hook, so neither the HOOK-106 note \
+         nor the HOOK-107 error may appear: {}\n{}",
+        r.stdout,
+        r.stderr
+    );
+}
+
+/// HOOK-107 is scoped to SOURCE targets. An ITEM target with a pending install
+/// hook, skipped in non-TTY, still exits 0 with no summary: `run_item_hooks`
+/// carries none of the counting. This pins the asymmetry deliberately -- the
+/// provisioning-script case U43 describes is just as invisible for
+/// `hooks run <source>#<item>` as it used to be for a source target.
+#[test]
+fn hooks_run_item_target_pending_install_hook_still_exits_zero_in_non_tty() {
+    // spec: HOOK-107 HOOK-102
+    let sb = Sandbox::new("item-silent");
+    sb.write_and_commit(
+        "mind.toml",
+        concat!(
+            "[[items]]\n",
+            "kind = \"skill\"\n",
+            "name = \"scanner\"\n",
+            "path = \"skills/scanner\"\n",
+            "install = \"touch item-hook-ran.sentinel\"\n",
+        ),
+    );
+    sb.write_and_commit(
+        "skills/scanner/SKILL.md",
+        "---\ndescription: scanner\n---\n# scanner\n",
+    );
+    let r = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(r.success, "meld: {}", r.stderr);
+    let r = sb.mind(&["learn", "scanner", "--dangerously-skip-install-hook-check"]);
+    assert!(r.success, "learn: {}", r.stderr);
+
+    let sentinel = sb
+        .mind_home
+        .join("store/skill/scanner/item-hook-ran.sentinel");
+    let _ = std::fs::remove_file(&sentinel);
+
+    let r = sb.mind(&["hooks", "run", "--event", "install", "item-silent#scanner"]);
+    assert!(
+        r.success,
+        "an item target's non-TTY skip is still a silent exit 0 (HOOK-107 is \
+         source-target only): {}\n{}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        !sentinel.exists(),
+        "the item hook must not have run in a non-TTY run: {}",
+        sentinel.display()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// HOOK-106: the remedy string itself.
+// ---------------------------------------------------------------------------
+
+/// The HOOK-106 note names the RESOLVED source identity, not the abbreviated
+/// selector the user typed, so the printed command is unambiguous even when
+/// the typed selector was a substring that happened to match.
+#[test]
+fn hooks_run_skip_note_remedy_names_the_resolved_source_identity() {
+    // spec: HOOK-106
+    let sb = Sandbox::new("remedy-identity");
+    sb.write_and_commit(
+        "mind.toml",
+        concat!(
+            "[[hooks]]\n",
+            "name = \"setup\"\n",
+            "run = \"echo setup\"\n",
+            "event = \"install\"\n",
+        ),
+    );
+    let r = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(r.success, "meld: {}", r.stderr);
+
+    let identity = format!(
+        "local/{}/remedy-identity",
+        sb.base.file_name().unwrap().to_string_lossy()
+    );
+
+    // The selector below is a bare substring of the identity, and a `*` glob
+    // would be a second abbreviated form; both must resolve into a note
+    // naming the full identity.
+    let r = sb.mind(&["hooks", "run", "--event", "install", "*"]);
+    assert!(!r.success, "must fail: {}\n{}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains(&format!(
+            "mind hooks run {identity} --dangerously-skip-install-hook-check"
+        )),
+        "the note's remedy must name the resolved identity, not the '*' \
+         selector: {}",
+        r.stdout
+    );
+}
+
+/// DEFECT (not fixed here, so this test is ignored): for `--event uninstall`,
+/// the HOOK-106 note and the HOOK-107 error both print
+/// `mind hooks run <source> --dangerously-skip-install-hook-check` with no
+/// `--event uninstall`. Copy-pasting that command does NOT re-run the skipped
+/// uninstall hook; it runs the source's INSTALL hooks instead (`--event`
+/// defaults to `install`). HOOK-106 promises a command "copy-pasteable with no
+/// placeholder to fill in", and the spec's own message template
+/// (spec/install-hooks.md:450) has the same omission, so the spec text needs
+/// the fix too. Un-ignore once the event is carried into the remedy.
+#[test]
+#[ignore = "known defect: the uninstall-event remedy omits --event uninstall, so it re-runs install hooks"]
+fn hooks_run_uninstall_skip_remedy_carries_the_event() {
+    // spec: HOOK-106
+    let sb = Sandbox::new("remedy-event");
+    sb.write_and_commit(
+        "mind.toml",
+        concat!(
+            "[[hooks]]\n",
+            "name = \"teardown\"\n",
+            "run = \"echo teardown\"\n",
+            "event = \"uninstall\"\n",
+        ),
+    );
+    let r = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(r.success, "meld: {}", r.stderr);
+
+    let r = sb.mind(&["hooks", "run", "--event", "uninstall", "remedy-event"]);
+    assert!(!r.success, "must fail: {}\n{}", r.stdout, r.stderr);
+    let combined = format!("{}{}", r.stdout, r.stderr);
+    assert!(
+        combined.contains("--event uninstall"),
+        "the remedy for an uninstall skip must re-select the uninstall event, \
+         otherwise it silently runs the install hooks instead: {combined}"
+    );
+}
+
+/// The HOOK-107 failure still persists the skip state it recorded before
+/// erroring: the hook stays pending, and `hooks list` says so. A `return Err`
+/// placed before `registry.save` would lose that.
+#[test]
+fn hooks_not_run_error_still_persists_the_recorded_skip() {
+    // spec: HOOK-107 HOOK-101
+    let sb = Sandbox::new("persist-skip");
+    sb.write_and_commit(
+        "mind.toml",
+        concat!(
+            "[[hooks]]\n",
+            "name = \"setup\"\n",
+            "run = \"echo setup\"\n",
+            "event = \"install\"\n",
+        ),
+    );
+    let r = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(r.success, "meld: {}", r.stderr);
+
+    let r = sb.mind(&["hooks", "run", "--event", "install", "persist-skip"]);
+    assert!(!r.success, "must fail: {}\n{}", r.stdout, r.stderr);
+
+    // The skip was recorded with ran_at = None (HOOK-101) BEFORE the error was
+    // returned, so the hook is still pending and the registry file survived.
+    let r = sb.mind(&["hooks", "list", "persist-skip"]);
+    assert!(r.success, "hooks list after the error: {}", r.stderr);
+    assert!(
+        r.stdout.contains("pending"),
+        "the skipped hook must remain pending after the HOOK-107 error: {}",
+        r.stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Helper functions
 // ---------------------------------------------------------------------------
+
+/// Extract the CLI-181 JSON error envelope from a `--json` run's stdout.
+///
+/// `hooks_cmd` prints its plain-text notes to stdout regardless of `--json`
+/// (see the ignored `hooks_run_json_stdout_is_only_the_envelope`), so the
+/// envelope is not necessarily the whole of stdout. `print_json` pretty-prints,
+/// so the envelope begins at the first line that is exactly `{`.
+fn json_envelope(stdout: &str) -> serde_json::Value {
+    let start = stdout
+        .lines()
+        .position(|l| l.trim_end() == "{")
+        .unwrap_or_else(|| panic!("no JSON envelope found in stdout: {stdout:?}"));
+    let body: String = stdout.lines().skip(start).collect::<Vec<_>>().join("\n");
+    serde_json::from_str(&body)
+        .unwrap_or_else(|e| panic!("envelope must parse as JSON ({e}): {body:?}"))
+}
 
 /// Initialise a second source git repo with a `mind.toml`, mirroring the setup
 /// `Sandbox::new` does for the primary source.
