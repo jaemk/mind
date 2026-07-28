@@ -539,11 +539,7 @@ pub enum MindError {
 
     /// NS-41: two agents from different sources share the same harness name and
     /// would overwrite each other's agent-home link.
-    #[error(
-        "agent '{name}' from source '{incoming}' conflicts with the installed agent from \
-         '{existing}': both link as agents/{name}.md in the agent home -- \
-         run `mind forget agent:{name}` (or the prefixed name) to remove the existing agent first"
-    )]
+    #[error("{}", agent_collision_message(name, existing, incoming))]
     AgentCollision {
         /// The bare harness name (frontmatter `name:`) that both agents share.
         name: String,
@@ -556,12 +552,7 @@ pub enum MindError {
     /// Cross-source skill/rule/tool name collision detected at `meld` (NS-43/NS-45).
     /// One or more incoming items share a `(kind, effective_name)` with an already-
     /// installed item from a different source, and the session is non-interactive.
-    #[error(
-        "name collision: the following items from the incoming source conflict with \
-         already-installed items:\n{}\nRun `mind meld --namespace {suggested} <repo>` \
-         to namespace the incoming source.",
-        format_conflicts(conflicts)
-    )]
+    #[error("{}", skill_collision_message(conflicts, suggested))]
     SkillCollision {
         /// Each conflict: `(kind, effective_name, existing_source)`.
         conflicts: Vec<(String, String, String)>,
@@ -659,12 +650,8 @@ pub enum MindError {
     /// silent pick. `item_forms` are the kind-qualified refs
     /// (`<source>#<kind>:<name>`) that unambiguously target each matching item;
     /// a `source:<target>` prefix unambiguously targets the source.
-    // spec: HOOK-105
-    #[error(
-        "'{target}' is ambiguous: it names both the registered source '{target}' and installed item(s) matching the same string; \
-         to target the source, run `mind hooks run 'source:{target}'`; to target an item, use a kind-qualified ref, e.g. `mind hooks run '{}'`",
-        item_forms.first().cloned().unwrap_or_default()
-    )]
+    // spec: HOOK-105 HOOK-106
+    #[error("{}", ambiguous_hook_target_message(target, item_forms))]
     AmbiguousHookTarget {
         target: String,
         /// The kind-qualified `<source>#<kind>:<name>` ref for each installed
@@ -684,10 +671,7 @@ pub enum MindError {
     /// single-source scan (`meld`, a fresh clone) still hard-fails on it since
     /// in practice a just-cloned directory cannot itself be gone.
     // spec: CLI-212 CLI-213
-    #[error(
-        "source '{source_name}': linked working tree '{path}' is gone; run 'mind unmeld \
-         {source_name}' to drop it, or restore the directory"
-    )]
+    #[error("{}", linked_source_gone_message(source_name, path))]
     LinkedSourceGone { source_name: String, path: String },
 
     /// HOOK-107 (source targets) / HOOK-108 (item targets): a `hooks run
@@ -749,6 +733,30 @@ pub(crate) fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
+/// The [`MindError::AmbiguousHookTarget`] message (HOOK-105/HOOK-106): both
+/// disambiguating forms it prints (`source:<target>` and the kind-qualified
+/// item ref) are runnable `mind hooks run <arg>` commands, and `target` /
+/// `item_forms` are exactly as attacker-influenced as a `HooksNotRun` resolved
+/// identity (a source identity or `<source>#<kind>:<name>` item form under the
+/// same permissive `validate_prefix`/`is_safe_manifest_path` validators, which
+/// allow shell metacharacters including an embedded `'`). Each is passed
+/// through [`shell_quote`] before it lands in a printed command, exactly as
+/// `hooks_not_run_message` treats a resolved identity -- an unquoted value
+/// here would be the same class of injection HOOK-106 already closed for
+/// `HooksNotRun`, just reachable through this sibling message instead. The
+/// plain-English mentions of `target` earlier in the sentence (describing
+/// *what* is ambiguous, not a command to run) are left bare: they are prose,
+/// not something a reader is invited to paste into a shell.
+fn ambiguous_hook_target_message(target: &str, item_forms: &[String]) -> String {
+    let source_arg = shell_quote(&format!("source:{target}"));
+    let item_form = item_forms.first().map(String::as_str).unwrap_or("");
+    let item_arg = shell_quote(item_form);
+    format!(
+        "'{target}' is ambiguous: it names both the registered source '{target}' and installed item(s) matching the same string; \
+         to target the source, run `mind hooks run {source_arg}`; to target an item, use a kind-qualified ref, e.g. `mind hooks run {item_arg}`"
+    )
+}
+
 /// The [`MindError::HooksNotRun`] message (HOOK-106/107/108): see the
 /// variant's doc comment for the single-vs-several-`resolved` distinction.
 ///
@@ -756,15 +764,18 @@ pub(crate) fn shell_quote(s: &str) -> String {
 /// into the printed "re-run with ..." command: they come from source names,
 /// marketplace aliases, and item-link paths, none of which are restricted
 /// against shell metacharacters, so pasting the remedy verbatim must not be
-/// able to run anything beyond `mind hooks run`. The single-match arm frames
-/// the whole runnable command in DOUBLE quotes (rather than the single quotes
-/// used elsewhere as plain English framing) specifically because the
-/// identity inside it is itself single-quoted by `shell_quote`: nesting a
-/// single-quoted identity inside a single-quoted "here is the command"
-/// wrapper would place an unescaped `'` where the wrapper's own closing quote
-/// is expected, corrupting the frame around the command (and confusing
-/// anything -- human or script -- that finds the command by splitting on the
-/// outer quote).
+/// able to run anything beyond `mind hooks run`. The single-match arm puts the
+/// runnable command on its own line, indented, with no surrounding shell-quote
+/// character (no `"..."` frame): the identity inside it is itself
+/// single-quoted by `shell_quote`, and framing the whole command in a
+/// DOUBLE-quote presentation frame (as this arm once did) is copyable in a way
+/// that re-exposes `$`/backtick metacharacters -- a double-quoted context
+/// keeps `$` and a backtick special, so a verbatim paste of the frame's
+/// closing/opening double quotes together with the single-quoted identity
+/// inside it would let a `$(...)`/backtick payload fire again, even though the
+/// identity is safely single-quoted on its own. Putting the command on its own
+/// line with no quote character to paste along with it removes that surface
+/// entirely, while staying readable.
 fn hooks_not_run_message(target: &str, event: &str, skipped: usize, resolved: &[String]) -> String {
     debug_assert!(
         !resolved.is_empty(),
@@ -777,8 +788,8 @@ fn hooks_not_run_message(target: &str, event: &str, skipped: usize, resolved: &[
             let quoted = shell_quote(one);
             format!(
                 "hooks run '{one}': {skipped} hook(s) had work to do but were skipped for want \
-                 of consent (not a terminal); re-run with \"mind hooks run {quoted} --event \
-                 {event} --dangerously-skip-install-hook-check\" to run them unattended"
+                 of consent (not a terminal); re-run unattended with:\n  mind hooks run {quoted} \
+                 --event {event} --dangerously-skip-install-hook-check"
             )
         }
         _ => {
@@ -798,6 +809,65 @@ fn hooks_not_run_message(target: &str, event: &str, skipped: usize, resolved: &[
             )
         }
     }
+}
+
+/// The [`MindError::LinkedSourceGone`] message (CLI-212/CLI-213). The
+/// `mind unmeld <source>` remedy is a copy-paste command, and `source_name` is
+/// an attacker-influenced source identity (a source name, a `meld --as`/
+/// `[source].prefix` alias, or an item-link `#<path>` segment; see
+/// `validate_prefix`/`is_safe_manifest_path`, which permit shell
+/// metacharacters), so the identity inside the runnable command is passed
+/// through [`shell_quote`] before it lands there -- the same rule the `hooks
+/// run` remedy family applies (HOOK-106, generalized by CLI-225). The earlier
+/// bare mentions of `source_name`/`path` are English prose naming what is gone,
+/// not a command, so they are left unquoted. This closes the same
+/// single-quote-framed-raw-value injection the `hooks run` family closed:
+/// before this, a `'`-carrying source name in a stale/tampered registry entry
+/// broke out of the old `'mind unmeld {source_name}'` frame, and pasting the
+/// suggested `mind unmeld ...` ran the injected code.
+fn linked_source_gone_message(source_name: &str, path: &str) -> String {
+    let quoted = shell_quote(source_name);
+    format!(
+        "source '{source_name}': linked working tree '{path}' is gone; run `mind unmeld {quoted}` to drop it, or restore the directory"
+    )
+}
+
+/// The [`MindError::AgentCollision`] message (NS-41). The
+/// `mind forget agent:<name>` remedy is a copy-paste command, and `name` is the
+/// agent's bare harness name -- its frontmatter `name:` field, source-controlled
+/// and not restricted against shell metacharacters (the effective-name safety
+/// check in `install.rs` guards only path traversal, not `;`/`'`/`$`/backtick).
+/// The whole `agent:<name>` argument is passed through [`shell_quote`] so a
+/// name carrying a quote or `$(...)` cannot turn the pasteable remedy into an
+/// injection (CLI-225, the same rule as HOOK-106). The earlier `agent '{name}'`
+/// and `agents/{name}.md` mentions are prose / a path illustration, not a
+/// command, so they are left unquoted.
+fn agent_collision_message(name: &str, existing: &str, incoming: &str) -> String {
+    let forget_arg = shell_quote(&format!("agent:{name}"));
+    format!(
+        "agent '{name}' from source '{incoming}' conflicts with the installed agent from \
+         '{existing}': both link as agents/{name}.md in the agent home -- \
+         run `mind forget {forget_arg}` (or the prefixed name) to remove the existing agent first"
+    )
+}
+
+/// The [`MindError::SkillCollision`] message (NS-43/NS-45). The
+/// `mind meld --namespace <prefix> <repo>` remedy is a copy-paste command
+/// (once `<repo>` is filled in), and `suggested` is the prefix derived from the
+/// incoming source's repo name / last URL component -- for a local-path meld
+/// that is a directory basename, which can carry a `;`/`'`/space and is not
+/// restricted against shell metacharacters. It is passed through [`shell_quote`]
+/// before it lands in the runnable command (CLI-225, the same rule as
+/// HOOK-106). The conflict list built by `format_conflicts` is a bulleted
+/// listing, not a command a reader pastes, so its names are not quoted here.
+fn skill_collision_message(conflicts: &[(String, String, String)], suggested: &str) -> String {
+    let ns = shell_quote(suggested);
+    format!(
+        "name collision: the following items from the incoming source conflict with \
+         already-installed items:\n{}\nRun `mind meld --namespace {ns} <repo>` \
+         to namespace the incoming source.",
+        format_conflicts(conflicts)
+    )
 }
 
 fn status_suffix(status: Option<ExitStatus>) -> String {
@@ -1079,16 +1149,32 @@ mod tests {
     }
 
     /// The multi-identity remedy (HOOK-106/107) quotes every resolved identity
-    /// in its parenthetical list, not just the first.
+    /// in its parenthetical list, not just the first. `c` carries an embedded
+    /// single quote (unlike `a`/`b`, which have no metacharacter `shell_quote`
+    /// would actually need to escape) so that `shell_quote(c)` and a naive bare
+    /// `'{c}'` interpolation produce DIFFERENT text: without this case, `a` and
+    /// `b` alone would pass against the unfixed bare `'{n}'` interpolation too,
+    /// since quoting a value with no embedded quote is a no-op either way.
     #[test]
     fn hooks_not_run_message_shell_quotes_every_resolved_identity_in_the_list() {
         // spec: HOOK-106 HOOK-107
         let a = "one; touch /tmp/a".to_string();
         let b = "two`whoami`".to_string();
-        let msg = hooks_not_run_message("glob*", "install", 2, &[a.clone(), b.clone()]);
+        let c = "x'; rm -rf ~; echo '".to_string();
+        let msg = hooks_not_run_message("glob*", "install", 3, &[a.clone(), b.clone(), c.clone()]);
         assert!(msg.contains(&shell_quote(&a)), "{msg}");
         assert!(msg.contains(&shell_quote(&b)), "{msg}");
+        assert!(msg.contains(&shell_quote(&c)), "{msg}");
         assert!(!msg.contains("(one; touch /tmp/a"), "{msg}");
+        // `shell_quote(c)` closes/escapes/reopens the embedded quote with the
+        // `'\''` idiom; a bare `'{c}'` interpolation would instead close the
+        // frame early at `c`'s first `'`, leaving `; rm -rf ~; echo ''`
+        // reachable as unquoted shell text.
+        assert!(
+            !msg.contains("'x'; rm -rf ~; echo ''"),
+            "must never carry the broken bare `'{{n}}'` interpolation of the \
+             single-quote-carrying identity: {msg}"
+        );
     }
 
     /// HOOK-106/107/108: an incoherent "0 matched target(s)" remedy never
@@ -1308,8 +1394,8 @@ mod tests {
             "must name the existing source: {msg}"
         );
         assert!(
-            msg.contains("--namespace acme"),
-            "must suggest --namespace with the repo name: {msg}"
+            msg.contains("--namespace 'acme'"),
+            "must suggest --namespace with the shell-quoted repo name (CLI-225): {msg}"
         );
     }
 
@@ -1603,8 +1689,8 @@ mod tests {
         );
         assert!(msg.contains("/tmp/starter"), "must name the path: {msg}");
         assert!(
-            msg.contains("mind unmeld local/tmp/starter"),
-            "must give the copy-pasteable unmeld remedy: {msg}"
+            msg.contains("mind unmeld 'local/tmp/starter'"),
+            "must give the copy-pasteable, shell-quoted unmeld remedy (CLI-225): {msg}"
         );
     }
 
@@ -1760,7 +1846,7 @@ mod tests {
         assert_eq!(e.kind(), "unsafe-clone-path", "kind slug must be stable");
     }
 
-    // spec: HOOK-105
+    // spec: HOOK-105 HOOK-106
     #[test]
     fn ambiguous_hook_target_names_both_disambiguated_forms() {
         // The message must name the ambiguous target string once as the source
@@ -1788,6 +1874,129 @@ mod tests {
             "ambiguous-hook-target",
             "kind slug must be stable"
         );
+    }
+
+    /// HOOK-105/HOOK-106 (P0 injection, the fix this shard exists for):
+    /// `AmbiguousHookTarget`'s two runnable-command examples must shell-quote
+    /// `target` and the item form, exactly as `HooksNotRun`'s remedy does.
+    /// Before this fix both were interpolated bare inside a hand-written
+    /// `'source:{target}'` / `'{}'` frame; an identity carrying an embedded
+    /// single quote breaks out of that bare frame, and `;`/`$(...)`/backtick
+    /// ride along unquoted once it has. Proved two ways: the printed message
+    /// must carry the properly `shell_quote`d form (not the broken bare
+    /// interpolation), and running each disambiguating command through a real
+    /// shell must leave the identity intact as one literal argument with the
+    /// injected `touch` never firing.
+    // spec: HOOK-105 HOOK-106
+    #[test]
+    fn ambiguous_hook_target_shell_quotes_both_runnable_examples() {
+        use std::process::Command;
+
+        let target = "x'; touch /tmp/mind-hook-105-pwned; echo '`id`$(id)".to_string();
+        let item_form =
+            "local/base/x'; touch /tmp/mind-hook-105-item-pwned; echo '#skill:x".to_string();
+        let e = MindError::AmbiguousHookTarget {
+            target: target.clone(),
+            item_forms: vec![item_form.clone()],
+        };
+        let msg = e.to_string();
+
+        // The source-targeting example must carry the shell-quoted
+        // `source:<target>` argument, not a bare interpolation.
+        let quoted_source = shell_quote(&format!("source:{target}"));
+        assert!(
+            msg.contains(&format!("mind hooks run {quoted_source}")),
+            "the source-targeting example must be shell-quoted: {msg}"
+        );
+        assert!(
+            !msg.contains(&format!("mind hooks run 'source:{target}'")),
+            "must never fall back to the broken bare `'source:{{target}}'` \
+             interpolation: {msg}"
+        );
+
+        // The item-targeting example must carry the shell-quoted item form.
+        let quoted_item = shell_quote(&item_form);
+        assert!(
+            msg.contains(&format!("mind hooks run {quoted_item}")),
+            "the item-targeting example must be shell-quoted: {msg}"
+        );
+        assert!(
+            !msg.contains(&format!("mind hooks run '{item_form}'")),
+            "must never fall back to the broken bare `'{{item_form}}'` \
+             interpolation: {msg}"
+        );
+
+        // Execution proof, mirroring `shell_quote_round_trips_a_malicious_identity_through_a_real_shell`:
+        // extract each `mind hooks run <arg>` example and run it through a
+        // real shell with `mind` swapped for `printf`, so an injection would
+        // fire the embedded `touch` rather than the argument being handed to
+        // `printf` as inert data.
+        if Command::new("sh").arg("-c").arg("true").status().is_err() {
+            return;
+        }
+        for (sentinel_path, command) in [
+            (
+                "/tmp/mind-hook-105-pwned",
+                format!("mind hooks run {quoted_source}"),
+            ),
+            (
+                "/tmp/mind-hook-105-item-pwned",
+                format!("mind hooks run {quoted_item}"),
+            ),
+        ] {
+            let sentinel = std::path::Path::new(sentinel_path);
+            let _ = std::fs::remove_file(sentinel);
+            let probe = command.replacen("mind hooks run", "printf '%s\\n'", 1);
+            let out = Command::new("sh")
+                .arg("-c")
+                .arg(&probe)
+                .output()
+                .expect("sh -c must run");
+            assert!(
+                out.status.success(),
+                "the quoted example must parse as one shell argument: {probe:?}\nstderr: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert!(
+                !sentinel.exists(),
+                "the injected 'touch' must not have executed via the printed \
+                 example: {probe:?}"
+            );
+            let _ = std::fs::remove_file(sentinel);
+        }
+    }
+
+    /// HOOK-106 Fix 2: the SAME whole-frame-paste proof as
+    /// `hooks_cmd::tests::source_skip_note_whole_framed_remedy_is_inert_when_pasted_with_the_frame`,
+    /// for `HooksNotRun`'s single-match arm. On the OLD double-quote
+    /// presentation frame, copying the frame's own `"` characters together
+    /// with the (already single-quoted) identity re-exposed `$`/backtick
+    /// inside it; the new frame carries no shell-quote character, so pasting
+    /// it whole must stay inert.
+    // spec: HOOK-106
+    #[test]
+    fn hooks_not_run_message_whole_framed_remedy_is_inert_when_pasted_with_the_frame() {
+        use std::process::Command;
+        if Command::new("sh").arg("-c").arg("true").status().is_err() {
+            return;
+        }
+        let sentinel = std::path::Path::new("/tmp/mind-hook-106-whole-frame-pwned");
+        let _ = std::fs::remove_file(sentinel);
+        let evil = "$(touch /tmp/mind-hook-106-whole-frame-pwned)`touch /tmp/mind-hook-106-whole-frame-pwned`".to_string();
+        let msg = hooks_not_run_message("target", "install", 1, std::slice::from_ref(&evil));
+
+        let lead_at = msg
+            .find("re-run unattended with:")
+            .expect("message has a remedy frame");
+        let framed_remedy = &msg[lead_at..];
+
+        let _ = Command::new("sh").arg("-c").arg(framed_remedy).output();
+        assert!(
+            !sentinel.exists(),
+            "pasting the whole framed remedy (frame included) must not execute \
+             the embedded command substitution: {framed_remedy:?}"
+        );
+        let _ = std::fs::remove_file(sentinel);
     }
 
     #[test]
@@ -1819,6 +2028,153 @@ mod tests {
             mismatch.contains("conflicts"),
             "must say 'conflicts': {mismatch}"
         );
+    }
+
+    // ---- CLI-225: printed remedies shell-quote interpolated identities -----
+
+    /// Prove a printed remedy is inert when pasted into a real shell: swap the
+    /// `<verb_prefix>` binary invocation for `printf '%s\n'` so an injected
+    /// `;`/`$(...)`/backtick would fire its embedded `touch` (dropping
+    /// `sentinel`) instead of being handed to the command as inert data, exactly
+    /// the printf-swap technique `tests/cli_hooks.rs` uses. `expected_arg` must
+    /// come back in printf's output as one literal argument, proving the
+    /// `shell_quote` passed it through unexecuted. Skips (does not fail) when no
+    /// `sh` is on PATH, mirroring `selfupdate.rs`'s `have("sh")` guard.
+    fn assert_command_inert(command: &str, verb_prefix: &str, sentinel: &str, expected_arg: &str) {
+        assert!(
+            command.starts_with(verb_prefix),
+            "extracted command must start with the verb: {command:?}"
+        );
+        if Command::new("sh").arg("-c").arg("true").status().is_err() {
+            return;
+        }
+        let sentinel_path = std::path::Path::new(sentinel);
+        let _ = std::fs::remove_file(sentinel_path);
+        let probe = command.replacen(verb_prefix, "printf '%s\\n'", 1);
+        let out = Command::new("sh")
+            .arg("-c")
+            .arg(&probe)
+            .output()
+            .expect("sh -c must run");
+        assert!(
+            !sentinel_path.exists(),
+            "the injected command fired via the printed remedy: {probe:?}"
+        );
+        let _ = std::fs::remove_file(sentinel_path);
+        assert!(
+            out.status.success(),
+            "the quoted remedy must parse as shell arguments: {probe:?}\nstderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains(expected_arg),
+            "the identity must survive as one literal argument: stdout {:?}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+    }
+
+    /// CLI-225 (P1 injection sweep): `LinkedSourceGone`'s `mind unmeld <source>`
+    /// remedy must shell-quote the source identity, closing the same class the
+    /// `hooks run` family closed. The old message framed the raw name in single
+    /// quotes (`'mind unmeld {source_name}'`), so a source name carrying a `'`
+    /// broke out and a paste of `mind unmeld ...` ran the injected code. Proved
+    /// two ways: the message carries the properly `shell_quote`d form (not the
+    /// broken bare frame), and running the printed command through a real shell
+    /// leaves the identity intact with the injected `touch` never firing.
+    // spec: CLI-225
+    #[test]
+    fn linked_source_gone_remedy_shell_quotes_the_source_identity() {
+        let evil = "s'; touch /tmp/mind-lsg-pwned; echo '`id`$(id)";
+        let e = MindError::LinkedSourceGone {
+            source_name: evil.to_string(),
+            path: "/gone".into(),
+        };
+        let msg = e.to_string();
+        // The runnable command the message prints, reconstructed from the same
+        // `shell_quote` the Display uses. The `contains` check ties this exact
+        // string to what was printed; building it directly (rather than parsing
+        // it back out of prose) sidesteps the backtick in the payload, which
+        // would otherwise confuse a naive backtick-delimited extraction.
+        let command = format!("mind unmeld {}", shell_quote(evil));
+        assert!(
+            msg.contains(&command),
+            "the unmeld remedy must carry the shell-quoted identity: {msg}"
+        );
+        assert!(
+            !msg.contains(&format!("mind unmeld '{evil}'")),
+            "must never fall back to the broken single-quote-framed raw name: {msg}"
+        );
+        assert_command_inert(&command, "mind unmeld", "/tmp/mind-lsg-pwned", evil);
+    }
+
+    /// CLI-225 (P1 injection sweep): `AgentCollision`'s `mind forget agent:<name>`
+    /// remedy must shell-quote the `agent:<name>` argument. The agent's bare
+    /// harness name is its source-controlled frontmatter `name:`, unrestricted
+    /// against shell metacharacters, and the old message spliced it straight into
+    /// the runnable command.
+    // spec: CLI-225
+    #[test]
+    fn agent_collision_remedy_shell_quotes_the_forget_argument() {
+        let evil = "dev'; touch /tmp/mind-agentcol-pwned; echo '`id`";
+        let e = MindError::AgentCollision {
+            name: evil.to_string(),
+            existing: "github.com/a/one".into(),
+            incoming: "github.com/a/two".into(),
+        };
+        let msg = e.to_string();
+        let command = format!("mind forget {}", shell_quote(&format!("agent:{evil}")));
+        assert!(
+            msg.contains(&command),
+            "the forget remedy must carry the shell-quoted agent ref: {msg}"
+        );
+        assert!(
+            !msg.contains(&format!("mind forget agent:{evil}")),
+            "must never splice the raw agent name into the runnable command: {msg}"
+        );
+        assert_command_inert(
+            &command,
+            "mind forget",
+            "/tmp/mind-agentcol-pwned",
+            &format!("agent:{evil}"),
+        );
+    }
+
+    /// CLI-225 (P1 injection sweep): `SkillCollision`'s
+    /// `mind meld --namespace <prefix> <repo>` remedy must shell-quote the
+    /// suggested prefix. For a local-path meld the prefix is a directory
+    /// basename, which can carry `;`/`'`/whitespace; the old message interpolated
+    /// it bare. The `<repo>` placeholder (which carries `<`/`>` the shell would
+    /// read as redirections) is stripped before the round-trip so only the
+    /// `--namespace <prefix>` segment under test is executed.
+    // spec: CLI-225
+    #[test]
+    fn skill_collision_remedy_shell_quotes_the_suggested_prefix() {
+        let evil = "fork'; touch /tmp/mind-skillcol-pwned; echo '`id`";
+        let e = MindError::SkillCollision {
+            conflicts: vec![(
+                "skill".into(),
+                "review".into(),
+                "github.com/acme/agents".into(),
+            )],
+            suggested: evil.to_string(),
+        };
+        let msg = e.to_string();
+        assert!(
+            msg.contains(&format!(
+                "mind meld --namespace {} <repo>",
+                shell_quote(evil)
+            )),
+            "the meld remedy must carry the shell-quoted prefix: {msg}"
+        );
+        assert!(
+            !msg.contains(&format!("--namespace {evil}")),
+            "must never interpolate the raw prefix into the runnable command: {msg}"
+        );
+        // The printed command carries a `<repo>` placeholder whose `<`/`>` the
+        // shell would read as redirections, so drop it and exercise only the
+        // `--namespace <prefix>` segment under test through the round-trip.
+        let command = format!("mind meld --namespace {}", shell_quote(evil));
+        assert_command_inert(&command, "mind meld", "/tmp/mind-skillcol-pwned", evil);
     }
 
     // ---- DSC-91: shared metadata size cap ----------------------------------

@@ -1055,18 +1055,20 @@ fn record_hook_run(source: &mut Source, command: &str, ran_at: Option<String>) {
 /// source name, marketplace alias, or item-link path segment, none restricted
 /// against shell metacharacters), so the identity that lands inside the runnable
 /// command is passed through [`crate::error::shell_quote`] (HOOK-106) exactly as
-/// the error's remedy is. The whole command is framed in DOUBLE quotes because
-/// the identity inside it is itself single-quoted by `shell_quote`; a
-/// single-quote frame would place an unescaped `'` where the frame's own closing
-/// quote is expected (the same reasoning as `error::hooks_not_run_message`'s
-/// single-match arm). `source_name` also appears once as bare prose ("for
-/// <name>"), which is not a shell command and needs no quoting.
+/// the error's remedy is. The runnable command is printed on its own indented
+/// line with no surrounding shell-quote character, exactly like
+/// `error::hooks_not_run_message`'s single-match arm: a DOUBLE-quote
+/// presentation frame around the (already single-quoted) identity is copyable
+/// in a way that re-exposes `$`/backtick inside it when the frame's own quotes
+/// are pasted along with the command, so this note avoids a shell-quote
+/// character as its frame entirely. `source_name` also appears once as bare
+/// prose ("for <name>"), which is not a shell command and needs no quoting.
 fn source_skip_note(event_name: &str, label: &str, source_name: &str) -> String {
     let quoted = crate::error::shell_quote(source_name);
     format!(
         "note: skipped {event_name} hook '{label}' for {source_name} (not a terminal); \
-         re-run with \"mind hooks run {quoted} --event {event_name} \
-         --dangerously-skip-install-hook-check\" to run it unattended"
+         re-run unattended with:\n  mind hooks run {quoted} --event {event_name} \
+         --dangerously-skip-install-hook-check"
     )
 }
 
@@ -1248,12 +1250,11 @@ mod tests {
         let evil = "x; touch /tmp/mind-skip-note-rt-pwned; echo hi";
         let note = source_skip_note("install", "setup", evil);
 
-        // Pull out the double-quote-framed runnable command the note prints.
-        let lead = "re-run with \"";
+        // Pull out the runnable command from its own indented line (no
+        // surrounding shell-quote character, HOOK-106 Fix 2).
+        let lead = "re-run unattended with:\n";
         let start = note.find(lead).expect("note has a runnable command") + lead.len();
-        let rest = &note[start..];
-        let end = rest.find('"').expect("command is double-quote framed");
-        let command = &rest[..end];
+        let command = note[start..].lines().next().unwrap().trim();
         assert!(
             command.starts_with("mind hooks run "),
             "extracted command must be the mind invocation: {command:?}"
@@ -1280,5 +1281,43 @@ mod tests {
              was not interpreted: stdout {:?}",
             String::from_utf8_lossy(&out.stdout)
         );
+    }
+
+    /// HOOK-106 Fix 2: pasting the WHOLE framed remedy -- the "re-run
+    /// unattended with:" line and the indented command line beneath it, frame
+    /// included -- into a real shell must not execute an embedded `$(...)`
+    /// command substitution. On the OLD double-quote presentation frame
+    /// (`re-run with "mind hooks run '...' ..."`), copying the surrounding `"`
+    /// characters along with the already-single-quoted identity re-exposed
+    /// `$`/backtick inside it, because a double-quoted context keeps `$` and a
+    /// backtick special even around an inner single-quoted segment. The new
+    /// frame carries no shell-quote character at all, so a verbatim paste of
+    /// the frame is inert regardless of what a reader includes.
+    // spec: HOOK-106
+    #[test]
+    fn source_skip_note_whole_framed_remedy_is_inert_when_pasted_with_the_frame() {
+        use std::process::Command;
+        if Command::new("sh").arg("-c").arg("true").status().is_err() {
+            return;
+        }
+        let sentinel = std::path::Path::new("/tmp/mind-skip-note-whole-frame-pwned");
+        let _ = std::fs::remove_file(sentinel);
+        let evil = "$(touch /tmp/mind-skip-note-whole-frame-pwned)`touch /tmp/mind-skip-note-whole-frame-pwned`";
+        let note = source_skip_note("install", "setup", evil);
+
+        // Take the remedy exactly as a reader would copy it: from "re-run
+        // unattended with:" through the end of the note, frame and all.
+        let lead_at = note
+            .find("re-run unattended with:")
+            .expect("note has a remedy frame");
+        let framed_remedy = &note[lead_at..];
+
+        let _ = Command::new("sh").arg("-c").arg(framed_remedy).output();
+        assert!(
+            !sentinel.exists(),
+            "pasting the whole framed remedy (frame included) must not execute \
+             the embedded command substitution: {framed_remedy:?}"
+        );
+        let _ = std::fs::remove_file(sentinel);
     }
 }

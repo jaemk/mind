@@ -294,7 +294,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   construction, so an ANSI escape or Unicode bidi-override sequence embedded
   in source-controlled text (a token, a hardcoded path) is stripped from both
   the human `error [kind]: ...`/`advisory [kind]: ...` output and the
-  `--json` document, instead of only the former (CLI-224).
+  `--json` document; previously neither was sanitized (CLI-224).
 
 ### Documentation
 

@@ -1545,10 +1545,21 @@ fn hard_finding_message_strips_a_bidi_override_in_text_and_json_output() {
 /// message. Both the human-readable text output and the `--json` document
 /// must have it stripped, not just serde-escaped: a bidi override renders
 /// visually even when it round-trips through valid JSON.
+///
+/// The token names a REAL sibling tool (the tool dir/entrypoint carry the
+/// same bidi-laced name), so it resolves and Check 8 has no reason to flag it
+/// as `bad-reference`: `inert-token` is the only check that fires here, which
+/// keeps this test isolated to the sanitize boundary on that finding path
+/// (CLI-223's Check-5/8-vs-14 suppression -- reviewed separately -- would
+/// otherwise remove an unresolved token from `inert-token`'s report).
 /// spec: CLI-224
 #[test]
 fn finding_message_strips_a_bidi_override_in_text_and_json_output() {
     let sb = fixture();
+    write(
+        &sb.source.join("tools/evil\u{202E}here/evil\u{202E}here"),
+        "#!/bin/sh\n",
+    );
     write(
         &sb.source.join("skills/cos-run/SKILL.md"),
         "---\nname: cos-run\ndescription: runner\n---\n# Runner\n",
@@ -1596,15 +1607,16 @@ fn finding_message_strips_a_bidi_override_in_text_and_json_output() {
     );
 }
 
-/// P4 documentation: the deliberate overlap between the new `inert-token`
-/// check (CLI-223) and the pre-existing `misplaced-reference` (Check 11) check.
-/// A single RESOLVABLE `{{ns:}}` token in a non-markdown file draws BOTH
-/// advisories: one broken/misplaced reference fires two findings. This test
-/// pins the current (accepted, un-deduped) behavior so a future dedup decision
-/// is a conscious change to a documented baseline, not an accidental drift.
+/// The suppression side of CLI-223: a single RESOLVABLE `{{ns:}}` token in a
+/// non-markdown file used to draw BOTH `misplaced-reference` (Check 11) and
+/// `inert-token` (Check 14) for the same span -- one broken/misplaced
+/// reference reported as two findings. Check 11 unconditionally reports every
+/// `{{ns:}}` token in a non-markdown file (misplaced by construction there),
+/// so it already names this span; the generic `inert-token` net now excludes
+/// any `{{ns:...}}` token for that reason, leaving exactly one finding.
 /// spec: CLI-223
 #[test]
-fn resolvable_ns_token_in_a_script_draws_both_misplaced_and_inert_advisories() {
+fn resolvable_ns_token_in_a_script_draws_only_misplaced_not_inert() {
     let sb = fixture();
     // cos-spec is a real sibling, so Check 5 (ns resolution) does NOT hard-fail;
     // the token simply sits in a script where it will never expand.
@@ -1624,8 +1636,9 @@ fn resolvable_ns_token_in_a_script_draws_both_misplaced_and_inert_advisories() {
         r.stdout
     );
     assert!(
-        r.stdout.contains("[inert-token]"),
-        "Check 14 also fires for the same token: {}",
+        !r.stdout.contains("[inert-token]"),
+        "Check 14 must not re-report the same {{{{ns:}}}} span Check 11 already \
+         named, or a single broken/misplaced reference reads as two findings: {}",
         r.stdout
     );
 }
@@ -1634,9 +1647,11 @@ fn resolvable_ns_token_in_a_script_draws_both_misplaced_and_inert_advisories() {
 /// review: install expands `{{ns:}}` in markdown only (NS-53), so the token is
 /// dead text that can never become a `BadReference` at install. Check 5 mirrors
 /// Check 8's non-markdown downgrade (CLI-132, CLI-135) and reports the miss as
-/// an advisory instead, consistent with the `inert-token` advisory (Check 14)
-/// already calling the same token harmless -- no more contradiction between the
-/// two checks.
+/// an advisory instead. Check 11 also fires (every `{{ns:}}` token in a
+/// non-markdown file is misplaced there, whether or not it resolves), but the
+/// generic `inert-token` net (Check 14) does NOT re-report the same span a
+/// third time: it excludes every `{{ns:...}}` token in a non-markdown file,
+/// since Check 11 already names all of them unconditionally (CLI-223).
 /// spec: CLI-132 CLI-223
 #[test]
 fn unresolvable_ns_token_in_a_script_is_advisory_not_hard() {
@@ -1663,8 +1678,210 @@ fn unresolvable_ns_token_in_a_script_is_advisory_not_hard() {
         r.stdout
     );
     assert!(
-        r.stdout.contains("[inert-token]"),
-        "the inert-token advisory still fires on the same token: {}",
+        r.stdout.contains("[misplaced-reference]"),
+        "Check 11 still fires for the same non-markdown ns token: {}",
+        r.stdout
+    );
+    assert!(
+        !r.stdout.contains("[inert-token]"),
+        "the generic inert-token net must not re-report the same {{{{ns:}}}} \
+         span Check 5 and Check 11 already named, or one broken reference \
+         reads as three findings: {}",
+        r.stdout
+    );
+}
+
+/// A resolvable `{{tools:detect}}` token in a `.sh` -- the case `inert-token`
+/// exists for (CLI-223): no other check has any reason to mention it, since it
+/// resolves fine and is not an `{{ns:}}` token -- draws exactly ONE
+/// `inert-token` advisory, not a duplicate. Counts the `--json` advisory array
+/// rather than a substring `contains`, so a regression that emitted the same
+/// finding twice would be caught even though both copies read identically.
+/// spec: CLI-223
+#[test]
+fn resolvable_tools_token_in_a_script_yields_exactly_one_inert_token_advisory() {
+    let sb = fixture();
+    write(&sb.source.join("tools/detect/detect"), "#!/bin/sh\n");
+    write(
+        &sb.source.join("skills/cos-run/SKILL.md"),
+        "---\nname: cos-run\ndescription: runner\n---\n# Runner\n",
+    );
+    let script = sb.source.join("skills/cos-run/run.sh");
+    write(&script, "#!/bin/sh\n{{tools:detect}} --scan\n");
+
+    let target = sb.source_spec();
+    let json = sb.mind(&["review", &target, "--json"]);
+    assert!(json.success, "{} {}", json.stdout, json.stderr);
+    let doc: serde_json::Value =
+        serde_json::from_str(&json.stdout).expect("--json must emit one JSON document");
+    let inert: Vec<&serde_json::Value> = doc["advisory"]
+        .as_array()
+        .expect("advisory array present")
+        .iter()
+        .filter(|f| f["kind"] == "inert-token")
+        .collect();
+    assert_eq!(
+        inert.len(),
+        1,
+        "a resolvable token that no other check mentions must draw exactly one \
+         inert-token advisory: {inert:?}"
+    );
+}
+
+/// The suppression is per-TOKEN, not per-file: an unresolved path token draws a
+/// `bad-reference` (Check 8, which stops at the first miss) and is excluded
+/// from `inert-token`, but a second, unrelated, resolvable token in the SAME
+/// file is not swept up by that exclusion and still gets its own
+/// `inert-token` advisory. Guards against an implementation that suppresses
+/// the whole file's `inert-token` finding rather than just the one span
+/// another check already reported.
+/// spec: CLI-223
+#[test]
+fn bad_reference_suppression_does_not_swallow_an_unrelated_token_in_the_same_file() {
+    let sb = fixture();
+    write(&sb.source.join("tools/detect/detect"), "#!/bin/sh\n");
+    write(
+        &sb.source.join("skills/cos-run/SKILL.md"),
+        "---\nname: cos-run\ndescription: runner\n---\n# Runner\n",
+    );
+    let script = sb.source.join("skills/cos-run/run.sh");
+    // {{tools:nosuch}} does not resolve (Check 8: bad-reference, advisory in a
+    // non-markdown file); {{tools:detect}} does resolve and is unrelated.
+    write(
+        &script,
+        "#!/bin/sh\n{{tools:nosuch}}\n{{tools:detect}} --scan\n",
+    );
+
+    let target = sb.source_spec();
+    let r = sb.mind(&["review", &target]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("[bad-reference]") && r.stdout.contains("{{tools:nosuch}}"),
+        "the unresolved token is still reported by Check 8: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("[inert-token]") && r.stdout.contains("{{tools:detect}}"),
+        "the unrelated resolvable token in the same file must still be named \
+         by inert-token: {}",
+        r.stdout
+    );
+    // The bad token itself must not ALSO show up inside the inert-token
+    // finding's own token list -- that would be the duplicate this test guards
+    // against.
+    let inert_line = r
+        .stdout
+        .lines()
+        .find(|l| l.contains("[inert-token]"))
+        .expect("an inert-token line is present");
+    assert!(
+        !inert_line.contains("{{tools:nosuch}}"),
+        "the token Check 8 already reported must not also appear in the \
+         inert-token finding's list: {inert_line}"
+    );
+}
+
+/// P1(c), the `{{ns:}}`-exclusion path (distinct from the check8 path the test
+/// above covers): a script holding TWO distinct tokens -- one `{{ns:}}` token
+/// that Check 11 already reports as misplaced, and one resolvable `{{tools:}}`
+/// token that only the generic net catches -- must report BOTH. The `ns:`
+/// exclusion in Check 14 keys on the token's inner text, so a mutation that
+/// widened it to drop the whole file (or the sibling tools token) would leave
+/// the resolvable token unreported. Guards that the exclusion removes only the
+/// ns span, never the unrelated tools span in the same file.
+/// spec: CLI-223
+#[test]
+fn ns_token_and_resolvable_tools_token_in_same_script_are_both_reported() {
+    let sb = fixture();
+    write(&sb.source.join("tools/detect/detect"), "#!/bin/sh\n");
+    write(
+        &sb.source.join("skills/cos-run/SKILL.md"),
+        "---\nname: cos-run\ndescription: runner\n---\n# Runner\n",
+    );
+    let script = sb.source.join("skills/cos-run/run.sh");
+    // {{ns:cos-cert-setup}} resolves (a real sibling) but is misplaced in a
+    // script -> Check 11. {{tools:detect}} resolves -> only Check 14.
+    write(
+        &script,
+        "#!/bin/sh\n# see {{ns:cos-cert-setup}}\n{{tools:detect}} --scan\n",
+    );
+
+    let target = sb.source_spec();
+    let json = sb.mind(&["review", &target, "--json"]);
+    assert!(json.success, "{} {}", json.stdout, json.stderr);
+    let doc: serde_json::Value =
+        serde_json::from_str(&json.stdout).expect("--json must emit one JSON document");
+    let advisory = doc["advisory"].as_array().expect("advisory array present");
+
+    // Check 11 names the ns token as misplaced.
+    let misplaced: Vec<&serde_json::Value> = advisory
+        .iter()
+        .filter(|f| f["kind"] == "misplaced-reference")
+        .collect();
+    assert_eq!(
+        misplaced.len(),
+        1,
+        "the ns token draws exactly one misplaced-reference: {advisory:#?}"
+    );
+
+    // Check 14 names the tools token exactly once, and its token list must NOT
+    // contain the ns token (that one is excluded, reported by Check 11 instead).
+    let inert: Vec<&serde_json::Value> = advisory
+        .iter()
+        .filter(|f| f["kind"] == "inert-token")
+        .collect();
+    assert_eq!(
+        inert.len(),
+        1,
+        "the resolvable tools token draws exactly one inert-token: {advisory:#?}"
+    );
+    let inert_msg = inert[0]["message"].as_str().unwrap();
+    assert!(
+        inert_msg.contains("{{tools:detect}}"),
+        "inert-token must name the tools token: {inert_msg}"
+    );
+    assert!(
+        !inert_msg.contains("cos-cert-setup"),
+        "inert-token must NOT re-list the ns token Check 11 already named: {inert_msg}"
+    );
+}
+
+/// Known-divergence pin (P1d): the Check 14 `ns:` exclusion keys on the token's
+/// trimmed inner text starting with `ns:`, but Check 11 (`scan_ns_refs`) only
+/// recognizes the literal `{{ns:` open delimiter. A token with whitespace
+/// BETWEEN the braces and `ns:` -- `{{ ns:foo }}` -- is therefore excluded by
+/// Check 14 (its inner trims to `ns:foo`) yet NOT reported by Check 11 (the
+/// `{{ns:` scan does not match the space), so it is reported by nobody. It also
+/// never expands anywhere (install's `expand` needs the same literal `{{ns:`),
+/// so it is genuinely dead text either way -- the divergence is an
+/// under-report of an already-broken token, not a mis-expansion. This pins the
+/// CURRENT behavior so the divergence is visible and a future change to close
+/// it is a deliberate, test-observed decision rather than a silent drift.
+/// spec: CLI-223
+#[test]
+fn spaced_ns_token_in_a_script_falls_through_both_checks_current_behavior() {
+    let sb = fixture();
+    write(
+        &sb.source.join("skills/cos-run/SKILL.md"),
+        "---\nname: cos-run\ndescription: runner\n---\n# Runner\n",
+    );
+    let script = sb.source.join("skills/cos-run/run.sh");
+    // Note the space between `{{` and `ns:`.
+    write(&script, "#!/bin/sh\n# see {{ ns:cos-cert-setup }}\n");
+
+    let target = sb.source_spec();
+    let r = sb.mind(&["review", &target]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    // Current behavior: neither Check 11 nor Check 14 reports this token.
+    assert!(
+        !r.stdout.contains("[misplaced-reference]"),
+        "Check 11 does not recognize a spaced `{{{{ ns:` token: {}",
+        r.stdout
+    );
+    assert!(
+        !r.stdout.contains("[inert-token]"),
+        "the `ns:` exclusion drops the spaced token even though Check 11 does \
+         not report it -- a known under-report divergence pinned here: {}",
         r.stdout
     );
 }
@@ -1708,6 +1925,13 @@ fn unresolvable_ns_token_in_markdown_still_hard_fails() {
 #[test]
 fn finding_message_preserves_legitimate_non_ascii() {
     let sb = fixture();
+    // The token names a real sibling tool, so it resolves and Check 8 leaves
+    // it to `inert-token` alone (CLI-223's suppression only excludes a token
+    // another check already reported).
+    write(
+        &sb.source.join("tools/caf\u{00e9}/caf\u{00e9}"),
+        "#!/bin/sh\n",
+    );
     write(
         &sb.source.join("skills/cos-run/SKILL.md"),
         "---\nname: cos-run\ndescription: runner\n---\n# Runner\n",

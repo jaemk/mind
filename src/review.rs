@@ -670,6 +670,12 @@ fn run_checks(
             // `{{ns:}}` in it is misplaced (NS-24), and no token family expands
             // there at all (NS-53).
             let is_md = crate::namespace::is_markdown(&file);
+            // The one path token Check 8 (below) reports as `bad-reference` for
+            // this file, if any, so Check 14 does not re-report the same span
+            // (CLI-223). `expand_paths` stops at the first bad token, so this is
+            // at most one entry; every other token in the file is untouched by
+            // Check 8 and remains eligible for Check 14.
+            let mut check8_bad_token: Option<String> = None;
             // Check 8: path-reference tokens that do not resolve (hard, CLI-135).
             // Gated on `is_md` (NS-53): install never expands a path/tools token
             // outside markdown, so an unresolved one in a non-markdown file is
@@ -705,6 +711,7 @@ fn run_checks(
                             item.key()
                         ),
                     ));
+                    check8_bad_token = Some(token);
                 }
             }
             // Check 9: hardcoded install paths that should be tokens (advisory,
@@ -793,12 +800,30 @@ fn run_checks(
             // inert (advisory, CLI-223): no token family expands outside
             // markdown (NS-53), so even a token that would resolve if the file
             // were markdown -- a `{{tools:name}}` naming a real sibling, say --
-            // is left literal at install and breaks at runtime. Checks 8 and 11
-            // above already report a token here when it fails to resolve (a
-            // path-token miss) or is an `{{ns:}}` token; this generic net also
-            // catches the case those two miss: a token that does resolve.
+            // is left literal at install and breaks at runtime. This generic net
+            // exists for the case Checks 5, 8, and 11 miss: a token that does
+            // resolve, so nothing else would otherwise flag it. A span those
+            // checks DID already flag is excluded here so the same token does
+            // not draw a second (or third) advisory (CLI-223):
+            //  - every `{{ns:...}}` token in a non-markdown file is unconditionally
+            //    reported by Check 11 above (outside markdown, every `{{ns:}}`
+            //    token is misplaced by construction, whether or not it resolves --
+            //    which also covers what Check 5's downgraded `bad-reference` would
+            //    report, since that is always a `{{ns:}}` token too);
+            //  - the one path token (`{{tools:}}`/`{{path:}}`/`{{self}}`) Check 8
+            //    above reported as `bad-reference` for this file, if any.
             if !is_md {
-                let tokens = crate::namespace::inert_tokens(&content);
+                let tokens: Vec<String> = crate::namespace::inert_tokens(&content)
+                    .into_iter()
+                    .filter(|tok| {
+                        let inner = tok
+                            .strip_prefix("{{")
+                            .and_then(|s| s.strip_suffix("}}"))
+                            .unwrap_or(tok)
+                            .trim();
+                        !inner.starts_with("ns:") && Some(tok) != check8_bad_token.as_ref()
+                    })
+                    .collect();
                 if !tokens.is_empty() {
                     let file_name = file
                         .file_name()

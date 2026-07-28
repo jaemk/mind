@@ -304,9 +304,11 @@ error, `-` available) so no information is lost (CLI-151, CLI-152, CLI-154).
 **`--json` output.** `--json` is universal: every verb answers it with exactly
 one JSON document on stdout, except a closed exclusion list -- `dump` (always
 emits TOML, CLI-153 does not apply), `completions`/`man` (print their script or
-roff page as the entire output), `evolve` (writes its own result document on a
-separate path), and `init-source` (a maintainer scaffolder with no JSON result
-to offer). Every other verb answers with a document.
+roff page as the entire output), `evolve` (writes its own result document from
+`selfupdate.rs` rather than through the shared JSON machinery -- the document
+IS JSON, just emitted on a separate path), and `init-source` (a maintainer
+scaffolder with no JSON result to offer). Every other verb answers with a
+document.
 
 `recall` and `probe` emit `{"schema": 1, "items": [...]}`.
 `introspect` emits `{"schema": 1, "issues": [...], "sources": N, "items": N}`

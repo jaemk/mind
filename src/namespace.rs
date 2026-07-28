@@ -795,6 +795,11 @@ fn scan_braced(content: &str) -> Vec<(usize, usize, &str)> {
 
 /// Replace every `{{...}}` span with a space, so prose scanning ignores anything
 /// already inside a reference token (any token kind, not just `{{ns:}}`).
+///
+/// An unterminated `{{` (no closing `}}` anywhere after it) is not a span
+/// [`scan_braced`] reports, so it -- and everything from it to the end of
+/// `content` -- is left verbatim rather than masked, mirroring [`expand`]'s
+/// "leave the rest verbatim" treatment of an unterminated token.
 fn strip_braced(content: &str) -> String {
     let mut out = String::with_capacity(content.len());
     let mut last = 0;
@@ -819,11 +824,23 @@ fn strip_braced(content: &str) -> String {
 /// advisory, never hard, since it can never break an install either way); this
 /// one reports the token regardless of whether it resolves, since neither case
 /// ever actually expands outside markdown.
+///
+/// For a nested construct (`{{ {{tools:detect}} }}`) [`scan_braced`] reports
+/// the outer span, so the string returned here is a superset of the inner
+/// token rather than the inner token alone -- cosmetic (the advisory message
+/// still names a span that covers the real token; the never-miss invariant in
+/// the tests below holds), not a correctness issue, so left as-is.
 pub fn inert_tokens(content: &str) -> Vec<String> {
+    // O(n) dedup via a seen-set (a hostile source can pack a non-markdown file
+    // with an attacker-controlled number of distinct tokens; `review` must stay
+    // linear in that count rather than the O(k^2) an `out.iter().any(...)` scan
+    // would cost per token). `out` still preserves first-seen order, since a
+    // `HashSet` alone would not.
+    let mut seen: HashSet<&str> = HashSet::new();
     let mut out: Vec<String> = Vec::new();
     for (start, end, _) in scan_braced(content) {
         let tok = &content[start..end];
-        if !out.iter().any(|t| t == tok) {
+        if seen.insert(tok) {
             out.push(tok.to_string());
         }
     }
@@ -4827,6 +4844,80 @@ mod tests {
                 .iter()
                 .any(|t| t.contains("ns:detect")),
             "inert_tokens must also cover a nested ns token"
+        );
+    }
+
+    #[test]
+    fn inert_tokens_dedup_is_linear_and_correct_on_many_distinct_tokens() {
+        // spec: CLI-223
+        // `inert_tokens` dedups via a `HashSet` seen-set, O(n) over the token
+        // count, rather than the O(k^2) `out.iter().any(...)` scan the previous
+        // implementation used: `review` is the tool meant to safely inspect a
+        // hostile source, and a source can ship a non-markdown file packed with
+        // an attacker-controlled number of distinct `{{...}}` tokens, so a
+        // quadratic dedup would let review itself become the denial-of-service
+        // vector it exists to guard against. A timing assertion would be
+        // brittle, so this pins correctness (every distinct token reported
+        // exactly once, in first-seen order) on an input large enough that an
+        // accidental O(k^2) regression would be conspicuous in a profiler even
+        // though the test itself only asserts on output shape.
+        let mut content = String::new();
+        for i in 0..5000 {
+            content.push_str(&format!("{{{{ns:x{i}}}}} "));
+        }
+        // Re-append the very first and very last tokens again, out of order, so
+        // a dedup bug that only catches adjacent duplicates (as an `out.last()`
+        // shortcut would) is still caught.
+        content.push_str("{{ns:x0}} {{ns:x4999}} ");
+
+        let tokens = inert_tokens(&content);
+        assert_eq!(
+            tokens.len(),
+            5000,
+            "5000 distinct tokens plus 2 repeats must dedup to exactly 5000"
+        );
+        // First-seen order is preserved.
+        assert_eq!(tokens[0], "{{ns:x0}}");
+        assert_eq!(tokens[1], "{{ns:x1}}");
+        assert_eq!(tokens[4999], "{{ns:x4999}}");
+        // No duplicates.
+        let unique: HashSet<&String> = tokens.iter().collect();
+        assert_eq!(
+            unique.len(),
+            tokens.len(),
+            "every reported token is distinct"
+        );
+    }
+
+    #[test]
+    fn strip_braced_leaves_an_unterminated_token_verbatim() {
+        // spec: CLI-223
+        // Pins the `scan_braced` refactor's behavior for an unterminated `{{`
+        // (no closing `}}` anywhere after it): unlike a *closed* span, which is
+        // masked to a single space, an unterminated one -- and everything from
+        // it to the end of the content -- is left completely untouched, the
+        // same "leave the rest verbatim" treatment `expand`/`expand_paths` give
+        // an unterminated token. `bare_tool_refs` is `strip_braced`'s only
+        // caller, so drive the pin through it: a tool name that appears only
+        // inside the unterminated span must still read as bare prose there
+        // (unmasked), while one appearing before it is correctly masked.
+        let sib = [
+            psib(ItemKind::Tool, "before", None),
+            psib(ItemKind::Tool, "after", None),
+        ];
+        // `before` sits inside a well-formed, closed token (masked); `after`
+        // sits inside the unterminated tail (left verbatim, so it reads as an
+        // ordinary bare prose mention and IS reported).
+        let content = "{{tools:before}} unterminated {{tools:after and more text";
+        let found = bare_tool_refs(content, &sib);
+        assert!(
+            !found.contains(&"before".to_string()),
+            "a name inside a closed, masked token must not read as bare prose: {found:?}"
+        );
+        assert!(
+            found.contains(&"after".to_string()),
+            "a name inside the unterminated tail is left verbatim, so it reads \
+             as an ordinary bare mention: {found:?}"
         );
     }
 }

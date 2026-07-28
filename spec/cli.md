@@ -322,7 +322,38 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   stripped string from the one place rather than each sanitizing separately.
   Serde alone keeps `--json` structurally valid but does not stop an embedded
   ANSI escape or bidi-override sequence from corrupting or spoofing a
-  terminal that renders the message.
+  terminal that renders the message. `strip_ansi` (`src/sanitize.rs`) collapses
+  a run of C0/DEL/C1 control characters that reach its own filter to a single
+  space rather than deleting it -- in practice, the only such character is
+  `\n` (every other C0/DEL/C1 control is already consumed with no trace by the
+  first pass, `strip_ansi_escapes::strip`, before this function's filter ever
+  runs) -- so text built by joining originally-separate lines with `\n` (a
+  multi-line hook command embedded in a disclosure, an `item-hook` finding's
+  `'{cmd}'`) is not silently fused into one word once the separator is
+  stripped. A security-blocked Unicode code point (a bidi override, a
+  directional mark U+200E/U+200F/U+061C, or a zero-width character
+  U+200B/U+2060/U+FEFF) is still dropped with no space substituted, since none
+  of those is a word boundary.
+- `CLI-225` Every error message or printed note that interpolates a
+  source-or-user-influenced identity (a source name, a `meld --as`/
+  `[source].prefix` alias, an item-link `#<path>` segment, an agent's harness
+  `name:`, a suggested namespace prefix derived from a repo name, or any similar
+  value) into a RUNNABLE command a reader is invited to copy and paste (`mind
+  unmeld ...`, `mind forget ...`, `mind meld ...`, `mind hooks run ...`, or any
+  shell command) shell-quotes that identity -- the POSIX single-quote `'\''`
+  idiom (`src/error::shell_quote`) -- before it lands in the command, applied
+  unconditionally rather than only when the value "looks dangerous". None of
+  these identities is restricted against shell metacharacters (`validate_prefix`
+  and `is_safe_manifest_path` reject only path traversal, not `;`/`'`/`$`/a
+  backtick/whitespace), so an unquoted splice would let a crafted identity turn
+  the pasteable remedy into an injection: a `'` breaks out of a
+  single-quote-framed raw value, after which `;`/`$(...)`/a backtick ride along.
+  This generalizes the `hooks run` family's rule (HOOK-106) to every printed
+  remedy: `LinkedSourceGone` (`mind unmeld`), `AgentCollision` (`mind forget
+  agent:<name>`), and `SkillCollision` (`mind meld --namespace <prefix>`) each
+  quote their interpolated identity by exactly this rule. A bare mention of the
+  same identity in surrounding English prose (naming *what* is wrong, not a
+  command to run) is not quoted; only the runnable command is.
 - `CLI-187` When no sources are melded, all verbs that report the empty state
   (sync, recall, probe) emit the same message: "no sources melded; run `mind
   meld <owner/repo>` to add one". This consistent phrasing always names the
@@ -871,7 +902,17 @@ only appear at meld or install time. It is read-only and installs nothing.
   `{{ns:}}`, so a resolvable path/self token in a non-markdown file was
   previously unreported by either. The finding names the file and the
   token(s) and states that tokens expand in markdown only. Never hard, and
-  `--fix` never rewrites the file (CLI-138, NS-54).
+  `--fix` never rewrites the file (CLI-138, NS-54). A token this generic net
+  would otherwise re-report is excluded when another check already reported
+  the same span for the same file, so a single broken or dead reference draws
+  one finding, not two or three: every `{{ns:...}}` token in a non-markdown
+  file is excluded (CLI-139's `misplaced-reference` unconditionally covers all
+  of them there, whether or not they resolve, which also subsumes what
+  CLI-135's downgraded `bad-reference` would report, since that is always an
+  `{{ns:}}` token too), and the one path token (`{{tools:}}`/`{{path:}}`/
+  `{{self}}`) CLI-135 reported as `bad-reference` for the file, if any, is
+  excluded as well. A resolvable path/self token that no other check mentions
+  -- the case this finding exists for -- is unaffected and still reported.
 - `CLI-144` `review` reports, as an advisory `duplicate-tooling` finding, a
   non-markdown helper file whose contents are byte-identical across two or more
   items. The finding names the file and the items that carry it and notes the

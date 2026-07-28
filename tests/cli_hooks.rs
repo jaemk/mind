@@ -3091,8 +3091,8 @@ fn hooks_run_item_glob_counts_every_skipped_item_hook() {
 /// End-to-end companion to the multi-SOURCE remedy test: a glob matching TWO
 /// ITEMS, each with a pending install hook, must name BOTH resolved item
 /// identities in the `HooksNotRun` remedy and must NOT synthesize a single
-/// "re-run with 'mind hooks run <target> ...'" command from the glob (there is
-/// no one target that covers both). This is the item-side analog of
+/// "re-run unattended with: mind hooks run <target> ..." command from the glob
+/// (there is no one target that covers both). This is the item-side analog of
 /// `hooks_run_glob_matching_several_sources_lists_names_not_one_command`, which
 /// the source path had but the item path did not.
 #[test]
@@ -3588,30 +3588,23 @@ fn shell_split(s: &str) -> Vec<String> {
 /// remedy, so a round-trip test can never pass by quietly finding nothing to
 /// run.
 ///
-/// The whole command is framed by an outer quote -- single quotes for the
-/// note (`hooks_cmd.rs`) and the multi-match error arm, double quotes for the
-/// single-match error arm (whose resolved identity is itself single-quoted by
-/// `shell_quote`, HOOK-106; double framing avoids the outer/inner quote
-/// nesting that a single-quote frame would create). Either framing is
-/// accepted here, and any single-quoted token inside is unescaped via
-/// [`shell_split`] before being handed back, so the returned argv is exactly
-/// what a real shell would produce, not the raw quoted text.
+/// The command sits on its own indented line right after a "re-run unattended
+/// with:" lead, with no surrounding shell-quote character (HOOK-106 Fix 2): a
+/// `"..."` presentation frame around the resolved identity's own
+/// `shell_quote`-applied single quotes would re-expose `$`/backtick inside it
+/// when the frame's own quotes are pasted along with the command, so neither
+/// the note (`hooks_cmd.rs`) nor the single-match error arm use one anymore.
+/// Any single-quoted token on that line is unescaped via [`shell_split`]
+/// before being handed back, so the returned argv is exactly what a real
+/// shell would produce, not the raw quoted text.
 fn remedy_argv(text: &str) -> Vec<String> {
-    const LEAD: &str = "re-run with ";
+    const LEAD: &str = "re-run unattended with:\n";
     let start = text
         .find(LEAD)
         .unwrap_or_else(|| panic!("no remedy in output: {text:?}"));
     let after_lead = &text[start + LEAD.len()..];
-    let delim = after_lead
-        .chars()
-        .next()
-        .filter(|c| *c == '\'' || *c == '"')
-        .unwrap_or_else(|| panic!("remedy is not quote-framed: {text:?}"));
-    let rest = &after_lead[delim.len_utf8()..];
-    let end = rest
-        .find(delim)
-        .unwrap_or_else(|| panic!("unterminated remedy quote: {text:?}"));
-    let mut argv = shell_split(&rest[..end]);
+    let line = after_lead.lines().next().unwrap_or(after_lead).trim();
+    let mut argv = shell_split(line);
     assert_eq!(
         argv.first().map(String::as_str),
         Some("mind"),
@@ -4035,8 +4028,8 @@ fn glob_selector_remedy_differs_between_the_note_and_the_error() {
 }
 
 /// A glob selector matching TWO sources, both with a pending hook: the error
-/// must not synthesize a single "re-run with 'mind hooks run <target> ...'"
-/// command at all (there is no one target that covers both), but it must
+/// must not synthesize a single "re-run unattended with: mind hooks run
+/// <target> ..." command at all (there is no one target that covers both), but it must
 /// still name both resolved identities so a reader knows what to re-run.
 #[test]
 fn hooks_run_glob_matching_several_sources_lists_names_not_one_command() {

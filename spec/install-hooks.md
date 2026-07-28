@@ -451,19 +451,34 @@ outside the surrounding verb, under the same consent model.
   (HOOK-22) rather than because a user interactively declined it, the skip
   note names both the cause and the exact remedy instead of stating only the
   bare consequence: `note: skipped <event> hook '<label>' for <source> (not a
-  terminal); re-run with "mind hooks run '<source>' --event <event>
-  --dangerously-skip-install-hook-check" to run it unattended`. `<source>` is
+  terminal); re-run unattended with:` followed, on its own indented line, by
+  `mind hooks run '<source>' --event <event>
+  --dangerously-skip-install-hook-check`. `<source>` is
   substituted with the RESOLVED source identity, never the raw selector the
   user typed (which may be a glob or an abbreviated form), and `<event>` with
   the event the run selected, so the printed command is copy-pasteable with no
   placeholder to fill in and re-runs the hooks that were skipped. The `<source>`
-  identity inside the runnable command is single-quoted (the POSIX `'\''` idiom),
-  and the whole command framed in double quotes, by exactly the same rule and
-  for exactly the same reason as the single-match `HooksNotRun` remedy described
-  below: the note's runnable command carries the same attacker-influenced
-  identity, so copy-pasting it must not be a way to run anything beyond `mind
-  hooks run`. The bare `for <source>` earlier in the note is English prose, not
-  a shell command, so it is not quoted. The
+  identity inside the runnable command is single-quoted (the POSIX `'\''` idiom)
+  by exactly the same rule and for exactly the same reason as the single-match
+  `HooksNotRun` remedy described below: the note's runnable command carries the
+  same attacker-influenced identity, so copy-pasting it must not be a way to
+  run anything beyond `mind hooks run`. The runnable command is printed on its
+  own line with no surrounding shell-quote character -- earlier revisions
+  framed it in double quotes, but a double-quote presentation frame is itself
+  copyable: pasting the frame's own `"` characters together with the
+  (already single-quoted) identity keeps `$`/backtick special inside a
+  double-quoted context, so a `$(...)`/backtick payload inside the identity
+  could fire again if the frame were included in the paste even though the
+  identity is safely single-quoted on its own. Putting the command on its own
+  line removes any shell-quote character from the presentation entirely, so a
+  verbatim paste of the whole remedy -- frame included -- stays inert. The bare
+  `for <source>` earlier in the note is English prose, not a shell command, so
+  it is not quoted. Every other runnable `mind hooks run <arg>` example `mind`
+  prints for this same target family -- including `AmbiguousHookTarget`'s
+  (HOOK-105) two disambiguating examples (`mind hooks run 'source:<target>'`
+  and the kind-qualified item ref example) -- shell-quotes its identity the
+  same way; none of the family's printed remedies interpolates an identity bare.
+  The
   `--event` segment is not optional dressing: `--event` defaults to `install`
   (CLI-195), so a remedy that omitted it would, after an `--event uninstall`
   run, silently name a command that executes the source's install hooks
@@ -508,11 +523,12 @@ outside the surrounding verb, under the same consent model.
   run`. This is what makes the promise above ("copy-pasteable with no
   placeholder to fill in") also mean "and copy-pasting it is not itself a way
   to run something else": quoting closes that gap regardless of which kind of
-  identity ended up in `resolved`. The single-match remedy frames the whole
-  command in double quotes rather than the single quotes used as plain
-  framing elsewhere in this message, because the identity inside it is itself
-  single-quoted; framing it with the same quote character would place an
-  unescaped `'` where the frame's own closing quote is expected.
+  identity ended up in `resolved`. The single-match remedy puts the runnable
+  command on its own indented line after a "re-run unattended with:" lead,
+  with no surrounding shell-quote character, for the same paste-safety reason
+  given under HOOK-106 above: a quote-character presentation frame is itself
+  copyable, and pasting it along with the (already single-quoted) identity can
+  re-expose a metacharacter the identity's own quoting had already neutralized.
 - `HOOK-107` `hooks run <target>` on a source target counts, across every
   matched source, how many hooks for the selected event EXISTED (were
   actually considered: not filtered out as already-up-to-date at the current
