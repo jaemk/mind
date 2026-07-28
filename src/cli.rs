@@ -770,8 +770,11 @@ pub enum HooksCmd {
     ///
     /// For a source target with `--event install` (the default), only *pending*
     /// hooks run by default -- those that never ran or did not run at the current
-    /// commit. `--force` re-runs every install hook regardless. For an item
-    /// target, hooks always run (item hooks carry no recorded run state).
+    /// commit. `--force` re-runs every install hook regardless. An item target's
+    /// install hooks are filtered the same way (a hook already recorded as run at
+    /// the item's current commit is skipped); `--force` applies only to a source
+    /// target. An item's uninstall hooks carry no recorded run state and always
+    /// run.
     ///
     /// Every hook goes through the same disclosure and consent prompt as an
     /// automatic run; it is never more silently than meld/learn would run it.

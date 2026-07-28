@@ -484,6 +484,7 @@ mod tests {
             store: "store/path".to_string(),
             links: vec![],
             description: None,
+            install_hooks: Vec::new(),
         }
     }
 

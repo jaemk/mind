@@ -59,7 +59,12 @@ namespacing.md.
   free prose, so a bare mention in it IS wrapped, the same as one in the
   markdown body (NS-56). The rewrite is still heuristic in prose (a sibling name
   can be an ordinary word), so it is opt-in and the maintainer reviews the
-  result (e.g. via `git diff`).
+  result (e.g. via `git diff`). The per-file gate is `namespace::is_markdown`
+  (NS-53), the same extension set (`.md`, `.markdown`, `.mdown`, `.mkd`,
+  case-insensitive) `install` expands tokens in: a non-markdown file in an
+  item's tree (a shell script, a data file) is skipped entirely, not just left
+  unwrapped at non-prose positions, since install never expands a `{{ns:}}`
+  token there either.
 - `INIT-6` `init-source` makes no network calls and does not read or write the
   store or any agent home; it edits only the target repo. Without `--template` it
   is read-only except for creating an absent `mind.toml` (INIT-3).

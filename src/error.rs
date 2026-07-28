@@ -704,17 +704,56 @@ pub enum MindError {
     /// remedy re-selects it (HOOK-106): without it the suggested command
     /// re-runs the default `install` hooks, which for an `uninstall` run is
     /// different code than the one that was skipped.
+    ///
+    /// `resolved` is the RESOLVED identity of every source or item that
+    /// actually contributed a skipped hook (as opposed to `target`, the
+    /// selector as the user typed it, which may be a glob). The message
+    /// substitutes a resolved identity into the remedy instead of the raw
+    /// selector (HOOK-106/107): a selector like `'*'` echoed back into a
+    /// "re-run with ..." command would glob-expand against the caller's cwd
+    /// if pasted into a shell, naming something that may not even be a
+    /// source. When `resolved` holds exactly one identity, the remedy is that
+    /// one paste-able command, exactly as when the target was already a
+    /// literal name. When it holds more than one, no single command is
+    /// synthesized; the message instead lists every resolved identity so the
+    /// reader can substitute one at a time, rather than printing something
+    /// that reads as one runnable command but is not.
     // spec: HOOK-106 HOOK-107 HOOK-108
-    #[error(
-        "hooks run '{target}': {skipped} hook(s) had work to do but were skipped for want of \
-         consent (not a terminal); re-run with 'mind hooks run {target} --event {event} \
-         --dangerously-skip-install-hook-check' to run them unattended"
-    )]
+    #[error("{}", hooks_not_run_message(target, event, *skipped, resolved))]
     HooksNotRun {
         target: String,
         event: String,
         skipped: usize,
+        resolved: Vec<String>,
     },
+}
+
+/// The [`MindError::HooksNotRun`] message (HOOK-106/107/108): see the
+/// variant's doc comment for the single-vs-several-`resolved` distinction.
+fn hooks_not_run_message(target: &str, event: &str, skipped: usize, resolved: &[String]) -> String {
+    match resolved {
+        [one] => format!(
+            "hooks run '{one}': {skipped} hook(s) had work to do but were skipped for want of \
+             consent (not a terminal); re-run with 'mind hooks run {one} --event {event} \
+             --dangerously-skip-install-hook-check' to run them unattended"
+        ),
+        _ => {
+            let names = if resolved.is_empty() {
+                String::new()
+            } else {
+                let quoted: Vec<String> = resolved.iter().map(|n| format!("'{n}'")).collect();
+                format!(" ({})", quoted.join(", "))
+            };
+            format!(
+                "hooks run '{target}': {skipped} hook(s) had work to do but were skipped for \
+                 want of consent (not a terminal), across {} matched target(s){names}; re-run \
+                 each individually with 'mind hooks run <name> --event {event} \
+                 --dangerously-skip-install-hook-check', substituting each resolved name above \
+                 for <name>",
+                resolved.len()
+            )
+        }
+    }
 }
 
 fn status_suffix(status: Option<ExitStatus>) -> String {
@@ -1274,6 +1313,7 @@ mod tests {
                 target: "t".into(),
                 event: "install".into(),
                 skipped: 1,
+                resolved: vec!["t".into()],
             }
             .kind(),
             "hooks-not-run"
@@ -1333,6 +1373,7 @@ mod tests {
             target: "myrepo".into(),
             event: "install".into(),
             skipped: 2,
+            resolved: vec!["myrepo".into()],
         };
         let msg = e.to_string();
         assert!(msg.contains("myrepo"), "must name the target: {msg}");
@@ -1356,6 +1397,7 @@ mod tests {
             target: "myrepo".into(),
             event: "uninstall".into(),
             skipped: 1,
+            resolved: vec!["myrepo".into()],
         };
         let msg = e.to_string();
         assert!(
@@ -1367,6 +1409,45 @@ mod tests {
         assert!(
             !msg.contains("--event install"),
             "the remedy must not name a different event than the run selected: {msg}"
+        );
+    }
+
+    /// When several sources/items resolved and contributed a skipped hook (a
+    /// glob selector), the message must not synthesize a single "re-run with
+    /// 'mind hooks run <target> ...'" command from the raw (possibly glob)
+    /// selector: that string, pasted into a shell, could glob-expand against
+    /// the caller's cwd instead of naming a real source. Instead every
+    /// resolved identity is listed so the reader substitutes one at a time.
+    // spec: HOOK-106 HOOK-107
+    #[test]
+    fn hooks_not_run_several_resolved_targets_lists_names_not_one_fake_command() {
+        let e = MindError::HooksNotRun {
+            target: "*".into(),
+            event: "install".into(),
+            skipped: 3,
+            resolved: vec!["github.com/a/one".into(), "github.com/a/two".into()],
+        };
+        let msg = e.to_string();
+        assert!(msg.contains('3'), "must name the skipped count: {msg}");
+        assert!(
+            msg.contains("github.com/a/one") && msg.contains("github.com/a/two"),
+            "must list every resolved identity: {msg}"
+        );
+        assert!(
+            !msg.contains("mind hooks run * --event"),
+            "must never echo the raw glob selector back into a runnable-looking \
+             remedy command: {msg}"
+        );
+        assert!(
+            !msg.contains(
+                "mind hooks run github.com/a/one --event install \
+             --dangerously-skip-install-hook-check"
+            ) && !msg.contains(
+                "mind hooks run github.com/a/two --event install \
+                     --dangerously-skip-install-hook-check"
+            ),
+            "must not synthesize a single command for either resolved name either \
+             (both had work, so neither alone is the whole remedy): {msg}"
         );
     }
 

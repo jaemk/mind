@@ -291,10 +291,25 @@ The on-disk layout and the two persisted JSON files.
 - `STO-21` Each installed item records: `kind`, `name` (effective), `bare_name`,
   `source`, `commit`, `hash` (of source content), `store` (path relative to the
   mind root), `links` (absolute symlink paths, one per agent home; a relative
-  lobe is resolved to absolute first, see STO-16), `description`.
+  lobe is resolved to absolute first, see STO-16), `description`, and
+  `install_hooks` (STO-75, HOOK-110).
 - `STO-22` `(source, kind, bare_name)` is the item's stable identity (see
   lifecycle.md). `store` and `links` are its file registry, used by uninstall.
 - `STO-23` A missing manifest file is treated as empty.
+- `STO-75` An installed item records an `install_hooks` set (HOOK-110), the
+  per-item counterpart of a source's `install_hooks` (STO-10's `RecordedHook`
+  set, HOOK-55): each entry is an effective install-hook command plus the
+  commit it last ran at, or `None` when it was offered and skipped rather than
+  run. Absent in a manifest written before this field existed, which
+  deserializes as an empty set (no behavior change for an item installed by an
+  older binary: its install hooks are simply treated as never offered). The
+  set is discarded and rebuilt from scratch whenever the item is (re)installed
+  (`learn`, or `upgrade`'s fresh install cycle) -- it is never merged with a
+  prior set, so a record tied to an old commit can never suppress a hook at a
+  new one. `mind hooks run` (HOOK-102) is the only reader: it filters a hook
+  already recorded as run at the item's current commit out of what it offers,
+  the item-level mirror of HOOK-101's source-side filter. `forget` removes the
+  whole manifest entry, so the record is removed with it.
 
 ## Concurrency and durability
 

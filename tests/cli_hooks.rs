@@ -2726,7 +2726,11 @@ fn hooks_run_item_target_pending_install_hook_is_hooks_not_run_in_non_tty() {
     );
     let r = sb.mind(&["meld", &sb.source_spec()]);
     assert!(r.success, "meld: {}", r.stderr);
-    let r = sb.mind(&["learn", "scanner", "--dangerously-skip-install-hook-check"]);
+    // Plain (non-TTY) learn: the hook is recorded as SKIPPED (ran_at = None,
+    // HOOK-110), so it is still pending below. `--dangerously-skip-install-hook-check`
+    // would run and record it, filtering it out of the `hooks run` below --
+    // exactly the fix HOOK-110 makes.
+    let r = sb.mind(&["learn", "scanner"]);
     assert!(r.success, "learn: {}", r.stderr);
 
     let sentinel = sb
@@ -2906,9 +2910,14 @@ fn hooks_run_item_glob_counts_every_skipped_item_hook() {
 
     let r = sb.mind(&["meld", &sb.source_spec()]);
     assert!(r.success, "meld: {}", r.stderr);
-    let r = sb.mind(&["learn", "alpha", "--dangerously-skip-install-hook-check"]);
+    // Plain (non-TTY) learn: the install hooks are recorded as SKIPPED
+    // (ran_at = None, HOOK-110), not run, so they are still pending for the
+    // `hooks run` below (an item hook already RUN, e.g. via
+    // `--dangerously-skip-install-hook-check`, would now be filtered out --
+    // that is exactly what HOOK-110 fixes).
+    let r = sb.mind(&["learn", "alpha"]);
     assert!(r.success, "learn alpha: {}", r.stderr);
-    let r = sb.mind(&["learn", "beta", "--dangerously-skip-install-hook-check"]);
+    let r = sb.mind(&["learn", "beta"]);
     assert!(r.success, "learn beta: {}", r.stderr);
 
     let r = sb.mind(&["hooks", "run", "--event", "install", "item-count#*"]);
@@ -2921,6 +2930,97 @@ fn hooks_run_item_glob_counts_every_skipped_item_hook() {
         r.stderr.contains("2 hook(s) had work to do"),
         "the count must accumulate across every matched item: {}",
         r.stderr
+    );
+}
+
+/// End-to-end companion to the multi-SOURCE remedy test: a glob matching TWO
+/// ITEMS, each with a pending install hook, must name BOTH resolved item
+/// identities in the `HooksNotRun` remedy and must NOT synthesize a single
+/// "re-run with 'mind hooks run <target> ...'" command from the glob (there is
+/// no one target that covers both). This is the item-side analog of
+/// `hooks_run_glob_matching_several_sources_lists_names_not_one_command`, which
+/// the source path had but the item path did not.
+#[test]
+fn hooks_run_item_glob_matching_several_items_lists_names_not_one_command() {
+    // spec: HOOK-106 HOOK-107 HOOK-108
+    let sb = Sandbox::new("item-multi");
+    sb.write_and_commit(
+        "mind.toml",
+        concat!(
+            "[[items]]\n",
+            "kind = \"skill\"\n",
+            "name = \"alpha\"\n",
+            "path = \"skills/alpha\"\n",
+            "install = \"touch alpha-ran.sentinel\"\n",
+            "\n",
+            "[[items]]\n",
+            "kind = \"skill\"\n",
+            "name = \"beta\"\n",
+            "path = \"skills/beta\"\n",
+            "install = \"touch beta-ran.sentinel\"\n",
+        ),
+    );
+    sb.write_and_commit("skills/alpha/SKILL.md", "---\ndescription: a\n---\n# a\n");
+    sb.write_and_commit("skills/beta/SKILL.md", "---\ndescription: b\n---\n# b\n");
+
+    let r = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(r.success, "meld: {}", r.stderr);
+    let r = sb.mind(&["learn", "alpha"]);
+    assert!(r.success, "learn alpha: {}", r.stderr);
+    let r = sb.mind(&["learn", "beta"]);
+    assert!(r.success, "learn beta: {}", r.stderr);
+
+    let source_identity = format!(
+        "local/{}/item-multi",
+        sb.base.file_name().unwrap().to_string_lossy()
+    );
+    let identity_alpha = format!("{source_identity}#skill:alpha");
+    let identity_beta = format!("{source_identity}#skill:beta");
+
+    let r = sb.mind(&["hooks", "run", "--event", "install", "item-multi#*"]);
+    assert!(
+        !r.success,
+        "both items had a pending hook: {}\n{}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr.contains(&identity_alpha) && r.stderr.contains(&identity_beta),
+        "the remedy must name every resolved item identity: {}",
+        r.stderr
+    );
+    assert!(
+        !r.stderr.contains("mind hooks run item-multi#* --event"),
+        "the remedy must never echo the raw '#*' glob back into a \
+         command-shaped string: {}",
+        r.stderr
+    );
+    assert!(
+        !r.stderr.contains(&format!(
+            "mind hooks run {identity_alpha} --event install \
+             --dangerously-skip-install-hook-check"
+        )) && !r.stderr.contains(&format!(
+            "mind hooks run {identity_beta} --event install \
+             --dangerously-skip-install-hook-check"
+        )),
+        "with two items contributing, neither alone is the whole remedy, so the \
+         error must not synthesize a single command naming just one: {}",
+        r.stderr
+    );
+    // Each named identity is itself a runnable single-item target: substituting
+    // one resolves back to exactly that item (the HOOK-106 promise the multi
+    // list defers to the reader).
+    let redo = sb.mind(&[
+        "hooks",
+        "run",
+        "--event",
+        "install",
+        "--dangerously-skip-install-hook-check",
+        &identity_alpha,
+    ]);
+    assert!(
+        redo.success,
+        "a single resolved item identity must be runnable as printed: {}\n{}",
+        redo.stdout, redo.stderr
     );
 }
 
@@ -3655,12 +3755,12 @@ fn remedy_from_a_link_instance_identity_round_trips_as_a_source_target() {
     );
 }
 
-/// The one place the remedy is NOT a literal command: a glob selector. The
-/// HOOK-106 note substitutes the resolved source identity, but the HOOK-107
-/// error echoes the selector as typed, so the error's remedy for `'*'` is
-/// `mind hooks run * ...` -- an unquoted shell glob, not something to paste.
-/// Pinned so the divergence between the two remedies is a decision and not a
-/// surprise.
+/// A glob selector matching exactly one source: the HOOK-106 note and the
+/// HOOK-107 error must AGREE, both substituting the resolved source identity
+/// rather than echoing the selector as typed. Before HOOK-106/107's fix, the
+/// error's remedy echoed the raw `'*'` selector -- an unquoted shell glob that
+/// would expand against the caller's cwd if pasted, naming something that may
+/// not even be a source.
 #[test]
 fn glob_selector_remedy_differs_between_the_note_and_the_error() {
     // spec: HOOK-106 HOOK-107
@@ -3691,18 +3791,96 @@ fn glob_selector_remedy_differs_between_the_note_and_the_error() {
          {note_argv:?}"
     );
     let err_argv = remedy_argv(&r.stderr);
-    assert_eq!(
-        err_argv.iter().find(|a| a.as_str() == "*"),
-        Some(&"*".to_string()),
-        "the error's remedy still carries the selector as typed, so a glob \
-         target's error remedy is not literally paste-able: {err_argv:?}"
-    );
-    // The note's remedy, unlike the error's, is executable as printed.
-    let redo = sb.mind(&as_args(&note_argv));
     assert!(
-        redo.success,
+        err_argv.contains(&identity),
+        "the error's remedy must also resolve the glob to the concrete \
+         identity, agreeing with the note: {err_argv:?}"
+    );
+    assert!(
+        !err_argv.iter().any(|a| a.as_str() == "*"),
+        "the error's remedy must never echo the raw '*' selector back into a \
+         command: {err_argv:?}"
+    );
+    // Both remedies, unlike the raw selector, are executable as printed.
+    let redo_note = sb.mind(&as_args(&note_argv));
+    assert!(
+        redo_note.success,
         "the note's remedy must run clean: {note_argv:?}\n{}\n{}",
-        redo.stdout, redo.stderr
+        redo_note.stdout, redo_note.stderr
+    );
+    let redo_err = sb.mind(&as_args(&err_argv));
+    assert!(
+        redo_err.success,
+        "the error's remedy must run clean: {err_argv:?}\n{}\n{}",
+        redo_err.stdout, redo_err.stderr
+    );
+}
+
+/// A glob selector matching TWO sources, both with a pending hook: the error
+/// must not synthesize a single "re-run with 'mind hooks run <target> ...'"
+/// command at all (there is no one target that covers both), but it must
+/// still name both resolved identities so a reader knows what to re-run.
+#[test]
+fn hooks_run_glob_matching_several_sources_lists_names_not_one_command() {
+    // spec: HOOK-106 HOOK-107
+    let sb = Sandbox::new("remedy-glob-multi-a");
+    sb.write_and_commit(
+        "mind.toml",
+        concat!(
+            "[[hooks]]\n",
+            "name = \"a-setup\"\n",
+            "run = \"echo a\"\n",
+            "event = \"install\"\n",
+        ),
+    );
+    let src_b = sb.base.join("remedy-glob-multi-b");
+    init_source_repo(
+        &src_b,
+        concat!(
+            "[[hooks]]\n",
+            "name = \"b-setup\"\n",
+            "run = \"echo b\"\n",
+            "event = \"install\"\n",
+        ),
+    );
+    let r = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(r.success, "meld a: {}\n{}", r.stdout, r.stderr);
+    let r = sb.mind(&["meld", src_b.to_string_lossy().as_ref()]);
+    assert!(r.success, "meld b: {}\n{}", r.stdout, r.stderr);
+
+    let identity_a = format!(
+        "local/{}/remedy-glob-multi-a",
+        sb.base.file_name().unwrap().to_string_lossy()
+    );
+    let identity_b = format!(
+        "local/{}/remedy-glob-multi-b",
+        sb.base.file_name().unwrap().to_string_lossy()
+    );
+
+    let r = sb.mind(&["hooks", "run", "--event", "install", "*"]);
+    assert!(!r.success, "must fail: {}\n{}", r.stdout, r.stderr);
+    assert!(
+        r.stderr.contains(&identity_a) && r.stderr.contains(&identity_b),
+        "the error must name every resolved source that had a pending hook: {}",
+        r.stderr
+    );
+    assert!(
+        !r.stderr.contains("mind hooks run * --event"),
+        "the error must never echo the raw '*' selector back into a \
+         command-shaped string: {}",
+        r.stderr
+    );
+    assert!(
+        !r.stderr.contains(&format!(
+            "mind hooks run {identity_a} --event install \
+             --dangerously-skip-install-hook-check"
+        )) && !r.stderr.contains(&format!(
+            "mind hooks run {identity_b} --event install \
+             --dangerously-skip-install-hook-check"
+        )),
+        "with two sources contributing, neither alone is the whole remedy, so \
+         the error must not synthesize a single command naming just one: {}",
+        r.stderr
     );
 }
 
@@ -3974,15 +4152,17 @@ fn hooks_run_item_glob_stops_at_the_first_failing_hook() {
     );
 }
 
-/// An item whose install hook has already been run by `learn` is offered again
-/// on every `hooks run --event install`: item hooks carry no run-commit record,
-/// so unlike a source install hook (which becomes "nothing to do") this stays a
-/// HOOK-108 error forever in a non-TTY. Pinned because it is the one asymmetry
-/// between the source and item accounting.
+/// An item whose install hook has already been run by `learn` is NOT offered
+/// again by a later `hooks run --event install`: item hooks now carry a
+/// run-commit record (HOOK-110), so -- exactly like a source install hook --
+/// a repeat run sees nothing pending and settles to a clean exit 0 instead of
+/// reporting `HooksNotRun` forever. This is the provisioning-script case
+/// HOOK-110 fixes: `learn --dangerously-skip-install-hook-check && hooks run`
+/// must not fail on the second command for a hook the first already ran.
 #[test]
-fn item_install_hooks_have_no_already_ran_record_so_they_re_report_forever() {
-    // spec: HOOK-108 HOOK-107
-    let sb = Sandbox::new("item-noreco");
+fn item_install_hooks_get_an_already_ran_record_so_a_repeat_run_settles() {
+    // spec: HOOK-110 HOOK-108 HOOK-107
+    let sb = Sandbox::new("item-reco");
     sb.write_and_commit(
         "mind.toml",
         &format!(
@@ -3993,7 +4173,7 @@ fn item_install_hooks_have_no_already_ran_record_so_they_re_report_forever() {
                 "path = \"skills/scanner\"\n",
                 "install = \"{}\"\n",
             ),
-            sb.touch("noreco.sentinel")
+            sb.touch("reco.sentinel")
         ),
     );
     sb.write_and_commit("skills/scanner/SKILL.md", "---\ndescription: s\n---\n# s\n");
@@ -4002,25 +4182,338 @@ fn item_install_hooks_have_no_already_ran_record_so_they_re_report_forever() {
     let r = sb.mind(&["learn", "scanner", "--dangerously-skip-install-hook-check"]);
     assert!(r.success, "learn: {}", r.stderr);
     assert!(
-        sb.sentinel("noreco.sentinel").exists(),
+        sb.sentinel("reco.sentinel").exists(),
         "learn with the bypass must have run the item hook"
     );
 
-    // Twice, to show the report does not settle after the first time.
+    // Twice, to show the settled state holds, not just on the first retry.
     for attempt in 1..=2 {
-        let r = sb.mind(&["hooks", "run", "--event", "install", "item-noreco#scanner"]);
+        let r = sb.mind(&["hooks", "run", "--event", "install", "item-reco#scanner"]);
         assert!(
-            !r.success,
-            "attempt {attempt}: an item hook already run by learn is still \
-             offered and still unconsentable: {}\n{}",
+            r.success,
+            "attempt {attempt}: an item hook already run by learn must not be \
+             re-offered: {}\n{}",
             r.stdout, r.stderr
         );
         assert!(
-            r.stderr.contains("1 hook(s) had work to do"),
+            !r.stderr.contains("had work to do"),
             "attempt {attempt}: {}",
             r.stderr
         );
     }
+}
+
+/// A record from the OLD commit does not suppress the install hook after
+/// `upgrade` moves the item to a NEW commit (HOOK-110): `upgrade` builds a
+/// completely fresh manifest record for the upgraded item (the same fresh
+/// record an ordinary `learn` would build), so the item's install hook is
+/// re-offered whenever its source or its own content advances (HOOK-81/84),
+/// exactly as before this fix -- the new record just happens to be tied to
+/// the new commit instead of carrying no record at all.
+#[test]
+fn hooks_run_item_install_hook_pending_again_after_upgrade_to_a_new_commit() {
+    // spec: HOOK-110
+    let sb = Sandbox::new("item-upg");
+    sb.write_and_commit(
+        "mind.toml",
+        &format!(
+            concat!(
+                "[[items]]\n",
+                "kind = \"skill\"\n",
+                "name = \"scanner\"\n",
+                "path = \"skills/scanner\"\n",
+                "install = \"{}\"\n",
+            ),
+            sb.touch("upg.sentinel")
+        ),
+    );
+    sb.write_and_commit("skills/scanner/SKILL.md", "---\ndescription: s\n---\n# s\n");
+    let r = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(r.success, "meld: {}", r.stderr);
+    let r = sb.mind(&["learn", "scanner", "--dangerously-skip-install-hook-check"]);
+    assert!(r.success, "learn: {}", r.stderr);
+    assert!(
+        sb.sentinel("upg.sentinel").exists(),
+        "learn with the bypass must have run the item hook"
+    );
+
+    // Immediately after: the hook already ran at the current commit, so
+    // nothing is pending.
+    let r = sb.mind(&["hooks", "run", "--event", "install", "item-upg#scanner"]);
+    assert!(
+        r.success,
+        "before upgrade, nothing should be pending: {}\n{}",
+        r.stdout, r.stderr
+    );
+
+    // Bump the item's content (a new commit + new hash), then upgrade
+    // (non-TTY, no bypass): the install hook is re-offered and skipped, but
+    // the item is now recorded at the NEW commit.
+    sb.write_and_commit(
+        "skills/scanner/SKILL.md",
+        "---\ndescription: s2\n---\n# s\n",
+    );
+    let r = sb.mind(&["upgrade", "--yes"]);
+    assert!(r.success, "upgrade: {}\n{}", r.stdout, r.stderr);
+
+    // The stale record from the OLD commit must not suppress the item's hook
+    // at the NEW commit: a repeat `hooks run` must find it pending again.
+    let r = sb.mind(&["hooks", "run", "--event", "install", "item-upg#scanner"]);
+    assert!(
+        !r.success,
+        "after upgrade to a new commit, the install hook must be pending \
+         again, not suppressed by the old commit's record: {}\n{}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr.contains("1 hook(s) had work to do"),
+        "{}",
+        r.stderr
+    );
+}
+
+/// `forget` drops the whole manifest entry, so an already-ran hook's record
+/// (HOOK-110) does not survive it: a `forget` followed by a fresh `learn`
+/// starts with no record at all, exactly like the item had never been
+/// installed. Guards against a naive implementation that kept the record
+/// keyed by something other than the manifest entry itself (e.g. a
+/// source-wide table) and so leaked it across a forget/re-learn cycle.
+#[test]
+fn hooks_run_item_install_hook_record_does_not_survive_forget_and_relearn() {
+    // spec: HOOK-110
+    let sb = Sandbox::new("item-forget");
+    sb.write_and_commit(
+        "mind.toml",
+        &format!(
+            concat!(
+                "[[items]]\n",
+                "kind = \"skill\"\n",
+                "name = \"scanner\"\n",
+                "path = \"skills/scanner\"\n",
+                "install = \"{}\"\n",
+            ),
+            sb.touch("forget.sentinel")
+        ),
+    );
+    sb.write_and_commit("skills/scanner/SKILL.md", "---\ndescription: s\n---\n# s\n");
+    let r = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(r.success, "meld: {}", r.stderr);
+    let r = sb.mind(&["learn", "scanner", "--dangerously-skip-install-hook-check"]);
+    assert!(r.success, "learn: {}", r.stderr);
+
+    // Already ran at the current commit: nothing pending.
+    let r = sb.mind(&["hooks", "run", "--event", "install", "item-forget#scanner"]);
+    assert!(r.success, "before forget: {}\n{}", r.stdout, r.stderr);
+
+    let r = sb.mind(&["forget", "scanner"]);
+    assert!(r.success, "forget: {}\n{}", r.stdout, r.stderr);
+    // A plain (non-TTY, no bypass) re-learn skips the hook and records
+    // ran_at = None; if the old record had survived at the same commit it
+    // would read as "already ran" and this would incorrectly stay exit 0.
+    let r = sb.mind(&["learn", "scanner"]);
+    assert!(r.success, "relearn: {}\n{}", r.stdout, r.stderr);
+
+    let r = sb.mind(&["hooks", "run", "--event", "install", "item-forget#scanner"]);
+    assert!(
+        !r.success,
+        "a re-learned item must start with no run record, not one carried \
+         over from before forget: {}\n{}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr.contains("1 hook(s) had work to do"),
+        "{}",
+        r.stderr
+    );
+}
+
+/// An INTERACTIVE (TTY) decline of an item install hook records `ran_at = null`,
+/// NOT `ran_at = <commit>` (HOOK-110). A decline is the user's own choice, so it
+/// is exit 0 (not a consent failure), the hook's side effect never runs, and --
+/// crucially -- the persisted record must NOT mark the hook as run: a later
+/// non-TTY `hooks run` must still find it pending. A bug that recorded a declined
+/// hook as `ran_at = Some(commit)` would suppress it forever, exactly the failure
+/// mode HOOK-110 fixes in the opposite direction. Reaches the interactive branch
+/// through the `MIND_TTY` seam (HOOK-109) with a scripted "n" (skip) reply.
+#[test]
+fn hooks_run_item_install_hook_interactive_decline_records_not_run() {
+    // spec: HOOK-110 HOOK-109
+    let sb = Sandbox::new("item-decline");
+    sb.write_and_commit(
+        "mind.toml",
+        &format!(
+            concat!(
+                "[[items]]\n",
+                "kind = \"skill\"\n",
+                "name = \"scanner\"\n",
+                "path = \"skills/scanner\"\n",
+                "install = \"{}\"\n",
+            ),
+            sb.touch("decline.sentinel")
+        ),
+    );
+    sb.write_and_commit("skills/scanner/SKILL.md", "---\ndescription: s\n---\n# s\n");
+    let r = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(r.success, "meld: {}", r.stderr);
+    // Plain (non-TTY) learn: the hook is offered and skipped (ran_at = None), so
+    // it is still pending for the interactive run below.
+    let r = sb.mind(&["learn", "scanner"]);
+    assert!(r.success, "learn: {}", r.stderr);
+
+    // Interactive (MIND_TTY=1) `hooks run`, declining the required hook with "n".
+    let (r, timed_out) = sb.mind_env_stdin_bounded(
+        &["hooks", "run", "--event", "install", "item-decline#scanner"],
+        &[("MIND_TTY", "1")],
+        "n\n",
+        60,
+    );
+    assert!(
+        !timed_out,
+        "the run must terminate: {}\n{}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.success,
+        "an interactive decline is the user's choice, not a consent failure, so \
+         it must exit 0: {}\n{}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        !sb.sentinel("decline.sentinel").exists(),
+        "a declined hook must not run its side effect: {}",
+        r.stdout
+    );
+
+    // The manifest must record the declined hook as NOT run (ran_at = null),
+    // never as run at the current commit.
+    let manifest =
+        std::fs::read_to_string(sb.mind_home.join("manifest.json")).expect("read manifest.json");
+    assert!(
+        manifest.contains("\"install_hooks\""),
+        "the item's manifest record must carry an install_hooks field: {manifest}"
+    );
+    assert!(
+        manifest.contains("\"ran_at\": null"),
+        "a declined item install hook must be recorded with ran_at = null, not \
+         a commit: {manifest}"
+    );
+
+    // Proof the record did not suppress the hook: a later non-TTY `hooks run`
+    // still finds it pending (exit 1). Had the decline recorded ran_at =
+    // Some(commit), this would wrongly settle to exit 0.
+    let r = sb.mind(&["hooks", "run", "--event", "install", "item-decline#scanner"]);
+    assert!(
+        !r.success,
+        "a declined (not run) hook must stay pending on a later non-TTY run: \
+         {}\n{}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr.contains("1 hook(s) had work to do"),
+        "{}",
+        r.stderr
+    );
+}
+
+/// Characterization of the partial-failure record path (HOOK-110): when an
+/// item declares several install hooks and a LATER one fails, the whole batch's
+/// records are discarded, so an EARLIER hook that already ran its side effect is
+/// re-offered (and, under the bypass, re-run) on the next `hooks run`.
+///
+/// This DIVERGES from the source-hook path, which persists the records of the
+/// hooks that ran before saving-and-propagating a mid-batch failure
+/// (`run_source_hooks`, "propagate the error after saving whatever was recorded
+/// so far"). For an ITEM `hooks run` the item stays installed on a hook failure,
+/// yet the successful earlier hook's record is dropped, so its side effect runs
+/// again next time. It is not a regression -- before HOOK-110 no item record
+/// existed at all, so every hook was always re-offered -- but it is an
+/// inconsistency worth pinning so any future parity fix is a conscious change.
+/// The `learn`/`upgrade` path is unaffected: a hook failure there rolls the
+/// whole item back, so there is genuinely no record to keep.
+#[test]
+fn hooks_run_item_partial_failure_discards_earlier_hooks_record() {
+    // spec: HOOK-110 HOOK-108
+    let sb = Sandbox::new("item-partial");
+    let counter = sb.sentinel("partial-counter").display().to_string();
+    sb.write_and_commit(
+        "mind.toml",
+        &format!(
+            concat!(
+                "[[items]]\n",
+                "kind = \"skill\"\n",
+                "name = \"scanner\"\n",
+                "path = \"skills/scanner\"\n",
+                // First install hook (the scalar shorthand): appends one byte to
+                // a counter file each time it runs. Idempotent-looking, but the
+                // file length is an observable run count.
+                "install = \"sh -c 'printf x >> {}'\"\n",
+                "\n",
+                // Second install hook: always fails, aborting the batch AFTER the
+                // first hook already ran.
+                "[[items.hooks]]\n",
+                "name = \"boom\"\n",
+                "run = \"exit 7\"\n",
+                "event = \"install\"\n",
+            ),
+            counter,
+        ),
+    );
+    sb.write_and_commit("skills/scanner/SKILL.md", "---\ndescription: s\n---\n# s\n");
+    let r = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(r.success, "meld: {}", r.stderr);
+    // Plain (non-TTY) learn: both hooks are skipped (recorded ran_at = None), so
+    // the item installs clean and both hooks are still pending.
+    let r = sb.mind(&["learn", "scanner"]);
+    assert!(r.success, "learn: {}\n{}", r.stdout, r.stderr);
+    assert!(
+        !std::path::Path::new(&counter).exists(),
+        "the counting hook must not have run during a plain learn"
+    );
+
+    // First bypass run: hook 1 runs (counter = 1 byte), hook 2 fails -> error.
+    let r = sb.mind(&[
+        "hooks",
+        "run",
+        "--event",
+        "install",
+        "--dangerously-skip-install-hook-check",
+        "item-partial#scanner",
+    ]);
+    assert!(
+        !r.success,
+        "the batch must fail on hook 2: {}\n{}",
+        r.stdout, r.stderr
+    );
+    let after_first = std::fs::read(&counter).expect("counter after first run");
+    assert_eq!(
+        after_first.len(),
+        1,
+        "hook 1 must have run exactly once so far"
+    );
+
+    // Second bypass run: because the first batch's records were discarded on the
+    // failure, hook 1 is offered again and re-runs its side effect (counter = 2).
+    let r = sb.mind(&[
+        "hooks",
+        "run",
+        "--event",
+        "install",
+        "--dangerously-skip-install-hook-check",
+        "item-partial#scanner",
+    ]);
+    assert!(
+        !r.success,
+        "the batch must fail again on hook 2: {}\n{}",
+        r.stdout, r.stderr
+    );
+    let after_second = std::fs::read(&counter).expect("counter after second run");
+    assert_eq!(
+        after_second.len(),
+        2,
+        "the earlier hook's record was discarded with the failed batch, so it \
+         re-ran; if this becomes 1, the item path gained source-path parity and \
+         this characterization test should be updated deliberately"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -4163,10 +4656,12 @@ fn hooks_run_json_item_glob_accumulates_one_tally_over_all_matches() {
     sb.write_and_commit("tools/alpha/run.sh", "#!/bin/sh\n");
     sb.write_and_commit("tools/zeta/run.sh", "#!/bin/sh\n");
     assert!(sb.mind(&["meld", &sb.source_spec()]).success);
-    assert!(
-        sb.mind(&["learn", "*", "--dangerously-skip-install-hook-check"])
-            .success
-    );
+    // Plain (non-TTY) learn: the install hooks are recorded as SKIPPED
+    // (ran_at = None, HOOK-110), still pending below. Learning with the bypass
+    // would have already run and recorded them, filtering them out of the
+    // `hooks run` below (which is exactly what HOOK-110 fixes) and defeating
+    // this test's purpose (accumulating a nonzero tally across a glob).
+    assert!(sb.mind(&["learn", "*"]).success);
 
     let r = sb.mind(&[
         "--json",

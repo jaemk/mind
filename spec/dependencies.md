@@ -28,7 +28,11 @@ identified by stable identity `(source, kind, bare_name)` (see namespacing.md).
 - `DEP-1` An item's dependencies are its intra-source references: each sibling
   named by a `{{ns:name}}` token (NS-10) appearing in the item's text files (the
   whole skill directory, or the agent/rule file, matching the scan breadth of
-  NS-20). A skill that references an agent profile is the common case.
+  NS-20). A skill that references an agent profile is the common case. Only
+  markdown files are scanned (`namespace::is_markdown`, NS-53): a `{{ns:}}`
+  token in a non-markdown file (a shell script, a data file) forms no
+  dependency edge, matching install, which never expands a token there either
+  (NS-53).
 - `DEP-2` Dependencies are intra-source only. A `{{ns:}}` token never crosses
   sources, so resolution stays within the one source and never pulls an item from
   another source.

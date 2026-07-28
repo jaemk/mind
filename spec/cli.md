@@ -790,8 +790,12 @@ only appear at meld or install time. It is read-only and installs nothing.
   token whose referent does not resolve in this source (a `{{tools:}}` naming a
   non-tool or a tool with no entrypoint, a `{{path:}}` miss or cross-kind
   ambiguity) is a hard `bad-reference` finding, which would be a `BadReference` at
-  install (tooling.md, TOOL-11/12). Every bad token is reported, not just the
-  first.
+  install (tooling.md, TOOL-11/12), in a markdown file (`namespace::is_markdown`,
+  NS-53). The identical unresolved token in a non-markdown item file (a script,
+  data) is only an advisory `bad-reference` finding, never hard: install never
+  expands any token there either, so it is dead text that cannot break an
+  install, matching how Check 9 (CLI-136) and Check 11 (CLI-139) already treat a
+  non-markdown file. Every bad token is reported, not just the first.
 - `CLI-136` `review` reports, as an advisory `hardcoded-path` finding, an item
   file that hardcodes a mind install path that a path token should replace. It
   recognizes the three install layouts (`.mind/store/<kind>/...`, the agent-home

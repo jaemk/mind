@@ -387,10 +387,13 @@ outside the surrounding verb, under the same consent model.
 - `HOOK-102` An item target (`<source>#<item>`) runs that item's install or
   uninstall hooks (HOOK-80/86) for the selected event, in place: with the working
   directory set to the item's installed store location (HOOK-81), against the
-  current store copy, with no reinstall. Item hooks carry no recorded run-state
-  (HOOK-84), so the selected hooks always run, subject to consent. `hooks run`
-  requires the target item to be installed; running against an item that is not
-  installed is an error naming it (there is no store copy to run against).
+  current store copy, with no reinstall. For the install event, `hooks run`
+  offers only the item's *pending* install hooks (HOOK-110): a hook already
+  recorded as run at the item's current commit is filtered out before it is
+  offered, mirroring HOOK-101's source-side filter. Uninstall hooks carry no
+  recorded run-state (HOOK-84) and always run. `hooks run` requires the target
+  item to be installed; running against an item that is not installed is an
+  error naming it (there is no store copy to run against).
 - `HOOK-103` `--event build` is valid only for an item target and re-runs the
   item's build hook (HOOK-70). Because a build hook is staging-bound and its output
   must land in the store transactionally (HOOK-71), `hooks run --event build`
@@ -450,16 +453,33 @@ outside the surrounding verb, under the same consent model.
   bare consequence: `note: skipped <event> hook '<label>' for <source> (not a
   terminal); re-run with 'mind hooks run <source> --event <event>
   --dangerously-skip-install-hook-check' to run it unattended`. `<source>` is
-  substituted with the actual target and `<event>` with the event the run
-  selected, so the printed command is copy-pasteable with no placeholder to
-  fill in and re-runs the hooks that were skipped. The `--event` segment is
-  not optional dressing: `--event` defaults to `install` (CLI-195), so a
-  remedy that omitted it would, after an `--event uninstall` run, silently
-  name a command that executes the source's install hooks instead. The same
-  substitution applies to the `HooksNotRun` message (HOOK-107/HOOK-108), which
-  carries the same remedy. An interactive decline (the user is on a TTY and
-  answered no/skip) keeps the plain `skipped ... hook ... for ...` note: there
-  is no "cause" to name when the user made an active choice.
+  substituted with the RESOLVED source identity, never the raw selector the
+  user typed (which may be a glob or an abbreviated form), and `<event>` with
+  the event the run selected, so the printed command is copy-pasteable with no
+  placeholder to fill in and re-runs the hooks that were skipped. The
+  `--event` segment is not optional dressing: `--event` defaults to `install`
+  (CLI-195), so a remedy that omitted it would, after an `--event uninstall`
+  run, silently name a command that executes the source's install hooks
+  instead. An interactive decline (the user is on a TTY and answered no/skip)
+  keeps the plain `skipped ... hook ... for ...` note: there is no "cause" to
+  name when the user made an active choice.
+
+  The `HooksNotRun` message (HOOK-107/HOOK-108) aggregates across every
+  matched source or item, so it cannot always follow the same one-remedy shape
+  as the per-hook note above: when exactly one source or item contributed a
+  skipped hook, the message substitutes that one resolved identity and carries
+  the identical paste-able remedy; when a selector matched SEVERAL sources or
+  items (a glob) that all contributed, no single command is synthesized from
+  the raw selector -- doing so for a selector like `'*'` would print an
+  unquoted shell glob that expands against the caller's cwd if pasted, naming
+  something that may not even be a source. Instead the message lists every
+  resolved identity that had work, so the reader substitutes one at a time; it
+  never echoes the raw multi-match selector back into a command-shaped string.
+  An item ref that itself resolved to exactly one item (whatever form it was
+  spelled in -- bare, a kind-qualified escape, or an abbreviated source
+  selector) keeps that exact typed form in its single-target remedy, since
+  rewriting it into a different form risks landing back in the HOOK-105
+  source/item ambiguity a kind-qualified escape exists specifically to avoid.
 - `HOOK-107` `hooks run <target>` on a source target counts, across every
   matched source, how many hooks for the selected event EXISTED (were
   actually considered: not filtered out as already-up-to-date at the current
@@ -486,14 +506,39 @@ outside the surrounding verb, under the same consent model.
   for the selected event existed, how many ran, and how many were skipped for
   want of consent, and reports `MindError::HooksNotRun` under the same
   predicate (at least one existed, none ran, at least one was skipped for want
-  of consent). The provisioning-script case U43 describes does not care whether
-  the target was spelled as a source or as one of its items, so neither does
-  the report. The error names the target as typed and carries the same remedy
-  as HOOK-106. An item with no hooks declared for the selected event stays exit
-  0, and an interactive decline stays exit 0, exactly as for a source target.
-  `--event build` is outside this accounting: it re-installs the item through
-  the transactional path (HOOK-103), where the build hook's consent outcome is
-  a step of the install rather than a result reported back to `hooks run`.
+  of consent). For the install event, "existed" excludes any hook already
+  recorded as run at the item's current commit (HOOK-110): a hook filtered out
+  that way was never offered, so it counts toward neither "existed" nor "ran"
+  nor "skipped". The provisioning-script case U43 describes does not care
+  whether the target was spelled as a source or as one of its items, so
+  neither does the report. The error names the target as typed and carries the
+  same remedy as HOOK-106. An item with no hooks declared for the selected
+  event, or whose install hooks are all already recorded as run at the current
+  commit, stays exit 0, and an interactive decline stays exit 0, exactly as for
+  a source target. `--event build` is outside this accounting: it re-installs
+  the item through the transactional path (HOOK-103), where the build hook's
+  consent outcome is a step of the install rather than a result reported back
+  to `hooks run`.
+- `HOOK-110` An installed item records its install hooks as a set
+  (`InstalledItem.install_hooks`, STO-75), the per-item counterpart of a
+  source's `install_hooks` record (HOOK-55): each entry is an effective
+  install-hook command plus the commit it last ran at, or absent (`None`) when
+  it was offered and skipped rather than run. The record is written by every
+  path that runs an item's install hooks -- `learn`, `upgrade`'s reinstall
+  cycle, and `hooks run` -- not just `hooks run`, so a hook `learn` skipped
+  (non-TTY) or ran (`--dangerously-skip-install-hook-check`) is reflected
+  immediately, before any `hooks run` of that item. `learn` and `upgrade`
+  build the record fresh on every (re)install (HOOK-84 is unaffected: they
+  still run or offer every declared install hook regardless of any prior
+  record); only `hooks run` reads the record, to filter its HOOK-108
+  accounting down to pending hooks (HOOK-102). This closes the gap where a
+  provisioning script doing `mind learn x --dangerously-skip-install-hook-check
+  && mind hooks run src#x` failed on the second command forever, with a remedy
+  that re-runs a side effect the first command already applied. Because
+  `learn`/`upgrade` rebuild the record from scratch on every (re)install rather
+  than merging it with what was there before, a record tied to an old commit
+  never suppresses a hook at a new one, and `forget` (which removes the whole
+  manifest entry) removes the record along with the item.
 - `HOOK-109` The interactive-terminal test (HOOK-22's gate, `hook::is_tty`)
   reads `$MIND_TTY` before falling back to inspecting stdin. When the variable
   is set, its value alone decides: `0`, `false`, `no`, `off`, and the empty

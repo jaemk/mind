@@ -758,6 +758,7 @@ mod tests {
             store: String::new(), // empty registry: uninstall is a no-op
             links: vec![],
             description: None,
+            install_hooks: Vec::new(),
         });
         manifest.save(paths).unwrap();
         source_name

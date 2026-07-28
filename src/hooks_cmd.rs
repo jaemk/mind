@@ -274,6 +274,10 @@ fn run_source_hooks(
     let mut existed: usize = 0;
     let mut ran: usize = 0;
     let mut skipped_for_consent: usize = 0;
+    // spec: HOOK-106 HOOK-107 -- every source that contributed at least one
+    // considered hook, for the HooksNotRun remedy (paste-able only when this
+    // holds exactly one entry; see `hooks_not_run_message`).
+    let mut contributors: Vec<String> = Vec::new();
 
     for idx in indices {
         let source = &registry.sources[idx];
@@ -311,6 +315,7 @@ fn run_source_hooks(
         let current = source.commit.clone();
         let clone_path = clone_dir.display().to_string();
         let browse_url = source.browse_url(&commit);
+        let mut source_contributed = false;
 
         for h in &hooks {
             // spec: HOOK-101 -- for install event, skip hooks already at current
@@ -322,6 +327,7 @@ fn run_source_hooks(
                 continue;
             }
             existed += 1;
+            source_contributed = true;
 
             let disclosure = crate::hook::hook_disclosure_text(
                 h.label(),
@@ -412,6 +418,9 @@ fn run_source_hooks(
                 }
             }
         }
+        if source_contributed {
+            contributors.push(source_name.clone());
+        }
     }
 
     if registry_dirty {
@@ -428,6 +437,7 @@ fn run_source_hooks(
             target: selector.to_string(),
             event: event_label(event).to_string(),
             skipped: skipped_for_consent,
+            resolved: contributors,
         });
     }
 
@@ -508,6 +518,10 @@ fn run_item_hooks(
     // spec: HOOK-108 -- the HOOK-107 accounting applies to item targets too,
     // accumulated across every item the ref matched.
     let mut tally = HookTally::default();
+    // spec: HOOK-106 HOOK-107 HOOK-108 -- every item that contributed at least
+    // one considered hook, for the HooksNotRun remedy (see `run_source_hooks`'s
+    // `contributors` for the same reasoning on the source side).
+    let mut contributors: Vec<String> = Vec::new();
 
     // spec: CLI-194 -- a ref matching several items runs each in turn.
     for installed in matches {
@@ -522,6 +536,7 @@ fn run_item_hooks(
                     event,
                     dangerously_skip_install,
                     &mut tally,
+                    &mut contributors,
                 )?;
             }
         }
@@ -531,10 +546,24 @@ fn run_item_hooks(
     // consent to any of them is an error, exactly as for a source target
     // (HOOK-107), instead of a silent exit 0.
     if tally.nothing_could_consent() {
+        // spec: HOOK-106 HOOK-107 -- when the ref matched exactly one item, the
+        // target as typed already resolves back to that same item
+        // deterministically (whatever form it was spelled in -- bare, a
+        // kind-qualified escape, or an abbreviated source selector), so it is
+        // kept verbatim rather than rewritten into a normalized form (that
+        // would risk re-entering the HOOK-105 source/item ambiguity a
+        // kind-qualified escape was written specifically to avoid). Only a ref
+        // that matched SEVERAL items (a glob) gets the resolved-identity list.
+        let resolved = if contributors.len() == 1 {
+            vec![target.to_string()]
+        } else {
+            contributors
+        };
         return Err(MindError::HooksNotRun {
             target: target.to_string(),
             event: event_label(event).to_string(),
             skipped: tally.skipped_for_consent,
+            resolved,
         });
     }
     Ok(tally)
@@ -590,7 +619,9 @@ fn run_item_build(
 }
 
 /// Run an item's install or uninstall hooks in place at its store location,
-/// adding what it considered to `tally` (HOOK-108).
+/// adding what it considered to `tally` (HOOK-108) and, if it contributed at
+/// least one considered hook, its key to `contributors` (HOOK-106/107, for the
+/// `HooksNotRun` remedy).
 // spec: HOOK-102 HOOK-108
 fn run_item_lifecycle_hooks(
     paths: &Paths,
@@ -598,6 +629,7 @@ fn run_item_lifecycle_hooks(
     event: HookEventArg,
     dangerously_skip: bool,
     tally: &mut HookTally,
+    contributors: &mut Vec<String>,
 ) -> Result<()> {
     let registry = Registry::load(paths)?;
     let source = registry
@@ -623,8 +655,8 @@ fn run_item_lifecycle_hooks(
 
     match event {
         HookEventArg::Install => {
-            let hooks = catalog_item.install_hooks();
-            if hooks.is_empty() {
+            let all_hooks = catalog_item.install_hooks();
+            if all_hooks.is_empty() {
                 // spec: CLI-217
                 crate::render::note(format!(
                     "note: no install hooks declared for {}",
@@ -632,15 +664,34 @@ fn run_item_lifecycle_hooks(
                 ));
                 return Ok(());
             }
+            // spec: HOOK-110 -- a hook already recorded as run at the item's
+            // current commit is filtered out before the HOOK-108 tally, exactly
+            // as `hook_already_ran` filters an already-ran source install hook
+            // (HOOK-101). This is what makes a repeat `hooks run` after the hook
+            // ran see `existed == 0` and settle to exit 0 instead of
+            // `HooksNotRun`. Filtered-out hooks print nothing, mirroring the
+            // silent `continue` in `run_source_hooks`.
+            let current = Some(commit.as_str());
+            let hooks: Vec<&crate::mindfile::ResolvedHook> = all_hooks
+                .into_iter()
+                .filter(|h| !item_hook_already_ran(installed, &h.run, current))
+                .collect();
+            if hooks.is_empty() {
+                return Ok(());
+            }
             // spec: HOOK-108
             tally.offered(hooks.len(), dangerously_skip);
-            crate::install::run_item_install_hooks(
+            contributors.push(item_hook_target(installed));
+            let recorded = crate::install::run_item_install_hooks(
                 catalog_item,
                 &hooks,
                 &store,
                 commit,
                 dangerously_skip,
             )?;
+            // spec: HOOK-110 -- persist the ran/skipped outcome so a later
+            // `hooks run` sees it.
+            record_item_hooks_run(paths, &installed.key(), &recorded)?;
         }
         HookEventArg::Uninstall => {
             let hooks = catalog_item.uninstall_hooks();
@@ -654,6 +705,7 @@ fn run_item_lifecycle_hooks(
             }
             // spec: HOOK-108
             tally.offered(hooks.len(), dangerously_skip);
+            contributors.push(item_hook_target(installed));
             crate::install::run_item_uninstall_hooks(
                 installed,
                 &hooks,
@@ -888,6 +940,21 @@ fn pin_description(pin: &Pin) -> String {
     }
 }
 
+/// The `<source>#<kind>:<name>` form that re-resolves `installed` as a
+/// `hooks run` item target (HOOK-106/107/108): unlike `InstalledItem::key()`
+/// (the manifest key, `kind:name`, which `hooks run` does not accept as a
+/// target at all), this is what a `HooksNotRun` remedy must name for the
+/// command it prints to actually be runnable. Mirrors the `item_forms`
+/// construction in `resolve_hook_target`'s `AmbiguousHookTarget` path.
+fn item_hook_target(installed: &InstalledItem) -> String {
+    format!(
+        "{}#{}:{}",
+        installed.source,
+        installed.kind.as_str(),
+        installed.name
+    )
+}
+
 /// Whether an install hook has already run at `current` (mirrors the private
 /// `hook_ran_at` in commands.rs).
 fn hook_already_ran(source: &Source, command: &str, current: Option<&str>) -> bool {
@@ -896,6 +963,43 @@ fn hook_already_ran(source: &Source, command: &str, current: Option<&str>) -> bo
             .install_hooks
             .iter()
             .any(|r| r.command == command && r.ran_at.as_deref() == current)
+}
+
+/// Whether an item's install hook has already run at `current` (HOOK-110).
+/// Mirrors `hook_already_ran` above, but reads the per-item record
+/// (`InstalledItem::install_hooks`) instead of the source's.
+fn item_hook_already_ran(installed: &InstalledItem, command: &str, current: Option<&str>) -> bool {
+    current.is_some()
+        && installed
+            .install_hooks
+            .iter()
+            .any(|r| r.command == command && r.ran_at.as_deref() == current)
+}
+
+/// Upsert `recorded`'s outcomes into the manifest entry keyed `key`'s
+/// `install_hooks` (HOOK-110), mirroring `record_hook_run`'s upsert-by-command
+/// for the source-level record. A no-op if the item vanished from the manifest
+/// between load and this call (nothing to persist against).
+fn record_item_hooks_run(paths: &Paths, key: &str, recorded: &[RecordedHook]) -> Result<()> {
+    if recorded.is_empty() {
+        return Ok(());
+    }
+    let mut manifest = Manifest::load(paths)?;
+    if let Some(item) = manifest.items.get_mut(key) {
+        for r in recorded {
+            if let Some(existing) = item
+                .install_hooks
+                .iter_mut()
+                .find(|e| e.command == r.command)
+            {
+                existing.ran_at = r.ran_at.clone();
+            } else {
+                item.install_hooks.push(r.clone());
+            }
+        }
+        manifest.save(paths)?;
+    }
+    Ok(())
 }
 
 /// Upsert a hook's run state in `source.install_hooks` (mirrors the private

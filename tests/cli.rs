@@ -1561,6 +1561,55 @@ fn init_source_reports_refs_scaffolds_toml_and_templates() {
 }
 
 #[test]
+fn init_source_template_skips_a_bare_mention_in_a_non_markdown_file() {
+    // spec: INIT-5
+    // --template's file gate is `namespace::is_markdown` (the same extension
+    // set install expands tokens in, NS-53), not an exact-`.md` test: a bare
+    // sibling mention in a `.sh` file is left alone (install would never
+    // expand a token there either), while the SAME mention in a `.markdown`
+    // file (a recognized-but-not-`.md` extension) IS templated.
+    let sb = Sandbox::new();
+    let repo = sb.base.join("authoring-md-gate");
+    write(
+        &repo.join("skills/review/SKILL.md"),
+        "---\ndescription: review\n---\n# review\n",
+    );
+    write(
+        &repo.join("skills/review/run.sh"),
+        "#!/bin/sh\n# hand off to dev\necho dev\n",
+    );
+    write(
+        &repo.join("skills/review/notes.markdown"),
+        "hand off to dev when done\n",
+    );
+    write(
+        &repo.join("agents/dev.md"),
+        "---\nname: dev\ndescription: dev\n---\n# dev\n",
+    );
+    let dir = repo.to_str().unwrap();
+
+    let t = sb.mind(&["init-source", dir, "--template"]);
+    assert!(
+        t.success,
+        "init-source --template failed: {} {}",
+        t.stdout, t.stderr
+    );
+
+    let script = std::fs::read_to_string(repo.join("skills/review/run.sh")).unwrap();
+    assert!(
+        script.contains("hand off to dev") && !script.contains("{{ns:dev}}"),
+        "a bare mention in a non-markdown file must not be templated: {script}"
+    );
+
+    let notes = std::fs::read_to_string(repo.join("skills/review/notes.markdown")).unwrap();
+    assert!(
+        notes.contains("{{ns:dev}}"),
+        "a bare mention in a recognized non-`.md` markdown extension (.markdown) \
+         must still be templated: {notes}"
+    );
+}
+
+#[test]
 fn init_source_flags_helper_script_duplicated_across_items() {
     // spec: INIT-7
     let sb = Sandbox::new();
@@ -6197,6 +6246,47 @@ fn learn_pulls_dependency_referenced_in_non_skill_md_file() {
     assert!(
         recall.contains("agent:reviewer"),
         "token in a non-SKILL.md file still pulls the dependency: {recall}"
+    );
+}
+
+#[test]
+fn learn_ignores_ns_token_in_a_non_markdown_file_within_the_skill() {
+    // spec: DEP-1
+    // A `{{ns:reviewer}}` token in a non-markdown sibling file (a shell script)
+    // forms no dependency edge: install never expands a token there either
+    // (NS-53), so the dependency scan must not treat it as a reference. A
+    // partial `learn skill:review` therefore installs ONLY the skill, with no
+    // dependency prompt (nothing was found to pull in).
+    let sb = Sandbox::bare("nonmd-no-deps");
+    sb.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\nname: review\ndescription: Review the diff\n---\n# review\n",
+    );
+    sb.write_and_commit(
+        "skills/review/run.sh",
+        "#!/bin/sh\n# see {{ns:reviewer}} for handoff\n",
+    );
+    sb.write_and_commit(
+        "agents/reviewer.md",
+        "---\nname: reviewer\ndescription: Reviews changes\n---\n# reviewer agent\n",
+    );
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+
+    // No --yes and no piped input: if the token were (wrongly) treated as a
+    // dependency, the confirmation prompt would block on EOF and default to
+    // "no", leaving the skill uninstalled -- so the assertions below also
+    // pin that no dependency was found at all.
+    let r = sb.mind(&["learn", "skill:review"]);
+    assert!(r.success, "{}", r.stderr);
+    let recall = sb.mind(&["recall"]).stdout;
+    assert!(
+        recall.contains("skill:review    installed"),
+        "the skill must install with no dependency prompt in the way: {recall}"
+    );
+    assert!(
+        recall.contains("agent:reviewer  available"),
+        "a {{{{ns:}}}} token in a non-markdown file must not pull in the \
+         sibling it names, so the agent stays uninstalled: {recall}"
     );
 }
 

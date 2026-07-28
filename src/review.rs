@@ -643,6 +643,10 @@ fn run_checks(
             // there at all (NS-53).
             let is_md = crate::namespace::is_markdown(&file);
             // Check 8: path-reference tokens that do not resolve (hard, CLI-135).
+            // Gated on `is_md` (NS-53): install never expands a path/tools token
+            // outside markdown, so an unresolved one in a non-markdown file is
+            // dead text install will never touch, not a defect that would break
+            // an install -- at most advisory, never a hard failure.
             if let Err((token, reason)) = crate::namespace::expand_paths(&content, &ctx) {
                 // Name the specific cause (TOOL-17/TOOL-18): a plain miss keeps the
                 // historical "does not resolve to any sibling" wording; a real tool
@@ -658,10 +662,22 @@ fn run_checks(
                     CrossSource => "crosses sources; a requires entry is intra-source only",
                     InvalidRef => "is not a valid item ref",
                 };
-                hard.push(Finding::hard(
-                    "bad-reference",
-                    format!("{}: {token} {detail} in this source", item.key()),
-                ));
+                if is_md {
+                    hard.push(Finding::hard(
+                        "bad-reference",
+                        format!("{}: {token} {detail} in this source", item.key()),
+                    ));
+                } else {
+                    advisory.push(Finding::advisory(
+                        "bad-reference",
+                        format!(
+                            "{}: {token} {detail} in this source, but it will not expand here \
+                             anyway -- tokens expand in markdown only, so this is dead text, not \
+                             a defect that would break an install",
+                            item.key()
+                        ),
+                    ));
+                }
             }
             // Check 9: hardcoded install paths that should be tokens (advisory,
             // CLI-136). The wording reflects what the path resolves to (CLI-145).
@@ -2661,6 +2677,43 @@ mod tests {
     }
 
     // --- tooling / path-reference checks + --fix (CLI-135..138) ---
+
+    /// An unresolved path token (`{{tools:nope}}`) living in a non-markdown
+    /// item file (a shell script) is at most advisory, never a hard finding:
+    /// install never expands a path/tools token outside markdown (NS-53), so
+    /// it can never break an install the way the same token in a markdown
+    /// file can. The identical token in SKILL.md, in the same source, still
+    /// hard-fails (bad_path_token_is_hard_error above), pinning the gate is
+    /// per-file, not source-wide.
+    /// spec: CLI-135
+    #[test]
+    fn bad_path_token_in_a_non_markdown_file_is_not_a_hard_error() {
+        let tmp = TmpDir::new();
+        let source_dir = tmp.path().join("src");
+        write_file(
+            &source_dir.join("skills/review/SKILL.md"),
+            "---\ndescription: review\n---\n# review\n",
+        );
+        write_file(
+            &source_dir.join("skills/review/run.sh"),
+            "#!/bin/sh\n# run {{tools:nope}} .\n",
+        );
+        let paths = paths_for(tmp.path());
+
+        let result = run_checks(&paths, &source_dir, None, false, true).unwrap();
+        assert!(
+            !result.hard.iter().any(|f| f.kind == "bad-reference"),
+            "an unresolved path token in a non-markdown file must not be a \
+             hard finding: {:?}",
+            result.hard
+        );
+        assert!(
+            result.advisory.iter().any(|f| f.kind == "bad-reference"),
+            "it should still surface as an advisory, not be silently dropped: \
+             {:?}",
+            result.advisory
+        );
+    }
 
     /// An unresolved path token (`{{tools:nope}}`) is a hard bad-reference, just
     /// like an unresolved `{{ns:}}`.

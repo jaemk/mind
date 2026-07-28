@@ -2188,7 +2188,9 @@ pub fn init_source(
             for file in crate::review::item_files(it) {
                 // {{ns:}} is a prose reference (NS-24); only markdown carries
                 // prose. Never templatize scripts/data, where every word is code.
-                if file.extension().and_then(|e| e.to_str()) != Some("md") {
+                // spec: INIT-5 -- the same extension set install expands
+                // (`namespace::is_markdown`, NS-53), not an exact-`.md` test.
+                if !crate::namespace::is_markdown(&file) {
                     continue;
                 }
                 let Ok(content) = std::fs::read_to_string(&file) else {
@@ -2209,10 +2211,17 @@ pub fn init_source(
     Ok(())
 }
 
-/// Read all of an item's text files into one buffer, for reference detection.
+/// Read all of an item's MARKDOWN text files into one buffer, for `{{ns:}}`
+/// dependency-edge detection (DEP-1). Narrowed to markdown
+/// (`namespace::is_markdown`, NS-53) so a `{{ns:}}` token in a non-markdown
+/// file -- which install no longer expands and no longer treats as a
+/// dependency -- does not create a phantom dependency edge here either.
 fn read_item_text(item: &CatalogItem) -> String {
     let mut buf = String::new();
     for file in crate::review::item_files(item) {
+        if !crate::namespace::is_markdown(&file) {
+            continue;
+        }
         if let Ok(content) = std::fs::read_to_string(&file) {
             buf.push_str(&content);
             buf.push('\n');
@@ -2670,10 +2679,16 @@ fn resolve_learn(
     let installed: HashSet<String> = manifest.items.keys().cloned().collect();
 
     // The `read` closure feeds each item's concatenated UTF-8 text to the
-    // resolver so it can scan for `{{ns:}}` tokens (DEP-1).
+    // resolver so it can scan for `{{ns:}}` tokens (DEP-1). Mirrors
+    // `read_item_text`: only markdown files are scanned
+    // (`namespace::is_markdown`, NS-53), since install never expands a
+    // `{{ns:}}` token in any other file either.
     let read = |item: &CatalogItem| -> String {
         let mut parts: Vec<String> = Vec::new();
         for file in crate::review::item_files(item) {
+            if !crate::namespace::is_markdown(&file) {
+                continue;
+            }
             if let Ok(content) = std::fs::read_to_string(&file) {
                 parts.push(content);
             }
@@ -4017,18 +4032,30 @@ fn install_item(
     dangerously_skip: bool,
     dangerously_skip_build: bool,
 ) -> Result<crate::manifest::InstalledItem> {
-    let installed = install::install(paths, item, commit, siblings, force, dangerously_skip_build)?;
+    let mut installed =
+        install::install(paths, item, commit, siblings, force, dangerously_skip_build)?;
     // HOOK-86: run every resolved install hook in declaration order (the scalar
     // shorthand is folded in as the first required hook). On a hook failure, roll
     // the just-installed item back.
     let install_hooks = item.install_hooks();
     if !install_hooks.is_empty() {
         let store = paths.mind_home.join(&installed.store);
-        if let Err(e) =
-            install::run_item_install_hooks(item, &install_hooks, &store, commit, dangerously_skip)
-        {
-            let _ = install::uninstall(paths, &installed);
-            return Err(e);
+        match install::run_item_install_hooks(
+            item,
+            &install_hooks,
+            &store,
+            commit,
+            dangerously_skip,
+        ) {
+            // spec: HOOK-110 -- persist the ran/skipped outcome on the item's
+            // manifest record so a later `hooks run` (HOOK-102) does not treat
+            // an already-run (or already-offered) hook as never having been
+            // offered.
+            Ok(recorded) => installed.install_hooks = recorded,
+            Err(e) => {
+                let _ = install::uninstall(paths, &installed);
+                return Err(e);
+            }
         }
     }
     Ok(installed)
@@ -8173,6 +8200,7 @@ mod tests {
             store: format!("store/skills/{name}"),
             links: vec![],
             description: None,
+            install_hooks: Vec::new(),
         }
     }
 
@@ -8977,6 +9005,7 @@ mod tests {
             store: format!("store/{name}"),
             links: vec![],
             description: None,
+            install_hooks: Vec::new(),
         });
         manifest.save(paths).expect("save manifest");
     }

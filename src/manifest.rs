@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{ItemKind, MindError, Result};
 use crate::paths::Paths;
+use crate::source::RecordedHook;
 
 /// `serde` shim so [`ItemKind`] round-trips through JSON as a lowercase string.
 mod kind_serde {
@@ -43,6 +44,16 @@ pub struct InstalledItem {
     /// One-line description captured at install time, for `recall`.
     #[serde(default)]
     pub description: Option<String>,
+    /// The item's install hooks recorded as run or offered (HOOK-110). Mirrors
+    /// the source-level mechanism (`RecordedHook`, HOOK-55): a hook that RAN
+    /// carries `ran_at = Some(<commit it ran at>)`; a hook that was offered but
+    /// skipped (a non-TTY `hooks run`) carries `ran_at = None`. Absent in a
+    /// manifest written before HOOK-110 deserializes as empty, so an item
+    /// installed by an older binary is treated as having no recorded runs (its
+    /// install hooks are re-offered on the next `hooks run`, same as before this
+    /// field existed).
+    #[serde(default)]
+    pub install_hooks: Vec<RecordedHook>,
 }
 
 impl InstalledItem {
@@ -197,6 +208,80 @@ mod tests {
             }
             other => panic!("expected StateTooNew, got {other:?}"),
         }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    fn stub_item(name: &str) -> InstalledItem {
+        InstalledItem {
+            kind: ItemKind::Skill,
+            name: name.to_string(),
+            bare_name: name.to_string(),
+            source: "local/test".to_string(),
+            commit: "abc123".to_string(),
+            hash: "deadbeef".to_string(),
+            store: format!("store/skill/{name}"),
+            links: Vec::new(),
+            description: None,
+            install_hooks: Vec::new(),
+        }
+    }
+
+    /// An item's `install_hooks` record (STO-75) survives a save/load
+    /// round-trip through `manifest.json`, including both a hook that ran
+    /// (`ran_at = Some(commit)`) and one that was offered and skipped
+    /// (`ran_at = None`).
+    // spec: STO-75 HOOK-110
+    #[test]
+    fn install_hooks_record_round_trips_through_save_and_load() {
+        let (base, paths) = tmp_paths();
+        let mut item = stub_item("scanner");
+        item.install_hooks = vec![
+            RecordedHook {
+                command: "touch ran.sentinel".to_string(),
+                ran_at: Some("abc123".to_string()),
+            },
+            RecordedHook {
+                command: "touch skipped.sentinel".to_string(),
+                ran_at: None,
+            },
+        ];
+        let mut manifest = Manifest::default();
+        manifest.insert(item.clone());
+        manifest.save(&paths).expect("save manifest");
+
+        let loaded = Manifest::load(&paths).expect("load manifest");
+        let back = loaded.items.get(&item.key()).expect("item present");
+        assert_eq!(
+            back.install_hooks, item.install_hooks,
+            "install_hooks must round-trip unchanged"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A `manifest.json` written before `install_hooks` existed (STO-75) has no
+    /// such key on its item objects. It must deserialize as an empty set rather
+    /// than fail to load, so an item installed by an older binary is simply
+    /// treated as having no recorded install-hook runs.
+    // spec: STO-75 HOOK-110
+    #[test]
+    fn install_hooks_missing_from_an_older_manifest_deserializes_as_empty() {
+        let (base, paths) = tmp_paths();
+        std::fs::write(
+            base.join("manifest.json"),
+            r#"{"version":1,"items":{"skill:scanner":{
+                "kind":"skill","name":"scanner","bare_name":"scanner",
+                "source":"local/test","commit":"abc123","hash":"deadbeef",
+                "store":"store/skill/scanner","links":[]
+            }}}"#,
+        )
+        .unwrap();
+        let m = Manifest::load(&paths).expect("must load a pre-HOOK-110 manifest");
+        let item = m.items.get("skill:scanner").expect("item present");
+        assert!(
+            item.install_hooks.is_empty(),
+            "a missing install_hooks field must default to empty, got {:?}",
+            item.install_hooks
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 }

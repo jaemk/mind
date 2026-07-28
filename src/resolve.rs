@@ -665,6 +665,7 @@ mod tests {
             store: String::new(),
             links: Vec::new(),
             description: None,
+            install_hooks: Vec::new(),
         }
     }
 

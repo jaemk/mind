@@ -244,6 +244,10 @@ pub fn install(
             .map(|p| p.to_string_lossy().into_owned())
             .collect(),
         description: item.description.clone(),
+        // spec: HOOK-110 -- filled in by the caller (`install_item` in
+        // commands.rs) once the item's install hooks have actually run; this
+        // function runs no hooks itself.
+        install_hooks: Vec::new(),
     })
 }
 
@@ -693,6 +697,9 @@ fn hook_cwd(store: &Path) -> std::path::PathBuf {
 /// non-TTY context skips it; `dangerously_skip` runs it unattended (HOOK-83). A
 /// non-zero exit is a `HookFailed` hard stop the caller acts on (install rolls
 /// back; uninstall leaves the item installed).
+///
+/// Returns whether the hook actually RAN (`true`) or was skipped (`false`),
+/// so an install-hook caller can record the outcome (HOOK-110).
 fn run_item_hook(
     event: &str,
     key: &str,
@@ -701,7 +708,7 @@ fn run_item_hook(
     store: &Path,
     commit: &str,
     dangerously_skip: bool,
-) -> Result<()> {
+) -> Result<bool> {
     // The noun for the side effect the hook applies, per event.
     let effect = if event == "install" {
         "its side effect is not applied"
@@ -742,22 +749,31 @@ fn run_item_hook(
         // spec: CLI-217
         crate::render::note(format!("note: skipped {event} hook for {key}; {effect}"));
     }
-    Ok(())
+    Ok(run)
 }
 
 /// Run an item's install hooks (HOOK-81, HOOK-86) as the final step of installing
 /// it, in declaration order. Each entry is disclosed, prompted, and fails exactly
 /// as the scalar shorthand does (HOOK-86): a non-zero exit aborts the loop and the
 /// caller rolls the install back. An empty list is a no-op.
+///
+/// Returns one [`crate::source::RecordedHook`] per hook offered, in the same
+/// order, so the caller can persist the outcome on the item's manifest record
+/// (HOOK-110): `ran_at = Some(commit)` for a hook that ran, `ran_at = None` for
+/// one that was offered but skipped (mirrors the source-level mechanism,
+/// HOOK-55). A hook whose failure aborts the loop is not represented in the
+/// returned vec (its error propagates instead and the caller rolls the whole
+/// install back, so there is nothing to record).
 pub fn run_item_install_hooks(
     item: &CatalogItem,
     hooks: &[&crate::mindfile::ResolvedHook],
     store: &Path,
     commit: &str,
     dangerously_skip: bool,
-) -> Result<()> {
+) -> Result<Vec<crate::source::RecordedHook>> {
+    let mut recorded = Vec::with_capacity(hooks.len());
     for hook in hooks {
-        run_item_hook(
+        let ran = run_item_hook(
             "install",
             &item.key(),
             &item.source,
@@ -766,8 +782,12 @@ pub fn run_item_install_hooks(
             commit,
             dangerously_skip,
         )?;
+        recorded.push(crate::source::RecordedHook {
+            command: hook.run.clone(),
+            ran_at: if ran { Some(commit.to_string()) } else { None },
+        });
     }
-    Ok(())
+    Ok(recorded)
 }
 
 /// Run an item's uninstall hooks (HOOK-82, HOOK-86) before its store copy and
@@ -993,6 +1013,7 @@ mod tests {
                 project_link.to_string_lossy().into_owned(),
             ],
             description: None,
+            install_hooks: Vec::new(),
         };
 
         let fixed = relink(&paths, &item).unwrap();

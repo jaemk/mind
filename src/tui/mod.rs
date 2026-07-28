@@ -1104,6 +1104,7 @@ mod tests {
             store: "store/solo".to_string(),
             links: vec![],
             description: None,
+            install_hooks: Vec::new(),
         });
         manifest.save(&paths).unwrap();
 

@@ -2004,6 +2004,7 @@ mod tests {
             store: store_rel.to_string(),
             links: vec![], // empty: link_rel falls back to default_link_rel
             description: None,
+            install_hooks: Vec::new(),
         };
 
         // A lobe whose PARENT directory does not exist -- freshly added, not yet
