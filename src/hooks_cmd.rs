@@ -682,16 +682,23 @@ fn run_item_lifecycle_hooks(
             // spec: HOOK-108
             tally.offered(hooks.len(), dangerously_skip);
             contributors.push(item_hook_target(installed));
-            let recorded = crate::install::run_item_install_hooks(
+            let (recorded, outcome) = crate::install::run_item_install_hooks_partial(
                 catalog_item,
                 &hooks,
                 &store,
                 commit,
                 dangerously_skip,
-            )?;
-            // spec: HOOK-110 -- persist the ran/skipped outcome so a later
-            // `hooks run` sees it.
+            );
+            // spec: HOOK-110 -- persist whatever ran or was offered before an
+            // abort too, exactly as `run_source_hooks` saves the registry
+            // before propagating a hook's error (HOOK-53): unlike the
+            // `learn`/`upgrade` path, this item stays installed regardless of
+            // the outcome, so a later hook's failure must not discard the
+            // record of an earlier hook that already ran its side effect (it
+            // would otherwise be offered, and its side effect re-applied, on
+            // retry).
             record_item_hooks_run(paths, &installed.key(), &recorded)?;
+            outcome?;
         }
         HookEventArg::Uninstall => {
             let hooks = catalog_item.uninstall_hooks();

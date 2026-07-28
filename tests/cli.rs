@@ -6526,19 +6526,15 @@ fn config_show_creates_default_and_reports_lobes() {
     assert!(sb.mind(&["config", "show"]).stdout.contains(&home));
 }
 
-/// `config show --json` is a documentation/classification mismatch worth
-/// pinning down: CLI-217's spec text and `main.rs`'s `json_reserves_stdout`
-/// both say "`config show` ... define[s] no JSON output at all, so it prints
-/// human text on stdout in every mode" -- but `commands::config_show` DOES
-/// have an `if out.json { return print_json(...) }` branch. It is excluded
-/// from the CLI-217 stdout reservation on that (incorrect) premise; harmless
-/// here only because `config_show` prints nothing before its JSON branch, so
-/// there is nothing an unreserved stdout could let leak ahead of it. This
-/// pins the actual behavior (a single JSON document, config data included) so
-/// a future change that adds a line before the branch is not silently
-/// exempted from CLI-217 by the same stale classification.
+/// `config show --json` answers with exactly one JSON document on stdout
+/// (CLI-217, CLI-218): `commands::config_show` has an
+/// `if out.json { return print_json(...) }` branch, and `main.rs`'s
+/// `json_reserves_stdout` reserves stdout for it like any other verb that
+/// answers `--json` with a document. This pins the actual behavior (a single
+/// JSON document, config data included) so a future change that adds a line
+/// before the branch is caught by the CLI-217 stdout reservation.
 #[test]
-fn config_show_json_emits_one_document_despite_being_classified_as_no_json() {
+fn config_show_json_emits_one_document() {
     // spec: CLI-217 CLI-110
     let sb = Sandbox::new();
     let home = sb.base.join("jsonLobe").display().to_string();

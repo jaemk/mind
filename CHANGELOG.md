@@ -118,6 +118,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Each item-link instance now gets its own clone directory, so two links from
   one repo at different refs no longer clobber each other's checkout, and
   `unmeld` of one no longer breaks the other (STO-70).
+- `mind hooks run <source>#<item> --event install` no longer errors on every
+  repeat run once the hook already ran. An installed item now records which
+  install hooks ran at which commit, the same way a source does, so a run
+  against an item already up to date settles to exit 0 instead of returning
+  `HooksNotRun` forever (HOOK-110).
+- `HooksNotRun`'s remedy no longer echoes a multi-match selector as an
+  unquoted shell glob (e.g. `hooks run --event install '*'` printing a
+  command whose bare `*` expands against the caller's cwd if pasted). When
+  several sources or items matched, the message now lists their resolved
+  identities instead of synthesizing one fake command (HOOK-106).
 
 ### Added
 
@@ -135,9 +145,25 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Build provenance attestation on release artifacts, soft-verified by
   `install.sh` when `gh` is available.
 - CI jobs for the declared MSRV and for RustSec advisories.
+- `--json` now answers every verb with one JSON document on stdout, except a
+  closed exclusion list (`dump`, `completions`, `man`, `evolve`,
+  `init-source`). `review` answers with a findings document and folds a hard
+  finding into the error envelope's new optional `details` member; `hooks
+  list` answers with a hooks document; `hooks run` answers a successful run
+  with an existed/ran/skipped tally (CLI-218, CLI-219, CLI-220, CLI-221,
+  CLI-222).
 
 ### Changed
 
+- `{{ns:}}`, `{{path:}}`, `{{tools:}}`, and `{{self}}` tokens now expand only
+  in a markdown file (`md`, `markdown`, `mdown`, `mkd`, case-insensitively),
+  not every text file of an item. A token left in a non-markdown file (a
+  script, data) is no longer expanded and is left exactly as written; an
+  unresolvable `{{ns:}}` there no longer fails the install, since nothing
+  there was ever expanded (NS-53, TOOL-19).
+- `review --fix` no longer rewrites a non-markdown item file. It still
+  reports a finding there (a hardcoded path, a misplaced token, an unguarded
+  reference); it just leaves the file unrewritten (NS-54).
 - `dump` now emits an item-link instance as a deep `tree` URL rebuilt from its
   recorded parts and pinned by `pin-ref`, instead of skipping it with a note. A
   skill installed from a pasted URL is reproduced by melding the dump, including

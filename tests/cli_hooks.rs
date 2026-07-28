@@ -4415,23 +4415,24 @@ fn hooks_run_item_install_hook_interactive_decline_records_not_run() {
     );
 }
 
-/// Characterization of the partial-failure record path (HOOK-110): when an
-/// item declares several install hooks and a LATER one fails, the whole batch's
-/// records are discarded, so an EARLIER hook that already ran its side effect is
-/// re-offered (and, under the bypass, re-run) on the next `hooks run`.
+/// The partial-failure record path (HOOK-110): when an item declares several
+/// install hooks and a LATER one fails, the records of the hooks that already
+/// ran (or were offered) before the failure survive, so an EARLIER hook that
+/// already ran its side effect is NOT re-offered (or re-run) on a later
+/// `hooks run` retry.
 ///
-/// This DIVERGES from the source-hook path, which persists the records of the
-/// hooks that ran before saving-and-propagating a mid-batch failure
+/// This mirrors the source-hook path, which persists the records of the hooks
+/// that ran before saving-and-propagating a mid-batch failure
 /// (`run_source_hooks`, "propagate the error after saving whatever was recorded
-/// so far"). For an ITEM `hooks run` the item stays installed on a hook failure,
-/// yet the successful earlier hook's record is dropped, so its side effect runs
-/// again next time. It is not a regression -- before HOOK-110 no item record
-/// existed at all, so every hook was always re-offered -- but it is an
-/// inconsistency worth pinning so any future parity fix is a conscious change.
+/// so far", HOOK-53). For an ITEM `hooks run` the item stays installed on a
+/// hook failure, so a dropped record for an already-run earlier hook would
+/// mean its side effect runs again next time; this test pins that it does not.
 /// The `learn`/`upgrade` path is unaffected: a hook failure there rolls the
-/// whole item back, so there is genuinely no record to keep.
+/// whole item back, so there is genuinely no record to keep
+/// (`run_item_install_hooks` in `src/install.rs`, used only by that path,
+/// still discards on error).
 #[test]
-fn hooks_run_item_partial_failure_discards_earlier_hooks_record() {
+fn hooks_run_item_partial_failure_keeps_the_records_of_hooks_that_already_ran() {
     // spec: HOOK-110 HOOK-108
     let sb = Sandbox::new("item-partial");
     let counter = sb.sentinel("partial-counter").display().to_string();
@@ -4491,8 +4492,36 @@ fn hooks_run_item_partial_failure_discards_earlier_hooks_record() {
         "hook 1 must have run exactly once so far"
     );
 
-    // Second bypass run: because the first batch's records were discarded on the
-    // failure, hook 1 is offered again and re-runs its side effect (counter = 2).
+    // The manifest must already carry hook 1's record with a non-null ran_at,
+    // persisted even though the batch as a whole errored on hook 2. (Hook 2's
+    // own entry legitimately stays ran_at = null: the plain `learn` above
+    // recorded it as skipped, and it never ran to completion in the bypass
+    // run either, since it errored.)
+    let manifest =
+        std::fs::read_to_string(sb.mind_home.join("manifest.json")).expect("read manifest.json");
+    let doc: serde_json::Value =
+        serde_json::from_str(&manifest).expect("manifest.json is valid JSON");
+    let install_hooks = doc["items"]["skill:scanner"]["install_hooks"]
+        .as_array()
+        .expect("skill:scanner has an install_hooks array");
+    let counting_hook = install_hooks
+        .iter()
+        .find(|h| {
+            h["command"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("printf x")
+        })
+        .expect("the counting hook is recorded in install_hooks");
+    assert!(
+        counting_hook["ran_at"].is_string(),
+        "the counting hook ran, so it must be recorded with ran_at = Some(commit), \
+         not null: {manifest}"
+    );
+
+    // Second bypass run: hook 1's record survived the first batch's failure, so
+    // it is NOT re-offered; only hook 2 (still failing) runs, and the counter
+    // stays at 1.
     let r = sb.mind(&[
         "hooks",
         "run",
@@ -4509,10 +4538,235 @@ fn hooks_run_item_partial_failure_discards_earlier_hooks_record() {
     let after_second = std::fs::read(&counter).expect("counter after second run");
     assert_eq!(
         after_second.len(),
-        2,
-        "the earlier hook's record was discarded with the failed batch, so it \
-         re-ran; if this becomes 1, the item path gained source-path parity and \
-         this characterization test should be updated deliberately"
+        1,
+        "the earlier hook's record must have survived the first batch's \
+         failure, so it must NOT be offered (or re-run) again"
+    );
+}
+
+/// The partial-failure record path over a batch LONGER than two hooks
+/// (HOOK-110): with a mid-batch failure, EVERY hook that ran before the failing
+/// one must keep its record, not just the one immediately preceding the failure.
+///
+/// The two-hook sibling test above can only exercise a single pre-failure hook,
+/// so it cannot distinguish "persist every prior record" from "persist the last
+/// prior record". This uses THREE hooks -- two independent side-effect counters
+/// then a failing hook -- and pins that both counters are recorded as run and
+/// neither is re-offered (re-run) on retry. An off-by-one in the accumulation
+/// (e.g. only the record for the hook immediately before the failure surviving)
+/// would leave the FIRST counter unrecorded, so a retry would re-run it and its
+/// counter would tick to 2.
+#[test]
+fn hooks_run_item_partial_failure_in_a_long_batch_keeps_every_earlier_record() {
+    // spec: HOOK-110 HOOK-108
+    let sb = Sandbox::new("item-long");
+    let counter1 = sb.sentinel("long-counter-1").display().to_string();
+    let counter2 = sb.sentinel("long-counter-2").display().to_string();
+    sb.write_and_commit(
+        "mind.toml",
+        &format!(
+            concat!(
+                "[[items]]\n",
+                "kind = \"skill\"\n",
+                "name = \"scanner\"\n",
+                "path = \"skills/scanner\"\n",
+                // Hook 1 (scalar shorthand, folds in first): appends a byte to
+                // counter 1 each time it runs.
+                "install = \"sh -c 'printf x >> {c1}'\"\n",
+                "\n",
+                // Hook 2 (first array entry): appends a byte to counter 2.
+                "[[items.hooks]]\n",
+                "name = \"second\"\n",
+                "run = \"sh -c 'printf x >> {c2}'\"\n",
+                "event = \"install\"\n",
+                "\n",
+                // Hook 3 (second array entry): always fails, aborting the batch
+                // AFTER hooks 1 and 2 have both run.
+                "[[items.hooks]]\n",
+                "name = \"boom\"\n",
+                "run = \"exit 7\"\n",
+                "event = \"install\"\n",
+            ),
+            c1 = counter1,
+            c2 = counter2,
+        ),
+    );
+    sb.write_and_commit("skills/scanner/SKILL.md", "---\ndescription: s\n---\n# s\n");
+    let r = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(r.success, "meld: {}", r.stderr);
+    let r = sb.mind(&["learn", "scanner"]);
+    assert!(r.success, "learn: {}\n{}", r.stdout, r.stderr);
+
+    // First bypass run: hooks 1 and 2 both run (each counter = 1 byte), hook 3
+    // fails -> error.
+    let r = sb.mind(&[
+        "hooks",
+        "run",
+        "--event",
+        "install",
+        "--dangerously-skip-install-hook-check",
+        "item-long#scanner",
+    ]);
+    assert!(
+        !r.success,
+        "the batch must fail on hook 3: {}\n{}",
+        r.stdout, r.stderr
+    );
+    assert_eq!(
+        std::fs::read(&counter1)
+            .expect("counter1 after first run")
+            .len(),
+        1,
+        "hook 1 must have run exactly once so far"
+    );
+    assert_eq!(
+        std::fs::read(&counter2)
+            .expect("counter2 after first run")
+            .len(),
+        1,
+        "hook 2 must have run exactly once so far"
+    );
+
+    // Both earlier hooks' records must have persisted with a non-null ran_at,
+    // even though the batch as a whole errored on hook 3. This is the off-by-one
+    // guard: dropping the FIRST record (keeping only the one immediately before
+    // the failure) would leave hook 1 with ran_at = null.
+    let manifest =
+        std::fs::read_to_string(sb.mind_home.join("manifest.json")).expect("read manifest.json");
+    let doc: serde_json::Value =
+        serde_json::from_str(&manifest).expect("manifest.json is valid JSON");
+    let install_hooks = doc["items"]["skill:scanner"]["install_hooks"]
+        .as_array()
+        .expect("skill:scanner has an install_hooks array");
+    for (needle, which) in [("long-counter-1", "hook 1"), ("long-counter-2", "hook 2")] {
+        let rec = install_hooks
+            .iter()
+            .find(|h| h["command"].as_str().unwrap_or_default().contains(needle))
+            .unwrap_or_else(|| panic!("{which} is recorded in install_hooks: {manifest}"));
+        assert!(
+            rec["ran_at"].is_string(),
+            "{which} ran, so it must be recorded with ran_at = Some(commit): {manifest}"
+        );
+    }
+
+    // Second bypass run: hooks 1 and 2 are filtered out (already ran at the
+    // current commit), so ONLY hook 3 runs again and fails. Both counters stay
+    // at 1 -- proof that neither earlier record was dropped.
+    let r = sb.mind(&[
+        "hooks",
+        "run",
+        "--event",
+        "install",
+        "--dangerously-skip-install-hook-check",
+        "item-long#scanner",
+    ]);
+    assert!(
+        !r.success,
+        "the batch must fail again on hook 3: {}\n{}",
+        r.stdout, r.stderr
+    );
+    assert_eq!(
+        std::fs::read(&counter1)
+            .expect("counter1 after second run")
+            .len(),
+        1,
+        "hook 1's record must have survived, so it must NOT be re-run"
+    );
+    assert_eq!(
+        std::fs::read(&counter2)
+            .expect("counter2 after second run")
+            .len(),
+        1,
+        "hook 2's record must have survived, so it must NOT be re-run"
+    );
+}
+
+/// Retry accounting after a partial failure (HOOK-108 / HOOK-110): once an
+/// earlier hook's run is recorded, a later non-TTY `hooks run` must offer only
+/// the still-pending hook, and the HOOK-108 tally must NOT count the filtered-out
+/// already-ran hook. Observed through the `HooksNotRun` "N hook(s) had work to
+/// do" count: after hook 1 ran and hook 2 is skipped for want of consent, the
+/// count must be 1, not 2. Were the already-ran hook still counted, the message
+/// would report 2.
+#[test]
+fn hooks_run_item_retry_tally_excludes_the_already_ran_hook() {
+    // spec: HOOK-108 HOOK-110
+    let sb = Sandbox::new("item-retry-tally");
+    let counter = sb.sentinel("retry-counter").display().to_string();
+    sb.write_and_commit(
+        "mind.toml",
+        &format!(
+            concat!(
+                "[[items]]\n",
+                "kind = \"skill\"\n",
+                "name = \"scanner\"\n",
+                "path = \"skills/scanner\"\n",
+                // Hook 1: a side effect, recorded as run under the bypass below.
+                "install = \"sh -c 'printf x >> {}'\"\n",
+                "\n",
+                // Hook 2: always fails, so the first (bypass) run aborts here and
+                // hook 2 is never recorded as run.
+                "[[items.hooks]]\n",
+                "name = \"boom\"\n",
+                "run = \"exit 7\"\n",
+                "event = \"install\"\n",
+            ),
+            counter,
+        ),
+    );
+    sb.write_and_commit("skills/scanner/SKILL.md", "---\ndescription: s\n---\n# s\n");
+    let r = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(r.success, "meld: {}", r.stderr);
+    let r = sb.mind(&["learn", "scanner"]);
+    assert!(r.success, "learn: {}\n{}", r.stdout, r.stderr);
+
+    // Bypass run: hook 1 runs (recorded ran_at = commit), hook 2 fails.
+    let r = sb.mind(&[
+        "hooks",
+        "run",
+        "--event",
+        "install",
+        "--dangerously-skip-install-hook-check",
+        "item-retry-tally#scanner",
+    ]);
+    assert!(!r.success, "hook 2 must fail: {}\n{}", r.stdout, r.stderr);
+    assert_eq!(
+        std::fs::read(&counter).expect("counter").len(),
+        1,
+        "hook 1 must have run once"
+    );
+
+    // Non-TTY retry (no bypass): hook 1 is filtered out (already ran), hook 2 is
+    // offered and skipped for want of consent. The tally therefore existed = 1,
+    // ran = 0, skipped = 1 -> HooksNotRun reporting exactly ONE skipped hook.
+    let r = sb.mind(&[
+        "hooks",
+        "run",
+        "--event",
+        "install",
+        "item-retry-tally#scanner",
+    ]);
+    assert!(
+        !r.success,
+        "the pending hook 2 has no consent in a non-TTY run: {}\n{}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr.contains("1 hook(s) had work to do"),
+        "the already-ran hook 1 must be filtered out of the tally, so exactly 1 \
+         hook is reported skipped, not 2: {}",
+        r.stderr
+    );
+    assert!(
+        !r.stderr.contains("2 hook(s) had work to do"),
+        "the already-ran hook must not be re-counted: {}",
+        r.stderr
+    );
+    // The retry did not re-run hook 1's side effect.
+    assert_eq!(
+        std::fs::read(&counter).expect("counter after retry").len(),
+        1,
+        "the non-TTY retry must not re-run hook 1"
     );
 }
 

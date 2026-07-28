@@ -805,7 +805,9 @@ only appear at meld or install time. It is read-only and installs nothing.
   dir -> `{{self}}`, a sibling tool's entrypoint -> `{{tools:name}}`, another
   sibling -> `{{path:kind:name}}`) the finding names the suggested token. The
   message reflects what the path resolves to at runtime (CLI-145). Advisory, not
-  hard: `--fix` rewrites the confidently-mapped ones (CLI-138). It is
+  hard: `--fix` rewrites the confidently-mapped ones, but only in a markdown file
+  (CLI-138, NS-54); the identical finding in a non-markdown file is reported and
+  left unrewritten. It is
   non-prescriptive about resources an item bundles: keeping a helper in the item's
   own directory, or having an install hook place it at a fixed location and
   referencing it there, are equally valid; the advisory points out only that a
@@ -823,11 +825,15 @@ only appear at meld or install time. It is read-only and installs nothing.
 - `CLI-138` `review --fix` rewrites the source in place and is the sole exception
   to `review` being read-only (CLI-132). It applies only to a local-path target;
   a registry selector or a repo spec (whose clone is a discarded temp) refuses
-  `--fix` and changes nothing. For each item file it rewrites confidently
-  recognized hardcoded install paths into the matching token (CLI-136), un-wraps
-  misplaced `{{ns:}}` tokens (CLI-139) back to the bare name, and templatizes
-  bare sibling names into `{{ns:}}` (the `init-source --template` transform,
-  INIT-5), then reports each file it changed.
+  `--fix` and changes nothing. For each markdown item file (NS-53, NS-54) it
+  rewrites confidently recognized hardcoded install paths into the matching
+  token (CLI-136), un-wraps misplaced `{{ns:}}` tokens (CLI-139) back to the
+  bare name, and templatizes bare sibling names into `{{ns:}}` (the
+  `init-source --template` transform, INIT-5), then reports each file it
+  changed. A non-markdown item file is never rewritten, since its content never
+  expands out of the token form (NS-53): a finding there is still reported by
+  the CLI-135..139 checks, which scan every text file regardless of extension,
+  it is just left unrewritten (NS-54).
 - `CLI-139` `review` flags a misplaced `{{ns:}}` token -- one in a non-prose
   context (NS-24) where name-substitution is wrong. A token inside a fenced code
   block, an inline code span, or adjacent to a path separator is an advisory
@@ -835,7 +841,10 @@ only appear at meld or install time. It is read-only and installs nothing.
   path tokens, tooling.md). A token in the frontmatter `name:` field is a hard
   `misplaced-reference`: an item must not namespace its own name. This is the dual
   of the unguarded-reference scan (CLI-131): one finds a bare name that should be
-  a token, the other a token that should be a bare word.
+  a token, the other a token that should be a bare word. The finding is reported
+  in any text file, markdown or not, but `--fix` only un-wraps it in a markdown
+  file (CLI-138, NS-54); in a non-markdown file the misplaced token is left as
+  written, since it never expanded there either (NS-53).
 - `CLI-144` `review` reports, as an advisory `duplicate-tooling` finding, a
   non-markdown helper file whose contents are byte-identical across two or more
   items. The finding names the file and the items that carry it and notes the

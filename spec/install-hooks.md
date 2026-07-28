@@ -538,7 +538,19 @@ outside the surrounding verb, under the same consent model.
   `learn`/`upgrade` rebuild the record from scratch on every (re)install rather
   than merging it with what was there before, a record tied to an old commit
   never suppresses a hook at a new one, and `forget` (which removes the whole
-  manifest entry) removes the record along with the item.
+  manifest entry) removes the record along with the item. When a `hooks run`
+  batch aborts partway through (HOOK-53: a hook's non-zero exit is a hard
+  stop), the hooks that already ran or were offered before the failing one
+  keep their persisted records rather than being discarded with the batch,
+  mirroring the source-level record's same guarantee (HOOK-101/HOOK-55): the
+  save happens before the error propagates, so a retry after fixing the
+  failing hook does not re-offer (and, under
+  `--dangerously-skip-install-hook-check`, re-run) a sibling hook that already
+  applied its side effect. This applies only where the item stays installed
+  regardless of the batch's outcome, i.e. `hooks run`; on the `learn`/
+  `upgrade` install path a hook's failure rolls the whole just-installed item
+  back (HOOK-86), so there is no manifest entry left to attach a partial
+  record to and nothing is persisted for that path.
 - `HOOK-109` The interactive-terminal test (HOOK-22's gate, `hook::is_tty`)
   reads `$MIND_TTY` before falling back to inspecting stdin. When the variable
   is set, its value alone decides: `0`, `false`, `no`, `off`, and the empty

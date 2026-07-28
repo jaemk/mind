@@ -930,8 +930,7 @@ mod tests {
     /// `review` and `hooks list` moved OUT of it (they answer `--json` with a
     /// document now, CLI-219/CLI-220) and `config show` moved out too (it
     /// always had a JSON branch; CLI-217's prior classification of it was
-    /// simply wrong, see `config_show_json_emits_one_document_despite_being_
-    /// classified_as_no_json` in tests/cli.rs).
+    /// simply wrong, see `config_show_json_emits_one_document` in tests/cli.rs).
     // spec: CLI-217 CLI-218
     #[test]
     fn json_reservation_covers_result_verbs_and_spares_payload_verbs() {

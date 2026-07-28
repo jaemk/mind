@@ -505,10 +505,12 @@ pub(crate) fn ensure_link(store: &Path, link: &Path) -> Result<()> {
     symlink(store, link)
 }
 
-/// Rewrite reference tokens in every text file under the staged copy: the
-/// `{{ns:name}}` name tokens, then the `{{self}}` / `{{tools:name}}` /
-/// `{{path:ref}}` path tokens. Both resolve against `siblings` (every item in the
-/// same source) and a bad reference in either pass aborts the staged install.
+/// Rewrite reference tokens in every markdown file under the staged copy (the
+/// extension test `namespace::is_markdown`, NS-53; a token in a non-markdown
+/// file is left literal): the `{{ns:name}}` name tokens, then the `{{self}}` /
+/// `{{tools:name}}` / `{{path:ref}}` path tokens. Both resolve against
+/// `siblings` (every item in the same source) and a bad reference in either
+/// pass aborts the staged install.
 /// Also validates the `requires` frontmatter entries (DEP-6): each must resolve
 /// to exactly one sibling (not source-qualified, not ambiguous, not missing).
 fn expand_references(
@@ -764,6 +766,15 @@ fn run_item_hook(
 /// HOOK-55). A hook whose failure aborts the loop is not represented in the
 /// returned vec (its error propagates instead and the caller rolls the whole
 /// install back, so there is nothing to record).
+///
+/// This is the entry point used by the `learn`/`upgrade` install path
+/// (`commands::install_item`), where a hook failure rolls the whole
+/// just-installed item back (HOOK-86): there is no manifest entry left to
+/// attach a partial record to, so discarding the partial vec on error is
+/// correct here. A caller that instead runs hooks against an item that stays
+/// installed regardless of the outcome (`hooks run`, HOOK-102) needs the
+/// hooks recorded before the failure too; see
+/// [`run_item_install_hooks_partial`] for that shape.
 pub fn run_item_install_hooks(
     item: &CatalogItem,
     hooks: &[&crate::mindfile::ResolvedHook],
@@ -772,6 +783,50 @@ pub fn run_item_install_hooks(
     dangerously_skip: bool,
 ) -> Result<Vec<crate::source::RecordedHook>> {
     let mut recorded = Vec::with_capacity(hooks.len());
+    run_item_install_hooks_recording(item, hooks, store, commit, dangerously_skip, &mut recorded)?;
+    Ok(recorded)
+}
+
+/// Same hook batch as [`run_item_install_hooks`], but for a caller whose item is
+/// already installed and stays installed regardless of the batch's outcome
+/// (`hooks run`, HOOK-102). Returns the hooks recorded before an abort
+/// alongside the error, mirroring `run_source_hooks`'s "save whatever was
+/// recorded so far before propagating the error" (HOOK-53): the caller can
+/// persist the partial vec to the manifest before returning the error, so a
+/// hook that already ran its side effect is not offered again on retry
+/// (HOOK-110).
+pub fn run_item_install_hooks_partial(
+    item: &CatalogItem,
+    hooks: &[&crate::mindfile::ResolvedHook],
+    store: &Path,
+    commit: &str,
+    dangerously_skip: bool,
+) -> (Vec<crate::source::RecordedHook>, Result<()>) {
+    let mut recorded = Vec::with_capacity(hooks.len());
+    let result = run_item_install_hooks_recording(
+        item,
+        hooks,
+        store,
+        commit,
+        dangerously_skip,
+        &mut recorded,
+    );
+    (recorded, result)
+}
+
+/// Shared loop backing [`run_item_install_hooks`] and
+/// [`run_item_install_hooks_partial`]: runs each hook in order, pushing its
+/// outcome onto `recorded` as it goes (not only on overall success), so a
+/// caller holding a `&mut` into `recorded` sees every hook that ran or was
+/// offered before an abort even though this function returns early via `?`.
+fn run_item_install_hooks_recording(
+    item: &CatalogItem,
+    hooks: &[&crate::mindfile::ResolvedHook],
+    store: &Path,
+    commit: &str,
+    dangerously_skip: bool,
+    recorded: &mut Vec<crate::source::RecordedHook>,
+) -> Result<()> {
     for hook in hooks {
         let ran = run_item_hook(
             "install",
@@ -787,7 +842,7 @@ pub fn run_item_install_hooks(
             ran_at: if ran { Some(commit.to_string()) } else { None },
         });
     }
-    Ok(recorded)
+    Ok(())
 }
 
 /// Run an item's uninstall hooks (HOOK-82, HOOK-86) before its store copy and

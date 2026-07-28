@@ -105,9 +105,12 @@ so a bad reference fails before the live install is touched. The recorded conten
 hash is of the token (source) form, so drift detection compares source with
 source (TOOL-13).
 
-Tokens expand in every text file of every item kind, including tool directories
-and bundled scripts (TOOL-14). Inner whitespace is trimmed (`{{ path:x }}` works);
-an unterminated token (no closing `}}`) is left verbatim; non-UTF-8 files are not
+Tokens expand only in markdown files (an extension of `md`, `markdown`, `mdown`,
+or `mkd`), whatever the item kind (TOOL-14, TOOL-19). A token in a non-markdown
+bundled file -- a script, data -- is left exactly as written; the designed use
+of a path token is prose, e.g. a skill telling Claude to run
+`{{tools:detect}}`. Inner whitespace is trimmed (`{{ path:x }}` works); an
+unterminated token (no closing `}}`) is left verbatim; non-UTF-8 files are not
 scanned.
 
 References resolve within the same source only: ship a tool in the same source
