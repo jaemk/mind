@@ -1381,3 +1381,365 @@ fn fix_wraps_an_items_own_name_in_its_own_prose() {
         "frontmatter is still untouched: {fixed}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// CLI-223: a `{{...}}` token that RESOLVES in a non-markdown item file is
+// still inert (it never expands there), and review must not stay silent
+// about it the way it used to.
+// ---------------------------------------------------------------------------
+
+/// A `{{tools:detect}}` token that names a real sibling tool -- i.e. one that
+/// `expand_paths` resolves successfully -- but sits in a bundled `.sh` file
+/// gets an `inert-token` advisory: the token would resolve if the file were
+/// markdown, but no token family expands outside markdown (NS-53), so it is
+/// left literal at install and silently breaks the script at runtime. Before
+/// this check, review only flagged an UNRESOLVED token here (`bad-reference`)
+/// and said nothing about a resolvable one, which is the exact case this
+/// advisory exists to catch.
+/// spec: CLI-223
+#[test]
+fn inert_token_in_a_non_markdown_file_is_advisory() {
+    let sb = fixture();
+    write(&sb.source.join("tools/detect/detect"), "#!/bin/sh\n");
+    write(
+        &sb.source.join("skills/cos-run/SKILL.md"),
+        "---\nname: cos-run\ndescription: runner\n---\n# Runner\n",
+    );
+    let script = sb.source.join("skills/cos-run/run.sh");
+    write(&script, "#!/bin/sh\n{{tools:detect}} --scan\n");
+
+    let target = sb.source_spec();
+    let r = sb.mind(&["review", &target]);
+    assert!(
+        r.success,
+        "advisory-only run must exit 0: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stdout.contains("[inert-token]"),
+        "a resolvable token in a non-markdown file must still be flagged \
+         inert: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("run.sh"),
+        "the advisory must name the file: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("{{tools:detect}}"),
+        "the advisory must name the token: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("markdown only"),
+        "the advisory must say tokens expand in markdown only: {}",
+        r.stdout
+    );
+    // The script itself is never rewritten (NS-54): `--fix` only reports here.
+    let r2 = sb.mind(&["review", &target, "--fix"]);
+    assert!(r2.success, "{} {}", r2.stdout, r2.stderr);
+    assert_eq!(
+        std::fs::read_to_string(&script).unwrap(),
+        "#!/bin/sh\n{{tools:detect}} --scan\n",
+        "--fix must never rewrite a non-markdown file"
+    );
+}
+
+/// The identical resolvable token, in a markdown file, expands normally and is
+/// not flagged `inert-token`: the whole point of the advisory is that the
+/// token never reaches install here, so it must not fire where the token
+/// actually does expand.
+/// spec: CLI-223
+#[test]
+fn inert_token_in_a_markdown_file_is_not_flagged() {
+    let sb = fixture();
+    write(&sb.source.join("tools/detect/detect"), "#!/bin/sh\n");
+    write(
+        &sb.source.join("skills/cos-run/SKILL.md"),
+        "---\nname: cos-run\ndescription: runner\n---\n\
+         Run {{tools:detect}} --scan.\n",
+    );
+
+    let target = sb.source_spec();
+    let r = sb.mind(&["review", &target]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert!(
+        !r.stdout.contains("[inert-token]"),
+        "the same token in a markdown file expands there, so it must not be \
+         flagged inert: {}",
+        r.stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// CLI-224: finding messages are sanitized before they reach either output
+// path (stderr text, `--json`'s `details`/document).
+// ---------------------------------------------------------------------------
+
+/// The sibling of the advisory test for the HARD finding path (CLI-224 covers
+/// both constructors). A `{{ns:}}` token in the frontmatter `name:` field is a
+/// hard `misplaced-reference` finding, and its message embeds the token name
+/// verbatim -- source-controlled text. A bidi override there must be stripped
+/// from the stderr text (hard findings print to stderr) and from the `--json`
+/// `hard` array, exactly as the advisory path is. Without this, the
+/// `Finding::hard` sanitize call could regress to identity undetected: no other
+/// test drives a hard finding through the sanitize boundary.
+/// spec: CLI-224
+#[test]
+fn hard_finding_message_strips_a_bidi_override_in_text_and_json_output() {
+    let sb = fixture();
+    // A `{{ns:}}` token in the frontmatter `name:` field -> hard
+    // misplaced-reference; the token name (with the bidi override) is embedded
+    // in the message verbatim.
+    write(
+        &sb.source.join("skills/cos-run/SKILL.md"),
+        "---\nname: {{ns:evil\u{202E}x}}\ndescription: runner\n---\n# Runner\n",
+    );
+
+    let target = sb.source_spec();
+
+    // Text mode: a hard finding fails the run and prints to stderr.
+    let text = sb.mind(&["review", &target]);
+    assert!(
+        text.stderr.contains("[misplaced-reference]"),
+        "the hard finding must fire on stderr: {} {}",
+        text.stdout,
+        text.stderr
+    );
+    assert!(
+        !text.stderr.contains('\u{202E}') && !text.stdout.contains('\u{202E}'),
+        "bidi override must be stripped from the hard finding output: {} {}",
+        text.stdout,
+        text.stderr
+    );
+
+    // `--json`: the hard array carries the same sanitized message.
+    let json = sb.mind(&["review", &target, "--json"]);
+    assert!(
+        !json.stdout.contains('\u{202E}'),
+        "bidi override must be stripped from the --json output: {}",
+        json.stdout
+    );
+    // Hard findings fail the run, so under `--json` the review document is the
+    // CLI-181 error envelope's `details` member (CLI-221), not the top level.
+    let doc: serde_json::Value =
+        serde_json::from_str(&json.stdout).expect("--json must emit one JSON document");
+    let hard = doc["details"]["hard"]
+        .as_array()
+        .expect("hard array present under details");
+    let msg = hard
+        .iter()
+        .find(|f| f["kind"] == "misplaced-reference")
+        .expect("a misplaced-reference hard finding is present")["message"]
+        .as_str()
+        .expect("message is a string");
+    assert!(
+        !msg.contains('\u{202E}'),
+        "the parsed JSON hard message field must not carry the bidi override: {msg}"
+    );
+}
+
+/// A token whose inner text carries a bidi-override character (U+202E) is
+/// source-controlled, and it flows verbatim into an `inert-token` advisory
+/// message. Both the human-readable text output and the `--json` document
+/// must have it stripped, not just serde-escaped: a bidi override renders
+/// visually even when it round-trips through valid JSON.
+/// spec: CLI-224
+#[test]
+fn finding_message_strips_a_bidi_override_in_text_and_json_output() {
+    let sb = fixture();
+    write(
+        &sb.source.join("skills/cos-run/SKILL.md"),
+        "---\nname: cos-run\ndescription: runner\n---\n# Runner\n",
+    );
+    let script = sb.source.join("skills/cos-run/run.sh");
+    write(&script, "#!/bin/sh\n{{tools:evil\u{202E}here}} --scan\n");
+
+    let target = sb.source_spec();
+
+    // Human text output: the raw bidi-override byte sequence must not survive.
+    let text = sb.mind(&["review", &target]);
+    assert!(text.success, "{} {}", text.stdout, text.stderr);
+    assert!(
+        !text.stdout.contains('\u{202E}'),
+        "bidi override must be stripped from the human-readable finding: {}",
+        text.stdout
+    );
+    assert!(
+        text.stdout.contains("[inert-token]"),
+        "the finding must still fire (only the character is stripped): {}",
+        text.stdout
+    );
+
+    // `--json`: the raw character must not survive inside the message field
+    // either, even though serde keeps the document structurally valid JSON.
+    let json = sb.mind(&["review", &target, "--json"]);
+    assert!(json.success, "{} {}", json.stdout, json.stderr);
+    assert!(
+        !json.stdout.contains('\u{202E}'),
+        "bidi override must be stripped from the --json output: {}",
+        json.stdout
+    );
+    let doc: serde_json::Value =
+        serde_json::from_str(&json.stdout).expect("--json must emit one JSON document");
+    let advisory = doc["advisory"].as_array().expect("advisory array present");
+    let msg = advisory
+        .iter()
+        .find(|f| f["kind"] == "inert-token")
+        .expect("an inert-token advisory is present")["message"]
+        .as_str()
+        .expect("message is a string");
+    assert!(
+        !msg.contains('\u{202E}'),
+        "the parsed JSON message field must not carry the bidi override: {msg}"
+    );
+}
+
+/// P4 documentation: the deliberate overlap between the new `inert-token`
+/// check (CLI-223) and the pre-existing `misplaced-reference` (Check 11) check.
+/// A single RESOLVABLE `{{ns:}}` token in a non-markdown file draws BOTH
+/// advisories: one broken/misplaced reference fires two findings. This test
+/// pins the current (accepted, un-deduped) behavior so a future dedup decision
+/// is a conscious change to a documented baseline, not an accidental drift.
+/// spec: CLI-223
+#[test]
+fn resolvable_ns_token_in_a_script_draws_both_misplaced_and_inert_advisories() {
+    let sb = fixture();
+    // cos-spec is a real sibling, so Check 5 (ns resolution) does NOT hard-fail;
+    // the token simply sits in a script where it will never expand.
+    let script = sb.source.join("skills/cos-spec/run.sh");
+    write(&script, "#!/bin/sh\n# see {{ns:cos-cert-setup}}\n");
+
+    let target = sb.source_spec();
+    let r = sb.mind(&["review", &target]);
+    assert!(
+        r.success,
+        "a resolvable token must not hard-fail review: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stdout.contains("[misplaced-reference]"),
+        "Check 11 still fires for a non-markdown ns token: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("[inert-token]"),
+        "Check 14 also fires for the same token: {}",
+        r.stdout
+    );
+}
+
+/// An UNRESOLVABLE `{{ns:}}` token in a NON-markdown file must not hard-fail
+/// review: install expands `{{ns:}}` in markdown only (NS-53), so the token is
+/// dead text that can never become a `BadReference` at install. Check 5 mirrors
+/// Check 8's non-markdown downgrade (CLI-132, CLI-135) and reports the miss as
+/// an advisory instead, consistent with the `inert-token` advisory (Check 14)
+/// already calling the same token harmless -- no more contradiction between the
+/// two checks.
+/// spec: CLI-132 CLI-223
+#[test]
+fn unresolvable_ns_token_in_a_script_is_advisory_not_hard() {
+    let sb = fixture();
+    let script = sb.source.join("skills/cos-spec/run.sh");
+    write(&script, "#!/bin/sh\n# call {{ns:nosuchsibling}} here\n");
+
+    let target = sb.source_spec();
+    let r = sb.mind(&["review", &target]);
+    assert!(
+        r.success,
+        "an unresolved ns token in a non-markdown file must not hard-fail review: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        !r.stderr.contains("[bad-reference]"),
+        "Check 5 must not emit a hard bad-reference for a non-markdown file: {} {}",
+        r.stdout,
+        r.stderr
+    );
+    assert!(
+        r.stdout.contains("[bad-reference]"),
+        "the unresolved token is still surfaced, just as an advisory: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("[inert-token]"),
+        "the inert-token advisory still fires on the same token: {}",
+        r.stdout
+    );
+}
+
+/// The same unresolvable `{{ns:}}` token in a MARKDOWN item file is unchanged:
+/// install WILL try to expand it there, so an unresolved token is a genuine
+/// install-blocking defect and Check 5 still hard-fails.
+/// spec: CLI-132
+#[test]
+fn unresolvable_ns_token_in_markdown_still_hard_fails() {
+    let sb = fixture();
+    let skill = sb.source.join("skills/cos-spec/SKILL.md");
+    write(
+        &skill,
+        "---\nname: cos-spec\ndescription: EARS patterns\n---\n\
+         # spec\n\nSee {{ns:nosuchsibling}} for details.\n",
+    );
+
+    let target = sb.source_spec();
+    let r = sb.mind(&["review", &target]);
+    assert!(
+        !r.success,
+        "an unresolved ns token in a markdown file must still hard-fail review: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr.contains("[bad-reference]"),
+        "Check 5 must still emit a hard bad-reference for a markdown file: {} {}",
+        r.stdout,
+        r.stderr
+    );
+}
+
+/// The sanitize boundary must strip only ANSI/control/bidi, never legitimate
+/// printable non-ASCII. A sibling-token name carrying an accented letter
+/// (U+00E9, not a bidi/control code point) must survive verbatim in the finding
+/// message, in both text and `--json`. Guards against the boundary regressing
+/// to an over-aggressive ASCII-only filter that would silently corrupt an
+/// international curator's name or a non-English token.
+/// spec: CLI-224
+#[test]
+fn finding_message_preserves_legitimate_non_ascii() {
+    let sb = fixture();
+    write(
+        &sb.source.join("skills/cos-run/SKILL.md"),
+        "---\nname: cos-run\ndescription: runner\n---\n# Runner\n",
+    );
+    let script = sb.source.join("skills/cos-run/run.sh");
+    // An accented letter inside the token; backticks/braces are ordinary
+    // printable ASCII and must survive too.
+    write(&script, "#!/bin/sh\n{{tools:caf\u{00e9}}} --scan\n");
+
+    let target = sb.source_spec();
+    let text = sb.mind(&["review", &target]);
+    assert!(text.success, "{} {}", text.stdout, text.stderr);
+    assert!(
+        text.stdout.contains("{{tools:caf\u{00e9}}}"),
+        "the accented token must survive verbatim in the text finding: {}",
+        text.stdout
+    );
+
+    let json = sb.mind(&["review", &target, "--json"]);
+    assert!(json.success, "{} {}", json.stdout, json.stderr);
+    let doc: serde_json::Value =
+        serde_json::from_str(&json.stdout).expect("--json must emit one JSON document");
+    let msg = doc["advisory"]
+        .as_array()
+        .expect("advisory array present")
+        .iter()
+        .find(|f| f["kind"] == "inert-token")
+        .expect("an inert-token advisory is present")["message"]
+        .as_str()
+        .expect("message is a string");
+    assert!(
+        msg.contains("caf\u{00e9}"),
+        "the accented letter must survive the sanitize boundary in --json: {msg}"
+    );
+}

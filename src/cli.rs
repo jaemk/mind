@@ -61,7 +61,9 @@ impl KindArg {
     arg_required_else_help = true
 )]
 pub struct Cli {
-    /// Emit machine-readable JSON instead of formatted text.
+    /// Emit machine-readable JSON instead of formatted text. `dump`,
+    /// `completions`, `man`, and `init-source` emit their own artifact
+    /// (a TOML/script/roff/manifest document) regardless of this flag.
     #[arg(long, global = true, help_heading = "Global options")]
     pub json: bool,
 
@@ -768,13 +770,11 @@ pub enum HooksCmd {
     /// like `'*'`) or an item ref `<source>#<item>` (e.g. `agents#skill:scan`).
     /// A ref that matches several sources or items runs each in turn.
     ///
-    /// For a source target with `--event install` (the default), only *pending*
-    /// hooks run by default -- those that never ran or did not run at the current
-    /// commit. `--force` re-runs every install hook regardless. An item target's
-    /// install hooks are filtered the same way (a hook already recorded as run at
-    /// the item's current commit is skipped); `--force` applies only to a source
-    /// target. An item's uninstall hooks carry no recorded run state and always
-    /// run.
+    /// For a source or item target with `--event install` (the default), only
+    /// *pending* hooks run by default -- those that never ran or did not run at
+    /// the current commit. `--force` re-runs every install hook regardless, for
+    /// both a source target and an item target. Uninstall hooks (source or item)
+    /// carry no recorded run state and always run.
     ///
     /// Every hook goes through the same disclosure and consent prompt as an
     /// automatic run; it is never more silently than meld/learn would run it.
@@ -793,9 +793,10 @@ pub enum HooksCmd {
         #[arg(long, value_enum, default_value = "install")]
         event: HookEventArg,
 
-        /// For a source install run: re-run every install hook even if it was
+        /// Re-run every install hook (source OR item target) even if it was
         /// already recorded at the current commit (for lost outputs or transient
-        /// failures), mirroring `meld --force`.
+        /// failures), mirroring `meld --force`. No effect on `--event uninstall`
+        /// or `--event build`, neither of which filters by a recorded commit.
         #[arg(long)]
         force: bool,
 

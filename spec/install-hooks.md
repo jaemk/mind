@@ -451,12 +451,19 @@ outside the surrounding verb, under the same consent model.
   (HOOK-22) rather than because a user interactively declined it, the skip
   note names both the cause and the exact remedy instead of stating only the
   bare consequence: `note: skipped <event> hook '<label>' for <source> (not a
-  terminal); re-run with 'mind hooks run <source> --event <event>
-  --dangerously-skip-install-hook-check' to run it unattended`. `<source>` is
+  terminal); re-run with "mind hooks run '<source>' --event <event>
+  --dangerously-skip-install-hook-check" to run it unattended`. `<source>` is
   substituted with the RESOLVED source identity, never the raw selector the
   user typed (which may be a glob or an abbreviated form), and `<event>` with
   the event the run selected, so the printed command is copy-pasteable with no
-  placeholder to fill in and re-runs the hooks that were skipped. The
+  placeholder to fill in and re-runs the hooks that were skipped. The `<source>`
+  identity inside the runnable command is single-quoted (the POSIX `'\''` idiom),
+  and the whole command framed in double quotes, by exactly the same rule and
+  for exactly the same reason as the single-match `HooksNotRun` remedy described
+  below: the note's runnable command carries the same attacker-influenced
+  identity, so copy-pasting it must not be a way to run anything beyond `mind
+  hooks run`. The bare `for <source>` earlier in the note is English prose, not
+  a shell command, so it is not quoted. The
   `--event` segment is not optional dressing: `--event` defaults to `install`
   (CLI-195), so a remedy that omitted it would, after an `--event uninstall`
   run, silently name a command that executes the source's install hooks
@@ -475,11 +482,37 @@ outside the surrounding verb, under the same consent model.
   something that may not even be a source. Instead the message lists every
   resolved identity that had work, so the reader substitutes one at a time; it
   never echoes the raw multi-match selector back into a command-shaped string.
-  An item ref that itself resolved to exactly one item (whatever form it was
-  spelled in -- bare, a kind-qualified escape, or an abbreviated source
-  selector) keeps that exact typed form in its single-target remedy, since
-  rewriting it into a different form risks landing back in the HOOK-105
-  source/item ambiguity a kind-qualified escape exists specifically to avoid.
+  An item ref that itself resolved to exactly one item, and carries no glob
+  metacharacter (`*`, `?`, `[`), keeps that exact typed form in its
+  single-target remedy (whatever form it was spelled in -- bare, a
+  kind-qualified escape, or an abbreviated source selector), since rewriting
+  it into a different form risks landing back in the HOOK-105 source/item
+  ambiguity a kind-qualified escape exists specifically to avoid. An item ref
+  that resolved to exactly one item but DOES carry a glob metacharacter (e.g.
+  `agents#skill:sc*`, which happens to match only one installed item) does
+  NOT keep its typed form for this reason: the glob text itself is not safe to
+  paste into a shell (it would expand against the caller's cwd rather than
+  necessarily naming the item), so it is replaced with the resolved concrete
+  `<source>#<kind>:<name>` identity exactly as the multi-match case is, even
+  though only one item is being named.
+
+  Every resolved identity the `HooksNotRun` message substitutes into a
+  runnable command -- whether the single-match remedy or the parenthetical
+  list in the multi-match message -- is single-quoted (the POSIX `'\''` idiom
+  for an embedded quote) before it is placed there, unconditionally, whether
+  or not it happens to contain a shell metacharacter. A source name, a `meld
+  --as`/`[source].prefix` alias, and an item-link's own `#<path>`-suffixed
+  identity are none of them restricted against characters a shell treats
+  specially (`;`, `$(...)`, a backtick, whitespace, a quote), so pasting an
+  unquoted identity into the remedy would let it run more than `mind hooks
+  run`. This is what makes the promise above ("copy-pasteable with no
+  placeholder to fill in") also mean "and copy-pasting it is not itself a way
+  to run something else": quoting closes that gap regardless of which kind of
+  identity ended up in `resolved`. The single-match remedy frames the whole
+  command in double quotes rather than the single quotes used as plain
+  framing elsewhere in this message, because the identity inside it is itself
+  single-quoted; framing it with the same quote character would place an
+  unescaped `'` where the frame's own closing quote is expected.
 - `HOOK-107` `hooks run <target>` on a source target counts, across every
   matched source, how many hooks for the selected event EXISTED (were
   actually considered: not filtered out as already-up-to-date at the current
@@ -531,7 +564,11 @@ outside the surrounding verb, under the same consent model.
   build the record fresh on every (re)install (HOOK-84 is unaffected: they
   still run or offer every declared install hook regardless of any prior
   record); only `hooks run` reads the record, to filter its HOOK-108
-  accounting down to pending hooks (HOOK-102). This closes the gap where a
+  accounting down to pending hooks (HOOK-102), UNLESS `--force` is given, in
+  which case an item target skips the filter exactly as a source target does
+  (HOOK-101): every declared install hook is offered regardless of its
+  recorded commit, for the same lost-output/transient-failure case `--force`
+  exists for on the source side. This closes the gap where a
   provisioning script doing `mind learn x --dangerously-skip-install-hook-check
   && mind hooks run src#x` failed on the second command forever, with a remedy
   that re-runs a side effect the first command already applied. Because

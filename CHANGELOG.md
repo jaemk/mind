@@ -152,6 +152,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   list` answers with a hooks document; `hooks run` answers a successful run
   with an existed/ran/skipped tally (CLI-218, CLI-219, CLI-220, CLI-221,
   CLI-222).
+- `review` reports, as an advisory `inert-token` finding, any `{{...}}` token
+  found in a non-markdown item file, whether or not it names a real referent.
+  Previously it only flagged an unresolved token there; a token that WOULD
+  resolve (e.g. `{{tools:name}}` naming a real sibling tool, in a bundled
+  `.sh`) went unreported, even though it never expands outside markdown
+  either and is left literal at install (CLI-223).
 
 ### Changed
 
@@ -284,6 +290,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   visible in the process table. The `wget` fallback still passes it on the
   command line; the shared-host exposure difference is now documented
   (STO-61).
+- `review` finding messages are now passed through `strip_ansi` at
+  construction, so an ANSI escape or Unicode bidi-override sequence embedded
+  in source-controlled text (a token, a hardcoded path) is stripped from both
+  the human `error [kind]: ...`/`advisory [kind]: ...` output and the
+  `--json` document, instead of only the former (CLI-224).
 
 ### Documentation
 
@@ -311,6 +322,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reachability-gated); added LNK-15, recording that a bare and an aliased
   link instance of the same path coexist; reworded the accepted-risks note to
   record that unbounded metadata reads are the norm for this class of tool.
+
+### Migration notes
+
+- A `{{...}}` token in a non-markdown item file (a script, data) no longer
+  expands, and `review` now flags every one it finds there, resolvable or
+  not (`inert-token`). Move the reference into markdown prose, or have the
+  script self-locate its own resources instead of relying on a token.
 
 ## [0.21.0] - 2026-07-23
 

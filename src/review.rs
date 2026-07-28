@@ -27,17 +27,25 @@ pub struct Finding {
 }
 
 impl Finding {
+    /// Both constructors sanitize `message` (CLI-224) through the same
+    /// `strip_ansi` boundary CLI-186 applies to git stderr: a finding message
+    /// is built from source-controlled text (a token, an `item.key()`), and it
+    /// reaches both stderr (`print_findings`) and `--json`'s `details` member
+    /// (CLI-219/CLI-221) verbatim from `Finding::message`. Sanitizing here,
+    /// once, at construction, means both output paths inherit the stripped
+    /// string rather than each needing its own call that could drift out of
+    /// sync.
     pub(crate) fn hard(kind: &'static str, message: impl Into<String>) -> Self {
         Finding {
             kind,
-            message: message.into(),
+            message: crate::sanitize::strip_ansi(&message.into()),
         }
     }
 
     pub(crate) fn advisory(kind: &'static str, message: impl Into<String>) -> Self {
         Finding {
             kind,
-            message: message.into(),
+            message: crate::sanitize::strip_ansi(&message.into()),
         }
     }
 }
@@ -496,8 +504,14 @@ fn run_checks(
         }
     }
 
-    // --- Check 5: {{ns:}} token resolution (hard error) ---
-    // An unresolved {{ns:}} token would be a BadReference at install time.
+    // --- Check 5: {{ns:}} token resolution (hard in markdown, advisory
+    // otherwise) ---
+    // An unresolved {{ns:}} token would be a BadReference at install time --
+    // but only in a markdown file: install expands `{{ns:}}` in markdown only
+    // (NS-53), same as the path-token family Check 8 handles below. So an
+    // unresolved `{{ns:}}` in a non-markdown file is dead text install will
+    // never touch, not a defect that would break an install -- advisory,
+    // mirroring Check 8's non-markdown downgrade.
     // spec: CLI-132
     let source_name = source.name.clone();
     let siblings = siblings_of_source(&items, &source_name);
@@ -512,19 +526,33 @@ fn run_checks(
                 Ok(c) => c,
                 Err(_) => continue,
             };
+            let is_md = crate::namespace::is_markdown(&file);
             // The bare_names set is empty here: review validates token resolution
             // (whether the name exists), not the expansion form, so bare vs.
             // prefixed output is irrelevant for this check.
             let no_bare = std::collections::HashSet::<String>::new();
             if let Err(bad_ref) = crate::namespace::expand(&content, &prefix, &siblings, &no_bare) {
-                hard.push(Finding::hard(
-                    "bad-reference",
-                    format!(
-                        "{}: {{{{ns:{}}}}} does not resolve to any sibling in this source",
-                        item.key(),
-                        bad_ref
-                    ),
-                ));
+                if is_md {
+                    hard.push(Finding::hard(
+                        "bad-reference",
+                        format!(
+                            "{}: {{{{ns:{}}}}} does not resolve to any sibling in this source",
+                            item.key(),
+                            bad_ref
+                        ),
+                    ));
+                } else {
+                    advisory.push(Finding::advisory(
+                        "bad-reference",
+                        format!(
+                            "{}: {{{{ns:{}}}}} does not resolve to any sibling in this source, but \
+                             it will not expand here anyway -- tokens expand in markdown only, so \
+                             this is dead text, not a defect that would break an install",
+                            item.key(),
+                            bad_ref
+                        ),
+                    ));
+                }
             }
         }
     }
@@ -759,6 +787,33 @@ fn run_checks(
                     hard.push(Finding::hard("misplaced-reference", msg));
                 } else {
                     advisory.push(Finding::advisory("misplaced-reference", msg));
+                }
+            }
+            // Check 14: any `{{...}}` token found in a non-markdown item file is
+            // inert (advisory, CLI-223): no token family expands outside
+            // markdown (NS-53), so even a token that would resolve if the file
+            // were markdown -- a `{{tools:name}}` naming a real sibling, say --
+            // is left literal at install and breaks at runtime. Checks 8 and 11
+            // above already report a token here when it fails to resolve (a
+            // path-token miss) or is an `{{ns:}}` token; this generic net also
+            // catches the case those two miss: a token that does resolve.
+            if !is_md {
+                let tokens = crate::namespace::inert_tokens(&content);
+                if !tokens.is_empty() {
+                    let file_name = file
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| file.display().to_string());
+                    advisory.push(Finding::advisory(
+                        "inert-token",
+                        format!(
+                            "{}: {file_name} contains token(s) {} that will never expand there; \
+                             tokens expand in markdown only, so move the reference into markdown \
+                             prose or have the script self-locate",
+                            item.key(),
+                            tokens.join(", ")
+                        ),
+                    ));
                 }
             }
         }

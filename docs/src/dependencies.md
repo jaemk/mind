@@ -11,8 +11,10 @@ one.
 A dependency is an intra-source reference. There are two ways to declare one,
 and the closure that `learn` installs is their union.
 
-**`{{ns:name}}` tokens** -- a token appearing in the item's text files (the whole
-skill directory, or the agent/rule file) names a sibling as a dependency. This is
+**`{{ns:name}}` tokens** -- a token appearing in one of the item's markdown files
+(the whole skill directory's `.md`/`.markdown`/`.mdown`/`.mkd` files, or the
+agent/rule file) names a sibling as a dependency. A token in a non-markdown
+bundled file (a shell script, a data file) forms no dependency edge. This is
 the inline form: the reference lives in the prose and is also rewritten to the
 effective name on install. See [Namespacing](namespacing.md) for token expansion
 rules.

@@ -313,6 +313,16 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   `strip_ansi` before being printed, preventing a hostile remote from embedding
   ANSI escape or Unicode bidi-override sequences to corrupt or spoof terminal
   output.
+- `CLI-224` A `review` finding's message (built from source-controlled text: a
+  token, a hardcoded path, an `item.key()`) is passed through the same
+  `strip_ansi` sanitization CLI-186 applies to git stderr, applied once at
+  `Finding::hard`/`Finding::advisory` construction so both the human `error
+  [kind]: ...`/`advisory [kind]: ...` text (CLI-131) and the `--json` document
+  (CLI-219, including its CLI-221 `details` form on a hard failure) inherit the
+  stripped string from the one place rather than each sanitizing separately.
+  Serde alone keeps `--json` structurally valid but does not stop an embedded
+  ANSI escape or bidi-override sequence from corrupting or spoofing a
+  terminal that renders the message.
 - `CLI-187` When no sources are melded, all verbs that report the empty state
   (sync, recall, probe) emit the same message: "no sources melded; run `mind
   meld <owner/repo>` to add one". This consistent phrasing always names the
@@ -774,10 +784,16 @@ only appear at meld or install time. It is read-only and installs nothing.
   `BadReference` at install), and unguarded prose references to siblings under the
   effective prefix (the meld-time heuristic, CLI-14).
 - `CLI-132` `review`'s exit status: a hard error (malformed `mind.toml`, an unknown
-  item kind, a conflicting `[source]` pin, or an unresolved `{{ns:}}` / path token)
-  exits non-zero; advisory findings only (unguarded references, missing
-  descriptions, hardcoded paths, bare tool references) exit zero. It changes
-  nothing on disk in either case, except under `--fix` (CLI-138).
+  item kind, a conflicting `[source]` pin, or an unresolved `{{ns:}}` / path token
+  in a markdown item file) exits non-zero; advisory findings only (unguarded
+  references, missing descriptions, hardcoded paths, bare tool references, and an
+  unresolved `{{ns:}}` / path token in a non-markdown item file) exit zero. It
+  changes nothing on disk in either case, except under `--fix` (CLI-138). An
+  unresolved `{{ns:}}` token is hard only in a markdown file
+  (`namespace::is_markdown`, NS-53): install expands `{{ns:}}` in markdown only,
+  so the identical unresolved token in a non-markdown item file (a script, data)
+  is dead text that cannot break an install and is downgraded to advisory,
+  mirroring the path-token treatment (CLI-135).
 - `CLI-133` `review --as <prefix>` evaluates the source under a prospective
   namespace, so token expansion and the unguarded-reference scan are checked as
   they would install under that prefix. With no flag the effective prefix is the
@@ -845,6 +861,17 @@ only appear at meld or install time. It is read-only and installs nothing.
   in any text file, markdown or not, but `--fix` only un-wraps it in a markdown
   file (CLI-138, NS-54); in a non-markdown file the misplaced token is left as
   written, since it never expanded there either (NS-53).
+- `CLI-223` `review` reports, as an advisory `inert-token` finding, every
+  `{{...}}` token found in a non-markdown item file, regardless of whether the
+  token would resolve: no token family expands outside markdown (NS-53), so a
+  token there never reaches install either way, and one that would resolve if
+  the file were markdown (e.g. a `{{tools:name}}` naming a real sibling tool,
+  in a bundled `.sh`) is otherwise silently left literal and breaks at
+  runtime -- CLI-135 only flags an unresolved one, and CLI-139 only covers
+  `{{ns:}}`, so a resolvable path/self token in a non-markdown file was
+  previously unreported by either. The finding names the file and the
+  token(s) and states that tokens expand in markdown only. Never hard, and
+  `--fix` never rewrites the file (CLI-138, NS-54).
 - `CLI-144` `review` reports, as an advisory `duplicate-tooling` finding, a
   non-markdown helper file whose contents are byte-identical across two or more
   items. The finding names the file and the items that carry it and notes the
@@ -948,7 +975,10 @@ only appear at meld or install time. It is read-only and installs nothing.
   the document above is not printed as a success envelope in that case, but
   recorded and folded into the CLI-181 error envelope's `details` member
   (CLI-221) instead, so a machine caller sees exactly what failed without
-  scraping stderr's `error [kind]: message` lines. `review --policy`'s document
+  scraping stderr's `error [kind]: message` lines. The envelope's own `kind`
+  (CLI-182) is the fixed slug `review-failed` (`MindError::ReviewFailed`), so
+  a machine caller can branch on the failure before even looking at
+  `details`. `review --policy`'s document
   uses the same shape (`hard`/`advisory` only; `fixed` is always empty, since
   `--policy` has no `--fix` mode).
 
@@ -1292,8 +1322,9 @@ and per-harness `kinds` defaults.
   kebab-case slug assigned once per `MindError` variant and never changed. Scripts
   may branch on `kind` to handle specific failures. Example slugs: `ItemNotFound`
   -> `"item-not-found"`, `DigestMismatch` -> `"digest-mismatch"`,
-  `SelfUpdatePolicy` -> `"self-update-policy"`. The slug set is exhaustive: every
-  variant has exactly one slug.
+  `SelfUpdatePolicy` -> `"self-update-policy"`, `ReviewFailed` ->
+  `"review-failed"` (the `review --json` hard-failure kind, CLI-219). The slug
+  set is exhaustive: every variant has exactly one slug.
 - `CLI-221` The CLI-181 error envelope carries an optional `details` member when
   the failing verb recorded structured findings before returning its error (a
   hard-finding `review` under `--json`, CLI-219, is the first user). `details`

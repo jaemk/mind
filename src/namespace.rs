@@ -766,26 +766,67 @@ pub fn rewrite_hardcoded_paths(content: &str, ctx: &PathCtx) -> (String, usize) 
     (out, count)
 }
 
+/// Find every well-formed `{{...}}` span in `content`, in document order, as
+/// `(start, end, inner)`: `start`/`end` are the byte offsets of the whole span
+/// (braces included), `inner` is the text between the braces with surrounding
+/// whitespace trimmed. An unterminated span (no closing `}}`) stops the scan,
+/// mirroring [`expand`]/[`scan_ns_refs`].
+///
+/// The one low-level `{{...}}` tokenizer this module has for "any token,
+/// whatever family": [`strip_braced`] (masking a token so prose scanning skips
+/// it) and [`inert_tokens`] (review's non-markdown-file check, CLI-223) both
+/// read it, so they cannot disagree about what counts as a token span.
+fn scan_braced(content: &str) -> Vec<(usize, usize, &str)> {
+    let mut out = Vec::new();
+    let mut pos = 0usize;
+    while let Some(rel) = content[pos..].find("{{") {
+        let start = pos + rel;
+        let after_start = start + 2;
+        let Some(rel_end) = content[after_start..].find("}}") else {
+            break;
+        };
+        let inner_end = after_start + rel_end;
+        let end = inner_end + 2;
+        out.push((start, end, content[after_start..inner_end].trim()));
+        pos = end;
+    }
+    out
+}
+
 /// Replace every `{{...}}` span with a space, so prose scanning ignores anything
 /// already inside a reference token (any token kind, not just `{{ns:}}`).
 fn strip_braced(content: &str) -> String {
     let mut out = String::with_capacity(content.len());
-    let mut rest = content;
-    while let Some(pos) = rest.find("{{") {
-        out.push_str(&rest[..pos]);
-        let after = &rest[pos + 2..];
-        match after.find("}}") {
-            Some(end) => {
-                out.push(' ');
-                rest = &after[end + 2..];
-            }
-            None => {
-                rest = "";
-                break;
-            }
+    let mut last = 0;
+    for (start, end, _) in scan_braced(content) {
+        out.push_str(&content[last..start]);
+        out.push(' ');
+        last = end;
+    }
+    out.push_str(&content[last..]);
+    out
+}
+
+/// Every `{{...}}` token found in `content`, as written (braces included),
+/// deduplicated in first-seen order.
+///
+/// Used by `review` to flag any token in a non-markdown item file (NS-53): no
+/// token family expands outside markdown, so even a token that would resolve
+/// if the file were markdown -- e.g. `{{tools:detect}}` in a bundled `.sh` --
+/// is left literal at install and is dead/inert text, not a working reference
+/// (CLI-223). This closes the gap [`expand_paths`]'s resolution check leaves:
+/// that one only reports a token here when it does NOT resolve (still
+/// advisory, never hard, since it can never break an install either way); this
+/// one reports the token regardless of whether it resolves, since neither case
+/// ever actually expands outside markdown.
+pub fn inert_tokens(content: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for (start, end, _) in scan_braced(content) {
+        let tok = &content[start..end];
+        if !out.iter().any(|t| t == tok) {
+            out.push(tok.to_string());
         }
     }
-    out.push_str(rest);
     out
 }
 
@@ -1219,6 +1260,19 @@ fn mark_frontmatter(content: &str, cells: &mut [Cell]) -> usize {
         // neither is any other line: `requires:`, `build:`, `install:`, `bin:`,
         // `link:` and every harness-owned field are structure parsed out of this
         // source file, where no token is ever expanded.
+        //
+        // The classifier below is line-shape-based (does this line's trimmed
+        // text start with `name:` / `description:`), not YAML-nesting-aware: it
+        // does not track indentation depth, so a `name:`/`description:`-shaped
+        // line that is actually a continuation of a folded/literal block
+        // scalar (`>-`/`|-`) or a nested mapping key under some other field
+        // would still classify by its own text. Every frontmatter field mind's
+        // own convention uses is flat, so this holds in practice; a nested
+        // document is outside what this scanner is built to read (a real YAML
+        // parser would be needed for that), and this classifier only ever
+        // widens or narrows a *wrappable* range, never expands a token, so a
+        // false positive here is at most an over-eager `--fix` suggestion, not
+        // a install-time defect.
         let trimmed = line.trim_start();
         if trimmed.starts_with("name:") {
             fill(cells, offset..end, Cell::FmName);
@@ -4675,6 +4729,104 @@ mod tests {
             surviving(doc),
             "\u{feff}```sh\nmind learn dev\n```\n\nThen see {{ns:do}}.\n",
             "`--fix` must not delete the prose token below the fence"
+        );
+    }
+
+    // ---- inert_tokens (CLI-223): the non-markdown-file token net -------------
+    // These lock the tokenizer `inert_tokens` shares with `strip_braced`
+    // (`scan_braced`) and cross-check it against what the expanders (`expand`,
+    // `expand_paths`) actually treat as a token. The load-bearing direction:
+    // `inert_tokens` must never MISS a span that covers a token an install would
+    // expand (a false-clean review that lets a live token silently die in a
+    // non-markdown file); over-reporting an inert brace construct is the safe
+    // way to be wrong.
+
+    #[test]
+    fn inert_tokens_reports_each_braced_span_as_written_deduped() {
+        // spec: CLI-223
+        // Braces included, first-seen order, de-duplicated across token kinds.
+        assert_eq!(
+            inert_tokens("a {{ns:x}} b {{tools:t}} c {{ns:x}} d"),
+            vec!["{{ns:x}}".to_string(), "{{tools:t}}".to_string()],
+        );
+        // The report is the file's literal text: interior whitespace is kept,
+        // not trimmed the way an expander trims before resolving.
+        assert_eq!(inert_tokens("{{ self }}"), vec!["{{ self }}".to_string()]);
+        // No braces -> nothing.
+        assert!(inert_tokens("plain text, no tokens").is_empty());
+    }
+
+    #[test]
+    fn inert_tokens_agree_with_expanders_on_unterminated_and_empty() {
+        // spec: CLI-223
+        let store = Path::new("/m/store");
+        let none = None;
+        let c = ctx(store, &none, ItemKind::Skill, "self", &[]);
+
+        // An unterminated `{{` is not a token to any expander, and inert_tokens
+        // must agree: reporting it would be a false positive no install could
+        // ever realize. Every parser stops at the missing `}}`.
+        assert!(inert_tokens("#!/bin/sh\n{{tools:detect --scan\n").is_empty());
+        assert!(referenced_names("{{ns:x").is_empty());
+        assert_eq!(expand_paths("{{self", &c).unwrap(), "{{self");
+        assert_eq!(
+            expand("{{ns:x", &none, &sibs(&["x"]), &sibs(&[])).unwrap(),
+            "{{ns:x",
+        );
+
+        // `{{}}` is a well-formed brace span, so `scan_braced`/`inert_tokens`
+        // report it, but no expander treats an empty token as a reference. This
+        // is the accepted over-report direction: named by review, expanded by
+        // nobody, so it can never be a silently-dropped live reference.
+        assert_eq!(inert_tokens("{{}}"), vec!["{{}}".to_string()]);
+        assert_eq!(expand_paths("{{}}", &c).unwrap(), "{{}}");
+        assert_eq!(
+            expand("{{}}", &none, &sibs(&[]), &sibs(&[])).unwrap(),
+            "{{}}",
+        );
+    }
+
+    #[test]
+    fn inert_tokens_never_misses_a_token_the_path_expander_would_expand() {
+        // spec: CLI-223
+        // `scan_braced` consumes greedily to the first `}}` then resumes past
+        // it, whereas `expand_paths` resumes just past a passthrough `{{`, so
+        // the two disagree about token BOUNDARIES on a nested construct. What
+        // must never happen is `inert_tokens` failing to name a span that
+        // CONTAINS a token `expand_paths` expands -- that would be a review
+        // reporting "no tokens here" while the install silently drops a live one.
+        let store = Path::new("/m/store");
+        let none = None;
+        let sib = [psib(ItemKind::Tool, "detect", Some("detect"))];
+        let c = ctx(store, &none, ItemKind::Skill, "run", &sib);
+
+        let nested = "{{ {{tools:detect}} }}";
+        let expanded = expand_paths(nested, &c).unwrap();
+        assert_ne!(
+            expanded, nested,
+            "the inner path token really does expand once the outer passes through"
+        );
+        let reported = inert_tokens(nested);
+        assert!(
+            reported.iter().any(|t| t.contains("tools:detect")),
+            "inert_tokens must name a span covering the token expand_paths \
+             expands, never miss it: {reported:?}"
+        );
+
+        // The same holds for an `{{ns:}}` token nested inside a passthrough span:
+        // `expand` reaches the inner token and rewrites it, and inert_tokens
+        // names a span covering it.
+        let nested_ns = "{{ {{ns:detect}} }}";
+        let ns_expanded = expand(nested_ns, &none, &sibs(&["detect"]), &sibs(&[])).unwrap();
+        assert_ne!(
+            ns_expanded, nested_ns,
+            "the inner ns token really does expand"
+        );
+        assert!(
+            inert_tokens(nested_ns)
+                .iter()
+                .any(|t| t.contains("ns:detect")),
+            "inert_tokens must also cover a nested ns token"
         );
     }
 }

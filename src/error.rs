@@ -728,20 +728,64 @@ pub enum MindError {
     },
 }
 
+/// Single-quote `s` for safe interpolation into a POSIX shell command line
+/// (HOOK-106): every embedded single quote is closed, escaped with a
+/// backslash-quoted literal quote, and reopened -- the standard `'\''` idiom.
+/// A resolved source or item identity is attacker-influenced (a source name,
+/// marketplace alias, or item-link path segment; see `validate_prefix` /
+/// `is_safe_manifest_path`, which allow shell metacharacters) and is placed
+/// verbatim into a "copy this and run it" remedy, so every such identity must
+/// pass through here before it reaches a formatted command string. Quoting
+/// even a value with no metacharacters is harmless (`'plain'` behaves
+/// identically to `plain` once past the shell), so this is applied
+/// unconditionally rather than only when something "looks dangerous".
+///
+/// `pub(crate)` so the non-error skip NOTE `hooks_cmd.rs` prints during the hook
+/// loop (which interpolates the same attacker-influenced identity into a
+/// pasteable `mind hooks run <id> ...` command) reuses this exact quoting rather
+/// than re-deriving it, keeping the note and the [`MindError::HooksNotRun`] error
+/// consistent (HOOK-106).
+pub(crate) fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
 /// The [`MindError::HooksNotRun`] message (HOOK-106/107/108): see the
 /// variant's doc comment for the single-vs-several-`resolved` distinction.
+///
+/// `resolved` identities are shell-quoted (HOOK-106) before they are placed
+/// into the printed "re-run with ..." command: they come from source names,
+/// marketplace aliases, and item-link paths, none of which are restricted
+/// against shell metacharacters, so pasting the remedy verbatim must not be
+/// able to run anything beyond `mind hooks run`. The single-match arm frames
+/// the whole runnable command in DOUBLE quotes (rather than the single quotes
+/// used elsewhere as plain English framing) specifically because the
+/// identity inside it is itself single-quoted by `shell_quote`: nesting a
+/// single-quoted identity inside a single-quoted "here is the command"
+/// wrapper would place an unescaped `'` where the wrapper's own closing quote
+/// is expected, corrupting the frame around the command (and confusing
+/// anything -- human or script -- that finds the command by splitting on the
+/// outer quote).
 fn hooks_not_run_message(target: &str, event: &str, skipped: usize, resolved: &[String]) -> String {
+    debug_assert!(
+        !resolved.is_empty(),
+        "hooks_not_run_message: resolved must never be empty -- both construction sites \
+         (run_source_hooks/run_item_hooks) only build MindError::HooksNotRun once at least \
+         one contributor pushed a resolved identity"
+    );
     match resolved {
-        [one] => format!(
-            "hooks run '{one}': {skipped} hook(s) had work to do but were skipped for want of \
-             consent (not a terminal); re-run with 'mind hooks run {one} --event {event} \
-             --dangerously-skip-install-hook-check' to run them unattended"
-        ),
+        [one] => {
+            let quoted = shell_quote(one);
+            format!(
+                "hooks run '{one}': {skipped} hook(s) had work to do but were skipped for want \
+                 of consent (not a terminal); re-run with \"mind hooks run {quoted} --event \
+                 {event} --dangerously-skip-install-hook-check\" to run them unattended"
+            )
+        }
         _ => {
             let names = if resolved.is_empty() {
                 String::new()
             } else {
-                let quoted: Vec<String> = resolved.iter().map(|n| format!("'{n}'")).collect();
+                let quoted: Vec<String> = resolved.iter().map(|n| shell_quote(n)).collect();
                 format!(" ({})", quoted.join(", "))
             };
             format!(
@@ -862,6 +906,204 @@ impl MindError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
+
+    /// `shell_quote` round-trips a malicious identity through a real `sh -c`
+    /// invocation byte-for-byte (HOOK-106): the same technique `hook.rs::run_hook`
+    /// uses to run declared hooks, applied here in the other direction to prove
+    /// the quoting is what actually protects the pasteable remedy. A source
+    /// name, marketplace alias, or item-link path segment is not restricted
+    /// against shell metacharacters (`validate_prefix`/`is_safe_manifest_path`
+    /// allow them), so an identity carrying `;`, `$(...)`, a backtick, and an
+    /// embedded single quote must survive quoting unexecuted and unexpanded.
+    /// Interpolating the same identity BARE (no quoting) would instead run the
+    /// injected `touch`/`echo`/backtick commands, which is exactly the defect
+    /// this test would catch on the unfixed code.
+    #[test]
+    fn shell_quote_round_trips_a_malicious_identity_through_a_real_shell() {
+        // spec: HOOK-106
+        if Command::new("sh").arg("-c").arg("true").status().is_err() {
+            // No `sh` on PATH in this environment (mirrors selfupdate.rs's
+            // `have("sh")` skip): nothing to prove here, so skip rather than
+            // fail on an environment gap unrelated to the fix.
+            return;
+        }
+        let evil = "x; touch /tmp/mind-hook-106-pwned; echo $(id) `whoami` it's-evil";
+        let quoted = shell_quote(evil);
+
+        // The quoted form must never contain the same run of characters that
+        // would let a shell parse it as anything other than one literal
+        // argument: no closing quote leaves an unquoted `;`/`$(`/backtick
+        // stretch reachable.
+        let output = Command::new("sh")
+            .arg("-c")
+            .arg(format!("printf '%s' {quoted}"))
+            .output()
+            .expect("sh -c must run");
+        assert!(
+            output.status.success(),
+            "the quoted identity must parse as a single shell argument: {quoted:?}\nstderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            evil,
+            "the shell must see the identity back EXACTLY as given, proving none of \
+             ';', '$(...)', backtick, or the embedded quote were interpreted rather \
+             than passed through literally: quoted form was {quoted:?}"
+        );
+
+        // Belt-and-braces: the injected commands must not have actually run.
+        let sentinel = std::path::Path::new("/tmp/mind-hook-106-pwned");
+        assert!(
+            !sentinel.exists(),
+            "the embedded 'touch' must not have executed"
+        );
+        let _ = std::fs::remove_file(sentinel);
+    }
+
+    /// P2 boundary coverage: every awkward identity a source name could carry
+    /// must survive `shell_quote` as one literal argument through a real shell --
+    /// a lone single quote, a trailing backslash, an embedded newline, and the
+    /// characters a DOUBLE-quoted frame would NOT neutralize on its own (`"`,
+    /// `$`, and a backtick command substitution). `shell_quote` single-quotes,
+    /// so all of these are inert; this proves it directly rather than by
+    /// inspection. If any escaped through, the injected `touch` would drop the
+    /// per-case sentinel.
+    #[test]
+    fn shell_quote_neutralizes_every_boundary_identity_through_a_real_shell() {
+        // spec: HOOK-106
+        if Command::new("sh").arg("-c").arg("true").status().is_err() {
+            return;
+        }
+        // Each payload embeds a `touch <sentinel>` attempt via a different
+        // metacharacter class; none may fire once quoted.
+        let cases = [
+            ("lone-quote", "'", "'"),
+            ("trailing-backslash", r"github.com/a/b\", r"github.com/a/b\"),
+            (
+                "newline",
+                "a\ntouch /tmp/mind-hq-nl\nb",
+                "a\ntouch /tmp/mind-hq-nl\nb",
+            ),
+            (
+                "double-quote",
+                "a\"; touch /tmp/mind-hq-dq; \"b",
+                "a\"; touch /tmp/mind-hq-dq; \"b",
+            ),
+            (
+                "dollar-paren",
+                "$(touch /tmp/mind-hq-dp)",
+                "$(touch /tmp/mind-hq-dp)",
+            ),
+            (
+                "backtick",
+                "`touch /tmp/mind-hq-bt`",
+                "`touch /tmp/mind-hq-bt`",
+            ),
+        ];
+        for (name, payload, expected) in cases {
+            let quoted = shell_quote(payload);
+            // Run through a real shell as the sole argument to `printf %s`.
+            let out = Command::new("sh")
+                .arg("-c")
+                .arg(format!("printf '%s' {quoted}"))
+                .output()
+                .unwrap_or_else(|e| panic!("[{name}] sh failed: {e}"));
+            assert!(
+                out.status.success(),
+                "[{name}] quoted form must parse as one argument: {quoted:?} stderr {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&out.stdout),
+                expected,
+                "[{name}] the shell must return the identity literally: quoted {quoted:?}"
+            );
+        }
+        // None of the substitution/newline payloads may have executed `touch`.
+        for p in [
+            "/tmp/mind-hq-nl",
+            "/tmp/mind-hq-dq",
+            "/tmp/mind-hq-dp",
+            "/tmp/mind-hq-bt",
+        ] {
+            let path = std::path::Path::new(p);
+            let existed = path.exists();
+            let _ = std::fs::remove_file(path);
+            assert!(!existed, "an injected touch executed and dropped {p}");
+        }
+    }
+
+    /// A plain identity (no shell metacharacters) round-trips unchanged in
+    /// substance -- `shell_quote` is applied unconditionally, so this pins that
+    /// doing so is harmless for the common case.
+    #[test]
+    fn shell_quote_is_harmless_for_a_plain_identity() {
+        // spec: HOOK-106
+        assert_eq!(
+            shell_quote("github.com/jaemk/agents"),
+            "'github.com/jaemk/agents'"
+        );
+    }
+
+    /// `shell_quote` closes, escapes, and reopens an embedded single quote with
+    /// the POSIX `'\''` idiom.
+    #[test]
+    fn shell_quote_escapes_embedded_single_quotes() {
+        // spec: HOOK-106
+        assert_eq!(shell_quote("it's"), r"'it'\''s'");
+    }
+
+    /// The `HooksNotRun` single-identity remedy (HOOK-106) quotes the resolved
+    /// identity rather than interpolating it bare: a source/item identity
+    /// carrying shell metacharacters must not appear unquoted in the printed
+    /// "re-run with ..." command. Fails against the unfixed
+    /// `format!("... {one} ...")` interpolation, which would place the raw
+    /// `;`/`$(...)`/backtick text straight into the message.
+    #[test]
+    fn hooks_not_run_message_shell_quotes_the_single_resolved_identity() {
+        // spec: HOOK-106
+        let evil = "evil; rm -rf /tmp/x".to_string();
+        let msg =
+            hooks_not_run_message("target-as-typed", "install", 1, std::slice::from_ref(&evil));
+        assert!(
+            msg.contains(&shell_quote(&evil)),
+            "the remedy must carry the shell-quoted identity: {msg}"
+        );
+        assert!(
+            !msg.contains("run evil; rm -rf /tmp/x --event"),
+            "the remedy must never place the identity bare (unquoted) into the \
+             runnable command: {msg}"
+        );
+    }
+
+    /// The multi-identity remedy (HOOK-106/107) quotes every resolved identity
+    /// in its parenthetical list, not just the first.
+    #[test]
+    fn hooks_not_run_message_shell_quotes_every_resolved_identity_in_the_list() {
+        // spec: HOOK-106 HOOK-107
+        let a = "one; touch /tmp/a".to_string();
+        let b = "two`whoami`".to_string();
+        let msg = hooks_not_run_message("glob*", "install", 2, &[a.clone(), b.clone()]);
+        assert!(msg.contains(&shell_quote(&a)), "{msg}");
+        assert!(msg.contains(&shell_quote(&b)), "{msg}");
+        assert!(!msg.contains("(one; touch /tmp/a"), "{msg}");
+    }
+
+    /// HOOK-106/107/108: an incoherent "0 matched target(s)" remedy never
+    /// renders -- `hooks_not_run_message` is only ever reached with a non-empty
+    /// `resolved` (both `run_source_hooks` and `run_item_hooks` build
+    /// `MindError::HooksNotRun` only after at least one contributor pushed a
+    /// resolved identity), and this pins the invariant with a `debug_assert`
+    /// so a future construction site that violates it fails loudly in
+    /// debug/test builds rather than emitting self-contradictory text.
+    #[test]
+    #[should_panic(expected = "resolved must never be empty")]
+    fn hooks_not_run_message_asserts_resolved_is_never_empty() {
+        // spec: HOOK-106
+        let _ = hooks_not_run_message("target", "install", 0, &[]);
+    }
 
     // HARN-1/HARN-4: the new lobe-related errors render actionable messages
     // (the kind/preset list and the add-needs-a-target hint).
@@ -1378,11 +1620,15 @@ mod tests {
         let msg = e.to_string();
         assert!(msg.contains("myrepo"), "must name the target: {msg}");
         assert!(msg.contains('2'), "must name the skipped count: {msg}");
+        // spec: HOOK-106 -- every resolved identity is shell-quoted (single
+        // quotes) before it lands in the printed command, even one with no
+        // metacharacters, since quoting is applied unconditionally rather than
+        // only when something "looks dangerous" (`shell_quote`).
         assert!(
             msg.contains(
-                "mind hooks run myrepo --event install --dangerously-skip-install-hook-check"
+                "mind hooks run 'myrepo' --event install --dangerously-skip-install-hook-check"
             ),
-            "must give the copy-pasteable remedy: {msg}"
+            "must give the copy-pasteable, shell-quoted remedy: {msg}"
         );
     }
 
@@ -1402,7 +1648,7 @@ mod tests {
         let msg = e.to_string();
         assert!(
             msg.contains(
-                "mind hooks run myrepo --event uninstall --dangerously-skip-install-hook-check"
+                "mind hooks run 'myrepo' --event uninstall --dangerously-skip-install-hook-check"
             ),
             "the remedy must re-select the uninstall event: {msg}"
         );

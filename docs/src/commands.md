@@ -105,11 +105,11 @@ anything; `evolve` updates the `mind` binary itself.
 | `mind forget [--yes] [-f\|--force] [--unmanaged] [--dangerously-skip-install-hook-check] [<item>]` (alias `unlearn`) | remove an installed item (glob removes many; a multi-match glob confirms first, `--yes` skips). `--unmanaged` scopes removal to unmanaged lobe items only; with no `<item>`, removes every unmanaged item across all lobes. `-f`/`--force` skips the dependents confirmation when the item being removed has dependents. `--dangerously-skip-install-hook-check` runs uninstall hooks without the safety prompt |
 | `mind sync [--upgrade] [--dangerously-skip-install-hook-check] [--dangerously-skip-build-hook-check]` | refresh every source clone; use `upgrade` to also upgrade items. `--upgrade` is deprecated sugar for `sync` followed by `upgrade` (the two hook-check flags are valid only with `--upgrade`) |
 | `mind upgrade [--yes] [--no-sync] [--dangerously-skip-install-hook-check] [--dangerously-skip-build-hook-check] [item]` | fetch each involved source, then upgrade installed items to their latest version (re-runs install hooks on sources that advance); `--no-sync` skips the fetch step |
-| `mind hooks run <target> [--event install\|uninstall\|build] [--force] [--dangerously-skip-install-hook-check] [--dangerously-skip-build-hook-check]` / `mind hooks list <target>` | run a source's or an item's hooks on demand (outside meld/learn/forget/upgrade), or list the hooks in effect without running any. `<target>` is a source selector or an `owner/repo#item` ref. See [Install hooks](install-hooks.md#running-hooks-on-demand) |
+| `mind hooks run <target> [--event install\|uninstall\|build] [--force] [--dangerously-skip-install-hook-check] [--dangerously-skip-build-hook-check] [--json]` / `mind hooks list <target> [--json]` | run a source's or an item's hooks on demand (outside meld/learn/forget/upgrade), or list the hooks in effect without running any. `<target>` is a source selector or an `owner/repo#item` ref. See [Install hooks](install-hooks.md#running-hooks-on-demand) |
 | `mind evolve [--check] [--yes] [--version <v>]` | update the mind binary itself to the latest release (or --version) |
 | `mind recall [item] [--sources] [--kind K] [--source S] [--tree] [--json]` (alias `status`) | status: each source with its items, marked installed or available; `--sources` narrows to sources; `<item>` shows one item's details; `--tree` renders installed items as a dependency forest (with an item ref, scopes to that item's subtree) |
 | `mind probe [query] [--kind K] [--source S] [--json] [--no-tui]` | browse and search items (interactive TUI on a terminal) |
-| `mind review <target> [-N\|--namespace <ns>]` / `mind review --policy <path>` | validate a source for publishing, or validate a managed policy file (read-only); a `<target>` naming an existing directory is read as that local path unless it first matches a melded source's identity, even when it also looks like a valid `owner/repo` spec |
+| `mind review <target> [-N\|--namespace <ns>] [--json]` / `mind review --policy <path> [--json]` | validate a source for publishing, or validate a managed policy file (read-only); a `<target>` naming an existing directory is read as that local path unless it first matches a melded source's identity, even when it also looks like a valid `owner/repo` spec |
 | `mind introspect [--fix] [--json]` | report drift and broken links (optionally repair) |
 | `mind config show` / `mind config lobes add [<dir>] [--preset <name>] [--subdir <rel>] [--snapshot] [--force]\|list\|remove <path> [--snapshot]\|detect [--yes] [--json]` | view config and manage lobes. `add --preset <name>` adds a preset lobe; `--preset` and a base `<dir>` are composable (e.g. `add . --preset windsurf` registers a lobe at `./.windsurf`). `--subdir <rel>` targets an arbitrary subdirectory under `<dir>`. `--snapshot` on `add` materializes a one-time frozen copy instead of registering a managed lobe; on `remove`, detaches a managed lobe by replacing its symlinks with real-file copies before unregistering. `--force` overwrites a colliding foreign file. `detect` reports which known harness homes exist; Windsurf is detected via `~/.codeium/windsurf` but prints guidance to run `link-project` instead of auto-adding a lobe. `config lobes list` and `config show` include the kinds filter for each lobe, e.g. `~/.gemini/config [skill]`. See [Configuration](configuration.md) for the preset table and per-harness path details. |
 | `mind link-project [<dir>] [--preset <name>] [--subdir <rel>] [--snapshot] [--force]` | convenience alias for `config lobes add`, with `<dir>` defaulting to `.` and `--preset` defaulting to `windsurf`; links installed skills into `./.windsurf/skills/` and registers a managed lobe so future `mind learn` fans new skills into it automatically. `--snapshot` writes real-file copies instead of a managed lobe: unmanaged, committable, and not updated by a later `mind learn` (see [Presets](configuration.md#presets)) |
@@ -301,13 +301,35 @@ error, `-` available) so no information is lost (CLI-151, CLI-152, CLI-154).
 `NO_COLOR` set to any value (including empty), a non-UTF-8 or unset locale, or
 `--ascii` each independently force plain ASCII regardless of the others.
 
-**`--json` output.** `recall` and `probe` emit `{"schema": 1, "items": [...]}`.
+**`--json` output.** `--json` is universal: every verb answers it with exactly
+one JSON document on stdout, except a closed exclusion list -- `dump` (always
+emits TOML, CLI-153 does not apply), `completions`/`man` (print their script or
+roff page as the entire output), `evolve` (writes its own result document on a
+separate path), and `init-source` (a maintainer scaffolder with no JSON result
+to offer). Every other verb answers with a document.
+
+`recall` and `probe` emit `{"schema": 1, "items": [...]}`.
 `introspect` emits `{"schema": 1, "issues": [...], "sources": N, "items": N}`
 where `issues` is an array of findings and `sources`/`items` are integer counts.
 Every mutating verb (`meld`, `learn`, `forget`,
 `sync`, `upgrade`, `unmeld`, `config lobes add`/`remove`) emits a structured
 result object with `"schema": 1` and at minimum `action`, `target`, and `outcome`
 fields (CLI-153).
+
+`review --json` answers with `{"schema": 1, "action": "review", "outcome":
+"clean|advisory|failed", "hard": [...], "advisory": [...], "fixed": [...]}`,
+where `hard`/`advisory` are arrays of `{"kind": "<slug>", "message": "<text>"}`
+findings and `fixed` lists the files `--fix` rewrote. A hard finding still
+fails `review` (CLI-132 is unconditional): the document is not printed as a
+success envelope in that case, but folded into the error envelope's `details`
+member instead (see below).
+
+`hooks list --json` answers with a document giving each matched source's or
+item's hooks (event, required/optional flag, command, and, for a recorded
+source install hook, its pending/last-ran status). `hooks run --json` on a
+successful run answers with a tally rather than nothing: `{"schema": 1,
+"action": "hooks-run", "target": "...", "event": "...", "existed": N, "ran": N,
+"skipped": N}`.
 
 When an error occurs under `--json`, the process emits a JSON error envelope on
 stdout instead of plain text on stderr, then exits 1 (unchanged):
@@ -322,6 +344,10 @@ Scripts may branch on `kind` to handle specific failures. The `message` field
 is the full display text. Exit code is always 1 for runtime errors; clap usage
 errors (exit 2) remain plain text and are not enveloped (CLI-181, CLI-182,
 CLI-183).
+
+The envelope carries an optional `details` member when a verb has more to say
+than the `kind`/`message` pair: a failed `review --json` records its findings
+document there instead of printing it as a success envelope (CLI-221).
 
 ## Exit status
 

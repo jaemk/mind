@@ -130,6 +130,7 @@ pub fn run(
             &item_ref,
             target,
             event,
+            force,
             dangerously_skip_install,
             dangerously_skip_build,
         )?,
@@ -384,14 +385,8 @@ fn run_source_hooks(
                         // `--event` defaults to `install`, so an uninstall
                         // skip whose remedy omitted it would silently suggest
                         // running different code.
-                        // spec: CLI-217
-                        crate::render::note(format!(
-                            "note: skipped {event_name} hook '{}' for {source_name} (not a \
-                             terminal); re-run with 'mind hooks run {source_name} --event \
-                             {event_name} --dangerously-skip-install-hook-check' to run it \
-                             unattended",
-                            h.label()
-                        ));
+                        // spec: CLI-217 HOOK-106
+                        crate::render::note(source_skip_note(event_name, h.label(), &source_name));
                     } else {
                         // spec: CLI-217
                         crate::render::note(format!(
@@ -494,14 +489,19 @@ impl HookTally {
 ///
 /// `target` is the raw target string the user typed; it names the run in the
 /// HOOK-108 error so the printed remedy is the command they actually invoked.
-/// Returns the HOOK-107/108 tally on success (CLI-222); always zero for
-/// `--event build`, which has no hook-by-hook count of its own.
-// spec: HOOK-102 HOOK-103 HOOK-108
+/// `force` mirrors `run_source_hooks`'s `--force`: for the install event, it
+/// re-runs a hook already recorded as run at the item's current commit
+/// (HOOK-110) instead of filtering it out as pending-only. Returns the
+/// HOOK-107/108 tally on success (CLI-222); always zero for `--event build`,
+/// which has no hook-by-hook count of its own (and does not consult `force`:
+/// a build hook carries no HOOK-110 recorded-run state to override).
+// spec: HOOK-102 HOOK-103 HOOK-108 HOOK-110
 fn run_item_hooks(
     paths: &Paths,
     item_ref: &crate::resolve::ItemRef,
     target: &str,
     event: HookEventArg,
+    force: bool,
     dangerously_skip_install: bool,
     dangerously_skip_build: bool,
 ) -> Result<HookTally> {
@@ -534,6 +534,7 @@ fn run_item_hooks(
                     paths,
                     installed,
                     event,
+                    force,
                     dangerously_skip_install,
                     &mut tally,
                     &mut contributors,
@@ -546,16 +547,29 @@ fn run_item_hooks(
     // consent to any of them is an error, exactly as for a source target
     // (HOOK-107), instead of a silent exit 0.
     if tally.nothing_could_consent() {
-        // spec: HOOK-106 HOOK-107 -- when the ref matched exactly one item, the
-        // target as typed already resolves back to that same item
-        // deterministically (whatever form it was spelled in -- bare, a
-        // kind-qualified escape, or an abbreviated source selector), so it is
-        // kept verbatim rather than rewritten into a normalized form (that
-        // would risk re-entering the HOOK-105 source/item ambiguity a
-        // kind-qualified escape was written specifically to avoid). Only a ref
-        // that matched SEVERAL items (a glob) gets the resolved-identity list.
+        // spec: HOOK-106 HOOK-107 -- when the ref matched exactly one item AND
+        // the typed target carries no glob metacharacter, the target as typed
+        // already resolves back to that same item deterministically (whatever
+        // form it was spelled in -- bare, a kind-qualified escape, or an
+        // abbreviated source selector), so it is kept verbatim rather than
+        // rewritten into a normalized form (that would risk re-entering the
+        // HOOK-105 source/item ambiguity a kind-qualified escape was written
+        // specifically to avoid). A target that DOES carry a glob metacharacter
+        // (e.g. `agents#skill:sc*`) is echoed back only when it matched
+        // SEVERAL items; when it happens to match exactly one, the glob text
+        // itself is still not safe to paste into a shell (it would expand
+        // against the caller's cwd, not necessarily naming the item at all),
+        // so it is replaced with the resolved concrete identity instead --
+        // `contributors` already holds exactly that (`item_hook_target`,
+        // pushed by `run_item_lifecycle_hooks` for the one item that
+        // contributed), which is what makes this branch able to reuse it
+        // rather than re-deriving it from a separately captured `InstalledItem`.
         let resolved = if contributors.len() == 1 {
-            vec![target.to_string()]
+            if crate::resolve::is_glob(target) {
+                contributors
+            } else {
+                vec![target.to_string()]
+            }
         } else {
             contributors
         };
@@ -621,12 +635,16 @@ fn run_item_build(
 /// Run an item's install or uninstall hooks in place at its store location,
 /// adding what it considered to `tally` (HOOK-108) and, if it contributed at
 /// least one considered hook, its key to `contributors` (HOOK-106/107, for the
-/// `HooksNotRun` remedy).
-// spec: HOOK-102 HOOK-108
+/// `HooksNotRun` remedy). `force` (HOOK-110) re-offers an install hook already
+/// recorded as run at the item's current commit, mirroring `run_source_hooks`'s
+/// `!force` guard on the source side; it has no effect on the uninstall event,
+/// which carries no recorded run-state to override.
+// spec: HOOK-102 HOOK-108 HOOK-110
 fn run_item_lifecycle_hooks(
     paths: &Paths,
     installed: &InstalledItem,
     event: HookEventArg,
+    force: bool,
     dangerously_skip: bool,
     tally: &mut HookTally,
     contributors: &mut Vec<String>,
@@ -670,11 +688,14 @@ fn run_item_lifecycle_hooks(
             // (HOOK-101). This is what makes a repeat `hooks run` after the hook
             // ran see `existed == 0` and settle to exit 0 instead of
             // `HooksNotRun`. Filtered-out hooks print nothing, mirroring the
-            // silent `continue` in `run_source_hooks`.
+            // silent `continue` in `run_source_hooks`. `--force` skips this
+            // filter entirely (offering every declared install hook regardless
+            // of its recorded commit), mirroring `run_source_hooks`'s
+            // `!force && hook_already_ran(...)` guard on the source side.
             let current = Some(commit.as_str());
             let hooks: Vec<&crate::mindfile::ResolvedHook> = all_hooks
                 .into_iter()
-                .filter(|h| !item_hook_already_ran(installed, &h.run, current))
+                .filter(|h| force || !item_hook_already_ran(installed, &h.run, current))
                 .collect();
             if hooks.is_empty() {
                 return Ok(());
@@ -1026,6 +1047,29 @@ fn record_hook_run(source: &mut Source, command: &str, ran_at: Option<String>) {
     }
 }
 
+/// The HOOK-106 skip NOTE for one source hook skipped for want of consent in a
+/// non-TTY run: it names the cause and prints the exact, copy-pasteable
+/// `mind hooks run <id> ...` command to re-run the hook unattended. This is the
+/// note counterpart of the [`MindError::HooksNotRun`] error's remedy, and it
+/// carries the SAME injection surface: `source_name` is attacker-influenced (a
+/// source name, marketplace alias, or item-link path segment, none restricted
+/// against shell metacharacters), so the identity that lands inside the runnable
+/// command is passed through [`crate::error::shell_quote`] (HOOK-106) exactly as
+/// the error's remedy is. The whole command is framed in DOUBLE quotes because
+/// the identity inside it is itself single-quoted by `shell_quote`; a
+/// single-quote frame would place an unescaped `'` where the frame's own closing
+/// quote is expected (the same reasoning as `error::hooks_not_run_message`'s
+/// single-match arm). `source_name` also appears once as bare prose ("for
+/// <name>"), which is not a shell command and needs no quoting.
+fn source_skip_note(event_name: &str, label: &str, source_name: &str) -> String {
+    let quoted = crate::error::shell_quote(source_name);
+    format!(
+        "note: skipped {event_name} hook '{label}' for {source_name} (not a terminal); \
+         re-run with \"mind hooks run {quoted} --event {event_name} \
+         --dangerously-skip-install-hook-check\" to run it unattended"
+    )
+}
+
 /// A human label for a hook event arg.
 fn event_label(event: HookEventArg) -> &'static str {
     match event {
@@ -1154,5 +1198,87 @@ mod tests {
                 "{label:?} must be a bare lowercase flag value"
             );
         }
+    }
+
+    /// HOOK-106 (P1 injection): the source skip NOTE's runnable command must
+    /// shell-quote the resolved identity, exactly as the `HooksNotRun` error's
+    /// remedy does. A source name is not restricted against shell metacharacters
+    /// (`validate_prefix`/`is_safe_manifest_path` allow them), and the note
+    /// interpolates it into a "copy this and run it" `mind hooks run <id> ...`
+    /// command. On the UNFIXED note (`'mind hooks run {source_name} ...'`, framed
+    /// in single quotes with the raw name inside) an identity carrying a single
+    /// quote breaks out of the frame; this pins that it no longer can.
+    // spec: HOOK-106
+    #[test]
+    fn source_skip_note_shell_quotes_the_identity_in_the_runnable_command() {
+        let evil = "x'; touch /tmp/mind-skip-note-pwned; echo '";
+        let note = source_skip_note("install", "setup", evil);
+        // The runnable command carries the shell-quoted identity, never the bare
+        // injected text spliced straight into the command.
+        assert!(
+            note.contains(&crate::error::shell_quote(evil)),
+            "the note's command must carry the shell-quoted identity: {note}"
+        );
+        assert!(
+            !note.contains("mind hooks run x'; touch"),
+            "the note must never splice the raw identity into the command: {note}"
+        );
+    }
+
+    /// HOOK-106 (P1 injection), proved by execution rather than string match:
+    /// extract the `mind hooks run ...` command the note prints and run it
+    /// through a real `sh -c`. The injected `touch` must never fire, and the
+    /// shell must see the identity back as a single literal argument. This is
+    /// the note-side counterpart of `error::tests::
+    /// shell_quote_round_trips_a_malicious_identity_through_a_real_shell`.
+    // spec: HOOK-106
+    #[test]
+    fn source_skip_note_command_is_inert_when_pasted_into_a_real_shell() {
+        use std::process::Command;
+        if Command::new("sh").arg("-c").arg("true").status().is_err() {
+            // No `sh` on PATH (mirrors selfupdate.rs's skip): nothing to prove.
+            return;
+        }
+        let sentinel = std::path::Path::new("/tmp/mind-skip-note-rt-pwned");
+        let _ = std::fs::remove_file(sentinel);
+        // No balancing quote in the payload, so on the UNFIXED note (bare
+        // identity spliced into the command) the `;` terminates `mind hooks run`
+        // and `touch` fires -- making the sentinel check below load-bearing, not
+        // merely the stdout comparison.
+        let evil = "x; touch /tmp/mind-skip-note-rt-pwned; echo hi";
+        let note = source_skip_note("install", "setup", evil);
+
+        // Pull out the double-quote-framed runnable command the note prints.
+        let lead = "re-run with \"";
+        let start = note.find(lead).expect("note has a runnable command") + lead.len();
+        let rest = &note[start..];
+        let end = rest.find('"').expect("command is double-quote framed");
+        let command = &rest[..end];
+        assert!(
+            command.starts_with("mind hooks run "),
+            "extracted command must be the mind invocation: {command:?}"
+        );
+
+        // Replace the `mind` binary name with `printf '%s\n'` so the arguments
+        // the shell would hand `mind` are instead echoed: an injection would run
+        // `touch` (and drop the sentinel) rather than being passed as data.
+        let probe = command.replacen("mind hooks run", "printf '%s\\n'", 1);
+        let out = Command::new("sh")
+            .arg("-c")
+            .arg(&probe)
+            .output()
+            .expect("sh -c must run");
+        assert!(
+            !sentinel.exists(),
+            "the injected 'touch' must not have executed via the note's command: {probe:?}"
+        );
+        let _ = std::fs::remove_file(sentinel);
+        // The identity must survive as one literal argument, unexecuted.
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains(evil),
+            "the shell must see the identity back literally, proving the quote \
+             was not interpreted: stdout {:?}",
+            String::from_utf8_lossy(&out.stdout)
+        );
     }
 }

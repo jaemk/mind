@@ -762,10 +762,10 @@ fn hooks_run_source_install_skips_in_non_tty() {
     );
     assert!(
         out.contains(&format!(
-            "mind hooks run {identity} --event install --dangerously-skip-install-hook-check"
+            "mind hooks run '{identity}' --event install --dangerously-skip-install-hook-check"
         )),
         "should print the exact copy-pasteable remedy, re-selecting the event \
-         the run selected (HOOK-106): {out}"
+         the run selected, with the identity shell-quoted (HOOK-106): {out}"
     );
     // The error itself also names the target and the reason.
     assert!(
@@ -1211,9 +1211,12 @@ fn hooks_run_item_uninstall_hook_skips_in_non_tty() {
          reported, not a silent exit 0: {}\n{}",
         r.stdout, r.stderr
     );
+    // spec: HOOK-106 -- the resolved identity is shell-quoted (single quotes)
+    // in the HooksNotRun error's remedy (`shell_quote`), even though it has no
+    // metacharacters here.
     assert!(
         r.stderr.contains(
-            "mind hooks run item-uninstall-src#fetcher --event uninstall \
+            "mind hooks run 'item-uninstall-src#fetcher' --event uninstall \
              --dangerously-skip-install-hook-check"
         ),
         "the remedy must re-select the uninstall event: {}",
@@ -1270,6 +1273,68 @@ fn hooks_run_item_build_reinstalls() {
             || combined.contains("reinstall")
             || combined.contains("builder"),
         "output should mention rebuild: {combined}"
+    );
+}
+
+/// HOOK-110 / CLI-195: `--force` on `--event build` is a documented no-op --
+/// the build path (`run_item_build`) reinstalls transactionally and never
+/// consults the recorded-run filter that `--force` overrides, so passing
+/// `--force` alongside `--event build` must behave identically to omitting it:
+/// the item still rebuilds, and nothing misbehaves (no error, no double action,
+/// no `HooksNotRun`). Guards against a future change that lets `--force` leak
+/// into the build branch.
+#[test]
+fn hooks_run_item_build_with_force_is_a_benign_no_op() {
+    // spec: HOOK-110 HOOK-103 CLI-195
+    let sb = Sandbox::new("item-bld-force");
+    sb.write_and_commit(
+        "mind.toml",
+        concat!(
+            "[[items]]\n",
+            "kind = \"skill\"\n",
+            "name = \"builder\"\n",
+            "path = \"skills/builder\"\n",
+        ),
+    );
+    sb.write_and_commit(
+        "skills/builder/SKILL.md",
+        "---\ndescription: builder\n---\n# builder\n",
+    );
+
+    let r = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(r.success, "meld: {}", r.stderr);
+    let r = sb.mind(&["learn", "builder"]);
+    assert!(r.success, "learn: {}", r.stderr);
+
+    // `--force` with `--event build`: must reinstall exactly as the plain build
+    // event does, with no error and no HooksNotRun.
+    let r = sb.mind(&[
+        "hooks",
+        "run",
+        "--event",
+        "build",
+        "--force",
+        "--dangerously-skip-build-hook-check",
+        "item-bld-force#builder",
+    ]);
+    assert!(
+        r.success,
+        "--force on --event build must stay a benign no-op that still \
+         reinstalls: {}\n{}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        !r.stderr.contains("want of consent") && !r.stdout.contains("want of consent"),
+        "--force on a build event must not fabricate a HooksNotRun: {}\n{}",
+        r.stdout,
+        r.stderr
+    );
+    let combined = format!("{}{}", r.stdout, r.stderr);
+    assert!(
+        combined.contains("rebuild")
+            || combined.contains("reinstall")
+            || combined.contains("builder"),
+        "the build must still have happened under --force: {combined}"
     );
 }
 
@@ -2757,9 +2822,11 @@ fn hooks_run_item_target_pending_install_hook_is_hooks_not_run_in_non_tty() {
         "the error must count the item's skipped hook: {}",
         r.stderr
     );
+    // spec: HOOK-106 -- shell-quoted (single quotes) even though this identity
+    // has no metacharacters, since `shell_quote` applies unconditionally.
     assert!(
         r.stderr.contains(
-            "mind hooks run item-silent#scanner --event install \
+            "mind hooks run 'item-silent#scanner' --event install \
              --dangerously-skip-install-hook-check"
         ),
         "the error must carry the copy-pasteable remedy naming the target as \
@@ -2770,6 +2837,94 @@ fn hooks_run_item_target_pending_install_hook_is_hooks_not_run_in_non_tty() {
         !sentinel.exists(),
         "the item hook must not have run in a non-TTY run: {}",
         sentinel.display()
+    );
+}
+
+/// HOOK-106: when an item ref that CARRIES a glob metacharacter happens to
+/// match exactly one installed item, the `HooksNotRun` remedy must name the
+/// resolved concrete identity (`<source>#<kind>:<name>`), not the glob text
+/// as typed -- pasting a glob back into a shell would expand it against the
+/// caller's cwd, not necessarily naming the item at all (and could name
+/// nothing, or something else entirely). This is the item-side counterpart of
+/// `hooks_run_skip_note_remedy_names_the_resolved_source_identity`: that test
+/// covers a SOURCE selector; this one covers an ITEM ref whose glob just
+/// happens to match a single item, which is exactly the case the raw
+/// `target.to_string()` shortcut got wrong before the fix.
+#[test]
+fn hooks_run_item_single_match_glob_remedy_names_the_resolved_identity_not_the_glob() {
+    // spec: HOOK-106 HOOK-108
+    let sb = Sandbox::new("item-glob-one");
+    sb.write_and_commit(
+        "mind.toml",
+        concat!(
+            "[[items]]\n",
+            "kind = \"skill\"\n",
+            "name = \"scanner\"\n",
+            "path = \"skills/scanner\"\n",
+            "install = \"touch item-hook-ran.sentinel\"\n",
+        ),
+    );
+    sb.write_and_commit(
+        "skills/scanner/SKILL.md",
+        "---\ndescription: scanner\n---\n# scanner\n",
+    );
+    let r = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(r.success, "meld: {}", r.stderr);
+    let r = sb.mind(&["learn", "scanner"]);
+    assert!(r.success, "learn: {}", r.stderr);
+
+    let sentinel = sb
+        .mind_home
+        .join("store/skill/scanner/item-hook-ran.sentinel");
+    let _ = std::fs::remove_file(&sentinel);
+
+    let source_identity = format!(
+        "local/{}/item-glob-one",
+        sb.base.file_name().unwrap().to_string_lossy()
+    );
+
+    // `sc*` is a glob (CLI-194) that happens to match only "scanner" in this
+    // source, but it is still glob TEXT -- unsafe to echo back verbatim.
+    let glob_target = format!("{source_identity}#sc*");
+    let r = sb.mind(&["hooks", "run", "--event", "install", &glob_target]);
+    assert!(
+        !r.success,
+        "the one matched item's hook was skipped for want of consent: {}\n{}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        !r.stderr.contains(&glob_target),
+        "the remedy must never echo the raw glob selector back into a \
+         command-shaped string: {}",
+        r.stderr
+    );
+    let concrete_identity = format!("{source_identity}#skill:scanner");
+    assert!(
+        r.stderr.contains(&format!(
+            "mind hooks run '{concrete_identity}' --event install \
+             --dangerously-skip-install-hook-check"
+        )),
+        "the remedy must name the resolved concrete identity instead: {}",
+        r.stderr
+    );
+
+    // And that resolved identity is itself genuinely runnable, unlike the glob.
+    let redo = sb.mind(&[
+        "hooks",
+        "run",
+        "--event",
+        "install",
+        "--dangerously-skip-install-hook-check",
+        &concrete_identity,
+    ]);
+    assert!(
+        redo.success,
+        "the resolved identity from the remedy must actually run: {}\n{}",
+        redo.stdout, redo.stderr
+    );
+    assert!(
+        sentinel.exists(),
+        "the remedy's resolved identity must have run the item's install hook"
     );
 }
 
@@ -2808,10 +2963,10 @@ fn hooks_run_skip_note_remedy_names_the_resolved_source_identity() {
     assert!(!r.success, "must fail: {}\n{}", r.stdout, r.stderr);
     assert!(
         r.stdout.contains(&format!(
-            "mind hooks run {identity} --event install --dangerously-skip-install-hook-check"
+            "mind hooks run '{identity}' --event install --dangerously-skip-install-hook-check"
         )),
-        "the note's remedy must name the resolved identity, not the '*' \
-         selector: {}",
+        "the note's remedy must name the resolved identity (shell-quoted), not \
+         the '*' selector: {}",
         r.stdout
     );
 }
@@ -3379,21 +3534,84 @@ fn hooks_run_item_interactive_decline_exits_zero() {
 // assert the *skipped hook* ran and no other did.
 // ---------------------------------------------------------------------------
 
+/// A minimal POSIX-ish shell tokenizer, understanding only what `mind`'s own
+/// remedies ever emit: whitespace-separated words, a single-quoted segment
+/// (`'...'`), and the `'\''` escaped-embedded-quote idiom `shell_quote`
+/// (HOOK-106) uses. Real enough to prove the printed remedy is what a shell
+/// would actually see, without pulling in a shell-parsing crate for a test
+/// helper.
+fn shell_split(s: &str) -> Vec<String> {
+    let chars: Vec<char> = s.chars().collect();
+    let n = chars.len();
+    let mut i = 0;
+    let mut tokens = Vec::new();
+    let mut cur = String::new();
+    let mut in_token = false;
+    while i < n {
+        let c = chars[i];
+        if c.is_whitespace() {
+            if in_token {
+                tokens.push(std::mem::take(&mut cur));
+                in_token = false;
+            }
+            i += 1;
+            continue;
+        }
+        in_token = true;
+        if c == '\'' {
+            i += 1;
+            while i < n && chars[i] != '\'' {
+                cur.push(chars[i]);
+                i += 1;
+            }
+            assert!(i < n, "unterminated single quote in {s:?}");
+            i += 1; // skip the closing quote
+        } else if c == '\\' && i + 1 < n && chars[i + 1] == '\'' {
+            // The `'\''` idiom: outside the quoted segment, a literal
+            // backslash-quote stands for one embedded single quote.
+            cur.push('\'');
+            i += 2;
+        } else {
+            cur.push(c);
+            i += 1;
+        }
+    }
+    if in_token {
+        tokens.push(cur);
+    }
+    tokens
+}
+
 /// Take the `mind ...` command a HOOK-106 note or a HOOK-107/HOOK-108 error
 /// offers as its remedy and return it as argv with the leading `mind` dropped,
 /// ready to hand back to [`Sandbox::mind`]. Panics when `text` carries no
 /// remedy, so a round-trip test can never pass by quietly finding nothing to
 /// run.
+///
+/// The whole command is framed by an outer quote -- single quotes for the
+/// note (`hooks_cmd.rs`) and the multi-match error arm, double quotes for the
+/// single-match error arm (whose resolved identity is itself single-quoted by
+/// `shell_quote`, HOOK-106; double framing avoids the outer/inner quote
+/// nesting that a single-quote frame would create). Either framing is
+/// accepted here, and any single-quoted token inside is unescaped via
+/// [`shell_split`] before being handed back, so the returned argv is exactly
+/// what a real shell would produce, not the raw quoted text.
 fn remedy_argv(text: &str) -> Vec<String> {
-    const LEAD: &str = "re-run with '";
+    const LEAD: &str = "re-run with ";
     let start = text
         .find(LEAD)
         .unwrap_or_else(|| panic!("no remedy in output: {text:?}"));
-    let rest = &text[start + LEAD.len()..];
+    let after_lead = &text[start + LEAD.len()..];
+    let delim = after_lead
+        .chars()
+        .next()
+        .filter(|c| *c == '\'' || *c == '"')
+        .unwrap_or_else(|| panic!("remedy is not quote-framed: {text:?}"));
+    let rest = &after_lead[delim.len_utf8()..];
     let end = rest
-        .find('\'')
+        .find(delim)
         .unwrap_or_else(|| panic!("unterminated remedy quote: {text:?}"));
-    let mut argv: Vec<String> = rest[..end].split_whitespace().map(str::to_string).collect();
+    let mut argv = shell_split(&rest[..end]);
     assert_eq!(
         argv.first().map(String::as_str),
         Some("mind"),
@@ -4263,6 +4481,141 @@ fn hooks_run_item_install_hook_pending_again_after_upgrade_to_a_new_commit() {
         !r.success,
         "after upgrade to a new commit, the install hook must be pending \
          again, not suppressed by the old commit's record: {}\n{}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr.contains("1 hook(s) had work to do"),
+        "{}",
+        r.stderr
+    );
+}
+
+/// `--force` on an ITEM target re-runs an install hook already recorded as
+/// run at the item's current commit (HOOK-110), exactly like `--force` on a
+/// source target (`hooks_run_source_install_force_reruns_hook`): without
+/// `--force`, a repeat `hooks run` on the same commit finds nothing pending
+/// and settles to exit 0; with it, the hook is offered (and, under the
+/// bypass, run) again regardless of the recorded commit.
+#[test]
+fn hooks_run_item_force_reruns_an_already_recorded_install_hook() {
+    // spec: HOOK-110 CLI-195
+    let sb = Sandbox::new("item-force");
+    sb.write_and_commit(
+        "mind.toml",
+        &format!(
+            concat!(
+                "[[items]]\n",
+                "kind = \"skill\"\n",
+                "name = \"scanner\"\n",
+                "path = \"skills/scanner\"\n",
+                "install = \"{}\"\n",
+            ),
+            sb.touch("force.sentinel")
+        ),
+    );
+    sb.write_and_commit("skills/scanner/SKILL.md", "---\ndescription: s\n---\n# s\n");
+    let r = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(r.success, "meld: {}", r.stderr);
+    let r = sb.mind(&["learn", "scanner", "--dangerously-skip-install-hook-check"]);
+    assert!(r.success, "learn: {}", r.stderr);
+
+    // Plain repeat: the hook already ran at the current commit, so nothing is
+    // pending and the run settles to exit 0 without re-running it.
+    let r = sb.mind(&["hooks", "run", "--event", "install", "item-force#scanner"]);
+    assert!(
+        r.success,
+        "a repeat run with no --force must find nothing pending: {}\n{}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        !r.stdout.contains("running install hook"),
+        "a plain repeat run must not re-run the already-recorded hook: {}",
+        r.stdout
+    );
+
+    // `--force`, still under the bypass so it can actually complete
+    // unattended: the recorded hook is offered AND run again, despite being
+    // recorded at the item's current (unchanged) commit.
+    let r = sb.mind(&[
+        "hooks",
+        "run",
+        "--event",
+        "install",
+        "--force",
+        "--dangerously-skip-install-hook-check",
+        "item-force#scanner",
+    ]);
+    assert!(
+        r.success,
+        "--force must re-offer and (under the bypass) re-run the recorded \
+         hook: {}\n{}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stdout.contains("running install hook"),
+        "--force must have re-run the item's install hook, not filtered it \
+         out as already-recorded: {}",
+        r.stdout
+    );
+}
+
+/// The HOOK-108 accounting side of the same fix: `--force` on an item target
+/// makes an already-recorded hook count toward `existed` again, so a non-TTY
+/// `--force` run (no bypass) reports `HooksNotRun` instead of settling to
+/// exit 0 -- proving the hook was genuinely re-OFFERED (and skipped for want
+/// of consent), not just silently skipped by the HOOK-110 filter as before.
+#[test]
+fn hooks_run_item_force_on_already_ran_hook_in_non_tty_is_hooks_not_run() {
+    // spec: HOOK-110 HOOK-108
+    let sb = Sandbox::new("item-force-nontty");
+    sb.write_and_commit(
+        "mind.toml",
+        &format!(
+            concat!(
+                "[[items]]\n",
+                "kind = \"skill\"\n",
+                "name = \"scanner\"\n",
+                "path = \"skills/scanner\"\n",
+                "install = \"{}\"\n",
+            ),
+            sb.touch("force-nontty.sentinel")
+        ),
+    );
+    sb.write_and_commit("skills/scanner/SKILL.md", "---\ndescription: s\n---\n# s\n");
+    let r = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(r.success, "meld: {}", r.stderr);
+    let r = sb.mind(&["learn", "scanner", "--dangerously-skip-install-hook-check"]);
+    assert!(r.success, "learn: {}", r.stderr);
+
+    // Without --force, nothing is pending, so the run stays exit 0.
+    let r = sb.mind(&[
+        "hooks",
+        "run",
+        "--event",
+        "install",
+        "item-force-nontty#scanner",
+    ]);
+    assert!(
+        r.success,
+        "no --force: nothing pending: {}\n{}",
+        r.stdout, r.stderr
+    );
+
+    // With --force in a non-TTY run (no bypass): the hook is re-offered, has
+    // no way to get consent, and the run reports HooksNotRun rather than a
+    // silent exit 0.
+    let r = sb.mind(&[
+        "hooks",
+        "run",
+        "--event",
+        "install",
+        "--force",
+        "item-force-nontty#scanner",
+    ]);
+    assert!(
+        !r.success,
+        "--force re-offers the recorded hook, which then has no consent \
+         available in non-TTY: {}\n{}",
         r.stdout, r.stderr
     );
     assert!(
