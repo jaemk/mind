@@ -639,8 +639,9 @@ fn run_checks(
                 continue;
             };
             // A non-markdown item file (a script, data) is entirely code: any
-            // `{{ns:}}` in it is misplaced (NS-24).
-            let is_md = file.extension().and_then(|e| e.to_str()) == Some("md");
+            // `{{ns:}}` in it is misplaced (NS-24), and no token family expands
+            // there at all (NS-53).
+            let is_md = crate::namespace::is_markdown(&file);
             // Check 8: path-reference tokens that do not resolve (hard, CLI-135).
             if let Err((token, reason)) = crate::namespace::expand_paths(&content, &ctx) {
                 // Name the specific cause (TOOL-17/TOOL-18): a plain miss keeps the
@@ -664,9 +665,15 @@ fn run_checks(
             }
             // Check 9: hardcoded install paths that should be tokens (advisory,
             // CLI-136). The wording reflects what the path resolves to (CLI-145).
+            // NS-53/NS-54: a token does not expand outside markdown, so a
+            // non-markdown file's suggestion says so instead of implying `--fix`
+            // would rewrite it there (it never does, per Check "Fix" below).
             for hp in crate::namespace::detect_hardcoded_paths(&content, &ctx) {
                 let suggestion = match &hp.suggestion {
-                    Some(tok) => format!("; use {tok}"),
+                    Some(tok) if is_md => format!("; use {tok}"),
+                    Some(tok) => {
+                        format!("; {tok} would not expand here -- tokens expand in markdown only")
+                    }
                     None => String::new(),
                 };
                 let msg = match hp.kind {
@@ -716,11 +723,22 @@ fn run_checks(
                     crate::namespace::NsContext::Path => "a path",
                     crate::namespace::NsContext::FrontmatterName => "the frontmatter `name:` field",
                 };
-                let msg = format!(
-                    "{}: {{{{ns:{}}}}} in {where_}; a name token belongs in prose (code/paths use {{{{tools:}}}}/{{{{self}}}}/{{{{path:}}}})",
-                    item.key(),
-                    r.name
-                );
+                // NS-54: a non-markdown file gets the literal "will not expand"
+                // wording rather than the misplaced-context wording, since it is
+                // never rewritten (--fix reports it and stops there).
+                let msg = if where_ == "a non-markdown file" {
+                    format!(
+                        "{}: {{{{ns:{}}}}} will not expand here; tokens expand in markdown only",
+                        item.key(),
+                        r.name
+                    )
+                } else {
+                    format!(
+                        "{}: {{{{ns:{}}}}} in {where_}; a name token belongs in prose (code/paths use {{{{tools:}}}}/{{{{self}}}}/{{{{path:}}}})",
+                        item.key(),
+                        r.name
+                    )
+                };
                 if context == crate::namespace::NsContext::FrontmatterName {
                     hard.push(Finding::hard("misplaced-reference", msg));
                 } else {
@@ -909,23 +927,24 @@ fn run_checks(
                     siblings: &path_siblings,
                 };
                 for file in item_files(item) {
+                    // NS-54: a token expands only in markdown (NS-53), so a
+                    // non-markdown file is reported (Checks 8-11 above already
+                    // do so) and never rewritten -- turning a hardcoded path
+                    // into a token there, or un-wrapping one, would write or
+                    // leave behind text that never expands.
+                    if !crate::namespace::is_markdown(&file) {
+                        continue;
+                    }
                     let Ok(content) = std::fs::read_to_string(&file) else {
                         continue;
                     };
-                    let is_md = file.extension().and_then(|e| e.to_str()) == Some("md");
-                    // Hardcoded install paths -> tokens (any file).
+                    // Hardcoded install paths -> tokens.
                     let (s1, n1) = crate::namespace::rewrite_hardcoded_paths(&content, &ctx);
-                    // Un-wrap misplaced {{ns:}}; a non-markdown file is all code,
-                    // so every token is misplaced there.
-                    let (s2, n2) = crate::namespace::unwrap_misplaced(&s1, !is_md);
-                    // Templatize bare prose refs -> {{ns:}}, markdown only (a
-                    // script is all code; wrapping a keyword there is the bug
-                    // this whole path exists to avoid).
-                    let (s3, n3) = if is_md {
-                        crate::namespace::templatize(&s2, &siblings)
-                    } else {
-                        (s2, 0)
-                    };
+                    // Un-wrap misplaced {{ns:}} tokens (structure-aware).
+                    let (s2, n2) = crate::namespace::unwrap_misplaced(&s1, false);
+                    // Templatize bare prose refs -> {{ns:}} (also reaches a
+                    // non-`name:` frontmatter field, NS-56).
+                    let (s3, n3) = crate::namespace::templatize(&s2, &siblings);
                     if n1 + n2 + n3 > 0 {
                         std::fs::write(&file, s3).map_err(|e| MindError::io(&file, e))?;
                         fixed.push(file.display().to_string());

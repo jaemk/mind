@@ -181,26 +181,48 @@ at runtime. Prefixing changes installed names, so references must be rewritten.
 
 - `NS-10` An intra-source reference is written `{{ns:name}}`, where `name` is a
   sibling's bare name.
-- `NS-11` At install, each `{{ns:name}}` token in the item's text files is
+- `NS-11` At install, each `{{ns:name}}` token in a markdown item file (NS-53) is
   expanded to the effective name: `name` when unprefixed, `p:name` when prefixed.
 - `NS-12` A token whose `name` is not a sibling in the same source is an error
-  (`BadReference`), naming the referencing item and the bad referent.
-- `NS-13` Content with no `{{ns:` tokens is copied unchanged. Non-text (non-UTF-8)
-  files are not scanned.
+  (`BadReference`), naming the referencing item and the bad referent. Applies only
+  within a markdown file (NS-53): a token with no resolvable referent in a
+  non-markdown file is not an error, since it is never expanded there either.
+- `NS-13` Content with no `{{ns:` tokens is copied unchanged. A non-markdown file
+  (NS-53) is not scanned at all, so its content -- non-UTF-8 or otherwise -- is
+  never read for tokens; a markdown file that is not valid UTF-8 is likewise not
+  scanned.
 - `NS-14` Expansion runs whether or not a prefix is in effect, so a token-using
   source installs correctly with or without a namespace.
 - `NS-15` Token edge cases: whitespace inside a token (`{{ns: name }}`) is
   trimmed before the sibling lookup; an unterminated token (`{{ns:` with no
   closing `}}`) is left verbatim rather than treated as a reference or an error.
+- `NS-53` All four token families -- `{{ns:}}` (this doc), `{{path:}}`,
+  `{{tools:}}`, and `{{self}}` (tooling.md, TOOL-19) -- expand only in a markdown
+  file: one whose extension, case-insensitively, is `md`, `markdown`, `mdown`, or
+  `mkd`. `install` skips any other file before expansion, leaving its content --
+  including any token in it, resolvable or not -- exactly as written (NS-12,
+  NS-13). This is a deliberate narrowing, not an oversight: the designed use of
+  a path token is prose (a skill telling Claude to run `{{tools:detect}}`), and
+  templating a file written in a language with its own `{{ }}` convention
+  (Jinja, Handlebars, Go templates) is a liability with no offsetting benefit.
+  The rule is judged by extension alone, not by content or by item kind: an
+  agent or a rule item is always a single markdown file by discovery convention
+  and so is unaffected in practice, but a `mind.toml`-declared item is free to
+  point at any path, and this still governs it. Widening later (an opt-in
+  `mind.toml` glob naming additional files to scan) stays backward-compatible;
+  narrowing later would not, which is why it is done now, pre-1.0.
 
 ## Unguarded-reference warning
 
 - `NS-20` When melding a source with a prefix in effect and `--verbose` is in
   effect (CLI-162), every text file of each item (the whole skill directory, or
   the agent/rule file) is scanned for sibling names that appear in bare prose
-  (outside any `{{ns:}}` token), matching the breadth of install-time expansion;
-  each item with such a reference is reported as a warning. Without `--verbose`
-  no scan is performed and no warning is emitted.
+  (outside any `{{ns:}}` token; structure-aware, NS-55); each item with such a
+  reference is reported as a warning. Without `--verbose` no scan is performed
+  and no warning is emitted. The scan covers every text file regardless of
+  extension, unlike install-time expansion (NS-53): a mention in a non-markdown
+  file is still worth flagging (the author may move it into markdown, or add a
+  reference doc later), even though it is inert either way.
 - `NS-21` Matching is whole-word (alphanumeric, `_`, and `-` are word
   characters); an item's own name is not reported against itself.
 - `NS-22` The warning is advisory and heuristic: it does not fail `meld`, does not
@@ -213,12 +235,25 @@ at runtime. Prefixing changes installed names, so references must be rewritten.
 - `NS-24` A `{{ns:name}}` token is a prose name reference: it expands to the
   referent's effective name (NS-11), which is correct only where an item name
   belongs. It is *misplaced* in a non-prose context -- inside a fenced code block
-  or an inline code span, adjacent to a path separator (`/` or `~`), or in a
-  frontmatter structured field such as `name:` -- where name-substitution yields
-  broken code, a broken path, or (under a prefix) a wrong identity. Code and paths
-  reference an item by path token instead (`{{self}}`, `{{tools:}}`, `{{path:}}`;
+  or an inline code span, adjacent to a path separator (`/` or `~`), or in the
+  frontmatter `name:` field, the one structured field that is the item's own
+  identity -- where name-substitution yields broken code, a broken path, or a
+  wrong identity. A token an author wrote in another frontmatter field is an
+  ordinary reference and is not reported as misplaced, but only the
+  `description:` value is a field wrapping may *create* one in (NS-56). Code and
+  paths reference an
+  item by path token instead (`{{self}}`, `{{tools:}}`, `{{path:}}`;
   tooling.md), never by `{{ns:}}`. `review` detects misplaced tokens (CLI-139) and
   `init-source --template` does not create them (INIT-5).
+- `NS-54` `review --fix` (CLI-138) rewrites only a markdown file (NS-53): for a
+  file the extension test rejects, every rewrite pass (un-wrapping a misplaced
+  `{{ns:}}` token, wrapping a bare prose mention, rewriting a hardcoded install
+  path into a token) is skipped, and the file is reported on instead --
+  `review`'s other checks (CLI-135..139) already scan every text file regardless
+  of extension, so nothing about a non-markdown file's tokens goes unreported,
+  only unrewritten. Rewriting a non-markdown file would write, or leave behind,
+  text that this file's contents never expand out of (NS-53), which is a
+  regression relative to the file's previous, unexpanded state.
 
 ### Structural scanning
 
@@ -291,22 +326,55 @@ code: every token wrapping creates is a token the scan calls prose.
   left exactly as written rather than having the name inside it wrapped again,
   which would produce a nested token that `install` rejects as a bad reference
   (NS-12) and so would stop the source installing at all.
-- `NS-48` `review --fix` (CLI-138) leaves no unguarded reference in prose: for
-  content whose sibling mentions all sit in prose (already tokenized or bare),
-  the rewritten content is reported clean by the unguarded-reference check
-  (NS-20, NS-21). A prose token misclassified as code would otherwise be
-  un-wrapped into exactly the bare name that check reports, and under a prefix
-  that name no longer resolves (NS-11); reading the document as CommonMark
-  (NS-46, NS-47, NS-49, NS-50) is what closes that class of misclassification.
-  The requirement is scoped to prose because the unguarded-reference check is
-  context-free while both `--fix` passes are not: un-wrapping a token that really
-  is in code restores a bare name that NS-20 still reports, and wrapping declines
-  to re-wrap it (NS-24), so `--fix` cannot clear it. The same holds for a sibling
-  name in a frontmatter field, which NS-20 reports and wrapping never touches;
-  for one abutting a path separator, which NS-20 reports (a `/` is not a word
-  character) and NS-24 forbids wrapping; for one reachable only as a link
-  destination, title, or reference label, which NS-20 reports and NS-52 forbids
-  wrapping; and for one in a fence info string, which NS-20 reports (a backtick
-  is not a word character) and which NS-47 calls delimiter structure rather than
-  content, so wrapping declines it. Those six are known false positives of the
-  advisory, not failures of this requirement.
+- `NS-48` `review --fix` (CLI-138) leaves no unguarded reference: for content
+  whose sibling mentions all sit where wrapping can reach them (prose or the
+  frontmatter `description:` value, NS-56), the rewritten content is reported
+  clean by the unguarded-reference check (NS-20, NS-21). A prose token
+  misclassified as code would otherwise be un-wrapped into exactly the bare
+  name that check reports, and under a prefix that name no longer resolves
+  (NS-11); reading the document as CommonMark (NS-46, NS-47, NS-49, NS-50) is
+  what closes that class of misclassification. This now holds without
+  exception: the unguarded-reference check is structure-aware (NS-55), reading
+  the same map both `--fix` passes read, so it never reports a mention in a
+  code span, a code block, a fence's delimiter structure, link syntax, or a
+  path-adjacent position -- none of those was ever a real reference, so
+  reporting one was always a false positive of the advisory, not a use of it
+  `--fix` failed to clear. A mention in the frontmatter `description:` value is
+  wrapped, same as prose (NS-56), so it clears too; a mention anywhere else in
+  a frontmatter block is never reported at all, because wrapping must never
+  create a token in a structured field (NS-56).
+- `NS-55` The unguarded-reference check (NS-20) is structure-aware: it reads
+  the same [`Structure`] map `templatize` (NS-46, NS-47, NS-52) and the
+  `{{ns:}}` misplaced-token scan (CLI-139) read, through the identical
+  wrappable-position test `templatize` wraps with, so it reports exactly the
+  set `templatize` can clear and no more. A sibling mention inside a code span,
+  a fenced or indented code block, link syntax, a fence's delimiter structure
+  (its info string), or a path-adjacent position is not reported, matching
+  `templatize`'s refusal to wrap any of them (NS-24, NS-46, NS-47, NS-52), and
+  neither is one in a structured frontmatter field (NS-56); one in prose or in
+  the frontmatter `description:` value is reported, matching `templatize`'s
+  willingness to wrap it (NS-56). Applying the markdown
+  structure map to a non-markdown file (a script, data) is not gated on the
+  file's extension: it is still a heuristic read of a file that is not
+  markdown, but it only ever suppresses a report an author wrote as, say, an
+  indented shell command, never adds a false one, so it moves scan accuracy in
+  the right direction even there.
+- `NS-56` `templatize` (INIT-5) wraps a bare whole-word sibling mention in the
+  *value* of the frontmatter `description:` field, the same as it wraps one in
+  the markdown body. `description:` is the only frontmatter field this applies
+  to, because it is the only one that is free prose. Every other line of a
+  frontmatter block is left exactly as written -- including the `description:`
+  key itself, and including a line carrying no `key:` at all (what an
+  unterminated block swallows) -- because frontmatter is structure that mind and
+  the harness parse out of the *source* file, where no token is ever expanded:
+  `requires:` is a list of item refs (DEP-4, DEP-5), `build:`, `install:`,
+  `uninstall:` and `bin:` are shell commands run verbatim (tooling.md), and
+  `name:` is the item's own identity (NS-24). Wrapping a sibling name into any
+  of those writes a token that nothing expands, which breaks the field rather
+  than templating it: a wrapped `requires:` entry stops resolving and fails the
+  install with a `BadReference` (NS-12). A wrapped `description:` is what a
+  display surface (`recall`, `probe`) would otherwise show verbatim as a raw
+  `{{ns:name}}` token to a human, so that surface flattens the token back to
+  the bare `name` for display (`namespace::flatten_display`) at the point it
+  reads the description from the catalog, while the installed item's store
+  copy still expands the token to the full effective name (NS-11) as normal.

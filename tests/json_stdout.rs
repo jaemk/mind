@@ -642,17 +642,399 @@ fn absorb_json_answers_with_absorb_not_meld() {
 }
 
 // ---------------------------------------------------------------------------
-// Verbs this gate could NOT drive into a meaningful CLI-217 state, and why:
-// `review` never calls `print_json` at all under `--json` (it always prints
-// plain text -- a separate, pre-existing "no --json support" gap, not a
-// note-ordering bug); `hooks list` has no JSON output defined either (CLI-196
-// does not mention one), so there is no envelope for a note to land ahead of;
-// `dump` always writes TOML by design (DUMP-9) and already routes its one note
-// (`--json does not apply to dump`) directly to stderr via `eprintln!`, so it
-// has no CLI-217 exposure to demonstrate. `completions`, `man`, and
-// `init-source` do not read `ctx().json` at all. Those six are exactly the
-// verbs `main.rs`'s `json_reserves_stdout` excludes from the redirect, since
-// for them stdout is a non-JSON product (or nothing at all) rather than the
-// result document. `recall`/`probe`/`introspect` are exercised by
+// CLI-218/CLI-219/CLI-220/CLI-221/CLI-222: `--json` is universal. `review`
+// (both the `<target>` and `--policy` modes) and `hooks list` used to have no
+// JSON output at all -- a documented gap -- and `hooks run` answered a
+// SUCCESSFUL run with nothing on stdout. All three now answer with a
+// document, closing the gap this file used to describe as permanent.
+// `dump`/`completions`/`man`/`evolve`/`init-source` remain the closed
+// exclusion list (CLI-218): `dump` always writes TOML by design (DUMP-9) and
+// already routes its one note (`--json does not apply to dump`) directly to
+// stderr via `eprintln!`; `completions`/`man` print the artifact itself;
+// `evolve` writes its own document from `selfupdate.rs` on a separate path
+// (untested here: it needs a real or faked release endpoint, already covered
+// hermetically in `src/selfupdate.rs`'s fake-`curl`/`gh` tests); `init-source`
+// has no JSON output at all. `recall`/`probe`/`introspect` are exercised by
 // `tests/cli.rs::json_stdout_is_exactly_one_document_across_the_verb_surface`.
 // ---------------------------------------------------------------------------
+
+/// `mind review <target> --json` on a clean source (every item described, no
+/// findings at all) answers with the CLI-219 document, `outcome: "clean"`,
+/// both finding arrays empty.
+#[test]
+fn review_json_clean_source_answers_clean_outcome() {
+    // spec: CLI-218 CLI-219
+    let sb = Sandbox::new("review-clean");
+    sb.write_and_commit(
+        "skills/widget/SKILL.md",
+        "---\ndescription: d\n---\n# widget\n",
+    );
+
+    let r = sb.mind(&["--json", "review", &sb.source_spec()]);
+    assert!(r.success, "review --json: {} {}", r.stdout, r.stderr);
+    let v = assert_stdout_is_one_json_document(&r.stdout);
+    assert_eq!(v["schema"], 1, "{v}");
+    assert_eq!(v["action"], "review", "{v}");
+    assert_eq!(v["outcome"], "clean", "{v}");
+    assert_eq!(v["hard"], serde_json::json!([]), "{v}");
+    assert_eq!(v["advisory"], serde_json::json!([]), "{v}");
+    assert_eq!(v["fixed"], serde_json::json!([]), "{v}");
+}
+
+/// `mind review <target> --json` on a source with only advisory findings (a
+/// skill with no description, CLI-131) answers `outcome: "advisory"`, still
+/// exit 0.
+#[test]
+fn review_json_advisory_only_answers_advisory_outcome() {
+    // spec: CLI-218 CLI-219
+    let sb = Sandbox::new("review-advisory");
+    sb.write_and_commit("agents/dev.md", "# dev agent\nno frontmatter here\n");
+
+    let r = sb.mind(&["--json", "review", &sb.source_spec()]);
+    assert!(r.success, "review --json: {} {}", r.stdout, r.stderr);
+    let v = assert_stdout_is_one_json_document(&r.stdout);
+    assert_eq!(v["outcome"], "advisory", "{v}");
+    assert_eq!(v["hard"], serde_json::json!([]), "{v}");
+    let advisory = v["advisory"]
+        .as_array()
+        .unwrap_or_else(|| panic!("advisory must be an array: {v}"));
+    assert!(
+        advisory.iter().any(|f| f["kind"] == "missing-description"),
+        "{v}"
+    );
+}
+
+/// `mind review <target> --json` on a source with a HARD finding (a malformed
+/// `mind.toml`) still exits non-zero, and stdout is the ONE CLI-181 error
+/// envelope -- not the CLI-219 success document -- with the findings folded
+/// into its `details` member (CLI-221) instead of dropped.
+#[test]
+fn review_json_hard_finding_is_folded_into_the_error_envelope_details() {
+    // spec: CLI-218 CLI-219 CLI-221
+    let sb = Sandbox::new("review-hard");
+    sb.write_and_commit("mind.toml", "[[[[bad toml");
+
+    let r = sb.mind(&["--json", "review", &sb.source_spec()]);
+    assert!(
+        !r.success,
+        "a hard finding must still fail review under --json: {} {}",
+        r.stdout, r.stderr
+    );
+    let v = assert_stdout_is_one_json_document(&r.stdout);
+    assert_eq!(v["schema"], 1, "{v}");
+    assert_eq!(
+        v["error"]["kind"], "review-failed",
+        "the CLI-181 envelope, not the CLI-219 success document: {v}"
+    );
+    assert_eq!(v["details"]["action"], "review", "{v}");
+    assert_eq!(v["details"]["outcome"], "failed", "{v}");
+    let hard = v["details"]["hard"]
+        .as_array()
+        .unwrap_or_else(|| panic!("details.hard must be an array: {v}"));
+    assert!(hard.iter().any(|f| f["kind"] == "toml-parse-error"), "{v}");
+}
+
+/// `mind review --policy <path> --json` shares the CLI-219 shape: a clean
+/// policy answers `outcome: "clean"`.
+#[test]
+fn review_policy_json_clean_answers_clean_outcome() {
+    // spec: CLI-218 CLI-219
+    let sb = Sandbox::new("review-policy-clean");
+    let policy = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/policy/policy.toml");
+
+    let r = sb.mind(&["--json", "review", "--policy", &policy.to_string_lossy()]);
+    assert!(
+        r.success,
+        "review --policy --json: {} {}",
+        r.stdout, r.stderr
+    );
+    let v = assert_stdout_is_one_json_document(&r.stdout);
+    assert_eq!(v["action"], "review", "{v}");
+    assert_eq!(v["outcome"], "clean", "{v}");
+}
+
+/// `mind review --policy <path> --json` on an invalid (unparseable) policy
+/// file fails and folds the finding into the CLI-181 envelope's `details`,
+/// exactly like the source-target hard-finding case.
+#[test]
+fn review_policy_json_hard_finding_is_folded_into_the_error_envelope_details() {
+    // spec: CLI-218 CLI-219 CLI-221
+    let sb = Sandbox::new("review-policy-hard");
+    let policy = sb.base.join("bad-policy.toml");
+    write(&policy, "not valid toml [[[");
+
+    let r = sb.mind(&["--json", "review", "--policy", &policy.to_string_lossy()]);
+    assert!(
+        !r.success,
+        "an invalid policy file must fail under --json: {} {}",
+        r.stdout, r.stderr
+    );
+    let v = assert_stdout_is_one_json_document(&r.stdout);
+    assert_eq!(v["error"]["kind"], "review-failed", "{v}");
+    let hard = v["details"]["hard"]
+        .as_array()
+        .unwrap_or_else(|| panic!("details.hard must be an array: {v}"));
+    assert!(hard.iter().any(|f| f["kind"] == "invalid-policy"), "{v}");
+}
+
+/// `mind hooks list <target> --json` answers with the CLI-220 document
+/// (schema/action/target/sources), the same shape asserted end to end in
+/// `tests/cli_hooks.rs::hooks_list_json_answers_with_the_cli_220_document`;
+/// this one just pins that it is exactly ONE document under this file's
+/// generic CLI-217 assertion, alongside every other verb here.
+#[test]
+fn hooks_list_json_is_one_document() {
+    // spec: CLI-218 CLI-220
+    let sb = Sandbox::new("hooks-list-doc");
+    let r = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(r.success, "meld: {}", r.stderr);
+
+    let r = sb.mind(&["--json", "hooks", "list", "hooks-list-doc"]);
+    assert!(r.success, "hooks list --json: {} {}", r.stdout, r.stderr);
+    let v = assert_stdout_is_one_json_document(&r.stdout);
+    assert_eq!(v["action"], "hooks-list", "{v}");
+}
+
+/// `mind hooks run <target> --json` on a source with no hooks declared (the
+/// "nothing to do" path) still answers with the CLI-222 document, all counts
+/// zero, rather than silence.
+#[test]
+fn hooks_run_json_no_hooks_still_answers_with_zeroed_document() {
+    // spec: CLI-218 CLI-222
+    let sb = Sandbox::new("hooks-run-doc");
+    let r = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(r.success, "meld: {}", r.stderr);
+
+    let r = sb.mind(&["--json", "hooks", "run", "hooks-run-doc"]);
+    assert!(r.success, "hooks run --json: {} {}", r.stdout, r.stderr);
+    let v = assert_stdout_is_one_json_document(&r.stdout);
+    assert_eq!(v["action"], "hooks-run", "{v}");
+    assert_eq!(v["existed"], 0, "{v}");
+    assert_eq!(v["ran"], 0, "{v}");
+    assert_eq!(v["skipped"], 0, "{v}");
+}
+
+/// CLI-218's boundary as executable code: every verb driven here answers
+/// `--json` with exactly one JSON document, EXCEPT the closed exclusion list
+/// (`dump`, `completions`, `man`), whose stdout is asserted to NOT parse as
+/// JSON. This is the rule the spec statement states, not an enumeration of
+/// what happens to work today: a verb added later and left off both lists
+/// would fail here, whichever side it landed on.
+#[test]
+fn cli_218_every_driven_verb_is_json_or_a_named_exclusion() {
+    // spec: CLI-218
+    let sb = Sandbox::new("boundary");
+    sb.write_and_commit(
+        "skills/widget/SKILL.md",
+        "---\ndescription: d\n---\n# widget\n",
+    );
+    let spec = sb.source_spec();
+    let policy = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("examples/policy/policy.toml")
+        .to_string_lossy()
+        .into_owned();
+
+    // Every one of these must answer with exactly one JSON document.
+    let included: Vec<Vec<&str>> = vec![
+        vec!["--json", "meld", &spec, "--register-only"],
+        vec!["--json", "meld", &spec, "--register-only"], // remeld branch
+        vec!["--json", "learn", "widget"],
+        vec!["--json", "recall"],
+        vec!["--json", "probe", "--no-tui"],
+        vec!["--json", "review", &spec],
+        vec!["--json", "review", "--policy", &policy],
+        vec!["--json", "introspect"],
+        vec!["--json", "config", "show"],
+        vec!["--json", "config", "lobes", "list"],
+        vec!["--json", "hooks", "list", "boundary"],
+        vec!["--json", "hooks", "run", "boundary"],
+        vec!["--json", "sync"],
+        vec!["--json", "upgrade", "--yes"],
+        vec!["--json", "forget", "widget", "--yes"],
+        vec!["--json", "unmeld", "boundary", "--yes"],
+    ];
+    for args in included {
+        let r = sb.mind(&args);
+        assert_stdout_is_one_json_document(&r.stdout);
+        assert!(
+            r.stdout.trim().lines().count() >= 1,
+            "{args:?}: {:?} / {:?}",
+            r.stdout,
+            r.stderr
+        );
+    }
+
+    // The closed exclusion list: stdout is a non-JSON product (`--json` or
+    // not), so it must NOT parse as JSON.
+    for args in [
+        vec!["--json", "dump"],
+        vec!["--json", "completions", "bash"],
+        vec!["--json", "man"],
+    ] {
+        let r = sb.mind(&args);
+        assert!(
+            serde_json::from_str::<serde_json::Value>(r.stdout.trim()).is_err(),
+            "{args:?} is a named CLI-218 exclusion; its stdout must not parse \
+             as JSON: {:?}",
+            r.stdout
+        );
+    }
+    // `evolve` and `init-source` are also named CLI-218 exclusions but are not
+    // driven here: `evolve` needs a real or faked release endpoint (covered
+    // hermetically by `src/selfupdate.rs`'s fake-`curl`/`gh` unit tests, not
+    // this end-to-end file), and `init-source` mutates the target repo's
+    // working tree in a way orthogonal to this file's fixtures.
+    //
+    // NOTE: the lists above are a fixed set of INVOCATIONS, so they can only
+    // ever cover verbs someone thought to list. The gate that actually closes
+    // CLI-218's boundary against a verb added later is
+    // `src/main.rs`'s `tests::cli_218_boundary_is_closed_over_every_clap_
+    // subcommand`, which enumerates the verbs from clap itself and fails when
+    // one is classified neither way. This test is the end-to-end companion:
+    // it proves the classification is honored by the real binary.
+}
+
+// ---------------------------------------------------------------------------
+// CLI-221: the `details` member is optional, and the slot behind it is a
+// process-global static. These pin its ABSENCE as carefully as its presence.
+// ---------------------------------------------------------------------------
+
+/// The ordinary failure: a verb that fails without recording any findings must
+/// produce an envelope with NO `details` key at all -- not `null`, not `{}`.
+/// A consumer doing `if "details" in doc` must not see one on every error just
+/// because the mechanism exists.
+#[test]
+fn error_envelope_without_recorded_details_has_no_details_member() {
+    // spec: CLI-181 CLI-221
+    let sb = Sandbox::new("no-details");
+    let r = sb.mind(&["--json", "learn", "does-not-exist"]);
+    assert!(
+        !r.success,
+        "learn of a missing item must fail: {}",
+        r.stdout
+    );
+    let v = assert_stdout_is_one_json_document(&r.stdout);
+    assert!(v["error"]["kind"].is_string(), "{v}");
+    assert!(
+        !v.as_object().is_some_and(|o| o.contains_key("details")),
+        "an error with no recorded findings must carry no `details` member: {v}"
+    );
+}
+
+/// A failing `review` records details; a LATER, unrelated failure must not
+/// inherit them. Each `mind` run is its own process so the static cannot
+/// physically carry over today -- this pins that it stays that way, i.e. that
+/// nobody "improves" the slot by persisting it to the mind home, and that the
+/// review run really is the only reason `details` ever appears.
+#[test]
+fn recorded_details_do_not_leak_into_a_later_unrelated_failure() {
+    // spec: CLI-181 CLI-221
+    let sb = Sandbox::new("leak");
+    sb.write_and_commit("mind.toml", "[[[[bad toml");
+
+    let failed_review = sb.mind(&["--json", "review", &sb.source_spec()]);
+    assert!(!failed_review.success, "{}", failed_review.stdout);
+    let v = assert_stdout_is_one_json_document(&failed_review.stdout);
+    assert!(v["details"].is_object(), "precondition: {v}");
+
+    let next = sb.mind(&["--json", "forget", "nothing-installed"]);
+    assert!(!next.success, "{}", next.stdout);
+    let v = assert_stdout_is_one_json_document(&next.stdout);
+    assert!(
+        !v.as_object().is_some_and(|o| o.contains_key("details")),
+        "the previous run's review findings must not appear here: {v}"
+    );
+}
+
+/// A hard finding does not suppress the rest of the CLI-219 document: the
+/// `details` member carries the advisory findings and the `--fix` list too, not
+/// just the hard ones. The implementor's test asserted only `details.hard`, so
+/// a `details` that dropped everything else would have passed it.
+#[test]
+fn review_json_error_details_carry_advisory_and_fixed_too() {
+    // spec: CLI-219 CLI-221
+    let sb = Sandbox::new("review-both");
+    // A `{{ns:}}` token naming no sibling is a HARD bad-reference...
+    sb.write_and_commit(
+        "skills/widget/SKILL.md",
+        "---\ndescription: d\n---\nhand off to {{ns:nope}}\n",
+    );
+    // ...and an item with no frontmatter description is an ADVISORY finding.
+    sb.write_and_commit("agents/dev.md", "# dev agent\n");
+
+    let r = sb.mind(&["--json", "review", &sb.source_spec()]);
+    assert!(
+        !r.success,
+        "a hard finding must fail: {} {}",
+        r.stdout, r.stderr
+    );
+    let v = assert_stdout_is_one_json_document(&r.stdout);
+    assert_eq!(v["error"]["kind"], "review-failed", "{v}");
+    assert_eq!(v["details"]["outcome"], "failed", "{v}");
+    let hard = v["details"]["hard"]
+        .as_array()
+        .unwrap_or_else(|| panic!("details.hard must be an array: {v}"));
+    assert!(
+        hard.iter().any(|f| f["kind"] == "bad-reference"),
+        "the hard finding: {v}"
+    );
+    let advisory = v["details"]["advisory"]
+        .as_array()
+        .unwrap_or_else(|| panic!("details.advisory must be an array: {v}"));
+    assert!(
+        advisory.iter().any(|f| f["kind"] == "missing-description"),
+        "the advisory findings must survive into `details`, not be dropped \
+         because the run failed: {v}"
+    );
+    assert!(
+        v["details"]["fixed"].is_array(),
+        "`fixed` must be present (empty) rather than omitted: {v}"
+    );
+    // Every finding carries a non-empty human message alongside the slug.
+    assert!(
+        hard.iter()
+            .chain(advisory.iter())
+            .all(|f| f["message"].as_str().is_some_and(|m| !m.is_empty())),
+        "{v}"
+    );
+}
+
+/// `review --fix --json`: the rewritten files reach the caller in the
+/// document's `fixed` array, and the per-file `fixed <path>` progress lines
+/// (plain `println!`s that run BEFORE the document is recorded) land on stderr
+/// rather than corrupting stdout. Only the empty-`fixed` case was covered.
+#[test]
+fn review_fix_json_reports_the_rewritten_files_and_one_document() {
+    // spec: CLI-217 CLI-219 CLI-138
+    let sb = Sandbox::new("review-fix");
+    sb.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\ndescription: review\n---\nrun ~/.claude/skills/review/run.sh; hand off to dev\n",
+    );
+    sb.write_and_commit("agents/dev.md", "---\ndescription: dev\n---\n# dev\n");
+
+    let r = sb.mind(&["--json", "review", &sb.source_spec(), "--fix"]);
+    assert!(r.success, "review --fix --json: {} {}", r.stdout, r.stderr);
+    let v = assert_stdout_is_one_json_document(&r.stdout);
+    assert_eq!(v["action"], "review", "{v}");
+    let fixed = v["fixed"]
+        .as_array()
+        .unwrap_or_else(|| panic!("fixed must be an array: {v}"));
+    assert!(
+        fixed.iter().any(|f| f
+            .as_str()
+            .is_some_and(|s| s.ends_with("skills/review/SKILL.md"))),
+        "the rewritten file must be reported in `fixed`: {v}"
+    );
+    // The rewrite really happened (so `fixed` is not just a hopeful label).
+    let rewritten = std::fs::read_to_string(sb.source.join("skills/review/SKILL.md")).unwrap();
+    assert!(
+        rewritten.contains("{{ns:dev}}"),
+        "the bare sibling name must have been templatized: {rewritten}"
+    );
+    assert!(
+        r.stderr.contains("fixed"),
+        "the per-file `fixed <path>` line must reach the user on stderr: {:?}",
+        r.stderr
+    );
+}

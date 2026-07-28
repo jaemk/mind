@@ -836,10 +836,16 @@ fn build_item(
     let requires: Vec<String> = frontmatter::file_field_capped(meta, "requires")?
         .map(|s| s.split_whitespace().map(str::to_owned).collect())
         .unwrap_or_default();
+    // NS-56: a `description:` (or any other non-`name:` frontmatter field) may
+    // carry a `{{ns:name}}` token wrapped by `templatize`/`review --fix`. The
+    // catalog is a display surface (`recall`/`probe`/`dump`), not the expanded
+    // store copy, so flatten it to the bare name here -- the single capture
+    // point -- rather than showing the raw token to a human.
     let description = match ov.description {
         Some(d) => Some(d),
         None => frontmatter::description_capped(meta)?,
-    };
+    }
+    .map(|d| namespace::flatten_display(&d));
     Ok(CatalogItem {
         kind,
         name,

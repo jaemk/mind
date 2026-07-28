@@ -1,5 +1,6 @@
-# A non-entrypoint file of the `detect` tool. An item reaches it via
-# {{path:tool:detect}}/lib.sh rather than the {{tools:detect}} entrypoint.
+# A non-entrypoint file of the `detect` tool. A markdown item reaches it with
+# the {{path:tool:detect}}/lib.sh token rather than the {{tools:detect}}
+# entrypoint; that token expands only in markdown, not here.
 detect_kind() {
   local root="$1"
   if [ -f "$root/Cargo.toml" ]; then echo rust

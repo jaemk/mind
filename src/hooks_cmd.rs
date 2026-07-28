@@ -3,6 +3,8 @@
 //!
 //! spec: HOOK-100..105, CLI-194..196
 
+use serde::Serialize;
+
 use crate::catalog::CatalogItem;
 use crate::cli::HookEventArg;
 use crate::error::{MindError, Result};
@@ -14,6 +16,90 @@ use crate::resolve::{
 };
 use crate::source::{Pin, RecordedHook, Registry, Source};
 
+/// [`crate::commands`]'s `print_json`, mirrored here so `hooks_cmd` stays
+/// self-contained (the same duplication rationale as `pin_description` below):
+/// route through `json_stdout::record` when stdout is reserved (CLI-217), or
+/// print directly otherwise.
+fn emit_json<T: Serialize>(value: &T) -> Result<()> {
+    if crate::json_stdout::is_reserved() {
+        let s =
+            serde_json::to_string_pretty(value).map_err(|e| MindError::json("json output", e))?;
+        crate::json_stdout::record(s);
+        return Ok(());
+    }
+    crate::render::print_json(value)
+}
+
+/// `mind hooks run --json`'s result document (CLI-222): the HOOK-107/HOOK-108
+/// tally for the invocation, so a script can tell "nothing to do" from "ran N
+/// hooks" without scraping stderr notes.
+#[derive(Serialize, Debug, PartialEq, Eq)]
+struct HooksRunResult {
+    schema: u8,
+    action: &'static str,
+    target: String,
+    event: &'static str,
+    existed: usize,
+    ran: usize,
+    skipped: usize,
+}
+
+/// `mind hooks list --json`'s result document (CLI-220). Exactly one of
+/// `sources`/`items` is populated, depending on whether `<target>` resolved
+/// to a source or to an item ref (HOOK-104's two branches).
+#[derive(Serialize, Debug, PartialEq)]
+struct HooksListResult {
+    schema: u8,
+    action: &'static str,
+    target: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    sources: Vec<SourceHooksJson>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    items: Vec<ItemHooksJson>,
+}
+
+/// One matched source's hooks and installed items, for `hooks list --json`'s
+/// `sources` array.
+#[derive(Serialize, Debug, PartialEq)]
+struct SourceHooksJson {
+    source: String,
+    hooks: Vec<SourceHookJson>,
+    items: Vec<ItemHooksJson>,
+}
+
+/// One source-level hook entry (CLI-220).
+#[derive(Serialize, Debug, PartialEq)]
+struct SourceHookJson {
+    event: &'static str,
+    required: bool,
+    command: String,
+    /// The CLI-196 pending/last-ran status; present only for a recorded
+    /// install-event hook (an uninstall hook carries no recorded run state).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<String>,
+}
+
+/// One item's hooks -- either nested under a `SourceHooksJson` (its `source`
+/// is the enclosing object, so omitted) or a top-level entry for an item-ref
+/// target (its `source` is set). A list of objects, not bare strings, so a
+/// later addition (e.g. an item-level install/uninstall disclosure record)
+/// has somewhere to go.
+#[derive(Serialize, Debug, PartialEq)]
+struct ItemHooksJson {
+    item: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<String>,
+    hooks: Vec<ItemHookJson>,
+}
+
+/// One item-level hook entry (CLI-220).
+#[derive(Serialize, Debug, PartialEq)]
+struct ItemHookJson {
+    event: &'static str,
+    required: bool,
+    command: String,
+}
+
 // ---------------------------------------------------------------------------
 // Public entry points
 // ---------------------------------------------------------------------------
@@ -22,7 +108,7 @@ use crate::source::{Pin, RecordedHook, Registry, Source};
 ///
 /// Reuses the same disclosure + consent + run machinery as the automatic flows,
 /// so it is neither more nor less guarded (HOOK-100).
-// spec: HOOK-100 HOOK-101 HOOK-102 HOOK-103 CLI-194 CLI-195 HOOK-105
+// spec: HOOK-100 HOOK-101 HOOK-102 HOOK-103 CLI-194 CLI-195 HOOK-105 CLI-222
 pub fn run(
     paths: &Paths,
     target: &str,
@@ -31,13 +117,13 @@ pub fn run(
     dangerously_skip_install: bool,
     dangerously_skip_build: bool,
 ) -> Result<()> {
-    match resolve_hook_target(paths, target)? {
+    let tally = match resolve_hook_target(paths, target)? {
         HookTarget::Source(selector) => {
             // spec: HOOK-103 CLI-195 - --event build is invalid for a source target.
             if event == HookEventArg::Build {
                 return Err(MindError::BuildEventRequiresItemTarget);
             }
-            run_source_hooks(paths, &selector, event, force, dangerously_skip_install)
+            run_source_hooks(paths, &selector, event, force, dangerously_skip_install)?
         }
         HookTarget::Item(item_ref) => run_item_hooks(
             paths,
@@ -46,8 +132,24 @@ pub fn run(
             event,
             dangerously_skip_install,
             dangerously_skip_build,
-        ),
+        )?,
+    };
+
+    // spec: CLI-222 -- a successful run answers `--json` with the HOOK-107/108
+    // tally rather than nothing, so a script sees "ran 2, skipped 0" instead
+    // of an empty stdout.
+    if crate::render::ctx().json {
+        emit_json(&HooksRunResult {
+            schema: 1,
+            action: "hooks-run",
+            target: target.to_string(),
+            event: event_label(event),
+            existed: tally.existed,
+            ran: tally.ran,
+            skipped: tally.skipped_for_consent,
+        })?;
     }
+    Ok(())
 }
 
 /// `mind hooks list <target>` -- report declared hooks without running any.
@@ -55,11 +157,11 @@ pub fn run(
 /// For a source target, lists the source's hooks (with pending/last-ran info
 /// for install hooks) and the hooks of its installed items. For an item ref,
 /// lists only that item's hooks.
-// spec: HOOK-104 CLI-196 HOOK-105
+// spec: HOOK-104 CLI-196 HOOK-105 CLI-220
 pub fn list(paths: &Paths, target: &str) -> Result<()> {
     match resolve_hook_target(paths, target)? {
-        HookTarget::Source(selector) => list_source_hooks(paths, &selector),
-        HookTarget::Item(item_ref) => list_item_hooks(paths, &item_ref),
+        HookTarget::Source(selector) => list_source_hooks(paths, target, &selector),
+        HookTarget::Item(item_ref) => list_item_hooks(paths, target, &item_ref),
     }
 }
 
@@ -136,6 +238,7 @@ fn resolve_hook_target(paths: &Paths, target: &str) -> Result<HookTarget> {
 // ---------------------------------------------------------------------------
 
 /// Run a source's hooks for the given event (`install` or `uninstall`).
+/// Returns the HOOK-107 tally on success (CLI-222).
 // spec: HOOK-101
 fn run_source_hooks(
     paths: &Paths,
@@ -143,7 +246,7 @@ fn run_source_hooks(
     event: HookEventArg,
     force: bool,
     dangerously_skip: bool,
-) -> Result<()> {
+) -> Result<HookTally> {
     let mut registry = Registry::load(paths)?;
 
     let indices: Vec<usize> = registry
@@ -328,7 +431,11 @@ fn run_source_hooks(
         });
     }
 
-    Ok(())
+    Ok(HookTally {
+        existed,
+        ran,
+        skipped_for_consent,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -377,6 +484,8 @@ impl HookTally {
 ///
 /// `target` is the raw target string the user typed; it names the run in the
 /// HOOK-108 error so the printed remedy is the command they actually invoked.
+/// Returns the HOOK-107/108 tally on success (CLI-222); always zero for
+/// `--event build`, which has no hook-by-hook count of its own.
 // spec: HOOK-102 HOOK-103 HOOK-108
 fn run_item_hooks(
     paths: &Paths,
@@ -385,7 +494,7 @@ fn run_item_hooks(
     event: HookEventArg,
     dangerously_skip_install: bool,
     dangerously_skip_build: bool,
-) -> Result<()> {
+) -> Result<HookTally> {
     let manifest = Manifest::load(paths)?;
     let matches = select_installed(&manifest.items, item_ref);
 
@@ -428,7 +537,7 @@ fn run_item_hooks(
             skipped: tally.skipped_for_consent,
         });
     }
-    Ok(())
+    Ok(tally)
 }
 
 /// Re-install an item through the transactional path so a failed build leaves
@@ -563,8 +672,8 @@ fn run_item_lifecycle_hooks(
 // ---------------------------------------------------------------------------
 
 /// List hooks for matching sources (and their installed items) without running.
-// spec: HOOK-104 CLI-196
-fn list_source_hooks(paths: &Paths, selector: &str) -> Result<()> {
+// spec: HOOK-104 CLI-196 CLI-220
+fn list_source_hooks(paths: &Paths, target: &str, selector: &str) -> Result<()> {
     let registry = Registry::load(paths)?;
     let manifest = Manifest::load(paths)?;
 
@@ -580,6 +689,8 @@ fn list_source_hooks(paths: &Paths, selector: &str) -> Result<()> {
         });
     }
 
+    let mut sources_json: Vec<SourceHooksJson> = Vec::new();
+
     for source in matching {
         let clone_dir = source.clone_dir(paths);
         let toml_path = clone_dir.join("mind.toml");
@@ -593,6 +704,7 @@ fn list_source_hooks(paths: &Paths, selector: &str) -> Result<()> {
         println!("source: {}", source.name);
         let current = source.commit.as_deref();
 
+        let mut hooks_json: Vec<SourceHookJson> = Vec::new();
         if resolved.is_empty() {
             println!("  (no source-level hooks declared)");
         } else {
@@ -603,11 +715,21 @@ fn list_source_hooks(paths: &Paths, selector: &str) -> Result<()> {
                     HookEvent::Uninstall => "uninstall",
                 };
                 let status = if h.event == HookEvent::Install {
-                    install_hook_status(source, &h.run, current)
+                    Some(install_hook_status(source, &h.run, current))
                 } else {
-                    "(not recorded)".to_string()
+                    None
                 };
-                println!("  [{event_str}] {kind_str}  {:?}  {}", h.run, status);
+                println!(
+                    "  [{event_str}] {kind_str}  {:?}  {}",
+                    h.run,
+                    status.as_deref().unwrap_or("(not recorded)")
+                );
+                hooks_json.push(SourceHookJson {
+                    event: event_str,
+                    required: !h.optional,
+                    command: h.run.clone(),
+                    status,
+                });
             }
         }
 
@@ -618,6 +740,7 @@ fn list_source_hooks(paths: &Paths, selector: &str) -> Result<()> {
             .filter(|it| it.source == source.name)
             .collect();
 
+        let mut items_json: Vec<ItemHooksJson> = Vec::new();
         if !source_items.is_empty() {
             let mut catalog_items = Vec::new();
             let _ = crate::catalog::scan_source(paths, source, &mut catalog_items);
@@ -634,6 +757,7 @@ fn list_source_hooks(paths: &Paths, selector: &str) -> Result<()> {
 
                 if !item_hooks.is_empty() {
                     println!("  item: {}", installed.key());
+                    let mut item_hooks_json: Vec<ItemHookJson> = Vec::new();
                     for h in item_hooks {
                         let kind_str = if h.optional { "optional" } else { "required" };
                         let event_str = match h.event {
@@ -641,10 +765,36 @@ fn list_source_hooks(paths: &Paths, selector: &str) -> Result<()> {
                             HookEvent::Uninstall => "uninstall",
                         };
                         println!("    [{event_str}] {kind_str}  {:?}", h.run);
+                        item_hooks_json.push(ItemHookJson {
+                            event: event_str,
+                            required: !h.optional,
+                            command: h.run.clone(),
+                        });
                     }
+                    items_json.push(ItemHooksJson {
+                        item: installed.key(),
+                        source: None,
+                        hooks: item_hooks_json,
+                    });
                 }
             }
         }
+
+        sources_json.push(SourceHooksJson {
+            source: source.name.clone(),
+            hooks: hooks_json,
+            items: items_json,
+        });
+    }
+
+    if crate::render::ctx().json {
+        emit_json(&HooksListResult {
+            schema: 1,
+            action: "hooks-list",
+            target: target.to_string(),
+            sources: sources_json,
+            items: Vec::new(),
+        })?;
     }
     Ok(())
 }
@@ -654,8 +804,8 @@ fn list_source_hooks(paths: &Paths, selector: &str) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 /// List hooks for matching installed items without running any.
-// spec: HOOK-104 CLI-196
-fn list_item_hooks(paths: &Paths, item_ref: &crate::resolve::ItemRef) -> Result<()> {
+// spec: HOOK-104 CLI-196 CLI-220
+fn list_item_hooks(paths: &Paths, target: &str, item_ref: &crate::resolve::ItemRef) -> Result<()> {
     let manifest = Manifest::load(paths)?;
     let matches = select_installed(&manifest.items, item_ref);
 
@@ -666,6 +816,8 @@ fn list_item_hooks(paths: &Paths, item_ref: &crate::resolve::ItemRef) -> Result<
     }
 
     let registry = Registry::load(paths)?;
+
+    let mut items_json: Vec<ItemHooksJson> = Vec::new();
 
     for installed in matches {
         println!("item: {} (source {})", installed.key(), installed.source);
@@ -683,6 +835,7 @@ fn list_item_hooks(paths: &Paths, item_ref: &crate::resolve::ItemRef) -> Result<
             vec![]
         };
 
+        let mut hooks_json: Vec<ItemHookJson> = Vec::new();
         if hooks.is_empty() {
             println!("  (no hooks declared)");
         } else {
@@ -693,8 +846,29 @@ fn list_item_hooks(paths: &Paths, item_ref: &crate::resolve::ItemRef) -> Result<
                     HookEvent::Uninstall => "uninstall",
                 };
                 println!("  [{event_str}] {kind_str}  {:?}", h.run);
+                hooks_json.push(ItemHookJson {
+                    event: event_str,
+                    required: !h.optional,
+                    command: h.run.clone(),
+                });
             }
         }
+
+        items_json.push(ItemHooksJson {
+            item: installed.key(),
+            source: Some(installed.source.clone()),
+            hooks: hooks_json,
+        });
+    }
+
+    if crate::render::ctx().json {
+        emit_json(&HooksListResult {
+            schema: 1,
+            action: "hooks-list",
+            target: target.to_string(),
+            sources: Vec::new(),
+            items: items_json,
+        })?;
     }
     Ok(())
 }

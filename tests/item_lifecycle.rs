@@ -919,6 +919,31 @@ fn init_source_with_prefix_emits_the_unguarded_reference_advisory() {
     );
 }
 
+#[test]
+fn init_source_does_not_flag_a_sibling_mention_inside_a_code_span() {
+    // spec: INIT-4 NS-55
+    // The unguarded-reference advisory is structure-aware (NS-55) on every
+    // surface, not just `review`: a sibling name inside a code span is not a
+    // real reference, so `init-source` must not flag it either, even under a
+    // prefix that would otherwise gate the check open.
+    let sb = init_fixture("codespan", Some("jk"));
+    write(
+        &sb.source.join("agents/dev.md"),
+        "---\ndescription: dev agent\n---\n# dev\nRun `review` locally first.\n",
+    );
+    let r = sb.mind_cwd(&["init-source", "."], &sb.source);
+    assert!(
+        r.success,
+        "init-source should succeed: {} {}",
+        r.stdout, r.stderr
+    );
+    let combined = format!("{}{}", r.stdout, r.stderr);
+    assert!(
+        !combined.contains("references sibling(s) in prose: review"),
+        "a code-span mention is not a reference and must not be flagged: {combined}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // CLI-203: `learn <url> --pin` on an already-melded link prints a note that
 // --pin was ignored, rather than silently dropping the flag.

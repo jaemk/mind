@@ -97,16 +97,26 @@ the recorded content hash is of the source (token) form.
   (source) form, not the expanded copy, so drift detection compares source with
   source (NS-13). Both prefixed and unprefixed installs expand tokens (NS-14): a
   store path is prefix-aware via the referent's effective name.
-- `TOOL-14` Path tokens expand in every text file of every item kind, including
-  tool directories and a skill's bundled scripts (so a bundled `pr.py` may
-  contain `{{tools:shard-plan}}`), matching the scan breadth of `{{ns:}}`
-  (NS-20). Token edge cases mirror `{{ns:}}` (NS-15): inner whitespace is trimmed
-  (`{{ path:x }}`); an unterminated token (no closing `}}`) is left verbatim;
-  non-UTF-8 files are not scanned; text with no `{{` token is copied unchanged.
+- `TOOL-14` Path tokens expand in a markdown item file, whatever the item kind:
+  the anchor file of a skill or tool (`SKILL.md`, `TOOL.md`), an agent or rule's
+  own file, or a bundled markdown reference doc. They do NOT expand in a
+  non-markdown bundled file (a script, data) -- `{{tools:shard-plan}}` written in
+  a bundled `pr.py` is left exactly as written -- because path tokens follow the
+  same markdown-only rule `{{ns:}}` does (NS-53, TOOL-19). The designed use of a
+  path token is prose (a skill telling Claude to run `{{tools:detect}}`), which
+  is why the narrowing costs nothing in practice. Token edge cases mirror
+  `{{ns:}}` (NS-15): inner whitespace is trimmed (`{{ path:x }}`); an
+  unterminated token (no closing `}}`) is left verbatim; a non-UTF-8 file is not
+  scanned; text with no `{{` token is copied unchanged.
 - `TOOL-15` Path tokens resolve within the source only (sibling scope), as
   `{{ns:}}` does, so tool-to-tool and bundled-script-to-tool references resolve
   when both items ship in the same source. Cross-source tooling references are out
   of scope: ship a tool in the same source as the items that use it.
+- `TOOL-19` Path tokens follow NS-53: `{{self}}`, `{{tools:name}}`, and
+  `{{path:ref}}` all expand only in a markdown file (an extension of `md`,
+  `markdown`, `mdown`, or `mkd`, case-insensitively), the same rule and the same
+  chokepoint (`namespace::is_markdown`) `{{ns:}}` expansion uses. Combined with
+  TOOL-14, this is the complete statement of where every token family expands.
 - `TOOL-16` A path token renders the store root with a leading `~` when the store
   lies under the user's home directory (the default `~/.mind/store`): the home
   prefix is written as a literal `~`, not spelled out absolutely. This keeps the

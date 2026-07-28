@@ -305,14 +305,16 @@ fn hooks_list_source_shows_declared_hooks() {
     );
 }
 
-/// CLI-217 names `hooks list` as one of the four verbs with no `--json`
-/// output; `main.rs`'s `json_reserves_stdout` excludes it on that premise, and
-/// `list_source_hooks` genuinely never reads `ctx().json`. Pins the premise:
-/// `--json` changes nothing about the output (still plain text with the
-/// `[install]`/`[uninstall]` tags), not silently-empty or malformed JSON.
+/// `hooks list --json` answers with the CLI-220 document instead of the plain
+/// text listing: text mode is unaffected (byte for byte what it always
+/// printed), but `--json` now yields exactly one JSON document naming the
+/// source, its hooks (as objects, with `status` on the recorded install
+/// hook), and its installed items (also objects, per item-hook entry list).
+/// This used to be a documented gap (CLI-217 excluded `hooks list` from
+/// `--json` support entirely); CLI-218/CLI-220 close it.
 #[test]
-fn hooks_list_json_flag_is_ignored_and_still_prints_plain_text() {
-    // spec: CLI-217 HOOK-104 CLI-196
+fn hooks_list_json_answers_with_the_cli_220_document() {
+    // spec: CLI-218 CLI-220 HOOK-104 CLI-196
     let sb = Sandbox::new("hooks-list-json");
     sb.write_and_commit(
         "mind.toml",
@@ -334,15 +336,43 @@ fn hooks_list_json_flag_is_ignored_and_still_prints_plain_text() {
         plain.stderr,
         json.stderr
     );
-    assert_eq!(
-        plain.stdout, json.stdout,
-        "`--json` must not change hooks list's output at all (no JSON branch exists)"
-    );
+    // Text mode is unaffected by the JSON support added alongside it.
     assert!(
-        serde_json::from_str::<serde_json::Value>(json.stdout.trim()).is_err(),
-        "hooks list --json must not accidentally look like a JSON document: {:?}",
-        json.stdout
+        plain.stdout.contains("[install]") && plain.stdout.contains("setup"),
+        "text mode must be unchanged: {:?}",
+        plain.stdout
     );
+
+    let doc: serde_json::Value = serde_json::from_str(json.stdout.trim()).unwrap_or_else(|e| {
+        panic!(
+            "hooks list --json stdout must parse as one JSON document ({e}): {:?}",
+            json.stdout
+        )
+    });
+    assert_eq!(doc["schema"], 1, "{doc}");
+    assert_eq!(doc["action"], "hooks-list", "{doc}");
+    assert_eq!(doc["target"], "hooks-list-json", "{doc}");
+    let sources = doc["sources"]
+        .as_array()
+        .unwrap_or_else(|| panic!("sources must be an array: {doc}"));
+    assert_eq!(sources.len(), 1, "{doc}");
+    assert!(
+        sources[0]["source"]
+            .as_str()
+            .is_some_and(|s| s.ends_with("hooks-list-json")),
+        "{doc}"
+    );
+    let hooks = sources[0]["hooks"]
+        .as_array()
+        .unwrap_or_else(|| panic!("sources[0].hooks must be an array: {doc}"));
+    assert_eq!(hooks.len(), 1, "{doc}");
+    assert_eq!(hooks[0]["event"], "install", "{doc}");
+    assert_eq!(hooks[0]["required"], true, "{doc}");
+    assert_eq!(hooks[0]["command"], "echo setup", "{doc}");
+    assert_eq!(hooks[0]["status"], "pending (never ran)", "{doc}");
+    // The top-level `items` field (for an item-ref target) is absent here,
+    // since this target resolved as a source.
+    assert!(doc.get("items").is_none(), "{doc}");
 }
 
 /// `hooks list <source>` on a source with no hooks prints a note, not an error.
@@ -365,6 +395,108 @@ fn hooks_list_source_no_hooks_prints_note() {
         "should note absence of hooks: {}",
         r.stdout
     );
+}
+
+/// The CLI-220 document for a source with NO hooks declared: the shape must
+/// still be complete, with `hooks` present as an empty array rather than the
+/// member vanishing. `sources` itself is `skip_serializing_if = "Vec::is_empty"`
+/// so a reader could reasonably fear the same treatment one level down; this
+/// pins that only the top-level `sources`/`items` pair is elided, and only when
+/// the OTHER one is the populated branch.
+#[test]
+fn hooks_list_json_source_without_hooks_still_has_an_empty_hooks_array() {
+    // spec: CLI-220 HOOK-104
+    let sb = Sandbox::new("no-hooks-json");
+    // No mind.toml -> no hooks declared, and no items installed.
+    let r = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(r.success, "meld failed: {}", r.stderr);
+
+    let r = sb.mind(&["--json", "hooks", "list", "no-hooks-json"]);
+    assert!(r.success, "hooks list --json: {} {}", r.stdout, r.stderr);
+    let doc: serde_json::Value = serde_json::from_str(r.stdout.trim())
+        .unwrap_or_else(|e| panic!("one JSON document ({e}): {:?}", r.stdout));
+    let sources = doc["sources"]
+        .as_array()
+        .unwrap_or_else(|| panic!("sources must be present even with no hooks: {doc}"));
+    assert_eq!(sources.len(), 1, "{doc}");
+    assert_eq!(
+        sources[0]["hooks"],
+        serde_json::json!([]),
+        "an empty `hooks` array, not an absent member: {doc}"
+    );
+    assert_eq!(
+        sources[0]["items"],
+        serde_json::json!([]),
+        "an empty `items` array, not an absent member: {doc}"
+    );
+    // The "(no source-level hooks declared)" text still reaches the user, on
+    // stderr, because CLI-217 redirects fd 1 rather than dropping the line.
+    assert!(
+        r.stderr.contains("no source-level hooks"),
+        "the text note must survive the redirect: {:?}",
+        r.stderr
+    );
+}
+
+/// A glob selector matching SEVERAL sources still answers with exactly ONE
+/// CLI-220 document, carrying one `sources` entry per match. The implementor
+/// only ever exercised a single-match target, and a per-source emit would look
+/// identical in that case while producing two concatenated documents here.
+#[test]
+fn hooks_list_json_glob_matching_two_sources_is_one_document() {
+    // spec: CLI-217 CLI-220 HOOK-104
+    let sb = Sandbox::new("globa");
+    sb.write_and_commit(
+        "mind.toml",
+        concat!(
+            "[[hooks]]\n",
+            "name = \"a-setup\"\n",
+            "run = \"echo a\"\n",
+            "event = \"install\"\n",
+        ),
+    );
+    let other = sb.base.join("globb");
+    init_source_repo(
+        &other,
+        concat!(
+            "[[hooks]]\n",
+            "name = \"b-setup\"\n",
+            "run = \"echo b\"\n",
+            "event = \"install\"\n",
+        ),
+    );
+
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    assert!(
+        sb.mind(&["meld", &other.to_string_lossy()]).success,
+        "second meld must succeed"
+    );
+
+    let r = sb.mind(&["--json", "hooks", "list", "glob*"]);
+    assert!(
+        r.success,
+        "hooks list --json glob: {} {}",
+        r.stdout, r.stderr
+    );
+    let doc: serde_json::Value = serde_json::from_str(r.stdout.trim()).unwrap_or_else(|e| {
+        panic!(
+            "a multi-source glob must still be ONE document ({e}): {:?}",
+            r.stdout
+        )
+    });
+    let sources = doc["sources"]
+        .as_array()
+        .unwrap_or_else(|| panic!("sources must be an array: {doc}"));
+    assert_eq!(sources.len(), 2, "both matched sources must appear: {doc}");
+    let commands: Vec<&str> = sources
+        .iter()
+        .filter_map(|s| s["hooks"][0]["command"].as_str())
+        .collect();
+    assert!(
+        commands.contains(&"echo a") && commands.contains(&"echo b"),
+        "each source's own hooks must be under its own entry: {doc}"
+    );
+    assert_eq!(doc["target"], "glob*", "{doc}");
 }
 
 /// `hooks list <unknown>` fails when no source matches the selector.
@@ -424,6 +556,121 @@ fn hooks_list_item_shows_hooks() {
     assert!(
         out.contains("echo scan-installed") || out.contains("scan-installed"),
         "install hook command should appear: {out}"
+    );
+}
+
+/// CLI-220's OTHER branch, which no existing test drives: an item-ref target
+/// populates the top-level `items` array (each entry naming its own `source`)
+/// and omits `sources` entirely. Also pins that item-level entries carry NO
+/// `status` member -- the spec says the pending/last-ran report is only ever
+/// present on a recorded SOURCE install hook.
+#[test]
+fn hooks_list_json_item_target_answers_with_items_and_no_sources() {
+    // spec: CLI-220 HOOK-104 CLI-196
+    let sb = Sandbox::new("item-json-src");
+    sb.write_and_commit(
+        "mind.toml",
+        concat!(
+            "[[items]]\n",
+            "kind = \"skill\"\n",
+            "name = \"myscan\"\n",
+            "path = \"skills/myscan\"\n",
+            "install = \"echo scan-installed\"\n",
+            "uninstall = \"echo scan-removed\"\n",
+        ),
+    );
+    sb.write_and_commit(
+        "skills/myscan/SKILL.md",
+        "---\ndescription: scan skill\n---\n# scan\n",
+    );
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    assert!(
+        sb.mind(&["learn", "myscan", "--dangerously-skip-install-hook-check"])
+            .success
+    );
+
+    let r = sb.mind(&["--json", "hooks", "list", "item-json-src#myscan"]);
+    assert!(r.success, "hooks list --json: {} {}", r.stdout, r.stderr);
+    let doc: serde_json::Value = serde_json::from_str(r.stdout.trim())
+        .unwrap_or_else(|e| panic!("one JSON document ({e}): {:?}", r.stdout));
+    assert_eq!(doc["action"], "hooks-list", "{doc}");
+    assert_eq!(doc["target"], "item-json-src#myscan", "{doc}");
+    assert!(
+        doc.get("sources").is_none(),
+        "an item-ref target must omit `sources`, not send an empty array: {doc}"
+    );
+    let items = doc["items"]
+        .as_array()
+        .unwrap_or_else(|| panic!("items must be an array: {doc}"));
+    assert_eq!(items.len(), 1, "{doc}");
+    assert_eq!(items[0]["item"], "skill:myscan", "{doc}");
+    assert!(
+        items[0]["source"]
+            .as_str()
+            .is_some_and(|s| s.ends_with("item-json-src")),
+        "a top-level item entry names its own source: {doc}"
+    );
+    let hooks = items[0]["hooks"]
+        .as_array()
+        .unwrap_or_else(|| panic!("hooks must be an array: {doc}"));
+    assert_eq!(hooks.len(), 2, "install + uninstall: {doc}");
+    let install = hooks
+        .iter()
+        .find(|h| h["event"] == "install")
+        .unwrap_or_else(|| panic!("an install entry: {doc}"));
+    assert_eq!(install["command"], "echo scan-installed", "{doc}");
+    assert_eq!(install["required"], true, "{doc}");
+    assert!(
+        install.get("status").is_none(),
+        "only a recorded SOURCE install hook carries `status`: {doc}"
+    );
+}
+
+/// The same item's hooks reached through its SOURCE target appear nested under
+/// that source's entry, with no `source` member of their own (it is the
+/// enclosing object). Pins the two encodings of the same item apart, which the
+/// implementor's single source-target test could not.
+#[test]
+fn hooks_list_json_source_target_nests_item_hooks_without_a_source_member() {
+    // spec: CLI-220 HOOK-104
+    let sb = Sandbox::new("nest-json-src");
+    sb.write_and_commit(
+        "mind.toml",
+        concat!(
+            "[[items]]\n",
+            "kind = \"skill\"\n",
+            "name = \"myscan\"\n",
+            "path = \"skills/myscan\"\n",
+            "install = \"echo scan-installed\"\n",
+        ),
+    );
+    sb.write_and_commit(
+        "skills/myscan/SKILL.md",
+        "---\ndescription: scan skill\n---\n# scan\n",
+    );
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    assert!(
+        sb.mind(&["learn", "myscan", "--dangerously-skip-install-hook-check"])
+            .success
+    );
+
+    let r = sb.mind(&["--json", "hooks", "list", "nest-json-src"]);
+    assert!(r.success, "hooks list --json: {} {}", r.stdout, r.stderr);
+    let doc: serde_json::Value = serde_json::from_str(r.stdout.trim())
+        .unwrap_or_else(|e| panic!("one JSON document ({e}): {:?}", r.stdout));
+    let nested = &doc["sources"][0]["items"][0];
+    assert_eq!(nested["item"], "skill:myscan", "{doc}");
+    assert!(
+        nested.get("source").is_none(),
+        "a nested item's source is the enclosing object, so it is omitted: {doc}"
+    );
+    assert_eq!(
+        nested["hooks"][0]["command"], "echo scan-installed",
+        "{doc}"
+    );
+    assert!(
+        doc.get("items").is_none(),
+        "the top-level `items` belongs to the item-ref branch only: {doc}"
     );
 }
 
@@ -2872,7 +3119,7 @@ fn hooks_run_interactive_accept_runs_the_hook() {
 /// pointing at the real stdout.
 #[test]
 fn hooks_run_json_interactive_accept_prompts_on_stderr_and_runs_the_hook() {
-    // spec: CLI-217 HOOK-109 HOOK-100
+    // spec: CLI-217 CLI-222 HOOK-109 HOOK-100
     let sb = Sandbox::new("tty-accept-json");
     sb.write_and_commit(
         "mind.toml",
@@ -2906,16 +3153,21 @@ fn hooks_run_json_interactive_accept_prompts_on_stderr_and_runs_the_hook() {
         r.stdout,
         r.stderr
     );
-    // `hooks run --json` answers a SUCCESSFUL run with nothing on stdout (only
-    // the HOOK-107 no-op path gets a CLI-181 envelope; see HOOK-107 in
-    // spec/install-hooks.md), so the interesting assertion here is where the
-    // prompt went, not whether stdout parses as JSON.
-    assert!(
-        r.stdout.is_empty(),
-        "hooks run --json answers a successful run with nothing on stdout \
-         (HOOK-107): {:?}",
-        r.stdout
-    );
+    // `hooks run --json` on a successful run answers with the CLI-222 tally
+    // document (existed=1, ran=1, skipped=0), not silence.
+    let doc: serde_json::Value = serde_json::from_str(r.stdout.trim()).unwrap_or_else(|e| {
+        panic!(
+            "hooks run --json stdout must parse as one JSON document ({e}): {:?}",
+            r.stdout
+        )
+    });
+    assert_eq!(doc["schema"], 1, "{doc}");
+    assert_eq!(doc["action"], "hooks-run", "{doc}");
+    assert_eq!(doc["target"], "tty-accept-json", "{doc}");
+    assert_eq!(doc["event"], "install", "{doc}");
+    assert_eq!(doc["existed"], 1, "{doc}");
+    assert_eq!(doc["ran"], 1, "{doc}");
+    assert_eq!(doc["skipped"], 0, "{doc}");
     assert!(
         r.stderr.contains("====== hook: setup ======") && r.stderr.contains("Run this hook?"),
         "the interactive disclosure and prompt must still reach the user, on \
@@ -3881,6 +4133,253 @@ fn hooks_run_item_build_glob_over_mixed_items_stays_exit_zero() {
         r.stdout.contains("rebuilding tool:alpha") && r.stdout.contains("rebuilding tool:zeta"),
         "both matched items must be re-installed: {}",
         r.stdout
+    );
+}
+
+/// CLI-222 over a MULTI-match item glob: the tally accumulates across every
+/// matched item and stdout is still ONE document. The implementor exercised
+/// only single-match targets, where a per-item emit and an accumulate-then-emit
+/// are indistinguishable.
+#[test]
+fn hooks_run_json_item_glob_accumulates_one_tally_over_all_matches() {
+    // spec: CLI-217 CLI-222 HOOK-108 CLI-194
+    let sb = Sandbox::new("tally-glob");
+    sb.write_and_commit(
+        "mind.toml",
+        concat!(
+            "[[items]]\n",
+            "kind = \"tool\"\n",
+            "name = \"alpha\"\n",
+            "path = \"tools/alpha\"\n",
+            "install = \"echo a\"\n",
+            "\n",
+            "[[items]]\n",
+            "kind = \"tool\"\n",
+            "name = \"zeta\"\n",
+            "path = \"tools/zeta\"\n",
+            "install = \"echo z\"\n",
+        ),
+    );
+    sb.write_and_commit("tools/alpha/run.sh", "#!/bin/sh\n");
+    sb.write_and_commit("tools/zeta/run.sh", "#!/bin/sh\n");
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    assert!(
+        sb.mind(&["learn", "*", "--dangerously-skip-install-hook-check"])
+            .success
+    );
+
+    let r = sb.mind(&[
+        "--json",
+        "hooks",
+        "run",
+        "--event",
+        "install",
+        "--dangerously-skip-install-hook-check",
+        "tally-glob#*",
+    ]);
+    assert!(
+        r.success,
+        "hooks run --json glob: {} {}",
+        r.stdout, r.stderr
+    );
+    let doc: serde_json::Value = serde_json::from_str(r.stdout.trim()).unwrap_or_else(|e| {
+        panic!(
+            "a multi-item glob must still be ONE document ({e}): {:?}",
+            r.stdout
+        )
+    });
+    assert_eq!(doc["action"], "hooks-run", "{doc}");
+    assert_eq!(doc["target"], "tally-glob#*", "{doc}");
+    assert_eq!(doc["existed"], 2, "one hook per matched item: {doc}");
+    assert_eq!(doc["ran"], 2, "{doc}");
+    assert_eq!(doc["skipped"], 0, "{doc}");
+}
+
+/// CLI-222 says `--event build`'s tally is always zero. Driven over a two-item
+/// glob so the claim is pinned where it would be easiest to get wrong (two
+/// items really were rebuilt, and the counts still read zero), and so the
+/// `rebuilding ...` progress lines -- plain `println!`s -- are proven to land
+/// on stderr rather than corrupting the document.
+#[test]
+fn hooks_run_json_build_event_answers_with_a_zeroed_tally() {
+    // spec: CLI-217 CLI-222 HOOK-103
+    let sb = Sandbox::new("tally-build");
+    sb.write_and_commit(
+        "mind.toml",
+        concat!(
+            "[[items]]\n",
+            "kind = \"tool\"\n",
+            "name = \"alpha\"\n",
+            "path = \"tools/alpha\"\n",
+            "\n",
+            "[[items]]\n",
+            "kind = \"tool\"\n",
+            "name = \"zeta\"\n",
+            "path = \"tools/zeta\"\n",
+        ),
+    );
+    sb.write_and_commit("tools/alpha/run.sh", "#!/bin/sh\n");
+    sb.write_and_commit("tools/zeta/run.sh", "#!/bin/sh\n");
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    assert!(sb.mind(&["learn", "*"]).success);
+
+    let r = sb.mind(&[
+        "--json",
+        "hooks",
+        "run",
+        "--event",
+        "build",
+        "tally-build#*",
+    ]);
+    assert!(
+        r.success,
+        "hooks run --json build: {} {}",
+        r.stdout, r.stderr
+    );
+    let doc: serde_json::Value = serde_json::from_str(r.stdout.trim())
+        .unwrap_or_else(|e| panic!("one JSON document ({e}): {:?}", r.stdout));
+    assert_eq!(doc["event"], "build", "{doc}");
+    assert_eq!(
+        doc["existed"], 0,
+        "a build run has no hook-by-hook count: {doc}"
+    );
+    assert_eq!(doc["ran"], 0, "{doc}");
+    assert_eq!(doc["skipped"], 0, "{doc}");
+    assert!(
+        r.stderr.contains("rebuilding tool:alpha") && r.stderr.contains("rebuilding tool:zeta"),
+        "both rebuild lines must reach the user on stderr: {:?}",
+        r.stderr
+    );
+}
+
+/// An install hook already recorded at the current commit is not even
+/// considered (HOOK-101's already-ran skip is a `continue` BEFORE the tally is
+/// bumped), so a repeat `hooks run --json` reports `existed: 0` -- the same
+/// zeroed document as "no hooks declared", and distinguishable from the first
+/// run's `existed: 1, ran: 1`. Pins that the "nothing to do" document really is
+/// reachable from a source that HAS hooks, not just from one that has none.
+#[test]
+fn hooks_run_json_already_ran_hook_answers_with_a_zeroed_tally() {
+    // spec: CLI-222 HOOK-101 HOOK-107
+    let sb = Sandbox::new("tally-again");
+    sb.write_and_commit(
+        "mind.toml",
+        concat!(
+            "[[hooks]]\n",
+            "name = \"setup\"\n",
+            "run = \"echo setup\"\n",
+            "event = \"install\"\n",
+        ),
+    );
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+
+    let first = sb.mind(&[
+        "--json",
+        "hooks",
+        "run",
+        "--dangerously-skip-install-hook-check",
+        "tally-again",
+    ]);
+    assert!(
+        first.success,
+        "first run: {} {}",
+        first.stdout, first.stderr
+    );
+    let doc: serde_json::Value = serde_json::from_str(first.stdout.trim())
+        .unwrap_or_else(|e| panic!("one JSON document ({e}): {:?}", first.stdout));
+    assert_eq!(doc["existed"], 1, "{doc}");
+    assert_eq!(doc["ran"], 1, "{doc}");
+
+    let again = sb.mind(&[
+        "--json",
+        "hooks",
+        "run",
+        "--dangerously-skip-install-hook-check",
+        "tally-again",
+    ]);
+    assert!(
+        again.success,
+        "repeat run: {} {}",
+        again.stdout, again.stderr
+    );
+    let doc: serde_json::Value = serde_json::from_str(again.stdout.trim())
+        .unwrap_or_else(|e| panic!("one JSON document ({e}): {:?}", again.stdout));
+    assert_eq!(
+        doc["existed"], 0,
+        "an already-ran hook is never considered: {doc}"
+    );
+    assert_eq!(doc["ran"], 0, "{doc}");
+    assert_eq!(doc["skipped"], 0, "{doc}");
+
+    // ...and `--force` reconsiders it, so the zero above is the already-ran
+    // skip and not a broken counter.
+    let forced = sb.mind(&[
+        "--json",
+        "hooks",
+        "run",
+        "--force",
+        "--dangerously-skip-install-hook-check",
+        "tally-again",
+    ]);
+    let doc: serde_json::Value = serde_json::from_str(forced.stdout.trim())
+        .unwrap_or_else(|e| panic!("one JSON document ({e}): {:?}", forced.stdout));
+    assert_eq!(doc["existed"], 1, "--force reconsiders it: {doc}");
+    assert_eq!(doc["ran"], 1, "{doc}");
+}
+
+/// The CLI-222 field most likely to be misread: `skipped` counts ONLY skips for
+/// want of consent (a non-TTY run), never an interactive decline. A user who
+/// answers "no" at the prompt gets `existed: 1, ran: 0, skipped: 0` and exit 0
+/// -- the counts do not add up to `existed`, by design (HOOK-107 keeps an
+/// interactive decline out of the "could not consent" bucket, which is what
+/// keeps it exit 0). Without this test the whole non-zero-`skipped` story is
+/// untested from the outside, since every OTHER way to skip is an error path.
+#[test]
+fn hooks_run_json_interactive_decline_reports_zero_ran_and_zero_skipped() {
+    // spec: CLI-222 HOOK-107 HOOK-109
+    let sb = Sandbox::new("tty-decline-json");
+    sb.write_and_commit(
+        "mind.toml",
+        concat!(
+            "[[hooks]]\n",
+            "name = \"setup\"\n",
+            "run = \"touch declined.sentinel\"\n",
+            "event = \"install\"\n",
+        ),
+    );
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+
+    let r = sb.mind_env_stdin(
+        &[
+            "--json",
+            "hooks",
+            "run",
+            "--event",
+            "install",
+            "tty-decline-json",
+        ],
+        &[("MIND_TTY", "1")],
+        "n\n",
+    );
+    assert!(
+        r.success,
+        "an interactive decline stays exit 0: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        !sb.source.join("declined.sentinel").exists(),
+        "the declined hook must not have run: {} {}",
+        r.stdout,
+        r.stderr
+    );
+    let doc: serde_json::Value = serde_json::from_str(r.stdout.trim())
+        .unwrap_or_else(|e| panic!("one JSON document ({e}): {:?}", r.stdout));
+    assert_eq!(doc["existed"], 1, "the hook was considered: {doc}");
+    assert_eq!(doc["ran"], 0, "and declined: {doc}");
+    assert_eq!(
+        doc["skipped"], 0,
+        "`skipped` is the want-of-consent bucket only; an interactive decline \
+         is not one: {doc}"
     );
 }
 

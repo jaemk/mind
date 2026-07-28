@@ -730,17 +730,15 @@ fn fix_treats_an_over_indented_continuation_line_as_prose() {
     );
 }
 
-/// A `.markdown` file inside an item is markdown, and `install` expands the
-/// `{{ns:}}` tokens in *every* UTF-8 file it copies, so those tokens are live
-/// references. `--fix` decides prose-versus-code by an exact `.md` extension
-/// test, so it treats the file as all code and strips every token in it,
-/// leaving bare names that no longer resolve under a prefix. Same destructive
-/// outcome as a misclassified fence, reached through the file filter instead.
-/// spec: NS-24 NS-48
+/// A `.markdown` file inside an item is markdown ([`namespace::is_markdown`],
+/// NS-53), and `install` expands `{{ns:}}` tokens in every markdown file it
+/// copies, so those tokens are live references there too. `--fix` recognizes
+/// the extension through the same predicate `install` uses (rather than an
+/// exact `.md` test), so it treats the file as prose and leaves the token
+/// alone instead of stripping it into a bare name that no longer resolves
+/// under a prefix.
+/// spec: NS-24 NS-48 NS-53
 #[test]
-#[ignore = "defect: `--fix` un-wraps every token in a `.markdown` (or `.txt`, \
-            or uppercase `.MD`) file because the prose test is an exact `.md` \
-            extension match, while `install` still expands them"]
 fn fix_keeps_prose_tokens_in_a_markdown_file_that_is_not_dot_md() {
     let sb = fixture();
     let doc = sb.source.join("skills/cos-run/REFERENCE.markdown");
@@ -759,6 +757,52 @@ fn fix_keeps_prose_tokens_in_a_markdown_file_that_is_not_dot_md() {
         original,
         "a prose token in a markdown file must survive whatever the extension"
     );
+}
+
+/// The companion the test above cannot be: "the file came back unchanged" is
+/// also what a file `--fix` skipped entirely looks like (NS-54), so it passes
+/// just as well if `is_markdown` stops recognizing the extension. This one
+/// distinguishes the two by asking for a rewrite that only happens *inside*
+/// markdown: a bare prose mention in a `.markdown` / `.mkd` / `.mdown` /
+/// uppercase `.MD` file must be wrapped, while the same text in a file the
+/// predicate rejects (`.mdx`, `.txt`, no extension at all) must not be.
+/// spec: NS-53 NS-54 NS-24
+#[test]
+fn fix_wraps_a_bare_mention_in_every_markdown_extension_and_no_other() {
+    let sb = fixture();
+    write(
+        &sb.source.join("skills/cos-run/SKILL.md"),
+        "---\nname: cos-run\ndescription: runner\n---\n# Runner\n",
+    );
+    let bare = "Hand off to cos-spec when done.\n";
+    let wrapped = "Hand off to {{ns:cos-spec}} when done.\n";
+    for name in ["A.markdown", "B.mkd", "C.mdown", "D.MD", "E.Markdown"] {
+        write(&sb.source.join("skills/cos-run").join(name), bare);
+    }
+    // Rejected by the predicate: a near-miss extension, an unrelated text
+    // extension, a bare extensionless name, and a dotfile whose leading dot is
+    // not an extension.
+    for name in ["F.mdx", "G.txt", "NOTES", ".mkd"] {
+        write(&sb.source.join("skills/cos-run").join(name), bare);
+    }
+
+    let target = sb.source_spec();
+    let r = sb.mind(&["review", &target, "--fix"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    for name in ["A.markdown", "B.mkd", "C.mdown", "D.MD", "E.Markdown"] {
+        assert_eq!(
+            std::fs::read_to_string(sb.source.join("skills/cos-run").join(name)).unwrap(),
+            wrapped,
+            "{name} is markdown, so its bare mention must be wrapped"
+        );
+    }
+    for name in ["F.mdx", "G.txt", "NOTES", ".mkd"] {
+        assert_eq!(
+            std::fs::read_to_string(sb.source.join("skills/cos-run").join(name)).unwrap(),
+            bare,
+            "{name} is not markdown, so --fix must not rewrite it (NS-54)"
+        );
+    }
 }
 
 /// A fenced block may open on the same line as a list marker. The hand-rolled
@@ -967,45 +1011,44 @@ fn fix_wraps_prose_beside_those_constructs_without_touching_their_code() {
     );
 }
 
-/// A non-markdown file inside an item is all code, so `--fix` un-wraps every
-/// `{{ns:}}` token in it and never wraps a bare name there. Characterization of
-/// one incompleteness: the structure map is still a markdown map, so a script
-/// line that happens to look like a fence delimiter is read as structure and a
-/// token on it is neither reported nor un-wrapped. Not destructive (`install`
-/// still expands it), but the cleanup is partial, so it is pinned rather than
-/// left to be discovered.
-/// spec: NS-24 NS-47
+/// A non-markdown file's tokens never expand (NS-53), so `--fix` reports them
+/// rather than rewriting (NS-54) -- the reverse of the old behavior, which
+/// treated the file as all code and silently un-wrapped every token in it. The
+/// file must come back byte for byte identical, and the token the structure
+/// map can see (the one not sitting on what a CommonMark parse reads as a
+/// fence-open line -- a pre-existing, unrelated limitation of that map) is
+/// reported with the literal "will not expand" wording rather than the
+/// misplaced-in-code wording used inside a markdown file.
+/// spec: NS-24 NS-47 NS-53 NS-54
 #[test]
-fn fix_treats_a_non_markdown_file_as_all_code() {
+fn fix_never_rewrites_a_non_markdown_file() {
     let sb = fixture();
     write(
         &sb.source.join("skills/cos-run/SKILL.md"),
         "---\nname: cos-run\ndescription: runner\n---\n# Runner\n",
     );
     let script = sb.source.join("skills/cos-run/run.sh");
-    write(
-        &script,
-        "#!/bin/sh\n\
-         # hand off to {{ns:cos-spec}}\n\
-         echo cos-cert-setup\n\
-         cat <<'EOF'\n\
-         ```{{ns:cos-spec}}\n\
-         EOF\n",
-    );
+    let original = "#!/bin/sh\n\
+                    # hand off to {{ns:cos-spec}}\n\
+                    echo cos-cert-setup\n\
+                    cat <<'EOF'\n\
+                    ```{{ns:cos-spec}}\n\
+                    EOF\n";
+    write(&script, original);
 
     let target = sb.source_spec();
     let r = sb.mind(&["review", &target, "--fix"]);
     assert!(r.success, "{} {}", r.stdout, r.stderr);
     assert_eq!(
         std::fs::read_to_string(&script).unwrap(),
-        "#!/bin/sh\n\
-         # hand off to cos-spec\n\
-         echo cos-cert-setup\n\
-         cat <<'EOF'\n\
-         ```{{ns:cos-spec}}\n\
-         EOF\n",
-        "the token in the script is un-wrapped, the bare name is never wrapped, \
-         and the one on a fence-shaped line is left behind"
+        original,
+        "--fix must never rewrite a non-markdown file (NS-54)"
+    );
+    assert!(
+        r.stdout
+            .contains("will not expand here; tokens expand in markdown only"),
+        "the token must be reported, not silently fixed: {}",
+        r.stdout
     );
 }
 
@@ -1039,8 +1082,9 @@ fn fix_leaves_link_reference_syntax_alone() {
 /// classifier's own frontmatter pre-pass does not strip it, so the whole file
 /// parses as markdown and the frontmatter becomes an ordinary block whose text
 /// wrapping rewrites -- including the `name:` field NS-24 names as the one place
-/// wrapping must never touch.
-/// spec: NS-24 NS-47
+/// wrapping must never touch. `description:` is not that field, so its sibling
+/// mention IS wrapped (NS-56) -- the BOM strip must still hold up under that.
+/// spec: NS-24 NS-47 NS-56
 #[test]
 fn fix_keeps_the_frontmatter_of_a_bom_prefixed_file() {
     let sb = fixture();
@@ -1054,8 +1098,67 @@ fn fix_keeps_the_frontmatter_of_a_bom_prefixed_file() {
     assert!(r.success, "{} {}", r.stdout, r.stderr);
     assert_eq!(
         std::fs::read_to_string(&skill).unwrap(),
-        original,
-        "frontmatter must survive a BOM"
+        "\u{feff}---\nname: cos-spec\ndescription: hands off to {{ns:cos-cert-setup}}\n\
+         ---\n# spec\n",
+        "name: survives the BOM; description: is wrapped"
+    );
+}
+
+/// NS-56 makes every frontmatter field other than `name:` wrappable. But
+/// `description:` is the only frontmatter field that is free prose; the others
+/// mind itself reads are *structured* and are parsed from the SOURCE file, not
+/// from the expanded store copy:
+///
+/// * `requires:` is a list of item refs (DEP-4/DEP-5) `catalog.rs` reads from
+///   the source frontmatter and `install.rs` validates before staging.
+/// * `build:`/`install:` are shell commands run verbatim (HOOK/TOOL) taken from
+///   the same source frontmatter.
+///
+/// Wrapping a sibling name inside any of those writes a token into a field
+/// nothing ever expands, which is destruction, not templating: the dependency
+/// stops resolving and the hook runs a literal `{{ns:...}}`. `--fix` must leave
+/// them alone.
+/// spec: NS-56 NS-24 DEP-4
+#[test]
+fn fix_never_wraps_a_structured_frontmatter_field() {
+    let sb = fixture();
+    let skill = sb.source.join("skills/cos-run/SKILL.md");
+    let original = "---\nname: cos-run\n\
+                    description: runner\n\
+                    requires: skill:cos-spec\n\
+                    build: make cos-cert-setup\n\
+                    ---\n# Runner\n";
+    write(&skill, original);
+
+    let target = sb.source_spec();
+    let r = sb.mind(&["review", &target, "--fix"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    let after = std::fs::read_to_string(&skill).unwrap();
+
+    // Stated as the consequence first: whatever `--fix` wrote, the source it
+    // just rewrote must still install. A token in `requires:` is read straight
+    // out of the source frontmatter and never expanded, so wrapping one turns a
+    // resolvable dependency into a `BadReference`.
+    let m = sb.mind(&["meld", &target, "--yes"]);
+    assert!(
+        m.success,
+        "the source `--fix` just rewrote must still meld: {} {} (file is now:\n{after})",
+        m.stdout, m.stderr
+    );
+    let l = sb.mind(&["learn", "cos:cos-run", "--yes"]);
+    assert!(
+        l.success,
+        "the `requires:` entry must still resolve after --fix: {} {} (file is now:\n{after})",
+        l.stdout, l.stderr
+    );
+
+    assert!(
+        after.contains("requires: skill:cos-spec\n"),
+        "a `requires:` entry is an item ref, not prose: {after}"
+    );
+    assert!(
+        after.contains("build: make cos-cert-setup\n"),
+        "a `build:` value is a shell command, not prose: {after}"
     );
 }
 
@@ -1169,9 +1272,14 @@ fn fix_wraps_only_the_visible_text_of_every_link_spelling() {
 /// The BOM fix in the combination a Windows editor actually produces: a BOM and
 /// CRLF together. The frontmatter read has to strip three bytes and then track
 /// one extra byte per line, and the field it protects is the `name:` NS-24 calls
-/// untouchable. Driven through the binary, so discovery reading the item and the
-/// classifier reading the same file have to agree about where its frontmatter is.
-/// spec: NS-47 NS-24
+/// untouchable; `description:` is not, so its sibling mention is wrapped too
+/// (NS-56). Driven through the binary, so discovery reading the item and the
+/// classifier reading the same file have to agree about where its frontmatter
+/// is, and so the display-vs-store ordering (NS-56) is proven end to end:
+/// `--fix` wraps `description:`, `probe` still shows the flattened bare name
+/// (`namespace::flatten_display`), and the installed store copy has the fully
+/// expanded (prefixed) name.
+/// spec: NS-47 NS-24 NS-56
 #[test]
 fn fix_keeps_the_frontmatter_of_a_bom_prefixed_crlf_file() {
     let sb = fixture();
@@ -1187,9 +1295,9 @@ fn fix_keeps_the_frontmatter_of_a_bom_prefixed_crlf_file() {
     assert!(r.success, "{} {}", r.stdout, r.stderr);
     assert_eq!(
         std::fs::read_to_string(&skill).unwrap(),
-        "\u{feff}---\r\nname: cos-spec\r\ndescription: hands off to cos-cert-setup\r\n\
+        "\u{feff}---\r\nname: cos-spec\r\ndescription: hands off to {{ns:cos-cert-setup}}\r\n\
          ---\r\n# spec\r\n\r\nSee the {{ns:cos-cert-setup}} skill.\r\n",
-        "the frontmatter survives the BOM and only the body mention is wrapped"
+        "name: survives the BOM; description: and the body mention are both wrapped"
     );
     // The premise of the fix, asserted rather than assumed: `frontmatter.rs`
     // strips the same BOM (DSC-23), so this file really is an item mind
@@ -1201,7 +1309,13 @@ fn fix_keeps_the_frontmatter_of_a_bom_prefixed_crlf_file() {
     assert!(p.success, "{} {}", p.stdout, p.stderr);
     assert!(
         p.stdout.contains("hands off to cos-cert-setup"),
-        "discovery reads the BOM-prefixed frontmatter: {}",
+        "discovery reads the BOM-prefixed frontmatter, and the token `--fix` \
+         wrapped it into is flattened back to the bare name for display: {}",
+        p.stdout
+    );
+    assert!(
+        !p.stdout.contains("{{ns:"),
+        "the raw token must never leak into the catalog display: {}",
         p.stdout
     );
     let l = sb.mind(&["learn", "cos:cos-spec", "--yes"]);
@@ -1213,8 +1327,25 @@ fn fix_keeps_the_frontmatter_of_a_bom_prefixed_crlf_file() {
         "the declared name is installed unprefixed and untouched: {installed}"
     );
     assert!(
+        installed.contains("description: hands off to cos:cos-cert-setup\r\n"),
+        "the description token expands fully (prefixed) in the installed copy: {installed}"
+    );
+    assert!(
         installed.contains("See the cos:cos-cert-setup skill."),
         "and the body token the fix created expands: {installed}"
+    );
+    // `probe` above is one display surface; `recall` is the other. It reads the
+    // description back out of the manifest (recorded at install from the
+    // catalog) rather than out of the file, so it is a second, independent read
+    // that would leak the raw token if the flatten sat only on the path `probe`
+    // happens to take. (`dump` emits no item description at all, so it is not a
+    // third surface however NS-56 once read it.)
+    let rc = sb.mind(&["recall", "cos:cos-spec"]);
+    assert!(rc.success, "{} {}", rc.stdout, rc.stderr);
+    assert!(
+        rc.stdout.contains("hands off to cos-cert-setup") && !rc.stdout.contains("{{ns:"),
+        "recall must show the flattened description: {}",
+        rc.stdout
     );
 }
 

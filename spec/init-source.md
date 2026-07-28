@@ -53,10 +53,13 @@ namespacing.md.
   files, and reports each rewrite. Text already inside a `{{ns:}}` token is left
   untouched, and so are non-prose positions (NS-24): a bare name inside a fenced
   code block, an inline code span, a path, or a frontmatter structured field is
-  not wrapped, so the rewrite never turns a keyword or path component into a
-  token. The rewrite is still heuristic in prose (a sibling name can be an
-  ordinary word), so it is opt-in and the maintainer reviews the result (e.g. via
-  `git diff`).
+  not wrapped, so the rewrite never turns a keyword, a path component, the
+  item's own identity, or a field mind itself parses (`requires:`, `build:`)
+  into a token. The frontmatter `description:` value is the one exception: it is
+  free prose, so a bare mention in it IS wrapped, the same as one in the
+  markdown body (NS-56). The rewrite is still heuristic in prose (a sibling name
+  can be an ordinary word), so it is opt-in and the maintainer reviews the
+  result (e.g. via `git diff`).
 - `INIT-6` `init-source` makes no network calls and does not read or write the
   store or any agent home; it edits only the target repo. Without `--template` it
   is read-only except for creating an absent `mind.toml` (INIT-3).

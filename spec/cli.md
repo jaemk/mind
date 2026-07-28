@@ -550,7 +550,81 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   and its installed items -- each hook's event, required/optional flag, command, and,
   for a recorded source install hook, whether it is pending and the commit it last ran
   at -- without running anything (HOOK-104). It is the read-only companion to `hooks
-  run` and the detail behind the `recall --sources` hook marker (HOOK-58).
+  run` and the detail behind the `recall --sources` hook marker (HOOK-58). Under
+  `--json` it answers with a document instead of this text listing (CLI-220).
+- `CLI-220` `mind hooks list --json` answers with one JSON document instead of
+  the CLI-196 text listing:
+
+  ```json
+  {
+    "schema": 1,
+    "action": "hooks-list",
+    "target": "<target as typed>",
+    "sources": [
+      {
+        "source": "<source name>",
+        "hooks": [
+          {"event": "install|uninstall", "required": true,
+           "command": "<run>", "status": "<CLI-196 status text>"}
+        ],
+        "items": [
+          {"item": "<kind:name>", "hooks": [
+            {"event": "install|uninstall", "required": true, "command": "<run>"}
+          ]}
+        ]
+      }
+    ],
+    "items": [
+      {"item": "<kind:name>", "source": "<source name>", "hooks": ["..."]}
+    ]
+  }
+  ```
+
+  `sources` is populated when `<target>` resolved as a source (HOOK-104's
+  source branch, possibly several under a glob); the top-level `items` is
+  populated instead when it resolved as an item ref, one entry per matched
+  item, each carrying its own `source`. The two are mutually exclusive (a
+  target resolves one way or the other, CLI-194) and whichever is empty is
+  omitted rather than serialized as `[]`. That elision applies ONLY to the
+  top-level `sources`/`items` pair: a nested `hooks` or `items` array is
+  always present, empty when the source declares no hooks or has no installed
+  items with hooks. `status` is present only for a
+  recorded source install hook (mirrors the text mode's pending/last-ran
+  report, HOOK-55); an uninstall hook and every item-level hook carry no
+  `status`. A source's nested installed items are objects (an `item` name
+  plus its own `hooks` array), not bare strings, so a later addition (e.g. a
+  per-item install/uninstall disclosure record) has somewhere to go without a
+  breaking shape change.
+- `CLI-222` `mind hooks run --json` on a successful run (no `MindError`)
+  answers with a count-based result rather than nothing:
+
+  ```json
+  {
+    "schema": 1,
+    "action": "hooks-run",
+    "target": "<target as typed>",
+    "event": "install|uninstall|build",
+    "existed": 0,
+    "ran": 0,
+    "skipped": 0
+  }
+  ```
+
+  `existed`/`ran`/`skipped` are the HOOK-107/HOOK-108 tally, accumulated
+  across every matched source or item: how many hooks for the selected event
+  were considered, how many actually ran, and how many were skipped
+  specifically for want of consent. A run with nothing to do (no hooks
+  declared, or every install hook already recorded at the current commit)
+  still answers with the document, all three counts zero, rather than
+  silence. `--event build`'s tally is always zero (HOOK-103's transactional
+  reinstall reports success or failure, not a hook-by-hook count). `skipped`
+  counts ONLY skips for want of consent, so it is `0` in every printed success
+  document: an interactive decline is the user's own choice and is not a
+  consent failure (it reports `existed: 1, ran: 0, skipped: 0`), while a
+  non-TTY run that could consent to nothing is the HOOK-107 error path below.
+  The three counts therefore need not sum to `existed`. On the
+  HOOK-107 failure path (`MindError::HooksNotRun`) no success document is
+  printed; the CLI-181 error envelope is the one document (CLI-217).
 
 ## recall
 
@@ -835,6 +909,35 @@ only appear at meld or install time. It is read-only and installs nothing.
   the source-wide form of the working-tree-vs-clone discrepancy. A metadata-only
   `[source]` block changes no discovery and is not flagged. Local working-tree git
   target only.
+- `CLI-219` `mind review --json` (either mode: a `<target>` source, or
+  `--policy <path>`) answers with one JSON document instead of the CLI-131/132
+  text findings:
+
+  ```json
+  {
+    "schema": 1,
+    "action": "review",
+    "outcome": "clean|advisory|failed",
+    "hard": [{"kind": "<slug>", "message": "<text>"}],
+    "advisory": [{"kind": "<slug>", "message": "<text>"}],
+    "fixed": ["<path>"]
+  }
+  ```
+
+  `outcome` is `"clean"` when both `hard` and `advisory` are empty,
+  `"advisory"` when only `advisory` findings exist, and `"failed"` when any
+  hard finding is present (the last value appears only inside the CLI-221
+  `details` member, never in a printed success document); `kind` is the same
+  machine-stable finding tag the text mode prints in `error [kind]: ...` /
+  `advisory [kind]: ...` (e.g. `bad-reference`, `missing-description`). `fixed`
+  lists the files `--fix` rewrote (CLI-138), empty otherwise. When any hard
+  finding is present, `review` still exits non-zero (CLI-132 is unconditional):
+  the document above is not printed as a success envelope in that case, but
+  recorded and folded into the CLI-181 error envelope's `details` member
+  (CLI-221) instead, so a machine caller sees exactly what failed without
+  scraping stderr's `error [kind]: message` lines. `review --policy`'s document
+  uses the same shape (`hard`/`advisory` only; `fixed` is always empty, since
+  `--policy` has no `--fix` mode).
 
 ## introspect
 
@@ -1004,7 +1107,9 @@ and per-harness `kinds` defaults.
   dependency-closure items). The read-only verbs (`recall`, `probe`, `introspect`)
   keep their existing JSON shapes (CLI-73, CLI-84, CLI-92) and are not affected by
   CLI-153. `absorb` is also a mutating verb covered by CLI-153; see ABS-11 for its
-  specific extra field.
+  specific extra field. `hooks run` is a mutating verb too (HOOK-101/HOOK-103) but
+  its result is a count-based tally rather than an `action`/`target`/`outcome`
+  object; see CLI-222 for its distinct shape.
 
 - `CLI-217` Under `--json`, stdout carries exactly one JSON document and nothing
   else, and that document answers the verb the user INVOKED. Two failure modes
@@ -1042,8 +1147,27 @@ and per-harness `kinds` defaults.
   The statement binds the verbs that answer `--json` with a document. It does
   not apply where another statement makes stdout a different product: `dump`
   writes TOML (DUMP-9), `completions` and `man` write their script and roff
-  page. `review`, `init-source`, `config show`, and `hooks list` define no JSON
-  output at all, so they print their human text on stdout in every mode.
+  page, and `evolve` writes its own document from `selfupdate.rs` on a path
+  that never goes through this module. `init-source` defines no JSON output at
+  all, so it prints its human text on stdout in every mode. CLI-218 states the
+  exclusion list this paragraph draws from as a closed boundary rather than an
+  enumeration; `review` (CLI-219) and `hooks list` (CLI-220) are NOT
+  exclusions, and both answer `--json` with a document like every other verb.
+
+- `CLI-218` `--json` is universal: every verb answers it with exactly one JSON
+  document on stdout (CLI-217), except a closed, named exclusion list -- the
+  boundary is a rule, not an enumeration of what a given release happens to
+  implement. The excluded verbs, and why each is excluded: `dump` writes TOML
+  by design (DUMP-9); `completions` and `man` print the artifact itself (a
+  shell script, a roff page) as their entire output; `evolve` writes its own
+  result document from `selfupdate.rs` rather than through the CLI-153/CLI-217
+  machinery (its document IS JSON, just emitted on a separate path); and
+  `init-source` is a maintainer scaffolder that edits the target repo in place
+  and has no JSON result to offer. Every other verb answers with a document,
+  including `review` (CLI-219) and `hooks list` (CLI-220), which for earlier
+  releases had none. A verb added later that is neither given a JSON shape nor
+  added to this exclusion list is a bug, not a silent gap: the boundary is
+  meant to be closed at every point in time, not merely today.
 
 - `CLI-154` `NO_COLOR` being set (to any value, including empty) forces the
   capability gate (CLI-151) OFF regardless of TTY or locale. A non-UTF-8 locale or
@@ -1157,6 +1281,15 @@ and per-harness `kinds` defaults.
   -> `"item-not-found"`, `DigestMismatch` -> `"digest-mismatch"`,
   `SelfUpdatePolicy` -> `"self-update-policy"`. The slug set is exhaustive: every
   variant has exactly one slug.
+- `CLI-221` The CLI-181 error envelope carries an optional `details` member when
+  the failing verb recorded structured findings before returning its error (a
+  hard-finding `review` under `--json`, CLI-219, is the first user). `details`
+  is whatever that verb recorded, verbatim; its shape is verb-specific and
+  documented at the verb's own JSON-shape entry (e.g. CLI-219), not here.
+  Absent entirely -- not `null` -- for the ordinary case of a `MindError` with
+  no recorded findings. This gives a machine caller the full structured
+  picture on the non-zero exit, not just the CLI-182 `kind` slug and a prose
+  `message`.
 - `CLI-183` Clap argument-parse failures (exit code 2) are not JSON-enveloped.
   They occur before flag parsing settles and are rendered by clap as plain text to
   stderr. Scripts may treat exit 2 as a usage error without inspecting stdout.

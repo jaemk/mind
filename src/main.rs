@@ -74,6 +74,14 @@ mod json_stdout {
     /// The document this run will answer with; the most recently recorded one.
     static PENDING: Mutex<Option<String>> = Mutex::new(None);
 
+    /// Structured findings a verb recorded before failing (CLI-221), folded
+    /// into the CLI-181 error envelope's `details` member when present.
+    /// Distinct from `PENDING`: that is the SUCCESS-path document, which
+    /// `emit_instead` discards on failure; a verb that fails still wants its
+    /// findings to reach the caller, hence a second slot that survives the
+    /// discard.
+    static ERROR_DETAILS: Mutex<Option<serde_json::Value>> = Mutex::new(None);
+
     /// Duplicate fd 1, then point fd 1 at fd 2. Returns the duplicate (the real
     /// stdout) on success. Mirrors the TUI's stdout-capture redirect
     /// (`tui::action::with_captured_stdout`), which does the same dance.
@@ -157,6 +165,38 @@ mod json_stdout {
             write_out(&s);
         }
     }
+
+    /// Record `value` as the CLI-181 error envelope's `details` member for
+    /// this run's eventual failure (CLI-221). Call before returning the
+    /// error; a run that never fails, or fails without recording details,
+    /// leaves this `None` and the envelope carries no `details` member at all.
+    pub fn record_error_details<T: serde::Serialize>(value: &T) {
+        if let Ok(v) = serde_json::to_value(value) {
+            *ERROR_DETAILS.lock().unwrap_or_else(|e| e.into_inner()) = Some(v);
+        }
+    }
+
+    /// Build the CLI-181 error envelope for `kind`/`message`, folding in
+    /// whatever was recorded via [`record_error_details`] as an optional
+    /// `details` member (CLI-221). Takes (clears) the recorded details, so a
+    /// second call in the same run starts clean.
+    pub fn build_error_envelope(kind: &str, message: &str) -> serde_json::Value {
+        let mut envelope = serde_json::json!({
+            "schema": 1,
+            "error": {
+                "kind": kind,
+                "message": message,
+            }
+        });
+        if let Some(details) = ERROR_DETAILS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            envelope["details"] = details;
+        }
+        envelope
+    }
 }
 
 fn main() -> std::process::ExitCode {
@@ -188,13 +228,10 @@ fn main() -> std::process::ExitCode {
                 // that scripts parsing stdout get a machine-readable reason. The
                 // exit code is unchanged (FAILURE = 1). Plain-text stderr output
                 // is suppressed; the envelope carries the full Display message.
-                let envelope = serde_json::json!({
-                    "schema": 1,
-                    "error": {
-                        "kind": err.kind(),
-                        "message": err.to_string(),
-                    }
-                });
+                // spec: CLI-221 -- folds in any findings the verb recorded
+                // before failing (e.g. `commands::review`'s hard findings)
+                // as the envelope's `details` member.
+                let envelope = json_stdout::build_error_envelope(err.kind(), &err.to_string());
                 // spec: CLI-217 -- the envelope REPLACES any result a verb
                 // recorded before failing, so stdout is one document either way.
                 json_stdout::emit_instead(&envelope);
@@ -301,8 +338,11 @@ fn lock_mode(command: &Command, json: bool) -> LockMode {
 /// The default is to reserve: a verb added later is protected without anyone
 /// having to remember this function. Only a verb whose stdout payload is NOT a
 /// JSON document needs an entry below, and getting that wrong is loud (its
-/// output disappears from stdout in the first test that pipes it).
-// spec: CLI-217
+/// output disappears from stdout in the first test that pipes it). CLI-218
+/// states this exclusion list as the closed boundary; every verb not listed
+/// here answers `--json` with exactly one document, `review` and `hooks list`
+/// included (CLI-219, CLI-220) -- neither is excluded any more.
+// spec: CLI-217 CLI-218
 fn json_reserves_stdout(command: &Command) -> bool {
     !matches!(
         command,
@@ -315,13 +355,10 @@ fn json_reserves_stdout(command: &Command) -> bool {
         // `selfupdate.rs` rather than through `commands.rs`, so redirecting fd 1
         // would silence it.
         | Command::Evolve { .. }
-        // No `--json` support at all today (a pre-existing gap, tracked
-        // separately): these print human text on stdout in every mode, and
-        // reserving stdout would drop it rather than fix it.
-        | Command::Review { .. }
+        // A maintainer scaffolder that edits the target repo in place; it has
+        // no JSON result to offer, so it prints human text on stdout in every
+        // mode.
         | Command::InitSource { .. }
-        | Command::Config { action: ConfigCmd::Show }
-        | Command::Hooks { action: HooksCmd::List { .. } }
     )
 }
 
@@ -672,7 +709,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             fix,
         } => {
             if let Some(p) = policy {
-                review::dispatch_policy(&p)
+                commands::review_policy_dispatch(&p)
             } else {
                 // CLI-26: no <target> (or an explicit `.`/`./`) reviews the
                 // current directory, resolved to an absolute path so a local
@@ -889,7 +926,13 @@ mod tests {
     /// visible in one place: an end-to-end test can only ever cover the verbs
     /// someone thought to list, and the reservation's failure mode for an
     /// excluded verb is silent (its output goes to stderr and stdout is empty).
-    // spec: CLI-217
+    /// CLI-218's closed exclusion list is exactly the second group below;
+    /// `review` and `hooks list` moved OUT of it (they answer `--json` with a
+    /// document now, CLI-219/CLI-220) and `config show` moved out too (it
+    /// always had a JSON branch; CLI-217's prior classification of it was
+    /// simply wrong, see `config_show_json_emits_one_document_despite_being_
+    /// classified_as_no_json` in tests/cli.rs).
+    // spec: CLI-217 CLI-218
     #[test]
     fn json_reservation_covers_result_verbs_and_spares_payload_verbs() {
         fn reserves(args: &[&str]) -> bool {
@@ -913,8 +956,12 @@ mod tests {
             &["mind", "introspect"],
             &["mind", "config", "lobes", "add", "/some/home"],
             &["mind", "config", "lobes", "list"],
+            &["mind", "config", "show"],
             &["mind", "link-project"],
             &["mind", "hooks", "run", "agents"],
+            &["mind", "hooks", "list", "agents"],
+            &["mind", "review", "/some/path"],
+            &["mind", "review", "--policy", "/etc/mind/policy.toml"],
         ] {
             assert!(
                 reserves(args),
@@ -922,23 +969,246 @@ mod tests {
             );
         }
 
-        // stdout is a non-JSON product, or the verb has no `--json` output at
-        // all. Reserving would redirect what they print into stderr.
+        // stdout is a non-JSON product, or (init-source) the verb has no
+        // `--json` output at all. Reserving would redirect what they print
+        // into stderr. This is CLI-218's closed exclusion list.
         for args in [
             &["mind", "dump"][..],
             &["mind", "completions", "bash"],
             &["mind", "man"],
             &["mind", "evolve", "--check"],
-            &["mind", "review", "/some/path"],
             &["mind", "init-source"],
-            &["mind", "config", "show"],
-            &["mind", "hooks", "list", "agents"],
         ] {
             assert!(
                 !reserves(args),
                 "{args:?} writes something other than a JSON document to stdout"
             );
         }
+    }
+
+    /// One representative argv per INVOCABLE command, i.e. per leaf of clap's
+    /// command tree (`config lobes add`, not just `config`). Keyed by the
+    /// subcommand path so the CLI-218 gate below can cross-check the table
+    /// against clap's own tree in BOTH directions.
+    ///
+    /// `json_reserves_stdout` matches on nested variants
+    /// (`Command::Hooks { action: HooksCmd::List }` was an exclusion until
+    /// CLI-220), so the classification has to be made at leaf granularity or a
+    /// new `config`/`hooks` child could opt out unnoticed.
+    const VERB_SAMPLES: &[(&[&str], &[&str])] = &[
+        (&["meld"], &["mind", "meld", "owner/repo"]),
+        (&["unmeld"], &["mind", "unmeld", "src"]),
+        (&["learn"], &["mind", "learn", "review"]),
+        (&["forget"], &["mind", "forget", "review"]),
+        (&["sync"], &["mind", "sync"]),
+        (&["upgrade"], &["mind", "upgrade"]),
+        (&["recall"], &["mind", "recall"]),
+        (&["probe"], &["mind", "probe"]),
+        (&["introspect"], &["mind", "introspect"]),
+        (&["absorb"], &["mind", "absorb", "skill:review"]),
+        (&["link-project"], &["mind", "link-project"]),
+        (&["review"], &["mind", "review", "/some/path"]),
+        (
+            &["review"],
+            &["mind", "review", "--policy", "/etc/mind/policy.toml"],
+        ),
+        (&["config", "show"], &["mind", "config", "show"]),
+        (
+            &["config", "lobes", "add"],
+            &["mind", "config", "lobes", "add", "/some/home"],
+        ),
+        (
+            &["config", "lobes", "list"],
+            &["mind", "config", "lobes", "list"],
+        ),
+        (
+            &["config", "lobes", "detect"],
+            &["mind", "config", "lobes", "detect"],
+        ),
+        (
+            &["config", "lobes", "remove"],
+            &["mind", "config", "lobes", "remove", "/some/home"],
+        ),
+        (&["hooks", "run"], &["mind", "hooks", "run", "agents"]),
+        (&["hooks", "list"], &["mind", "hooks", "list", "agents"]),
+        // The CLI-218 exclusions.
+        (&["dump"], &["mind", "dump"]),
+        (&["completions"], &["mind", "completions", "bash"]),
+        (&["man"], &["mind", "man"]),
+        (&["evolve"], &["mind", "evolve", "--check"]),
+        (&["init-source"], &["mind", "init-source"]),
+    ];
+
+    /// CLI-218's exclusion list, spelled by subcommand path. Everything else
+    /// answers `--json` with exactly one document.
+    const CLI_218_EXCLUSIONS: &[&[&str]] = &[
+        &["dump"],
+        &["completions"],
+        &["man"],
+        &["evolve"],
+        &["init-source"],
+    ];
+
+    /// Every invocable command path in clap's tree: the leaves, so
+    /// `config lobes add` rather than `config`. clap's synthesized `help`
+    /// subcommands are not mind verbs and are skipped.
+    fn clap_command_paths(cmd: &clap::Command, prefix: &[String]) -> Vec<Vec<String>> {
+        let mut out = Vec::new();
+        for sub in cmd.get_subcommands() {
+            let name = sub.get_name();
+            if name == "help" {
+                continue;
+            }
+            let mut path = prefix.to_vec();
+            path.push(name.to_string());
+            let children = clap_command_paths(sub, &path);
+            if children.is_empty() {
+                out.push(path);
+            } else {
+                out.extend(children);
+            }
+        }
+        out
+    }
+
+    /// The CLI-218 boundary as a GATE rather than a restatement: enumerate the
+    /// commands from clap itself (`Cli::command()`), not from a list someone
+    /// maintains by hand, and require every one of them to be classified. A
+    /// verb (or a new `config`/`hooks` child) added tomorrow has no
+    /// `VERB_SAMPLES` row, so this test goes red and its author has to decide,
+    /// explicitly, whether it answers `--json` with a document or joins the
+    /// closed exclusion list. That is exactly what the CLI-218 statement buys,
+    /// and what the end-to-end
+    /// `cli_218_every_driven_verb_is_json_or_a_named_exclusion` (a fixed list
+    /// of invocations, which a new verb simply would not appear in) cannot do.
+    // spec: CLI-217 CLI-218
+    #[test]
+    fn cli_218_boundary_is_closed_over_every_clap_subcommand() {
+        let cmd = Cli::command();
+        let paths = clap_command_paths(&cmd, &[]);
+        assert!(
+            paths.len() > 10,
+            "the walk must actually find the command tree, got {paths:?}"
+        );
+        let has_sample = |path: &[String]| {
+            VERB_SAMPLES
+                .iter()
+                .any(|(p, _)| p.len() == path.len() && p.iter().zip(path).all(|(a, b)| a == b))
+        };
+
+        // 1. Every command clap knows about is classified here.
+        for path in &paths {
+            assert!(
+                has_sample(path),
+                "`mind {}` has no CLI-218 classification: add a VERB_SAMPLES row \
+                 and either give it a `--json` document or add it to \
+                 CLI_218_EXCLUSIONS (and to spec/cli.md's CLI-218 list)",
+                path.join(" ")
+            );
+        }
+        // 2. ...and nothing here names a command clap dropped.
+        for (path, _) in VERB_SAMPLES {
+            assert!(
+                paths
+                    .iter()
+                    .any(|p| p.len() == path.len() && p.iter().zip(*path).all(|(a, b)| a == b)),
+                "VERB_SAMPLES names `mind {}`, which is not a clap command any more",
+                path.join(" ")
+            );
+        }
+        // 3. Every exclusion is a real command (a typo would silently widen the
+        //    "answers with a document" side otherwise).
+        for path in CLI_218_EXCLUSIONS {
+            assert!(
+                paths
+                    .iter()
+                    .any(|p| p.len() == path.len() && p.iter().zip(*path).all(|(a, b)| a == b)),
+                "CLI_218_EXCLUSIONS names `mind {}`, which is not a clap command",
+                path.join(" ")
+            );
+        }
+        // 4. The reservation agrees with the classification, command by command.
+        for (path, args) in VERB_SAMPLES {
+            let cli = Cli::try_parse_from(*args).expect("sample args should parse");
+            let reserves = json_reserves_stdout(&cli.command);
+            let excluded = CLI_218_EXCLUSIONS.contains(path);
+            assert_eq!(
+                reserves,
+                !excluded,
+                "`mind {}`: json_reserves_stdout said {reserves}, but CLI-218 \
+                 classifies it as {}",
+                path.join(" "),
+                if excluded {
+                    "an exclusion"
+                } else {
+                    "answering with a document"
+                }
+            );
+        }
+    }
+
+    /// The CLI-221 `details` slot is process-global state, so its whole risk
+    /// surface is "what is in there when nobody put anything in there". All of
+    /// it is asserted in ONE test on purpose: `build_error_envelope` TAKES the
+    /// recorded value, so two tests touching the static would race under the
+    /// default parallel test runner and pass or fail by scheduling.
+    ///
+    /// Pins, in order: an envelope built with nothing recorded has no `details`
+    /// KEY at all (not `null`, not `{}`); a recorded value lands verbatim; the
+    /// take is real, so a second failure in the same run cannot inherit the
+    /// first one's findings; and a second record before the take overwrites
+    /// rather than accumulating.
+    // spec: CLI-181 CLI-182 CLI-221
+    #[test]
+    fn cli_221_error_details_is_absent_unless_recorded_and_never_leaks() {
+        // Nothing recorded -> no `details` member whatsoever.
+        let plain = json_stdout::build_error_envelope("not-installed", "item not installed");
+        assert_eq!(
+            plain,
+            serde_json::json!({
+                "schema": 1,
+                "error": {"kind": "not-installed", "message": "item not installed"}
+            }),
+            "an error with no recorded findings must carry no `details` member"
+        );
+        assert!(
+            !plain.as_object().is_some_and(|o| o.contains_key("details")),
+            "`details` must be ABSENT, not null: {plain}"
+        );
+
+        // Recorded -> folded in verbatim.
+        json_stdout::record_error_details(&serde_json::json!({
+            "action": "review", "outcome": "failed", "hard": [{"kind": "toml-parse-error"}]
+        }));
+        let with = json_stdout::build_error_envelope("review-failed", "1 hard finding");
+        assert_eq!(with["error"]["kind"], "review-failed", "{with}");
+        assert_eq!(with["details"]["outcome"], "failed", "{with}");
+        assert_eq!(
+            with["details"]["hard"][0]["kind"], "toml-parse-error",
+            "{with}"
+        );
+
+        // ...and TAKEN: an unrelated later error cannot inherit them.
+        let after = json_stdout::build_error_envelope("source-not-found", "no such source");
+        assert!(
+            !after.as_object().is_some_and(|o| o.contains_key("details")),
+            "recorded details must not leak into the next envelope: {after}"
+        );
+
+        // Recording twice before the take replaces rather than accumulating,
+        // so the caller sees the LAST verb's findings, matching `record`'s
+        // outermost-frame-wins rule (CLI-153).
+        json_stdout::record_error_details(&serde_json::json!({"which": "first"}));
+        json_stdout::record_error_details(&serde_json::json!({"which": "second"}));
+        let twice = json_stdout::build_error_envelope("review-failed", "x");
+        assert_eq!(
+            twice["details"],
+            serde_json::json!({"which": "second"}),
+            "{twice}"
+        );
+
+        // Leave the static clean for anything else in this binary.
+        let _ = json_stdout::build_error_envelope("x", "y");
     }
 
     #[test]

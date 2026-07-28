@@ -1597,16 +1597,14 @@ fn review_with_no_target_reviews_the_current_directory() {
     );
 }
 
-/// CLI-217 names `review` as one of the four verbs with "no `--json` output at
-/// all ... print[s] ... human text on stdout in every mode", and
-/// `json_reserves_stdout` excludes it on that premise. Unlike `config show`
-/// (see `config_show_json_emits_one_document_despite_being_classified_as_no_json`),
-/// `review` genuinely never reads `ctx().json` anywhere, so this pins the
-/// premise itself: `--json` changes nothing about the output, and it is still
-/// plain text, not silently-empty or malformed JSON.
+/// `review` is the verb whose entire output is findings, so under CLI-218 it
+/// answers with a document rather than the human text it prints in text mode.
+/// This is the cross-surface pin: the two modes must genuinely differ, and the
+/// JSON one must parse. It was written the other way round while `review` was
+/// a CLI-217 exclusion, which made it a test that asserted the gap.
 #[test]
-fn review_json_flag_is_ignored_and_still_prints_plain_text() {
-    // spec: CLI-217
+fn review_json_answers_with_a_document_not_the_text_output() {
+    // spec: CLI-218, CLI-219
     let sb = Sandbox::new();
     let plain = sb.mind_cwd(&["review"], &sb.source);
     let json = sb.mind_cwd(&["--json", "review"], &sb.source);
@@ -1616,15 +1614,13 @@ fn review_json_flag_is_ignored_and_still_prints_plain_text() {
         plain.stderr,
         json.stderr
     );
-    assert_eq!(
+    assert_ne!(
         plain.stdout, json.stdout,
-        "`--json` must not change review's output at all (no JSON branch exists)"
+        "`--json` must change review's output; it is no longer an exclusion"
     );
-    assert!(
-        serde_json::from_str::<serde_json::Value>(json.stdout.trim()).is_err(),
-        "review --json must not accidentally look like a JSON document: {:?}",
-        json.stdout
-    );
+    let doc: serde_json::Value = serde_json::from_str(json.stdout.trim())
+        .unwrap_or_else(|e| panic!("review --json must be one document: {e}: {:?}", json.stdout));
+    assert_eq!(doc["action"], "review", "{doc}");
 }
 
 /// The `init-source` twin of the test above (CLI-217's fourth "no --json
@@ -4351,6 +4347,131 @@ fn bad_ns_reference_errors_on_install() {
 }
 
 #[test]
+fn bad_ns_token_in_non_markdown_file_installs_clean_but_still_fails_in_markdown() {
+    // spec: NS-53
+    // Token expansion is narrowed to markdown files (NS-53): a `{{ns:}}` token
+    // in a non-markdown bundled file is left exactly as written at install, and
+    // an unresolvable one there no longer fails the install -- this retires the
+    // BadReference NS-11/NS-12 used to raise for it before the narrowing. The
+    // same bad token in the item's own SKILL.md still fails, proving the
+    // narrowing is markdown-only, not a blanket relaxation.
+    let sb = Sandbox::new();
+    sb.write_and_commit(
+        "skills/review/run.sh",
+        "#!/bin/sh\n# hand off to {{ns:ghost}}\necho ok\n",
+    );
+    let spec = sb.source_spec();
+    assert!(sb.mind(&["meld", &spec]).success);
+    let r = sb.mind(&["learn", "review", "--yes"]);
+    assert!(
+        r.success,
+        "a bad {{{{ns:}}}} token outside markdown must not fail install: {} {}",
+        r.stdout, r.stderr
+    );
+    let script = std::fs::read_to_string(sb.mind_home.join("store/skill/review/run.sh")).unwrap();
+    assert!(
+        script.contains("{{ns:ghost}}"),
+        "the token must be left exactly as written outside markdown: {script}"
+    );
+
+    // The same bad token, written in the skill's SKILL.md (markdown) instead,
+    // still fails install.
+    let sb2 = Sandbox::new();
+    sb2.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\nname: review\ndescription: review\n---\nhand off to {{ns:ghost}}\n",
+    );
+    let spec2 = sb2.source_spec();
+    assert!(sb2.mind(&["meld", &spec2]).success);
+    let r2 = sb2.mind(&["learn", "review"]);
+    assert!(
+        !r2.success,
+        "the same bad token in a markdown file must still fail install"
+    );
+}
+
+#[test]
+fn path_token_outside_markdown_does_not_expand() {
+    // spec: TOOL-19
+    // Path tokens follow the same markdown-only expansion rule as `{{ns:}}`
+    // (NS-53): `{{self}}` in the skill's SKILL.md expands, but the same token in
+    // a bundled non-markdown script is left exactly as written.
+    let sb = Sandbox::new();
+    sb.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\nname: review\ndescription: Review the diff for bugs\n---\nSee {{self}}/run.sh.\n",
+    );
+    sb.write_and_commit(
+        "skills/review/run.sh",
+        "#!/bin/sh\n# lives at {{self}}\necho ok\n",
+    );
+    let spec = sb.source_spec();
+    assert!(sb.mind(&["meld", &spec]).success);
+    assert!(sb.mind(&["learn", "review", "--yes"]).success);
+
+    let md = std::fs::read_to_string(sb.mind_home.join("store/skill/review/SKILL.md")).unwrap();
+    assert!(
+        md.contains("/store/skill/review/run.sh"),
+        "the markdown file's {{{{self}}}} token must expand: {md}"
+    );
+    let script = std::fs::read_to_string(sb.mind_home.join("store/skill/review/run.sh")).unwrap();
+    assert!(
+        script.contains("{{self}}"),
+        "the non-markdown file's token must be left exactly as written: {script}"
+    );
+}
+
+#[test]
+fn tokens_expand_in_every_markdown_extension_and_no_other() {
+    // spec: NS-53 TOOL-19 NS-11
+    // The positive half of the markdown gate at install, which the negative
+    // tests above cannot prove: a file the predicate ACCEPTS has to actually be
+    // scanned. `is_markdown` is a case-insensitive match over four extensions,
+    // so a `.markdown`, `.mkd`, `.mdown` or uppercase `.MD` reference doc
+    // bundled in a skill gets its tokens expanded exactly like `SKILL.md`,
+    // while a near-miss `.mdx`, a `.txt`, an extensionless name and a dotfile
+    // whose leading dot is not an extension are all left verbatim. Written as
+    // one file per extension so a shrunk extension list fails loudly rather
+    // than being absorbed by the "unchanged file" shape of the skip path.
+    let sb = Sandbox::new();
+    let token = "see {{ns:dev}} and {{self}}\n";
+    for name in [
+        "A.markdown",
+        "B.mkd",
+        "C.mdown",
+        "D.MD",
+        "E.Markdown",
+        "F.mdx",
+        "G.txt",
+        "NOTES",
+        ".mkd",
+    ] {
+        sb.write_and_commit(&format!("skills/review/{name}"), token);
+    }
+
+    let spec = sb.source_spec();
+    assert!(sb.mind(&["meld", &spec, "--as", "jk"]).success);
+    assert!(sb.mind(&["learn", "jk:review", "--yes"]).success);
+
+    let store = sb.mind_home.join("store/skill/jk:review");
+    for name in ["A.markdown", "B.mkd", "C.mdown", "D.MD", "E.Markdown"] {
+        let got = std::fs::read_to_string(store.join(name)).unwrap();
+        assert!(
+            !got.contains("{{"),
+            "{name} is markdown: every token must expand: {got}"
+        );
+        assert!(got.contains("see dev and "), "{name}: {got}");
+    }
+    for name in ["F.mdx", "G.txt", "NOTES", ".mkd"] {
+        assert_eq!(
+            std::fs::read_to_string(store.join(name)).unwrap(),
+            token,
+            "{name} is not markdown: its tokens must be left exactly as written"
+        );
+    }
+}
+
+#[test]
 fn meld_as_warns_about_unguarded_prose_references() {
     // spec: NS-20, NS-22, NS-42, CLI-14, CLI-162
     // Without --verbose the unguarded-reference warning is suppressed (CLI-162).
@@ -4386,6 +4507,29 @@ fn meld_as_warns_about_unguarded_prose_references() {
         r2.stderr.contains("references sibling(s) in prose") && r2.stderr.contains("review"),
         "expected unguarded-ref warning under --verbose: {}",
         r2.stderr
+    );
+}
+
+#[test]
+fn meld_as_does_not_warn_for_a_sibling_mention_inside_a_code_span() {
+    // spec: NS-20 NS-55
+    // The unguarded-reference warning is structure-aware (NS-55) on every
+    // surface that calls it, not just `review`: a sibling name that sits
+    // inside a code span is not a real reference, so `meld --verbose` must not
+    // flag it either, even though a whole-word text scan (the pre-NS-55
+    // behavior) would have.
+    let sb = Sandbox::new();
+    sb.write_and_commit(
+        "agents/lead.md",
+        "---\nname: lead\ndescription: lead\n---\nRun `review` locally first.\n",
+    );
+    let spec = sb.source_spec();
+    let r = sb.mind(&["--verbose", "meld", &spec, "--as", "jk"]);
+    assert!(r.success, "{}", r.stderr);
+    assert!(
+        !r.stderr.contains("references sibling(s) in prose"),
+        "a code-span mention is not a reference and must not be flagged: {}",
+        r.stderr
     );
 }
 
@@ -7714,6 +7858,22 @@ fn example_tooling_expands_path_tokens() {
     assert!(
         sb.mind_home.join("store/tool/detect/detect.sh").exists(),
         "the detect tool should be copied into the store"
+    );
+
+    // spec: NS-53 TOOL-19
+    // The tool's own non-markdown files mention the tokens that reach them (as
+    // documentation), but those tokens do not expand there: markdown is the
+    // only place any token family expands.
+    let detect_sh =
+        std::fs::read_to_string(sb.mind_home.join("store/tool/detect/detect.sh")).unwrap();
+    assert!(
+        detect_sh.contains("{{tools:detect}}"),
+        "a token in a non-markdown file is left exactly as written: {detect_sh}"
+    );
+    let lib_sh = std::fs::read_to_string(sb.mind_home.join("store/tool/detect/lib.sh")).unwrap();
+    assert!(
+        lib_sh.contains("{{path:tool:detect}}") && lib_sh.contains("{{tools:detect}}"),
+        "a token in a non-markdown file is left exactly as written: {lib_sh}"
     );
 }
 
@@ -14712,8 +14872,12 @@ fn tool_source() -> Sandbox {
 }
 
 #[test]
-fn tool_installs_store_only_and_tokens_expand_everywhere() {
-    // spec: TOOL-3 TOOL-13 TOOL-14 TOOL-15
+fn tool_installs_store_only_and_tokens_expand_in_markdown_only() {
+    // spec: TOOL-3 TOOL-13 TOOL-14 TOOL-15 TOOL-19 NS-53
+    // Path tokens follow the same markdown-only narrowing as `{{ns:}}` (NS-53,
+    // TOOL-19): a token in the skill's SKILL.md expands, but the same token
+    // family in a bundled non-markdown script (the skill's own `run.sh`, a
+    // tool's own `lib.sh`) is left exactly as written.
     let sb = tool_source();
     let spec = sb.source_spec();
     let r = sb.mind(&["meld", &spec, "--yes"]);
@@ -14739,7 +14903,7 @@ fn tool_installs_store_only_and_tokens_expand_everywhere() {
         "the skill links as usual"
     );
 
-    // Tokens expanded to store paths in the SKILL.md...
+    // Tokens expanded to store paths in the SKILL.md (markdown)...
     let s = store.display().to_string();
     let skill_md = std::fs::read_to_string(store.join("skill/review/SKILL.md")).unwrap();
     assert!(
@@ -14754,17 +14918,18 @@ fn tool_installs_store_only_and_tokens_expand_everywhere() {
         skill_md.contains(&format!("lib {s}/tool/detect/lib.sh")),
         "{skill_md}"
     );
-    // ...in the skill's bundled script (TOOL-14)...
+    // ...but NOT in the skill's bundled non-markdown script (NS-53/TOOL-19):
+    // the token is left exactly as written.
     let run_sh = std::fs::read_to_string(store.join("skill/review/run.sh")).unwrap();
     assert!(
-        run_sh.contains(&format!("{s}/tool/detect/detect run")),
-        "{run_sh}"
+        run_sh.contains("{{tools:detect}} run"),
+        "a non-markdown file's token must not expand: {run_sh}"
     );
-    // ...and tool -> tool, in a tool's own helper file (TOOL-15).
+    // ...nor in a tool's own non-markdown helper file (tool -> tool, NS-53).
     let lib_sh = std::fs::read_to_string(store.join("tool/detect/lib.sh")).unwrap();
     assert!(
-        lib_sh.contains(&format!("exec {s}/tool/shard/shard")),
-        "{lib_sh}"
+        lib_sh.contains("exec {{tools:shard}} \"$@\""),
+        "a non-markdown file's token must not expand: {lib_sh}"
     );
 }
 

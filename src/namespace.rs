@@ -13,6 +13,53 @@
 
 use std::collections::HashSet;
 
+/// The file extensions (case-insensitive) [`is_markdown`] recognizes as
+/// markdown.
+const MARKDOWN_EXTENSIONS: &[&str] = &["md", "markdown", "mdown", "mkd"];
+
+/// Whether `path` is a markdown file, by a case-insensitive extension match
+/// against [`MARKDOWN_EXTENSIONS`].
+///
+/// The single chokepoint for "does a token expand here" (NS-53): all four
+/// token families (`{{ns:}}`, `{{path:}}`, `{{tools:}}`, `{{self}}`) expand only
+/// in a file this returns `true` for. `install.rs` skips any other file before
+/// expansion; `review --fix` reports but never rewrites one (NS-54). Every
+/// caller that needs this question answered goes through here rather than
+/// repeating an extension check.
+pub fn is_markdown(path: &std::path::Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+        MARKDOWN_EXTENSIONS
+            .iter()
+            .any(|md| e.eq_ignore_ascii_case(md))
+    })
+}
+
+/// Render `{{ns:name}}` tokens in `text` as their bare `name`, for a display
+/// surface (`recall`, `probe`, `dump`) that shows raw source text -- a
+/// frontmatter `description:` -- rather than an item's expanded store copy
+/// (NS-56). This lets `templatize` wrap a sibling mention in a description
+/// (NS-56) without the wrapped token leaking into a human-facing listing. Any
+/// other `{{...}}` token is left as written; an unterminated token (no closing
+/// `}}`) is left verbatim, mirroring [`expand`].
+pub fn flatten_display(text: &str) -> String {
+    const OPEN: &str = "{{ns:";
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(pos) = rest.find(OPEN) {
+        out.push_str(&rest[..pos]);
+        let after = &rest[pos + OPEN.len()..];
+        let Some(end) = after.find("}}") else {
+            out.push_str(&rest[pos..]);
+            return out;
+        };
+        let name = after[..end].trim();
+        out.push_str(name);
+        rest = &after[end + 2..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Apply an effective prefix to a bare item name. An empty prefix is treated as
 /// no prefix (the "no prefix" override; see [`prefix_choice`]).
 pub fn apply(bare: &str, prefix: &Option<String>) -> String {
@@ -32,8 +79,13 @@ fn is_word_char(c: char) -> bool {
 /// tokens, returning the new content and the number of replacements. Wrapping is
 /// confined to prose (NS-24): text already inside a `{{...}}` brace span, a code
 /// block, an inline code span, link syntax (a destination, a title, a reference
-/// label; NS-52), the leading frontmatter, or a path-adjacent position is left
-/// untouched, so a keyword, a path component, or a link is never wrapped.
+/// label; NS-52), the frontmatter `name:` field, or a path-adjacent position is
+/// left untouched, so a keyword, a path component, a link, or the item's own
+/// identity is never wrapped. A sibling mention in any other frontmatter field
+/// (e.g. `description:`) is ordinary prose and is wrapped (NS-56): the
+/// `description:` value is what `recall`/`probe`/`dump` display, so a display
+/// surface flattens the token back to a bare name for that listing
+/// ([`flatten_display`]) while the installed copy still expands it.
 /// Still heuristic in prose (a sibling name can be an ordinary word), so callers
 /// (init-source) keep it opt-in and reviewable, and apply it only to markdown.
 ///
@@ -120,10 +172,8 @@ pub fn templatize(content: &str, siblings: &HashSet<String>) -> (String, usize) 
 }
 
 /// Emit the word spanning `[start, end)` of `content`: wrapped as a `{{ns:}}`
-/// token when it is a sibling name in a prose position, else verbatim. Returns 1
-/// if wrapped. A word the structure map does not call prose -- in a code block, a
-/// code span, link syntax, the frontmatter, or on a delimiter line -- or one
-/// abutting a path separator (`/`/`~`) is never wrapped (NS-24, NS-52).
+/// token when it is a sibling name in a wrappable position, else verbatim.
+/// Returns 1 if wrapped. See [`is_wrappable_mention`] for what counts.
 #[allow(clippy::too_many_arguments)]
 fn emit_word(
     content: &str,
@@ -137,8 +187,7 @@ fn emit_word(
 ) -> usize {
     let Some(start) = start else { return 0 };
     let word = &content[start..end];
-    let path_adj = matches!(before, Some('/') | Some('~')) || matches!(after, Some('/'));
-    if doc.at(start) == Cell::Prose && !path_adj && siblings.contains(word) {
+    if is_wrappable_mention(doc, start, word, siblings, before, after) {
         out.push_str("{{ns:");
         out.push_str(word);
         out.push_str("}}");
@@ -147,6 +196,27 @@ fn emit_word(
         out.push_str(word);
         0
     }
+}
+
+/// Whether the word `word` starting at byte `start` (with `before`/`after` its
+/// neighboring non-word characters, for the path-adjacency test) is a bare
+/// sibling mention `templatize` may wrap into a token and [`unguarded_refs`]
+/// must report (NS-24, NS-46, NS-47, NS-52, NS-55, NS-56): a real sibling name,
+/// in prose or in a frontmatter field other than `name:`, not abutting a path
+/// separator (`/` or `~`). The one predicate both read, so wrapping and
+/// reporting cannot disagree about what counts.
+fn is_wrappable_mention(
+    doc: &Structure,
+    start: usize,
+    word: &str,
+    siblings: &HashSet<String>,
+    before: Option<char>,
+    after: Option<char>,
+) -> bool {
+    let path_adj = matches!(before, Some('/') | Some('~')) || matches!(after, Some('/'));
+    !path_adj
+        && matches!(doc.at(start), Cell::Prose | Cell::FmDescription)
+        && siblings.contains(word)
 }
 
 /// Interpret the user's answer to the meld prefix prompt for a source that
@@ -768,15 +838,102 @@ pub fn referenced_names(content: &str) -> Vec<String> {
 /// A sibling name that already appears inside any token kind (`{{ns:}}`,
 /// `{{tools:}}`, `{{path:}}`, `{{self}}`) is correctly guarded and is NOT
 /// reported; only names in genuinely bare prose are flagged.
+///
+/// Structure-aware (NS-55): reads the same [`Structure`] map `templatize` and
+/// `scan_ns_refs` read, through the same [`is_wrappable_mention`] predicate
+/// `templatize` wraps with, so a mention inside a code span, a fenced or
+/// indented code block, link syntax, or a path-adjacent position is never
+/// reported (it was never a real reference there), while a mention in prose or
+/// in a frontmatter field other than `name:` is (NS-56) -- exactly the set
+/// `templatize` can wrap, so `--fix` clears every mention this reports instead
+/// of leaving some of them permanently unclearable (NS-48).
+///
+/// `content` need not be markdown (a script, data): [`Structure`] still reads
+/// it as a CommonMark document, which is a heuristic parse rather than a
+/// meaningful one for such a file, but it only ever suppresses a report (an
+/// indented line reads as code), never adds a false one, so applying it to any
+/// text file moves in the right direction rather than the wrong one.
 pub fn unguarded_refs(content: &str, siblings: &HashSet<String>) -> Vec<String> {
-    let stripped = strip_braced(content);
-    let mut found: Vec<String> = siblings
-        .iter()
-        .filter(|name| whole_word_present(&stripped, name))
-        .cloned()
-        .collect();
+    let doc = Structure::new(content);
+    let mut found: Vec<String> = Vec::new();
+    let mut word: Option<usize> = None;
+    let mut before: Option<char> = None;
+    let mut i = 0usize;
+    while i < content.len() {
+        let rest = &content[i..];
+        // An existing `{{...}}` span is not a bare mention: skip it whole,
+        // exactly as `templatize` does, so a name already inside any token kind
+        // is never reported (it is correctly guarded, whatever the token).
+        if rest.starts_with("{{") {
+            note_mention(
+                content,
+                word.take(),
+                i,
+                &doc,
+                siblings,
+                before,
+                None,
+                &mut found,
+            );
+            let Some(close) = rest.find("}}") else {
+                break;
+            };
+            i += close + 2;
+            before = Some('}');
+            continue;
+        }
+        let c = rest.chars().next().expect("non-empty remainder");
+        if is_word_char(c) {
+            word.get_or_insert(i);
+            i += c.len_utf8();
+            continue;
+        }
+        note_mention(
+            content,
+            word.take(),
+            i,
+            &doc,
+            siblings,
+            before,
+            Some(c),
+            &mut found,
+        );
+        before = Some(c);
+        i += c.len_utf8();
+    }
+    note_mention(
+        content,
+        word.take(),
+        content.len(),
+        &doc,
+        siblings,
+        before,
+        None,
+        &mut found,
+    );
     found.sort();
+    found.dedup();
     found
+}
+
+/// Record the word spanning `[start, end)` of `content` when it is a bare
+/// sibling mention ([`is_wrappable_mention`]).
+#[allow(clippy::too_many_arguments)]
+fn note_mention(
+    content: &str,
+    start: Option<usize>,
+    end: usize,
+    doc: &Structure,
+    siblings: &HashSet<String>,
+    before: Option<char>,
+    after: Option<char>,
+    found: &mut Vec<String>,
+) {
+    let Some(start) = start else { return };
+    let word = &content[start..end];
+    if is_wrappable_mention(doc, start, word, siblings, before, after) {
+        found.push(word.to_string());
+    }
 }
 
 fn whole_word_present(haystack: &str, needle: &str) -> bool {
@@ -849,8 +1006,17 @@ enum Cell {
     LinkSyntax,
     /// The frontmatter `name:` field.
     FmName,
-    /// Any other frontmatter content. A token here is a reference (prose), but
-    /// wrapping never rewrites a structured field, so it is kept distinct.
+    /// The *value* of the frontmatter `description:` field: the one frontmatter
+    /// field that is free prose rather than machine-read structure, so the one
+    /// wrapping may rewrite (NS-56).
+    FmDescription,
+    /// Any other frontmatter content: another field's key or value, the
+    /// `description:` key itself, or a line with no `key:` at all. A token here
+    /// is a reference (prose), but the field is structure mind or the harness
+    /// parses out of the *source* file -- `requires:` is a list of item refs
+    /// (DEP-4), `build:`/`install:`/`bin:` are shell commands (TOOL-6..) --
+    /// and nothing ever expands a token there, so wrapping must never create
+    /// one (NS-56).
     FmOther,
     /// Structure carrying no scannable content: a frontmatter delimiter, a code
     /// fence delimiter (info string included), or a container marker prefixing
@@ -958,7 +1124,7 @@ impl Structure {
             Cell::Skip => return None,
             Cell::FmName => NsContext::FrontmatterName,
             // A token in any other frontmatter field is an ordinary reference.
-            Cell::FmOther => NsContext::Prose,
+            Cell::FmDescription | Cell::FmOther => NsContext::Prose,
             Cell::Code => NsContext::CodeBlock,
             Cell::Span => NsContext::CodeSpan,
             // A destination, a label, or a title is a path or an identifier, not
@@ -1017,6 +1183,8 @@ fn fill(cells: &mut [Cell], range: std::ops::Range<usize>, cell: Cell) {
 /// rewrites (NS-47). The BOM is marked with the opening delimiter, and every
 /// offset returned or recorded stays document-global.
 fn mark_frontmatter(content: &str, cells: &mut [Cell]) -> usize {
+    /// The one frontmatter key whose value is free prose (NS-56).
+    const DESCRIPTION_KEY: &str = "description:";
     let bom = if content.starts_with('\u{feff}') {
         '\u{feff}'.len_utf8()
     } else {
@@ -1044,12 +1212,24 @@ fn mark_frontmatter(content: &str, cells: &mut [Cell]) -> usize {
             fill(cells, offset..end, Cell::Skip);
             return end;
         }
-        let cell = if line.trim_start().starts_with("name:") {
-            Cell::FmName
+        // NS-56: `description:` is the one frontmatter field that is free prose,
+        // so its *value* is the one frontmatter region wrapping may rewrite. Its
+        // key is not (a source with a sibling literally named `description`
+        // would otherwise have the key itself wrapped, breaking the field), and
+        // neither is any other line: `requires:`, `build:`, `install:`, `bin:`,
+        // `link:` and every harness-owned field are structure parsed out of this
+        // source file, where no token is ever expanded.
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("name:") {
+            fill(cells, offset..end, Cell::FmName);
+        } else if trimmed.starts_with(DESCRIPTION_KEY) {
+            let indent = line.len() - trimmed.len();
+            let value_start = offset + indent + DESCRIPTION_KEY.len();
+            fill(cells, offset..value_start, Cell::FmOther);
+            fill(cells, value_start..end, Cell::FmDescription);
         } else {
-            Cell::FmOther
-        };
-        fill(cells, offset..end, cell);
+            fill(cells, offset..end, Cell::FmOther);
+        }
         offset = end;
     }
     content.len()
@@ -1098,9 +1278,15 @@ pub fn scan_ns_refs(content: &str) -> Vec<NsRef> {
 }
 
 /// Un-wrap misplaced `{{ns:name}}` tokens (NS-24) back to the bare `name`. With
-/// `all_code` false, only non-prose tokens are un-wrapped (the markdown case);
-/// with it true, every token is un-wrapped (a non-markdown file, which is all
-/// code, where no `{{ns:}}` belongs). Returns the new content and the count.
+/// `all_code` false, only non-prose tokens are un-wrapped; with it true, every
+/// token is un-wrapped. Returns the new content and the count.
+///
+/// `review --fix` (NS-54) only ever calls this with `all_code = false`, and
+/// only on a markdown file ([`is_markdown`]): a token has no reportable
+/// "misplaced" reading outside markdown, since none expands there at all, so
+/// `--fix` reports it instead of rewriting (see `review.rs`). The `all_code`
+/// parameter stays for callers that do want to unwrap every token in a
+/// known-all-code text uniformly.
 pub fn unwrap_misplaced(content: &str, all_code: bool) -> (String, usize) {
     let mut out = String::with_capacity(content.len());
     let mut last = 0;
@@ -1133,6 +1319,66 @@ mod tests {
         assert_eq!(apply("review", &None), "review");
         // An empty prefix is "no prefix" (the override), not a leading colon.
         assert_eq!(apply("review", &Some(String::new())), "review");
+    }
+
+    #[test]
+    fn is_markdown_matches_every_recognized_extension_case_insensitively() {
+        // spec: NS-53
+        for name in [
+            "SKILL.md",
+            "notes.markdown",
+            "notes.MARKDOWN",
+            "notes.mdown",
+            "notes.mkd",
+            "notes.Md",
+        ] {
+            assert!(
+                is_markdown(std::path::Path::new(name)),
+                "{name} should be recognized as markdown"
+            );
+        }
+        for name in [
+            "run.sh",
+            "TOOL",
+            "lib.py",
+            "notes.txt",
+            "notes",
+            "notes.mdx",
+            // The extension is the LAST component, so one appearing mid-name is
+            // not one: a generated script and a backup both stay non-markdown.
+            "run.md.sh",
+            "notes.md.bak",
+            // A leading dot is a stem, not an extension (Rust's own rule), so a
+            // dotfile named for a markdown extension is not markdown.
+            ".md",
+            ".markdown",
+            // A path is judged by its file name, not by a directory component
+            // that happens to carry the extension.
+            "docs.md/run.sh",
+        ] {
+            assert!(
+                !is_markdown(std::path::Path::new(name)),
+                "{name} should not be recognized as markdown"
+            );
+        }
+    }
+
+    #[test]
+    fn flatten_display_renders_ns_tokens_as_their_bare_name() {
+        // spec: NS-56
+        assert_eq!(
+            flatten_display("hand off to {{ns:dev}} when done"),
+            "hand off to dev when done"
+        );
+        // Whitespace inside the token is trimmed, mirroring `expand`.
+        assert_eq!(flatten_display("see {{ns: dev }}"), "see dev");
+        // No tokens: unchanged.
+        assert_eq!(flatten_display("plain text"), "plain text");
+        // An unterminated token is left verbatim.
+        assert_eq!(flatten_display("see {{ns:dev"), "see {{ns:dev");
+        // A non-`ns:` token (e.g. a stray `{{self}}`) is left as written: this
+        // helper only flattens the name-reference family.
+        assert_eq!(flatten_display("path is {{self}}"), "path is {{self}}");
     }
 
     #[test]
@@ -2100,10 +2346,12 @@ mod tests {
         // For every whole-word sibling mention in every shape, ask the two
         // passes the same question about the same byte offset: did wrapping
         // rewrite this occurrence, and does the scan call a token written at
-        // this offset prose? The two must answer alike. Frontmatter is the one
-        // documented asymmetry (NS-48): a token in a frontmatter field is a
-        // reference the scan calls prose, but wrapping never rewrites a
-        // structured field, so wrapping is a subset there, never a superset.
+        // this offset prose? The two must answer alike. The frontmatter
+        // `name:` field is the one remaining documented asymmetry (NS-24,
+        // NS-56): a token there is a reference the scan calls
+        // `FrontmatterName` (not `Prose`), so both sides already agree it is
+        // not a wrap target and neither branch below needs to special-case it.
+        // Every other frontmatter field agrees with prose now (NS-56).
         let s = sibs(&["dev", "do"]);
         for doc in SHAPES {
             let (bare, _) = unwrap_misplaced(doc, true);
@@ -2126,7 +2374,7 @@ mod tests {
                             "wrapping created a token at {start} the scan calls \
                              {scanned:?} in:\n{bare}"
                         );
-                    } else if !in_frontmatter(&bare, start) {
+                    } else {
                         assert!(
                             !scan_prose,
                             "the scan calls a token at {start} prose but wrapping \
@@ -2191,28 +2439,6 @@ mod tests {
             from = end;
         }
         out
-    }
-
-    /// Whether byte offset `pos` lies in the document's leading frontmatter.
-    fn in_frontmatter(content: &str, pos: usize) -> bool {
-        let mut lines = content.split_inclusive('\n');
-        let Some(first) = lines.next() else {
-            return false;
-        };
-        if first.trim() != "---" {
-            return false;
-        }
-        let mut offset = first.len();
-        for raw in lines {
-            if pos < offset {
-                return true;
-            }
-            offset += raw.len();
-            if raw.strip_suffix('\n').unwrap_or(raw).trim() == "---" {
-                return pos < offset;
-            }
-        }
-        true
     }
 
     #[test]
@@ -2593,13 +2819,18 @@ mod tests {
     }
 
     #[test]
-    fn fix_does_not_clear_an_unguarded_mention_outside_prose() {
-        // spec: NS-48
-        // The boundary NS-48 is scoped to, stated as a test rather than left as
-        // prose: `unguarded_refs` is context-free, so a sibling name inside a
-        // code span, inside a fence, or in the frontmatter is reported both
-        // before and after `--fix`, and `--fix` cannot clear it (un-wrapping put
-        // the first two there, and wrapping never touches any of the three).
+    fn fix_clears_mentions_that_used_to_be_permanently_unclearable() {
+        // spec: NS-48 NS-55 NS-56
+        // NS-48 used to list a sibling name inside a code span, inside a fence,
+        // or in the frontmatter as three of its six known false positives:
+        // `unguarded_refs` was context-free, so it reported all three both
+        // before and after `--fix`, which had no move left to clear any of
+        // them (un-wrapping put the first two there; wrapping never touched any
+        // of the three). Structure-aware `unguarded_refs` (NS-55) no longer
+        // reports a mention inside a code span or a fence at all -- it was
+        // never a real reference there -- and `templatize` wrapping into a
+        // non-`name:` frontmatter field (NS-56) clears the frontmatter case
+        // instead of leaving it forever reported.
         let s = sibs(&["dev"]);
         for doc in [
             "run `{{ns:dev}}` now\n",
@@ -2609,8 +2840,8 @@ mod tests {
             let fixed = fix_passes(doc, &s);
             assert_eq!(
                 unguarded_refs(&fixed, &s),
-                vec!["dev".to_string()],
-                "still reported, and `--fix` has no move left: {fixed}"
+                Vec::<String>::new(),
+                "no longer reported: {fixed}"
             );
         }
     }
@@ -2627,6 +2858,67 @@ mod tests {
         assert!(out.contains("~/dev"), "path untouched: {out}");
         assert!(out.contains("for x; do"), "code block untouched: {out}");
         assert!(out.contains("name: dev"), "frontmatter untouched: {out}");
+    }
+
+    #[test]
+    fn templatize_wraps_the_description_field_but_never_name() {
+        // spec: NS-56
+        // A sibling mention in the `description:` *value* is ordinary prose and
+        // gets wrapped; the `name:` field itself stays unwrappable (NS-24) even
+        // when its value happens to also be another sibling's name.
+        let s = sibs(&["dev", "review"]);
+        let doc = "---\nname: review\ndescription: hand off to dev when done\n---\nbody\n";
+        let (out, n) = templatize(doc, &s);
+        assert_eq!(n, 1, "only the description mention is wrapped: {out}");
+        assert!(
+            out.contains("description: hand off to {{ns:dev}} when done"),
+            "{out}"
+        );
+        assert!(out.contains("name: review"), "name: stays bare: {out}");
+
+        // Idempotent: a second pass changes nothing further.
+        let (again, m) = templatize(&out, &s);
+        assert_eq!(again, out);
+        assert_eq!(m, 0);
+    }
+
+    #[test]
+    fn templatize_never_wraps_a_structured_frontmatter_field() {
+        // spec: NS-56 NS-24
+        // The other half of NS-56, and the half that is destructive to get
+        // wrong. `description:` is the only frontmatter field that is free
+        // prose. Every other one is machine-read structure parsed out of *this*
+        // source file, where no token is ever expanded: `requires:` is a list of
+        // item refs (DEP-4/DEP-5) `catalog.rs` reads and `install.rs` validates,
+        // and `build:`/`install:`/`uninstall:`/`bin:` are shell commands run
+        // verbatim. Wrapping a sibling name into any of them writes a token
+        // nothing expands, which breaks the field rather than templating it.
+        let s = sibs(&["dev", "review", "detect", "description"]);
+        for doc in [
+            "---\nname: review\nrequires: agent:dev\n---\nbody\n",
+            "---\nname: review\nbuild: make detect\n---\nbody\n",
+            "---\nname: review\ninstall: ./setup dev\n---\nbody\n",
+            "---\nname: review\nuninstall: ./teardown dev\n---\nbody\n",
+            "---\nname: review\nbin: detect\n---\nbody\n",
+            "---\nname: review\nmodel: dev\n---\nbody\n",
+            // The `description:` KEY is not its value: a source that happens to
+            // ship a sibling literally named `description` must not have the
+            // key itself wrapped into `{{ns:description}}:`, which would destroy
+            // the field outright.
+            "---\nname: review\ndescription: a runner\n---\nbody\n",
+        ] {
+            assert_eq!(
+                templatize(doc, &s),
+                (doc.to_string(), 0),
+                "a structured frontmatter field must never be wrapped: {doc}"
+            );
+        }
+        // And the check agrees with wrapping (NS-48/NS-55): what wrapping
+        // declines here is not reported as an unguarded reference either.
+        assert_eq!(
+            unguarded_refs("---\nname: review\nrequires: agent:dev\n---\nbody\n", &s),
+            Vec::<String>::new()
+        );
     }
 
     // ---- outside-in second pass over the structural scan (NS-46..NS-50) ------
@@ -3237,14 +3529,14 @@ mod tests {
     }
 
     #[test]
-    fn a_link_only_mention_is_the_fifth_carve_out_ns48_names() {
-        // spec: NS-48 NS-52
-        // The cost of the link rule, stated the way the path-adjacency carve-out
-        // is: a name reachable only as a destination or a label is reported by
-        // the context-free unguarded check, and `--fix` has no move on it, since
-        // wrapping it would break the link. The behavior is right and the
-        // advisory is a false positive, so NS-48 names it rather than claiming
-        // `--fix` clears it.
+    fn a_link_only_mention_is_no_longer_a_false_positive() {
+        // spec: NS-48 NS-52 NS-55
+        // A name reachable only as a destination or a label: wrapping still has
+        // no move on it, since wrapping it would break the link, but
+        // structure-aware `unguarded_refs` (NS-55) now reads the same link-syntax
+        // cell and no longer reports it either -- it was never a real reference
+        // there. NS-48 no longer names this a false positive: there is nothing
+        // left to report.
         let s = sibs(&["dev"]);
         for doc in [
             "See [the docs](dev.md).\n",
@@ -3254,8 +3546,8 @@ mod tests {
             assert_eq!(fixed, doc, "wrapping must not rewrite link syntax: {fixed}");
             assert_eq!(
                 unguarded_refs(&fixed, &s),
-                vec!["dev".to_string()],
-                "and the context-free check still reports it: {fixed}"
+                Vec::<String>::new(),
+                "link syntax is not a reference and is no longer reported: {fixed}"
             );
         }
     }
@@ -3599,14 +3891,14 @@ mod tests {
 
     #[test]
     fn an_unterminated_frontmatter_block_swallows_the_whole_document() {
-        // spec: NS-24 NS-48
+        // spec: NS-24 NS-47 NS-56
         // Characterization of the documented "runs to the end of the document"
         // rule, in the shape where it costs something. A file whose leading
-        // `---` never closes is frontmatter throughout, so wrapping rewrites
-        // nothing in it and every token in it classifies prose (and survives
-        // `--fix`). Nothing is deleted, which is the direction that matters,
-        // but NS-48's frontmatter carve-out is what excuses the bare mention
-        // the unguarded check still reports.
+        // `---` never closes is frontmatter throughout, so every line in it that
+        // is not `description:` is a structured field: wrapping rewrites nothing
+        // there (NS-56 opens up only the `description:` value) and every token in
+        // it classifies prose, so it survives `--fix` (NS-24). Nothing is
+        // deleted, which is the direction that matters.
         let s = sibs(&["dev"]);
         let doc = "---\nname: thing\ndescription: x\n\nSee dev in the body.\n";
         assert_eq!(templatize(doc, &s), (doc.to_string(), 0));
@@ -3615,13 +3907,14 @@ mod tests {
         assert_eq!(surviving(tokenized), tokenized);
         assert_eq!(
             unguarded_refs(&fix_passes(doc, &s), &s),
-            vec!["dev".to_string()],
-            "the carve-out: `--fix` has no move inside frontmatter"
+            Vec::<String>::new(),
+            "and the structure-aware check does not report what wrapping declines"
         );
         // The same rule read the other way: a leading `---` that the author
         // meant as a thematic break opens a frontmatter block, and a later one
-        // closes it, so the prose between them is never wrapped while the body
-        // after it is.
+        // closes it, so the text between them is read as structured frontmatter
+        // and is never wrapped, while the ordinary markdown body after the close
+        // is.
         let doc = "---\n\nIntro mentioning dev.\n\n---\n\nBody mentioning dev.\n";
         let (out, n) = templatize(doc, &s);
         assert_eq!(n, 1, "only the text past the second delimiter: {out}");
@@ -3690,16 +3983,18 @@ mod tests {
         );
         // The body after a BOM-prefixed frontmatter block is ordinary markdown,
         // so a bare mention in it is still wrapped: the strip protects the
-        // frontmatter without turning the rest of the file into a dead zone.
+        // `name:` field without turning the rest of the file into a dead zone.
+        // The `description:` mention is wrapped too (NS-56): only `name:` is
+        // exempt.
         let s = sibs(&["dev"]);
         let (out, n) = templatize(
             "\u{feff}---\nname: thing\ndescription: hands off to dev\n---\nSee dev here.\n",
             &s,
         );
-        assert_eq!(n, 1, "only the body mention: {out}");
+        assert_eq!(n, 2, "the description mention and the body mention: {out}");
         assert_eq!(
             out,
-            "\u{feff}---\nname: thing\ndescription: hands off to dev\n---\n\
+            "\u{feff}---\nname: thing\ndescription: hands off to {{ns:dev}}\n---\n\
              See {{ns:dev}} here.\n"
         );
         // A BOM on a file with no frontmatter opens no block: the first line is
@@ -3789,17 +4084,13 @@ mod tests {
     }
 
     #[test]
-    fn a_path_adjacent_mention_is_a_carve_out_ns48_names() {
-        // spec: NS-48 NS-24
-        // NS-48 is falsifiable as written. It scopes itself to "content whose
-        // sibling mentions all sit in prose" and then lists the known false
-        // positives of the context-free unguarded check as a code span, a code
-        // block, and a frontmatter field. A path-adjacent mention is a fourth:
-        // `unguarded_refs` reports `dev` in `~/dev` (a `/` is not a word
-        // character), while NS-24 forbids wrapping it, so `--fix` cannot clear
-        // it either. The behavior is right -- wrapping `~/{{ns:dev}}` would
-        // rewrite a path -- and the requirement's carve-out list is what is
-        // incomplete. Pinned so the gap is visible rather than latent.
+    fn a_path_adjacent_mention_is_no_longer_a_false_positive() {
+        // spec: NS-48 NS-24 NS-55
+        // A path-adjacent mention: wrapping still declines it (NS-24) --
+        // wrapping `~/{{ns:dev}}` would rewrite a path -- but structure-aware
+        // `unguarded_refs` (NS-55) shares the same path-adjacency test and no
+        // longer reports it either, so `--fix` is not asked to clear a mention
+        // that was never a real reference to begin with.
         let s = sibs(&["dev"]);
         for doc in [
             "Config lives in ~/dev now.\n",
@@ -3809,8 +4100,8 @@ mod tests {
             assert_eq!(fixed, doc, "wrapping must not rewrite a path: {fixed}");
             assert_eq!(
                 unguarded_refs(&fixed, &s),
-                vec!["dev".to_string()],
-                "and the context-free check still reports it: {fixed}"
+                Vec::<String>::new(),
+                "a path-adjacent mention is not a reference and is no longer reported: {fixed}"
             );
         }
         // The proof that it is the path rule and not a structural miss: the
@@ -4117,12 +4408,15 @@ mod tests {
 
     #[test]
     fn a_definition_below_an_unterminated_frontmatter_block_is_never_read() {
-        // spec: NS-52 NS-47
+        // spec: NS-52 NS-47 NS-56
         // The frontmatter pre-pass runs before the parse and hands it only the
         // body, so a document whose leading `---` never closes hands it nothing
         // at all: there are no definitions and no links, and every byte is a
-        // frontmatter field. Nothing is wrapped, which is the safe direction,
-        // and nothing below it is deleted either.
+        // frontmatter field. Nothing is wrapped -- a swallowed line is a
+        // structured field, not the `description:` value NS-56 opens up -- which
+        // is the safe direction twice over: the definition's own label would
+        // otherwise be rewritten into `[{{ns:dev}}]:`, silently breaking the
+        // link the parser never got to see.
         let s = sibs(&["dev", "do"]);
         let doc = "---\nname: thing\n[dev]: https://example.com/x\n\n\
                    See [the do notes][dev].\n";
@@ -4185,22 +4479,21 @@ mod tests {
     }
 
     #[test]
-    fn a_fence_info_string_mention_is_a_carve_out_ns48_names() {
-        // spec: NS-48 NS-47
-        // NS-48 now lists five known false positives of the context-free
-        // unguarded check. A sibling name in a fence's info string is a sixth:
-        // the delimiter line is `Skip`, so wrapping declines it (NS-47 calls the
-        // info string structure, not content) while `unguarded_refs` reports it
-        // -- a `` ` `` is not a word character. The behavior is right; the
-        // requirement's list is what is short. Pinned so the gap is visible.
+    fn a_fence_info_string_mention_is_no_longer_a_false_positive() {
+        // spec: NS-48 NS-47 NS-55
+        // A sibling name in a fence's info string: the delimiter line is
+        // `Skip`, so wrapping declines it (NS-47 calls the info string
+        // structure, not content), and structure-aware `unguarded_refs` (NS-55)
+        // reads the same `Skip` cell, so it no longer reports it either. NS-48's
+        // false-positive list, once six deep, is now empty.
         let s = sibs(&["dev"]);
         for doc in ["```dev\nx\n```\n", "~~~ dev\nx\n~~~\n"] {
             let fixed = fix_passes(doc, &s);
             assert_eq!(fixed, doc, "an info string is never rewritten: {fixed}");
             assert_eq!(
                 unguarded_refs(&fixed, &s),
-                vec!["dev".to_string()],
-                "and the context-free check still reports it: {fixed}"
+                Vec::<String>::new(),
+                "delimiter structure is not a reference and is no longer reported: {fixed}"
             );
         }
     }
@@ -4215,22 +4508,25 @@ mod tests {
         // frontmatter and leave the `name:` field alone.
         let s = sibs(&["dev", "do"]);
         // BOM plus CRLF, which shifts every offset by one more byte per line.
+        // `name:` stays bare; `description:` and the body mention are both
+        // wrapped (NS-56).
         let doc = "\u{feff}---\r\nname: dev\r\ndescription: see do\r\n---\r\nSee do here.\r\n";
         let (out, n) = templatize(doc, &s);
-        assert_eq!(n, 1, "only the body mention: {out}");
+        assert_eq!(n, 2, "the description mention and the body mention: {out}");
         assert_eq!(
             out,
-            "\u{feff}---\r\nname: dev\r\ndescription: see do\r\n---\r\n\
+            "\u{feff}---\r\nname: dev\r\ndescription: see {{ns:do}}\r\n---\r\n\
              See {{ns:do}} here.\r\n"
         );
         // BOM plus whitespace before the delimiter: `frontmatter.rs` trims the
-        // line, so this is a real item and its fields must be protected too.
+        // line, so this is a real item and its `name:` field must be protected
+        // too; `description:` is wrapped like the body.
         let doc = "\u{feff} ---\nname: dev\ndescription: see do\n--- \nSee do here.\n";
         let (out, n) = templatize(doc, &s);
-        assert_eq!(n, 1, "only the body mention: {out}");
+        assert_eq!(n, 2, "the description mention and the body mention: {out}");
         assert_eq!(
             out,
-            "\u{feff} ---\nname: dev\ndescription: see do\n--- \nSee {{ns:do}} here.\n"
+            "\u{feff} ---\nname: dev\ndescription: see {{ns:do}}\n--- \nSee {{ns:do}} here.\n"
         );
         // The BOM is marked with the opening delimiter, so a token in the
         // `name:` field three bytes further on still lands on `FmName`: an
@@ -4244,7 +4540,9 @@ mod tests {
             ]
         );
         // A BOM-prefixed block that never closes swallows the document, exactly
-        // as an unprefixed one does.
+        // as an unprefixed one does; the swallowed body line is a structured
+        // field, not the `description:` value, so nothing in it is wrapped
+        // (NS-56).
         let doc = "\u{feff}---\nname: dev\n\nSee do in the body.\n";
         assert_eq!(templatize(doc, &s), (doc.to_string(), 0));
         // The body offset the read returns has to land exactly on the end of

@@ -376,15 +376,25 @@ prevent the lost-update and torn-read races a plain read-modify-write would allo
   once, never loops), and prints a note naming the version and the fallback
   before retrying.
 - `STO-74` `resources/install.sh`'s `fetch_to` (the downloader used for the
-  release asset and `SHA256SUMS`) requires curl or wget on `PATH`, exactly as
-  `fetch` (the downloader used for the `releases/latest` lookup) does: when
-  neither is present it fails immediately with `need curl or wget on PATH`,
-  the same message `fetch` uses. This matters because `fetch_to` can be the
-  *first* downloader call: when `MIND_VERSION` is set, the `releases/latest`
-  lookup that goes through `fetch` is skipped entirely, so `fetch_to`'s own
-  missing-downloader check is the only thing standing between a downloader-less
-  environment and a misleading `download failed: <url>` error that hides the
-  real cause.
+  release asset and `SHA256SUMS`) requires curl or wget on `PATH`, matching
+  `fetch` (the downloader used for the `releases/latest` lookup): both run the
+  same `command -v curl || command -v wget || err ...` check and both end the
+  script with the same non-zero exit and the same `need curl or wget on PATH`
+  message. The *output* is not identical, because of where each is called:
+  `fetch_to` is invoked directly in a top-level `if`, so its `err` exits the
+  script immediately with that one line on stderr. `fetch` is invoked inside a
+  pipeline within a command substitution
+  (`tag="$(fetch ... | sed ... | head -n 1)"`), and in `sh`/`dash` each
+  pipeline stage runs in its own subshell, so `err`'s `exit 1` there kills only
+  that subshell; the script falls through to
+  `[ -n "$tag" ] || err "could not determine the latest release; set
+  MIND_VERSION"`, so stderr shows that message too, after the real cause. The
+  true cause always prints first and is never masked. This matters because
+  `fetch_to` can be the *first* downloader call: when `MIND_VERSION` is set,
+  the `releases/latest` lookup that goes through `fetch` is skipped entirely,
+  so `fetch_to`'s own missing-downloader check is the only thing standing
+  between a downloader-less environment and a misleading `download failed:
+  <url>` error that hides the real cause.
 - `STO-66` `evolve`'s download path soft-verifies the downloaded release
   archive's GitHub build-provenance attestation (`actions/attest-build-provenance`)
   via `gh attestation verify <archive> --repo jaemk/mind` when a `gh` binary is

@@ -3,9 +3,9 @@
 //! Installs are transactional and preserve the previous version until the new
 //! one is fully built and validated:
 //!
-//! 1. Build the new copy in a staging dir and expand its `{{ns:}}` references
-//!    there. The likeliest failure (a bad reference) happens here, while the
-//!    live install is untouched.
+//! 1. Build the new copy in a staging dir and expand its `{{ns:}}`/path-token
+//!    references there, in every markdown file (NS-53). The likeliest failure
+//!    (a bad reference) happens here, while the live install is untouched.
 //! 2. Move any existing store copy aside to a backup, then move staging into
 //!    place and ensure the symlink.
 //! 3. On any failure during the swap, restore from the backup. On success,
@@ -589,6 +589,21 @@ fn expand_references(
         files.push(root.to_path_buf());
     }
     for file in files {
+        // NS-53: all four token families expand only in a markdown file. A
+        // token in any other file (a script, data) is left exactly as written
+        // -- including one that would not resolve, which retires the
+        // BadReference this loop used to raise for it (NS-11/NS-12 are scoped
+        // to markdown accordingly).
+        //
+        // A directory item (skill/tool) stages every file under its original
+        // name, so `file` itself carries the right extension to check. A
+        // single-file item (agent/rule) stages as a bare name with no
+        // extension at all (matching its store form), so its markdown-ness is
+        // read from the source path instead.
+        let source_like: &Path = if root.is_dir() { &file } else { &item.path };
+        if !namespace::is_markdown(source_like) {
+            continue;
+        }
         // Skip anything that is not valid UTF-8 text.
         let Ok(content) = std::fs::read_to_string(&file) else {
             continue;
