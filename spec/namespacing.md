@@ -223,54 +223,90 @@ at runtime. Prefixing changes installed names, so references must be rewritten.
 ### Structural scanning
 
 Deciding whether a token sits in code (NS-24) is a question about markdown
-structure, and both constructs that answer it are document-wide, not line-local:
-an inline code span may close on a later line, and a fenced block may contain a
-fence of its own. The scan reads them that way. The same structure map drives
-un-wrapping (`review --fix`, CLI-138) and wrapping (`templatize`, INIT-5), so the
-two passes cannot disagree about what is code.
+structure, and the answer is a property of the whole document, not of the line
+the token sits on: an inline code span may close on a later line, a fenced block
+may quote a fence of its own, and either may be nested inside a list item or a
+blockquote. The structural read is therefore CommonMark, as implemented by a
+conformant parser: the requirements below state which structures decide a
+token's context, not how those structures are recognized. Where this spec and
+CommonMark could differ, CommonMark wins, and a shape it disagrees with is a
+defect in this scan rather than a documented behavior.
 
-- `NS-46` An inline code span is a run of backticks matched by a later run of
-  exactly the same length. The span may cross a line break inside a paragraph and
-  is terminated by a blank line or the start of a new block (a heading, list
-  item, blockquote, or table row); a run with no matching run is literal text,
-  and scanning resumes after it. A `{{ns:}}` token is in a code span only when it
-  falls inside a matched span, so a token following a span that closed on a
-  continuation line is prose, not a misplaced reference.
-- `NS-47` A fenced code block opens on a line whose leading run is at least three
-  backticks or tildes, followed only by an info string, and closes only on a run
-  of the same character that is at least as long with nothing else on the line. A
-  shorter run, a run of the other character, or a run carrying an info string is
-  block content, so an inner example fence does not close the block that contains
-  it and a four-backtick fence is not closed by a three-backtick one. A backtick
-  opener's info string may not itself contain a backtick, so a line that leads
-  with a backtick run and carries more backticks after it is text with code spans
-  (NS-46), not a fence.
-- `NS-49` Indentation is measured against the content column of the innermost
-  open list item, which is the column that item's own content starts in (zero
-  when no list item is open); a tab advances to the next multiple of four
-  columns. A fence delimiter may be indented at most three columns past that
-  baseline, so a fence nested in a list item is still a fence. A line indented
-  four or more columns past the baseline is never a delimiter: it is an indented
-  code block when no paragraph is open above it (its tokens are in code), and a
-  lazy continuation of that paragraph otherwise (its tokens are prose). So a
-  document showing a bare ` ``` ` inside an indented code block opens no block,
-  and the prose after it stays prose. A fenced block opened inside a list item
-  ends with the item: a non-blank line that dedents past the item's content
-  column closes it, so an unclosed fence there does not run to the end of the
-  document the way an unclosed fence at column zero does (NS-47).
-- `NS-50` A backtick preceded by an odd number of backslashes is escaped: it is
-  literal text and never opens a code span (NS-46). Backslash escapes do not
+One structure map is derived per document and answers, per byte position, what
+that position is. The same map drives un-wrapping (`review --fix`, CLI-138) and
+wrapping (`templatize`, INIT-5), so the two passes cannot disagree about what is
+code: every token wrapping creates is a token the scan calls prose.
+
+- `NS-46` A `{{ns:}}` token is in a code span when it falls inside an inline code
+  span, and a bare sibling name inside one is never wrapped. Code spans are read
+  as CommonMark defines them, so a token following a span that closed on a
+  continuation line is prose rather than a misplaced reference, a backtick run
+  that no run matches is literal text, and a run cannot pair with one in a
+  different block.
+- `NS-47` A `{{ns:}}` token is in a code block when it falls inside the content
+  of a code block -- fenced or indented, at the top level or inside a list item
+  or a blockquote -- and a bare sibling name there is never wrapped. Code blocks
+  are read as CommonMark defines them, so an inner example fence does not close
+  the block quoting it, and an unclosed fence runs to the end of whatever
+  contains it. A block's delimiter lines are structure and not content: a token
+  in an info string is not a reference, so `review` neither reports nor rewrites
+  it (`expand` still substitutes it at install time, NS-11). The leading
+  `--- ... ---` frontmatter block is not CommonMark and is read separately: it
+  opens only on the document's first line, after a leading UTF-8 BOM if the file
+  carries one (stripped exactly as discovery strips it, DSC-23, so a BOM-prefixed
+  item file mind installs normally is one whose frontmatter this read still
+  sees); its delimiters carry no content; and the structural read covers the body
+  after it.
+- `NS-49` Indentation and containers are read as CommonMark defines them. An
+  indented code block is a code block (NS-47), so a document showing a bare
+  ` ``` ` inside one opens nothing and the prose after it stays prose; a fence
+  indented to its list item's content column is still a fence; an over-indented
+  continuation of an open paragraph is prose, because an indented code block
+  cannot interrupt a paragraph; and a block ends where the container holding it
+  ends, so an unclosed fence inside a list item stops with the item instead of
+  running to the end of the document.
+- `NS-50` Backslash escapes are read as CommonMark defines them: an escaped
+  backtick is literal text and opens no code span (NS-46), while escapes do not
   apply inside a code span, so an escaped backtick still closes a span that is
   already open.
+- `NS-52` Everything a link or an image is made of except its visible text is
+  markdown syntax, not prose: the destination, the title, the reference label,
+  and the whole of a link reference definition (`[label]: url "title"`). A bare
+  sibling name in any of them is never wrapped, because wrapping it edits syntax
+  rather than prose and the link stops resolving (a reference renders as a
+  literal `[{{ns:name}}]`, a destination points at a name that is not a path). A
+  token there is misplaced for the same reason a token beside a path separator is
+  (NS-24): it expands to the referent's effective name (NS-11), which under a
+  prefix is a destination or a label that no longer resolves, so `review` reports
+  it as a path and `--fix` un-wraps it. The visible text of an inline
+  (`[text](url)`) or full reference (`[text][label]`) link is prose and stays
+  wrappable, since a sibling named there is a real name reference. A shortcut
+  (`[label]`), collapsed (`[label][]`), or autolink (`<https://x/y>`,
+  `<a@b.c>`) link has no text distinct from its label or destination, so its text
+  is syntax too. Links are read as CommonMark defines them, so text that no
+  definition resolves is not a link at all and stays ordinary prose.
+- `NS-51` Wrapping copies every `{{...}}` brace span verbatim, whatever it
+  contains and whether or not it fits on one line, so it never creates a token
+  inside an existing one. In particular a token written across a line break is
+  left exactly as written rather than having the name inside it wrapped again,
+  which would produce a nested token that `install` rejects as a bad reference
+  (NS-12) and so would stop the source installing at all.
 - `NS-48` `review --fix` (CLI-138) leaves no unguarded reference in prose: for
   content whose sibling mentions all sit in prose (already tokenized or bare),
   the rewritten content is reported clean by the unguarded-reference check
   (NS-20, NS-21). A prose token misclassified as code would otherwise be
   un-wrapped into exactly the bare name that check reports, and under a prefix
-  that name no longer resolves (NS-11). The requirement is scoped to prose
-  because the unguarded-reference check is context-free while both `--fix`
-  passes are not: un-wrapping a token that really is in code restores a bare
-  name that NS-20 still reports, and wrapping declines to re-wrap it (NS-24), so
-  `--fix` cannot clear it. The same holds for a sibling name in a frontmatter
-  field, which NS-20 reports and wrapping never touches. Those are known false
-  positives of the advisory, not failures of this requirement.
+  that name no longer resolves (NS-11); reading the document as CommonMark
+  (NS-46, NS-47, NS-49, NS-50) is what closes that class of misclassification.
+  The requirement is scoped to prose because the unguarded-reference check is
+  context-free while both `--fix` passes are not: un-wrapping a token that really
+  is in code restores a bare name that NS-20 still reports, and wrapping declines
+  to re-wrap it (NS-24), so `--fix` cannot clear it. The same holds for a sibling
+  name in a frontmatter field, which NS-20 reports and wrapping never touches;
+  for one abutting a path separator, which NS-20 reports (a `/` is not a word
+  character) and NS-24 forbids wrapping; for one reachable only as a link
+  destination, title, or reference label, which NS-20 reports and NS-52 forbids
+  wrapping; and for one in a fence info string, which NS-20 reports (a backtick
+  is not a word character) and which NS-47 calls delimiter structure rather than
+  content, so wrapping declines it. Those six are known false positives of the
+  advisory, not failures of this requirement.

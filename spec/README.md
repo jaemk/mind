@@ -61,7 +61,7 @@ and verified.
 | Flat skill layout: `[source].flat-skills` + `meld --flat-skills` + per-entry `[[discover.sources]]` flag (skill dirs at a root, no `skills/` container); `dump` propagates it | done | DSC-74, DSC-75, DSC-76, DSC-77, STO-44, CLI-158, DUMP-10 |
 | Version pinning: single `--pin` (`HEAD`/ref freeze, `branch=`/`tag=` follow) + deprecated `--follow-branch`/`--pin-tag`/`--pin-ref` aliases + `[source]` directive + `learn <url> --pin` note when already melded | done | DSC-41, STO-18, CLI-17, CLI-18, CLI-200, CLI-201, CLI-202, CLI-203, CLI-55 |
 | `review` verb: author-side source validation | done | CLI-130, CLI-131, CLI-132, CLI-133 |
-| `review` flags path tokens + hardcoded paths + bare tool refs + misplaced `{{ns:}}`; `--fix` rewrites via a document-wide CommonMark-structural scan (code spans, fences, list-item indentation, backslash escapes) | partial | CLI-135, CLI-136, CLI-137, CLI-138, CLI-139, CLI-145, NS-24, NS-46, NS-47, NS-48, NS-49, NS-50 |
+| `review` flags path tokens + hardcoded paths + bare tool refs + misplaced `{{ns:}}`; `--fix` rewrites via a CommonMark parse (code spans, fences, containers, link syntax, brace spans) | done | CLI-135, CLI-136, CLI-137, CLI-138, CLI-139, CLI-145, NS-24, NS-46, NS-47, NS-48, NS-49, NS-50, NS-51, NS-52 |
 | `review`/`init-source` flag helper scripts duplicated across items (`duplicate-tooling`) | done | CLI-144, INIT-7 |
 | `evolve` verb: in-place upgrade of the `mind` binary | done | CLI-140, CLI-141, CLI-142, CLI-143 |
 | Managed policy (enterprise): trusted-source allowlist, require-pinned, auto-meld, lobe lock; `mind review --policy` | done | [policy.md](policy.md) |

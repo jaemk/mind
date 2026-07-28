@@ -9,19 +9,24 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - `mind review --fix` was deleting valid `{{ns:}}` tokens out of prose,
-  producing bare names that no longer resolve under a prefixed meld. Its
-  line-local backtick-parity and naive fence-toggle scanners are replaced with
-  a document-wide CommonMark-structural read, shared by `--fix` and
-  `init-source --template`'s wrapper: code spans matched by backtick run
-  length, fenced blocks matched by run length and character, indentation
-  measured against list-item content columns, and backslash escapes (NS-46,
-  NS-47, NS-49, NS-50). Several shapes are still misclassified and remain
-  open, pinned as `#[ignore]`d tests rather than left undiscovered: a fence
-  opened on the same line as a list marker, a code span crossing a thematic
-  break/setext underline/HTML block, a setext heading's paragraph closing
-  before an indented block after it, a `{{ns:}}` token split across a line
-  break, and a fence inside a blockquote. NS-48 (no unguarded reference
-  survives `--fix`) is not yet clean on any document that hits one of these.
+  producing bare names that no longer resolve under a prefixed meld. The
+  hand-rolled scanners that decided whether a token sat in prose or code are
+  replaced by a `pulldown-cmark` parse, shared by `--fix` and `init-source
+  --template`'s wrapper, so code spans, fenced and indented blocks, list and
+  blockquote containers, and backslash escapes are read as CommonMark defines
+  them (NS-46, NS-47, NS-49, NS-50). Ten misclassifications are closed,
+  including several the hand-rolled scanners never saw: a fence opened on a
+  list-marker line, a code span crossing a thematic break or setext underline,
+  a fence inside a blockquote, and a leading UTF-8 BOM displacing the first
+  line's structure.
+- `review --fix` no longer nests a `{{ns:}}` token inside one that spans a line
+  break, which produced `{{ns:\n{{ns:name}} }}` and made the source fail to
+  install (NS-51).
+- `review --fix` no longer rewrites link syntax. A sibling name used as a
+  reference label or a relative destination was wrapped, so the reference
+  stopped resolving and rendered literally; destinations, titles, reference
+  labels, and link reference definitions are now syntax, while a name in a
+  link's visible text is still a prose reference and is still wrapped (NS-52).
 - `meld` on an already-melded source whose linked working tree has since
   vanished no longer reports it as a healthy source with `0 item(s)` at exit
   0; it now names the gone working tree the same way `recall`/`probe`

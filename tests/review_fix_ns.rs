@@ -1,11 +1,15 @@
 //! Integration tests for `mind review --fix` and the `{{ns:}}` context
-//! classifier (spec/namespacing.md NS-46, NS-47, NS-48).
+//! classifier (spec/namespacing.md NS-46 through NS-51).
 //!
 //! `--fix` is the one path that rewrites a user's files, and it un-wraps a token
 //! it believes sits in code. These tests drive the real binary against hermetic
 //! fixture sources (local path, no network) with isolated MIND_HOME /
 //! CLAUDE_HOME temp dirs, and assert both directions: a prose token survives the
 //! rewrite byte for byte, and a token genuinely in code is still un-wrapped.
+//!
+//! The classifier reads the document as CommonMark (`pulldown-cmark`), so each
+//! case below is stated as what a renderer does with the document rather than as
+//! what the scan's own rules would make of it.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -757,14 +761,13 @@ fn fix_keeps_prose_tokens_in_a_markdown_file_that_is_not_dot_md() {
     );
 }
 
-/// A fenced block may open on the same line as a list marker. `--fix` reads the
-/// opener as prose and the real closer as an opener, so the rest of the item is
-/// a code block: every token below it is un-wrapped, which is the filed bug's
-/// exact symptom in a document that no existing test covers.
+/// A fenced block may open on the same line as a list marker. The hand-rolled
+/// classifier only looked for a delimiter at the start of a line, so it read the
+/// opener as prose and the real closer as an opener: the rest of the item became
+/// a code block and every token below it was un-wrapped, the filed bug's exact
+/// symptom. A CommonMark parse sees the block where the marker puts it.
 /// spec: NS-47 NS-49
 #[test]
-#[ignore = "defect: a fence opened on a list-marker line inverts the block, so \
-            `--fix` deletes the tokens in the rest of the item"]
 fn fix_leaves_a_prose_token_after_a_marker_line_fence_untouched() {
     let sb = fixture();
     let skill = sb.source.join("skills/cos-run/SKILL.md");
@@ -786,9 +789,434 @@ fn fix_leaves_a_prose_token_after_a_marker_line_fence_untouched() {
     );
 }
 
+/// A fence inside a blockquote is a fence, end to end. The quoted delimiter used
+/// to be invisible, so the whole quoted block read as prose and wrapping
+/// rewrote the bare sibling name inside the quoted sample: the sample then reads
+/// wrong and expands to a prefixed name at install. Quoted code is code for both
+/// passes, so the sample survives while the quoted prose around it is still
+/// wrapped.
+/// spec: NS-47
+#[test]
+fn fix_leaves_a_bare_name_inside_a_blockquoted_code_sample_alone() {
+    let sb = fixture();
+    let skill = sb.source.join("skills/cos-run/SKILL.md");
+    write(
+        &skill,
+        "---\nname: cos-run\ndescription: runner\n---\n\
+         Quoting the install step:\n\n\
+         > ```sh\n\
+         > mind learn cos-spec\n\
+         > ```\n\
+         >\n\
+         > Then read the cos-cert-setup skill.\n",
+    );
+
+    let target = sb.source_spec();
+    let r = sb.mind(&["review", &target, "--fix"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert_eq!(
+        std::fs::read_to_string(&skill).unwrap(),
+        "---\nname: cos-run\ndescription: runner\n---\n\
+         Quoting the install step:\n\n\
+         > ```sh\n\
+         > mind learn cos-spec\n\
+         > ```\n\
+         >\n\
+         > Then read the {{ns:cos-cert-setup}} skill.\n",
+        "the quoted code sample keeps its bare name; the quoted prose is wrapped"
+    );
+}
+
+/// A `{{ns:}}` token written across a line break is a live reference at install
+/// time (`expand` reads the file as a whole). The line-by-line wrapper swallowed
+/// the opening line looking for `}}`, then wrapped the name on the next line
+/// *inside* the token, producing `{{ns:\n{{ns:cos-spec}} }}`, which `install`
+/// rejects as a bad reference: the source stops installing entirely. Asserted
+/// through both binaries' worth of behavior -- the rewrite, and then a `learn`
+/// of the rewritten source.
+/// spec: NS-51
+#[test]
+fn fix_does_not_nest_a_token_inside_one_that_spans_a_line_break() {
+    let sb = fixture();
+    let skill = sb.source.join("skills/cos-run/SKILL.md");
+    let original = "---\nname: cos-run\ndescription: runner\n---\n\
+                    Hand off to {{ns:\n\
+                    cos-spec }} when the run finishes.\n";
+    write(&skill, original);
+
+    let target = sb.source_spec();
+    let r = sb.mind(&["review", &target, "--fix"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    let fixed = std::fs::read_to_string(&skill).unwrap();
+    assert_eq!(
+        fixed, original,
+        "a token that spans a line break is copied verbatim, not wrapped into"
+    );
+
+    // The proof that the corruption mattered: the rewritten source still
+    // installs, and the token expands to the prefixed name.
+    let m = sb.mind(&["meld", &target, "--yes"]);
+    assert!(m.success, "meld must succeed: {} {}", m.stdout, m.stderr);
+    let l = sb.mind(&["learn", "cos:cos-run", "--yes"]);
+    assert!(l.success, "learn must succeed: {} {}", l.stdout, l.stderr);
+    let installed = std::fs::read_to_string(sb.mind_home.join("store/skill/cos:cos-run/SKILL.md"))
+        .expect("installed skill");
+    assert!(
+        installed.contains("cos:cos-spec"),
+        "the split token must still expand: {installed}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // What else the same rewrite pass does to prose it decides is prose
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Outside-in third pass: constructs the parser swap did not exercise
+// ---------------------------------------------------------------------------
+
+/// One file carrying the constructs no earlier test drove -- an HTML block, a
+/// table, an autolink, a nested blockquote, a heading with a closing hash
+/// sequence, a hard line break, and a tight list -- each with a prose token
+/// beside it. None of them is code, so `--fix` must return the file byte for
+/// byte and must flag nothing. A single misread of any one of them deletes the
+/// token next to it, which is the filed bug's exact symptom reached through a
+/// construct nobody tested.
+/// spec: NS-46 NS-47 NS-48 NS-49
+#[test]
+fn fix_leaves_prose_tokens_beside_untested_constructs_untouched() {
+    let sb = fixture();
+    let skill = sb.source.join("skills/cos-run/SKILL.md");
+    let original = "---\nname: cos-run\ndescription: runner\n---\n\
+                    ## Runner ##\n\n\
+                    <div align=\"center\">\n\
+                    Set up with {{ns:cos-cert-setup}}.\n\
+                    </div>\n\n\
+                    | step | note |\n\
+                    |---|---|\n\
+                    | one | see {{ns:cos-spec}} |\n\
+                    | two | and `mind sync` |\n\n\
+                    Docs live at <https://example.com/docs>, see {{ns:cos-spec}}.\n\n\
+                    > > ```sh\n\
+                    > > mind learn cos-spec\n\
+                    > > ```\n\
+                    >\n\
+                    > Then read {{ns:cos-cert-setup}}.\n\n\
+                    A wrapped line\\\n\
+                    continues into {{ns:cos-spec}} here.\n\n\
+                    - tight {{ns:cos-spec}}\n\
+                    - items {{ns:cos-cert-setup}}\n";
+    write(&skill, original);
+
+    let target = sb.source_spec();
+    let r = sb.mind(&["review", &target, "--fix"]);
+    assert!(r.success, "review must exit 0: {} {}", r.stdout, r.stderr);
+    assert!(
+        !r.stdout.contains("misplaced-reference"),
+        "no token here is misplaced: {}",
+        r.stdout
+    );
+    assert_eq!(
+        std::fs::read_to_string(&skill).unwrap(),
+        original,
+        "--fix must leave the file byte for byte identical"
+    );
+}
+
+/// The wrapping direction over the same constructs: a bare sibling name inside
+/// a blockquoted fence and inside a table cell's code span stays bare, while the
+/// mentions in the surrounding prose are wrapped. Pinned byte for byte, because
+/// a wrap in a code sample corrupts the sample and then expands to a prefixed
+/// name at install.
+/// spec: INIT-5 NS-46 NS-47
+#[test]
+fn fix_wraps_prose_beside_those_constructs_without_touching_their_code() {
+    let sb = fixture();
+    let skill = sb.source.join("skills/cos-run/SKILL.md");
+    write(
+        &skill,
+        "---\nname: cos-run\ndescription: runner\n---\n\
+         | step | note |\n\
+         |---|---|\n\
+         | one | see cos-spec |\n\
+         | two | run `mind learn cos-spec` |\n\n\
+         > > ```sh\n\
+         > > mind learn cos-spec\n\
+         > > ```\n\
+         >\n\
+         > Then read cos-cert-setup.\n",
+    );
+
+    let target = sb.source_spec();
+    let r = sb.mind(&["review", &target, "--fix"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert_eq!(
+        std::fs::read_to_string(&skill).unwrap(),
+        "---\nname: cos-run\ndescription: runner\n---\n\
+         | step | note |\n\
+         |---|---|\n\
+         | one | see {{ns:cos-spec}} |\n\
+         | two | run `mind learn cos-spec` |\n\n\
+         > > ```sh\n\
+         > > mind learn cos-spec\n\
+         > > ```\n\
+         >\n\
+         > Then read {{ns:cos-cert-setup}}.\n",
+        "the cell's prose and the quoted prose are wrapped; both code samples \
+         keep their bare names"
+    );
+}
+
+/// A non-markdown file inside an item is all code, so `--fix` un-wraps every
+/// `{{ns:}}` token in it and never wraps a bare name there. Characterization of
+/// one incompleteness: the structure map is still a markdown map, so a script
+/// line that happens to look like a fence delimiter is read as structure and a
+/// token on it is neither reported nor un-wrapped. Not destructive (`install`
+/// still expands it), but the cleanup is partial, so it is pinned rather than
+/// left to be discovered.
+/// spec: NS-24 NS-47
+#[test]
+fn fix_treats_a_non_markdown_file_as_all_code() {
+    let sb = fixture();
+    write(
+        &sb.source.join("skills/cos-run/SKILL.md"),
+        "---\nname: cos-run\ndescription: runner\n---\n# Runner\n",
+    );
+    let script = sb.source.join("skills/cos-run/run.sh");
+    write(
+        &script,
+        "#!/bin/sh\n\
+         # hand off to {{ns:cos-spec}}\n\
+         echo cos-cert-setup\n\
+         cat <<'EOF'\n\
+         ```{{ns:cos-spec}}\n\
+         EOF\n",
+    );
+
+    let target = sb.source_spec();
+    let r = sb.mind(&["review", &target, "--fix"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert_eq!(
+        std::fs::read_to_string(&script).unwrap(),
+        "#!/bin/sh\n\
+         # hand off to cos-spec\n\
+         echo cos-cert-setup\n\
+         cat <<'EOF'\n\
+         ```{{ns:cos-spec}}\n\
+         EOF\n",
+        "the token in the script is un-wrapped, the bare name is never wrapped, \
+         and the one on a fence-shaped line is left behind"
+    );
+}
+
+/// A link reference definition and a reference label are markdown syntax, not
+/// prose, but the structure map calls everything that is not a code block or a
+/// code span prose, so wrapping rewrites them. The rewritten file no longer
+/// resolves the reference and renders a literal `[{{ns:name}}]`, which is a
+/// destructive rewrite of the author's working tree.
+/// spec: NS-24 NS-52 INIT-5
+#[test]
+fn fix_leaves_link_reference_syntax_alone() {
+    let sb = fixture();
+    let skill = sb.source.join("skills/cos-http/SKILL.md");
+    let original = "---\nname: cos-http\ndescription: http client\n---\n\
+                    Read the [certificate notes][cos-spec] first.\n\n\
+                    [cos-spec]: https://example.com/notes\n";
+    write(&skill, original);
+
+    let target = sb.source_spec();
+    let r = sb.mind(&["review", &target, "--fix"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert_eq!(
+        std::fs::read_to_string(&skill).unwrap(),
+        original,
+        "a link label is syntax, not prose"
+    );
+}
+
+/// `frontmatter.rs` strips a UTF-8 BOM before its delimiter check (DSC-23), so
+/// a BOM-prefixed SKILL.md is a valid item mind reads normally. The `--fix`
+/// classifier's own frontmatter pre-pass does not strip it, so the whole file
+/// parses as markdown and the frontmatter becomes an ordinary block whose text
+/// wrapping rewrites -- including the `name:` field NS-24 names as the one place
+/// wrapping must never touch.
+/// spec: NS-24 NS-47
+#[test]
+fn fix_keeps_the_frontmatter_of_a_bom_prefixed_file() {
+    let sb = fixture();
+    let skill = sb.source.join("skills/cos-spec/SKILL.md");
+    let original = "\u{feff}---\nname: cos-spec\ndescription: hands off to cos-cert-setup\n\
+                    ---\n# spec\n";
+    write(&skill, original);
+
+    let target = sb.source_spec();
+    let r = sb.mind(&["review", &target, "--fix"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert_eq!(
+        std::fs::read_to_string(&skill).unwrap(),
+        original,
+        "frontmatter must survive a BOM"
+    );
+}
+
+/// NS-52 through `review`'s own output. `Cell::LinkSyntax` deliberately has no
+/// `NsContext` of its own -- it maps onto `Path`, so the advisory reads "in a
+/// path" -- and nothing but this asserts that the mapping reaches the user.
+/// Every token here sits in a different part of a link (destination, reference
+/// label, definition label, definition title), and `--fix` must take all four
+/// back out without the wrapping pass putting any of them back.
+/// spec: NS-52 NS-24
+#[test]
+fn review_reports_a_token_in_link_syntax_as_a_path_and_fix_removes_it() {
+    let sb = fixture();
+    let skill = sb.source.join("skills/cos-http/SKILL.md");
+    write(
+        &skill,
+        "---\nname: cos-http\ndescription: http client\n---\n\
+         Read [the notes]({{ns:cos-spec}}.md) and [more][{{ns:cos-spec}}].\n\n\
+         [{{ns:cos-spec}}]: https://example.com/x \"{{ns:cos-cert-setup}} notes\"\n",
+    );
+
+    let target = sb.source_spec();
+    let r = sb.mind(&["review", &target]);
+    assert!(r.success, "review must exit 0: {} {}", r.stdout, r.stderr);
+    assert_eq!(
+        r.stdout.matches("in a path").count(),
+        4,
+        "every part of a link but its text reports as a path: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("{{ns:cos-spec}} in a path"),
+        "the destination and the labels: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("{{ns:cos-cert-setup}} in a path"),
+        "the definition's title too: {}",
+        r.stdout
+    );
+    assert!(
+        !r.stdout.contains("in a code span") && !r.stdout.contains("in a code block"),
+        "link syntax is not code: {}",
+        r.stdout
+    );
+
+    let f = sb.mind(&["review", &target, "--fix"]);
+    assert!(f.success, "{} {}", f.stdout, f.stderr);
+    let fixed = "---\nname: cos-http\ndescription: http client\n---\n\
+                 Read [the notes](cos-spec.md) and [more][cos-spec].\n\n\
+                 [cos-spec]: https://example.com/x \"cos-cert-setup notes\"\n";
+    assert_eq!(
+        std::fs::read_to_string(&skill).unwrap(),
+        fixed,
+        "--fix un-wraps link syntax and wrapping must not put it back"
+    );
+    let f2 = sb.mind(&["review", &target, "--fix"]);
+    assert!(f2.success, "{} {}", f2.stdout, f2.stderr);
+    assert_eq!(
+        std::fs::read_to_string(&skill).unwrap(),
+        fixed,
+        "--fix must settle after one pass"
+    );
+}
+
+/// The wrapping direction of NS-52 over one document carrying every link
+/// spelling at once, pinned byte for byte. A link's visible text is the prose
+/// wrapping is meant to reach; everything else it is made of is syntax, and a
+/// rewrite there breaks the link in the author's working tree. The shapes the
+/// unit tests could not compose -- a link in a table cell, a link in a
+/// blockquote, an angle-bracket destination, an image, a code span inside link
+/// text -- are all here together, so an interaction between them fails this.
+/// spec: NS-52 INIT-5
+#[test]
+fn fix_wraps_only_the_visible_text_of_every_link_spelling() {
+    let sb = fixture();
+    let skill = sb.source.join("skills/cos-http/SKILL.md");
+    write(
+        &skill,
+        "---\nname: cos-http\ndescription: http client\n---\n\
+         See [the cos-spec notes](cos-spec.md) and ![a shot](<a cos-spec shot.png>).\n\n\
+         | step | link |\n\
+         |---|---|\n\
+         | one | [the cos-spec guide](cos-spec.md) |\n\n\
+         > Quoted [cos-spec] shortcut, and [the cos-spec page][cos-spec].\n\n\
+         Mail <cos-spec@example.com> or read [the `cos-spec` command](x.md).\n\n\
+         [cos-spec]: https://example.com/x \"the cos-cert-setup notes\"\n",
+    );
+
+    let target = sb.source_spec();
+    let r = sb.mind(&["review", &target, "--fix"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    let expected = "---\nname: cos-http\ndescription: http client\n---\n\
+         See [the {{ns:cos-spec}} notes](cos-spec.md) and ![a shot](<a cos-spec shot.png>).\n\n\
+         | step | link |\n\
+         |---|---|\n\
+         | one | [the {{ns:cos-spec}} guide](cos-spec.md) |\n\n\
+         > Quoted [cos-spec] shortcut, and [the {{ns:cos-spec}} page][cos-spec].\n\n\
+         Mail <cos-spec@example.com> or read [the `cos-spec` command](x.md).\n\n\
+         [cos-spec]: https://example.com/x \"the cos-cert-setup notes\"\n";
+    assert_eq!(std::fs::read_to_string(&skill).unwrap(), expected);
+    let r2 = sb.mind(&["review", &target, "--fix"]);
+    assert!(r2.success, "{} {}", r2.stdout, r2.stderr);
+    assert_eq!(
+        std::fs::read_to_string(&skill).unwrap(),
+        expected,
+        "--fix must not re-dirty the file"
+    );
+}
+
+/// The BOM fix in the combination a Windows editor actually produces: a BOM and
+/// CRLF together. The frontmatter read has to strip three bytes and then track
+/// one extra byte per line, and the field it protects is the `name:` NS-24 calls
+/// untouchable. Driven through the binary, so discovery reading the item and the
+/// classifier reading the same file have to agree about where its frontmatter is.
+/// spec: NS-47 NS-24
+#[test]
+fn fix_keeps_the_frontmatter_of_a_bom_prefixed_crlf_file() {
+    let sb = fixture();
+    let skill = sb.source.join("skills/cos-spec/SKILL.md");
+    write(
+        &skill,
+        "\u{feff}---\r\nname: cos-spec\r\ndescription: hands off to cos-cert-setup\r\n\
+         ---\r\n# spec\r\n\r\nSee the cos-cert-setup skill.\r\n",
+    );
+
+    let target = sb.source_spec();
+    let r = sb.mind(&["review", &target, "--fix"]);
+    assert!(r.success, "{} {}", r.stdout, r.stderr);
+    assert_eq!(
+        std::fs::read_to_string(&skill).unwrap(),
+        "\u{feff}---\r\nname: cos-spec\r\ndescription: hands off to cos-cert-setup\r\n\
+         ---\r\n# spec\r\n\r\nSee the {{ns:cos-cert-setup}} skill.\r\n",
+        "the frontmatter survives the BOM and only the body mention is wrapped"
+    );
+    // The premise of the fix, asserted rather than assumed: `frontmatter.rs`
+    // strips the same BOM (DSC-23), so this file really is an item mind
+    // discovers, describes and installs. If it were not, protecting its
+    // frontmatter would be protecting nothing.
+    let m = sb.mind(&["meld", &target, "--yes"]);
+    assert!(m.success, "meld must succeed: {} {}", m.stdout, m.stderr);
+    let p = sb.mind(&["probe", "cos-spec", "--no-tui"]);
+    assert!(p.success, "{} {}", p.stdout, p.stderr);
+    assert!(
+        p.stdout.contains("hands off to cos-cert-setup"),
+        "discovery reads the BOM-prefixed frontmatter: {}",
+        p.stdout
+    );
+    let l = sb.mind(&["learn", "cos:cos-spec", "--yes"]);
+    assert!(l.success, "learn must succeed: {} {}", l.stdout, l.stderr);
+    let installed = std::fs::read_to_string(sb.mind_home.join("store/skill/cos:cos-spec/SKILL.md"))
+        .expect("installed skill");
+    assert!(
+        installed.contains("name: cos-spec\r\n"),
+        "the declared name is installed unprefixed and untouched: {installed}"
+    );
+    assert!(
+        installed.contains("See the cos:cos-cert-setup skill."),
+        "and the body token the fix created expands: {installed}"
+    );
+}
 
 /// Characterization, not endorsement: `review --fix` passes the *whole* sibling
 /// set to the wrapper, including the item's own name, so an item that names
