@@ -22,7 +22,7 @@ use crate::resolve::{
     is_glob, parse_item_ref, resolve, select, select_by_bare_refs, select_installed,
     source_matches, source_matches_glob,
 };
-use crate::source::{ManifestOrigin, Pin, Registry, parse_spec};
+use crate::source::{ManifestOrigin, Pin, Registry, parse_spec, parse_spec_quiet};
 
 /// `mind meld <repo> [--as <prefix>] [--root <dir>] [--follow-branch|--pin-tag|--pin-ref]`
 /// — register and clone a source.
@@ -56,7 +56,10 @@ pub fn meld(
     let mut visited = HashSet::new();
     // spec: STO-58 -- the reported identity includes the consumer alias, so the
     // deferred JSON install and the caller's post-meld steps target this instance.
-    let source_name = parse_spec(repo)
+    // spec: CLI-216 -- an identity-only parse: `meld_recursive` below performs
+    // the parse that really decides which reading gets cloned, and that one
+    // carries the CLI-215 note.
+    let source_name = parse_spec_quiet(repo)
         .map(|mut s| {
             s.apply_alias(alias.clone());
             s.name
@@ -374,18 +377,23 @@ fn run_install_hooks(
 
         match crate::hook::decide(&disclosure, h.optional, dangerously_skip)? {
             crate::hook::HookAct::Run => {
-                // HOOK-60: indicate the running hook.
+                // HOOK-60: indicate the running hook. A progress line, not an
+                // aside: stdout in text mode, and unreachable from `--json`
+                // stdout because the run's fd 1 points at stderr (main.rs's
+                // `json_stdout`). spec: CLI-217
                 println!("running install hook '{}' for {}", h.label(), name);
                 // HOOK-53: a non-zero exit (optional or required) is a hard stop.
                 crate::hook::run_hook(&h.run, clone_dir, &name, h.label())?;
                 record_install_hook(source, &h.run, current.clone());
             }
             crate::hook::HookAct::Skip => {
-                println!(
+                // spec: CLI-217 -- `meld --json` reaches this (the no-TTY skip
+                // path), and the meld result object is printed after it.
+                crate::render::note(format!(
                     "note: skipped install hook '{}' for {}; its items may not work until it runs",
                     h.label(),
                     name
-                );
+                ));
                 record_install_hook(source, &h.run, None);
             }
             crate::hook::HookAct::Abort => return Ok(HookOutcome::Abort),
@@ -1200,6 +1208,36 @@ fn meld_recursive(
             // mutually exclusive; error before we register anything.
             entry.validate(&toml_path)?;
 
+            // spec: DSC-93 -- the absolute entry wins. DSC-92 resolves a
+            // relative local `source` against the directory the `mind.toml` was
+            // read from; for a CLONED curator that directory sits inside mind's
+            // own managed sources tree, so `../nested` names a sibling clone dir
+            // mind never created. Attempting it is a guaranteed clone failure,
+            // and for a curator with no items of its own DSC-80 escalates that
+            // into a hard error that aborts the whole meld -- even when the
+            // caller (a `dump` reproduction, say) ALSO carries a correct
+            // absolute entry for that very source, which the walk simply had not
+            // reached yet. Skip it with a warning so the absolute reading gets
+            // its turn. A LINKED curator is unaffected: its `mind.toml` is read
+            // from the user's own working tree, so its relative entries never
+            // resolve into the sources tree, and a genuine typo there still
+            // fails exactly as before (DSC-79/DSC-80).
+            if let Some(missing) = unresolvable_managed_local_entry(paths, &entry.source) {
+                eprintln!(
+                    "warning: skipping nested source '{}' curated by '{super_source_name}': it \
+                     resolves inside mind's own sources tree ({}) where nothing was cloned, so \
+                     it is a relative path that only meant something in the curator's own \
+                     working tree; meld that source by an absolute path or a URL instead",
+                    missing.display(),
+                    paths.sources_dir().display()
+                );
+                skipped.push(SkippedEntry {
+                    source: entry.source.clone(),
+                    reason: "unresolvable_local_path".into(),
+                });
+                continue;
+            }
+
             // DSC-59 DSC-65: lift this entry's curator-supplied configuration.
             // The pin directive is authoritative (DSC-65). Hooks and roots are
             // gated (DSC-60). All are resolved here against the super-source's
@@ -1246,7 +1284,10 @@ fn meld_recursive(
                     // spec: STO-58 -- the nested source registers under its
                     // effective alias, so resolve its identity with that alias to
                     // match the DSC-70 "already registered" guard correctly.
-                    let entry_name = parse_spec(&entry.source)
+                    // spec: CLI-216 -- quiet: the clone this entry names has
+                    // already been attempted and failed; re-deriving its name is
+                    // answering a question, not deciding a reading.
+                    let entry_name = parse_spec_quiet(&entry.source)
                         .map(|mut s| {
                             s.apply_alias(entry.effective_alias());
                             s.name
@@ -1285,7 +1326,8 @@ fn meld_recursive(
                     // spec: STO-58 -- the nested source registers under its
                     // effective alias, so resolve its identity with that alias to
                     // match the DSC-70 "already registered" guard correctly.
-                    let entry_name = parse_spec(&entry.source)
+                    // spec: CLI-216 -- quiet, same as the auth-failure arm above.
+                    let entry_name = parse_spec_quiet(&entry.source)
                         .map(|mut s| {
                             s.apply_alias(entry.effective_alias());
                             s.name
@@ -1317,7 +1359,9 @@ fn meld_recursive(
             // at meld, not a silent skip.
             if let Some(refs) = &entry.install_items
                 && !refs.is_empty()
-                && let Ok(mut spec) = parse_spec(&entry.source)
+                // spec: CLI-216 -- an identity lookup for the DSC-63 validation,
+                // not a decision to clone: quiet.
+                && let Ok(mut spec) = parse_spec_quiet(&entry.source)
                 // spec: STO-58 -- the nested source is registered under its
                 // effective alias; resolve against that identity to find it.
                 && {
@@ -1414,7 +1458,9 @@ fn meld_recursive(
                     // recursive meld, find the just-registered sub-source
                     // by its computed name and overwrite any fields the
                     // entry supplies (entry wins when both supply a value).
-                    if let Ok(mut sub_spec) = parse_spec(&repo_spec)
+                    // spec: CLI-216 -- the sub-meld above already took its
+                    // reading; this only re-derives the name to find it.
+                    if let Ok(mut sub_spec) = parse_spec_quiet(&repo_spec)
                         && {
                             // spec: STO-58 -- the sub-source was melded under the
                             // entry name as its alias, so its identity is `@<name>`.
@@ -1449,7 +1495,8 @@ fn meld_recursive(
                 Err(e) => {
                     // spec: STO-58 -- the sub-source registers under the entry
                     // name as its alias, so resolve its identity with that alias.
-                    let sub_name = parse_spec(&repo_spec)
+                    // spec: CLI-216 -- quiet: naming a clone that already failed.
+                    let sub_name = parse_spec_quiet(&repo_spec)
                         .map(|mut s| {
                             s.apply_alias(Some(entry_name.clone()));
                             s.name
@@ -1484,7 +1531,11 @@ fn meld_recursive(
     if nested_clone_failures > 0
         && added == 1
         && let Some(primary) = registry.find(&super_source_name)
-        && catalog::scan(paths, &single(primary))?.is_empty()
+        // spec: CLI-213 -- a single-source lookup, so it must not degrade: a
+        // `LinkedSourceGone` primary would scan as empty here and be reported as
+        // "every nested source failed and the curator has nothing of its own",
+        // which names the wrong cause.
+        && scan_one(paths, primary)?.is_empty()
     {
         return Err(MindError::CuratorAllNestedFailed {
             super_source: super_source_name.to_string(),
@@ -2231,18 +2282,20 @@ fn run_uninstall_hooks(
 
         match crate::hook::decide(&disclosure, h.optional, dangerously_skip_hook_check)? {
             crate::hook::HookAct::Run => {
-                // HOOK-60: indicate the running hook.
+                // HOOK-60: indicate the running hook. Same as the install-hook
+                // line above. spec: CLI-217
                 println!("running uninstall hook '{}' for {}", h.label(), source_name);
                 // HOOK-53: any failure (optional or required) is a hard stop;
                 // the unmeld stops and the source remains.
                 crate::hook::run_hook(&h.run, &clone_dir, source_name, h.label())?;
             }
             crate::hook::HookAct::Skip => {
-                println!(
+                // spec: CLI-217 -- same for `unmeld --json`.
+                crate::render::note(format!(
                     "note: skipped uninstall hook '{}' for {}",
                     h.label(),
                     source_name
-                );
+                ));
             }
             crate::hook::HookAct::Abort => {
                 println!("aborted; source left in place");
@@ -3176,16 +3229,23 @@ pub fn install_source_items_subset(
 /// hooks follow the standard non-TTY path: they are skipped in a non-interactive
 /// context (HOOK-72).
 ///
-/// Returns a list of `(item_key, error)` pairs for each failed item so the
-/// caller can apply POL-34/POL-60 soft-fail semantics (warn, record, continue,
-/// non-zero exit). An empty list means all items installed successfully (or there
-/// were no items to install).
+/// Returns `(installed_keys, failures)`: the effective keys installed in this
+/// pass, and a `(item_key, error)` pair for each failed item so the caller can
+/// apply POL-34/POL-60 soft-fail semantics (warn, record, continue, non-zero
+/// exit). Empty failures means all items installed successfully (or there were
+/// no items to install).
+///
+/// spec: CLI-217 -- under `--json` the per-item install runs through the SILENT
+/// `learn_collecting`, and the keys ride back to `sync` to be folded into its
+/// one result object. Calling `learn` there emitted one `learn` document per
+/// provisioned item ahead of sync's own, which is N+1 documents on the stdout
+/// of exactly the unattended fleet run `auto_meld` exists for.
 // spec: POL-58 POL-59 POL-60
 pub fn install_provisioned_items(
     paths: &Paths,
     source_name: &str,
     run_build_hooks: bool,
-) -> Vec<(String, MindError)> {
+) -> (Vec<String>, Vec<(String, MindError)>) {
     let flow = InstallFlow {
         yes: true,
         clobber: Clobber::Prompt,
@@ -3196,17 +3256,22 @@ pub fn install_provisioned_items(
     // Load the registry and scan items for this source only.
     let registry = match Registry::load(paths) {
         Ok(r) => r,
-        Err(e) => return vec![(source_name.to_string(), e)],
+        Err(e) => return (vec![], vec![(source_name.to_string(), e)]),
     };
     let Some(source) = registry.find(source_name) else {
-        return vec![];
+        return (vec![], vec![]);
     };
-    let source_items = match catalog::scan(paths, &single(source)) {
+    // spec: CLI-213 POL-60 -- a single-source scan, so it must not degrade past a
+    // `LinkedSourceGone` source: `catalog::scan` would return `Ok(vec![])` and this
+    // function would report "nothing to install" for a source that could not be
+    // read at all, so POL-60's warn-record-continue-nonzero accounting would record
+    // nothing. A scan failure is a recorded `(source, err)` failure instead.
+    let source_items = match scan_one(paths, source) {
         Ok(items) => items,
-        Err(e) => return vec![(source_name.to_string(), e)],
+        Err(e) => return (vec![], vec![(source_name.to_string(), e)]),
     };
     if source_items.is_empty() {
-        return vec![];
+        return (vec![], vec![]);
     }
 
     // Load the manifest once to know what is already installed; `learn` will
@@ -3214,24 +3279,34 @@ pub fn install_provisioned_items(
     // for items that are clearly already done.
     let manifest = match Manifest::load(paths) {
         Ok(m) => m,
-        Err(e) => return vec![(source_name.to_string(), e)],
+        Err(e) => return (vec![], vec![(source_name.to_string(), e)]),
     };
     let installed: std::collections::HashSet<String> = manifest.items.keys().cloned().collect();
 
     // Install each not-yet-installed item independently so a failure on one
     // does not block the rest (POL-60).
+    let json = json_mode();
     let mut failures = Vec::new();
+    let mut installed_keys: Vec<String> = Vec::new();
     for item in &source_items {
         let key = item.key();
         if installed.contains(&key) {
             continue; // already installed; no-op
         }
         let item_ref = format!("{source_name}#{key}");
-        if let Err(e) = learn(paths, &item_ref, false, flow) {
+        // spec: CLI-217 -- silent under `--json` (keys are returned instead of
+        // a per-item document); the ordinary `learn` in text mode, so an
+        // interactive `mind sync` still narrates what it installed.
+        let outcome = if json {
+            learn_collecting(paths, &item_ref, flow).map(|keys| installed_keys.extend(keys))
+        } else {
+            learn(paths, &item_ref, false, flow)
+        };
+        if let Err(e) = outcome {
             failures.push((key, e));
         }
     }
-    failures
+    (installed_keys, failures)
 }
 
 /// The registry identity for a repo spec under a consumer alias (STO-58):
@@ -3241,7 +3316,12 @@ pub fn install_provisioned_items(
 /// (the `--as ''` no-prefix override) resolves to the bare identity, so it names
 /// the same instance as `None`.
 pub fn instance_name(repo: &str, alias: Option<&str>) -> Result<String> {
-    let mut source = parse_spec(repo)?;
+    // spec: CLI-216 -- naming an instance answers a question ("which instance
+    // does this spec select?"); it never clones. `meld_recursive`'s parse is the
+    // one that decides a reading, and it carries the CLI-215 note. Without this,
+    // the dispatcher's two identity calls (`instance_name` for the post-meld
+    // steps and `is_melded` for the routing) printed the note twice more.
+    let mut source = parse_spec_quiet(repo)?;
     source.apply_alias(alias.map(str::to_string));
     Ok(source.name)
 }
@@ -3353,6 +3433,28 @@ pub fn remeld(
     }
 
     if !link_only {
+        // spec: CLI-217 CLI-156 -- the `--json` re-meld installs through the
+        // SILENT helpers `meld`'s fresh branch uses, then answers with ONE
+        // object of its own. Routed through `install_source_items` instead, this
+        // branch emitted `learn`'s result object (an action the caller never
+        // invoked) and either returned before its own object or printed a second
+        // one after it.
+        if out.json {
+            let (mut installed, pending) =
+                install_source_items_for_json(paths, &source_name, flow)?;
+            installed.extend(install_curated_sources_for_json(
+                paths,
+                &source_name,
+                recursive,
+                flow,
+            )?);
+            let mut result = MutationResult::new("meld", &source_name, "already-melded");
+            result.installed = installed;
+            if pending > 0 {
+                result.pending_items = Some(pending);
+            }
+            return print_json(&result);
+        }
         let item_ref = format!("{source_name}#*");
         let to_install = match learn_preview(paths, &item_ref) {
             Ok(plan) => plan.install_count,
@@ -3374,6 +3476,8 @@ pub fn remeld(
             return Ok(());
         }
     }
+    // Only `--register-only` (link_only) reaches this under `--json`; the
+    // install branch above answers with its own object.
     if out.json {
         return print_json(&MutationResult::new("meld", &source_name, "already-melded"));
     }
@@ -3555,7 +3659,10 @@ pub fn install_curated_sources(
             .map(|d| d.sources)
             .unwrap_or_default();
         for ns in nested {
-            let Ok(mut spec) = parse_spec(&ns.source) else {
+            // spec: CLI-216 -- the install walk only resolves already-registered
+            // identities; it clones nothing, so it must not repeat the CLI-215
+            // note the melding parse already printed for this same entry.
+            let Ok(mut spec) = parse_spec_quiet(&ns.source) else {
                 continue;
             };
             // spec: STO-58 -- the nested source was melded under this entry's
@@ -3622,7 +3729,9 @@ fn marketplace_subsources(
     let mut out = Vec::new();
     for entry in plugin_manifest::load_marketplace_manifest(&mp)?.into_entries() {
         let in_repo = matches!(entry.source, plugin_manifest::PluginSource::InRepo { .. });
-        if let Ok(mut spec) = parse_spec(&marketplace_entry_spec(&entry, &clone)) {
+        // spec: CLI-216 -- resolving a marketplace entry to the identity it was
+        // melded under; the meld already happened, so this parse is quiet.
+        if let Ok(mut spec) = parse_spec_quiet(&marketplace_entry_spec(&entry, &clone)) {
             // spec: STO-58/MKT-8 -- an external entry was melded under the entry
             // name as its alias, so its registered identity carries `@<name>`.
             spec.apply_alias(Some(entry.name.clone()));
@@ -3688,7 +3797,9 @@ pub(crate) fn install_curated_sources_for_json(
             .map(|d| d.sources)
             .unwrap_or_default();
         for ns in nested {
-            let Ok(mut spec) = parse_spec(&ns.source) else {
+            // spec: CLI-216 -- the json twin of the install walk above; quiet for
+            // the same reason.
+            let Ok(mut spec) = parse_spec_quiet(&ns.source) else {
                 continue;
             };
             // spec: STO-58 -- resolve the nested source under its effective alias.
@@ -3769,7 +3880,11 @@ fn source_status(paths: &Paths, source_name: &str) -> Result<()> {
             name: source_name.to_string(),
         });
     };
-    let items = catalog::scan(paths, &single(source))?;
+    // spec: CLI-213 -- `meld`'s already-melded branch reaches this, and meld's own
+    // scan hard-fails on any scan error. `catalog::scan` would degrade a
+    // `LinkedSourceGone` source into `Ok(vec![])` and print it as a healthy source
+    // with "0 item(s)", contradicting the stderr warning next to it.
+    let items = scan_one(paths, source)?;
     let manifest = Manifest::load(paths)?;
 
     let head = source
@@ -4741,6 +4856,10 @@ pub fn sync(
     // spec: POL-34 -- provisioning failures are soft; collect them here so the
     // per-source sync loop still runs and they are reported at the end.
     let mut provision_failures: Vec<String> = Vec::new();
+    // spec: CLI-217 POL-58 -- keys installed by the auto_meld provisioning pass,
+    // reported in sync's own result object rather than by a `learn` document per
+    // item.
+    let mut provisioned_keys: Vec<String> = Vec::new();
 
     // POL-32: provision the policy's auto-meld base set before syncing. Each entry
     // not already in the registry is melded at its declared pin; an entry already
@@ -4765,7 +4884,10 @@ pub fn sync(
             // (meld_recursive also skips a same-URL duplicate, but checking here
             // avoids the clone attempt and the "melding ..." chatter.)
             let source_registered: bool = 'registered: {
-                if let Ok(spec) = parse_spec(&am.repo) {
+                // spec: CLI-216 -- "is this policy entry already registered?" is
+                // a question; the meld_recursive call below is what decides a
+                // reading and clones.
+                if let Ok(spec) = parse_spec_quiet(&am.repo) {
                     if let Some(src) = registry.sources.iter_mut().find(|s| s.name == spec.name) {
                         let old_pin = src.pin.clone();
                         if old_pin == am.pin {
@@ -4840,7 +4962,8 @@ pub fn sync(
             // `install_provisioned_items` (`installed.contains(&key)`) makes repeat
             // syncs idempotent: already-installed items are skipped without error.
             if am.install && source_registered {
-                if let Ok(spec) = parse_spec(&am.repo) {
+                // spec: CLI-216 -- identity of an entry that is already melded.
+                if let Ok(spec) = parse_spec_quiet(&am.repo) {
                     // Save the registry first so the install pass can read
                     // the newly registered source from disk.
                     if provisioned > 0 {
@@ -4861,8 +4984,11 @@ pub fn sync(
                     // spec: POL-60 -- per-item failures are soft: warn,
                     // record, continue; do not abort remaining items or
                     // other sources.
-                    let item_failures =
+                    let (keys, item_failures) =
                         install_provisioned_items(paths, &spec.name, am.run_build_hooks);
+                    // spec: CLI-217 -- folded into sync's ONE result object
+                    // below instead of each item emitting its own.
+                    provisioned_keys.extend(keys);
                     for (key, e) in item_failures {
                         if !out.json {
                             eprintln!(
@@ -5117,7 +5243,9 @@ pub fn sync(
         for todo in nested {
             // spec: STO-58 -- resolve the nested source under its effective alias
             // so an already-registered aliased instance is recognized.
-            if let Ok(mut s) = parse_spec(&todo.spec)
+            // spec: CLI-216 -- the already-registered guard is a lookup; the
+            // meld_recursive call below is the parse that may clone.
+            if let Ok(mut s) = parse_spec_quiet(&todo.spec)
                 && {
                     s.apply_alias(todo.alias.clone());
                     true
@@ -5154,7 +5282,8 @@ pub fn sync(
                 Err(e) if git::is_auth_failure(&e) => {
                     // spec: STO-58 -- match the aliased identity the nested source
                     // registers under.
-                    let entry_name = parse_spec(&todo.spec)
+                    // spec: CLI-216 -- quiet: naming a clone that already failed.
+                    let entry_name = parse_spec_quiet(&todo.spec)
                         .map(|mut s| {
                             s.apply_alias(todo_alias.clone());
                             s.name
@@ -5189,7 +5318,8 @@ pub fn sync(
                 Err(e) => {
                     // spec: STO-58 -- match the aliased identity the nested source
                     // registers under.
-                    let entry_name = parse_spec(&todo.spec)
+                    // spec: CLI-216 -- quiet: naming a clone that already failed.
+                    let entry_name = parse_spec_quiet(&todo.spec)
                         .map(|mut s| {
                             s.apply_alias(todo_alias.clone());
                             s.name
@@ -5224,22 +5354,40 @@ pub fn sync(
             total: total + provision_failures.len(),
         });
     }
+    let mut upgraded: Vec<String> = Vec::new();
+    if then_upgrade {
+        // spec: HOOK-11, HOOK-23 - sync already done above; run the pass with
+        // no_sync to avoid a redundant fetch. Deprecated: prefer `mind upgrade`
+        // (CLI-169).
+        // spec: CLI-217 -- `upgrade_inner` (not the `upgrade_no_sync` wrapper)
+        // so the pass does not emit its own document: the caller invoked `sync`,
+        // and what the pass applied is folded into sync's one object below.
+        let pass = upgrade_inner(
+            paths,
+            false,
+            None,
+            true,
+            dangerously_skip_hook_check,
+            dangerously_skip_build_hook_check,
+        )?;
+        if let Some(result) = pass {
+            upgraded = result.installed;
+        }
+    }
+    // spec: CLI-217 -- emitted AFTER the `--upgrade` pass, not before it. The
+    // invoked verb is `sync`, so sync's object is the one the caller is
+    // answered with; printed first, the pass's own object came last on stdout
+    // (two documents, which no single-value JSON parse accepts), and a failing
+    // pass left sync's result on stdout ahead of the CLI-181 error envelope.
     if out.json {
         let mut result = MutationResult::new("sync", "", "synced");
         result.count = Some(synced);
         result.skipped = sync_skipped;
+        // Everything this run installed or re-installed: the POL-58 auto_meld
+        // provisioning pass, then the `--upgrade` pass.
+        result.installed = provisioned_keys;
+        result.installed.extend(upgraded);
         print_json(&result)?;
-    }
-    if then_upgrade {
-        // spec: HOOK-11, HOOK-23 - sync already done above; use upgrade_no_sync
-        // to avoid a redundant fetch. Deprecated: prefer `mind upgrade` (CLI-169).
-        upgrade_no_sync(
-            paths,
-            false,
-            None,
-            dangerously_skip_hook_check,
-            dangerously_skip_build_hook_check,
-        )?;
     }
     Ok(())
 }
@@ -5331,14 +5479,14 @@ pub fn upgrade(
     dangerously_skip_hook_check: bool,
     dangerously_skip_build_hook_check: bool,
 ) -> Result<()> {
-    upgrade_inner(
+    emit_upgrade_result(upgrade_inner(
         paths,
         yes,
         item_ref,
         false,
         dangerously_skip_hook_check,
         dangerously_skip_build_hook_check,
-    )
+    )?)
 }
 
 /// `mind upgrade --no-sync` — skip the pre-upgrade source fetch (CLI-169).
@@ -5349,16 +5497,33 @@ pub fn upgrade_no_sync(
     dangerously_skip_hook_check: bool,
     dangerously_skip_build_hook_check: bool,
 ) -> Result<()> {
-    upgrade_inner(
+    emit_upgrade_result(upgrade_inner(
         paths,
         yes,
         item_ref,
         true,
         dangerously_skip_hook_check,
         dangerously_skip_build_hook_check,
-    )
+    )?)
 }
 
+/// Emit an upgrade pass's result when `upgrade` was the verb the user invoked.
+///
+/// `upgrade_inner` RETURNS its `--json` result rather than printing it, because
+/// it is also the `--upgrade` pass inside `sync`, where the caller invoked
+/// `sync` and CLI-217 allows exactly one document. Only these two wrappers --
+/// the real `upgrade` verb -- print it.
+// spec: CLI-217
+fn emit_upgrade_result(result: Option<MutationResult>) -> Result<()> {
+    match result {
+        Some(r) => print_json(&r),
+        None => Ok(()),
+    }
+}
+
+/// The upgrade pass. Returns the `--json` result object (`None` in text mode,
+/// or when the pass ended on a path with nothing to report) for the caller to
+/// emit or fold into its own; see [`emit_upgrade_result`].
 fn upgrade_inner(
     paths: &Paths,
     yes: bool,
@@ -5366,7 +5531,7 @@ fn upgrade_inner(
     no_sync: bool,
     dangerously_skip_hook_check: bool,
     dangerously_skip_build_hook_check: bool,
-) -> Result<()> {
+) -> Result<Option<MutationResult>> {
     let out = crate::render::ctx();
     // POL-3: load the managed policy once (fail closed on Err; None = inert).
     let policy = Policy::load()?;
@@ -5506,20 +5671,20 @@ fn upgrade_inner(
             if out.json {
                 let mut result = MutationResult::new("upgrade", target, "incomplete");
                 result.count = Some(unscannable.len());
-                return print_json(&result);
+                return Ok(Some(result));
             }
             println!(
                 "no pending upgrades among the source(s) that could be checked; {} source(s) could not be checked: {}",
                 unscannable.len(),
                 unscannable.join(", ")
             );
-            return Ok(());
+            return Ok(None);
         }
         if out.json {
-            return print_json(&MutationResult::new("upgrade", target, "up-to-date"));
+            return Ok(Some(MutationResult::new("upgrade", target, "up-to-date")));
         }
         println!("everything is up to date");
-        return Ok(());
+        return Ok(None);
     }
 
     if !out.json {
@@ -5528,7 +5693,7 @@ fn upgrade_inner(
 
     if !yes && !out.json && !confirm_default_yes("apply these upgrades?")? {
         println!("aborted; nothing changed");
-        return Ok(());
+        return Ok(None);
     }
 
     let mut manifest = manifest;
@@ -5592,9 +5757,9 @@ fn upgrade_inner(
         let outcome = if renamed { "renamed" } else { "upgraded" };
         let mut result = MutationResult::new("upgrade", target, outcome);
         result.installed = applied;
-        return print_json(&result);
+        return Ok(Some(result));
     }
-    Ok(())
+    Ok(None)
 }
 
 /// HOOK-11, HOOK-55: re-run each source's install hooks when warranted (any
@@ -6839,7 +7004,6 @@ fn format_lobe(entry: &crate::config::LobeEntry) -> String {
 /// `--force` remedy) in the `errs` list printed below as a warning, rather than
 /// overwriting it.
 fn backfill_new_lobes(paths: &Paths, new_lobes: &[crate::paths::Lobe], force: bool) -> Result<()> {
-    let out = crate::render::ctx();
     let mut manifest = Manifest::load(paths)?;
     if manifest.items.is_empty() {
         return Ok(());
@@ -6853,7 +7017,10 @@ fn backfill_new_lobes(paths: &Paths, new_lobes: &[crate::paths::Lobe], force: bo
                 .map(|p| p.to_string_lossy().into_owned()),
         );
         for (p, e) in errs {
-            println!("{} could not link {}: {e}", out.warn(), p.display());
+            // spec: CLI-217 -- HARN-17 runs this backfill under `--json` too, and
+            // the caller prints its JSON result AFTER this loop, so a bare
+            // `println!` here would land ahead of the envelope on stdout.
+            crate::render::warn(format!("could not link {}: {e}", p.display()));
         }
     }
     manifest.save(paths)?;
@@ -7461,13 +7628,90 @@ fn json_mode() -> bool {
     crate::render::ctx().json
 }
 
-use crate::render::{print_json, print_json_envelope};
+/// Emit a verb's JSON result (CLI-153).
+///
+/// When stdout is reserved (`--json` on a verb that answers with a document,
+/// CLI-217) the document is RECORDED rather than printed: `main` writes the
+/// last one recorded, once, to the preserved stdout. Every `print_json` call in
+/// this module goes through here, so a nested verb invoked on another verb's
+/// behalf (`meld`/`sync` -> `learn`) can no longer put a second document on
+/// stdout, whatever the call site does. Outside that mode it is
+/// `render::print_json` unchanged.
+// spec: CLI-217
+fn print_json<T: Serialize>(value: &T) -> Result<()> {
+    if crate::json_stdout::is_reserved() {
+        let s =
+            serde_json::to_string_pretty(value).map_err(|e| MindError::json("json output", e))?;
+        crate::json_stdout::record(s);
+        return Ok(());
+    }
+    crate::render::print_json(value)
+}
+
+/// [`print_json`] for the `{"schema": 1, "items": [...]}` array envelope
+/// (CLI-167), with the same CLI-217 recording behavior.
+// spec: CLI-217
+fn print_json_envelope<T: Serialize>(items: &[T]) -> Result<()> {
+    if crate::json_stdout::is_reserved() {
+        // Same envelope `render::print_json_envelope` builds, routed through the
+        // recording emitter above instead of straight to stdout.
+        #[derive(Serialize)]
+        struct Envelope<'a, T: Serialize> {
+            schema: u8,
+            items: &'a [T],
+        }
+        return print_json(&Envelope { schema: 1, items });
+    }
+    crate::render::print_json_envelope(items)
+}
 
 /// A throwaway registry holding just one source, for catalog scans during meld.
 fn single(source: &crate::source::Source) -> Registry {
     Registry {
         sources: vec![source.clone()],
     }
+}
+
+/// DSC-93: the resolved path of a `[discover].sources` entry that names a LOCAL
+/// path which (a) does not exist and (b) lies inside mind's managed sources tree
+/// (`<mind_home>/sources`), i.e. a relative curator entry DSC-92 resolved against
+/// a cloned copy of that curator. `None` for every other entry: a remote spec, an
+/// absolute local path outside the sources tree, or any path that actually
+/// exists (including a sibling clone the same walk already created, which the
+/// DSC-70 already-registered guard handles).
+///
+/// The predicate is deliberately structural rather than name-based: mind is the
+/// only writer of the sources tree, and it never creates the sibling a curator's
+/// `../x` would need, so a non-existent path there can only be a misresolved
+/// relative reference -- no matching of the entry against other entries in the
+/// walk is required, and identity (`host/owner/repo`), which the two readings
+/// disagree on, is never consulted.
+// spec: DSC-93
+fn unresolvable_managed_local_entry(paths: &Paths, spec: &str) -> Option<std::path::PathBuf> {
+    // The quiet parse: this is a classification, not a decision to clone, so the
+    // CLI-215 shadowing note would be noise here (CLI-216).
+    let parsed = crate::source::parse_spec_quiet(spec).ok()?;
+    if parsed.host != "local" {
+        return None;
+    }
+    let path = std::path::PathBuf::from(&parsed.url);
+    (!path.exists() && path.starts_with(paths.sources_dir())).then_some(path)
+}
+
+/// Scan exactly ONE source, hard-failing on any scan error.
+///
+/// The counterpart to `catalog::scan(paths, &single(src))`, which routes through
+/// the whole-registry walk and therefore inherits its CLI-213 degradation: a
+/// `LinkedSourceGone` source is skipped with a stderr warning and the call
+/// returns `Ok(vec![])`. That degradation exists so one dead source does not take
+/// down a LISTING of every source; it is wrong for a caller that named a single
+/// source and needs to know whether THAT source could be read, because an empty
+/// result is indistinguishable from a healthy source with no items.
+// spec: CLI-212 CLI-213
+fn scan_one(paths: &Paths, source: &crate::source::Source) -> Result<Vec<CatalogItem>> {
+    let mut items = Vec::new();
+    catalog::scan_source(paths, source, &mut items)?;
+    Ok(items)
 }
 
 /// First 8 chars of a hash/commit, for compact display.
@@ -8921,6 +9165,169 @@ mod tests {
             Some(dest.to_string_lossy().as_ref()),
             "the chosen destination must be saved as absorb_to"
         );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ---- CLI-212/CLI-213: a single-source scan does not degrade ----
+
+    /// `scan_one` is the non-degrading counterpart of
+    /// `catalog::scan(paths, &single(src))`, and the difference between the two
+    /// is the whole point of every site that moved onto it. The DSC-80 curator
+    /// guard in `meld_recursive` is the one such site that cannot be driven into
+    /// this state from the CLI hermetically (it scans the primary source it just
+    /// registered, whose directory was verified moments earlier), so the contract
+    /// it now rests on is pinned here directly: for the SAME gone source, the
+    /// registry walk yields an empty catalog and the single-source scan errors.
+    /// Were the guard still on the degrading scan, a `LinkedSourceGone` primary
+    /// would scan as empty and be reported as `CuratorAllNestedFailed` -- a real
+    /// condition, but not this one.
+    #[test]
+    fn scan_one_hard_fails_where_the_registry_walk_degrades() {
+        // spec: CLI-212 CLI-213
+        let (paths, base) = ns_paths();
+        let gone = base.join("never-created");
+        let src = crate::source::parse_spec(&gone.to_string_lossy()).expect("parse local spec");
+        assert!(
+            src.is_linked(),
+            "sanity: a local unpinned source is linked (CLI-27), which is what \
+             LinkedSourceGone applies to"
+        );
+
+        let degraded =
+            catalog::scan(&paths, &single(&src)).expect("the registry walk degrades, CLI-213");
+        assert!(
+            degraded.is_empty(),
+            "the degraded result is indistinguishable from a healthy source with \
+             no items, which is exactly why a single-source caller cannot use it"
+        );
+
+        let err = scan_one(&paths, &src).expect_err("a single-source scan must not degrade");
+        assert!(
+            matches!(err, MindError::LinkedSourceGone { .. }),
+            "the vanished working tree must surface as LinkedSourceGone (with its \
+             `mind unmeld` remedy), got: {err:?}"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ---- DSC-93: the absolute entry wins ----
+
+    /// The DSC-93 predicate, at its four boundaries. It is structural (a
+    /// non-existent path inside mind's managed sources tree) rather than
+    /// name-based, so it must not fire for a remote entry, for a mistyped
+    /// relative path in a LINKED curator (which resolves into the user's own
+    /// tree and still fails as DSC-79/DSC-80 describe), or for a path that
+    /// actually exists (a sibling clone the same walk already created, which the
+    /// DSC-70 already-registered guard handles).
+    #[test]
+    fn dsc93_skips_only_a_missing_path_inside_the_managed_sources_tree() {
+        // spec: DSC-93
+        let (paths, base) = ns_paths();
+
+        // (1) A remote entry: never a local path, never skipped.
+        assert_eq!(
+            unresolvable_managed_local_entry(&paths, "github:acme/nested"),
+            None,
+            "a remote entry must never be skipped"
+        );
+
+        // (2) A local path outside the sources tree that does not exist: a
+        // curator typo in the user's own working tree, which keeps failing.
+        let typo = base.join("curator-worktree").join("nested-lib");
+        assert_eq!(
+            unresolvable_managed_local_entry(&paths, &typo.to_string_lossy()),
+            None,
+            "a missing path outside the sources tree is a real error, not a skip"
+        );
+
+        // (3) A path inside the sources tree that does not exist: the misresolved
+        // relative reference of a cloned curator.
+        let phantom = paths.sources_dir().join("local/owner/nested-lib");
+        assert_eq!(
+            unresolvable_managed_local_entry(&paths, &phantom.to_string_lossy()),
+            Some(phantom.clone()),
+            "a missing sibling inside mind's own sources tree is the DSC-93 case"
+        );
+
+        // (4) The same path, once something IS cloned there: attempted as usual,
+        // so DSC-70's already-registered guard stays in charge of it.
+        std::fs::create_dir_all(&phantom).expect("create the sibling clone dir");
+        assert_eq!(
+            unresolvable_managed_local_entry(&paths, &phantom.to_string_lossy()),
+            None,
+            "an entry that resolves to a directory that exists must be attempted"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The DSC-93 predicate reaches the sources tree through
+    /// `parse_spec_quiet`, which has more local-path branches than the plain
+    /// absolute path the test above uses. Each of them can appear verbatim in a
+    /// curator's `[discover].sources`, so each must classify the same way; a
+    /// branch the predicate silently misses is a curator entry that goes back
+    /// to being attempted, failing to clone, and (DSC-80) aborting a whole
+    /// `dump` reproduction.
+    #[test]
+    fn dsc93_classifies_every_local_spec_form_the_parser_accepts() {
+        // spec: DSC-93 CLI-216
+        let (paths, base) = ns_paths();
+        let phantom = paths.sources_dir().join("local/owner/nested-lib");
+
+        // The `file://` spelling of the same missing path. `parse_spec` treats
+        // it as the identical local repo, so the predicate must too.
+        let file_url = format!("file://{}", phantom.display());
+        assert_eq!(
+            unresolvable_managed_local_entry(&paths, &file_url),
+            Some(phantom.clone()),
+            "the file:// spelling of a missing sources-tree path is the same case \
+             as the bare path"
+        );
+
+        // A local ITEM LINK (LNK-1) inside the sources tree: the predicate must
+        // classify by the REPO part (what would be cloned), not by the deep
+        // path, which never exists as a directory in its own right.
+        let link = format!("file://{}/tree/main/skills/greet", phantom.display());
+        assert_eq!(
+            unresolvable_managed_local_entry(&paths, &link),
+            Some(phantom.clone()),
+            "a local item-link entry must be classified by its repo part"
+        );
+
+        // A relative spec is resolved against the CWD, never against the
+        // sources tree, so it can never be the DSC-93 case. (DSC-92 has already
+        // rewritten a curator's relative entry to an absolute path by the time
+        // the predicate sees it; this pins that a leftover relative string does
+        // not accidentally match.)
+        assert_eq!(
+            unresolvable_managed_local_entry(&paths, "../nested-lib"),
+            None,
+            "a relative entry resolves against the cwd, never into the sources tree"
+        );
+
+        // A sibling whose name merely SHARES A PREFIX with the sources dir is
+        // outside it: `starts_with` is component-wise, and this pins that.
+        let neighbour = format!("{}-elsewhere/owner/nested", paths.sources_dir().display());
+        assert_eq!(
+            unresolvable_managed_local_entry(&paths, &neighbour),
+            None,
+            "a path whose string merely shares a prefix with the sources dir is \
+             not inside it"
+        );
+
+        // Something exists at the path, but as a FILE. `exists()` is true, so
+        // the entry is attempted and fails as an ordinary nested clone failure
+        // rather than being skipped. Documented, not incidental: mind never
+        // writes a file there, so this cannot arise from mind's own bookkeeping.
+        std::fs::create_dir_all(phantom.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&phantom, b"not a clone").expect("write file at the clone path");
+        assert_eq!(
+            unresolvable_managed_local_entry(&paths, &phantom.to_string_lossy()),
+            None,
+            "a path occupied by a FILE exists, so it is attempted (and fails as a \
+             clone error) rather than skipped"
+        );
+
         let _ = std::fs::remove_dir_all(&base);
     }
 

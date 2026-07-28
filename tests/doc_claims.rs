@@ -19,6 +19,12 @@
 //!   - docs/src/troubleshooting.md: the dead-local-source recovery recipe
 //!     (`mind recall --sources`, then `mind unmeld <name>`) actually works
 //!     end to end after the directory is gone (CLI-213).
+//!   - docs/src/configuration.md: `config lobes add` backfills already-installed
+//!     items into a new lobe only for the kinds the lobe admits (HARN-17), not
+//!     every installed item.
+//!   - docs/src/configuration.md: `config lobes add` creates its target
+//!     directory immediately only on the managed (non-`--snapshot`) path
+//!     (HARN-15).
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -393,5 +399,106 @@ fn unmeld_of_a_vanished_source_does_not_require_the_directory_to_exist() {
         r.success,
         "unmeld by the short selector must work on a vanished source: {}\n{}",
         r.stdout, r.stderr
+    );
+}
+
+// ---------------------------------------------------------------------------
+// docs/src/configuration.md:88-89 -- "Already-installed items link into the
+// new lobe as part of the same command" omits that the lobe's `kinds` filter
+// still applies (HARN-17): a skill-only lobe backfills no rule.
+// ---------------------------------------------------------------------------
+
+/// A skill and a rule are installed BEFORE the lobe exists. Adding a
+/// `windsurf`-preset (skill-only) lobe afterward must backfill the skill but
+/// not the rule, proving the doc's unqualified "already-installed items link
+/// in" statement is only true for the kinds the lobe admits.
+#[test]
+fn config_lobes_add_backfills_only_the_kinds_the_lobe_admits() {
+    // spec: HARN-17
+    let sb = Sandbox::new("kinds-backfill");
+    let source = sb.base.join("agents");
+    write(
+        &source.join("skills/hello/SKILL.md"),
+        "---\ndescription: say hello\n---\n# hello\n",
+    );
+    write(
+        &source.join("rules/style-rule.md"),
+        "---\ndescription: ASCII only\n---\n# style\n",
+    );
+    init_repo(&source);
+
+    assert!(
+        sb.mind(&["meld", source.to_string_lossy().as_ref(), "--register-only"])
+            .success
+    );
+    assert!(sb.mind(&["learn", "hello"]).success, "learn skill");
+    assert!(sb.mind(&["learn", "style-rule"]).success, "learn rule");
+
+    let project = sb.base.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let r = sb.mind(&[
+        "config",
+        "lobes",
+        "add",
+        project.to_string_lossy().as_ref(),
+        "--preset",
+        "windsurf",
+    ]);
+    assert!(r.success, "config lobes add: {}\n{}", r.stdout, r.stderr);
+
+    let windsurf = project.join(".windsurf");
+    assert!(
+        std::fs::symlink_metadata(windsurf.join("skills/hello")).is_ok(),
+        "the skill is a kind the windsurf lobe admits, so it must be backfilled: {}",
+        r.stdout
+    );
+    assert!(
+        std::fs::symlink_metadata(windsurf.join("rules/style-rule.md")).is_err(),
+        "the windsurf preset is skill-only, so the already-installed rule must \
+         NOT be backfilled into it: {}",
+        r.stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// docs/src/configuration.md:86 -- "Adding a lobe creates its target directory
+// immediately" omits that this is true only on the managed (non-`--snapshot`)
+// path (HARN-15).
+// ---------------------------------------------------------------------------
+
+/// A plain (managed) `config lobes add` creates the target directory
+/// immediately; the same command with `--snapshot` on an empty install set
+/// creates nothing, so the doc's unqualified claim only holds for the managed
+/// path.
+#[test]
+fn config_lobes_add_creates_target_dir_only_on_the_managed_path() {
+    // spec: HARN-15
+    let sb = Sandbox::new("mkdir-managed");
+
+    let managed = sb.base.join("managed-target");
+    assert!(!managed.exists(), "precondition: target must not pre-exist");
+    let r = sb.mind(&["config", "lobes", "add", managed.to_string_lossy().as_ref()]);
+    assert!(r.success, "config lobes add: {}\n{}", r.stdout, r.stderr);
+    assert!(
+        std::fs::symlink_metadata(&managed).is_ok(),
+        "a managed lobe add must create its target directory immediately: {}",
+        r.stdout
+    );
+
+    let snap = sb.base.join("snapshot-target");
+    assert!(!snap.exists(), "precondition: target must not pre-exist");
+    let r = sb.mind(&[
+        "config",
+        "lobes",
+        "add",
+        snap.to_string_lossy().as_ref(),
+        "--snapshot",
+    ]);
+    assert!(r.success, "snapshot add: {}\n{}", r.stdout, r.stderr);
+    assert!(
+        std::fs::symlink_metadata(&snap).is_err(),
+        "--snapshot must NOT create the target directory (HARN-15 is confined \
+         to the managed path): {}",
+        r.stdout
     );
 }

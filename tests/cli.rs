@@ -927,28 +927,61 @@ fn meld_of_a_nonexistent_local_path_still_hard_fails_and_registers_nothing() {
 }
 
 #[test]
-#[ignore = "PRODUCTION DEFECT: meld's source_status degrades a vanished source into '0 item(s)', \
-            contradicting CLI-213 ('meld's own scan still hard-fails on any scan error, \
-            including this one')"]
+fn dsc93_does_not_soften_a_top_level_meld_of_a_missing_sources_tree_path() {
+    // spec: DSC-93 CLI-213
+    // DSC-93's predicate is "a non-existent path inside mind's own sources
+    // tree", which is a shape a user can also type at the top level -- pasting
+    // a clone path out of a `recall`/`introspect` message, say. The skip is
+    // deliberately scoped to `[discover].sources` entries, where the path was
+    // MISRESOLVED by DSC-92 rather than chosen. At the top level the same path
+    // must still be the hard error CLI-213 promises, not a warning: the user
+    // named this source, so "it isn't there" is the answer they asked for, and
+    // a warn-and-continue would exit 0 having registered nothing.
+    let sb = Sandbox::bare("dsc93-toplevel");
+    let inside = sb
+        .mind_home
+        .join("sources/local/someone/never-cloned")
+        .to_string_lossy()
+        .into_owned();
+    let r = sb.mind(&["meld", &inside]);
+    assert!(
+        !r.success,
+        "a top-level meld of a missing path inside the sources tree must still \
+         hard-fail: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr.contains("not a directory"),
+        "the failure must name the missing path: {}",
+        r.stderr
+    );
+    assert!(
+        !r.stderr.contains("resolves inside mind's own sources tree"),
+        "the DSC-93 skip rationale must not be applied to a path the user named \
+         directly: {}",
+        r.stderr
+    );
+    let sources = sb.mind(&["recall", "--sources"]);
+    assert!(
+        !sources.stdout.contains("never-cloned"),
+        "nothing may be registered: {}",
+        sources.stdout
+    );
+}
+
+#[test]
 fn remelding_a_vanished_linked_source_names_it_rather_than_reporting_zero_items() {
-    // PRODUCTION DEFECT, src/commands.rs:3772 (`source_status`):
-    //     let items = catalog::scan(paths, &single(source))?;
-    // `catalog::scan` is the function CLI-212/CLI-213 changed to DEGRADE past a
-    // `LinkedSourceGone` source, and `source_status` is reached from `meld` (the
-    // already-melded branch, src/commands.rs:3380). CLI-213 states that
-    // "`meld`'s own scan of the source it just cloned ... still hard-fail[s] on
-    // any scan error, including this one", but it does not: re-melding a source
-    // whose working tree has vanished prints
+    // `source_status` (reached from `meld`'s already-melded branch) scans the one
+    // named source through `scan_one`/`catalog::scan_source`, NOT the
+    // whole-registry `catalog::scan` that CLI-212/CLI-213 made degrade past a
+    // `LinkedSourceGone` source. With the degrading scan, re-melding a source
+    // whose working tree has vanished printed
     //     * local/<owner>/agents is already melded
     //     * local/<owner>/agents: 0 item(s) (source @ <sha>)
-    // and exits 0, describing a dead source as a healthy source that happens to
-    // offer nothing. (The stderr warning IS emitted, but stdout contradicts it
-    // and the exit status says success.) A user re-melding to check on a source
-    // is told everything is fine.
-    //
-    // Fix: `source_status` should call `catalog::scan_source` (which does not
-    // degrade), like `dump` does, so naming a source directly still errors.
-    // Un-ignore when it does.
+    // and exited 0, describing a dead source as a healthy source that happens to
+    // offer nothing: stdout contradicted the stderr warning beside it, and the
+    // exit status said success. CLI-213 reserves the degradation for LISTING
+    // every source; a caller that named one source is told what happened to it.
     // spec: CLI-212 CLI-213
     let sb = Sandbox::new();
     let spec = sb.source_spec();
@@ -968,6 +1001,11 @@ fn remelding_a_vanished_linked_source_names_it_rather_than_reporting_zero_items(
         !r.stdout.contains("0 item(s)"),
         "a vanished source must not be reported as an empty but healthy source: {}",
         r.stdout
+    );
+    assert!(
+        !r.success,
+        "the scan error must fail the command, not be degraded into a success: {} {}",
+        r.stdout, r.stderr
     );
 }
 
@@ -1072,19 +1110,14 @@ fn review_reads_a_relative_two_segment_directory_as_a_local_path() {
 }
 
 #[test]
-#[ignore = "known defect: review emits parse_spec's CLI-215 note, which contradicts the CLI-214 note"]
 fn review_of_a_shadowed_directory_emits_only_the_note_for_the_reading_it_took() {
-    // KNOWN DEFECT (src/review.rs `shadow_note` -> src/source.rs `parse_spec`):
-    // `shadow_note` builds its message by calling `parse_spec`, whose bare
-    // `owner/repo` branch itself prints the CLI-215 note when the spec shadows
-    // a local directory. So `mind review skills/greet` prints BOTH, and
-    // CLI-215's line ("to meld/review it as a local path instead of a remote
-    // repo, use './skills/greet'") tells the user to do the thing `review` has
-    // already done, immediately before the CLI-214 line says so. Neither spec
-    // statement is violated in isolation, which is why this is ignored rather
-    // than red; un-ignore when `shadow_note` stops routing through the
-    // note-printing parse.
-    // spec: CLI-214 CLI-215
+    // `shadow_note` builds its message from `parse_spec_quiet`, not `parse_spec`,
+    // whose bare `owner/repo` branch prints the CLI-215 note on this exact shape.
+    // Routed through the printing parse, `mind review skills/greet` printed BOTH,
+    // and CLI-215's line ("to meld/review it as a local path instead of a remote
+    // repo, use './skills/greet'") told the user to do the thing `review` had
+    // already done, immediately before the CLI-214 line said so.
+    // spec: CLI-214 CLI-215 CLI-216
     let sb = Sandbox::bare("cli214-notes");
     let fake_dir = fake_git_bin_dir(&sb.base);
     let new_path = prepend_path(&fake_dir);
@@ -1109,6 +1142,119 @@ fn review_of_a_shadowed_directory_emits_only_the_note_for_the_reading_it_took() 
         !r.stderr.contains("use './skills/greet'"),
         "the CLI-215 note contradicts the reading review actually took: {}",
         r.stderr
+    );
+}
+
+#[test]
+fn a_curated_entry_that_shadows_a_local_directory_is_noted_exactly_once() {
+    // CLI-216's rule is "a caller that parses a spec to ANSWER a question rather
+    // than to act on it must use `parse_spec_quiet`". These callers all parse an
+    // already-decided `[discover].sources` entry purely to derive its identity,
+    // and every one of them used to print:
+    //   src/commands.rs  the DSC-68/69 auth-failure arm  (fires below)
+    //   src/commands.rs  install_curated_sources' walk   (fires below)
+    //   src/commands.rs  the DSC-79 clone-failure arm    (same shape)
+    //   src/commands.rs  the DSC-63 install_items check  (same shape)
+    //   src/commands.rs  the json twin of the walk       (same shape)
+    // Concretely: standing in a directory that contains `skills/greet`, melding
+    // a curator whose entry is `source = "skills/greet"` printed
+    //   note: 'skills/greet' is also a directory here; ... use './skills/greet'
+    // THREE times (once from the real recursion, once from the failure arm's
+    // identity parse, once from the install walk) -- and every copy is advice
+    // the user cannot act on, because the reading is the curator's, not theirs.
+    // With `--register-only` it was twice. The DSC-93 predicate was never one of
+    // them: it already used `parse_spec_quiet`, which is why the count was 3 and
+    // not 4.
+    //
+    // Exactly one is the right number: zero would mean CLI-215 stopped warning
+    // before a curated clone at all.
+    // spec: CLI-215 CLI-216 DSC-93
+    let sb = Sandbox::named("shadow-curator");
+    sb.write_and_commit(
+        "mind.toml",
+        "[[items]]\nkind = \"skill\"\nname = \"review\"\npath = \"skills/review\"\n\n\
+         [[discover.sources]]\nsource = \"skills/greet\"\n\
+         on-auth-failure = { action = \"skip\" }\n",
+    );
+
+    // Stand in a directory where `skills/greet` names a real directory, so the
+    // curated entry shadows it. A stubbed `git` refuses every https clone, so
+    // the remote reading the note is about can never reach the network.
+    let fake_dir = fake_git_bin_dir(&sb.base);
+    let new_path = prepend_path(&fake_dir);
+    let workdir = sb.base.join("standhere");
+    write(
+        &workdir.join("skills/greet/SKILL.md"),
+        "---\nname: greet\ndescription: a decoy that shadows the curated entry\n---\n# greet\n",
+    );
+
+    let spec = sb.source_spec();
+    let r = mind_in(
+        &sb,
+        &["meld", &spec, "--yes"],
+        &workdir,
+        &[("PATH", &new_path)],
+    );
+    let combined = format!("{}{}", r.stdout, r.stderr);
+    assert_eq!(
+        combined.matches("is also a directory here").count(),
+        1,
+        "a curated entry that shadows a local directory must be noted exactly \
+         once (the recursion's real parse), not once more by the DSC-93 \
+         classification: stdout={} stderr={}",
+        r.stdout,
+        r.stderr
+    );
+}
+
+#[test]
+fn a_top_level_shadowing_spec_is_noted_exactly_once() {
+    // The same CLI-216 defect one level UP, on the plainest invocation there is:
+    // `mind meld skills/greet` standing in a directory that contains
+    // `skills/greet`. Nothing curated, nothing nested. Four parses of the user's
+    // own spec ran before the clone, and all four printed:
+    //   main.rs   `instance_name` (for the post-meld install target)
+    //   main.rs   `is_melded` -> `instance_name` (the fresh/re-meld routing)
+    //   commands.rs `meld`'s identity parse (STO-58 source_name)
+    //   commands.rs `meld_recursive`'s parse -- the one that actually clones
+    // Only the last decides a reading, so the first three are CLI-216
+    // "answering a question" parses. Three passes over this class each looked
+    // only at the curated/nested sites and missed this one, which is the one an
+    // ordinary user hits.
+    //
+    // A stubbed `git` refuses every https clone, so the remote reading the note
+    // is about never reaches the network; the meld fails, which is fine -- the
+    // note is printed before the clone (CLI-215) and its count is what is under
+    // test.
+    // spec: CLI-215 CLI-216
+    let sb = Sandbox::bare("top-shadow");
+    let fake_dir = fake_git_bin_dir(&sb.base);
+    let new_path = prepend_path(&fake_dir);
+    let workdir = sb.base.join("standhere");
+    write(
+        &workdir.join("skills/greet/SKILL.md"),
+        "---\nname: greet\ndescription: a decoy that shadows the spec\n---\n# greet\n",
+    );
+
+    let r = mind_in(
+        &sb,
+        &["meld", "skills/greet", "--register-only"],
+        &workdir,
+        &[("PATH", &new_path)],
+    );
+    let combined = format!("{}{}", r.stdout, r.stderr);
+    assert_eq!(
+        combined.matches("is also a directory here").count(),
+        1,
+        "a shadowing top-level spec must be noted exactly once (by the parse \
+         that decides what to clone), not once per identity lookup: stdout={} \
+         stderr={}",
+        r.stdout,
+        r.stderr
+    );
+    assert!(
+        combined.contains("use './skills/greet'"),
+        "the one note must still name the local-path form (CLI-215): {combined}"
     );
 }
 
@@ -1448,6 +1594,72 @@ fn review_with_no_target_reviews_the_current_directory() {
         r.success,
         "a bare `review` of the current directory should succeed for a clean source: {} {}",
         r.stdout, r.stderr
+    );
+}
+
+/// CLI-217 names `review` as one of the four verbs with "no `--json` output at
+/// all ... print[s] ... human text on stdout in every mode", and
+/// `json_reserves_stdout` excludes it on that premise. Unlike `config show`
+/// (see `config_show_json_emits_one_document_despite_being_classified_as_no_json`),
+/// `review` genuinely never reads `ctx().json` anywhere, so this pins the
+/// premise itself: `--json` changes nothing about the output, and it is still
+/// plain text, not silently-empty or malformed JSON.
+#[test]
+fn review_json_flag_is_ignored_and_still_prints_plain_text() {
+    // spec: CLI-217
+    let sb = Sandbox::new();
+    let plain = sb.mind_cwd(&["review"], &sb.source);
+    let json = sb.mind_cwd(&["--json", "review"], &sb.source);
+    assert!(
+        plain.success && json.success,
+        "{} {}",
+        plain.stderr,
+        json.stderr
+    );
+    assert_eq!(
+        plain.stdout, json.stdout,
+        "`--json` must not change review's output at all (no JSON branch exists)"
+    );
+    assert!(
+        serde_json::from_str::<serde_json::Value>(json.stdout.trim()).is_err(),
+        "review --json must not accidentally look like a JSON document: {:?}",
+        json.stdout
+    );
+}
+
+/// The `init-source` twin of the test above (CLI-217's fourth "no --json
+/// output" verb along with `hooks list`, covered in tests/cli_hooks.rs).
+#[test]
+fn init_source_json_flag_is_ignored_and_still_prints_plain_text() {
+    // spec: CLI-217
+    let sb = Sandbox::bare("init-json");
+    let dir = sb.base.join("scaffold-target");
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir_str = dir.to_str().unwrap();
+
+    let plain = sb.mind(&["init-source", dir_str]);
+    // Re-running init-source on the same, now-scaffolded directory still
+    // succeeds (CLI-26-style idempotence is not the point here); only the
+    // stdout shape under --json matters, so drive a second, distinct target.
+    let dir2 = sb.base.join("scaffold-target-json");
+    std::fs::create_dir_all(&dir2).unwrap();
+    let dir2_str = dir2.to_str().unwrap();
+    let json = sb.mind(&["--json", "init-source", dir2_str]);
+    assert!(
+        plain.success && json.success,
+        "{} {}",
+        plain.stderr,
+        json.stderr
+    );
+    assert!(
+        serde_json::from_str::<serde_json::Value>(json.stdout.trim()).is_err(),
+        "init-source --json must not accidentally look like a JSON document: {:?}",
+        json.stdout
+    );
+    assert!(
+        json.stdout.contains("mind.toml") || json.stdout.contains("wrote"),
+        "init-source --json must still print its ordinary human report: {:?}",
+        json.stdout
     );
 }
 
@@ -6078,6 +6290,45 @@ fn config_show_creates_default_and_reports_lobes() {
     let home = sb.base.join("shownLobe").display().to_string();
     assert!(sb.mind(&["config", "lobes", "add", &home]).success);
     assert!(sb.mind(&["config", "show"]).stdout.contains(&home));
+}
+
+/// `config show --json` is a documentation/classification mismatch worth
+/// pinning down: CLI-217's spec text and `main.rs`'s `json_reserves_stdout`
+/// both say "`config show` ... define[s] no JSON output at all, so it prints
+/// human text on stdout in every mode" -- but `commands::config_show` DOES
+/// have an `if out.json { return print_json(...) }` branch. It is excluded
+/// from the CLI-217 stdout reservation on that (incorrect) premise; harmless
+/// here only because `config_show` prints nothing before its JSON branch, so
+/// there is nothing an unreserved stdout could let leak ahead of it. This
+/// pins the actual behavior (a single JSON document, config data included) so
+/// a future change that adds a line before the branch is not silently
+/// exempted from CLI-217 by the same stale classification.
+#[test]
+fn config_show_json_emits_one_document_despite_being_classified_as_no_json() {
+    // spec: CLI-217 CLI-110
+    let sb = Sandbox::new();
+    let home = sb.base.join("jsonLobe").display().to_string();
+    assert!(sb.mind(&["config", "lobes", "add", &home]).success);
+
+    let r = sb.mind(&["--json", "config", "show"]);
+    assert!(r.success, "config show --json: {} {}", r.stdout, r.stderr);
+    let doc: serde_json::Value = serde_json::from_str(r.stdout.trim()).unwrap_or_else(|e| {
+        panic!(
+            "config show --json stdout must parse as a single JSON document \
+             ({e}): {:?}",
+            r.stdout
+        )
+    });
+    assert!(
+        doc.get("config_file").is_some(),
+        "the config-show JSON object must be present, not silently dropped: {doc:#}"
+    );
+    assert!(
+        doc["lobes"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|l| l.as_str() == Some(home.as_str()))),
+        "the added lobe must appear in the JSON lobes array: {doc:#}"
+    );
 }
 
 #[test]
@@ -12078,6 +12329,451 @@ fn sandbox_with_declared_hook(name: &str, cmd: &str) -> Sandbox {
 }
 
 #[test]
+fn meld_json_stdout_is_only_the_result_object_when_a_hook_is_skipped() {
+    // spec: CLI-217 HOOK-22
+    // The HOOK-22 skip note is printed from `run_install_hooks`, which runs
+    // BEFORE `meld` emits its CLI-153 result object, and this harness is never a
+    // TTY so the note always fires. On stdout it left `mind meld --json` emitting
+    // prose followed by an object, which no consumer can parse. The note routes
+    // through `render::note`, so under `--json` it lands on stderr instead -- and
+    // it is still emitted, since a source whose tooling was not built is exactly
+    // what a machine caller needs to hear about.
+    let sb = sandbox_with_declared_hook("agents", "touch hookran");
+    let r = sb.mind(&["meld", &sb.source_spec(), "--json"]);
+    assert!(r.success, "meld --json: {} {}", r.stdout, r.stderr);
+    serde_json::from_str::<serde_json::Value>(r.stdout.trim()).unwrap_or_else(|e| {
+        panic!(
+            "stdout under --json must parse as a single JSON document ({e}): {:?}",
+            r.stdout
+        )
+    });
+    assert!(
+        r.stderr.contains("note: skipped install hook"),
+        "the skip note must still be reported, on stderr: {}",
+        r.stderr
+    );
+}
+
+#[test]
+fn learn_json_stdout_is_only_the_result_object_when_an_item_hook_is_skipped() {
+    // spec: CLI-217 HOOK-81
+    // The same shape one level down: a per-item install hook's non-TTY skip note
+    // is printed by `install.rs` in the middle of `learn`, ahead of learn's own
+    // JSON result.
+    let sb = Sandbox::named("agents");
+    sb.write_and_commit(
+        "mind.toml",
+        "[[items]]\nkind = \"skill\"\nname = \"review\"\npath = \"skills/review\"\n\
+         install = \"touch itemhookran\"\n",
+    );
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success, "meld");
+
+    let r = sb.mind(&["learn", "review", "--json"]);
+    assert!(r.success, "learn --json: {} {}", r.stdout, r.stderr);
+    serde_json::from_str::<serde_json::Value>(r.stdout.trim()).unwrap_or_else(|e| {
+        panic!(
+            "stdout under --json must parse as a single JSON document ({e}): {:?}",
+            r.stdout
+        )
+    });
+    assert!(
+        r.stderr
+            .contains("note: skipped install hook for skill:review"),
+        "the per-item skip note must still be reported, on stderr: {}",
+        r.stderr
+    );
+}
+
+#[test]
+fn json_does_not_swallow_the_stdout_of_verbs_whose_output_is_not_json() {
+    // spec: CLI-217
+    // CLI-217 reserves stdout under `--json` by pointing the process's fd 1 at
+    // stderr for the whole run (main.rs's `json_reserves_stdout` decides which
+    // verbs that applies to). The failure mode of that mechanism is the mirror
+    // image of the leak it closes: a verb whose stdout payload is NOT a JSON
+    // document would have its output silently redirected into stderr, so
+    // `mind --json completions bash > mind.bash` would write an empty file.
+    // `--json` is a global flag, so this is reachable by accident (an alias, a
+    // wrapper script that always passes it), and it fails quietly.
+    //
+    // `dump` is the third such verb and has its own coverage
+    // (cli_dump.rs::dump_json_flag_prints_stderr_note, DUMP-9).
+    let sb = Sandbox::new();
+
+    let comp = sb.mind(&["--json", "completions", "bash"]);
+    assert!(comp.success, "completions --json: {}", comp.stderr);
+    assert!(
+        comp.stdout.contains("mind"),
+        "the completion script must still go to STDOUT under --json: stdout={:?} stderr={:?}",
+        comp.stdout,
+        comp.stderr
+    );
+
+    let man = sb.mind(&["--json", "man"]);
+    assert!(man.success, "man --json: {}", man.stderr);
+    assert!(
+        man.stdout.contains(".TH"),
+        "the roff page must still go to STDOUT under --json: stdout={:?} stderr={:?}",
+        man.stdout,
+        man.stderr
+    );
+}
+
+#[test]
+fn json_stdout_is_exactly_one_document_across_the_verb_surface() {
+    // spec: CLI-217 CLI-153
+    // CLI-217 is a property of `--json`, not of one verb, and the change that
+    // introduced it converted seven sites found by inspection. This walks the
+    // whole mutating/reporting surface in one ordinary lifecycle so a verb that
+    // was never looked at cannot leak prose (or a second object) onto stdout
+    // unnoticed. It is a floor, not a substitute for the adverse-condition
+    // tests around it: it exercises only the happy path of each verb, which is
+    // exactly the path least likely to print an aside.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    let lobe = sb.base.join("extra-lobe");
+    std::fs::create_dir_all(&lobe).unwrap();
+    let lobe_str = lobe.to_string_lossy().into_owned();
+
+    let steps: Vec<Vec<&str>> = vec![
+        vec!["meld", &spec, "--json"],
+        vec!["meld", &spec, "--json"], // the already-melded (remeld) branch
+        vec!["recall", "--json"],
+        vec!["recall", "--sources", "--json"],
+        vec!["probe", "--json", "--no-tui"],
+        vec!["learn", "review", "--json"],
+        vec!["learn", "review", "--json"], // the up-to-date branch
+        vec!["introspect", "--json"],
+        vec!["sync", "--json"],
+        vec!["upgrade", "--json", "--yes"],
+        vec!["config", "lobes", "add", "--json", &lobe_str],
+        vec!["config", "lobes", "remove", "--json", &lobe_str],
+        vec!["forget", "review", "--json", "--yes"],
+        vec!["unmeld", "agents", "--json", "--yes"],
+    ];
+
+    let mut silent: Vec<String> = Vec::new();
+    for args in steps {
+        let r = sb.mind(&args);
+        let body = r.stdout.trim();
+        if body.is_empty() {
+            silent.push(args.join(" "));
+            continue;
+        }
+        serde_json::from_str::<serde_json::Value>(body).unwrap_or_else(|e| {
+            panic!(
+                "`mind {}` must leave stdout as exactly one JSON document ({e}); \
+                 anything else belongs on stderr (CLI-217):\nstdout={:?}\nstderr={:?}",
+                args.join(" "),
+                r.stdout,
+                r.stderr
+            )
+        });
+    }
+    // No invocation above may answer with silence. The last holdout was the
+    // second `meld <spec> --json` (re-melding a source that still has items to
+    // install, without `--yes`): `remeld`'s `!link_only` block returned as soon
+    // as `install_source_items` had run, so its own `already-melded` object was
+    // never reached. Zero documents is not the CLI-217 corruption mode, but it
+    // left a CLI-153 mutating verb telling a machine caller nothing at all.
+    // spec: CLI-153
+    assert!(
+        silent.is_empty(),
+        "every --json invocation must answer with a document; these wrote \
+         nothing to stdout: {silent:?}"
+    );
+}
+
+#[test]
+fn unmeld_json_stdout_is_only_the_result_object_when_an_uninstall_hook_is_skipped() {
+    // spec: CLI-217 HOOK-54
+    // The third converted `render::note` site (`run_uninstall_hooks`). It runs
+    // in `unmeld_one` BEFORE the source is dropped and BEFORE the CLI-153
+    // result object is printed, so under `--json` a bare `println!` here put
+    // prose ahead of the object exactly as the meld and learn paths did. Only
+    // those two paths had tests, which is why this one had to be checked
+    // separately rather than inferred from them.
+    let sb = Sandbox::named("agents");
+    sb.write_and_commit(
+        "mind.toml",
+        "[[hooks]]\nname = \"cleanup\"\nrun = \"echo clean\"\nevent = \"uninstall\"\n",
+    );
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success, "meld");
+
+    let r = sb.mind(&["unmeld", "agents", "--json"]);
+    assert!(r.success, "unmeld --json: {} {}", r.stdout, r.stderr);
+    serde_json::from_str::<serde_json::Value>(r.stdout.trim()).unwrap_or_else(|e| {
+        panic!(
+            "stdout under --json must parse as a single JSON document ({e}): {:?}",
+            r.stdout
+        )
+    });
+    assert!(
+        r.stderr.contains("note: skipped uninstall hook 'cleanup'"),
+        "the uninstall-hook skip note must still be reported, on stderr: {}",
+        r.stderr
+    );
+}
+
+#[test]
+fn hook_skip_notes_stay_on_stdout_in_text_mode() {
+    // spec: CLI-217 HOOK-22 HOOK-54
+    // CLI-217 routes these notes; it does not move them. In text mode they are
+    // "byte for byte what a `println!` would have written", i.e. STDOUT. Every
+    // other test of the conversion asserts the `--json` half (the note is on
+    // stderr) or accepts either stream, so all of them would still pass if
+    // `render::note` unconditionally wrote to stderr -- which would silently
+    // move a routine, expected line out of the output a user pipes and reads.
+    // Both converted hook sites are checked here, in one run each.
+    let src = sandbox_with_declared_hook("agents", "touch hookran");
+    let meld = src.mind(&["meld", &src.source_spec()]);
+    assert!(meld.success, "meld: {} {}", meld.stdout, meld.stderr);
+    assert!(
+        meld.stdout.contains("note: skipped install hook "),
+        "the install-hook skip note belongs on STDOUT in text mode: stdout={} stderr={}",
+        meld.stdout,
+        meld.stderr
+    );
+
+    let un = Sandbox::named("agents");
+    un.write_and_commit(
+        "mind.toml",
+        "[[hooks]]\nname = \"cleanup\"\nrun = \"echo clean\"\nevent = \"uninstall\"\n",
+    );
+    assert!(un.mind(&["meld", &un.source_spec()]).success, "meld");
+    let r = un.mind(&["unmeld", "agents"]);
+    assert!(r.success, "unmeld: {} {}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("note: skipped uninstall hook 'cleanup'"),
+        "the uninstall-hook skip note belongs on STDOUT in text mode: stdout={} stderr={}",
+        r.stdout,
+        r.stderr
+    );
+}
+
+#[test]
+fn item_hook_skip_note_stays_on_stdout_in_text_mode() {
+    // spec: CLI-217 HOOK-81
+    // The `install.rs` half of the same rule: the per-item install-hook skip
+    // note. Same reason as above -- the `--json` test for this site asserts
+    // stderr, so nothing pinned the text-mode stream.
+    let sb = Sandbox::named("agents");
+    sb.write_and_commit(
+        "mind.toml",
+        "[[items]]\nkind = \"skill\"\nname = \"review\"\npath = \"skills/review\"\n\
+         install = \"touch itemhookran\"\n",
+    );
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success, "meld");
+    let r = sb.mind(&["learn", "review"]);
+    assert!(r.success, "learn: {} {}", r.stdout, r.stderr);
+    assert!(
+        r.stdout
+            .contains("note: skipped install hook for skill:review"),
+        "the per-item skip note belongs on STDOUT in text mode: stdout={} stderr={}",
+        r.stdout,
+        r.stderr
+    );
+}
+
+#[test]
+fn meld_json_stdout_is_only_the_result_object_when_a_hook_actually_runs() {
+    // CLI-217 binds "every line a verb may print", with no exemption for a hook
+    // that was consented to. Three sites on this one path wrote to stdout
+    // unconditionally:
+    //   src/commands.rs  `println!("running install hook '{}' for {}", ...)`
+    //   src/hook.rs      `println!("====== (hook-stdout: {label}) ======")`
+    //                    plus `print!("{stdout_str}")` -- the hook's own output
+    //   src/hook.rs      the same pair for the hook's stderr, also on stdout
+    // `hook::decide` returns `Run` in a non-TTY only when
+    // `--dangerously-skip-install-hook-check` is passed, so this is exactly the
+    // unattended/CI invocation the flag exists for, and it is also the one that
+    // most wants `--json`. The hook's own stdout is the worst of the three: it
+    // is arbitrary text chosen by the SOURCE AUTHOR, so a `--json` consumer's
+    // stdout could be made to contain anything at all -- including a forged
+    // result envelope. Under `--json` the whole process now runs with fd 1
+    // pointed at stderr (main.rs's `json_stdout`), so neither mind's own
+    // `println!` nor a child process that inherits stdout can reach it; the one
+    // document is written by `main` at the end.
+    // spec: CLI-217 HOOK-23
+    let sb = sandbox_with_declared_hook("agents", "echo hook-said-this");
+    let r = sb.mind(&[
+        "meld",
+        &sb.source_spec(),
+        "--json",
+        "--dangerously-skip-install-hook-check",
+    ]);
+    assert!(r.success, "meld --json: {} {}", r.stdout, r.stderr);
+    serde_json::from_str::<serde_json::Value>(r.stdout.trim()).unwrap_or_else(|e| {
+        panic!(
+            "stdout under --json must parse as a single JSON document ({e}): {:?}",
+            r.stdout
+        )
+    });
+    // The hook DID run, and its output is still shown -- on stderr. Asserting
+    // this is what keeps the fix from degenerating into "swallow the hook's
+    // output", which would also pass the parse above.
+    assert!(
+        r.stderr.contains("hook-said-this"),
+        "the hook's own output must still be reported, on stderr: {}",
+        r.stderr
+    );
+    assert!(
+        !r.stdout.contains("hook-said-this"),
+        "source-controlled hook output must never reach --json stdout: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn remeld_json_stdout_is_one_document_when_it_installs_pending_items() {
+    // spec: CLI-217 CLI-153 CLI-12
+    // `remeld` (the already-melded branch) used to be the one `--json` path that
+    // did NOT route its install through the silent
+    // `install_source_items_for_json` helper `meld` uses: it called
+    // `install_source_items` directly, which under `--yes` calls `learn`, which
+    // emits its OWN CLI-153 object and returns before remeld's. Register-only
+    // first so items are genuinely pending, then re-meld with --yes so that path
+    // is taken.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    assert!(
+        sb.mind(&["meld", &spec, "--register-only"]).success,
+        "register-only meld"
+    );
+
+    let r = sb.mind(&["meld", &spec, "--yes", "--json"]);
+    assert!(r.success, "re-meld --json: {} {}", r.stdout, r.stderr);
+    let doc: serde_json::Value = serde_json::from_str(r.stdout.trim()).unwrap_or_else(|e| {
+        panic!(
+            "stdout under --json must parse as a single JSON document ({e}): {:?}",
+            r.stdout
+        )
+    });
+    assert_eq!(
+        doc["schema"], 1,
+        "the one document must be a CLI-153 result envelope: {doc:#}"
+    );
+    // The one document answers the verb the caller INVOKED. It used to be
+    // `learn`'s -- `install_source_items` returned through `learn`'s own
+    // `print_json` and `remeld` never reached its `already-melded` object -- so
+    // `mind meld --json` reported an action nobody asked for. A re-meld now
+    // mirrors the fresh-meld branch (CLI-156): one `meld` object whose
+    // `installed` array carries what the install step did.
+    assert_eq!(
+        doc["action"], "meld",
+        "a re-meld must answer with the invoked verb, not the nested one: {doc:#}"
+    );
+    assert_eq!(
+        doc["outcome"], "already-melded",
+        "CLI-153's re-meld outcome token: {doc:#}"
+    );
+    assert!(
+        doc["installed"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|k| k == "skill:review")),
+        "the pending items installed by this call must be listed: {doc:#}"
+    );
+    assert!(
+        sb.claude_home.join("skills/review").exists(),
+        "the pending items must actually have been installed: {doc:#}"
+    );
+}
+
+#[test]
+fn remeld_json_answers_a_machine_caller_even_when_it_installs_nothing() {
+    // spec: CLI-217 CLI-153 CLI-12
+    // The other half of the same defect, and the one that produced ZERO
+    // documents rather than two: re-melding a source that still has items to
+    // install, WITHOUT `--yes`. `remeld`'s `!link_only` block returned as soon
+    // as `install_source_items` had run (in a non-TTY without `--yes` that only
+    // prints a note, suppressed under `--json`), so remeld's own object was
+    // never reached and `mind meld <melded> --json` answered a machine caller
+    // with silence -- from a CLI-153 mutating verb. Nothing was corrupted, which
+    // is exactly why no parse-based check caught it.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    assert!(
+        sb.mind(&["meld", &spec, "--register-only"]).success,
+        "register-only meld"
+    );
+
+    let r = sb.mind(&["meld", &spec, "--json"]);
+    assert!(r.success, "re-meld --json: {} {}", r.stdout, r.stderr);
+    let doc: serde_json::Value = serde_json::from_str(r.stdout.trim()).unwrap_or_else(|e| {
+        panic!(
+            "a mutating verb must answer --json with a document, not silence \
+             ({e}): stdout={:?} stderr={:?}",
+            r.stdout, r.stderr
+        )
+    });
+    assert_eq!(doc["action"], "meld", "{doc:#}");
+    assert_eq!(doc["outcome"], "already-melded", "{doc:#}");
+    // The items are still PENDING (no --yes), and the count says so rather than
+    // the caller having to infer it from an empty `installed`.
+    assert!(
+        doc["pending_items"].as_u64().is_some_and(|n| n > 0),
+        "the un-installed items must be reported as pending (CLI-156's field on \
+         the fresh-meld branch): {doc:#}"
+    );
+    assert!(
+        !sb.claude_home.join("skills/review").exists(),
+        "nothing may be installed without --yes: {doc:#}"
+    );
+}
+
+#[test]
+fn remeld_json_of_a_curator_emits_one_document_not_two() {
+    // CLI-217: "under --json, stdout carries exactly one JSON document and
+    // nothing else". `remeld` was the `--json` path with no silent install
+    // helper: for a curator with no items of its own it ran
+    //     install_curated_sources(...)?;   // -> install_source_items -> learn
+    //                                      //    -> learn's own print_json
+    //     ...
+    //     if out.json { return print_json(already-melded) }   // a SECOND doc
+    // (src/commands.rs, `remeld`, the `!link_only` block). `meld`'s fresh-meld
+    // branch avoids this by routing through `install_source_items_for_json`
+    // (main.rs, CLI-156); the re-meld branch has now been given the same
+    // treatment, so `mind meld <curator> --yes --json | jq .` no longer trips
+    // over a trailing object.
+    // spec: CLI-217 CLI-153 CLI-156
+    let sb = Sandbox::bare("json-curator");
+    nested_repo(&sb.base.join("curated-lib"), "greet");
+    let nested_abs = sb.base.join("curated-lib").to_string_lossy().into_owned();
+    sb.write_and_commit(
+        "mind.toml",
+        &format!("[[discover.sources]]\nsource = \"{nested_abs}\"\ninstall = true\n"),
+    );
+    let spec = sb.source_spec();
+    assert!(
+        sb.mind(&["meld", &spec, "--register-only"]).success,
+        "register-only meld of the curator"
+    );
+
+    let r = sb.mind(&["meld", &spec, "--yes", "--json"]);
+    assert!(r.success, "re-meld --json: {} {}", r.stdout, r.stderr);
+    let doc: serde_json::Value = serde_json::from_str(r.stdout.trim()).unwrap_or_else(|e| {
+        panic!(
+            "stdout under --json must parse as a single JSON document ({e}): {:?}",
+            r.stdout
+        )
+    });
+    // The one document is the CALLER'S verb, and it accounts for the curated
+    // install that happened underneath it rather than dropping it on the floor.
+    assert_eq!(doc["action"], "meld", "{doc:#}");
+    assert_eq!(doc["outcome"], "already-melded", "{doc:#}");
+    assert!(
+        doc["installed"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|k| k == "skill:greet")),
+        "the curated chain's install must be reported in meld's object: {doc:#}"
+    );
+    assert!(
+        sb.claude_home.join("skills/greet").exists(),
+        "the curated item must actually be installed: {doc:#}"
+    );
+}
+
+#[test]
 fn meld_with_declared_hook_non_tty_skips_but_still_installs() {
     // spec: HOOK-22, HOOK-21, HOOK-55
     // stdin is not a TTY in this harness, so a declared hook takes the skip
@@ -12713,6 +13409,112 @@ fn evolve_check_json_includes_target_triple_key() {
     assert_eq!(v.get("action").and_then(|a| a.as_str()), Some("evolve"));
     assert_eq!(v.get("target").and_then(|t| t.as_str()), Some("9.9.9"));
     assert_eq!(v.get("outcome").and_then(|o| o.as_str()), Some("available"));
+}
+
+/// A fake `curl` on PATH (no network) that answers every request with content
+/// that fails SHA256SUMS verification: a file-fetch (`-o dest`, used for the
+/// release archive) writes placeholder bytes to `dest`; any other invocation
+/// (the SHA256SUMS string-fetch) prints one sums-file line for a filename
+/// that never matches the real archive name, so `parse_sha256sums` reports
+/// "not found" regardless of platform triple or version string.
+fn fake_curl_bin_dir(dir: &Path) -> PathBuf {
+    let bin_dir = dir.join("fake-curl-bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let bogus_digest = "0".repeat(64);
+    let script = format!(
+        "#!/bin/sh\nout=\"\"\nprev=\"\"\nfor a in \"$@\"; do\n  \
+         if [ \"$prev\" = \"-o\" ]; then\n    out=\"$a\"\n  fi\n  prev=\"$a\"\n\
+         done\nif [ -n \"$out\" ]; then\n  printf 'not a real archive' > \"$out\"\n\
+         else\n  printf '%s  wrong-file.tar.gz\\n' \"{bogus_digest}\"\nfi\nexit 0\n"
+    );
+    let script_path = bin_dir.join("curl");
+    std::fs::write(&script_path, &script).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    bin_dir
+}
+
+/// `evolve` is the one verb `json_reserves_stdout` (CLI-217) deliberately
+/// excludes: "evolve writes its own document straight to stdout from
+/// selfupdate.rs rather than through commands.rs, so redirecting fd 1 would
+/// silence it". That means evolve gets none of CLI-217's structural
+/// protection -- its own hand-written `if !out.json { println!(...) }` guards
+/// around the download progress lines (STO-46..STO-49) are the ONLY thing
+/// keeping `--json` stdout clean. This drives the real download corridor (no
+/// network: a fake `curl` on PATH) far enough to pass the "downloading mind
+/// ..." progress line and then fail on a SHA256SUMS digest mismatch, exactly
+/// the stretch between the guarded progress lines and the final
+/// `print_evolve_json`/error return.
+#[test]
+fn evolve_json_download_failure_keeps_stdout_one_document() {
+    // spec: CLI-217 STO-47
+    let sb = Sandbox::bare("evolve-json");
+    let fake_dir = fake_curl_bin_dir(&sb.base);
+    let new_path = prepend_path(&fake_dir);
+
+    let r = sb.mind_env(
+        &["--json", "evolve", "--yes", "--version", "99.0.0"],
+        &[("PATH", &new_path)],
+    );
+    assert!(
+        !r.success,
+        "the crafted SHA256SUMS response must fail digest verification: {} {}",
+        r.stdout, r.stderr
+    );
+    let doc: serde_json::Value = serde_json::from_str(r.stdout.trim()).unwrap_or_else(|e| {
+        panic!(
+            "stdout under --json must parse as a single JSON document even on \
+             evolve's own download failure, which the CLI-217 redirect does NOT \
+             cover ({e}): {:?}",
+            r.stdout
+        )
+    });
+    assert!(
+        doc.get("error").is_some(),
+        "a download failure must answer with the CLI-181 error envelope: {doc:#}"
+    );
+    assert!(
+        !r.stdout.contains("downloading mind"),
+        "the download progress line must not leak into --json stdout: {:?}",
+        r.stdout
+    );
+}
+
+/// The text-mode control for the test above: without `--json` the same
+/// corridor DOES print the progress line on stdout (the `if !out.json`
+/// guards are conditional, not a silent drop), and the DigestMismatch failure
+/// is reported on stderr as an ordinary structured-error message. Without
+/// this, the `--json` test above could pass by coincidence if the progress
+/// line were deleted outright rather than routed.
+#[test]
+fn evolve_text_mode_download_failure_still_shows_progress() {
+    // spec: STO-47
+    let sb = Sandbox::bare("evolve-text");
+    let fake_dir = fake_curl_bin_dir(&sb.base);
+    let new_path = prepend_path(&fake_dir);
+
+    let r = sb.mind_env(
+        &["evolve", "--yes", "--version", "99.0.0"],
+        &[("PATH", &new_path)],
+    );
+    assert!(
+        !r.success,
+        "the crafted SHA256SUMS response must fail digest verification: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stdout.contains("downloading mind"),
+        "text mode must still show the download progress line: {} {}",
+        r.stdout,
+        r.stderr
+    );
+    assert!(
+        r.stderr.contains("digest")
+            || r.stderr.contains("SHA256SUMS")
+            || r.stderr.contains("not found"),
+        "the digest-mismatch failure must be reported: {}",
+        r.stderr
+    );
 }
 
 #[test]
@@ -14849,37 +15651,92 @@ fn every_reachable_verb_emits_valid_json_under_json_flag() {
 }
 
 #[test]
-fn json_sync_upgrade_emits_two_objects_one_per_action() {
-    // spec: CLI-153
-    // `sync --upgrade --json` performs two logical actions (sync, then upgrade)
-    // and emits one JSON object per action. Assert BOTH objects are present and
-    // each parses on its own (concatenated pretty-JSON objects). This documents
-    // the deliberate two-object stream: stdout is NOT a single JSON value here.
+fn json_sync_upgrade_emits_one_document_for_the_invoked_verb() {
+    // spec: CLI-153 CLI-217
+    // `sync --upgrade --json` performs two logical actions (sync, then the
+    // upgrade pass) and USED TO emit one JSON object per action -- a stream that
+    // this test previously pinned, asserting that a single-value parse must
+    // FAIL. CLI-217 says the opposite and is the newer, stronger statement: two
+    // concatenated objects break every ordinary consumer, and no spec statement
+    // ever required the second one (CLI-53 describes the pass, not its output).
+    //
+    // A seventh instance of the same class as this round's fixes, and one no
+    // previous pass looked at, because it was hiding behind a passing test that
+    // asserted the defect. The upgrade pass no longer prints: `upgrade_inner`
+    // returns its result, the real `upgrade` verb prints it, and `sync` folds
+    // what the pass applied into its own `installed`.
     let sb = melded();
     assert!(sb.mind(&["learn", "skill:review"]).success);
+    // Move the source ahead so the pass has something real to apply; otherwise
+    // it is up-to-date and the fold is vacuous.
+    sb.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\nname: review\ndescription: Review code (v2)\n---\n# review v2\n",
+    );
     let r = sb.mind(&["sync", "--upgrade", "--json"]);
     assert!(r.success, "sync --upgrade --json failed: {}", r.stderr);
 
-    // A single-value parse must FAIL (there are two top-level objects), which is
-    // the property we are pinning: this stream is two objects, not one.
-    assert!(
-        serde_json::from_str::<serde_json::Value>(r.stdout.trim()).is_err(),
-        "sync --upgrade --json is expected to emit two objects, not one value: {}",
-        r.stdout
-    );
-    // Both a sync action and an upgrade action must appear in the stream.
-    let actions: Vec<serde_json::Value> = serde_json::Deserializer::from_str(&r.stdout)
-        .into_iter::<serde_json::Value>()
-        .map(|d| d.expect("each chunk must be valid JSON"))
-        .collect();
+    let doc: serde_json::Value = serde_json::from_str(r.stdout.trim()).unwrap_or_else(|e| {
+        panic!(
+            "sync --upgrade --json must leave stdout as exactly one JSON \
+             document ({e}): {:?}",
+            r.stdout
+        )
+    });
     assert_eq!(
-        actions.len(),
-        2,
-        "exactly two JSON objects (one per logical action): {}",
-        r.stdout
+        doc["action"], "sync",
+        "the one document answers the invoked verb: {doc:#}"
     );
-    assert_eq!(actions[0]["action"], "sync", "{}", r.stdout);
-    assert_eq!(actions[1]["action"], "upgrade", "{}", r.stdout);
+    // The pass's outcome is not dropped: what it applied appears in sync's
+    // `installed`, so a caller can still see that (and what) was upgraded.
+    assert!(
+        doc["installed"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|k| k == "skill:review")),
+        "the --upgrade pass's applied items must be folded into sync's object: {doc:#}"
+    );
+}
+
+#[test]
+fn json_upgrade_verb_still_emits_its_own_object() {
+    // The guard on the refactor above: `upgrade_inner` stopped printing, so the
+    // real `upgrade` verb must print the result it now returns. Every outcome
+    // token comes from the same place, so the up-to-date branch (the one a
+    // caller polls) is checked alongside the applied branch.
+    // spec: CLI-153
+    let sb = melded();
+    assert!(sb.mind(&["learn", "skill:review"]).success);
+
+    let clean = sb.mind(&["upgrade", "--json", "--yes"]);
+    assert!(clean.success, "upgrade --json: {}", clean.stderr);
+    let doc: serde_json::Value = serde_json::from_str(clean.stdout.trim()).unwrap_or_else(|e| {
+        panic!(
+            "upgrade --json must emit one object ({e}): {:?}",
+            clean.stdout
+        )
+    });
+    assert_eq!(doc["action"], "upgrade", "{doc:#}");
+    assert_eq!(doc["outcome"], "up-to-date", "{doc:#}");
+
+    sb.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\nname: review\ndescription: Review code (v2)\n---\n# review v2\n",
+    );
+    let applied = sb.mind(&["upgrade", "--json", "--yes"]);
+    assert!(applied.success, "upgrade --json: {}", applied.stderr);
+    let doc: serde_json::Value = serde_json::from_str(applied.stdout.trim()).unwrap_or_else(|e| {
+        panic!(
+            "upgrade --json must emit one object ({e}): {:?}",
+            applied.stdout
+        )
+    });
+    assert_eq!(doc["outcome"], "upgraded", "{doc:#}");
+    assert!(
+        doc["installed"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|k| k == "skill:review")),
+        "the upgraded item must be listed: {doc:#}"
+    );
 }
 
 // ===== Per-item install/uninstall hooks (HOOK-80..85) =====

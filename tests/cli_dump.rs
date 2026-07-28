@@ -649,11 +649,12 @@ fn dump_roundtrip_remeld_reproduces_install_set() {
 
 #[test]
 fn dump_of_a_curator_with_a_relative_nested_source_reproduces_it_absolutely() {
-    // spec: DSC-92 DUMP-1 -- the third caller DSC-92 says the read-site fix
-    // covers. `dump` reconstructs `[discover].sources` from the REGISTRY, so
-    // what has to hold is that a curator whose own `mind.toml` declared a
-    // relative `../nested` melds into a registry entry carrying the ABSOLUTE
-    // resolution, and therefore dumps to an entry that re-melds from any cwd.
+    // spec: DSC-92 DUMP-1 -- `dump` is NOT a caller of the DSC-92 read-site fix:
+    // it reconstructs `[discover].sources` from the REGISTRY, never from the
+    // curator's own entries. So what has to hold is that a curator whose own
+    // `mind.toml` declared a relative `../nested` melds into a registry entry
+    // carrying the ABSOLUTE resolution, and therefore dumps to an entry that
+    // re-melds from any cwd.
     // A dump emitting the curator's literal `../nested` would reproduce a
     // different (or no) source in the fresh environment.
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
@@ -702,26 +703,21 @@ fn dump_of_a_curator_with_a_relative_nested_source_reproduces_it_absolutely() {
 }
 
 #[test]
-#[ignore = "known limitation: a cloned curator's relative nested source resolves inside the \
-            sources tree, so a dump naming that curator is not reproducible"]
 fn dump_of_a_curator_with_a_relative_nested_source_remelds_in_a_fresh_home() {
-    // KNOWN LIMITATION (pre-dates DSC-92, and DSC-92 does not close it).
-    // DSC-92 resolves a `[discover].sources` relative path against "the
-    // directory it read the mind.toml from". For a LINKED local curator that is
-    // the user's working tree and `../nested` finds the real sibling. But a
-    // curator reached through a dump is CLONED (dump emits `pin-ref`), so its
-    // mind.toml is read from `<mind_home>/sources/<host>/<owner>/<repo>` and
-    // `../nested` resolves to a sibling inside the managed sources tree that was
-    // never cloned. The nested clone then fails and, for a curator with no items
-    // of its own, DSC-80 turns that into a hard `CuratorAllNestedFailed`, so the
-    // whole reproduction aborts -- even though the dump ALSO carries a correct
-    // absolute entry for that same nested source (asserted by the test above).
-    // The curator's own re-walk reaches the broken relative reading first.
-    //
-    // Un-ignore when either the re-walk skips a curator entry the dump already
-    // pins absolutely, or a cloned curator's relative nested source is dropped
-    // with a warning instead of failing the meld.
-    // spec: DSC-92 DUMP-7
+    // DSC-93, the case DSC-92 alone does not close. DSC-92 resolves a
+    // `[discover].sources` relative path against "the directory it read the
+    // mind.toml from". For a LINKED local curator that is the user's working tree
+    // and `../nested` finds the real sibling. But a curator reached through a
+    // dump is CLONED (dump emits `pin-ref`), so its mind.toml is read from
+    // `<mind_home>/sources/<host>/<owner>/<repo>` and `../nested` resolves to a
+    // sibling inside the managed sources tree that was never cloned. That entry
+    // used to be attempted: the clone failed and, for a curator with no items of
+    // its own, DSC-80 turned it into a hard `CuratorAllNestedFailed` that aborted
+    // the whole reproduction -- even though the dump ALSO carries a correct
+    // absolute entry for that same nested source (asserted by the test above),
+    // which the walk had simply not reached yet. DSC-93 skips the dead relative
+    // entry with a warning, so the absolute one gets its turn.
+    // spec: DSC-92 DSC-93 DUMP-7
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
     let curator = Sandbox::bare("dsc92-remeld-curator");
     let nested = curator.base.join("nested-lib");
@@ -770,6 +766,101 @@ fn dump_of_a_curator_with_a_relative_nested_source_remelds_in_a_fresh_home() {
     assert!(
         fresh_claude.join("skills/greet").exists(),
         "the nested source's item must be reproduced: {fresh_claude:?}"
+    );
+    // DSC-93 skips the dead relative entry loudly: silently dropping it would
+    // leave a curator whose nested source is genuinely unreachable looking fine.
+    assert!(
+        String::from_utf8_lossy(&remeld.stderr).contains("sources tree"),
+        "the skipped relative entry must be named on stderr: {}",
+        String::from_utf8_lossy(&remeld.stderr)
+    );
+}
+
+#[test]
+fn dsc93_skip_is_reported_in_the_meld_json_skipped_array() {
+    // spec: DSC-93 CLI-153 CLI-217
+    // The prose warning above is the human channel. DSC-93 also pushes a
+    // `SkippedEntry` with `reason = "unresolvable_local_path"`, and that array
+    // is the ONLY way a `--json` consumer can learn an entry was dropped: the
+    // warning goes to stderr (CLI-217) and the meld still exits 0. Nothing read
+    // that array, so the reason string -- the part a consumer branches on --
+    // was free to change or vanish without a test noticing.
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let curator = Sandbox::bare("dsc93-json-curator");
+    let nested = curator.base.join("nested-lib");
+    write_file(
+        &nested.join("skills/greet/SKILL.md"),
+        "---\nname: greet\ndescription: Greet skill\n---\n# greet\n",
+    );
+    git_init(&nested);
+    curator.write_and_commit(
+        "mind.toml",
+        "[[discover.sources]]\nsource = \"../nested-lib\"\ninstall = true\n",
+    );
+    assert!(
+        curator
+            .mind(&["meld", &curator.source_spec(), "--yes"])
+            .success
+    );
+
+    let super_dir = curator.base.join(format!("dsc93-json-super-{n}"));
+    std::fs::create_dir_all(&super_dir).expect("create super dir");
+    let dump_path = super_dir.join("mind.toml");
+    let dump_path_str = dump_path.to_string_lossy().into_owned();
+    assert!(curator.mind(&["dump", "--output", &dump_path_str]).success);
+
+    git_init(&super_dir);
+    let super_spec = super_dir.to_string_lossy().into_owned();
+    let fresh_base = curator.base.join(format!("dsc93-json-fresh-{n}"));
+    std::fs::create_dir_all(&fresh_base).expect("fresh base");
+    let remeld = Command::new(env!("CARGO_BIN_EXE_mind"))
+        .args(["meld", &super_spec, "--yes", "--json"])
+        .env("MIND_HOME", fresh_base.join("mind"))
+        .env("CLAUDE_HOME", fresh_base.join("claude"))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null())
+        .output()
+        .expect("run remeld --json");
+    let stdout = String::from_utf8_lossy(&remeld.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&remeld.stderr).into_owned();
+    assert!(
+        remeld.status.success(),
+        "re-meld of the dump must succeed under --json too: {stdout} {stderr}"
+    );
+
+    // CLI-217: the DSC-93 warning is on stderr, so stdout is still exactly one
+    // JSON document.
+    let doc: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("stdout must be one JSON document ({e}): {stdout:?}"));
+    assert!(
+        stderr.contains("sources tree"),
+        "the DSC-93 warning must still be emitted, on stderr: {stderr}"
+    );
+    assert!(
+        !stdout.contains("sources tree"),
+        "the DSC-93 warning must not reach stdout under --json: {stdout}"
+    );
+
+    let skipped = doc["skipped"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the meld result must carry a `skipped` array: {doc:#}"));
+    let entry = skipped
+        .iter()
+        .find(|e| e["reason"] == "unresolvable_local_path")
+        .unwrap_or_else(|| panic!("DSC-93 must record reason=unresolvable_local_path: {doc:#}"));
+    let named = entry["source"].as_str().unwrap_or_default();
+    assert!(
+        named.contains("nested-lib"),
+        "the skipped entry must name the entry that was dropped, so a consumer \
+         can tell WHICH nested source went missing: {doc:#}"
+    );
+
+    // The skip is not a loss: the dump's absolute entry for the same nested
+    // source still installed it.
+    assert!(
+        fresh_base.join("claude/skills/greet").exists(),
+        "the nested source's item must still be reproduced: {doc:#} {stderr}"
     );
 }
 

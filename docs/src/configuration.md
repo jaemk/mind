@@ -83,10 +83,11 @@ composable:
 project-scoped: `mind config lobes add --preset windsurf` (no `<dir>`) targets the
 current directory.
 
-Adding a lobe creates its target directory immediately, so a preset for a
-harness that is not installed yet still registers and is reachable right away
-(HARN-15). Already-installed items link into the new lobe as part of the same
-command; no separate `introspect --fix` step is needed (HARN-17).
+Adding a managed lobe (anything but `--snapshot`) creates its target directory
+immediately, so a preset for a harness that is not installed yet still
+registers and is reachable right away (HARN-15). Already-installed items of the
+kinds the lobe admits link into the new lobe as part of the same command; no
+separate `introspect --fix` step is needed (HARN-17).
 
 Additional flags for `config lobes add`:
 

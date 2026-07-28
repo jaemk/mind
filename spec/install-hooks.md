@@ -448,13 +448,18 @@ outside the surrounding verb, under the same consent model.
   (HOOK-22) rather than because a user interactively declined it, the skip
   note names both the cause and the exact remedy instead of stating only the
   bare consequence: `note: skipped <event> hook '<label>' for <source> (not a
-  terminal); re-run with 'mind hooks run <source>
+  terminal); re-run with 'mind hooks run <source> --event <event>
   --dangerously-skip-install-hook-check' to run it unattended`. `<source>` is
-  substituted with the actual target, so the printed command is
-  copy-pasteable with no placeholder to fill in. An interactive decline (the
-  user is on a TTY and answered no/skip) keeps the plain `skipped ... hook ...
-  for ...` note: there is no "cause" to name when the user made an active
-  choice.
+  substituted with the actual target and `<event>` with the event the run
+  selected, so the printed command is copy-pasteable with no placeholder to
+  fill in and re-runs the hooks that were skipped. The `--event` segment is
+  not optional dressing: `--event` defaults to `install` (CLI-195), so a
+  remedy that omitted it would, after an `--event uninstall` run, silently
+  name a command that executes the source's install hooks instead. The same
+  substitution applies to the `HooksNotRun` message (HOOK-107/HOOK-108), which
+  carries the same remedy. An interactive decline (the user is on a TTY and
+  answered no/skip) keeps the plain `skipped ... hook ... for ...` note: there
+  is no "cause" to name when the user made an active choice.
 - `HOOK-107` `hooks run <target>` on a source target counts, across every
   matched source, how many hooks for the selected event EXISTED (were
   actually considered: not filtered out as already-up-to-date at the current
@@ -471,9 +476,37 @@ outside the surrounding verb, under the same consent model.
   is unaffected and stays exit 0: only the specific "there was work, and
   consent was unavailable for all of it" case is an error. A required hook's
   interactive abort (HOOK-100) is unaffected; it already reports
-  `HookAborted`. This also gives `hooks run --json` non-empty output on the
-  no-op path (CLI-181's structured error envelope), where it previously
-  produced zero bytes at exit 0.
+  `HookAborted`. This also gives `hooks run --json` a structured result on the
+  no-op path (CLI-181's error envelope), where it previously produced only an
+  unstructured `note: skipped <event> hook '<label>' for <source>` line at exit
+  0.
+- `HOOK-108` The HOOK-107 accounting applies to an item target
+  (`<source>#<item>`) as well: `hooks run --event install|uninstall` counts,
+  across every item the ref matched (CLI-194), how many of that item's hooks
+  for the selected event existed, how many ran, and how many were skipped for
+  want of consent, and reports `MindError::HooksNotRun` under the same
+  predicate (at least one existed, none ran, at least one was skipped for want
+  of consent). The provisioning-script case U43 describes does not care whether
+  the target was spelled as a source or as one of its items, so neither does
+  the report. The error names the target as typed and carries the same remedy
+  as HOOK-106. An item with no hooks declared for the selected event stays exit
+  0, and an interactive decline stays exit 0, exactly as for a source target.
+  `--event build` is outside this accounting: it re-installs the item through
+  the transactional path (HOOK-103), where the build hook's consent outcome is
+  a step of the install rather than a result reported back to `hooks run`.
+- `HOOK-109` The interactive-terminal test (HOOK-22's gate, `hook::is_tty`)
+  reads `$MIND_TTY` before falling back to inspecting stdin. When the variable
+  is set, its value alone decides: `0`, `false`, `no`, `off`, and the empty
+  string (any case, surrounding whitespace ignored) mean "not a terminal", and
+  any other value means "a terminal". This follows the `MIND_HOME` /
+  `CLAUDE_HOME` / `MIND_DETECT_HOME` test-isolation precedent (STO-1, HARN-5)
+  and exists for the same reason: without it, every consent path that turns on
+  being interactive (the HOOK-20/HOOK-52 prompts, the HOOK-106 distinction
+  between a non-TTY skip and an interactive decline) is unreachable from a
+  headless test, so the branch that decides whether arbitrary source code runs
+  is the one branch nothing verifies. The override changes only which branch is
+  taken; it never bypasses a prompt or consents on the user's behalf, and a
+  prompt that reaches EOF still skips (HOOK-22).
 
 ## Managed-policy composition (research needed)
 

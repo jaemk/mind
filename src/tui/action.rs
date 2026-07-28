@@ -265,6 +265,41 @@ mod tests {
     static COUNTER: AtomicU32 = AtomicU32::new(0);
 
     #[test]
+    fn with_captured_stdout_cannot_observe_println_content_under_cargo_test() {
+        // Documents a real limitation of every test in this module that calls
+        // `execute`/`with_captured_stdout` in-process: `cargo test` installs a
+        // thread-local `OUTPUT_CAPTURE` that intercepts `println!` at the Rust
+        // level (io::stdout()) BEFORE it ever reaches a raw write(2) syscall.
+        // `with_captured_stdout` only dup2's the OS-level fd 1, so it can never
+        // see a `println!` issued from inside a `#[test]` -- the captured
+        // string is always empty here, regardless of what the wrapped closure
+        // actually printed.
+        //
+        // This is why no test in this module may assert on captured PROSE
+        // content (e.g. "the summary line contains --force"): such an
+        // assertion would pass vacuously, always, independent of whether the
+        // verb actually printed that text. State-based assertions (manifest,
+        // filesystem, `Display` of the error type) are the only sound
+        // in-process proof; the prose itself is certified out-of-process by
+        // `tests/cli_lobes.rs::harn17_backfill_reports_foreign_target_without_clobbering`,
+        // which spawns the compiled binary and reads its real, unintercepted
+        // stdout.
+        //
+        // If this assertion ever starts failing (`captured` becomes
+        // non-empty), `cargo test`'s capture behavior changed and prose
+        // assertions become sound to write in-process again.
+        let marker = "TUI-62-diagnostic-canary-line-that-must-not-be-observed";
+        let (_, captured) = with_captured_stdout(|| println!("{marker}"));
+        assert!(
+            captured.is_empty(),
+            "expected with_captured_stdout to see nothing (libtest intercepts \
+             println! first); got {captured:?} instead -- if this now \
+             contains {marker:?}, in-process prose assertions on captured \
+             TUI output are sound again and the comment above is stale"
+        );
+    }
+
+    #[test]
     // spec: TUI-61
     fn create_capture_file_is_owner_only_0600() {
         // Mirrors the STO-61 `curl_auth_config_file_is_owner_only_0600` test:
@@ -955,6 +990,277 @@ mod tests {
         assert_eq!(
             count, 1,
             "duplicate lobe add must not produce duplicate entries"
+        );
+    }
+
+    #[test]
+    fn execute_lobe_add_creates_lobe_dir_and_backfills_installed_item() {
+        // spec: TUI-62 HARN-15 HARN-7 HARN-17
+        // Through the TUI's own entry point -- execute(ActionKind::LobeAdd), which
+        // dispatches to commands::lobe_add (src/tui/action.rs:135) exactly as
+        // the CLI's `config lobes add <path>` does -- the resolved lobe
+        // directory must be created (HARN-15) and an already-installed item
+        // must be backfilled into it (HARN-7/HARN-17).
+        let (paths, base) = temp_paths();
+        crate::paths::mkdir_p(&paths.mind_home).unwrap();
+        crate::config::Config {
+            lobes: vec![crate::config::LobeEntry::bare(
+                paths.claude_home.to_str().unwrap(),
+            )],
+            ..Default::default()
+        }
+        .save(&paths)
+        .unwrap();
+
+        let src = make_source_repo(&base);
+        commands::meld(
+            &paths,
+            src.to_str().unwrap(),
+            None,
+            vec![],
+            vec![],
+            false,
+            commands::PinRequest::None,
+            None,
+            false,
+        )
+        .expect("meld");
+        commands::learn(
+            &paths,
+            "skill:build",
+            false,
+            commands::InstallFlow {
+                yes: true,
+                clobber: commands::Clobber::Error,
+                dangerously_skip: false,
+                dangerously_skip_build: false,
+            },
+        )
+        .expect("learn skill:build");
+
+        let new_lobe = base.join("tui-new-lobe");
+        assert!(
+            !new_lobe.exists(),
+            "the lobe directory must not exist before the add"
+        );
+
+        let action = PendingAction {
+            kind: ActionKind::LobeAdd {
+                path: new_lobe.to_str().unwrap().to_string(),
+            },
+            description: "Add lobe?".to_string(),
+            dep_tree: None,
+        };
+        let result = execute(&paths, action);
+        assert!(result.is_ok(), "LobeAdd should succeed: {:?}", result.err());
+
+        assert!(
+            new_lobe.is_dir(),
+            "HARN-15: the resolved lobe directory must be created by the TUI's \
+             lobe-add action, before it is written to config"
+        );
+        let backfilled = new_lobe.join("skills/build");
+        let meta = std::fs::symlink_metadata(&backfilled).unwrap_or_else(|e| {
+            panic!(
+                "HARN-7/HARN-17: the installed skill:build must be backfilled \
+                 into the newly added lobe by the TUI's own lobe-add action: {e}"
+            )
+        });
+        assert!(
+            meta.file_type().is_symlink(),
+            "the backfilled item must be linked as a symlink into the store, \
+             matching the per-item link operation `learn` uses"
+        );
+    }
+
+    #[test]
+    fn execute_lobe_add_reports_foreign_target_without_clobbering() {
+        // spec: TUI-62 HARN-17
+        // The highest-stakes property of the HARN-7 backfill: a pre-existing
+        // foreign file at a backfill target must be reported as a failure, not
+        // silently overwritten, even though the backfill itself is
+        // unconditional (HARN-17). Proven through the TUI's own dispatch
+        // (execute(ActionKind::LobeAdd) -> commands::lobe_add, force = false
+        // hardcoded at src/tui/action.rs:135), not by calling the guard
+        // directly.
+        let (paths, base) = temp_paths();
+        crate::paths::mkdir_p(&paths.mind_home).unwrap();
+        crate::config::Config {
+            lobes: vec![crate::config::LobeEntry::bare(
+                paths.claude_home.to_str().unwrap(),
+            )],
+            ..Default::default()
+        }
+        .save(&paths)
+        .unwrap();
+
+        let src = make_source_repo(&base);
+        commands::meld(
+            &paths,
+            src.to_str().unwrap(),
+            None,
+            vec![],
+            vec![],
+            false,
+            commands::PinRequest::None,
+            None,
+            false,
+        )
+        .expect("meld");
+        commands::learn(
+            &paths,
+            "skill:build",
+            false,
+            commands::InstallFlow {
+                yes: true,
+                clobber: commands::Clobber::Error,
+                dangerously_skip: false,
+                dangerously_skip_build: false,
+            },
+        )
+        .expect("learn skill:build");
+
+        let new_lobe = base.join("tui-foreign-lobe");
+        let skills_dir = new_lobe.join("skills");
+        std::fs::create_dir_all(&skills_dir).unwrap();
+        let foreign_target = skills_dir.join("build");
+        let foreign_content = b"not managed by mind, do not clobber";
+        std::fs::write(&foreign_target, foreign_content).unwrap();
+
+        let action = PendingAction {
+            kind: ActionKind::LobeAdd {
+                path: new_lobe.to_str().unwrap().to_string(),
+            },
+            description: "Add lobe?".to_string(),
+            dep_tree: None,
+        };
+        let result = execute(&paths, action);
+        assert!(
+            result.is_ok(),
+            "the lobe add itself must still succeed even when a backfill \
+             target is blocked (a blocked item is reported, not fatal): {:?}",
+            result.as_ref().err()
+        );
+
+        // The blocked target must not be recorded as a link either: only
+        // links `link_into_new_lobes` actually created are appended to the
+        // manifest (src/commands.rs backfill_new_lobes), so a failed target
+        // leaves no trace there. (The prose report naming `--force` goes to
+        // the verb's real stdout, which under `cargo test` is intercepted by
+        // libtest's own per-test capture before the TUI's fd-level
+        // `with_captured_stdout` ever sees it, so it is not observable via
+        // the returned summary string in-process; `tests/cli_lobes.rs`'s
+        // `harn17_backfill_reports_foreign_target_without_clobbering` already
+        // certifies that prose end-to-end against the compiled binary.)
+        let foreign_target_str = foreign_target.to_string_lossy().into_owned();
+        let manifest = crate::manifest::Manifest::load(&paths).unwrap();
+        let item = manifest
+            .items
+            .get("skill:build")
+            .expect("skill:build must still be in the manifest");
+        assert!(
+            !item.links.contains(&foreign_target_str),
+            "a blocked backfill target must NOT be recorded as a link: {:?}",
+            item.links
+        );
+
+        let meta = std::fs::symlink_metadata(&foreign_target).unwrap();
+        assert!(
+            !meta.file_type().is_symlink(),
+            "TUI-62: a foreign file at a backfill target reached through the \
+             TUI must NOT be clobbered into a symlink"
+        );
+        assert_eq!(
+            std::fs::read(&foreign_target).unwrap(),
+            foreign_content,
+            "TUI-62: the foreign file's content must be untouched"
+        );
+    }
+
+    #[test]
+    fn force_true_would_have_clobbered_the_foreign_target_proving_the_guard_is_load_bearing() {
+        // Load-bearing proof for `execute_lobe_add_reports_foreign_target_without_clobbering`.
+        //
+        // This shard owns only src/tui/action.rs and spec/tui.md; the guard
+        // itself (`ensure_unoccupied` / `link_into_new_lobes`'s `force` check)
+        // lives in src/install.rs, and the hardcoded `force = false` the TUI
+        // relies on lives in commands::lobe_add (src/commands.rs), neither of
+        // which this shard may edit. So instead of using `Edit` to invert the
+        // guard's condition in place, this test flips the exact boolean the
+        // TUI's dispatch hardcodes to `false` -- by calling the SAME public
+        // function (`commands::lobe_add_resolved`) the TUI's `commands::lobe_add`
+        // wraps, with `force = true` -- on an identical foreign-file setup, and
+        // shows the outcome inverts: the foreign file IS clobbered into a
+        // symlink. That demonstrates the `force` parameter is exactly what
+        // distinguishes "reported, not clobbered" from "clobbered", so the
+        // TUI's hardcoded `false` (asserted by the sibling test above) is
+        // load-bearing, not a vacuously-true assertion.
+        let (paths, base) = temp_paths();
+        crate::paths::mkdir_p(&paths.mind_home).unwrap();
+        crate::config::Config {
+            lobes: vec![crate::config::LobeEntry::bare(
+                paths.claude_home.to_str().unwrap(),
+            )],
+            ..Default::default()
+        }
+        .save(&paths)
+        .unwrap();
+
+        let src = make_source_repo(&base);
+        commands::meld(
+            &paths,
+            src.to_str().unwrap(),
+            None,
+            vec![],
+            vec![],
+            false,
+            commands::PinRequest::None,
+            None,
+            false,
+        )
+        .expect("meld");
+        commands::learn(
+            &paths,
+            "skill:build",
+            false,
+            commands::InstallFlow {
+                yes: true,
+                clobber: commands::Clobber::Error,
+                dangerously_skip: false,
+                dangerously_skip_build: false,
+            },
+        )
+        .expect("learn skill:build");
+
+        let new_lobe = base.join("tui-foreign-lobe-forced");
+        let skills_dir = new_lobe.join("skills");
+        std::fs::create_dir_all(&skills_dir).unwrap();
+        let foreign_target = skills_dir.join("build");
+        std::fs::write(&foreign_target, b"not managed by mind, do not clobber").unwrap();
+
+        // Same underlying call `commands::lobe_add` makes, but with `force =
+        // true` instead of the TUI's hardcoded `false`.
+        let result = commands::lobe_add_resolved(
+            &paths,
+            Some(new_lobe.to_str().unwrap()),
+            None,
+            None,
+            false, // snapshot
+            true,  // force -- the inverse of what the TUI dispatch hardcodes
+            true,  // yes (unused by the HARN-17 unconditional backfill)
+        );
+        assert!(
+            result.is_ok(),
+            "a forced backfill must still succeed: {:?}",
+            result.err()
+        );
+
+        let meta = std::fs::symlink_metadata(&foreign_target).unwrap();
+        assert!(
+            meta.file_type().is_symlink(),
+            "with force = true the foreign target MUST be clobbered into a \
+             symlink -- proving the force parameter (hardcoded to false at \
+             the TUI's call site) is what the non-clobber guarantee depends on"
         );
     }
 

@@ -39,8 +39,10 @@ fetch_to() {
 	if command -v curl >/dev/null 2>&1; then
 		curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL \
 			--connect-timeout "$CONNECT_TIMEOUT" --max-time "$MAX_TIME" "$1" -o "$2"
-	else
+	elif command -v wget >/dev/null 2>&1; then
 		wget --https-only --tries=1 --timeout="$CONNECT_TIMEOUT" -qO "$2" "$1"
+	else
+		err "need curl or wget on PATH"
 	fi
 }
 

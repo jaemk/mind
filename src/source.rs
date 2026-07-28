@@ -446,7 +446,31 @@ fn revalidate_sources(sources: Vec<Source>, mut warn: impl FnMut(&str)) -> Vec<S
 /// - `github:owner/repo`                -> github.com
 /// - `https://github.com/owner/repo`    -> as given
 /// - `git@github.com:owner/repo.git`    -> ssh form
+///
+/// Prints the CLI-215 shadowing-directory note when the bare `owner/repo` form
+/// also names a directory here. A caller that has ALREADY decided which reading
+/// it is taking (and says so itself) must use [`parse_spec_quiet`] instead, so
+/// the user is not told to use `./x` immediately before being told that `./x`
+/// is exactly what was used (CLI-216).
 pub fn parse_spec(spec: &str) -> Result<Source> {
+    parse_spec_inner(spec, true)
+}
+
+/// [`parse_spec`] without the CLI-215 note: the same parse, no output.
+///
+/// For callers that parse a spec to ANSWER a question rather than to act on it
+/// (`review`'s CLI-214 shadow note, which reports the reading it already took;
+/// the DSC-93 nested-entry check, which only classifies an entry). The note is
+/// about which reading a *clone* is about to take, so emitting it from these
+/// sites is at best noise and at worst a contradiction (CLI-216).
+/// spec: CLI-216
+pub(crate) fn parse_spec_quiet(spec: &str) -> Result<Source> {
+    parse_spec_inner(spec, false)
+}
+
+/// The shared parser. `note` enables the CLI-215 advisory on the bare
+/// `owner/repo` branch; nothing else differs between the two entry points.
+fn parse_spec_inner(spec: &str, note: bool) -> Result<Source> {
     let spec = spec.trim();
     let invalid = || MindError::InvalidRepoSpec {
         spec: spec.to_string(),
@@ -562,7 +586,8 @@ pub fn parse_spec(spec: &str) -> Result<Source> {
     // surprise network clone. This does not change which reading `parse_spec`
     // takes here (still the remote spec, always) -- it only names the
     // ambiguity and the `./` form that means the directory instead.
-    if let Ok(cwd) = std::env::current_dir()
+    if note
+        && let Ok(cwd) = std::env::current_dir()
         && local_dir_shadow(&cwd, bare)
     {
         eprintln!(
@@ -3216,5 +3241,140 @@ mod tests {
         assert!(!local_dir_shadow(&base, "owner/nonexistent"));
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ---- CLI-216: the quiet parse is the SAME parse ----
+
+    /// Every repo spec in the product passes through `parse_spec`, and CLI-216
+    /// split it into `parse_spec` / `parse_spec_quiet` over a shared
+    /// `parse_spec_inner(spec, note)`. The split is only safe if `note` changes
+    /// NOTHING but the advisory print: a divergence would silently give two
+    /// callers different identities, clone URLs, pins, or item paths for the
+    /// same string, and no caller would notice until a source was registered
+    /// under the wrong name.
+    ///
+    /// So walk the whole grammar -- every branch of `parse_spec_inner`, plus
+    /// the rejection paths -- and require the two entry points to agree
+    /// structurally (`Debug` covers every field of `Source`, including the ones
+    /// no other test reads).
+    // spec: CLI-216
+    #[test]
+    fn parse_spec_quiet_agrees_with_parse_spec_across_the_whole_grammar() {
+        // The `owner/repo` branch that carries the CLI-215 note is the ONLY
+        // branch where the two differ at all, so it must be exercised. The
+        // crate root is the cwd for a unit test, and `src/tui` is a real
+        // directory there, so `src/tui` is an `owner/repo`-shaped spec that
+        // shadows a local directory: the note fires for `parse_spec` and not
+        // for `parse_spec_quiet`, and the returned value must still match.
+        let cwd = std::env::current_dir().expect("cwd");
+        assert!(
+            local_dir_shadow(&cwd, "src/tui"),
+            "fixture rotted: `src/tui` must be a directory relative to the test \
+             cwd ({cwd:?}) for the CLI-215 note branch to be exercised here"
+        );
+
+        let specs = [
+            // The shadowing bare form: the one branch that differs.
+            "src/tui",
+            // Bare / shorthand remote forms.
+            "owner/repo",
+            "github:owner/repo",
+            "  owner/repo  ",
+            "owner/repo.git",
+            // URL forms, including a non-github host and the `.git` suffix.
+            "https://github.com/owner/repo",
+            "https://github.com/owner/repo.git",
+            "https://gitlab.com/owner/repo",
+            "http://example.com/owner/repo",
+            "ssh://git@github.com/owner/repo",
+            "ssh://git@github.com/owner/repo.git",
+            // SSH scp-like form.
+            "git@github.com:owner/repo",
+            "git@github.com:owner/repo.git",
+            // Local path forms.
+            "/abs/path/repo",
+            "/abs/path/repo/",
+            "./rel/repo",
+            "../rel/repo",
+            "file:///abs/path/repo",
+            // Item links (LNK-1), remote and local, tree and blob, and the
+            // GitLab `/-/` variant.
+            "https://github.com/owner/repo/tree/main/skills/greet",
+            "https://github.com/owner/repo/blob/abc1234/skills/greet/SKILL.md",
+            "https://gitlab.com/owner/repo/-/tree/main/skills/greet",
+            "file:///abs/path/repo/tree/main/skills/greet",
+            // Rejections: the error must be identical too, not merely "an error".
+            "",
+            "   ",
+            "notaspec",
+            "owner/repo/extra",
+            "https://github.com/owner",
+            "https://github.com",
+            "git@github.com",
+            "https://user:pw@github.com/owner/repo",
+            "ssh://@github.com/owner/repo",
+        ];
+
+        for spec in specs {
+            let loud = parse_spec(spec);
+            let quiet = parse_spec_quiet(spec);
+            match (&loud, &quiet) {
+                (Ok(a), Ok(b)) => assert_eq!(
+                    format!("{a:?}"),
+                    format!("{b:?}"),
+                    "parse_spec and parse_spec_quiet must return the SAME Source \
+                     for {spec:?}; the `note` flag may only change what is printed"
+                ),
+                (Err(a), Err(b)) => assert_eq!(
+                    format!("{a:?}"),
+                    format!("{b:?}"),
+                    "parse_spec and parse_spec_quiet must reject {spec:?} with the \
+                     SAME error"
+                ),
+                _ => panic!(
+                    "parse_spec and parse_spec_quiet disagree on whether {spec:?} \
+                     parses at all: loud={loud:?} quiet={quiet:?}"
+                ),
+            }
+        }
+    }
+
+    /// The table above is only meaningful if it actually reaches the branches.
+    /// Pin the shapes it is asserted to cover, so a future grammar change that
+    /// makes one of them fall through to `InvalidRepoSpec` is visible here
+    /// rather than silently weakening the equivalence check.
+    // spec: CLI-216
+    #[test]
+    fn the_quiet_equivalence_table_reaches_every_parse_branch() {
+        let host_of = |spec: &str| {
+            parse_spec_quiet(spec)
+                .unwrap_or_else(|e| panic!("{spec:?} must parse: {e:?}"))
+                .host
+        };
+        assert_eq!(host_of("owner/repo"), "github.com");
+        assert_eq!(host_of("github:owner/repo"), "github.com");
+        assert_eq!(host_of("https://gitlab.com/o/r"), "gitlab.com");
+        assert_eq!(host_of("git@github.com:o/r"), "github.com");
+        assert_eq!(host_of("ssh://git@github.com/o/r"), "github.com");
+        assert_eq!(host_of("/abs/path/repo"), "local");
+        assert_eq!(host_of("file:///abs/path/repo"), "local");
+        assert!(
+            parse_spec_quiet("https://github.com/o/r/tree/main/skills/greet")
+                .expect("remote item link must parse")
+                .item_path
+                .is_some(),
+            "the remote item-link branch must be reachable from the table"
+        );
+        assert!(
+            parse_spec_quiet("file:///abs/path/repo/tree/main/skills/greet")
+                .expect("local item link must parse")
+                .item_path
+                .is_some(),
+            "the local item-link branch must be reachable from the table"
+        );
+        assert!(
+            parse_spec_quiet("notaspec").is_err(),
+            "the rejection branch must be reachable from the table"
+        );
     }
 }

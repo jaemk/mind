@@ -318,6 +318,8 @@ const REAL_TOOLS: &[&str] = &[
     "install",
     // `tar -xzf` forks gzip.
     "gzip",
+    // The fake curl script's asset-matching arm shells out to `basename`.
+    "basename",
 ];
 
 /// A per-test fixture: a scratch dir with `bin/`, `assets/`, a request log, and
@@ -740,6 +742,233 @@ fn install_sh_falls_back_over_wget_when_curl_is_absent() {
     assert!(
         log.contains(&gnu),
         "the gnu retry must happen over wget too: {log:?}"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("build provenance"),
+        "with no gh on PATH the provenance step must be skipped silently: {stdout}"
+    );
+}
+
+#[test]
+// spec: STO-74
+fn install_sh_fetch_to_refuses_without_curl_or_wget() {
+    // `fetch` (used for the `releases/latest` lookup) already refuses cleanly
+    // when neither curl nor wget is on PATH. `fetch_to` (used for the asset and
+    // SHA256SUMS downloads) is the one that mattered less obviously: it is
+    // reachable WITHOUT going through `fetch` at all when `MIND_VERSION` is
+    // set, since that short-circuits the `releases/latest` lookup entirely.
+    // `PATH` here is a restricted directory holding only the real utilities
+    // install.sh needs plus a fake `uname`: curl, wget, and gh are genuinely
+    // absent, so this run provably cannot reach the network by any route, and
+    // `fetch_to` is the first (and only) downloader call.
+    let fx = Fixture::new("no-downloader", "9.9.9");
+    link_real_tools(&fx.bin_dir, REAL_TOOLS);
+    write_fake_uname_linux_x86_64(&fx.bin_dir);
+
+    let sh = which("sh").expect("sh must exist on PATH");
+    let out = Command::new(&sh)
+        .arg(install_sh_path())
+        .env("PATH", fx.bin_dir.display().to_string())
+        .env("MIND_INSTALL_DIR", &fx.install_dir)
+        .env("MIND_VERSION", "9.9.9")
+        .output()
+        .expect("spawn sh resources/install.sh under a restricted PATH");
+
+    assert!(
+        !out.status.success(),
+        "install.sh must fail with no downloader on PATH"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("need curl or wget on PATH"),
+        "fetch_to must refuse with the same message fetch() uses, not an \
+         opaque download failure: stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("download failed:"),
+        "the real cause (no downloader) must not be masked by a generic \
+         download-failed message: stderr: {stderr}"
+    );
+    assert!(
+        !fx.install_dir.join("mind").exists(),
+        "nothing must be installed when there is no downloader"
+    );
+}
+
+#[test]
+// spec: STO-74
+fn install_sh_fetch_refuses_without_curl_or_wget_when_version_is_not_pinned() {
+    // The counterpart to `install_sh_fetch_to_refuses_without_curl_or_wget`:
+    // that test only ever exercises `fetch_to`'s missing-downloader arm,
+    // because it pins `MIND_VERSION` so `fetch`'s own `releases/latest` lookup
+    // is skipped. Nothing in this suite -- before or after the STO-74 fix --
+    // ever ran `fetch`'s pre-existing `else err "need curl or wget on PATH"`
+    // arm (the one `fetch_to`'s new arm was written to match). Same restricted,
+    // downloader-less `PATH` as the `fetch_to` test, but `MIND_VERSION` is left
+    // unset so `fetch` is reached first, exactly as an un-pinned install would.
+    //
+    // Unlike `fetch_to` (called directly in a top-level `if`), `fetch` is
+    // called inside a pipeline within a command substitution
+    // (`tag="$(fetch ... | sed ... | head -n 1)"`), and each pipeline stage in
+    // `sh`/`dash` runs in its own subshell. So `err`'s `exit 1` only kills
+    // that subshell, not the main script: the real-cause message still prints
+    // first, but the script then falls through to `[ -n "$tag" ] || err
+    // "could not determine the latest release; set MIND_VERSION"`, so a
+    // SECOND, derived error line trails it before the script actually exits.
+    // This is pre-existing `fetch`/version-resolution plumbing the STO-74 diff
+    // does not touch, so it is asserted here as documented behavior (the true
+    // cause still prints, first and un-swallowed) rather than tightened.
+    let fx = Fixture::new("no-downloader-unpinned", "9.9.9");
+    link_real_tools(&fx.bin_dir, REAL_TOOLS);
+    write_fake_uname_linux_x86_64(&fx.bin_dir);
+
+    let sh = which("sh").expect("sh must exist on PATH");
+    let out = Command::new(&sh)
+        .arg(install_sh_path())
+        .env("PATH", fx.bin_dir.display().to_string())
+        .env("MIND_INSTALL_DIR", &fx.install_dir)
+        .env_remove("MIND_VERSION")
+        .output()
+        .expect("spawn sh resources/install.sh under a restricted PATH");
+
+    assert!(
+        !out.status.success(),
+        "install.sh must fail with no downloader on PATH and no pinned version"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let first_line = stderr.lines().next().unwrap_or_default();
+    assert!(
+        first_line.contains("need curl or wget on PATH"),
+        "the real cause must be the FIRST thing printed, not buried after a \
+         derived error: stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("download failed:"),
+        "the real cause (no downloader) must never be masked by the generic \
+         download-failed wording: stderr: {stderr}"
+    );
+    assert_eq!(
+        fx.requested(),
+        "",
+        "no request can have been logged: there is no curl or wget stub to log \
+         one, so any content here would mean install.sh reached a real \
+         downloader"
+    );
+    assert!(
+        !fx.install_dir.join("mind").exists(),
+        "nothing must be installed when there is no downloader"
+    );
+}
+
+#[test]
+fn install_sh_prefers_curl_over_wget_when_both_are_present() {
+    // `fetch`/`fetch_to` both pick curl first (`if command -v curl ... elif
+    // command -v wget ...`), but no existing test puts BOTH a working curl and
+    // a working wget on `PATH` at once: every curl-path test relies on
+    // whatever wget may or may not be reachable further down the *inherited*
+    // PATH (never asserted either way), and the dedicated wget test makes curl
+    // genuinely absent rather than present-but-unused. Here both are stubbed,
+    // each logging to its OWN file, on a restricted, isolated PATH: if the
+    // preference ever flipped (or a future refactor tried both, or fell
+    // through to wget for the asset/sums calls even though curl succeeded for
+    // the version lookup), the wget log would be non-empty.
+    let fx = Fixture::new("both-present", "9.9.9");
+    link_real_tools(&fx.bin_dir, REAL_TOOLS);
+    write_fake_uname_linux_x86_64(&fx.bin_dir);
+    write_fake_gh_always_fails(&fx.bin_dir);
+    write_fake_curl(&fx.bin_dir, &fx.dir, &fx.log_path);
+    let wget_log = fx.dir.join("wget_urls.log");
+    write_fake_wget(&fx.bin_dir, &fx.dir, &wget_log);
+
+    let musl = fx.publish("x86_64-unknown-linux-musl", b"BOTH-PRESENT-MUSL");
+    fx.publish_sums(&[&musl]);
+
+    let sh = which("sh").expect("sh must exist on PATH");
+    let out = Command::new(&sh)
+        .arg(install_sh_path())
+        .env("PATH", fx.bin_dir.display().to_string())
+        .env("MIND_INSTALL_DIR", &fx.install_dir)
+        .env_remove("MIND_VERSION")
+        .output()
+        .expect("spawn sh resources/install.sh under a restricted PATH");
+
+    assert!(
+        out.status.success(),
+        "install must succeed with both downloaders present\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        std::fs::read(fx.install_dir.join("mind")).unwrap(),
+        b"BOTH-PRESENT-MUSL",
+        "the payload fetched over curl must land on disk"
+    );
+
+    let curl_log = fx.requested();
+    assert!(
+        curl_log.contains("releases/latest"),
+        "the version lookup (fetch) must go over curl: {curl_log:?}"
+    );
+    assert!(
+        curl_log.contains(&musl),
+        "the asset download (fetch_to) must go over curl: {curl_log:?}"
+    );
+    assert!(
+        curl_log.contains("SHA256SUMS"),
+        "the SHA256SUMS download (fetch_to) must go over curl: {curl_log:?}"
+    );
+    assert!(
+        !wget_log.exists(),
+        "wget must never be invoked when curl is present on PATH: found {wget_log:?}"
+    );
+}
+
+#[test]
+fn install_sh_uses_curl_when_wget_is_genuinely_absent() {
+    // The mirror image of `install_sh_falls_back_over_wget_when_curl_is_absent`:
+    // that test proves the wget arm works with curl genuinely absent. This
+    // proves the curl arm works with wget genuinely absent -- every OTHER
+    // curl-path test in this suite prepends the stub dir to the inherited
+    // PATH, so real wget's presence or absence is never controlled. Here PATH
+    // is exactly the restricted directory: wget is not on it at all.
+    let fx = Fixture::new("curl-only", "9.9.9");
+    link_real_tools(&fx.bin_dir, REAL_TOOLS);
+    write_fake_uname_linux_x86_64(&fx.bin_dir);
+    write_fake_curl(&fx.bin_dir, &fx.dir, &fx.log_path);
+
+    let musl = fx.publish("x86_64-unknown-linux-musl", b"CURL-ONLY-MUSL");
+    fx.publish_sums(&[&musl]);
+
+    let sh = which("sh").expect("sh must exist on PATH");
+    let out = Command::new(&sh)
+        .arg(install_sh_path())
+        .env("PATH", fx.bin_dir.display().to_string())
+        .env("MIND_INSTALL_DIR", &fx.install_dir)
+        .env_remove("MIND_VERSION")
+        .output()
+        .expect("spawn sh resources/install.sh under a restricted PATH");
+
+    assert!(
+        out.status.success(),
+        "install.sh must work with curl only\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        std::fs::read(fx.install_dir.join("mind")).unwrap(),
+        b"CURL-ONLY-MUSL",
+        "the payload fetched over curl must land on disk"
+    );
+
+    let log = fx.requested();
+    assert!(
+        log.contains("releases/latest"),
+        "the version lookup must have gone through the curl arm of fetch(): {log:?}"
+    );
+    assert!(
+        log.contains(&musl),
+        "the asset download must have gone through the curl arm of fetch_to(): {log:?}"
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(

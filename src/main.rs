@@ -36,6 +36,129 @@ use cli::{Cli, Command, ConfigCmd, HooksCmd, LobesCmd};
 use error::Result;
 use paths::Paths;
 
+/// CLI-217's enforcement mechanism: under `--json`, stdout is RESERVED for the
+/// one result document the invoked verb answers with.
+///
+/// Three rounds of per-site sweeps each shipped a fresh leak into `--json`
+/// stdout (an unguarded `println!` ahead of the result, a nested verb's second
+/// result object, a hook's own output), so the rule is enforced structurally
+/// here instead of by discipline at every call site:
+///
+/// 1. [`reserve`] moves the real stdout aside and points fd 1 at stderr for the
+///    rest of the process. After that NOTHING can reach stdout by printing:
+///    not a `println!` anywhere in the tree, not a `print!` in a module this
+///    change never touched, and not a child process that inherits fd 1 (a
+///    source's install hook, whose output is arbitrary text chosen by the
+///    source author -- the worst case in the class).
+/// 2. Result documents are [`record`]ed rather than printed. The LAST one
+///    recorded wins, which in this call graph is the outermost frame's: a
+///    nested `learn` performed on `meld`'s or `sync`'s behalf records first and
+///    the invoked verb records after it, so the caller is answered by the verb
+///    it actually invoked (CLI-153).
+/// 3. `main` writes that one document to the preserved stdout, exactly once, on
+///    the success path -- or the CLI-181 error envelope INSTEAD of it on the
+///    failure path, so a verb that mutated something and then failed cannot
+///    emit both.
+///
+/// The two halves are deliberately coupled: recording (not printing) the
+/// document is what lets fd 1 stay redirected for the whole run.
+mod json_stdout {
+    use std::io::Write;
+    use std::sync::Mutex;
+
+    /// The real stdout, moved aside by [`reserve`]. `None` when stdout was never
+    /// reserved: text mode, or a verb whose stdout payload is not a JSON
+    /// document (see `json_reserves_stdout`).
+    static REAL_STDOUT: Mutex<Option<std::fs::File>> = Mutex::new(None);
+
+    /// The document this run will answer with; the most recently recorded one.
+    static PENDING: Mutex<Option<String>> = Mutex::new(None);
+
+    /// Duplicate fd 1, then point fd 1 at fd 2. Returns the duplicate (the real
+    /// stdout) on success. Mirrors the TUI's stdout-capture redirect
+    /// (`tui::action::with_captured_stdout`), which does the same dance.
+    #[cfg(unix)]
+    fn move_stdout_aside() -> Option<std::fs::File> {
+        use std::os::fd::FromRawFd;
+        // Nothing should be buffered this early, but flush before the swap so a
+        // stray byte cannot land on the wrong description.
+        let _ = std::io::stdout().flush();
+        let saved = unsafe { libc::dup(libc::STDOUT_FILENO) };
+        if saved < 0 {
+            return None;
+        }
+        if unsafe { libc::dup2(libc::STDERR_FILENO, libc::STDOUT_FILENO) } < 0 {
+            unsafe { libc::close(saved) };
+            return None;
+        }
+        // SAFETY: `saved` is a fresh fd owned by nobody else.
+        Some(unsafe { std::fs::File::from_raw_fd(saved) })
+    }
+
+    /// Non-unix fallback: no redirect, so `--json` output stays as it was
+    /// (correct for every already-guarded site, unenforced for the rest).
+    #[cfg(not(unix))]
+    fn move_stdout_aside() -> Option<std::fs::File> {
+        None
+    }
+
+    /// Reserve stdout for this run's single JSON document. Idempotent; a failure
+    /// to redirect is silently tolerated (the verb still works, it just loses
+    /// the structural guarantee).
+    pub fn reserve() {
+        let mut real = REAL_STDOUT.lock().unwrap_or_else(|e| e.into_inner());
+        if real.is_none() {
+            *real = move_stdout_aside();
+        }
+    }
+
+    /// Whether stdout is reserved, i.e. whether a result document must be
+    /// recorded rather than printed.
+    pub fn is_reserved() -> bool {
+        REAL_STDOUT
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+    }
+
+    /// Record `doc` as the document this run answers with, replacing any
+    /// document an inner frame recorded earlier.
+    pub fn record(doc: String) {
+        *PENDING.lock().unwrap_or_else(|e| e.into_inner()) = Some(doc);
+    }
+
+    /// Write `doc` (plus a trailing newline, exactly as `println!` would) to the
+    /// preserved stdout, or to the process stdout when nothing was reserved.
+    fn write_out(doc: &str) {
+        let mut real = REAL_STDOUT.lock().unwrap_or_else(|e| e.into_inner());
+        match real.as_mut() {
+            Some(f) => {
+                let _ = writeln!(f, "{doc}");
+                let _ = f.flush();
+            }
+            None => println!("{doc}"),
+        }
+    }
+
+    /// Emit the recorded document, if any. Called once, by `main`, on success.
+    pub fn flush_pending() {
+        let doc = PENDING.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(doc) = doc {
+            write_out(&doc);
+        }
+    }
+
+    /// Emit `value` as the run's answer INSTEAD of anything recorded (CLI-181:
+    /// on failure the error envelope is the one document, even if a verb
+    /// already recorded a result before failing).
+    pub fn emit_instead<T: serde::Serialize>(value: &T) {
+        let _ = PENDING.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Ok(s) = serde_json::to_string_pretty(value) {
+            write_out(&s);
+        }
+    }
+}
+
 fn main() -> std::process::ExitCode {
     // spec: CLI-207 -- bare `mind` prints help on stdout and exits 0.
     // `arg_required_else_help` alone is not enough: clap renders the resulting
@@ -54,7 +177,11 @@ fn main() -> std::process::ExitCode {
     // succeeded at this point, so cli.json is trustworthy.
     let json = cli.json;
     match run(cli) {
-        Ok(()) => std::process::ExitCode::SUCCESS,
+        Ok(()) => {
+            // spec: CLI-217 -- the single point stdout is written under `--json`.
+            json_stdout::flush_pending();
+            std::process::ExitCode::SUCCESS
+        }
         Err(err) => {
             if json {
                 // spec: CLI-181 -- emit the error as a JSON envelope on stdout so
@@ -68,8 +195,9 @@ fn main() -> std::process::ExitCode {
                         "message": err.to_string(),
                     }
                 });
-                // Ignore the Result: we are already in the error path.
-                let _ = crate::render::print_json(&envelope);
+                // spec: CLI-217 -- the envelope REPLACES any result a verb
+                // recorded before failing, so stdout is one document either way.
+                json_stdout::emit_instead(&envelope);
             } else {
                 // Structured errors print their own Display; print the source chain too.
                 eprintln!("error: {err}");
@@ -167,6 +295,36 @@ fn lock_mode(command: &Command, json: bool) -> LockMode {
     }
 }
 
+/// Whether `--json` makes stdout the exclusive channel for this verb's one
+/// result document (CLI-217), so it may be reserved for the whole run.
+///
+/// The default is to reserve: a verb added later is protected without anyone
+/// having to remember this function. Only a verb whose stdout payload is NOT a
+/// JSON document needs an entry below, and getting that wrong is loud (its
+/// output disappears from stdout in the first test that pipes it).
+// spec: CLI-217
+fn json_reserves_stdout(command: &Command) -> bool {
+    !matches!(
+        command,
+        // stdout carries a non-JSON product, `--json` or not:
+        //   dump      -- DUMP-9: TOML on stdout, plus a stderr note that --json
+        //                does not apply
+        //   completions/man -- the script / roff page IS the output
+        Command::Dump { .. } | Command::Completions { .. } | Command::Man
+        // `evolve` writes its own document straight to stdout from
+        // `selfupdate.rs` rather than through `commands.rs`, so redirecting fd 1
+        // would silence it.
+        | Command::Evolve { .. }
+        // No `--json` support at all today (a pre-existing gap, tracked
+        // separately): these print human text on stdout in every mode, and
+        // reserving stdout would drop it rather than fix it.
+        | Command::Review { .. }
+        | Command::InitSource { .. }
+        | Command::Config { action: ConfigCmd::Show }
+        | Command::Hooks { action: HooksCmd::List { .. } }
+    )
+}
+
 /// True when `probe` will launch the interactive TUI: the flags permit it AND
 /// stdout is a TTY. This is the single test for the TUI/fallback branch; it is
 /// used in both `lock_mode` and `dispatch` so the decision stays consistent.
@@ -187,6 +345,12 @@ fn run(cli: Cli) -> Result<()> {
         cli.ascii,
         cli.verbose,
     ));
+
+    // spec: CLI-217 -- reserve stdout BEFORE anything can print to it, so the
+    // guarantee does not depend on where in the verb the first line is written.
+    if cli.json && json_reserves_stdout(&cli.command) {
+        json_stdout::reserve();
+    }
 
     let paths = Paths::resolve()?;
 
@@ -719,6 +883,64 @@ mod tests {
         );
     }
 
+    /// Under `--json`, stdout is reserved for the one result document (CLI-217)
+    /// for every verb that answers with one, and NOT for the verbs whose stdout
+    /// carries something else. Classified at the parse layer so both halves are
+    /// visible in one place: an end-to-end test can only ever cover the verbs
+    /// someone thought to list, and the reservation's failure mode for an
+    /// excluded verb is silent (its output goes to stderr and stdout is empty).
+    // spec: CLI-217
+    #[test]
+    fn json_reservation_covers_result_verbs_and_spares_payload_verbs() {
+        fn reserves(args: &[&str]) -> bool {
+            let cli = Cli::try_parse_from(args).expect("args should parse");
+            json_reserves_stdout(&cli.command)
+        }
+
+        // Answers `--json` with a CLI-153 result object (or, for `hooks run`,
+        // with the CLI-181 error envelope and nothing else).
+        for args in [
+            &["mind", "meld", "owner/repo"][..],
+            &["mind", "unmeld", "src"],
+            &["mind", "learn", "review"],
+            &["mind", "forget", "review"],
+            &["mind", "sync"],
+            &["mind", "sync", "--upgrade"],
+            &["mind", "upgrade"],
+            &["mind", "absorb", "skill:review"],
+            &["mind", "recall"],
+            &["mind", "probe"],
+            &["mind", "introspect"],
+            &["mind", "config", "lobes", "add", "/some/home"],
+            &["mind", "config", "lobes", "list"],
+            &["mind", "link-project"],
+            &["mind", "hooks", "run", "agents"],
+        ] {
+            assert!(
+                reserves(args),
+                "{args:?} answers --json with a document, so stdout must be reserved"
+            );
+        }
+
+        // stdout is a non-JSON product, or the verb has no `--json` output at
+        // all. Reserving would redirect what they print into stderr.
+        for args in [
+            &["mind", "dump"][..],
+            &["mind", "completions", "bash"],
+            &["mind", "man"],
+            &["mind", "evolve", "--check"],
+            &["mind", "review", "/some/path"],
+            &["mind", "init-source"],
+            &["mind", "config", "show"],
+            &["mind", "hooks", "list", "agents"],
+        ] {
+            assert!(
+                !reserves(args),
+                "{args:?} writes something other than a JSON document to stdout"
+            );
+        }
+    }
+
     #[test]
     fn lockless_commands_take_no_lock() {
         // completions and man touch no persisted state, so they skip the lock
@@ -1105,5 +1327,91 @@ mod tests {
         // Pre-verb short form: `mind -v probe`
         let cli = Cli::try_parse_from(["mind", "-v", "probe"]).expect("-v probe should parse");
         assert!(cli.verbose, "-v probe: cli.verbose must be true");
+    }
+
+    // ==========================================================================
+    // CLI-217: `json_stdout::emit_instead` discards a prior recording
+    // ==========================================================================
+
+    /// Turns a re-exec of this test binary into a one-shot driver of the
+    /// `record` -> `emit_instead` sequence: the "verb recorded a result, then
+    /// failed" corridor CLI-181 relies on (the error envelope REPLACES
+    /// whatever a verb recorded before failing, CLI-217 point 2). No verb in
+    /// the current call graph reaches this in practice -- every `print_json`
+    /// call site in `commands.rs` is the last statement before its function
+    /// returns, so nothing can record and then still error out of the SAME
+    /// call -- which is exactly why this is a direct unit test of the
+    /// mechanism rather than an end-to-end one: `emit_instead`'s own contract
+    /// (discard the pending recording, write only the replacement) needs to
+    /// hold regardless of whether today's call graph exercises it, since a
+    /// future call site (or a refactor that moves a `print_json` earlier) could
+    /// start relying on it.
+    const EMIT_INSTEAD_TEST: &str = "tests::emit_instead_discards_a_prior_recording";
+    const EMIT_INSTEAD_MODE_ENV: &str = "MIND_TEST_EMIT_INSTEAD_MODE";
+
+    /// `json_stdout::reserve` does a real `dup2` of this process's fd 1, which
+    /// would corrupt libtest's own output capturing for every OTHER test
+    /// running concurrently in this binary if called in-process. Re-executing
+    /// the test binary filtered to just this test isolates the fd mutation to
+    /// a throwaway child, the same technique `render::tests::note_and_warn_route_by_output_mode`
+    /// uses for the same reason.
+    #[test]
+    fn emit_instead_discards_a_prior_recording() {
+        if std::env::var_os(EMIT_INSTEAD_MODE_ENV).is_some() {
+            // Child role: reserve stdout for real, record a first document,
+            // then let `emit_instead` replace it, exactly as main()'s error
+            // path does on a verb that recorded before failing.
+            json_stdout::reserve();
+            json_stdout::record(
+                serde_json::json!({"schema": 1, "action": "first-recorded"}).to_string(),
+            );
+            json_stdout::emit_instead(&serde_json::json!({
+                "error": {"kind": "replacement", "message": "the one document"}
+            }));
+            // A THIRD write attempt (flush_pending, as main() calls on the
+            // success path) must be a no-op: emit_instead already took the
+            // pending slot, so there is nothing left to flush. If this wrote
+            // again, the parent would see a second JSON value tacked onto
+            // stdout, which does not parse as one document.
+            json_stdout::flush_pending();
+            std::process::exit(0);
+        }
+
+        let exe = std::env::current_exe().expect("path of the running test binary");
+        let out = std::process::Command::new(exe)
+            .args([
+                "--exact",
+                EMIT_INSTEAD_TEST,
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(EMIT_INSTEAD_MODE_ENV, "1")
+            .output()
+            .expect("re-exec the test binary");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        // `--nocapture` means libtest's own "running 1 test" / "test ... "
+        // preamble shares this stdout ahead of our real output (it is written
+        // by libtest itself, before the test body runs `reserve()`), so this
+        // checks for the replacement/discard by substring rather than parsing
+        // the whole capture as one JSON value.
+        assert!(
+            stdout.contains("\"replacement\""),
+            "emit_instead's value must reach the preserved stdout: {stdout:?}"
+        );
+        assert!(
+            !stdout.contains("first-recorded"),
+            "the document recorded before the failure must be discarded, not \
+             concatenated ahead of the replacement: {stdout:?}"
+        );
+        // The trailing `flush_pending()` call in the child must not add a
+        // second occurrence of the replacement text (it would if PENDING were
+        // not actually cleared by `emit_instead`, so `flush_pending` wrote it
+        // again on top).
+        assert_eq!(
+            stdout.matches("\"replacement\"").count(),
+            1,
+            "the replacement document must be written exactly once, not once \
+             by emit_instead and again by a later flush_pending: {stdout:?}"
+        );
     }
 }

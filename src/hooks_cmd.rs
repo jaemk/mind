@@ -42,6 +42,7 @@ pub fn run(
         HookTarget::Item(item_ref) => run_item_hooks(
             paths,
             &item_ref,
+            target,
             event,
             dangerously_skip_install,
             dangerously_skip_build,
@@ -193,10 +194,11 @@ fn run_source_hooks(
         let hooks: Vec<&ResolvedHook> = resolved.iter().filter(|h| h.event == hook_event).collect();
 
         if hooks.is_empty() {
-            println!(
+            // spec: CLI-217
+            crate::render::note(format!(
                 "note: no {event_name} hooks declared for source {}",
                 source.name
-            );
+            ));
             continue;
         }
 
@@ -233,6 +235,14 @@ fn run_source_hooks(
             match crate::hook::decide(&disclosure, h.optional, dangerously_skip)? {
                 crate::hook::HookAct::Run => {
                     ran += 1;
+                    // Unlike the `note:`-prefixed lines around it this is a
+                    // progress announcement, so it stays a `println!`: stdout in
+                    // text mode, unreachable from `--json` stdout because the
+                    // run's fd 1 points at stderr (main.rs's `json_stdout`).
+                    // Same for install.rs's `running build hook for ...` and
+                    // commands.rs's `running install hook '...' for ...`. See
+                    // `tests/cli_hooks.rs::hooks_run_running_hook_note_is_one_document`.
+                    // spec: CLI-217
                     println!(
                         "running {event_name} hook '{}' for {}",
                         h.label(),
@@ -261,18 +271,25 @@ fn run_source_hooks(
                     // a bare note that says nothing about why or what to do.
                     if !crate::hook::is_tty() {
                         skipped_for_consent += 1;
-                        println!(
+                        // The remedy re-selects the event that was run:
+                        // `--event` defaults to `install`, so an uninstall
+                        // skip whose remedy omitted it would silently suggest
+                        // running different code.
+                        // spec: CLI-217
+                        crate::render::note(format!(
                             "note: skipped {event_name} hook '{}' for {source_name} (not a \
-                             terminal); re-run with 'mind hooks run {source_name} \
-                             --dangerously-skip-install-hook-check' to run it unattended",
+                             terminal); re-run with 'mind hooks run {source_name} --event \
+                             {event_name} --dangerously-skip-install-hook-check' to run it \
+                             unattended",
                             h.label()
-                        );
+                        ));
                     } else {
-                        println!(
+                        // spec: CLI-217
+                        crate::render::note(format!(
                             "note: skipped {event_name} hook '{}' for {}",
                             h.label(),
                             source_name
-                        );
+                        ));
                     }
                     // spec: HOOK-101 -- even a skipped install hook is recorded
                     // (with ran_at = None) so repeat runs know it was offered.
@@ -306,6 +323,7 @@ fn run_source_hooks(
     if existed > 0 && ran == 0 && skipped_for_consent > 0 {
         return Err(MindError::HooksNotRun {
             target: selector.to_string(),
+            event: event_label(event).to_string(),
             skipped: skipped_for_consent,
         });
     }
@@ -317,11 +335,53 @@ fn run_source_hooks(
 // Item-level hook runner (HOOK-102 / HOOK-103)
 // ---------------------------------------------------------------------------
 
+/// The HOOK-107/HOOK-108 accounting for one `hooks run` invocation: how many
+/// hooks for the selected event were actually considered, how many of those
+/// ran, and how many were skipped specifically for want of consent (a non-TTY
+/// run, not an interactive decline).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct HookTally {
+    existed: usize,
+    ran: usize,
+    skipped_for_consent: usize,
+}
+
+impl HookTally {
+    /// Record `count` item hooks offered for the selected event, resolving how
+    /// they will be decided (HOOK-108).
+    ///
+    /// Every item lifecycle hook goes through the same ladder as a source hook
+    /// (`install.rs::run_item_hook`), mirrored here in the same order: the
+    /// bypass flag runs it unattended (HOOK-83), a non-TTY run skips it
+    /// outright (HOOK-22), and only a terminal prompts. So the outcome for the
+    /// whole batch is known before the batch runs. An interactive run is the
+    /// user's own decision per hook and is counted as neither a run nor a
+    /// consent failure, which is what keeps an interactive decline at exit 0.
+    fn offered(&mut self, count: usize, dangerously_skip: bool) {
+        self.existed += count;
+        if dangerously_skip {
+            self.ran += count;
+        } else if !crate::hook::is_tty() {
+            self.skipped_for_consent += count;
+        }
+    }
+
+    /// The HOOK-107 predicate: there was work to do, none of it ran, and at
+    /// least one hook was skipped for want of consent.
+    fn nothing_could_consent(self) -> bool {
+        self.existed > 0 && self.ran == 0 && self.skipped_for_consent > 0
+    }
+}
+
 /// Run an item's hooks in place (install/uninstall) or re-install it (build).
-// spec: HOOK-102 HOOK-103
+///
+/// `target` is the raw target string the user typed; it names the run in the
+/// HOOK-108 error so the printed remedy is the command they actually invoked.
+// spec: HOOK-102 HOOK-103 HOOK-108
 fn run_item_hooks(
     paths: &Paths,
     item_ref: &crate::resolve::ItemRef,
+    target: &str,
     event: HookEventArg,
     dangerously_skip_install: bool,
     dangerously_skip_build: bool,
@@ -336,6 +396,10 @@ fn run_item_hooks(
         });
     }
 
+    // spec: HOOK-108 -- the HOOK-107 accounting applies to item targets too,
+    // accumulated across every item the ref matched.
+    let mut tally = HookTally::default();
+
     // spec: CLI-194 -- a ref matching several items runs each in turn.
     for installed in matches {
         match event {
@@ -343,9 +407,26 @@ fn run_item_hooks(
                 run_item_build(paths, installed, dangerously_skip_build)?;
             }
             HookEventArg::Install | HookEventArg::Uninstall => {
-                run_item_lifecycle_hooks(paths, installed, event, dangerously_skip_install)?;
+                run_item_lifecycle_hooks(
+                    paths,
+                    installed,
+                    event,
+                    dangerously_skip_install,
+                    &mut tally,
+                )?;
             }
         }
+    }
+
+    // spec: HOOK-108 -- an item target that had hooks to offer but no way to
+    // consent to any of them is an error, exactly as for a source target
+    // (HOOK-107), instead of a silent exit 0.
+    if tally.nothing_could_consent() {
+        return Err(MindError::HooksNotRun {
+            target: target.to_string(),
+            event: event_label(event).to_string(),
+            skipped: tally.skipped_for_consent,
+        });
     }
     Ok(())
 }
@@ -378,6 +459,11 @@ fn run_item_build(
         })?;
 
     let commit = installed.commit.clone();
+    // A progress line, not an aside, so it stays a `println!`: stdout in text
+    // mode, and unreachable from `--json` stdout because the run's fd 1 points
+    // at stderr (main.rs's `json_stdout`). See
+    // `tests/cli_hooks.rs::hooks_run_build_rebuilding_note_is_one_document`.
+    // spec: CLI-217
     println!("rebuilding {} via transactional reinstall", installed.key());
     let new_installed = crate::install::install(
         paths,
@@ -394,13 +480,15 @@ fn run_item_build(
     Ok(())
 }
 
-/// Run an item's install or uninstall hooks in place at its store location.
-// spec: HOOK-102
+/// Run an item's install or uninstall hooks in place at its store location,
+/// adding what it considered to `tally` (HOOK-108).
+// spec: HOOK-102 HOOK-108
 fn run_item_lifecycle_hooks(
     paths: &Paths,
     installed: &InstalledItem,
     event: HookEventArg,
     dangerously_skip: bool,
+    tally: &mut HookTally,
 ) -> Result<()> {
     let registry = Registry::load(paths)?;
     let source = registry
@@ -428,9 +516,15 @@ fn run_item_lifecycle_hooks(
         HookEventArg::Install => {
             let hooks = catalog_item.install_hooks();
             if hooks.is_empty() {
-                println!("note: no install hooks declared for {}", installed.key());
+                // spec: CLI-217
+                crate::render::note(format!(
+                    "note: no install hooks declared for {}",
+                    installed.key()
+                ));
                 return Ok(());
             }
+            // spec: HOOK-108
+            tally.offered(hooks.len(), dangerously_skip);
             crate::install::run_item_install_hooks(
                 catalog_item,
                 &hooks,
@@ -442,9 +536,15 @@ fn run_item_lifecycle_hooks(
         HookEventArg::Uninstall => {
             let hooks = catalog_item.uninstall_hooks();
             if hooks.is_empty() {
-                println!("note: no uninstall hooks declared for {}", installed.key());
+                // spec: CLI-217
+                crate::render::note(format!(
+                    "note: no uninstall hooks declared for {}",
+                    installed.key()
+                ));
                 return Ok(());
             }
+            // spec: HOOK-108
+            tally.offered(hooks.len(), dangerously_skip);
             crate::install::run_item_uninstall_hooks(
                 installed,
                 &hooks,
@@ -665,6 +765,109 @@ fn install_hook_status(source: &Source, command: &str, current: Option<&str>) ->
             } else {
                 format!("pending (last ran at {ran})")
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The HOOK-107 predicate, one axis at a time. Each of the three clauses
+    /// has to be able to veto on its own, or the error fires on a run that
+    /// either had nothing to do or actually did something.
+    // spec: HOOK-107 HOOK-108
+    #[test]
+    fn nothing_could_consent_needs_work_no_runs_and_a_consent_failure() {
+        let t = |existed, ran, skipped_for_consent| {
+            HookTally {
+                existed,
+                ran,
+                skipped_for_consent,
+            }
+            .nothing_could_consent()
+        };
+        // The one true case: there was work, none of it ran, consent failed.
+        assert!(t(1, 0, 1));
+        assert!(t(5, 0, 5));
+        // Nothing existed: a run with nothing to do is never an error, even if
+        // the other counters were somehow non-zero.
+        assert!(!t(0, 0, 0));
+        assert!(!t(0, 0, 1));
+        // Something ran: partial progress is not "the run did nothing".
+        assert!(!t(2, 1, 1));
+        // Nothing was skipped for want of consent: an interactive decline (or
+        // an already-satisfied run) leaves this at zero and stays exit 0.
+        assert!(!t(1, 0, 0));
+    }
+
+    /// `offered` records HOOKS, not calls: a single call for an item with three
+    /// hooks contributes three, and repeated calls accumulate across the items
+    /// an item glob matched (CLI-194).
+    // spec: HOOK-108
+    #[test]
+    fn offered_accumulates_hook_counts_across_items() {
+        let mut tally = HookTally::default();
+        tally.offered(3, true);
+        tally.offered(2, true);
+        assert_eq!(
+            tally,
+            HookTally {
+                existed: 5,
+                ran: 5,
+                skipped_for_consent: 0,
+            }
+        );
+        assert!(!tally.nothing_could_consent());
+    }
+
+    /// A zero-hook offer moves nothing. The callers guard `hooks.is_empty()`
+    /// before calling, so this pins that the guard is belt-and-braces rather
+    /// than the only thing keeping an empty batch out of the accounting.
+    // spec: HOOK-108
+    #[test]
+    fn offered_zero_hooks_is_a_no_op() {
+        let mut tally = HookTally::default();
+        tally.offered(0, true);
+        tally.offered(0, false);
+        assert_eq!(tally, HookTally::default());
+        assert!(!tally.nothing_could_consent());
+    }
+
+    /// The bypass arm of `offered` short-circuits ahead of the TTY test, so it
+    /// predicts "ran" without consulting the environment at all. That is what
+    /// makes `--dangerously-skip-install-hook-check` unable to produce a
+    /// `HooksNotRun` no matter how the process was launched.
+    // spec: HOOK-108 HOOK-83
+    #[test]
+    fn offered_under_the_bypass_predicts_ran_regardless_of_environment() {
+        let mut tally = HookTally::default();
+        tally.offered(4, true);
+        assert_eq!(tally.ran, 4);
+        assert_eq!(tally.skipped_for_consent, 0);
+        assert!(!tally.nothing_could_consent());
+    }
+
+    /// The event labels are the literal `--event` values (CLI-195), because the
+    /// HOOK-106 remedy interpolates one straight into the command it tells the
+    /// user to run. A label that is not a valid flag value would print a
+    /// command that fails to parse.
+    // spec: HOOK-106 CLI-195
+    #[test]
+    fn event_label_matches_the_cli_event_values() {
+        assert_eq!(event_label(HookEventArg::Install), "install");
+        assert_eq!(event_label(HookEventArg::Uninstall), "uninstall");
+        assert_eq!(event_label(HookEventArg::Build), "build");
+        for arg in [
+            HookEventArg::Install,
+            HookEventArg::Uninstall,
+            HookEventArg::Build,
+        ] {
+            let label = event_label(arg);
+            assert!(
+                !label.is_empty() && label.chars().all(|c| c.is_ascii_lowercase()),
+                "{label:?} must be a bare lowercase flag value"
+            );
         }
     }
 }

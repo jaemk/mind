@@ -704,3 +704,298 @@ fn remeld_pin_refused_when_source_falls_outside_locked_allowlist() {
         r.stderr
     );
 }
+
+// --- POL-60 x CLI-213: the headless install pass scans ONE source -----------
+
+#[test]
+fn auto_meld_install_records_a_source_it_cannot_scan_at_all() {
+    // spec: POL-60 CLI-213
+    // `install_provisioned_items` scans exactly the one source it was asked to
+    // provision. Routed through the whole-registry `catalog::scan`, it inherited
+    // the CLI-213 degradation: a `LinkedSourceGone` source scanned as
+    // `Ok(vec![])`, the function took the `source_items.is_empty()` early return,
+    // and it reported NO failures -- so POL-60's warn-record-continue-nonzero
+    // accounting recorded nothing and the run looked like "this source had
+    // nothing left to install" rather than "this source could not be read".
+    // Melded, installed, then the working tree vanishes; the next `sync` must
+    // name the source in the auto_meld install accounting.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    let policy = sb.write_policy(&format!(
+        "[[sources.auto_meld]]\nrepo = \"{}\"\ninstall = true\n",
+        spec.replace('\\', "\\\\")
+    ));
+
+    let first = sb.mind_env(&["sync"], &[("MIND_POLICY_FILE", policy.as_str())]);
+    assert!(
+        first.success,
+        "auto_meld provisioning must succeed: {} {}",
+        first.stdout, first.stderr
+    );
+    assert!(
+        sb.claude_home.join("skills/review").exists(),
+        "the provisioned source's items must be installed by the first sync: {} {}",
+        first.stdout,
+        first.stderr
+    );
+
+    // The linked working tree goes away (CLI-212's exact scenario).
+    std::fs::remove_dir_all(&sb.source).expect("remove the linked working tree");
+
+    let second = sb.mind_env(&["sync"], &[("MIND_POLICY_FILE", policy.as_str())]);
+    assert!(
+        second.stderr.contains("auto_meld item install failed"),
+        "the install pass must record the unscannable source as a failure, not \
+         return an empty item list: {} {}",
+        second.stdout,
+        second.stderr
+    );
+    assert!(
+        second.stderr.contains("linked working tree") && second.stderr.contains("is gone"),
+        "the recorded failure must carry the LinkedSourceGone cause: {} {}",
+        second.stdout,
+        second.stderr
+    );
+    assert!(
+        !second.success,
+        "POL-60 records the failure and exits non-zero: {} {}",
+        second.stdout, second.stderr
+    );
+}
+
+#[test]
+fn auto_meld_install_records_one_bad_item_and_still_installs_the_rest() {
+    // spec: POL-60
+    // The other half of the accounting the CLI-213 change moved onto: a
+    // WHOLE-SOURCE scan failure short-circuits `install_provisioned_items`
+    // before the per-item loop, so the test above never enters that loop. This
+    // one does. POL-60 promises warn, record, CONTINUE, non-zero exit, and
+    // "continue" is the part with no coverage: an early `return` on the first
+    // failing item would satisfy every assertion about the failure itself while
+    // silently dropping every later item.
+    //
+    // One item carries a `{{ns:}}` reference to a sibling that does not exist,
+    // which fails at install time (BadReference) with the source itself
+    // perfectly readable. The other item must still land.
+    let sb = Sandbox::new();
+    // `aaa-broken` sorts before `review`/`extra` so, whatever order the catalog
+    // yields, the failure is not guaranteed to be last: an early return would
+    // be observable.
+    sb.write_and_commit(
+        "skills/aaa-broken/SKILL.md",
+        "---\ndescription: references a sibling that does not exist\n---\n\
+         # broken\nSee {{ns:no-such-sibling}} for details.\n",
+    );
+    let spec = sb.source_spec();
+    let policy = sb.write_policy(&format!(
+        "[[sources.auto_meld]]\nrepo = \"{}\"\ninstall = true\n",
+        spec.replace('\\', "\\\\")
+    ));
+
+    let r = sb.mind_env(&["sync"], &[("MIND_POLICY_FILE", policy.as_str())]);
+    assert!(
+        r.stderr.contains("auto_meld item install failed"),
+        "the failing item must be recorded through the POL-60 accounting: {} {}",
+        r.stdout,
+        r.stderr
+    );
+    assert!(
+        r.stderr.contains("skill:aaa-broken"),
+        "the recorded failure must name the ITEM, not just the source: {} {}",
+        r.stdout,
+        r.stderr
+    );
+    assert!(
+        !r.success,
+        "POL-60 exits non-zero when any item failed: {} {}",
+        r.stdout, r.stderr
+    );
+
+    // CONTINUE: the sibling items are installed anyway.
+    assert!(
+        sb.claude_home.join("skills/review").exists(),
+        "a failing item must not abort the rest of the source's install: {} {}",
+        r.stdout,
+        r.stderr
+    );
+    assert!(
+        sb.claude_home.join("skills/extra").exists(),
+        "every other item must still install: {} {}",
+        r.stdout,
+        r.stderr
+    );
+    assert!(
+        !sb.claude_home.join("skills/aaa-broken").exists(),
+        "the failing item must not be left half-installed: {} {}",
+        r.stdout,
+        r.stderr
+    );
+}
+
+#[test]
+fn auto_meld_install_under_json_emits_one_document() {
+    // CLI-217: "under --json, stdout carries exactly one JSON document and
+    // nothing else". POL-58's headless install pass calls
+    // `install_provisioned_items`, which called `learn` once per item, and
+    // `learn` emits its OWN CLI-153 result object under `--json`. `sync` then
+    // printed its own. So the machine-driven path -- a managed fleet running
+    // `mind --json sync` on a schedule, which is precisely who `auto_meld`
+    // exists for -- got N+1 JSON documents concatenated on stdout.
+    //
+    // Every OTHER line on this path was already correctly guarded (`if !out.json
+    // { eprintln!(...) }` for the POL-60 accounting), which is what made the
+    // leak easy to miss: it is not prose, it is well-formed JSON in the wrong
+    // quantity.
+    //
+    // The provisioning pass now installs through the silent `learn_collecting`
+    // under `--json` and hands its keys back to `sync`, which reports them in
+    // its one object.
+    // spec: CLI-217 POL-58 POL-60
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    let policy = sb.write_policy(&format!(
+        "[[sources.auto_meld]]\nrepo = \"{}\"\ninstall = true\n",
+        spec.replace('\\', "\\\\")
+    ));
+
+    let r = sb.mind_env(
+        &["--json", "sync"],
+        &[("MIND_POLICY_FILE", policy.as_str())],
+    );
+    assert!(r.success, "sync --json: {} {}", r.stdout, r.stderr);
+    let doc: serde_json::Value = serde_json::from_str(r.stdout.trim()).unwrap_or_else(|e| {
+        panic!(
+            "stdout under --json must parse as a single JSON document ({e}): {:?}",
+            r.stdout
+        )
+    });
+    assert_eq!(
+        doc["action"], "sync",
+        "the one document is the invoked verb's, not a provisioned item's: {doc:#}"
+    );
+    // The provisioned items are still ACCOUNTED FOR, in sync's object. Without
+    // this the leak could be "fixed" by silently dropping what the pass did.
+    assert!(
+        doc["installed"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|k| k == "skill:review")),
+        "sync must report what the auto_meld install pass installed: {doc:#}"
+    );
+    assert!(
+        sb.claude_home.join("skills/review").exists(),
+        "the provisioned item must actually be installed: {doc:#}"
+    );
+}
+
+#[test]
+fn auto_meld_install_in_text_mode_still_narrates_each_item() {
+    // The other side of the CLI-217 fix above: the silent install path is
+    // reserved for `--json`. An interactive `mind sync` must still print the
+    // per-item "learned ..." lines, or the fix would have traded a machine-
+    // readability bug for a human-visibility one -- and every assertion in the
+    // test above would still pass.
+    // spec: POL-58
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    let policy = sb.write_policy(&format!(
+        "[[sources.auto_meld]]\nrepo = \"{}\"\ninstall = true\n",
+        spec.replace('\\', "\\\\")
+    ));
+
+    let r = sb.mind_env(&["sync"], &[("MIND_POLICY_FILE", policy.as_str())]);
+    assert!(r.success, "sync: {} {}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("learned skill:review"),
+        "text-mode sync must narrate the provisioned install: stdout={} stderr={}",
+        r.stdout,
+        r.stderr
+    );
+}
+
+#[test]
+fn auto_meld_install_under_json_records_one_bad_item_and_still_installs_the_rest() {
+    // The JSON twin of `auto_meld_install_records_one_bad_item_and_still_installs_the_rest`
+    // above: `install_provisioned_items` branches on `json_mode()` to call
+    // `learn_collecting` instead of `learn` (CLI-217), which is different code
+    // from the text-mode path that test drives. POL-60's warn/record/continue/
+    // non-zero-exit accounting is asserted there but never through the JSON
+    // branch: an early `return` on the first failing item inside the
+    // `learn_collecting` arm, or a swallowed failure that stopped recording it
+    // in `provision_failures`, would satisfy every text-mode assertion while
+    // breaking the JSON path silently.
+    // spec: CLI-217 POL-58 POL-60
+    let sb = Sandbox::new();
+    sb.write_and_commit(
+        "skills/aaa-broken/SKILL.md",
+        "---\ndescription: references a sibling that does not exist\n---\n\
+         # broken\nSee {{ns:no-such-sibling}} for details.\n",
+    );
+    let spec = sb.source_spec();
+    let policy = sb.write_policy(&format!(
+        "[[sources.auto_meld]]\nrepo = \"{}\"\ninstall = true\n",
+        spec.replace('\\', "\\\\")
+    ));
+
+    let r = sb.mind_env(
+        &["--json", "sync"],
+        &[("MIND_POLICY_FILE", policy.as_str())],
+    );
+    assert!(
+        !r.success,
+        "POL-60 exits non-zero when any item failed, even under --json: {} {}",
+        r.stdout, r.stderr
+    );
+    // stdout must still be exactly one JSON document: CLI-181's error envelope,
+    // since a run reporting a POL-60 failure exits non-zero.
+    let doc: serde_json::Value = serde_json::from_str(r.stdout.trim()).unwrap_or_else(|e| {
+        panic!(
+            "stdout under --json must parse as a single JSON document even on a \
+             POL-60 failure ({e}): {:?}",
+            r.stdout
+        )
+    });
+    assert!(
+        doc.get("error").is_some(),
+        "a non-zero exit must answer with the CLI-181 error envelope: {doc:#}"
+    );
+    // Pre-existing (not part of this round's diff): the per-item
+    // "auto_meld item install failed" detail line is itself guarded by
+    // `if !out.json { eprintln!(...) }`, so under --json it is dropped
+    // entirely rather than routed to stderr the way CLI-217 routes every
+    // other note/warn. The failure is still counted (the envelope's message
+    // says "1 of 2 source(s)"), but the human-readable detail the message
+    // text ("see the messages above") implies is not actually there under
+    // --json. Documented, not asserted as correct: a JSON caller should not
+    // rely on stderr detail here.
+    assert!(
+        !r.stderr.contains("auto_meld item install failed"),
+        "if this line starts appearing on stderr under --json, update this \
+         test to assert it (that would be a strict improvement over today's \
+         behavior, not a regression): {} {}",
+        r.stdout,
+        r.stderr
+    );
+
+    // CONTINUE: the sibling items are installed anyway, exactly as in the
+    // text-mode case -- the JSON branch must not stop early on the first
+    // failure.
+    assert!(
+        sb.claude_home.join("skills/review").exists(),
+        "a failing item must not abort the rest of the source's install under \
+         --json: {} {}",
+        r.stdout,
+        r.stderr
+    );
+    assert!(
+        sb.claude_home.join("skills/extra").exists(),
+        "every other item must still install under --json: {} {}",
+        r.stdout,
+        r.stderr
+    );
+    assert!(
+        !sb.claude_home.join("skills/aaa-broken").exists(),
+        "the failing item must not be left half-installed: {} {}",
+        r.stdout,
+        r.stderr
+    );
+}

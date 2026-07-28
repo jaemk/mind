@@ -591,7 +591,8 @@ pub enum Command {
         #[arg(long)]
         snapshot: bool,
 
-        /// Overwrite a colliding target in snapshot mode.
+        /// Overwrite a colliding target: a snapshot file, or a foreign file
+        /// blocking backfill of already-installed items into a newly added lobe.
         #[arg(short = 'f', long)]
         force: bool,
     },
@@ -728,7 +729,8 @@ pub enum LobesCmd {
         #[arg(long)]
         snapshot: bool,
 
-        /// Overwrite a colliding target in snapshot mode.
+        /// Overwrite a colliding target: a snapshot file, or a foreign file
+        /// blocking backfill of already-installed items into a newly added lobe.
         #[arg(short = 'f', long)]
         force: bool,
     },

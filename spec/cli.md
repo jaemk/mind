@@ -668,6 +668,28 @@ only appear at meld or install time. It is read-only and installs nothing.
   local-path forms it previously omitted (`/abs/path`, `./rel/path`,
   `../rel/path`, `file:///abs/path`), matching what `mind review --help` (and
   now CLI-214) already document as accepted.
+- `CLI-216` The CLI-215 note is printed at most ONCE per ambiguous spec, by the
+  parse that DECIDES which reading gets cloned. A caller that parses a spec to
+  answer a question rather than to act on it uses the non-printing
+  `parse_spec_quiet`: deriving a registry identity (`instance_name`, the
+  already-registered guards, the clone-failure arms that name the entry that
+  just failed, the install walks over an already-melded chain), classifying an
+  entry (the DSC-93 predicate), or building a different note about a reading
+  already taken. The note is about which reading a clone is ABOUT to take, so
+  from those sites it is at best a duplicate and at worst a contradiction.
+  The motivating case is `review`, which emits at most one note about how it
+  read its target: when it takes the CLI-214 local-directory reading, its own
+  note (naming that reading and the `mind review github:<target>` escape) is the
+  only one, because CLI-215 would tell the user to write `./<target>` to get the
+  local reading, which is the reading `review` just took. The same rule bounds
+  `meld`: melding a shadowing spec (`mind meld skills/greet` where
+  `./skills/greet` exists) notes it exactly once even though the dispatcher, the
+  verb, and the recursion each parse it, and a curated `[discover].sources`
+  entry that shadows a directory in the CONSUMER's cwd is noted once by the
+  recursion that clones it, not again by each identity lookup along the way.
+  This is a discipline at the call sites rather than a special case inside
+  `parse_spec`, so the parse on the path that really is about to clone a remote
+  still notes the ambiguity exactly as CLI-215 requires.
 - `CLI-26` `review` with no `<target>` (or an explicit `.`/`./`) validates the
   current directory, so a maintainer can `mind review` in their repo. It is the
   read-only counterpart to `init-source` (init-source.md). `--policy` is the
@@ -983,6 +1005,45 @@ and per-harness `kinds` defaults.
   keep their existing JSON shapes (CLI-73, CLI-84, CLI-92) and are not affected by
   CLI-153. `absorb` is also a mutating verb covered by CLI-153; see ABS-11 for its
   specific extra field.
+
+- `CLI-217` Under `--json`, stdout carries exactly one JSON document and nothing
+  else, and that document answers the verb the user INVOKED. Two failure modes
+  are ruled out, and both are enforced structurally rather than by a rule each
+  call site has to remember:
+
+  1. *Anything that is not the document.* An advisory note (`note: lobe '...' is
+     unreachable`, `note: skipped install hook ...`), a warning about a step that
+     failed without stopping the verb (HARN-17's unlinkable backfill target), a
+     progress line (`running install hook '...' for ...`), and the output of a
+     hook mind ran on the source's behalf all belong on stderr while `--json` is
+     in effect. Printed ahead of the JSON they leave stdout holding prose
+     followed by an object, which no longer parses; a hook's output is the worst
+     case, since it is arbitrary text chosen by the source author and could
+     otherwise forge a result envelope. Mechanically, a verb covered by this
+     statement runs with the process's stdout pointed at stderr for its whole
+     duration, so no `println!` on any path -- and no child process that inherits
+     stdout -- can reach stdout at all. Notes are not dropped: they stay visible
+     on stderr. `render::note` / `render::warn` remain the way to write a line
+     that belongs on stdout in text mode (byte for byte what a `println!` would
+     have written) and on stderr under `--json`.
+  2. *A second document.* A verb that performs another verb's work internally
+     (`meld` and `sync` installing items through `learn`, `sync --upgrade`
+     running the upgrade pass) must fold that outcome into its own CLI-153
+     object rather than letting the inner verb emit one: `mind meld <repo>
+     --json` answers with a `meld` object whose `installed` array names what the
+     install step did, `mind sync --json` with one `sync` object covering the
+     POL-58 provisioning pass and the `--upgrade` pass, never N+1 objects. This
+     holds on the already-melded (re-meld) branch as well as the fresh one, and
+     a re-meld that installs nothing still answers with its object rather than
+     with silence -- a CLI-153 mutating verb always tells a machine caller what
+     happened. On failure the CLI-181 error envelope REPLACES whatever a verb
+     recorded before failing, so stdout is one document either way.
+
+  The statement binds the verbs that answer `--json` with a document. It does
+  not apply where another statement makes stdout a different product: `dump`
+  writes TOML (DUMP-9), `completions` and `man` write their script and roff
+  page. `review`, `init-source`, `config show`, and `hooks list` define no JSON
+  output at all, so they print their human text on stdout in every mode.
 
 - `CLI-154` `NO_COLOR` being set (to any value, including empty) forces the
   capability gate (CLI-151) OFF regardless of TTY or locale. A non-UTF-8 locale or

@@ -27,6 +27,34 @@ pub(crate) fn print_json_envelope<T: Serialize>(items: &[T]) -> Result<()> {
     print_json(&Envelope { schema: 1, items })
 }
 
+/// Emit one advisory line that is NOT part of a verb's machine-readable result:
+/// a `note:`-style aside, a skipped-hook disclosure, a degraded-but-continuing
+/// remark. Text mode writes it to stdout, byte for byte the `println!` it
+/// replaces; `--json` writes it to stderr instead, so stdout stays exactly one
+/// JSON document (CLI-217).
+///
+/// Use this for anything printed on a path that can also reach `print_json`.
+/// A line that is already behind an `if out.json { return print_json(..) }`
+/// early return can stay a plain `println!`; one that is not, cannot.
+// spec: CLI-217
+pub fn note(msg: impl AsRef<str>) {
+    let msg = msg.as_ref();
+    if ctx().json {
+        eprintln!("{msg}");
+    } else {
+        println!("{msg}");
+    }
+}
+
+/// [`note`] with the context's warn marker (`!`) prefixed: the same routing
+/// (stdout in text mode, stderr under `--json`, CLI-217) for a line that
+/// reports something the user should act on but that did not stop the verb.
+// spec: CLI-217
+pub fn warn(msg: impl AsRef<str>) {
+    let out = ctx();
+    note(format!("{} {}", out.warn(), msg.as_ref()));
+}
+
 /// Install the process-wide output context. Call once, early in `main`, after
 /// parsing the global flags. A second call is ignored.
 pub fn set_ctx(ctx: OutputCtx) {
@@ -753,6 +781,109 @@ mod tests {
         assert!(!c.color, "default/plain ctx must have color=false");
         assert!(!c.unicode, "default/plain ctx must have unicode=false");
         assert!(!c.json, "default/plain ctx must have json=false");
+    }
+
+    // ==========================================================================
+    // CLI-217: note / warn routing
+    // ==========================================================================
+
+    /// Turns a re-exec of this test binary into a one-shot emitter for the
+    /// routing checks below. Value is `text` or `json`.
+    const ROUTING_MODE_ENV: &str = "MIND_TEST_RENDER_ROUTING_MODE";
+    /// Sentinels chosen so they cannot collide with anything libtest itself
+    /// prints (the test name, `running 1 test`, `ok`).
+    const NOTE_SENTINEL: &str = "ZZ-RENDER-ROUTING-NOTE-ZZ";
+    const WARN_SENTINEL: &str = "ZZ-RENDER-ROUTING-WARN-ZZ";
+    const ROUTING_TEST: &str = "render::tests::note_and_warn_route_by_output_mode";
+
+    /// Re-run this binary filtered to the routing test with `mode` installed,
+    /// and return its (stdout, stderr).
+    fn routing_probe(mode: &str) -> (String, String) {
+        let exe = std::env::current_exe().expect("path of the running test binary");
+        let out = std::process::Command::new(exe)
+            .args(["--exact", ROUTING_TEST, "--nocapture", "--test-threads=1"])
+            .env(ROUTING_MODE_ENV, mode)
+            .output()
+            .expect("re-exec the test binary");
+        (
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    }
+
+    /// `note`/`warn` are the single chokepoint CLI-217 rests on, and seven call
+    /// sites across `install.rs` and `commands.rs` were converted onto them.
+    /// Every other test of that conversion is end-to-end through one caller, so
+    /// none of them pins the helper's own contract; a helper that always wrote
+    /// to stderr, or that dropped the warn marker, would satisfy all of them
+    /// (they assert "the note is on stderr under --json", never "and on stdout
+    /// otherwise, with its marker").
+    ///
+    /// The routing cannot be observed in-process: `ctx()` is a set-once
+    /// `OnceLock` shared by every test in this binary, and the helpers write to
+    /// the real fds rather than returning a string. So this test re-executes
+    /// the test binary filtered to itself, with the mode in an env var; the
+    /// child installs that context, emits one `note` and one `warn`, and exits.
+    // spec: CLI-217
+    #[test]
+    fn note_and_warn_route_by_output_mode() {
+        if let Ok(mode) = std::env::var(ROUTING_MODE_ENV) {
+            // Child role: emit, then exit before libtest prints anything else.
+            set_ctx(OutputCtx {
+                json: mode == "json",
+                color: false,
+                unicode: false,
+                verbose: false,
+            });
+            note(NOTE_SENTINEL);
+            warn(WARN_SENTINEL);
+            std::process::exit(0);
+        }
+
+        // Text mode: both lines go to stdout, byte for byte the `println!` they
+        // replaced, and `warn` carries the context's marker.
+        let (text_out, text_err) = routing_probe("text");
+        assert!(
+            text_out.contains(NOTE_SENTINEL),
+            "text mode must write a note to STDOUT (this is the `println!` the \
+             conversion replaced): stdout={text_out:?} stderr={text_err:?}"
+        );
+        assert!(
+            !text_err.contains(NOTE_SENTINEL),
+            "text mode must not move the note to stderr: {text_err:?}"
+        );
+        assert!(
+            text_out.contains(&format!("! {WARN_SENTINEL}")),
+            "warn must prefix the context's warn marker (`!`) and land on \
+             stdout in text mode: {text_out:?}"
+        );
+        assert!(
+            !text_err.contains(WARN_SENTINEL),
+            "text mode must not move the warning to stderr: {text_err:?}"
+        );
+
+        // --json: both lines move to stderr so stdout stays exactly one JSON
+        // document. They are ROUTED, not dropped.
+        let (json_out, json_err) = routing_probe("json");
+        assert!(
+            !json_out.contains(NOTE_SENTINEL),
+            "under --json a note must never touch stdout: {json_out:?}"
+        );
+        assert!(
+            json_err.contains(NOTE_SENTINEL),
+            "under --json the note must still be emitted, on stderr: \
+             stdout={json_out:?} stderr={json_err:?}"
+        );
+        assert!(
+            !json_out.contains(WARN_SENTINEL),
+            "under --json a warning must never touch stdout: {json_out:?}"
+        );
+        assert!(
+            json_err.contains(&format!("! {WARN_SENTINEL}")),
+            "under --json the warning must still be emitted on stderr, marker \
+             and all (json forces the capability gate off, so the marker is the \
+             ASCII `!`): {json_err:?}"
+        );
     }
 
     /// set_ctx installs a value that ctx() then returns.

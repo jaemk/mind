@@ -205,6 +205,15 @@ manifest, and store.
 - `TUI-54` `probe --no-tui` is long-only; its former short `-n` is removed (CLI-164,
   CLI-163). `mind probe --no-tui` is the only accepted form; `mind probe -n` is now
   a usage error.
+- `TUI-62` The lobes action (TUI-23) shares its implementation with the CLI:
+  `ActionKind::LobeAdd` dispatches to `commands::lobe_add`, the same function
+  `mind config lobes add <path>` calls, with `force` hardcoded to `false`. So the
+  CLI's guarantees around it apply to the TUI path with no separate
+  implementation: the resolved lobe directory is created before the config entry
+  is written (HARN-15), already-installed items of admitted kinds are backfilled
+  into it unconditionally (HARN-7, HARN-17), and a pre-existing foreign file at a
+  backfill target is reported as a failure -- naming the `--force` remedy -- and
+  never clobbered, because the TUI's call site never passes `force`.
 
 ## Security
 

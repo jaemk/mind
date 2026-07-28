@@ -38,56 +38,59 @@ fn is_word_char(c: char) -> bool {
 pub fn templatize(content: &str, siblings: &HashSet<String>) -> (String, usize) {
     let mut out = String::with_capacity(content.len());
     let mut count = 0;
-    let mut in_fence = false;
-    let mut in_frontmatter = false;
+    // One structural read of the document (NS-46/NS-47): the same map the
+    // misplaced-token scan uses, so wrapping and un-wrapping cannot disagree
+    // about what is code.
+    let doc = Structure::new(content);
+    let mut offset = 0usize;
     for (idx, raw) in content.split_inclusive('\n').enumerate() {
         let line = raw.strip_suffix('\n').unwrap_or(raw);
         let nl = &raw[line.len()..];
-        let trimmed = line.trim();
-        if idx == 0 && trimmed == "---" {
-            in_frontmatter = true;
+        if doc.kinds[idx] == LineKind::Text {
+            let (wrapped, n) = wrap_line(line, siblings, &doc, offset);
+            out.push_str(&wrapped);
+            out.push_str(nl);
+            count += n;
+        } else {
+            // Frontmatter, a fence delimiter, or fenced content: never wrapped.
             out.push_str(raw);
-            continue;
         }
-        if in_frontmatter {
-            if trimmed == "---" {
-                in_frontmatter = false;
-            }
-            out.push_str(raw); // never wrap inside frontmatter
-            continue;
-        }
-        if trimmed.starts_with("```") {
-            in_fence = !in_fence;
-            out.push_str(raw);
-            continue;
-        }
-        if in_fence {
-            out.push_str(raw); // never wrap inside a code block
-            continue;
-        }
-        let (wrapped, n) = wrap_line(line, siblings);
-        out.push_str(&wrapped);
-        out.push_str(nl);
-        count += n;
+        offset += raw.len();
     }
     (out, count)
 }
 
 /// Wrap bare sibling names in one prose line, skipping existing `{{...}}` tokens,
-/// inline code spans, and path-adjacent positions.
-fn wrap_line(line: &str, siblings: &HashSet<String>) -> (String, usize) {
+/// inline code spans, and path-adjacent positions. `base` is the line's byte
+/// offset in the document, used to test each word against the document-wide
+/// code-span ranges (NS-46).
+fn wrap_line(
+    line: &str,
+    siblings: &HashSet<String>,
+    doc: &Structure,
+    base: usize,
+) -> (String, usize) {
     let chars: Vec<char> = line.chars().collect();
     let mut out = String::with_capacity(line.len());
     let mut count = 0;
     let mut word = String::new();
-    let mut in_span = false;
+    // Byte offset in the document of `chars[i]`, and of the current word's start.
+    let mut pos = base;
+    let mut word_start = base;
     let mut before: Option<char> = None;
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
         // Copy an existing `{{...}}` token verbatim (do not re-wrap inside it).
         if c == '{' && chars.get(i + 1) == Some(&'{') {
-            count += emit_word(&word, siblings, in_span, before, None, &mut out);
+            count += emit_word(
+                &word,
+                siblings,
+                doc.in_code_span(word_start),
+                before,
+                None,
+                &mut out,
+            );
             word.clear();
             let start = i;
             i += 2;
@@ -101,31 +104,42 @@ fn wrap_line(line: &str, siblings: &HashSet<String>) -> (String, usize) {
             };
             for &ch in &chars[start..i] {
                 out.push(ch);
+                pos += ch.len_utf8();
             }
             before = Some('}');
             continue;
         }
-        if c == '`' {
-            count += emit_word(&word, siblings, in_span, before, Some('`'), &mut out);
-            word.clear();
-            in_span = !in_span;
-            out.push(c);
-            before = Some('`');
-            i += 1;
-            continue;
-        }
         if is_word_char(c) {
+            if word.is_empty() {
+                word_start = pos;
+            }
             word.push(c);
             i += 1;
+            pos += c.len_utf8();
             continue;
         }
-        count += emit_word(&word, siblings, in_span, before, Some(c), &mut out);
+        count += emit_word(
+            &word,
+            siblings,
+            doc.in_code_span(word_start),
+            before,
+            Some(c),
+            &mut out,
+        );
         word.clear();
         out.push(c);
         before = Some(c);
         i += 1;
+        pos += c.len_utf8();
     }
-    count += emit_word(&word, siblings, in_span, before, None, &mut out);
+    count += emit_word(
+        &word,
+        siblings,
+        doc.in_code_span(word_start),
+        before,
+        None,
+        &mut out,
+    );
     (out, count)
 }
 
@@ -837,10 +851,354 @@ pub struct NsRef {
     pub end: usize,
 }
 
-/// True when byte position `pos` in `line` is inside an inline code span (an odd
-/// number of backticks precede it on the line).
-fn in_code_span(line: &str, pos: usize) -> bool {
-    line[..pos].bytes().filter(|&b| b == b'`').count() % 2 == 1
+/// What one line of a markdown document is, structurally (NS-47).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LineKind {
+    /// A `---` delimiter of the leading frontmatter block.
+    FrontmatterDelim,
+    /// A line inside the leading frontmatter block.
+    Frontmatter,
+    /// A fence opener or closer line.
+    FenceDelim,
+    /// A line inside a fenced code block.
+    CodeBlock,
+    /// Ordinary text: prose, possibly carrying inline code spans.
+    Text,
+}
+
+/// The structure of a markdown document: what each line is (NS-47) and where its
+/// inline code spans are (NS-46).
+///
+/// Both are read document-wide rather than line by line, because both constructs
+/// are document-wide: a code span may cross a line break inside a paragraph, and
+/// a fence closes only on a run of its own character that is at least as long as
+/// the opener, so an inner example fence does not end the outer block.
+struct Structure {
+    /// One entry per line of the document, in order.
+    kinds: Vec<LineKind>,
+    /// Byte ranges of inline code spans, sorted and non-overlapping.
+    spans: Vec<(usize, usize)>,
+}
+
+impl Structure {
+    fn new(content: &str) -> Self {
+        let kinds = line_kinds(content);
+        let spans = code_spans(content, &kinds);
+        Structure { kinds, spans }
+    }
+
+    /// True when byte position `pos` falls inside a matched inline code span.
+    fn in_code_span(&self, pos: usize) -> bool {
+        self.spans.iter().any(|&(s, e)| pos >= s && pos < e)
+    }
+}
+
+/// The fence delimiter a line leads with, if any: the fence character, the length
+/// of its run, and the trimmed text after the run (the info string on an opener,
+/// which must be empty on a closer). A run shorter than three is not a fence.
+fn fence_delim(line: &str) -> Option<(char, usize, &str)> {
+    let body = line.trim_start();
+    let ch = body.chars().next()?;
+    if ch != '`' && ch != '~' {
+        return None;
+    }
+    // Both fence characters are one byte, so the run length is a byte count too.
+    let len = body.chars().take_while(|&c| c == ch).count();
+    if len < 3 {
+        return None;
+    }
+    Some((ch, len, body[len..].trim()))
+}
+
+/// The visual indentation of `line` in columns, with a tab advancing to the next
+/// multiple of four (NS-49).
+fn indent_cols(line: &str) -> usize {
+    let mut col = 0;
+    for c in line.chars() {
+        match c {
+            ' ' => col += 1,
+            '\t' => col += 4 - (col % 4),
+            _ => break,
+        }
+    }
+    col
+}
+
+/// The content column a list-item marker on `line` opens, when the line starts
+/// one (NS-49). Everything inside the item is written from that column, so it is
+/// the baseline the fence-indent and indented-code rules measure against: a
+/// fence nested in a list item is indented but is still a fence.
+fn list_item_content_col(line: &str) -> Option<usize> {
+    let body = line.trim_start();
+    let first = body.chars().next()?;
+    let marker = match first {
+        '-' | '*' | '+' => 1,
+        '0'..='9' => {
+            let digits = body.chars().take_while(char::is_ascii_digit).count();
+            // CommonMark caps an ordered-list marker at nine digits.
+            if digits > 9 {
+                return None;
+            }
+            let rest = &body[digits..];
+            if !(rest.starts_with('.') || rest.starts_with(')')) {
+                return None;
+            }
+            digits + 1
+        }
+        _ => return None,
+    };
+    let after = &body[marker..];
+    let spaces = after.chars().take_while(|&c| c == ' ' || c == '\t').count();
+    // The marker must be followed by whitespace, or end the line (an empty item).
+    if spaces == 0 && !after.is_empty() {
+        return None;
+    }
+    // One to four spaces put the content right after them. More of them start an
+    // indented code block *inside* the item, whose content column is one past
+    // the marker; so does an empty item.
+    let width = if (1..=4).contains(&spaces) { spaces } else { 1 };
+    Some(indent_cols(line) + marker + width)
+}
+
+/// Whether `line` is an ATX heading, which is a leaf block of its own and so
+/// leaves no paragraph open behind it (NS-49).
+fn is_atx_heading(line: &str) -> bool {
+    let body = line.trim_start();
+    let hashes = body.chars().take_while(|&c| c == '#').count();
+    (1..=6).contains(&hashes)
+        && (body[hashes..].is_empty() || body[hashes..].starts_with([' ', '\t']))
+}
+
+/// Classify every line of `content` (NS-47, NS-49). The leading `---` frontmatter
+/// block is recognized first, as before; outside it a fenced code block opens on
+/// a run of at least three backticks or tildes and closes only on a run of the
+/// same character that is at least as long, with nothing but whitespace after it.
+///
+/// Indentation is measured against the content column of the innermost open list
+/// item (NS-49), so a fence nested in a list item is recognized while a line
+/// indented four or more columns past that baseline is indented code (or a lazy
+/// paragraph continuation) and can never be a delimiter.
+fn line_kinds(content: &str) -> Vec<LineKind> {
+    let mut kinds = Vec::new();
+    let mut in_frontmatter = false;
+    // The open fence's character and run length, while a block is open.
+    let mut fence: Option<(char, usize)> = None;
+    // The content column the open fence was written from (NS-49).
+    let mut fence_base = 0usize;
+    // Content columns of the list items currently open, outermost first (NS-49).
+    let mut containers: Vec<usize> = Vec::new();
+    // Whether the previous line left a paragraph open, so an indented line
+    // continues it lazily rather than starting an indented code block (NS-49).
+    let mut paragraph = false;
+    for (idx, raw) in content.split_inclusive('\n').enumerate() {
+        let line = raw.strip_suffix('\n').unwrap_or(raw);
+        let trimmed = line.trim();
+        if idx == 0 && trimmed == "---" {
+            in_frontmatter = true;
+            kinds.push(LineKind::FrontmatterDelim);
+            continue;
+        }
+        if in_frontmatter {
+            if trimmed == "---" {
+                in_frontmatter = false;
+                kinds.push(LineKind::FrontmatterDelim);
+            } else {
+                kinds.push(LineKind::Frontmatter);
+            }
+            continue;
+        }
+        let blank = trimmed.is_empty();
+        let ind = indent_cols(line);
+        // A fence opened inside a list item ends with the item (NS-49): its
+        // content is written from the item's content column, so a non-blank line
+        // that dedents past it leaves both. Without this an unclosed fence in a
+        // list item would swallow the rest of the document.
+        if fence.is_some() && !blank && ind < fence_base {
+            fence = None;
+        }
+        // A non-blank line that dedents past an open list item's content column
+        // leaves the item. A blank line does not: an item may contain them, and
+        // the fenced or indented block after one is still inside the item.
+        if fence.is_none() && !blank {
+            while containers.last().is_some_and(|&col| ind < col) {
+                containers.pop();
+            }
+        }
+        let base = containers.last().copied().unwrap_or(0);
+        // Four or more columns past the containing block's content column is
+        // indented code, so the leading run there is literal text, not a fence
+        // delimiter (NS-49).
+        let delim = if ind >= base + 4 {
+            None
+        } else {
+            fence_delim(line)
+        };
+        let kind = match (fence, delim) {
+            // Inside a block: only a matching, long-enough, bare run closes it.
+            // A shorter run, a different character, or a run with an info string
+            // is content (a nested example fence).
+            (Some((fc, flen)), Some((c, len, rest))) => {
+                if c == fc && len >= flen && rest.is_empty() {
+                    fence = None;
+                    LineKind::FenceDelim
+                } else {
+                    LineKind::CodeBlock
+                }
+            }
+            (Some(_), None) => LineKind::CodeBlock,
+            // Outside a block: a backtick fence's info string may not contain a
+            // backtick, so such a line is ordinary text carrying code spans.
+            (None, Some((c, len, rest))) => {
+                if c == '`' && rest.contains('`') {
+                    LineKind::Text
+                } else {
+                    fence = Some((c, len));
+                    fence_base = base;
+                    LineKind::FenceDelim
+                }
+            }
+            // An indented line that does not continue a paragraph is an indented
+            // code block; one that does is a lazy continuation, so still prose.
+            (None, None) => {
+                if !blank && ind >= base + 4 && !paragraph {
+                    LineKind::CodeBlock
+                } else {
+                    LineKind::Text
+                }
+            }
+        };
+        if kind == LineKind::Text
+            && !blank
+            && let Some(col) = list_item_content_col(line)
+        {
+            containers.push(col);
+        }
+        paragraph = kind == LineKind::Text && !blank && !is_atx_heading(line);
+        kinds.push(kind);
+    }
+    kinds
+}
+
+/// Whether `line` starts a new leaf block (a heading, blockquote, list item, or
+/// table row) rather than continuing the paragraph above it. Bounds code-span
+/// matching (NS-46): two list items are two blocks, so a backtick in one cannot
+/// open a span that closes in the next.
+fn starts_leaf_block(line: &str) -> bool {
+    let body = line.trim_start();
+    let mut chars = body.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    match first {
+        '#' => {
+            let hashes = body.chars().take_while(|&c| c == '#').count();
+            hashes <= 6 && body[hashes..].starts_with([' ', '\t'])
+        }
+        '>' | '|' => true,
+        '-' | '*' | '+' => matches!(chars.next(), Some(' ') | Some('\t')),
+        '0'..='9' => {
+            let digits = body.chars().take_while(char::is_ascii_digit).count();
+            let rest = &body[digits..];
+            (rest.starts_with('.') || rest.starts_with(')')) && rest[1..].starts_with([' ', '\t'])
+        }
+        _ => false,
+    }
+}
+
+/// Byte ranges of the inline code spans in `content` (NS-46).
+///
+/// Only text lines are considered: frontmatter, fence delimiters, and fenced
+/// content are handled by [`line_kinds`]. A span may cross a line break inside a
+/// paragraph but never a blank line or a block boundary, so matching runs over
+/// each maximal run of consecutive non-blank text lines belonging to one block.
+fn code_spans(content: &str, kinds: &[LineKind]) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut offset = 0usize;
+    let mut para: Option<(usize, usize)> = None;
+    for (idx, raw) in content.split_inclusive('\n').enumerate() {
+        let line = raw.strip_suffix('\n').unwrap_or(raw);
+        if kinds[idx] == LineKind::Text && !line.trim().is_empty() {
+            let end = offset + raw.len();
+            // A new block ends the paragraph the previous lines formed.
+            if starts_leaf_block(line)
+                && let Some((start, prev_end)) = para.take()
+            {
+                match_spans(content, start, prev_end, &mut spans);
+            }
+            para = Some(match para {
+                Some((start, _)) => (start, end),
+                None => (offset, end),
+            });
+        } else if let Some((start, end)) = para.take() {
+            match_spans(content, start, end, &mut spans);
+        }
+        offset += raw.len();
+    }
+    if let Some((start, end)) = para.take() {
+        match_spans(content, start, end, &mut spans);
+    }
+    spans
+}
+
+/// Whether the byte at `pos` is backslash-escaped: preceded, within
+/// `[start, pos)`, by an odd number of backslashes (NS-50).
+fn is_escaped(content: &str, start: usize, pos: usize) -> bool {
+    let bytes = content.as_bytes();
+    let mut n = 0usize;
+    let mut i = pos;
+    while i > start && bytes[i - 1] == b'\\' {
+        n += 1;
+        i -= 1;
+    }
+    n % 2 == 1
+}
+
+/// Match backtick runs within `content[start..end]`, pushing each resulting code
+/// span's byte range onto `out` (NS-46). A run opens a span that only a later run
+/// of exactly the same length closes; an unmatched run is literal text, and
+/// scanning resumes right after it.
+///
+/// A backslash-escaped backtick is literal text and does not open a span
+/// (NS-50). Backslash escapes do not apply *inside* a code span, so only the
+/// opener is checked: an escaped backtick still closes a span already open.
+fn match_spans(content: &str, start: usize, end: usize, out: &mut Vec<(usize, usize)>) {
+    let bytes = content.as_bytes();
+    let mut i = start;
+    while i < end {
+        if bytes[i] != b'`' {
+            i += 1;
+            continue;
+        }
+        if is_escaped(content, start, i) {
+            i += 1;
+            continue;
+        }
+        let open = i;
+        while i < end && bytes[i] == b'`' {
+            i += 1;
+        }
+        let len = i - open;
+        let mut j = i;
+        let mut close = None;
+        while j < end {
+            if bytes[j] != b'`' {
+                j += 1;
+                continue;
+            }
+            let run = j;
+            while j < end && bytes[j] == b'`' {
+                j += 1;
+            }
+            if j - run == len {
+                close = Some(j);
+                break;
+            }
+        }
+        if let Some(e) = close {
+            out.push((open, e));
+            i = e;
+        }
+    }
 }
 
 /// True when the token spanning `[start, end)` in `line` abuts a path separator.
@@ -851,33 +1209,22 @@ fn path_adjacent(line: &str, start: usize, end: usize) -> bool {
 }
 
 /// Find every `{{ns:name}}` token in `content`, each with its structural context
-/// (NS-24) and byte span. Tracks fenced code blocks and the leading frontmatter
-/// so a token can be classified as misplaced (in code, a path, or `name:`).
+/// (NS-24) and byte span. Reads the document's structure once (NS-46/NS-47) so a
+/// token can be classified as misplaced (in code, a path, or `name:`).
 pub fn scan_ns_refs(content: &str) -> Vec<NsRef> {
     const OPEN: &str = "{{ns:";
     let mut out = Vec::new();
-    let mut in_fence = false;
-    let mut in_frontmatter = false;
+    let doc = Structure::new(content);
     let mut offset = 0usize;
     for (idx, raw) in content.split_inclusive('\n').enumerate() {
         let line = raw.strip_suffix('\n').unwrap_or(raw);
-        let trimmed = line.trim();
-        if idx == 0 && trimmed == "---" {
-            in_frontmatter = true;
+        let kind = doc.kinds[idx];
+        // A delimiter line is structure, not content: it carries no token.
+        if matches!(kind, LineKind::FrontmatterDelim | LineKind::FenceDelim) {
             offset += raw.len();
             continue;
         }
-        if in_frontmatter {
-            if trimmed == "---" {
-                in_frontmatter = false;
-                offset += raw.len();
-                continue;
-            }
-        } else if trimmed.starts_with("```") {
-            in_fence = !in_fence;
-            offset += raw.len();
-            continue;
-        }
+        let in_frontmatter = kind == LineKind::Frontmatter;
         let fm_name = in_frontmatter && line.trim_start().starts_with("name:");
         let mut from = 0;
         while let Some(rel) = line[from..].find(OPEN) {
@@ -890,9 +1237,9 @@ pub fn scan_ns_refs(content: &str) -> Vec<NsRef> {
                 NsContext::FrontmatterName
             } else if in_frontmatter {
                 NsContext::Prose
-            } else if in_fence {
+            } else if kind == LineKind::CodeBlock {
                 NsContext::CodeBlock
-            } else if in_code_span(line, tstart) {
+            } else if doc.in_code_span(offset + tstart) {
                 NsContext::CodeSpan
             } else if path_adjacent(line, tstart, tend) {
                 NsContext::Path
@@ -1655,6 +2002,613 @@ mod tests {
         );
     }
 
+    /// Collect the classified context of each token, for the structural tests.
+    fn contexts(doc: &str) -> Vec<(String, NsContext)> {
+        scan_ns_refs(doc)
+            .into_iter()
+            .map(|r| (r.name, r.context))
+            .collect()
+    }
+
+    #[test]
+    fn token_after_a_multiline_code_span_is_prose() {
+        // spec: NS-46
+        // The reported repro: a code span opened on one line and closed on the
+        // next leaves the closing backtick alone on the continuation line, which
+        // line-local backtick parity read as "inside a span" for everything after
+        // it. The span is matched document-wide, so the token is prose.
+        let doc = "Set up the token with `gh auth\n\
+                   token --hostname github.com` and the bundle (via {{ns:cert}}).\n";
+        assert_eq!(contexts(doc), vec![("cert".into(), NsContext::Prose)]);
+    }
+
+    #[test]
+    fn token_inside_a_multiline_code_span_is_a_code_span() {
+        // spec: NS-46
+        // The true positive the fix must not break: a token genuinely inside a
+        // span that wraps across a line break is still misplaced.
+        let doc = "run `mind learn\n{{ns:dev}}` now\n";
+        assert_eq!(contexts(doc), vec![("dev".into(), NsContext::CodeSpan)]);
+    }
+
+    #[test]
+    fn code_spans_match_by_run_length_and_stop_at_a_blank_line() {
+        // spec: NS-46
+        // A double-backtick span may contain a single backtick: only a run of the
+        // same length closes it.
+        let doc = "``a ` {{ns:dev}}`` and {{ns:do}} after\n";
+        assert_eq!(
+            contexts(doc),
+            vec![
+                ("dev".into(), NsContext::CodeSpan),
+                ("do".into(), NsContext::Prose),
+            ]
+        );
+        // An unmatched run is literal text, and a blank line ends the paragraph,
+        // so a backtick in one paragraph cannot open a span over the next.
+        let doc = "a stray ` backtick\n\nsee {{ns:dev}} here\n";
+        assert_eq!(contexts(doc), vec![("dev".into(), NsContext::Prose)]);
+        // A block boundary ends it too: two list items are two blocks, so the
+        // stray backtick in the first cannot pair with the one in the second.
+        let doc = "- a stray ` backtick\n- hand off to {{ns:dev}} ` now\n";
+        assert_eq!(contexts(doc), vec![("dev".into(), NsContext::Prose)]);
+        // A span still crosses the line break inside one list item.
+        let doc = "- run `gh auth\n  token` then {{ns:dev}}\n";
+        assert_eq!(contexts(doc), vec![("dev".into(), NsContext::Prose)]);
+        let doc = "- run `gh {{ns:dev}}\n  token` now\n";
+        assert_eq!(contexts(doc), vec![("dev".into(), NsContext::CodeSpan)]);
+    }
+
+    #[test]
+    fn fences_close_only_on_an_equal_or_longer_run_of_their_own_char() {
+        // spec: NS-47
+        // A four-backtick fence wrapping a three-backtick example: the inner
+        // fence is content, so the outer block ends where it says it does and the
+        // prose after it is prose.
+        let doc = "````markdown\n{{ns:dev}}\n```sh\necho {{ns:do}}\n```\n````\n\
+                   then see {{ns:dev}} in prose\n";
+        assert_eq!(
+            contexts(doc),
+            vec![
+                ("dev".into(), NsContext::CodeBlock),
+                ("do".into(), NsContext::CodeBlock),
+                ("dev".into(), NsContext::Prose),
+            ]
+        );
+        // A tilde fence is a fence too, and a backtick run does not close it.
+        let doc = "~~~\n{{ns:dev}}\n```\n{{ns:do}}\n~~~\nprose {{ns:dev}}\n";
+        assert_eq!(
+            contexts(doc),
+            vec![
+                ("dev".into(), NsContext::CodeBlock),
+                ("do".into(), NsContext::CodeBlock),
+                ("dev".into(), NsContext::Prose),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_line_initial_backtick_run_with_an_info_backtick_is_not_a_fence() {
+        // spec: NS-47
+        // ```` ``a ` b`` ```` at the start of a line is a code span, not a fence
+        // opener: a backtick fence's info string may not contain a backtick. The
+        // old prefix test flipped the fence state here and misclassified the rest
+        // of the document as a code block.
+        let doc = "``run ` here`` opens nothing\n\nprose {{ns:dev}} here\n";
+        assert_eq!(contexts(doc), vec![("dev".into(), NsContext::Prose)]);
+    }
+
+    #[test]
+    fn templatize_reads_the_same_structure_as_the_token_scan() {
+        // spec: NS-46 NS-47
+        // Wrapping and un-wrapping must agree about what is code, or `--fix`
+        // un-wraps a token that it then declines to re-wrap. A bare sibling name
+        // after a multi-line code span is prose and gets wrapped; one inside a
+        // nested fence stays bare.
+        let s = sibs(&["dev", "do"]);
+        let doc = "run `gh auth\nprint` then dev runs\n\n\
+                   ````md\n```sh\ndev do\n```\n````\n";
+        let (out, n) = templatize(doc, &s);
+        assert_eq!(n, 1, "only the prose mention is wrapped: {out}");
+        assert!(out.contains("then {{ns:dev}} runs"), "{out}");
+        assert!(out.contains("dev do\n"), "fenced content untouched: {out}");
+    }
+
+    #[test]
+    fn fix_passes_never_introduce_an_unguarded_reference() {
+        // spec: NS-48
+        // The class-level guard, over a corpus of the reported shapes whose
+        // sibling mentions all sit in prose: run the same two passes `review
+        // --fix` runs (un-wrap misplaced tokens, then templatize bare prose refs)
+        // and require the result to be clean by the independent
+        // unguarded-reference check (NS-20/NS-21).
+        let s = sibs(&["cos-spec", "cos-cert-setup"]);
+        let corpus = [
+            // Multi-line code span, then a prose token (the cos-http repro).
+            "Get it with `gh auth\ntoken --hostname github.com` (via {{ns:cos-cert-setup}}).\n",
+            // Nested fence, then a prose token (the cos-handoff repro).
+            "````md\n```sh\necho hi\n```\n````\nSee the {{ns:cos-spec}} skill for EARS.\n",
+            // A bare prose mention after a multi-line span: templatize must reach
+            // it, or the fixed file keeps an unguarded reference.
+            "Get it with `gh auth\ntoken` then read the cos-spec skill.\n",
+            // A line-initial backtick run that is not a fence opener.
+            "``a ` b`` is a span\n\nhand off to {{ns:cos-spec}} now\n",
+        ];
+        for doc in corpus {
+            let (unwrapped, _) = unwrap_misplaced(doc, false);
+            let (fixed, _) = templatize(&unwrapped, &s);
+            assert_eq!(
+                unguarded_refs(&fixed, &s),
+                Vec::<String>::new(),
+                "--fix left an unguarded reference in: {fixed}"
+            );
+        }
+    }
+
+    // ---- outside-in coverage of the structural scan (NS-46 / NS-47 / NS-48) --
+
+    /// The two passes `review --fix` runs over a markdown file, in order:
+    /// un-wrap misplaced tokens, then wrap bare prose mentions.
+    fn fix_passes(content: &str, siblings: &HashSet<String>) -> String {
+        let (unwrapped, _) = unwrap_misplaced(content, false);
+        templatize(&unwrapped, siblings).0
+    }
+
+    /// Every structural shape the classifier has to get right, in one corpus, so
+    /// the whole-pipeline properties below are checked against all of them
+    /// rather than against one hand-picked happy path.
+    const SHAPES: &[&str] = &[
+        // A code span that closes on the next line, then a prose mention.
+        "Read it with `gh auth\ntoken --hostname github.com` and see dev now.\n",
+        // A four-backtick fence quoting a three-backtick one.
+        "````md\n```sh\ndev do\n```\n````\nThen see dev in prose.\n",
+        // A tilde fence quoting a backtick one.
+        "~~~text\n```\ndev\n~~~\nThen see do.\n",
+        // A tilde fence carrying an info string.
+        "~~~ruby\ndev\n~~~\nThen see dev.\n",
+        // A line-initial backtick run that is a span, not a fence opener.
+        "``a ` b`` is a span\n\nhand off to dev now\n",
+        // A span crossing a line break inside one list item, and a second item.
+        "- run `gh auth\n  token` then dev\n- and do\n",
+        // A table: each row is its own block.
+        "| a | b |\n|---|---|\n| `dev` | do |\n",
+        // Frontmatter, a heading, and prose.
+        "---\nname: dev\ndescription: see do\n---\n# Title\n\nsee do here\n",
+        // Path-adjacent mentions, which are never prose.
+        "# Heading\n\nsee ~/dev and dev/x and dev.\n",
+        // A fence that never closes.
+        "```\nunclosed fence\ndev\n",
+        // Existing tokens in all three misplaced contexts.
+        "prose {{ns:dev}} and `{{ns:do}}` and ~/{{ns:dev}}\n",
+        // Brace pairs inside code spans.
+        "`{{`  and `}}` then dev\n",
+        // CRLF line endings.
+        "a\r\n\r\nsee dev here\r\n",
+        // A blockquote holding a fence: `>` keeps the fence from being seen.
+        "> ```\n> dev\n> ```\n\nsee do after\n",
+        // An indented code block whose content is a lone fence delimiter.
+        "Open it with:\n\n    ```\n\nThen see dev.\n",
+        // An over-indented lazy continuation of a paragraph.
+        "This sentence wraps\n    onto dev here.\n",
+        // A fence in an ordered item whose content column is four.
+        "1.  step:\n\n    ```sh\n    dev do\n    ```\n\nThen see dev.\n",
+        // An escaped backtick before a real code span.
+        "Escape it with \\` in prose. Then dev and `do`.\n",
+        // A fence left unclosed inside a list item the document then dedents out of.
+        "- item:\n\n  ```sh\n  dev\n\nBack at top level, see do.\n",
+    ];
+
+    #[test]
+    fn fix_is_a_fixed_point_on_every_structural_shape() {
+        // spec: NS-46 NS-47
+        // What the reporter actually complained about: `--fix` re-dirtying files
+        // on every run. Note what this does and does not prove. Because the pass
+        // pair is wrap-after-un-wrap, a wrap that disagrees with the scan still
+        // converges after one run (the next un-wrap removes exactly what the
+        // last wrap added, and the wrap puts it back). What this pins down is
+        // that inserting `{{ns:` / `}}` never changes the structure map itself,
+        // so no rewrite can turn a line into a different kind of block. The
+        // wrap/scan agreement claim is `templatize_only_ever_creates_prose_tokens`.
+        let s = sibs(&["dev", "do"]);
+        for doc in SHAPES {
+            let once = fix_passes(doc, &s);
+            let twice = fix_passes(&once, &s);
+            assert_eq!(
+                once, twice,
+                "--fix is not idempotent on:\n{doc}\nfirst:\n{once}\nsecond:\n{twice}"
+            );
+        }
+    }
+
+    #[test]
+    fn templatize_only_ever_creates_prose_tokens() {
+        // spec: NS-46 NS-47
+        // The same agreement from the other side: strip every token from a
+        // shape, wrap it, and require the scan to call each token it created
+        // prose. A token wrapping puts anywhere else is one `--fix` deletes.
+        let s = sibs(&["dev", "do"]);
+        for doc in SHAPES {
+            let (bare, _) = unwrap_misplaced(doc, true);
+            let (wrapped, _) = templatize(&bare, &s);
+            for r in scan_ns_refs(&wrapped) {
+                assert!(
+                    !r.context.is_misplaced(),
+                    "templatize wrapped {} into {:?} in:\n{wrapped}",
+                    r.name,
+                    r.context
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fix_clears_prose_mentions_behind_every_desyncing_fence_shape() {
+        // spec: NS-48
+        // NS-48 over the fence shapes that actually desynchronized the old
+        // toggle, which needs an *odd* number of line-initial triple-backtick
+        // lines. A balanced nested fence (four such lines) does not desync, so a
+        // corpus built only from balanced shapes cannot fail when NS-47 breaks.
+        let s = sibs(&["dev"]);
+        for doc in [
+            // Three: a four-backtick fence quoting one delimiter.
+            "````md\n```\nreply here\n````\nThen see the {{ns:dev}} skill.\n",
+            // One: a tilde fence quoting a backtick delimiter.
+            "~~~md\n```\nreply here\n~~~\nThen see the {{ns:dev}} skill.\n",
+            // The same with the mention bare: wrapping has to reach it.
+            "~~~md\n```\nreply here\n~~~\nThen see the dev skill.\n",
+            // One, unfenced: a triple-backtick *span* at the start of a line.
+            // (A line-initial run followed by plain text, e.g. "``` is the
+            // delimiter", is a real fence opener with an info string in
+            // CommonMark, and is read as one here.)
+            "```mind sync``` at line start\n\nThen see the {{ns:dev}} skill.\n",
+        ] {
+            let fixed = fix_passes(doc, &s);
+            assert_eq!(
+                unguarded_refs(&fixed, &s),
+                Vec::<String>::new(),
+                "--fix left an unguarded reference in: {fixed}"
+            );
+            assert!(
+                fixed.contains("{{ns:dev}} skill"),
+                "the prose reference must end up tokenized: {fixed}"
+            );
+        }
+    }
+
+    #[test]
+    fn fix_clears_prose_mentions_past_an_indented_block_or_an_escaped_backtick() {
+        // spec: NS-48 NS-49 NS-50
+        // NS-48 over the two shapes that still misclassified after the
+        // structural read landed. Both are destructive in the same way as the
+        // filed report: a false fence opener (an indented ``` ) and a false span
+        // opener (an escaped backtick) each swallow a prose token, and `--fix`
+        // deletes its wrapper. Asserted through the whole `--fix` pass pair, in
+        // both the already-tokenized and the still-bare direction.
+        let s = sibs(&["dev"]);
+        for doc in [
+            // A lone fence delimiter shown inside an indented code block.
+            "Wrap the reply in a fence, opened by:\n\n    ```\n\nThen see the {{ns:dev}} skill.\n",
+            "Wrap the reply in a fence, opened by:\n\n    ```\n\nThen see the dev skill.\n",
+            // An escaped backtick ahead of a real code span.
+            "Escape it with \\` in prose. Then see the {{ns:dev}} skill, then run `mind sync`.\n",
+            "Escape it with \\` in prose. Then see the dev skill, then run `mind sync`.\n",
+        ] {
+            let fixed = fix_passes(doc, &s);
+            assert_eq!(
+                unguarded_refs(&fixed, &s),
+                Vec::<String>::new(),
+                "--fix left an unguarded reference in: {fixed}"
+            );
+            assert!(
+                fixed.contains("{{ns:dev}} skill"),
+                "the prose reference must end up tokenized: {fixed}"
+            );
+        }
+    }
+
+    #[test]
+    fn tilde_fences_take_an_info_string_and_close_only_on_a_bare_run() {
+        // spec: NS-47
+        // A tilde opener may carry an info string (and, unlike a backtick one,
+        // may carry backticks in it); a run that carries trailing text is not a
+        // closer, so the block runs on to the real one.
+        let doc = "~~~ruby `x`\n{{ns:dev}}\n~~~ still open\n{{ns:do}}\n~~~\nprose {{ns:dev}}\n";
+        assert_eq!(
+            contexts(doc),
+            vec![
+                ("dev".into(), NsContext::CodeBlock),
+                ("do".into(), NsContext::CodeBlock),
+                ("dev".into(), NsContext::Prose),
+            ]
+        );
+        // A longer closing run closes a shorter opener; the reverse does not.
+        let doc = "~~~\n{{ns:dev}}\n~~~~~\nprose {{ns:do}}\n";
+        assert_eq!(
+            contexts(doc),
+            vec![
+                ("dev".into(), NsContext::CodeBlock),
+                ("do".into(), NsContext::Prose),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unclosed_fence_runs_to_the_end_of_the_document() {
+        // spec: NS-47
+        // CommonMark closes an unterminated fence at the end of the document,
+        // and so does this: every later token is in code, and `--fix` un-wraps
+        // it. That is correct for a genuinely unclosed fence, and it is why a
+        // *false* opener (see the indented-fence tests) is destructive.
+        let doc = "```sh\necho {{ns:dev}}\n\nstill fenced {{ns:do}}\n";
+        assert_eq!(
+            contexts(doc),
+            vec![
+                ("dev".into(), NsContext::CodeBlock),
+                ("do".into(), NsContext::CodeBlock),
+            ]
+        );
+        let (out, n) = unwrap_misplaced(doc, false);
+        assert_eq!(n, 2, "both tokens are un-wrapped: {out}");
+    }
+
+    #[test]
+    fn crlf_documents_classify_and_rewrite_like_lf_ones() {
+        // spec: NS-46 NS-47
+        // A carriage return rides along on every line; it must not break fence
+        // matching (the run is followed by `\r`, not by end-of-line), span
+        // matching, or byte-exact round-tripping of the line ending.
+        let doc = "````md\r\n```sh\r\n{{ns:dev}}\r\n```\r\n````\r\n\r\n\
+                   Read it with `gh auth\r\ntoken` then {{ns:do}} runs.\r\n";
+        assert_eq!(
+            contexts(doc),
+            vec![
+                ("dev".into(), NsContext::CodeBlock),
+                ("do".into(), NsContext::Prose),
+            ]
+        );
+        // Wrapping preserves CRLF byte for byte and reaches the prose mention.
+        let s = sibs(&["dev", "do"]);
+        let (out, n) = templatize("a\r\n\r\nRun `gh auth\r\ntoken` then dev.\r\n", &s);
+        assert_eq!(n, 1, "{out}");
+        assert_eq!(out, "a\r\n\r\nRun `gh auth\r\ntoken` then {{ns:dev}}.\r\n");
+    }
+
+    #[test]
+    fn a_code_span_may_contain_brace_pairs() {
+        // spec: NS-46
+        // `{{` / `}}` inside a span are literal text, not token syntax: the span
+        // still matches by backtick run, the token inside one is still code, and
+        // a token after one is still prose.
+        let doc = "see `{{ns:dev}}` and `a }} b` then {{ns:do}} here\n";
+        assert_eq!(
+            contexts(doc),
+            vec![
+                ("dev".into(), NsContext::CodeSpan),
+                ("do".into(), NsContext::Prose),
+            ]
+        );
+        // Wrapping steps over a lone brace pair in a span without losing the
+        // prose mention that follows it.
+        let s = sibs(&["dev"]);
+        let (out, n) = templatize("`{{` and `}}` then dev\n", &s);
+        assert_eq!(n, 1, "{out}");
+        assert_eq!(out, "`{{` and `}}` then {{ns:dev}}\n");
+    }
+
+    #[test]
+    fn a_token_on_a_fence_delimiter_line_is_not_scanned() {
+        // spec: NS-47
+        // A delimiter line is structure, not content. A token in an info string
+        // is invisible to the scan, so `--fix` neither reports nor rewrites it
+        // (`expand` still substitutes it at install time).
+        let doc = "```{{ns:dev}}\nbody\n```\nprose {{ns:do}}\n";
+        assert_eq!(contexts(doc), vec![("do".into(), NsContext::Prose)]);
+        let (out, n) = unwrap_misplaced(doc, false);
+        assert_eq!(n, 0, "nothing on a delimiter line is rewritten: {out}");
+        assert_eq!(out, doc);
+        // A run that carries text while a block is open is content, not a
+        // closer, so a token on it *is* seen, as code.
+        let doc = "```\n``` {{ns:dev}}\n```\nprose {{ns:do}}\n";
+        assert_eq!(
+            contexts(doc),
+            vec![
+                ("dev".into(), NsContext::CodeBlock),
+                ("do".into(), NsContext::Prose),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_table_row_bounds_a_code_span() {
+        // spec: NS-46
+        // Rows are separate blocks: an unmatched backtick in one cannot pair
+        // with one in the next and swallow the token between them.
+        let doc = "| col | note |\n|---|---|\n| a ` b | see {{ns:dev}} |\n\
+                   | c ` d | and {{ns:do}} |\n";
+        assert_eq!(
+            contexts(doc),
+            vec![
+                ("dev".into(), NsContext::Prose),
+                ("do".into(), NsContext::Prose),
+            ]
+        );
+        // A real span inside one cell still classifies its token as code.
+        let doc = "| a | `{{ns:dev}}` | {{ns:do}} |\n";
+        assert_eq!(
+            contexts(doc),
+            vec![
+                ("dev".into(), NsContext::CodeSpan),
+                ("do".into(), NsContext::Prose),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_indented_fence_line_opens_a_block() {
+        // spec: NS-47 NS-49
+        // A fence nested in a list item is indented to the item's content
+        // column, and is still a fence. The indent allowance is measured from
+        // that column (NS-49), not from column zero, which is what keeps this
+        // working while a four-column indent at document level does not open a
+        // fence (`an_indented_code_block_...` below).
+        let doc = "- item:\n\n  ```sh\n  echo {{ns:dev}}\n  ```\n\nprose {{ns:do}}\n";
+        assert_eq!(
+            contexts(doc),
+            vec![
+                ("dev".into(), NsContext::CodeBlock),
+                ("do".into(), NsContext::Prose),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_fence_opens_inside_a_list_item_whose_content_column_is_four() {
+        // spec: NS-49
+        // The case that rules out "just stop trimming indentation": an ordered
+        // item written `1.  text` starts its content at column 4, so its fence
+        // is indented four columns and must still open. Only four columns *past*
+        // the item's own content column is indented code.
+        let doc = "1.  step:\n\n    ```sh\n    echo {{ns:dev}}\n    ```\n\nprose {{ns:do}}\n";
+        assert_eq!(
+            contexts(doc),
+            vec![
+                ("dev".into(), NsContext::CodeBlock),
+                ("do".into(), NsContext::Prose),
+            ]
+        );
+        // Nested items compose: the inner item's content column is 4, so its
+        // fence at column 4 opens too.
+        let doc =
+            "- outer\n  - inner\n\n    ```sh\n    echo {{ns:dev}}\n    ```\n\nprose {{ns:do}}\n";
+        assert_eq!(
+            contexts(doc),
+            vec![
+                ("dev".into(), NsContext::CodeBlock),
+                ("do".into(), NsContext::Prose),
+            ]
+        );
+        // And a line four columns past the inner item's content column is
+        // indented code inside the item, not a fence.
+        let doc = "- outer\n  - inner:\n\n        ```\n\n    still the item, {{ns:dev}}\n";
+        assert_eq!(contexts(doc), vec![("dev".into(), NsContext::Prose)]);
+    }
+
+    #[test]
+    fn an_indented_code_block_containing_a_lone_fence_line_is_not_a_fence() {
+        // spec: NS-49
+        // An indented code block (four columns, at document level) showing a
+        // literal fence delimiter. CommonMark reads the ``` as content of the
+        // indented block, and so does this: it opens nothing, so the token in
+        // the prose below it is prose and `review --fix` leaves it alone.
+        // Previously it opened a fence nothing closed, and every token after it
+        // classified CodeBlock -- the same destructive shape as the filed bug.
+        let doc = "Wrap the reply in a fence, opened by:\n\n    ```\n\n\
+                   Then see the {{ns:dev}} skill.\n";
+        assert_eq!(contexts(doc), vec![("dev".into(), NsContext::Prose)]);
+        // The indented block is code, so a token *in* it is still misplaced and
+        // a bare name in it is never wrapped.
+        let doc = "Sample:\n\n    mind learn {{ns:dev}}\n\nprose {{ns:do}} here\n";
+        assert_eq!(
+            contexts(doc),
+            vec![
+                ("dev".into(), NsContext::CodeBlock),
+                ("do".into(), NsContext::Prose),
+            ]
+        );
+        let s = sibs(&["dev", "do"]);
+        let (out, n) = templatize("Sample:\n\n    mind learn dev\n\nprose do here\n", &s);
+        assert_eq!(n, 1, "only the prose mention is wrapped: {out}");
+        assert!(out.contains("    mind learn dev\n"), "{out}");
+    }
+
+    #[test]
+    fn an_unclosed_fence_in_a_list_item_ends_with_the_item() {
+        // spec: NS-49
+        // A fence's content is written from its list item's content column, so
+        // a line that dedents past it leaves the item and closes the fence. An
+        // unclosed fence inside an item would otherwise swallow the rest of the
+        // document and `--fix` would de-tokenize every prose token below it --
+        // the same destructive shape as an indented ``` opening a false fence.
+        let doc = "- item:\n\n  ```sh\n  echo hi\n\nBack at top level, {{ns:dev}}.\n";
+        assert_eq!(contexts(doc), vec![("dev".into(), NsContext::Prose)]);
+        // The content of the fence is still code while the item holds it.
+        let doc = "- item:\n\n  ```sh\n  echo {{ns:dev}}\n\ntop level {{ns:do}}\n";
+        assert_eq!(
+            contexts(doc),
+            vec![
+                ("dev".into(), NsContext::CodeBlock),
+                ("do".into(), NsContext::Prose),
+            ]
+        );
+        // A top-level fence has no such boundary: it still runs to the end of
+        // the document (NS-47), because no dedent can leave column zero.
+        let doc = "```sh\necho hi\n\nstill fenced {{ns:dev}}\n";
+        assert_eq!(contexts(doc), vec![("dev".into(), NsContext::CodeBlock)]);
+    }
+
+    #[test]
+    fn an_indented_line_that_continues_a_paragraph_is_still_prose() {
+        // spec: NS-49
+        // An indented code block cannot interrupt a paragraph, so a wrapped and
+        // over-indented continuation line is prose, not code. Reading it as code
+        // would be the same destructive un-wrap in the other direction.
+        let doc = "This sentence runs long and wraps\n    onto {{ns:dev}} here.\n";
+        assert_eq!(contexts(doc), vec![("dev".into(), NsContext::Prose)]);
+        // A blank line closes the paragraph, so the same indent then *is* code.
+        let doc = "This sentence ends.\n\n    onto {{ns:dev}} here.\n";
+        assert_eq!(contexts(doc), vec![("dev".into(), NsContext::CodeBlock)]);
+        // A heading leaves no paragraph open behind it.
+        let doc = "# Title\n    {{ns:dev}} here\n";
+        assert_eq!(contexts(doc), vec![("dev".into(), NsContext::CodeBlock)]);
+    }
+
+    #[test]
+    fn a_backslash_escaped_backtick_does_not_open_a_code_span() {
+        // spec: NS-50
+        // CommonMark treats `\`` as a literal backtick, never a delimiter.
+        // Previously it counted as a run, so it paired with the opener of the
+        // next real span and everything between them -- including a prose token
+        // -- read as code, which `review --fix` then deleted the wrapper of.
+        let doc = "Escape it with \\` in prose. Then see {{ns:dev}} and run `mind sync`.\n";
+        assert_eq!(contexts(doc), vec![("dev".into(), NsContext::Prose)]);
+        // A doubled backslash escapes the backslash, not the backtick, so the
+        // run is a real opener again and the token between the two is code.
+        let doc = "Literal \\\\` opens. Then {{ns:dev}} and `x`.\n";
+        assert_eq!(contexts(doc), vec![("dev".into(), NsContext::CodeSpan)]);
+        // Escapes do not apply inside a span: an escaped backtick still closes
+        // one that is already open, so the token after it is prose.
+        let doc = "run `a \\` then {{ns:dev}} here\n";
+        assert_eq!(contexts(doc), vec![("dev".into(), NsContext::Prose)]);
+        // Wrapping agrees: the bare mention after an escaped backtick is prose.
+        let s = sibs(&["dev"]);
+        let (out, n) = templatize("Escape it with \\` then see dev and run `x`.\n", &s);
+        assert_eq!(n, 1, "{out}");
+        assert_eq!(out, "Escape it with \\` then see {{ns:dev}} and run `x`.\n");
+    }
+
+    #[test]
+    fn fix_does_not_clear_an_unguarded_mention_outside_prose() {
+        // spec: NS-48
+        // The boundary NS-48 is scoped to, stated as a test rather than left as
+        // prose: `unguarded_refs` is context-free, so a sibling name inside a
+        // code span, inside a fence, or in the frontmatter is reported both
+        // before and after `--fix`, and `--fix` cannot clear it (un-wrapping put
+        // the first two there, and wrapping never touches any of the three).
+        let s = sibs(&["dev"]);
+        for doc in [
+            "run `{{ns:dev}}` now\n",
+            "```sh\nmind learn {{ns:dev}}\n```\n",
+            "---\nname: thing\ndescription: hand off to dev\n---\nbody\n",
+        ] {
+            let fixed = fix_passes(doc, &s);
+            assert_eq!(
+                unguarded_refs(&fixed, &s),
+                vec!["dev".to_string()],
+                "still reported, and `--fix` has no move left: {fixed}"
+            );
+        }
+    }
+
     #[test]
     fn templatize_skips_code_paths_and_frontmatter() {
         // spec: NS-24 INIT-5
@@ -1667,6 +2621,382 @@ mod tests {
         assert!(out.contains("~/dev"), "path untouched: {out}");
         assert!(out.contains("for x; do"), "code block untouched: {out}");
         assert!(out.contains("name: dev"), "frontmatter untouched: {out}");
+    }
+
+    // ---- outside-in second pass over the structural scan (NS-46..NS-50) ------
+    //
+    // Written against CommonMark rather than against the implementation: each
+    // case below states what a markdown renderer does with the document, and
+    // requires the classifier to agree wherever disagreeing would make `--fix`
+    // rewrite prose. A `#[ignore]`d test here is a demonstrated defect, not a
+    // style preference; its comment says which way the miss goes.
+
+    /// Un-wrapping is what `--fix` does to a token it calls code, so the whole
+    /// question for any document is: which tokens survive it?
+    fn surviving(doc: &str) -> String {
+        unwrap_misplaced(doc, false).0
+    }
+
+    #[test]
+    fn list_item_content_col_reads_every_marker_shape() {
+        // spec: NS-49
+        // The baseline every indent rule measures against, tested directly
+        // rather than through a document, so a change of shape shows up here
+        // instead of as a distant misclassification.
+        let col = list_item_content_col;
+        // Bullet markers: content starts after the marker plus its spaces.
+        assert_eq!(col("- item"), Some(2));
+        assert_eq!(col("* item"), Some(2));
+        assert_eq!(col("+ item"), Some(2));
+        assert_eq!(col("-   item"), Some(4), "three spaces put content at 4");
+        assert_eq!(col("-    item"), Some(5), "four spaces still count");
+        assert_eq!(
+            col("-     item"),
+            Some(2),
+            "five or more spaces start indented code inside the item, whose \
+             content column is one past the marker"
+        );
+        // An empty item: the marker ends the line.
+        assert_eq!(col("-"), Some(2));
+        assert_eq!(col("1."), Some(3));
+        // Ordered markers, both terminators, and the nine-digit cap.
+        assert_eq!(col("1. step"), Some(3));
+        assert_eq!(col("1) step"), Some(3));
+        assert_eq!(col("10. step"), Some(4));
+        assert_eq!(col("1.  step"), Some(4), "two spaces after `1.`");
+        assert_eq!(col("1234567890. step"), None, "ten digits is not a marker");
+        assert_eq!(col("123456789. step"), Some(11));
+        // Nesting adds the line's own indentation.
+        assert_eq!(col("  - inner"), Some(4));
+        assert_eq!(col("\t- inner"), Some(6), "a tab advances to column 4");
+        // Not markers.
+        assert_eq!(col("-item"), None, "no space after the marker");
+        assert_eq!(col("1.step"), None);
+        assert_eq!(col("---"), None, "a thematic break of dashes");
+        assert_eq!(col("***"), None);
+        assert_eq!(col("text"), None);
+        assert_eq!(col(""), None);
+        // Known and accepted: a spaced thematic break parses as a list marker,
+        // which lifts the indent baseline to column 2 for the lines under it.
+        // It cannot delete a token (the fence-dedent rule and the container pop
+        // both fire on the next line at column 0), so it is left alone.
+        assert_eq!(col("* * *"), Some(2));
+        // Known and understated (NS-49): a tab after the marker counts as one
+        // column where CommonMark advances to the next multiple of four. That
+        // errs toward "this is a fence", never toward deleting prose.
+        assert_eq!(col("-\titem"), Some(2), "CommonMark would say 4");
+    }
+
+    #[test]
+    fn indent_cols_expands_tabs_to_the_next_multiple_of_four() {
+        // spec: NS-49
+        assert_eq!(indent_cols("x"), 0);
+        assert_eq!(indent_cols("    x"), 4);
+        assert_eq!(indent_cols("\tx"), 4);
+        assert_eq!(indent_cols(" \tx"), 4, "a tab completes the first stop");
+        assert_eq!(indent_cols("    \tx"), 8);
+        assert_eq!(indent_cols("\t\tx"), 8);
+        assert_eq!(indent_cols("  "), 2, "a whitespace-only line");
+    }
+
+    #[test]
+    fn a_tab_indented_block_is_code_at_document_level() {
+        // spec: NS-49
+        // The column count is only worth measuring if it reaches the decision:
+        // one tab is a full indent, so the block below is code and its token is
+        // un-wrapped, while the paragraph after it keeps its own. A tab counted
+        // as one column would make the sample prose and let wrapping rewrite
+        // the names in it.
+        let doc = "Sample:\n\n\tmind learn {{ns:dev}}\n\nprose {{ns:do}}\n";
+        assert_eq!(
+            contexts(doc),
+            vec![
+                ("dev".into(), NsContext::CodeBlock),
+                ("do".into(), NsContext::Prose)
+            ]
+        );
+        let s = sibs(&["dev", "do"]);
+        let (out, n) = templatize("Sample:\n\n\tmind learn dev\n\nprose do\n", &s);
+        assert_eq!(n, 1, "only the prose mention is wrapped: {out}");
+        assert!(out.contains("\tmind learn dev\n"), "{out}");
+    }
+
+    #[test]
+    fn a_blank_line_keeps_a_list_item_open_and_a_dedent_closes_it() {
+        // spec: NS-49
+        // The container stack, probed at its two decision points. An item holds
+        // its blank lines, so the block after one is measured from the item's
+        // content column; a non-blank line at a lower column leaves the item,
+        // and leaves every item nested inside it.
+        //
+        // Item content at column 2 with a fence written at column 2: inside.
+        let doc = "- item:\n\n  ```sh\n  echo {{ns:a}}\n  ```\n\n  Then {{ns:b}}.\n";
+        assert_eq!(
+            contexts(doc),
+            vec![
+                ("a".into(), NsContext::CodeBlock),
+                ("b".into(), NsContext::Prose)
+            ],
+            "a blank line inside the item does not end it"
+        );
+        // Two levels of nesting, then one line back at column 0: both pop, so
+        // the four-column line that follows is indented code again.
+        let doc = "- outer\n  - inner\n\n    text {{ns:a}}\n\nback at zero\n\n    {{ns:b}} here\n";
+        assert_eq!(
+            contexts(doc),
+            vec![
+                ("a".into(), NsContext::Prose),
+                ("b".into(), NsContext::CodeBlock)
+            ],
+            "the inner item's content column is 4, so `    text` is prose; after \
+             the dedent the baseline is 0 again, so the same indent is code"
+        );
+        // Sibling items at the same column do not stack a deeper baseline: the
+        // eight-column line under the second item is still indented code.
+        let doc = "- one\n- two\n- three\n\n        {{ns:a}} deep\n";
+        assert_eq!(contexts(doc), vec![("a".into(), NsContext::CodeBlock)]);
+    }
+
+    #[test]
+    fn an_escape_never_reaches_across_a_line_break() {
+        // spec: NS-50
+        // The backslash scan walks backwards over bytes; a line ending in a
+        // backslash (a hard line break) must not escape the first backtick of
+        // the next line, or a real span opener would be dropped and the token
+        // *inside* it would read as prose and survive a `--fix` that should
+        // have un-wrapped it. Checked in the direction that matters: the token
+        // between the two runs is code.
+        let doc = "A trailing backslash \\\nthen `run {{ns:dev}} now` here\n";
+        assert_eq!(contexts(doc), vec![("dev".into(), NsContext::CodeSpan)]);
+        // The same with CRLF: the byte before the backtick is `\n`, not `\\`.
+        let doc = "A trailing backslash \\\r\nthen `run {{ns:dev}} now` here\r\n";
+        assert_eq!(contexts(doc), vec![("dev".into(), NsContext::CodeSpan)]);
+        // A hard line break written as two trailing spaces changes nothing.
+        let doc = "Wrapped line  \nthen `run {{ns:dev}} now` here\n";
+        assert_eq!(contexts(doc), vec![("dev".into(), NsContext::CodeSpan)]);
+        // A backslash at the very start of the paragraph escapes the backtick
+        // right after it, and the scan stops at the paragraph boundary rather
+        // than reading backslashes out of the block above.
+        let doc =
+            "para one ends \\\n\n\\` opens nothing, so {{ns:dev}} is prose and `x` is a span\n";
+        assert_eq!(contexts(doc), vec![("dev".into(), NsContext::Prose)]);
+    }
+
+    #[test]
+    fn an_escaped_backtick_closes_an_open_span_and_is_literal_after_it() {
+        // spec: NS-50
+        // The asymmetry, driven past the first span: escapes do not apply inside
+        // a span, so `\`` closes one; the run after the close is a fresh opener
+        // and *is* escape-checked, so an escaped one there opens nothing.
+        let doc = "run `a \\` then {{ns:one}} and \\` still prose {{ns:two}} and `x`\n";
+        assert_eq!(
+            contexts(doc),
+            vec![
+                ("one".into(), NsContext::Prose),
+                ("two".into(), NsContext::Prose)
+            ],
+            "the span is `a \\`; both later tokens sit in prose"
+        );
+        // Two backslashes escape the backslash, so the backtick is a live
+        // opener again and the token between it and the next run is code.
+        let doc = "literal \\\\` opens a span with {{ns:dev}} in it `\n";
+        assert_eq!(contexts(doc), vec![("dev".into(), NsContext::CodeSpan)]);
+        // Three backslashes: the backtick is escaped again.
+        let doc = "literal \\\\\\` opens nothing, {{ns:dev}} is prose, `x` is a span\n";
+        assert_eq!(contexts(doc), vec![("dev".into(), NsContext::Prose)]);
+    }
+
+    #[test]
+    fn a_word_after_a_multibyte_character_is_measured_in_bytes() {
+        // spec: NS-46
+        // Code-span ranges are byte offsets into the document, while `wrap_line`
+        // walks the line by `char`. A single multi-byte character ahead of a
+        // sibling name shifts one against the other, so a mention inside a span
+        // would be wrapped (corrupting the sample) and one outside skipped.
+        let doc = "R\u{e9}sum\u{e9}: run `mind learn {{ns:dev}}` then see {{ns:do}}.\n";
+        assert_eq!(
+            contexts(doc),
+            vec![
+                ("dev".into(), NsContext::CodeSpan),
+                ("do".into(), NsContext::Prose)
+            ]
+        );
+        let s = sibs(&["dev"]);
+        let (out, n) = templatize("R\u{e9}sum\u{e9}: run `dev` then see dev.\n", &s);
+        assert_eq!(n, 1, "only the mention outside the span is wrapped: {out}");
+        assert_eq!(out, "R\u{e9}sum\u{e9}: run `dev` then see {{ns:dev}}.\n");
+        // The same across a line break, where the offset is the line's own base.
+        let (out, n) = templatize("caf\u{e9} `gh auth\ntoken` then dev.\n", &s);
+        assert_eq!(n, 1, "{out}");
+        assert_eq!(out, "caf\u{e9} `gh auth\ntoken` then {{ns:dev}}.\n");
+    }
+
+    #[test]
+    fn a_spaced_thematic_break_lifts_the_baseline_but_cannot_delete_a_token() {
+        // spec: NS-49
+        // `* * *` parses as a list marker (see the marker test above), so the
+        // lines under it are measured from column 2 rather than column 0. That
+        // is wrong, and this is the bound on how wrong: the fence-dedent rule
+        // and the container pop both fire on the next line at column 0, so no
+        // token can end up in code that a renderer calls prose.
+        let doc = "intro\n\n* * *\n\n  ```\n\nThen see {{ns:dev}}.\n";
+        assert_eq!(
+            contexts(doc),
+            vec![("dev".into(), NsContext::Prose)],
+            "a fence opened under the break closes when the document dedents"
+        );
+        // The other direction of the same error: four columns under the break
+        // is an indented code block to a renderer and prose here, so wrapping
+        // may rewrite a name inside it. Non-destructive to tokens, and pinned
+        // so that a change of shape is a decision rather than a surprise.
+        let doc = "intro\n\n* * *\n\n    mind learn {{ns:dev}}\n";
+        assert_eq!(contexts(doc), vec![("dev".into(), NsContext::Prose)]);
+    }
+
+    #[test]
+    #[ignore = "defect: a fence opened on a list-marker line is read as prose, \
+                and its closer as an opener, so `--fix` deletes every token in \
+                the rest of the item"]
+    fn a_fence_opened_on_a_list_marker_line_is_still_a_fence() {
+        // spec: NS-47 NS-49
+        // A fenced block may open on the same line as the list marker. The
+        // classifier only looks for a delimiter at the *start* of a line, so it
+        // reads the opener as prose and then reads the real closer as an
+        // opener: from there the rest of the item is a code block and `--fix`
+        // deletes every token in it.
+        let doc = "Setup:\n\n- ```sh\n  mind sync\n  ```\n\n  Then see the {{ns:dev}} skill.\n";
+        // NS-48 fails here too: every sibling mention in this document sits in
+        // prose, yet `--fix` leaves a bare one behind.
+        let s = sibs(&["dev"]);
+        assert_eq!(
+            unguarded_refs(&fix_passes(doc, &s), &s),
+            Vec::<String>::new(),
+            "NS-48"
+        );
+        assert_eq!(
+            contexts(doc),
+            vec![("dev".into(), NsContext::Prose)],
+            "the item's trailing paragraph is prose, not code"
+        );
+        assert_eq!(surviving(doc), doc, "`--fix` must not touch it");
+    }
+
+    #[test]
+    #[ignore = "defect: a thematic break, a setext underline, and an HTML block \
+                are not block boundaries to the span matcher, so a code span \
+                leaks across one and `--fix` deletes the token it covers"]
+    fn a_thematic_break_ends_the_paragraph_a_code_span_may_cross() {
+        // spec: NS-46
+        // A code span may cross a line break inside one paragraph, so the run
+        // it is matched over has to stop at every block boundary. A thematic
+        // break (`***`) and a setext underline (`---`) both end the paragraph
+        // above them, and neither is recognized, so a lone literal backtick in
+        // that paragraph pairs with the opener of a real span two blocks later
+        // and everything between them -- including a prose token -- reads as a
+        // code span that `--fix` un-wraps.
+        let doc = "Type a lone ` in prose\n---\nThen see {{ns:dev}} and run `mind sync`.\n";
+        // NS-48 fails on the same documents: the mention is prose, and `--fix`
+        // hands back the bare name the unguarded-reference check reports.
+        let s = sibs(&["dev"]);
+        assert_eq!(
+            unguarded_refs(&fix_passes(doc, &s), &s),
+            Vec::<String>::new(),
+            "NS-48"
+        );
+        assert_eq!(
+            contexts(doc),
+            vec![("dev".into(), NsContext::Prose)],
+            "setext"
+        );
+        assert_eq!(surviving(doc), doc);
+        let doc = "Type a lone ` in prose\n***\nThen see {{ns:dev}} and run `mind sync`.\n";
+        assert_eq!(
+            contexts(doc),
+            vec![("dev".into(), NsContext::Prose)],
+            "break"
+        );
+        assert_eq!(surviving(doc), doc);
+        // An HTML block interrupts a paragraph the same way.
+        let doc = "Type a lone ` in prose\n<div>\nThen see {{ns:dev}} and run `mind sync`.\n";
+        assert_eq!(
+            contexts(doc),
+            vec![("dev".into(), NsContext::Prose)],
+            "html"
+        );
+        assert_eq!(surviving(doc), doc);
+        // NS-48 fails on the same documents: the mention is prose, and `--fix`
+        // hands back the bare name the unguarded-reference check reports.
+        let s = sibs(&["dev"]);
+        assert_eq!(
+            unguarded_refs(&fix_passes(doc, &s), &s),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    #[ignore = "defect: a setext underline is treated as ordinary paragraph \
+                text, so the indented code block after one is read as a lazy \
+                continuation and wrapping rewrites a name inside the sample"]
+    fn a_setext_heading_leaves_no_paragraph_open_behind_it() {
+        // spec: NS-49
+        // The lazy-continuation rule asks whether a paragraph is open above an
+        // indented line. A setext heading closes the paragraph it is made of,
+        // so the indented block after one is code; reading it as a lazy
+        // continuation makes it prose, and wrapping then rewrites a bare name
+        // inside a code sample.
+        let doc = "Title\n---\n    mind learn {{ns:dev}}\n";
+        assert_eq!(contexts(doc), vec![("dev".into(), NsContext::CodeBlock)]);
+        let s = sibs(&["dev"]);
+        let (out, n) = templatize("Title\n---\n    mind learn dev\n", &s);
+        assert_eq!(n, 0, "nothing in the code block is wrapped: {out}");
+        // A thematic break closes the paragraph above it for the same reason.
+        let doc = "Some prose\n***\n    mind learn {{ns:dev}}\n";
+        assert_eq!(contexts(doc), vec![("dev".into(), NsContext::CodeBlock)]);
+    }
+
+    #[test]
+    #[ignore = "defect: wrapping nests a new token inside a `{{ns:}}` token \
+                that spans a line break, producing `{{ns:\\n{{ns:dev}} }}`, \
+                which `install` then rejects as a bad reference"]
+    fn a_token_broken_across_a_line_break_is_left_alone() {
+        // spec: NS-24 NS-46
+        // `expand` finds a `{{ns:}}` token document-wide, so a token split over
+        // a line break is a live reference at install time. The scan and the
+        // wrapper both work line by line and neither sees it. Not seeing it is
+        // acceptable; wrapping *into* it is not, and that is what happens: the
+        // wrapper swallows the rest of the opening line looking for `}}`, then
+        // treats the next line as ordinary prose and wraps the name inside the
+        // token, producing `{{ns:\n{{ns:dev}}}}`, which `install` then rejects
+        // as a bad reference (the source stops installing at all).
+        let s = sibs(&["dev"]);
+        let doc = "see {{ns:\ndev }} for the handoff\n";
+        let (out, n) = templatize(doc, &s);
+        assert_eq!(n, 0, "a split token is left alone, not nested: {out}");
+        assert_eq!(out, doc);
+    }
+
+    #[test]
+    #[ignore = "defect: `> ` hides the delimiter, so a blockquoted fence is \
+                prose throughout and wrapping rewrites a bare sibling name \
+                inside the quoted code"]
+    fn a_fence_inside_a_blockquote_is_a_fence() {
+        // spec: NS-47
+        // `> ` before the delimiter hides it, so the quoted block classifies as
+        // prose throughout. That cannot delete a token, but it is the same
+        // defect pointed the other way: wrapping rewrites a bare sibling name
+        // inside quoted code, and the rewritten sample is wrong for the reader
+        // and expands to a prefixed name at install.
+        let s = sibs(&["dev"]);
+        let (out, n) = templatize("> ```sh\n> mind learn dev\n> ```\n", &s);
+        assert_eq!(n, 0, "quoted code is not prose: {out}");
+        let doc = "> ```sh\n> mind learn {{ns:dev}}\n> ```\n\nThen see {{ns:do}}.\n";
+        assert_eq!(
+            contexts(doc),
+            vec![
+                ("dev".into(), NsContext::CodeBlock),
+                ("do".into(), NsContext::Prose)
+            ]
+        );
     }
 
     #[test]

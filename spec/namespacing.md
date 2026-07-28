@@ -219,3 +219,58 @@ at runtime. Prefixing changes installed names, so references must be rewritten.
   reference an item by path token instead (`{{self}}`, `{{tools:}}`, `{{path:}}`;
   tooling.md), never by `{{ns:}}`. `review` detects misplaced tokens (CLI-139) and
   `init-source --template` does not create them (INIT-5).
+
+### Structural scanning
+
+Deciding whether a token sits in code (NS-24) is a question about markdown
+structure, and both constructs that answer it are document-wide, not line-local:
+an inline code span may close on a later line, and a fenced block may contain a
+fence of its own. The scan reads them that way. The same structure map drives
+un-wrapping (`review --fix`, CLI-138) and wrapping (`templatize`, INIT-5), so the
+two passes cannot disagree about what is code.
+
+- `NS-46` An inline code span is a run of backticks matched by a later run of
+  exactly the same length. The span may cross a line break inside a paragraph and
+  is terminated by a blank line or the start of a new block (a heading, list
+  item, blockquote, or table row); a run with no matching run is literal text,
+  and scanning resumes after it. A `{{ns:}}` token is in a code span only when it
+  falls inside a matched span, so a token following a span that closed on a
+  continuation line is prose, not a misplaced reference.
+- `NS-47` A fenced code block opens on a line whose leading run is at least three
+  backticks or tildes, followed only by an info string, and closes only on a run
+  of the same character that is at least as long with nothing else on the line. A
+  shorter run, a run of the other character, or a run carrying an info string is
+  block content, so an inner example fence does not close the block that contains
+  it and a four-backtick fence is not closed by a three-backtick one. A backtick
+  opener's info string may not itself contain a backtick, so a line that leads
+  with a backtick run and carries more backticks after it is text with code spans
+  (NS-46), not a fence.
+- `NS-49` Indentation is measured against the content column of the innermost
+  open list item, which is the column that item's own content starts in (zero
+  when no list item is open); a tab advances to the next multiple of four
+  columns. A fence delimiter may be indented at most three columns past that
+  baseline, so a fence nested in a list item is still a fence. A line indented
+  four or more columns past the baseline is never a delimiter: it is an indented
+  code block when no paragraph is open above it (its tokens are in code), and a
+  lazy continuation of that paragraph otherwise (its tokens are prose). So a
+  document showing a bare ` ``` ` inside an indented code block opens no block,
+  and the prose after it stays prose. A fenced block opened inside a list item
+  ends with the item: a non-blank line that dedents past the item's content
+  column closes it, so an unclosed fence there does not run to the end of the
+  document the way an unclosed fence at column zero does (NS-47).
+- `NS-50` A backtick preceded by an odd number of backslashes is escaped: it is
+  literal text and never opens a code span (NS-46). Backslash escapes do not
+  apply inside a code span, so an escaped backtick still closes a span that is
+  already open.
+- `NS-48` `review --fix` (CLI-138) leaves no unguarded reference in prose: for
+  content whose sibling mentions all sit in prose (already tokenized or bare),
+  the rewritten content is reported clean by the unguarded-reference check
+  (NS-20, NS-21). A prose token misclassified as code would otherwise be
+  un-wrapped into exactly the bare name that check reports, and under a prefix
+  that name no longer resolves (NS-11). The requirement is scoped to prose
+  because the unguarded-reference check is context-free while both `--fix`
+  passes are not: un-wrapping a token that really is in code restores a bare
+  name that NS-20 still reports, and wrapping declines to re-wrap it (NS-24), so
+  `--fix` cannot clear it. The same holds for a sibling name in a frontmatter
+  field, which NS-20 reports and wrapping never touches. Those are known false
+  positives of the advisory, not failures of this requirement.

@@ -690,21 +690,31 @@ pub enum MindError {
     )]
     LinkedSourceGone { source_name: String, path: String },
 
-    /// HOOK-107: a `hooks run <target>` invocation found at least one hook
-    /// that existed and needed running, but EVERY one of them was skipped for
-    /// want of consent (no terminal, and `--dangerously-skip-install-hook-check`
-    /// not given) - so the run did nothing, silently, in the state where a
-    /// provisioning script most needs to know it. A run with nothing to do (no
-    /// hooks declared, or every install hook already ran at the current
-    /// commit) is unaffected and stays exit 0; only "there was work and
-    /// consent was unavailable" is this error.
-    // spec: HOOK-107
+    /// HOOK-107 (source targets) / HOOK-108 (item targets): a `hooks run
+    /// <target>` invocation found at least one hook that existed and needed
+    /// running, but EVERY one of them was skipped for want of consent (no
+    /// terminal, and `--dangerously-skip-install-hook-check` not given) - so
+    /// the run did nothing, silently, in the state where a provisioning script
+    /// most needs to know it. A run with nothing to do (no hooks declared, or
+    /// every install hook already ran at the current commit) is unaffected and
+    /// stays exit 0; only "there was work and consent was unavailable" is this
+    /// error.
+    ///
+    /// `event` is the lifecycle event the run selected, carried so the printed
+    /// remedy re-selects it (HOOK-106): without it the suggested command
+    /// re-runs the default `install` hooks, which for an `uninstall` run is
+    /// different code than the one that was skipped.
+    // spec: HOOK-106 HOOK-107 HOOK-108
     #[error(
         "hooks run '{target}': {skipped} hook(s) had work to do but were skipped for want of \
-         consent (not a terminal); re-run with 'mind hooks run {target} \
+         consent (not a terminal); re-run with 'mind hooks run {target} --event {event} \
          --dangerously-skip-install-hook-check' to run them unattended"
     )]
-    HooksNotRun { target: String, skipped: usize },
+    HooksNotRun {
+        target: String,
+        event: String,
+        skipped: usize,
+    },
 }
 
 fn status_suffix(status: Option<ExitStatus>) -> String {
@@ -1262,6 +1272,7 @@ mod tests {
         assert_eq!(
             MindError::HooksNotRun {
                 target: "t".into(),
+                event: "install".into(),
                 skipped: 1,
             }
             .kind(),
@@ -1315,19 +1326,47 @@ mod tests {
         );
     }
 
-    // spec: HOOK-107
+    // spec: HOOK-107 HOOK-106
     #[test]
     fn hooks_not_run_names_target_count_and_remedy() {
         let e = MindError::HooksNotRun {
             target: "myrepo".into(),
+            event: "install".into(),
             skipped: 2,
         };
         let msg = e.to_string();
         assert!(msg.contains("myrepo"), "must name the target: {msg}");
         assert!(msg.contains('2'), "must name the skipped count: {msg}");
         assert!(
-            msg.contains("mind hooks run myrepo --dangerously-skip-install-hook-check"),
+            msg.contains(
+                "mind hooks run myrepo --event install --dangerously-skip-install-hook-check"
+            ),
             "must give the copy-pasteable remedy: {msg}"
+        );
+    }
+
+    /// HOOK-106: the remedy re-selects the event the run selected. Without the
+    /// `--event` segment the printed command re-runs the source's INSTALL
+    /// hooks, which is different code than the uninstall hooks that were
+    /// skipped -- a silent substitution for anyone who copy-pastes it.
+    // spec: HOOK-106
+    #[test]
+    fn hooks_not_run_remedy_carries_the_selected_event() {
+        let e = MindError::HooksNotRun {
+            target: "myrepo".into(),
+            event: "uninstall".into(),
+            skipped: 1,
+        };
+        let msg = e.to_string();
+        assert!(
+            msg.contains(
+                "mind hooks run myrepo --event uninstall --dangerously-skip-install-hook-check"
+            ),
+            "the remedy must re-select the uninstall event: {msg}"
+        );
+        assert!(
+            !msg.contains("--event install"),
+            "the remedy must not name a different event than the run selected: {msg}"
         );
     }
 

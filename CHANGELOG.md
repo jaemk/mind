@@ -8,6 +8,41 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `mind review --fix` was deleting valid `{{ns:}}` tokens out of prose,
+  producing bare names that no longer resolve under a prefixed meld. Its
+  line-local backtick-parity and naive fence-toggle scanners are replaced with
+  a document-wide CommonMark-structural read, shared by `--fix` and
+  `init-source --template`'s wrapper: code spans matched by backtick run
+  length, fenced blocks matched by run length and character, indentation
+  measured against list-item content columns, and backslash escapes (NS-46,
+  NS-47, NS-49, NS-50). Several shapes are still misclassified and remain
+  open, pinned as `#[ignore]`d tests rather than left undiscovered: a fence
+  opened on the same line as a list marker, a code span crossing a thematic
+  break/setext underline/HTML block, a setext heading's paragraph closing
+  before an indented block after it, a `{{ns:}}` token split across a line
+  break, and a fence inside a blockquote. NS-48 (no unguarded reference
+  survives `--fix`) is not yet clean on any document that hits one of these.
+- `meld` on an already-melded source whose linked working tree has since
+  vanished no longer reports it as a healthy source with `0 item(s)` at exit
+  0; it now names the gone working tree the same way `recall`/`probe`
+  already did (CLI-212, CLI-213).
+- `review`'s CLI-215 ambiguity note is now printed at most once per target.
+  Taking the CLI-214 local-directory reading no longer also prints the
+  CLI-215 note, which would tell the user to write `./<target>` to get the
+  very reading `review` had just taken (CLI-216).
+- A relative `[discover].sources` entry that only resolves inside a curator's
+  own working tree, and inside a clone resolves to a sibling mind never
+  created, no longer hard-fails the whole meld under the DSC-80 curator
+  guard; it is skipped with a warning, and the absolute entry `dump` always
+  emits for the same nested source still installs it (DSC-93).
+- `resources/install.sh`'s `fetch_to` (the release-asset and `SHA256SUMS`
+  downloader) now checks for `curl`/`wget` on `PATH` itself, instead of
+  surfacing a misleading `download failed: <url>` when neither is present and
+  `MIND_VERSION` skipped the earlier check that would have caught it (STO-74).
+- `--force`'s `--help` text on `config lobes add`/`link-project` now names
+  both effects it has: overwriting a snapshot target, and overriding the
+  backfill guard on a foreign file at a lobe-add target. It previously named
+  only the snapshot one.
 - A local-path source is now recorded as an absolute path, so melding by a
   relative path and then working from another directory no longer breaks the
   source. An existing relative path is migrated to absolute on load when it
@@ -19,17 +54,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A relative local path in a curated mind.toml's `[discover].sources` now
   resolves against the directory that declares it, not the consumer's working
   directory (DSC-92).
-- `review` now accepts any target naming an existing directory, so a bare or
-  two-segment relative path is reviewed locally instead of being treated as
-  owner/repo and cloned (CLI-214, CLI-215).
+- `review` now accepts any target naming an existing directory that does not
+  first match a melded source, so a bare or two-segment relative path is
+  reviewed locally instead of being treated as owner/repo and cloned
+  (CLI-214, CLI-215).
 - Registering a lobe now creates its directory and links the already-installed
   items into it, so `link-project` and `config lobes add --preset` no longer
   register a lobe that silently never receives anything (HARN-15, HARN-17).
 - `introspect --fix` no longer reports a lobe it pruned in the same run as an
   outstanding issue (HARN-18).
 - `hooks run` that could not run anything because it had no terminal now names
-  the cause and the exact command to run it unattended, and exits non-zero
-  instead of reporting success (HOOK-106, HOOK-107).
+  the cause and an exact, copy-pasteable command (naming the `--event` it
+  selected) to run it unattended, and exits non-zero instead of reporting
+  success. This now covers an item target (`<source>#<item>`) the same as a
+  source target (HOOK-106, HOOK-107, HOOK-108).
 - Policy allowlist matching now compares the base `host/owner/repo` identity at
   every gate, so an instance admitted at meld time is no longer skipped by
   `sync`, `upgrade`, and install-hook gating under a locked allowlist.
@@ -78,6 +116,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `hook::is_tty` now honors a `$MIND_TTY` override (falsy: empty, `0`,
+  `false`, `no`, `off`; anything else is truthy), read before inspecting
+  stdin, so the interactive-consent branches are reachable from a headless
+  test (HOOK-109).
 - `SECURITY.md` (reporting channel, trust model), `CONTRIBUTING.md`,
   `CODE_OF_CONDUCT.md`, issue and pull-request templates, and a `dependabot.yml`
   covering both `cargo` and `github-actions`.
@@ -149,6 +191,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Security
 
+- `--json` output is now produced from a single reserved channel: `main`
+  redirects the process's real stdout to stderr for the whole run and prints
+  only the recorded result document (or the CLI-181 error envelope) at the
+  very end, instead of relying on discipline at each call site. This closes
+  several concrete leaks (an unconverted progress line printed ahead of the
+  envelope on the install-hook, uninstall-hook, item-build-hook, and
+  item-install-hook paths) and a distinct class (a nested verb call -- `sync`'s
+  `auto_meld` install pass, `learn <url>`, `absorb` -- printing its own extra
+  result object ahead of the caller's, so stdout under `--json` could carry
+  more than one document). It also forecloses the general case: a source's
+  install hook is arbitrary output chosen by its author, and previously any
+  unrouted print anywhere in the call graph could reach `--json` stdout,
+  including a well-formed forgery of the result envelope (CLI-217).
 - `evolve` verifies the downloaded archive's build-provenance attestation with
   `gh attestation verify` when `gh` is on PATH, after the checksum check and
   before extraction. An absent `gh` or a tooling failure (no `attestation`
@@ -201,6 +256,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Documentation
 
+- Authoring guide and commands reference: corrected `review`'s target
+  precedence to "a target naming an existing directory is read as that local
+  path unless it first matches a melded source's identity" (was stated as
+  unconditional).
+- Configuration guide: corrected lobe backfill to say only a managed lobe
+  (not `--snapshot`) gets its directory created immediately, and that
+  backfill covers already-installed items of the kinds the new lobe admits,
+  not every installed item.
 - Enterprise guide: added a `GITHUB_TOKEN`/`GH_TOKEN` visibility note for
   shared hosts, covering the curl-vs-wget token exposure difference (STO-61).
 - Policy reference: documented that allow/lock matching runs against the base

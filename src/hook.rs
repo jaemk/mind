@@ -32,10 +32,31 @@ pub fn parse_hook_choice(input: &str) -> HookChoice {
     }
 }
 
-/// Whether stdin is an interactive terminal (the HOOK-22 gate). The one seam
-/// that cannot be exercised headlessly.
+/// Whether stdin is an interactive terminal (the HOOK-22 gate).
+///
+/// `$MIND_TTY` overrides the answer (HOOK-109) so the interactive branches are
+/// reachable from a headless test, following the `MIND_HOME` / `CLAUDE_HOME` /
+/// `MIND_DETECT_HOME` test-isolation precedent (`paths.rs`): the variable is
+/// read first and, when set, decides on its own; `is_terminal()` is the
+/// fallback consulted only when the variable is absent. Values are read as a
+/// boolean by [`tty_override`].
+// spec: HOOK-109
 pub fn is_tty() -> bool {
-    std::io::stdin().is_terminal()
+    match std::env::var_os("MIND_TTY") {
+        Some(v) => tty_override(&v),
+        None => std::io::stdin().is_terminal(),
+    }
+}
+
+/// Read a `$MIND_TTY` value as a boolean (HOOK-109). Empty, `0`, `false`, `no`,
+/// and `off` (any case, surrounding whitespace ignored) mean "not a terminal";
+/// every other value means "a terminal". Pure, so the mapping is unit-testable
+/// without mutating the process environment.
+fn tty_override(value: &std::ffi::OsStr) -> bool {
+    !matches!(
+        value.to_string_lossy().trim().to_ascii_lowercase().as_str(),
+        "" | "0" | "false" | "no" | "off"
+    )
 }
 
 /// The HOOK-20 disclosure shown before running a hook. Pure (returns a String)
@@ -360,6 +381,15 @@ pub fn apply_install_override(
 /// frames so both streams are visible in mind's output. Stdin is closed so a
 /// hook cannot consume mind's input. A non-zero exit (or spawn failure) maps to
 /// `MindError::HookFailed`.
+///
+/// The framed output below is a plain `println!`/`print!` on purpose, NOT
+/// `render::note`: what it echoes is arbitrary text chosen by the source
+/// author, so no per-line routing rule could bound it (a hook that printed
+/// `note:`-prefixed lines, or a forged result envelope, would defeat one).
+/// Under `--json` the process runs with fd 1 pointed at stderr for the whole
+/// run (main.rs's `json_stdout`), which is what keeps this out of the result
+/// document; in text mode it lands on stdout exactly as before.
+// spec: CLI-217
 pub fn run_hook(command: &str, clone_dir: &Path, identity: &str, label: &str) -> Result<()> {
     // Flush mind's own buffered output first so it does not interleave with the
     // hook's output blocks.
@@ -448,6 +478,28 @@ mod tests {
         // Abort or Run (HOOK-22: never run silently).
         assert_eq!(decide("d", false, false).unwrap(), HookAct::Skip);
         assert_eq!(decide("d", true, false).unwrap(), HookAct::Skip);
+    }
+
+    /// `$MIND_TTY` is read as a boolean: the falsey spellings mean "not a
+    /// terminal" and everything else means "a terminal". Driven through the
+    /// pure mapping so no process-wide env mutation is needed (the variable
+    /// itself is exercised end to end by the `hooks run` integration tests).
+    // spec: HOOK-109
+    #[test]
+    fn tty_override_reads_a_boolean() {
+        use std::ffi::OsStr;
+        for falsey in ["", "0", "false", "FALSE", "no", "off", "  0  "] {
+            assert!(
+                !tty_override(OsStr::new(falsey)),
+                "{falsey:?} must read as not-a-terminal"
+            );
+        }
+        for truthy in ["1", "true", "TRUE", "yes", "on", "anything"] {
+            assert!(
+                tty_override(OsStr::new(truthy)),
+                "{truthy:?} must read as a terminal"
+            );
+        }
     }
 
     /// RAII guard that removes a temp directory when dropped.

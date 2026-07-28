@@ -3699,22 +3699,15 @@ fn harn18_without_fix_the_vanished_lobe_is_still_counted() {
     );
 }
 
-// HARN-16 under `--json`: the one-time unreachable-lobe note goes to stdout via
-// a bare `println!`, with no render-context check. `learn --json` must still
-// emit a single JSON document on stdout, or every machine consumer breaks the
-// moment a configured lobe becomes unreachable.
-//
-// KNOWN DEFECT (ignored, not a coverage gap): src/install.rs
-// `note_unreachable_lobe_once` prints with an unguarded `println!`, so with an
-// unreachable lobe configured, `mind learn <item> --json` emits
-//   note: lobe '...' is unreachable ...
-//   { "schema": 1, "action": "learn", ... }
-// and stdout no longer parses as JSON. Guard the note on
-// `crate::render::ctx().json` (or route it to stderr) and un-ignore this test.
+// HARN-16 under `--json`: the one-time unreachable-lobe note runs on the
+// ordinary install path, ahead of `learn`'s JSON result. `learn --json` must
+// still emit a single JSON document on stdout, or every machine consumer breaks
+// the moment a configured lobe becomes unreachable. `note_unreachable_lobe_once`
+// routes through `render::note`, which sends it to stderr under `--json`
+// (CLI-217).
 #[test]
-#[ignore = "known defect: the HARN-16 note is printed unguarded and corrupts --json stdout"]
 fn harn16_unreachable_note_keeps_json_stdout_parseable() {
-    // spec: HARN-16
+    // spec: HARN-16 CLI-217
     let sb = Sandbox::new();
     let gone = sb.base.join("gone-json").join(".windsurf");
     sb.write_config(&format!(
@@ -3732,26 +3725,24 @@ fn harn16_unreachable_note_keeps_json_stdout_parseable() {
          must be suppressed or routed to stderr: {}",
         learn.stdout
     );
+    // CLI-217 routes the note, it does not delete it: it is still reported, on
+    // stderr. Deleting it would satisfy the assertion above and lose HARN-16.
+    assert!(
+        learn.stderr.contains("is unreachable"),
+        "the HARN-16 note must still be emitted, on stderr: {}",
+        learn.stderr
+    );
 }
 
-// HARN-17 under `--json`: a blocked backfill target prints a `could not link
-// ...` line through `println!` before the JSON result object, so the same
-// stdout-purity question applies to the foreign-target path.
-//
-// KNOWN DEFECT (ignored, not a coverage gap): src/commands.rs
-// `backfill_new_lobes` prints each failure with an unguarded `println!`, and
-// `lobe_add_resolved` calls it BEFORE `print_json`, so
-// `mind config lobes add --json <lobe with a foreign target>` emits
-//   ! could not link ...: ... already exists and is not managed by mind ...
-//   { "schema": 1, "action": "lobe-add", ... }
-// and stdout no longer parses as JSON. This is the exact path HARN-17 added
-// (unconditional backfill under --json), so the guard and the JSON pollution
-// arrived together. Same fix as the HARN-16 note: suppress under `out.json` or
-// route to stderr.
+// HARN-17 under `--json`: a blocked backfill target reports a `could not link
+// ...` line, and `lobe_add_resolved` runs the backfill BEFORE `print_json`, so
+// the same stdout-purity question applies to the foreign-target path. This is
+// the exact path HARN-17 added (unconditional backfill under --json), so the
+// guard and the reporting arrived together; `render::warn` puts the line on
+// stderr under `--json` (CLI-217).
 #[test]
-#[ignore = "known defect: the HARN-17 blocked-target warning corrupts --json stdout"]
 fn harn17_blocked_backfill_keeps_json_stdout_parseable() {
-    // spec: HARN-17
+    // spec: HARN-17 CLI-217
     let sb = Sandbox::new();
     sb.write_config(&format!("lobes = [\"{}\"]\n", sb.claude_home.display()));
     assert!(sb.mind(&["meld", &sb.source_spec()]).success);
@@ -3769,6 +3760,50 @@ fn harn17_blocked_backfill_keeps_json_stdout_parseable() {
         "stdout under --json must be a single JSON document; the blocked-target \
          warning must be suppressed or routed to stderr: {}",
         added.stdout
+    );
+    // As with HARN-16: routed, not deleted. A blocked target is the one thing
+    // this JSON result does not carry, so losing the line loses the signal.
+    assert!(
+        added.stderr.contains("could not link"),
+        "the blocked-target warning must still be emitted, on stderr: {}",
+        added.stderr
+    );
+}
+
+// HARN-17 x CLI-217, the half the `--json` test cannot see: `render::warn` is
+// the only warn-marked caller of the new routing, and the routing is
+// stdout-in-text-mode. Every existing assertion about this line reads either
+// stderr (under --json) or a substring of the underlying error ("--force"), so
+// a `render::warn` that always wrote to stderr, or that dropped the `!` marker
+// the rest of mind's warnings carry, would pass all of them: this line would
+// quietly leave the stream the user is reading, or lose the marker that tells
+// them it is a warning and not part of the report.
+#[test]
+fn harn17_blocked_backfill_warning_is_marked_and_on_stdout_in_text_mode() {
+    // spec: HARN-17 CLI-217
+    let sb = Sandbox::new();
+    sb.write_config(&format!("lobes = [\"{}\"]\n", sb.claude_home.display()));
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    assert!(sb.mind(&["learn", "review"]).success, "learn skill");
+
+    let new_lobe = sb.base.join("text-blocked-lobe");
+    std::fs::create_dir_all(new_lobe.join("skills")).unwrap();
+    std::fs::write(new_lobe.join("skills/review"), b"user content").unwrap();
+    let new_lobe_str = new_lobe.to_string_lossy().into_owned();
+
+    let added = sb.mind(&["config", "lobes", "add", &new_lobe_str]);
+    assert!(added.success, "lobe add failed: {}", added.stderr);
+    assert!(
+        added.stdout.contains("! could not link"),
+        "in text mode the blocked-target warning belongs on STDOUT, carrying the \
+         warn marker: stdout={} stderr={}",
+        added.stdout,
+        added.stderr
+    );
+    assert!(
+        !added.stderr.contains("could not link"),
+        "text mode must not route the warning to stderr: {}",
+        added.stderr
     );
 }
 

@@ -459,12 +459,14 @@ fn note_unreachable_lobe_once(path: &Path) {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if seen.insert(path.to_path_buf()) {
-        println!(
+        // spec: CLI-217 -- this runs on the ordinary `learn`/`meld` install path,
+        // ahead of the verb's `print_json`, so it must not be a bare `println!`.
+        crate::render::note(format!(
             "note: lobe '{}' is unreachable (its parent directory does not exist); \
              create the missing directory, or run `mind config lobes remove {}` to drop it",
             path.display(),
             path.display()
-        );
+        ));
     }
 }
 
@@ -618,10 +620,11 @@ fn run_build_hook(
     let run = if dangerously_skip {
         true
     } else if !crate::hook::is_tty() {
-        println!(
+        // spec: CLI-217
+        crate::render::note(format!(
             "note: skipped build hook for {} in a non-interactive context; its tooling is not built",
             item.key()
-        );
+        ));
         false
     } else {
         let disclosure = crate::hook::disclosure_text(
@@ -639,13 +642,18 @@ fn run_build_hook(
         )
     };
     if run {
+        // A progress line, not an aside: it belongs on stdout in text mode, and
+        // under `--json` the whole run's fd 1 already points at stderr
+        // (main.rs's `json_stdout`), so it cannot reach the result document.
+        // spec: CLI-217
         println!("running build hook for {}", item.key());
         crate::hook::run_hook(build, staging, &item.source, "build")?;
     } else if crate::hook::is_tty() && !dangerously_skip {
-        println!(
+        // spec: CLI-217
+        crate::render::note(format!(
             "note: skipped build hook for {}; its tooling is not built",
             item.key()
-        );
+        ));
     }
     Ok(())
 }
@@ -689,7 +697,10 @@ fn run_item_hook(
     let run = if dangerously_skip {
         true
     } else if !crate::hook::is_tty() {
-        println!("note: skipped {event} hook for {key} in a non-interactive context; {effect}");
+        // spec: CLI-217
+        crate::render::note(format!(
+            "note: skipped {event} hook for {key} in a non-interactive context; {effect}"
+        ));
         false
     } else {
         let disclosure = crate::hook::disclosure_text(
@@ -707,10 +718,14 @@ fn run_item_hook(
         )
     };
     if run {
+        // Same as the build-hook line above: a progress line on stdout in text
+        // mode, unreachable from `--json` stdout by the process-wide redirect.
+        // spec: CLI-217
         println!("running {event} hook for {key}");
         crate::hook::run_hook(cmd, &cwd, source, event)?;
     } else if crate::hook::is_tty() && !dangerously_skip {
-        println!("note: skipped {event} hook for {key}; {effect}");
+        // spec: CLI-217
+        crate::render::note(format!("note: skipped {event} hook for {key}; {effect}"));
     }
     Ok(())
 }

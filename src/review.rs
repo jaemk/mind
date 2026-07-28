@@ -241,10 +241,15 @@ fn resolve_target(
 /// Returns `None` when `target` does not also parse as a remote spec (the
 /// common case: no ambiguity to report), including when it is itself a `/`,
 /// `./`, `../`, or `file://` local-path spec (those already mean "this local
-/// path" unambiguously). Pure: `parse_spec` touches no disk or network.
-/// spec: CLI-214
+/// path" unambiguously). Pure: `parse_spec_quiet` touches no disk or network.
+///
+/// spec: CLI-214 CLI-216 -- the parse is the QUIET one. `parse_spec` itself
+/// prints the CLI-215 note ("'x' is also a directory here; ... use './x'") on
+/// this exact shape, and this function's own message says `review` already read
+/// the target as that local path, so routing through the printing parse emitted
+/// two notes telling the user opposite things.
 fn shadow_note(target: &str) -> Option<String> {
-    let remote = parse_spec(target).ok()?;
+    let remote = crate::source::parse_spec_quiet(target).ok()?;
     if remote.host == "local" {
         return None;
     }

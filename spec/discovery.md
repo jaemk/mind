@@ -158,10 +158,36 @@ run = "make build"
   super-source melds a different (or no) nested source depending on where the
   consumer happens to be standing. Fixed at the read site (`MindToml::load`
   itself knows the directory it read from) rather than at each use site, so it
-  covers every caller uniformly: `meld`'s initial curated-source walk, `sync`'s
-  DSC-57 re-walk, and `dump`'s reconstruction all resolve nested local sources
-  against the same, correct base with no per-caller change needed. An absolute
-  nested `source` (or a remote spec) is unaffected.
+  covers both callers that read a curator's entries uniformly: `meld`'s initial
+  curated-source walk and `sync`'s DSC-57 re-walk resolve nested local sources
+  against the same, correct base with no per-caller change needed. (`dump` is
+  not one of them: it never reads a curator's `[discover].sources`, it rebuilds
+  the list from the registry, where every local source already carries its
+  absolute path, STO-72.) An absolute nested `source` (or a remote spec) is
+  unaffected.
+- `DSC-93` The absolute entry wins. A `[discover].sources` entry whose DSC-92
+  resolution lands inside mind's own managed sources tree
+  (`<mind_home>/sources`) at a path that does not exist is skipped with a stderr
+  warning and a `SkippedEntry` (`reason = "unresolvable_local_path"`), instead of
+  being attempted, failing to clone, and counting toward the DSC-80 curator
+  guard. That combination only arises for a relative entry in a CLONED curator:
+  DSC-92 resolves it against the directory the `mind.toml` was read from, which
+  for a clone is `<mind_home>/sources/<host>/<owner>/<repo>`, so `../nested`
+  names a sibling clone dir mind never created. The reference meant something in
+  the curator's own working tree and nothing here, and under DSC-80 a curator
+  with no items of its own would turn that dead reference into a hard failure of
+  the entire meld. It is specifically a `dump` reproduction that suffers: the
+  dump carries a correct absolute entry for that same nested source (DUMP-1), so
+  the source IS reachable, but the curator's own re-walk reaches the broken
+  relative reading first and aborts before the absolute entry is reached. A
+  LINKED curator is unaffected (its `mind.toml` is read from the user's working
+  tree, so its relative entries resolve there), as is a mistyped relative path in
+  any curator whose resolution lands outside the sources tree: that still fails
+  as DSC-79/DSC-80 describe. The predicate is structural, not name-based: mind is
+  the sole writer of the sources tree and never creates the sibling such an entry
+  needs, so a non-existent path there cannot be anything but a misresolved
+  relative reference. Identity (`host/owner/repo`) is deliberately not consulted,
+  because the two readings of the same nested source resolve to different owners.
 - `DSC-58` A `[discover].sources` entry may set `install = true` (default false)
   to recommend that nested source for install: melding the super-source offers its
   items via the same preview-and-prompt as the top-level source (CLI-23, honoring

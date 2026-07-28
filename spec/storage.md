@@ -375,6 +375,16 @@ prevent the lost-update and torn-read races a plain read-modify-write would allo
   Linux and only when the failed asset was the musl one (so it fires exactly
   once, never loops), and prints a note naming the version and the fallback
   before retrying.
+- `STO-74` `resources/install.sh`'s `fetch_to` (the downloader used for the
+  release asset and `SHA256SUMS`) requires curl or wget on `PATH`, exactly as
+  `fetch` (the downloader used for the `releases/latest` lookup) does: when
+  neither is present it fails immediately with `need curl or wget on PATH`,
+  the same message `fetch` uses. This matters because `fetch_to` can be the
+  *first* downloader call: when `MIND_VERSION` is set, the `releases/latest`
+  lookup that goes through `fetch` is skipped entirely, so `fetch_to`'s own
+  missing-downloader check is the only thing standing between a downloader-less
+  environment and a misleading `download failed: <url>` error that hides the
+  real cause.
 - `STO-66` `evolve`'s download path soft-verifies the downloaded release
   archive's GitHub build-provenance attestation (`actions/attest-build-provenance`)
   via `gh attestation verify <archive> --repo jaemk/mind` when a `gh` binary is

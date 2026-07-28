@@ -61,7 +61,7 @@ and verified.
 | Flat skill layout: `[source].flat-skills` + `meld --flat-skills` + per-entry `[[discover.sources]]` flag (skill dirs at a root, no `skills/` container); `dump` propagates it | done | DSC-74, DSC-75, DSC-76, DSC-77, STO-44, CLI-158, DUMP-10 |
 | Version pinning: single `--pin` (`HEAD`/ref freeze, `branch=`/`tag=` follow) + deprecated `--follow-branch`/`--pin-tag`/`--pin-ref` aliases + `[source]` directive + `learn <url> --pin` note when already melded | done | DSC-41, STO-18, CLI-17, CLI-18, CLI-200, CLI-201, CLI-202, CLI-203, CLI-55 |
 | `review` verb: author-side source validation | done | CLI-130, CLI-131, CLI-132, CLI-133 |
-| `review` flags path tokens + hardcoded paths + bare tool refs + misplaced `{{ns:}}`; `--fix` rewrites | done | CLI-135, CLI-136, CLI-137, CLI-138, CLI-139, CLI-145, NS-24 |
+| `review` flags path tokens + hardcoded paths + bare tool refs + misplaced `{{ns:}}`; `--fix` rewrites via a document-wide CommonMark-structural scan (code spans, fences, list-item indentation, backslash escapes) | partial | CLI-135, CLI-136, CLI-137, CLI-138, CLI-139, CLI-145, NS-24, NS-46, NS-47, NS-48, NS-49, NS-50 |
 | `review`/`init-source` flag helper scripts duplicated across items (`duplicate-tooling`) | done | CLI-144, INIT-7 |
 | `evolve` verb: in-place upgrade of the `mind` binary | done | CLI-140, CLI-141, CLI-142, CLI-143 |
 | Managed policy (enterprise): trusted-source allowlist, require-pinned, auto-meld, lobe lock; `mind review --policy` | done | [policy.md](policy.md) |
@@ -182,17 +182,20 @@ and verified.
 | `upgrade` reports a source it could not scan instead of reporting everything up to date | done | CLI-211 |
 | A local-path spec is made absolute before the source is constructed; identity derives from the absolute path | done | STO-72 |
 | `Registry::load` migrates a relative local url to absolute when it resolves to an existing directory, rewriting `url` only, never `name` | done | STO-73 |
-| A nested `[discover].sources` relative local path resolves against the declaring `mind.toml`'s directory | done | DSC-92 |
+| `install.sh`'s `fetch_to` requires curl or wget on `PATH`, matching `fetch`'s check, instead of surfacing a misleading generic download failure | done | STO-74 |
+| A nested `[discover].sources` relative local path resolves against the declaring `mind.toml`'s directory; a curator's own relative entry that resolves to a never-cloned sibling inside mind's managed sources tree is skipped with a warning rather than hard-failing the meld, since `dump`'s absolute entry for the same nested source still installs it | done | DSC-92, DSC-93 |
 | The whole-registry catalog scan skips an unscannable source with a warning and completes on the partial catalog; a targeted single-source scan and `dump` still error | done | CLI-212 |
-| A linked source whose working tree is gone is reported with an unmeld-or-restore message | done | CLI-213 |
-| `review` treats a target naming an existing directory as a local path regardless of prefix, and notes the reading when it is also a valid owner/repo | done | CLI-214 |
-| `InvalidRepoSpec` names the local-path forms; an owner/repo spec shadowed by an existing directory gets a note before any clone | done | CLI-215 |
-| A hook skipped for want of a terminal states the cause and the exact `hooks run` remedy | done | HOOK-106 |
-| `hooks run` that ran nothing because consent was unavailable summarizes and exits non-zero; nothing-to-do stays exit 0 | done | HOOK-107 |
+| A linked source whose working tree is gone is reported with an unmeld-or-restore message when named directly, and `meld` on an already-melded instance names it too, instead of reporting a healthy source with 0 items | done | CLI-213 |
+| `review` treats a target naming an existing directory as a local path unless it first matches a melded source's identity, and notes the reading when it is also a valid owner/repo | done | CLI-214 |
+| `InvalidRepoSpec` names the local-path forms; an owner/repo spec shadowed by an existing directory gets a note before any clone, printed at most once per ambiguous spec even though multiple call sites parse it | done | CLI-215, CLI-216 |
+| Under `--json`, stdout is reserved for the single result document the invoked verb answers with: an advisory note, a progress line, and a nested verb's own output all route to stderr instead of leaking onto stdout ahead of or alongside the result | done | CLI-217 |
+| A hook skipped for want of a terminal states the cause and the exact `hooks run` remedy (naming the `--event` it selected), for both a source target and an item target | done | HOOK-106, HOOK-107, HOOK-108 |
+| `hook::is_tty` honors a `$MIND_TTY` override ahead of inspecting stdin, so the interactive-consent branches are reachable from a headless test | done | HOOK-109 |
 | Registering a lobe creates its directory, so a preset for an uninstalled harness is reachable immediately | done | HARN-15 |
 | An install fan-out that skips an unreachable lobe says so once per run, naming both remedies | done | HARN-16 |
 | Registering a fan-out-mode lobe links every admitted installed item into it immediately; an occupied foreign target is reported with the `--force` remedy, not clobbered | done | HARN-17 |
 | `introspect --fix` re-filters findings after repair; a lobe pruned in the same run is not also reported outstanding | done | HARN-18 |
+| The TUI's lobes action shares `config lobes add`'s implementation (lobe-dir creation, kinds-filtered backfill, `--force`-gated foreign-file guard), so it carries the same guarantees with no separate implementation | done | TUI-62 |
 | Selective lobe mode: items install into a lobe only when explicitly targeted, rather than by global fan-out | planned | HARN-19 |
 
 ## Documents
