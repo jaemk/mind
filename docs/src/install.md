@@ -52,7 +52,7 @@ cargo install mind-cli
 
 Builds from source using the Rust toolchain. This is the recommended path for
 Intel macOS and any other Linux or macOS host not covered by the install script
-or Homebrew tap. Requires Rust 1.85 or later (`rustup` is the standard way to
+or Homebrew tap. Requires Rust 1.88 or later (`rustup` is the standard way to
 install it).
 
 The supported platforms are Linux and macOS; the binary does not currently build
