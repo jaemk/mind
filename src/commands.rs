@@ -4951,28 +4951,28 @@ pub fn sync(
                 // spec: CLI-216 -- "is this policy entry already registered?" is
                 // a question; the meld_recursive call below is what decides a
                 // reading and clones.
-                if let Ok(spec) = parse_spec_quiet(&am.repo) {
-                    if let Some(src) = registry.sources.iter_mut().find(|s| s.name == spec.name) {
-                        let old_pin = src.pin.clone();
-                        if old_pin == am.pin {
-                            // spec: POL-32 -- already at the declared pin; confirmed registered.
-                            break 'registered true;
-                        }
-                        // spec: POL-55 -- pin drift: update the recorded pin so the
-                        // per-source sync fetch below lands the new ref.
-                        src.pin = am.pin.clone();
-                        provisioned += 1; // mark registry dirty to trigger save below
-                        if !out.json {
-                            println!(
-                                "  {} re-pinned {} {} -> {}",
-                                out.ok(),
-                                spec.name,
-                                pin_description(&old_pin),
-                                pin_description(&am.pin),
-                            );
-                        }
+                if let Ok(spec) = parse_spec_quiet(&am.repo)
+                    && let Some(src) = registry.sources.iter_mut().find(|s| s.name == spec.name)
+                {
+                    let old_pin = src.pin.clone();
+                    if old_pin == am.pin {
+                        // spec: POL-32 -- already at the declared pin; confirmed registered.
                         break 'registered true;
                     }
+                    // spec: POL-55 -- pin drift: update the recorded pin so the
+                    // per-source sync fetch below lands the new ref.
+                    src.pin = am.pin.clone();
+                    provisioned += 1; // mark registry dirty to trigger save below
+                    if !out.json {
+                        println!(
+                            "  {} re-pinned {} {} -> {}",
+                            out.ok(),
+                            spec.name,
+                            pin_description(&old_pin),
+                            pin_description(&am.pin),
+                        );
+                    }
+                    break 'registered true;
                 }
                 // spec: POL-34 -- soft-fail: warn and continue so already-melded
                 // sources still sync; record the failure for the final exit-code check.
@@ -6717,51 +6717,51 @@ pub fn introspect(paths: &Paths, fix: bool, json: bool) -> Result<()> {
         std::collections::HashSet::new();
     {
         let cfg_result = Config::load(paths);
-        if let Ok(mut cfg) = cfg_result {
-            if !cfg.lobes.is_empty() {
-                let mut pruned = false;
-                for entry in &cfg.lobes {
-                    let lobe = crate::paths::Lobe {
-                        path: std::path::PathBuf::from(entry.path()),
-                        kinds: entry.kinds().map(|ks| ks.to_vec()),
-                    };
-                    if !lobe.reachable() {
-                        issues.push(Issue {
-                            kind: "vanished-lobe",
-                            target: entry.path().to_string(),
-                            message: format!(
-                                "lobe '{}' parent dir is gone; \
+        if let Ok(mut cfg) = cfg_result
+            && !cfg.lobes.is_empty()
+        {
+            let mut pruned = false;
+            for entry in &cfg.lobes {
+                let lobe = crate::paths::Lobe {
+                    path: std::path::PathBuf::from(entry.path()),
+                    kinds: entry.kinds().map(|ks| ks.to_vec()),
+                };
+                if !lobe.reachable() {
+                    issues.push(Issue {
+                        kind: "vanished-lobe",
+                        target: entry.path().to_string(),
+                        message: format!(
+                            "lobe '{}' parent dir is gone; \
                                  run `mind introspect --fix` to prune it",
-                                entry.path()
-                            ),
-                        });
-                        if fix {
-                            // Strip manifest links confined under this lobe.
-                            let lobe_pb = std::path::PathBuf::from(entry.path());
-                            for item in manifest.items.values_mut() {
-                                let before = item.links.len();
-                                item.links
-                                    .retain(|l| !std::path::Path::new(l).starts_with(&lobe_pb));
-                                if item.links.len() != before {
-                                    manifest_dirty = true;
-                                }
+                            entry.path()
+                        ),
+                    });
+                    if fix {
+                        // Strip manifest links confined under this lobe.
+                        let lobe_pb = std::path::PathBuf::from(entry.path());
+                        for item in manifest.items.values_mut() {
+                            let before = item.links.len();
+                            item.links
+                                .retain(|l| !std::path::Path::new(l).starts_with(&lobe_pb));
+                            if item.links.len() != before {
+                                manifest_dirty = true;
                             }
-                            pruned = true;
-                            repaired_vanished_lobes.insert(entry.path().to_string());
                         }
+                        pruned = true;
+                        repaired_vanished_lobes.insert(entry.path().to_string());
                     }
                 }
-                if fix && pruned {
-                    cfg.lobes.retain(|e| {
-                        let lobe = crate::paths::Lobe {
-                            path: std::path::PathBuf::from(e.path()),
-                            kinds: e.kinds().map(|ks| ks.to_vec()),
-                        };
-                        lobe.reachable()
-                    });
-                    cfg.save(paths)?;
-                    repaired.push("pruned vanished lobe(s) from config".to_string());
-                }
+            }
+            if fix && pruned {
+                cfg.lobes.retain(|e| {
+                    let lobe = crate::paths::Lobe {
+                        path: std::path::PathBuf::from(e.path()),
+                        kinds: e.kinds().map(|ks| ks.to_vec()),
+                    };
+                    lobe.reachable()
+                });
+                cfg.save(paths)?;
+                repaired.push("pruned vanished lobe(s) from config".to_string());
             }
         }
     }

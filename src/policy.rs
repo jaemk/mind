@@ -482,15 +482,15 @@ fn check_policy_file_permissions(path: &Path) -> Vec<String> {
             false,
         ));
     }
-    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        if let Ok(meta) = std::fs::metadata(parent) {
-            out.extend(policy_path_security_warnings(
-                &parent.display().to_string(),
-                meta.mode(),
-                meta.uid(),
-                true,
-            ));
-        }
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty())
+        && let Ok(meta) = std::fs::metadata(parent)
+    {
+        out.extend(policy_path_security_warnings(
+            &parent.display().to_string(),
+            meta.mode(),
+            meta.uid(),
+            true,
+        ));
     }
     out
 }
