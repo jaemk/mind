@@ -353,7 +353,21 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   agent:<name>`), and `SkillCollision` (`mind meld --namespace <prefix>`) each
   quote their interpolated identity by exactly this rule. A bare mention of the
   same identity in surrounding English prose (naming *what* is wrong, not a
-  command to run) is not quoted; only the runnable command is.
+  command to run) is not quoted; only the runnable command is. The rule is not
+  limited to a `MindError` variant: an ordinary `println!`/`eprintln!` note in
+  `commands.rs`/`install.rs` that offers a pasteable remedy is the same class
+  and is quoted the same way -- the re-meld ignored-flags note (`mind unmeld
+  <name>`), the emptied item-link forget hint (`mind unmeld <link-id>`), the
+  `learn` not-found hint (`mind probe <query>`, echoing the user's own
+  argument) and its melded-source hint (`mind learn --all <query>`), the
+  unreachable-lobe note (`mind config lobes remove <path>`, a path taken from
+  user config), the DSC-60 add-roots-yourself hint (`mind meld <source>
+  --add-root <dir>`), `unmeld --unlink-only`'s and the non-TTY post-meld
+  install note's remaining-items hints (`mind forget`/`mind learn
+  <source>#*`), the agent-collision skip warning (`mind forget
+  <kind>:<name>`), a re-meld's per-item "not installed" listing (`mind learn
+  <kind>:<name>`), and `init-source`'s `--template` hint (`mind init-source
+  <dir> --template`, the user's own path argument).
 - `CLI-187` When no sources are melded, all verbs that report the empty state
   (sync, recall, probe) emit the same message: "no sources melded; run `mind
   meld <owner/repo>` to add one". This consistent phrasing always names the

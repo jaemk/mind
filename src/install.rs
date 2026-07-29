@@ -465,10 +465,13 @@ fn note_unreachable_lobe_once(path: &Path) {
     if seen.insert(path.to_path_buf()) {
         // spec: CLI-217 -- this runs on the ordinary `learn`/`meld` install path,
         // ahead of the verb's `print_json`, so it must not be a bare `println!`.
+        // spec: CLI-225 -- the lobe path comes from user config (`~/.mind/config.toml`),
+        // not restricted against shell metacharacters, and lands in a pasteable
+        // `mind config lobes remove <path>` remedy, so it is shell-quoted first.
+        let quoted_path = crate::error::shell_quote(&path.display().to_string());
         crate::render::note(format!(
             "note: lobe '{}' is unreachable (its parent directory does not exist); \
-             create the missing directory, or run `mind config lobes remove {}` to drop it",
-            path.display(),
+             create the missing directory, or run `mind config lobes remove {quoted_path}` to drop it",
             path.display()
         ));
     }

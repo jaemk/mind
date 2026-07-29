@@ -455,6 +455,114 @@ fn forget_of_an_emptied_link_hints_at_unmeld() {
     assert_eq!(source_count(&sb), 1, "the instance stays registered");
 }
 
+/// Mirrors `crate::error::shell_quote` (HOOK-106/CLI-225). Reproduced here
+/// (not imported) because an integration test is a separate crate from the
+/// binary and cannot reach a `pub(crate)` item.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+#[test]
+fn forget_of_an_emptied_link_hint_shell_quotes_a_quote_carrying_identity() {
+    // spec: LNK-5, CLI-225 -- the item-link identity is `local/<base>/<repo>#
+    // <path>`, and `is_safe_manifest_path` allows the `#<path>` segment to
+    // carry a `'` (only path traversal is rejected). The forget-of-an-
+    // emptied-link hint used to frame the identity in bare single quotes
+    // (`'{src_name}'`), which a `'` inside it would break out of; it must be
+    // shell-quoted instead. Proven as a real round trip: the printed
+    // `mind unmeld` command, run verbatim, drops exactly that instance.
+    let sb = Sandbox::new();
+    sb.write_and_commit(
+        "skills/rev'iew/SKILL.md",
+        "---\ndescription: a quote-carrying item\n---\n# skill\n",
+    );
+    assert!(
+        sb.mind(&["learn", &sb.link("tree/main/skills/rev'iew")])
+            .success
+    );
+    let name = sb.link_name("skills/rev'iew");
+    let r = sb.mind(&["forget", "skill:rev'iew"]);
+    assert!(r.success, "forget failed: {} {}", r.stdout, r.stderr);
+
+    let quoted = shell_quote(&name);
+    assert!(
+        r.stderr.contains(&format!("mind unmeld {quoted}")),
+        "the hint must shell-quote the quote-carrying identity: {}",
+        r.stderr
+    );
+    assert!(
+        !r.stderr.contains(&format!("mind unmeld '{name}'")),
+        "the identity must never be framed in bare single quotes \
+         (it would break out at the embedded '): {}",
+        r.stderr
+    );
+    assert_eq!(source_count(&sb), 1, "the instance stays registered");
+
+    // Real round trip: extract the printed command, tokenize as a shell
+    // would, and run it -- it must drop exactly the aliased instance.
+    let start = r.stderr.find("`mind ").expect("remedy present") + 1;
+    let rest = &r.stderr[start..];
+    let end = rest.find('`').unwrap_or(rest.len());
+    let cmd = &rest[..end];
+    let mut argv = shell_split(cmd);
+    assert_eq!(argv.first().map(String::as_str), Some("mind"));
+    argv.remove(0);
+    let args: Vec<&str> = argv.iter().map(String::as_str).collect();
+    let unmeld = sb.mind(&args);
+    assert!(
+        unmeld.success,
+        "the round-tripped remedy must succeed: {} {}",
+        unmeld.stdout, unmeld.stderr
+    );
+    assert_eq!(
+        source_count(&sb),
+        0,
+        "the round-tripped `mind unmeld` must have dropped exactly the aliased instance"
+    );
+}
+
+/// A minimal shell tokenizer for the single-quote + `'\''` idiom
+/// `shell_quote` produces. Mirrors `tests/cli_hooks.rs`'s `shell_split`.
+fn shell_split(s: &str) -> Vec<String> {
+    let chars: Vec<char> = s.chars().collect();
+    let n = chars.len();
+    let mut i = 0;
+    let mut tokens = Vec::new();
+    let mut cur = String::new();
+    let mut in_token = false;
+    while i < n {
+        let c = chars[i];
+        if c.is_whitespace() {
+            if in_token {
+                tokens.push(std::mem::take(&mut cur));
+                in_token = false;
+            }
+            i += 1;
+            continue;
+        }
+        in_token = true;
+        if c == '\'' {
+            i += 1;
+            while i < n && chars[i] != '\'' {
+                cur.push(chars[i]);
+                i += 1;
+            }
+            assert!(i < n, "unterminated single quote in {s:?}");
+            i += 1;
+        } else if c == '\\' && i + 1 < n && chars[i + 1] == '\'' {
+            cur.push('\'');
+            i += 2;
+        } else {
+            cur.push(c);
+            i += 1;
+        }
+    }
+    if in_token {
+        tokens.push(cur);
+    }
+    tokens
+}
+
 #[test]
 fn curated_sources_entry_can_be_an_item_link() {
     // spec: LNK-2

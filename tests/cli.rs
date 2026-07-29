@@ -332,6 +332,373 @@ fn melded() -> Sandbox {
     sb
 }
 
+// ---------------------------------------------------------------------------
+// CLI-225: printed-remedy shell-quoting helpers, reproduced here (not
+// imported) since an integration test is a separate crate from the binary
+// and cannot reach `crate::error::shell_quote` (`pub(crate)`). Kept a
+// byte-for-byte mirror of the production algorithm in `src/error.rs` and the
+// `shell_split`/round-trip technique `tests/cli_hooks.rs` uses for the
+// HOOK-106 family, applied here to the CLI-225 sites in `commands.rs`/
+// `install.rs`.
+// ---------------------------------------------------------------------------
+
+/// Mirrors `crate::error::shell_quote`: POSIX single-quote, with an embedded
+/// `'` escaped via the `'\''` idiom.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// A minimal shell tokenizer understanding only what `mind`'s CLI-225 remedies
+/// ever emit: whitespace-separated words and a `shell_quote`d single-quoted
+/// segment (including the `'\''` embedded-quote idiom). See
+/// `tests/cli_hooks.rs`'s `shell_split` for the original.
+fn shell_split(s: &str) -> Vec<String> {
+    let chars: Vec<char> = s.chars().collect();
+    let n = chars.len();
+    let mut i = 0;
+    let mut tokens = Vec::new();
+    let mut cur = String::new();
+    let mut in_token = false;
+    while i < n {
+        let c = chars[i];
+        if c.is_whitespace() {
+            if in_token {
+                tokens.push(std::mem::take(&mut cur));
+                in_token = false;
+            }
+            i += 1;
+            continue;
+        }
+        in_token = true;
+        if c == '\'' {
+            i += 1;
+            while i < n && chars[i] != '\'' {
+                cur.push(chars[i]);
+                i += 1;
+            }
+            assert!(i < n, "unterminated single quote in {s:?}");
+            i += 1;
+        } else if c == '\\' && i + 1 < n && chars[i + 1] == '\'' {
+            cur.push('\'');
+            i += 2;
+        } else {
+            cur.push(c);
+            i += 1;
+        }
+    }
+    if in_token {
+        tokens.push(cur);
+    }
+    tokens
+}
+
+/// Find the line containing "run `mind ...`" (or "hint: run `mind ...`"),
+/// pull the backtick-fenced command out of it, and return it tokenized (with
+/// the leading `mind` dropped) ready to hand to [`Sandbox::mind`]. Panics if
+/// no such line is found, so a round-trip test can never pass by quietly
+/// finding nothing to run.
+fn remedy_argv(text: &str) -> Vec<String> {
+    let line = text
+        .lines()
+        .find(|l| l.contains("run `mind ") || l.contains("run\n`mind "))
+        .unwrap_or_else(|| panic!("no `run \\`mind ...\\`` remedy line in: {text:?}"));
+    let start = line.find("`mind ").expect("checked above") + 1;
+    let rest = &line[start..];
+    let end = rest.find('`').unwrap_or(rest.len());
+    let cmd = &rest[..end];
+    let mut argv = shell_split(cmd);
+    assert_eq!(
+        argv.first().map(String::as_str),
+        Some("mind"),
+        "the remedy must be a `mind` invocation: {cmd:?}"
+    );
+    argv.remove(0);
+    argv
+}
+
+// ---------------------------------------------------------------------------
+// CLI-225: printed-remedy shell-quoting at commands.rs/install.rs sites
+// (the error.rs remedies were already covered by HOOK-106's tests).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn remeld_ignored_flags_note_shell_quotes_a_metachar_alias() {
+    // spec: CLI-225 -- the re-meld ignored-flags note's `mind unmeld <name>`
+    // remedy embeds the source-influenced `--as` alias. `validate_prefix`
+    // rejects only path traversal, not shell metacharacters, so a `'`/`;`/
+    // `$(...)` alias must be shell-quoted rather than spliced raw. Proven as a
+    // real round trip: the printed command, tokenized as a shell would, must
+    // unmeld exactly the aliased instance.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    let alias = "it's; touch pwned; echo $(whoami)";
+    let first = sb.mind(&["meld", &spec, "--as", alias, "--register-only"]);
+    assert!(
+        first.success,
+        "first meld failed: {} {}",
+        first.stdout, first.stderr
+    );
+
+    let again = sb.mind(&[
+        "meld",
+        &spec,
+        "--as",
+        alias,
+        "--register-only",
+        "--add-root",
+        ".claude",
+    ]);
+    assert!(
+        again.success,
+        "a re-meld is not an error: {} {}",
+        again.stdout, again.stderr
+    );
+
+    // The registered identity is `local/<base>/<repo>@<alias>` (STO-58): the
+    // alias is a suffix, not the whole name, so the quoted form covers the
+    // whole identity string.
+    let source_name = format!("local/{}/agents@{alias}", sb.base_name());
+    let quoted = shell_quote(&source_name);
+    assert!(
+        again.stdout.contains(&format!("mind unmeld {quoted}")),
+        "the remedy must shell-quote the source identity: {}",
+        again.stdout
+    );
+    assert!(
+        !again.stdout.contains(&format!("mind unmeld {source_name}")),
+        "the raw identity must never be spliced in unquoted: {}",
+        again.stdout
+    );
+
+    let argv = remedy_argv(&again.stdout);
+    let args: Vec<&str> = argv.iter().map(String::as_str).collect();
+    let r = sb.mind(&args);
+    assert!(
+        r.success,
+        "the round-tripped remedy must succeed: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        sb.mind(&["recall", "--sources"])
+            .stdout
+            .contains("no sources melded"),
+        "the round-tripped `mind unmeld` must have removed exactly the aliased instance"
+    );
+}
+
+#[test]
+fn learn_not_found_hint_shell_quotes_a_metachar_query() {
+    // spec: CLI-225, CLI-179 -- the `mind probe <query>` hint on a `learn`
+    // ItemNotFound echoes the user's own argument verbatim; shell-quote it
+    // before printing so the pasteable remedy cannot inject.
+    let sb = melded();
+    let query = "a'; touch pwned; echo $(whoami)";
+    let r = sb.mind(&["learn", query]);
+    assert!(
+        !r.success,
+        "learn must fail for an unknown item: {}",
+        r.stdout
+    );
+
+    let quoted = shell_quote(query);
+    assert!(
+        r.stderr.contains(&format!("mind probe {quoted}")),
+        "the hint must shell-quote the query: {}",
+        r.stderr
+    );
+    assert!(
+        !r.stderr.contains(&format!("mind probe {query}")),
+        "the raw query must never be spliced in unquoted: {}",
+        r.stderr
+    );
+}
+
+#[test]
+fn unmeld_unlink_only_remaining_items_hint_shell_quotes_a_metachar_alias() {
+    // spec: CLI-225, CLI-22 -- `unmeld --unlink-only`'s "N item(s) remain
+    // installed" note prints `mind forget '<source>#*'`; the source identity
+    // must be shell-quoted, not framed in bare single quotes (a `'` in the
+    // identity would otherwise break out of that frame). Proven as a real
+    // round trip: the printed command actually forgets the leftover item.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    let alias = "it's a source";
+    assert!(sb.mind(&["meld", &spec, "--as", alias]).success);
+    // `--as` selects the instance by suffix match (CLI-5), but the note prints
+    // the full registered identity `local/<base>/<repo>@<alias>` (STO-58).
+    let source_name = format!("local/{}/agents@{alias}", sb.base_name());
+    // `--as` also sets the effective namespace prefix, so `review`'s effective
+    // name is `<alias>:review`, not the bare name; `*` installs every item
+    // from the one melded source regardless of its prefix.
+    let learn_all = sb.mind(&["learn", "*"]);
+    assert!(
+        learn_all.success,
+        "learn * failed: {} {}",
+        learn_all.stdout, learn_all.stderr
+    );
+
+    let r = sb.mind(&["unmeld", &source_name, "--unlink-only"]);
+    assert!(r.success, "unmeld failed: {} {}", r.stdout, r.stderr);
+
+    let quoted = shell_quote(&format!("{source_name}#*"));
+    assert!(
+        r.stdout.contains(&format!("mind forget {quoted}")),
+        "the remedy must shell-quote the source identity: {}",
+        r.stdout
+    );
+    assert!(
+        !r.stdout.contains(&format!("mind forget '{source_name}#*'")),
+        "the identity must never be framed in bare single quotes: {}",
+        r.stdout
+    );
+
+    let argv = remedy_argv(&r.stdout);
+    // The remedy names 3 items via a glob; append --yes so this round trip
+    // can run non-interactively (unrelated to what CLI-225 proves: that the
+    // glob/source identity itself parses back to exactly the intended items).
+    let mut args: Vec<&str> = argv.iter().map(String::as_str).collect();
+    args.push("--yes");
+    let forget = sb.mind(&args);
+    assert!(
+        forget.success,
+        "the round-tripped remedy must succeed: {} {}",
+        forget.stdout, forget.stderr
+    );
+    assert!(
+        !sb.mind(&["recall"]).stdout.contains("installed @"),
+        "the round-tripped `mind forget` must have removed every item"
+    );
+}
+
+#[test]
+fn recall_not_installed_hint_shell_quotes_an_item_name_with_a_quote() {
+    // spec: CLI-225 -- a re-meld's per-item listing (`source_status`, reached
+    // via `meld <already-melded-source> --register-only`) prints `mind learn
+    // '<kind:name>'` for each not-yet-installed item; the item's own name is
+    // source content (only restricted against path separators/NUL,
+    // `is_safe_item_name`), so a `'` in it must be shell-quoted before it
+    // lands in the pasteable remedy.
+    let sb = Sandbox::bare("quoteitems");
+    sb.write_and_commit(
+        "skills/rev'iew/SKILL.md",
+        "---\ndescription: a quote-carrying item\n---\n# skill\n",
+    );
+    let spec = sb.source_spec();
+    assert!(sb.mind(&["meld", &spec, "--register-only"]).success);
+    // Re-meld the already-registered source to reach `source_status`'s
+    // per-item listing.
+    let r = sb.mind(&["meld", &spec, "--register-only"]);
+    assert!(r.success, "re-meld failed: {} {}", r.stdout, r.stderr);
+
+    let quoted = shell_quote("skill:rev'iew");
+    assert!(
+        r.stdout.contains(&format!("mind learn {quoted}")),
+        "the hint must shell-quote the item key: {}",
+        r.stdout
+    );
+    assert!(
+        !r.stdout.contains("mind learn 'skill:rev'iew'"),
+        "the raw item key must never be framed in bare single quotes: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn meld_default_non_tty_install_note_shell_quotes_a_metachar_alias() {
+    // spec: CLI-225 -- the "registered only, nothing installed (not a TTY)"
+    // note prints `mind learn '<source>#*'`; same rule as the unlink-only
+    // remaining-items hint, at the `install_source_items` call site. Proven
+    // as a real round trip: the printed command actually installs the item.
+    let sb = Sandbox::new();
+    let spec = sb.source_spec();
+    let alias = "it's; touch pwned";
+    let r = sb.mind(&["meld", &spec, "--as", alias]);
+    assert!(r.success, "meld failed: {} {}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("nothing installed"),
+        "must note nothing was installed (not a TTY): {}",
+        r.stdout
+    );
+
+    let source_name = format!("local/{}/agents@{alias}", sb.base_name());
+    let quoted = shell_quote(&format!("{source_name}#*"));
+    assert!(
+        r.stdout.contains(&format!("mind learn {quoted}")),
+        "the note must shell-quote the source identity: {}",
+        r.stdout
+    );
+    assert!(
+        !r.stdout.contains(&format!("mind learn '{source_name}#*'")),
+        "the identity must never be framed in bare single quotes: {}",
+        r.stdout
+    );
+
+    let argv = remedy_argv(&r.stdout);
+    let args: Vec<&str> = argv.iter().map(String::as_str).collect();
+    let learn = sb.mind(&args);
+    assert!(
+        learn.success,
+        "the round-tripped remedy must succeed: {} {}",
+        learn.stdout, learn.stderr
+    );
+    assert!(
+        sb.mind(&["recall"]).stdout.contains("installed @"),
+        "the round-tripped `mind learn` must have installed the item(s)"
+    );
+}
+
+#[test]
+fn curator_add_roots_warning_shell_quotes_a_metachar_nested_source_name() {
+    // spec: CLI-225, DSC-60 -- the DSC-60 "apply add-roots yourself" hint
+    // prints `mind meld <nested-source> --add-root <dir>`; the nested
+    // source's identity is source-influenced (its local path's own basename)
+    // and must be shell-quoted.
+    let nested = Sandbox::bare("it's a nested source");
+    nested.write_and_commit(
+        "skills/base/SKILL.md",
+        "---\nname: base\ndescription: base skill\n---\n# base\n",
+    );
+    nested.write_and_commit(
+        "contrib/skills/addon/SKILL.md",
+        "---\nname: addon\ndescription: add-root contributed skill\n---\n# addon\n",
+    );
+    nested.write_and_commit("mind.toml", "[source]\ndescription = \"onboarded\"\n");
+
+    let registry = Sandbox::bare("addroot-registry-quote-test");
+    registry.write_and_commit(
+        "mind.toml",
+        &format!(
+            "[[discover.sources]]\nsource = \"{}\"\nadd-roots = [\"contrib\"]\n",
+            nested.source_spec()
+        ),
+    );
+    let spec = registry.source_spec();
+    let r = registry.mind(&["meld", &spec]);
+    assert!(r.success, "meld should succeed: {} {}", r.stdout, r.stderr);
+
+    // The nested source's identity is `local/<base>/<name>` (see `link_name`
+    // in tests/cli_item_link.rs for the same pattern); locate it from the
+    // warning text itself rather than reconstructing it, since only the
+    // fixture's own temp-dir basename is not under our control.
+    assert!(
+        r.stderr.contains("mind meld") && r.stderr.contains("--add-root"),
+        "the DSC-60 warning must offer the consumer-side add-root remedy: {}",
+        r.stderr
+    );
+    // Whatever identity the remedy names, it must appear shell-quoted:
+    // extract the `mind meld <id> --add-root` command and confirm the
+    // fixture's raw quote-carrying basename is not spliced in bare.
+    let start = r.stderr.find("`mind meld ").expect("remedy present") + 1;
+    let rest = &r.stderr[start..];
+    let end = rest.find('`').unwrap_or(rest.len());
+    let cmd = &rest[..end];
+    assert!(
+        cmd.contains(r"'\''"),
+        "the nested source's quote-carrying name must be shell-quoted \
+         (the '\\'' idiom must appear) in: {cmd:?}"
+    );
+}
+
 #[test]
 fn meld_registers_source_and_lists_items() {
     // spec: CLI-10, CLI-72
@@ -1102,7 +1469,7 @@ fn review_reads_a_relative_two_segment_directory_as_a_local_path() {
     );
     assert!(
         r.stderr.contains("reviewed as that local path")
-            && r.stderr.contains("mind review github:skills/greet"),
+            && r.stderr.contains("mind review 'github:skills/greet'"),
         "review must say which reading it took and how to force the remote one: {}",
         r.stderr
     );
@@ -20728,6 +21095,58 @@ fn marketplace_plugin_description_and_version_recorded() {
 }
 
 #[test]
+fn marketplace_plugin_description_strips_bidi_directional_and_zero_width() {
+    // spec: MKT-9, DSC-69 -- a plugin.json `description` is untrusted,
+    // attacker-controlled content. It used to reach display through a private
+    // copy of `strip_ansi` in commands.rs that only blocked the bidi-override
+    // range and line/paragraph separators; the shared, hardened
+    // `crate::sanitize::strip_ansi` (CLI-224) additionally blocks the
+    // directional marks U+200E/U+200F/U+061C and the zero-width characters
+    // U+200B/U+2060/U+FEFF. Now that commands.rs routes through the one
+    // shared implementation, all of those must be stripped here too, in both
+    // plain-text and `--json` output.
+    let sb = Sandbox::bare("quote-plugin");
+    sb.write_and_commit(
+        ".claude-plugin/plugin.json",
+        "{\"name\":\"quoteplugin\",\"version\":\"1.0\",\
+         \"description\":\"Evil \u{202E}RTL\u{200E} zerowidth\u{200B} end\"}",
+    );
+    let spec = sb.source_spec();
+    assert!(sb.mind(&["meld", &spec, "--link-only"]).success);
+
+    let sources = sb.mind(&["recall", "--sources"]);
+    assert!(
+        sources.stdout.contains("Evil RTL zerowidth end"),
+        "the sanitized description text must survive: {}",
+        sources.stdout
+    );
+    assert!(
+        !sources.stdout.contains('\u{202E}')
+            && !sources.stdout.contains('\u{200E}')
+            && !sources.stdout.contains('\u{200B}'),
+        "the bidi override, directional mark, and zero-width character must \
+         all be stripped from plain-text output: {:?}",
+        sources.stdout
+    );
+
+    let jsrc = sb.mind(&["recall", "--sources", "--json"]);
+    assert!(jsrc.success, "{}", jsrc.stderr);
+    assert!(
+        jsrc.stdout.contains("Evil RTL zerowidth end"),
+        "the sanitized description text must survive in --json: {}",
+        jsrc.stdout
+    );
+    assert!(
+        !jsrc.stdout.contains('\u{202E}')
+            && !jsrc.stdout.contains('\u{200E}')
+            && !jsrc.stdout.contains('\u{200B}'),
+        "the bidi override, directional mark, and zero-width character must \
+         all be stripped from --json output: {:?}",
+        jsrc.stdout
+    );
+}
+
+#[test]
 fn marketplace_catalog_melds_in_repo_plugins() {
     // spec: MKT-7 MKT-14
     // A .claude-plugin/marketplace.json catalog scans each listed in-repo
@@ -23639,8 +24058,10 @@ fn learn_not_found_with_sources_hints_probe_not_sync() {
     let sb = melded();
     let r = sb.mind(&["learn", "does-not-exist"]);
     assert!(!r.success, "learn must fail for unknown item: {}", r.stderr);
+    // spec: CLI-225 -- the query is shell-quoted before landing in the
+    // pasteable `mind probe <query>` remedy (see the CLI-225 tests above).
     assert!(
-        r.stderr.contains("probe does-not-exist"),
+        r.stderr.contains("probe 'does-not-exist'"),
         "hint must point at `mind probe <query>`: {}",
         r.stderr
     );

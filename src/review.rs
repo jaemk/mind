@@ -261,10 +261,20 @@ fn shadow_note(target: &str) -> Option<String> {
     if remote.host == "local" {
         return None;
     }
+    // spec: CLI-225 -- `target` is the user's own `review` argument, but it
+    // lands in a pasteable `mind review github:<target>` remedy and the
+    // identity validators permit shell metacharacters in an owner/repo (only
+    // `/`, `\`, control characters, and per-part `@`/`#` are rejected; see
+    // `validate_identity_part`). A directory named e.g. `owner/repo;cmd` both
+    // resolves as a local dir here AND parses as a non-local remote spec, so it
+    // reaches this note; framed in a bare single-quote frame it would break out.
+    // Route the whole `github:<target>` argument through `shell_quote` (and use
+    // the house `\`mind ...\`` presentation frame) so a verbatim paste is inert.
+    let quoted = crate::error::shell_quote(&format!("github:{target}"));
     Some(format!(
         "note: '{target}' is also a valid repo spec, but a directory named '{target}' exists \
-         here, so it is reviewed as that local path; to review the remote repo instead, use \
-         'mind review github:{target}'"
+         here, so it is reviewed as that local path; to review the remote repo instead, run \
+         `mind review {quoted}`"
     ))
 }
 
@@ -1418,8 +1428,49 @@ mod tests {
             "must name the target: {note}"
         );
         assert!(
-            note.contains("mind review github:skills/greet"),
-            "must name the escape to force the remote reading: {note}"
+            note.contains("mind review 'github:skills/greet'"),
+            "must name the escape to force the remote reading, shell-quoted: {note}"
+        );
+    }
+
+    /// CLI-225 regression: the `mind review github:<target>` remedy is a
+    /// pasteable command, and `target` (the user's own argument) can carry
+    /// shell metacharacters -- the owner/repo validators reject only `/`,
+    /// `\`, control chars, and per-part `@`/`#`, so `owner/repo;payload`
+    /// parses as a valid remote spec (owner `owner`, repo `repo;payload`) and
+    /// also resolves as a local directory, reaching this note. The identity
+    /// MUST be shell-quoted so a verbatim paste cannot break out of the frame
+    /// and run the trailing payload.
+    /// spec: CLI-225
+    #[test]
+    fn shadow_note_shell_quotes_a_metacharacter_target() {
+        let evil = "owner/repo;touch pwned";
+        let note = shadow_note(evil).expect("owner/repo;... still parses as a remote spec");
+        // The dangerous unquoted command must NOT appear...
+        assert!(
+            !note.contains("`mind review github:owner/repo;touch pwned`")
+                && !note.contains("'mind review github:owner/repo;touch pwned'"),
+            "the payload must not sit unquoted in the runnable command: {note}"
+        );
+        // ...and the shell-quoted argument must.
+        assert!(
+            note.contains("mind review 'github:owner/repo;touch pwned'"),
+            "the whole github:<target> argument must be shell-quoted: {note}"
+        );
+    }
+
+    /// CLI-225: a target carrying a single quote must still be neutralized --
+    /// `shell_quote` closes and reopens the quote (`'\''`), so the pasteable
+    /// command cannot break out. A repo segment may legitimately carry a `'`
+    /// (the identity validators do not reject it).
+    /// spec: CLI-225
+    #[test]
+    fn shadow_note_neutralizes_an_embedded_single_quote_target() {
+        let evil = "owner/repo';id;'x";
+        let note = shadow_note(evil).expect("still a remote spec");
+        assert!(
+            note.contains(r#"mind review 'github:owner/repo'\'';id;'\''x'"#),
+            "an embedded single quote must be escaped via the '\\'' idiom: {note}"
         );
     }
 

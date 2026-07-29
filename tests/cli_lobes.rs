@@ -1418,6 +1418,54 @@ fn harn16_unreachable_lobe_prints_note_once_per_process() {
     );
 }
 
+/// Mirrors `crate::error::shell_quote` (HOOK-106/CLI-225). Reproduced here
+/// (not imported) because an integration test is a separate crate from the
+/// binary and cannot reach a `pub(crate)` item.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+// HARN-16 / CLI-225: the unreachable-lobe note's `mind config lobes remove
+// <path>` remedy embeds a path taken straight from user config
+// (`~/.mind/config.toml`), not restricted against shell metacharacters, so it
+// must be shell-quoted before printing.
+#[test]
+fn harn16_unreachable_lobe_note_shell_quotes_a_metachar_path() {
+    // spec: HARN-16, CLI-225
+    let sb = Sandbox::new();
+    // A directory name carrying a `'`/`;`/`$(...)` -- all valid on a Linux
+    // filesystem in a single path component -- whose parent is never created,
+    // so the lobe is unreachable from the moment it is configured.
+    let vanished_project = sb.base.join("it's a $(vanished); project");
+    let unreachable_lobe = vanished_project.join(".windsurf");
+    sb.write_config(&format!(
+        "lobes = [\"{}\", \"{}\"]\n",
+        sb.claude_home.display(),
+        unreachable_lobe.display()
+    ));
+
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    let learn = sb.mind(&["learn", "*"]);
+    assert!(learn.success, "learn failed: {}", learn.stderr);
+
+    let path_str = unreachable_lobe.to_string_lossy().into_owned();
+    let quoted = shell_quote(&path_str);
+    assert!(
+        learn
+            .stdout
+            .contains(&format!("mind config lobes remove {quoted}")),
+        "the remedy must shell-quote the unreachable lobe's path: {}",
+        learn.stdout
+    );
+    assert!(
+        !learn
+            .stdout
+            .contains(&format!("mind config lobes remove {path_str}")),
+        "the raw path must never be spliced in unquoted: {}",
+        learn.stdout
+    );
+}
+
 // HARN-17: `link-project` in a fresh project backfills already-installed items
 // immediately (no introspect --fix note), matching `config lobes add`.
 #[test]

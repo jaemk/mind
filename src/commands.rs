@@ -640,10 +640,14 @@ fn meld_recursive(
         // fewer items than before: point the consumer at applying it
         // themselves.
         let add_root_hint = if curated.add_roots.is_some() {
+            // spec: CLI-225 -- `source.name` is source-influenced (derived
+            // from the repo spec / `--as` alias) and lands in a pasteable
+            // `mind meld <name> --add-root <dir>` remedy, so it is
+            // shell-quoted before printing.
             format!(
                 "; to apply add-roots yourself, run `mind meld {} --add-root <dir>` \
                  (that flag is not gated by a nested mind.toml)",
-                source.name
+                crate::error::shell_quote(&source.name)
             )
         } else {
             String::new()
@@ -1545,31 +1549,16 @@ fn meld_recursive(
     Ok(added)
 }
 
-/// Strip ANSI CSI escape sequences and control characters from `s`.
-/// CSI sequences (`ESC [` params final-byte) are removed in full; C0
-/// Strip ANSI/VT escape sequences and terminal-dangerous Unicode from `s`.
-/// `strip-ansi-escapes` handles the full escape grammar (CSI, OSC, DCS, etc.).
-/// A second pass drops C0/DEL/C1 controls and Unicode bidi-override/separator
-/// code points that are not escape sequences but can still corrupt terminal output.
-/// Printable non-ASCII (U+00A0 and above, minus the blocked ranges) is preserved
-/// so non-English curator messages are not corrupted.
-fn strip_ansi(s: &str) -> String {
-    let bytes = strip_ansi_escapes::strip(s);
-    // Input is valid UTF-8, so output is too; lossy conversion is a no-op in practice.
-    String::from_utf8_lossy(&bytes)
-        .chars()
-        .filter(|&c| {
-            (('\x20'..='\x7e').contains(&c) || c > '\u{009f}')
-                && !matches!(
-                    c,
-                    // Bidi-override code points: phishing/spoofing vectors.
-                    '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
-                    // Line separator and paragraph separator.
-                    | '\u{2028}' | '\u{2029}'
-                )
-        })
-        .collect()
-}
+// spec: DSC-69/CLI-224 -- `strip_ansi` used to be a private copy here, out of
+// step with the shared, hardened `crate::sanitize::strip_ansi` (it also
+// blocks Unicode directional marks and zero-width characters, and collapses a
+// control-character run to one space instead of deleting it outright). Both
+// copies applied to the exact same class of untrusted, source/curator-derived
+// strings (plugin/marketplace descriptions, collision-prompt identities, auth-
+// failure messages, git stderr), so the divergence meant only half of those
+// call sites got the newer hardening. Now a plain re-export: every call site
+// below routes through the one shared, hardened implementation.
+use crate::sanitize::strip_ansi;
 
 /// Return the path of the managed policy file currently in effect, if any.
 ///
@@ -1915,13 +1904,17 @@ fn warn_agent_collisions(paths: &Paths, items: &[CatalogItem]) {
                     .any(|p| p.as_path() == std::path::Path::new(link.as_str()))
             });
             if collides {
+                // spec: CLI-225 -- `entry.key()` is `kind:name` built from the
+                // installed item's (source-influenced) name, which
+                // `is_safe_item_name` does not restrict against shell
+                // metacharacters, and lands in a pasteable `mind forget`
+                // remedy, so it is shell-quoted before printing.
+                let quoted_key = crate::error::shell_quote(&entry.key());
                 eprintln!(
                     "warning: agent '{harness_name}' from '{}' would collide with the installed \
-                     agent from '{}' at agents/{harness_name}.md -- run `mind forget {}` to \
+                     agent from '{}' at agents/{harness_name}.md -- run `mind forget {quoted_key}` to \
                      remove it first",
-                    item.source,
-                    entry.source,
-                    entry.key(),
+                    item.source, entry.source,
                 );
             }
         }
@@ -2097,8 +2090,13 @@ pub fn init_source(
     findings.extend(crate::review::duplicate_tooling_findings(&items));
     crate::review::print_findings(&[], &findings);
     if has_unguarded && !template {
+        // spec: CLI-225 -- `dir` is the user's own CLI path argument, not
+        // restricted against shell metacharacters, and lands in a pasteable
+        // `mind init-source <dir> --template` remedy, so it is shell-quoted
+        // before printing (same rule as source/item identities elsewhere).
+        let quoted_dir = crate::error::shell_quote(dir);
         println!(
-            "run `mind init-source {dir} --template` to wrap the bare references as {{{{ns:name}}}}"
+            "run `mind init-source {quoted_dir} --template` to wrap the bare references as {{{{ns:name}}}}"
         );
     }
 
@@ -2511,7 +2509,11 @@ fn unmeld_one(
             for k in &item_keys {
                 println!("  {} {k}", out.bullet());
             }
-            println!("run `mind forget '{source_name}#*'` to remove them");
+            // spec: CLI-225 -- `source_name` is source-influenced and lands
+            // in a pasteable `mind forget` remedy, so it is shell-quoted
+            // before printing rather than framed in bare single quotes.
+            let quoted_ref = crate::error::shell_quote(&format!("{source_name}#*"));
+            println!("run `mind forget {quoted_ref}` to remove them");
         }
         return Ok(());
     }
@@ -2812,8 +2814,14 @@ pub fn learn(paths: &Paths, item_ref: &str, dry_run: bool, flow: InstallFlow) ->
         // direct the user to `mind probe <query>` (search) rather than
         // `mind sync` (which cannot help if the item simply does not exist).
         if let MindError::ItemNotFound { ref query, sources } = e {
+            // spec: CLI-225 -- `query` is the user's own `learn` argument but
+            // lands verbatim in pasteable `mind probe <query>` / `mind learn
+            // --all <query>` remedies below, so it is shell-quoted once here
+            // before printing, matching the rule applied to source/item
+            // identities elsewhere.
+            let quoted_query = crate::error::shell_quote(query);
             if sources > 0 {
-                eprintln!("hint: run `mind probe {query}` to search available items");
+                eprintln!("hint: run `mind probe {quoted_query}` to search available items");
             }
             // spec: CLI-208 -- a query that names (exactly, or as an
             // unambiguous trailing suffix, CLI-5) an already-melded source is a
@@ -2834,7 +2842,7 @@ pub fn learn(paths: &Paths, item_ref: &str, dry_run: bool, flow: InstallFlow) ->
                 if let [only] = matching.as_slice() {
                     eprintln!(
                         "hint: '{query}' names the melded source {only}; run \
-                         `mind learn --all {query}` to install all of its items"
+                         `mind learn --all {quoted_query}` to install all of its items"
                     );
                 }
             }
@@ -3103,6 +3111,10 @@ fn learn_collecting(paths: &Paths, item_ref: &str, flow: InstallFlow) -> Result<
 // spec: CLI-23
 pub fn install_source_items(paths: &Paths, source_name: &str, flow: InstallFlow) -> Result<()> {
     let item_ref = format!("{source_name}#*");
+    // spec: CLI-225 -- `item_ref` embeds the source-influenced `source_name`
+    // and lands in pasteable `mind learn` remedies below, so it is
+    // shell-quoted once here rather than framed in bare single quotes.
+    let quoted_item_ref = crate::error::shell_quote(&item_ref);
 
     // Resolve what would install (excludes already-installed items, DEP-23). A
     // source that offers nothing matching is an ItemNotFound here; treat it as
@@ -3122,7 +3134,7 @@ pub fn install_source_items(paths: &Paths, source_name: &str, flow: InstallFlow)
     if !crate::hook::is_tty() {
         if !json_mode() {
             println!(
-                "note: registered only, nothing installed (not a TTY); {source_name} has {} item(s) to install; run `mind learn '{item_ref}'` (or re-meld with --yes)",
+                "note: registered only, nothing installed (not a TTY); {source_name} has {} item(s) to install; run `mind learn {quoted_item_ref}` (or re-meld with --yes)",
                 plan.install_count
             );
         }
@@ -3137,7 +3149,7 @@ pub fn install_source_items(paths: &Paths, source_name: &str, flow: InstallFlow)
     ))? {
         learn(paths, &item_ref, false, InstallFlow { yes: true, ..flow })
     } else {
-        println!("skipped; run `mind learn '{item_ref}'` to install later");
+        println!("skipped; run `mind learn {quoted_item_ref}` to install later");
         Ok(())
     }
 }
@@ -3207,13 +3219,19 @@ pub fn install_source_items_subset(
     if !crate::hook::is_tty() {
         let ref_list = refs.join(", ");
         if !json_mode() {
+            // spec: CLI-225 -- each candidate ref embeds `source_name` and an
+            // item name from `it.key()`, neither restricted against shell
+            // metacharacters, and lands in a pasteable `mind learn` remedy,
+            // so it is shell-quoted before printing rather than framed in
+            // bare single quotes.
+            let ref_str = if refs.len() == 1 {
+                refs[0].clone()
+            } else {
+                format!("{source_name}#*")
+            };
+            let quoted_ref = crate::error::shell_quote(&ref_str);
             println!(
-                "note: registered only, nothing installed (not a TTY); {source_name} has {count} item(s) to install; run `mind learn '{}'` (or re-meld with --yes)",
-                if refs.len() == 1 {
-                    refs[0].clone()
-                } else {
-                    format!("{source_name}#*")
-                }
+                "note: registered only, nothing installed (not a TTY); {source_name} has {count} item(s) to install; run `mind learn {quoted_ref}` (or re-meld with --yes)"
             );
             let _ = ref_list; // suppress unused warning
         }
@@ -3229,7 +3247,10 @@ pub fn install_source_items_subset(
             learn(paths, item_ref, false, InstallFlow { yes: true, ..flow })?;
         }
     } else {
-        println!("skipped; run `mind learn '{source_name}#*'` to install later");
+        // spec: CLI-225 -- same rationale as above: shell-quote before
+        // printing.
+        let quoted_ref = crate::error::shell_quote(&format!("{source_name}#*"));
+        println!("skipped; run `mind learn {quoted_ref}` to install later");
     }
     Ok(())
 }
@@ -3397,10 +3418,16 @@ pub fn remeld(
         if !ignored_flags.is_empty() {
             let flags = ignored_flags.join(", ");
             let plural = ignored_flags.len() != 1;
+            // spec: CLI-225 -- `source_name` is source-influenced (an
+            // instance name derived from the repo spec plus the consumer
+            // alias) and lands in a pasteable `mind unmeld <name>` remedy, so
+            // it is shell-quoted before printing (same rule as the
+            // `HooksNotRun`/`AmbiguousHookTarget` remedies in error.rs).
+            let quoted_source = crate::error::shell_quote(&source_name);
             println!(
                 "note: {flags} ignored; {source_name} is already melded (re-melding \
                  does not change a source's discovery configuration). To apply \
-                 {}, run `mind unmeld {source_name}` then `mind meld` again with {}.",
+                 {}, run `mind unmeld {quoted_source}` then `mind meld` again with {}.",
                 if plural { "them" } else { "it" },
                 if plural { "the flags" } else { "the flag" }
             );
@@ -3950,11 +3977,15 @@ fn source_status(paths: &Paths, source_name: &str) -> Result<()> {
                     lag
                 );
             }
+            // spec: CLI-225 -- `it.key()` is a source-influenced `kind:name`
+            // identity and lands in a pasteable `mind learn` remedy, so it is
+            // shell-quoted before printing rather than framed in bare single
+            // quotes.
             None => println!(
-                "  {} {}  not installed (run `mind learn '{}'`)",
+                "  {} {}  not installed (run `mind learn {}`)",
                 out.available(),
                 it.key(),
-                it.key()
+                crate::error::shell_quote(&it.key())
             ),
         }
     }
@@ -4733,8 +4764,14 @@ pub fn forget(
             .is_some_and(|s| s.item_path.is_some())
             && !manifest.items.values().any(|it| &it.source == src_name)
         {
+            // spec: CLI-225 -- `src_name` is an item-link source identity,
+            // which `is_safe_manifest_path` allows to carry a `'` (via the
+            // `#<path>` segment), so a bare single-quote frame breaks out.
+            // Route through `shell_quote` (which supplies its own quoting)
+            // instead of hand-framing it.
+            let quoted_src = crate::error::shell_quote(src_name);
             eprintln!(
-                "hint: item link {src_name} has nothing installed; run `mind unmeld '{src_name}'` to drop it"
+                "hint: item link {src_name} has nothing installed; run `mind unmeld {quoted_src}` to drop it"
             );
         }
     }

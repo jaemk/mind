@@ -210,7 +210,13 @@ held to the same guards as `mind.toml`.
   through the same path as a `[discover].sources` spec, including pin-value
   validation (DSC-66). Names and descriptions taken from a manifest have ANSI
   escapes and control characters stripped before display (DSC-69 rule), preventing
-  terminal injection from catalog-controlled text.
+  terminal injection from catalog-controlled text. This runs through the one
+  shared `crate::sanitize::strip_ansi` (also backing CLI-224/CLI-186), not a
+  separate copy: a plugin/marketplace description, the collision-prompt item
+  and source names it can carry (NS-44), and every other DSC-69/CLI-224 call
+  site get the same Unicode bidi-override, directional-mark (U+200E/U+200F/
+  U+061C), and zero-width (U+200B/U+2060/U+FEFF) stripping and control-run
+  collapse-to-space behavior, so none of them can lag the others' hardening.
 
 ## Provenance
 

@@ -191,7 +191,7 @@ fn review_reads_a_two_segment_relative_path_as_a_local_dir_without_cloning() {
     // CLI-214: the note names the reading taken and the escape to force the
     // remote one.
     assert!(
-        r.stderr.contains("skills/greet") && r.stderr.contains("mind review github:skills/greet"),
+        r.stderr.contains("skills/greet") && r.stderr.contains("mind review 'github:skills/greet'"),
         "the shadow note must name the target and the remote-forcing escape: {}",
         r.stderr
     );
