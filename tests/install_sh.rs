@@ -75,16 +75,32 @@ fn build_asset_tarball(out_path: &Path, content: &[u8]) {
     let _ = std::fs::remove_dir_all(&staging);
 }
 
+/// The SHA-256 utility this platform provides: GNU `sha256sum` on Linux, BSD
+/// `shasum` on macOS. `install.sh` accepts either (it prefers `sha256sum` and
+/// falls back to `shasum -a 256`), so the tests use whichever is present.
+fn checksum_tool() -> &'static str {
+    if which("sha256sum").is_some() {
+        "sha256sum"
+    } else {
+        "shasum"
+    }
+}
+
 fn sha256_of(path: &Path) -> String {
-    let out = Command::new("sha256sum")
+    let tool = checksum_tool();
+    let mut cmd = Command::new(tool);
+    if tool == "shasum" {
+        cmd.args(["-a", "256"]);
+    }
+    let out = cmd
         .arg(path)
         .output()
-        .expect("spawn sha256sum");
-    assert!(out.status.success(), "sha256sum must succeed on {path:?}");
+        .unwrap_or_else(|e| panic!("spawn {tool}: {e}"));
+    assert!(out.status.success(), "{tool} must succeed on {path:?}");
     String::from_utf8_lossy(&out.stdout)
         .split_whitespace()
         .next()
-        .expect("sha256sum output must start with the digest")
+        .expect("checksum output must start with the digest")
         .to_string()
 }
 
@@ -236,7 +252,11 @@ fn which(tool: &str) -> Option<PathBuf> {
 /// shells out to -- and nothing else. Anything not listed (notably `curl` and
 /// the real `gh`) is unreachable.
 fn link_real_tools(bin_dir: &Path, tools: &[&str]) {
-    for tool in tools {
+    // Always resolve the platform's checksum tool (sha256sum or shasum) on top
+    // of the caller's list, so the restricted PATH matches what install.sh
+    // looks for regardless of host.
+    let checksum = checksum_tool();
+    for tool in tools.iter().copied().chain(std::iter::once(checksum)) {
         let real = which(tool).unwrap_or_else(|| panic!("{tool} must exist on PATH for this test"));
         let dest = bin_dir.join(tool);
         if dest.exists() {
@@ -304,21 +324,9 @@ fn write_fake_wget(bin_dir: &Path, fixture_dir: &Path, log_path: &Path) {
 /// The real utilities install.sh shells out to, for the restricted-`PATH` run.
 /// Deliberately excludes `curl` and `gh`.
 const REAL_TOOLS: &[&str] = &[
-    "sed",
-    "head",
-    "mktemp",
-    "awk",
-    "sha256sum",
-    "tar",
-    "mkdir",
-    "cp",
-    "chmod",
-    "rm",
-    "cat",
-    "install",
+    "sed", "head", "mktemp", "awk", "tar", "mkdir", "cp", "chmod", "rm", "cat", "install",
     // `tar -xzf` forks gzip.
-    "gzip",
-    // The fake curl script's asset-matching arm shells out to `basename`.
+    "gzip", // The fake curl script's asset-matching arm shells out to `basename`.
     "basename",
 ];
 
