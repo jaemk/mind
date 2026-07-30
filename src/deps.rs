@@ -786,6 +786,7 @@ mod tests {
             install: None,
             uninstall: None,
             requires: Vec::new(),
+            expand: Vec::new(),
             hooks: Vec::new(),
         }
     }

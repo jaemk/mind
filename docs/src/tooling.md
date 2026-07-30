@@ -111,10 +111,48 @@ bundled file -- a script, data -- is left exactly as written; the designed use
 of a path token is prose, e.g. a skill telling Claude to run
 `{{tools:detect}}`. Inner whitespace is trimmed (`{{ path:x }}` works); an
 unterminated token (no closing `}}`) is left verbatim; non-UTF-8 files are not
-scanned.
+scanned. To expand tokens in a specific script, list it in `expand:` (below).
 
 References resolve within the same source only: ship a tool in the same source
 as the items that use it (TOOL-15).
+
+### Expanding tokens in a script: `expand:` (NS-57, TOOL-20)
+
+A bundled script that must call a sibling tool or reach an adjacent file can opt
+that file into expansion, so its tokens resolve at install instead of being left
+literal. Add an `expand:` key to the item's frontmatter, listing item-relative
+paths (whitespace-separated, the same form as `requires:`):
+
+```markdown
+---
+name: review
+description: Review code changes.
+expand: resources/pr.py
+---
+```
+
+Now `resources/pr.py` is expanded exactly like markdown. A token in it renders
+as an **absolute** store path (`/home/you/.mind/store/tool/detect/detect.sh`),
+not the `~` form markdown uses, because the file is read by a program that does
+not expand a leading `~` (a Python `pathlib.Path`, say). So a script locates its
+tooling without a language-specific self-locate:
+
+```python
+# resources/pr.py -- {{tools:detect}} is rewritten to an absolute path at install
+det = Path("{{tools:detect}}")
+```
+
+The key lives on the item, so declaring it keeps convention discovery on and
+says nothing about other items (it does not make a source authoritative). An
+entry naming a file the item does not ship, an absolute path, or a `..` segment
+fails the install (`BadReference`) and is reported by `review` as a hard
+`bad-expand` finding, so a typo surfaces before a meld. An unresolved token in a
+listed file is a hard failure, exactly as in markdown.
+
+Cross-source tooling is still out of scope: `expand:` bakes an install-time path
+that works because the tool ships in the same source. A script needing a tool
+from a different source has no token mechanism; ship the tool alongside its
+callers.
 
 ### `{{self}}` (TOOL-10)
 

@@ -80,6 +80,11 @@ the name or a bundled path.
 References resolve within the same source only: ship a tool in the same source as
 the items that use it.
 
+Tokens expand only in markdown files. A token in a bundled script (a
+`resources/pr.py`) is left literal by default. To expand it there, list the file
+in the item's `expand:` frontmatter, so a script can locate its tooling without a
+language-specific self-locate; see [Tooling and shared scripts](tooling.md).
+
 ## Hardcoded paths
 
 `mind learn` copies an item into the store (`~/.mind/store/<kind>/<name>`) and

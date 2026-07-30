@@ -64,6 +64,7 @@ and verified.
 | `review` flags path tokens + hardcoded paths + bare tool refs + misplaced `{{ns:}}`; `--fix` rewrites via a CommonMark parse (code spans, fences, containers, link syntax, brace spans) | done | CLI-135, CLI-136, CLI-137, CLI-138, CLI-139, CLI-145, NS-24, NS-46, NS-47, NS-48, NS-49, NS-50, NS-51, NS-52 |
 | `{{ns:}}`/path-token expansion, `review --fix`'s rewrites, and the unguarded-reference scan are markdown-file only (an extension test, `namespace::is_markdown`), reading a CommonMark structure map so code spans/blocks and link syntax are never touched; `templatize` also wraps a bare sibling mention in the frontmatter `description:` value, the one frontmatter field that is free prose | done | NS-53, NS-54, NS-55, NS-56, TOOL-19 |
 | `review` flags any `{{...}}` token found in a non-markdown item file (`inert-token`), resolvable or not, since none of them expand outside markdown | done | CLI-223 |
+| Opt-in token expansion in a non-markdown file: an item's `expand:` frontmatter lists item-relative files scanned like markdown, path tokens rendered absolute; a bad entry is a hard install/`review` error; convention discovery stays on | done | NS-57, TOOL-20, CLI-226 |
 | `review` finding messages are sanitized (`strip_ansi`) at construction, so both the text and `--json` output inherit it | done | CLI-224 |
 | `review`/`init-source` flag helper scripts duplicated across items (`duplicate-tooling`) | done | CLI-144, INIT-7 |
 | `evolve` verb: in-place upgrade of the `mind` binary | done | CLI-140, CLI-141, CLI-142, CLI-143 |

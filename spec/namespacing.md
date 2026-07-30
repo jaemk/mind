@@ -210,7 +210,35 @@ at runtime. Prefixing changes installed names, so references must be rewritten.
   and so is unaffected in practice, but a `mind.toml`-declared item is free to
   point at any path, and this still governs it. Widening later (an opt-in
   `mind.toml` glob naming additional files to scan) stays backward-compatible;
-  narrowing later would not, which is why it is done now, pre-1.0.
+  narrowing later would not, which is why it is done now, pre-1.0. The widening
+  is NS-57.
+- `NS-57` An item may opt specific non-markdown files into expansion with an
+  `expand:` frontmatter key: a whitespace-separated list of item-relative file
+  paths (the same scalar form `requires:` uses, DEP-4). At install, each listed
+  file is scanned and expanded exactly as a markdown file is -- all four token
+  families (`{{ns:}}`, `{{path:}}`, `{{tools:}}`, `{{self}}`), the same resolver
+  and the same bad-reference rule (NS-11, NS-12) -- overriding the NS-53
+  extension test for that file alone. This is the designed escape for a bundled
+  script that must reference a sibling tool or an adjacent file in a language
+  whose own path handling makes self-location awkward. Properties:
+  - The key lives in the item's own frontmatter, not in `mind.toml`'s inventory
+    layer, so declaring it on one item leaves convention discovery on and says
+    nothing about any other item; a source needing expansion on one skill does
+    not become authoritative (DSC-8) and does not have to enumerate the rest.
+  - A path token in an expand-listed file renders as an absolute store path, not
+    the `~` form TOOL-16 uses for markdown, because such a file is typically read
+    by a program that does not itself expand `~` (TOOL-20).
+  - An `expand:` entry is a safe relative path within the item: an absolute path,
+    a `..` segment, or an entry naming a file the item does not ship fails the
+    install with `BadReference` during staging (the transactional pre-swap check,
+    like a bad `{{ns:}}` or `requires:` entry), so a typo is caught loudly rather
+    than left as an un-expanded literal. A token in an expand-listed file that
+    does not resolve is a hard install failure, exactly as in markdown (NS-12),
+    not the inert dead text it would be in an unlisted non-markdown file.
+  - Only a directory item (a skill or a tool) has bundled files to list. An agent
+    or a rule is a single markdown file already covered by NS-53, so an `expand:`
+    entry on one resolves to nothing and is a no-op or, if it names a path, the
+    same missing-file `BadReference`.
 
 ## Unguarded-reference warning
 

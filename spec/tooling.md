@@ -116,7 +116,17 @@ the recorded content hash is of the source (token) form.
   `{{path:ref}}` all expand only in a markdown file (an extension of `md`,
   `markdown`, `mdown`, or `mkd`, case-insensitively), the same rule and the same
   chokepoint (`namespace::is_markdown`) `{{ns:}}` expansion uses. Combined with
-  TOOL-14, this is the complete statement of where every token family expands.
+  TOOL-14, this is the complete statement of where every token family expands,
+  except for a file an item opts in with `expand:` (NS-57, TOOL-20).
+- `TOOL-20` A path token in a file listed in an item's `expand:` frontmatter
+  (NS-57) does expand, overriding TOOL-19 for that file, and renders as an
+  absolute store path rather than the `~` form of TOOL-16. A `{{tools:name}}` in
+  a bundled `pr.py` listed under `expand:` expands to
+  `/home/user/.mind/store/tool/name/...`, not `~/.mind/store/tool/name/...`,
+  because the file is read by a program (here Python's `pathlib`) that does not
+  itself expand a leading `~`. The permission-glob rationale for TOOL-16 does not
+  apply: an `expand:` file is program input, not a command line a Claude
+  `settings.json` rule matches.
 - `TOOL-16` A path token renders the store root with a leading `~` when the store
   lies under the user's home directory (the default `~/.mind/store`): the home
   prefix is written as a literal `~`, not spelled out absolutely. This keeps the

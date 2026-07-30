@@ -536,13 +536,16 @@ fn run_checks(
                 Ok(c) => c,
                 Err(_) => continue,
             };
-            let is_md = crate::namespace::is_markdown(&file);
+            // NS-57/CLI-226: an `expand:`-listed file expands like markdown, so
+            // an unresolved token in it is a real install failure (hard), not the
+            // dead text a plain non-markdown file gets.
+            let expands = crate::namespace::is_markdown(&file) || item_expands_file(item, &file);
             // The bare_names set is empty here: review validates token resolution
             // (whether the name exists), not the expansion form, so bare vs.
             // prefixed output is irrelevant for this check.
             let no_bare = std::collections::HashSet::<String>::new();
             if let Err(bad_ref) = crate::namespace::expand(&content, &prefix, &siblings, &no_bare) {
-                if is_md {
+                if expands {
                     hard.push(Finding::hard(
                         "bad-reference",
                         format!(
@@ -678,8 +681,10 @@ fn run_checks(
             };
             // A non-markdown item file (a script, data) is entirely code: any
             // `{{ns:}}` in it is misplaced (NS-24), and no token family expands
-            // there at all (NS-53).
-            let is_md = crate::namespace::is_markdown(&file);
+            // there at all (NS-53) -- unless the item opts the file into
+            // expansion with `expand:`, which makes it behave like markdown for
+            // every token check (NS-57, CLI-226).
+            let expands = crate::namespace::is_markdown(&file) || item_expands_file(item, &file);
             // The one path token Check 8 (below) reports as `bad-reference` for
             // this file, if any, so Check 14 does not re-report the same span
             // (CLI-223). `expand_paths` stops at the first bad token, so this is
@@ -706,7 +711,7 @@ fn run_checks(
                     CrossSource => "crosses sources; a requires entry is intra-source only",
                     InvalidRef => "is not a valid item ref",
                 };
-                if is_md {
+                if expands {
                     hard.push(Finding::hard(
                         "bad-reference",
                         format!("{}: {token} {detail} in this source", item.key()),
@@ -731,7 +736,7 @@ fn run_checks(
             // would rewrite it there (it never does, per Check "Fix" below).
             for hp in crate::namespace::detect_hardcoded_paths(&content, &ctx) {
                 let suggestion = match &hp.suggestion {
-                    Some(tok) if is_md => format!("; use {tok}"),
+                    Some(tok) if expands => format!("; use {tok}"),
                     Some(tok) => {
                         format!("; {tok} would not expand here -- tokens expand in markdown only")
                     }
@@ -770,15 +775,16 @@ fn run_checks(
             // its own name).
             for r in crate::namespace::scan_ns_refs(&content) {
                 // In a non-markdown file the whole text is code, so treat any
-                // token as code-block context.
-                let context = if is_md {
+                // token as code-block context. An `expand:`-listed file expands
+                // like markdown (NS-57), so it keeps its parsed context.
+                let context = if expands {
                     r.context
                 } else {
                     crate::namespace::NsContext::CodeBlock
                 };
                 let where_ = match context {
                     crate::namespace::NsContext::Prose => continue,
-                    crate::namespace::NsContext::CodeBlock if !is_md => "a non-markdown file",
+                    crate::namespace::NsContext::CodeBlock if !expands => "a non-markdown file",
                     crate::namespace::NsContext::CodeBlock => "a code block",
                     crate::namespace::NsContext::CodeSpan => "a code span",
                     crate::namespace::NsContext::Path => "a path",
@@ -822,7 +828,9 @@ fn run_checks(
             //    report, since that is always a `{{ns:}}` token too);
             //  - the one path token (`{{tools:}}`/`{{path:}}`/`{{self}}`) Check 8
             //    above reported as `bad-reference` for this file, if any.
-            if !is_md {
+            // NS-57/CLI-226: skip an `expand:`-listed file -- its tokens are not
+            // inert, they expand at install -- via `expands`.
+            if !expands {
                 let tokens: Vec<String> = crate::namespace::inert_tokens(&content)
                     .into_iter()
                     .filter(|tok| {
@@ -844,7 +852,8 @@ fn run_checks(
                         format!(
                             "{}: {file_name} contains token(s) {} that will never expand there; \
                              tokens expand in markdown only, so move the reference into markdown \
-                             prose or have the script self-locate",
+                             prose, have the script self-locate, or list this file in the item's \
+                             `expand:` frontmatter to expand it here",
                             item.key(),
                             tokens.join(", ")
                         ),
@@ -861,6 +870,29 @@ fn run_checks(
                     bare_tools.join(", ")
                 ),
             ));
+        }
+        // CLI-226: an `expand:` entry naming a file the item does not ship, or an
+        // unsafe path, is a hard finding -- it is the install-time BadReference
+        // (NS-57) surfaced ahead of a meld.
+        for entry in &item.expand {
+            let rel = Path::new(entry);
+            let unsafe_path = rel.components().any(|c| {
+                matches!(
+                    c,
+                    std::path::Component::ParentDir
+                        | std::path::Component::RootDir
+                        | std::path::Component::Prefix(_)
+                )
+            });
+            if unsafe_path || !(item.path.is_dir() && item.path.join(rel).is_file()) {
+                hard.push(Finding::hard(
+                    "bad-expand",
+                    format!(
+                        "{}: expand: {entry} does not name a file this item ships",
+                        item.key()
+                    ),
+                ));
+            }
         }
     }
 
@@ -1172,6 +1204,18 @@ pub(crate) fn duplicate_tooling_findings(items: &[CatalogItem]) -> Vec<Finding> 
 
 /// All text files for an item: every file under a skill dir, or the single
 /// agent/rule file.
+/// Whether `file` (a path under the item's dir) is opted into token expansion by
+/// the item's `expand:` frontmatter (NS-57), so every token check treats it as
+/// markdown (CLI-226). A single-file item has no bundled files to list, so this
+/// is always false for it.
+fn item_expands_file(item: &CatalogItem, file: &Path) -> bool {
+    item.path.is_dir()
+        && file
+            .strip_prefix(&item.path)
+            .ok()
+            .is_some_and(|rel| item.expand.iter().any(|e| Path::new(e) == rel))
+}
+
 pub(crate) fn item_files(item: &CatalogItem) -> Vec<PathBuf> {
     if item.path.is_dir() {
         let mut files = Vec::new();
@@ -2863,6 +2907,82 @@ mod tests {
         assert!(
             result.hard.iter().any(|f| f.kind == "bad-reference"),
             "an unresolved path token must be a hard bad-reference: {:?}",
+            result.hard
+        );
+    }
+
+    /// A file listed in `expand:` is not flagged as carrying inert tokens: its
+    /// tokens expand at install (NS-57), so the CLI-223 net must skip it.
+    /// spec: CLI-226 NS-57
+    #[test]
+    fn expand_listed_file_is_not_flagged_inert() {
+        let tmp = TmpDir::new();
+        let source_dir = tmp.path().join("src");
+        write_file(
+            &source_dir.join("skills/review/SKILL.md"),
+            "---\ndescription: review\nexpand: run.sh\n---\n# review\n",
+        );
+        write_file(
+            &source_dir.join("skills/review/run.sh"),
+            "#!/bin/sh\n# see {{self}}/x\n",
+        );
+        let paths = paths_for(tmp.path());
+
+        let result = run_checks(&paths, &source_dir, None, false, true).unwrap();
+        assert!(
+            !result.advisory.iter().any(|f| f.kind == "inert-token"),
+            "a token in an expand-listed file is not inert: {:?}",
+            result.advisory
+        );
+        assert!(
+            !result.hard.iter().any(|f| f.kind == "bad-reference"),
+            "a resolvable {{self}} in a listed file is not a defect: {:?}",
+            result.hard
+        );
+    }
+
+    /// An unresolved token in an `expand:`-listed file is a HARD bad-reference,
+    /// unlike the advisory dead-text an unlisted non-markdown file gets.
+    /// spec: CLI-226 NS-57
+    #[test]
+    fn unresolved_token_in_expand_listed_file_is_hard() {
+        let tmp = TmpDir::new();
+        let source_dir = tmp.path().join("src");
+        write_file(
+            &source_dir.join("skills/review/SKILL.md"),
+            "---\ndescription: review\nexpand: run.sh\n---\n# review\n",
+        );
+        write_file(
+            &source_dir.join("skills/review/run.sh"),
+            "#!/bin/sh\n# run {{tools:nope}} .\n",
+        );
+        let paths = paths_for(tmp.path());
+
+        let result = run_checks(&paths, &source_dir, None, false, true).unwrap();
+        assert!(
+            result.hard.iter().any(|f| f.kind == "bad-reference"),
+            "an unresolved token in a listed file must be hard: {:?}",
+            result.hard
+        );
+    }
+
+    /// An `expand:` entry naming a file the item does not ship is a hard
+    /// `bad-expand` finding, matching the install-time BadReference.
+    /// spec: CLI-226 NS-57
+    #[test]
+    fn expand_entry_naming_a_missing_file_is_hard() {
+        let tmp = TmpDir::new();
+        let source_dir = tmp.path().join("src");
+        write_file(
+            &source_dir.join("skills/review/SKILL.md"),
+            "---\ndescription: review\nexpand: resources/missing.py\n---\n# review\n",
+        );
+        let paths = paths_for(tmp.path());
+
+        let result = run_checks(&paths, &source_dir, None, false, true).unwrap();
+        assert!(
+            result.hard.iter().any(|f| f.kind == "bad-expand"),
+            "a missing expand target must be a hard bad-expand finding: {:?}",
             result.hard
         );
     }

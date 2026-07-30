@@ -131,6 +131,21 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- An item may opt specific non-markdown files into token expansion with an
+  `expand:` frontmatter key: a whitespace-separated list of item-relative paths
+  (the same scalar form `requires:` uses). Each listed file is expanded at
+  install exactly as a markdown file is (`{{ns:}}`, `{{path:}}`, `{{tools:}}`,
+  `{{self}}`), so a bundled script can reference a sibling tool or adjacent file
+  without a language-specific self-locate. A path token in an expand-listed file
+  renders as an absolute store path, not the `~` form markdown uses, since the
+  file is program input. The key lives on the item, not in `mind.toml`'s
+  inventory, so declaring it keeps convention discovery on and does not force a
+  source to enumerate its other items. A bad entry (an absolute path, a `..`
+  segment, or a file the item does not ship) fails the install as a
+  `BadReference` during staging, and `review` reports the same as a hard
+  `bad-expand` finding; an expand-listed file is no longer flagged `inert-token`,
+  and an unresolved token in it is a hard `bad-reference` rather than dead-text
+  advisory (NS-57, TOOL-20, CLI-226).
 - `hook::is_tty` now honors a `$MIND_TTY` override (falsy: empty, `0`,
   `false`, `no`, `off`; anything else is truthy), read before inspecting
   stdin, so the interactive-consent branches are reachable from a headless
@@ -144,7 +159,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   gnu artifacts remain for the Homebrew formula.
 - Build provenance attestation on release artifacts, soft-verified by
   `install.sh` when `gh` is available.
-- CI jobs for the declared MSRV and for RustSec advisories.
+- CI jobs for the declared MSRV (1.88) and for RustSec advisories.
 - `--json` now answers every verb with one JSON document on stdout, except a
   closed exclusion list (`dump`, `completions`, `man`, `evolve`,
   `init-source`). `review` answers with a findings document and folds a hard
@@ -219,6 +234,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `install.sh` reports an explicit error when the install directory is not
   writable, instead of exiting silently with no binary, and matches the
   checksum line exactly rather than by an unanchored pattern.
+- The minimum supported Rust version is now 1.88 (was 1.85), to use let-chains.
+  Building from source needs a 1.88+ toolchain; installing a released binary,
+  the `install.sh` script, or Homebrew is unaffected.
 - `spec/` is included in the published crate, so `cargo test` works against an
   unpacked `.crate`; `.claude` is excluded.
 - `meld` prints an explicit note when a differing `--namespace` forks a new
@@ -295,9 +313,28 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   in source-controlled text (a token, a hardcoded path) is stripped from both
   the human `error [kind]: ...`/`advisory [kind]: ...` output and the
   `--json` document; previously neither was sanitized (CLI-224).
+- Every printed remedy that splices a source- or user-influenced identity into
+  a runnable `mind ...` command now shell-quotes that identity, not only the
+  `MindError` variants an earlier pass reached: the re-meld ignored-flags and
+  `--keep-items` notes, the curator add-root hint, the collision and non-TTY
+  install hints, the `source_status` listing, the `probe`/`learn`/`config
+  lobes remove` hints, and the `review` shadow note for a directory that also
+  parses as a remote spec. A name carrying a quote, `$`, or backtick can no
+  longer break out of a command a user pastes (CLI-225).
+- `commands.rs` no longer carries its own `strip_ansi`, which stripped only
+  bidi overrides and deleted control runs; every caller now routes through the
+  shared `sanitize::strip_ansi`, which also strips directional marks
+  (U+200E/U+200F/U+061C) and zero-width code points (U+200B/U+2060/U+FEFF) and
+  collapses a control run to a space. A hostile plugin or marketplace
+  description could previously carry those code points through the weaker copy
+  onto stdout and into a `--json` document.
 
 ### Documentation
 
+- Tooling guide: documented the `expand:` frontmatter key next to the
+  markdown-only rule it relaxes, with the absolute-path rendering, the
+  bad-entry failure, and the cross-source caveat; the source-layout page points
+  at it from the token section (NS-57, TOOL-20).
 - Authoring guide and commands reference: corrected `review`'s target
   precedence to "a target naming an existing directory is read as that local
   path unless it first matches a melded source's identity" (was stated as
@@ -327,8 +364,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - A `{{...}}` token in a non-markdown item file (a script, data) no longer
   expands, and `review` now flags every one it finds there, resolvable or
-  not (`inert-token`). Move the reference into markdown prose, or have the
-  script self-locate its own resources instead of relying on a token.
+  not (`inert-token`). Move the reference into markdown prose, have the script
+  self-locate its own resources, or list the file in the item's `expand:`
+  frontmatter to keep expanding its tokens (NS-57).
 
 ## [0.21.0] - 2026-07-23
 

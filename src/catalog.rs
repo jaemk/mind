@@ -62,6 +62,12 @@ pub struct CatalogItem {
     /// `requires:` key (DEP-4). Whitespace-split raw strings as written, e.g.
     /// `["skill:x", "agent:y"]`. Empty when absent.
     pub requires: Vec<String>,
+    /// Item-relative file paths opted into token expansion via the frontmatter
+    /// `expand:` key (NS-57). Whitespace-split raw strings as written, e.g.
+    /// `["resources/pr.py"]`. At install these non-markdown files are expanded
+    /// like markdown, with path tokens rendered absolute (TOOL-20). Empty when
+    /// absent.
+    pub expand: Vec<String>,
     /// The item's full resolved lifecycle hooks (HOOK-86), in execution order:
     /// the scalar `install`/`uninstall` shorthand folded in ahead of any
     /// `[[items.hooks]]` array entries. The scalar fields above stay populated
@@ -836,6 +842,12 @@ fn build_item(
     let requires: Vec<String> = frontmatter::file_field_capped(meta, "requires")?
         .map(|s| s.split_whitespace().map(str::to_owned).collect())
         .unwrap_or_default();
+    // NS-57: read the `expand:` frontmatter scalar the same way -- a
+    // whitespace-split list of item-relative files to expand tokens in, even
+    // though they are not markdown. Absent or empty -> empty Vec.
+    let expand: Vec<String> = frontmatter::file_field_capped(meta, "expand")?
+        .map(|s| s.split_whitespace().map(str::to_owned).collect())
+        .unwrap_or_default();
     // NS-56: a `description:` (or any other non-`name:` frontmatter field) may
     // carry a `{{ns:name}}` token wrapped by `templatize`/`review --fix`. The
     // catalog is a display surface (`recall`/`probe`/`dump`), not the expanded
@@ -859,6 +871,7 @@ fn build_item(
         install,
         uninstall,
         requires,
+        expand,
         hooks,
     })
 }
@@ -2531,6 +2544,7 @@ mod tests {
             install: None,
             uninstall: None,
             requires: Vec::new(),
+            expand: Vec::new(),
             hooks: Vec::new(),
         }
     }
@@ -2606,6 +2620,7 @@ mod tests {
             install: None,
             uninstall: None,
             requires: Vec::new(),
+            expand: Vec::new(),
             hooks: Vec::new(),
         };
         assert_eq!(item.resolved_bin(), None);
@@ -2888,6 +2903,41 @@ mod tests {
     }
 
     #[test]
+    fn expand_field_parsed_and_split_from_frontmatter() {
+        // spec: NS-57
+        // An `expand:` key in SKILL.md is read as a whitespace-split Vec, the
+        // same scalar form `requires:` uses; absent yields an empty Vec.
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let clone = base.join("sources/local/test/repo");
+        write_file(
+            &clone.join("skills/review/SKILL.md"),
+            "---\ndescription: review\nexpand:  resources/pr.py   bin/run.sh \n---\n# review\n",
+        );
+        write_file(
+            &clone.join("skills/plain/SKILL.md"),
+            "---\ndescription: plain\n---\n# plain\n",
+        );
+
+        let paths = paths_for(base);
+        let source = make_source_for(&clone);
+        let mut items = Vec::new();
+        scan_source(&paths, &source, &mut items).unwrap();
+
+        let review = items.iter().find(|i| i.name == "review").unwrap();
+        assert_eq!(
+            review.expand,
+            vec!["resources/pr.py".to_string(), "bin/run.sh".to_string()],
+            "expand must be whitespace-split from the frontmatter scalar"
+        );
+        let plain = items.iter().find(|i| i.name == "plain").unwrap();
+        assert!(
+            plain.expand.is_empty(),
+            "absent expand must yield empty Vec"
+        );
+    }
+
+    #[test]
     fn requires_field_parsed_from_agent_frontmatter() {
         // spec: DEP-4
         // `requires:` works on an agent file, not just skills.
@@ -3048,6 +3098,7 @@ mod tests {
             install: None,
             uninstall: None,
             requires: Vec::new(),
+            expand: Vec::new(),
             hooks: Vec::new(),
         }
     }

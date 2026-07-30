@@ -514,8 +514,11 @@ pub(crate) fn ensure_link(store: &Path, link: &Path) -> Result<()> {
 /// `{{tools:name}}` / `{{path:ref}}` path tokens. Both resolve against
 /// `siblings` (every item in the same source) and a bad reference in either
 /// pass aborts the staged install.
+/// A non-markdown file the item lists in `expand:` is expanded too (NS-57), with
+/// path tokens rendered absolute rather than the TOOL-16 `~` form (TOOL-20).
 /// Also validates the `requires` frontmatter entries (DEP-6): each must resolve
-/// to exactly one sibling (not source-qualified, not ambiguous, not missing).
+/// to exactly one sibling (not source-qualified, not ambiguous, not missing);
+/// and each `expand:` entry must be a safe relative path naming a shipped file.
 fn expand_references(
     root: &Path,
     item: &CatalogItem,
@@ -553,6 +556,11 @@ fn expand_references(
         self_name: &item.name,
         siblings: &path_siblings,
     };
+    // NS-57/TOOL-20: an `expand:`-listed non-markdown file renders path tokens
+    // as an absolute store path (home = None), since it is program input read by
+    // something that does not expand a leading `~` the way TOOL-16's markdown
+    // form assumes.
+    let ctx_abs = namespace::PathCtx { home: None, ..ctx };
 
     // DEP-6: validate every `requires` entry before touching any file. A bad
     // entry here aborts the staged install (the live copy is still untouched).
@@ -591,6 +599,36 @@ fn expand_references(
         }
     }
 
+    // NS-57: validate every `expand:` entry before staging touches a file. Each
+    // must be a safe relative path (no absolute, no `..`) naming a file the item
+    // ships; a bad entry aborts the staged install as a BadReference, the same
+    // transactional pre-swap failure a bad `requires` or `{{ns:}}` raises, so a
+    // typo is caught loudly rather than left as an un-expanded literal.
+    let mut expand_set: std::collections::HashSet<std::path::PathBuf> =
+        std::collections::HashSet::new();
+    for entry in &item.expand {
+        // spec: NS-57
+        use crate::error::BadRefReason::InvalidRef;
+        let rel = Path::new(entry);
+        let unsafe_path = rel.components().any(|c| {
+            matches!(
+                c,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        });
+        if unsafe_path {
+            return Err(bad_ref(format!("expand: {entry}"), InvalidRef));
+        }
+        // Must name a real file within the staged item. A single-file item
+        // (agent/rule) has no bundled files, so any entry is a miss.
+        if !(root.is_dir() && root.join(rel).is_file()) {
+            return Err(bad_ref(format!("expand: {entry}"), NoMatch));
+        }
+        expand_set.insert(rel.to_path_buf());
+    }
+
     let mut files = Vec::new();
     if root.is_dir() {
         collect_files(root, &mut files)?;
@@ -610,7 +648,17 @@ fn expand_references(
         // extension at all (matching its store form), so its markdown-ness is
         // read from the source path instead.
         let source_like: &Path = if root.is_dir() { &file } else { &item.path };
-        if !namespace::is_markdown(source_like) {
+        let is_md = namespace::is_markdown(source_like);
+        // NS-57: a file listed in `expand:` is expanded like markdown even
+        // though its extension is not, so a bundled script can reference a
+        // sibling tool. Its relative path (under the staged dir) is what the
+        // validated `expand_set` holds.
+        let is_listed = root.is_dir()
+            && file
+                .strip_prefix(root)
+                .map(|rel| expand_set.contains(rel))
+                .unwrap_or(false);
+        if !is_md && !is_listed {
             continue;
         }
         // Skip anything that is not valid UTF-8 text.
@@ -620,9 +668,12 @@ fn expand_references(
         if !content.contains("{{") {
             continue;
         }
+        // TOOL-20: a listed non-markdown file renders path tokens absolute; a
+        // markdown file keeps the TOOL-16 `~` form.
+        let path_ctx = if is_listed && !is_md { &ctx_abs } else { &ctx };
         let expanded = namespace::expand(&content, &item.prefix, &names, &bare_names)
             .map_err(|name| bad_ref(format!("{{{{ns:{name}}}}}"), NoMatch))?;
-        let expanded = namespace::expand_paths(&expanded, &ctx)
+        let expanded = namespace::expand_paths(&expanded, path_ctx)
             .map_err(|(referent, reason)| bad_ref(referent, reason))?;
         std::fs::write(&file, expanded).map_err(|e| MindError::io(&file, e))?;
     }
@@ -1107,6 +1158,7 @@ mod tests {
             install: None,
             uninstall: None,
             requires: Vec::new(),
+            expand: Vec::new(),
             hooks: Vec::new(),
         }
     }
@@ -1159,6 +1211,7 @@ mod tests {
             install: None,
             uninstall: None,
             requires,
+            expand: Vec::new(),
             hooks: Vec::new(),
         }
     }
@@ -1177,6 +1230,7 @@ mod tests {
             install: None,
             uninstall: None,
             requires: Vec::new(),
+            expand: Vec::new(),
             hooks: Vec::new(),
         }
     }
@@ -1297,6 +1351,7 @@ mod tests {
             install: None,
             uninstall: None,
             requires: Vec::new(),
+            expand: Vec::new(),
             hooks: Vec::new(),
         };
         let rule = CatalogItem {
@@ -1312,6 +1367,7 @@ mod tests {
             install: None,
             uninstall: None,
             requires: Vec::new(),
+            expand: Vec::new(),
             hooks: Vec::new(),
         };
         let siblings = vec![item.clone(), agent, rule];
@@ -1361,6 +1417,7 @@ mod tests {
             install: None,
             uninstall: None,
             requires: Vec::new(),
+            expand: Vec::new(),
             hooks: Vec::new(),
         };
         let rule = CatalogItem {
@@ -1376,6 +1433,7 @@ mod tests {
             install: None,
             uninstall: None,
             requires: Vec::new(),
+            expand: Vec::new(),
             hooks: Vec::new(),
         };
         let siblings = vec![item.clone(), agent, rule];
@@ -1415,6 +1473,171 @@ mod tests {
         assert!(
             result.is_ok(),
             "a self-requires must resolve to the item itself and not error: {result:?}"
+        );
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+
+    // ---- NS-57 / TOOL-20: `expand:` opt-in token expansion -----------------
+
+    /// A skill item at `path` (a fake source path) that opts `expand` files into
+    /// token expansion.
+    fn skill_item_expand(name: &str, path: std::path::PathBuf, expand: Vec<String>) -> CatalogItem {
+        let mut item = skill_item_at(name, path, Vec::new());
+        item.expand = expand;
+        item
+    }
+
+    #[test]
+    fn expand_listed_non_markdown_file_expands_with_absolute_path() {
+        // spec: NS-57 TOOL-20
+        // A file named in `expand:` is expanded like markdown even though it is
+        // not markdown, and its path tokens render as an ABSOLUTE store path,
+        // while a markdown sibling keeps the TOOL-16 `~` form. Uses a store root
+        // under home so the two renderings are distinguishable.
+        let home = dirs::home_dir().expect("home dir for the tilde-vs-absolute check");
+        let store_root = home.join("mind-expand-store");
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let staging =
+            std::env::temp_dir().join(format!("mind-expand-abs-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&staging);
+        std::fs::create_dir_all(staging.join("resources")).unwrap();
+        std::fs::write(staging.join("SKILL.md"), "see {{self}}/x\n").unwrap();
+        std::fs::write(staging.join("resources/pr.py"), "p = \"{{self}}/x\"\n").unwrap();
+
+        let item = skill_item_expand(
+            "review",
+            std::path::PathBuf::from("/src/skills/review"),
+            vec!["resources/pr.py".to_string()],
+        );
+        let siblings = vec![item.clone()];
+        expand_references(&staging, &item, &siblings, &store_root).unwrap();
+
+        let md = std::fs::read_to_string(staging.join("SKILL.md")).unwrap();
+        let py = std::fs::read_to_string(staging.join("resources/pr.py")).unwrap();
+        assert!(
+            md.contains("~/mind-expand-store/skill/review/x"),
+            "a markdown file keeps the ~ form (TOOL-16): {md:?}"
+        );
+        let abs = store_root.join("skill/review/x");
+        assert!(
+            py.contains(&abs.to_string_lossy().into_owned()),
+            "an expand-listed file renders the absolute store path (TOOL-20): {py:?}"
+        );
+        assert!(
+            !py.contains("~/mind-expand-store"),
+            "an expand-listed file must not carry the ~ form: {py:?}"
+        );
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+
+    #[test]
+    fn unlisted_non_markdown_file_is_left_literal() {
+        // spec: NS-57 NS-53
+        // Without an `expand:` entry, a token in a non-markdown file is left
+        // exactly as written (the NS-53 default).
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let staging =
+            std::env::temp_dir().join(format!("mind-expand-literal-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&staging);
+        std::fs::create_dir_all(staging.join("resources")).unwrap();
+        std::fs::write(staging.join("SKILL.md"), "# hi\n").unwrap();
+        std::fs::write(staging.join("resources/other.py"), "p = \"{{self}}/x\"\n").unwrap();
+
+        let item = skill_item_expand(
+            "review",
+            std::path::PathBuf::from("/src/skills/review"),
+            Vec::new(),
+        );
+        let siblings = vec![item.clone()];
+        expand_references(&staging, &item, &siblings, std::path::Path::new("/store")).unwrap();
+
+        let py = std::fs::read_to_string(staging.join("resources/other.py")).unwrap();
+        assert_eq!(
+            py, "p = \"{{self}}/x\"\n",
+            "an unlisted non-markdown file must be left literal (NS-53)"
+        );
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+
+    #[test]
+    fn expand_entry_naming_a_missing_file_is_bad_reference() {
+        // spec: NS-57
+        // An `expand:` entry that names no shipped file aborts the staged install
+        // as a BadReference, so a typo is caught loudly.
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let staging =
+            std::env::temp_dir().join(format!("mind-expand-miss-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&staging);
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("SKILL.md"), "# hi\n").unwrap();
+
+        let item = skill_item_expand(
+            "review",
+            std::path::PathBuf::from("/src/skills/review"),
+            vec!["resources/nope.py".to_string()],
+        );
+        let siblings = vec![item.clone()];
+        let err = expand_references(&staging, &item, &siblings, std::path::Path::new("/store"))
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::error::MindError::BadReference { .. }),
+            "a missing expand target must be BadReference: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+
+    #[test]
+    fn expand_entry_escaping_the_item_is_bad_reference() {
+        // spec: NS-57
+        // A `..`-bearing (or absolute) `expand:` entry is refused before any file
+        // is touched.
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let staging =
+            std::env::temp_dir().join(format!("mind-expand-esc-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&staging);
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("SKILL.md"), "# hi\n").unwrap();
+
+        let item = skill_item_expand(
+            "review",
+            std::path::PathBuf::from("/src/skills/review"),
+            vec!["../escape.py".to_string()],
+        );
+        let siblings = vec![item.clone()];
+        let err = expand_references(&staging, &item, &siblings, std::path::Path::new("/store"))
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::error::MindError::BadReference { .. }),
+            "an escaping expand entry must be BadReference: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+
+    #[test]
+    fn unresolved_token_in_listed_file_is_a_hard_failure() {
+        // spec: NS-57
+        // A token that does not resolve is inert (left literal) in an unlisted
+        // non-markdown file, but a HARD install failure once the file is listed,
+        // exactly as in markdown (NS-12).
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let staging =
+            std::env::temp_dir().join(format!("mind-expand-bad-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&staging);
+        std::fs::create_dir_all(staging.join("resources")).unwrap();
+        std::fs::write(staging.join("SKILL.md"), "# hi\n").unwrap();
+        std::fs::write(staging.join("resources/pr.py"), "p = \"{{tools:nope}}\"\n").unwrap();
+
+        let item = skill_item_expand(
+            "review",
+            std::path::PathBuf::from("/src/skills/review"),
+            vec!["resources/pr.py".to_string()],
+        );
+        let siblings = vec![item.clone()];
+        let err = expand_references(&staging, &item, &siblings, std::path::Path::new("/store"))
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::error::MindError::BadReference { .. }),
+            "an unresolved token in a listed file must be a hard BadReference: {err}"
         );
         let _ = std::fs::remove_dir_all(&staging);
     }
@@ -1550,6 +1773,7 @@ mod tests {
             install: None,
             uninstall: None,
             requires: Vec::new(),
+            expand: Vec::new(),
             hooks: Vec::new(),
         };
 

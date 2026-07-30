@@ -915,8 +915,11 @@ only appear at meld or install time. It is read-only and installs nothing.
   runtime -- CLI-135 only flags an unresolved one, and CLI-139 only covers
   `{{ns:}}`, so a resolvable path/self token in a non-markdown file was
   previously unreported by either. The finding names the file and the
-  token(s) and states that tokens expand in markdown only. Never hard, and
-  `--fix` never rewrites the file (CLI-138, NS-54). A token this generic net
+  token(s), states that tokens expand in markdown only, and names the three
+  remedies: move the reference into markdown prose, have the script
+  self-locate, or list the file in the item's `expand:` frontmatter to expand
+  it there (NS-57). Never hard, and `--fix` never rewrites the file (CLI-138,
+  NS-54). A token this generic net
   would otherwise re-report is excluded when another check already reported
   the same span for the same file, so a single broken or dead reference draws
   one finding, not two or three: every `{{ns:...}}` token in a non-markdown
@@ -927,6 +930,15 @@ only appear at meld or install time. It is read-only and installs nothing.
   `{{self}}`) CLI-135 reported as `bad-reference` for the file, if any, is
   excluded as well. A resolvable path/self token that no other check mentions
   -- the case this finding exists for -- is unaffected and still reported.
+- `CLI-226` A file listed in an item's `expand:` frontmatter (NS-57) is treated
+  as markdown by every `review` token check: its tokens do expand at install, so
+  no `inert-token` finding (CLI-223) is raised for it, an unresolved token in it
+  is a hard `bad-reference` (CLI-135) rather than the downgraded dead-text
+  advisory a non-markdown file gets, and a `{{ns:}}` in it is not `misplaced`
+  (CLI-139). An `expand:` entry naming a file the item does not ship is itself a
+  hard `bad-expand` finding, matching the install-time `BadReference` (NS-57), so
+  `review` catches a typo before a meld does. `--fix` still never rewrites a
+  non-markdown file, `expand:`-listed or not (NS-54).
 - `CLI-144` `review` reports, as an advisory `duplicate-tooling` finding, a
   non-markdown helper file whose contents are byte-identical across two or more
   items. The finding names the file and the items that carry it and notes the

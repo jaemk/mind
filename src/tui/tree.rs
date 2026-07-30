@@ -589,6 +589,7 @@ fn item_matches_search_installed(item: &crate::tui::data::SnapshotInstalled, sea
         install: None,
         uninstall: None,
         requires: Vec::new(),
+        expand: Vec::new(),
         hooks: Vec::new(),
     };
     catalog::matches_query(&fake, search)
@@ -617,6 +618,7 @@ fn item_matches_search_available(item: &crate::tui::data::SnapshotAvailable, sea
         install: None,
         uninstall: None,
         requires: Vec::new(),
+        expand: Vec::new(),
         hooks: Vec::new(),
     };
     catalog::matches_query(&fake, search)
