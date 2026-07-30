@@ -6,10 +6,14 @@
       "Bash(cargo clippy *)",
       "Bash(cargo fmt *)",
       "Bash(cargo fmt --check)",
+      "Bash(cargo check *)",
+      "Bash(cargo doc *)",
       "Bash(make ci *)",
       "Bash(make check *)",
       "Bash(make ci)",
-      "Bash(make check)"
+      "Bash(make check)",
+      "Bash(make ci-local)",
+      "Bash(make ci-local *)"
     ]
   }
 }
