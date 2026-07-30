@@ -1835,13 +1835,19 @@ follow_branch = "main"
     #[test]
     fn min_mind_version_equal_to_current_is_accepted() {
         // `min-mind-version` must be dotted numeric (DSC-40), and between
-        // releases the running binary carries a `-dev` pre-release suffix, so
-        // compare against the numeric base of the running version rather than
-        // the raw string. A `-dev` build satisfies its own base version:
-        // `version_at_least` parses the suffixed component as 0.
+        // releases the running binary carries a `-dev` pre-release suffix.
+        // `version_at_least` parses each dotted component as a u64 and treats a
+        // non-numeric one (the suffixed patch, e.g. `1-dev`) as 0, so a
+        // `x.y.1-dev` build is seen as `x.y.0`. Build the gate from the running
+        // version viewed through that same parse, so this asserts the `>=`
+        // equality boundary (POL-62) for any dev patch number, not just `.0`.
         let current = env!("CARGO_PKG_VERSION");
-        let base = current.split('-').next().unwrap();
-        let text = format!("min-mind-version = \"{base}\"\n[sources]\nlock = true\n");
+        let gate = current
+            .split('.')
+            .map(|c| c.trim().parse::<u64>().unwrap_or(0).to_string())
+            .collect::<Vec<_>>()
+            .join(".");
+        let text = format!("min-mind-version = \"{gate}\"\n[sources]\nlock = true\n");
         parse_str(&text, Path::new("test-policy.toml"))
             .expect("version == running binary must be accepted");
     }

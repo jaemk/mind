@@ -14469,9 +14469,16 @@ fn evolve_policy_pin_equal_to_running_no_skew_warning() {
     // PinnedBelowCurrent, so no skew warning is emitted.
     let sb = Sandbox::new();
     // A policy pin must be dotted numeric, and between releases the running
-    // binary carries a `-dev` pre-release suffix, so pin the numeric base. A
-    // `-dev` build compares equal to its own base version.
-    let current = env!("CARGO_PKG_VERSION").split('-').next().unwrap();
+    // binary carries a `-dev` pre-release suffix. `evolve`'s decision (via
+    // `version_at_least`) parses each dotted component as a u64 and treats a
+    // non-numeric one (the suffixed patch, e.g. `1-dev`) as 0, so a `x.y.1-dev`
+    // build is seen as `x.y.0`. Pin the running version viewed through that
+    // same parse so pin == running for any dev patch number, not just `.0`.
+    let current: String = env!("CARGO_PKG_VERSION")
+        .split('.')
+        .map(|c| c.trim().parse::<u64>().unwrap_or(0).to_string())
+        .collect::<Vec<_>>()
+        .join(".");
     let policy = write_policy(&sb, &format!("[binary]\nself-update = \"{current}\"\n"));
 
     let r = sb.mind_env(
