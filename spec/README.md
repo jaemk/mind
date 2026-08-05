@@ -202,7 +202,27 @@ and verified.
 | Registering a fan-out-mode lobe links every admitted installed item into it immediately; an occupied foreign target is reported with the `--force` remedy, not clobbered | done | HARN-17 |
 | `introspect --fix` re-filters findings after repair; a lobe pruned in the same run is not also reported outstanding | done | HARN-18 |
 | The TUI's lobes action shares `config lobes add`'s implementation (lobe-dir creation, kinds-filtered backfill, `--force`-gated foreign-file guard), so it carries the same guarantees with no separate implementation | done | TUI-62 |
-| Selective lobe mode: items install into a lobe only when explicitly targeted, rather than by global fan-out | planned | HARN-19 |
+| Selective lobe mode: `--local` on `learn`/`meld` scopes an install to the single registered project lobe the cwd sits inside, instead of the default fan-out | done | HARN-19, HARN-20, HARN-21 |
+| `--json` treated as always non-interactive for a destructive confirmation (unmeld, forget --unmanaged, upgrade apply, evolve binary-swap) | done | LIFE-45 |
+| `upgrade` refuses a rename that would evict a different installed item already occupying the new key, instead of silently deleting it | done | LIFE-46 |
+| `upgrade` rename excludes the new install's own links from the old item's link cleanup, so a shared link path (e.g. an agent's bare-name link) is not deleted out from under the new install | done | LIFE-47 |
+| A mid-batch `upgrade`/hook-rerun failure saves the manifest/registry for every already-applied item before the error propagates | done | LIFE-48 |
+| `sync --upgrade --yes` forwards `--yes` into the upgrade pass instead of forcing it off | done | LIFE-49 |
+| mind refuses an item install up front on a non-unix platform instead of falling back to an unrecognized copy | done | LIFE-50 |
+| Source-derived item descriptions (frontmatter and `[[items]]` overrides) are sanitized (ANSI/control/bidi stripped) at catalog capture, not per display site | done | DSC-94 |
+| TUI: installed rows carry a `stale` flag with a drift marker and an explicit per-item upgrade-confirm list | done | TUI-63 |
+| TUI: `?` opens a keymap help overlay; hint line names `/`, `h`/`l`, paging, and `?` | done | TUI-64 |
+| TUI honors `NO_COLOR` (monochrome style) and falls back to an ASCII glyph set on a non-UTF-8 locale | done | TUI-65 |
+| Text measurement for TUI wrapping/sizing uses display-width, not char count; truncated tree-row descriptions get a trailing `...` marker | done | TUI-67 |
+| TUI: an empty Installed/Available group shows a call-to-action row instead of a bare blank list | done | TUI-68 |
+| TUI: Esc on a settled search filter arms a clear on the first press and only clears on a second consecutive Esc | done | TUI-69 |
+| TUI status/error line's row budget scales with terminal height instead of a flat 3-row ceiling | done | TUI-70 |
+| `probe` also falls back to the non-interactive listing under `--ascii` or a non-UTF-8 locale | done | TUI-71 |
+| `--dangerously-skip-hook-check` renamed from `--dangerously-skip-install-hook-check` for `unmeld`/`forget` (an uninstall-hook flag); old spelling kept as a hidden alias | done | CLI-227 |
+| `mind hooks run --rerun` is a visible alias for `--force` | done | CLI-228 |
+| `evolve`'s pin-a-version flag renamed `--to <VERSION>`; `--version` kept as a hidden alias | done | CLI-229 |
+| `unmeld` accepts `remove`/`rm` as additional visible aliases | done | CLI-230 |
+| `sync [source]` accepts an optional source selector, syncing only the matching source(s) | done | CLI-231 |
 
 ## Documents
 

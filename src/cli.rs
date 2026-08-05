@@ -87,7 +87,14 @@ pub struct Cli {
 pub enum Command {
     /// Meld with a source repo and install its items (prompts to install; use `--register-only` to skip).
     // spec: CLI-173
-    #[command(visible_alias = "add")]
+    #[command(
+        visible_alias = "add",
+        after_help = "\
+EXAMPLES:
+    mind meld owner/repo
+    mind meld https://github.com/owner/repo --namespace acme
+    mind meld . --register-only"
+    )]
     Meld {
         /// Repo spec to meld. Supported forms:
         ///
@@ -126,8 +133,7 @@ pub enum Command {
         /// `[source]` pin directive (else the remote default branch) applies.
         /// Unlike the discovery flags below, this ALSO takes effect against an
         /// already-melded source: a re-meld with `--pin` re-pins it, re-checking
-        /// out the clone if the resolved commit differs and reporting what
-        /// changed (CLI-209).
+        /// out the clone if the resolved commit differs and reporting what changed.
         // spec: CLI-200, CLI-201, CLI-209
         #[arg(long, value_name = "HEAD|REF|branch=NAME|tag=NAME")]
         pin: Option<String>,
@@ -152,7 +158,8 @@ pub enum Command {
         /// Persisted on the source and used by later scans and sync. Only takes
         /// effect at the meld that registers the source: passing it against an
         /// already-melded source is ignored (a note lists it and points at
-        /// `unmeld` + `meld` to change it, CLI-206).
+        /// `unmeld` + `meld` to change it).
+        // spec: CLI-206
         #[arg(long = "root", value_name = "DIR")]
         roots: Vec<String>,
 
@@ -164,7 +171,8 @@ pub enum Command {
         /// or suppress anything. Persisted on the source and used by later
         /// scans and sync. Only takes effect at the meld that registers the
         /// source: passing it against an already-melded source is ignored (a
-        /// note lists it and points at `unmeld` + `meld` to change it, CLI-206).
+        /// note lists it and points at `unmeld` + `meld` to change it).
+        // spec: CLI-206
         #[arg(long = "add-root", value_name = "DIR")]
         add_roots: Vec<String>,
 
@@ -176,8 +184,8 @@ pub enum Command {
         /// only (ignored for an authoritative `mind.toml`). Persisted on the source
         /// and used by later scans and sync. Only takes effect at the meld that
         /// registers the source: passing it against an already-melded source is
-        /// ignored (a note lists it and points at `unmeld` + `meld` to change it,
-        /// CLI-206).
+        /// ignored (a note lists it and points at `unmeld` + `meld` to change it).
+        // spec: CLI-206
         #[arg(long)]
         flat_skills: bool,
 
@@ -189,7 +197,8 @@ pub enum Command {
         /// prompt. Use `mind review <repo>` to see a source's declared hook
         /// before melding. Only takes effect at the meld that registers the
         /// source: passing it against an already-melded source is ignored (a
-        /// note lists it and points at `unmeld` + `meld` to change it, CLI-206).
+        /// note lists it and points at `unmeld` + `meld` to change it).
+        // spec: CLI-206
         #[arg(long, value_name = "CMD")]
         install_hook: Option<String>,
 
@@ -221,9 +230,22 @@ pub enum Command {
         recursive: bool,
 
         /// When installing, overwrite link targets that already exist and are not
-        /// managed by mind. Without it, a conflict prompts on a TTY.
+        /// managed by mind. Without it, a conflict prompts on a TTY. On a re-meld
+        /// of an already-melded source, `--force` ALSO re-offers every one of the
+        /// source's install hooks, even those already run at the current commit
+        /// (not just the pending ones an ordinary re-meld re-offers).
+        // spec: HOOK-60
         #[arg(short = 'f', long)]
         force: bool,
+
+        /// Install the source's item(s) into ONLY the current project's lobe --
+        /// a registered lobe whose directory lives under the current working
+        /// directory -- instead of fanning them into every configured agent
+        /// home (the default). Errors when the current directory is not inside
+        /// any registered project lobe.
+        // spec: HARN-20 HARN-21
+        #[arg(long)]
+        local: bool,
     },
 
     /// Scaffold a `mind.toml` and report the references among a source's items.
@@ -269,6 +291,13 @@ pub enum Command {
     /// matching sources.
     // spec: CLI-174 - long_about leads with the uninstall default.
     // spec: CLI-172 - the former `detach` alias is removed.
+    // spec: CLI-230 - `remove`/`rm` visible aliases, for symmetry with learn's
+    // install/uninstall aliases.
+    #[command(visible_aliases = ["remove", "rm"], after_help = "\
+EXAMPLES:
+    mind unmeld github.com/acme/agents
+    mind unmeld acme/agents --keep-items
+    mind unmeld '*agents' --yes")]
     Unmeld {
         /// The source name (see `mind recall --sources`).
         name: String,
@@ -288,7 +317,15 @@ pub enum Command {
         /// Run uninstall hooks without the safety prompt. This executes
         /// arbitrary code from the source; only use it for a source you trust.
         /// Without this flag, a non-TTY run skips the hook and prints a note.
-        #[arg(long)]
+        /// `--dangerously-skip-install-hook-check` is a deprecated alias kept for
+        /// backwards compatibility.
+        // spec: CLI-227 - renamed from --dangerously-skip-install-hook-check,
+        // which gated an UNINSTALL hook despite its name; old spelling is a
+        // hidden alias.
+        #[arg(
+            long = "dangerously-skip-hook-check",
+            alias = "dangerously-skip-install-hook-check"
+        )]
         dangerously_skip_install_hook_check: bool,
     },
 
@@ -302,7 +339,14 @@ pub enum Command {
     /// printing a dependency tree and prompting before installing; `--dry-run`
     /// previews the closure without installing anything and `--yes` skips the prompt.
     // spec: CLI-172
-    #[command(visible_alias = "install")]
+    #[command(
+        visible_alias = "install",
+        after_help = "\
+EXAMPLES:
+    mind learn review
+    mind learn 'skill:*'
+    mind learn owner/repo --all"
+    )]
     Learn {
         /// Item ref or glob: `name`, `skill:name`, `owner/repo#name`, `'review*'`, `'*'`.
         /// Also accepts a deep tree/blob URL to one skill
@@ -318,10 +362,14 @@ pub enum Command {
         /// For a deep tree/blob URL, freeze the link's branch ref to its current
         /// commit when registering the single-item source, so the instance is an
         /// immutable snapshot instead of tracking the branch. This is a bare flag
-        /// (unlike `meld --pin`, which takes a value): the ref comes from the URL.
-        /// Ignored (with a note) for a non-URL item ref, which names an
+        /// that takes NO value (unlike `meld --pin <REF>`, which takes one): the
+        /// ref to freeze comes from the URL itself, so there is nothing to
+        /// supply. Ignored (with a note) for a non-URL item ref, which names an
         /// already-melded source.
-        // spec: CLI-200
+        // spec: CLI-200 - learn's --pin is intentionally bare (arity 0), NOT
+        // symmetric with meld's `--pin <value>`: learn resolves items from an
+        // already-melded source or a URL whose ref is in the URL, so there is no
+        // ref value for the flag to accept.
         #[arg(long)]
         pin: bool,
 
@@ -347,6 +395,15 @@ pub enum Command {
         /// note, so the item's tooling is not built.
         #[arg(long)]
         dangerously_skip_build_hook_check: bool,
+
+        /// Install the item(s) into ONLY the current project's lobe -- a
+        /// registered lobe whose directory lives under the current working
+        /// directory -- instead of fanning them into every configured agent home
+        /// (the default). Errors when the current directory is not inside any
+        /// registered project lobe.
+        // spec: HARN-20 HARN-21
+        #[arg(long)]
+        local: bool,
     },
 
     /// Remove an installed item, or many via a glob.
@@ -356,7 +413,14 @@ pub enum Command {
     /// With no `<item>` and `--unmanaged`, every unmanaged item across all
     /// configured lobes is removed.
     // spec: CLI-172 - added `uninstall` visible alias; `unlearn` kept.
-    #[command(visible_aliases = ["unlearn", "uninstall"])]
+    #[command(
+        visible_aliases = ["unlearn", "uninstall"],
+        after_help = "\
+EXAMPLES:
+    mind forget review
+    mind forget 'skill:*' --yes
+    mind forget --unmanaged"
+    )]
     Forget {
         /// The installed item ref or glob: `name`, `skill:name`, `'review*'`, `'*'`.
         /// With `--unmanaged`: the ref or glob scopes removal to unmanaged items only;
@@ -370,17 +434,28 @@ pub enum Command {
         #[arg(long)]
         unmanaged: bool,
 
-        /// Skip the dependents confirmation when removing a single item that other
-        /// installed items depend on (DEP-60). Without this flag, `forget` warns and
-        /// prompts; with it, removal proceeds immediately. Does not affect the
-        /// multi-item glob confirmation (CLI-42).
+        /// Skip the dependents confirmation when removing a single item that
+        /// other installed items depend on. Without this flag, `forget` warns
+        /// and prompts; with it, removal proceeds immediately. The global
+        /// `--yes` also skips this same prompt, but additionally skips the
+        /// separate confirmation shown when a glob would remove more than one
+        /// item; `--force` alone skips only the dependents prompt.
+        // spec: DEP-60 CLI-42
         #[arg(short = 'f', long)]
         force: bool,
 
         /// Run an item's uninstall hook without the safety prompt. This executes
         /// arbitrary code from the source; only use it for a source you trust.
         /// Without this flag, a non-TTY run skips the hook and prints a note.
-        #[arg(long)]
+        /// `--dangerously-skip-install-hook-check` is a deprecated alias kept for
+        /// backwards compatibility.
+        // spec: CLI-227 - renamed from --dangerously-skip-install-hook-check,
+        // which gated an UNINSTALL hook despite its name; old spelling is a
+        // hidden alias.
+        #[arg(
+            long = "dangerously-skip-hook-check",
+            alias = "dangerously-skip-install-hook-check"
+        )]
         dangerously_skip_install_hook_check: bool,
     },
 
@@ -388,6 +463,12 @@ pub enum Command {
     // spec: CLI-172
     #[command(visible_alias = "update")]
     Sync {
+        /// Only sync the source(s) matching this selector (exact name, an
+        /// unambiguous trailing suffix like `repo` or `owner/repo`, or a glob).
+        /// With no selector, every melded source is synced (CLI-50).
+        // spec: CLI-231
+        source: Option<String>,
+
         /// After refreshing, run an `upgrade` pass (report + prompt) to apply upgrades.
         /// Deprecated: prefer `mind upgrade` which now syncs first by default (CLI-169).
         #[arg(long)]
@@ -438,21 +519,28 @@ pub enum Command {
         dangerously_skip_build_hook_check: bool,
     },
 
-    /// Update the `mind` binary itself to the latest release (or `--version`).
+    /// Upgrade the `mind` binary itself to the latest release (or a version
+    /// pinned with `--to`). Distinct from `sync`'s `update` alias, which
+    /// refreshes melded sources, not the binary.
     ///
     /// Downloads the release binary for this platform and replaces the running
-    /// executable in place. `--check` reports whether an update is available and
-    /// changes nothing. Without `--yes` it prompts before replacing.
+    /// executable in place. `--check` reports whether a newer release is
+    /// available and changes nothing. Without `--yes` it prompts before replacing.
     // Disable clap's auto `--version` flag on this subcommand so the explicit
-    // `--version <VERSION>` argument below (pin a target release) owns the name.
+    // `--to <VERSION>` argument below (pin a target release) owns the name
+    // rather than shadowing the global `-V`/`--version` flag other verbs carry.
     // spec: CLI-172
     #[command(disable_version_flag = true, visible_alias = "self-update")]
     Evolve {
-        /// Report whether an update is available, then exit without changing anything.
+        /// Report whether a newer release is available, then exit without
+        /// changing anything.
         #[arg(long)]
         check: bool,
-        /// Update to this exact version instead of the latest release.
-        #[arg(long, value_name = "VERSION")]
+        /// Upgrade to this exact version instead of the latest release.
+        /// `--version` is a deprecated alias kept for backwards compatibility.
+        // spec: CLI-229 - renamed from --version, which shadowed the global
+        // -V/--version flag other verbs carry; old spelling is a hidden alias.
+        #[arg(long = "to", alias = "version", value_name = "VERSION")]
         version: Option<String>,
     },
 
@@ -475,8 +563,9 @@ pub enum Command {
         #[arg(long)]
         source: Option<String>,
 
-        /// Render installed items as a dependency forest (DEP-61). With no item,
-        /// shows the full forest; with an item ref, scopes to that item's subtree.
+        /// Render installed items as a dependency forest. With no item, shows
+        /// the full forest; with an item ref, scopes to that item's subtree.
+        // spec: DEP-61
         #[arg(long)]
         tree: bool,
     },
@@ -710,7 +799,8 @@ pub enum LobesCmd {
         /// `base/preset.rel_path`; with `--subdir`, at `base/<REL>`; as a bare
         /// argument, the lobe IS the directory (all kinds, no filter). A leading
         /// `~` is expanded. Omitting this for a project preset defaults to cwd;
-        /// omitting it without any flag is `LobeTargetRequired`.
+        /// omitting it with no preset and no `--subdir` is an error: `add` needs
+        /// a path or `--preset <name>`.
         path: Option<String>,
 
         /// Add a known harness preset (gemini, codex, universal, windsurf).
@@ -740,7 +830,7 @@ pub enum LobesCmd {
     /// List configured agent homes.
     List,
 
-    /// Detect installed harness homes and offer to add their presets.
+    /// Detect installed agent homes (lobes) and offer to add their presets.
     /// Honors the global `-y`/`--yes` flag to add without prompting.
     Detect,
 
@@ -797,7 +887,10 @@ pub enum HooksCmd {
         /// already recorded at the current commit (for lost outputs or transient
         /// failures), mirroring `meld --force`. No effect on `--event uninstall`
         /// or `--event build`, neither of which filters by a recorded commit.
-        #[arg(long)]
+        /// `--rerun` is a visible alias that names this flag's actual meaning
+        /// here more directly than the borrowed `--force`.
+        // spec: CLI-228
+        #[arg(long, visible_alias = "rerun")]
         force: bool,
 
         /// Run install hooks without the safety prompt. This executes arbitrary

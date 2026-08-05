@@ -97,7 +97,7 @@ pub struct Policy {
 //   2. The strict parse (`RawPolicy`, `deny_unknown_fields`) validates every
 //      known key and rejects unknowns (POL-5).
 // This ordering ensures a future-schema policy with `min-mind-version` set
-// gives a clear "upgrade mind" error (POL-62) instead of an opaque
+// gives a clear "run `mind evolve`" error (POL-62) instead of an opaque
 // "unknown field" error on whatever new key triggered the old binary.
 
 /// Phase-1 probe: reads only `min-mind-version`; ignores all other keys
@@ -549,8 +549,8 @@ pub fn load_file(path: &Path) -> Result<Policy> {
 fn parse_str(text: &str, path: &Path) -> Result<Policy> {
     // spec: POL-61 -- phase-1 probe: permissive parse to extract min-mind-version
     // before the strict deny_unknown_fields parse. This ensures that a policy
-    // written for a newer schema gives a clear "upgrade mind" error (POL-62) on
-    // an old binary instead of an opaque "unknown field" error.
+    // written for a newer schema gives a clear "run `mind evolve`" error (POL-62)
+    // on an old binary instead of an opaque "unknown field" error.
     //
     // unwrap_or_default: if the TOML is syntactically malformed the probe yields
     // no version, and the strict parse below reports the real parse error.
@@ -573,7 +573,7 @@ fn parse_str(text: &str, path: &Path) -> Result<Policy> {
             return Err(MindError::InvalidPolicy {
                 path: path.display().to_string(),
                 reason: format!(
-                    "managed policy requires mind >= {v}, running {running}; upgrade mind"
+                    "managed policy requires mind >= {v}, running {running}; run `mind evolve`"
                 ),
             });
         }
@@ -1752,7 +1752,7 @@ follow_branch = "main"
     // ----- POL-61/62/63: min-mind-version gate --------------------------------
 
     // POL-62: a policy declaring min-mind-version higher than the running binary
-    // returns a clear "upgrade mind" error rather than an opaque unknown-field error.
+    // returns a clear "run `mind evolve`" error rather than an opaque unknown-field error.
     // POL-61: the check fires before the strict deny_unknown_fields parse.
     // spec: POL-61
     // spec: POL-62
@@ -1775,8 +1775,8 @@ follow_branch = "main"
                     "must name the required version: {reason}"
                 );
                 assert!(
-                    reason.contains("upgrade mind"),
-                    "must tell the user to upgrade: {reason}"
+                    reason.contains("mind evolve"),
+                    "must tell the user to run `mind evolve`: {reason}"
                 );
             }
             other => panic!("expected InvalidPolicy, got {other:?}"),
@@ -1788,7 +1788,7 @@ follow_branch = "main"
     // min-mind-version AND an unknown key (which the strict parse would reject)
     // must surface the version error, not the unknown-field error. This is the
     // core correctness claim of the two-phase parse: an old binary reading a
-    // newer-schema policy gets "upgrade mind", never an opaque unknown-field
+    // newer-schema policy gets "run `mind evolve`", never an opaque unknown-field
     // error on whatever new key the newer schema introduced.
     // spec: POL-61
     // spec: POL-62
@@ -1835,19 +1835,15 @@ follow_branch = "main"
     #[test]
     fn min_mind_version_equal_to_current_is_accepted() {
         // `min-mind-version` must be dotted numeric (DSC-40), and between
-        // releases the running binary carries a `-dev` pre-release suffix.
-        // `version_at_least` parses each dotted component as a u64 and treats a
-        // non-numeric one (the suffixed patch, e.g. `1-dev`) as 0, so a
-        // `x.y.1-dev` build is seen as `x.y.0`. Build the gate from the running
-        // version viewed through that same parse, so this asserts the `>=`
-        // equality boundary (POL-62) for any dev patch number, not just `.0`.
+        // releases the running binary carries a `-dev` pre-release suffix, so
+        // compare against the numeric base of the running version rather than
+        // the raw string. `version_at_least` strips a trailing `-suffix` from
+        // each component before parsing (H1), so `0.22.1-dev` compares equal
+        // to its own numeric base `0.22.1` for any dev patch number, not just
+        // `.0`. This asserts the `>=` equality boundary (POL-62).
         let current = env!("CARGO_PKG_VERSION");
-        let gate = current
-            .split('.')
-            .map(|c| c.trim().parse::<u64>().unwrap_or(0).to_string())
-            .collect::<Vec<_>>()
-            .join(".");
-        let text = format!("min-mind-version = \"{gate}\"\n[sources]\nlock = true\n");
+        let base = current.split('-').next().unwrap();
+        let text = format!("min-mind-version = \"{base}\"\n[sources]\nlock = true\n");
         parse_str(&text, Path::new("test-policy.toml"))
             .expect("version == running binary must be accepted");
     }

@@ -20,7 +20,9 @@ The on-disk layout and the two persisted JSON files.
 ```
 
 - `STO-1` The mind root is `$MIND_HOME` if set, else `~/.mind`. The claude root is
-  `$CLAUDE_HOME` if set, else `~/.claude`. Both overrides are honored everywhere.
+  `$MIND_DEFAULT_LOBE` if set, else `$CLAUDE_HOME` if set, else `~/.claude`
+  (`$MIND_DEFAULT_LOBE` takes precedence over `$CLAUDE_HOME`, CLI-170). All
+  overrides are honored everywhere.
 - `STO-2` The default link target for an item, relative to an agent home, is
   `skills/<name>` (skill), `agents/<name>.md` (agent), or `rules/<name>.md`
   (rule), where `<name>` is the effective name. A tool has no default link
@@ -48,8 +50,9 @@ The on-disk layout and the two persisted JSON files.
   "any install-target directory". See STO-56 for the reachability gate that
   governs project-scoped lobes.
 - `STO-15` When `~/.mind/config.toml` does not exist, it is created with the
-  default lobe (the `$CLAUDE_HOME` override if set, else `~/.claude`) on first
-  use (any command that sets up the layout, or any `config` command).
+  default lobe (the `$MIND_DEFAULT_LOBE` override if set, else the `$CLAUDE_HOME`
+  override if set, else `~/.claude`; CLI-170) on first use (any command that sets
+  up the layout, or any `config` command).
 - `STO-16` An agent home given as a relative path (after `~` expansion) is
   resolved to an absolute path against the current directory before items are
   linked, so the link paths recorded in the manifest do not depend on the

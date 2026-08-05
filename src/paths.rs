@@ -17,6 +17,16 @@
 //! Roots are overridable via environment variables so the test harness can point
 //! them at temp dirs: `MIND_HOME`, `CLAUDE_HOME`, `MIND_AGENT_HOMES`.
 //!
+//! The default lobe (the home written into a fresh config, and the fallback when
+//! no lobes are configured) is `MIND_DEFAULT_LOBE` if set, else `CLAUDE_HOME` if
+//! set, else `~/.claude`. `MIND_DEFAULT_LOBE` therefore takes precedence over
+//! `CLAUDE_HOME` (CLI-170); both `Paths::resolve` and `default_lobe` honor that
+//! order.
+//!
+//! `--local` on `learn`/`meld` narrows the install fan-out to a single project
+//! lobe for one invocation (HARN-20); see [`Paths::scope_to_local_lobe`] and
+//! [`Paths::detect_local_lobe`].
+//!
 //! A lobe is the parent of `skills/` / `agents/` / `rules/`; the default is
 //! `~/.claude`, but a lobe may be any harness home (Gemini, Codex, Windsurf, Antigravity)
 //! because the skill/agent layouts double as the cross-tool conventions
@@ -26,11 +36,37 @@
 //! dirs exist under the detection base (HARN-5), consulting `MIND_DETECT_HOME`
 //! (else the home dir) so detection stays hermetic without mutating process HOME.
 
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
 use crate::config::Config;
 use crate::error::{ItemKind, MindError, Result};
 use crate::policy::Policy;
+
+thread_local! {
+    /// The active `--local` install scope (HARN-20): when set, [`Paths::agent_homes`]
+    /// returns exactly this lobe instead of the global fan-out set. Thread-local
+    /// (not a process global) so it needs no locking and cannot leak across the
+    /// TUI's worker threads; the guard that owns it clears it on drop.
+    static LOCAL_LOBE: RefCell<Option<Lobe>> = const { RefCell::new(None) };
+}
+
+fn local_lobe_override() -> Option<Lobe> {
+    LOCAL_LOBE.with(|c| c.borrow().clone())
+}
+
+/// RAII guard for a `--local` install scope (HARN-20). While it is alive,
+/// [`Paths::agent_homes`] returns exactly the scoped lobe; dropping it restores
+/// the normal (global fan-out) resolution. Created by
+/// [`Paths::scope_to_local_lobe`].
+#[must_use = "dropping the guard immediately ends the --local scope"]
+pub struct LocalLobeGuard(());
+
+impl Drop for LocalLobeGuard {
+    fn drop(&mut self) {
+        LOCAL_LOBE.with(|c| *c.borrow_mut() = None);
+    }
+}
 
 /// A resolved agent home: an absolute path plus the kinds it admits (HARN-1).
 /// `kinds == None` is "no filter": it admits every kind, the historical behavior
@@ -285,6 +321,14 @@ impl Paths {
     /// policy targets resolve to `kinds: None` (all kinds), preserving current
     /// behavior. Lobes are deduplicated by path (first-seen kinds win).
     pub fn agent_homes(&self) -> Result<Vec<Lobe>> {
+        // spec: HARN-20 -- an active `--local` scope narrows the fan-out to the
+        // single project lobe it holds. That lobe was drawn from this same
+        // effective set by `detect_local_lobe` before the scope was set (the
+        // override is None during detection), so returning it here is a subset of
+        // the normally-resolved homes and does not bypass managed-policy filtering.
+        if let Some(lobe) = local_lobe_override() {
+            return Ok(vec![lobe]);
+        }
         // Compute the user's normal homes (pre-policy).
         let user_homes: Vec<Lobe> = {
             let mut h: Vec<Lobe> = Vec::new();
@@ -376,6 +420,84 @@ impl Paths {
         Ok(lobe)
     }
 
+    /// Restrict the install fan-out to `lobe` for the lifetime of the returned
+    /// guard (HARN-20). While the guard is held, [`Paths::agent_homes`] returns
+    /// exactly `lobe`; dropping it restores the normal resolution.
+    pub fn scope_to_local_lobe(lobe: Lobe) -> LocalLobeGuard {
+        LOCAL_LOBE.with(|c| *c.borrow_mut() = Some(lobe));
+        LocalLobeGuard(())
+    }
+
+    /// Detect the registered project lobe the current working directory sits
+    /// inside (HARN-21): a configured lobe whose directory lives under the cwd
+    /// (e.g. a `<project>/.windsurf` windsurf lobe, or a `<project>/<subdir>`
+    /// lobe). A global home lives under `~`, not under an arbitrary project cwd,
+    /// so it does not match. When several configured lobes qualify, the deepest
+    /// (closest to the cwd) wins. Returns `None` when the cwd is not inside any
+    /// registered project lobe, which is what makes `--local` an error there.
+    ///
+    /// Paths are canonicalized for the containment test so a symlinked cwd or
+    /// lobe directory still matches; a path that does not exist yet falls back to
+    /// its lexical form.
+    ///
+    /// A global home never qualifies as the project lobe an invocation is
+    /// "inside", even when the containment test would otherwise match it (HARN-21:
+    /// "A global home lives under `~`, not under an arbitrary project cwd, so it
+    /// does not qualify"). Two things count as a global home and are excluded:
+    /// - the resolved default home (`claude_home` / `MIND_DEFAULT_LOBE` /
+    ///   `CLAUDE_HOME`, else `~/.claude`): it is always the global fan-out target
+    ///   (HARN-20 says the default `~/.claude` is not written under `--local`), so
+    ///   it can never be a project lobe. Without this, running `--local` from the
+    ///   default home's PARENT (e.g. `$HOME`, with only `~/.claude` configured)
+    ///   would see `~/.claude` satisfy `starts_with(cwd)` and be wrongly narrowed
+    ///   to, instead of the install being refused.
+    /// - any home-rooted lobe (a global preset such as `~/.gemini/config` or
+    ///   `~/.agents`) when the cwd sits at or above `~`: its containment under the
+    ///   cwd is then an artifact of the cwd being the home directory or an ancestor
+    ///   of it, not of the lobe being a genuine project lobe.
+    ///
+    /// A real project lobe placed under `~` (e.g. `~/dev/proj/.windsurf` with cwd
+    /// `~/dev/proj`) is unaffected: the cwd is below `~`, not at or above it, so
+    /// the home-rooted exclusion does not fire.
+    // spec: HARN-21
+    pub fn detect_local_lobe(&self) -> Result<Option<Lobe>> {
+        let cwd = std::env::current_dir().map_err(|e| MindError::io(".", e))?;
+        let cwd_c = cwd.canonicalize().unwrap_or(cwd);
+        // The resolved default/global home: never a `--local` target (HARN-20/21).
+        let global_home = make_absolute(self.claude_home.clone())?;
+        let global_home_c = global_home.canonicalize().unwrap_or(global_home);
+        // The home directory, for the home-rooted global-preset exclusion below.
+        // Absent (no home dir) means the exclusion is simply not applied.
+        let home_c = home().ok().map(|h| h.canonicalize().unwrap_or(h));
+        let mut best: Option<(usize, Lobe)> = None;
+        for lobe in self.agent_homes()? {
+            let lp = lobe
+                .path
+                .canonicalize()
+                .unwrap_or_else(|_| lobe.path.clone());
+            if lp == cwd_c || !lp.starts_with(&cwd_c) {
+                continue;
+            }
+            // Exclude the default/global home outright (HARN-21).
+            if lp == global_home_c {
+                continue;
+            }
+            // Exclude a home-rooted global lobe when the cwd is at or above `~`:
+            // the match is only an artifact of the cwd sitting at/above home.
+            if let Some(home_c) = &home_c
+                && lp.starts_with(home_c)
+                && home_c.starts_with(&cwd_c)
+            {
+                continue;
+            }
+            let depth = lp.components().count();
+            if best.as_ref().is_none_or(|(d, _)| depth > *d) {
+                best = Some((depth, lobe));
+            }
+        }
+        Ok(best.map(|(_, l)| l))
+    }
+
     /// The base directory detection scans under (HARN-5): `$MIND_DETECT_HOME` if
     /// set (so tests stay hermetic without mutating process HOME), else the home
     /// directory.
@@ -460,9 +582,17 @@ impl Paths {
         let tmp_name = format!(".{}.tmp.{}", file_name, std::process::id());
         let tmp_path = dir.join(&tmp_name);
 
-        // Write to temp; clean up on error.
-        let write_result =
-            std::fs::write(&tmp_path, bytes).map_err(|e| MindError::io(&tmp_path, e));
+        // Write to temp and fsync it before the rename, so a crash after the
+        // rename cannot leave the target pointing at an inode whose data never
+        // reached disk (a truncated/zero-length manifest.json/sources.json). The
+        // sync_all flushes both the file contents and its length. Clean up on error.
+        use std::io::Write as _;
+        let write_result = std::fs::File::create(&tmp_path)
+            .and_then(|mut f| {
+                f.write_all(bytes)?;
+                f.sync_all()
+            })
+            .map_err(|e| MindError::io(&tmp_path, e));
         if let Err(e) = write_result {
             let _ = std::fs::remove_file(&tmp_path);
             return Err(e);

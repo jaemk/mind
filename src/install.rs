@@ -275,9 +275,7 @@ pub fn uninstall(paths: &Paths, item: &InstalledItem) -> Result<()> {
 
     for link in &item.links {
         let p = Path::new(link);
-        // Canonicalize the link path for the comparison. If the link no longer
-        // exists, fall back to the raw path (it will be absent anyway).
-        let canon_p = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+        let canon_p = canonicalize_link_parent(p);
         if !is_confined_under_any(&canon_p, &root_refs) {
             // Secondary check: if the stored link IS absolute and contains no
             // `..` components, allow deletion (the manifest was written by mind
@@ -304,6 +302,31 @@ pub fn uninstall(paths: &Paths, item: &InstalledItem) -> Result<()> {
     }
     remove_path(&store_path)?;
     Ok(())
+}
+
+/// Canonicalize `link`'s PARENT directory and rejoin the file name, rather
+/// than canonicalizing `link` itself, for the LIFE-44 confinement check.
+///
+/// `link` names a symlink into the store; canonicalizing straight through it
+/// (a plain `link.canonicalize()`) follows the symlink to its target (the
+/// store), which is never under an agent home, so `is_confined_under_any`
+/// would be permanently unreachable for any link that still existed on disk.
+/// Canonicalizing the parent resolves any indirection in the directory prefix
+/// (e.g. a lobe path recorded relative to another cwd) while leaving the
+/// final, possibly-symlinked component untouched, so the comparison lands on
+/// the lobe location instead of the store target. If the link no longer
+/// exists (or has no parent/file-name component), falls back to the raw path
+/// unchanged.
+fn canonicalize_link_parent(link: &Path) -> PathBuf {
+    link.parent()
+        .zip(link.file_name())
+        .map(|(parent, name)| {
+            parent
+                .canonicalize()
+                .unwrap_or_else(|_| parent.to_path_buf())
+                .join(name)
+        })
+        .unwrap_or_else(|| link.to_path_buf())
 }
 
 /// True when `path` is lexically under `root`: `Path::starts_with(root)` is
@@ -1818,6 +1841,55 @@ mod tests {
     }
 
     // ---- LIFE-44: uninstall path confinement checks --------------------------
+
+    /// The bug this fix closes: canonicalizing a recorded link straight
+    /// through the symlink it names resolves to the store target, which is
+    /// never under an agent home, making `is_confined_under_any` permanently
+    /// false for any link that still exists on disk. Canonicalizing only the
+    /// link's PARENT directory (this crate's `canonicalize_link_parent`) keeps
+    /// the comparison anchored at the lobe location instead.
+    #[cfg(unix)]
+    #[test]
+    fn canonicalize_link_parent_resolves_the_parent_not_the_symlink_target() {
+        // spec: LIFE-44
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let base = std::env::temp_dir().join(format!("mind-life44-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let lobe = base.join("lobe");
+        let store = base.join("mind/store/skill/x");
+        std::fs::create_dir_all(&lobe).unwrap();
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::write(store.join("SKILL.md"), b"x").unwrap();
+
+        let link = lobe.join("x");
+        std::os::unix::fs::symlink(&store, &link).unwrap();
+
+        let canon_lobe = lobe.canonicalize().unwrap();
+
+        // The FIX: canonicalizing the link's parent keeps the result under
+        // the lobe, with the link's own file name preserved as the last
+        // component.
+        let canon = canonicalize_link_parent(&link);
+        assert!(
+            canon.starts_with(&canon_lobe),
+            "canonicalize_link_parent must stay under the lobe (the link's \
+             parent), not follow the symlink into the store: {canon:?}"
+        );
+        assert_eq!(canon.file_name(), Some(std::ffi::OsStr::new("x")));
+
+        // Sanity/contrast: the OLD, buggy approach -- canonicalizing the link
+        // itself -- resolves through the symlink into the store instead, so it
+        // is NOT under the lobe. This pins that the bug this test guards
+        // against is real, not a strawman.
+        let old_buggy_approach = link.canonicalize().unwrap();
+        assert!(
+            !old_buggy_approach.starts_with(&canon_lobe),
+            "sanity: canonicalizing straight through the symlink must NOT stay \
+             under the lobe -- this is the LIFE-44 bug the fix avoids: {old_buggy_approach:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn is_confined_under_accepts_child_paths() {

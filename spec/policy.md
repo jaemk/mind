@@ -231,9 +231,10 @@ normatively. Source identity is `host/owner/repo` (see storage.md).
   a new key still sees the version error rather than an opaque unknown-field error.
 - `POL-62` If the declared `min-mind-version` exceeds the running binary version,
   `mind` returns `InvalidPolicy` naming the policy file path with the message:
-  "managed policy requires mind >= <X.Y.Z>, running <current>; upgrade mind". This
-  replaces the opaque unknown-field failure for schema-skew scenarios (see DSC-40
-  for the same gate on source `mind.toml` files; POL-5 for the fail-closed rule).
+  "managed policy requires mind >= <X.Y.Z>, running <current>; run `mind evolve`".
+  This replaces the opaque unknown-field failure for schema-skew scenarios (see
+  DSC-40 for the same gate on source `mind.toml` files; POL-5 for the fail-closed
+  rule).
 - `POL-63` A `min-mind-version` value that is not a valid dotted-numeric version
   string (e.g. `"not-a-version"`, `""`, `"1.x"`) is a hard policy-parse error
   (fail closed, consistent with POL-5). Format validation mirrors the source-side
@@ -309,5 +310,7 @@ normatively. Source identity is `host/owner/repo` (see storage.md).
   float (`auto_meld` entries present with `pinned = false` and `lock = false`). It
   reports hard errors and advisories and exits non-zero on a hard error, mirroring
   source review (CLI-130..133). The pinned-when-`pinned` (POL-21) and
-  satisfies-`allow`-when-locked (POL-31) constraints are enforced at meld time, not
-  re-checked here.
+  satisfies-`allow`-when-locked (POL-31) constraints are checked here too, against
+  the policy's own declared `auto_meld` entries (a violation is a hard finding);
+  the same constraints are also enforced live at meld time against whatever
+  source is actually being melded.

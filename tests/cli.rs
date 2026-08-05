@@ -1203,6 +1203,113 @@ fn recall_still_lists_the_healthy_sources_items_when_another_source_is_gone() {
     );
 }
 
+// ---- B4/DSC-94: source-derived descriptions are sanitized at capture -------
+
+/// A SKILL.md `description:` carrying an ANSI color escape and a bidi-override
+/// code point (U+202E) must reach every display surface sanitized: raw ESC and
+/// the bidi override must not survive to `probe --no-tui`, `recall`, or
+/// `--json` stdout, closing the terminal-injection gap for the frontmatter
+/// path (the plugin-manifest path already sanitized at store time).
+#[test]
+fn hostile_frontmatter_description_is_sanitized_everywhere() {
+    // spec: DSC-94
+    let sb = Sandbox::bare("hostile-desc");
+    sb.write_and_commit(
+        "skills/evil/SKILL.md",
+        "---\nname: evil\ndescription: \"\x1b[31mRED\x1b[0m \u{202E}oot now\"\n---\n# evil\n",
+    );
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+
+    // probe --no-tui (human listing).
+    let probe = sb.mind(&["probe", "--no-tui"]);
+    assert!(probe.success, "{}", probe.stderr);
+    assert!(
+        !probe.stdout.contains('\x1b') && !probe.stdout.contains('\u{202E}'),
+        "probe --no-tui must not leak raw ANSI/bidi: {:?}",
+        probe.stdout
+    );
+    assert!(
+        probe.stdout.contains("RED") && probe.stdout.contains("oot now"),
+        "the surrounding text must still be shown: {}",
+        probe.stdout
+    );
+
+    // probe --json.
+    let probe_json = sb.mind(&["probe", "--json"]);
+    assert!(probe_json.success, "{}", probe_json.stderr);
+    assert!(
+        !probe_json.stdout.contains('\x1b') && !probe_json.stdout.contains('\u{202E}'),
+        "probe --json must not leak raw ANSI/bidi (serde only escapes ANSI, \
+         not the bidi override): {:?}",
+        probe_json.stdout
+    );
+
+    // recall <item> (human).
+    assert!(sb.mind(&["learn", "skill:evil"]).success);
+    let recall = sb.mind(&["recall", "skill:evil"]);
+    assert!(recall.success, "{}", recall.stderr);
+    assert!(
+        !recall.stdout.contains('\x1b') && !recall.stdout.contains('\u{202E}'),
+        "recall must not leak raw ANSI/bidi: {:?}",
+        recall.stdout
+    );
+
+    // recall <item> --json.
+    let recall_json = sb.mind(&["recall", "skill:evil", "--json"]);
+    assert!(recall_json.success, "{}", recall_json.stderr);
+    assert!(
+        !recall_json.stdout.contains('\x1b') && !recall_json.stdout.contains('\u{202E}'),
+        "recall --json must not leak raw ANSI/bidi: {:?}",
+        recall_json.stdout
+    );
+}
+
+/// A `mind.toml` `[source].description` carrying the same hostile content must
+/// be sanitized too (the mind.toml variant of B4/DSC-94), including through
+/// `sync`'s re-read.
+#[test]
+fn hostile_mind_toml_source_description_is_sanitized_everywhere() {
+    // spec: DSC-94
+    let sb = Sandbox::bare("hostile-source-desc");
+    // TOML basic strings require control/bidi bytes to be written as `\uXXXX`
+    // escapes, not embedded raw; the parsed value still carries the real
+    // ESC/U+202E code points, so this exercises the same sanitization path.
+    sb.write_and_commit(
+        "mind.toml",
+        "[source]\ndescription = \"\\u001b[31mRED\\u001b[0m \\u202Eoot now\"\n",
+    );
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+
+    let sources = sb.mind(&["recall", "--sources"]);
+    assert!(sources.success, "{}", sources.stderr);
+    assert!(
+        !sources.stdout.contains('\x1b') && !sources.stdout.contains('\u{202E}'),
+        "recall --sources must not leak raw ANSI/bidi from [source].description: {:?}",
+        sources.stdout
+    );
+
+    let sources_json = sb.mind(&["recall", "--sources", "--json"]);
+    assert!(sources_json.success, "{}", sources_json.stderr);
+    assert!(
+        !sources_json.stdout.contains('\x1b') && !sources_json.stdout.contains('\u{202E}'),
+        "recall --sources --json must not leak raw ANSI/bidi: {:?}",
+        sources_json.stdout
+    );
+
+    // Re-synced (re-read) description stays sanitized too.
+    sb.write_and_commit(
+        "mind.toml",
+        "[source]\ndescription = \"\\u001b[32mGREEN\\u001b[0m \\u202Eoot again\"\n",
+    );
+    assert!(sb.mind(&["sync"]).success);
+    let after_sync = sb.mind(&["recall", "--sources"]);
+    assert!(
+        !after_sync.stdout.contains('\x1b') && !after_sync.stdout.contains('\u{202E}'),
+        "a re-synced [source].description must stay sanitized: {:?}",
+        after_sync.stdout
+    );
+}
+
 #[test]
 fn learn_still_resolves_an_item_when_another_source_is_gone() {
     // spec: CLI-213 -- `learn`'s item resolution is named explicitly in the
@@ -5317,6 +5424,355 @@ fn upgrade_treats_a_prefix_change_as_a_rename() {
 }
 
 #[test]
+fn upgrade_rename_refuses_to_evict_a_different_sources_item() {
+    // spec: LIFE-46 -- B2: two sources both ship a `review` skill. Source `x`
+    // installs prefixed (`skill:jk:review`); source `y` installs unprefixed
+    // (`skill:review`). `x` then drops its prefix upstream, so the rename
+    // `upgrade` would apply for `x`'s item targets the SAME key `y` already
+    // occupies. `upgrade --yes` must refuse rather than evict `y`'s item.
+    let x = Sandbox::bare("x");
+    x.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\nname: review\ndescription: X review\n---\n# X review\n",
+    );
+    x.write_and_commit("mind.toml", "[source]\nprefix = \"jk\"\n");
+    let y = Sandbox::bare("y");
+    y.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\nname: review\ndescription: Y review\n---\n# Y review\n",
+    );
+
+    assert!(x.mind(&["meld", &x.source_spec()]).success);
+    assert!(x.mind(&["meld", &y.source_spec()]).success);
+    // Y's unprefixed review -> skill:review.
+    assert!(x.mind(&["learn", "review"]).success);
+    // X's prefixed review -> skill:jk:review.
+    assert!(x.mind(&["learn", "jk:review"]).success);
+
+    // X drops its prefix upstream: the next upgrade would rename
+    // skill:jk:review -> skill:review, colliding with Y's item.
+    x.write_and_commit("mind.toml", "[source]\n");
+    assert!(x.mind(&["sync"]).success);
+
+    let r = x.mind(&["upgrade", "--yes"]);
+    assert!(
+        !r.success,
+        "a colliding rename must be refused, not applied: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr.contains("skill:review") || r.stderr.contains("ambiguous"),
+        "the refusal should name the colliding key: {}",
+        r.stderr
+    );
+
+    // Y's item must be completely untouched: same store content, same link.
+    let store_content =
+        std::fs::read_to_string(x.mind_home.join("store/skill/review/SKILL.md")).unwrap();
+    assert!(
+        store_content.contains("Y review"),
+        "Y's store copy must not be evicted by X's refused rename: {store_content}"
+    );
+    assert!(
+        std::fs::symlink_metadata(x.claude_home.join("skills/review")).is_ok(),
+        "Y's link must remain in place"
+    );
+    // X's item is untouched too: still installed under its old key.
+    assert!(x.mind(&["recall", "skill:jk:review"]).success);
+    let manifest = std::fs::read_to_string(x.mind_home.join("manifest.json")).unwrap_or_default();
+    assert!(
+        manifest.contains("\"skill:jk:review\"") && manifest.contains("\"skill:review\""),
+        "both items must remain recorded in the manifest: {manifest}"
+    );
+}
+
+#[test]
+fn upgrade_rename_collision_and_coincident_links_together_still_refuses_cleanly() {
+    // spec: LIFE-46, LIFE-47 -- B2+B3 interaction: a rename that is BOTH a
+    // colliding rename (B2) AND has an old-link == new-install-link coincidence
+    // (B3, reachable for a skill via an explicit `link =` override, not just an
+    // agent's bare harness name) must still refuse via the B2 collision guard,
+    // which runs BEFORE the apply loop (and so before B3's link-stripping logic
+    // ever executes) -- proving the two fixes compose safely instead of the
+    // link-overlap case somehow bypassing the collision refusal.
+    let x = Sandbox::bare("x3");
+    // X's skill has a link target fixed by an explicit override, independent of
+    // its name/prefix, so its OWN link path is identical before and after the
+    // upcoming rename (the B3 condition), even though the rename is refused.
+    x.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\nname: review\ndescription: X review\n---\n# X review\n",
+    );
+    x.write_and_commit(
+        "mind.toml",
+        concat!(
+            "[[items]]\n",
+            "kind = \"skill\"\n",
+            "name = \"review\"\n",
+            "path = \"skills/review\"\n",
+            "link = \"skills/shared-review\"\n",
+        ),
+    );
+    // Y already occupies the key X's rename will target: skill:jk:review.
+    let y = Sandbox::bare("y3");
+    y.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\nname: review\ndescription: Y review\n---\n# Y review\n",
+    );
+    y.write_and_commit("mind.toml", "[source]\nprefix = \"jk\"\n");
+
+    assert!(x.mind(&["meld", &x.source_spec()]).success);
+    assert!(x.mind(&["meld", &y.source_spec()]).success);
+    assert!(x.mind(&["learn", "review"]).success); // X -> skill:review, linked at skills/shared-review
+    assert!(x.mind(&["learn", "jk:review"]).success); // Y -> skill:jk:review
+
+    let shared_link = x.claude_home.join("skills/shared-review");
+    assert!(
+        std::fs::symlink_metadata(&shared_link).is_ok(),
+        "X's explicit link override must exist after learn"
+    );
+
+    // X's source now adds the SAME prefix Y already uses, keeping the fixed
+    // link override: the next upgrade would rename skill:review ->
+    // skill:jk:review (colliding with Y) while X's own link target
+    // (skills/shared-review) would stay byte-identical old vs new.
+    x.write_and_commit(
+        "mind.toml",
+        concat!(
+            "[source]\n",
+            "prefix = \"jk\"\n\n",
+            "[[items]]\n",
+            "kind = \"skill\"\n",
+            "name = \"review\"\n",
+            "path = \"skills/review\"\n",
+            "link = \"skills/shared-review\"\n",
+        ),
+    );
+    assert!(x.mind(&["sync"]).success);
+
+    let r = x.mind(&["upgrade", "--yes"]);
+    assert!(
+        !r.success,
+        "the colliding rename must be refused even with coincident links: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+
+    // Nothing moved: X's own link (which would have coincided old vs new) is
+    // untouched -- B3's link-stripping logic never got a chance to run because
+    // B2's guard aborted first.
+    assert!(
+        std::fs::symlink_metadata(&shared_link).is_ok(),
+        "X's link must survive the refused rename untouched"
+    );
+    // Y's item is untouched too (same B2 guarantee as the collision-only test).
+    let y_store =
+        std::fs::read_to_string(x.mind_home.join("store/skill/jk:review/SKILL.md")).unwrap();
+    assert!(
+        y_store.contains("Y review"),
+        "Y's store copy must not be evicted: {y_store}"
+    );
+    assert!(x.mind(&["recall", "skill:review"]).success);
+    assert!(x.mind(&["recall", "skill:jk:review"]).success);
+    let manifest = std::fs::read_to_string(x.mind_home.join("manifest.json")).unwrap_or_default();
+    assert!(
+        manifest.contains("\"skill:jk:review\"") && manifest.contains("\"skill:review\""),
+        "both items must remain recorded in the manifest: {manifest}"
+    );
+}
+
+#[test]
+fn upgrade_rename_keeps_the_just_created_link_when_old_and_new_paths_coincide() {
+    // spec: LIFE-47 -- B3: an agent links under its bare harness name (NS-40)
+    // regardless of the item's effective name, so a prefix-only rename can
+    // produce the exact same link path before and after. Applying the rename
+    // must not remove the link the new install just created.
+    let sb = melded();
+    assert!(sb.mind(&["learn", "dev"]).success);
+    assert!(
+        std::fs::symlink_metadata(sb.claude_home.join("agents/dev.md")).is_ok(),
+        "the agent link must exist after learn"
+    );
+
+    sb.write_and_commit("mind.toml", "[source]\nprefix = \"jk\"\n");
+    assert!(sb.mind(&["sync"]).success);
+    let r = sb.mind(&["upgrade", "--yes"]);
+    assert!(r.success, "{}", r.stderr);
+    assert!(r.stdout.contains("rename"), "{}", r.stdout);
+
+    // The link (agents/dev.md, same path old and new) must still be present.
+    assert!(
+        std::fs::symlink_metadata(sb.claude_home.join("agents/dev.md")).is_ok(),
+        "the link must survive the rename: the new install's link must not be \
+         removed by the old item's uninstall"
+    );
+    // The manifest records the renamed key.
+    let recall = sb.mind(&["recall"]);
+    assert!(recall.stdout.contains("agent:jk:dev"), "{}", recall.stdout);
+}
+
+#[test]
+fn upgrade_mid_batch_failure_still_saves_the_earlier_successful_upgrades() {
+    // spec: LIFE-48 -- H3: a batch of two pending upgrades where the SECOND
+    // item's install hook fails. `agent:dev` (key "agent:dev" sorts before
+    // "skill:review" in the manifest's BTreeMap, so it is applied first) must
+    // still be recorded as upgraded on disk even though the command as a whole
+    // fails on the second item.
+    let sb = melded();
+    assert!(sb.mind(&["learn", "agent:dev"]).success);
+    assert!(sb.mind(&["learn", "skill:review"]).success);
+    let before_manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(sb.mind_home.join("manifest.json")).unwrap())
+            .unwrap();
+    let before_hash = before_manifest["items"]["agent:dev"]["hash"].clone();
+
+    // An authoritative mind.toml declaring all three fixture items, so nothing
+    // is dropped from the catalog; `review` alone carries a required install
+    // hook that always fails, forcing its upgrade's `install_item` to error.
+    sb.write_and_commit(
+        "mind.toml",
+        concat!(
+            "[[items]]\n",
+            "kind = \"skill\"\n",
+            "name = \"review\"\n",
+            "path = \"skills/review\"\n",
+            "install = \"exit 3\"\n",
+            "\n",
+            "[[items]]\n",
+            "kind = \"agent\"\n",
+            "name = \"dev\"\n",
+            "path = \"agents/dev.md\"\n",
+            "\n",
+            "[[items]]\n",
+            "kind = \"rule\"\n",
+            "name = \"style\"\n",
+            "path = \"rules/style.md\"\n",
+        ),
+    );
+    // Bump both dev and review upstream so both are pending.
+    sb.write_and_commit(
+        "agents/dev.md",
+        "---\nname: dev\ndescription: Implements a spec with tests (v2)\n---\n# dev agent v2\n",
+    );
+    sb.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\nname: review\ndescription: Review the diff for bugs (v2)\n---\n# review skill v2\n",
+    );
+    assert!(sb.mind(&["sync"]).success);
+
+    let r = sb.mind(&["upgrade", "--yes", "--dangerously-skip-install-hook-check"]);
+    assert!(
+        !r.success,
+        "the batch must fail on review's install hook: {} {}",
+        r.stdout, r.stderr
+    );
+
+    // agent:dev's upgrade must be recorded on disk (manifest.json's own "hash"
+    // field for agent:dev) even though the command failed on the later item.
+    // `before`'s hash is the OLD recorded hash; a failure to save here would
+    // leave manifest.json holding that same old hash, so this is a direct
+    // check of manifest.json's persisted content -- not `recall`'s live
+    // drift-comparison summary (CLI-75), which would differ from `before`
+    // regardless (the source content changed either way).
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(sb.mind_home.join("manifest.json")).unwrap())
+            .unwrap();
+    let old_hash = manifest["items"]["agent:dev"]["hash"].clone();
+    assert_ne!(
+        old_hash, before_hash,
+        "sanity: agent:dev's manifest hash must have advanced past the \
+         pre-upgrade hash for this test to be meaningful"
+    );
+    // Its store copy really did advance to the new content too (not just a
+    // manifest/disk mismatch in the other direction).
+    let store_content = std::fs::read_to_string(sb.mind_home.join("store/agent/dev")).unwrap();
+    assert!(
+        store_content.contains("v2"),
+        "agent:dev's store copy must hold the new content: {store_content}"
+    );
+}
+
+#[test]
+fn upgrade_mid_batch_failure_still_saves_earlier_upgrades_under_json() {
+    // spec: LIFE-48 -- H3, --json variant: the mid-batch failure save must not
+    // be an artifact of the human-output code path. Same fixture as
+    // `upgrade_mid_batch_failure_still_saves_the_earlier_successful_upgrades`,
+    // driven with the global `--json` flag; stdout must still carry a valid
+    // error envelope, and the manifest save must still have happened.
+    let sb = melded();
+    assert!(sb.mind(&["learn", "agent:dev"]).success);
+    assert!(sb.mind(&["learn", "skill:review"]).success);
+    let before_manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(sb.mind_home.join("manifest.json")).unwrap())
+            .unwrap();
+    let before_hash = before_manifest["items"]["agent:dev"]["hash"].clone();
+
+    sb.write_and_commit(
+        "mind.toml",
+        concat!(
+            "[[items]]\n",
+            "kind = \"skill\"\n",
+            "name = \"review\"\n",
+            "path = \"skills/review\"\n",
+            "install = \"exit 3\"\n",
+            "\n",
+            "[[items]]\n",
+            "kind = \"agent\"\n",
+            "name = \"dev\"\n",
+            "path = \"agents/dev.md\"\n",
+            "\n",
+            "[[items]]\n",
+            "kind = \"rule\"\n",
+            "name = \"style\"\n",
+            "path = \"rules/style.md\"\n",
+        ),
+    );
+    sb.write_and_commit(
+        "agents/dev.md",
+        "---\nname: dev\ndescription: Implements a spec with tests (v2)\n---\n# dev agent v2\n",
+    );
+    sb.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\nname: review\ndescription: Review the diff for bugs (v2)\n---\n# review skill v2\n",
+    );
+    assert!(sb.mind(&["sync"]).success);
+
+    let r = sb.mind(&[
+        "--json",
+        "upgrade",
+        "--yes",
+        "--dangerously-skip-install-hook-check",
+    ]);
+    assert!(
+        !r.success,
+        "the batch must fail on review's install hook: {} {}",
+        r.stdout, r.stderr
+    );
+    let v: serde_json::Value = serde_json::from_str(r.stdout.trim()).unwrap_or_else(|e| {
+        panic!(
+            "stdout must be a JSON error envelope, got {e}: {:?}",
+            r.stdout
+        )
+    });
+    assert_eq!(v["schema"], 1, "{}", r.stdout);
+    assert!(v["error"].is_object(), "{}", r.stdout);
+
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(sb.mind_home.join("manifest.json")).unwrap())
+            .unwrap();
+    let old_hash = manifest["items"]["agent:dev"]["hash"].clone();
+    assert_ne!(
+        old_hash, before_hash,
+        "agent:dev's manifest hash must have advanced even though the whole \
+         command failed under --json: {manifest:#}"
+    );
+    let store_content = std::fs::read_to_string(sb.mind_home.join("store/agent/dev")).unwrap();
+    assert!(
+        store_content.contains("v2"),
+        "agent:dev's store copy must hold the new content: {store_content}"
+    );
+}
+
+#[test]
 fn unmeld_unlink_only_keeps_installed_items() {
     // spec: CLI-20, CLI-22 - `--unlink-only` removes the source but keeps its
     // installed items, listing them with the forget hint.
@@ -7478,6 +7934,211 @@ fn forget_unmanaged_bulk_refuses_non_tty_without_yes() {
         r.stderr
     );
     assert!(skill.exists(), "nothing must be removed on refusal");
+}
+
+// ---- B1/LIFE-45: `--json` is always non-interactive for a destructive
+// confirmation, even on a simulated TTY (MIND_TTY=1). Model: cli_absorb.rs
+// "json is always non-interactive" (ABS-7). ----------------------------------
+
+/// The worst case (UNM-5): `forget --unmanaged <ref> --json` on a TTY without
+/// `--yes` must refuse rather than delete the user's own file.
+#[test]
+fn forget_unmanaged_single_json_on_tty_without_yes_is_confirmation_required() {
+    // spec: LIFE-45
+    let sb = melded();
+    let skill = sb.claude_home.join("skills/handmade");
+    write(
+        &skill.join("SKILL.md"),
+        "---\ndescription: mine\n---\n# handmade\n",
+    );
+    let r = sb.mind_env(
+        &["--json", "forget", "skill:handmade"],
+        &[("MIND_TTY", "1")],
+    );
+    assert!(
+        !r.success,
+        "--json on a TTY without --yes must refuse: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+    let v: serde_json::Value = serde_json::from_str(r.stdout.trim()).unwrap_or_else(|e| {
+        panic!(
+            "stdout must be a JSON error envelope, got {e}: {:?}",
+            r.stdout
+        )
+    });
+    assert_eq!(v["schema"], 1, "schema must be 1: {}", r.stdout);
+    assert_eq!(
+        v["error"]["kind"], "confirmation-required",
+        "kind must be confirmation-required: {}",
+        r.stdout
+    );
+    assert!(
+        skill.exists(),
+        "the user's own unmanaged file must NOT be deleted: {}",
+        r.stdout
+    );
+}
+
+/// The bulk form (UNM-8): `forget --unmanaged --json` on a TTY without
+/// `--yes` must refuse and remove nothing.
+#[test]
+fn forget_unmanaged_bulk_json_on_tty_without_yes_is_confirmation_required() {
+    // spec: LIFE-45
+    let sb = melded();
+    let skill = sb.claude_home.join("skills/handmade");
+    write(
+        &skill.join("SKILL.md"),
+        "---\ndescription: mine\n---\n# handmade\n",
+    );
+    let r = sb.mind_env(
+        &["--json", "forget", "--unmanaged", "skill:*"],
+        &[("MIND_TTY", "1")],
+    );
+    assert!(!r.success, "{} {}", r.stdout, r.stderr);
+    let v: serde_json::Value = serde_json::from_str(r.stdout.trim()).unwrap_or_else(|e| {
+        panic!(
+            "stdout must be a JSON error envelope, got {e}: {:?}",
+            r.stdout
+        )
+    });
+    assert_eq!(v["schema"], 1, "{}", r.stdout);
+    assert_eq!(v["error"]["kind"], "confirmation-required", "{}", r.stdout);
+    assert!(skill.exists(), "nothing must be removed: {}", r.stdout);
+}
+
+/// `forget '<glob matching several>' --json` on a TTY without `--yes` must
+/// refuse (CLI-42's multi-item confirmation) rather than removing everything.
+#[test]
+fn forget_glob_json_on_tty_without_yes_is_confirmation_required() {
+    // spec: LIFE-45
+    let sb = melded();
+    assert!(sb.mind(&["learn", "skill:review"]).success);
+    assert!(sb.mind(&["learn", "agent:dev"]).success);
+    let r = sb.mind_env(&["--json", "forget", "*"], &[("MIND_TTY", "1")]);
+    assert!(!r.success, "{} {}", r.stdout, r.stderr);
+    let v: serde_json::Value = serde_json::from_str(r.stdout.trim()).unwrap_or_else(|e| {
+        panic!(
+            "stdout must be a JSON error envelope, got {e}: {:?}",
+            r.stdout
+        )
+    });
+    assert_eq!(v["error"]["kind"], "confirmation-required", "{}", r.stdout);
+    assert!(
+        sb.mind(&["recall", "skill:review"]).success,
+        "nothing must have been removed"
+    );
+    assert!(sb.mind(&["recall", "agent:dev"]).success);
+}
+
+/// `unmeld '<glob matching several sources>' --json` on a TTY without `--yes`
+/// must refuse (CLI-28's multi-source confirmation) rather than dropping them.
+#[test]
+fn unmeld_glob_json_on_tty_without_yes_is_confirmation_required() {
+    // spec: LIFE-45
+    let (sb, _tools) = melded_two_sources();
+    let r = sb.mind_env(&["--json", "unmeld", "*"], &[("MIND_TTY", "1")]);
+    assert!(!r.success, "{} {}", r.stdout, r.stderr);
+    let v: serde_json::Value = serde_json::from_str(r.stdout.trim()).unwrap_or_else(|e| {
+        panic!(
+            "stdout must be a JSON error envelope, got {e}: {:?}",
+            r.stdout
+        )
+    });
+    assert_eq!(v["error"]["kind"], "confirmation-required", "{}", r.stdout);
+    // A precise count, not just "not empty": a bug that unmelds only SOME of
+    // the glob's matches (rather than none) would still pass a substring check
+    // but must fail this one.
+    let sources = sb.mind(&["recall", "--sources", "--json"]);
+    let sv: serde_json::Value = serde_json::from_str(sources.stdout.trim()).unwrap_or_else(|e| {
+        panic!(
+            "recall --sources --json must be JSON, got {e}: {:?}",
+            sources.stdout
+        )
+    });
+    assert_eq!(
+        sv["items"].as_array().map(|a| a.len()),
+        Some(2),
+        "both sources must remain melded, none removed: {}",
+        sources.stdout
+    );
+}
+
+/// `upgrade --json` on a TTY without `--yes` must refuse rather than apply
+/// pending upgrades unprompted.
+#[test]
+fn upgrade_json_on_tty_without_yes_is_confirmation_required() {
+    // spec: LIFE-45
+    let sb = melded();
+    assert!(sb.mind(&["learn", "skill:review"]).success);
+    sb.edit_source();
+    assert!(sb.mind(&["sync"]).success);
+    let before = sb.mind(&["recall", "skill:review"]).stdout;
+
+    let r = sb.mind_env(&["--json", "upgrade"], &[("MIND_TTY", "1")]);
+    assert!(!r.success, "{} {}", r.stdout, r.stderr);
+    let v: serde_json::Value = serde_json::from_str(r.stdout.trim()).unwrap_or_else(|e| {
+        panic!(
+            "stdout must be a JSON error envelope, got {e}: {:?}",
+            r.stdout
+        )
+    });
+    assert_eq!(v["error"]["kind"], "confirmation-required", "{}", r.stdout);
+    assert_eq!(
+        before,
+        sb.mind(&["recall", "skill:review"]).stdout,
+        "nothing must have been upgraded"
+    );
+}
+
+/// `evolve --json` on a TTY without `--yes` must refuse rather than swap the
+/// running binary unprompted. `--version` bypasses the network release lookup
+/// entirely, so this stays hermetic.
+#[test]
+fn evolve_json_on_tty_without_yes_is_confirmation_required() {
+    // spec: LIFE-45
+    let sb = Sandbox::bare("evolve-confirm");
+    let r = sb.mind_env(
+        &["--json", "evolve", "--version", "99.0.0"],
+        &[("MIND_TTY", "1")],
+    );
+    assert!(!r.success, "{} {}", r.stdout, r.stderr);
+    let v: serde_json::Value = serde_json::from_str(r.stdout.trim()).unwrap_or_else(|e| {
+        panic!(
+            "stdout must be a JSON error envelope, got {e}: {:?}",
+            r.stdout
+        )
+    });
+    assert_eq!(v["schema"], 1, "{}", r.stdout);
+    assert_eq!(v["error"]["kind"], "confirmation-required", "{}", r.stdout);
+}
+
+// ---- M1/LIFE-49: `sync --upgrade` honors the global `--yes` -----------------
+
+/// `sync --upgrade --yes` must actually skip the confirmation and apply the
+/// pending upgrade, not silently drop `--yes` (which would either prompt on a
+/// TTY or, worse, refuse/hang on a non-interactive run).
+#[test]
+fn sync_upgrade_yes_applies_without_a_prompt_reply() {
+    // spec: LIFE-49
+    let sb = melded();
+    assert!(sb.mind(&["learn", "skill:review"]).success);
+    sb.edit_source();
+    // No stdin reply is supplied at all (stdin is closed): if `--yes` were
+    // dropped internally, the text-mode confirm would read EOF and decline
+    // (report "aborted; nothing changed"); with `--yes` correctly threaded,
+    // the pass applies without ever reading stdin.
+    let r = sb.mind(&["sync", "--upgrade", "--yes"]);
+    assert!(r.success, "{}", r.stderr);
+    assert!(
+        !r.stdout.contains("aborted"),
+        "sync --upgrade --yes must not fall back to the confirmation prompt: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("upgraded skill:review"),
+        "sync --upgrade --yes must apply the pending upgrade: {}",
+        r.stdout
+    );
 }
 
 /// A ref that matches no unmanaged item exits NotInstalled.
@@ -11974,9 +12635,11 @@ fn policy_min_mind_version_gate_surfaces_clean_error_end_to_end() {
         "must surface the version gate error naming the required version: {}",
         r.stderr
     );
+    // spec: H2 -- the remedy points at the actual self-update verb (`mind
+    // evolve`); `mind upgrade` upgrades installed items, not the binary.
     assert!(
-        r.stderr.contains("upgrade mind"),
-        "must tell the user to upgrade: {}",
+        r.stderr.contains("mind evolve"),
+        "must tell the user to run `mind evolve`: {}",
         r.stderr
     );
     // Ordering proof: the version error wins over the unknown-field error even
@@ -13590,6 +14253,108 @@ fn recall_sources_shows_install_hook_marker() {
 }
 
 #[test]
+fn upgrade_source_hook_rerun_mid_batch_failure_saves_earlier_hook_runs() {
+    // spec: LIFE-48 -- H3: two sources both need their install hook re-run in
+    // the same upgrade pass (rerun_source_hooks, a source-level pass separate
+    // from the per-item loop). Source A's hook succeeds; source B's (visited
+    // second, in registration order) fails. A's `ran_at` update must be
+    // persisted even though the pass as a whole fails on B.
+    let a = sandbox_with_declared_hook("amarker", "true");
+    assert!(
+        a.mind(&[
+            "meld",
+            &a.source_spec(),
+            "--dangerously-skip-install-hook-check"
+        ])
+        .success
+    );
+    // B declares a hook that always fails from the start. Melded WITHOUT the
+    // dangerous flag (non-TTY): the hook is offered and SKIPPED (never run,
+    // ran_at stays None), which HOOK-11 also treats as pending -- so it does
+    // not need a source-content advance to be re-offered by the upgrade pass.
+    let b = Sandbox::bare("bfailer");
+    b.write_and_commit("mind.toml", "[source]\ninstall = \"exit 7\"\n");
+    assert!(a.mind(&["meld", &b.source_spec()]).success);
+
+    // Advance A so its (successful) hook is pending re-offer too (HOOK-11).
+    a.edit_source();
+    assert!(a.mind(&["sync"]).success);
+
+    let r = a.mind(&["upgrade", "--yes", "--dangerously-skip-install-hook-check"]);
+    assert!(
+        !r.success,
+        "must fail on B's hook: {} {}",
+        r.stdout, r.stderr
+    );
+
+    // A's install hook ran_at must have advanced to A's new (post-sync) commit
+    // even though the pass overall failed on B.
+    let sources_json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(a.mind_home.join("sources.json")).unwrap())
+            .unwrap();
+    let sources = sources_json["sources"].as_array().unwrap();
+    let a_entry = sources
+        .iter()
+        .find(|s| s["name"].as_str().unwrap().contains("amarker"))
+        .expect("source A recorded");
+    let ran_at = a_entry["install_hooks"][0]["ran_at"].as_str();
+    let commit = a_entry["commit"].as_str();
+    assert_eq!(
+        ran_at, commit,
+        "source A's hook re-run must be persisted before B's failure propagated: {a_entry:#}"
+    );
+}
+
+#[test]
+fn remeld_hook_failure_mid_batch_saves_earlier_successful_hook_run() {
+    // spec: LIFE-48 -- H3: a re-meld with two pending install hooks where the
+    // SECOND fails. The first hook's successful run must be persisted (its
+    // `ran_at` recorded) even though the re-meld as a whole fails on the
+    // second (mirrors HOOK-53's "leave the source melded" intent, but for the
+    // hook run record too).
+    let sb = Sandbox::named("remeld-hooks");
+    sb.write_and_commit(
+        "mind.toml",
+        concat!(
+            "[[hooks]]\n",
+            "name = \"first\"\n",
+            "run = \"true\"\n",
+            "event = \"install\"\n",
+            "\n",
+            "[[hooks]]\n",
+            "name = \"second\"\n",
+            "run = \"exit 9\"\n",
+            "event = \"install\"\n",
+        ),
+    );
+    let spec = sb.source_spec();
+    // Initial meld: non-TTY, no --dangerously-skip -> both hooks are offered
+    // and SKIPPED (ran_at stays None for both).
+    assert!(sb.mind(&["meld", &spec]).success);
+
+    // Re-meld with --dangerously-skip-install-hook-check: both pending hooks
+    // run unattended, in declaration order; the first succeeds, the second
+    // fails, stopping the batch.
+    let r = sb.mind(&["meld", &spec, "--dangerously-skip-install-hook-check"]);
+    assert!(
+        !r.success,
+        "the re-meld must fail on the second hook: {} {}",
+        r.stdout, r.stderr
+    );
+
+    let sources_json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(sb.mind_home.join("sources.json")).unwrap())
+            .unwrap();
+    let entry = &sources_json["sources"][0];
+    let first_ran_at = entry["install_hooks"][0]["ran_at"].as_str();
+    assert!(
+        first_ran_at.is_some(),
+        "the first hook's successful run must be persisted even though the \
+         second hook in the same pass failed: {entry:#}"
+    );
+}
+
+#[test]
 fn upgrade_reruns_hook_after_source_advances() {
     // spec: HOOK-11
     // After a source advances to a new commit, upgrade re-runs the hook (the
@@ -14469,16 +15234,11 @@ fn evolve_policy_pin_equal_to_running_no_skew_warning() {
     // PinnedBelowCurrent, so no skew warning is emitted.
     let sb = Sandbox::new();
     // A policy pin must be dotted numeric, and between releases the running
-    // binary carries a `-dev` pre-release suffix. `evolve`'s decision (via
-    // `version_at_least`) parses each dotted component as a u64 and treats a
-    // non-numeric one (the suffixed patch, e.g. `1-dev`) as 0, so a `x.y.1-dev`
-    // build is seen as `x.y.0`. Pin the running version viewed through that
-    // same parse so pin == running for any dev patch number, not just `.0`.
-    let current: String = env!("CARGO_PKG_VERSION")
-        .split('.')
-        .map(|c| c.trim().parse::<u64>().unwrap_or(0).to_string())
-        .collect::<Vec<_>>()
-        .join(".");
+    // binary carries a `-dev` pre-release suffix, so pin the numeric base. A
+    // `-dev` build compares equal to its own base version: `version_at_least`
+    // strips a trailing `-suffix` from each component before parsing (H1), so
+    // `0.22.1-dev` compares equal to `0.22.1` for any dev patch number.
+    let current = env!("CARGO_PKG_VERSION").split('-').next().unwrap();
     let policy = write_policy(&sb, &format!("[binary]\nself-update = \"{current}\"\n"));
 
     let r = sb.mind_env(
@@ -16298,8 +17058,15 @@ fn json_sync_upgrade_emits_one_document_for_the_invoked_verb() {
         "skills/review/SKILL.md",
         "---\nname: review\ndescription: Review code (v2)\n---\n# review v2\n",
     );
-    let r = sb.mind(&["sync", "--upgrade", "--json"]);
-    assert!(r.success, "sync --upgrade --json failed: {}", r.stderr);
+    // spec: LIFE-15 -- B1: `--json` is non-interactive, so applying the
+    // `--upgrade` pass without `--yes` must refuse (mirroring `mind upgrade
+    // --json`) rather than silently apply; `--yes` is required here.
+    let r = sb.mind(&["sync", "--upgrade", "--json", "--yes"]);
+    assert!(
+        r.success,
+        "sync --upgrade --json --yes failed: {}",
+        r.stderr
+    );
 
     let doc: serde_json::Value = serde_json::from_str(r.stdout.trim()).unwrap_or_else(|e| {
         panic!(
@@ -24987,5 +25754,166 @@ fn add_root_invalid_root_is_error() {
         r.stderr.contains("scan root") && r.stderr.contains("no-such-dir"),
         "the InvalidRoot error must name the root: {}",
         r.stderr
+    );
+}
+
+// ---- CLI-231: `sync [source]` selector ------------------------------------
+
+#[test]
+fn sync_source_selector_scopes_to_one_source() {
+    // spec: CLI-231
+    let sb = Sandbox::named("alpha");
+
+    // A second source (`beta`) melded into the same mind home.
+    let beta = sb.base.join("beta");
+    write(
+        &beta.join("skills/scan/SKILL.md"),
+        "---\nname: scan\ndescription: b\n---\n# scan\n",
+    );
+    git(&beta, &["-c", "init.defaultBranch=main", "init", "-q"]);
+    git(&beta, &["config", "user.email", "t@t"]);
+    git(&beta, &["config", "user.name", "t"]);
+    git(&beta, &["add", "-A"]);
+    git(&beta, &["commit", "-qm", "initial"]);
+    let beta_spec = beta.to_string_lossy().into_owned();
+
+    assert!(
+        sb.mind(&["meld", &sb.source_spec(), "--register-only"])
+            .success
+    );
+    assert!(sb.mind(&["meld", &beta_spec, "--register-only"]).success);
+
+    // Targeted sync fetches only the matching source.
+    let one = sb.mind(&["sync", "alpha"]);
+    assert!(one.success, "sync alpha failed: {}", one.stderr);
+    assert!(
+        one.stdout.contains("alpha"),
+        "sync alpha must refresh alpha: {}",
+        one.stdout
+    );
+    assert!(
+        !one.stdout.contains("beta"),
+        "sync alpha must NOT refresh beta: {}",
+        one.stdout
+    );
+
+    // A selector that matches no source is a SourceNotFound error.
+    let bad = sb.mind(&["sync", "no-such-source"]);
+    assert!(
+        !bad.success,
+        "an unknown selector must fail: {}",
+        bad.stdout
+    );
+    assert!(
+        bad.stderr.contains("no source named"),
+        "unknown selector must be SourceNotFound: {}",
+        bad.stderr
+    );
+
+    // No selector still fetches every source (CLI-50 unchanged).
+    let all = sb.mind(&["sync"]);
+    assert!(all.success, "bare sync failed: {}", all.stderr);
+    assert!(
+        all.stdout.contains("alpha") && all.stdout.contains("beta"),
+        "bare sync must fetch both sources: {}",
+        all.stdout
+    );
+}
+
+/// `sync '[bad'` carries glob metacharacters but is not a valid pattern. It
+/// must report InvalidPattern (validated up front, CLI-231) rather than
+/// silently matching zero sources or surfacing as SourceNotFound.
+#[test]
+fn sync_malformed_glob_selector_reports_invalid_pattern() {
+    // spec: CLI-231
+    let sb = Sandbox::named("alpha");
+    assert!(
+        sb.mind(&["meld", &sb.source_spec(), "--register-only"])
+            .success
+    );
+
+    let r = sb.mind(&["sync", "[bad"]);
+    assert!(!r.success, "malformed glob must fail: {}", r.stdout);
+    assert!(
+        r.stderr.contains("not a valid glob selector"),
+        "expected invalid-pattern error, got stderr={} stdout={}",
+        r.stderr,
+        r.stdout
+    );
+    assert!(
+        !r.stderr.contains("no source named"),
+        "malformed glob must NOT surface as SourceNotFound: {}",
+        r.stderr
+    );
+}
+
+// ---- Downgrade recipe: re-pin to an older sha, then upgrade ----------------
+
+#[test]
+fn re_pin_to_older_sha_then_upgrade_installs_older_content() {
+    // spec: CLI-209 -- a re-meld with --pin re-pins (and re-checks out) the source.
+    // spec: LIFE-11 -- an item is pending on ANY content change, so applying the
+    // older content is an ordinary upgrade. Together these are the documented
+    // downgrade/rollback recipe (docs/src/troubleshooting.md).
+    let (sb, sha_v1, sha_v2) = make_pinnable_repo("downgrade");
+    let spec = sb.source_spec();
+
+    // Meld pinned at v2 and install the agent: the store holds "dev v2".
+    assert!(
+        sb.mind(&["meld", &spec, "--pin", &sha_v2]).success,
+        "meld --pin v2 must succeed"
+    );
+    assert!(sb.mind(&["learn", "dev"]).success, "learn dev failed");
+    let link = sb.claude_home.join("agents/dev.md");
+    let at_v2 = std::fs::read_to_string(&link).expect("installed agent");
+    assert!(
+        at_v2.contains("dev v2"),
+        "the installed agent must start at v2: {at_v2}"
+    );
+    let store_path = sb.mind_home.join("store/agent/dev");
+    let store_at_v2 = std::fs::read_to_string(&store_path).expect("store copy at v2");
+    assert!(store_at_v2.contains("dev v2"), "{store_at_v2}");
+    let manifest_v2: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(sb.mind_home.join("manifest.json")).unwrap())
+            .unwrap();
+    let hash_v2 = manifest_v2["items"]["agent:dev"]["hash"].clone();
+    assert!(hash_v2.is_string(), "sanity: hash recorded at v2");
+
+    // Downgrade: re-pin to the older commit, then upgrade applies the older
+    // content (LIFE-11 pends on the hash change back to v1).
+    assert!(
+        sb.mind(&["meld", &spec, "--pin", &sha_v1]).success,
+        "re-pin to v1 must succeed"
+    );
+    let up = sb.mind(&["upgrade", "dev", "--yes"]);
+    assert!(up.success, "downgrade upgrade failed: {}", up.stderr);
+
+    let at_v1 = std::fs::read_to_string(&link).expect("installed agent after downgrade");
+    assert!(
+        at_v1.contains("dev v1"),
+        "the agent must be rolled back to v1: {at_v1}"
+    );
+    assert!(
+        !at_v1.contains("dev v2"),
+        "the v2 content must be gone after the downgrade: {at_v1}"
+    );
+
+    // The recipe must update the STORE copy and the manifest's recorded hash,
+    // not just the lobe symlink target (a link-only downgrade would leave a
+    // stale store copy and hash behind, which `recall`/`introspect` would then
+    // misreport as drift).
+    let store_at_v1 = std::fs::read_to_string(&store_path).expect("store copy after downgrade");
+    assert!(
+        store_at_v1.contains("dev v1") && !store_at_v1.contains("dev v2"),
+        "the store copy must roll back to v1, not just the link: {store_at_v1}"
+    );
+    let manifest_v1: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(sb.mind_home.join("manifest.json")).unwrap())
+            .unwrap();
+    let hash_v1 = manifest_v1["items"]["agent:dev"]["hash"].clone();
+    assert_ne!(
+        hash_v1, hash_v2,
+        "the manifest's recorded hash must advance to the v1 content's hash, \
+         not stay pinned at v2's: {manifest_v1:#}"
     );
 }

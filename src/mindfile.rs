@@ -588,11 +588,17 @@ fn validate_version_string(val: &str, field: &str, path: &Path) -> Result<()> {
 
 /// Whether `running` satisfies `>= required`, comparing dotted numeric version
 /// components (a missing component counts as 0, so `0.2` == `0.2.0`). A
-/// non-numeric component compares as 0, so a prerelease/build suffix is ignored.
+/// trailing prerelease (`-suffix`) or build (`+suffix`) tag on a component is
+/// stripped before parsing, so `0.22.1-dev` compares as `0.22.1`, not
+/// `0.22.0`; a component with no leading digits at all still compares as 0.
 pub fn version_at_least(running: &str, required: &str) -> bool {
     let parse = |v: &str| -> Vec<u64> {
         v.split('.')
-            .map(|c| c.trim().parse::<u64>().unwrap_or(0))
+            .map(|c| {
+                let c = c.trim();
+                let end = c.find(['-', '+']).unwrap_or(c.len());
+                c[..end].parse::<u64>().unwrap_or(0)
+            })
             .collect()
     };
     let r = parse(running);
@@ -1000,6 +1006,22 @@ mod tests {
         // Non-numeric / suffix components in the running binary's version count
         // as 0; validation of the field value is a separate concern.
         assert!(version_at_least("0.2.0-rc1", "0.2"));
+    }
+
+    #[test]
+    fn version_comparison_strips_prerelease_and_build_suffix_before_parsing() {
+        // spec: DSC-40, POL-61 -- a `-dev`/`-rcN`/`+build` tag on the final
+        // dotted component must not zero out its leading digits (H1): a dev
+        // build of a not-yet-released patch satisfies a min-version gate for
+        // that patch, and an actually older version is still refused.
+        assert!(version_at_least("0.22.1-dev", "0.22.1"));
+        assert!(version_at_least("0.23.1-dev", "0.23.1"));
+        assert!(version_at_least("0.22.1+build.5", "0.22.1"));
+        assert!(version_at_least("0.22.1-dev", "0.22.0"));
+        assert!(!version_at_least("0.22.1-dev", "0.22.2"));
+        // A real older running version is still refused even though its own
+        // suffix parses fine -- the fix must not make the gate permissive.
+        assert!(!version_at_least("0.21.9-dev", "0.22.0"));
     }
 
     #[test]

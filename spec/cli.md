@@ -7,15 +7,17 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 | `probe [query] [--no-tui]` | interactive browser (default); catalog listing with `--no-tui`/`--json` |
 | `meld [<repo>] [--register-only] [--yes] [-N\|--namespace <prefix>] [--root <dir>] [--flat-skills] [--pin <HEAD\|ref\|branch=NAME\|tag=NAME>]` | connect a source (default `.`), then install its items |
 | `init-source [<path>] [--template] [--marketplace] [--flat-skills] [-N\|--namespace <prefix>]` | scaffold `mind.toml` + detect references (maintainer) |
-| `unmeld <name\|glob> [--keep-items] [--yes] [--uninstall-hook <cmd>] [--dangerously-skip-install-hook-check]` | disconnect a source (or all sources matching a glob) and uninstall its items (`--keep-items` leaves them) |
+| `unmeld <name\|glob> [--keep-items] [--yes] [--uninstall-hook <cmd>] [--dangerously-skip-hook-check]` (alias: `remove`/`rm`) | disconnect a source (or all sources matching a glob) and uninstall its items (`--keep-items` leaves them) |
 | `learn <item> [--dangerously-skip-install-hook-check]` (alias: `install`) | install |
-| `forget <item> [--dangerously-skip-install-hook-check]` (aliases: `unlearn`, `uninstall`) | uninstall |
-| `sync` (alias: `update`) | refresh sources |
+| `forget <item> [--dangerously-skip-hook-check]` (aliases: `unlearn`, `uninstall`) | uninstall |
+| `sync [source]` (alias: `update`) | refresh sources (all, or one matching `[source]`) |
 | `upgrade [--yes] [--no-sync] [item]` | upgrade installed; syncs first by default |
 | `recall [item] [--sources] [--kind K] [--source S] [--json]` (aliases: `status`, `list`) | status: sources with their items (install state marked); `--sources` narrows to sources |
 | `review [<target>] [-N\|--namespace <prefix>]` (default `.`) / `review --policy <path>` | validate a source / a policy file |
 | `introspect` (alias: `doctor`) | diagnose |
-| `evolve [--check] [--yes] [--version <v>]` (alias: `self-update`) | update the `mind` binary itself |
+| `evolve [--check] [--yes] [--to <v>]` (alias: `self-update`) | upgrade the `mind` binary itself |
+| `hooks run <target> [--event E] [--force\|--rerun]` / `hooks list <target>` | run or list a source's or item's hooks on demand |
+| `link-project [dir] [--preset <name>] [--subdir <rel>] [--snapshot] [--force]` | shorthand: link installed skills into a project's harness skills directory |
 | `absorb <item> [--to <path>]` | claim an unmanaged lobe item into a managed source |
 | `dump [--whole-sources] [--output <path>]` | write a super-source `mind.toml` reproducing the melded + installed state |
 | `config show` / `config lobes ...` | view/edit config |
@@ -397,9 +399,20 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   remove them later. This is the opt-out from the default item removal (CLI-21),
   mirroring `meld --register-only` (CLI-165).
 - `unmeld` runs the source's uninstall hooks before removal and accepts
-  `--dangerously-skip-install-hook-check` to run them unattended, and
+  `--dangerously-skip-hook-check` to run them unattended, and
   `--uninstall-hook <cmd>` to supply or override the uninstall hook (see
   install-hooks.md, HOOK-54, HOOK-59).
+- `CLI-227` `unmeld` and `forget`'s hook-consent flag is
+  `--dangerously-skip-hook-check`. `--dangerously-skip-install-hook-check` (the
+  original spelling) is kept as a hidden alias: both gate an UNINSTALL hook on
+  these two verbs, despite the "install" in the old name, which the rename
+  fixes without breaking a script that already passes the old spelling.
+  `meld`/`learn`/`sync`/`upgrade`/`hooks run`, whose install-hook flag really
+  does gate an install hook, keep `--dangerously-skip-install-hook-check`
+  unchanged.
+- `CLI-230` `unmeld` accepts `remove` and `rm` as additional visible aliases,
+  for symmetry with `learn`'s `install` alias and `forget`'s `unlearn`/
+  `uninstall` aliases.
 - `CLI-28` `unmeld <pattern>` accepts a glob (`*`, `?`, `[`) in place of an exact
   name or suffix (CLI-20), matched against each melded source's `host/owner/repo`
   identity and its trailing-suffix forms, mirroring `learn`/`forget` glob selection
@@ -496,6 +509,16 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   branch, and updates the recorded commit and `[source].description`. A linked
   local source (CLI-27) is not fetched or reset: `sync` only re-reads its HEAD
   and updates the recorded commit from the working tree.
+- `CLI-231` `sync` accepts an optional `[source]` selector: `mind sync <source>`
+  fetches only the melded source(s) matching it (an exact `host/owner/repo`, an
+  unambiguous trailing suffix like `repo` or `owner/repo`, or a glob), leaving
+  every other source untouched. A selector that matches no melded source (against
+  a non-empty registry) is a `SourceNotFound` error, so a typo is reported rather
+  than silently syncing nothing; a malformed glob is an `InvalidPattern` error.
+  With a selector the whole-set operations are skipped: the managed-policy
+  auto-meld provisioning (POL-32) and the `[discover].sources`/marketplace
+  nested-source re-walk (DSC-57) run only for a full `sync`. With no selector,
+  every source is fetched (CLI-50, the unchanged default).
 - `CLI-51` With no sources melded, `sync` reports that and exits successfully.
 - `CLI-52` `sync` does not change consumer aliases.
 - `CLI-53` `sync --upgrade` runs an `upgrade` pass after refreshing sources
@@ -601,6 +624,10 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   the current commit (HOOK-101). The `--dangerously-skip-install-hook-check` and
   `--dangerously-skip-build-hook-check` flags apply as they do to the automatic flows
   (HOOK-23/74).
+- `CLI-228` `mind hooks run --rerun` is a visible alias for `--force` (CLI-195):
+  same flag, same field, just a name that reads as "re-run recorded hooks"
+  rather than the borrowed `meld --force` clobber sense. Both spellings are
+  interchangeable in `--help` and on the command line.
 - `CLI-196` `mind hooks list <target>` lists the hooks in effect for a source
   and its installed items -- each hook's event, required/optional flag, command, and,
   for a recorded source install hook, whether it is pending and the commit it last ran
@@ -1104,15 +1131,22 @@ release artifacts as the install script and the Homebrew formula.
   brew-managed install is install-path guidance, not behavior, and lives in
   docs/src/install.md. A target path that is not writable is
   `TargetNotWritable` and nothing is changed.
-- `CLI-147` `evolve` never downgrades the binary. When `--version V` is given
+- `CLI-147` `evolve` never downgrades the binary. When `--to V` is given
   explicitly and V is strictly below the running version, `evolve` exits 0 without
   downloading anything and reports that the pinned version is below the running
   version (e.g. "pinned 0.1.0 is below the running 0.3.0; not downgrading"). This
   is distinct from the "up to date" message, which applies when V equals the running
-  version or when no `--version` is given and the running version is already current.
+  version or when no `--to` is given and the running version is already current.
   `--check` surfaces the same message. Under `--json`, the outcome is
   `"not-downgrading"` rather than `"up-to-date"`, so callers can distinguish the
   two cases.
+- `CLI-229` `evolve`'s pin-a-version flag is `--to <VERSION>`.
+  `--version <VERSION>` (the original spelling) is kept as a hidden alias: on
+  every other verb `--version`/`-V` is the global flag that prints the running
+  `mind` version and exits, so an arg of the same name taking a value on
+  `evolve` read as a collision even though `evolve` disables the global flag
+  for itself (`disable_version_flag`) and never actually conflicted at the
+  parser level.
 
 ## config
 
@@ -1170,10 +1204,11 @@ and per-harness `kinds` defaults.
 - `CLI-151` The color/Unicode capability gate is ON when ALL of the following hold:
   stdout is a TTY; the locale is UTF-8 (the first of `LC_ALL`, `LC_CTYPE`, `LANG`
   that is set contains the substring `UTF-8` or `utf8`, case-insensitively); the
-  environment variable `NO_COLOR` is unset or empty; the `--json` flag is not in
+  environment variable `NO_COLOR` is unset; the `--json` flag is not in
   effect; and the `--ascii` flag is not in effect. An unset locale (none of the
   three variables is set) is treated as non-UTF-8. When the gate is OFF, all output
-  is plain ASCII with no ANSI escape sequences.
+  is plain ASCII with no ANSI escape sequences. (`NO_COLOR` set to an empty string
+  still forces the gate OFF, same as any other value: see CLI-154.)
 
 - `CLI-152` When the capability gate (CLI-151) is ON, output uses ANSI color and
   Unicode glyphs with these semantics: green = installed / ok; yellow = warning /

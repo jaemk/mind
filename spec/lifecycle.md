@@ -58,8 +58,16 @@ agent homes (a store-only tool is not linked; tooling.md TOOL-3).
 > idempotent-reinstall path recognize ownership by "is a symlink into the store",
 > that fallback copy is not recognized as mind's own: a reinstall or `upgrade`
 > over it reports `LinkOccupied`, and `introspect`/`forget` cannot tell it apart
-> from a user's file. mind is therefore supported on unix; non-unix is
-> copy-only and best-effort. This is a documented limitation, not yet addressed.
+> from a user's file. Rather than that best-effort breakage, mind refuses cleanly
+> on a non-unix platform (LIFE-50).
+
+- `LIFE-50` mind supports only unix-like platforms, where installed items are
+  linked with real symlinks. On a non-unix platform an item install is refused up
+  front at the single item-install chokepoint with a clear "unsupported platform"
+  error, rather than falling back to the unrecognized copy that later breaks
+  reinstall/upgrade with `LinkOccupied`. The refusal is `cfg`-gated and a no-op on
+  unix; only the guard's unix (supported) branch is exercised by the test suite,
+  as CI does not run on a non-unix host.
 
 ## Upgrade
 
@@ -76,6 +84,58 @@ agent homes (a store-only tool is not linked; tooling.md TOOL-3).
   version is not removed until the new install succeeds.
 - `LIFE-15` The hash recorded and compared is of the source content, not the
   expanded store copy, so detection compares source with source.
+- `LIFE-46` Before applying a rename (LIFE-14), `upgrade` looks up the rename's
+  new effective key in the manifest. If an item is already installed under that
+  key with a DIFFERENT stable identity `(source, kind, bare_name)` than the item
+  being renamed, `upgrade` refuses that item (an `AmbiguousItem` error naming
+  both identities) instead of evicting the occupant. This mirrors `learn`'s own
+  collision guard (DEP-23): a third-party source's `mind.toml` edit (e.g.
+  dropping its namespace prefix) must not let its next upgrade silently delete
+  a different, unrelated source's installed item -- no hook, no prompt.
+- `LIFE-47` When applying a rename (LIFE-14) whose new install's links overlap
+  the old item's links (e.g. an agent, which links under its bare harness name
+  regardless of the item's effective name, NS-40), the old item's link removal
+  excludes any link the new install already owns. This mirrors the in-place
+  upgrade's own link cleanup (LIFE-13): without it, removing the old item's
+  full link set would delete the link the new install just created, leaving no
+  link on disk for a key the manifest claims is installed.
+- `LIFE-48` A failure partway through applying a batch of upgrades (the
+  `install_item`/`uninstall_item` calls for one item out of several pending)
+  saves the manifest with every upgrade already applied in this pass before
+  the error propagates, mirroring `learn`/`forget`'s own failure-path save.
+  Without this, an earlier item in the same batch is correct on disk but
+  unrecorded: a retry re-runs its install hook, and a completed rename's old
+  entry is left pointing at removed paths. The same persist-before-propagate
+  rule applies to a source's re-run install hooks (a source-level pass
+  separate from the per-item loop) and to a re-meld's hook re-run: an earlier
+  hook's recorded run must not be lost when a later hook in the same pass
+  fails, or its side effect is silently re-offered next time (mirroring
+  HOOK-53's item-level guarantee at the source level).
+- `LIFE-49` `sync --upgrade` forwards the same `--yes` the CLI already threads
+  into `mind upgrade`/`mind forget` to the `--upgrade` pass, instead of forcing
+  it off. `sync --upgrade --yes` therefore applies pending upgrades without
+  prompting, exactly like `mind upgrade --yes` would after a `sync`; without
+  this, `--yes` is silently dropped and a non-interactive `sync --upgrade` run
+  either prompts (a TTY) or refuses (LIFE-45, `--json` or non-TTY) regardless
+  of the flag.
+
+## Non-interactive confirmation (`--json`)
+
+- `LIFE-45` `--json` is always treated as a non-interactive session for a
+  destructive confirmation, the same rule DEP-60 already establishes for
+  `forget`'s dependent-item warning: a run with `--json` and no `--yes` refuses
+  with `ConfirmationRequired` rather than falling through to a prompt (which
+  `--json` cannot answer) or, worse, proceeding unprompted. This applies to
+  `unmeld`'s multi-source and multi-item confirmations (CLI-28, CLI-21),
+  `forget --unmanaged`'s single-item and bulk confirmations (UNM-5, UNM-8) --
+  the worst case, since an unmanaged item is the user's own file or directory,
+  not a mind-owned symlink -- `upgrade`'s apply confirmation (LIFE-14), and
+  `evolve`'s binary-swap confirmation. `upgrade`'s own text-mode (non-`--json`)
+  prompt is unaffected: it reads stdin directly and already treats EOF/no-input
+  as a safe decline, so it does not additionally require a real TTY the way the
+  other sites above do (mirroring DEP-60's TTY check) -- only `--json` could
+  previously bypass it, by skipping the confirm call entirely rather than by a
+  TTY distinction.
 
 ## Uninstall
 

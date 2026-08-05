@@ -281,10 +281,19 @@ pub fn run(check: bool, yes: bool, mut version: Option<String>) -> Result<()> {
         Decision::Update => {}
     }
 
-    if !yes && !out.json && !crate::commands::confirm(&format!("update mind to {target_version}?"))?
-    {
-        println!("aborted; nothing changed");
-        return Ok(());
+    if !yes {
+        // spec: LIFE-45 -- B1: `--json` is non-interactive, mirroring DEP-60: a
+        // non-TTY run or a `--json` run without `--yes` refuses rather than
+        // swapping the binary unprompted.
+        if !crate::hook::is_tty() || out.json {
+            return Err(MindError::ConfirmationRequired {
+                action: format!("updating mind to {target_version}"),
+            });
+        }
+        if !crate::commands::confirm(&format!("update mind to {target_version}?"))? {
+            println!("aborted; nothing changed");
+            return Ok(());
+        }
     }
 
     let url = asset_url(&target_version, target);

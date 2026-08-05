@@ -154,9 +154,12 @@ const ALLOWLIST: &[&str] = &[
     //   note), HARN-17 (unconditional fan-out backfill, with the foreign-target
     //   guard), and HARN-18 (a repaired vanished-lobe finding is dropped from
     //   introspect's exit summary) are also cited from tests/cli_lobes.rs.
-    //   HARN-19 (planned): a selective/local lobe mode, distinct from today's
-    //   fan-out mode, is recorded ahead of implementation; not yet built, so it
-    //   has no citing test. See spec/README.md feature status.
+    //   HARN-19: umbrella statement for the selective/local lobe mode; its
+    //   sub-behaviors HARN-20 (`--local` scoping) and HARN-21 (project-lobe
+    //   detection) carry the citations (src/paths.rs, src/main.rs,
+    //   tests/cli_lobes.rs). HARN-19 itself names no independently testable
+    //   behavior beyond what HARN-20/HARN-21 already assert, so it stays
+    //   allowlisted rather than duplicating a citation.
     "HARN-19",
     //   cross-source skill/rule/tool collision detection: NS-43 (detection) and
     //   NS-45 (non-interactive error) are now implemented and cited from

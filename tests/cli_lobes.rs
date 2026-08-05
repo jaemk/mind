@@ -394,8 +394,8 @@ fn detect_yes_text_output_reports_and_persists() {
 }
 
 // HARN-5: when no known harness dirs exist under the detection base, detect
-// reports "no new harness homes detected" and mutates nothing - in both the text
-// and JSON forms, with and without --yes (the empty-candidates path the
+// reports "no new agent homes (lobes) detected" and mutates nothing - in both the
+// text and JSON forms, with and without --yes (the empty-candidates path the
 // implementor flagged).
 #[test]
 fn detect_no_homes_reports_nothing_and_mutates_nothing() {
@@ -413,7 +413,7 @@ fn detect_no_homes_reports_nothing_and_mutates_nothing() {
     );
     assert!(text.success, "detect failed: {}", text.stderr);
     assert!(
-        text.stdout.contains("no new harness homes"),
+        text.stdout.contains("no new agent homes (lobes) detected"),
         "empty detection must report none found: {}",
         text.stdout
     );
@@ -3855,38 +3855,458 @@ fn harn17_blocked_backfill_warning_is_marked_and_on_stdout_in_text_mode() {
     );
 }
 
-// HARN-19 honesty check (deliberately cites no spec ID: HARN-19 is ALLOWLISTed
-// in tests/spec_coverage.rs as planned-and-unimplemented, and a citation would
-// fail that gate's "remove now-cited IDs from ALLOWLIST" assertion).
-//
-// Guards the claim the allowlist entry and the `planned` status row rest on: no
-// selective/local lobe mode exists. If someone builds one, this test fails and
-// forces the spec status + allowlist to be updated with it.
-#[test]
-fn selective_lobe_mode_is_still_unimplemented() {
-    let sb = Sandbox::new();
-    for verb in ["learn", "meld"] {
-        let help = sb.mind(&[verb, "--help"]);
-        assert!(help.success, "{verb} --help failed: {}", help.stderr);
-        assert!(
-            !help.stdout.contains("--local"),
-            "a `--local` (selective-mode) flag on `{verb}` would make the \
-             planned status of the selective lobe mode wrong: {}",
-            help.stdout
-        );
-    }
+// ---- HARN-20/HARN-21: selective (`--local`) lobe mode --------------------
 
-    let readme = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("spec/README.md"),
-    )
-    .expect("read spec/README.md");
-    let row = readme
-        .lines()
-        .find(|l| l.contains("HARN-19"))
-        .expect("spec/README.md must carry a HARN-19 feature-status row");
+/// A source melded and a config with TWO all-kinds lobes: the sandbox Claude
+/// home, and a project lobe living under `<base>/proj`. Returns (project dir,
+/// project lobe path). The project dir is created so it can serve as a cwd and
+/// so the lobe's parent is reachable (STO-56).
+fn setup_project_lobe(sb: &Sandbox) -> (PathBuf, PathBuf) {
+    let proj = sb.base.join("proj");
+    let local_lobe = proj.join("locallobe");
+    std::fs::create_dir_all(&proj).unwrap();
+    sb.write_config(&format!(
+        "lobes = [\"{claude}\", \"{local}\"]\n",
+        claude = sb.claude_home.display(),
+        local = local_lobe.display(),
+    ));
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    (proj, local_lobe)
+}
+
+// HARN-20: `learn --local` run inside a registered project lobe links the item
+// into ONLY that lobe, not the global fan-out set (the Claude home is untouched).
+#[test]
+fn local_learn_links_only_into_the_project_lobe() {
+    // spec: HARN-20
+    // spec: HARN-21
+    let sb = Sandbox::new();
+    let (proj, local_lobe) = setup_project_lobe(&sb);
+
+    let learned = sb.run_cwd(&["learn", "review", "--local"], &[], Some(&proj));
     assert!(
-        row.contains("| planned |"),
-        "the HARN-19 status row must say `planned` while no selective mode \
-         exists: {row}"
+        learned.success,
+        "learn --local inside a project lobe must succeed: {}",
+        learned.stderr
+    );
+
+    assert!(
+        std::fs::symlink_metadata(local_lobe.join("skills/review")).is_ok(),
+        "the skill must link into the project lobe"
+    );
+    assert!(
+        std::fs::symlink_metadata(sb.claude_home.join("skills/review")).is_err(),
+        "--local must NOT fan the skill into the global Claude home: stderr={}",
+        learned.stderr
+    );
+}
+
+// HARN-21: `--local` from a directory not inside any registered project lobe is
+// an error naming the fix, not a silent fall-back to the global fan-out.
+#[test]
+fn local_learn_outside_any_lobe_is_an_error() {
+    // spec: HARN-21
+    let sb = Sandbox::new();
+    let (_proj, local_lobe) = setup_project_lobe(&sb);
+
+    // An unrelated cwd: neither the Claude home nor the project lobe lives under it.
+    let elsewhere = sb.base.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+
+    let learned = sb.run_cwd(&["learn", "review", "--local"], &[], Some(&elsewhere));
+    assert!(
+        !learned.success,
+        "--local outside a registered project lobe must fail: {}",
+        learned.stdout
+    );
+    assert!(
+        learned
+            .stderr
+            .contains("not inside any registered project lobe"),
+        "the error must explain that the cwd is not inside a project lobe: {}",
+        learned.stderr
+    );
+    // Nothing was installed anywhere.
+    assert!(
+        std::fs::symlink_metadata(sb.claude_home.join("skills/review")).is_err()
+            && std::fs::symlink_metadata(local_lobe.join("skills/review")).is_err(),
+        "a refused --local install must link nothing"
+    );
+}
+
+// HARN-20: a plain (no-flag) `learn` still fans out into every configured lobe,
+// including the project lobe. `--local` narrows that; its absence does not.
+#[test]
+fn global_learn_still_fans_out_to_all_lobes() {
+    // spec: HARN-20
+    let sb = Sandbox::new();
+    let (_proj, local_lobe) = setup_project_lobe(&sb);
+
+    // Run from an unrelated cwd so no availability note is even considered.
+    let elsewhere = sb.base.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let learned = sb.run_cwd(&["learn", "review"], &[], Some(&elsewhere));
+    assert!(learned.success, "global learn failed: {}", learned.stderr);
+
+    assert!(
+        std::fs::symlink_metadata(sb.claude_home.join("skills/review")).is_ok(),
+        "global learn must link into the Claude home"
+    );
+    assert!(
+        std::fs::symlink_metadata(local_lobe.join("skills/review")).is_ok(),
+        "global learn must also fan into the project lobe"
+    );
+}
+
+// HARN-21: a global home never qualifies as the project lobe an invocation is
+// "inside", even when the naive containment test would match it.
+//
+// spec/harness-lobes.md (HARN-21) says "A global home lives under `~`, not
+// under an arbitrary project cwd, so it does not qualify" for `--local`'s
+// containment test. The regression this guards: when the cwd is the PARENT of
+// the only configured (global) lobe -- exactly the case the spec text
+// describes, cwd = `~`, lobe = `~/.claude` -- `~/.claude` satisfies
+// `starts_with(cwd)`, so a naive test would treat the global home as "the
+// project lobe the cwd sits inside" and silently narrow the `--local` install
+// to it. `detect_local_lobe` excludes the resolved default/global home, so this
+// must instead be REFUSED with the same actionable error as
+// `local_learn_outside_any_lobe_is_an_error`.
+#[test]
+fn local_learn_from_global_lobes_parent_dir_refuses() {
+    // spec: HARN-21
+    let sb = Sandbox::new();
+    // Default config: the single global lobe is `claude_home`, no project lobe
+    // registered anywhere. `sb.base` is `claude_home`'s parent directory --
+    // i.e. what a real invocation from `$HOME` looks like when only `~/.claude`
+    // is configured.
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+
+    let learned = sb.run_cwd(&["learn", "review", "--local"], &[], Some(&sb.base));
+
+    // Per HARN-21's spec text the global home does not qualify as a project
+    // lobe, so `--local` from its parent directory must be refused, not narrowed
+    // to that global home.
+    assert!(
+        !learned.success,
+        "--local from the global lobe's parent directory must be refused, not \
+         narrowed to the global home: stdout={} stderr={}",
+        learned.stdout, learned.stderr
+    );
+    assert!(
+        learned
+            .stderr
+            .contains("not inside any registered project lobe"),
+        "the error must explain that the cwd is not inside a project lobe: {}",
+        learned.stderr
+    );
+    // Nothing was linked into the global home (the refused install is a no-op).
+    assert!(
+        std::fs::symlink_metadata(sb.claude_home.join("skills/review")).is_err(),
+        "a refused --local install must not link into the global home: {}",
+        learned.stderr
+    );
+}
+
+// HARN-21: when the cwd contains TWO registered lobes at different nesting
+// depths, the deeper one (more path components, i.e. the outer/shallow lobe's
+// own subdirectory) wins over the shallower one -- pinning down
+// `detect_local_lobe`'s tie-break, which is otherwise untested.
+#[test]
+fn local_learn_picks_the_deeper_of_two_qualifying_lobes() {
+    // spec: HARN-21
+    let sb = Sandbox::new();
+    let proj = sb.base.join("proj");
+    let shallow = proj.join("shallowlobe");
+    let deep = proj.join("shallowlobe").join("nested").join("deeplobe");
+    // The lobe's parent directory must exist (STO-56) for it to be reachable.
+    std::fs::create_dir_all(deep.parent().unwrap()).unwrap();
+    sb.write_config(&format!(
+        "lobes = [\"{claude}\", \"{shallow}\", \"{deep}\"]\n",
+        claude = sb.claude_home.display(),
+        shallow = shallow.display(),
+        deep = deep.display(),
+    ));
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+
+    let learned = sb.run_cwd(&["learn", "review", "--local"], &[], Some(&proj));
+    assert!(learned.success, "{}", learned.stderr);
+    assert!(
+        learned
+            .stderr
+            .contains(&deep.to_string_lossy().into_owned()),
+        "the note must name the deeper (winning) lobe: {}",
+        learned.stderr
+    );
+
+    assert!(
+        std::fs::symlink_metadata(deep.join("skills/review")).is_ok(),
+        "the deeper lobe must receive the link"
+    );
+    assert!(
+        std::fs::symlink_metadata(shallow.join("skills/review")).is_err(),
+        "the shallower (losing) lobe must NOT receive the link"
+    );
+    assert!(
+        std::fs::symlink_metadata(sb.claude_home.join("skills/review")).is_err(),
+        "the global lobe must not receive the link either"
+    );
+}
+
+// HARN-20: `--local` combined with `--json` must still scope to exactly one
+// lobe, and the scoping note (normally on stderr) must be suppressed --
+// stdout carries only the JSON result envelope.
+#[test]
+fn local_learn_json_scopes_to_one_lobe_and_suppresses_the_note() {
+    // spec: HARN-20
+    let sb = Sandbox::new();
+    let (proj, local_lobe) = setup_project_lobe(&sb);
+
+    let learned = sb.run_cwd(&["--json", "learn", "review", "--local"], &[], Some(&proj));
+    assert!(learned.success, "{} {}", learned.stdout, learned.stderr);
+
+    let v = parse_json(&learned.stdout);
+    assert_eq!(v["schema"], 1, "{}", learned.stdout);
+
+    assert!(
+        std::fs::symlink_metadata(local_lobe.join("skills/review")).is_ok(),
+        "--local --json must still link into the project lobe"
+    );
+    assert!(
+        std::fs::symlink_metadata(sb.claude_home.join("skills/review")).is_err(),
+        "--local --json must NOT fan into the global Claude home"
+    );
+    assert!(
+        !learned.stderr.contains("--local"),
+        "the --local scoping note must be suppressed under --json: {}",
+        learned.stderr
+    );
+}
+
+// HARN-20: `meld --local` (as distinct from `learn --local`) also scopes its
+// install fan-out to only the project lobe. Driven under `--json` so the
+// install-all offer runs silently instead of needing a TTY confirm.
+#[test]
+fn local_meld_json_links_only_into_the_project_lobe() {
+    // spec: HARN-20
+    let sb = Sandbox::new();
+    let proj = sb.base.join("proj");
+    let local_lobe = proj.join("locallobe");
+    std::fs::create_dir_all(&proj).unwrap();
+    sb.write_config(&format!(
+        "lobes = [\"{claude}\", \"{local}\"]\n",
+        claude = sb.claude_home.display(),
+        local = local_lobe.display(),
+    ));
+
+    let spec = sb.source_spec();
+    let melded = sb.run_cwd(
+        &["--json", "--yes", "meld", &spec, "--local"],
+        &[],
+        Some(&proj),
+    );
+    assert!(melded.success, "{} {}", melded.stdout, melded.stderr);
+
+    assert!(
+        std::fs::symlink_metadata(local_lobe.join("skills/review")).is_ok(),
+        "meld --local must link into the project lobe: {}",
+        melded.stdout
+    );
+    assert!(
+        std::fs::symlink_metadata(sb.claude_home.join("skills/review")).is_err(),
+        "meld --local must NOT fan into the global Claude home"
+    );
+}
+
+// HARN-20: a plain (no-flag) `learn` run inside a registered project lobe
+// prints the "you could use --local" advisory note on stderr, but stays
+// non-interactive (still fans out to every lobe) and the note is suppressed
+// under `--json`.
+#[test]
+fn plain_learn_inside_a_project_lobe_prints_the_local_availability_note() {
+    // spec: HARN-20
+    let sb = Sandbox::new();
+    let (proj, local_lobe) = setup_project_lobe(&sb);
+
+    let learned = sb.run_cwd(&["learn", "review"], &[], Some(&proj));
+    assert!(learned.success, "{}", learned.stderr);
+    assert!(
+        learned.stderr.contains("--local"),
+        "a plain learn inside a registered project lobe must advertise \
+         --local on stderr: {}",
+        learned.stderr
+    );
+    // Still fans out to every configured lobe (the note is advisory only).
+    assert!(std::fs::symlink_metadata(sb.claude_home.join("skills/review")).is_ok());
+    assert!(std::fs::symlink_metadata(local_lobe.join("skills/review")).is_ok());
+
+    // Under --json the note is suppressed entirely (LIFE-45 / HARN-20: json
+    // output is non-interactive and its stderr carries no interleaved prose).
+    let json_run = sb.run_cwd(&["--json", "learn", "review"], &[], Some(&proj));
+    assert!(json_run.success, "{}", json_run.stderr);
+    assert!(
+        !json_run.stderr.contains("--local"),
+        "the availability note must be suppressed under --json: {}",
+        json_run.stderr
+    );
+}
+
+// HARN-21: a home-rooted global preset lobe (e.g. `~/.gemini/config`) must NOT
+// qualify as the project lobe an invocation is "inside" when the cwd sits AT
+// (not just above) the home directory. This exercises the
+// `lp.starts_with(home) && home.starts_with(cwd)` branch of
+// `detect_local_lobe` directly -- distinct from
+// `local_learn_from_global_lobes_parent_dir_refuses`, which only ever hits the
+// `lp == global_home` branch because its sole configured lobe IS the resolved
+// default home. Here the configured lobe is a SEPARATE, home-rooted, non-default
+// lobe (like a `--preset gemini` add), so only the home-rooted exclusion can be
+// responsible for the refusal.
+#[test]
+fn local_learn_from_home_rooted_preset_lobe_refuses() {
+    // spec: HARN-21
+    let sb = Sandbox::new();
+    let home_dir = sb.base.join("home");
+    let gemini_lobe = home_dir.join(".gemini").join("config");
+    std::fs::create_dir_all(&home_dir).unwrap();
+    sb.write_config(&format!(
+        "lobes = [\"{claude}\", \"{gemini}\"]\n",
+        claude = sb.claude_home.display(),
+        gemini = gemini_lobe.display(),
+    ));
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+
+    let home_str = home_dir.to_string_lossy().into_owned();
+    let learned = sb.run_cwd(
+        &["learn", "review", "--local"],
+        &[("HOME", home_str.as_str())],
+        Some(&home_dir),
+    );
+
+    assert!(
+        !learned.success,
+        "--local from a home-rooted preset lobe's home directory must be \
+         refused, not narrowed to that preset lobe: stdout={} stderr={}",
+        learned.stdout, learned.stderr
+    );
+    assert!(
+        learned
+            .stderr
+            .contains("not inside any registered project lobe"),
+        "the error must explain that the cwd is not inside a project lobe: {}",
+        learned.stderr
+    );
+    assert!(
+        std::fs::symlink_metadata(gemini_lobe.join("skills/review")).is_err(),
+        "a refused --local install must not link into the home-rooted preset \
+         lobe: {}",
+        learned.stderr
+    );
+    assert!(
+        std::fs::symlink_metadata(sb.claude_home.join("skills/review")).is_err(),
+        "a refused --local install must not link into the global home either"
+    );
+}
+
+// HARN-21 (inverse of the above, guarding against over-exclusion): a genuine
+// PROJECT lobe that happens to live under the home directory, with the cwd
+// genuinely BELOW the home directory (not at or above it), must still be
+// detected and receive the `--local` install. "A real project lobe placed
+// under `~` ... is unaffected: the cwd is below `~`, not at or above it, so
+// the home-rooted exclusion does not fire" (spec/harness-lobes.md HARN-21).
+#[test]
+fn local_learn_project_lobe_under_home_dir_is_still_detected() {
+    // spec: HARN-21
+    let sb = Sandbox::new();
+    let home_dir = sb.base.join("home");
+    let proj = home_dir.join("dev").join("proj");
+    let local_lobe = proj.join("locallobe");
+    std::fs::create_dir_all(&proj).unwrap();
+    sb.write_config(&format!(
+        "lobes = [\"{claude}\", \"{local}\"]\n",
+        claude = sb.claude_home.display(),
+        local = local_lobe.display(),
+    ));
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+
+    let home_str = home_dir.to_string_lossy().into_owned();
+    let learned = sb.run_cwd(
+        &["learn", "review", "--local"],
+        &[("HOME", home_str.as_str())],
+        Some(&proj),
+    );
+
+    assert!(
+        learned.success,
+        "a genuine project lobe under the home directory, with cwd below the \
+         home directory, must still be detected: {}",
+        learned.stderr
+    );
+    assert!(
+        std::fs::symlink_metadata(local_lobe.join("skills/review")).is_ok(),
+        "the project lobe under the home directory must receive the link"
+    );
+    assert!(
+        std::fs::symlink_metadata(sb.claude_home.join("skills/review")).is_err(),
+        "--local must NOT fan the skill into the global Claude home"
+    );
+}
+
+// HARN-21: the global-home exclusion must key off the RESOLVED default home
+// (`MIND_DEFAULT_LOBE`, which per CLI-170 takes precedence over `CLAUDE_HOME`),
+// not just `CLAUDE_HOME`. With no `lobes` configured, `agent_homes()` falls
+// back to `[claude_home]`, and `claude_home` is resolved from
+// `MIND_DEFAULT_LOBE` here even though `CLAUDE_HOME` is also set (to a
+// different, unused path) by the test harness on every invocation.
+#[test]
+fn local_learn_mind_default_lobe_as_global_home_is_excluded() {
+    // spec: HARN-21
+    // spec: CLI-170
+    let sb = Sandbox::new();
+    let default_lobe_dir = sb.base.join("customdefault");
+    std::fs::create_dir_all(&default_lobe_dir).unwrap();
+    let default_str = default_lobe_dir.to_string_lossy().into_owned();
+    // `meld` (like every command) calls `ensure_config`, which persists a
+    // default `lobes = [self.default_lobe()]` entry to config.toml on first
+    // touch (using whatever env is in effect for THAT invocation). Meld with
+    // the same MIND_DEFAULT_LOBE so the persisted default lobe is the one
+    // under test, rather than accidentally locking in a stale CLAUDE_HOME
+    // value from an earlier untagged invocation.
+    assert!(
+        sb.mind_env(
+            &["meld", &sb.source_spec()],
+            &[("MIND_DEFAULT_LOBE", default_str.as_str())]
+        )
+        .success
+    );
+
+    let learned = sb.run_cwd(
+        &["learn", "review", "--local"],
+        &[("MIND_DEFAULT_LOBE", default_str.as_str())],
+        Some(&sb.base),
+    );
+
+    assert!(
+        !learned.success,
+        "--local from the MIND_DEFAULT_LOBE-resolved global home's parent \
+         directory must be refused, not narrowed to that home: stdout={} \
+         stderr={}",
+        learned.stdout, learned.stderr
+    );
+    assert!(
+        learned
+            .stderr
+            .contains("not inside any registered project lobe"),
+        "the error must explain that the cwd is not inside a project lobe: {}",
+        learned.stderr
+    );
+    assert!(
+        std::fs::symlink_metadata(default_lobe_dir.join("skills/review")).is_err(),
+        "a refused --local install must not link into the MIND_DEFAULT_LOBE \
+         home: {}",
+        learned.stderr
+    );
+    assert!(
+        std::fs::symlink_metadata(sb.claude_home.join("skills/review")).is_err(),
+        "a refused --local install must not link into the (unused) CLAUDE_HOME \
+         either"
     );
 }

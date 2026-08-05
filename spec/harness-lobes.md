@@ -197,14 +197,46 @@ per-rule files. Rules stay Claude-only here; an `AGENTS.md`-writer is out of sco
   issue count), rather than being both reported as repaired ("pruned vanished
   lobe(s) from config") and counted as an outstanding issue.
 
-- `HARN-19` (planned) A selective lobe mode, distinct from today's fan-out mode
-  (HARN-17's only mode), in which items are installed into a lobe only when
-  explicitly targeted (e.g. a `--local` flag on `learn`/`meld`) rather than
-  automatically fanned into every configured lobe. Detecting that the current
-  invocation runs inside a registered project lobe lets the CLI offer a
-  local-vs-global choice. Motivation: project-scoped skills for harnesses like
-  Windsurf, where fanning every installed item into every project is not always
-  wanted. Not implemented.
+- `HARN-19` A selective lobe mode, distinct from the fan-out mode (HARN-17), in
+  which an install targets a single project lobe instead of fanning into every
+  configured lobe. It is requested per invocation by `--local` on `learn`/`meld`
+  (HARN-20) and is anchored on detecting the registered project lobe the current
+  working directory sits inside (HARN-21). Motivation: project-scoped skills for
+  harnesses like Windsurf, where fanning every installed item into every project
+  is not always wanted. The fan-out default (HARN-7/HARN-17) is unchanged when
+  `--local` is absent.
+
+- `HARN-20` `--local` on `learn` and `meld` restricts that invocation's install
+  fan-out to exactly one lobe: the registered project lobe the current working
+  directory sits inside (HARN-21). Only that lobe receives links; the other
+  configured agent homes (including the default `~/.claude`) are not written.
+  The scoped lobe is a subset of the normally-resolved homes, so it is still
+  subject to the lobe's own `kinds` filter (HARN-1) and to any managed-policy
+  lobe filtering (POL-40/POL-41) that produced the effective set. Without
+  `--local`, behavior is exactly the fan-out default (HARN-7/HARN-17). When a
+  plain (no-`--local`) `learn`/`meld` runs inside a registered project lobe, an
+  advisory note that `--local` is available is printed to stderr; it never
+  prompts or blocks, so non-interactive behavior is unchanged. The note and the
+  `--local` scoping messages are suppressed under `--json`.
+
+- `HARN-21` The project lobe an invocation is "inside" is a configured lobe whose
+  directory lives under the current working directory (e.g. a
+  `<project>/.windsurf` windsurf lobe, or a `<project>/<subdir>` lobe registered
+  by `config lobes add`/`link-project`). A global home lives under `~`, not under
+  an arbitrary project cwd, so it does not qualify. In particular the resolved
+  default home (the `MIND_DEFAULT_LOBE` / `CLAUDE_HOME` override, else `~/.claude`)
+  is always the global fan-out target (HARN-20 keeps it unwritten under `--local`)
+  and is therefore never detected as the project lobe, even when the cwd is its
+  parent directory (e.g. running `--local` from `~` with only `~/.claude`
+  configured): that is refused, not narrowed to the default home. Likewise a
+  home-rooted global preset lobe (e.g. `~/.gemini/config`) does not qualify when
+  the cwd is at or above `~`. When several configured lobes qualify, the deepest
+  (closest to the cwd) is chosen; containment is tested on
+  canonicalized paths so a symlinked cwd or lobe still matches. When `--local` is
+  given and the cwd is not inside any registered project lobe, the install is
+  refused with an actionable error (naming `mind link-project` / `mind config
+  lobes add` as the fix, or dropping `--local`) rather than silently falling back
+  to the global fan-out.
 
 ## Documentation map
 

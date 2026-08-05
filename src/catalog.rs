@@ -853,11 +853,18 @@ fn build_item(
     // catalog is a display surface (`recall`/`probe`/`dump`), not the expanded
     // store copy, so flatten it to the bare name here -- the single capture
     // point -- rather than showing the raw token to a human.
+    //
+    // spec: DSC-94 -- B4: a source-controlled description (frontmatter or an
+    // `[[items]]` override) reaches every display surface (`recall`, `probe
+    // --no-tui`, `--json`) from this one capture point, so sanitize it here
+    // exactly as the plugin-manifest path already does (commands.rs), closing
+    // the raw-ANSI/bidi-override gap for the biggest funnel of source text.
     let description = match ov.description {
         Some(d) => Some(d),
         None => frontmatter::description_capped(meta)?,
     }
-    .map(|d| namespace::flatten_display(&d));
+    .map(|d| namespace::flatten_display(&d))
+    .map(|d| crate::sanitize::strip_ansi(&d));
     Ok(CatalogItem {
         kind,
         name,
@@ -1015,397 +1022,6 @@ fn make_item(
         meta,
         ItemOverrides::default(),
     )
-}
-
-#[cfg(test)]
-mod lifecycle_tests {
-    use super::*;
-    use std::sync::atomic::{AtomicU32, Ordering};
-
-    static N: AtomicU32 = AtomicU32::new(0);
-
-    fn tmp() -> PathBuf {
-        let n = N.fetch_add(1, Ordering::SeqCst);
-        let p = std::env::temp_dir().join(format!("mind-lifecycle-{}-{n}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&p);
-        std::fs::create_dir_all(&p).unwrap();
-        p
-    }
-
-    fn write(path: &Path, contents: &str) {
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, contents).unwrap();
-    }
-
-    fn source_for(clone: &Path) -> Source {
-        use crate::source::Pin;
-        Source {
-            name: "local/test/repo".to_string(),
-            url: clone.to_string_lossy().into_owned(),
-            host: "local".to_string(),
-            owner: "test".to_string(),
-            repo: "repo".to_string(),
-            commit: None,
-            description: None,
-            alias: None,
-            as_alias: None,
-            pin: Pin::default(),
-            roots: None,
-            flat_skills: false,
-            add_roots: None,
-            item_path: None,
-            origin: None,
-            plugin_version: None,
-            install_hooks: Vec::new(),
-            install_hook: None,
-            install_hook_commit: None,
-        }
-    }
-
-    #[test]
-    fn item_install_uninstall_hooks_from_mind_toml_on_any_kind() {
-        // spec: HOOK-80
-        // A `mind.toml` [[items]].install/.uninstall is valid on a non-tool kind
-        // (here a rule), unlike `bin`/`build` which are tool-only.
-        let base = tmp();
-        let clone = base.join("sources/local/test/repo");
-        write(
-            &clone.join("guidelines/style.md"),
-            "---\ndescription: style\n---\n# style\n",
-        );
-        write(
-            &clone.join("mind.toml"),
-            concat!(
-                "[[items]]\n",
-                "kind = \"rule\"\n",
-                "name = \"style\"\n",
-                "path = \"guidelines/style.md\"\n",
-                "install = \"echo set-up\"\n",
-                "uninstall = \"echo tear-down\"\n",
-            ),
-        );
-        let paths = Paths {
-            mind_home: base.clone(),
-            claude_home: base.join("claude"),
-        };
-        let mut items = Vec::new();
-        scan_source(&paths, &source_for(&clone), &mut items).unwrap();
-        let rule = items.iter().find(|i| i.name == "style").unwrap();
-        assert_eq!(rule.install.as_deref(), Some("echo set-up"));
-        assert_eq!(rule.uninstall.as_deref(), Some("echo tear-down"));
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn item_hooks_from_tool_md_frontmatter() {
-        // spec: HOOK-80
-        // A tool's TOOL.md may carry install:/uninstall: in frontmatter.
-        let base = tmp();
-        let clone = base.join("sources/local/test/repo");
-        write(
-            &clone.join("tools/helper/TOOL.md"),
-            "---\ndescription: helper\ninstall: make setup\nuninstall: make cleanup\n---\n# helper\n",
-        );
-        write(&clone.join("tools/helper/helper"), "#!/bin/sh\n");
-        let paths = Paths {
-            mind_home: base.clone(),
-            claude_home: base.join("claude"),
-        };
-        let mut items = Vec::new();
-        scan_source(&paths, &source_for(&clone), &mut items).unwrap();
-        let tool = items.iter().find(|i| i.name == "helper").unwrap();
-        assert_eq!(tool.install.as_deref(), Some("make setup"));
-        assert_eq!(tool.uninstall.as_deref(), Some("make cleanup"));
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn empty_item_hook_is_treated_as_absent() {
-        // spec: HOOK-80
-        // An empty/whitespace install or uninstall is absent (HOOK-3).
-        let base = tmp();
-        let clone = base.join("sources/local/test/repo");
-        write(
-            &clone.join("guidelines/style.md"),
-            "---\ndescription: style\n---\n# style\n",
-        );
-        write(
-            &clone.join("mind.toml"),
-            concat!(
-                "[[items]]\n",
-                "kind = \"rule\"\n",
-                "name = \"style\"\n",
-                "path = \"guidelines/style.md\"\n",
-                "install = \"   \"\n",
-            ),
-        );
-        let paths = Paths {
-            mind_home: base.clone(),
-            claude_home: base.join("claude"),
-        };
-        let mut items = Vec::new();
-        scan_source(&paths, &source_for(&clone), &mut items).unwrap();
-        let rule = items.iter().find(|i| i.name == "style").unwrap();
-        assert_eq!(rule.install, None, "whitespace install must be absent");
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn scalar_item_hooks_populate_both_the_scalar_fields_and_the_list() {
-        // spec: HOOK-86
-        // COORDINATION: the scalar install/uninstall fields stay populated (the
-        // HOOK-85 disclosure reads them) AND the resolved hook list is populated.
-        let base = tmp();
-        let clone = base.join("sources/local/test/repo");
-        write(
-            &clone.join("guidelines/style.md"),
-            "---\ndescription: style\n---\n# style\n",
-        );
-        write(
-            &clone.join("mind.toml"),
-            concat!(
-                "[[items]]\n",
-                "kind = \"rule\"\n",
-                "name = \"style\"\n",
-                "path = \"guidelines/style.md\"\n",
-                "install = \"echo set-up\"\n",
-                "uninstall = \"echo tear-down\"\n",
-            ),
-        );
-        let paths = Paths {
-            mind_home: base.clone(),
-            claude_home: base.join("claude"),
-        };
-        let mut items = Vec::new();
-        scan_source(&paths, &source_for(&clone), &mut items).unwrap();
-        let rule = items.iter().find(|i| i.name == "style").unwrap();
-        // Scalar fields still populated.
-        assert_eq!(rule.install.as_deref(), Some("echo set-up"));
-        assert_eq!(rule.uninstall.as_deref(), Some("echo tear-down"));
-        // The resolved list mirrors them: one required install, one required
-        // uninstall, in fold-in order.
-        assert_eq!(rule.hooks.len(), 2);
-        let ih = rule.install_hooks();
-        assert_eq!(ih.len(), 1);
-        assert_eq!(ih[0].run, "echo set-up");
-        let uh = rule.uninstall_hooks();
-        assert_eq!(uh.len(), 1);
-        assert_eq!(uh[0].run, "echo tear-down");
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn array_item_hooks_resolve_in_order_with_scalar_folded_ahead() {
-        // spec: HOOK-86
-        // A `[[items.hooks]]` array plus a scalar install: the scalar folds in as
-        // the first install hook, then the array entries in declaration order.
-        let base = tmp();
-        let clone = base.join("sources/local/test/repo");
-        write(&clone.join("tools/helper/helper"), "#!/bin/sh\n");
-        write(
-            &clone.join("mind.toml"),
-            concat!(
-                "[[items]]\n",
-                "kind = \"tool\"\n",
-                "name = \"helper\"\n",
-                "path = \"tools/helper\"\n",
-                "install = \"scalar-install\"\n",
-                "\n",
-                "[[items.hooks]]\n",
-                "run = \"array-install\"\n",
-                "name = \"Second step\"\n",
-                "\n",
-                "[[items.hooks]]\n",
-                "run = \"array-uninstall\"\n",
-                "event = \"uninstall\"\n",
-            ),
-        );
-        let paths = Paths {
-            mind_home: base.clone(),
-            claude_home: base.join("claude"),
-        };
-        let mut items = Vec::new();
-        scan_source(&paths, &source_for(&clone), &mut items).unwrap();
-        let tool = items.iter().find(|i| i.name == "helper").unwrap();
-        // Scalar field still set.
-        assert_eq!(tool.install.as_deref(), Some("scalar-install"));
-        // Full list: scalar install, then the two array entries.
-        assert_eq!(tool.hooks.len(), 3);
-        let ih = tool.install_hooks();
-        assert_eq!(ih.len(), 2);
-        assert_eq!(ih[0].run, "scalar-install");
-        assert_eq!(ih[1].run, "array-install");
-        assert_eq!(ih[1].name.as_deref(), Some("Second step"));
-        let uh = tool.uninstall_hooks();
-        assert_eq!(uh.len(), 1);
-        assert_eq!(uh[0].run, "array-uninstall");
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn tool_md_scalar_hooks_fold_into_the_list() {
-        // spec: HOOK-86
-        // For a convention-discovered tool, the TOOL.md install:/uninstall:
-        // frontmatter scalars (DSC-21: the only form there) fold into the hook
-        // list AND populate the scalar fields.
-        let base = tmp();
-        let clone = base.join("sources/local/test/repo");
-        write(
-            &clone.join("tools/helper/TOOL.md"),
-            "---\ndescription: helper\ninstall: make setup\nuninstall: make cleanup\n---\n# helper\n",
-        );
-        write(&clone.join("tools/helper/helper"), "#!/bin/sh\n");
-        let paths = Paths {
-            mind_home: base.clone(),
-            claude_home: base.join("claude"),
-        };
-        let mut items = Vec::new();
-        scan_source(&paths, &source_for(&clone), &mut items).unwrap();
-        let tool = items.iter().find(|i| i.name == "helper").unwrap();
-        assert_eq!(tool.install.as_deref(), Some("make setup"));
-        assert_eq!(tool.uninstall.as_deref(), Some("make cleanup"));
-        // Folded into the list as one required hook each.
-        assert_eq!(tool.hooks.len(), 2);
-        assert_eq!(tool.install_hooks()[0].run, "make setup");
-        assert!(!tool.install_hooks()[0].optional);
-        assert_eq!(tool.uninstall_hooks()[0].run, "make cleanup");
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn item_array_hooks_unknown_event_is_a_scan_error() {
-        // spec: HOOK-86
-        // An unknown event in a `[[items.hooks]]` entry surfaces as a mind.toml
-        // schema error from the scan (via from_decl).
-        let base = tmp();
-        let clone = base.join("sources/local/test/repo");
-        write(&clone.join("tools/helper/helper"), "#!/bin/sh\n");
-        write(
-            &clone.join("mind.toml"),
-            concat!(
-                "[[items]]\n",
-                "kind = \"tool\"\n",
-                "name = \"helper\"\n",
-                "path = \"tools/helper\"\n",
-                "\n",
-                "[[items.hooks]]\n",
-                "run = \"do-it\"\n",
-                "event = \"build\"\n",
-            ),
-        );
-        let paths = Paths {
-            mind_home: base.clone(),
-            claude_home: base.join("claude"),
-        };
-        let mut items = Vec::new();
-        let err = scan_source(&paths, &source_for(&clone), &mut items).unwrap_err();
-        assert!(
-            matches!(err, MindError::MindToml { .. }),
-            "unknown item hook event must be a schema error: {err}"
-        );
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn requires_populated_on_authoritative_mind_toml_item() {
-        // spec: DEP-4
-        // An authoritative `[[items]]` declaration routes through `from_decl` ->
-        // `build_item`, the same constructor as convention discovery. So an item
-        // declared in mind.toml whose META FILE frontmatter carries `requires:`
-        // must still have that field populated (it is read from the meta file, not
-        // from the `[[items]]` table). Pins the otherwise-untested mind.toml route.
-        let base = tmp();
-        let clone = base.join("sources/local/test/repo");
-        write(
-            &clone.join("guidelines/style.md"),
-            "---\ndescription: style\nrequires: agent:linter\n---\n# style\n",
-        );
-        write(
-            &clone.join("agents/linter.md"),
-            "---\ndescription: linter\n---\n# linter\n",
-        );
-        write(
-            &clone.join("mind.toml"),
-            concat!(
-                "[[items]]\n",
-                "kind = \"rule\"\n",
-                "name = \"style\"\n",
-                "path = \"guidelines/style.md\"\n",
-                "[[items]]\n",
-                "kind = \"agent\"\n",
-                "name = \"linter\"\n",
-                "path = \"agents/linter.md\"\n",
-            ),
-        );
-        let paths = Paths {
-            mind_home: base.clone(),
-            claude_home: base.join("claude"),
-        };
-        let mut items = Vec::new();
-        scan_source(&paths, &source_for(&clone), &mut items).unwrap();
-        let rule = items.iter().find(|i| i.name == "style").unwrap();
-        assert_eq!(
-            rule.requires,
-            vec!["agent:linter".to_string()],
-            "requires from the meta-file frontmatter must populate on the authoritative mind.toml path"
-        );
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn requires_splits_on_arbitrary_whitespace() {
-        // spec: DEP-4
-        // The `requires:` scalar is split on whitespace, not a YAML sequence:
-        // multiple internal spaces and leading/trailing whitespace collapse to a
-        // clean list of entries (DEP-4: "a single string split on whitespace").
-        let base = tmp();
-        let clone = base.join("sources/local/test/repo");
-        write(
-            &clone.join("skills/review/SKILL.md"),
-            "---\ndescription: review\nrequires:   agent:a    rule:b  \n---\n# review\n",
-        );
-        let paths = Paths {
-            mind_home: base.clone(),
-            claude_home: base.join("claude"),
-        };
-        let mut items = Vec::new();
-        scan_source(&paths, &source_for(&clone), &mut items).unwrap();
-        let skill = items.iter().find(|i| i.name == "review").unwrap();
-        assert_eq!(
-            skill.requires,
-            vec!["agent:a".to_string(), "rule:b".to_string()],
-            "extra/leading/trailing whitespace must split into exactly two entries"
-        );
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn empty_requires_scalar_yields_no_entries() {
-        // spec: DEP-4
-        // An empty (or whitespace-only) `requires:` value yields an empty entry
-        // list and no error: `"".split_whitespace()` produces zero items. Pins
-        // that an author writing `requires:` with no value is a benign no-op, not
-        // a spurious edge or a bad-reference at scan time.
-        let base = tmp();
-        let clone = base.join("sources/local/test/repo");
-        write(
-            &clone.join("skills/review/SKILL.md"),
-            "---\ndescription: review\nrequires:    \n---\n# review\n",
-        );
-        let paths = Paths {
-            mind_home: base.clone(),
-            claude_home: base.join("claude"),
-        };
-        let mut items = Vec::new();
-        scan_source(&paths, &source_for(&clone), &mut items).unwrap();
-        let skill = items.iter().find(|i| i.name == "review").unwrap();
-        assert!(
-            skill.requires.is_empty(),
-            "a whitespace-only requires value must yield no entries: {:?}",
-            skill.requires
-        );
-        let _ = std::fs::remove_dir_all(&base);
-    }
 }
 
 /// Scan a plugin root for skills and agents only (MKT-3).
@@ -4701,5 +4317,396 @@ mod plugin_tests {
             "acme:mkt",
             "the in-repo plugin skill keeps its marketplace-entry namespace (MKT-8)"
         );
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static N: AtomicU32 = AtomicU32::new(0);
+
+    fn tmp() -> PathBuf {
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let p = std::env::temp_dir().join(format!("mind-lifecycle-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    fn write(path: &Path, contents: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+
+    fn source_for(clone: &Path) -> Source {
+        use crate::source::Pin;
+        Source {
+            name: "local/test/repo".to_string(),
+            url: clone.to_string_lossy().into_owned(),
+            host: "local".to_string(),
+            owner: "test".to_string(),
+            repo: "repo".to_string(),
+            commit: None,
+            description: None,
+            alias: None,
+            as_alias: None,
+            pin: Pin::default(),
+            roots: None,
+            flat_skills: false,
+            add_roots: None,
+            item_path: None,
+            origin: None,
+            plugin_version: None,
+            install_hooks: Vec::new(),
+            install_hook: None,
+            install_hook_commit: None,
+        }
+    }
+
+    #[test]
+    fn item_install_uninstall_hooks_from_mind_toml_on_any_kind() {
+        // spec: HOOK-80
+        // A `mind.toml` [[items]].install/.uninstall is valid on a non-tool kind
+        // (here a rule), unlike `bin`/`build` which are tool-only.
+        let base = tmp();
+        let clone = base.join("sources/local/test/repo");
+        write(
+            &clone.join("guidelines/style.md"),
+            "---\ndescription: style\n---\n# style\n",
+        );
+        write(
+            &clone.join("mind.toml"),
+            concat!(
+                "[[items]]\n",
+                "kind = \"rule\"\n",
+                "name = \"style\"\n",
+                "path = \"guidelines/style.md\"\n",
+                "install = \"echo set-up\"\n",
+                "uninstall = \"echo tear-down\"\n",
+            ),
+        );
+        let paths = Paths {
+            mind_home: base.clone(),
+            claude_home: base.join("claude"),
+        };
+        let mut items = Vec::new();
+        scan_source(&paths, &source_for(&clone), &mut items).unwrap();
+        let rule = items.iter().find(|i| i.name == "style").unwrap();
+        assert_eq!(rule.install.as_deref(), Some("echo set-up"));
+        assert_eq!(rule.uninstall.as_deref(), Some("echo tear-down"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn item_hooks_from_tool_md_frontmatter() {
+        // spec: HOOK-80
+        // A tool's TOOL.md may carry install:/uninstall: in frontmatter.
+        let base = tmp();
+        let clone = base.join("sources/local/test/repo");
+        write(
+            &clone.join("tools/helper/TOOL.md"),
+            "---\ndescription: helper\ninstall: make setup\nuninstall: make cleanup\n---\n# helper\n",
+        );
+        write(&clone.join("tools/helper/helper"), "#!/bin/sh\n");
+        let paths = Paths {
+            mind_home: base.clone(),
+            claude_home: base.join("claude"),
+        };
+        let mut items = Vec::new();
+        scan_source(&paths, &source_for(&clone), &mut items).unwrap();
+        let tool = items.iter().find(|i| i.name == "helper").unwrap();
+        assert_eq!(tool.install.as_deref(), Some("make setup"));
+        assert_eq!(tool.uninstall.as_deref(), Some("make cleanup"));
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn empty_item_hook_is_treated_as_absent() {
+        // spec: HOOK-80
+        // An empty/whitespace install or uninstall is absent (HOOK-3).
+        let base = tmp();
+        let clone = base.join("sources/local/test/repo");
+        write(
+            &clone.join("guidelines/style.md"),
+            "---\ndescription: style\n---\n# style\n",
+        );
+        write(
+            &clone.join("mind.toml"),
+            concat!(
+                "[[items]]\n",
+                "kind = \"rule\"\n",
+                "name = \"style\"\n",
+                "path = \"guidelines/style.md\"\n",
+                "install = \"   \"\n",
+            ),
+        );
+        let paths = Paths {
+            mind_home: base.clone(),
+            claude_home: base.join("claude"),
+        };
+        let mut items = Vec::new();
+        scan_source(&paths, &source_for(&clone), &mut items).unwrap();
+        let rule = items.iter().find(|i| i.name == "style").unwrap();
+        assert_eq!(rule.install, None, "whitespace install must be absent");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn scalar_item_hooks_populate_both_the_scalar_fields_and_the_list() {
+        // spec: HOOK-86
+        // COORDINATION: the scalar install/uninstall fields stay populated (the
+        // HOOK-85 disclosure reads them) AND the resolved hook list is populated.
+        let base = tmp();
+        let clone = base.join("sources/local/test/repo");
+        write(
+            &clone.join("guidelines/style.md"),
+            "---\ndescription: style\n---\n# style\n",
+        );
+        write(
+            &clone.join("mind.toml"),
+            concat!(
+                "[[items]]\n",
+                "kind = \"rule\"\n",
+                "name = \"style\"\n",
+                "path = \"guidelines/style.md\"\n",
+                "install = \"echo set-up\"\n",
+                "uninstall = \"echo tear-down\"\n",
+            ),
+        );
+        let paths = Paths {
+            mind_home: base.clone(),
+            claude_home: base.join("claude"),
+        };
+        let mut items = Vec::new();
+        scan_source(&paths, &source_for(&clone), &mut items).unwrap();
+        let rule = items.iter().find(|i| i.name == "style").unwrap();
+        // Scalar fields still populated.
+        assert_eq!(rule.install.as_deref(), Some("echo set-up"));
+        assert_eq!(rule.uninstall.as_deref(), Some("echo tear-down"));
+        // The resolved list mirrors them: one required install, one required
+        // uninstall, in fold-in order.
+        assert_eq!(rule.hooks.len(), 2);
+        let ih = rule.install_hooks();
+        assert_eq!(ih.len(), 1);
+        assert_eq!(ih[0].run, "echo set-up");
+        let uh = rule.uninstall_hooks();
+        assert_eq!(uh.len(), 1);
+        assert_eq!(uh[0].run, "echo tear-down");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn array_item_hooks_resolve_in_order_with_scalar_folded_ahead() {
+        // spec: HOOK-86
+        // A `[[items.hooks]]` array plus a scalar install: the scalar folds in as
+        // the first install hook, then the array entries in declaration order.
+        let base = tmp();
+        let clone = base.join("sources/local/test/repo");
+        write(&clone.join("tools/helper/helper"), "#!/bin/sh\n");
+        write(
+            &clone.join("mind.toml"),
+            concat!(
+                "[[items]]\n",
+                "kind = \"tool\"\n",
+                "name = \"helper\"\n",
+                "path = \"tools/helper\"\n",
+                "install = \"scalar-install\"\n",
+                "\n",
+                "[[items.hooks]]\n",
+                "run = \"array-install\"\n",
+                "name = \"Second step\"\n",
+                "\n",
+                "[[items.hooks]]\n",
+                "run = \"array-uninstall\"\n",
+                "event = \"uninstall\"\n",
+            ),
+        );
+        let paths = Paths {
+            mind_home: base.clone(),
+            claude_home: base.join("claude"),
+        };
+        let mut items = Vec::new();
+        scan_source(&paths, &source_for(&clone), &mut items).unwrap();
+        let tool = items.iter().find(|i| i.name == "helper").unwrap();
+        // Scalar field still set.
+        assert_eq!(tool.install.as_deref(), Some("scalar-install"));
+        // Full list: scalar install, then the two array entries.
+        assert_eq!(tool.hooks.len(), 3);
+        let ih = tool.install_hooks();
+        assert_eq!(ih.len(), 2);
+        assert_eq!(ih[0].run, "scalar-install");
+        assert_eq!(ih[1].run, "array-install");
+        assert_eq!(ih[1].name.as_deref(), Some("Second step"));
+        let uh = tool.uninstall_hooks();
+        assert_eq!(uh.len(), 1);
+        assert_eq!(uh[0].run, "array-uninstall");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn tool_md_scalar_hooks_fold_into_the_list() {
+        // spec: HOOK-86
+        // For a convention-discovered tool, the TOOL.md install:/uninstall:
+        // frontmatter scalars (DSC-21: the only form there) fold into the hook
+        // list AND populate the scalar fields.
+        let base = tmp();
+        let clone = base.join("sources/local/test/repo");
+        write(
+            &clone.join("tools/helper/TOOL.md"),
+            "---\ndescription: helper\ninstall: make setup\nuninstall: make cleanup\n---\n# helper\n",
+        );
+        write(&clone.join("tools/helper/helper"), "#!/bin/sh\n");
+        let paths = Paths {
+            mind_home: base.clone(),
+            claude_home: base.join("claude"),
+        };
+        let mut items = Vec::new();
+        scan_source(&paths, &source_for(&clone), &mut items).unwrap();
+        let tool = items.iter().find(|i| i.name == "helper").unwrap();
+        assert_eq!(tool.install.as_deref(), Some("make setup"));
+        assert_eq!(tool.uninstall.as_deref(), Some("make cleanup"));
+        // Folded into the list as one required hook each.
+        assert_eq!(tool.hooks.len(), 2);
+        assert_eq!(tool.install_hooks()[0].run, "make setup");
+        assert!(!tool.install_hooks()[0].optional);
+        assert_eq!(tool.uninstall_hooks()[0].run, "make cleanup");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn item_array_hooks_unknown_event_is_a_scan_error() {
+        // spec: HOOK-86
+        // An unknown event in a `[[items.hooks]]` entry surfaces as a mind.toml
+        // schema error from the scan (via from_decl).
+        let base = tmp();
+        let clone = base.join("sources/local/test/repo");
+        write(&clone.join("tools/helper/helper"), "#!/bin/sh\n");
+        write(
+            &clone.join("mind.toml"),
+            concat!(
+                "[[items]]\n",
+                "kind = \"tool\"\n",
+                "name = \"helper\"\n",
+                "path = \"tools/helper\"\n",
+                "\n",
+                "[[items.hooks]]\n",
+                "run = \"do-it\"\n",
+                "event = \"build\"\n",
+            ),
+        );
+        let paths = Paths {
+            mind_home: base.clone(),
+            claude_home: base.join("claude"),
+        };
+        let mut items = Vec::new();
+        let err = scan_source(&paths, &source_for(&clone), &mut items).unwrap_err();
+        assert!(
+            matches!(err, MindError::MindToml { .. }),
+            "unknown item hook event must be a schema error: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn requires_populated_on_authoritative_mind_toml_item() {
+        // spec: DEP-4
+        // An authoritative `[[items]]` declaration routes through `from_decl` ->
+        // `build_item`, the same constructor as convention discovery. So an item
+        // declared in mind.toml whose META FILE frontmatter carries `requires:`
+        // must still have that field populated (it is read from the meta file, not
+        // from the `[[items]]` table). Pins the otherwise-untested mind.toml route.
+        let base = tmp();
+        let clone = base.join("sources/local/test/repo");
+        write(
+            &clone.join("guidelines/style.md"),
+            "---\ndescription: style\nrequires: agent:linter\n---\n# style\n",
+        );
+        write(
+            &clone.join("agents/linter.md"),
+            "---\ndescription: linter\n---\n# linter\n",
+        );
+        write(
+            &clone.join("mind.toml"),
+            concat!(
+                "[[items]]\n",
+                "kind = \"rule\"\n",
+                "name = \"style\"\n",
+                "path = \"guidelines/style.md\"\n",
+                "[[items]]\n",
+                "kind = \"agent\"\n",
+                "name = \"linter\"\n",
+                "path = \"agents/linter.md\"\n",
+            ),
+        );
+        let paths = Paths {
+            mind_home: base.clone(),
+            claude_home: base.join("claude"),
+        };
+        let mut items = Vec::new();
+        scan_source(&paths, &source_for(&clone), &mut items).unwrap();
+        let rule = items.iter().find(|i| i.name == "style").unwrap();
+        assert_eq!(
+            rule.requires,
+            vec!["agent:linter".to_string()],
+            "requires from the meta-file frontmatter must populate on the authoritative mind.toml path"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn requires_splits_on_arbitrary_whitespace() {
+        // spec: DEP-4
+        // The `requires:` scalar is split on whitespace, not a YAML sequence:
+        // multiple internal spaces and leading/trailing whitespace collapse to a
+        // clean list of entries (DEP-4: "a single string split on whitespace").
+        let base = tmp();
+        let clone = base.join("sources/local/test/repo");
+        write(
+            &clone.join("skills/review/SKILL.md"),
+            "---\ndescription: review\nrequires:   agent:a    rule:b  \n---\n# review\n",
+        );
+        let paths = Paths {
+            mind_home: base.clone(),
+            claude_home: base.join("claude"),
+        };
+        let mut items = Vec::new();
+        scan_source(&paths, &source_for(&clone), &mut items).unwrap();
+        let skill = items.iter().find(|i| i.name == "review").unwrap();
+        assert_eq!(
+            skill.requires,
+            vec!["agent:a".to_string(), "rule:b".to_string()],
+            "extra/leading/trailing whitespace must split into exactly two entries"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn empty_requires_scalar_yields_no_entries() {
+        // spec: DEP-4
+        // An empty (or whitespace-only) `requires:` value yields an empty entry
+        // list and no error: `"".split_whitespace()` produces zero items. Pins
+        // that an author writing `requires:` with no value is a benign no-op, not
+        // a spurious edge or a bad-reference at scan time.
+        let base = tmp();
+        let clone = base.join("sources/local/test/repo");
+        write(
+            &clone.join("skills/review/SKILL.md"),
+            "---\ndescription: review\nrequires:    \n---\n# review\n",
+        );
+        let paths = Paths {
+            mind_home: base.clone(),
+            claude_home: base.join("claude"),
+        };
+        let mut items = Vec::new();
+        scan_source(&paths, &source_for(&clone), &mut items).unwrap();
+        let skill = items.iter().find(|i| i.name == "review").unwrap();
+        assert!(
+            skill.requires.is_empty(),
+            "a whitespace-only requires value must yield no entries: {:?}",
+            skill.requires
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

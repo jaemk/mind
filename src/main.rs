@@ -268,7 +268,7 @@ enum LockMode {
 /// acquired: the TUI takes the lock per-operation itself (TUI-25). In fallback
 /// mode (non-TTY, `--no-tui`, `--json`), `probe` takes the normal shared lock.
 // spec: STO-41
-fn lock_mode(command: &Command, json: bool) -> LockMode {
+fn lock_mode(command: &Command, json: bool, ascii: bool) -> LockMode {
     match command {
         // No persisted state touched (init-source operates on the repo dir, not
         // the store).
@@ -310,7 +310,7 @@ fn lock_mode(command: &Command, json: bool) -> LockMode {
         // probe in TUI mode: the TUI manages its own per-op locks (TUI-25).
         // TUI-1 is the launch entry point (requires a real TTY; allowlisted).
         // spec: TUI-25
-        Command::Probe { no_tui, .. } if probe_launches_tui(*no_tui, json) => LockMode::None,
+        Command::Probe { no_tui, .. } if probe_launches_tui(*no_tui, json, ascii) => LockMode::None,
 
         // Read-only commands (including probe in fallback/listing mode).
         Command::Recall { .. }
@@ -366,11 +366,35 @@ fn json_reserves_stdout(command: &Command) -> bool {
 /// stdout is a TTY. This is the single test for the TUI/fallback branch; it is
 /// used in both `lock_mode` and `dispatch` so the decision stays consistent.
 ///
+/// `probe` falls back to the plain (`--no-tui`) listing not only on `--no-tui`,
+/// `--json`, and a non-TTY stdout (TUI-2), but also when `--ascii` is given or
+/// the active locale is not UTF-8 (TUI-71): the TUI draws Unicode box glyphs, so
+/// a Unicode-hostile output mode must not silently launch it.
+///
 /// TUI-1 (interactive launch) requires a real TTY to verify; it is allowlisted
-/// rather than cited. TUI-2 (fallback) is tested in tests/cli.rs.
-// spec: TUI-2
-fn probe_launches_tui(no_tui: bool, json: bool) -> bool {
-    !no_tui && !json && std::io::stdout().is_terminal()
+/// rather than cited. TUI-2/TUI-71 (fallback) are tested in tests/cli.rs.
+// spec: TUI-2 TUI-71
+fn probe_launches_tui(no_tui: bool, json: bool, ascii: bool) -> bool {
+    !no_tui && !json && !ascii && utf8_locale() && std::io::stdout().is_terminal()
+}
+
+/// Whether the active locale advertises UTF-8 (TUI-71). Checks `LC_ALL`,
+/// `LC_CTYPE`, `LANG` in that order (first set wins); returns `false` when none
+/// is set (a conservative ASCII default). Mirrors `render::detect_utf8_locale`,
+/// which is private to that module; kept here so the probe launch gate does not
+/// depend on the color/glyph capability context (which also folds in `NO_COLOR`,
+/// a signal that must NOT block the TUI -- TUI-65 renders it monochrome).
+fn utf8_locale() -> bool {
+    for var in ["LC_ALL", "LC_CTYPE", "LANG"] {
+        if let Some(val) = std::env::var_os(var) {
+            let lower = val.to_string_lossy().to_lowercase();
+            if lower.is_empty() {
+                continue;
+            }
+            return lower.contains("utf-8") || lower.contains("utf8");
+        }
+    }
+    false
 }
 
 fn run(cli: Cli) -> Result<()> {
@@ -394,7 +418,7 @@ fn run(cli: Cli) -> Result<()> {
     // spec: STO-40 STO-41 STO-42
     // Completions and man touch no persisted state: skip the lock. All other
     // commands acquire the lock (shared or exclusive) before reading or writing.
-    match lock_mode(&cli.command, cli.json) {
+    match lock_mode(&cli.command, cli.json, cli.ascii) {
         LockMode::None => dispatch(cli, &paths),
         LockMode::Exclusive => {
             let mut lock = lock::open(&paths)?;
@@ -413,6 +437,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
     // Global flags sourced before the match moves cli.command.
     let json = cli.json;
     let yes = cli.yes;
+    let ascii = cli.ascii;
     match cli.command {
         Command::Meld {
             repo,
@@ -430,7 +455,14 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             register_only,
             recursive,
             force,
+            local,
         } => {
+            // spec: HARN-20/HARN-21 -- `--local` restricts the install fan-out to
+            // the registered project lobe containing the cwd; without it, plain
+            // meld/learn inside such a lobe gets a one-line note that --local is
+            // available. The guard lives for the whole arm so every install path
+            // (fresh meld, re-meld, curated chain) is scoped.
+            let _local_guard = commands::apply_local_scope(paths, local)?;
             // spec: CLI-17, CLI-200..202 -- fold the pin flag (and deprecated
             // aliases) into one request; more than one is a structured
             // ConflictingPin error rather than a clap usage string.
@@ -579,7 +611,11 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             force,
             dangerously_skip_install_hook_check,
             dangerously_skip_build_hook_check,
+            local,
         } => {
+            // spec: HARN-20/HARN-21 -- scope the install to the project lobe when
+            // `--local`; guard held for the whole arm (URL, dry-run, glob paths).
+            let _local_guard = commands::apply_local_scope(paths, local)?;
             let flow = commands::InstallFlow {
                 yes,
                 clobber: if force {
@@ -625,12 +661,15 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             dangerously_skip_install_hook_check,
         ),
         Command::Sync {
+            source,
             upgrade,
             dangerously_skip_install_hook_check,
             dangerously_skip_build_hook_check,
-        } => commands::sync(
+        } => commands::sync_with_selector(
             paths,
+            source.as_deref(),
             upgrade,
+            yes,
             dangerously_skip_install_hook_check,
             dangerously_skip_build_hook_check,
         ),
@@ -681,7 +720,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             source,
             no_tui,
         } => {
-            if probe_launches_tui(no_tui, json) {
+            if probe_launches_tui(no_tui, json, ascii) {
                 // TUI mode: the interactive browser manages its own locks.
                 // spec: TUI-2
                 tui::run(
@@ -816,7 +855,7 @@ mod tests {
     /// Parse a CLI line the way the binary would, then classify its lock mode.
     fn mode_of(args: &[&str]) -> LockMode {
         let cli = Cli::try_parse_from(args).expect("args should parse");
-        lock_mode(&cli.command, cli.json)
+        lock_mode(&cli.command, cli.json, cli.ascii)
     }
 
     #[test]
@@ -1208,6 +1247,66 @@ mod tests {
 
         // Leave the static clean for anything else in this binary.
         let _ = json_stdout::build_error_envelope("x", "y");
+    }
+
+    /// `probe_launches_tui` forces the plain listing for every Unicode-hostile
+    /// output mode (TUI-71): `--no-tui`, `--json`, and `--ascii` each return
+    /// `false` without needing a real TTY (the flag short-circuits ahead of the
+    /// terminal check). The positive (real-TTY, UTF-8) launch is TUI-1, which
+    /// needs a PTY and is allowlisted. `utf8_locale` reads the locale env vars in
+    /// precedence order, treating an unset locale as non-UTF-8.
+    // spec: TUI-71
+    #[test]
+    fn probe_gate_forces_fallback_for_unicode_hostile_modes() {
+        assert!(
+            !probe_launches_tui(true, false, false),
+            "--no-tui must fall back to the listing"
+        );
+        assert!(
+            !probe_launches_tui(false, true, false),
+            "--json must fall back to the listing"
+        );
+        assert!(
+            !probe_launches_tui(false, false, true),
+            "--ascii must fall back to the listing (no Unicode glyphs)"
+        );
+
+        // Locale detection: serialize env mutation crate-wide, save/restore.
+        let _g = crate::paths::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let saved: Vec<(&str, Option<std::ffi::OsString>)> = ["LC_ALL", "LC_CTYPE", "LANG"]
+            .iter()
+            .map(|k| (*k, std::env::var_os(k)))
+            .collect();
+        // SAFETY: ENV_LOCK is held, so no concurrent env access on other threads.
+        unsafe {
+            for (k, _) in &saved {
+                std::env::remove_var(k);
+            }
+            assert!(
+                !utf8_locale(),
+                "no locale vars set => non-UTF-8 (conservative)"
+            );
+
+            std::env::set_var("LANG", "C");
+            assert!(!utf8_locale(), "LANG=C is not UTF-8");
+
+            std::env::set_var("LANG", "en_US.UTF-8");
+            assert!(utf8_locale(), "LANG=en_US.UTF-8 is UTF-8");
+
+            // LC_ALL wins over LANG when both are set.
+            std::env::set_var("LC_ALL", "C");
+            assert!(!utf8_locale(), "LC_ALL=C overrides a UTF-8 LANG");
+
+            // Restore.
+            for (k, v) in &saved {
+                match v {
+                    Some(val) => std::env::set_var(k, val),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
     }
 
     #[test]

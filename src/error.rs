@@ -202,7 +202,7 @@ pub enum MindError {
     #[error("could not locate the home directory")]
     HomeDirNotFound,
 
-    #[error("I/O error at {path}: {source}")]
+    #[error("I/O error at '{path}': {source}")]
     Io {
         path: PathBuf,
         #[source]
@@ -235,7 +235,7 @@ pub enum MindError {
 
     // Names the next command, mirroring `ItemNotFound`'s house style (CLI-179).
     #[error(
-        "'{path}' is not a configured agent home (lobe); run 'mind config lobes list' to see configured lobes"
+        "'{path}' is not a configured agent home (lobe); run `mind config lobes list` to see configured lobes"
     )]
     UnknownLobe { path: String },
 
@@ -266,7 +266,7 @@ pub enum MindError {
     /// exceeded [`METADATA_SIZE_LIMIT`]. Refused before the whole file is read
     /// into memory (see [`read_capped_metadata`]).
     #[error(
-        "{path} exceeds the {} MiB size cap for a hand-authored metadata file (mind.toml, an \
+        "'{path}' exceeds the {} MiB size cap for a hand-authored metadata file (mind.toml, an \
          item's frontmatter, or a plugin/marketplace manifest); trim the file, or move large \
          content out of it, and try again",
         limit / (1024 * 1024)
@@ -342,7 +342,7 @@ pub enum MindError {
 
     // Names the next command, mirroring `ItemNotFound`'s house style (CLI-179).
     #[error(
-        "no source named '{name}' is melded; run 'mind recall --sources' to list melded sources"
+        "no source named '{name}' is melded; run `mind recall --sources` to list melded sources"
     )]
     SourceNotFound { name: String },
 
@@ -383,7 +383,7 @@ pub enum MindError {
     SyncFailed { failed: usize, total: usize },
 
     #[error(
-        "source '{source_name}' requires mind >= {required}, but this is mind {running}; upgrade mind"
+        "source '{source_name}' requires mind >= {required}, but this is mind {running}; run `mind evolve`"
     )]
     IncompatibleVersion {
         source_name: String,
@@ -392,7 +392,7 @@ pub enum MindError {
     },
 
     #[error(
-        "{path} already exists and is not managed by mind; remove it (or `mind forget` the item) before installing, or re-run with `--force` to overwrite"
+        "'{path}' already exists and is not managed by mind; remove it (or `mind forget` the item) before installing, or re-run with `--force` to overwrite"
     )]
     LinkOccupied { path: String },
 
@@ -596,7 +596,7 @@ pub enum MindError {
 
     /// STO-50/STO-51: state file was written by a newer mind and uses an unknown schema version.
     #[error(
-        "{what} uses schema version {found} but this mind only supports up to version {supported}; upgrade mind to read it"
+        "{what} uses schema version {found} but this mind only supports up to version {supported}; run `mind evolve` to read it"
     )]
     StateTooNew {
         what: &'static str,
@@ -864,8 +864,8 @@ fn skill_collision_message(conflicts: &[(String, String, String)], suggested: &s
     let ns = shell_quote(suggested);
     format!(
         "name collision: the following items from the incoming source conflict with \
-         already-installed items:\n{}\nRun `mind meld --namespace {ns} <repo>` \
-         to namespace the incoming source.",
+         already-installed items:\n{}\nrun `mind meld --namespace {ns} <repo>` \
+         to namespace the incoming source",
         format_conflicts(conflicts)
     )
 }
@@ -1561,7 +1561,32 @@ mod tests {
         assert!(e.contains("sources.json"), "must name the file: {e}");
         assert!(e.contains("3"), "must name the found version: {e}");
         assert!(e.contains("1"), "must name the supported version: {e}");
-        assert!(e.contains("upgrade"), "must suggest upgrading: {e}");
+        // The remedy points at the actual self-update verb (`mind evolve`);
+        // `mind upgrade` upgrades installed items, not the binary.
+        assert!(e.contains("mind evolve"), "must suggest `mind evolve`: {e}");
+    }
+
+    // The self-update verb is `evolve`, not `upgrade` (which upgrades installed
+    // items); the remedy must name the actual verb.
+    #[test]
+    fn incompatible_version_remedy_points_at_evolve() {
+        // spec: DSC-40
+        let e = MindError::IncompatibleVersion {
+            source_name: "github.com/acme/agents".into(),
+            required: "0.30.0".into(),
+            running: "0.22.0".into(),
+        }
+        .to_string();
+        assert!(e.contains("github.com/acme/agents"), "{e}");
+        assert!(e.contains("0.30.0") && e.contains("0.22.0"), "{e}");
+        assert!(
+            e.contains("mind evolve"),
+            "must suggest `mind evolve`, not `mind upgrade`: {e}"
+        );
+        assert!(
+            !e.contains("upgrade mind"),
+            "must not say 'upgrade mind' (upgrade upgrades items, not the binary): {e}"
+        );
     }
 
     #[test]

@@ -184,7 +184,8 @@ still parsed and folded in (HOOK-50).
   multi-item confirm, hooks run before the source is removed. They use
   the same prompt model as install hooks: required = run / skip / abort-the-unmeld;
   optional = run / skip; a non-TTY `unmeld` skips them and notes it; `mind unmeld
-  --dangerously-skip-install-hook-check` runs them unattended. A required
+  --dangerously-skip-hook-check` (CLI-227; `--dangerously-skip-install-hook-check`
+  is a hidden alias here) runs them unattended. A required
   uninstall hook that fails or is aborted leaves the source melded. Item uninstall
   hooks run before source uninstall hooks, making teardown the reverse of install
   (HOOK-87).
@@ -237,13 +238,16 @@ that an individual item ships and must build before use (a compiled binary, a
 vendored dependency) instead uses an item-level build hook: a command tied to one
 item that runs when that item is installed, in the item's staging copy, so its
 output is captured into the store transactionally. Build hooks back the `tool`
-kind and `{{tools:name}}` (tooling.md, TOOL-12), but any kind may declare one.
+kind and `{{tools:name}}` (tooling.md, TOOL-12); `build` (like `bin`) is valid
+only on a tool, and a schema error on any other kind (TOOL-7).
 
 - `HOOK-70` An item declares a build hook with `build`, a shell command:
   `[[items]].build` in `mind.toml`, or `build:` in a tool's `TOOL.md`
   frontmatter. It is distinct from a source's install/uninstall hooks (HOOK-50):
   it is item-scoped and runs per item at install, not once per source at meld. An
-  empty or whitespace-only `build` is treated as absent (HOOK-3).
+  empty or whitespace-only `build` is treated as absent (HOOK-3). `build` is
+  valid only on a `tool` item; declaring it on any other kind is a `mind.toml`
+  schema error (TOOL-7).
 - `HOOK-71` A build hook runs in the item's staging directory
   (`~/.mind/.tmp/staging/<kind>/<name>/`) as the working directory, after
   reference/token expansion (NS-11, TOOL-13) and before the store swap (LIFE-1),

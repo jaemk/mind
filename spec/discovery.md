@@ -57,6 +57,18 @@ super-source on top of the manifest (MKT-15, MKT-16). See
   U+FEFF) from the file text before checking for the `---` opening delimiter.
   A file authored on Windows or by an editor that emits a BOM still has its
   frontmatter read correctly.
+- `DSC-94` An item's description (DSC-20, from frontmatter, or a `[[items]]`
+  override, DSC-32) has ANSI escape sequences, control characters, and
+  security-blocked Unicode code points (bidi overrides, directional marks,
+  zero-width characters) stripped at the single catalog capture point
+  (`build_item`), the same class of sanitization the plugin-manifest discovery
+  path (marketplace.md) already applies to its own description fields. This
+  makes every display surface (`recall`, `probe --no-tui`, `--json`, which
+  otherwise only ANSI-escapes but does not strip a bidi override) safe by
+  construction rather than depending on each call site remembering to sanitize
+  before printing. A source `mind.toml`'s `[source].description` (below) is
+  sanitized the same way, at every point it is read into the registry (meld,
+  sync, pin/freeze).
 
 ## mind.toml
 

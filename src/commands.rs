@@ -1,6 +1,6 @@
 //! Command implementations, one public function per CLI verb.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::io::Write;
 
 use serde::Serialize;
@@ -612,7 +612,14 @@ fn meld_recursive(
         })?;
     }
     let mut mindfile = MindToml::load(&dir)?;
-    source.description = mindfile.as_ref().and_then(|m| m.source.description.clone());
+    // spec: DSC-94 -- B4: a `mind.toml [source].description` is source-
+    // controlled text, sanitized here at the store point exactly like the
+    // plugin-manifest path above (line ~1181), closing the frontmatter-path
+    // gap for the biggest funnel of raw-ANSI/bidi-override source text.
+    source.description = mindfile
+        .as_ref()
+        .and_then(|m| m.source.description.clone())
+        .map(|d| strip_ansi(&d));
 
     // DSC-60: the curator-supplied roots and hooks apply only when the nested
     // source ships NO mind.toml of its own. The gate is whole-file: any nested
@@ -739,7 +746,11 @@ fn meld_recursive(
         // The pin may land on a different mind.toml than the working tree / default
         // branch. Reload it so downstream in-memory reads see the pinned content.
         mindfile = MindToml::load(&dir)?;
-        source.description = mindfile.as_ref().and_then(|m| m.source.description.clone());
+        // spec: DSC-94 -- B4: sanitize at every re-read of the pinned mind.toml too.
+        source.description = mindfile
+            .as_ref()
+            .and_then(|m| m.source.description.clone())
+            .map(|d| strip_ansi(&d));
     }
 
     // Resolve the recorded commit at the checkout point. A linked (no-pin) local
@@ -778,7 +789,11 @@ fn meld_recursive(
             }
             dir = target;
             mindfile = MindToml::load(&dir)?;
-            source.description = mindfile.as_ref().and_then(|m| m.source.description.clone());
+            // spec: DSC-94 -- B4: sanitize at the freeze-snapshot re-read too.
+            source.description = mindfile
+                .as_ref()
+                .and_then(|m| m.source.description.clone())
+                .map(|d| strip_ansi(&d));
         }
         ref_pin
     } else {
@@ -2398,7 +2413,8 @@ pub fn unmeld(
                 println!("  {} {}", out.warn(), registry.sources[*i].name);
             }
         }
-        if !crate::hook::is_tty() {
+        // spec: LIFE-45 -- B1: `--json` is non-interactive (mirrors DEP-60).
+        if !crate::hook::is_tty() || out.json {
             return Err(MindError::ConfirmationRequired {
                 action: format!("unmelding {} sources", matched.len()),
             });
@@ -2532,7 +2548,8 @@ fn unmeld_one(
                 println!("  {} {k}", out.warn());
             }
         }
-        if !crate::hook::is_tty() {
+        // spec: LIFE-45 -- B1: `--json` is non-interactive (mirrors DEP-60).
+        if !crate::hook::is_tty() || out.json {
             return Err(MindError::ConfirmationRequired {
                 action: format!(
                     "unmelding {source_name} (removing {} items)",
@@ -2742,6 +2759,95 @@ pub struct InstallFlow {
     pub clobber: Clobber,
     pub dangerously_skip: bool,
     pub dangerously_skip_build: bool,
+}
+
+/// Apply `--local` install scoping for one `learn`/`meld` invocation
+/// (HARN-20/HARN-21).
+///
+/// When `local` is set, resolve the registered project lobe the cwd sits inside
+/// and return an RAII guard that restricts the install fan-out to it (a subset of
+/// the normally-resolved homes). If the cwd is not inside any registered project
+/// lobe, this is an error: the user asked to install locally but there is no
+/// local target. An actionable note is printed to stderr first (matching the
+/// hint-then-error pattern `learn` already uses for a missed item), and the
+/// returned error is [`MindError::LobeTargetRequired`] -- the same
+/// "a lobe target is required" condition, whose `kind` (`lobe-target-required`)
+/// is apt for `--json` consumers.
+///
+/// When `local` is unset but the cwd IS inside a registered project lobe, print
+/// a one-line note advertising `--local` (so the fan-out default stays
+/// discoverable) and return `None`, leaving the global fan-out unchanged. All
+/// notes are stderr-only and suppressed under `--json`.
+pub fn apply_local_scope(
+    paths: &Paths,
+    local: bool,
+) -> Result<Option<crate::paths::LocalLobeGuard>> {
+    let out = crate::render::ctx();
+    let detected = paths.detect_local_lobe()?;
+    if local {
+        match detected {
+            Some(lobe) => {
+                if !out.json {
+                    eprintln!(
+                        "note: --local -- installing into the project lobe {} only",
+                        lobe.path.display()
+                    );
+                }
+                Ok(Some(Paths::scope_to_local_lobe(lobe)))
+            }
+            None => {
+                if !out.json {
+                    eprintln!(
+                        "note: --local installs into a project lobe under the current directory, \
+                         but this directory is not inside any registered project lobe"
+                    );
+                    eprintln!(
+                        "hint: register one with `mind link-project` (or `mind config lobes add`), \
+                         or drop --local to install into every configured agent home"
+                    );
+                }
+                Err(MindError::LobeTargetRequired)
+            }
+        }
+    } else {
+        if let Some(lobe) = detected
+            && !out.json
+        {
+            eprintln!(
+                "note: this directory has a registered project lobe ({}); \
+                 pass --local to install only there",
+                lobe.path.display()
+            );
+        }
+        Ok(None)
+    }
+}
+
+/// Refuse cleanly on a platform that cannot support mind's symlink-based install
+/// model (LIFE-50). On a non-unix platform the copy fallback used in place of a
+/// symlink is not recognized as mind's own on a later reinstall/upgrade, which
+/// surfaces as a `LinkOccupied` error; rather than that best-effort breakage, 1.0
+/// refuses up front at the single item-install chokepoint. A no-op on unix.
+#[cfg(unix)]
+fn require_link_platform(_paths: &Paths) -> Result<()> {
+    Ok(())
+}
+
+/// See the `#[cfg(unix)]` sibling. This branch is not compiled on unix and so
+/// cannot be exercised by the CI test suite; its spec ID (LIFE-50) is cited by
+/// the unix-branch unit test, which pins the supported-platform half of the
+/// contract.
+#[cfg(not(unix))]
+fn require_link_platform(paths: &Paths) -> Result<()> {
+    Err(MindError::io(
+        &paths.mind_home,
+        std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "mind requires a Unix-like platform: it links installed items with symlinks, \
+             and the non-unix copy fallback is not recognized as mind's own on a later \
+             reinstall or upgrade; this platform is not supported",
+        ),
+    ))
 }
 
 /// `mind learn <url>` (LNK-6): the one-shot form for an item link. Registers
@@ -3469,7 +3575,15 @@ pub fn remeld(
                     }
                     return Ok(());
                 }
-                Err(e) => return Err(e), // a hook failed; leave the source melded
+                Err(e) => {
+                    // spec: LIFE-48 -- H3: persist any earlier hook's ran_at
+                    // update in this pass before propagating a later hook's
+                    // failure; otherwise a hook that already succeeded is
+                    // silently re-offered on the next meld/upgrade (mirrors
+                    // HOOK-53's own "leave the source melded" intent).
+                    registry.save(paths)?;
+                    return Err(e); // a hook failed; leave the source melded
+                }
             }
         }
     }
@@ -3645,7 +3759,10 @@ fn repin_source(paths: &Paths, source_name: &str, pin: PinRequest) -> Result<()>
     };
     source.pin = final_pin.clone();
     source.commit = Some(resolved_commit);
-    source.description = MindToml::load(&target)?.and_then(|m| m.source.description);
+    // spec: DSC-94 -- B4: sanitize at the sync-time re-read too.
+    source.description = MindToml::load(&target)?
+        .and_then(|m| m.source.description)
+        .map(|d| strip_ansi(&d));
     registry.save(paths)?;
 
     if !out.json {
@@ -4063,6 +4180,9 @@ fn install_item(
     dangerously_skip: bool,
     dangerously_skip_build: bool,
 ) -> Result<crate::manifest::InstalledItem> {
+    // spec: LIFE-50 -- refuse cleanly on a platform mind's symlink model does not
+    // support, before creating (or reusing) any link.
+    require_link_platform(paths)?;
     let mut installed =
         install::install(paths, item, commit, siblings, force, dangerously_skip_build)?;
     // HOOK-86: run every resolved install hook in declaration order (the scalar
@@ -4675,7 +4795,8 @@ pub fn forget(
                 println!("  {} {key}", out.warn());
             }
         }
-        if !crate::hook::is_tty() {
+        // spec: LIFE-45 -- B1: `--json` is non-interactive (mirrors DEP-60).
+        if !crate::hook::is_tty() || out.json {
             return Err(MindError::ConfirmationRequired {
                 action: format!("removing {} items", keys.len()),
             });
@@ -4731,7 +4852,10 @@ pub fn forget(
     }
 
     let mut removed: Vec<String> = Vec::new();
-    let mut removed_sources: HashSet<String> = HashSet::new();
+    // spec: CLI-226 -- a BTreeSet (not HashSet) so the per-source forget hints
+    // below print in a deterministic order rather than HashSet's random
+    // iteration order.
+    let mut removed_sources: BTreeSet<String> = BTreeSet::new();
     for key in keys {
         let item = manifest.items.remove(&key).expect("key from manifest");
         let uninstall_hooks: Vec<&crate::mindfile::ResolvedHook> =
@@ -4804,12 +4928,15 @@ fn forget_unmanaged_single(item: &crate::unmanaged::UnmanagedItem, yes: bool) ->
         );
     }
     if !yes {
-        if !crate::hook::is_tty() {
+        // spec: LIFE-45 -- B1: `--json` is non-interactive (mirrors DEP-60);
+        // this is the worst-case site (UNM-5): without this, `--json` on a TTY
+        // would delete the user's own unmanaged file with zero consent.
+        if !crate::hook::is_tty() || out.json {
             return Err(MindError::ConfirmationRequired {
                 action: format!("removing unmanaged {}", item.key()),
             });
         }
-        if !out.json && !confirm("remove this unmanaged item?")? {
+        if !confirm("remove this unmanaged item?")? {
             println!("cancelled; nothing removed");
             return Ok(());
         }
@@ -4865,12 +4992,13 @@ fn forget_unmanaged_bulk(paths: &Paths, item_ref: Option<&str>, yes: bool) -> Re
         );
     }
     if !yes {
-        if !crate::hook::is_tty() {
+        // spec: LIFE-45 -- B1: `--json` is non-interactive (mirrors DEP-60).
+        if !crate::hook::is_tty() || out.json {
             return Err(MindError::ConfirmationRequired {
                 action: format!("removing {} unmanaged items", matched.len()),
             });
         }
-        if !out.json && !confirm("remove these unmanaged items?")? {
+        if !confirm("remove these unmanaged items?")? {
             println!("cancelled; nothing removed");
             return Ok(());
         }
@@ -4904,13 +5032,51 @@ fn forget_unmanaged_bulk(paths: &Paths, item_ref: Option<&str>, yes: bool) -> Re
 /// upgrades. Both `dangerously_skip_hook_check` and
 /// `dangerously_skip_build_hook_check` are forwarded to the `upgrade` pass so
 /// hooks can run unattended in CI; they are unused when `--upgrade` is absent.
+///
+/// spec: LIFE-49 -- M1: `yes` is the same global `--yes` the CLI already
+/// threads into `mind upgrade`/`mind forget`; it is forwarded to the
+/// `--upgrade` pass's `upgrade_inner` call below instead of being hardcoded to
+/// `false`, so `sync --upgrade --yes` (and, since B1/LIFE-45, `sync --upgrade
+/// --json --yes`) actually skips the confirmation instead of silently
+/// cancelling or refusing.
+/// `mind sync` over ALL sources: the historical entry point, kept for callers
+/// that never scope the sync (e.g. the TUI's sync action). Delegates to
+/// [`sync_with_selector`] with no selector.
 pub fn sync(
     paths: &Paths,
     then_upgrade: bool,
+    yes: bool,
+    dangerously_skip_hook_check: bool,
+    dangerously_skip_build_hook_check: bool,
+) -> Result<()> {
+    sync_with_selector(
+        paths,
+        None,
+        then_upgrade,
+        yes,
+        dangerously_skip_hook_check,
+        dangerously_skip_build_hook_check,
+    )
+}
+
+/// `mind sync [source]` — refresh melded source clones and catalogs. With a
+/// `[source]` selector, only matching sources are fetched (CLI-231); with none,
+/// every source is (CLI-50).
+pub fn sync_with_selector(
+    paths: &Paths,
+    source_selector: Option<&str>,
+    then_upgrade: bool,
+    yes: bool,
     dangerously_skip_hook_check: bool,
     dangerously_skip_build_hook_check: bool,
 ) -> Result<()> {
     let out = crate::render::ctx();
+    // spec: CLI-231 -- a `[source]` selector narrows the sync to matching
+    // sources; validate a glob selector up front so a malformed pattern reports
+    // cleanly rather than silently matching nothing.
+    if let Some(sel) = source_selector {
+        crate::resolve::validate_source_selector(sel)?;
+    }
     // POL-3: load the managed policy once (fail closed on Err; None = inert).
     let policy = Policy::load()?;
     // CLI-19: auto-meld honors the user's SSH preference too.
@@ -4931,7 +5097,11 @@ pub fn sync(
     // entries discover nested sources just like a user meld. Entries satisfy
     // allow/pinned by policy validation (POL-21/POL-31), so they pass the meld
     // enforcement above.
-    if let Some(policy) = policy.as_ref() {
+    //
+    // spec: CLI-231 -- a targeted `sync <source>` fetches only the named
+    // source(s); the whole-set operations (policy auto-meld provisioning here, and
+    // the DSC-57 nested re-walk below) are skipped so a scoped sync stays scoped.
+    if let Some(policy) = policy.as_ref().filter(|_| source_selector.is_none()) {
         paths.ensure_layout()?;
         let mut visited = HashSet::new();
         let mut provisioned = 0usize;
@@ -5083,13 +5253,44 @@ pub fn sync(
         println!("no sources melded; run `mind meld <owner/repo>` to add one");
         return Ok(());
     }
+    // spec: CLI-231 -- resolve a `[source]` selector to the set of matching
+    // source names. A selector that matches nothing (against a non-empty
+    // registry) is a SourceNotFound, so a typo is reported rather than silently
+    // syncing nothing. With no selector, every source is in scope (CLI-50).
+    let selected: Option<Vec<String>> = match source_selector {
+        Some(sel) => {
+            let names: Vec<String> = registry
+                .sources
+                .iter()
+                .filter(|s| crate::resolve::source_matches_glob(&s.name, sel))
+                .map(|s| s.name.clone())
+                .collect();
+            if names.is_empty() {
+                return Err(MindError::SourceNotFound {
+                    name: sel.to_string(),
+                });
+            }
+            Some(names)
+        }
+        None => None,
+    };
+    let in_scope = |name: &str| {
+        selected
+            .as_ref()
+            .is_none_or(|ns| ns.iter().any(|n| n == name))
+    };
+
     // A per-source failure (e.g. a network error on one remote) must not abort
     // the whole run: refresh each source independently, persist whatever
     // progress was made, then report the failures and exit non-zero.
-    let total = registry.sources.len();
+    let total = selected.as_ref().map_or(registry.sources.len(), Vec::len);
     let mut failures: Vec<String> = Vec::new();
     let mut synced = 0usize;
     for source in &mut registry.sources {
+        // spec: CLI-231 -- skip sources outside a `[source]` selector's scope.
+        if !in_scope(&source.name) {
+            continue;
+        }
         // POL-12: with the allowlist locked, do not sync a source whose identity
         // is no longer allowed; report and skip it (the rest still sync).
         if let Some(policy) = policy.as_ref()
@@ -5129,7 +5330,10 @@ pub fn sync(
                     .or_else(|| source.commit.clone())
                     .unwrap_or_default();
                 let changed = source.commit.as_deref() != Some(new_commit.as_str());
-                let desc = MindToml::load(&dir)?.and_then(|mt| mt.source.description);
+                // spec: DSC-94 -- B4: sanitize at the sync-time re-read too.
+                let desc = MindToml::load(&dir)?
+                    .and_then(|mt| mt.source.description)
+                    .map(|d| strip_ansi(&d));
                 return Ok((new_commit, changed, desc));
             }
             // CLI-55: resolve the source against its recorded pin (never change
@@ -5145,7 +5349,10 @@ pub fn sync(
             }
             let new_commit = git::head_commit(&source.url, &dir)?;
             let changed = source.commit.as_deref() != Some(new_commit.as_str());
-            let desc = MindToml::load(&dir)?.and_then(|mt| mt.source.description);
+            // spec: DSC-94 -- B4: sanitize at the sync-time re-read too.
+            let desc = MindToml::load(&dir)?
+                .and_then(|mt| mt.source.description)
+                .map(|d| strip_ansi(&d));
             Ok((new_commit, changed, desc))
         })();
         match refreshed {
@@ -5193,7 +5400,11 @@ pub fn sync(
     // meld any newly-listed nested source not already registered. Register-only
     // (the DSC-54 default; nested items are not installed) and cycle-safe by the
     // DSC-38 guards. Only adds; a nested source dropped upstream stays registered.
-    {
+    //
+    // spec: CLI-231 -- skipped for a targeted `sync <source>`: discovering and
+    // melding new nested sources is a whole-set operation, not part of fetching
+    // one named source.
+    if source_selector.is_none() {
         // Collect the nested specs now, before mutably borrowing the registry.
         // DSC-61: carry each entry's curator-supplied configuration so a newly
         // discovered nested source is melded with the same gate/apply behavior as
@@ -5428,7 +5639,7 @@ pub fn sync(
         // and what the pass applied is folded into sync's one object below.
         let pass = upgrade_inner(
             paths,
-            false,
+            yes,
             None,
             true,
             dangerously_skip_hook_check,
@@ -5725,6 +5936,47 @@ fn upgrade_inner(
         }
     }
 
+    // spec: LIFE-46 -- B2: a rename must never evict a DIFFERENT item that
+    // already occupies the new effective key. A third-party source edit (e.g.
+    // dropping its prefix) can otherwise make one source's upgrade delete
+    // another source's installed item -- no hook, no prompt (verified: two
+    // sources both shipping a `review` skill, one prefixed). Mirror `learn`'s
+    // `colliding_install` guard (DEP-23/NS-41): refuse rather than clobber
+    // when the manifest already holds a DIFFERENT stable identity
+    // `(source, kind, bare_name)` under the rename's target key.
+    for up in &pending {
+        if up.new_name == up.old.name {
+            continue;
+        }
+        // `up.new_name` is the bare effective name (`CatalogItem::effective_name`);
+        // the manifest is keyed `kind:name` (`InstalledItem::key`), so the lookup
+        // key must carry the kind prefix too.
+        let new_key = format!("{}:{}", up.old.kind.as_str(), up.new_name);
+        if let Some(occupant) = manifest.items.get(&new_key) {
+            let same_identity = occupant.kind == up.old.kind
+                && occupant.bare_name == up.old.bare_name
+                && occupant.source == up.old.source;
+            if !same_identity {
+                return Err(MindError::AmbiguousItem {
+                    query: new_key.clone(),
+                    candidates: vec![
+                        format!(
+                            "{} (already installed from source '{}')",
+                            occupant.key(),
+                            occupant.source
+                        ),
+                        format!(
+                            "{} (upgrading {} from source '{}' would rename to this same key)",
+                            new_key,
+                            up.old.key(),
+                            up.old.source
+                        ),
+                    ],
+                });
+            }
+        }
+    }
+
     let target = item_ref.unwrap_or("all");
 
     if pending.is_empty() {
@@ -5755,9 +6007,24 @@ fn upgrade_inner(
         print_upgrade_report(&registry, &pending);
     }
 
-    if !yes && !out.json && !confirm_default_yes("apply these upgrades?")? {
-        println!("aborted; nothing changed");
-        return Ok(None);
+    if !yes {
+        // spec: LIFE-45 -- B1: `--json` is non-interactive (mirrors DEP-60): a
+        // `--json` run without `--yes` refuses instead of silently applying the
+        // upgrades. Unlike DEP-60's own gate, this does NOT also require a real
+        // TTY: the text-mode prompt below reads stdin directly and already
+        // treats EOF/no-input as a safe decline (`read_confirm`), so a
+        // non-interactive *text*-mode run (e.g. piped stdin with no reply) was
+        // never able to apply an upgrade unprompted -- only `--json` could
+        // bypass it, by skipping the confirm call entirely.
+        if out.json {
+            return Err(MindError::ConfirmationRequired {
+                action: "applying pending upgrades".to_string(),
+            });
+        }
+        if !confirm_default_yes("apply these upgrades?")? {
+            println!("aborted; nothing changed");
+            return Ok(None);
+        }
     }
 
     let mut manifest = manifest;
@@ -5768,7 +6035,14 @@ fn upgrade_inner(
         // Build the new version first; the old copy is preserved until this
         // succeeds (transactional install). An upgrade never force-overwrites a
         // foreign target; that is for an explicit `learn --force`.
-        let installed = install_item(
+        //
+        // spec: LIFE-48 -- H3: a failure partway through this batch must not
+        // lose the manifest state for items already upgraded on disk (mirrors
+        // `learn`/`forget`, which deliberately save on their failure path).
+        // Each fallible step below therefore saves whatever has been applied
+        // so far before propagating, instead of letting `?` unwind straight
+        // out of the loop with an unsaved manifest.
+        let installed = match install_item(
             paths,
             &up.cat,
             &up.new_commit,
@@ -5776,18 +6050,45 @@ fn upgrade_inner(
             false,
             dangerously_skip_hook_check,
             dangerously_skip_build_hook_check,
-        )?;
+        ) {
+            Ok(i) => i,
+            Err(e) => {
+                manifest.save(paths)?;
+                return Err(e);
+            }
+        };
         if up.new_name != up.old.name {
             // Rename: drop the old item (by its file registry) and re-key. The OLD
             // item is removed, so its uninstall hook fires (HOOK-82); the new
             // item's install hook already ran in install_item above.
-            uninstall_item(
+            //
+            // spec: LIFE-47 -- B3: strip any link the new install already owns
+            // before removing the old ones. Agents link under the bare harness
+            // name (NS-40) regardless of the item's effective name, so a
+            // prefix-only rename can produce `old.links == installed.links`;
+            // removing them unfiltered would delete the link the new install
+            // just created, leaving the manifest claiming a link that no
+            // longer exists (mirrors the in-place branch below).
+            let mut old_for_uninstall = up.old.clone();
+            old_for_uninstall
+                .links
+                .retain(|l| !installed.links.contains(l));
+            if let Err(e) = uninstall_item(
                 paths,
-                &up.old,
+                &old_for_uninstall,
                 &up.cat.uninstall_hooks(),
                 &up.old.commit,
                 dangerously_skip_hook_check,
-            )?;
+            ) {
+                // The new copy is already live on disk (install_item succeeded
+                // above); record it before propagating so a retry does not
+                // re-run its install hook. The old key is left in place (it was
+                // never removed), so both entries are recorded -- matching what
+                // is actually on disk until this is resolved.
+                manifest.insert(installed);
+                manifest.save(paths)?;
+                return Err(e);
+            }
             manifest.items.remove(&up.old.key());
             renamed = true;
             if !out.json {
@@ -5805,8 +6106,12 @@ fn upgrade_inner(
             // so remove any old link the new install no longer owns, leaving no
             // orphaned symlink behind.
             for old_link in &up.old.links {
-                if !installed.links.contains(old_link) {
-                    install::remove_path(std::path::Path::new(old_link))?;
+                if !installed.links.contains(old_link)
+                    && let Err(e) = install::remove_path(std::path::Path::new(old_link))
+                {
+                    manifest.insert(installed);
+                    manifest.save(paths)?;
+                    return Err(e);
                 }
             }
             if !out.json {
@@ -5929,7 +6234,17 @@ fn rerun_source_hooks(
             if run {
                 // HOOK-30: a non-zero exit is a hard error. The source stays
                 // registered; just propagate the failure.
-                crate::hook::run_hook(&cmd, &dir, &source.name, &cmd)?;
+                //
+                // spec: LIFE-48 -- H3: persist any hook runs already recorded
+                // in this pass before propagating, so an earlier source's
+                // successful re-run is not lost (and its side effect not
+                // silently re-offered on the next pass).
+                if let Err(e) = crate::hook::run_hook(&cmd, &dir, &source.name, &cmd) {
+                    if changed {
+                        registry.save(paths)?;
+                    }
+                    return Err(e);
+                }
                 // HOOK-55: record the commit the hook ran at.
                 source.install_hooks[idx].ran_at = source.commit.clone();
                 changed = true;
@@ -6026,7 +6341,13 @@ struct Upgrade {
 
 fn print_upgrade_report(registry: &Registry, pending: &[Upgrade]) {
     let out = crate::render::ctx();
-    println!("{} item(s) have upstream changes:\n", pending.len());
+    let n = pending.len();
+    let (noun, verb) = if n == 1 {
+        ("item", "has")
+    } else {
+        ("items", "have")
+    };
+    println!("{n} {noun} {verb} upstream changes:\n");
     for up in pending {
         if up.new_name != up.old.name {
             println!(
@@ -7509,8 +7830,8 @@ pub fn lobe_remove(paths: &Paths, path: &str, snapshot: bool) -> Result<()> {
     Ok(())
 }
 
-/// `mind config lobes detect` — detect installed harness homes and offer to add
-/// their presets (HARN-5). Global presets (gemini, codex, universal) are
+/// `mind config lobes detect` — detect installed agent homes (lobes) and offer
+/// to add their presets (HARN-5). Global presets (gemini, codex, universal) are
 /// offered for auto-add with confirmation or `--yes`. Project-scoped presets
 /// (windsurf) are never auto-added; detection prints guidance to run
 /// `mind link-project [--preset <name>]` inside a project directory instead.
@@ -7636,7 +7957,7 @@ pub fn lobe_detect(paths: &Paths, yes: bool) -> Result<()> {
     }
 
     if global_candidates.is_empty() && project_candidates.is_empty() {
-        println!("{} no new harness homes detected", out.bullet());
+        println!("{} no new agent homes (lobes) detected", out.bullet());
         return Ok(());
     }
 
@@ -7661,7 +7982,7 @@ pub fn lobe_detect(paths: &Paths, yes: bool) -> Result<()> {
         // foreign target is reported (never clobbered).
         backfill_new_lobes(paths, &new_lobes, false)?;
     } else if !global_candidates.is_empty() {
-        println!("{} detected harness home(s):", out.bullet());
+        println!("{} detected agent home(s) (lobes):", out.bullet());
         for (name, entry) in &global_candidates {
             println!("  {} {name}: {}", out.dim("·"), format_lobe(entry));
         }
@@ -7954,6 +8275,24 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    /// On a unix host the platform guard is a no-op, so an item install is not
+    /// refused (LIFE-50). The non-unix refusal branch is `#[cfg(not(unix))]` and
+    /// cannot run in CI here; this pins the supported-platform half of the
+    /// contract. The ID is cited by this test, so no allowlist entry is needed.
+    // spec: LIFE-50
+    #[cfg(unix)]
+    #[test]
+    fn require_link_platform_is_ok_on_unix() {
+        let paths = Paths {
+            mind_home: PathBuf::from("/tmp/mind-life50"),
+            claude_home: PathBuf::from("/tmp/claude-life50"),
+        };
+        assert!(
+            require_link_platform(&paths).is_ok(),
+            "the platform guard must be a no-op on unix"
+        );
+    }
 
     // ----- DSC-69: auth-failure message rendering -----
 
