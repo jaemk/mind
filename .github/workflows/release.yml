@@ -93,8 +93,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+      # Embed a dependency SBOM in the shipped binary (cargo-auditable) so
+      # `cargo audit bin mind` can scan a downloaded release against the RustSec
+      # advisory database. Pinned for a reproducible release build.
+      - name: install cargo-auditable
+        run: cargo install cargo-auditable --version 0.7.5 --locked
       - name: build
-        run: cargo build --release --locked --bin mind --target ${{ matrix.target }}
+        run: cargo auditable build --release --locked --bin mind --target ${{ matrix.target }}
       - name: package
         run: |
           cargo package --locked --target ${{ matrix.target }}
