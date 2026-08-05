@@ -462,19 +462,21 @@ impl Paths {
     // spec: HARN-21
     pub fn detect_local_lobe(&self) -> Result<Option<Lobe>> {
         let cwd = std::env::current_dir().map_err(|e| MindError::io(".", e))?;
-        let cwd_c = cwd.canonicalize().unwrap_or(cwd);
+        let cwd_c = canonicalize_existing(&cwd);
         // The resolved default/global home: never a `--local` target (HARN-20/21).
         let global_home = make_absolute(self.claude_home.clone())?;
-        let global_home_c = global_home.canonicalize().unwrap_or(global_home);
+        let global_home_c = canonicalize_existing(&global_home);
         // The home directory, for the home-rooted global-preset exclusion below.
         // Absent (no home dir) means the exclusion is simply not applied.
-        let home_c = home().ok().map(|h| h.canonicalize().unwrap_or(h));
+        let home_c = home().ok().map(|h| canonicalize_existing(&h));
         let mut best: Option<(usize, Lobe)> = None;
         for lobe in self.agent_homes()? {
-            let lp = lobe
-                .path
-                .canonicalize()
-                .unwrap_or_else(|_| lobe.path.clone());
+            // A registered project lobe often does not exist on disk yet (it is
+            // created on the first link into it), so `Path::canonicalize` would
+            // fail and leave the path unresolved. Resolve the deepest existing
+            // ancestor instead, so a symlinked ancestor (e.g. macOS `/var` ->
+            // `/private/var`) matches the likewise-resolved cwd.
+            let lp = canonicalize_existing(&lobe.path);
             if lp == cwd_c || !lp.starts_with(&cwd_c) {
                 continue;
             }
@@ -639,6 +641,36 @@ fn make_absolute(path: PathBuf) -> Result<PathBuf> {
     Ok(cwd.join(path))
 }
 
+/// Canonicalize as much of `path` as exists on disk, re-appending the
+/// non-existent trailing components lexically.
+///
+/// `Path::canonicalize` fails outright when the full path does not yet exist,
+/// leaving symlinked ancestors unresolved. This resolves the deepest existing
+/// ancestor (so e.g. macOS `/var` -> `/private/var` is applied) and rejoins the
+/// remaining components, so containment checks compare like-for-like even for a
+/// path that has not been created yet (a registered project lobe dir before its
+/// first link). Falls back to the lexical path when nothing resolves.
+fn canonicalize_existing(path: &Path) -> PathBuf {
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    let mut cur: &Path = path;
+    loop {
+        if let Ok(resolved) = cur.canonicalize() {
+            let mut out = resolved;
+            for name in tail.iter().rev() {
+                out.push(name);
+            }
+            return out;
+        }
+        match (cur.file_name(), cur.parent()) {
+            (Some(name), Some(parent)) => {
+                tail.push(name.to_owned());
+                cur = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
+}
+
 /// Deduplicate a `Vec<Lobe>` by path, preserving first-seen order. When the same
 /// path appears twice, the first-seen lobe (and its kinds) wins.
 fn dedup_lobes(lobes: Vec<Lobe>) -> Vec<Lobe> {
@@ -783,6 +815,34 @@ mod tests {
             absolute_home("/tmp/lobe").unwrap(),
             PathBuf::from("/tmp/lobe")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonicalize_existing_resolves_a_symlinked_ancestor_with_a_missing_tail() {
+        // spec: HARN-21
+        // A registered project lobe dir often does not exist yet, and its parent
+        // may be reached through a symlink (as on macOS, where the temp dir sits
+        // under /var -> /private/var). canonicalize_existing must resolve the
+        // existing ancestor and keep the not-yet-created tail, so the containment
+        // check in detect_local_lobe compares like-for-like.
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let root = std::env::temp_dir().join(format!("mind-canon-{}-{n}", std::process::id()));
+        let real = root.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = root.join("link");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        // A path through the symlink whose final component does not exist.
+        let resolved = canonicalize_existing(&link.join("locallobe"));
+        let expected = real.canonicalize().unwrap().join("locallobe");
+        assert_eq!(
+            resolved, expected,
+            "the symlinked ancestor should resolve and the missing tail be kept"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
