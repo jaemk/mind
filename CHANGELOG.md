@@ -6,6 +6,75 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-08-05
+
+### Added
+
+- Selective lobe mode: `learn --local` and `meld --local` install an item into
+  only the current project's lobe instead of the global fan-out set, when run
+  inside a registered project lobe. From a directory not inside any registered
+  lobe, `--local` is an error naming the fix rather than a silent fall-back
+  (HARN-19, HARN-20, HARN-21).
+- `sync [source]` fetches a single source instead of every melded source
+  (CLI-231).
+- `evolve --to <VERSION>` replaces `evolve --version`, which shadowed the global
+  `--version`; the old flag stays as a hidden alias. `unmeld` gains `remove`/`rm`
+  aliases, and `hooks run` gains a `--rerun` alias for `--force` (CLI-229,
+  CLI-230, CLI-228).
+- The `probe` TUI marks out-of-date items, lists the pending items in the
+  upgrade confirmation, offers a `?` help overlay, honors `NO_COLOR`, and falls
+  back to ASCII glyphs on a non-UTF-8 locale. `probe` under `--ascii` or a
+  non-UTF-8 locale now shows the plain listing instead of launching the Unicode
+  TUI (TUI-63, TUI-64, TUI-65, TUI-71).
+- `meld`, `learn`, `forget`, and `unmeld` carry an EXAMPLES section in `--help`.
+- The docs document the item downgrade recipe (`meld --pin <old-sha>` then
+  `upgrade`).
+
+### Changed
+
+- `--dangerously-skip-install-hook-check` is renamed to
+  `--dangerously-skip-hook-check` on `unmeld`/`forget`, where it gates uninstall
+  hooks; the old spelling is kept as a hidden alias (CLI-227).
+- Source-derived descriptions are sanitized at the point they are read from a
+  catalog or `mind.toml`, so a crafted `description` can no longer inject ANSI or
+  bidi control sequences into `probe`, `recall`, or `--json` output (DSC-94).
+- The `min-mind-version` comparator preserves a nonzero pre-release patch: a
+  `0.23.1-dev` binary is no longer read as `0.23.0` by the source gate, the
+  policy gate, or `evolve`.
+- `config lobes detect` output uses "agent home (lobe)" consistently.
+
+### Fixed
+
+- `--json` without `--yes` no longer bypasses a destructive confirmation on a
+  TTY: `forget`, `forget --unmanaged`, `unmeld`, `upgrade`, and `evolve` now
+  refuse with `confirmation-required` instead of acting unprompted. In
+  particular `forget --unmanaged <ref> --json` no longer deletes the target
+  file without consent (LIFE-45).
+- `upgrade` renaming an item (for example after an upstream prefix change) no
+  longer evicts a different source's item registered under the new name, and no
+  longer removes the freshly created link when the old and new link paths
+  coincide (LIFE-46, LIFE-47).
+- `upgrade` and re-meld save the manifest and hook registry when a batch fails
+  partway, so a retry does not re-run hook side effects or leave the manifest
+  disagreeing with what is on disk (LIFE-48).
+- `sync --upgrade` honors `--yes` (LIFE-49).
+- `--local` lobe detection resolves a symlinked ancestor when the project lobe
+  directory does not exist yet, so it no longer refuses on a temp directory
+  reached through a symlink.
+- The `IncompatibleVersion`, `StateTooNew`, and managed-policy remedies point at
+  `mind evolve`, the binary self-update verb, not `mind upgrade`.
+- `forget`'s per-source hints print in a deterministic order.
+- `atomic_write` fsyncs before the rename, for crash-safety of `manifest.json`
+  and `sources.json`.
+
+### Security
+
+- Release binaries embed a dependency SBOM (`cargo-auditable`), so
+  `cargo audit bin mind` can scan a downloaded release against the RustSec
+  advisory database.
+- `anyhow` (a transitive dependency) is bumped to 1.0.104, clearing
+  RUSTSEC-2026-0190 (unsoundness in `Error::downcast_mut`).
+
 ## [0.22.0] - 2026-07-30
 
 ### Fixed
@@ -1289,7 +1358,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovery, frontmatter descriptions, transactional install/upgrade/uninstall
   with a file registry, and a tag-driven release pipeline with a Homebrew tap.
 
-[Unreleased]: https://github.com/jaemk/mind/compare/v0.22.0...HEAD
+[Unreleased]: https://github.com/jaemk/mind/compare/v0.23.0...HEAD
+[0.23.0]: https://github.com/jaemk/mind/compare/v0.22.0...v0.23.0
 [0.22.0]: https://github.com/jaemk/mind/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/jaemk/mind/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/jaemk/mind/compare/v0.19.0...v0.20.0
