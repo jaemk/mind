@@ -50,11 +50,14 @@ pub fn learn_ref(item_key: &str, source: &str) -> String {
 }
 
 /// Detail lines for an item dialog (TUI-26): kind and source always, the commit
-/// when installed, and the description (if any) after a blank separator line.
+/// when installed, a status line when the installed item is out of date
+/// (TUI-63, M2 -- mirrors the CLI's CLI-75 `(outdated; run mind upgrade)`
+/// note), and the description (if any) after a blank separator line.
 fn item_detail(
     kind: ItemKind,
     source: &str,
     commit: Option<&str>,
+    stale: bool,
     description: Option<&str>,
 ) -> Vec<String> {
     let mut d = vec![
@@ -63,6 +66,10 @@ fn item_detail(
     ];
     if let Some(c) = commit {
         d.push(format!("commit: {}", c.chars().take(8).collect::<String>()));
+    }
+    if stale {
+        // spec: TUI-63
+        d.push("status: out of date (run upgrade)".to_string());
     }
     if let Some(s) = description {
         d.push(String::new());
@@ -246,6 +253,18 @@ pub struct App {
     /// True after one Ctrl-C: a second consecutive Ctrl-C force-exits from any
     /// mode (TUI-43). Any other key disarms it.
     pub ctrl_c_armed: bool,
+    /// True after one Esc pressed in normal mode (not search-focused) while a
+    /// settled search filter is active: a second consecutive Esc then clears
+    /// the filter (TUI-69). Any other intent disarms it, so Esc does not wipe
+    /// a filter the user set moments ago just because they pressed Esc to
+    /// dismiss something else in between.
+    // spec: TUI-69
+    pub search_clear_armed: bool,
+    /// True when the `?` keymap help overlay is open (TUI-64). Toggled by `?`
+    /// in normal mode; any key closes it while open (mod.rs intercepts before
+    /// normal-mode routing, mirroring the lobes-modal pattern).
+    // spec: TUI-64
+    pub help_visible: bool,
 }
 
 /// One row in the flat (display) tree.
@@ -302,6 +321,8 @@ impl App {
             quit: false,
             search_focused: false,
             ctrl_c_armed: false,
+            help_visible: false,
+            search_clear_armed: false,
         }
     }
 
@@ -376,6 +397,13 @@ impl App {
     /// Apply a non-action intent (movement, expand/collapse, search, etc.).
     // spec: TUI-11 TUI-14
     pub fn apply_intent(&mut self, intent: Intent) {
+        // spec: TUI-69 - any intent OTHER than SearchClear disarms the
+        // two-step settled-filter clear, so an unrelated Esc (or any other
+        // key) in between does not leave a stale arm primed for a LATER Esc
+        // to consume.
+        if !matches!(intent, Intent::SearchClear) {
+            self.search_clear_armed = false;
+        }
         match intent {
             Intent::MoveUp => {
                 self.error = None;
@@ -469,10 +497,26 @@ impl App {
                     self.rebuild_tree();
                 }
             }
+            // spec: TUI-69 - Esc while actively typing in the search box (or
+            // with no filter at all) still clears/unfocuses immediately: only
+            // a SETTLED filter (non-empty, not focused -- i.e. Tab/Enter was
+            // already used to submit it) gets the two-step confirm, so a
+            // reflexive Esc elsewhere in normal mode does not wipe a filter
+            // the user deliberately kept in effect.
             Intent::SearchClear => {
-                self.search.clear();
-                self.search_focused = false;
-                self.rebuild_tree();
+                if self.search_focused || self.search.is_empty() {
+                    self.search.clear();
+                    self.search_focused = false;
+                    self.search_clear_armed = false;
+                    self.rebuild_tree();
+                } else if self.search_clear_armed {
+                    self.search.clear();
+                    self.search_clear_armed = false;
+                    self.rebuild_tree();
+                } else {
+                    self.search_clear_armed = true;
+                    self.set_status("Press Esc again to clear the search filter.".to_string());
+                }
             }
             Intent::SearchSubmit => {
                 self.search_focused = false;
@@ -566,6 +610,10 @@ impl App {
                 self.spec_input_text.clear();
                 self.active_preview = None;
                 self.set_error(message);
+            }
+            // spec: TUI-64 - toggle the `?` keymap help overlay.
+            Intent::ToggleHelp => {
+                self.help_visible = !self.help_visible;
             }
             // --- Lobe management intents (TUI-23) ---
 
@@ -900,11 +948,39 @@ impl App {
         self.modal_visible = true;
     }
 
+    /// Build the per-item pending-upgrade list for the confirm modal (TUI-63,
+    /// M2): the CLI shows a hash/commit delta before an upgrade applies
+    /// (DEP-40's CLI report); the TUI previously showed only "Upgrade all
+    /// pending items?" with no indication of what that would touch. Every
+    /// installed item whose snapshot `stale` flag is set (computed in data.rs
+    /// against the CLI's own CLI-75 comparison) is listed by key and source,
+    /// pure (reads `last_snapshot`, no I/O).
+    // spec: TUI-63
+    fn pending_upgrade_items(&self) -> Vec<String> {
+        let Some(snap) = &self.last_snapshot else {
+            return Vec::new();
+        };
+        snap.installed
+            .iter()
+            .filter(|it| it.stale)
+            .map(|it| format!("{} ({})", it.key, it.source))
+            .collect()
+    }
+
     fn initiate_upgrade(&mut self) {
-        self.pending_action = Some(PendingAction::new(
-            ActionKind::Upgrade,
-            "Upgrade all pending items?".to_string(),
-        ));
+        let pending = self.pending_upgrade_items();
+        let description = if pending.is_empty() {
+            // Nothing is out of date; still confirm (mirrors the CLI, which
+            // reports "nothing to upgrade" rather than silently no-op'ing).
+            "Upgrade: no items are out of date. Proceed anyway?".to_string()
+        } else {
+            format!(
+                "Upgrade {} pending item(s)?\n\n{}",
+                pending.len(),
+                pending.join("\n")
+            )
+        };
+        self.pending_action = Some(PendingAction::new(ActionKind::Upgrade, description));
         self.modal_visible = true;
     }
 
@@ -1030,7 +1106,13 @@ impl App {
                     .collect();
                 Some(Dialog {
                     title: it.name.clone(),
-                    detail: item_detail(it.kind, &it.source, None, it.description.as_deref()),
+                    detail: item_detail(
+                        it.kind,
+                        &it.source,
+                        None,
+                        false,
+                        it.description.as_deref(),
+                    ),
                     actions,
                     selected: 0,
                 })
@@ -1047,6 +1129,7 @@ impl App {
                         it.kind,
                         &it.source,
                         Some(&it.commit),
+                        it.stale,
                         it.description.as_deref(),
                     ),
                     actions,
@@ -1308,6 +1391,7 @@ mod tests {
                 commit: "abc12345".to_string(),
                 description: Some("Review skill".to_string()),
                 deps: vec![],
+                stale: false,
             }],
             available: vec![SnapshotAvailable {
                 key: "agent:dev".to_string(),
@@ -1427,15 +1511,36 @@ mod tests {
         app.search = "zzznomatch".to_string();
         app.rebuild_tree();
         // Either fewer nodes or the same (headers may remain)
-        // The key assertion: items not matching query should be hidden
+        // The key assertion: no actual item node matches the query (an
+        // EmptyState call-to-action row legitimately echoes the query back,
+        // TUI-68, so this checks item/source nodes specifically rather than
+        // "no visible label contains the search string" -- that would fail on
+        // the CTA row's own "no items match 'zzznomatch'" text, which is the
+        // intended new behavior, not a leaked non-matching item).
+        // spec: TUI-68
         let matched: Vec<_> = app
             .visible
             .iter()
-            .filter(|n| n.label.contains("zzznomatch"))
+            .filter(|n| {
+                matches!(
+                    &n.node,
+                    crate::tui::tree::TreeNode::InstalledItem(_)
+                        | crate::tui::tree::TreeNode::AvailableItem(_)
+                        | crate::tui::tree::TreeNode::Source(_)
+                ) && n.label.contains("zzznomatch")
+            })
             .collect();
         assert!(
             matched.is_empty(),
             "non-matching items should be hidden: {:?}",
+            app.visible.iter().map(|n| &n.label).collect::<Vec<_>>()
+        );
+        // And the empty-state call-to-action row IS shown (TUI-68).
+        assert!(
+            app.visible
+                .iter()
+                .any(|n| matches!(&n.node, crate::tui::tree::TreeNode::EmptyState(_))),
+            "a search with no matches must show a call-to-action row: {:?}",
             app.visible.iter().map(|n| &n.label).collect::<Vec<_>>()
         );
         let _ = all_count;
@@ -1862,6 +1967,7 @@ mod tests {
             commit: "def67890".to_string(),
             description: None,
             deps: vec!["skill:review".to_string()],
+            stale: false,
         });
         app.apply_snapshot(snap);
         let idx = app
@@ -2062,6 +2168,100 @@ mod tests {
         app.apply_intent(Intent::SearchClear);
         assert_eq!(app.search, "");
         assert!(!app.search_focused);
+    }
+
+    // --- TUI-69: Esc on a settled (unfocused) filter is a two-step clear ---
+
+    #[test]
+    fn esc_on_settled_filter_arms_instead_of_clearing_immediately() {
+        // spec: TUI-69 - a settled filter (non-empty, NOT focused: the user
+        // already Tab/Enter-submitted it) survives the first Esc in normal
+        // mode; it only arms a pending clear and surfaces a status hint.
+        let mut app = App::new(String::new(), None, None);
+        app.apply_snapshot(make_snapshot());
+        app.search = "rev".to_string();
+        app.search_focused = false; // settled, not actively typing
+        app.apply_intent(Intent::SearchClear);
+        assert_eq!(
+            app.search, "rev",
+            "the first Esc must NOT clear a settled filter"
+        );
+        assert!(
+            app.search_clear_armed,
+            "the first Esc on a settled filter must arm the clear"
+        );
+        assert!(
+            app.status.as_deref().unwrap_or("").contains("Esc again"),
+            "a hint must explain the second Esc is needed: {:?}",
+            app.status
+        );
+    }
+
+    #[test]
+    fn second_esc_on_settled_filter_clears_it() {
+        // spec: TUI-69 - a second CONSECUTIVE Esc (no other intent in between)
+        // clears the armed filter.
+        let mut app = App::new(String::new(), None, None);
+        app.apply_snapshot(make_snapshot());
+        app.search = "rev".to_string();
+        app.search_focused = false;
+        app.apply_intent(Intent::SearchClear); // arms
+        app.apply_intent(Intent::SearchClear); // clears
+        assert_eq!(app.search, "", "the second Esc must clear the filter");
+        assert!(!app.search_clear_armed, "the arm must reset after clearing");
+    }
+
+    #[test]
+    fn any_other_intent_disarms_the_pending_settled_filter_clear() {
+        // spec: TUI-69 - an intent other than SearchClear in between (e.g.
+        // moving the selection) disarms the pending clear, so a LATER,
+        // unrelated Esc does not unexpectedly wipe the filter on its "second"
+        // press when the two presses were not actually consecutive.
+        let mut app = App::new(String::new(), None, None);
+        app.apply_snapshot(make_snapshot());
+        app.search = "rev".to_string();
+        app.search_focused = false;
+        app.apply_intent(Intent::SearchClear); // arms
+        assert!(app.search_clear_armed);
+        app.apply_intent(Intent::MoveDown); // unrelated intent: disarms
+        assert!(
+            !app.search_clear_armed,
+            "a non-SearchClear intent must disarm the pending clear"
+        );
+        app.apply_intent(Intent::SearchClear); // this is now a FIRST press again
+        assert_eq!(
+            app.search, "rev",
+            "the filter must survive: the arm was reset, so this is a fresh first Esc"
+        );
+    }
+
+    #[test]
+    fn esc_while_search_focused_still_clears_immediately() {
+        // spec: TUI-69 - the two-step confirm is only for a SETTLED (unfocused)
+        // filter. While actively typing in the search box, Esc still clears
+        // and unfocuses in one press (the pre-existing, expected "bail out of
+        // search entry" behavior) -- this is search_clear_resets_search_string
+        // above, restated here to pin the contrast explicitly against TUI-69.
+        let mut app = App::new(String::new(), None, None);
+        app.apply_snapshot(make_snapshot());
+        app.search = "rev".to_string();
+        app.search_focused = true;
+        app.apply_intent(Intent::SearchClear);
+        assert_eq!(app.search, "", "focused Esc clears immediately");
+        assert!(!app.search_clear_armed);
+    }
+
+    #[test]
+    fn esc_with_no_active_filter_is_a_no_op_not_armed() {
+        // spec: TUI-69 - Esc with an empty filter (nothing to clear) must not
+        // arm anything or show the hint.
+        let mut app = App::new(String::new(), None, None);
+        app.apply_snapshot(make_snapshot());
+        app.search_focused = false;
+        assert!(app.search.is_empty());
+        app.apply_intent(Intent::SearchClear);
+        assert!(!app.search_clear_armed);
+        assert!(app.status.is_none());
     }
 
     // --- TUI-30: spec-input / preview flow ---
@@ -2299,6 +2499,84 @@ mod tests {
             has_sug,
             "SuggestedSource should appear in Available tree: {:?}",
             flat.iter().map(|n| &n.label).collect::<Vec<_>>()
+        );
+    }
+
+    // --- TUI-63: upgrade confirm shows the pending set + stale indicator ---
+
+    #[test]
+    fn action_upgrade_with_stale_items_lists_them_in_the_confirm() {
+        // spec: TUI-63 - M2: the confirm modal must name the items an upgrade
+        // would touch (source-qualified), not just "Upgrade all pending items?".
+        let mut app = App::new(String::new(), None, None);
+        let mut snap = make_snapshot();
+        snap.installed[0].stale = true; // skill:review / local/agents
+        app.apply_snapshot(snap);
+
+        app.apply_intent(Intent::ActionUpgrade);
+        let desc = app
+            .pending_action
+            .as_ref()
+            .expect("ActionUpgrade must arm a pending confirm")
+            .description
+            .clone();
+        assert!(
+            desc.contains("skill:review"),
+            "confirm must name the stale item's key: {desc:?}"
+        );
+        assert!(
+            desc.contains("local/agents"),
+            "confirm must name the stale item's source: {desc:?}"
+        );
+    }
+
+    #[test]
+    fn action_upgrade_with_nothing_stale_says_so_instead_of_listing() {
+        // spec: TUI-63 - when nothing is out of date, the confirm must say so
+        // rather than silently listing nothing (which would look identical to
+        // the old blind "Upgrade all pending items?" prompt).
+        let mut app = App::new(String::new(), None, None);
+        let snap = make_snapshot(); // no item marked stale
+        app.apply_snapshot(snap);
+
+        app.apply_intent(Intent::ActionUpgrade);
+        let desc = app
+            .pending_action
+            .as_ref()
+            .expect("ActionUpgrade must arm a pending confirm even with nothing stale")
+            .description
+            .clone();
+        assert!(
+            desc.to_lowercase().contains("no items are out of date"),
+            "confirm must say nothing is out of date: {desc:?}"
+        );
+    }
+
+    #[test]
+    fn pending_upgrade_items_empty_without_a_snapshot() {
+        // spec: TUI-63 - before any snapshot has loaded, pending_upgrade_items
+        // must return empty rather than panicking on last_snapshot being None.
+        let app = App::new(String::new(), None, None);
+        assert!(app.pending_upgrade_items().is_empty());
+    }
+
+    // --- TUI-64: `?` keymap help overlay ---
+
+    #[test]
+    fn toggle_help_intent_flips_help_visible() {
+        // spec: TUI-64 - ToggleHelp opens the overlay when closed and closes it
+        // when open, so the same key both opens and (if reachable) toggles it.
+        let mut app = App::new(String::new(), None, None);
+        assert!(!app.help_visible, "help overlay starts closed");
+        app.apply_intent(Intent::ToggleHelp);
+        assert!(
+            app.help_visible,
+            "ToggleHelp must open the overlay from closed"
+        );
+        app.apply_intent(Intent::ToggleHelp);
+        assert!(
+            !app.help_visible,
+            "a second ToggleHelp must close the overlay again"
         );
     }
 
@@ -2691,6 +2969,7 @@ mod tests {
                 commit: "abc12345".to_string(),
                 description: None,
                 deps: vec![],
+                stale: false,
             }],
             available: vec![],
             unmanaged: vec![],
@@ -3144,6 +3423,7 @@ mod tests {
                     commit: "abc12345".into(),
                     description: None,
                     deps: vec![],
+                    stale: false,
                 }),
             },
         ];
@@ -3203,6 +3483,7 @@ mod tests {
                     commit: "abc12345".into(),
                     description: None,
                     deps: vec![],
+                    stale: false,
                 }),
             },
         ];
@@ -3395,6 +3676,41 @@ mod tests {
     }
 
     #[test]
+    fn installed_item_dialog_shows_out_of_date_status_when_stale() {
+        // spec: TUI-63 - M2: the item details dialog must surface the same
+        // out-of-date state the browse row does, so a user who opened the
+        // dialog (rather than reading the row glyph) still sees it.
+        let mut app = App::new(String::new(), None, None);
+        let mut snap = make_snapshot();
+        snap.installed[0].stale = true;
+        app.apply_snapshot(snap);
+        select_node(&mut app, |n| matches!(n, TreeNode::InstalledItem(_)));
+        app.apply_intent(Intent::OpenDialog);
+        let d = app.dialog.as_ref().expect("a dialog must open");
+        assert!(
+            d.detail.iter().any(|l| l.contains("out of date")),
+            "stale installed item's dialog must note it is out of date: {:?}",
+            d.detail
+        );
+    }
+
+    #[test]
+    fn installed_item_dialog_omits_status_line_when_current() {
+        // spec: TUI-63 - the contrast case: a current (non-stale) item's dialog
+        // must NOT carry the out-of-date line.
+        let mut app = App::new(String::new(), None, None);
+        app.apply_snapshot(make_snapshot()); // stale defaults to false
+        select_node(&mut app, |n| matches!(n, TreeNode::InstalledItem(_)));
+        app.apply_intent(Intent::OpenDialog);
+        let d = app.dialog.as_ref().expect("a dialog must open");
+        assert!(
+            !d.detail.iter().any(|l| l.contains("out of date")),
+            "a current item's dialog must not claim it is out of date: {:?}",
+            d.detail
+        );
+    }
+
+    #[test]
     fn enter_on_source_offers_bulk_actions_and_unmeld() {
         // spec: TUI-26 - a source dialog offers install-all, uninstall-all, and
         // unmeld. make_snapshot has one available and one installed item under
@@ -3485,6 +3801,7 @@ mod tests {
                 commit: "abc12345".to_string(),
                 description: Some("Review skill".to_string()),
                 deps: vec![],
+                stale: false,
             }],
             available: vec![],
             unmanaged: vec![],
@@ -3863,6 +4180,7 @@ mod tests {
                     commit: "abc12345".to_string(),
                     description: None,
                     deps: vec!["agent:dev".to_string()],
+                    stale: false,
                 },
                 SnapshotInstalled {
                     key: "agent:dev".to_string(),
@@ -3872,6 +4190,7 @@ mod tests {
                     commit: "def67890".to_string(),
                     description: None,
                     deps: vec![],
+                    stale: false,
                 },
             ],
             available: vec![],
@@ -4026,6 +4345,7 @@ mod tests {
                 commit: "def67890".to_string(),
                 description: None,
                 deps: vec![],
+                stale: false,
             }],
             available: vec![SnapshotAvailable {
                 key: "skill:review".to_string(),
@@ -4086,6 +4406,7 @@ mod tests {
                     commit: "aaaaaaaa".to_string(),
                     description: None,
                     deps: vec!["agent:dev".to_string()],
+                    stale: false,
                 },
                 SnapshotInstalled {
                     key: "agent:dev".to_string(),
@@ -4095,6 +4416,7 @@ mod tests {
                     commit: "bbbbbbbb".to_string(),
                     description: None,
                     deps: vec!["skill:build".to_string()],
+                    stale: false,
                 },
                 SnapshotInstalled {
                     key: "skill:build".to_string(),
@@ -4104,6 +4426,7 @@ mod tests {
                     commit: "cccccccc".to_string(),
                     description: None,
                     deps: vec![],
+                    stale: false,
                 },
             ],
             available: vec![],

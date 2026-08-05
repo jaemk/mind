@@ -138,6 +138,14 @@ fn handle_key(paths: &Paths, app: &mut app::App, k: crossterm::event::KeyEvent) 
     }
     app.ctrl_c_armed = false;
 
+    // --- Help overlay (TUI-64): any key closes it; nothing else routes while
+    // it is open, so the overlay does not leak keystrokes into search/actions.
+    // spec: TUI-64
+    if app.help_visible {
+        app.help_visible = false;
+        return;
+    }
+
     // --- Namespace-input mode (TUI-53): user is typing a namespace prefix. ---
     // Opened via "Set namespace" in the source details dialog when no items are
     // installed. Intercept all keys so none route through normal intent dispatch.
@@ -486,7 +494,10 @@ fn run_learn_preview(paths: &Paths, app: &mut app::App, item_ref: &str) {
     match crate::commands::learn_preview(paths, item_ref) {
         Ok(plan) => {
             if plan.adds_dependencies {
-                app.set_learn_dep_tree(Some(plan.tree));
+                // spec: TUI-60 - the tree renders catalog item names (source-
+                // controlled) so it is sanitized at this I/O boundary before
+                // it reaches the pure App model / confirm modal.
+                app.set_learn_dep_tree(Some(crate::sanitize::strip_ansi(&plan.tree)));
             } else {
                 app.set_learn_dep_tree(None);
             }
@@ -538,6 +549,7 @@ mod tests {
                 commit: "abc12345".to_string(),
                 description: Some("Review skill".to_string()),
                 deps: vec![],
+                stale: false,
             }],
             available: vec![SnapshotAvailable {
                 key: "agent:dev".to_string(),
@@ -596,6 +608,27 @@ mod tests {
             "'q' must not quit while search is focused"
         );
         assert_eq!(app.search, "q", "'q' must be typed into the query");
+    }
+
+    #[test]
+    fn question_mark_opens_help_and_any_key_closes_it() {
+        // spec: TUI-64 - '?' in normal mode opens the keymap help overlay; while
+        // open, handle_key intercepts every key to close it (rather than routing
+        // to normal-mode actions), so e.g. 'd' does not sneak a forget through.
+        let paths = temp_paths();
+        let mut app = seeded_app();
+        assert!(!app.help_visible, "help starts closed");
+
+        handle_key(&paths, &mut app, key(KeyCode::Char('?')));
+        assert!(app.help_visible, "'?' must open the help overlay");
+
+        // Any key closes it -- here 'd', which normally maps to ActionForget.
+        handle_key(&paths, &mut app, key(KeyCode::Char('d')));
+        assert!(!app.help_visible, "any key must close the help overlay");
+        assert!(
+            app.pending_action.is_none(),
+            "the key that closed help must not also fall through to an action"
+        );
     }
 
     #[test]
@@ -782,6 +815,118 @@ mod tests {
         assert!(
             tree.contains("dev"),
             "tree must mention the pulled-in dependency agent: {tree}"
+        );
+    }
+
+    #[test]
+    fn run_learn_preview_strips_ansi_from_dep_tree() {
+        // spec: TUI-60 - the dependency tree text (DEP-40) is built from
+        // catalog item names, which are source-controlled (here, a filename).
+        // An ANSI escape embedded in a dependency's name must not survive into
+        // the pending action's dep_tree, which the confirm modal renders
+        // verbatim (B4-TUI).
+        use std::process::Command;
+
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base =
+            std::env::temp_dir().join(format!("mind-tui-mod-ansi-dep-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let _owned = OwnedTemp(base.clone());
+        let paths = Paths {
+            mind_home: base.join("mind"),
+            claude_home: base.join("claude"),
+        };
+        crate::paths::mkdir_p(&paths.mind_home).unwrap();
+        crate::config::Config {
+            lobes: vec![crate::config::LobeEntry::bare(
+                paths.claude_home.to_str().unwrap(),
+            )],
+            ..Default::default()
+        }
+        .save(&paths)
+        .unwrap();
+
+        // The dependency agent's filename (and hence its catalog item name)
+        // carries a raw ANSI color escape. The skill references it via the
+        // same (ESC-carrying) token so the reference resolves.
+        // A full CSI color sequence (ESC '[' ... 'm'), not a bare ESC: this is
+        // stripped as one unit by strip_ansi, leaving "dev" intact so the
+        // sanitized-but-present assertion below is meaningful.
+        let ansi_dep_name = format!("de{}[31mv", '\x1b');
+        let src = base.join("ansi-dep-source");
+        std::fs::create_dir_all(src.join("skills/review")).unwrap();
+        std::fs::write(
+            src.join("skills/review/SKILL.md"),
+            format!(
+                "---\ndescription: review skill\n---\n# review\nHand off to {{{{ns:{ansi_dep_name}}}}}.\n"
+            ),
+        )
+        .unwrap();
+        std::fs::create_dir_all(src.join("agents")).unwrap();
+        std::fs::write(
+            src.join(format!("agents/{ansi_dep_name}.md")),
+            "---\nname: dev\ndescription: dev agent\n---\n# dev\n",
+        )
+        .unwrap();
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(&src)
+                .output()
+                .expect("git");
+        };
+        git(&["-c", "init.defaultBranch=main", "init", "-q"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "initial"]);
+        crate::commands::meld(
+            &paths,
+            src.to_str().unwrap(),
+            None,
+            vec![],
+            vec![],
+            false,
+            crate::commands::PinRequest::None,
+            None,
+            false,
+        )
+        .expect("meld");
+
+        let source_name = crate::source::Registry::load(&paths).unwrap().sources[0]
+            .name
+            .clone();
+
+        let mut app = app::App::new(String::new(), None, None);
+        app.pending_action = Some(app::PendingAction::new(
+            app::ActionKind::Learn {
+                item_key: "skill:review".to_string(),
+                source: source_name.clone(),
+            },
+            "Install skill:review?".to_string(),
+        ));
+        let item_ref = app::learn_ref("skill:review", &source_name);
+
+        run_learn_preview(&paths, &mut app, &item_ref);
+
+        let tree = app
+            .pending_action
+            .as_ref()
+            .expect("pending action survives a successful preview")
+            .dep_tree
+            .clone()
+            .expect("the dependency tree must be stashed onto the Learn confirm");
+        assert!(
+            !tree.contains('\x1b'),
+            "the ANSI escape from the dependency's name must be stripped from \
+             dep_tree before it reaches the pending action; got: {tree:?}"
+        );
+        assert!(
+            tree.contains("dev"),
+            "the (sanitized) dependency name must still be present: {tree:?}"
         );
     }
 

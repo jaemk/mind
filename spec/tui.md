@@ -20,6 +20,13 @@ the lock it takes per action is defined in storage.md (STO-40, STO-41).
   apply in both modes: in the listing they filter it (CLI-80, CLI-83); in the TUI
   they seed the initial search and filter state. Bare `mind` (no subcommand) is
   unchanged and does not launch the TUI.
+- `TUI-71` `probe` also falls back to the non-interactive listing (extending
+  TUI-2's conditions) when the output mode is Unicode-hostile: `--ascii` is given,
+  or the active locale is not UTF-8 (`LC_ALL`/`LC_CTYPE`/`LANG`, first set wins;
+  none set is treated as non-UTF-8). The TUI draws Unicode box-drawing glyphs, so
+  a run that asked for ASCII output, or a terminal whose locale cannot render
+  them, must not silently launch it. This is distinct from `NO_COLOR`, which does
+  NOT force the fallback: the TUI still launches and renders monochrome (TUI-65).
 - `TUI-3` (removed, superseded by TUI-54) `-n` was formerly the short form of
   `--no-tui` on `probe`. Removed to free `-n` globally for `--dry-run` (CLI-163).
   `--no-tui` is now long-only; see TUI-54.
@@ -205,6 +212,67 @@ manifest, and store.
 - `TUI-54` `probe --no-tui` is long-only; its former short `-n` is removed (CLI-164,
   CLI-163). `mind probe --no-tui` is the only accepted form; `mind probe -n` is now
   a usage error.
+- `TUI-63` An installed row carries a `stale` flag, computed at the snapshot
+  boundary (data.rs) the same way the CLI's CLI-75 outdated check is computed at
+  its three call sites: the source content hash no longer matches the recorded
+  manifest hash, or the effective name has changed (a rename, e.g. a prefix
+  change). A stale row shows a trailing drift marker (`\u{2191}`, ASCII `^` under
+  TUI-65) matching the CLI's CLI-155 glyph, and its details dialog (TUI-26) adds
+  an `out of date` status line. The upgrade confirm (`u`, TUI-22) is no longer
+  blind: instead of a bare "Upgrade all pending items?", it lists every stale
+  item by key and source (mirroring the per-item delta the CLI's `upgrade`
+  reports before applying, DEP-40), or states explicitly that nothing is out of
+  date when the stale set is empty, so the user always confirms a specific,
+  named set of changes rather than an opaque bulk action.
+- `TUI-64` Pressing `?` in normal mode opens a keymap help overlay listing every
+  binding grouped by category (navigation, actions, general); any key closes it,
+  intercepted ahead of normal-mode routing so it never leaks into search or an
+  action. The bottom hint line (HINTS) additionally names `/` (search), `h/l`
+  (collapse/expand), paging, and `?` (help), which it previously omitted
+  alongside the always-abbreviated action keys.
+- `TUI-65` The TUI honors the same output-capability signals the CLI's
+  `render::OutputCtx` already resolves once at startup (CLI-150, CLI-151,
+  CLI-154): `NO_COLOR` (any value) disables every `fg`/`bg` color in the tree
+  rows, selection highlight, modal borders, and status/hint text -- a monochrome
+  style set that keeps BOLD/DIM/REVERSED (video attributes, not colors) so
+  structure and selection stay visible without emitting color codes. A non-UTF-8
+  locale (the same `detect_utf8_locale` check) disables the Unicode geometric
+  markers, disclosure triangles, and highlight symbol in favor of an ASCII
+  fallback (`+`/`o`/`*`/`-`/`?`/`^`/`>` for node kinds, `v`/`>` for disclosure,
+  `>` for the highlight symbol and the dialog action marker), so a non-UTF-8
+  terminal never renders mojibake in place of a box-drawing or geometric glyph.
+- `TUI-67` Text measurement for wrapping and modal sizing (TUI-42) is in display
+  columns (`unicode-width`), not a raw char count, so a line containing a wide
+  CJK/emoji character is not under-counted and does not wrap or size later than
+  it actually would on screen. A truncated item description in a tree row
+  (`truncate`, 50-char budget) carries a trailing `...` marker, so a cut
+  description reads as "more text exists here" rather than looking like the
+  description simply ends there; untruncated text is returned unchanged.
+- `TUI-68` An empty Installed or Available group shows a call-to-action row
+  instead of a bare, unexplained blank list, using the same wording the CLI's
+  plain listing already uses (CLI-187) so the message is consistent across
+  surfaces: `no sources melded; run \`mind meld <owner/repo>\` to add one` when
+  no source is melded at all, or `no items match '<query>'` when a search
+  matched nothing. A group that is empty for a legitimate reason (sources are
+  melded, nothing has been installed yet, and no search is active) gets no
+  synthetic row -- that state needs no explanation.
+- `TUI-69` Esc on a settled search filter (non-empty, not focused -- the user
+  already submitted it with Tab/Enter, TUI-14) is a two-step clear: the first
+  Esc in normal mode arms the clear and shows a status hint instead of wiping
+  the filter immediately, and only a second CONSECUTIVE Esc clears it. Any
+  other intent in between (moving the selection, an action key, and so on)
+  disarms the pending clear, so a later, unrelated Esc is treated as a fresh
+  first press rather than completing an old one. Esc still clears immediately
+  in the two cases where that is the expected, unsurprising behavior: while
+  actively typing in the search box (`search_focused`, bailing out of entry),
+  and when there is no active filter to protect (nothing to arm).
+- `TUI-70` The status/error line's row budget scales with the terminal height
+  rather than a flat 3-row ceiling: a chained `MindError` can run several
+  sentences, and clamping it to 3 wrapped rows regardless of terminal size cut
+  it off with no way to read the rest. A fixed reserve (the search bar, a
+  minimum tree row, a minimum hint row) is always held back, so a very long
+  message still cannot starve the tree pane on a short terminal, but a taller
+  terminal shows correspondingly more of a long message.
 - `TUI-62` The lobes action (TUI-23) shares its implementation with the CLI:
   `ActionKind::LobeAdd` dispatches to `commands::lobe_add`, the same function
   `mind config lobes add <path>` calls, with `force` hardcoded to `false`. So the

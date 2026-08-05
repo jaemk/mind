@@ -21,8 +21,37 @@ use crate::tui::app::{App, FlatNode};
 use crate::tui::tree::TreeNode;
 
 /// The bottom key-hint line. Uses a middot separator and wraps on narrow
-/// terminals (TUI-42).
-const HINTS: &str = " j/k move \u{b7} Enter details \u{b7} Space expand \u{b7} i install \u{b7} d delete \u{b7} s sync \u{b7} u upgrade \u{b7} m meld \u{b7} M unmeld \u{b7} C lobes \u{b7} q quit";
+/// terminals (TUI-42). Covers navigation (including search and expand/collapse
+/// and paging, TUI-64), the mutating actions, and the `?` full keymap overlay.
+// spec: TUI-64
+const HINTS: &str = " j/k move \u{b7} h/l collapse/expand \u{b7} PgUp/PgDn page \u{b7} / search \u{b7} Enter details \u{b7} Space expand \u{b7} i install \u{b7} d delete \u{b7} s sync \u{b7} u upgrade \u{b7} m meld \u{b7} M unmeld \u{b7} C lobes \u{b7} ? help \u{b7} q quit";
+
+/// The full keymap listing shown by the `?` help overlay (TUI-64). Grouped by
+/// category so a user can find a binding without reading `HINTS` (which is
+/// necessarily abbreviated to fit one status-bar row).
+// spec: TUI-64
+const HELP_TEXT: &str = "Navigation\n\
+  j/k, Up/Down    move selection\n\
+  h/l, Left/Right collapse / expand\n\
+  Space           toggle expand\n\
+  Ctrl-u/Ctrl-d   page up/down\n\
+  /               jump to search (Esc clears, Enter/Tab submits)\n\
+  Enter           open details dialog\n\
+\n\
+Actions\n\
+  i               install selected item\n\
+  d               uninstall (forget) selected item\n\
+  s               sync all sources\n\
+  u               upgrade pending items\n\
+  m               meld a source\n\
+  M               unmeld selected source\n\
+  C               agent homes (lobes)\n\
+\n\
+General\n\
+  y / n           confirm / cancel a pending action\n\
+  Esc             cancel / close the active overlay\n\
+  ?               toggle this help\n\
+  q, Ctrl-C x2    quit";
 
 /// Estimate how many terminal rows `text` occupies when wrapped at `width`
 /// columns (greedy word wrap, hard-splitting words longer than the width).
@@ -38,6 +67,10 @@ fn wrapped_rows(text: &str, width: u16) -> u16 {
 }
 
 /// Rows one `\n`-free segment needs at `w` columns. An empty segment is one row.
+/// Word width is measured with `visible_width` (display columns via
+/// `unicode-width`, ANSI-blind), not a raw char count, so a CJK/emoji word does
+/// not under-count and wrap later than it actually would on screen (TUI-67).
+// spec: TUI-67
 fn line_rows(line: &str, w: usize) -> u16 {
     let mut rows: u16 = 1;
     let mut col: usize = 0;
@@ -53,7 +86,7 @@ fn line_rows(line: &str, w: usize) -> u16 {
         }
     };
     for word in line.split(' ') {
-        let wl = word.chars().count();
+        let wl = crate::render::visible_width(word);
         if col == 0 {
             place(wl, &mut rows, &mut col);
         } else if col + 1 + wl <= w {
@@ -65,6 +98,24 @@ fn line_rows(line: &str, w: usize) -> u16 {
         }
     }
     rows
+}
+
+/// Rows the status/error line gets (TUI-70). Previously clamped to a flat
+/// maximum of 3 rows regardless of terminal size, so a long error (a chained
+/// `MindError` can run several sentences) was always cut off at 3 lines with
+/// no way to read the rest -- the status Paragraph wraps but the layout slot
+/// never grew past 3. Instead the cap scales with the terminal height, so a
+/// taller terminal shows more of a long message; a fixed reserve (search bar,
+/// a minimum tree row, and a minimum hint row) is always held back so a very
+/// long message cannot push the tree pane to zero height on a short terminal.
+// spec: TUI-70
+fn status_height(status_text: &str, width: u16, term_height: u16) -> u16 {
+    if status_text.is_empty() {
+        return 1;
+    }
+    const RESERVED: u16 = 3 + 1 + 1; // search bar + min tree row + min hint row
+    let cap = term_height.saturating_sub(RESERVED).max(3);
+    wrapped_rows(status_text, width).clamp(1, cap)
 }
 
 /// Clamp a modal width to the terminal: at least `min` (for readability) but
@@ -110,11 +161,7 @@ fn draw_frame(frame: &mut Frame, app: &App) {
     // The status line and the hint line grow to as many rows as their text needs
     // at this width (bounded), so neither is truncated on a narrow terminal.
     let status_text = status_text(app);
-    let status_h = if status_text.is_empty() {
-        1
-    } else {
-        wrapped_rows(&status_text, size.width).clamp(1, 3)
-    };
+    let status_h = status_height(&status_text, size.width, size.height);
     let hint_h = wrapped_rows(HINTS, size.width).clamp(1, 3);
 
     // Layout: search bar at top, main tree in middle, status + hints at bottom.
@@ -165,6 +212,31 @@ fn draw_frame(frame: &mut Frame, app: &App) {
     if app.namespace_input_active {
         draw_namespace_input(frame, app, size);
     }
+
+    // The `?` help overlay is drawn last so it sits on top of everything else
+    // (TUI-64); mod.rs's handle_key intercepts every key while it is open so
+    // no other overlay is reachable at the same time in practice, but drawing
+    // it last keeps the invariant even if that ever changes.
+    // spec: TUI-64
+    if app.help_visible {
+        draw_help(frame, size);
+    }
+}
+
+/// Draw the `?` keymap help overlay (TUI-64): every key binding grouped by
+/// category, centered and clamped to the terminal (TUI-42). Any key closes it
+/// (handled in mod.rs's handle_key, not here).
+// spec: TUI-64
+fn draw_help(frame: &mut Frame, area: Rect) {
+    let w = modal_width(60, 40, area.width);
+    let inner_w = w.saturating_sub(2).max(1);
+    let content_h = wrapped_rows(HELP_TEXT, inner_w);
+    let h = content_h
+        .saturating_add(2)
+        .clamp(5.min(area.height.max(1)), area.height.max(1));
+    let inner = overlay(frame, area, "Keymap Help (any key closes)", w, h);
+    let widget = Paragraph::new(HELP_TEXT).wrap(Wrap { trim: false });
+    frame.render_widget(widget, inner);
 }
 
 /// A rounded-border block with a title, the common frame for panes and modals.
@@ -176,17 +248,22 @@ fn titled_block(title: &str) -> Block<'_> {
 }
 
 /// Center a `w x h` overlay inside `area` (clamping to fit), render a
-/// `Clear` to erase what was under it, render a yellow titled border block,
-/// and return the inner `Rect` (the usable content area inside the border).
-/// Used by all four modal draw functions so the centering and Clear logic
-/// live in one place (TUI-42).
+/// `Clear` to erase what was under it, render a titled border block -- yellow
+/// when color is on, unstyled under NO_COLOR (TUI-65) -- and return the inner
+/// `Rect` (the usable content area inside the border). Used by every modal
+/// draw function so the centering and Clear logic live in one place (TUI-42).
 fn overlay(frame: &mut Frame, area: Rect, title: &str, w: u16, h: u16) -> Rect {
     let w = w.min(area.width.max(1));
     let h = h.min(area.height.max(1));
     let x = (area.width.saturating_sub(w)) / 2;
     let y = (area.height.saturating_sub(h)) / 2;
     let modal_area = Rect::new(x, y, w, h);
-    let block = titled_block(title).style(ratatui::style::Style::default().fg(Color::Yellow));
+    let border_style = if crate::render::ctx().color {
+        ratatui::style::Style::default().fg(Color::Yellow)
+    } else {
+        ratatui::style::Style::default()
+    };
+    let block = titled_block(title).style(border_style);
     let inner = block.inner(modal_area);
     frame.render_widget(ratatui::widgets::Clear, modal_area);
     frame.render_widget(block, modal_area);
@@ -199,8 +276,13 @@ fn draw_search_bar(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         "Search (/) to focus"
     };
+    // spec: TUI-65 - no color under NO_COLOR; BOLD still marks focus.
     let style = if app.search_focused {
-        Style::default().fg(Color::Yellow)
+        if crate::render::ctx().color {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default().add_modifier(Modifier::BOLD)
+        }
     } else {
         Style::default()
     };
@@ -211,10 +293,14 @@ fn draw_search_bar(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_tree(frame: &mut Frame, app: &App, area: Rect) {
+    // spec: TUI-65 - read the process-wide output context once per draw so
+    // color/Unicode capability (NO_COLOR, non-UTF-8 locale, --ascii) is honored
+    // consistently across every row.
+    let rc = crate::render::ctx();
     let items: Vec<ListItem> = app
         .visible
         .iter()
-        .map(|node| flat_node_to_list_item(node))
+        .map(|node| flat_node_to_list_item(node, rc))
         .collect();
 
     // Keep the highlighted row within the middle two-thirds of the visible area
@@ -230,65 +316,187 @@ fn draw_tree(frame: &mut Frame, app: &App, area: Rect) {
     state.select(Some(app.selected));
     *state.offset_mut() = offset;
 
+    // spec: TUI-65 - selection uses REVERSED (a video attribute, not a color)
+    // under NO_COLOR so the highlight stays visible without emitting color, and
+    // an ASCII arrow instead of the Unicode highlight symbol under a non-UTF-8
+    // locale.
+    let highlight_style = if rc.color {
+        Style::default()
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().add_modifier(Modifier::REVERSED)
+    };
+    let highlight_symbol = if rc.unicode { "\u{276f} " } else { "> " };
+
     let list = List::new(items)
         .block(titled_block("Items"))
-        .highlight_style(
-            Style::default()
-                .bg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol("\u{276f} "); // heavy right-pointing angle
+        .highlight_style(highlight_style)
+        .highlight_symbol(highlight_symbol);
 
     frame.render_stateful_widget(list, area, &mut state);
 }
 
-fn flat_node_to_list_item(node: &FlatNode) -> ListItem<'_> {
-    let indent = "  ".repeat(node.depth);
-    // Disclosure triangle for expandable rows; two spaces keep leaves aligned.
-    let expand_marker = if node.expandable {
-        if node.expanded {
-            "\u{25be} " // down-pointing triangle
-        } else {
-            "\u{25b8} " // right-pointing triangle
+/// Disclosure triangle for an expandable row (Unicode) or its ASCII fallback
+/// (TUI-65, M12): a non-UTF-8 locale must not draw a triangle glyph that would
+/// come out as mojibake. Two spaces keep non-expandable leaves aligned.
+fn expand_marker(expandable: bool, expanded: bool, unicode: bool) -> &'static str {
+    if !expandable {
+        return "  ";
+    }
+    match (expanded, unicode) {
+        (true, true) => "\u{25be} ",  // down-pointing triangle
+        (false, true) => "\u{25b8} ", // right-pointing triangle
+        (true, false) => "v ",
+        (false, false) => "> ",
+    }
+}
+
+/// A marker per node kind: filled = present/installed, hollow = available;
+/// group headers carry no marker (the bold label leads). ASCII fallback under
+/// a non-UTF-8 locale (TUI-65, M12).
+fn node_icon(node: &TreeNode, unicode: bool) -> &'static str {
+    if unicode {
+        match node {
+            TreeNode::InstalledGroup | TreeNode::AvailableGroup | TreeNode::UnmanagedGroup => "",
+            TreeNode::Source(_) => "\u{25c6} ", // filled diamond
+            TreeNode::KindBucket { .. } => "\u{25aa} ", // small square
+            TreeNode::InstalledItem(_) => "\u{25cf} ", // filled circle
+            TreeNode::AvailableItem(_) => "\u{25cb} ", // hollow circle
+            TreeNode::UnmanagedItem(_) => "\u{25cb} ", // hollow circle (not mind-managed)
+            TreeNode::SuggestedSource(_) => "\u{25c7} ", // hollow diamond
+            // spec: TUI-50 - dependency child nodes under an expanded item.
+            TreeNode::DepChild(dep) if dep.is_cycle => "\u{21ba} ", // cycle arrow
+            TreeNode::DepChild(_) => "\u{21b3} ",                   // dep arrow
+            // spec: TUI-68 - a call-to-action row carries no marker.
+            TreeNode::EmptyState(_) => "",
         }
     } else {
-        "  "
-    };
+        match node {
+            TreeNode::InstalledGroup | TreeNode::AvailableGroup | TreeNode::UnmanagedGroup => "",
+            TreeNode::Source(_) => "* ",
+            TreeNode::KindBucket { .. } => "- ",
+            TreeNode::InstalledItem(_) => "+ ",
+            TreeNode::AvailableItem(_) => "o ",
+            TreeNode::UnmanagedItem(_) => "o ",
+            TreeNode::SuggestedSource(_) => "? ",
+            TreeNode::DepChild(dep) if dep.is_cycle => "^ ",
+            TreeNode::DepChild(_) => "> ",
+            TreeNode::EmptyState(_) => "",
+        }
+    }
+}
 
-    // A geometric marker per node kind: filled = present/installed, hollow =
-    // available; group headers carry no marker (the bold label leads).
-    let icon = match &node.node {
-        TreeNode::InstalledGroup | TreeNode::AvailableGroup | TreeNode::UnmanagedGroup => "",
-        TreeNode::Source(_) => "\u{25c6} ", // filled diamond
-        TreeNode::KindBucket { .. } => "\u{25aa} ", // small square
-        TreeNode::InstalledItem(_) => "\u{25cf} ", // filled circle
-        TreeNode::AvailableItem(_) => "\u{25cb} ", // hollow circle
-        TreeNode::UnmanagedItem(_) => "\u{25cb} ", // hollow circle (not mind-managed)
-        TreeNode::SuggestedSource(_) => "\u{25c7} ", // hollow diamond
-        // spec: TUI-50 - dependency child nodes shown under an expanded item.
-        TreeNode::DepChild(dep) if dep.is_cycle => "\u{21ba} ", // cycle arrow
-        TreeNode::DepChild(_) => "\u{21b3} ",                   // dep arrow
-    };
-
-    let style = match &node.node {
+/// Row style per node kind. Under NO_COLOR (`color == false`) every `fg` is
+/// dropped -- only BOLD/DIM survive, since those are video attributes a
+/// monochrome terminal still renders, not color (TUI-65, M12).
+fn node_style(node: &TreeNode, color: bool) -> Style {
+    match node {
         TreeNode::InstalledGroup | TreeNode::AvailableGroup | TreeNode::UnmanagedGroup => {
             Style::default().add_modifier(Modifier::BOLD)
         }
-        TreeNode::InstalledItem(_) => Style::default().fg(Color::Green),
+        TreeNode::InstalledItem(_) => {
+            if color {
+                Style::default().fg(Color::Green)
+            } else {
+                Style::default()
+            }
+        }
         TreeNode::AvailableItem(_) => Style::default(),
-        TreeNode::UnmanagedItem(_) => Style::default().fg(Color::Yellow),
-        TreeNode::Source(_) => Style::default().fg(Color::Cyan),
-        TreeNode::KindBucket { .. } => Style::default().fg(Color::Blue),
-        TreeNode::SuggestedSource(_) => Style::default().fg(Color::Magenta),
+        TreeNode::UnmanagedItem(_) => {
+            if color {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default()
+            }
+        }
+        TreeNode::Source(_) => {
+            if color {
+                Style::default().fg(Color::Cyan)
+            } else {
+                Style::default()
+            }
+        }
+        TreeNode::KindBucket { .. } => {
+            if color {
+                Style::default().fg(Color::Blue)
+            } else {
+                Style::default()
+            }
+        }
+        TreeNode::SuggestedSource(_) => {
+            if color {
+                Style::default().fg(Color::Magenta)
+            } else {
+                Style::default()
+            }
+        }
         // spec: TUI-50 - dependency children use a dim style to distinguish
-        // them from canonical item lines in the same view.
-        TreeNode::DepChild(dep) if dep.is_cycle => Style::default()
-            .fg(Color::DarkGray)
-            .add_modifier(Modifier::DIM),
-        TreeNode::DepChild(_) => Style::default().fg(Color::DarkGray),
-    };
+        // them from canonical item lines in the same view; DIM survives
+        // NO_COLOR (it is a video attribute, not a color).
+        TreeNode::DepChild(dep) if dep.is_cycle => {
+            let s = Style::default().add_modifier(Modifier::DIM);
+            if color { s.fg(Color::DarkGray) } else { s }
+        }
+        TreeNode::DepChild(_) => {
+            if color {
+                Style::default().fg(Color::DarkGray)
+            } else {
+                Style::default()
+            }
+        }
+        // spec: TUI-68 - a call-to-action row is dim/secondary, like a hint.
+        TreeNode::EmptyState(_) => Style::default().add_modifier(Modifier::DIM),
+    }
+}
 
-    let label = format!("{indent}{expand_marker}{icon}{}", node.label);
+/// A selection/highlight style: colored reverse-video-ish bg+bold when color
+/// is on, plain REVERSED (a video attribute, not a color) under NO_COLOR
+/// (TUI-65). Shared by the lobes modal list and the details dialog action
+/// list, which both highlight the selected row the same way as the main tree.
+fn selection_style(color: bool) -> Style {
+    if color {
+        Style::default()
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().add_modifier(Modifier::REVERSED)
+    }
+}
+
+/// A dim/secondary text style (hints, disabled-looking rows): DarkGray when
+/// color is on, unstyled under NO_COLOR (TUI-65).
+fn dim_style(color: bool) -> Style {
+    if color {
+        Style::default().fg(Color::DarkGray)
+    } else {
+        Style::default()
+    }
+}
+
+/// The out-of-date drift marker (TUI-63, mirrors the CLI's CLI-155 `^`/`↑`
+/// stale glyph) for an installed row whose `upgrade` would act on it. `None`
+/// when the node is not a stale InstalledItem.
+fn stale_suffix(node: &TreeNode, unicode: bool) -> Option<&'static str> {
+    match node {
+        TreeNode::InstalledItem(info) if info.stale => {
+            Some(if unicode { " \u{2191}" } else { " ^" })
+        }
+        _ => None,
+    }
+}
+
+fn flat_node_to_list_item(node: &FlatNode, rc: crate::render::OutputCtx) -> ListItem<'_> {
+    let indent = "  ".repeat(node.depth);
+    let expand_marker = expand_marker(node.expandable, node.expanded, rc.unicode);
+    let icon = node_icon(&node.node, rc.unicode);
+    let style = node_style(&node.node, rc.color);
+
+    let mut label = format!("{indent}{expand_marker}{icon}{}", node.label);
+    // spec: TUI-63 - append the out-of-date marker for a stale installed item.
+    if let Some(suffix) = stale_suffix(&node.node, rc.unicode) {
+        label.push_str(suffix);
+    }
     ListItem::new(Line::from(vec![Span::styled(label, style)]))
 }
 
@@ -304,16 +512,32 @@ fn status_text(app: &App) -> String {
 }
 
 fn draw_status(frame: &mut Frame, text: &str, is_error: bool, area: Rect) {
-    let color = if is_error { Color::Red } else { Color::Green };
+    // spec: TUI-65 - status/error text drops color under NO_COLOR; an error
+    // still stands out via BOLD (a video attribute, not a color).
+    let rc = crate::render::ctx();
+    let style = if rc.color {
+        let color = if is_error { Color::Red } else { Color::Green };
+        Style::default().fg(color)
+    } else if is_error {
+        Style::default().add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
     let widget = Paragraph::new(text.to_string())
-        .style(Style::default().fg(color))
+        .style(style)
         .wrap(Wrap { trim: false });
     frame.render_widget(widget, area);
 }
 
 fn draw_hints(frame: &mut Frame, area: Rect) {
+    // spec: TUI-65 - no color under NO_COLOR.
+    let style = if crate::render::ctx().color {
+        Style::default().fg(Color::DarkGray)
+    } else {
+        Style::default()
+    };
     let widget = Paragraph::new(HINTS)
-        .style(Style::default().fg(Color::DarkGray))
+        .style(style)
         .wrap(Wrap { trim: false });
     frame.render_widget(widget, area);
 }
@@ -332,6 +556,7 @@ fn draw_spec_input(frame: &mut Frame, app: &App, area: Rect) {
 /// with navigation and `a`/`D` bindings for add/remove (CLI-111..113).
 // spec: TUI-23 CLI-111 CLI-112 CLI-113
 fn draw_lobes_modal(frame: &mut Frame, app: &App, area: Rect) {
+    let rc = crate::render::ctx();
     let w = modal_width(area.width * 2 / 3, 50, area.width);
     let h = (app.lobes.len() as u16 + 8)
         .min(area.height.saturating_sub(4).max(1))
@@ -342,7 +567,7 @@ fn draw_lobes_modal(frame: &mut Frame, app: &App, area: Rect) {
     let items: Vec<ListItem> = if app.lobes.is_empty() {
         vec![ListItem::new(Line::from(vec![Span::styled(
             "  (none configured - using default)",
-            Style::default().fg(Color::DarkGray),
+            dim_style(rc.color),
         )]))]
     } else {
         app.lobes
@@ -350,11 +575,11 @@ fn draw_lobes_modal(frame: &mut Frame, app: &App, area: Rect) {
             .enumerate()
             .map(|(i, lobe)| {
                 let style = if i == app.lobes_selected {
-                    Style::default()
-                        .bg(Color::DarkGray)
-                        .add_modifier(Modifier::BOLD)
-                } else {
+                    selection_style(rc.color)
+                } else if rc.color {
                     Style::default().fg(Color::Cyan)
+                } else {
+                    Style::default()
                 };
                 ListItem::new(Line::from(vec![Span::styled(format!("  {lobe}"), style)]))
             })
@@ -371,15 +596,11 @@ fn draw_lobes_modal(frame: &mut Frame, app: &App, area: Rect) {
         .constraints([Constraint::Min(list_h), Constraint::Length(hint_h)])
         .split(inner);
 
-    let list = List::new(items).highlight_style(
-        Style::default()
-            .bg(Color::DarkGray)
-            .add_modifier(Modifier::BOLD),
-    );
+    let list = List::new(items).highlight_style(selection_style(rc.color));
     frame.render_widget(list, splits[0]);
 
     let hint = Paragraph::new(hint_line)
-        .style(Style::default().fg(Color::DarkGray))
+        .style(dim_style(rc.color))
         .wrap(Wrap { trim: false });
     frame.render_widget(hint, splits[1]);
 }
@@ -389,6 +610,7 @@ fn draw_lobes_modal(frame: &mut Frame, app: &App, area: Rect) {
 /// list, and a key hint. Centered and clamped to the terminal (TUI-42).
 // spec: TUI-26
 fn draw_dialog(frame: &mut Frame, dialog: &crate::tui::app::Dialog, area: Rect) {
+    let rc = crate::render::ctx();
     let w = modal_width(area.width * 2 / 3, 40, area.width);
     let detail_h = dialog.detail.len() as u16;
     let actions_h = (dialog.actions.len() as u16).max(1);
@@ -411,25 +633,30 @@ fn draw_dialog(frame: &mut Frame, dialog: &crate::tui::app::Dialog, area: Rect) 
         ])
         .split(inner);
 
+    let detail_style = if rc.color {
+        Style::default().fg(Color::Gray)
+    } else {
+        Style::default()
+    };
     let detail = Paragraph::new(dialog.detail.join("\n"))
-        .style(Style::default().fg(Color::Gray))
+        .style(detail_style)
         .wrap(Wrap { trim: false });
     frame.render_widget(detail, splits[0]);
 
+    // spec: TUI-65 - the marker glyph respects the unicode capability.
+    let marker_glyph = if rc.unicode { "\u{276f} " } else { "> " };
     let items: Vec<ListItem> = dialog
         .actions
         .iter()
         .enumerate()
         .map(|(i, a)| {
             let marker = if i == dialog.selected {
-                "\u{276f} "
+                marker_glyph
             } else {
                 "  "
             };
             let style = if i == dialog.selected {
-                Style::default()
-                    .bg(Color::DarkGray)
-                    .add_modifier(Modifier::BOLD)
+                selection_style(rc.color)
             } else {
                 Style::default()
             };
@@ -442,7 +669,7 @@ fn draw_dialog(frame: &mut Frame, dialog: &crate::tui::app::Dialog, area: Rect) 
     frame.render_widget(List::new(items), splits[2]);
 
     let hint = Paragraph::new("  [j/k] move   [Enter/y] run   [Esc/n] close")
-        .style(Style::default().fg(Color::DarkGray))
+        .style(dim_style(rc.color))
         .wrap(Wrap { trim: false });
     frame.render_widget(hint, splits[3]);
 }
@@ -519,8 +746,14 @@ fn draw_modal(frame: &mut Frame, app: &App, area: Rect) {
 
     // Center a dialog sized to the content. Width grows to fit the widest line
     // (tree rows can be long), bounded by the terminal; height to the wrapped
-    // line count, also bounded.
-    let content_w = text.lines().map(|l| l.chars().count()).max().unwrap_or(0) as u16;
+    // line count, also bounded. Measured in display columns (TUI-67), not a
+    // raw char count, so a CJK/emoji-heavy line still gets a wide-enough modal.
+    // spec: TUI-67
+    let content_w = text
+        .lines()
+        .map(crate::render::visible_width)
+        .max()
+        .unwrap_or(0) as u16;
     let w = (content_w + 4)
         .max(area.width / 2)
         .max(40)
@@ -538,8 +771,206 @@ fn draw_modal(frame: &mut Frame, app: &App, area: Rect) {
 
 #[cfg(test)]
 mod tests {
-    use super::{confirm_modal_text, modal_width, scroll_offset, wrapped_rows};
+    use super::{
+        HELP_TEXT, HINTS, confirm_modal_text, dim_style, expand_marker, modal_width, node_icon,
+        node_style, scroll_offset, selection_style, stale_suffix, status_height, wrapped_rows,
+    };
     use crate::tui::app::{ActionKind, PendingAction};
+    use crate::tui::tree::{InstalledInfo, SourceInfo, TreeNode};
+    use ratatui::style::Modifier;
+
+    fn installed_node(stale: bool) -> TreeNode {
+        TreeNode::InstalledItem(InstalledInfo {
+            key: "skill:review".to_string(),
+            name: "review".to_string(),
+            source: "local/agents".to_string(),
+            kind: crate::error::ItemKind::Skill,
+            commit: "abc12345".to_string(),
+            description: None,
+            deps: vec![],
+            stale,
+        })
+    }
+
+    // ==========================================================================
+    // TUI-65: NO_COLOR / non-UTF-8 locale (M12)
+    // ==========================================================================
+
+    #[test]
+    fn expand_marker_ascii_fallback_has_no_unicode() {
+        // spec: TUI-65 - under a non-UTF-8 locale (unicode=false) the disclosure
+        // triangle must not draw a Unicode glyph that would come out as mojibake.
+        for expanded in [true, false] {
+            let m = expand_marker(true, expanded, false);
+            assert!(
+                m.is_ascii(),
+                "ASCII-mode expand marker must be pure ASCII: {m:?}"
+            );
+        }
+        // Non-expandable stays the same two-space filler in both modes.
+        assert_eq!(expand_marker(false, false, true), "  ");
+        assert_eq!(expand_marker(false, false, false), "  ");
+    }
+
+    #[test]
+    fn expand_marker_unicode_mode_uses_triangles() {
+        // spec: TUI-65
+        assert_eq!(expand_marker(true, true, true), "\u{25be} ");
+        assert_eq!(expand_marker(true, false, true), "\u{25b8} ");
+    }
+
+    #[test]
+    fn node_icon_ascii_fallback_has_no_unicode() {
+        // spec: TUI-65 - every node kind's ASCII icon must be pure ASCII.
+        let node = installed_node(false);
+        let icon = node_icon(&node, false);
+        assert!(
+            icon.is_ascii(),
+            "ASCII-mode icon must be pure ASCII: {icon:?}"
+        );
+        assert_eq!(icon, "+ ");
+    }
+
+    #[test]
+    fn node_icon_unicode_mode_uses_geometric_marker() {
+        // spec: TUI-65
+        let node = installed_node(false);
+        assert_eq!(node_icon(&node, true), "\u{25cf} ");
+    }
+
+    #[test]
+    fn node_style_drops_fg_color_under_no_color() {
+        // spec: TUI-65 - NO_COLOR (color=false) must not set any `fg`; ratatui's
+        // `Style::default()` has `fg: None`, so this is directly observable.
+        let installed = installed_node(false);
+        let src = TreeNode::Source(SourceInfo {
+            name: "local/agents".to_string(),
+            installed: true,
+        });
+        assert_eq!(
+            node_style(&installed, false).fg,
+            None,
+            "installed item must carry no fg color under NO_COLOR"
+        );
+        assert_eq!(
+            node_style(&src, false).fg,
+            None,
+            "source node must carry no fg color under NO_COLOR"
+        );
+        // With color on, the installed row IS colored (green), proving the
+        // false-branch above is a real gate and not just an always-None style.
+        assert!(
+            node_style(&installed, true).fg.is_some(),
+            "installed item must carry a fg color when color is on"
+        );
+    }
+
+    #[test]
+    fn status_height_empty_text_is_one_row() {
+        // spec: TUI-70
+        assert_eq!(status_height("", 80, 40), 1);
+    }
+
+    #[test]
+    fn status_height_grows_past_three_rows_on_a_tall_terminal() {
+        // spec: TUI-70 - a long error must be able to claim more than the old
+        // flat 3-row ceiling when the terminal is tall enough to show it; a
+        // regression to the old `clamp(1, 3)` would cap this at 3 regardless
+        // of the 40-row terminal.
+        let long_error = "ERROR: ".to_string() + &"word ".repeat(60); // wraps to many rows at width 20
+        let h = status_height(&long_error, 20, 40);
+        assert!(
+            h > 3,
+            "a long error on a tall terminal must get more than 3 rows, got {h}"
+        );
+    }
+
+    #[test]
+    fn status_height_never_starves_the_tree_pane_on_a_short_terminal() {
+        // spec: TUI-70 - even an extremely long message must leave the fixed
+        // reserve (search bar + minimum tree + minimum hint row) on a short
+        // terminal, so the status pane cannot claim the whole screen.
+        let long_error = "x ".repeat(500);
+        let h = status_height(&long_error, 10, 12);
+        assert!(
+            h <= 12,
+            "status height must never exceed the terminal height: {h}"
+        );
+        assert!(
+            h < 12 - 3,
+            "some rows must remain for search/tree/hints on a 12-row terminal: {h}"
+        );
+    }
+
+    #[test]
+    fn selection_style_uses_reversed_not_bg_color_under_no_color() {
+        // spec: TUI-65 - the selection highlight must not set a `bg` color under
+        // NO_COLOR, and must instead use the REVERSED modifier so the row is
+        // still visually distinguishable on a monochrome terminal.
+        let mono = selection_style(false);
+        assert_eq!(mono.bg, None, "no bg color under NO_COLOR: {mono:?}");
+        assert!(
+            mono.add_modifier.contains(Modifier::REVERSED),
+            "must use REVERSED under NO_COLOR: {mono:?}"
+        );
+        let colored = selection_style(true);
+        assert!(colored.bg.is_some(), "color mode sets a bg: {colored:?}");
+    }
+
+    #[test]
+    fn dim_style_drops_fg_under_no_color() {
+        // spec: TUI-65
+        assert_eq!(dim_style(false).fg, None);
+        assert!(dim_style(true).fg.is_some());
+    }
+
+    #[test]
+    fn stale_suffix_ascii_and_unicode_glyphs() {
+        // spec: TUI-63 TUI-65 - a stale installed row gets a drift marker whose
+        // glyph respects the unicode capability; a non-stale row gets none.
+        assert_eq!(stale_suffix(&installed_node(true), true), Some(" \u{2191}"));
+        assert_eq!(stale_suffix(&installed_node(true), false), Some(" ^"));
+        assert_eq!(stale_suffix(&installed_node(false), true), None);
+        assert_eq!(stale_suffix(&installed_node(false), false), None);
+    }
+
+    #[test]
+    fn hints_line_covers_search_collapse_paging_and_help() {
+        // spec: TUI-64 - M11 discoverability: the bottom hint line must mention
+        // search, h/l collapse/expand, paging, and the `?` help key, not just the
+        // subset that existed before (which omitted all four).
+        assert!(
+            HINTS.contains("/ search"),
+            "HINTS must mention search: {HINTS:?}"
+        );
+        assert!(
+            HINTS.contains("h/l"),
+            "HINTS must mention h/l collapse/expand: {HINTS:?}"
+        );
+        assert!(
+            HINTS.to_lowercase().contains("page"),
+            "HINTS must mention paging: {HINTS:?}"
+        );
+        assert!(
+            HINTS.contains("? help"),
+            "HINTS must mention the ? help key: {HINTS:?}"
+        );
+    }
+
+    #[test]
+    fn help_text_lists_every_normal_mode_key() {
+        // spec: TUI-64 - the help overlay must document every key that HINTS
+        // only abbreviates: navigation, every mutating action, and confirm/cancel.
+        for key in [
+            "j/k", "h/l", "Space", "Enter", "i ", "d ", "s ", "u ", "m ", "M ", "C ", "y / n",
+            "Esc", "q,",
+        ] {
+            assert!(
+                HELP_TEXT.contains(key),
+                "help overlay must mention {key:?}: {HELP_TEXT:?}"
+            );
+        }
+    }
 
     #[test]
     fn scroll_offset_keeps_selection_in_middle_band() {
@@ -667,6 +1098,22 @@ mod tests {
         // Degenerate width never panics and is at least one row.
         assert!(wrapped_rows("anything", 0) >= 1);
         assert_eq!(wrapped_rows("", 10), 1);
+    }
+
+    #[test]
+    fn wrapped_rows_measures_wide_chars_by_display_width_not_char_count() {
+        // spec: TUI-67 - four CJK chars occupy 8 display columns (2 each), not 4;
+        // at a width of 4 a char-count-based estimate would (wrongly) fit them
+        // on one row, while a display-width-aware one correctly wraps to 2.
+        let cjk = "\u{4e2d}\u{6587}\u{5b57}\u{7b26}"; // 4 chars, 8 columns
+        assert_eq!(
+            wrapped_rows(cjk, 4),
+            2,
+            "4 wide chars (8 columns) at width 4 must wrap to 2 rows"
+        );
+        // The equivalent 8-column-wide ASCII string wraps the same way, proving
+        // the two are measured on a common (display-width) basis.
+        assert_eq!(wrapped_rows("abcdefgh", 4), 2);
     }
 
     #[test]

@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use crate::catalog;
 use crate::config::Config;
 use crate::error::{ItemKind, Result};
+use crate::hash::hash_path;
 use crate::lock;
 use crate::manifest::Manifest;
 use crate::paths::Paths;
@@ -59,6 +60,14 @@ pub struct SnapshotInstalled {
     /// Direct dependency keys (`kind:name`) for TUI-50 dependency subtree.
     // spec: TUI-50
     pub deps: Vec<String>,
+    /// Whether `upgrade` would act on this item: its source content hash has
+    /// drifted from the recorded manifest hash, or its effective name has
+    /// changed (a rename, e.g. a prefix change). Mirrors the CLI-75 outdated
+    /// check (commands.rs, three call sites) at the TUI snapshot boundary so
+    /// the browse tree and item dialog can show the same drift a user would
+    /// see from `recall`, without re-deriving the comparison at draw time.
+    // spec: TUI-63
+    pub stale: bool,
 }
 
 /// One available (catalog) item in the snapshot.
@@ -146,16 +155,27 @@ fn load_inner(paths: &Paths) -> Result<Snapshot> {
     // spec: TUI-60 - all source-derived strings are sanitized through strip_ansi
     // at the model boundary to prevent terminal injection from catalog-controlled
     // content (consistent with the CLI's DSC-69 / MKT-9 call sites).
+    // spec: TUI-63 - out-of-date detection mirrors the CLI's CLI-75 check:
+    // hash drift (the source content changed) or a rename (effective name
+    // no longer matches the recorded manifest name), computed against the
+    // matching catalog item.
     let installed: Vec<SnapshotInstalled> = manifest
         .items
         .values()
         .map(|it| {
-            // Find the matching catalog item to get direct deps.
-            let deps = catalog_items
+            // Find the matching catalog item to get direct deps + drift.
+            let matched = catalog_items
                 .iter()
-                .find(|ci| ci.source == it.source && ci.kind == it.kind && ci.name == it.bare_name)
+                .find(|ci| ci.source == it.source && ci.kind == it.kind && ci.name == it.bare_name);
+            let deps = matched
                 .map(|ci| crate::deps::direct_dependency_keys(ci, &catalog_items, &read_item_text))
                 .unwrap_or_default();
+            let stale = matched.is_some_and(|ci| {
+                let cur = hash_path(&ci.path).ok();
+                let hash_drift = cur.as_deref().is_none_or(|h| h != it.hash);
+                let rename_drift = ci.effective_name() != it.name;
+                hash_drift || rename_drift
+            });
             SnapshotInstalled {
                 key: it.key(),
                 name: strip_ansi(&it.name),
@@ -164,6 +184,7 @@ fn load_inner(paths: &Paths) -> Result<Snapshot> {
                 commit: it.commit.clone(),
                 description: it.description.as_deref().map(strip_ansi),
                 deps,
+                stale,
             }
         })
         .collect();
@@ -399,6 +420,97 @@ mod tests {
             desc
         );
         assert_eq!(item.kind, ItemKind::Skill, "kind field must be preserved");
+
+        cleanup(&base);
+    }
+
+    /// M2/TUI-63: `SnapshotInstalled.stale` mirrors the CLI's CLI-75 outdated
+    /// check. A local-path source is read live from its working tree (no
+    /// separate clone step), so editing the item file in place changes its
+    /// content hash while the recorded commit stays put -- exactly the CLI-75
+    /// scenario (`recall_marks_item_outdated_after_in_place_content_edit`).
+    #[test]
+    fn snapshot_installed_marks_stale_after_in_place_content_edit() {
+        // spec: TUI-63
+        use std::process::Command;
+
+        let (paths, base) = temp_paths();
+        crate::paths::mkdir_p(&paths.mind_home).unwrap();
+        crate::config::Config {
+            lobes: vec![crate::config::LobeEntry::bare(
+                paths.claude_home.to_str().unwrap(),
+            )],
+            ..Default::default()
+        }
+        .save(&paths)
+        .unwrap();
+
+        let src = base.join("stale-source");
+        std::fs::create_dir_all(src.join("skills/review")).unwrap();
+        std::fs::write(
+            src.join("skills/review/SKILL.md"),
+            "---\ndescription: review skill\n---\n# review\noriginal content\n",
+        )
+        .unwrap();
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(&src)
+                .output()
+                .expect("git");
+        };
+        git(&["-c", "init.defaultBranch=main", "init", "-q"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "initial"]);
+
+        crate::commands::meld(
+            &paths,
+            src.to_str().unwrap(),
+            None,
+            vec![],
+            vec![],
+            false,
+            crate::commands::PinRequest::None,
+            None,
+            false,
+        )
+        .expect("meld");
+        crate::commands::learn(
+            &paths,
+            "skill:review",
+            false,
+            crate::commands::InstallFlow {
+                yes: true,
+                clobber: crate::commands::Clobber::Force,
+                dangerously_skip: true,
+                dangerously_skip_build: true,
+            },
+        )
+        .expect("learn");
+
+        let snap = load(&paths).expect("load should succeed");
+        assert_eq!(snap.installed.len(), 1, "one installed item");
+        assert!(
+            !snap.installed[0].stale,
+            "a freshly installed item must not be marked stale"
+        );
+
+        // Edit the item source file in place without committing (mirrors the
+        // CLI-75 test): content hash changes, commit does not.
+        std::fs::write(
+            src.join("skills/review/SKILL.md"),
+            "---\ndescription: review skill\n---\n# review\nmodified content\n",
+        )
+        .unwrap();
+
+        let snap2 = load(&paths).expect("load should succeed after edit");
+        assert_eq!(snap2.installed.len(), 1, "still one installed item");
+        assert!(
+            snap2.installed[0].stale,
+            "an in-place content edit must mark the item stale (TUI-63)"
+        );
 
         cleanup(&base);
     }

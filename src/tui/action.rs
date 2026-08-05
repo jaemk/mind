@@ -126,8 +126,10 @@ fn dispatch(paths: &Paths, kind: ActionKind) -> Result<()> {
         ActionKind::Unmeld { name, forget } => {
             commands::unmeld(paths, &name, !forget, true, false, None)?
         }
-        // spec: TUI-22
-        ActionKind::Sync => commands::sync(paths, false, false, false)?,
+        // spec: TUI-22 -- `then_upgrade: false` here, so the new `yes` param
+        // (LIFE-49/M1) is inert; passed `false` to match the plain `mind sync`
+        // (no --upgrade) this action mirrors.
+        ActionKind::Sync => commands::sync(paths, false, false, false, false)?,
         // spec: TUI-22 - `yes: true` so it applies without prompting on stdin.
         ActionKind::Upgrade => commands::upgrade(paths, true, None, false, false)?,
         // spec: TUI-23 CLI-112
@@ -146,15 +148,23 @@ fn dispatch(paths: &Paths, kind: ActionKind) -> Result<()> {
     Ok(())
 }
 
-/// The last non-empty line of captured output, trimmed, for the status bar.
+/// Reduce the captured verb output to a one-line status-bar summary: the last
+/// non-empty line, ANSI-stripped. The captured text is whatever the verb's own
+/// `println!`s wrote (colored when the CLI's own color detection says so, and
+/// carrying whatever a source's content contributed, e.g. a name/description
+/// echoed back in the summary), so it can contain raw SGR escapes; the TUI's
+/// status bar renders it as plain text, not through a terminal that
+/// interprets ANSI, so leftover escapes would show as literal garbage
+/// characters instead of color.
+// spec: TUI-60
 fn summary_line(captured: &str) -> String {
-    captured
+    let line = captured
         .lines()
         .rev()
         .map(str::trim)
         .find(|l| !l.is_empty())
-        .unwrap_or_default()
-        .to_string()
+        .unwrap_or_default();
+    crate::sanitize::strip_ansi(line)
 }
 
 /// Open the stdout-capture file at `path` (TUI-61): `create_new` refuses to
@@ -402,6 +412,23 @@ mod tests {
         assert_eq!(summary_line("first\nlast\n\n"), "last");
         assert_eq!(summary_line("   \n  \n"), "");
         assert_eq!(summary_line(""), "");
+    }
+
+    #[test]
+    fn summary_line_strips_ansi_from_captured_output() {
+        // spec: TUI-60 - the status bar is not a terminal that interprets ANSI,
+        // so raw SGR escapes left in the captured verb output (which can carry
+        // color codes the CLI's own detection emitted, or source-controlled
+        // text) must be stripped rather than shown as literal garbage.
+        use super::summary_line;
+        assert_eq!(
+            summary_line("\x1b[32m+ installed skill:review\x1b[0m\n"),
+            "+ installed skill:review"
+        );
+        assert!(
+            !summary_line("\x1b[33mup to date\x1b[0m\n").contains('\x1b'),
+            "no raw ESC byte must survive summary_line"
+        );
     }
 
     #[test]

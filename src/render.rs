@@ -260,8 +260,13 @@ impl OutputCtx {
 }
 
 /// Visible (display) width of `s`, ignoring ANSI SGR escape sequences like
-/// `"\x1b[32m"` ... `"\x1b[0m"`. Counts Unicode scalar values (chars), not bytes.
+/// `"\x1b[32m"` ... `"\x1b[0m"`. Uses `unicode-width` for each surviving char's
+/// terminal column width (0 for combining marks, 1 for most, 2 for wide
+/// CJK/emoji), not a raw char count, so a row containing wide characters
+/// aligns with plain-ASCII rows instead of coming up short by however many
+/// double-width characters it has.
 pub fn visible_width(s: &str) -> usize {
+    use unicode_width::UnicodeWidthChar;
     let mut count = 0usize;
     let mut chars = s.chars();
     while let Some(c) = chars.next() {
@@ -278,7 +283,7 @@ pub fn visible_width(s: &str) -> usize {
             // If the char after ESC is not '[', we consumed just ESC and one unknown
             // char; we don't count either but we already advanced past them.
         } else {
-            count += 1;
+            count += c.width().unwrap_or(0);
         }
     }
     count
@@ -592,6 +597,25 @@ mod tests {
         let s = "\x1b[1mhello\x1b[0m \x1b[31mworld\x1b[0m";
         // "hello world" = 11 chars (including the space).
         assert_eq!(visible_width(s), 11);
+    }
+
+    #[test]
+    fn visible_width_counts_wide_cjk_chars_as_two_columns() {
+        // A CJK character occupies two terminal columns, not one -- unlike a raw
+        // char count (the pre-unicode-width behavior), which would misalign a row
+        // containing CJK/emoji against a plain-ASCII row of the same char count.
+        assert_eq!(
+            visible_width("\u{4e2d}"),
+            2,
+            "one wide CJK char is 2 columns"
+        );
+        assert_eq!(
+            visible_width("\u{4e2d}\u{6587}"),
+            4,
+            "two wide CJK chars are 4 columns"
+        );
+        // Mixed ASCII + wide: 3 narrow (1 each) + 1 wide (2) = 5.
+        assert_eq!(visible_width("ab\u{4e2d}c"), 5);
     }
 
     // ==========================================================================

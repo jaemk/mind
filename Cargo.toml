@@ -38,3 +38,4 @@ crossterm = "0.29"
 libc = "0.2"
 strip-ansi-escapes = "0.2"
 pulldown-cmark = { version = "0.13", default-features = false }
+unicode-width = "0.2"

@@ -42,6 +42,11 @@ pub enum TreeNode {
     /// This is a VIEW of the graph, not the item's canonical line.
     // spec: TUI-50
     DepChild(DepChildInfo),
+    /// A synthetic call-to-action row shown in place of an empty group (no
+    /// sources melded at all, or a search that matched nothing): a leaf with a
+    /// message, not selectable for any action (TUI-68).
+    // spec: TUI-68
+    EmptyState(String),
 }
 
 /// Info for a dependency child node under an expanded item node (TUI-50).
@@ -77,6 +82,11 @@ pub struct InstalledInfo {
     /// Direct dependency keys for TUI-50 dependency subtree expansion.
     // spec: TUI-50
     pub deps: Vec<String>,
+    /// Whether `upgrade` would act on this item (hash drift or rename); mirrors
+    /// the CLI's CLI-75 outdated marker. Drives the drift glyph on the row and
+    /// in the item details dialog (TUI-63).
+    // spec: TUI-63
+    pub stale: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -361,6 +371,7 @@ fn build_installed_group(
                             commit: it.commit.clone(),
                             description: it.description.clone(),
                             deps: it.deps.clone(),
+                            stale: it.stale,
                         }),
                         children: dep_children,
                     }
@@ -388,11 +399,53 @@ fn build_installed_group(
         });
     }
 
+    // spec: TUI-68 - an empty Installed group gets a call-to-action row instead
+    // of a bare, unexplained blank list: the wording matches the CLI's own
+    // (CLI-187 "no sources melded", "no items match") so the message is
+    // consistent whichever surface the user sees it on. A legitimately empty
+    // group (sources melded, nothing installed yet, no active filter) gets no
+    // synthetic row: it is Available, not a broken/misconfigured state.
+    if source_nodes.is_empty()
+        && let Some(msg) = empty_state_message(search, snap.source_names.is_empty())
+    {
+        source_nodes.push(empty_state_node("installed", msg));
+    }
+
     Node {
         id: "group:installed".to_string(),
         label: "Installed".to_string(),
         node: TreeNode::InstalledGroup,
         children: source_nodes,
+    }
+}
+
+/// The call-to-action message for an empty group (TUI-68), or `None` for a
+/// legitimately empty group that needs no explanation (sources melded,
+/// nothing matched by name because there's simply nothing there yet, no
+/// active search). Shared by Installed and Available so the wording -- and
+/// the CLI-187 text it mirrors -- stays in exactly one place.
+fn empty_state_message(search: &str, no_sources_melded: bool) -> Option<String> {
+    if !search.is_empty() {
+        // spec: CLI-187 (commands.rs `no items match '{q}'`)
+        Some(format!("no items match '{search}'"))
+    } else if no_sources_melded {
+        // spec: CLI-187 (commands.rs `no sources melded; run ...`)
+        Some("no sources melded; run `mind meld <owner/repo>` to add one".to_string())
+    } else {
+        None
+    }
+}
+
+/// Build a synthetic call-to-action leaf (TUI-68): non-expandable, carries no
+/// actions (`node_actions` has no arm for it, so it returns none via its
+/// default case), and never collides with a real node id (`empty:<group>` is
+/// not a namespace any item/source/kind id uses).
+fn empty_state_node(group: &str, message: String) -> Node {
+    Node {
+        id: format!("empty:{group}"),
+        label: message.clone(),
+        node: TreeNode::EmptyState(message),
+        children: vec![],
     }
 }
 
@@ -519,6 +572,15 @@ fn build_available_group(
             // No children yet: expanding triggers a preview (handled in event loop).
             children: vec![],
         });
+    }
+
+    // spec: TUI-68 - same call-to-action treatment as Installed, applied after
+    // suggested sources are appended (an empty group means no catalog items AND
+    // no suggestions matched/exist).
+    if source_nodes.is_empty()
+        && let Some(msg) = empty_state_message(search, snap.source_names.is_empty())
+    {
+        source_nodes.push(empty_state_node("available", msg));
     }
 
     Node {
@@ -699,13 +761,29 @@ fn short_commit(s: &str) -> String {
     }
 }
 
-fn truncate(s: &str, max: usize) -> &str {
+/// Truncate `s` to at most `max` chars, appending an ASCII `...` ellipsis when
+/// it was cut (TUI-67): a bare cut with no marker looks like the description
+/// just ends there, rather than signaling more text exists. Untruncated input
+/// is returned unchanged (no ellipsis added when nothing was cut). ASCII, not
+/// the Unicode "..." character: this module builds the tree independent of
+/// any I/O or terminal-capability context (it stays pure and testable without
+/// a Frame), so it cannot consult TUI-65's unicode-capability gate the way
+/// render.rs's own glyphs do -- ASCII is always safe here.
+// spec: TUI-67
+fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
-        s
+        s.to_string()
     } else {
-        // Find the byte offset of the max-th char
-        let idx = s.char_indices().nth(max).map(|(i, _)| i).unwrap_or(s.len());
-        &s[..idx]
+        // Find the byte offset of the max-th char, leaving room for the
+        // ellipsis itself when max is small enough that it would otherwise
+        // dominate the budget.
+        let budget = max.saturating_sub(3).max(1);
+        let idx = s
+            .char_indices()
+            .nth(budget)
+            .map(|(i, _)| i)
+            .unwrap_or(s.len());
+        format!("{}...", &s[..idx])
     }
 }
 
@@ -725,6 +803,7 @@ mod tests {
             commit: "abc12345".to_string(),
             description: Some(format!("{name} description")),
             deps: vec![],
+            stale: false,
         }
     }
 
@@ -763,6 +842,86 @@ mod tests {
     }
 
     #[test]
+    fn empty_state_shows_no_sources_melded_when_registry_is_empty() {
+        // spec: TUI-68 - with no sources melded at all, both empty groups get
+        // the same call-to-action wording the CLI uses (CLI-187).
+        let snap = Snapshot {
+            generation: 1,
+            installed: vec![],
+            available: vec![],
+            unmanaged: vec![],
+            source_names: vec![], // no sources melded
+            suggestions: vec![],
+            lobes: vec![],
+            source_namespaces: std::collections::HashMap::new(),
+        };
+        let nodes = build_tree(&snap, "", None, None, false, false);
+        let flat = flatten_tree(&nodes, &HashSet::new(), &HashSet::new());
+        let cta_count = flat
+            .iter()
+            .filter(|n| matches!(&n.node, TreeNode::EmptyState(_)))
+            .count();
+        assert_eq!(
+            cta_count,
+            2,
+            "both Installed and Available must show the no-sources CTA: {:?}",
+            flat.iter().map(|n| &n.label).collect::<Vec<_>>()
+        );
+        assert!(
+            flat.iter().any(|n| n.label.contains("mind meld")),
+            "the CTA must name the remedy verb: {:?}",
+            flat.iter().map(|n| &n.label).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn empty_state_shows_no_items_match_for_a_failed_search() {
+        // spec: TUI-68 - sources are melded (items exist) but the search
+        // matches nothing: the CTA names the query, distinct from "no sources".
+        let snap = snap_with(
+            vec![make_installed(
+                "skill:review",
+                "review",
+                "src/a",
+                ItemKind::Skill,
+            )],
+            vec![],
+        );
+        let nodes = build_tree(&snap, "zzznomatch", None, None, false, false);
+        let flat = flatten_tree(&nodes, &HashSet::new(), &HashSet::new());
+        assert!(
+            flat.iter()
+                .any(|n| n.label == "no items match 'zzznomatch'"),
+            "a failed search must show the no-items-match CTA: {:?}",
+            flat.iter().map(|n| &n.label).collect::<Vec<_>>()
+        );
+        // Must NOT claim no sources are melded (they are; the search just
+        // matched nothing).
+        assert!(
+            !flat.iter().any(|n| n.label.contains("no sources melded")),
+            "a failed search must not be conflated with the no-sources case: {:?}",
+            flat.iter().map(|n| &n.label).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn empty_state_absent_when_legitimately_empty_with_sources_melded() {
+        // spec: TUI-68 - sources are melded but nothing is installed yet, and
+        // there is no active search: this is a normal, self-explanatory empty
+        // state (not a misconfiguration), so no synthetic CTA row is added.
+        let snap = snap_with(vec![], vec![]); // snap_with seeds source_names non-empty
+        let nodes = build_tree(&snap, "", None, None, false, false);
+        let flat = flatten_tree(&nodes, &HashSet::new(), &HashSet::new());
+        assert!(
+            !flat
+                .iter()
+                .any(|n| matches!(&n.node, TreeNode::EmptyState(_))),
+            "a legitimately empty (but sourced) Installed group must show no CTA: {:?}",
+            flat.iter().map(|n| &n.label).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn tree_has_installed_and_available_groups() {
         // spec: TUI-10
         let snap = snap_with(
@@ -778,6 +937,56 @@ mod tests {
         assert_eq!(nodes.len(), 2);
         assert!(matches!(nodes[0].node, TreeNode::InstalledGroup));
         assert!(matches!(nodes[1].node, TreeNode::AvailableGroup));
+    }
+
+    #[test]
+    fn truncate_appends_ellipsis_only_when_actually_cut() {
+        // spec: TUI-67 - a truncated description must carry a trailing marker
+        // signaling more text exists, not a bare cut that looks like the text
+        // just ends there. Untouched (short) input is returned byte-for-byte.
+        let short = "a short description";
+        assert_eq!(truncate(short, 50), short, "no cut, no ellipsis appended");
+
+        let long = "x".repeat(80);
+        let t = truncate(&long, 50);
+        assert!(
+            t.ends_with("..."),
+            "a cut string must end with the ellipsis marker: {t:?}"
+        );
+        assert!(
+            t.len() < long.len(),
+            "truncated output must be shorter than the input"
+        );
+        // The ellipsis itself must be ASCII (tree.rs has no terminal-capability
+        // context to gate a Unicode glyph on, TUI-65's concern; see truncate's
+        // doc comment).
+        assert!(t.is_ascii(), "ellipsis marker must be ASCII: {t:?}");
+    }
+
+    #[test]
+    fn installed_item_description_in_label_is_truncated_with_ellipsis() {
+        // spec: TUI-67 - end-to-end through build_tree: a long installed-item
+        // description shows up truncated with a trailing ellipsis in the row
+        // label, not silently cut with no indication more text exists.
+        let mut item = make_installed("skill:review", "review", "src/a", ItemKind::Skill);
+        item.description = Some("y".repeat(80));
+        let snap = snap_with(vec![item], vec![]);
+        let nodes = build_tree(&snap, "", None, None, false, false);
+        let flat = flatten_tree(&nodes, &HashSet::new(), &HashSet::new());
+        let row = flat
+            .iter()
+            .find(|n| matches!(&n.node, TreeNode::InstalledItem(i) if i.name == "review"))
+            .expect("the review item row must be present");
+        assert!(
+            row.label.contains("..."),
+            "a long description must be shown truncated with an ellipsis: {:?}",
+            row.label
+        );
+        assert!(
+            !row.label.contains(&"y".repeat(80)),
+            "the full 80-char description must not appear verbatim: {:?}",
+            row.label
+        );
     }
 
     #[test]
@@ -1370,6 +1579,7 @@ mod tests {
                 commit: "abc".to_string(),
                 description: None,
                 deps: vec![],
+                stale: false,
             }),
             children: vec![Node {
                 id: "item-child".to_string(),
@@ -1382,6 +1592,7 @@ mod tests {
                     commit: "abc".to_string(),
                     description: None,
                     deps: vec![],
+                    stale: false,
                 }),
                 children: vec![],
             }],
@@ -1719,6 +1930,7 @@ mod tests {
             commit: "abc12345".to_string(),
             description: None,
             deps: deps.into_iter().map(|s| s.to_string()).collect(),
+            stale: false,
         }
     }
 

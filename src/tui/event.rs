@@ -92,6 +92,9 @@ pub enum Intent {
     NamespaceInputBackspace,
     /// Quit the TUI.
     Quit,
+    /// Toggle the `?` keymap help overlay (TUI-64).
+    // spec: TUI-64
+    ToggleHelp,
     /// No recognized binding.
     None,
 }
@@ -128,6 +131,11 @@ pub fn key_to_intent(key: KeyEvent) -> Intent {
         // Lobe management: `C` opens the lobes modal (TUI-23).
         // spec: TUI-23
         (KeyCode::Char('C'), KeyModifiers::SHIFT) => Intent::ActionLobes,
+        // `?` opens the keymap help overlay (TUI-64). Matched with a wildcard
+        // modifier: terminals commonly report '?' with SHIFT set (it is
+        // Shift+/ on a US layout), so a modifier-specific match would miss it.
+        // spec: TUI-64
+        (KeyCode::Char('?'), _) => Intent::ToggleHelp,
 
         // Confirm / cancel
         (KeyCode::Char('y'), KeyModifiers::NONE) => Intent::ConfirmAction,
@@ -382,6 +390,17 @@ mod tests {
     }
 
     // --- TUI-23: lobe management key bindings ---
+
+    #[test]
+    fn question_mark_maps_to_toggle_help() {
+        // spec: TUI-64 - `?` opens the keymap help overlay, both with and
+        // without the SHIFT modifier a terminal may report for it.
+        assert_eq!(key_to_intent(key(KeyCode::Char('?'))), Intent::ToggleHelp);
+        assert_eq!(
+            key_to_intent(key_mod(KeyCode::Char('?'), KeyModifiers::SHIFT)),
+            Intent::ToggleHelp
+        );
+    }
 
     #[test]
     fn shift_c_maps_to_action_lobes() {

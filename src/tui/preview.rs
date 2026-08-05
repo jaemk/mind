@@ -16,6 +16,7 @@ use crate::error::Result;
 use crate::git;
 use crate::mindfile::MindToml;
 use crate::paths::Paths;
+use crate::sanitize::strip_ansi;
 use crate::source::{Registry, parse_spec};
 
 /// Process-wide counter ensuring each `preview` call gets a unique temp dir,
@@ -115,6 +116,9 @@ pub struct RegistrySuggestion {
 /// Build the union of `[discover].sources` from all melded sources, excluding
 /// any that are already melded, de-duplicated by URL.
 // spec: TUI-31
+// spec: TUI-60 - suggestion fields are source-controlled (a melded source's
+// own `[discover].sources` entries) and are sanitized through strip_ansi
+// before entering the snapshot model, matching the installed/available path.
 #[allow(dead_code)] // called from TUI registry display (TUI-31)
 pub fn suggested_registry(paths: &Paths) -> Result<Vec<RegistrySuggestion>> {
     let registry = Registry::load(paths)?;
@@ -142,10 +146,10 @@ pub fn suggested_registry(paths: &Paths) -> Result<Vec<RegistrySuggestion>> {
             }
             seen_urls.insert(parsed.url.clone());
             suggestions.push(RegistrySuggestion {
-                spec: entry.source.clone(),
-                name: parsed.name.clone(),
-                url: parsed.url.clone(),
-                alias: entry.alias.clone(),
+                spec: strip_ansi(&entry.source),
+                name: strip_ansi(&parsed.name),
+                url: strip_ansi(&parsed.url),
+                alias: entry.alias.as_deref().map(strip_ansi),
             });
         }
     }
@@ -350,6 +354,83 @@ mod tests {
         assert!(
             !still_has,
             "a source that is now melded must be excluded from suggestions (dedup by URL): {suggestions2:?}"
+        );
+
+        cleanup(&base);
+    }
+
+    /// A melded source's `[discover].sources` entry carries source-controlled
+    /// text (the nested source's own `namespace`/`as` alias is a free string,
+    /// never validated the way host/owner/repo identity parts are). B4-TUI /
+    /// TUI-60: it must be sanitized before it reaches `RegistrySuggestion`,
+    /// matching the `Snapshot.installed` sanitize boundary.
+    #[test]
+    fn suggested_registry_strips_ansi_from_alias() {
+        // spec: TUI-60
+        let (base, mind) = temp_base();
+
+        let nested_src = make_source_repo(&base);
+        let super_src = base.join("super-source");
+        std::fs::create_dir_all(&super_src).unwrap();
+        std::fs::write(super_src.join("README.md"), "# super\n").unwrap();
+        // The alias ("as"/"namespace") is a free TOML string: inject an ANSI
+        // color escape via a  TOML unicode-escape so the parsed String
+        // actually contains ESC (0x1B), not literal backslash-u.
+        std::fs::write(
+            super_src.join("mind.toml"),
+            format!(
+                "[source]\ndescription = \"super\"\n\n[discover]\n[[discover.sources]]\nsource = \"{}\"\nas = \"\\u001b[31mevil\\u001b[0m\"\n",
+                nested_src.to_str().unwrap()
+            ),
+        )
+        .unwrap();
+        init_git_repo(&super_src);
+        Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(&super_src)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-qm", "init"])
+            .current_dir(&super_src)
+            .output()
+            .unwrap();
+
+        let paths = Paths {
+            mind_home: mind.clone(),
+            claude_home: base.join("claude"),
+        };
+        let mut super_source_parsed = parse_spec(super_src.to_str().unwrap()).unwrap();
+        super_source_parsed.commit = Some("abc".to_string());
+        let clone_dir = super_source_parsed.clone_dir(&paths);
+        crate::paths::mkdir_p(clone_dir.parent().unwrap()).unwrap();
+        Command::new("git")
+            .args([
+                "clone",
+                super_src.to_str().unwrap(),
+                clone_dir.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+
+        let registry = Registry {
+            sources: vec![super_source_parsed],
+        };
+        registry.save(&paths).unwrap();
+
+        let suggestions = suggested_registry(&paths).unwrap();
+        assert_eq!(suggestions.len(), 1, "one nested suggestion expected");
+        let alias = suggestions[0]
+            .alias
+            .as_deref()
+            .expect("alias must be present");
+        assert!(
+            !alias.contains('\x1b'),
+            "ANSI escape must be stripped from suggestion alias; got: {alias:?}"
+        );
+        assert_eq!(
+            alias, "evil",
+            "alias text must be preserved once the ANSI color sequences are stripped"
         );
 
         cleanup(&base);
