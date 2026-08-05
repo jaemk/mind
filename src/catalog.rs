@@ -1358,7 +1358,7 @@ fn glob_paths(root: &Path, pattern: &str, kind: ItemKind) -> Result<Vec<PathBuf>
             }
             Err(e) => {
                 let path = e.path().to_path_buf();
-                return Err(MindError::io(path, e.into_error()));
+                return Err(MindError::io(path, e.into()));
             }
         }
     }
