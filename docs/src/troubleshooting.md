@@ -32,10 +32,26 @@
 - `learn` reports `LinkOccupied` and refuses to overwrite. The clobber guard
   will not replace a path that mind did not create (LIFE-41). Move the existing
   file aside, then `learn` again, or pass `learn --force` (CLI-35) to replace
-  it unconditionally. Note: on non-unix platforms mind cannot always recognize
-  its own copies (symlink ownership is not detectable), so a reinstall or
-  `upgrade` may report `LinkOccupied` for items mind did install; this is a
-  documented platform limitation (see the lifecycle.md platform note).
+  it unconditionally. Note: mind supports only unix-like platforms, where items
+  are linked with real symlinks. On a non-unix platform an install is refused up
+  front with an "unsupported platform" error (LIFE-50), rather than falling back
+  to a copy that mind cannot later recognize as its own (which would break
+  reinstall/upgrade with `LinkOccupied`).
+- Roll back an item to an older source version (downgrade). The upgrade
+  mechanism applies whatever the source's pin resolves to, and an item is pending
+  on any content change, not only a newer commit (LIFE-11). So re-pin the source
+  to the older commit and apply it:
+
+  ```
+  mind meld <repo> --pin <old-sha>   # re-pins the already-melded source (CLI-209)
+  mind upgrade <item> --yes          # applies the older content
+  ```
+
+  Use `mind recall --sources` to find the source, and a forge compare view (or a
+  local clone's `git log`) to pick the target `<old-sha>`. To pin an exact ref by
+  name instead of a commit, `--pin tag=<name>` or `--pin branch=<name>` also
+  work. Re-pinning forward again (`--pin <newer-sha>` or `--pin HEAD`) followed by
+  `upgrade` restores the newer version.
 - An item shows as out of date in `recall`/`probe` without an upstream change.
   Editing a store or source file by hand changes its content hash; mind compares
   source-content hashes and reports the delta as drift (LIFE-33, CLI-75). Either

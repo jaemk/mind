@@ -65,9 +65,9 @@ before the clone is removed. They use the same safety-prompt model as install
 hooks: required hooks prompt run / skip / abort-the-unmeld; optional hooks prompt
 run / skip; a non-TTY `unmeld` skips them and notes it. `unmeld --uninstall-hook
 <cmd>` supplies or overrides the source's declared uninstall hooks. `unmeld
---dangerously-skip-install-hook-check` runs them unattended (the flag name is
-reused deliberately). A required uninstall hook that fails or is aborted leaves
-the source melded.
+--dangerously-skip-hook-check` runs them unattended (`--dangerously-skip-install-hook-check`,
+the original spelling, is kept as a hidden alias). A required uninstall hook that
+fails or is aborted leaves the source melded.
 
 ## Running hooks on demand
 

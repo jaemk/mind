@@ -60,6 +60,7 @@ maintained by hand.
 | `absorb <item> [--to PATH]` | claim an unmanaged lobe item into a managed source, then install it |
 | `dump [--whole-sources]` | write a super-source `mind.toml` reproducing the melded + installed state |
 | `config show` / `config lobes ...` | view config / manage agent homes (lobes); a lobe may carry a `kinds` filter limiting which item kinds link there; `--preset <name>` adds a non-Claude harness lobe (gemini/codex/universal/windsurf); `detect` auto-detects installed harnesses and prompts |
+| `link-project [--preset <name>] [--subdir <dir>]` | register a project-scoped agent home (lobe) rooted at or under the cwd; `--snapshot`/`remove --snapshot` freeze/thaw it |
 | `completions <shell>` / `man` | shell completion script / roff man page |
 
 ## Layout
@@ -70,6 +71,7 @@ and fans out to the modules below.
 CLI surface and output:
 - `src/cli.rs` - clap command/flag definitions (the `Command` enum). Doc comments here are the `--help` text.
 - `src/commands.rs` - the per-verb implementations (one function per CLI verb).
+- `src/hooks_cmd.rs` - `hooks run`/`hooks list`: on-demand hook execution and inspection, outside meld/learn/forget/upgrade.
 - `src/main.rs` - entrypoint: parse, acquire the lock, dispatch (`match cli.command`) to `commands.rs`, map errors to exit codes.
 - `src/render.rs` - output context: color, Unicode glyphs, and the `--json` emitter.
 - `src/sanitize.rs` - ANSI/control/bidi stripping for source-derived strings (shared by CLI and TUI).
@@ -97,7 +99,7 @@ Install, lifecycle, and state:
 Foundations and cross-cutting:
 - `src/error.rs` - structured errors (`thiserror`). No `anyhow`; every fallible path returns `MindError`.
 - `src/paths.rs` - `~/.mind` and `~/.claude` roots (overridable via `MIND_HOME` / `CLAUDE_HOME`, used for test isolation).
-- `src/config.rs` - user config at `~/.mind/config.toml` (lobes, default lobe, `absorb-to`).
+- `src/config.rs` - user config at `~/.mind/config.toml` (`lobes`, `ssh`, `absorb-to`).
 - `src/lock.rs` - advisory file-lock + atomic registry writes guarding all persisted state.
 - `src/policy.rs` - enterprise managed policy (trusted sources, pins, lobe lock, self-update control).
 - `src/dump.rs` - `dump`: emit a pinned super-source `mind.toml` from the installed set.
@@ -159,8 +161,9 @@ a real YAML parser rather than extending the hand-rolled scanner.
 Two melded sources can both ship a `review`; they would collide at
 `~/.claude/skills/review`. A *prefix* namespaces a source so every item from it
 installs under `<prefix>:<name>` (identity, store path, symlink, and ref). The
-effective prefix is, in order: the consumer's `meld --as <prefix>` (persisted as
-`Source.alias`), else the repo's `[source].prefix`, else none.
+effective prefix is, in order: the consumer's `meld --namespace <prefix>`
+(`-N`; persisted as `Source.alias`; `--as` is a hidden deprecated alias), else
+the repo's `[source].prefix`, else none.
 
 The catalog is source truth: `CatalogItem.name` is the *bare* name, and the
 prefix is an install-time transform (`CatalogItem::effective_name()`), not baked

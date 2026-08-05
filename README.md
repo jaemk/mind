@@ -9,7 +9,7 @@ Skills, agents, and rules get copy-pasted between repos and machines, drift
 silently against their source, and have no install/upgrade/uninstall story.
 `mind` is a package manager for agent tooling, modeled on Homebrew: it melds a
 git repo of skills, agents, rules, and tools and links its items into your agent
-directories (default `~/.claude`).
+homes (lobes; default `~/.claude`).
 
 ```
 mind meld jaemk/mind
@@ -19,8 +19,8 @@ mind meld jaemk/mind
 
 Each installed item is tracked and checked for drift from its source, install /
 upgrade / uninstall are transactional, and linking works across Claude Code,
-Gemini CLI, Codex CLI, Antigravity, and Windsurf (as a project lobe), not just
-`~/.claude`.
+Gemini CLI (Antigravity rides the same home), Codex CLI, and Windsurf (as a
+project lobe), not just `~/.claude`.
 
 Full documentation: https://jaemk.github.io/mind/
 
@@ -89,9 +89,9 @@ with extra scan roots composed in:
 mind meld owner/repo --add-root community --add-root experimental
 ```
 
-Lobes (install targets) can be global agent homes (Claude Code, Gemini CLI, Codex
-CLI, Antigravity) or project directories (Windsurf reads skills from
-`<project>/.windsurf/skills/`). See
+Lobes (install targets) can be global agent homes (Claude Code, Gemini CLI
+(shared with Antigravity), Codex CLI) or project directories (Windsurf reads
+skills from `<project>/.windsurf/skills/`). See
 [configuration](https://jaemk.github.io/mind/guide/configuration.html#cross-harness-lobes)
 for details.
 
