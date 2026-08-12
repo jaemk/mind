@@ -5981,6 +5981,47 @@ fn upgrade_inner(
         }
     }
 
+    // spec: LIFE-46 -- the guard above compares each rename against the
+    // PRE-EXISTING manifest, but two pending items in ONE batch can converge on
+    // the same target key when neither key is occupied yet (each source drops
+    // its prefix in the same upgrade). The first install then becomes the
+    // second's "previous version" and is evicted silently. Detect a duplicate
+    // target key WITHIN `pending` too (verified: sources `jx:review` and
+    // `jy:review` both dropping their prefixes). The result key of an item that
+    // is not renaming is its unchanged key, so a rename colliding with a
+    // non-renaming sibling is caught as well.
+    {
+        use std::collections::HashMap;
+        let mut seen: HashMap<String, &Upgrade> = HashMap::new();
+        for up in &pending {
+            let key = format!("{}:{}", up.old.kind.as_str(), up.new_name);
+            if let Some(prev) = seen.get(&key) {
+                let same_identity = prev.old.kind == up.old.kind
+                    && prev.old.bare_name == up.old.bare_name
+                    && prev.old.source == up.old.source;
+                if !same_identity {
+                    return Err(MindError::AmbiguousItem {
+                        query: key.clone(),
+                        candidates: vec![
+                            format!(
+                                "upgrading {} from source '{}' targets this key",
+                                prev.old.key(),
+                                prev.old.source
+                            ),
+                            format!(
+                                "upgrading {} from source '{}' would rename to the same key",
+                                up.old.key(),
+                                up.old.source
+                            ),
+                        ],
+                    });
+                }
+            } else {
+                seen.insert(key, up);
+            }
+        }
+    }
+
     let target = item_ref.unwrap_or("all");
 
     if pending.is_empty() {
@@ -6057,7 +6098,11 @@ fn upgrade_inner(
         ) {
             Ok(i) => i,
             Err(e) => {
-                manifest.save(paths)?;
+                // spec: LIFE-48 -- persist what earlier items applied, but do not
+                // let a save failure mask the root cause `e`.
+                if let Err(se) = manifest.save(paths) {
+                    eprintln!("error: also failed to persist the manifest: {se}");
+                }
                 return Err(e);
             }
         };
@@ -6085,12 +6130,17 @@ fn upgrade_inner(
                 dangerously_skip_hook_check,
             ) {
                 // The new copy is already live on disk (install_item succeeded
-                // above); record it before propagating so a retry does not
-                // re-run its install hook. The old key is left in place (it was
-                // never removed), so both entries are recorded -- matching what
-                // is actually on disk until this is resolved.
+                // above); record it before propagating. Recording it keeps the
+                // manifest matching disk and makes it visible to `hooks run`
+                // (HOOK-110); a later `upgrade` retry still re-runs install_item
+                // (install hooks included), which is why the record is safe to
+                // leave. The old key is left in place (it was never removed), so
+                // both entries are recorded until this is resolved.
                 manifest.insert(installed);
-                manifest.save(paths)?;
+                // spec: LIFE-48 -- a save failure here must not mask `e`.
+                if let Err(se) = manifest.save(paths) {
+                    eprintln!("error: also failed to persist the manifest: {se}");
+                }
                 return Err(e);
             }
             manifest.items.remove(&up.old.key());
@@ -6099,8 +6149,8 @@ fn upgrade_inner(
                 println!(
                     "{} upgraded {} -> {}",
                     out.ok(),
-                    up.old.key(),
-                    out.green(&installed.key())
+                    up.old.display_key(),
+                    out.green(&installed.display_key())
                 );
             }
         } else {
@@ -6114,7 +6164,10 @@ fn upgrade_inner(
                     && let Err(e) = install::remove_path(std::path::Path::new(old_link))
                 {
                     manifest.insert(installed);
-                    manifest.save(paths)?;
+                    // spec: LIFE-48 -- a save failure here must not mask `e`.
+                    if let Err(se) = manifest.save(paths) {
+                        eprintln!("error: also failed to persist the manifest: {se}");
+                    }
                     return Err(e);
                 }
             }

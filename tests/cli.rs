@@ -5585,6 +5585,66 @@ fn upgrade_rename_refuses_to_evict_a_different_sources_item() {
 }
 
 #[test]
+fn upgrade_rename_within_batch_collision_is_refused() {
+    // spec: LIFE-46 -- H1: two sources both ship a `review` skill and BOTH
+    // install prefixed (`skill:jx:review`, `skill:jy:review`), then both drop
+    // their prefixes upstream. In ONE `upgrade` batch both renames target the
+    // same bare key `skill:review`. The pre-existing-manifest guard passes both
+    // (neither `skill:review` is occupied yet), so only the within-batch guard
+    // catches it. Without that guard the first install becomes the second's
+    // evicted "previous version" and one item is silently lost.
+    let x = Sandbox::bare("x");
+    x.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\nname: review\ndescription: X review\n---\n# X review\n",
+    );
+    x.write_and_commit("mind.toml", "[source]\nprefix = \"jx\"\n");
+    let y = Sandbox::bare("y");
+    y.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\nname: review\ndescription: Y review\n---\n# Y review\n",
+    );
+    y.write_and_commit("mind.toml", "[source]\nprefix = \"jy\"\n");
+
+    assert!(x.mind(&["meld", &x.source_spec()]).success);
+    assert!(x.mind(&["meld", &y.source_spec()]).success);
+    assert!(x.mind(&["learn", "jx:review"]).success);
+    assert!(x.mind(&["learn", "jy:review"]).success);
+
+    // Both sources drop their prefix upstream.
+    x.write_and_commit("mind.toml", "[source]\n");
+    y.write_and_commit("mind.toml", "[source]\n");
+    assert!(x.mind(&["sync"]).success);
+
+    // One batch upgrade covering both sources: both renames converge on
+    // skill:review and must be refused without touching either item.
+    let r = x.mind(&["upgrade", "--yes"]);
+    assert!(
+        !r.success,
+        "two same-batch renames converging on one key must be refused: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+
+    // Neither item was evicted: both old store copies and both manifest entries
+    // remain intact.
+    let x_store =
+        std::fs::read_to_string(x.mind_home.join("store/skill/jx:review/SKILL.md")).unwrap();
+    assert!(x_store.contains("X review"), "X's store copy must survive");
+    let y_store =
+        std::fs::read_to_string(x.mind_home.join("store/skill/jy:review/SKILL.md")).unwrap();
+    assert!(y_store.contains("Y review"), "Y's store copy must survive");
+    let manifest = std::fs::read_to_string(x.mind_home.join("manifest.json")).unwrap_or_default();
+    assert!(
+        manifest.contains("\"skill:jx:review\"") && manifest.contains("\"skill:jy:review\""),
+        "both items must remain recorded: {manifest}"
+    );
+    assert!(
+        !manifest.contains("\"skill:review\""),
+        "neither rename may have been applied: {manifest}"
+    );
+}
+
+#[test]
 fn upgrade_rename_collision_and_coincident_links_together_still_refuses_cleanly() {
     // spec: LIFE-46, LIFE-47 -- B2+B3 interaction: a rename that is BOTH a
     // colliding rename (B2) AND has an old-link == new-install-link coincidence

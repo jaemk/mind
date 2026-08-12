@@ -87,10 +87,17 @@ agent homes (a store-only tool is not linked; tooling.md TOOL-3).
 - `LIFE-46` Before applying a rename (LIFE-14), `upgrade` looks up the rename's
   new effective key in the manifest. If an item is already installed under that
   key with a DIFFERENT stable identity `(source, kind, bare_name)` than the item
-  being renamed, `upgrade` refuses that item (an `AmbiguousItem` error naming
-  both identities) instead of evicting the occupant. This mirrors `learn`'s own
-  collision guard (DEP-23): a third-party source's `mind.toml` edit (e.g.
-  dropping its namespace prefix) must not let its next upgrade silently delete
+  being renamed, `upgrade` refuses (an `AmbiguousItem` error naming both
+  identities) instead of evicting the occupant. `upgrade` ALSO refuses when two
+  items in the SAME batch resolve to one target key with different identities
+  (e.g. two sources each dropping their namespace prefix in one upgrade so both
+  land on the bare key): the pre-existing-manifest check alone would pass both,
+  since neither key is occupied yet, and the first install would then become the
+  second's evicted "previous version". Both checks run before any item in the
+  batch is touched, so a detected collision aborts the whole run leaving nothing
+  changed (a scoped `upgrade <item>` upgrades one identity at a time as the
+  workaround). This mirrors `learn`'s own collision guard (DEP-23): a
+  third-party source's `mind.toml` edit must not let an upgrade silently delete
   a different, unrelated source's installed item -- no hook, no prompt.
 - `LIFE-47` When applying a rename (LIFE-14) whose new install's links overlap
   the old item's links (e.g. an agent, which links under its bare harness name
