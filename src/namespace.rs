@@ -256,9 +256,11 @@ const EXTRA_RESERVED: &[&str] = &[
 /// `"plugin"` must remain usable.
 ///
 /// A safe prefix must not be empty, `.`, or `..`; must not start with `~`; and
-/// must not contain `/`, `\`, `:`, NUL, or any ASCII control character (0x00-0x1F
-/// or 0x7F).  The Path component check is belt-and-suspenders: it rejects anything
-/// the byte-level scan would miss on unusual platforms.
+/// must not contain `/`, `\`, `:`, NUL, any ASCII control character (0x00-0x1F
+/// or 0x7F), or a security-blocked Unicode code point (a C1 control, a bidi
+/// override, a directional mark, or a zero-width character -- NS-72). The Path
+/// component check is belt-and-suspenders: it rejects anything the scans would
+/// miss on unusual platforms.
 pub(crate) fn is_safe_prefix_component(prefix: &str) -> bool {
     if prefix.is_empty() || prefix == "." || prefix == ".." {
         return false;
@@ -275,6 +277,12 @@ pub(crate) fn is_safe_prefix_component(prefix: &str) -> bool {
         if b == b'/' || b == b'\\' || b == b':' || b == b'\0' {
             return false;
         }
+    }
+    // NS-72: reject multi-byte control/bidi/zero-width code points the byte scan
+    // above cannot see (a prefix derived from an untrusted marketplace entry name
+    // would otherwise carry a direction-spoofing mark into every namespaced ref).
+    if crate::sanitize::has_blocked_chars(prefix) {
+        return false;
     }
     // Belt-and-suspenders: exactly one Normal path component.
     let mut comps = std::path::Path::new(prefix).components();
@@ -1751,6 +1759,27 @@ mod tests {
                 matches!(err, crate::error::MindError::UnsafePrefix { .. }),
                 "expected UnsafePrefix for {bad:?}, got {err:?}"
             );
+        }
+    }
+
+    #[test]
+    fn is_safe_prefix_component_rejects_multibyte_control_and_bidi() {
+        // spec: NS-72 -- the byte scan catches ASCII controls, but a multi-byte
+        // bidi override / directional mark / zero-width / C1 control must be
+        // rejected too, so an auto-generated prefix from a marketplace entry name
+        // cannot seed a direction-spoofing namespace.
+        for ok in ["plugin", "my-plugin", "caf\u{00e9}"] {
+            assert!(is_safe_prefix_component(ok), "{ok:?} should be accepted");
+        }
+        for bad in [
+            "pay\u{202E}", // bidi override
+            "a\u{2066}b",  // isolate
+            "a\u{200B}b",  // zero-width space
+            "a\u{200E}b",  // LRM
+            "a\u{FEFF}b",  // BOM
+            "a\u{0085}b",  // NEL, a C1 control
+        ] {
+            assert!(!is_safe_prefix_component(bad), "{bad:?} should be rejected");
         }
     }
 

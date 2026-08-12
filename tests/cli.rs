@@ -1310,6 +1310,104 @@ fn hostile_mind_toml_source_description_is_sanitized_everywhere() {
     );
 }
 
+/// H2/DSC-95: an item NAME is source-controlled and keys both identity and
+/// every display surface, but the B4/DSC-94 capture-point fix sanitized only
+/// the description. A skill directory whose on-disk name carries an ANSI escape
+/// and a bidi override (U+202E) must have the name sanitized at every CLI print
+/// site (the `learned` line, `recall` human/listing/`--json`, and `probe`
+/// human/`--json`), exactly as the TUI already does. The name keys identity, so
+/// it is sanitized for display rather than rewritten in the store.
+#[test]
+fn hostile_item_name_is_sanitized_at_every_cli_surface() {
+    // spec: DSC-95
+    let sb = Sandbox::bare("hostile-name");
+    // Skill directory name carries an ANSI CSI color sequence and a bidi
+    // override. "review" stays intact so the sanitized-but-present checks work.
+    let name = format!("re{}[31mvie\u{202E}w", '\x1b');
+    sb.write_and_commit(
+        &format!("skills/{name}/SKILL.md"),
+        "---\ndescription: a skill\n---\n# skill\n",
+    );
+
+    // meld succeeds (the name is tolerated), but its progress line is clean.
+    let meld = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(meld.success, "{}", meld.stderr);
+
+    // recall listing (human).
+    let recall = sb.mind(&["recall"]);
+    assert!(recall.success, "{}", recall.stderr);
+    assert!(
+        !recall.stdout.contains('\x1b') && !recall.stdout.contains('\u{202E}'),
+        "recall must not leak raw ANSI/bidi from an item name: {:?}",
+        recall.stdout
+    );
+
+    // probe (human + json).
+    for args in [
+        vec!["probe", "--no-tui"],
+        vec!["probe", "--json"],
+        vec!["recall", "--json"],
+    ] {
+        let out = sb.mind(&args);
+        assert!(out.success, "{args:?}: {}", out.stderr);
+        assert!(
+            !out.stdout.contains('\x1b') && !out.stdout.contains('\u{202E}'),
+            "{args:?} must not leak raw ANSI/bidi from an item name: {:?}",
+            out.stdout
+        );
+    }
+
+    // learn + single-item recall (human + json).
+    let bare = format!("skill:re{}[31mvie\u{202E}w", '\x1b');
+    let learn = sb.mind(&["learn", &bare]);
+    assert!(learn.success, "{}", learn.stderr);
+    assert!(
+        !learn.stdout.contains('\x1b') && !learn.stdout.contains('\u{202E}'),
+        "the `learned` line must not leak raw ANSI/bidi: {:?}",
+        learn.stdout
+    );
+    for args in [
+        vec!["recall", bare.as_str()],
+        vec!["recall", bare.as_str(), "--json"],
+    ] {
+        let out = sb.mind(&args);
+        assert!(out.success, "{args:?}: {}", out.stderr);
+        assert!(
+            !out.stdout.contains('\x1b') && !out.stdout.contains('\u{202E}'),
+            "{args:?} must not leak raw ANSI/bidi: {:?}",
+            out.stdout
+        );
+    }
+}
+
+/// M5/DSC-95: a `mind.toml` `[discover]` glob is source-controlled and is echoed
+/// back verbatim in a rejection message (absolute glob, `..`, or an
+/// out-of-root/unsafe-name confinement error). The B4 fix closed the description
+/// variant but not this one, so an absolute glob carrying an ANSI/bidi payload
+/// reached stderr raw. It must now be sanitized.
+#[test]
+fn hostile_discover_glob_error_is_sanitized() {
+    // spec: DSC-95
+    let sb = Sandbox::bare("hostile-glob");
+    // An absolute glob (rejected by DSC-81) whose text carries ESC + U+202E.
+    // TOML basic strings encode the control/bidi bytes as `\uXXXX` escapes; the
+    // parsed value still carries the real code points.
+    sb.write_and_commit(
+        "mind.toml",
+        "[discover]\nskills = [\"/abs\\u001b[31mINJ\\u001b[0m\\u202E/*/SKILL.md\"]\n",
+    );
+    let meld = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(
+        !meld.success,
+        "an absolute discover glob must be rejected (DSC-81)"
+    );
+    assert!(
+        !meld.stderr.contains('\x1b') && !meld.stderr.contains('\u{202E}'),
+        "the glob-rejection message must not echo the raw ANSI/bidi pattern: {:?}",
+        meld.stderr
+    );
+}
+
 #[test]
 fn learn_still_resolves_an_item_when_another_source_is_gone() {
     // spec: CLI-213 -- `learn`'s item resolution is named explicitly in the

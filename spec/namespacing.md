@@ -78,6 +78,14 @@ The rest of this document states these rules normatively.
   `config` -- calls `validate_prefix` before persisting the value. A violation
   is a structured `UnsafePrefix` error, distinct from the `ReservedPrefix`
   error for the kind-word/DEC-9 reserved list (NS-25/NS-29).
+- `NS-72` The low-level `is_safe_prefix_component` guard (used by
+  `validate_prefix` and by the auto-generation of a prefix from an untrusted
+  marketplace entry name, MKT-8) additionally rejects a multi-byte
+  security-blocked Unicode code point the NS-28 byte scan cannot see: a C1
+  control, a bidi override, a directional mark, or a zero-width character (the
+  DSC-94 set). Without this an entry name like `pay\u{202E}` would seed a
+  direction-spoofing prefix onto every namespaced ref; instead the entry falls
+  back to no prefix.
 - `NS-29` The reserved-kind-word list (NS-25) is permanent and append-only
   (DEC-9). The following additional words are reserved against plausible future
   item kinds or CLI subsystem names: `command`, `hook`, `mcp`, `plugin`,

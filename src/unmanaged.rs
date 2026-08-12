@@ -26,6 +26,13 @@ impl UnmanagedItem {
     pub fn key(&self) -> String {
         format!("{}:{}", self.kind.as_str(), self.name)
     }
+
+    /// The key sanitized for a terminal (DSC-95): the name is a lobe filesystem
+    /// component and can carry ANSI/control/bidi code points. Use this at
+    /// human/`--json` print sites; `key()` stays raw for ref resolution.
+    pub fn display_key(&self) -> String {
+        crate::sanitize::strip_ansi(&self.key())
+    }
 }
 
 /// Scan every configured agent home for unmanaged items (UNM-1): kind-dir entries

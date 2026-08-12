@@ -121,6 +121,20 @@ run = "make build"
   stops a melded source from steering either path outside its kind directory.
   (Convention and `[discover]`-glob names are derived from a single filesystem
   component, so they cannot carry a separator and are inherently safe.)
+- `DSC-95` An item's bare NAME is source-controlled (a filename or a `[[items]]`
+  value) and keys identity, so -- unlike a description (DSC-94) -- it cannot be
+  sanitized at the catalog capture point without changing what the item is.
+  Instead every human/`--json` print site renders the name through a sanitizing
+  display accessor (`display_key`/`display_name`/`display_effective_name`, and
+  `InstalledItem::sanitized_for_display` for a whole serialized item), so an
+  ANSI/control/bidi code point in a name is stripped before it reaches a
+  terminal, exactly as the TUI already sanitizes at its model boundary (TUI-60)
+  and `review` sanitizes a finding message (CLI-224); the raw `key()`/`name`
+  stays intact for identity, store, link, and manifest matching. Separately,
+  every source-controlled string a scan-time error message echoes back (a
+  `[[items]]` name/link/path, a `[discover]` glob pattern, and a matched path in
+  a confinement error) is sanitized (DSC-94 rule) before it reaches stderr, so a
+  rejection cannot itself carry an injection payload.
 - `DSC-72` A `[[items]]` `link` override (the link target relative to an agent
   home) must be a safe relative path: it is rejected (`MindToml`) when empty,
   absolute, beginning with `~`, containing a `..` (parent) component, or

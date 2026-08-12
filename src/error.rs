@@ -560,10 +560,10 @@ pub enum MindError {
         suggested: String,
     },
 
-    /// NS-28: effective item name contains path-traversal characters.
-    #[error(
-        "unsafe effective name '{name}': contains path-traversal characters or resolves to a relative component (`.`/`..`); refusing to build store or link paths from it"
-    )]
+    /// NS-28: effective item name contains path-traversal characters. The
+    /// message sanitizes the offending name (DSC-95) so the rejection itself
+    /// cannot carry a terminal-injection payload.
+    #[error("{}", unsafe_name_message(name))]
     UnsafeName { name: String },
 
     /// STO-47: downloaded archive SHA-256 does not match the published digest.
@@ -867,6 +867,14 @@ fn skill_collision_message(conflicts: &[(String, String, String)], suggested: &s
          already-installed items:\n{}\nrun `mind meld --namespace {ns} <repo>` \
          to namespace the incoming source",
         format_conflicts(conflicts)
+    )
+}
+
+fn unsafe_name_message(name: &str) -> String {
+    format!(
+        "unsafe effective name '{}': contains path-traversal characters or resolves to a \
+         relative component (`.`/`..`); refusing to build store or link paths from it",
+        crate::sanitize::strip_ansi(name)
     )
 }
 

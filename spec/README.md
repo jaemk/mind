@@ -108,6 +108,7 @@ and verified.
 | `[discover].sources` `install-items`: install only a named subset of a nested source | done | DSC-62, DSC-63, DSC-64 |
 | Pin/ref value validation at parse time + `--` terminator in git subcommands | done | DSC-66 |
 | `[[items]]` traversal guard: reject an unsafe `name`, escaping `link`, or out-of-clone `path` | done | DSC-71, DSC-72, DSC-73 |
+| Source-controlled item names sanitized at every CLI human/`--json` print site (display accessors); scan-error messages sanitize echoed source strings | done | DSC-95 |
 | auth failure handling for nested sources: `on-auth-failure = { action, message }` per entry | done | DSC-68, DSC-69 |
 | `on-auth-failure` scope: descendant auth failures are not attributed to the entry | done | DSC-70 |
 | Rename `[discover].sources` alias key to `namespace`; `as` stays as backward-compat alias; `dump` emits canonical `namespace =` | done | DSC-78 |
@@ -119,6 +120,7 @@ and verified.
 | Marketplace + curator compose: a co-present `mind.toml` `[discover].sources` layers on a `.claude-plugin/` manifest; `roots`/`flat-skills`/`[[items]]`/`[discover]` globs suppress the manifest's own-item layer | done | MKT-15, MKT-16 |
 | Graceful degradation of nested non-auth clone failures (skip + curator-empty guard) | done | DSC-79, DSC-80 |
 | Namespace prefix is a safe path component; future kind words reserved (command, hook, mcp, plugin, prompt, mode, output-style) | done | NS-28, NS-29 |
+| Auto-generated prefix guard rejects multi-byte control/bidi/zero-width the byte scan misses | done | NS-72 |
 | `[discover]` glob confinement: reject absolute/`..` patterns, canonicalize matches into the clone | done | DSC-81 |
 | `evolve` integrity: SHA256SUMS verification before extraction, unique staging name, exclusive lock (self-managed, no outer lock) | done | STO-45, STO-46, STO-47, STO-48 |
 | Uninstall confinement: recorded paths must resolve under the store or a configured lobe | done | LIFE-44 |

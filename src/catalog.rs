@@ -143,6 +143,28 @@ impl CatalogItem {
         format!("{}:{}", self.kind.as_str(), self.effective_name())
     }
 
+    /// The key sanitized for a terminal (DSC-95): `key()` embeds the bare name,
+    /// which is source-controlled (a filename or `[[items]]` value) and can carry
+    /// ANSI/control/bidi code points. Use this at every human/`--json` print
+    /// site; `key()` itself stays raw so it keeps matching the store/manifest
+    /// identity. This mirrors the single-capture-point sanitize the description
+    /// gets in `build_item` (DSC-94), for the field that keys identity and so
+    /// cannot be sanitized in place.
+    pub fn display_key(&self) -> String {
+        crate::sanitize::strip_ansi(&self.key())
+    }
+
+    /// The bare name sanitized for display (DSC-95); see [`Self::display_key`].
+    pub fn display_name(&self) -> String {
+        crate::sanitize::strip_ansi(&self.name)
+    }
+
+    /// The effective (possibly prefixed) name sanitized for display (DSC-95);
+    /// see [`Self::display_key`]. Used for the `--json` `name` field.
+    pub fn display_effective_name(&self) -> String {
+        crate::sanitize::strip_ansi(&self.effective_name())
+    }
+
     /// This item as a path-token resolution sibling (namespace.rs), carrying its
     /// kind, bare name, and resolved `bin`. `PathSibling` exists so `namespace`
     /// need not depend on `catalog`; this is the one place the mapping lives.
@@ -617,9 +639,16 @@ fn from_decl(
     prefix: &Option<String>,
     decl: &ItemDecl,
 ) -> Result<CatalogItem> {
+    // DSC-95: `decl.*` fields are source-controlled and are echoed back in these
+    // rejection messages, so sanitize each before it reaches stderr.
+    let safe_name = crate::sanitize::strip_ansi(&decl.name);
     let kind = ItemKind::parse(&decl.kind).ok_or_else(|| MindError::MindToml {
         path: root.join("mind.toml"),
-        msg: format!("unknown item kind '{}' for '{}'", decl.kind, decl.name),
+        msg: format!(
+            "unknown item kind '{}' for '{}'",
+            crate::sanitize::strip_ansi(&decl.kind),
+            safe_name
+        ),
     })?;
     // DSC-71/DSC-72: a melded source's `name` and `link` flow into filesystem
     // paths (the store key and the per-home symlink), so reject any value that
@@ -628,9 +657,8 @@ fn from_decl(
         return Err(MindError::MindToml {
             path: root.join("mind.toml"),
             msg: format!(
-                "item name '{}' is unsafe: it must be a single path component (no '/', '\\', \
-                 '.', '..', or NUL)",
-                decl.name
+                "item name '{safe_name}' is unsafe: it must be a single path component (no '/', \
+                 '\\', '.', '..', NUL, a control character, or a bidi/zero-width Unicode code point)"
             ),
         });
     }
@@ -640,9 +668,9 @@ fn from_decl(
         return Err(MindError::MindToml {
             path: root.join("mind.toml"),
             msg: format!(
-                "item '{}' has an unsafe link '{}': it must be a relative path inside the agent \
-                 home (no leading '/' or '~', no '..' component, no NUL)",
-                decl.name, link
+                "item '{safe_name}' has an unsafe link '{}': it must be a relative path inside the \
+                 agent home (no leading '/' or '~', no '..' component, no NUL)",
+                crate::sanitize::strip_ansi(link)
             ),
         });
     }
@@ -651,8 +679,8 @@ fn from_decl(
         return Err(MindError::MindToml {
             path: root.join("mind.toml"),
             msg: format!(
-                "`bin`/`build` are only valid on a tool item, not '{}' ('{}')",
-                decl.kind, decl.name
+                "`bin`/`build` are only valid on a tool item, not '{}' ('{safe_name}')",
+                crate::sanitize::strip_ansi(&decl.kind)
             ),
         });
     }
@@ -664,9 +692,9 @@ fn from_decl(
         return Err(MindError::MindToml {
             path: root.join("mind.toml"),
             msg: format!(
-                "item '{}' has an unsafe path '{}': must be a relative path inside the clone \
-                 (no leading '/' or '~', no '..' component, no NUL)",
-                decl.name, decl.path
+                "item '{safe_name}' has an unsafe path '{}': must be a relative path inside the \
+                 clone (no leading '/' or '~', no '..' component, no NUL)",
+                crate::sanitize::strip_ansi(&decl.path)
             ),
         });
     }
@@ -1119,7 +1147,7 @@ fn scan_marketplace_in_repo_plugins(
         // 2. Compute the effective prefix (MKT-5 / MKT-8 / MKT-13).
         //    M5a (MKT-14): strip ANSI from the entry name before using as a prefix
         //    to prevent terminal injection from catalog-controlled content.
-        let entry_name = strip_ansi(entry.name.trim());
+        let entry_name = crate::sanitize::strip_ansi(entry.name.trim());
 
         let plugin_prefix = if has_explicit_prefix {
             // Consumer set an explicit namespace override (MKT-13).  Per-plugin
@@ -1255,30 +1283,6 @@ fn meta_file(kind: ItemKind, path: &Path) -> PathBuf {
 
 /// Strip ANSI escape sequences and certain unsafe Unicode code points from `s`.
 ///
-/// Used to sanitize names and descriptions read from plugin/marketplace manifests
-/// (MKT-9) before using them as namespace prefixes or display strings, preventing
-/// terminal injection from catalog-controlled content (DSC-69 rule).
-///
-/// Mirrors `commands::strip_ansi`; duplicated here to avoid a cross-module
-/// private dependency.
-fn strip_ansi(s: &str) -> String {
-    let bytes = strip_ansi_escapes::strip(s);
-    // Input is valid UTF-8, so output is too; lossy is a no-op in practice.
-    String::from_utf8_lossy(&bytes)
-        .chars()
-        .filter(|&c| {
-            (('\x20'..='\x7e').contains(&c) || c > '\u{009f}')
-                && !matches!(
-                    c,
-                    // Bidi-override code points: phishing/spoofing vectors.
-                    '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
-                    // Line separator and paragraph separator.
-                    | '\u{2028}' | '\u{2029}'
-                )
-        })
-        .collect()
-}
-
 /// Expand a glob pattern rooted at `root`, returning sorted matches.
 fn glob_paths(root: &Path, pattern: &str, kind: ItemKind) -> Result<Vec<PathBuf>> {
     // spec: DSC-81 -- confinement of [discover] globs to the clone root.
@@ -1286,11 +1290,16 @@ fn glob_paths(root: &Path, pattern: &str, kind: ItemKind) -> Result<Vec<PathBuf>
     // before the glob expands and before any filesystem access.
     {
         let pp = Path::new(pattern);
+        // DSC-95: the glob is source-controlled and is echoed back in the
+        // rejection message, so sanitize it before it reaches stderr -- an
+        // absolute/`..` glob is exactly the hostile-source case, and its raw
+        // text must not carry a terminal-injection payload.
         if pp.is_absolute() || pattern.starts_with('~') {
             return Err(MindError::MindToml {
                 path: root.join("mind.toml"),
                 msg: format!(
-                    "discover glob '{pattern}' is absolute; globs must be relative to the repo root"
+                    "discover glob '{}' is absolute; globs must be relative to the repo root",
+                    crate::sanitize::strip_ansi(pattern)
                 ),
             });
         }
@@ -1299,7 +1308,8 @@ fn glob_paths(root: &Path, pattern: &str, kind: ItemKind) -> Result<Vec<PathBuf>
             return Err(MindError::MindToml {
                 path: root.join("mind.toml"),
                 msg: format!(
-                    "discover glob '{pattern}' contains '..'; globs must not escape the repo root"
+                    "discover glob '{}' contains '..'; globs must not escape the repo root",
+                    crate::sanitize::strip_ansi(pattern)
                 ),
             });
         }
@@ -1310,7 +1320,10 @@ fn glob_paths(root: &Path, pattern: &str, kind: ItemKind) -> Result<Vec<PathBuf>
     let full = joined.to_string_lossy();
     let paths = glob::glob(&full).map_err(|e| MindError::MindToml {
         path: root.join("mind.toml"),
-        msg: format!("bad discover glob '{pattern}': {e}"),
+        msg: format!(
+            "bad discover glob '{}': {e}",
+            crate::sanitize::strip_ansi(pattern)
+        ),
     })?;
     let mut out = Vec::new();
     for entry in paths {
@@ -1324,8 +1337,9 @@ fn glob_paths(root: &Path, pattern: &str, kind: ItemKind) -> Result<Vec<PathBuf>
                     return Err(MindError::MindToml {
                         path: root.join("mind.toml"),
                         msg: format!(
-                            "discover glob '{pattern}' matched '{}' which is outside the repo root",
-                            p.display()
+                            "discover glob '{}' matched '{}' which is outside the repo root",
+                            crate::sanitize::strip_ansi(pattern),
+                            crate::sanitize::strip_ansi(&p.display().to_string())
                         ),
                     });
                 }
@@ -1348,9 +1362,10 @@ fn glob_paths(root: &Path, pattern: &str, kind: ItemKind) -> Result<Vec<PathBuf>
                     return Err(MindError::MindToml {
                         path: root.join("mind.toml"),
                         msg: format!(
-                            "discover glob '{pattern}' matched '{}' whose derived name '{}' is unsafe",
-                            p.display(),
-                            item_name
+                            "discover glob '{}' matched '{}' whose derived name '{}' is unsafe",
+                            crate::sanitize::strip_ansi(pattern),
+                            crate::sanitize::strip_ansi(&p.display().to_string()),
+                            crate::sanitize::strip_ansi(&item_name)
                         ),
                     });
                 }
@@ -2245,7 +2260,7 @@ mod tests {
     #[test]
     fn is_safe_item_name_rejects_traversal_and_separators() {
         // spec: DSC-71
-        for ok in ["x", "my-skill", "a.b", "review2"] {
+        for ok in ["x", "my-skill", "a.b", "review2", "caf\u{00e9}"] {
             assert!(is_safe_item_name(ok), "{ok:?} should be accepted");
         }
         for bad in ["", ".", "..", "a/b", "../x", "/etc", "a\\b", "x\0y"] {

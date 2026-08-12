@@ -2052,7 +2052,7 @@ pub fn init_source(
     } else {
         println!("  {} item(s):", items.len());
         for it in &items {
-            println!("    {} {}", it.kind, it.name);
+            println!("    {} {}", it.kind, it.display_name());
         }
     }
 
@@ -3095,7 +3095,7 @@ pub fn learn(paths: &Paths, item_ref: &str, dry_run: bool, flow: InstallFlow) ->
                     // prefix); the commit is greened (no-op when color is off).
                     println!(
                         "learned {} from {} ({})",
-                        installed.key(),
+                        installed.display_key(),
                         installed.source,
                         out.green(&short(&installed.commit))
                     );
@@ -3114,7 +3114,11 @@ pub fn learn(paths: &Paths, item_ref: &str, dry_run: bool, flow: InstallFlow) ->
         None => {
             if out.json {
                 let mut result = MutationResult::new("learn", item_ref, "installed");
-                result.installed = installed_keys;
+                // DSC-95: an installed key embeds a source-controlled bare name.
+                result.installed = installed_keys
+                    .iter()
+                    .map(|k| crate::sanitize::strip_ansi(k))
+                    .collect();
                 return print_json(&result);
             }
             Ok(())
@@ -4945,11 +4949,11 @@ fn forget_unmanaged_single(item: &crate::unmanaged::UnmanagedItem, yes: bool) ->
         crate::install::remove_path(p)?;
     }
     if out.json {
-        let mut result = MutationResult::new("forget", &item.key(), "removed");
-        result.removed = vec![item.key()];
+        let mut result = MutationResult::new("forget", &item.display_key(), "removed");
+        result.removed = vec![item.display_key()];
         return print_json(&result);
     }
-    println!("{} forgot {} (unmanaged)", out.ok(), item.key());
+    println!("{} forgot {} (unmanaged)", out.ok(), item.display_key());
     Ok(())
 }
 
@@ -4984,7 +4988,7 @@ fn forget_unmanaged_bulk(paths: &Paths, item_ref: Option<&str>, yes: bool) -> Re
             matched.len()
         );
         for item in &matched {
-            println!("  {} {}", out.warn(), item.key());
+            println!("  {} {}", out.warn(), item.display_key());
         }
         println!(
             "{} these items are NOT managed by mind: removing them deletes your own files or directories, not symlinks.",
@@ -5010,9 +5014,9 @@ fn forget_unmanaged_bulk(paths: &Paths, item_ref: Option<&str>, yes: bool) -> Re
         for p in &item.paths {
             crate::install::remove_path(p)?;
         }
-        removed.push(item.key());
+        removed.push(item.display_key());
         if !out.json {
-            println!("{} forgot {} (unmanaged)", out.ok(), item.key());
+            println!("{} forgot {} (unmanaged)", out.ok(), item.display_key());
         }
     }
 
@@ -6115,7 +6119,11 @@ fn upgrade_inner(
                 }
             }
             if !out.json {
-                println!("{} upgraded {}", out.ok(), out.green(&installed.key()));
+                println!(
+                    "{} upgraded {}",
+                    out.ok(),
+                    out.green(&installed.display_key())
+                );
             }
         }
         applied.push(installed.key());
@@ -6524,22 +6532,31 @@ pub fn recall(
         let parsed = parse_item_ref(item_ref)?;
         let found = crate::resolve::resolve_installed(&manifest.items, &parsed)?;
         if json {
-            return print_json(found);
+            // DSC-95: the serialized `name`/`store`/`links` embed a
+            // source-controlled bare name; sanitize the display copy so a
+            // bidi/ANSI name cannot ride the `--json` document to a terminal
+            // (serde escapes ESC but not a bidi override).
+            return print_json(&found.sanitized_for_display());
         }
-        println!("{}", out.bold(&found.key()));
+        println!("{}", out.bold(&found.display_key()));
         if let Some(d) = &found.description {
             println!("  {}{d}", out.dim("desc    "));
         }
         println!("  {}{}", out.dim("source  "), found.source);
         println!("  {}{}", out.dim("commit  "), short(&found.commit));
         println!("  {}{}", out.dim("hash    "), short(&found.hash));
+        // DSC-95: store/link paths embed the source-controlled bare name.
         println!(
             "  {}{}",
             out.dim("store   "),
-            paths.mind_home.join(&found.store).display()
+            crate::sanitize::strip_ansi(&paths.mind_home.join(&found.store).display().to_string())
         );
         for link in &found.links {
-            println!("  {}{link}", out.dim("link    "));
+            println!(
+                "  {}{}",
+                out.dim("link    "),
+                crate::sanitize::strip_ansi(link)
+            );
         }
         // CLI-75 / LIFE-11: mark out of date exactly when `upgrade` would act --
         // source-content hash changed, or effective name changed (rename).
@@ -6623,7 +6640,8 @@ pub fn recall(
                             m.source == it.source && m.kind == it.kind && m.bare_name == it.name
                         });
                         serde_json::json!({
-                            "key": it.key(),
+                            // DSC-95: the key embeds a source-controlled name.
+                            "key": it.display_key(),
                             "installed": inst.is_some(),
                             "commit": inst.map(|m| m.commit.clone()),
                         })
@@ -6631,7 +6649,7 @@ pub fn recall(
                     .collect();
                 for m in orphans_of(s) {
                     rows.push(serde_json::json!({
-                        "key": m.key(),
+                        "key": m.display_key(),
                         "installed": true,
                         "commit": m.commit.clone(),
                         "orphaned": true,
@@ -6696,7 +6714,7 @@ pub fn recall(
         // with the leading glyph (its visible width ignores any ANSI codes).
         let mut rows: Vec<Vec<String>> = Vec::new();
         for it in items {
-            let key = it.key();
+            let key = it.display_key();
             // Match by stable identity (source, kind, bare_name), as source_status,
             // the single-item detail, and probe do, so a pure namespace/prefix
             // rename (effective name changed, bare identity unchanged) still
@@ -6775,7 +6793,11 @@ pub fn recall(
                         .map(|p| p.display().to_string())
                         .collect::<Vec<_>>()
                         .join(", ");
-                    vec![format!("  {}", out.warn()), u.key(), out.dim(&where_)]
+                    vec![
+                        format!("  {}", out.warn()),
+                        u.display_key(),
+                        out.dim(&where_),
+                    ]
                 })
                 .collect();
             out.print_rows(&rows);
@@ -6842,11 +6864,16 @@ pub fn probe(
             .iter()
             .map(|it| {
                 // DEP-62: add direct dependency keys to each catalog row.
-                let dependencies = crate::deps::direct_dependency_keys(it, &items, &read_item_text);
+                // DSC-95: keys embed source-controlled names; sanitize for the
+                // `--json` document.
+                let dependencies = crate::deps::direct_dependency_keys(it, &items, &read_item_text)
+                    .iter()
+                    .map(|k| crate::sanitize::strip_ansi(k))
+                    .collect();
                 ProbeRow {
                     installed: installed(it),
                     kind: it.kind.as_str(),
-                    name: it.effective_name(),
+                    name: it.display_effective_name(),
                     source: &it.source,
                     hash: hash_path(&it.path).ok(),
                     description: it.description.as_deref(),
@@ -6859,7 +6886,7 @@ pub fn probe(
             rows.push(ProbeRow {
                 installed: false,
                 kind: u.kind.as_str(),
-                name: u.name.clone(),
+                name: crate::sanitize::strip_ansi(&u.name),
                 source: "",
                 hash: None,
                 description: None,
@@ -6923,7 +6950,7 @@ pub fn probe(
         }
         rows.push(vec![
             marker,
-            it.key(),
+            it.display_key(),
             out.dim(&it.source),
             out.dim(&hash),
             desc,
@@ -6939,7 +6966,8 @@ pub fn probe(
             for line in subtree.lines().skip(1) {
                 rows.push(vec![
                     String::new(),
-                    line.to_string(),
+                    // DSC-95: the rendered subtree embeds dependency names.
+                    crate::sanitize::strip_ansi(line),
                     String::new(),
                     String::new(),
                     String::new(),

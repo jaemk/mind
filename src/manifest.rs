@@ -61,6 +61,35 @@ impl InstalledItem {
     pub fn key(&self) -> String {
         format!("{}:{}", self.kind.as_str(), self.name)
     }
+
+    /// The key sanitized for a terminal (DSC-95): the installed name is
+    /// source-derived and can carry ANSI/control/bidi code points. Use this at
+    /// every human/`--json` print site; `key()` stays raw so it keeps matching
+    /// the manifest map and the store/link paths.
+    pub fn display_key(&self) -> String {
+        crate::sanitize::strip_ansi(&self.key())
+    }
+
+    /// A display copy with every source-controlled string sanitized (DSC-95).
+    /// Serialize this (not `self`) into a `--json` document so a bidi/ANSI bare
+    /// name -- which `name`, `bare_name`, `store`, and each `link` embed -- cannot
+    /// ride the document to a terminal (serde escapes ESC but not a bidi
+    /// override). The persisted manifest is untouched; this is display-only.
+    pub fn sanitized_for_display(&self) -> InstalledItem {
+        let s = |v: &str| crate::sanitize::strip_ansi(v);
+        InstalledItem {
+            kind: self.kind,
+            name: s(&self.name),
+            bare_name: s(&self.bare_name),
+            source: s(&self.source),
+            commit: self.commit.clone(),
+            hash: self.hash.clone(),
+            store: s(&self.store),
+            links: self.links.iter().map(|l| s(l)).collect(),
+            description: self.description.as_deref().map(s),
+            install_hooks: self.install_hooks.clone(),
+        }
+    }
 }
 
 /// The persisted set of installed items, keyed by `kind:name`.

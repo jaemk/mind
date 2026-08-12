@@ -83,6 +83,19 @@ pub(crate) fn strip_ansi(s: &str) -> String {
     out
 }
 
+/// Whether `s` contains any character [`strip_ansi`] would remove or collapse: a
+/// C0/DEL/C1 control character (ESC, `\x1b`, is one, so any ANSI escape sequence
+/// makes this true) or a security-blocked Unicode code point (bidi override,
+/// directional mark, zero-width, line/paragraph separator).
+///
+/// Use this to *reject* a source-controlled value that will key a filesystem
+/// path or a namespace prefix (DSC-95, NS-72), where sanitizing in place would
+/// silently mutate identity. To clean a value that is only ever displayed, use
+/// [`strip_ansi`] instead.
+pub(crate) fn has_blocked_chars(s: &str) -> bool {
+    s.chars().any(|c| is_control(c) || is_blocked_unicode(c))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,6 +215,31 @@ mod tests {
     #[test]
     fn strip_ansi_empty_string() {
         assert_eq!(strip_ansi(""), "");
+    }
+
+    // spec: DSC-95
+    #[test]
+    fn has_blocked_chars_flags_exactly_what_strip_removes() {
+        // Clean strings (including printable non-ASCII) are not flagged.
+        for ok in ["", "hello", "my-skill", "caf\u{00e9}", "a.b_c-2"] {
+            assert!(!has_blocked_chars(ok), "{ok:?} should be clean");
+        }
+        // Control characters, ANSI escapes (ESC is a control char), and the
+        // security-blocked Unicode set are all flagged.
+        for bad in [
+            "a\x00b",
+            "a\nb",
+            "a\x1b[0mb",
+            "pay\u{202E}oot",
+            "a\u{2066}b",
+            "a\u{200B}b",
+            "a\u{200E}b",
+            "a\u{FEFF}b",
+            "a\u{2028}b",
+            "a\u{0085}b",
+        ] {
+            assert!(has_blocked_chars(bad), "{bad:?} should be flagged");
+        }
     }
 
     // spec: CLI-224
