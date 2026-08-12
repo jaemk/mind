@@ -290,12 +290,13 @@ fn cited_ids() -> BTreeSet<String> {
             continue; // don't count the ALLOWLIST literals as citations
         }
         let text = std::fs::read_to_string(&f).unwrap();
-        // In `src/`, a citation counts only from the first `#[cfg(test)]` on.
-        // Test modules are conventionally last in a file here, so this is a
-        // simple and stable rule; a file with no test module contributes
-        // nothing.
+        // In `src/`, a citation counts only from the first `#[cfg(test)]` that
+        // gates a test MODULE. A `#[cfg(test)]` on a non-module item (e.g. a
+        // test-only accessor method mid-file) must NOT start the region, or the
+        // production `// spec:` comments after it would be miscounted as
+        // citations. A file with no test module contributes nothing.
         let scanned = if tests_only {
-            match text.find("#[cfg(test)]") {
+            match find_test_module(&text) {
                 Some(i) => &text[i..],
                 None => continue,
             }
@@ -311,6 +312,27 @@ fn cited_ids() -> BTreeSet<String> {
         }
     }
     out
+}
+
+/// Byte offset of the first `#[cfg(test)]` attribute that gates a `mod` (a test
+/// module), or `None` if the file has none. A `#[cfg(test)]` on a non-module
+/// item (e.g. a test-only accessor method) is skipped so a mid-file test helper
+/// does not pull the production `// spec:` comments after it into the citation
+/// region. If a real test module is ever hidden behind an intervening attribute
+/// (`#[cfg(test)] #[allow(..)] mod tests`), this returns None for that file and
+/// its citations stop counting -- a loud gate failure, not a silent miscount.
+fn find_test_module(text: &str) -> Option<usize> {
+    const ATTR: &str = "#[cfg(test)]";
+    let mut from = 0;
+    while let Some(rel) = text[from..].find(ATTR) {
+        let at = from + rel;
+        let after = text[at + ATTR.len()..].trim_start();
+        if after.starts_with("mod ") || after.starts_with("pub mod ") {
+            return Some(at);
+        }
+        from = at + ATTR.len();
+    }
+    None
 }
 
 /// Extract the LEADING run of spec IDs after the `// spec:` marker.

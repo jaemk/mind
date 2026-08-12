@@ -465,12 +465,13 @@ EXAMPLES:
     Sync {
         /// Only sync the source(s) matching this selector (exact name, an
         /// unambiguous trailing suffix like `repo` or `owner/repo`, or a glob).
-        /// With no selector, every melded source is synced (CLI-50).
-        // spec: CLI-231
+        /// With no selector, every melded source is synced.
+        // spec: CLI-231 CLI-50
         source: Option<String>,
 
         /// After refreshing, run an `upgrade` pass (report + prompt) to apply upgrades.
-        /// Deprecated: prefer `mind upgrade` which now syncs first by default (CLI-169).
+        /// Deprecated: prefer `mind upgrade`, which now syncs first by default.
+        // spec: CLI-169
         #[arg(long)]
         upgrade: bool,
 

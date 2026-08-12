@@ -554,7 +554,8 @@ prevent the lost-update and torn-read races a plain read-modify-write would allo
   before this field existed).
 - `STO-51` A `StateTooNew` error names the file (`"sources.json"` or
   `"manifest.json"`), the version found, and the highest version supported, and
-  advises the user to upgrade mind.
+  advises the user to run `mind evolve` (the binary self-update verb; `upgrade`
+  is the item verb, so the remedy names `evolve` explicitly).
 
 ## Per-project lobes
 

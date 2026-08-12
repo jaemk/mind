@@ -285,7 +285,7 @@ binary older than `min-mind-version` loads the policy, it reports:
 
 ```
 error: invalid managed policy at /etc/mind/policy.toml:
-managed policy requires mind >= 0.15.0, running 0.14.0; upgrade mind
+managed policy requires mind >= 0.15.0, running 0.14.0; run `mind evolve`
 ```
 
 instead of an opaque "unknown field" error (POL-62). The gate only helps binaries

@@ -48,7 +48,7 @@ maintained by hand.
 | `unmeld <name>` | drop a source |
 | `learn <item>` | copy item to the store, symlink into each agent home (lobe); `learn <url>` with a deep tree/blob skill URL registers the repo as a single-item source instance (`host/owner/repo#path`) and installs that skill in one step |
 | `forget <item>` | remove symlink + store copy |
-| `sync [--upgrade]` | fetch every source, refresh recorded commit (`--upgrade` then runs an upgrade pass) |
+| `sync [source] [--upgrade]` | fetch every source (or only those matching `[source]`), refresh recorded commit (`--upgrade` then runs an upgrade pass) |
 | `upgrade [item]` | report each installed item's hash/commit delta, prompt, then re-link the changed ones (syncs involved sources first; `--no-sync` opts out) |
 | `hooks run <target>` / `hooks list <target>` | run a source's or an item's hooks on demand (outside meld/learn/forget/upgrade), or list the hooks in effect; reuses the meld/learn consent machinery |
 | `evolve [--check] [--version V]` | update the `mind` binary itself to the latest release (or a pinned version) |
