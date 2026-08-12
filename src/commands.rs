@@ -2805,6 +2805,11 @@ pub fn apply_local_scope(
                          but this directory is not inside any registered project lobe"
                     );
                     eprintln!(
+                        "hint: --local matches a lobe directory strictly BELOW the current one, \
+                         so run it from the project root (not from inside the lobe dir or a \
+                         nested subdirectory)"
+                    );
+                    eprintln!(
                         "hint: register one with `mind link-project` (or `mind config lobes add`), \
                          or drop --local to install into every configured agent home"
                     );

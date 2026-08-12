@@ -93,6 +93,18 @@ pub fn parse_latest_tag(json: &str) -> Result<String> {
 // spec: CLI-140
 pub fn decision(current: &str, target: &str, explicit: bool) -> Decision {
     if version_at_least(current, target) {
+        // A prerelease `current` (e.g. `0.23.1-dev`, a source build) has the same
+        // NUMERIC view as its base release `0.23.1`, so `version_at_least` reads
+        // them as equal in both directions. But a `-dev` build predates that
+        // release, so treat a prerelease current as strictly below a release
+        // target of the same numeric version: offer the update (including an
+        // explicit `--to 0.23.1` onto its own base) rather than claiming
+        // up-to-date. The `version_at_least(target, current)` guard restricts
+        // this to a numeric TIE, so a genuinely newer dev build
+        // (`0.24.0-dev` vs release `0.23.1`) is unaffected.
+        if is_prerelease(current) && !is_prerelease(target) && version_at_least(target, current) {
+            return Decision::Update;
+        }
         // current >= target; check whether the target is strictly BELOW current
         // and was given as an explicit pin.
         if explicit && !version_at_least(target, current) {
@@ -104,6 +116,13 @@ pub fn decision(current: &str, target: &str, explicit: bool) -> Decision {
     } else {
         Decision::Update
     }
+}
+
+/// Whether `v` carries a prerelease suffix (a `-` segment, e.g. the `-dev` a
+/// source build appends). Build metadata (`+...`) is not a prerelease. Used by
+/// [`decision`] to break a numeric tie between a dev build and its base release.
+fn is_prerelease(v: &str) -> bool {
+    v.split_once('+').map_or(v, |(base, _)| base).contains('-')
 }
 
 /// The one-line status `--check` (and the run path) reports: the running version,
@@ -2095,6 +2114,39 @@ mod tests {
     fn decision_explicit_above_current_is_update() {
         // An explicit --version newer than the running version requests an upgrade.
         assert_eq!(decision("0.2.0", "0.3.0", true), Decision::Update);
+    }
+
+    #[test]
+    // spec: CLI-140
+    fn decision_prerelease_current_updates_onto_its_base_release() {
+        // A source-built `-dev` binary shares the numeric view of its base
+        // release, so the comparator reads them as equal; but the dev build
+        // predates the release, so `decision` must offer the update rather than
+        // claim up-to-date -- both when resolving latest and for an explicit
+        // `--to` onto the same base version.
+        assert_eq!(decision("0.23.1-dev", "0.23.1", false), Decision::Update);
+        assert_eq!(decision("0.23.1-dev", "0.23.1", true), Decision::Update);
+        // A genuinely newer dev build is NOT downgraded onto an older release.
+        assert_eq!(decision("0.24.0-dev", "0.23.1", false), Decision::UpToDate);
+        assert_eq!(
+            decision("0.24.0-dev", "0.23.1", true),
+            Decision::PinnedBelowCurrent
+        );
+        // Two prereleases of the same base stay up-to-date (no release to move to).
+        assert_eq!(
+            decision("0.23.1-dev", "0.23.1-dev", false),
+            Decision::UpToDate
+        );
+        // A release current is never treated as a prerelease.
+        assert_eq!(decision("0.23.1", "0.23.1", false), Decision::UpToDate);
+    }
+
+    #[test]
+    fn is_prerelease_detects_only_a_dash_suffix() {
+        assert!(is_prerelease("0.23.1-dev"));
+        assert!(is_prerelease("1.0.0-rc.2"));
+        assert!(!is_prerelease("0.23.1"));
+        assert!(!is_prerelease("0.23.1+build"));
     }
 
     #[test]

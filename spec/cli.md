@@ -1112,7 +1112,12 @@ release artifacts as the install script and the Homebrew formula.
 - `CLI-140` `evolve` compares the running version against the latest published
   release. With nothing newer it reports up to date and changes nothing. With a
   newer release it replaces the running executable in place with the release binary
-  for the current platform.
+  for the current platform. A prerelease running version (a `-dev` source build,
+  DSC-40's version rule reads it by its numeric part alone) is treated as strictly
+  below a release target of the same numeric version: `evolve` on a `0.23.1-dev`
+  build offers the `0.23.1` release rather than reporting up to date, and an
+  explicit `--to 0.23.1` onto its own base is an update, not a no-op. A
+  numerically newer dev build (`0.24.0-dev` vs release `0.23.1`) is unaffected.
 - `CLI-141` Unless `--yes` is given, `evolve` prompts `[y/N]` (default No, EOF
   counts as No) before replacing the binary, mirroring `upgrade` (CLI-60). `--check`
   reports the latest available version and whether an update is pending, then exits

@@ -591,6 +591,12 @@ fn validate_version_string(val: &str, field: &str, path: &Path) -> Result<()> {
 /// trailing prerelease (`-suffix`) or build (`+suffix`) tag on a component is
 /// stripped before parsing, so `0.22.1-dev` compares as `0.22.1`, not
 /// `0.22.0`; a component with no leading digits at all still compares as 0.
+///
+/// The strip is per-DOTTED-COMPONENT, so a dotted prerelease like `1.0.0-rc.2`
+/// parses as `[1, 0, 0, 2]` (the `.2` becomes a fourth component). This is
+/// harmless at every call site: the required side is always validated
+/// pure-numeric (`validate_version_string` / `is_plausible_version`), and the
+/// running side is `CARGO_PKG_VERSION`, whose only suffix is a bare `-dev`.
 pub fn version_at_least(running: &str, required: &str) -> bool {
     let parse = |v: &str| -> Vec<u64> {
         v.split('.')
