@@ -2419,7 +2419,9 @@ pub fn unmeld(
                 action: format!("unmelding {} sources", matched.len()),
             });
         }
-        if !out.json && !confirm("remove these source(s)?")? {
+        // `out.json` already returned above, so this branch is reached only for
+        // an interactive TTY; no `!out.json` guard needed.
+        if !confirm("remove these source(s)?")? {
             println!("cancelled; nothing removed");
             return Ok(());
         }
@@ -2557,7 +2559,8 @@ fn unmeld_one(
                 ),
             });
         }
-        if !out.json && !confirm("remove these item(s) and unmeld the source?")? {
+        // `out.json` already returned above; this branch is TTY-only.
+        if !confirm("remove these item(s) and unmeld the source?")? {
             println!("cancelled; nothing removed");
             return Ok(());
         }
@@ -3004,7 +3007,16 @@ pub fn learn(paths: &Paths, item_ref: &str, dry_run: bool, flow: InstallFlow) ->
     // DEP-31: when the closure adds items beyond the explicit selection, show the
     // tree and prompt; proceed only on a yes (or `--yes`). When it adds nothing,
     // install directly with no prompt and no tree (CLI-30 behavior unchanged).
-    if resolution.adds_dependencies() && !yes && !out.json {
+    if resolution.adds_dependencies() && !yes {
+        // spec: LIFE-45 -- `--json` is non-interactive: refuse rather than
+        // install a whole dependency closure unprompted. (A non-TTY *text* run
+        // still reaches the prompt below, whose EOF-default is No, so it cancels
+        // safely; only `--json` skipped the prompt entirely and auto-proceeded.)
+        if out.json {
+            return Err(MindError::ConfirmationRequired {
+                action: format!("installing the dependency closure of '{item_ref}'"),
+            });
+        }
         print!("{}", resolution.render_tree(&items));
         if !confirm("install this dependency closure?")? {
             println!("cancelled; nothing installed");
@@ -4805,7 +4817,8 @@ pub fn forget(
                 action: format!("removing {} items", keys.len()),
             });
         }
-        if !out.json && !confirm("remove these item(s)?")? {
+        // `out.json` already returned above; this branch is TTY-only.
+        if !confirm("remove these item(s)?")? {
             println!("cancelled; nothing removed");
             return Ok(());
         }

@@ -7147,6 +7147,35 @@ fn learn_dependency_prompt_decline_installs_nothing() {
 }
 
 #[test]
+fn learn_dependency_json_without_yes_refuses() {
+    // spec: DEP-31, LIFE-45 -- M1: `--json` cannot show the DEP-31 prompt, so it
+    // must refuse a dependency-pulling `learn` without `--yes` (ConfirmationRequired,
+    // exit 1) rather than install the whole closure unprompted.
+    let sb = dep_fixture();
+    let r = sb.mind(&["learn", "skill:review", "--json"]);
+    assert!(
+        !r.success,
+        "--json learn that pulls in a dependency must refuse without --yes: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stdout.contains("confirmation-required"),
+        "the json envelope should carry the confirmation-required kind: {}",
+        r.stdout
+    );
+    // Nothing was installed: neither the selected skill nor its pulled-in dep.
+    assert!(std::fs::symlink_metadata(sb.claude_home.join("skills/review")).is_err());
+    assert!(std::fs::symlink_metadata(sb.claude_home.join("agents/reviewer.md")).is_err());
+
+    // With --yes the whole closure installs (the refusal is only about consent).
+    assert!(
+        sb.mind(&["learn", "skill:review", "--json", "--yes"])
+            .success
+    );
+    assert!(std::fs::symlink_metadata(sb.claude_home.join("skills/review")).is_ok());
+}
+
+#[test]
 fn learn_dependency_prompt_defaults_to_no_on_eof() {
     // spec: DEP-31
     // With no stdin (immediate EOF on the prompt), the `[y/N]` default is No, so
