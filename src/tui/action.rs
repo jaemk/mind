@@ -130,8 +130,13 @@ fn dispatch(paths: &Paths, kind: ActionKind) -> Result<()> {
         // (LIFE-49/M1) is inert; passed `false` to match the plain `mind sync`
         // (no --upgrade) this action mirrors.
         ActionKind::Sync => commands::sync(paths, false, false, false, false)?,
-        // spec: TUI-22 - `yes: true` so it applies without prompting on stdin.
-        ActionKind::Upgrade => commands::upgrade(paths, true, None, false, false)?,
+        // spec: TUI-63 - `yes: true` so it applies without prompting on stdin.
+        // Use the NO-SYNC upgrade: the confirm modal's pending list was computed
+        // from the last poll snapshot (pre-sync), so a sync-first upgrade could
+        // pull new upstream commits and apply items the modal never named. The
+        // TUI offers `s` (Sync) separately and re-polls ~1s, so drift is
+        // refreshed there; here the applied set must match what was shown.
+        ActionKind::Upgrade => commands::upgrade_no_sync(paths, true, None, false, false)?,
         // spec: TUI-23 CLI-112
         // `yes: true` so backfill applies without prompting on stdin in the TUI.
         ActionKind::LobeAdd { path } => commands::lobe_add(paths, &path, true)?,
@@ -597,6 +602,13 @@ mod tests {
             result.err()
         );
     }
+
+    // Note: the TUI upgrade action routes to `commands::upgrade_no_sync` (TUI-63)
+    // so the applied set matches the confirm modal's pre-sync pending list. The
+    // no-fetch behavior is covered by `upgrade_no_sync_flag_is_accepted`
+    // (CLI-169) and the policy suite; it is not separately exercised here because
+    // a hermetic local source is read live from its working tree (CLI-27
+    // `is_linked`), so sync-vs-no-sync is indistinguishable without a real remote.
 
     fn init_git_repo(dir: &std::path::Path) {
         use std::process::Command;

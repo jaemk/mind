@@ -406,7 +406,7 @@ fn build_installed_group(
     // group (sources melded, nothing installed yet, no active filter) gets no
     // synthetic row: it is Available, not a broken/misconfigured state.
     if source_nodes.is_empty()
-        && let Some(msg) = empty_state_message(search, snap.source_names.is_empty())
+        && let Some(msg) = empty_state_message("installed", search, snap.source_names.is_empty())
     {
         source_nodes.push(empty_state_node("installed", msg));
     }
@@ -423,11 +423,14 @@ fn build_installed_group(
 /// legitimately empty group that needs no explanation (sources melded,
 /// nothing matched by name because there's simply nothing there yet, no
 /// active search). Shared by Installed and Available so the wording -- and
-/// the CLI-187 text it mirrors -- stays in exactly one place.
-fn empty_state_message(search: &str, no_sources_melded: bool) -> Option<String> {
+/// the CLI-187 text it mirrors -- stays in exactly one place. `group` scopes
+/// the search-miss wording ("no installed items match ..." vs "no available
+/// items match ...") so an empty Installed group does not claim a global "no
+/// items match" while matches sit in Available.
+fn empty_state_message(group: &str, search: &str, no_sources_melded: bool) -> Option<String> {
     if !search.is_empty() {
         // spec: CLI-187 (commands.rs `no items match '{q}'`)
-        Some(format!("no items match '{search}'"))
+        Some(format!("no {group} items match '{search}'"))
     } else if no_sources_melded {
         // spec: CLI-187 (commands.rs `no sources melded; run ...`)
         Some("no sources melded; run `mind meld <owner/repo>` to add one".to_string())
@@ -578,7 +581,7 @@ fn build_available_group(
     // suggested sources are appended (an empty group means no catalog items AND
     // no suggestions matched/exist).
     if source_nodes.is_empty()
-        && let Some(msg) = empty_state_message(search, snap.source_names.is_empty())
+        && let Some(msg) = empty_state_message("available", search, snap.source_names.is_empty())
     {
         source_nodes.push(empty_state_node("available", msg));
     }
@@ -889,10 +892,13 @@ mod tests {
         );
         let nodes = build_tree(&snap, "zzznomatch", None, None, false, false);
         let flat = flatten_tree(&nodes, &HashSet::new(), &HashSet::new());
+        // The CTA is group-scoped so an empty Installed group does not claim a
+        // global "no items match" while Available may hold matches (and vice
+        // versa).
         assert!(
             flat.iter()
-                .any(|n| n.label == "no items match 'zzznomatch'"),
-            "a failed search must show the no-items-match CTA: {:?}",
+                .any(|n| n.label == "no installed items match 'zzznomatch'"),
+            "a failed search must show the group-scoped no-items-match CTA: {:?}",
             flat.iter().map(|n| &n.label).collect::<Vec<_>>()
         );
         // Must NOT claim no sources are melded (they are; the search just

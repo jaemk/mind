@@ -34,7 +34,7 @@ const HELP_TEXT: &str = "Navigation\n\
   j/k, Up/Down    move selection\n\
   h/l, Left/Right collapse / expand\n\
   Space           toggle expand\n\
-  Ctrl-u/Ctrl-d   page up/down\n\
+  PgUp/PgDn, Ctrl-u/Ctrl-d page up/down\n\
   /               jump to search (Esc clears, Enter/Tab submits)\n\
   Enter           open details dialog\n\
 \n\

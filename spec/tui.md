@@ -223,7 +223,11 @@ manifest, and store.
   item by key and source (mirroring the per-item delta the CLI's `upgrade`
   reports before applying, DEP-40), or states explicitly that nothing is out of
   date when the stale set is empty, so the user always confirms a specific,
-  named set of changes rather than an opaque bulk action.
+  named set of changes rather than an opaque bulk action. Applying the confirmed
+  upgrade runs the NO-SYNC upgrade (CLI-169): the pending list was computed from
+  the current poll snapshot, so a sync-first apply could pull new upstream
+  commits and act on items the modal never named. Refreshing drift is the job of
+  the separate `s` (Sync) action plus the ~1s re-poll, not of the apply step.
 - `TUI-64` Pressing `?` in normal mode opens a keymap help overlay listing every
   binding grouped by category (navigation, actions, general); any key closes it,
   intercepted ahead of normal-mode routing so it never leaks into search or an
