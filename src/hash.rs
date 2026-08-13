@@ -27,6 +27,10 @@ impl Fnv {
     fn finish_hex(self) -> String {
         format!("{:016x}", self.0)
     }
+    /// The raw digest, for folding one hash into another as a field.
+    fn value(self) -> u64 {
+        self.0
+    }
 }
 
 /// Hash an arbitrary string, returning its 16-hex-digit FNV-1a digest.
@@ -89,6 +93,91 @@ pub fn hash_path(path: &Path) -> Result<String> {
         h.write(&bytes);
     }
     Ok(h.finish_hex())
+}
+
+/// A cheap change-detection fingerprint for the same tree [`hash_path`] hashes:
+/// the identical walk, but reading each entry's `(mtime, size)` instead of its
+/// contents. Symlinks are still not followed and still contribute their target
+/// string (which is cheap and catches a retarget).
+///
+/// This is NOT a content hash and must never be compared against a recorded
+/// manifest hash. Its only use is to decide whether re-reading content is
+/// warranted: equal fingerprint means "nothing observably changed, reuse the
+/// previous content hash". A filesystem with coarse mtime granularity could in
+/// principle miss a same-second, same-size edit, which is why the only caller is
+/// the TUI's display-side staleness memo (tui/data.rs); every path that ACTS on
+/// a hash (`upgrade`, `introspect`, `recall`) calls `hash_path` directly.
+pub(crate) fn stat_fingerprint(path: &Path) -> Result<String> {
+    let mut h = Fnv::new();
+    let meta = std::fs::symlink_metadata(path).map_err(|e| MindError::io(path, e))?;
+    if meta.file_type().is_symlink() {
+        let target = std::fs::read_link(path).map_err(|e| MindError::io(path, e))?;
+        let target_bytes = target.to_string_lossy();
+        h.write(b"S");
+        h.write(&(target_bytes.len() as u64).to_le_bytes());
+        h.write(target_bytes.as_bytes());
+    } else if meta.is_dir() {
+        let mut entries = Vec::new();
+        collect_stats(path, path, &mut entries)?;
+        entries.sort();
+        for (tag, rel, mtime, size) in entries {
+            h.write(&[tag]);
+            h.write(&(rel.len() as u64).to_le_bytes());
+            h.write(rel.as_bytes());
+            h.write(&mtime.to_le_bytes());
+            h.write(&size.to_le_bytes());
+        }
+    } else {
+        h.write(b"F");
+        h.write(&mtime_nanos(&meta)?.to_le_bytes());
+        h.write(&meta.len().to_le_bytes());
+    }
+    Ok(h.finish_hex())
+}
+
+/// Modification time as nanoseconds since the epoch. An error (a platform or
+/// filesystem that does not report mtime) propagates so the caller falls back
+/// to a real content hash rather than trusting a constant fingerprint.
+fn mtime_nanos(meta: &std::fs::Metadata) -> Result<u128> {
+    let t = meta
+        .modified()
+        .map_err(|e| MindError::io(std::path::Path::new("<metadata>"), e))?;
+    Ok(t.duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0))
+}
+
+/// Walk `dir` and collect `(type_tag, relative_path, mtime_nanos, size)` tuples:
+/// the [`collect_files`] walk with `stat` in place of `read`.
+fn collect_stats(root: &Path, dir: &Path, out: &mut Vec<(u8, String, u128, u64)>) -> Result<()> {
+    let rd = std::fs::read_dir(dir).map_err(|e| MindError::io(dir, e))?;
+    for entry in rd {
+        let entry = entry.map_err(|e| MindError::io(dir, e))?;
+        let path = entry.path();
+        let meta = std::fs::symlink_metadata(&path).map_err(|e| MindError::io(&path, e))?;
+        let ft = meta.file_type();
+        let rel = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .into_owned();
+        if ft.is_symlink() {
+            // Hash the target string, not a stat: a retarget changes it even when
+            // the link's own mtime does not.
+            let target = std::fs::read_link(&path).map_err(|e| MindError::io(&path, e))?;
+            let target_bytes = target.to_string_lossy();
+            // Fold the target string into the size slot so a retarget changes
+            // the fingerprint even when the link's own stat does not.
+            let mut th = Fnv::new();
+            th.write(target_bytes.as_bytes());
+            out.push((b'S', rel, 0, th.value()));
+        } else if ft.is_dir() {
+            collect_stats(root, &path, out)?;
+        } else {
+            out.push((b'F', rel, mtime_nanos(&meta)?, meta.len()));
+        }
+    }
+    Ok(())
 }
 
 /// Walk `dir` and collect `(type_tag, relative_path_string, content_bytes)` triples.
@@ -176,6 +265,68 @@ mod tests {
             a.chars().all(|ch| ch.is_ascii_hexdigit()),
             "hash_str digest must be pure hex: {a}"
         );
+    }
+
+    // spec: TUI-63
+    #[test]
+    fn stat_fingerprint_is_stable_and_changes_with_content() {
+        // The fingerprint gates whether the TUI re-hashes content, so it must be
+        // stable across repeated calls over an untouched tree, and must change
+        // when a file's content changes (here also changing its size, the case
+        // the fingerprint is designed to catch).
+        let dir = tmp("fingerprint");
+        std::fs::write(dir.join("a.txt"), b"hello").unwrap();
+        let f1 = stat_fingerprint(&dir).unwrap();
+        let f2 = stat_fingerprint(&dir).unwrap();
+        assert_eq!(f1, f2, "fingerprint must be stable for an untouched tree");
+
+        std::fs::write(dir.join("a.txt"), b"hello world, longer").unwrap();
+        let f3 = stat_fingerprint(&dir).unwrap();
+        assert_ne!(f1, f3, "a content+size change must change the fingerprint");
+
+        // A NEW file changes it too (the walk covers the whole tree).
+        std::fs::write(dir.join("b.txt"), b"x").unwrap();
+        let f4 = stat_fingerprint(&dir).unwrap();
+        assert_ne!(f3, f4, "adding a file must change the fingerprint");
+
+        // Removing it again returns to the previous fingerprint's shape (a
+        // different mtime is possible, so just assert it moved off f4).
+        std::fs::remove_file(dir.join("b.txt")).unwrap();
+        let f5 = stat_fingerprint(&dir).unwrap();
+        assert_ne!(f4, f5, "removing a file must change the fingerprint");
+    }
+
+    // spec: TUI-63
+    #[test]
+    fn stat_fingerprint_covers_nested_files_and_symlink_targets() {
+        // A nested edit must be visible: caching on the ROOT directory's mtime
+        // alone would miss this, which is why the fingerprint walks the tree.
+        let dir = tmp("fingerprint-nested");
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("sub/deep.txt"), b"one").unwrap();
+        let before = stat_fingerprint(&dir).unwrap();
+        std::fs::write(dir.join("sub/deep.txt"), b"two different").unwrap();
+        assert_ne!(
+            before,
+            stat_fingerprint(&dir).unwrap(),
+            "a nested file edit must change the fingerprint"
+        );
+
+        // A symlink retarget changes the fingerprint even though its own stat
+        // need not: the target string is folded in (matching hash_path, LIFE-34).
+        #[cfg(unix)]
+        {
+            let link = dir.join("link");
+            std::os::unix::fs::symlink("first-target", &link).unwrap();
+            let with_first = stat_fingerprint(&dir).unwrap();
+            std::fs::remove_file(&link).unwrap();
+            std::os::unix::fs::symlink("second-target", &link).unwrap();
+            assert_ne!(
+                with_first,
+                stat_fingerprint(&dir).unwrap(),
+                "a symlink retarget must change the fingerprint"
+            );
+        }
     }
 
     #[test]

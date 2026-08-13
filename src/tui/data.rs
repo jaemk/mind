@@ -98,6 +98,45 @@ pub struct SnapshotUnmanaged {
     pub paths: Vec<PathBuf>,
 }
 
+/// Memo of item content hashes for the TUI's staleness check, keyed by item
+/// path, holding `(stat_fingerprint, content_hash)`.
+///
+/// The poll tick runs about once a second and computes TUI-63 staleness for
+/// every installed item, which means a full content hash of every item's source
+/// tree. For a markdown skill that is trivial; for a `tool` directory carrying a
+/// vendored binary it is tens of megabytes re-read per second. The memo replaces
+/// that with the same directory walk reading only `(mtime, size)`
+/// (`hash::stat_fingerprint`), and re-reads content only when that changes.
+///
+/// Display-side only: `upgrade`/`introspect`/`recall` all call `hash_path`
+/// directly, so a fingerprint that missed a same-second, same-size edit could at
+/// worst delay a drift MARKER by one tick, never change what a verb does.
+static HASH_MEMO: std::sync::Mutex<std::collections::BTreeMap<PathBuf, (String, String)>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// The content hash of `path`, reusing the memo when the cheap stat fingerprint
+/// is unchanged. `None` on any hash failure, which callers treat as drift
+/// (matching `hash_path(..).ok()`, the CLI-75 rule). When the fingerprint itself
+/// cannot be computed, this falls back to hashing every time and caches nothing,
+/// so an unsupported-mtime platform behaves exactly as before the memo existed.
+fn memoized_hash(path: &std::path::Path) -> Option<String> {
+    let fingerprint = crate::hash::stat_fingerprint(path).ok();
+    if let Some(fp) = &fingerprint
+        && let Ok(memo) = HASH_MEMO.lock()
+        && let Some((cached_fp, cached_hash)) = memo.get(path)
+        && cached_fp == fp
+    {
+        return Some(cached_hash.clone());
+    }
+    let hash = hash_path(path).ok()?;
+    if let Some(fp) = fingerprint
+        && let Ok(mut memo) = HASH_MEMO.lock()
+    {
+        memo.insert(path.to_path_buf(), (fp, hash.clone()));
+    }
+    Some(hash)
+}
+
 /// Load the initial snapshot under a blocking shared lock (called once at
 /// startup). Returns an error if the lock cannot be acquired.
 // spec: TUI-25
@@ -167,7 +206,9 @@ fn load_inner(paths: &Paths) -> Result<Snapshot> {
                 .map(|ci| crate::deps::direct_dependency_keys(ci, &catalog_items, &read_item_text))
                 .unwrap_or_default();
             let stale = matched.is_some_and(|ci| {
-                let cur = hash_path(&ci.path).ok();
+                // Memoized on the cheap stat fingerprint: the poll tick would
+                // otherwise re-read every installed item's content every second.
+                let cur = memoized_hash(&ci.path);
                 let hash_drift = cur.as_deref().is_none_or(|h| h != it.hash);
                 let rename_drift = ci.effective_name() != it.name;
                 hash_drift || rename_drift
@@ -334,6 +375,43 @@ mod tests {
             "try_poll must return None when exclusive lock is held"
         );
         drop(_excl);
+        cleanup(&base);
+    }
+
+    // spec: TUI-63
+    #[test]
+    fn memoized_hash_matches_hash_path_and_refreshes_on_change() {
+        // The memo must be transparent: the value it returns is always the value
+        // `hash_path` would return, both on the cold path and on a memo hit, and
+        // it must pick up a content change rather than serving a stale hash.
+        let (paths, base) = temp_paths();
+        crate::paths::mkdir_p(&paths.mind_home).unwrap();
+        let item = base.join("item");
+        crate::paths::mkdir_p(&item).unwrap();
+        std::fs::write(item.join("SKILL.md"), b"v1").unwrap();
+
+        // Cold: computes and caches.
+        let first = memoized_hash(&item).expect("hash");
+        assert_eq!(
+            first,
+            hash_path(&item).unwrap(),
+            "cold value must be correct"
+        );
+        // Warm: served from the memo, same value.
+        let second = memoized_hash(&item).expect("hash");
+        assert_eq!(second, first, "a memo hit must return the same hash");
+
+        // Content change (also a size change): the fingerprint moves, so the
+        // memo must recompute rather than serve the cached value.
+        std::fs::write(item.join("SKILL.md"), b"v2 is longer than v1").unwrap();
+        let after = memoized_hash(&item).expect("hash");
+        assert_ne!(after, first, "a content change must invalidate the memo");
+        assert_eq!(
+            after,
+            hash_path(&item).unwrap(),
+            "the refreshed value must equal a direct hash_path"
+        );
+
         cleanup(&base);
     }
 

@@ -228,6 +228,13 @@ manifest, and store.
   the current poll snapshot, so a sync-first apply could pull new upstream
   commits and act on items the modal never named. Refreshing drift is the job of
   the separate `s` (Sync) action plus the ~1s re-poll, not of the apply step.
+  Because the poll recomputes this for every installed item about once a second,
+  the content hash is memoized against a cheap stat fingerprint (the same tree
+  walk reading only each entry's mtime/size, plus a symlink's target), and the
+  content is re-read only when that fingerprint changes. The memo is display-only:
+  every verb that ACTS on a hash (`upgrade`, `introspect`, `recall`) hashes
+  directly, so a fingerprint that missed a same-second, same-size edit could at
+  most delay the drift marker by a tick, never change what a verb does.
 - `TUI-64` Pressing `?` in normal mode opens a keymap help overlay listing every
   binding grouped by category (navigation, actions, general); any key closes it,
   intercepted ahead of normal-mode routing so it never leaks into search or an
