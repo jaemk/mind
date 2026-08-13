@@ -205,6 +205,7 @@ and verified.
 | `introspect --fix` re-filters findings after repair; a lobe pruned in the same run is not also reported outstanding | done | HARN-18 |
 | The TUI's lobes action shares `config lobes add`'s implementation (lobe-dir creation, kinds-filtered backfill, `--force`-gated foreign-file guard), so it carries the same guarantees with no separate implementation | done | TUI-62 |
 | Selective lobe mode: `--local` on `learn`/`meld` scopes an install to the single registered project lobe the cwd sits inside, instead of the default fan-out | done | HARN-19, HARN-20, HARN-21 |
+| A dangling-symlink path component is reported as a named broken link, not the OS's bare `File exists` | done | HARN-22 |
 | `--json` treated as always non-interactive for a destructive confirmation (unmeld, forget --unmanaged, upgrade apply, evolve binary-swap) | done | LIFE-45 |
 | `upgrade` refuses a rename that would evict a different installed item already occupying the new key, instead of silently deleting it | done | LIFE-46 |
 | `upgrade` rename excludes the new install's own links from the old item's link cleanup, so a shared link path (e.g. an agent's bare-name link) is not deleted out from under the new install | done | LIFE-47 |

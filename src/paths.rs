@@ -773,7 +773,43 @@ pub(crate) fn resolve_lobe(
 
 /// `mkdir -p` that tags failures with the offending path.
 pub fn mkdir_p(path: &Path) -> Result<()> {
-    std::fs::create_dir_all(path).map_err(|e| MindError::io(path, e))
+    std::fs::create_dir_all(path).map_err(|e| {
+        // `create_dir_all` reports a dangling-symlink component as a bare
+        // `File exists` (the link itself exists, so the directory create
+        // refuses), which names neither the link nor what it points at. That is
+        // reachable through a configured agent home whose path is a broken
+        // symlink. Name the real cause instead; fall back to the plain I/O
+        // error when no broken component is found.
+        match broken_symlink_component(path) {
+            Some((link, target)) => MindError::BrokenSymlinkPath {
+                path: path.to_path_buf(),
+                link,
+                target,
+            },
+            None => MindError::io(path, e),
+        }
+    })
+}
+
+/// The first component of `path` (itself included) that is a symlink whose
+/// target does not resolve, with that target. `None` when every existing
+/// component resolves. Used to explain a `create_dir_all` failure in terms of
+/// the broken link rather than the `File exists` the OS reports.
+fn broken_symlink_component(path: &Path) -> Option<(PathBuf, PathBuf)> {
+    let mut prefix = PathBuf::new();
+    for comp in path.components() {
+        prefix.push(comp);
+        // `symlink_metadata` succeeds on a dangling link; `metadata` follows it
+        // and fails. That pair is exactly the broken-symlink signature.
+        let Ok(md) = std::fs::symlink_metadata(&prefix) else {
+            continue; // does not exist yet: a normal to-be-created component
+        };
+        if md.file_type().is_symlink() && std::fs::metadata(&prefix).is_err() {
+            let target = std::fs::read_link(&prefix).unwrap_or_default();
+            return Some((prefix, target));
+        }
+    }
+    None
 }
 
 /// Crate-wide lock serializing every test (in any module) that mutates a
@@ -841,6 +877,48 @@ mod tests {
             resolved, expected,
             "the symlinked ancestor should resolve and the missing tail be kept"
         );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mkdir_p_names_a_dangling_symlink_instead_of_reporting_file_exists() {
+        // spec: HARN-22 -- a configured agent home whose path is a broken
+        // symlink otherwise fails at link time with a bare `File exists`
+        // (os error 17): `create_dir_all` refuses because the LINK exists, which
+        // names neither the link nor its missing target. The error must identify
+        // the broken component instead.
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let root = std::env::temp_dir().join(format!("mind-brokenlink-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let link = root.join("brokenlobe");
+        let missing = root.join("gone");
+        std::os::unix::fs::symlink(&missing, &link).unwrap();
+
+        let err = mkdir_p(&link.join("skills")).expect_err("a dangling-symlink parent must fail");
+        assert!(
+            matches!(err, MindError::BrokenSymlinkPath { .. }),
+            "expected BrokenSymlinkPath, got {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("brokenlobe") && msg.contains("gone"),
+            "the message must name both the broken link and its target: {msg}"
+        );
+        assert!(
+            !msg.contains("os error 17"),
+            "the raw File-exists errno must not be the reported cause: {msg}"
+        );
+        assert_eq!(err.kind(), "broken-symlink-path");
+
+        // A healthy path is unaffected: still created, still Ok.
+        let good = root.join("real").join("skills");
+        assert!(
+            mkdir_p(&good).is_ok(),
+            "a normal mkdir_p must still succeed"
+        );
+        assert!(good.is_dir());
 
         std::fs::remove_dir_all(&root).ok();
     }

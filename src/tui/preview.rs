@@ -100,7 +100,8 @@ pub fn preview(paths: &Paths, spec: &str) -> Result<SourcePreview> {
 }
 
 /// A registry suggestion: a not-yet-melded source declared by a melded super-source.
-#[derive(Debug, Clone)]
+// `PartialEq` so `Snapshot` can be compared by value across poll ticks (TUI-15).
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)] // fields read by TUI display layer
 pub struct RegistrySuggestion {
     /// The repo spec for this source.

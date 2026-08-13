@@ -540,7 +540,6 @@ mod tests {
     fn seeded_app() -> App {
         let mut app = App::new(String::new(), None, None);
         app.apply_snapshot(Snapshot {
-            generation: 1,
             installed: vec![SnapshotInstalled {
                 key: "skill:review".to_string(),
                 name: "review".to_string(),

@@ -250,6 +250,20 @@ pub enum MindError {
     #[error("`config lobes add` needs a path or `--preset <name>`")]
     LobeTargetRequired,
 
+    /// A path could not be created because one of its components is a symlink
+    /// whose target does not exist. `create_dir_all` reports this as a bare
+    /// `File exists` (the link itself exists), which does not point at the real
+    /// cause, so name the broken link and its target instead.
+    #[error(
+        "cannot create {path}: '{link}' is a symlink pointing at '{target}', which does not exist; \
+         fix or remove the broken link (if it is a configured agent home, see `mind config lobes`)"
+    )]
+    BrokenSymlinkPath {
+        path: PathBuf,
+        link: PathBuf,
+        target: PathBuf,
+    },
+
     #[error("mind.toml at {path}: {msg}")]
     MindToml { path: PathBuf, msg: String },
 
@@ -918,6 +932,7 @@ impl MindError {
             MindError::UnknownKind { .. } => "unknown-kind",
             MindError::UnknownPreset { .. } => "unknown-preset",
             MindError::LobeTargetRequired => "lobe-target-required",
+            MindError::BrokenSymlinkPath { .. } => "broken-symlink-path",
             MindError::MindToml { .. } => "mind-toml",
             MindError::Manifest { .. } => "manifest",
             MindError::MetadataTooLarge { .. } => "metadata-too-large",

@@ -20,12 +20,15 @@ use crate::sanitize::strip_ansi;
 use crate::source::Registry;
 
 /// A snapshot of the TUI's data, built from registry + manifest + catalog.
-/// The `generation` counter increments on each structural change so the App
-/// can detect when a rebuild is needed.
+///
+/// Change detection is by VALUE (`PartialEq`), not by a counter: the poll tick
+/// compares the freshly loaded snapshot against the last applied one and skips
+/// the rebuild when they are equal (TUI-15). An earlier `generation` counter was
+/// minted fresh on every load, so it always compared unequal and the gate never
+/// fired -- every tick rebuilt the tree even when nothing had changed.
 // spec: TUI-15
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
-    pub generation: u64,
     pub installed: Vec<SnapshotInstalled>,
     pub available: Vec<SnapshotAvailable>,
     /// Unmanaged lobe items: skills/agents/rules present in a configured agent
@@ -49,7 +52,7 @@ pub struct Snapshot {
 }
 
 /// One installed item in the snapshot.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotInstalled {
     pub key: String,
     pub name: String,
@@ -71,7 +74,7 @@ pub struct SnapshotInstalled {
 }
 
 /// One available (catalog) item in the snapshot.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotAvailable {
     pub key: String,
     pub name: String,
@@ -87,19 +90,12 @@ pub struct SnapshotAvailable {
 /// One unmanaged lobe item in the snapshot (UNM-6). Its `key` is the
 /// `kind:name` form so the `forget` action resolves it like a managed ref.
 // spec: UNM-6
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotUnmanaged {
     pub key: String,
     pub name: String,
     pub kind: ItemKind,
     pub paths: Vec<PathBuf>,
-}
-
-/// Global generation counter, incremented when data changes are detected.
-static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-
-fn next_generation() -> u64 {
-    GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Load the initial snapshot under a blocking shared lock (called once at
@@ -253,7 +249,6 @@ fn load_inner(paths: &Paths) -> Result<Snapshot> {
     };
 
     Ok(Snapshot {
-        generation: next_generation(),
         installed,
         available,
         unmanaged,
@@ -343,15 +338,19 @@ mod tests {
     }
 
     #[test]
-    fn generation_increments_on_each_load() {
-        // spec: TUI-15
+    fn two_loads_with_no_change_produce_equal_snapshots() {
+        // spec: TUI-15 - change detection is by VALUE, so two loads over
+        // unchanged state must compare equal; otherwise the poll tick's
+        // `apply_snapshot_if_changed` gate can never fire and every tick
+        // rebuilds the tree. (The previous `generation` counter was minted
+        // fresh per load, which is exactly the bug this pins against.)
         let (paths, base) = temp_paths();
         crate::paths::mkdir_p(&paths.mind_home).unwrap();
         let snap1 = load(&paths).unwrap();
         let snap2 = load(&paths).unwrap();
-        assert!(
-            snap2.generation > snap1.generation,
-            "generation should increment on each load"
+        assert_eq!(
+            snap1, snap2,
+            "two loads over unchanged state must be equal so the poll gate can skip the rebuild"
         );
         cleanup(&base);
     }

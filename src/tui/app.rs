@@ -348,14 +348,14 @@ impl App {
     }
 
     /// Apply a snapshot only if the data changed (used for poll ticks).
+    ///
+    /// The comparison is by VALUE: a poll that observes identical state is a
+    /// no-op, so the tree is not rebuilt and the redraw shows the same frame.
+    /// (This gate previously compared a `generation` counter that `data::load`
+    /// minted fresh on every call, so it never matched and every tick rebuilt.)
     // spec: TUI-15
     pub fn apply_snapshot_if_changed(&mut self, snapshot: Snapshot) {
-        let changed = self
-            .last_snapshot
-            .as_ref()
-            .map(|s| s.generation != snapshot.generation)
-            .unwrap_or(true);
-        if changed {
+        if self.last_snapshot.as_ref() != Some(&snapshot) {
             self.apply_snapshot(snapshot);
         }
     }
@@ -1382,7 +1382,6 @@ mod tests {
 
     fn make_snapshot() -> Snapshot {
         Snapshot {
-            generation: 1,
             installed: vec![SnapshotInstalled {
                 key: "skill:review".to_string(),
                 name: "review".to_string(),
@@ -1621,9 +1620,8 @@ mod tests {
         if !app.visible.is_empty() {
             app.selected = 0;
             let id = app.visible[0].id.clone();
-            // Apply same snapshot again (same data, same generation -> no change expected)
-            let mut snap2 = make_snapshot();
-            snap2.generation = 2; // different generation
+            // Apply an equivalent snapshot again (forced, bypassing the gate).
+            let snap2 = make_snapshot();
             app.apply_snapshot(snap2);
             // Selection should still point to same id if it exists
             if let Some(idx) = app.visible.iter().position(|n| n.id == id) {
@@ -1641,8 +1639,7 @@ mod tests {
         // user's search query and expansion set, not just the selection. Otherwise
         // the once-a-second poll would wipe what the user is doing.
         let mut app = App::new(String::new(), None, None);
-        let mut snap1 = make_snapshot();
-        snap1.generation = 1;
+        let snap1 = make_snapshot();
         app.apply_snapshot(snap1);
 
         // Establish search + expansion state.
@@ -1655,9 +1652,9 @@ mod tests {
         let search_before = app.search.clone();
         let expanded_before = app.expanded.clone();
 
-        // A new, higher-generation snapshot arrives (another process touched disk).
+        // A genuinely changed snapshot arrives (another process touched disk).
         let mut snap2 = make_snapshot();
-        snap2.generation = 2;
+        snap2.installed.pop();
         app.apply_snapshot_if_changed(snap2);
 
         assert_eq!(
@@ -1739,16 +1736,14 @@ mod tests {
     }
 
     #[test]
-    fn apply_snapshot_if_changed_is_noop_when_generation_equal() {
-        // spec: TUI-15 - the poll tick gates re-application on the generation
-        // counter. When the new snapshot has the SAME generation as the last
-        // applied one, apply_snapshot_if_changed must NOT rebuild (it would
-        // otherwise reset selection/expansion every second). The implementor
-        // flagged the "equal, not just less" edge, so pin it explicitly.
+    fn apply_snapshot_if_changed_is_noop_when_data_is_identical() {
+        // spec: TUI-15 - the poll tick gates re-application on snapshot VALUE.
+        // An unchanged poll (the common case, once a second) must NOT rebuild:
+        // a rebuild re-derives the tree and would churn every tick for nothing.
+        // This is the case the old `generation` counter could never detect,
+        // because `data::load` minted a fresh counter value on every call.
         let mut app = App::new(String::new(), None, None);
-        let mut snap1 = make_snapshot();
-        snap1.generation = 7;
-        app.apply_snapshot(snap1);
+        app.apply_snapshot(make_snapshot());
 
         // Move selection and expand a node so we can detect an unwanted rebuild.
         let expandable_idx = app.visible.iter().position(|n| n.expandable);
@@ -1757,49 +1752,44 @@ mod tests {
             let id = app.visible[idx].id.clone();
             app.expanded.insert(id);
         }
+        app.rebuild_tree();
         let selected_before = app.selected;
         let expanded_before = app.expanded.clone();
         let visible_before: Vec<String> = app.visible.iter().map(|n| n.id.clone()).collect();
 
-        // A snapshot with the SAME generation: must be ignored (no rebuild).
-        let mut snap_same = make_snapshot();
-        snap_same.generation = 7;
-        // Make the data clearly different so a wrongful rebuild would be visible.
-        snap_same.installed.clear();
-        app.apply_snapshot_if_changed(snap_same);
+        // An IDENTICAL snapshot: must be ignored (no rebuild).
+        app.apply_snapshot_if_changed(make_snapshot());
 
         assert_eq!(
             app.selected, selected_before,
-            "selection must be unchanged on equal generation"
+            "selection must be unchanged on an identical snapshot"
         );
         assert_eq!(
             app.expanded, expanded_before,
-            "expansion must be unchanged on equal generation"
+            "expansion must be unchanged on an identical snapshot"
         );
         let visible_after: Vec<String> = app.visible.iter().map(|n| n.id.clone()).collect();
         assert_eq!(
             visible_after, visible_before,
-            "tree must NOT be rebuilt when generation is equal (would have dropped installed items)"
+            "tree must NOT be rebuilt when the snapshot is unchanged"
         );
     }
 
     #[test]
-    fn apply_snapshot_if_changed_rebuilds_when_generation_differs() {
-        // spec: TUI-15 - the contrast case: a higher generation IS applied, so a
-        // genuine on-disk change (e.g. a source added by another process) shows up.
+    fn apply_snapshot_if_changed_rebuilds_when_data_differs() {
+        // spec: TUI-15 - the contrast case: a genuinely different snapshot IS
+        // applied, so an on-disk change (e.g. an item removed by another
+        // process) shows up on the next tick.
         let mut app = App::new(String::new(), None, None);
-        let mut snap1 = make_snapshot();
-        snap1.generation = 1;
-        app.apply_snapshot(snap1);
+        app.apply_snapshot(make_snapshot());
         let had_installed = app
             .visible
             .iter()
             .any(|n| matches!(&n.node, crate::tui::tree::TreeNode::InstalledItem(_)));
         assert!(had_installed, "fixture should start with an installed item");
 
-        // New generation, installed list emptied: must be applied.
+        // Installed list emptied: a real change, so it must be applied.
         let mut snap2 = make_snapshot();
-        snap2.generation = 2;
         snap2.installed.clear();
         app.apply_snapshot_if_changed(snap2);
         let still_installed = app
@@ -1808,7 +1798,7 @@ mod tests {
             .any(|n| matches!(&n.node, crate::tui::tree::TreeNode::InstalledItem(_)));
         assert!(
             !still_installed,
-            "a higher generation must rebuild and reflect the new data"
+            "a changed snapshot must rebuild and reflect the new data"
         );
     }
 
@@ -2611,7 +2601,6 @@ mod tests {
 
         // A subsequent snapshot with a different list replaces it.
         let mut snap2 = make_snapshot();
-        snap2.generation = 2;
         snap2.lobes = vec!["~/.claude".to_string()];
         app.apply_snapshot(snap2);
         assert_eq!(app.lobes, vec!["~/.claude"]);
@@ -2843,7 +2832,6 @@ mod tests {
         let mut ns = std::collections::HashMap::new();
         ns.insert("local/agents".to_string(), prefix.map(|s| s.to_string()));
         Snapshot {
-            generation: 1,
             installed: vec![],
             available: vec![SnapshotAvailable {
                 key: "agent:dev".to_string(),
@@ -2960,7 +2948,6 @@ mod tests {
         let mut ns = std::collections::HashMap::new();
         ns.insert("local/agents".to_string(), Some("jk".to_string()));
         app.apply_snapshot(Snapshot {
-            generation: 1,
             installed: vec![SnapshotInstalled {
                 key: "agent:jk:dev".to_string(),
                 name: "jk:dev".to_string(),
@@ -3792,7 +3779,6 @@ mod tests {
     /// available): the source dialog must omit install-all.
     fn snapshot_installed_only() -> Snapshot {
         Snapshot {
-            generation: 1,
             installed: vec![SnapshotInstalled {
                 key: "skill:review".to_string(),
                 name: "review".to_string(),
@@ -3816,7 +3802,6 @@ mod tests {
     /// installed): the source dialog must omit uninstall-all.
     fn snapshot_available_only() -> Snapshot {
         Snapshot {
-            generation: 1,
             installed: vec![],
             available: vec![SnapshotAvailable {
                 key: "agent:dev".to_string(),
@@ -4170,7 +4155,6 @@ mod tests {
     /// installed. Returns the snapshot and the dep key ("agent:dev").
     fn make_dep_snapshot() -> Snapshot {
         Snapshot {
-            generation: 1,
             installed: vec![
                 SnapshotInstalled {
                     key: "skill:review".to_string(),
@@ -4336,7 +4320,6 @@ mod tests {
     /// its canonical line under Installed.
     fn make_cross_group_dep_snapshot() -> Snapshot {
         Snapshot {
-            generation: 1,
             installed: vec![SnapshotInstalled {
                 key: "agent:dev".to_string(),
                 name: "dev".to_string(),
@@ -4396,7 +4379,6 @@ mod tests {
     /// transitive dep-subtree expansion via the Expand/Collapse intents.
     fn make_transitive_dep_snapshot() -> Snapshot {
         Snapshot {
-            generation: 1,
             installed: vec![
                 SnapshotInstalled {
                     key: "skill:review".to_string(),

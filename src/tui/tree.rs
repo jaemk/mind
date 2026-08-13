@@ -824,7 +824,6 @@ mod tests {
 
     fn snap_with(installed: Vec<SnapshotInstalled>, available: Vec<SnapshotAvailable>) -> Snapshot {
         Snapshot {
-            generation: 1,
             installed,
             available,
             unmanaged: vec![],
@@ -849,7 +848,6 @@ mod tests {
         // spec: TUI-68 - with no sources melded at all, both empty groups get
         // the same call-to-action wording the CLI uses (CLI-187).
         let snap = Snapshot {
-            generation: 1,
             installed: vec![],
             available: vec![],
             unmanaged: vec![],

@@ -159,6 +159,14 @@ per-rule files. Rules stay Claude-only here; an `AGENTS.md`-writer is out of sco
   and missing-lobe-link loops so that a removed project directory does not produce
   spurious repair errors for the links that lived inside it.
 
+- `HARN-22` When a directory cannot be created because a component of its path
+  is a symlink whose target does not exist, the failure is reported as a
+  `broken-symlink-path` error naming the broken link and the target it points
+  at, not as the OS's bare `File exists` (which refers to the link itself and so
+  points at neither cause). This is reachable through a configured agent home
+  whose path is a dangling symlink: linking an item into it would otherwise fail
+  with an `os error 17` that reads as a spurious collision.
+
 - `HARN-15` `config lobes add` (and `link-project`, which shares its
   implementation) creates the resolved lobe path on disk (`mkdir -p`) immediately
   after resolving it and before the config entry is written, in the managed
