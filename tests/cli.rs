@@ -1638,27 +1638,12 @@ fn hostile_named_item_is_skipped_at_scan_not_installed() {
 /// back verbatim in a rejection message (absolute glob, `..`, or an
 /// out-of-root/unsafe-name confinement error).
 ///
-/// KNOWN GAP (not fixed by this shard -- out of file scope): as of this test,
-/// `src/mindfile.rs::validate_discover_patterns` embeds the raw pattern into
-/// `MindError::MindToml`'s `msg` unsanitized (`format!("discover glob '{pattern}'
-/// is absolute; ...")`), and `MindError`'s `Display` does not sanitize it either.
-/// The ORIGINAL version of this test asserted only "no raw ANSI/bidi in
-/// stderr", which passed today -- but only because the fixture TOML used the
-/// OLD flat-array `[discover].skills` schema, which is now a type error caught
-/// before DSC-81's own check ever ran (a TOML `invalid type` error, not the
-/// DSC-81 rejection); the M-test2 finding this test is named for. Once the
-/// TOML is corrected to the current `skills = { include = [...] }` schema, the
-/// real DSC-81 rejection message is reached and DOES echo the raw ESC/bidi
-/// bytes: a live, unfixed DSC-95 gap in `src/mindfile.rs` (owned by a
-/// different shard than this one). Fix: sanitize `pattern` (e.g.
-/// `crate::sanitize::strip_ansi(pattern)`) before formatting it into `msg` at
-/// both raise sites in `validate_discover_patterns`. This test intentionally
-/// does NOT assert the sanitized-absence property until that lands (a
-/// permanently-red test would misrepresent this as this shard's own failure);
-/// it instead pins the M-test2 fix (naming the actual DSC-81 rejection, not a
-/// TOML parse error) and the correct-schema fixture, so re-adding the
-/// sanitization assertion is a one-line follow-up once `mindfile.rs` closes
-/// the gap.
+/// Asserting only "no raw ANSI/bidi in stderr" is not enough on its own: an
+/// earlier form of this test passed only because its fixture used the old flat
+/// `[discover].skills` array, which is now a TOML type error caught before
+/// DSC-81's check ever runs. So this pins the actual DSC-81 rejection (an
+/// absolute glob) alongside the sanitizing, using the current
+/// `skills = { include = [...] }` schema that reaches it.
 #[test]
 fn hostile_discover_glob_error_is_sanitized_and_names_the_dsc81_rejection() {
     // spec: DSC-95
@@ -1700,6 +1685,24 @@ fn hostile_discover_glob_error_is_sanitized_and_names_the_dsc81_rejection() {
     assert!(
         message.contains("absolute") || message.contains("must be relative"),
         "the --json error message must also name the absolute-glob rejection: {v}"
+    );
+
+    // DSC-95: the source-controlled pattern is echoed stripped, in both the
+    // human message and the `--json` document. serde escapes ESC but not a bidi
+    // override, so the raw character would otherwise survive the envelope.
+    assert!(
+        !meld.stderr.contains('\x1b') && !meld.stderr.contains('\u{202E}'),
+        "the rejected glob must be echoed stripped on stderr: {:?}",
+        meld.stderr
+    );
+    assert!(
+        !message.contains('\x1b') && !message.contains('\u{202E}'),
+        "the rejected glob must be echoed stripped in --json: {message:?}"
+    );
+    // The pattern is still named, not dropped.
+    assert!(
+        message.contains("INJ"),
+        "the sanitized pattern must still be shown: {message:?}"
     );
 }
 

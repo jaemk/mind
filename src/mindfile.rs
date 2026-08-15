@@ -520,11 +520,15 @@ fn validate_discover_patterns(discover: &Discover, toml_path: &Path) -> Result<(
 
     for pattern in all_globs {
         let pp = std::path::Path::new(pattern);
+        // DSC-95: the pattern is source-controlled and this message reaches the
+        // terminal, so echo it stripped. The rejection tests the RAW pattern;
+        // only the rendering is sanitized.
+        let shown = crate::sanitize::strip_ansi(pattern);
         if pp.is_absolute() || pattern.starts_with('~') {
             return Err(MindError::MindToml {
                 path: toml_path.to_path_buf(),
                 msg: format!(
-                    "discover glob '{pattern}' is absolute; globs must be relative to the repo root"
+                    "discover glob '{shown}' is absolute; globs must be relative to the repo root"
                 ),
             });
         }
@@ -533,7 +537,7 @@ fn validate_discover_patterns(discover: &Discover, toml_path: &Path) -> Result<(
             return Err(MindError::MindToml {
                 path: toml_path.to_path_buf(),
                 msg: format!(
-                    "discover glob '{pattern}' contains '..'; globs must not escape the repo root"
+                    "discover glob '{shown}' contains '..'; globs must not escape the repo root"
                 ),
             });
         }
