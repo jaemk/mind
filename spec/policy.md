@@ -278,11 +278,11 @@ normatively. Source identity is `host/owner/repo` (see storage.md).
   `SelfUpdatePolicy` error. Rationale: an organization that disables updates does
   not want version-nagging either.
 - `POL-53` `[binary].self-update = "<version>"` pins the target to that version
-  string, behaving exactly as if `--version <pin>` were passed (offline resolution;
+  string, behaving exactly as if `--to <pin>` were passed (offline resolution;
   the GitHub API is not consulted for "latest"). The pinned version string is
   validated as a dotted numeric value (e.g. `"0.14.0"`) at policy-parse time
   (POL-5 fail closed); a leading `v` is stripped before validation. If the user
-  also passes `--version V` where V differs from the pin, the command fails with
+  also passes `--to V` where V differs from the pin, the command fails with
   `SelfUpdatePolicy` naming the conflict. `evolve --check` reports against the
   pinned version and respects the existing `PinnedBelowCurrent` no-downgrade logic.
 - `POL-54` `[binary].self-update = true` is identical to the absent key: `evolve`

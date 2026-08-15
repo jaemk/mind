@@ -321,13 +321,9 @@ fn scan_item_link(
     if !(skill_dir.is_dir() && skill_md.is_file()) {
         return Err(not_a_skill());
     }
-    out.push(make_item(
-        source,
-        prefix,
-        ItemKind::Skill,
-        skill_dir,
-        &skill_md,
-    )?);
+    if let Some(item) = make_item(source, prefix, ItemKind::Skill, skill_dir, &skill_md)? {
+        out.push(item);
+    }
     Ok(())
 }
 
@@ -583,14 +579,11 @@ fn scan_add_roots(
         let skills_dir = root.join(ItemKind::Skill.dir());
         for entry in read_dir_opt(&skills_dir)? {
             let skill_md = entry.join("SKILL.md");
-            if entry.is_dir() && skill_md.is_file() {
-                out.push(make_item(
-                    source,
-                    prefix,
-                    ItemKind::Skill,
-                    entry,
-                    &skill_md,
-                )?);
+            if entry.is_dir()
+                && skill_md.is_file()
+                && let Some(item) = make_item(source, prefix, ItemKind::Skill, entry, &skill_md)?
+            {
+                out.push(item);
             }
         }
     }
@@ -662,17 +655,31 @@ fn from_decl(
             ),
         });
     }
-    if let Some(link) = &decl.link
-        && !is_safe_link_rel(link)
-    {
-        return Err(MindError::MindToml {
-            path: root.join("mind.toml"),
-            msg: format!(
-                "item '{safe_name}' has an unsafe link '{}': it must be a relative path inside the \
-                 agent home (no leading '/' or '~', no '..' component, no NUL)",
-                crate::sanitize::strip_ansi(link)
-            ),
-        });
+    if let Some(link) = &decl.link {
+        if !is_safe_link_rel(link) {
+            return Err(MindError::MindToml {
+                path: root.join("mind.toml"),
+                msg: format!(
+                    "item '{safe_name}' has an unsafe link '{}': it must be a relative path inside \
+                     the agent home (no leading '/' or '~', no '..' component, no NUL)",
+                    crate::sanitize::strip_ansi(link)
+                ),
+            });
+        }
+        // spec: DSC-97 -- confine the link target to a kind directory so a
+        // source cannot plant a file at the agent-home root (e.g.
+        // `settings.json`) or inside a harness's own config directory.
+        if !is_confined_link_target(link) {
+            return Err(MindError::MindToml {
+                path: root.join("mind.toml"),
+                msg: format!(
+                    "item '{safe_name}' has a link '{}' outside a kind directory: it must begin \
+                     with 'skills/', 'agents/', 'rules/', or 'tools/' (a link cannot place a file \
+                     at the agent-home root or inside a harness's own config, e.g. 'settings.json')",
+                    crate::sanitize::strip_ansi(link)
+                ),
+            });
+        }
     }
     // `bin` and `build` describe tooling, so they are valid only on a tool item.
     if kind != ItemKind::Tool && (decl.bin.is_some() || decl.build.is_some()) {
@@ -728,11 +735,26 @@ fn from_decl(
 /// or `..`, and free of a path separator or NUL. The name keys the store and the
 /// per-home symlink, so anything else could steer those paths out of the kind
 /// directory.
+///
+/// Also rejects a control character or a security-blocked Unicode code point
+/// (a bidi override, a directional mark, or a zero-width character -- DSC-96,
+/// mirroring `namespace::is_safe_prefix_component`'s NS-72 guard). Identity is
+/// the raw name (it keys the store path, the symlink, and the manifest, and
+/// the cross-source collision check compares it raw), while display sanitizes
+/// only at print time (DSC-95); left unchecked here, a hostile source could
+/// ship a name that renders identically to a trusted item's name in every
+/// human-facing surface while installing as a distinct item, defeating both
+/// the visual comparison a user makes before approving an install and the
+/// collision check that would otherwise warn them.
 fn is_safe_item_name(name: &str) -> bool {
     if name.is_empty() || name == "." || name == ".." {
         return false;
     }
     if name.contains('/') || name.contains('\\') || name.contains('\0') {
+        return false;
+    }
+    // spec: DSC-96
+    if crate::sanitize::has_blocked_chars(name) {
         return false;
     }
     // Belt and suspenders: exactly one normal component, nothing else.
@@ -744,6 +766,12 @@ fn is_safe_item_name(name: &str) -> bool {
 /// non-empty, not absolute, not `~`-rooted, and with no parent (`..`)/root/prefix
 /// component or NUL. `rel` may contain `/` for subdirectories; it just may not
 /// escape the home.
+///
+/// This alone does not confine `rel` to a kind directory: a `[[items]] link`
+/// value additionally needs [`is_confined_link_target`] (DSC-97). `path`
+/// (DSC-73) reuses only this function, not the confinement check -- a source
+/// path lives inside the clone, not the agent home, so "which kind directory"
+/// does not apply to it.
 fn is_safe_link_rel(rel: &str) -> bool {
     if rel.is_empty() || rel.contains('\0') || rel.starts_with('~') {
         return false;
@@ -755,6 +783,41 @@ fn is_safe_link_rel(rel: &str) -> bool {
     use std::path::Component;
     p.components()
         .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+}
+
+/// True when a (already `is_safe_link_rel`-checked) link target's first real
+/// path component names one of the four kind directories: `skills`, `agents`,
+/// `rules`, or `tools` (DSC-97). A leading `./` is skipped so `./skills/x` and
+/// `skills/x` are treated alike.
+///
+/// Confines a `[[items]] link` override to landing alongside items an
+/// ordinary (non-`link`) install would produce, so it can change only the
+/// linked name/subdirectory within a kind directory, never place a symlink at
+/// the agent-home root or inside a harness's own config directory. Without
+/// this, `is_safe_link_rel` alone accepts any relative path inside the agent
+/// home, including e.g. `settings.json`: a malicious source's item content
+/// (JSON with a `hooks` key) installed under that name becomes the Claude
+/// harness's own settings file on the next `learn`, executing an
+/// attacker-chosen command with no mind hook-consent prompt involved.
+fn is_confined_link_target(rel: &str) -> bool {
+    use std::path::Component;
+    let mut comps = Path::new(rel)
+        .components()
+        .skip_while(|c| matches!(c, Component::CurDir));
+    match comps.next() {
+        Some(Component::Normal(first)) => {
+            let first = first.to_string_lossy();
+            [
+                ItemKind::Skill,
+                ItemKind::Agent,
+                ItemKind::Rule,
+                ItemKind::Tool,
+            ]
+            .iter()
+            .any(|k| k.dir() == first)
+        }
+        _ => false,
+    }
 }
 
 /// Read a lifecycle hook (`install`/`uninstall`, HOOK-80) from an item's meta
@@ -922,14 +985,19 @@ fn scan_globs(
 ) -> Result<()> {
     for skill_md in resolve_globs(root, &discover.skills, ItemKind::Skill)? {
         // The glob points at the SKILL.md; the item is its parent dir.
-        if let Some(dir) = skill_md.parent() {
-            out.push(make_item(
+        // resolve_globs already validated the derived name (DSC-81/DSC-96), so
+        // make_item's skip path is not expected to trigger here; handle it
+        // anyway rather than assuming.
+        if let Some(dir) = skill_md.parent()
+            && let Some(item) = make_item(
                 source,
                 prefix,
                 ItemKind::Skill,
                 dir.to_path_buf(),
                 &skill_md,
-            )?);
+            )?
+        {
+            out.push(item);
         }
     }
     for (kind, globs) in [
@@ -937,14 +1005,18 @@ fn scan_globs(
         (ItemKind::Rule, &discover.rules),
     ] {
         for md in resolve_globs(root, globs, kind)? {
-            out.push(make_item(source, prefix, kind, md.clone(), &md)?);
+            if let Some(item) = make_item(source, prefix, kind, md.clone(), &md)? {
+                out.push(item);
+            }
         }
     }
     // Tool globs match the tool directory itself; its `TOOL.md` (if any) is the
     // metadata source.
     for dir in resolve_globs(root, &discover.tools, ItemKind::Tool)? {
         let meta = dir.join("TOOL.md");
-        out.push(make_item(source, prefix, ItemKind::Tool, dir, &meta)?);
+        if let Some(item) = make_item(source, prefix, ItemKind::Tool, dir, &meta)? {
+            out.push(item);
+        }
     }
     Ok(())
 }
@@ -986,22 +1058,22 @@ fn scan_convention(
     };
     for entry in read_dir_opt(&skills_dir)? {
         let skill_md = entry.join("SKILL.md");
-        if entry.is_dir() && skill_md.is_file() {
-            out.push(make_item(
-                source,
-                prefix,
-                ItemKind::Skill,
-                entry,
-                &skill_md,
-            )?);
+        if entry.is_dir()
+            && skill_md.is_file()
+            && let Some(item) = make_item(source, prefix, ItemKind::Skill, entry, &skill_md)?
+        {
+            out.push(item);
         }
     }
 
     for kind in [ItemKind::Agent, ItemKind::Rule] {
         let kind_dir = root.join(kind.dir());
         for entry in read_dir_opt(&kind_dir)? {
-            if entry.is_file() && entry.extension().is_some_and(|e| e == "md") {
-                out.push(make_item(source, prefix, kind, entry.clone(), &entry)?);
+            if entry.is_file()
+                && entry.extension().is_some_and(|e| e == "md")
+                && let Some(item) = make_item(source, prefix, kind, entry.clone(), &entry)?
+            {
+                out.push(item);
             }
         }
     }
@@ -1013,7 +1085,9 @@ fn scan_convention(
     for entry in read_dir_opt(&tools_dir)? {
         if entry.is_dir() {
             let meta = entry.join("TOOL.md");
-            out.push(make_item(source, prefix, ItemKind::Tool, entry, &meta)?);
+            if let Some(item) = make_item(source, prefix, ItemKind::Tool, entry, &meta)? {
+                out.push(item);
+            }
         }
     }
     Ok(())
@@ -1021,6 +1095,14 @@ fn scan_convention(
 
 /// Build a [`CatalogItem`], deriving its bare name from the path and its
 /// description from `meta_file`'s frontmatter, then applying the prefix.
+///
+/// Returns `Ok(None)` -- skipping the item rather than failing the whole scan
+/// -- when the derived name fails the DSC-96 safety check (a control
+/// character or a security-blocked Unicode code point): unlike an explicit
+/// `[[items]]` declaration (a hard error, since the author wrote the name),
+/// a convention-derived name comes from an arbitrary filename in the source
+/// tree, so one hostile file should not make an otherwise-good repo
+/// un-meldable. A warning is printed to stderr so the skip is not silent.
 ///
 /// spec: DSC-91 -- bubbles a size-cap failure from `build_item`'s capped
 /// frontmatter reads.
@@ -1030,7 +1112,7 @@ fn make_item(
     kind: ItemKind,
     path: PathBuf,
     meta: &Path,
-) -> Result<CatalogItem> {
+) -> Result<Option<CatalogItem>> {
     let bare = match kind {
         // Directory-shaped items take the directory name; file items the stem.
         ItemKind::Skill | ItemKind::Tool => file_name(&path),
@@ -1039,6 +1121,17 @@ fn make_item(
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default(),
     };
+    // spec: DSC-96
+    if !is_safe_item_name(&bare) {
+        eprintln!(
+            "warning: skipping {} '{}' in source '{}': unsafe item name (a control character or \
+             a bidi/zero-width Unicode code point)",
+            kind.as_str(),
+            crate::sanitize::strip_ansi(&bare),
+            crate::sanitize::strip_ansi(&source.name)
+        );
+        return Ok(None);
+    }
     // Convention discovery carries no overrides: every field falls back to the
     // item's frontmatter (HOOK-80: install/uninstall only from a tool's TOOL.md).
     build_item(
@@ -1050,6 +1143,7 @@ fn make_item(
         meta,
         ItemOverrides::default(),
     )
+    .map(Some)
 }
 
 /// Scan a plugin root for skills and agents only (MKT-3).
@@ -1068,28 +1162,22 @@ fn scan_plugin_components(
     let skills_dir = plugin_root.join(ItemKind::Skill.dir());
     for entry in read_dir_opt(&skills_dir)? {
         let skill_md = entry.join("SKILL.md");
-        if entry.is_dir() && skill_md.is_file() {
-            out.push(make_item(
-                source,
-                prefix,
-                ItemKind::Skill,
-                entry,
-                &skill_md,
-            )?);
+        if entry.is_dir()
+            && skill_md.is_file()
+            && let Some(item) = make_item(source, prefix, ItemKind::Skill, entry, &skill_md)?
+        {
+            out.push(item);
         }
     }
     // Agents: agents/<name>.md at the plugin root (DSC-11, MKT-3).
     // NS-40: agent_harness_name reads frontmatter `name:` just as convention does.
     let agents_dir = plugin_root.join(ItemKind::Agent.dir());
     for entry in read_dir_opt(&agents_dir)? {
-        if entry.is_file() && entry.extension().is_some_and(|e| e == "md") {
-            out.push(make_item(
-                source,
-                prefix,
-                ItemKind::Agent,
-                entry.clone(),
-                &entry,
-            )?);
+        if entry.is_file()
+            && entry.extension().is_some_and(|e| e == "md")
+            && let Some(item) = make_item(source, prefix, ItemKind::Agent, entry.clone(), &entry)?
+        {
+            out.push(item);
         }
     }
     Ok(())
@@ -1204,14 +1292,17 @@ fn scan_marketplace_in_repo_plugins(
             for skill_path in &entry.skills {
                 let skill_dir = plugin_root.join(skill_path);
                 let skill_md = skill_dir.join("SKILL.md");
-                if skill_dir.is_dir() && skill_md.is_file() {
-                    out.push(make_item(
+                if skill_dir.is_dir()
+                    && skill_md.is_file()
+                    && let Some(item) = make_item(
                         source,
                         &plugin_prefix,
                         ItemKind::Skill,
                         skill_dir,
                         &skill_md,
-                    )?);
+                    )?
+                {
+                    out.push(item);
                 }
             }
         } else {
@@ -1219,14 +1310,17 @@ fn scan_marketplace_in_repo_plugins(
             let skills_dir = plugin_root.join(ItemKind::Skill.dir());
             for entry_path in read_dir_opt(&skills_dir)? {
                 let skill_md = entry_path.join("SKILL.md");
-                if entry_path.is_dir() && skill_md.is_file() {
-                    out.push(make_item(
+                if entry_path.is_dir()
+                    && skill_md.is_file()
+                    && let Some(item) = make_item(
                         source,
                         &plugin_prefix,
                         ItemKind::Skill,
                         entry_path,
                         &skill_md,
-                    )?);
+                    )?
+                {
+                    out.push(item);
                 }
             }
         }
@@ -1234,14 +1328,17 @@ fn scan_marketplace_in_repo_plugins(
         // 4. Scan agents (always): agents/<name>.md at the plugin root (DSC-11, MKT-3).
         let agents_dir = plugin_root.join(ItemKind::Agent.dir());
         for agent_path in read_dir_opt(&agents_dir)? {
-            if agent_path.is_file() && agent_path.extension().is_some_and(|e| e == "md") {
-                out.push(make_item(
+            if agent_path.is_file()
+                && agent_path.extension().is_some_and(|e| e == "md")
+                && let Some(item) = make_item(
                     source,
                     &plugin_prefix,
                     ItemKind::Agent,
                     agent_path.clone(),
                     &agent_path,
-                )?);
+                )?
+            {
+                out.push(item);
             }
         }
     }
@@ -1281,8 +1378,6 @@ fn meta_file(kind: ItemKind, path: &Path) -> PathBuf {
     }
 }
 
-/// Strip ANSI escape sequences and certain unsafe Unicode code points from `s`.
-///
 /// Expand a glob pattern rooted at `root`, returning sorted matches.
 fn glob_paths(root: &Path, pattern: &str, kind: ItemKind) -> Result<Vec<PathBuf>> {
     // spec: DSC-81 -- confinement of [discover] globs to the clone root.
@@ -2269,6 +2364,21 @@ mod tests {
     }
 
     #[test]
+    fn is_safe_item_name_rejects_blocked_unicode() {
+        // spec: DSC-96 -- a control character or a security-blocked Unicode
+        // code point (bidi override, zero-width) is rejected even though it is
+        // not a path separator, so a name cannot render identically to a
+        // trusted item's name while installing as a distinct identity.
+        for bad in [
+            "revie\u{200B}w", // zero-width space mid-name
+            "pay\u{202E}oot", // right-to-left override
+            "a\x01b",         // C0 control character
+        ] {
+            assert!(!is_safe_item_name(bad), "{bad:?} should be rejected");
+        }
+    }
+
+    #[test]
     fn is_safe_link_rel_rejects_escape() {
         // spec: DSC-72
         for ok in ["rules/x.md", "skills/x", "commands/x.toml", "./a/b.md"] {
@@ -2308,6 +2418,105 @@ mod tests {
         assert!(
             matches!(err, MindError::MindToml { .. }),
             "an unsafe item name must be a schema error: {err}"
+        );
+    }
+
+    #[test]
+    fn from_decl_rejects_bidi_name() {
+        // spec: DSC-96 -- a declared `[[items]] name` carrying a security-blocked
+        // Unicode code point is a hard error, since the author wrote it
+        // explicitly (unlike a convention-derived name, which is skipped with a
+        // warning instead, see `convention_scan_skips_item_with_unsafe_name`).
+        let tmp = TmpDir::new();
+        let root = tmp.path();
+        let source = make_source_for(root);
+        let decl = ItemDecl {
+            kind: "rule".to_string(),
+            name: "revie\u{200B}w".to_string(),
+            path: "rules/x.md".to_string(),
+            link: None,
+            description: None,
+            bin: None,
+            build: None,
+            install: None,
+            uninstall: None,
+            hooks: Vec::new(),
+        };
+        let err = from_decl(root, &source, &None, &decl).unwrap_err();
+        assert!(
+            matches!(err, MindError::MindToml { .. }),
+            "a bidi/zero-width name must be a schema error: {err}"
+        );
+    }
+
+    #[test]
+    fn convention_scan_skips_item_with_unsafe_name_and_warns() {
+        // spec: DSC-96 -- a convention-derived name (a filename in the source
+        // tree, not an author-declared value) is skipped with a warning rather
+        // than failing the whole scan, so one hostile filename does not make an
+        // otherwise-good repo un-meldable.
+        let tmp = TmpDir::new();
+        let root = tmp.path();
+        write_file(&root.join("rules/good.md"), "---\n---\n# good\n");
+        write_file(&root.join("rules/b\u{200B}ad.md"), "---\n---\n# bad\n");
+        let paths = paths_for(root);
+        let source = make_source_for(root);
+        let mut items = Vec::new();
+        scan_source(&paths, &source, &mut items).unwrap();
+        assert_eq!(
+            items.iter().filter(|i| i.kind == ItemKind::Rule).count(),
+            1,
+            "only the safely-named item should surface: {items:?}"
+        );
+        assert!(items.iter().any(|i| i.name == "good"));
+        assert!(
+            !items.iter().any(|i| i.name.contains('\u{200B}')),
+            "the unsafely-named item must not be in the catalog"
+        );
+    }
+
+    #[test]
+    fn is_confined_link_target_requires_a_kind_directory() {
+        // spec: DSC-97
+        for ok in [
+            "skills/x",
+            "agents/x.md",
+            "rules/x.md",
+            "tools/x",
+            "./rules/x.md",
+        ] {
+            assert!(is_confined_link_target(ok), "{ok:?} should be accepted");
+        }
+        for bad in ["settings.json", "hooks/x.json", ".claude/settings.json", ""] {
+            assert!(!is_confined_link_target(bad), "{bad:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn from_decl_rejects_link_outside_kind_directory() {
+        // spec: DSC-97 -- H4: an `[[items]] link` outside a kind directory
+        // (e.g. the agent-home root) is rejected before install ever runs, so
+        // a source cannot plant a symlink at `settings.json` and have a
+        // harness read attacker-controlled item content as its own config.
+        let tmp = TmpDir::new();
+        let root = tmp.path();
+        let source = make_source_for(root);
+        let decl = ItemDecl {
+            kind: "rule".to_string(),
+            name: "x".to_string(),
+            path: "rules/x.md".to_string(),
+            link: Some("settings.json".to_string()),
+            description: None,
+            bin: None,
+            build: None,
+            install: None,
+            uninstall: None,
+            hooks: Vec::new(),
+        };
+        let err = from_decl(root, &source, &None, &decl).unwrap_err();
+        assert!(
+            matches!(err, MindError::MindToml { .. }),
+            "a link outside a kind directory must be a schema error: {err}"
         );
     }
 

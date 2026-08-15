@@ -400,15 +400,16 @@ fn build_installed_group(
     }
 
     // spec: TUI-68 - an empty Installed group gets a call-to-action row instead
-    // of a bare, unexplained blank list: the wording matches the CLI's own
-    // (CLI-187 "no sources melded", "no items match") so the message is
-    // consistent whichever surface the user sees it on. A legitimately empty
-    // group (sources melded, nothing installed yet, no active filter) gets no
-    // synthetic row: it is Available, not a broken/misconfigured state.
+    // of a bare, unexplained blank list: the "no sources melded" case matches
+    // the CLI's own wording (CLI-187); the search-miss case is deliberately
+    // group-scoped (see `empty_state_row`'s doc), not CLI-187's global text.
+    // A legitimately empty group (sources melded, nothing installed yet, no
+    // active filter) gets no synthetic row: it is Available, not a
+    // broken/misconfigured state.
     if source_nodes.is_empty()
-        && let Some(msg) = empty_state_message("installed", search, snap.source_names.is_empty())
+        && let Some(node) = empty_state_row("installed", search, snap.source_names.is_empty())
     {
-        source_nodes.push(empty_state_node("installed", msg));
+        source_nodes.push(node);
     }
 
     Node {
@@ -419,37 +420,41 @@ fn build_installed_group(
     }
 }
 
-/// The call-to-action message for an empty group (TUI-68), or `None` for a
+/// Build the call-to-action row for an empty group (TUI-68), or `None` for a
 /// legitimately empty group that needs no explanation (sources melded,
 /// nothing matched by name because there's simply nothing there yet, no
-/// active search). Shared by Installed and Available so the wording -- and
-/// the CLI-187 text it mirrors -- stays in exactly one place. `group` scopes
-/// the search-miss wording ("no installed items match ..." vs "no available
-/// items match ...") so an empty Installed group does not claim a global "no
-/// items match" while matches sit in Available.
-fn empty_state_message(group: &str, search: &str, no_sources_melded: bool) -> Option<String> {
-    if !search.is_empty() {
-        // spec: CLI-187 (commands.rs `no items match '{q}'`)
-        Some(format!("no {group} items match '{search}'"))
+/// active search). Shared by Installed and Available so the wording, the node
+/// id, and the CLI-187 text the "no sources melded" case mirrors all stay in
+/// exactly one place -- taking a single `group` value in rather than having
+/// two separate helpers each independently derive their own string from it
+/// (L19: those two could disagree if a call site passed a different literal
+/// to each). `group` also scopes the search-miss wording ("no installed items
+/// match ..." vs "no available items match ..."; TUI-68) so an empty
+/// Installed group does not claim a global "no items match" while matches sit
+/// in Available, and vice versa -- a deliberate divergence from CLI-187's
+/// ungrouped `no items match '{q}'`, since the CLI's plain listing has no
+/// separate groups to scope by.
+fn empty_state_row(group: &str, search: &str, no_sources_melded: bool) -> Option<Node> {
+    let message = if !search.is_empty() {
+        // spec: TUI-68 -- group-scoped, deliberately distinct from the CLI's
+        // ungrouped `no items match '{q}'` (CLI-187).
+        format!("no {group} items match '{search}'")
     } else if no_sources_melded {
         // spec: CLI-187 (commands.rs `no sources melded; run ...`)
-        Some("no sources melded; run `mind meld <owner/repo>` to add one".to_string())
+        "no sources melded; run `mind meld <owner/repo>` to add one".to_string()
     } else {
-        None
-    }
-}
-
-/// Build a synthetic call-to-action leaf (TUI-68): non-expandable, carries no
-/// actions (`node_actions` has no arm for it, so it returns none via its
-/// default case), and never collides with a real node id (`empty:<group>` is
-/// not a namespace any item/source/kind id uses).
-fn empty_state_node(group: &str, message: String) -> Node {
-    Node {
+        return None;
+    };
+    Some(Node {
+        // Non-expandable, carries no actions (`node_actions` has no arm for
+        // `EmptyState`, so it returns none via its default case), and never
+        // collides with a real node id (`empty:<group>` is not a namespace
+        // any item/source/kind id uses).
         id: format!("empty:{group}"),
         label: message.clone(),
         node: TreeNode::EmptyState(message),
         children: vec![],
-    }
+    })
 }
 
 /// Build the Available subtree, de-duplicating items that are already installed.
@@ -581,9 +586,9 @@ fn build_available_group(
     // suggested sources are appended (an empty group means no catalog items AND
     // no suggestions matched/exist).
     if source_nodes.is_empty()
-        && let Some(msg) = empty_state_message("available", search, snap.source_names.is_empty())
+        && let Some(node) = empty_state_row("available", search, snap.source_names.is_empty())
     {
-        source_nodes.push(empty_state_node("available", msg));
+        source_nodes.push(node);
     }
 
     Node {
@@ -905,6 +910,81 @@ mod tests {
             !flat.iter().any(|n| n.label.contains("no sources melded")),
             "a failed search must not be conflated with the no-sources case: {:?}",
             flat.iter().map(|n| &n.label).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn empty_state_available_branch_and_mixed_installed_available_search() {
+        // spec: TUI-68 - M-test8: only the "installed" branch of the
+        // group-scoped wording was previously asserted; the "available" branch
+        // (and the motivating mixed scenario the change exists for -- a search
+        // that matches an Available item while Installed holds nothing at
+        // all) went untested. A call site that passed the wrong group literal
+        // would still pass the rest of the suite while showing the user an
+        // "Available" group claiming nothing *installed* matched, or vice
+        // versa.
+        let snap = snap_with(
+            vec![],
+            vec![make_available(
+                "skill:build",
+                "build",
+                "src/a",
+                ItemKind::Skill,
+            )],
+        );
+        let nodes = build_tree(&snap, "build", None, None, false, false);
+        let flat = flatten_tree(&nodes, &HashSet::new(), &HashSet::new());
+
+        // Installed is empty and the search matched nothing there: the
+        // INSTALLED-scoped CTA, not a global or available-scoped one.
+        assert!(
+            flat.iter()
+                .any(|n| n.label == "no installed items match 'build'"),
+            "an empty Installed group during a search that matches Available \
+             must show the installed-scoped CTA: {:?}",
+            flat.iter().map(|n| &n.label).collect::<Vec<_>>()
+        );
+        // Available actually has the match: the real item shows, no CTA there.
+        assert!(
+            flat.iter().any(|n| n.label.starts_with("build")),
+            "the matching Available item must still be shown: {:?}",
+            flat.iter().map(|n| &n.label).collect::<Vec<_>>()
+        );
+        assert!(
+            !flat
+                .iter()
+                .any(|n| n.label.contains("no available items match")),
+            "Available is not empty, so it must not show its own empty-state \
+             CTA: {:?}",
+            flat.iter().map(|n| &n.label).collect::<Vec<_>>()
+        );
+
+        // Mirror scenario: pins the "available" branch directly -- Available
+        // is empty (search matches nothing there) while Installed holds the
+        // real match.
+        let snap2 = snap_with(
+            vec![make_installed(
+                "skill:review",
+                "review",
+                "src/a",
+                ItemKind::Skill,
+            )],
+            vec![make_available(
+                "skill:build",
+                "build",
+                "src/a",
+                ItemKind::Skill,
+            )],
+        );
+        let nodes2 = build_tree(&snap2, "review", None, None, false, false);
+        let flat2 = flatten_tree(&nodes2, &HashSet::new(), &HashSet::new());
+        assert!(
+            flat2
+                .iter()
+                .any(|n| n.label == "no available items match 'review'"),
+            "an empty Available group during a search that matches Installed \
+             must show the available-scoped CTA: {:?}",
+            flat2.iter().map(|n| &n.label).collect::<Vec<_>>()
         );
     }
 

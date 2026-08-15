@@ -362,8 +362,23 @@ prevent the lost-update and torn-read races a plain read-modify-write would allo
   digest. The `SHA256SUMS` format is standard `sha256sum` output: lowercase hex
   digest, two spaces, bare filename, one line per file. A digest mismatch, or a
   sums file that has no entry for the archive, is a `DigestMismatch` error and
-  the archive is not extracted. Version-pinned `evolve` (`--version V`) verifies
+  the archive is not extracted. Version-pinned `evolve` (`--to V`) verifies
   the pinned release's `SHA256SUMS`.
+- `STO-76` The resolved `evolve` target version -- from an explicit `--to`, a
+  managed-policy pin, or a fetched `releases/latest` `tag_name` -- is validated
+  as a plausible dotted-numeric version string
+  (`mindfile::is_plausible_version`) before it is interpolated into either URL
+  it drives: the release asset URL (STO-47's download) and the `SHA256SUMS`
+  URL. This runs before either URL is built and before any download-step
+  network call. Without it, a value carrying path segments (e.g.
+  `1/../../../../attacker/mind/releases/download/v1`, from a repo/release
+  takeover, a TLS-intercepting proxy, or a `--to` value copied from a
+  malicious "install these steps" doc) re-points BOTH URLs at the same
+  attacker-controlled location once curl normalizes the `..` segments, so the
+  `SHA256SUMS` digest check would compare the attacker's binary against the
+  attacker's own digest file and silently pass. A rejected value fails with a
+  structured `SelfUpdatePolicy` error naming the value, refused before any
+  network call the download step would make.
 - `STO-65` `evolve --check` (and the run path's equivalent report) names the
   resolved release target triple (`target_triple`, e.g.
   `x86_64-unknown-linux-musl`) alongside the version comparison, so the exact
@@ -555,7 +570,12 @@ prevent the lost-update and torn-read races a plain read-modify-write would allo
 - `STO-51` A `StateTooNew` error names the file (`"sources.json"` or
   `"manifest.json"`), the version found, and the highest version supported, and
   advises the user to run `mind evolve` (the binary self-update verb; `upgrade`
-  is the item verb, so the remedy names `evolve` explicitly).
+  is the item verb, so the remedy names `evolve` explicitly), or, if `evolve`
+  itself reports up to date, to use the newer `mind` binary that wrote the
+  file instead. The second clause covers the realistic trigger for this error:
+  a locally built or newer-than-release `mind` wrote the state, so `evolve`
+  cannot supply a newer release to fix it, and the first clause alone would
+  strand the user with every command failing and no next step.
 
 ## Per-project lobes
 

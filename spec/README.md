@@ -120,7 +120,7 @@ and verified.
 | Marketplace + curator compose: a co-present `mind.toml` `[discover].sources` layers on a `.claude-plugin/` manifest; `roots`/`flat-skills`/`[[items]]`/`[discover]` globs suppress the manifest's own-item layer | done | MKT-15, MKT-16 |
 | Graceful degradation of nested non-auth clone failures (skip + curator-empty guard) | done | DSC-79, DSC-80 |
 | Namespace prefix is a safe path component; future kind words reserved (command, hook, mcp, plugin, prompt, mode, output-style) | done | NS-28, NS-29 |
-| Auto-generated prefix guard rejects multi-byte control/bidi/zero-width the byte scan misses | done | NS-72 |
+| `is_safe_prefix_component` guard rejects multi-byte control/bidi/zero-width the byte scan misses, for both an auto-generated prefix and a user-supplied `--namespace`/`[source].prefix` (`validate_prefix` shares the same guard) | done | NS-72 |
 | `[discover]` glob confinement: reject absolute/`..` patterns, canonicalize matches into the clone | done | DSC-81 |
 | `evolve` integrity: SHA256SUMS verification before extraction, unique staging name, exclusive lock (self-managed, no outer lock) | done | STO-45, STO-46, STO-47, STO-48 |
 | Uninstall confinement: recorded paths must resolve under the store or a configured lobe | done | LIFE-44 |
@@ -206,7 +206,7 @@ and verified.
 | The TUI's lobes action shares `config lobes add`'s implementation (lobe-dir creation, kinds-filtered backfill, `--force`-gated foreign-file guard), so it carries the same guarantees with no separate implementation | done | TUI-62 |
 | Selective lobe mode: `--local` on `learn`/`meld` scopes an install to the single registered project lobe the cwd sits inside, instead of the default fan-out | done | HARN-19, HARN-20, HARN-21 |
 | A dangling-symlink path component is reported as a named broken link, not the OS's bare `File exists` | done | HARN-22 |
-| `--json` treated as always non-interactive for a destructive confirmation (unmeld, forget --unmanaged, upgrade apply, evolve binary-swap) | done | LIFE-45 |
+| `--json` treated as always non-interactive for a destructive confirmation (unmeld, forget --unmanaged, upgrade apply, evolve binary-swap, learn's dependency-closure confirmation) | done | LIFE-45 |
 | `upgrade` refuses a rename that would evict a different installed item already occupying the new key, instead of silently deleting it | done | LIFE-46 |
 | `upgrade` rename excludes the new install's own links from the old item's link cleanup, so a shared link path (e.g. an agent's bare-name link) is not deleted out from under the new install | done | LIFE-47 |
 | A mid-batch `upgrade`/hook-rerun failure saves the manifest/registry for every already-applied item before the error propagates | done | LIFE-48 |
@@ -226,6 +226,14 @@ and verified.
 | `evolve`'s pin-a-version flag renamed `--to <VERSION>`; `--version` kept as a hidden alias | done | CLI-229 |
 | `unmeld` accepts `remove`/`rm` as additional visible aliases | done | CLI-230 |
 | `sync [source]` accepts an optional source selector, syncing only the matching source(s) | done | CLI-231 |
+| `sync <selector> --upgrade`'s upgrade pass and its hook re-run are scoped to the selected sources | done | CLI-232 |
+| Item-name capture rejects control/bidi/zero-width code points: a hard error for a `mind.toml` declaration, skip-with-warning in the convention scan | done | DSC-96 |
+| `[[items]] link` target is confined to the item kind's directory; anything else is refused | done | DSC-97 |
+| Blocked-character set extended to the Unicode format class (tag block, variation selectors, U+00AD, U+180E, U+2061-2064, U+206A-206F, U+FFF9-FFFB, U+3164, U+115F) | done | NS-73 |
+| Broken-symlink diagnosis is substituted only for an `AlreadyExists` mkdir failure whose offending component is a `NotFound` symlink | done | HARN-23 |
+| Resolved `evolve` target version is validated as a plausible version before any URL is built | done | STO-76 |
+| TUI: staleness flag is memoized against a fingerprint of a stat-derived hash | done | TUI-72 |
+| TUI: `u` applies pending upgrades without syncing first; the confirm modal says so | done | TUI-73 |
 
 ## Documents
 

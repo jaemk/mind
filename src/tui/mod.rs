@@ -818,12 +818,16 @@ mod tests {
     }
 
     #[test]
-    fn run_learn_preview_strips_ansi_from_dep_tree() {
-        // spec: TUI-60 - the dependency tree text (DEP-40) is built from
-        // catalog item names, which are source-controlled (here, a filename).
-        // An ANSI escape embedded in a dependency's name must not survive into
-        // the pending action's dep_tree, which the confirm modal renders
-        // verbatim (B4-TUI).
+    fn run_learn_preview_keeps_ansi_out_of_the_dep_tree() {
+        // spec: TUI-60, DSC-96 - the dependency tree text (DEP-40) is built from
+        // catalog item names, which are source-controlled (here, a filename), and
+        // the confirm modal renders dep_tree verbatim (B4-TUI). DSC-96 now closes
+        // this at capture rather than at display: a name carrying a control or
+        // bidi/zero-width code point is skipped by the convention scan with a
+        // warning, so it never becomes a catalog item and can never reach the
+        // tree. This asserts the end state either way - whatever lands in
+        // dep_tree carries no escape - so it still fails if the capture guard is
+        // removed without a display-side sanitizer taking over.
         use std::process::Command;
 
         let n = std::time::SystemTime::now()
@@ -916,17 +920,22 @@ mod tests {
             .as_ref()
             .expect("pending action survives a successful preview")
             .dep_tree
-            .clone()
-            .expect("the dependency tree must be stashed onto the Learn confirm");
+            .clone();
+        // DSC-96 skips the ESC-named agent at scan, so the `{{ns:}}` reference
+        // resolves to nothing and no closure is rendered at all.
         assert!(
-            !tree.contains('\x1b'),
-            "the ANSI escape from the dependency's name must be stripped from \
-             dep_tree before it reaches the pending action; got: {tree:?}"
+            tree.is_none(),
+            "an item whose name carries a control character must be skipped at \
+             scan (DSC-96), leaving no dependency to render; got: {tree:?}"
         );
-        assert!(
-            tree.contains("dev"),
-            "the (sanitized) dependency name must still be present: {tree:?}"
-        );
+        // The invariant that matters regardless of which layer enforces it: no
+        // escape reaches the text the confirm modal prints verbatim.
+        if let Some(t) = &tree {
+            assert!(
+                !t.contains('\x1b'),
+                "no ANSI escape may reach dep_tree; got: {t:?}"
+            );
+        }
     }
 
     #[test]

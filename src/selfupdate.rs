@@ -93,14 +93,16 @@ pub fn parse_latest_tag(json: &str) -> Result<String> {
 // spec: CLI-140
 pub fn decision(current: &str, target: &str, explicit: bool) -> Decision {
     if version_at_least(current, target) {
-        // A prerelease `current` (e.g. `0.23.1-dev`, a source build) has the same
-        // NUMERIC view as its base release `0.23.1`, so `version_at_least` reads
-        // them as equal in both directions. But a `-dev` build predates that
-        // release, so treat a prerelease current as strictly below a release
-        // target of the same numeric version: offer the update (including an
-        // explicit `--to 0.23.1` onto its own base) rather than claiming
-        // up-to-date. The `version_at_least(target, current)` guard restricts
-        // this to a numeric TIE, so a genuinely newer dev build
+        // A prerelease `current` (e.g. `0.23.1-dev`, a prerelease version
+        // string such as one from a fork or a packager -- this repo's own
+        // releases never carry one, see CARGO_PKG_VERSION in `run`) has the
+        // same NUMERIC view as its base release `0.23.1`, so `version_at_least`
+        // reads them as equal in both directions. But a prerelease predates
+        // its base release, so treat a prerelease current as strictly below a
+        // release target of the same numeric version: offer the update
+        // (including an explicit `--to 0.23.1` onto its own base) rather than
+        // claiming up-to-date. The `version_at_least(target, current)` guard
+        // restricts this to a numeric TIE, so a genuinely newer prerelease
         // (`0.24.0-dev` vs release `0.23.1`) is unaffected.
         if is_prerelease(current) && !is_prerelease(target) && version_at_least(target, current) {
             return Decision::Update;
@@ -118,9 +120,10 @@ pub fn decision(current: &str, target: &str, explicit: bool) -> Decision {
     }
 }
 
-/// Whether `v` carries a prerelease suffix (a `-` segment, e.g. the `-dev` a
-/// source build appends). Build metadata (`+...`) is not a prerelease. Used by
-/// [`decision`] to break a numeric tie between a dev build and its base release.
+/// Whether `v` carries a prerelease suffix (a `-` segment, e.g. `-dev` or
+/// `-rc.2`, such as a fork or packager might append). Build metadata (`+...`)
+/// is not a prerelease. Used by [`decision`] to break a numeric tie between a
+/// prerelease and its base release.
 fn is_prerelease(v: &str) -> bool {
     v.split_once('+').map_or(v, |(base, _)| base).contains('-')
 }
@@ -160,12 +163,13 @@ fn check_report(current: &str, target: &str, decision: &Decision, triple: &str) 
 ///
 /// Returns:
 /// - `Ok(None)` when the policy allows `evolve` to any version (no pin).
-/// - `Ok(Some(pin))` when the policy pins to a specific version (use as `--version`).
+/// - `Ok(Some(pin))` when the policy pins to a specific version (use as `--to`).
 /// - `Err(SelfUpdatePolicy)` when `evolve` is disabled (POL-52) or when
 ///   `user_version` conflicts with the pin (POL-53).
 ///
-/// Pure: no network call. `user_version` is the raw `--version` argument (may
-/// have a leading `v`, which is stripped before comparison).
+/// Pure: no network call. `user_version` is the raw `--to` argument (`--version`
+/// is a hidden deprecated alias for the same value; may have a leading `v`,
+/// which is stripped before comparison).
 pub(crate) fn check_policy_for_evolve(
     policy: Option<&crate::policy::Policy>,
     user_version: Option<&str>,
@@ -186,7 +190,7 @@ pub(crate) fn check_policy_for_evolve(
                     return Err(MindError::SelfUpdatePolicy {
                         detail: format!(
                             "managed policy pins self-update to {pin}; \
-                             --version {uv_clean} conflicts with the pin"
+                             --to {uv_clean} conflicts with the pin"
                         ),
                     });
                 }
@@ -233,6 +237,26 @@ pub fn run(check: bool, yes: bool, mut version: Option<String>) -> Result<()> {
             parse_latest_tag(&json)?
         }
     };
+
+    // spec: STO-76 -- validate the resolved target version BEFORE it is
+    // interpolated into either URL it drives (the release asset URL and the
+    // SHA256SUMS URL, both built later from this same string). A value
+    // carrying path segments (e.g. an explicit `--to
+    // "1/../../../../attacker/mind/releases/download/v1"`, or a compromised
+    // release's `tag_name`) would otherwise re-point both URLs at an
+    // attacker-controlled location -- curl normalizes `..` segments -- so the
+    // SHA256SUMS digest check would silently compare the attacker's binary
+    // against the attacker's own digest file. Reject before any URL is built
+    // and before any download-step network call.
+    if !crate::mindfile::is_plausible_version(&target_version) {
+        return Err(MindError::SelfUpdatePolicy {
+            detail: format!(
+                "self-update target version {target_version:?} is not a plausible \
+                 dotted-numeric version string (e.g. \"1.2.3\"); refusing before \
+                 building the release URL"
+            ),
+        });
+    }
 
     let d = decision(current, &target_version, explicit);
     let out = crate::render::ctx();
@@ -1598,6 +1622,143 @@ mod tests {
     }
 
     #[test]
+    // spec: STO-76
+    fn run_refuses_a_malicious_latest_tag_before_any_second_network_call() {
+        // A stubbed GitHub "latest release" response whose tag_name carries
+        // path segments (e.g. from a repo/release takeover, or a TLS-
+        // intercepting proxy) must be refused by `is_plausible_version`
+        // validation before `run` ever builds the release asset URL or the
+        // SHA256SUMS URL from it, and before any second network call (the
+        // asset/sums download) is attempted. Drives the real `run()` against a
+        // fake curl on PATH that always answers the malicious JSON and counts
+        // its own invocations, never touching the network.
+        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let n = MKTEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let scratch = std::env::temp_dir().join(format!(
+            "mind-evolve-fake-curl-latest-{}-{n}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&scratch).expect("create scratch dir");
+        let counter_path = scratch.join("call-count.txt");
+        let script_path = scratch.join("curl");
+        // Every invocation appends one byte to the counter file and answers
+        // with a tag_name that, once the leading 'v' is stripped, contains
+        // '..' path segments -- the shape that would re-point the release
+        // asset URL AND the SHA256SUMS URL at an attacker-controlled path
+        // once curl normalizes them.
+        let script = format!(
+            "#!/bin/sh\nprintf x >> {counter:?}\nprintf '%s' '{{\"tag_name\":\"v1/../../../../attacker/mind/releases/download/v1\"}}'\nexit 0\n",
+            counter = counter_path
+        );
+        std::fs::write(&script_path, script).expect("write fake curl");
+        let mut perms = std::fs::metadata(&script_path)
+            .expect("stat fake curl")
+            .permissions();
+        perms.set_mode(0o700);
+        std::fs::set_permissions(&script_path, perms).expect("chmod fake curl");
+
+        let orig_path = std::env::var("PATH").unwrap_or_default();
+        let orig_policy_file = std::env::var("MIND_POLICY_FILE").ok();
+        let new_path = format!("{}:{orig_path}", scratch.display());
+        // SAFETY: ENV_LOCK is held for the duration of the mutation and the
+        // `run()` call below; no real network is reached (PATH resolves
+        // `curl` to the fake script above first, and `run` never gets far
+        // enough to need MIND_HOME).
+        unsafe {
+            std::env::set_var("PATH", &new_path);
+            std::env::remove_var("MIND_POLICY_FILE");
+        }
+
+        let result = run(false, true, None);
+
+        // Restore env immediately, before any assertion can panic.
+        // SAFETY: ENV_LOCK is still held.
+        unsafe {
+            std::env::set_var("PATH", &orig_path);
+            match orig_policy_file {
+                Some(v) => std::env::set_var("MIND_POLICY_FILE", v),
+                None => std::env::remove_var("MIND_POLICY_FILE"),
+            }
+        }
+        drop(guard);
+
+        match result {
+            Err(MindError::SelfUpdatePolicy { detail }) => {
+                assert!(
+                    detail.contains("not a plausible"),
+                    "must explain the version is implausible: {detail}"
+                );
+                assert!(
+                    detail.contains("attacker"),
+                    "must name the rejected value: {detail}"
+                );
+            }
+            other => panic!("expected a SelfUpdatePolicy refusal, got {other:?}"),
+        }
+
+        let call_count =
+            std::fs::read_to_string(&counter_path).expect("fake curl must have been invoked");
+        assert_eq!(
+            call_count.len(),
+            1,
+            "curl must be invoked exactly once (the latest-release lookup); a second \
+             invocation would mean evolve proceeded to build a URL from the unvalidated \
+             target version: {call_count:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    // spec: STO-76
+    fn run_refuses_an_explicit_to_target_with_path_segments_with_no_network_call() {
+        // An explicit `--to` value bypasses the network entirely for target
+        // resolution (no `latest` lookup), so a malicious value must still be
+        // refused purely from local validation -- no PATH stub needed; if
+        // `run` somehow tried to shell out despite there being no curl/wget
+        // stub on PATH, it would fail with a `DownloadFailed`/`Io` error
+        // instead of `SelfUpdatePolicy`, and the assertion below would catch
+        // that misbehavior.
+        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let orig_policy_file = std::env::var("MIND_POLICY_FILE").ok();
+        // SAFETY: ENV_LOCK is held for the duration of the mutation and the
+        // `run()` call below.
+        unsafe {
+            std::env::remove_var("MIND_POLICY_FILE");
+        }
+
+        let result = run(
+            true,
+            false,
+            Some("1/../../../../attacker/mind/releases/download/v1".to_string()),
+        );
+
+        // SAFETY: ENV_LOCK is still held.
+        unsafe {
+            match orig_policy_file {
+                Some(v) => std::env::set_var("MIND_POLICY_FILE", v),
+                None => std::env::remove_var("MIND_POLICY_FILE"),
+            }
+        }
+        drop(guard);
+
+        match result {
+            Err(MindError::SelfUpdatePolicy { detail }) => {
+                assert!(
+                    detail.contains("not a plausible"),
+                    "must explain the version is implausible: {detail}"
+                );
+                assert!(
+                    detail.contains("attacker"),
+                    "must name the rejected --to value: {detail}"
+                );
+            }
+            other => panic!("expected a SelfUpdatePolicy refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
     // spec: STO-52
     fn timeout_param_flows_through_arg_builders() {
         // Verify that different timeout values produce the corresponding flag
@@ -1982,6 +2143,13 @@ mod tests {
                     detail.contains("conflicts"),
                     "must say 'conflicts': {detail}"
                 );
+                // `--to` is the canonical evolve flag (`--version` is a hidden
+                // deprecated alias, commit 40c495f); the pin-conflict message
+                // must name the flag `evolve --help` actually documents.
+                assert!(
+                    detail.contains("--to 0.15.0"),
+                    "must name the canonical --to flag, not the hidden --version alias: {detail}"
+                );
             }
             other => panic!("expected SelfUpdatePolicy, got {other:?}"),
         }
@@ -2139,6 +2307,35 @@ mod tests {
         );
         // A release current is never treated as a prerelease.
         assert_eq!(decision("0.23.1", "0.23.1", false), Decision::UpToDate);
+    }
+
+    #[test]
+    // spec: CLI-140
+    fn decision_dotted_prerelease_current_updates_onto_its_base_release() {
+        // A DOTTED prerelease suffix (semver's `-rc.2` form, as opposed to a
+        // bare `-dev`) must be handled identically to `decision_prerelease_
+        // current_updates_onto_its_base_release` above. Before the
+        // `version_at_least` fix (mindfile.rs), per-dotted-component suffix
+        // stripping mis-parsed "1.0.0-rc.2" as [1, 0, 0, 2] -- numerically
+        // ABOVE the plain "1.0.0" it should tie with -- so `is_prerelease`
+        // correctly flagged the value as a prerelease, but the numeric-tie
+        // guard `version_at_least(target, current)` never held, and `decision`
+        // fell through to UpToDate / PinnedBelowCurrent instead of offering
+        // the update that supersedes the prerelease.
+        assert_eq!(decision("1.0.0-rc.2", "1.0.0", false), Decision::Update);
+        assert_eq!(decision("1.0.0-rc.2", "1.0.0", true), Decision::Update);
+        // A genuinely newer dotted prerelease is NOT downgraded onto an older
+        // release.
+        assert_eq!(decision("1.1.0-rc.2", "1.0.0", false), Decision::UpToDate);
+        assert_eq!(
+            decision("1.1.0-rc.2", "1.0.0", true),
+            Decision::PinnedBelowCurrent
+        );
+        // Two dotted prereleases of the same base stay up-to-date.
+        assert_eq!(
+            decision("1.0.0-rc.2", "1.0.0-rc.2", false),
+            Decision::UpToDate
+        );
     }
 
     #[test]

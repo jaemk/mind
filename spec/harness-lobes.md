@@ -165,7 +165,26 @@ per-rule files. Rules stay Claude-only here; an `AGENTS.md`-writer is out of sco
   at, not as the OS's bare `File exists` (which refers to the link itself and so
   points at neither cause). This is reachable through a configured agent home
   whose path is a dangling symlink: linking an item into it would otherwise fail
-  with an `os error 17` that reads as a spurious collision.
+  with an `os error 17` that reads as a spurious collision. The remedy points at
+  `mind config lobes list` to see configured lobes.
+
+- `HARN-23` The `broken-symlink-path` diagnosis (HARN-22) is substituted for the
+  underlying `create_dir_all` failure only when BOTH: the `create_dir_all` error
+  kind is `AlreadyExists` (the exact signature a dangling-symlink component
+  produces), AND a path component that actually exists as a symlink resolves
+  (via `std::fs::metadata`) to an error whose kind is `NotFound`. Any other
+  combination -- an unrelated permission or read-only-filesystem failure deeper
+  in the path that happens to occur after an earlier dangling symlink, or a
+  symlink component whose target is unreadable for a reason other than
+  not-existing (e.g. a permission error or a symlink loop, `ELOOP`) -- leaves the
+  original I/O error (with its real `path` and `source`) to propagate instead of
+  being misreported as a broken link. When the broken-symlink diagnosis IS
+  substituted but the link's target itself cannot be read back (`read_link`
+  fails), that read failure propagates as the reported error rather than
+  rendering an empty target. A relative link target is resolved against the
+  link's own parent directory before being shown, so the displayed target is
+  interpretable on its own rather than printed as a bare (and possibly
+  relative-looking) string with nothing to resolve it against.
 
 - `HARN-15` `config lobes add` (and `link-project`, which shares its
   implementation) creates the resolved lobe path on disk (`mkdir -p`) immediately
@@ -208,15 +227,15 @@ per-rule files. Rules stay Claude-only here; an `AGENTS.md`-writer is out of sco
 - `HARN-19` A selective lobe mode, distinct from the fan-out mode (HARN-17), in
   which an install targets a single project lobe instead of fanning into every
   configured lobe. It is requested per invocation by `--local` on `learn`/`meld`
-  (HARN-20) and is anchored on detecting the registered project lobe the current
-  working directory sits inside (HARN-21). Motivation: project-scoped skills for
+  (HARN-20) and is anchored on detecting the registered project lobe living
+  under the current working directory (HARN-21). Motivation: project-scoped skills for
   harnesses like Windsurf, where fanning every installed item into every project
   is not always wanted. The fan-out default (HARN-7/HARN-17) is unchanged when
   `--local` is absent.
 
 - `HARN-20` `--local` on `learn` and `meld` restricts that invocation's install
-  fan-out to exactly one lobe: the registered project lobe the current working
-  directory sits inside (HARN-21). Only that lobe receives links; the other
+  fan-out to exactly one lobe: the registered project lobe living under the
+  current working directory (HARN-21). Only that lobe receives links; the other
   configured agent homes (including the default `~/.claude`) are not written.
   The scoped lobe is a subset of the normally-resolved homes, so it is still
   subject to the lobe's own `kinds` filter (HARN-1) and to any managed-policy
@@ -238,10 +257,11 @@ per-rule files. Rules stay Claude-only here; an `AGENTS.md`-writer is out of sco
   parent directory (e.g. running `--local` from `~` with only `~/.claude`
   configured): that is refused, not narrowed to the default home. Likewise a
   home-rooted global preset lobe (e.g. `~/.gemini/config`) does not qualify when
-  the cwd is at or above `~`. When several configured lobes qualify, the deepest
-  (closest to the cwd) is chosen; containment is tested on
-  canonicalized paths so a symlinked cwd or lobe still matches. When `--local` is
-  given and the cwd is not inside any registered project lobe, the install is
+  the cwd is at or above `~`. When several configured lobes qualify, the most
+  deeply nested (the one with the most path components, i.e. farthest below the
+  cwd) is chosen; containment is tested on canonicalized paths so a symlinked
+  cwd or lobe still matches. When `--local` is given and the cwd is not inside
+  any registered project lobe, the install is
   refused with an actionable error (naming `mind link-project` / `mind config
   lobes add` as the fix, or dropping `--local`) rather than silently falling back
   to the global fan-out.

@@ -228,19 +228,38 @@ impl OutputCtx {
     /// that column; the last column is left as-is; trailing empty cells are trimmed.
     /// Width is measured ignoring ANSI SGR escapes via [`visible_width`].
     /// Columns are separated by two spaces.
+    ///
+    /// DSC-95: each cell is sanitized (`crate::sanitize::strip_ansi`) before
+    /// the line is composed, not after. A cell built from a source-controlled
+    /// name can carry an unterminated ANSI/OSC sequence; `strip_ansi_escapes`
+    /// is a state machine, so sanitizing the already-composed line would let
+    /// that sequence consume whatever a caller appended after it (a role tag,
+    /// a status marker) instead of just the hostile cell. Sanitizing per cell
+    /// keeps the damage contained to the cell that carried it. This is a
+    /// single chokepoint: every `print_rows` caller is covered without having
+    /// to sanitize at each call site.
+    // spec: CLI-232 DSC-95
     pub fn print_rows(&self, rows: &[Vec<String>]) {
         let Some(ncols) = rows.iter().map(Vec::len).max() else {
             return;
         };
+        let rows: Vec<Vec<String>> = rows
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|cell| crate::sanitize::strip_ansi(cell))
+                    .collect()
+            })
+            .collect();
         let mut widths = vec![0usize; ncols];
-        for row in rows {
+        for row in &rows {
             for (i, cell) in row.iter().enumerate() {
                 if i + 1 < ncols {
                     widths[i] = widths[i].max(visible_width(cell));
                 }
             }
         }
-        for row in rows {
+        for row in &rows {
             let mut line = String::new();
             for (i, cell) in row.iter().enumerate() {
                 if i > 0 {
@@ -708,6 +727,62 @@ mod tests {
         // Must not panic.
         ctx.print_rows(&[]);
         ctx.print_rows(&[vec![]]);
+    }
+
+    // ==========================================================================
+    // print_rows sanitization (DSC-95 / CLI-232)
+    // ==========================================================================
+
+    /// `print_rows` must sanitize each cell BEFORE composing the line, not
+    /// after: `strip_ansi_escapes::strip` is a state machine, and an
+    /// unterminated OSC sequence (`\x1b]` with no terminator) in one cell
+    /// would consume the rest of an already-composed line -- including a
+    /// later cell in the same row -- if sanitization ran post-composition.
+    /// This re-execs the test binary (println! output can't be captured
+    /// in-process) to prove the later cell survives and the escape is gone.
+    // spec: CLI-232 DSC-95
+    #[test]
+    fn print_rows_sanitizes_each_cell_before_composing_the_line() {
+        const ENV: &str = "MIND_TEST_PRINT_ROWS_HOSTILE_CELL";
+        const SURVIVOR: &str = "ZZ-PRINT-ROWS-SURVIVOR-ZZ";
+
+        if std::env::var_os(ENV).is_some() {
+            // Child role: print one row whose first cell carries an
+            // unterminated OSC sequence, and whose second (last) cell is the
+            // survivor marker. If sanitization ran on the composed line
+            // instead of per-cell, the OSC's runaway consumption would eat
+            // the survivor marker too.
+            plain().print_rows(&[vec!["evil\x1b]".to_string(), SURVIVOR.to_string()]]);
+            std::process::exit(0);
+        }
+
+        let exe = std::env::current_exe().expect("path of the running test binary");
+        let out = std::process::Command::new(exe)
+            .args([
+                "--exact",
+                "render::tests::print_rows_sanitizes_each_cell_before_composing_the_line",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(ENV, "1")
+            .output()
+            .expect("re-exec the test binary");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            !stdout.contains('\x1b'),
+            "the escape sequence must not reach the terminal: {stdout:?}"
+        );
+        assert!(
+            stdout.contains(SURVIVOR),
+            "the second cell must survive sanitizing the first cell in \
+             isolation, not disappear because sanitization ran on the \
+             composed line: {stdout:?}"
+        );
+        assert!(
+            stdout.contains("evil"),
+            "the non-hostile prefix of the first cell must still be printed \
+             (this is not a fail-closed/erase-the-item response): {stdout:?}"
+        );
     }
 
     // ==========================================================================

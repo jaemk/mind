@@ -79,13 +79,34 @@ The rest of this document states these rules normatively.
   is a structured `UnsafePrefix` error, distinct from the `ReservedPrefix`
   error for the kind-word/DEC-9 reserved list (NS-25/NS-29).
 - `NS-72` The low-level `is_safe_prefix_component` guard (used by
-  `validate_prefix` and by the auto-generation of a prefix from an untrusted
-  marketplace entry name, MKT-8) additionally rejects a multi-byte
-  security-blocked Unicode code point the NS-28 byte scan cannot see: a C1
-  control, a bidi override, a directional mark, or a zero-width character (the
-  DSC-94 set). Without this an entry name like `pay\u{202E}` would seed a
-  direction-spoofing prefix onto every namespaced ref; instead the entry falls
-  back to no prefix.
+  `validate_prefix`, and independently by catalog code that derives a prefix
+  from a marketplace/catalog entry name) additionally rejects a multi-byte
+  security-blocked Unicode code point the NS-28 byte scan cannot see: a bidi
+  override, a directional mark, a zero-width character, or a line/paragraph
+  separator (U+2028, U+2029) -- the DSC-94 set, via
+  `sanitize::has_blocked_chars`. The live path this guard changes the outcome
+  on is `validate_prefix`: a user-supplied `meld --namespace`/`-N` value, or a
+  `[source].prefix` declared in a melded repo's `mind.toml`, that carries one
+  of these characters is refused with a structured `UnsafePrefix` error rather
+  than being accepted as a prefix that would carry a spoofing mark into every
+  namespaced ref (tests/cli_prefix_guard.rs). The catalog's entry-name path is
+  NOT where this guard bites in practice: `catalog.rs` already runs
+  `strip_ansi` on a marketplace/catalog entry name before offering it as a
+  prefix candidate, so by the time `is_safe_prefix_component` sees that name
+  the DSC-94 set is already gone from it; the guard is defense in depth there,
+  not the mechanism that stops a raw entry name from seeding a prefix.
+- `NS-73` The security-blocked Unicode set `sanitize::has_blocked_chars` (and
+  therefore `is_safe_prefix_component`/`validate_prefix`, NS-72) rejects is
+  broadened beyond the original bidi/zero-width/separator set (DSC-94) to
+  cover the rest of the Unicode format category (Cf) plus two additional
+  invisible blocks: the Unicode tag block (U+E0000--U+E007F) and the
+  variation-selector blocks (U+FE00--U+FE0F, U+E0100--U+E01EF). The tag block
+  is the standard "invisible ASCII smuggling" vector -- text hidden there
+  renders as nothing at a terminal but is plain text to a parser or an AI
+  agent reading the same string -- so a prefix or an item name carrying a tag
+  character is rejected the same as one carrying a bidi override. The
+  broadened set is a strict superset of the original: every code point
+  blocked before NS-73 is still blocked.
 - `NS-29` The reserved-kind-word list (NS-25) is permanent and append-only
   (DEC-9). The following additional words are reserved against plausible future
   item kinds or CLI subsystem names: `command`, `hook`, `mcp`, `plugin`,

@@ -75,6 +75,15 @@ impl InstalledItem {
     /// name -- which `name`, `bare_name`, `store`, and each `link` embed -- cannot
     /// ride the document to a terminal (serde escapes ESC but not a bidi
     /// override). The persisted manifest is untouched; this is display-only.
+    ///
+    /// `install_hooks[].command` is sanitized too (CLI-232): it is fully
+    /// source-controlled shell text (the source declared it; HOOK-110 records
+    /// it verbatim as offered/run), and `recall <item> --json` serializes this
+    /// copy -- a richer payload than the bare name this function was
+    /// originally written to defuse, so leaving it out of `s(...)` would have
+    /// been an asymmetry inside the very function meant to close DSC-95's gaps.
+    /// `ran_at` (a commit hash) is not source-*controlled* text in the same
+    /// sense and is left as-is.
     pub fn sanitized_for_display(&self) -> InstalledItem {
         let s = |v: &str| crate::sanitize::strip_ansi(v);
         InstalledItem {
@@ -87,7 +96,14 @@ impl InstalledItem {
             store: s(&self.store),
             links: self.links.iter().map(|l| s(l)).collect(),
             description: self.description.as_deref().map(s),
-            install_hooks: self.install_hooks.clone(),
+            install_hooks: self
+                .install_hooks
+                .iter()
+                .map(|h| crate::source::RecordedHook {
+                    command: s(&h.command),
+                    ran_at: h.ran_at.clone(),
+                })
+                .collect(),
         }
     }
 }
@@ -312,5 +328,40 @@ mod tests {
             item.install_hooks
         );
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `sanitized_for_display` (DSC-95) must sanitize `install_hooks[].command`,
+    /// not just the name/path fields: it is fully source-controlled shell text
+    /// that `recall <item> --json` serializes from this exact copy (M9 -- a
+    /// richer payload than the bare name this function exists to defuse).
+    // spec: CLI-232 DSC-95
+    #[test]
+    fn sanitized_for_display_strips_ansi_from_install_hook_commands() {
+        let mut item = stub_item("evil");
+        item.install_hooks = vec![
+            RecordedHook {
+                command: "echo \x1b[31mran\x1b[0m".to_string(),
+                ran_at: Some("abc123".to_string()),
+            },
+            RecordedHook {
+                command: "echo \x1b]0;evil\x07skipped".to_string(),
+                ran_at: None,
+            },
+        ];
+        let display = item.sanitized_for_display();
+        assert_eq!(display.install_hooks.len(), 2);
+        for hook in &display.install_hooks {
+            assert!(
+                !hook.command.contains('\x1b'),
+                "sanitized_for_display must strip ANSI/escape bytes from a hook \
+                 command, got {:?}",
+                hook.command
+            );
+        }
+        assert_eq!(display.install_hooks[0].command, "echo ran");
+        assert_eq!(display.install_hooks[0].ran_at, Some("abc123".to_string()));
+        assert_eq!(display.install_hooks[1].ran_at, None);
+        // The persisted item is untouched -- this is display-only.
+        assert!(item.install_hooks[0].command.contains('\x1b'));
     }
 }

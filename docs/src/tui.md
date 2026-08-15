@@ -63,9 +63,10 @@ running.
 ## Actions
 
 Each action invokes the same verb the CLI exposes, against the same registry,
-manifest, and store. Every mutating action confirms before applying; destructive
-actions (`forget`, `unmeld --forget`) require an explicit confirmation. Results
-and errors are shown inline.
+manifest, and store, with one exception: upgrade does not fetch first (see
+below). Every mutating action confirms before applying; destructive actions
+(`forget`, `unmeld --forget`) require an explicit confirmation. Results and
+errors are shown inline.
 
 - **Install / learn**: install the selected Available item. On a higher node it
   installs in bulk: a source installs every available item from it, a kind bucket
@@ -75,8 +76,14 @@ and errors are shown inline.
 - **Meld / unmeld**: meld the selected or entered source; unmeld a melded source.
   The TUI's unmeld uninstalls the source's installed items by default and
   confirms first.
-- **Sync / upgrade**: sync all or the selected source; upgrade pending or the
-  selected items, showing the same deltas and confirming before applying.
+- **Sync**: sync all or the selected source.
+- **Upgrade**: upgrade pending items (or the selected item), showing the same
+  deltas the CLI would and confirming before applying. Unlike the CLI's plain
+  `upgrade`, this does NOT sync first: it acts on whatever the last sync or poll
+  already found to be out of date. Run **Sync** first if you want to check
+  upstream before upgrading. When nothing is currently known to be out of date,
+  the confirm says so relative to the last sync, not as a claim that you are
+  fully current.
 - **Config lobes**: view and manage agent homes (list / add / remove).
 
 An install preview arms the same dependency closure as the direct install

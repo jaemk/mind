@@ -96,17 +96,26 @@ pub fn hash_path(path: &Path) -> Result<String> {
 }
 
 /// A cheap change-detection fingerprint for the same tree [`hash_path`] hashes:
-/// the identical walk, but reading each entry's `(mtime, size)` instead of its
-/// contents. Symlinks are still not followed and still contribute their target
-/// string (which is cheap and catches a retarget).
+/// the identical walk, but reading each entry's stat fields -- `mtime`, `size`,
+/// and, under `cfg(unix)`, `ctime` and inode number -- instead of its contents.
+/// Symlinks are still not followed and still contribute their target string
+/// (which is cheap and catches a retarget).
 ///
 /// This is NOT a content hash and must never be compared against a recorded
 /// manifest hash. Its only use is to decide whether re-reading content is
 /// warranted: equal fingerprint means "nothing observably changed, reuse the
-/// previous content hash". A filesystem with coarse mtime granularity could in
-/// principle miss a same-second, same-size edit, which is why the only caller is
-/// the TUI's display-side staleness memo (tui/data.rs); every path that ACTS on
-/// a hash (`upgrade`, `introspect`, `recall`) calls `hash_path` directly.
+/// previous content hash". The real blind spot is not filesystem mtime
+/// granularity: it is any mtime-PRESERVING replacement at unchanged size --
+/// `cp -p`, `rsync -a`, `tar -p`, `touch -r`, some FUSE/network mounts -- which
+/// leaves `(mtime, size)` alone regardless of granularity. Folding in `ctime`
+/// and the inode number under `cfg(unix)` closes this for the realistic cases:
+/// `ctime` cannot be set from userland and changes on every write (even one
+/// that deliberately preserves `mtime`), and those tools' usual "preserve
+/// mtime" replace (write a new file, then rename it over the old path) swaps
+/// the inode too. This is why the only caller is the TUI's display-side
+/// staleness memo (tui/data.rs, TUI-72); every path that ACTS on a hash
+/// (`upgrade`, `introspect`, `recall`) calls `hash_path` directly and is
+/// unaffected by any residual gap here.
 pub(crate) fn stat_fingerprint(path: &Path) -> Result<String> {
     let mut h = Fnv::new();
     let meta = std::fs::symlink_metadata(path).map_err(|e| MindError::io(path, e))?;
@@ -120,36 +129,72 @@ pub(crate) fn stat_fingerprint(path: &Path) -> Result<String> {
         let mut entries = Vec::new();
         collect_stats(path, path, &mut entries)?;
         entries.sort();
-        for (tag, rel, mtime, size) in entries {
+        for (tag, rel, mtime, size, ino, ctime) in entries {
             h.write(&[tag]);
             h.write(&(rel.len() as u64).to_le_bytes());
             h.write(rel.as_bytes());
             h.write(&mtime.to_le_bytes());
             h.write(&size.to_le_bytes());
+            h.write(&ino.to_le_bytes());
+            h.write(&ctime.to_le_bytes());
         }
     } else {
+        let (ino, ctime) = unix_stat_fields(&meta);
         h.write(b"F");
-        h.write(&mtime_nanos(&meta)?.to_le_bytes());
+        h.write(&mtime_nanos(&meta, path)?.to_le_bytes());
         h.write(&meta.len().to_le_bytes());
+        h.write(&ino.to_le_bytes());
+        h.write(&ctime.to_le_bytes());
     }
     Ok(h.finish_hex())
 }
 
-/// Modification time as nanoseconds since the epoch. An error (a platform or
-/// filesystem that does not report mtime) propagates so the caller falls back
-/// to a real content hash rather than trusting a constant fingerprint.
-fn mtime_nanos(meta: &std::fs::Metadata) -> Result<u128> {
-    let t = meta
-        .modified()
-        .map_err(|e| MindError::io(std::path::Path::new("<metadata>"), e))?;
-    Ok(t.duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0))
+/// `(inode, ctime_nanos)` for a stat entry, under `cfg(unix)`
+/// (`std::os::unix::fs::MetadataExt`). `ctime` cannot be set from userland --
+/// it is bumped by the kernel on any inode metadata change, including a write
+/// that deliberately preserves `mtime` -- so it closes `stat_fingerprint`'s
+/// realistic blind spot (see its doc). Always `(0, 0)` on a non-unix target, so
+/// the fingerprint still compiles and functions there, just without this extra
+/// coverage.
+#[cfg(unix)]
+fn unix_stat_fields(meta: &std::fs::Metadata) -> (u64, i128) {
+    use std::os::unix::fs::MetadataExt;
+    let ctime_nanos = meta.ctime() as i128 * 1_000_000_000 + meta.ctime_nsec() as i128;
+    (meta.ino(), ctime_nanos)
 }
 
-/// Walk `dir` and collect `(type_tag, relative_path, mtime_nanos, size)` tuples:
-/// the [`collect_files`] walk with `stat` in place of `read`.
-fn collect_stats(root: &Path, dir: &Path, out: &mut Vec<(u8, String, u128, u64)>) -> Result<()> {
+#[cfg(not(unix))]
+fn unix_stat_fields(_meta: &std::fs::Metadata) -> (u64, i128) {
+    (0, 0)
+}
+
+/// Modification time as signed nanoseconds since the epoch. Signed (not the
+/// previous `u128` with `unwrap_or(0)`) so a pre-epoch mtime keeps its own
+/// distinct value instead of every pre-epoch timestamp collapsing to the same
+/// constant, which would make two edits between two pre-epoch mtimes invisible
+/// to the fingerprint. An error (a platform or filesystem that does not report
+/// mtime) propagates tagged with the real file path -- not a placeholder -- so
+/// the caller falls back to a real content hash rather than trusting a
+/// constant fingerprint.
+fn mtime_nanos(meta: &std::fs::Metadata, path: &Path) -> Result<i128> {
+    let t = meta.modified().map_err(|e| MindError::io(path, e))?;
+    Ok(match t.duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => d.as_nanos() as i128,
+        Err(e) => -(e.duration().as_nanos() as i128),
+    })
+}
+
+/// Walk `dir` and collect `(type_tag, relative_path, mtime_nanos, size, inode,
+/// ctime_nanos)` tuples: the [`collect_files`] walk with `stat` in place of
+/// `read`. For a symlink entry the `size`/`ctime` slots double as a folded
+/// target-string digest / zero (safe because the type tag is hashed first, so
+/// a symlink entry can never be mistaken for a file entry regardless of what
+/// numbers land in those slots).
+fn collect_stats(
+    root: &Path,
+    dir: &Path,
+    out: &mut Vec<(u8, String, i128, u64, u64, i128)>,
+) -> Result<()> {
     let rd = std::fs::read_dir(dir).map_err(|e| MindError::io(dir, e))?;
     for entry in rd {
         let entry = entry.map_err(|e| MindError::io(dir, e))?;
@@ -166,15 +211,21 @@ fn collect_stats(root: &Path, dir: &Path, out: &mut Vec<(u8, String, u128, u64)>
             // the link's own mtime does not.
             let target = std::fs::read_link(&path).map_err(|e| MindError::io(&path, e))?;
             let target_bytes = target.to_string_lossy();
-            // Fold the target string into the size slot so a retarget changes
-            // the fingerprint even when the link's own stat does not.
             let mut th = Fnv::new();
             th.write(target_bytes.as_bytes());
-            out.push((b'S', rel, 0, th.value()));
+            out.push((b'S', rel, 0, th.value(), 0, 0));
         } else if ft.is_dir() {
             collect_stats(root, &path, out)?;
         } else {
-            out.push((b'F', rel, mtime_nanos(&meta)?, meta.len()));
+            let (ino, ctime) = unix_stat_fields(&meta);
+            out.push((
+                b'F',
+                rel,
+                mtime_nanos(&meta, &path)?,
+                meta.len(),
+                ino,
+                ctime,
+            ));
         }
     }
     Ok(())
@@ -267,7 +318,7 @@ mod tests {
         );
     }
 
-    // spec: TUI-63
+    // spec: TUI-72
     #[test]
     fn stat_fingerprint_is_stable_and_changes_with_content() {
         // The fingerprint gates whether the TUI re-hashes content, so it must be
@@ -296,7 +347,7 @@ mod tests {
         assert_ne!(f4, f5, "removing a file must change the fingerprint");
     }
 
-    // spec: TUI-63
+    // spec: TUI-72
     #[test]
     fn stat_fingerprint_covers_nested_files_and_symlink_targets() {
         // A nested edit must be visible: caching on the ROOT directory's mtime
@@ -327,6 +378,84 @@ mod tests {
                 "a symlink retarget must change the fingerprint"
             );
         }
+    }
+
+    // spec: TUI-72
+    #[test]
+    fn stat_fingerprint_detects_same_size_content_change() {
+        // M3(d): every prior fingerprint test above also changed the file's
+        // SIZE alongside its content, so a fingerprint keyed on `size` alone
+        // (with `mtime` silently dropped by a future edit) would still have
+        // passed those tests. Isolate a same-size rewrite.
+        let dir = tmp("fingerprint-same-size");
+        std::fs::write(dir.join("a.txt"), b"aaaaa").unwrap();
+        let f1 = stat_fingerprint(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), b"bbbbb").unwrap();
+        let f2 = stat_fingerprint(&dir).unwrap();
+        assert_ne!(
+            f1, f2,
+            "a same-size content rewrite must change the fingerprint"
+        );
+    }
+
+    /// Force `path`'s mtime to an exact `(seconds, nanos)` value since the
+    /// epoch, to simulate an mtime-PRESERVING replace (`cp -p`, `rsync -a`,
+    /// `touch -r`) precisely rather than relying on two writes racing the
+    /// clock. `ctime` cannot be forced this way (or any way, from userland):
+    /// the kernel always bumps it to "now" on the `utimensat` call itself, so
+    /// this helper is exactly the tool that would defeat a fingerprint keyed
+    /// on `(mtime, size)` alone.
+    #[cfg(unix)]
+    fn force_mtime(path: &std::path::Path, seconds: i64, nanos: i64) {
+        use std::ffi::CString;
+        let c_path = CString::new(path.to_str().unwrap()).unwrap();
+        let times = [
+            libc::timespec {
+                tv_sec: seconds,
+                tv_nsec: nanos,
+            },
+            libc::timespec {
+                tv_sec: seconds,
+                tv_nsec: nanos,
+            },
+        ];
+        let rc = unsafe { libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), 0) };
+        assert_eq!(rc, 0, "utimensat must succeed to force mtime for this test");
+    }
+
+    // spec: TUI-72
+    #[cfg(unix)]
+    #[test]
+    fn stat_fingerprint_same_size_mtime_preserving_rewrite_still_changes() {
+        // M3(a)/(c): the realistic blind spot is not mtime granularity, it is
+        // a same-size replace that deliberately PRESERVES mtime -- exactly what
+        // `cp -p`/`rsync -a`/`tar -p`/`touch -r` do. `(mtime, size)` alone would
+        // miss this entirely, regardless of clock resolution. `ctime`/inode
+        // close it: this test forces mtime back to its original value after a
+        // same-size content rewrite and still expects the fingerprint to move.
+        let dir = tmp("fingerprint-mtime-preserving");
+        let f = dir.join("a.txt");
+        std::fs::write(&f, b"aaaaa").unwrap();
+        let meta_before = std::fs::metadata(&f).unwrap();
+        let mtime_before = meta_before.modified().unwrap();
+        let dur = mtime_before.duration_since(std::time::UNIX_EPOCH).unwrap();
+        let before = stat_fingerprint(&dir).unwrap();
+
+        // Same-size content change, then force mtime back to the original.
+        std::fs::write(&f, b"bbbbb").unwrap();
+        force_mtime(&f, dur.as_secs() as i64, dur.subsec_nanos() as i64);
+        let mtime_after = std::fs::metadata(&f).unwrap().modified().unwrap();
+        assert_eq!(
+            mtime_after, mtime_before,
+            "mtime must be forced back to its original value for this test to be meaningful"
+        );
+
+        let after = stat_fingerprint(&dir).unwrap();
+        assert_ne!(
+            before, after,
+            "a same-size, mtime-preserving content change must still move the \
+             fingerprint (ctime/inode must catch what mtime/size cannot)"
+        );
     }
 
     #[test]

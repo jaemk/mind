@@ -500,16 +500,6 @@ impl Discover {
     }
 }
 
-/// Validate that `val` is a well-formed dotted numeric version string, as
-/// required for `min-mind-version` (DSC-40). A valid string is non-empty, and
-/// every dot-separated component is itself non-empty and consists solely of
-/// ASCII decimal digits (e.g. `"1"`, `"0.7"`, `"2.3.1"`). Returns a
-/// `MindToml` error naming `field` and the bad value when validation fails.
-///
-/// This validator applies to the *field value* in `mind.toml`. The running
-/// binary's version string (from the build environment) may carry a
-/// pre-release segment (e.g. `0.2.0-rc1`); such a segment compares as 0
-/// in [`version_at_least`] only.
 /// Validate every glob pattern in a `[discover]` section (DSC-81): patterns
 /// must be relative (no leading `/` or `~`) and must not contain `..` components.
 /// Called at parse time in [`MindToml::load`].
@@ -560,6 +550,17 @@ pub fn is_plausible_version(s: &str) -> bool {
             .all(|c| !c.is_empty() && c.bytes().all(|b| b.is_ascii_digit()))
 }
 
+/// Validate that `val` is a well-formed dotted numeric version string, as
+/// required for `min-mind-version` (DSC-40). A valid string is non-empty, and
+/// every dot-separated component is itself non-empty and consists solely of
+/// ASCII decimal digits (e.g. `"1"`, `"0.7"`, `"2.3.1"`). Returns a
+/// `MindToml` error naming `field` and the bad value when validation fails.
+///
+/// This validator applies to the *field value* in `mind.toml`. The running
+/// binary's version string (from the build environment) may carry a
+/// pre-release segment (e.g. `0.2.0-rc1`); such a segment is stripped from
+/// the whole string (not per dotted component) before parsing in
+/// [`version_at_least`], so `0.2.0-rc1` compares as `0.2.0`, not `0`.
 fn validate_version_string(val: &str, field: &str, path: &Path) -> Result<()> {
     let bad = |reason: &str| {
         Err(MindError::MindToml {
@@ -588,23 +589,25 @@ fn validate_version_string(val: &str, field: &str, path: &Path) -> Result<()> {
 
 /// Whether `running` satisfies `>= required`, comparing dotted numeric version
 /// components (a missing component counts as 0, so `0.2` == `0.2.0`). A
-/// trailing prerelease (`-suffix`) or build (`+suffix`) tag on a component is
-/// stripped before parsing, so `0.22.1-dev` compares as `0.22.1`, not
-/// `0.22.0`; a component with no leading digits at all still compares as 0.
+/// trailing prerelease (`-suffix`) or build (`+suffix`) tag is stripped from
+/// the WHOLE string, before splitting on `.`, so `0.22.1-dev` compares as
+/// `0.22.1`, not `0.22.0`; a component with no leading digits at all still
+/// compares as 0.
 ///
-/// The strip is per-DOTTED-COMPONENT, so a dotted prerelease like `1.0.0-rc.2`
-/// parses as `[1, 0, 0, 2]` (the `.2` becomes a fourth component). This is
-/// harmless at every call site: the required side is always validated
-/// pure-numeric (`validate_version_string` / `is_plausible_version`), and the
-/// running side is `CARGO_PKG_VERSION`, whose only suffix is a bare `-dev`.
+/// The strip happens once, on the whole string, rather than per dotted
+/// component: stripping per-component would mis-parse a dotted prerelease
+/// like `1.0.0-rc.2` as `[1, 0, 0, 2]` (the `.2` surviving as a spurious
+/// fourth component), which reads as numerically ABOVE the plain `1.0.0` it
+/// should tie with. Whole-string stripping instead parses `1.0.0-rc.2` as
+/// `[1, 0, 0]`, tying with `1.0.0` in both directions, which is what lets
+/// `selfupdate::decision` treat a dotted prerelease as offering the same-numbered
+/// release rather than silently reporting up to date.
 pub fn version_at_least(running: &str, required: &str) -> bool {
     let parse = |v: &str| -> Vec<u64> {
-        v.split('.')
-            .map(|c| {
-                let c = c.trim();
-                let end = c.find(['-', '+']).unwrap_or(c.len());
-                c[..end].parse::<u64>().unwrap_or(0)
-            })
+        let end = v.find(['-', '+']).unwrap_or(v.len());
+        v[..end]
+            .split('.')
+            .map(|c| c.trim().parse::<u64>().unwrap_or(0))
             .collect()
     };
     let r = parse(running);
@@ -1028,6 +1031,27 @@ mod tests {
         // A real older running version is still refused even though its own
         // suffix parses fine -- the fix must not make the gate permissive.
         assert!(!version_at_least("0.21.9-dev", "0.22.0"));
+    }
+
+    #[test]
+    // spec: DSC-40
+    fn version_comparison_strips_a_dotted_prerelease_suffix_from_the_whole_string() {
+        // A DOTTED prerelease suffix (e.g. semver's `-rc.2`) must be stripped
+        // from the whole string before splitting on '.', not per dotted
+        // component. Per-component stripping mis-parses "1.0.0-rc.2" as
+        // [1, 0, 0, 2] (the ".2" surviving as a spurious 4th component),
+        // which reads as numerically ABOVE the plain "1.0.0" it should tie
+        // with -- so the "required" side (1.0.0) fails `>= "1.0.0-rc.2"`.
+        // With whole-string stripping both sides parse as [1, 0, 0] and tie.
+        assert!(
+            version_at_least("1.0.0", "1.0.0-rc.2"),
+            "1.0.0 must satisfy >= 1.0.0-rc.2 (both parse as [1,0,0]); \
+             per-component stripping would wrongly refuse this"
+        );
+        assert!(version_at_least("1.0.0-rc.2", "1.0.0"));
+        // A dotted prerelease of a genuinely lower version is still refused.
+        assert!(!version_at_least("1.0.0-rc.2", "1.0.1"));
+        assert!(!version_at_least("0.9.0-rc.2", "1.0.0"));
     }
 
     #[test]

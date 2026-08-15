@@ -294,7 +294,15 @@ fn cited_ids() -> BTreeSet<String> {
         // gates a test MODULE. A `#[cfg(test)]` on a non-module item (e.g. a
         // test-only accessor method mid-file) must NOT start the region, or the
         // production `// spec:` comments after it would be miscounted as
-        // citations. A file with no test module contributes nothing.
+        // citations. A file with no test module contributes nothing -- and that
+        // is often a SILENT loss, not a loud one: most `src/` modules have the
+        // same IDs also cited from a `tests/*.rs` integration test (e.g.
+        // `plugin_manifest.rs`'s DSC-91/MKT-9 also live in `tests/cli.rs`), so
+        // missing the module here does not flip the gate to failing. Only an ID
+        // cited *exclusively* from an undetected module, with no allowlist entry,
+        // fails loudly. Do not rely on "the gate will tell me" -- verify
+        // `find_test_module` itself against every mod-declaration form the repo
+        // uses (see `find_test_module_recognizes_every_mod_form` below).
         let scanned = if tests_only {
             match find_test_module(&text) {
                 Some(i) => &text[i..],
@@ -318,21 +326,238 @@ fn cited_ids() -> BTreeSet<String> {
 /// module), or `None` if the file has none. A `#[cfg(test)]` on a non-module
 /// item (e.g. a test-only accessor method) is skipped so a mid-file test helper
 /// does not pull the production `// spec:` comments after it into the citation
-/// region. If a real test module is ever hidden behind an intervening attribute
-/// (`#[cfg(test)] #[allow(..)] mod tests`), this returns None for that file and
-/// its citations stop counting -- a loud gate failure, not a silent miscount.
+/// region.
+///
+/// Between the attribute and the `mod` keyword, further attributes (e.g.
+/// `#[allow(..)]`) and `//`/`///` line comments are skipped, and any
+/// visibility (`pub`, `pub(crate)`, `pub(in ...)`, ...) before `mod` is
+/// accepted. The `mod` keyword itself may be followed by any whitespace,
+/// including a newline (`mod\ntests`).
+///
+/// This is a textual scan, not a real parser: an occurrence of the literal
+/// `#[cfg(test)]` text inside a `//`/`///` comment is explicitly excluded (by
+/// checking whether the line up to the attribute is itself a comment line), but
+/// an occurrence inside a block comment (`/* ... */`) or a string literal is
+/// not detected and could still be misread as a real attribute. That is an
+/// accepted limitation given the repo's style (block comments and string
+/// literals containing this exact attribute text are not in use); if one is
+/// ever added, this function must be hardened further rather than trusted
+/// blindly.
+///
+/// If a real test module is ever hidden behind a form this function does not
+/// recognize, this returns `None` for that file and its citations stop
+/// counting. That is loud ONLY when every ID cited from that module has no
+/// other citation and no allowlist entry -- see the caller's note on why a
+/// missed module is usually a silent narrowing, not a build failure.
 fn find_test_module(text: &str) -> Option<usize> {
     const ATTR: &str = "#[cfg(test)]";
+
+    fn line_start(text: &str, at: usize) -> usize {
+        text[..at].rfind('\n').map(|i| i + 1).unwrap_or(0)
+    }
+
+    // Skip a `#[...]` attribute (balanced on `[`/`]`) starting at `s[0..]`,
+    // returning the byte length consumed, or `None` if `s` doesn't start with
+    // one or it's unterminated.
+    fn skip_attr(s: &str) -> Option<usize> {
+        if !s.starts_with("#[") {
+            return None;
+        }
+        let bytes = s.as_bytes();
+        let mut depth = 0i32;
+        let mut j = 0;
+        while j < bytes.len() {
+            match bytes[j] {
+                b'[' => depth += 1,
+                b']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(j + 1);
+                    }
+                }
+                _ => {}
+            }
+            j += 1;
+        }
+        None
+    }
+
+    // Skip a `//` or `///` line comment starting at `s[0..]`, returning the
+    // byte length consumed (up to and including the newline, if any), or
+    // `None` if `s` doesn't start with one.
+    fn skip_line_comment(s: &str) -> Option<usize> {
+        if !s.starts_with("//") {
+            return None;
+        }
+        Some(match s.find('\n') {
+            Some(nl) => nl + 1,
+            None => s.len(),
+        })
+    }
+
     let mut from = 0;
-    while let Some(rel) = text[from..].find(ATTR) {
+    'outer: while let Some(rel) = text[from..].find(ATTR) {
         let at = from + rel;
-        let after = text[at + ATTR.len()..].trim_start();
-        if after.starts_with("mod ") || after.starts_with("pub mod ") {
+
+        // An occurrence whose own line is itself a comment line (e.g. a doc
+        // comment reading "Test-only (`#[cfg(test)]`): ...") is prose, not a
+        // real attribute -- skip it entirely rather than risk it gating a
+        // `mod` that follows later in the same comment block.
+        let prefix = text[line_start(text, at)..at].trim_start();
+        if prefix.starts_with("//") {
+            from = at + ATTR.len();
+            continue;
+        }
+
+        // Walk past whitespace, further attributes, and line comments until
+        // we hit real code.
+        let mut i = at + ATTR.len();
+        loop {
+            let rest = &text[i..];
+            let trimmed = rest.trim_start();
+            i += rest.len() - trimmed.len();
+            let rest = &text[i..];
+            if let Some(n) = skip_attr(rest) {
+                i += n;
+                continue;
+            }
+            if let Some(n) = skip_line_comment(rest) {
+                i += n;
+                continue;
+            }
+            break;
+        }
+
+        let mut after = text[i..].trim_start();
+        if let Some(rest) = after.strip_prefix("pub") {
+            after = match rest.strip_prefix('(') {
+                Some(rest) => match rest.find(')') {
+                    Some(p) => rest[p + 1..].trim_start(),
+                    None => {
+                        // Unterminated `pub(...`: not a real visibility
+                        // modifier we understand. Try the next occurrence.
+                        from = at + ATTR.len();
+                        continue 'outer;
+                    }
+                },
+                None => rest.trim_start(),
+            };
+        }
+        if after
+            .strip_prefix("mod")
+            .is_some_and(|r| r.starts_with(char::is_whitespace))
+        {
             return Some(at);
         }
         from = at + ATTR.len();
     }
     None
+}
+
+#[test]
+fn find_test_module_recognizes_every_mod_form() {
+    // Each case: (label, source text, expected TAIL of the source starting at
+    // the `#[cfg(test)]` that should be matched -- `None` if no test module
+    // should be found. Comparing the tail (rather than a hand-computed byte
+    // offset) pins down *which* occurrence matched without brittle counting.
+    let cases: &[(&str, &str, Option<&str>)] = &[
+        (
+            "plain: #[cfg(test)] mod tests",
+            "// spec: FOO-1\nfn helper() {}\n#[cfg(test)]\nmod tests {\n    // spec: BAR-1\n}\n",
+            Some("#[cfg(test)]\nmod tests {\n    // spec: BAR-1\n}\n"),
+        ),
+        (
+            "pub mod tests",
+            "fn helper() {}\n#[cfg(test)]\npub mod tests {\n    // spec: BAR-1\n}\n",
+            Some("#[cfg(test)]\npub mod tests {\n    // spec: BAR-1\n}\n"),
+        ),
+        (
+            "pub(crate) mod tests",
+            "fn helper() {}\n#[cfg(test)]\npub(crate) mod tests {\n    // spec: BAR-1\n}\n",
+            Some("#[cfg(test)]\npub(crate) mod tests {\n    // spec: BAR-1\n}\n"),
+        ),
+        (
+            "pub(in crate::foo) mod tests",
+            "fn helper() {}\n#[cfg(test)]\npub(in crate::foo) mod tests {\n    // spec: BAR-1\n}\n",
+            Some("#[cfg(test)]\npub(in crate::foo) mod tests {\n    // spec: BAR-1\n}\n"),
+        ),
+        (
+            "an intervening attribute: #[cfg(test)] #[allow(dead_code)] mod tests",
+            "fn helper() {}\n#[cfg(test)]\n#[allow(dead_code)]\nmod tests {\n    // spec: BAR-1\n}\n",
+            Some("#[cfg(test)]\n#[allow(dead_code)]\nmod tests {\n    // spec: BAR-1\n}\n"),
+        ),
+        (
+            "an intervening comment between the attribute and mod",
+            "fn helper() {}\n#[cfg(test)]\n// why this module exists\nmod tests {\n    // spec: BAR-1\n}\n",
+            Some("#[cfg(test)]\n// why this module exists\nmod tests {\n    // spec: BAR-1\n}\n"),
+        ),
+        (
+            "mod on its own line (newline form)",
+            "fn helper() {}\n#[cfg(test)]\nmod\ntests {\n    // spec: BAR-1\n}\n",
+            Some("#[cfg(test)]\nmod\ntests {\n    // spec: BAR-1\n}\n"),
+        ),
+        (
+            "a #[cfg(test)] gating a plain fn, not a module -- must be skipped",
+            "fn helper() {}\n#[cfg(test)]\nfn only_in_tests() {}\n// spec: FOO-2\n",
+            None,
+        ),
+        (
+            "a #[cfg(test)] gating a pub fn, not a module -- must be skipped",
+            "fn helper() {}\n#[cfg(test)]\npub fn only_in_tests() {}\n// spec: FOO-2\n",
+            None,
+        ),
+        (
+            "a non-module #[cfg(test)] followed later by a real test module",
+            "#[cfg(test)]\npub fn accessor_for_tests_only() {}\n\n#[cfg(test)]\nmod tests {\n    // spec: BAR-1\n}\n",
+            Some("#[cfg(test)]\nmod tests {\n    // spec: BAR-1\n}\n"),
+        ),
+        (
+            "no #[cfg(test)] at all",
+            "fn helper() {}\n// spec: FOO-3\n",
+            None,
+        ),
+        (
+            "the literal text appears only inside a doc comment, never gating real code",
+            "/// Test-only (`#[cfg(test)]`): it must never be reachable from prod.\nfn helper() {}\n// spec: FOO-4\n",
+            None,
+        ),
+    ];
+
+    for (label, src, expected_tail) in cases {
+        let got = find_test_module(src);
+        match expected_tail {
+            Some(tail) => {
+                let idx = got.unwrap_or_else(|| {
+                    panic!("case {label:?}: expected a match, got None for input:\n{src}")
+                });
+                assert_eq!(
+                    &src[idx..],
+                    *tail,
+                    "case {label:?}: matched at the wrong occurrence"
+                );
+            }
+            None => {
+                assert_eq!(
+                    got, None,
+                    "case {label:?}: expected no match, got {got:?} for input:\n{src}"
+                );
+            }
+        }
+    }
+}
+
+/// A regression guard for the specific bug class this gate exists to prevent:
+/// once `find_test_module` locates the region, citations inside it must still
+/// be collected. This is a smoke test on the region-slicing behavior, not a
+/// re-test of `find_test_module` itself.
+#[test]
+fn find_test_module_region_includes_citations_after_the_match() {
+    let src = "fn helper() {}\n#[cfg(test)]\npub(crate) mod tests {\n    // spec: QUX-9\n}\n";
+    let at = find_test_module(src).expect("expected a test module to be found");
+    assert!(
+        src[at..].contains("QUX-9"),
+        "the sliced region must still contain the citation after the match point"
+    );
 }
 
 /// Extract the LEADING run of spec IDs after the `// spec:` marker.

@@ -3901,7 +3901,7 @@ fn local_learn_links_only_into_the_project_lobe() {
     );
 }
 
-// HARN-21: `--local` from a directory not inside any registered project lobe is
+// HARN-21: `--local` from a directory with no registered project lobe under it is
 // an error naming the fix, not a silent fall-back to the global fan-out.
 #[test]
 fn local_learn_outside_any_lobe_is_an_error() {
@@ -3922,7 +3922,7 @@ fn local_learn_outside_any_lobe_is_an_error() {
     assert!(
         learned
             .stderr
-            .contains("not inside any registered project lobe"),
+            .contains("no registered project lobe lives under this directory"),
         "the error must explain that the cwd is not inside a project lobe: {}",
         learned.stderr
     );
@@ -3995,7 +3995,7 @@ fn local_learn_from_global_lobes_parent_dir_refuses() {
     assert!(
         learned
             .stderr
-            .contains("not inside any registered project lobe"),
+            .contains("no registered project lobe lives under this directory"),
         "the error must explain that the cwd is not inside a project lobe: {}",
         learned.stderr
     );
@@ -4190,7 +4190,7 @@ fn local_learn_from_home_rooted_preset_lobe_refuses() {
     assert!(
         learned
             .stderr
-            .contains("not inside any registered project lobe"),
+            .contains("no registered project lobe lives under this directory"),
         "the error must explain that the cwd is not inside a project lobe: {}",
         learned.stderr
     );
@@ -4294,7 +4294,7 @@ fn local_learn_mind_default_lobe_as_global_home_is_excluded() {
     assert!(
         learned
             .stderr
-            .contains("not inside any registered project lobe"),
+            .contains("no registered project lobe lives under this directory"),
         "the error must explain that the cwd is not inside a project lobe: {}",
         learned.stderr
     );
@@ -4308,5 +4308,63 @@ fn local_learn_mind_default_lobe_as_global_home_is_excluded() {
         std::fs::symlink_metadata(sb.claude_home.join("skills/review")).is_err(),
         "a refused --local install must not link into the (unused) CLAUDE_HOME \
          either"
+    );
+}
+
+// HARN-22/HARN-23: a configured agent home whose own directory is a dangling
+// symlink otherwise fails deep inside install with a bare `File exists` (the
+// link itself exists, so `create_dir_all` refuses) that names neither the
+// link nor its missing target. This is the exact user-facing path HARN-22
+// exists for; unlike the unit-level `mkdir_p` coverage in `src/paths.rs`, this
+// drives the real `learn` command end-to-end so a future change to where the
+// lobe directory gets created (which would silently move the failure back to
+// a bare `File exists`) is caught here even if the unit test stays green.
+#[cfg(unix)]
+#[test]
+fn learn_into_a_lobe_whose_directory_is_a_dangling_symlink_names_the_broken_link() {
+    // spec: HARN-22
+    // spec: HARN-23
+    let sb = Sandbox::new();
+    let broken_lobe = sb.base.join("brokenlobe");
+    let missing_target = sb.base.join("gone");
+    std::os::unix::fs::symlink(&missing_target, &broken_lobe).unwrap();
+
+    // Configure ONLY the broken lobe, so `learn` cannot succeed by fanning
+    // into some other, healthy lobe.
+    sb.write_config(&format!("lobes = [\"{}\"]\n", broken_lobe.display()));
+
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+
+    let learned = sb.mind(&["learn", "review"]);
+    assert!(
+        !learned.success,
+        "learn into a lobe whose directory is a dangling symlink must fail: \
+         stdout={} stderr={}",
+        learned.stdout, learned.stderr
+    );
+    assert!(
+        learned.stderr.contains("brokenlobe"),
+        "the error must name the broken link: {}",
+        learned.stderr
+    );
+    assert!(
+        learned.stderr.contains("gone"),
+        "the error must name the link's (missing) target: {}",
+        learned.stderr
+    );
+    assert!(
+        !learned.stderr.contains("os error 17") && !learned.stderr.contains("File exists"),
+        "must not surface the OS's bare File-exists errno as the reported cause: {}",
+        learned.stderr
+    );
+
+    // Confirm via `--json` that the structured error kind is exactly
+    // `broken-symlink-path`, not a generic `io`.
+    let learned_json = sb.mind(&["learn", "review", "--json"]);
+    assert!(!learned_json.success);
+    let v = parse_json(&learned_json.stdout);
+    assert_eq!(
+        v["error"]["kind"], "broken-symlink-path",
+        "expected the broken-symlink-path error kind: {v}"
     );
 }

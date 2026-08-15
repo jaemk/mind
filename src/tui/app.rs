@@ -972,7 +972,14 @@ impl App {
         let description = if pending.is_empty() {
             // Nothing is out of date; still confirm (mirrors the CLI, which
             // reports "nothing to upgrade" rather than silently no-op'ing).
-            "Upgrade: no items are out of date. Proceed anyway?".to_string()
+            // spec: TUI-73 - the pending set is only as fresh as the last sync
+            // or poll: `u` itself never fetches (`upgrade_no_sync`), so a bare
+            // "nothing is out of date" would read as "you are current" even
+            // when upstream has moved and nobody has synced yet. Name the
+            // qualifier and the remedy explicitly.
+            "Upgrade: nothing is out of date since the last sync. Press `s` to \
+             sync and check for updates. Proceed with upgrade anyway?"
+                .to_string()
         } else {
             format!(
                 "Upgrade {} pending item(s)?\n\n{}",
@@ -2522,9 +2529,13 @@ mod tests {
 
     #[test]
     fn action_upgrade_with_nothing_stale_says_so_instead_of_listing() {
-        // spec: TUI-63 - when nothing is out of date, the confirm must say so
-        // rather than silently listing nothing (which would look identical to
-        // the old blind "Upgrade all pending items?" prompt).
+        // spec: TUI-63 TUI-73 - when nothing is out of date, the confirm must
+        // say so rather than silently listing nothing (which would look
+        // identical to the old blind "Upgrade all pending items?" prompt), AND
+        // must qualify that against the last sync/poll: `u` itself never
+        // fetches (upgrade_no_sync, TUI-73), so a bare "nothing is out of
+        // date" would misleadingly read as "you are current" even when
+        // upstream has moved and the user has not pressed `s` yet.
         let mut app = App::new(String::new(), None, None);
         let snap = make_snapshot(); // no item marked stale
         app.apply_snapshot(snap);
@@ -2537,8 +2548,17 @@ mod tests {
             .description
             .clone();
         assert!(
-            desc.to_lowercase().contains("no items are out of date"),
+            desc.to_lowercase().contains("nothing is out of date"),
             "confirm must say nothing is out of date: {desc:?}"
+        );
+        assert!(
+            desc.to_lowercase().contains("since the last sync"),
+            "confirm must qualify against the last sync/poll, not imply full \
+             currency: {desc:?}"
+        );
+        assert!(
+            desc.contains("`s`"),
+            "confirm must name the sync remedy key: {desc:?}"
         );
     }
 

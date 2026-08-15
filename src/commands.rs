@@ -941,7 +941,10 @@ fn meld_recursive(
         let preview = if items.is_empty() {
             String::new()
         } else {
-            let names: Vec<String> = items.iter().map(|it| it.key()).collect();
+            // spec: CLI-232 DSC-95 -- sanitize each name before joining (not the
+            // composed preview afterward): an unterminated escape in one name
+            // would otherwise consume the rest of the joined list.
+            let names: Vec<String> = items.iter().map(|it| it.display_key()).collect();
             format!("\n  items would install as: {}", names.join(", "))
         };
         let answer = prompt_line(&format!(
@@ -1866,10 +1869,18 @@ fn warn_unguarded_references(items: &[CatalogItem]) {
             }
         }
         if !refs.is_empty() {
+            // spec: CLI-232 DSC-95 -- sanitize each field before composing (not
+            // the finished line): both the item key and each sibling name are
+            // source-controlled, and an unterminated escape in one would
+            // otherwise consume the trailing advisory text.
+            let refs_display: Vec<String> = refs
+                .iter()
+                .map(|r| crate::sanitize::strip_ansi(r))
+                .collect();
             eprintln!(
                 "warning: {} references sibling(s) in prose: {}; prefixing may break them at runtime (use {{{{ns:name}}}})",
-                item.key(),
-                refs.join(", ")
+                item.display_key(),
+                refs_display.join(", ")
             );
         }
     }
@@ -2401,12 +2412,12 @@ pub fn unmeld(
     // at source granularity). `--yes` skips it; a non-TTY run without `--yes`
     // refuses rather than removing silently.
     if matched.len() > 1 && !yes {
-        // `--json` is treated as non-interactive: both the human-readable listing
-        // and the `confirm(...)` prompt below are gated on `!out.json`, so a JSON
-        // run never blocks on a prompt. A non-TTY JSON run without `--yes` still
-        // returns ConfirmationRequired (the is_tty check below applies regardless
-        // of json), so nothing is removed without an explicit `--yes`; the prompt
-        // is intentionally skipped only when an interactive terminal is also JSON.
+        // spec: LIFE-45 -- `--json` is always non-interactive (regardless of
+        // whether stdin is a real TTY), so it never reaches the `confirm(...)`
+        // prompt below: the check right after this block returns
+        // `ConfirmationRequired` whenever `!is_tty() || out.json`, before the
+        // prompt is ever called. The human-readable listing keeps its own
+        // `!out.json` guard so it does not print ahead of a JSON error.
         if !out.json {
             println!("unmeld would remove {} source(s):", matched.len());
             for i in &matched {
@@ -2415,12 +2426,16 @@ pub fn unmeld(
         }
         // spec: LIFE-45 -- B1: `--json` is non-interactive (mirrors DEP-60).
         if !crate::hook::is_tty() || out.json {
+            // spec: CLI-232
             return Err(MindError::ConfirmationRequired {
-                action: format!("unmelding {} sources", matched.len()),
+                action: json_confirmation_action(
+                    format!("unmelding {} sources", matched.len()),
+                    out.json,
+                ),
             });
         }
         // `out.json` already returned above, so this branch is reached only for
-        // an interactive TTY; no `!out.json` guard needed.
+        // an interactive TTY.
         if !confirm("remove these source(s)?")? {
             println!("cancelled; nothing removed");
             return Ok(());
@@ -2547,15 +2562,20 @@ fn unmeld_one(
                 item_keys.len()
             );
             for k in &item_keys {
-                println!("  {} {k}", out.warn());
+                // spec: CLI-232 DSC-95
+                println!("  {} {}", out.warn(), strip_ansi(k));
             }
         }
         // spec: LIFE-45 -- B1: `--json` is non-interactive (mirrors DEP-60).
         if !crate::hook::is_tty() || out.json {
+            // spec: CLI-232
             return Err(MindError::ConfirmationRequired {
-                action: format!(
-                    "unmelding {source_name} (removing {} items)",
-                    item_keys.len()
+                action: json_confirmation_action(
+                    format!(
+                        "unmelding {source_name} (removing {} items)",
+                        item_keys.len()
+                    ),
+                    out.json,
                 ),
             });
         }
@@ -2767,15 +2787,18 @@ pub struct InstallFlow {
 /// Apply `--local` install scoping for one `learn`/`meld` invocation
 /// (HARN-20/HARN-21).
 ///
-/// When `local` is set, resolve the registered project lobe the cwd sits inside
-/// and return an RAII guard that restricts the install fan-out to it (a subset of
-/// the normally-resolved homes). If the cwd is not inside any registered project
-/// lobe, this is an error: the user asked to install locally but there is no
-/// local target. An actionable note is printed to stderr first (matching the
-/// hint-then-error pattern `learn` already uses for a missed item), and the
-/// returned error is [`MindError::LobeTargetRequired`] -- the same
-/// "a lobe target is required" condition, whose `kind` (`lobe-target-required`)
-/// is apt for `--json` consumers.
+/// When `local` is set, resolve the registered project lobe that lives AT or
+/// BELOW the cwd (`Paths::detect_local_lobe`: `lobe_path.starts_with(cwd) &&
+/// lobe_path != cwd`, i.e. the cwd must be an ancestor of the lobe directory,
+/// not the lobe directory itself or a descendant of it) and return an RAII
+/// guard that restricts the install fan-out to it (a subset of the normally-
+/// resolved homes). If no registered project lobe lives under the cwd, this is
+/// an error: the user asked to install locally but there is no local target.
+/// An actionable note is printed to stderr first (matching the hint-then-error
+/// pattern `learn` already uses for a missed item), and the returned error is
+/// [`MindError::LobeTargetRequired`] -- the same "a lobe target is required"
+/// condition, whose `kind` (`lobe-target-required`) is apt for `--json`
+/// consumers.
 ///
 /// When `local` is unset but the cwd IS inside a registered project lobe, print
 /// a one-line note advertising `--local` (so the fan-out default stays
@@ -2800,9 +2823,15 @@ pub fn apply_local_scope(
             }
             None => {
                 if !out.json {
+                    // spec: CLI-232 -- M4 fix: the note and the hint now state
+                    // the same rule `detect_local_lobe` actually applies
+                    // (`lobe_path.starts_with(cwd) && lobe_path != cwd`): the
+                    // cwd must be an ancestor of the lobe, not the lobe dir
+                    // itself or somewhere below it.
                     eprintln!(
-                        "note: --local installs into a project lobe under the current directory, \
-                         but this directory is not inside any registered project lobe"
+                        "note: --local installs into a project lobe that lives at or below the \
+                         current directory, but no registered project lobe lives under this \
+                         directory"
                     );
                     eprintln!(
                         "hint: --local matches a lobe directory strictly BELOW the current one, \
@@ -2994,16 +3023,19 @@ pub fn learn(paths: &Paths, item_ref: &str, dry_run: bool, flow: InstallFlow) ->
     if dry_run {
         if out.json {
             let mut result = MutationResult::new("learn", item_ref, "dry-run");
-            result.installed = closure.iter().map(|t| t.key()).collect();
+            // spec: CLI-232 DSC-95
+            result.installed = closure.iter().map(|t| t.display_key()).collect();
             return print_json(&result);
         }
         if resolution.adds_dependencies() {
             print!("{}", resolution.render_tree(&items));
         }
         println!("would learn {} item(s):", closure.len());
+        // spec: CLI-232 DSC-95 -- sanitize each cell before `print_rows` composes
+        // the line.
         let rows = closure
             .iter()
-            .map(|t| vec![t.key(), t.source.clone()])
+            .map(|t| vec![t.display_key(), crate::sanitize::strip_ansi(&t.source)])
             .collect::<Vec<_>>();
         out.print_rows(&rows);
         return Ok(());
@@ -3018,8 +3050,12 @@ pub fn learn(paths: &Paths, item_ref: &str, dry_run: bool, flow: InstallFlow) ->
         // still reaches the prompt below, whose EOF-default is No, so it cancels
         // safely; only `--json` skipped the prompt entirely and auto-proceeded.)
         if out.json {
+            // spec: CLI-232
             return Err(MindError::ConfirmationRequired {
-                action: format!("installing the dependency closure of '{item_ref}'"),
+                action: json_confirmation_action(
+                    format!("installing the dependency closure of '{item_ref}'"),
+                    true,
+                ),
             });
         }
         print!("{}", resolution.render_tree(&items));
@@ -3043,11 +3079,12 @@ pub fn learn(paths: &Paths, item_ref: &str, dry_run: bool, flow: InstallFlow) ->
             && !policy.allow_matches(&policy_identity(&registry, &target.source))
         {
             if !out.json {
+                // spec: CLI-232 DSC-95
                 println!(
                     "{} skipping {} from {}: source not permitted by the managed policy's allowlist",
                     out.warn(),
-                    target.key(),
-                    target.source
+                    target.display_key(),
+                    crate::sanitize::strip_ansi(&target.source)
                 );
             }
             continue;
@@ -3088,8 +3125,13 @@ pub fn learn(paths: &Paths, item_ref: &str, dry_run: bool, flow: InstallFlow) ->
             && !out.json
         {
             let path = path.clone();
+            // spec: CLI-232 DSC-95 -- sanitize the path component before
+            // composing the prompt (not the whole prompt after), so the
+            // trailing "exists and is not..." text cannot be swallowed by an
+            // unterminated escape in the path.
             result = if confirm(&format!(
-                "{path} exists and is not managed by mind; overwrite it?"
+                "{} exists and is not managed by mind; overwrite it?",
+                display_path(std::path::Path::new(&path))
             ))? {
                 install_item(
                     paths,
@@ -4107,10 +4149,11 @@ fn source_status(paths: &Paths, source_name: &str) -> Result<()> {
                 };
                 // Stale installs use the ↑ marker, distinct from ✓ for current.
                 let marker = if stale { out.stale() } else { out.ok() };
+                // spec: CLI-232 DSC-95
                 println!(
                     "  {} {}  installed @ {}{}",
                     marker,
-                    it.key(),
+                    it.display_key(),
                     out.green(&short(&m.commit)),
                     lag
                 );
@@ -4119,11 +4162,13 @@ fn source_status(paths: &Paths, source_name: &str) -> Result<()> {
             // identity and lands in a pasteable `mind learn` remedy, so it is
             // shell-quoted before printing rather than framed in bare single
             // quotes.
+            // spec: CLI-232 DSC-95 -- sanitize before shell-quoting too, so a
+            // control/ANSI byte cannot ride the pasteable remedy either.
             None => println!(
                 "  {} {}  not installed (run `mind learn {}`)",
                 out.available(),
-                it.key(),
-                crate::error::shell_quote(&it.key())
+                it.display_key(),
+                crate::error::shell_quote(&it.display_key())
             ),
         }
     }
@@ -4457,21 +4502,26 @@ pub fn absorb(
         // Print what we will do.
         if !out.json {
             println!("absorb will:");
+            // spec: CLI-232 DSC-95
             println!(
                 "  move  {} -> {}",
-                source_lobe_path.display(),
-                dest_item_path.display()
+                display_path(&source_lobe_path),
+                display_path(&dest_item_path)
             );
             for stray in &stray_paths {
-                println!("  delete (stray copy) {}", stray.display());
+                println!("  delete (stray copy) {}", display_path(stray));
             }
         }
         // C3 / ABS-7: json mode is non-interactive; treat it like non-TTY for
         // the destructive confirmation. A missing --yes refuses with
         // ConfirmationRequired regardless of whether a real TTY is attached.
         if !crate::hook::is_tty() || out.json {
+            // spec: CLI-232
             return Err(MindError::ConfirmationRequired {
-                action: format!("absorbing {}", item.key()),
+                action: json_confirmation_action(
+                    format!("absorbing {}", item.display_key()),
+                    out.json,
+                ),
             });
         }
         if !confirm("proceed with absorb?")? {
@@ -4813,13 +4863,18 @@ pub fn forget(
         if !out.json {
             println!("forget would remove {} item(s):", keys.len());
             for key in &keys {
-                println!("  {} {key}", out.warn());
+                // spec: CLI-232 DSC-95
+                println!("  {} {}", out.warn(), crate::sanitize::strip_ansi(key));
             }
         }
         // spec: LIFE-45 -- B1: `--json` is non-interactive (mirrors DEP-60).
         if !crate::hook::is_tty() || out.json {
+            // spec: CLI-232
             return Err(MindError::ConfirmationRequired {
-                action: format!("removing {} items", keys.len()),
+                action: json_confirmation_action(
+                    format!("removing {} items", keys.len()),
+                    out.json,
+                ),
             });
         }
         // `out.json` already returned above; this branch is TTY-only.
@@ -4846,23 +4901,30 @@ pub fn forget(
         let graph = crate::deps::installed_graph(&catalog, &installed_keys, read_item_text);
         let dependents = graph.dependents(removed_key);
         if !dependents.is_empty() && !yes && !force {
+            // spec: CLI-232 DSC-95 -- sanitize each field before composing, not
+            // the finished line.
+            let removed_display = crate::sanitize::strip_ansi(removed_key);
             if !out.json {
                 println!(
-                    "{} removing {removed_key} will break the following installed items that depend on it:",
+                    "{} removing {removed_display} will break the following installed items that depend on it:",
                     out.warn()
                 );
                 for dep in &dependents {
-                    println!("  {dep}");
+                    println!("  {}", crate::sanitize::strip_ansi(dep));
                 }
             }
             // C3 / DEP-60: json mode is non-interactive; treat it like non-TTY
             // for this destructive confirmation. A missing --yes/--force refuses
             // with ConfirmationRequired regardless of whether a real TTY is attached.
             if !crate::hook::is_tty() || out.json {
+                // spec: CLI-232
                 return Err(MindError::ConfirmationRequired {
-                    action: format!(
-                        "removing {removed_key} (has {} dependent(s))",
-                        dependents.len()
+                    action: json_confirmation_action(
+                        format!(
+                            "removing {removed_display} (has {} dependent(s))",
+                            dependents.len()
+                        ),
+                        out.json,
                     ),
                 });
             }
@@ -4896,9 +4958,13 @@ pub fn forget(
             return Err(e);
         }
         removed_sources.insert(item.source.clone());
-        removed.push(key.clone());
+        // spec: CLI-232 DSC-95 -- the display copy pushed for `--json`'s
+        // `removed` array and the human line are sanitized; `key` itself stays
+        // raw (used above to key `manifest.items`).
+        let key_display = crate::sanitize::strip_ansi(&key);
+        removed.push(key_display.clone());
         if !out.json {
-            println!("{} forgot {key}", out.ok());
+            println!("{} forgot {key_display}", out.ok());
         }
     }
     manifest.save(paths)?;
@@ -4934,19 +5000,24 @@ pub fn forget(
 /// store copy or manifest entry, so the manifest is left untouched.
 fn forget_unmanaged_single(item: &crate::unmanaged::UnmanagedItem, yes: bool) -> Result<()> {
     let out = crate::render::ctx();
+    // spec: CLI-232 DSC-95 -- sanitize each path before joining, not the
+    // joined string after (an unterminated escape in one path would
+    // otherwise consume the remaining paths in the list).
     let where_ = item
         .paths
         .iter()
-        .map(|p| p.display().to_string())
+        .map(|p| display_path(p))
         .collect::<Vec<_>>()
         .join(", ");
     // UNM-5: always state explicitly that the item is not mind-managed and that
-    // removal deletes the user's own file or directory.
+    // removal deletes the user's own file or directory. This is the disclosure
+    // that immediately precedes deletion of the user's OWN files, so it must
+    // use the sanitized key like every other print site (CLI-232 DSC-95).
     if !out.json {
         println!(
             "{} {} is not managed by mind: it is your own file or directory at {where_}, not a mind install. Removing it deletes it.",
             out.warn(),
-            item.key()
+            item.display_key()
         );
     }
     if !yes {
@@ -4954,8 +5025,12 @@ fn forget_unmanaged_single(item: &crate::unmanaged::UnmanagedItem, yes: bool) ->
         // this is the worst-case site (UNM-5): without this, `--json` on a TTY
         // would delete the user's own unmanaged file with zero consent.
         if !crate::hook::is_tty() || out.json {
+            // spec: CLI-232 DSC-95
             return Err(MindError::ConfirmationRequired {
-                action: format!("removing unmanaged {}", item.key()),
+                action: json_confirmation_action(
+                    format!("removing unmanaged {}", item.display_key()),
+                    out.json,
+                ),
             });
         }
         if !confirm("remove this unmanaged item?")? {
@@ -5016,8 +5091,12 @@ fn forget_unmanaged_bulk(paths: &Paths, item_ref: Option<&str>, yes: bool) -> Re
     if !yes {
         // spec: LIFE-45 -- B1: `--json` is non-interactive (mirrors DEP-60).
         if !crate::hook::is_tty() || out.json {
+            // spec: CLI-232
             return Err(MindError::ConfirmationRequired {
-                action: format!("removing {} unmanaged items", matched.len()),
+                action: json_confirmation_action(
+                    format!("removing {} unmanaged items", matched.len()),
+                    out.json,
+                ),
             });
         }
         if !confirm("remove these unmanaged items?")? {
@@ -5656,14 +5735,21 @@ pub fn sync_with_selector(
         // spec: HOOK-11, HOOK-23 - sync already done above; run the pass with
         // no_sync to avoid a redundant fetch. Deprecated: prefer `mind upgrade`
         // (CLI-169).
-        // spec: CLI-217 -- `upgrade_inner` (not the `upgrade_no_sync` wrapper)
-        // so the pass does not emit its own document: the caller invoked `sync`,
-        // and what the pass applied is folded into sync's one object below.
-        let pass = upgrade_inner(
+        // spec: CLI-217 -- `upgrade_inner_scoped` (not the `upgrade_no_sync`
+        // wrapper) so the pass does not emit its own document: the caller
+        // invoked `sync`, and what the pass applied is folded into sync's one
+        // object below.
+        // spec: CLI-232 -- H2 fix: thread `selected` (the `[source]` selector
+        // already resolved above) through as the upgrade pass's source scope,
+        // so `sync <source> --upgrade` upgrades (and re-runs install hooks
+        // for, HOOK-11) only the named source(s), not every installed item
+        // from every melded source.
+        let pass = upgrade_inner_scoped(
             paths,
             yes,
             None,
             true,
+            selected.as_deref(),
             dangerously_skip_hook_check,
             dangerously_skip_build_hook_check,
         )?;
@@ -5829,6 +5915,33 @@ fn upgrade_inner(
     dangerously_skip_hook_check: bool,
     dangerously_skip_build_hook_check: bool,
 ) -> Result<Option<MutationResult>> {
+    upgrade_inner_scoped(
+        paths,
+        yes,
+        item_ref,
+        no_sync,
+        None,
+        dangerously_skip_hook_check,
+        dangerously_skip_build_hook_check,
+    )
+}
+
+/// The upgrade pass, additionally restricted to a `source_scope` (CLI-232, H2
+/// fix). `source_scope` is threaded from `sync <source> --upgrade`'s already-
+/// computed selector (`sync_inner`'s `selected`): `None` means every source is
+/// in scope (unscoped `mind upgrade`, unchanged); `Some(names)` restricts both
+/// the per-item delta loop AND the HOOK-11 install-hook re-run to sources in
+/// `names`, so `sync <source> --upgrade` cannot silently upgrade items from
+/// (or re-run install hooks for, HOOK-11) a source the caller never named.
+fn upgrade_inner_scoped(
+    paths: &Paths,
+    yes: bool,
+    item_ref: Option<&str>,
+    no_sync: bool,
+    source_scope: Option<&[String]>,
+    dangerously_skip_hook_check: bool,
+    dangerously_skip_build_hook_check: bool,
+) -> Result<Option<MutationResult>> {
     let out = crate::render::ctx();
     // POL-3: load the managed policy once (fail closed on Err; None = inert).
     let policy = Policy::load()?;
@@ -5844,21 +5957,34 @@ fn upgrade_inner(
     let manifest = Manifest::load(paths)?;
 
     let filter = item_ref.map(parse_item_ref).transpose()?;
+    let source_scope: Option<HashSet<String>> =
+        source_scope.map(|names| names.iter().cloned().collect());
 
-    // HOOK-11 scope: a scoped `upgrade <item>` must not re-run install hooks
-    // (arbitrary code) for sources unrelated to the targeted item. When a filter
-    // is present, restrict the hook re-run to sources that have at least one
-    // INSTALLED item matching the filter (the same scoping the per-item loop uses
-    // via `installed_matches_glob`). With no filter, `None` means every source is
-    // in scope, leaving the unscoped behavior unchanged.
-    let hook_scope: Option<HashSet<String>> = filter.as_ref().map(|f| {
-        manifest
-            .items
-            .values()
-            .filter(|it| crate::resolve::installed_matches_glob(it, f))
-            .map(|it| it.source.clone())
-            .collect()
-    });
+    // HOOK-11 scope: a scoped `upgrade <item>` (or a scoped `sync <source>
+    // --upgrade`, CLI-232) must not re-run install hooks (arbitrary code) for
+    // sources unrelated to the targeted item/source. When a filter is present,
+    // restrict the hook re-run to sources that have at least one INSTALLED item
+    // matching the filter (the same scoping the per-item loop uses via
+    // `installed_matches_glob`); when a source scope is present, intersect with
+    // it too (a `sync <source> --upgrade` names the source directly). With
+    // neither, `None` means every source is in scope, leaving the unscoped
+    // behavior unchanged.
+    let hook_scope: Option<HashSet<String>> = {
+        let from_filter = filter.as_ref().map(|f| {
+            manifest
+                .items
+                .values()
+                .filter(|it| crate::resolve::installed_matches_glob(it, f))
+                .map(|it| it.source.clone())
+                .collect::<HashSet<String>>()
+        });
+        match (from_filter, source_scope.clone()) {
+            (Some(a), Some(b)) => Some(a.intersection(&b).cloned().collect()),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        }
+    };
 
     // HOOK-11: re-run a source's install hook when its commit has advanced past
     // the commit the hook last ran at (or it was recorded but never run). This is
@@ -5895,7 +6021,13 @@ fn upgrade_inner(
     let mut pending: Vec<Upgrade> = Vec::new();
 
     for installed in manifest.items.values() {
-        match upgrade_item_disposition(installed, filter.as_ref(), policy.as_ref(), &registry) {
+        match upgrade_item_disposition(
+            installed,
+            filter.as_ref(),
+            source_scope.as_ref(),
+            policy.as_ref(),
+            &registry,
+        ) {
             // Out of the scoped selection: silent skip, no output.
             UpgradeDisposition::OutOfScope => continue,
             // POL-12: in-scope but the source is no longer allowed by the locked
@@ -5904,11 +6036,12 @@ fn upgrade_inner(
             // the user never selected.
             UpgradeDisposition::PolicyBlocked => {
                 if !out.json {
+                    // spec: CLI-232 DSC-95
                     println!(
                         "{} skipping {} from {}: source not permitted by the managed policy's allowlist",
                         out.warn(),
-                        installed.key(),
-                        installed.source
+                        installed.display_key(),
+                        strip_ansi(&installed.source)
                     );
                 }
                 continue;
@@ -5919,11 +6052,12 @@ fn upgrade_inner(
             // and point at `introspect` to diagnose the drift.
             UpgradeDisposition::SourceNotRegistered => {
                 if !out.json {
+                    // spec: CLI-232 DSC-95
                     println!(
                         "{} skipping {} from {}: source is not registered (not currently melded); run `mind introspect` to check for drift",
                         out.warn(),
-                        installed.key(),
-                        installed.source
+                        installed.display_key(),
+                        strip_ansi(&installed.source)
                     );
                 }
                 continue;
@@ -5966,80 +6100,6 @@ fn upgrade_inner(
     // `colliding_install` guard (DEP-23/NS-41): refuse rather than clobber
     // when the manifest already holds a DIFFERENT stable identity
     // `(source, kind, bare_name)` under the rename's target key.
-    for up in &pending {
-        if up.new_name == up.old.name {
-            continue;
-        }
-        // `up.new_name` is the bare effective name (`CatalogItem::effective_name`);
-        // the manifest is keyed `kind:name` (`InstalledItem::key`), so the lookup
-        // key must carry the kind prefix too.
-        let new_key = format!("{}:{}", up.old.kind.as_str(), up.new_name);
-        if let Some(occupant) = manifest.items.get(&new_key) {
-            let same_identity = occupant.kind == up.old.kind
-                && occupant.bare_name == up.old.bare_name
-                && occupant.source == up.old.source;
-            if !same_identity {
-                return Err(MindError::AmbiguousItem {
-                    query: new_key.clone(),
-                    candidates: vec![
-                        format!(
-                            "{} (already installed from source '{}')",
-                            occupant.key(),
-                            occupant.source
-                        ),
-                        format!(
-                            "{} (upgrading {} from source '{}' would rename to this same key)",
-                            new_key,
-                            up.old.key(),
-                            up.old.source
-                        ),
-                    ],
-                });
-            }
-        }
-    }
-
-    // spec: LIFE-46 -- the guard above compares each rename against the
-    // PRE-EXISTING manifest, but two pending items in ONE batch can converge on
-    // the same target key when neither key is occupied yet (each source drops
-    // its prefix in the same upgrade). The first install then becomes the
-    // second's "previous version" and is evicted silently. Detect a duplicate
-    // target key WITHIN `pending` too (verified: sources `jx:review` and
-    // `jy:review` both dropping their prefixes). The result key of an item that
-    // is not renaming is its unchanged key, so a rename colliding with a
-    // non-renaming sibling is caught as well.
-    {
-        use std::collections::HashMap;
-        let mut seen: HashMap<String, &Upgrade> = HashMap::new();
-        for up in &pending {
-            let key = format!("{}:{}", up.old.kind.as_str(), up.new_name);
-            if let Some(prev) = seen.get(&key) {
-                let same_identity = prev.old.kind == up.old.kind
-                    && prev.old.bare_name == up.old.bare_name
-                    && prev.old.source == up.old.source;
-                if !same_identity {
-                    return Err(MindError::AmbiguousItem {
-                        query: key.clone(),
-                        candidates: vec![
-                            format!(
-                                "upgrading {} from source '{}' targets this key",
-                                prev.old.key(),
-                                prev.old.source
-                            ),
-                            format!(
-                                "upgrading {} from source '{}' would rename to the same key",
-                                up.old.key(),
-                                up.old.source
-                            ),
-                        ],
-                    });
-                }
-            } else {
-                seen.insert(key, up);
-            }
-        }
-    }
-
     let target = item_ref.unwrap_or("all");
 
     if pending.is_empty() {
@@ -6070,6 +6130,73 @@ fn upgrade_inner(
         print_upgrade_report(&registry, &pending);
     }
 
+    // spec: LIFE-46 CLI-232 -- these two collision checks used to run BEFORE
+    // the pending report above, so a batch that hit either collision aborted
+    // with no visibility into what else was pending. They now run after the
+    // report so a human run always sees the full pending list first, even
+    // when it then aborts. Both raise `UpgradeRenameCollision`, which (unlike
+    // `AmbiguousItem`) names the collision explicitly and states both real
+    // remedies (`mind forget`, re-namespace with `mind meld -N`) rather than
+    // phrasing it as a "query" the user never typed with no next step.
+    for up in &pending {
+        if up.new_name == up.old.name {
+            continue;
+        }
+        // `up.new_name` is the bare effective name (`CatalogItem::effective_name`);
+        // the manifest is keyed `kind:name` (`InstalledItem::key`), so the lookup
+        // key must carry the kind prefix too.
+        let new_key = format!("{}:{}", up.old.kind.as_str(), up.new_name);
+        if let Some(occupant) = manifest.items.get(&new_key) {
+            let same_identity = occupant.kind == up.old.kind
+                && occupant.bare_name == up.old.bare_name
+                && occupant.source == up.old.source;
+            if !same_identity {
+                // spec: CLI-232 DSC-95 -- sanitize each field passed into the
+                // error before it is embedded in the (source-controlled-name
+                // carrying) Display message.
+                return Err(MindError::UpgradeRenameCollision {
+                    key: strip_ansi(&new_key),
+                    existing_source: strip_ansi(&occupant.source),
+                    incoming: strip_ansi(&up.old.key()),
+                    incoming_source: strip_ansi(&up.old.source),
+                });
+            }
+        }
+    }
+
+    // spec: LIFE-46 -- the guard above compares each rename against the
+    // PRE-EXISTING manifest, but two pending items in ONE batch can converge on
+    // the same target key when neither key is occupied yet (each source drops
+    // its prefix in the same upgrade). The first install then becomes the
+    // second's "previous version" and is evicted silently. Detect a duplicate
+    // target key WITHIN `pending` too (verified: sources `jx:review` and
+    // `jy:review` both dropping their prefixes). The result key of an item that
+    // is not renaming is its unchanged key, so a rename colliding with a
+    // non-renaming sibling is caught as well.
+    {
+        use std::collections::HashMap;
+        let mut seen: HashMap<String, &Upgrade> = HashMap::new();
+        for up in &pending {
+            let key = format!("{}:{}", up.old.kind.as_str(), up.new_name);
+            if let Some(prev) = seen.get(&key) {
+                let same_identity = prev.old.kind == up.old.kind
+                    && prev.old.bare_name == up.old.bare_name
+                    && prev.old.source == up.old.source;
+                if !same_identity {
+                    // spec: CLI-232 DSC-95
+                    return Err(MindError::UpgradeRenameCollision {
+                        key: strip_ansi(&key),
+                        existing_source: strip_ansi(&prev.old.source),
+                        incoming: strip_ansi(&up.old.key()),
+                        incoming_source: strip_ansi(&up.old.source),
+                    });
+                }
+            } else {
+                seen.insert(key, up);
+            }
+        }
+    }
+
     if !yes {
         // spec: LIFE-45 -- B1: `--json` is non-interactive (mirrors DEP-60): a
         // `--json` run without `--yes` refuses instead of silently applying the
@@ -6080,8 +6207,9 @@ fn upgrade_inner(
         // never able to apply an upgrade unprompted -- only `--json` could
         // bypass it, by skipping the confirm call entirely.
         if out.json {
+            // spec: CLI-232
             return Err(MindError::ConfirmationRequired {
-                action: "applying pending upgrades".to_string(),
+                action: json_confirmation_action("applying pending upgrades", true),
             });
         }
         if !confirm_default_yes("apply these upgrades?")? {
@@ -6119,7 +6247,7 @@ fn upgrade_inner(
                 // spec: LIFE-48 -- persist what earlier items applied, but do not
                 // let a save failure mask the root cause `e`.
                 if let Err(se) = manifest.save(paths) {
-                    eprintln!("error: also failed to persist the manifest: {se}");
+                    warn_manifest_save_also_failed(&se);
                 }
                 return Err(e);
             }
@@ -6157,7 +6285,7 @@ fn upgrade_inner(
                 manifest.insert(installed);
                 // spec: LIFE-48 -- a save failure here must not mask `e`.
                 if let Err(se) = manifest.save(paths) {
-                    eprintln!("error: also failed to persist the manifest: {se}");
+                    warn_manifest_save_also_failed(&se);
                 }
                 return Err(e);
             }
@@ -6184,7 +6312,7 @@ fn upgrade_inner(
                     manifest.insert(installed);
                     // spec: LIFE-48 -- a save failure here must not mask `e`.
                     if let Err(se) = manifest.save(paths) {
-                        eprintln!("error: also failed to persist the manifest: {se}");
+                        warn_manifest_save_also_failed(&se);
                     }
                     return Err(e);
                 }
@@ -6197,7 +6325,8 @@ fn upgrade_inner(
                 );
             }
         }
-        applied.push(installed.key());
+        // spec: CLI-232 DSC-95
+        applied.push(installed.display_key());
         manifest.insert(installed);
     }
     manifest.save(paths)?;
@@ -6377,18 +6506,29 @@ fn policy_identity(registry: &Registry, source_name: &str) -> String {
         .unwrap_or_else(|| source_name.to_string())
 }
 
-/// Decide an installed item's `upgrade` disposition. The item-ref filter is
-/// applied first (POL-12 ordering fix): a scoped `upgrade <item>` must not emit
+/// Decide an installed item's `upgrade` disposition. The item-ref filter and
+/// the source scope are both applied first (POL-12 ordering fix, CLI-232): a
+/// scoped `upgrade <item>` or a scoped `sync <source> --upgrade` must not emit
 /// policy-skip lines for sources the user never selected. The policy block is
-/// only ever reported for items that passed the filter.
+/// only ever reported for items that passed both filters.
 fn upgrade_item_disposition(
     installed: &crate::manifest::InstalledItem,
     filter: Option<&crate::resolve::ItemRef>,
+    // spec: CLI-232 -- H2 fix: `sync <source> --upgrade`'s source scope. `None`
+    // means every source is in scope (the unscoped `mind upgrade` behavior is
+    // unchanged); `Some(set)` restricts consideration to installed items whose
+    // recorded source name is in `set`, exactly like `filter` restricts by item.
+    source_scope: Option<&HashSet<String>>,
     policy: Option<&Policy>,
     registry: &Registry,
 ) -> UpgradeDisposition {
     if let Some(f) = filter
         && !crate::resolve::installed_matches_glob(installed, f)
+    {
+        return UpgradeDisposition::OutOfScope;
+    }
+    if let Some(scope) = source_scope
+        && !scope.contains(&installed.source)
     {
         return UpgradeDisposition::OutOfScope;
     }
@@ -6428,22 +6568,31 @@ fn print_upgrade_report(registry: &Registry, pending: &[Upgrade]) {
     };
     println!("{n} {noun} {verb} upstream changes:\n");
     for up in pending {
+        // spec: CLI-232 DSC-95 -- sanitize every source-controlled field before
+        // composing the line (not the composed line after): this report
+        // prints right before a default-yes confirmation, so an unterminated
+        // escape in one field must not be able to consume a later one and
+        // read as "nothing to do".
+        let cat_name = crate::sanitize::strip_ansi(&up.cat.name);
+        let cat_source = crate::sanitize::strip_ansi(&up.cat.source);
+        let old_name = crate::sanitize::strip_ansi(&up.old.name);
+        let new_name = crate::sanitize::strip_ansi(&up.new_name);
         if up.new_name != up.old.name {
             println!(
                 "  {} {} {} {}  rename {} -> {}",
                 out.warn(),
                 up.cat.kind,
-                up.cat.name,
-                out.dim(&format!("[{}]", up.cat.source)),
-                up.old.name,
-                out.green(&up.new_name)
+                cat_name,
+                out.dim(&format!("[{cat_source}]")),
+                old_name,
+                out.green(&new_name)
             );
         } else {
             println!(
                 "  {} {} {}",
                 out.warn(),
-                up.cat.key(),
-                out.dim(&format!("[{}]", up.cat.source))
+                up.cat.display_key(),
+                out.dim(&format!("[{cat_source}]"))
             );
         }
         println!(
@@ -6515,9 +6664,11 @@ pub fn recall(
                 // subtree_node returns None when the item is installed but has
                 // no catalog entry (and thus no node in the graph); fall back
                 // to a no-dependency node so the caller always gets valid JSON.
+                // spec: CLI-232 DSC-95 -- the fallback's own key must be
+                // sanitized too (the lookup itself needs the raw key).
                 let node = graph
                     .subtree_node(&key)
-                    .unwrap_or_else(|| crate::deps::DepNode::normal(key, vec![]));
+                    .unwrap_or_else(|| crate::deps::DepNode::normal(found.display_key(), vec![]));
                 return print_json(&node);
             } else {
                 // Full forest: emit a JSON array of root nodes.
@@ -6532,7 +6683,8 @@ pub fn recall(
             let key = found.key();
             match graph.render_subtree(&key) {
                 Some(subtree) => print!("{subtree}"),
-                None => println!("{key}"),
+                // spec: CLI-232 DSC-95
+                None => println!("{}", found.display_key()),
             }
         } else {
             // Full forest.
@@ -6827,9 +6979,10 @@ pub fn recall(
             }
         }
         for m in orphans {
+            // spec: CLI-232 DSC-95
             rows.push(vec![
                 format!("  {}", out.warn()),
-                m.key(),
+                m.display_key(),
                 format!(
                     "installed @ {} {}",
                     short(&m.commit),
@@ -6858,10 +7011,12 @@ pub fn recall(
             let rows: Vec<Vec<String>> = unmanaged
                 .iter()
                 .map(|u| {
+                    // spec: CLI-232 DSC-95 -- sanitize each path before
+                    // joining, not the joined string after.
                     let where_ = u
                         .paths
                         .iter()
-                        .map(|p| p.display().to_string())
+                        .map(|p| display_path(p))
                         .collect::<Vec<_>>()
                         .join(", ");
                     vec![
@@ -6945,9 +7100,9 @@ pub fn probe(
                     installed: installed(it),
                     kind: it.kind.as_str(),
                     name: it.display_effective_name(),
-                    source: &it.source,
+                    source: crate::sanitize::strip_ansi(&it.source),
                     hash: hash_path(&it.path).ok(),
-                    description: it.description.as_deref(),
+                    description: it.description.as_deref().map(crate::sanitize::strip_ansi),
                     unmanaged: false,
                     dependencies,
                 }
@@ -6958,7 +7113,7 @@ pub fn probe(
                 installed: false,
                 kind: u.kind.as_str(),
                 name: crate::sanitize::strip_ansi(&u.name),
-                source: "",
+                source: String::new(),
                 hash: None,
                 description: None,
                 unmanaged: true,
@@ -7049,15 +7204,17 @@ pub fn probe(
     // UNM-3: unmanaged rows are marked in the source column and carry their lobe
     // path in place of a description. No dependency nesting for unmanaged items.
     for u in &unmanaged {
+        // spec: CLI-232 DSC-95 -- sanitize each path before joining, not the
+        // joined string after.
         let where_ = u
             .paths
             .iter()
-            .map(|p| p.display().to_string())
+            .map(|p| display_path(p))
             .collect::<Vec<_>>()
             .join(", ");
         rows.push(vec![
             String::new(),
-            u.key(),
+            u.display_key(),
             out.dim("(unmanaged)"),
             out.dim("-"),
             out.dim(&where_),
@@ -7076,9 +7233,12 @@ struct ProbeRow<'a> {
     installed: bool,
     kind: &'a str,
     name: String,
-    source: &'a str,
+    // spec: CLI-232 DSC-95 -- owned and sanitized (not `&'a str` borrowed
+    // straight from the catalog item): the source name and description are
+    // both source-controlled text.
+    source: String,
     hash: Option<String>,
-    description: Option<&'a str>,
+    description: Option<String>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     unmanaged: bool,
     /// Direct dependency keys (DEP-62). Empty for unmanaged rows. Omitted when
@@ -7343,6 +7503,19 @@ pub fn introspect(paths: &Paths, fix: bool, json: bool) -> Result<()> {
 
     if fix && manifest_dirty {
         manifest.save(paths)?;
+    }
+
+    // spec: CLI-232 DSC-95 -- every issue's `target`/`message`, and every
+    // `repaired` note, can embed a source-controlled name (an item key, a
+    // source name, a lobe path): sanitize once here, covering both the
+    // `--json` `Report` below and the human `println!` loop further down,
+    // rather than at each of this function's dozen build sites above.
+    for issue in &mut issues {
+        issue.target = strip_ansi(&issue.target);
+        issue.message = strip_ansi(&issue.message);
+    }
+    for note in &mut repaired {
+        *note = strip_ansi(note);
     }
 
     if json {
@@ -8284,6 +8457,55 @@ fn scan_one(paths: &Paths, source: &crate::source::Source) -> Result<Vec<Catalog
     Ok(items)
 }
 
+/// Report a manifest-save failure that occurred while already unwinding from
+/// another error (LIFE-48's double-failure outcome, CLI-232): the root cause
+/// `e` is about to propagate, and persisting the manifest to record what
+/// already happened on disk ALSO failed, so on-disk state may now not match
+/// `manifest.json`.
+///
+/// Routed through `render::warn` rather than a bare `eprintln!` so the
+/// message is sanitized (DSC-95 -- `se`'s Display can embed a source-
+/// controlled path) and follows the same stdout/text vs stderr/json routing
+/// as every other advisory line (CLI-217). It also drops the `error: `
+/// prefix the bare `eprintln!` reused: `main.rs` already prints `error: {err}`
+/// for the propagated root cause, so two lines both starting `error: ` read
+/// as two candidates for "the" error rather than a root cause plus a
+/// secondary complication. Names `mind introspect --fix` as the remedy.
+// spec: CLI-232 LIFE-48
+fn warn_manifest_save_also_failed(se: &MindError) {
+    crate::render::warn(format!(
+        "also failed to persist the manifest: {}; on-disk state may not match \
+         manifest.json -- run `mind introspect --fix` to reconcile",
+        strip_ansi(&se.to_string())
+    ));
+}
+
+/// Build the `action` text for a `ConfirmationRequired` raised because
+/// `--json` is non-interactive (LIFE-45), as opposed to stdin merely not
+/// being a TTY. The variant's fixed suffix ("re-run with --yes (or in an
+/// interactive terminal)") is misleading for a `--json` caller: retrying in
+/// a real terminal changes nothing, because `--json` disables interactive
+/// confirmation unconditionally regardless of the TTY. Route through this so
+/// the action text names the only remedy that actually applies.
+// spec: CLI-232
+fn json_confirmation_action(base: impl std::fmt::Display, json: bool) -> String {
+    if json {
+        format!("{base} (--json is always non-interactive; --yes is the only way to proceed)")
+    } else {
+        base.to_string()
+    }
+}
+
+/// Sanitize a filesystem path for display (DSC-95): a path built from a
+/// source-controlled item name (a store path, a lobe link target) can embed
+/// ANSI/control/bidi bytes just as much as the name itself. Local to this
+/// module -- `sanitize.rs` is owned by a different shard -- and a candidate to
+/// promote there later.
+// spec: CLI-232 DSC-95
+fn display_path(p: &std::path::Path) -> String {
+    crate::sanitize::strip_ansi(&p.display().to_string())
+}
+
 /// First 8 chars of a hash/commit, for compact display.
 fn short(s: &str) -> String {
     if s.is_empty() {
@@ -8309,6 +8531,10 @@ fn summary(desc: Option<&str>, max: usize) -> String {
 /// yields an empty string. Used for free-form answers like the prefix prompt
 /// (CLI-24), where `[y/N]` is not enough.
 fn prompt_line(prompt: &str) -> Result<String> {
+    // spec: CLI-232 DSC-95 -- a prompt built from a source-controlled name (the
+    // meld prefix preview, CLI-24) can carry ANSI/control/bidi bytes; sanitize
+    // before it reaches the terminal.
+    let prompt = crate::sanitize::strip_ansi(prompt);
     print!("{prompt}");
     let _ = std::io::stdout().flush();
     let mut line = String::new();
@@ -8335,6 +8561,11 @@ fn parse_confirm(input: &str, default_yes: bool) -> bool {
 /// Print `prompt {hint}`, read one line from stdin, and resolve it against
 /// `default_yes`. EOF (no input) is always No.
 fn read_confirm(prompt: &str, hint: &str, default_yes: bool) -> Result<bool> {
+    // spec: CLI-232 DSC-95 -- the single chokepoint every `confirm`/
+    // `confirm_default_yes` call routes through; sanitize here so a
+    // source-controlled name baked into a prompt string cannot carry ANSI/
+    // control/bidi bytes to the terminal.
+    let prompt = crate::sanitize::strip_ansi(prompt);
     print!("\n{prompt} {hint} ");
     let _ = std::io::stdout().flush();
     let mut line = String::new();
@@ -8557,11 +8788,18 @@ mod tests {
             "a\u{2065}b",
             "U+2065 must pass through (below the isolate block)"
         );
-        // U+206A sits just above the U+2066-2069 isolate block.
+        // U+206A-206F (the deprecated format controls) are themselves blocked by
+        // NS-73, so the first pass-through code point above the isolate block is
+        // U+2070.
         assert_eq!(
             strip_ansi("a\u{206A}b"),
-            "a\u{206A}b",
-            "U+206A must pass through (above the isolate block)"
+            "ab",
+            "U+206A is a deprecated format control and must be dropped (NS-73)"
+        );
+        assert_eq!(
+            strip_ansi("a\u{2070}b"),
+            "a\u{2070}b",
+            "U+2070 must pass through (above the deprecated-format block)"
         );
     }
 
@@ -8804,20 +9042,20 @@ mod tests {
 
         // Out-of-scope item: silently skipped, never reported as PolicyBlocked.
         assert_eq!(
-            upgrade_item_disposition(&other, Some(&filter), Some(&policy), &registry),
+            upgrade_item_disposition(&other, Some(&filter), None, Some(&policy), &registry),
             UpgradeDisposition::OutOfScope,
             "POL-12: an unselected item must not be policy-skipped (no skip line)"
         );
         // The selected, allowed item is considered for upgrade.
         assert_eq!(
-            upgrade_item_disposition(&selected, Some(&filter), Some(&policy), &registry),
+            upgrade_item_disposition(&selected, Some(&filter), None, Some(&policy), &registry),
             UpgradeDisposition::Consider,
         );
 
         // Sanity: with no scope filter, the disallowed item IS policy-blocked
         // (the existing unscoped behavior is preserved).
         assert_eq!(
-            upgrade_item_disposition(&other, None, Some(&policy), &registry),
+            upgrade_item_disposition(&other, None, None, Some(&policy), &registry),
             UpgradeDisposition::PolicyBlocked,
         );
 
@@ -8857,7 +9095,7 @@ mod tests {
 
         for name in [&link_name, &aliased_name] {
             assert_eq!(
-                upgrade_item_disposition(&item("foo", name), None, Some(&policy), &registry),
+                upgrade_item_disposition(&item("foo", name), None, None, Some(&policy), &registry),
                 UpgradeDisposition::Consider,
                 "{name}: an instance of an allowed repo stays allowed"
             );
@@ -8871,6 +9109,7 @@ mod tests {
         assert_eq!(
             upgrade_item_disposition(
                 &item("foo", "github.com/me/allowed-src#skills/foo"),
+                None,
                 None,
                 Some(&policy),
                 &Registry::default()
@@ -8904,6 +9143,7 @@ mod tests {
             upgrade_item_disposition(
                 &item("foo", "github.com/them/blocked-src"),
                 None,
+                None,
                 Some(&policy),
                 &registry,
             ),
@@ -8917,6 +9157,7 @@ mod tests {
         assert_eq!(
             upgrade_item_disposition(
                 &item("foo", "github.com/gone/unmelded-src"),
+                None,
                 None,
                 Some(&policy),
                 &registry,
@@ -8947,7 +9188,7 @@ mod tests {
         let registry = registry_of(&["me/allowed-src", "them/blocked-src"]);
 
         assert_eq!(
-            upgrade_item_disposition(&selected, Some(&filter), Some(&policy), &registry),
+            upgrade_item_disposition(&selected, Some(&filter), None, Some(&policy), &registry),
             UpgradeDisposition::PolicyBlocked,
             "a selected item from a disallowed source is still reported"
         );

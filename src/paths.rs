@@ -772,30 +772,68 @@ pub(crate) fn resolve_lobe(
 }
 
 /// `mkdir -p` that tags failures with the offending path.
+// spec: HARN-23
 pub fn mkdir_p(path: &Path) -> Result<()> {
-    std::fs::create_dir_all(path).map_err(|e| {
-        // `create_dir_all` reports a dangling-symlink component as a bare
-        // `File exists` (the link itself exists, so the directory create
-        // refuses), which names neither the link nor what it points at. That is
-        // reachable through a configured agent home whose path is a broken
-        // symlink. Name the real cause instead; fall back to the plain I/O
-        // error when no broken component is found.
+    std::fs::create_dir_all(path).map_err(|e| classify_mkdir_error(path, e))
+}
+
+/// Turn a raw `create_dir_all(path)` failure into a [`MindError`], substituting
+/// the [`MindError::BrokenSymlinkPath`] diagnosis only for its exact known
+/// signature (HARN-23). Split out from [`mkdir_p`] so the classification rule
+/// can be exercised directly with a synthetic `io::Error` (a real
+/// `create_dir_all` call cannot be made to report an arbitrary error kind
+/// on demand).
+///
+/// `create_dir_all` reports a dangling-symlink component as a bare `File
+/// exists` (`ErrorKind::AlreadyExists`; the link itself exists, so the
+/// directory create refuses), which names neither the link nor what it points
+/// at. That is reachable through a configured agent home whose path is a
+/// broken symlink. Only substitute the diagnosis for exactly that error kind:
+/// any other kind -- a permission or read-only-filesystem failure at some
+/// deeper component, say -- keeps its real cause rather than being
+/// misreported as a broken link just because a dangling symlink happens to
+/// sit elsewhere in the same path.
+fn classify_mkdir_error(path: &Path, e: std::io::Error) -> MindError {
+    if e.kind() == std::io::ErrorKind::AlreadyExists {
         match broken_symlink_component(path) {
-            Some((link, target)) => MindError::BrokenSymlinkPath {
-                path: path.to_path_buf(),
-                link,
-                target,
-            },
-            None => MindError::io(path, e),
+            Ok(Some((link, target))) => {
+                return MindError::BrokenSymlinkPath {
+                    path: path.to_path_buf(),
+                    link,
+                    target,
+                };
+            }
+            // The broken component was identified, but its target could not
+            // be read back (`read_link` itself failed); propagate that real
+            // I/O error rather than rendering an empty target.
+            Err(read_err) => return read_err,
+            Ok(None) => {}
         }
-    })
+    }
+    MindError::io(path, e)
 }
 
 /// The first component of `path` (itself included) that is a symlink whose
-/// target does not resolve, with that target. `None` when every existing
-/// component resolves. Used to explain a `create_dir_all` failure in terms of
-/// the broken link rather than the `File exists` the OS reports.
-fn broken_symlink_component(path: &Path) -> Option<(PathBuf, PathBuf)> {
+/// target does not resolve, paired with that target resolved against the
+/// link's own parent directory for display (so a relative target like
+/// `../gone` renders as an interpretable path instead of a bare relative
+/// string with nothing to resolve it against). `Ok(None)` when every existing
+/// component resolves cleanly (or does not exist yet, a normal to-be-created
+/// component). `Err(..)` when a broken-symlink component IS found but its
+/// target cannot be read back at all (`read_link` failing is itself an I/O
+/// error, distinct from a target that reads back but does not exist). Used to
+/// explain a `create_dir_all` failure in terms of the broken link rather than
+/// the `File exists` the OS reports.
+///
+/// Classification of "broken" is `ErrorKind::NotFound` specifically
+/// (HARN-23): following a symlink via `std::fs::metadata` can also fail with
+/// e.g. `PermissionDenied` or a symlink-loop error, neither of which means
+/// "the target does not exist" -- misreporting either as a dangling link
+/// would assert something false about a path that may well exist. A
+/// non-`NotFound` failure is not treated as this component being broken; the
+/// scan continues past it in case a later component is the genuine dangling
+/// link.
+fn broken_symlink_component(path: &Path) -> Result<Option<(PathBuf, PathBuf)>> {
     let mut prefix = PathBuf::new();
     for comp in path.components() {
         prefix.push(comp);
@@ -804,12 +842,50 @@ fn broken_symlink_component(path: &Path) -> Option<(PathBuf, PathBuf)> {
         let Ok(md) = std::fs::symlink_metadata(&prefix) else {
             continue; // does not exist yet: a normal to-be-created component
         };
-        if md.file_type().is_symlink() && std::fs::metadata(&prefix).is_err() {
-            let target = std::fs::read_link(&prefix).unwrap_or_default();
-            return Some((prefix, target));
+        if !md.file_type().is_symlink() {
+            continue;
         }
+        let Err(follow_err) = std::fs::metadata(&prefix) else {
+            continue; // the symlink resolves fine: not the broken component
+        };
+        if follow_err.kind() != std::io::ErrorKind::NotFound {
+            // Exists but is unreadable for some other reason (permission, a
+            // symlink loop, ...): not "does not exist", so don't misreport it.
+            continue;
+        }
+        return resolve_broken_link_display(&prefix, std::fs::read_link(&prefix)).map(Some);
     }
-    None
+    Ok(None)
+}
+
+/// Turn a `read_link` result for a confirmed-broken symlink at `prefix` into
+/// either the display-resolved `(link, target)` pair, or the I/O error
+/// `read_link` itself produced (HARN-23). A `read_link` failure is a genuine
+/// I/O error distinct from "the target does not exist" (which is what got
+/// `prefix` classified as broken in the first place), so it propagates rather
+/// than the caller rendering an empty target. A relative target is resolved
+/// against `prefix`'s own parent directory before being returned, so it
+/// displays as an interpretable path (e.g. `<parent>/../gone`) instead of a
+/// bare relative string with nothing to resolve it against; an absolute
+/// target is returned unchanged. Split out from [`broken_symlink_component`]
+/// so this step can be exercised directly with a synthetic `read_link`
+/// result -- a real dangling symlink's `read_link` call essentially cannot be
+/// made to fail on demand once `symlink_metadata`/`metadata` already
+/// succeeded/failed as required.
+fn resolve_broken_link_display(
+    prefix: &Path,
+    target: std::io::Result<PathBuf>,
+) -> Result<(PathBuf, PathBuf)> {
+    let target = target.map_err(|e| MindError::io(prefix, e))?;
+    let display_target = if target.is_absolute() {
+        target
+    } else {
+        prefix
+            .parent()
+            .map(|parent| parent.join(&target))
+            .unwrap_or(target)
+    };
+    Ok((prefix.to_path_buf(), display_target))
 }
 
 /// Crate-wide lock serializing every test (in any module) that mutates a
@@ -911,6 +987,14 @@ mod tests {
             "the raw File-exists errno must not be the reported cause: {msg}"
         );
         assert_eq!(err.kind(), "broken-symlink-path");
+        // HARN-23(a): the remedy names a real, runnable command --
+        // `ConfigCmd::Lobes` requires a subcommand, so a bare `mind config
+        // lobes` exits with a clap usage error.
+        assert!(
+            msg.contains("mind config lobes list"),
+            "the remedy must name the runnable `mind config lobes list`, not a bare \
+             `mind config lobes`: {msg}"
+        );
 
         // A healthy path is unaffected: still created, still Ok.
         let good = root.join("real").join("skills");
@@ -921,6 +1005,146 @@ mod tests {
         assert!(good.is_dir());
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// HARN-23(b): a symlink whose target cannot be followed for a reason
+    /// OTHER than "does not exist" -- here, a self-referential loop (ELOOP) --
+    /// must not be classified as a dangling/broken link: `broken_symlink_component`
+    /// must return `Ok(None)`, not `Ok(Some(..))`, since "the target does not
+    /// exist" is false for a loop (the target chain exists, it just never
+    /// terminates). Fails against the unfixed `metadata(&prefix).is_err()`
+    /// check, which treats ELOOP identically to NotFound.
+    #[cfg(unix)]
+    #[test]
+    fn broken_symlink_component_does_not_misclassify_a_symlink_loop_as_dangling() {
+        // spec: HARN-23
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let root =
+            std::env::temp_dir().join(format!("mind-brokenlink-loop-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let loop_link = root.join("loopy");
+        std::os::unix::fs::symlink(&loop_link, &loop_link).unwrap();
+
+        // Confirm this test's premise: following the loop must fail, but NOT
+        // with `NotFound` -- otherwise this would not distinguish the fix from
+        // the unfixed code at all.
+        let follow_err = std::fs::metadata(&loop_link)
+            .expect_err("a self-referential symlink must fail to resolve");
+        assert_ne!(
+            follow_err.kind(),
+            std::io::ErrorKind::NotFound,
+            "premise of this test: a symlink loop must not present as NotFound: {follow_err:?}"
+        );
+
+        let result = broken_symlink_component(&loop_link).unwrap();
+        assert!(
+            result.is_none(),
+            "a symlink loop (not NotFound) must not be classified as a broken/dangling link: \
+             {result:?}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// HARN-23(c): `classify_mkdir_error` must only substitute the
+    /// broken-symlink diagnosis when the underlying `create_dir_all` error
+    /// kind is exactly `AlreadyExists`. Even when a real dangling symlink IS
+    /// present in `path`'s own ancestry (so `broken_symlink_component` would
+    /// find it), a DIFFERENT outer error kind (e.g. `PermissionDenied`) must
+    /// propagate as a plain `Io` error, not be reclassified as
+    /// `BrokenSymlinkPath`. Fails against the unfixed code, which calls
+    /// `broken_symlink_component` unconditionally on every `create_dir_all`
+    /// failure regardless of its kind.
+    #[cfg(unix)]
+    #[test]
+    fn classify_mkdir_error_does_not_reclassify_a_non_already_exists_error() {
+        // spec: HARN-23
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let root =
+            std::env::temp_dir().join(format!("mind-mkdirp-guard-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let link = root.join("brokenlobe");
+        let missing = root.join("gone");
+        std::os::unix::fs::symlink(&missing, &link).unwrap();
+        let target = link.join("skills");
+
+        // Sanity: `broken_symlink_component` really does find the dangling
+        // link along this exact path (otherwise the guard below is untested).
+        assert!(
+            broken_symlink_component(&target).unwrap().is_some(),
+            "test setup: the dangling symlink must be detected along this path"
+        );
+
+        // A synthetic PermissionDenied, standing in for a real deeper I/O
+        // failure that happens to share a path prefix with an unrelated
+        // dangling symlink -- must NOT be reclassified.
+        let synthetic = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        let classified = classify_mkdir_error(&target, synthetic);
+        assert!(
+            !matches!(classified, MindError::BrokenSymlinkPath { .. }),
+            "a PermissionDenied error must not be reclassified as BrokenSymlinkPath: \
+             {classified:?}"
+        );
+        assert!(
+            matches!(classified, MindError::Io { .. }),
+            "expected a plain Io error, got {classified:?}"
+        );
+
+        // The real AlreadyExists signature IS still reclassified (control:
+        // proves the guard is selective, not simply disabled).
+        let real_already_exists = std::io::Error::new(std::io::ErrorKind::AlreadyExists, "eexist");
+        let classified = classify_mkdir_error(&target, real_already_exists);
+        assert!(
+            matches!(classified, MindError::BrokenSymlinkPath { .. }),
+            "an AlreadyExists error with a genuine dangling-symlink ancestor must still be \
+             reclassified: {classified:?}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// HARN-23(d): when the broken-symlink component's target cannot be read
+    /// back at all (`read_link` itself fails), that I/O error must propagate
+    /// rather than the caller substituting an empty target. Fails against the
+    /// unfixed `unwrap_or_default()`, which would render `pointing at ''`.
+    #[test]
+    fn resolve_broken_link_display_propagates_a_read_link_failure() {
+        // spec: HARN-23
+        let prefix = PathBuf::from("/some/broken/link");
+        let synthetic = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        let err = resolve_broken_link_display(&prefix, Err(synthetic)).unwrap_err();
+        assert!(
+            matches!(err, MindError::Io { .. }),
+            "a read_link failure must propagate as an Io error, not be swallowed: {err:?}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("/some/broken/link"),
+            "the Io error must be tagged with the offending path: {msg}"
+        );
+    }
+
+    /// HARN-23(e): a relative link target is resolved against the link's own
+    /// parent directory before being returned, so it displays as an
+    /// interpretable path rather than a bare relative string with nothing to
+    /// resolve it against. An absolute target is left unchanged.
+    #[test]
+    fn resolve_broken_link_display_resolves_a_relative_target_against_the_links_parent() {
+        // spec: HARN-23
+        let prefix = PathBuf::from("/home/user/.claude/brokenlobe");
+        let (link, target) =
+            resolve_broken_link_display(&prefix, Ok(PathBuf::from("../gone"))).unwrap();
+        assert_eq!(link, prefix);
+        assert_eq!(
+            target,
+            PathBuf::from("/home/user/.claude/../gone"),
+            "a relative target must be joined against the link's own parent directory: {target:?}"
+        );
+
+        // An absolute target passes through unchanged.
+        let (_, target) =
+            resolve_broken_link_display(&prefix, Ok(PathBuf::from("/elsewhere/gone"))).unwrap();
+        assert_eq!(target, PathBuf::from("/elsewhere/gone"));
     }
 
     #[test]

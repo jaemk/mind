@@ -101,7 +101,7 @@ targets = ["~/.claude"]
 [binary]
 # Control `mind evolve` (binary self-update). Absent or true: unrestricted.
 # false: evolve and evolve --check fail before any network call.
-# A version string: evolve resolves to that version offline; --version with a
+# A version string: evolve resolves to that version offline; --to with a
 # different value is refused; an invalid string fails policy parse.
 self-update = false     # or true, or "0.14.0"
 ```
@@ -198,7 +198,9 @@ allowlist, or whose `repo` does not parse, is an invalid policy (POL-31).
 
 Auto-meld provisioning runs during `sync`, using each entry's declared pin. It is
 idempotent: an entry already melded at the declared pin is left unchanged
-(POL-32).
+(POL-32). Provisioning runs only for a full `mind sync` with no selector; a
+scoped `mind sync <source>` skips it entirely, with no message, so a runbook
+that only ever runs a scoped sync never converges on the policy's base set.
 
 **Item install.** By default, provisioning registers the source only; no items
 are installed. Set `install = true` on an entry to also install every item the
@@ -237,9 +239,9 @@ missing `[binary]` table or missing key leaves `evolve` unrestricted (POL-51).
   any network call with a policy error. The disable applies to `--check` as well
   so the binary does not nag about available updates (POL-52).
 - `self-update = "X.Y.Z"`: `evolve` resolves to that exact version offline (no
-  `api.github.com` call), behaving as if `--version X.Y.Z` were passed. The pin
+  `api.github.com` call), behaving as if `--to X.Y.Z` were passed. The pin
   is validated as a dotted-numeric version at policy-parse time (POL-5 fail
-  closed); a leading `v` is stripped before validation. If `--version V` is also
+  closed); a leading `v` is stripped before validation. If `--to V` is also
   passed and V differs from the pin, the command fails with a policy error naming
   the conflict. `evolve --check` reports against the pinned version and respects
   the no-downgrade logic (POL-53).

@@ -135,11 +135,79 @@ run = "make build"
   `[[items]]` name/link/path, a `[discover]` glob pattern, and a matched path in
   a confinement error) is sanitized (DSC-94 rule) before it reaches stderr, so a
   rejection cannot itself carry an injection payload.
+
+  Caveat: sanitizing only at display means a
+  sanitized name may not round-trip as an item ref. `mind recall`/`probe` show
+  the display-sanitized `skill:review`, but `mind forget skill:review` matches
+  on the raw name, so if the installed item's raw name actually carries a
+  stripped code point (e.g. `revie<ZWSP>w`), the ref a user copies from
+  `recall`'s output does not resolve and `forget` reports "not installed".
+  This is a known, accepted rough edge of keeping identity raw while display is
+  sanitized; DSC-96 closes the more serious half of this (a hostile name that
+  is indistinguishable from a trusted one) by refusing such a name at capture
+  instead of merely sanitizing it at display.
+- `DSC-96` An item's bare NAME (DSC-71's single-path-component rule) is also
+  rejected when it contains a control character or a security-blocked Unicode
+  code point (a bidi override, a directional mark, or a zero-width character --
+  the same class `namespace::is_safe_prefix_component` rejects for a prefix,
+  NS-72). Name identity is raw (it keys the store path, the symlink, and the
+  manifest, and the cross-source collision check compares it raw, NS-43), while
+  DSC-95 sanitizes only at display; without this rule a hostile source could
+  ship a name (e.g. a skill directory `revie<ZWSP>w/`, or a declared
+  `[[items]] name = "revie<ZWSP>w"`) that renders identically to a trusted
+  item's name in `recall`, `probe`, the TUI, and the `learn` confirmation while
+  installing as a distinct item, defeating both the visual check a user makes
+  before approving an install and the DSC-95/NS-43 collision warning (neither
+  of which would fire, since the raw names differ only by an invisible or
+  direction-altering code point). Two capture points, two consequences for the
+  same rule:
+  - A `[[items]]` declared `name` failing this check is a hard `MindToml`
+    error (the author wrote the name explicitly, so it is treated like any
+    other DSC-71 violation).
+  - A convention- or `[discover]`-glob-derived name (an arbitrary filename in
+    the source tree, not an author-declared value) failing this check is
+    skipped with a stderr warning instead of failing the whole scan, so one
+    hostile filename does not make an otherwise-good repo un-meldable; every
+    other item in the source is still discovered.
 - `DSC-72` A `[[items]]` `link` override (the link target relative to an agent
   home) must be a safe relative path: it is rejected (`MindToml`) when empty,
   absolute, beginning with `~`, containing a `..` (parent) component, or
   containing a NUL byte. So a melded source cannot place a symlink outside the
-  agent home (e.g. `link = "../../.bashrc"`).
+  agent home (e.g. `link = "../../.bashrc"`). DSC-97 narrows this further: the
+  target must also stay inside one of the four kind directories.
+- `DSC-97` A `[[items]]` `link` override must, beyond DSC-72's escape-safety
+  rule, have its first path component name one of the four kind directories
+  (`skills/`, `agents/`, `rules/`, `tools/`); anything else is rejected
+  (`MindToml`) at catalog scan, before install ever runs. Without this, DSC-72
+  alone accepts any relative path inside the agent home, including its root:
+  a source declaring `link = "settings.json"` (or a harness's own hooks/config
+  path) and shipping matching content installs, via an ordinary `learn`, as a
+  symlink at that root path. On the Claude harness that turns attacker-chosen
+  item content into `~/.claude/settings.json` (or the equivalent inside a
+  `--local`/`link-project` project lobe), which the harness reads as its own
+  settings on the very next tool use, including a `hooks` key that runs an
+  arbitrary command -- with no `mind` hook-consent prompt involved, since this
+  path never touches the hooks machinery (hook.rs). `ensure_unoccupied`
+  (install.rs) only refuses when the target already exists, so a fresh
+  `~/.claude`/project lobe is not protected by that guard, and `--force`
+  (LIFE-41) stashing a pre-existing file aside does not help either; the fix
+  has to happen before either of those, at catalog validation. Confining the
+  first component to a kind directory closes both the fresh-lobe and the
+  `--local`/snapshot-lobe (which copies a real file rather than symlinking)
+  variants at once, without narrowing TOOL-4's documented use case (a tool
+  surfaced under a *different* kind directory than its own, e.g.
+  `link = "agents/detect"` on a `kind = "tool"` item): TOOL-4 only ever needed
+  a different kind directory, never an arbitrary path, so nothing legitimate
+  is lost. There is no consent-based escape hatch (contrast the hook
+  disclosure/prompt machinery): the risk (planting a harness's own config) is
+  judged severe enough, and the confined form flexible enough (any name,
+  subdirectory nesting, and any of the four kind directories, not just the
+  item's own kind), that a bypass is not offered. `mind review` (CLI-130..133)
+  discloses every item's custom `link` target as an advisory finding
+  (`custom-link`) alongside the hooks and risky references it already reports,
+  so a consumer sees where each item will symlink before melding; a link that
+  fails this confinement surfaces instead as a hard `scan-error` finding (the
+  meld would already refuse it), not a `custom-link` advisory.
 - `DSC-73` A `[[items]]` `path` must be a safe repo-root-relative path: it is
   rejected (`MindToml`) when empty, absolute, beginning with `~`, containing a
   `..` (parent) component, or containing a NUL byte. A relative value free of

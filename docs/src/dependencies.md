@@ -77,7 +77,10 @@ Nodes already in the manifest are marked `[installed]` and are not re-installed
 (DEP-23). Cycles are shown as marked back-edges rather than expanded again
 (DEP-22).
 
-`--yes` (or answering `y`) confirms without prompting. See
+`--yes` (or answering `y`) confirms without prompting. Under `--json` there is no
+prompt at all: `--yes` is mandatory whenever the closure adds items beyond the
+explicit selection, and `learn --json` without it refuses with
+`confirmation-required` instead of installing unprompted. See
 [Commands - learn](commands.md) for the full flag reference.
 
 ## `--dry-run` preview

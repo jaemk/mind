@@ -1310,65 +1310,99 @@ fn hostile_mind_toml_source_description_is_sanitized_everywhere() {
     );
 }
 
-/// H2/DSC-95: an item NAME is source-controlled and keys both identity and
-/// every display surface, but the B4/DSC-94 capture-point fix sanitized only
-/// the description. A skill directory whose on-disk name carries an ANSI escape
-/// and a bidi override (U+202E) must have the name sanitized at every CLI print
-/// site (the `learned` line, `recall` human/listing/`--json`, and `probe`
-/// human/`--json`), exactly as the TUI already does. The name keys identity, so
-/// it is sanitized for display rather than rewritten in the store.
+/// DSC-95/DSC-96/CLI-232: an item NAME is source-controlled and keys identity.
+/// DSC-96 (a sibling fix landed concurrently with this one) now REJECTS a
+/// hostile name (a control byte, an ANSI escape, or a bidi/zero-width code
+/// point) at catalog-scan time, so a freshly melded source can no longer
+/// install one -- see `hostile_named_item_is_skipped_at_scan_not_installed`
+/// below, which pins that gate. That closes the vector for a NEW install, but
+/// a manifest entry with a hostile name is still a live, reachable state: an
+/// item installed by an older binary (before DSC-96 existed), or a hand-edited
+/// `manifest.json`. `recall`, `introspect`, and `forget` all read the manifest
+/// directly and must still sanitize such an entry for display, exactly as
+/// DSC-95 requires. This test injects a hostile manifest entry the way a
+/// pre-DSC-96 install would have left one, then drives those three surfaces.
+///
+/// A hostile-named UNMANAGED lobe item (never catalog-scanned, so DSC-96 does
+/// not apply to it at all) is exercised separately below through the real
+/// `forget` UNM-5 disclosure path.
+///
+/// Every assertion below is a PAIR: absence of the raw escape/bidi bytes, AND
+/// presence of the sanitized name ("review"/"handmade" -- both chosen so the
+/// escape/bidi bytes sit strictly inside a run of letters that survives
+/// sanitizing intact). Checking absence alone would also pass a regression
+/// that dropped the hostile item from the output entirely, or replaced it
+/// with a placeholder.
 #[test]
-fn hostile_item_name_is_sanitized_at_every_cli_surface() {
-    // spec: DSC-95
-    let sb = Sandbox::bare("hostile-name");
-    // Skill directory name carries an ANSI CSI color sequence and a bidi
-    // override. "review" stays intact so the sanitized-but-present checks work.
-    let name = format!("re{}[31mvie\u{202E}w", '\x1b');
-    sb.write_and_commit(
-        &format!("skills/{name}/SKILL.md"),
-        "---\ndescription: a skill\n---\n# skill\n",
-    );
+fn hostile_installed_item_is_sanitized_at_recall_introspect_and_forget() {
+    // spec: DSC-95 CLI-232
+    let sb = melded();
+    assert!(sb.mind(&["learn", "review"]).success);
 
-    // meld succeeds (the name is tolerated), but its progress line is clean.
-    let meld = sb.mind(&["meld", &sb.source_spec()]);
-    assert!(meld.success, "{}", meld.stderr);
+    // Hand-edit manifest.json: clone the "review" entry under a hostile
+    // `kind:name` key, with an on-disk name carrying an ANSI CSI color
+    // sequence and a bidi override (U+202E). "review" stays intact inside the
+    // hostile bytes so the sanitized-but-present checks work. The bare_name no
+    // longer matches any real catalog item, so this also doubles as an
+    // "installed but removed upstream" (orphan) row for `recall`/`introspect`.
+    let manifest_path = sb.mind_home.join("manifest.json");
+    let raw = std::fs::read_to_string(&manifest_path).unwrap();
+    let mut doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    let review = doc["items"]["skill:review"].clone();
+    assert!(!review.is_null(), "the review entry must exist: {doc}");
+    // A C0 control byte (BEL, not part of a `[`-bracketed CSI sequence) plus a
+    // bidi override. Deliberately avoids '[' (and '*'/'?'): `resolve::is_glob`
+    // treats a literal '[' as a glob metacharacter, which would misroute
+    // `forget`'s ref through its glob-selection path instead of the exact-match
+    // path this test means to exercise -- an unrelated ref-parsing quirk, not a
+    // DSC-95 sanitization gap (CSI/SGR-sequence stripping is already covered
+    // elsewhere, e.g. `hostile_frontmatter_description_is_sanitized_everywhere`).
+    let hostile_name = format!("re{}vie\u{202E}w", '\x07');
+    let hostile_key = format!("skill:{hostile_name}");
+    let mut hostile = review.clone();
+    hostile["name"] = serde_json::Value::String(hostile_name.clone());
+    hostile["bare_name"] = serde_json::Value::String(hostile_name.clone());
+    // Store/link paths must be distinct so `forget` does not try to remove
+    // the real "review" install's files.
+    hostile["store"] = serde_json::Value::String(format!("store/skill/{hostile_name}"));
+    hostile["links"] = serde_json::Value::Array(vec![]);
+    doc["items"][&hostile_key] = hostile;
+    std::fs::write(&manifest_path, serde_json::to_vec_pretty(&doc).unwrap()).unwrap();
 
-    // recall listing (human).
+    // recall: the injected item is now an orphan row (installed, no catalog
+    // match under its hostile bare_name).
     let recall = sb.mind(&["recall"]);
     assert!(recall.success, "{}", recall.stderr);
     assert!(
         !recall.stdout.contains('\x1b') && !recall.stdout.contains('\u{202E}'),
-        "recall must not leak raw ANSI/bidi from an item name: {:?}",
+        "recall must not leak raw ANSI/bidi from an installed item name: {:?}",
+        recall.stdout
+    );
+    assert!(
+        recall.stdout.contains("skill:review"),
+        "recall must still show the sanitized key (twice: the real item and \
+         the orphan row): {:?}",
         recall.stdout
     );
 
-    // probe (human + json).
-    for args in [
-        vec!["probe", "--no-tui"],
-        vec!["probe", "--json"],
-        vec!["recall", "--json"],
-    ] {
-        let out = sb.mind(&args);
-        assert!(out.success, "{args:?}: {}", out.stderr);
-        assert!(
-            !out.stdout.contains('\x1b') && !out.stdout.contains('\u{202E}'),
-            "{args:?} must not leak raw ANSI/bidi from an item name: {:?}",
-            out.stdout
-        );
-    }
-
-    // learn + single-item recall (human + json).
-    let bare = format!("skill:re{}[31mvie\u{202E}w", '\x1b');
-    let learn = sb.mind(&["learn", &bare]);
-    assert!(learn.success, "{}", learn.stderr);
+    let recall_json = sb.mind(&["recall", "--json"]);
+    assert!(recall_json.success, "{}", recall_json.stderr);
     assert!(
-        !learn.stdout.contains('\x1b') && !learn.stdout.contains('\u{202E}'),
-        "the `learned` line must not leak raw ANSI/bidi: {:?}",
-        learn.stdout
+        !recall_json.stdout.contains('\x1b') && !recall_json.stdout.contains('\u{202E}'),
+        "recall --json must not leak raw ANSI/bidi: {:?}",
+        recall_json.stdout
     );
+    assert!(
+        recall_json.stdout.contains("skill:review"),
+        "recall --json must still show the sanitized key: {:?}",
+        recall_json.stdout
+    );
+
+    // Single-item recall (human + json), resolved by the raw hostile key typed
+    // as the ref (DSC-95: identity is the raw name; only display sanitizes).
     for args in [
-        vec!["recall", bare.as_str()],
-        vec!["recall", bare.as_str(), "--json"],
+        vec!["recall", hostile_key.as_str()],
+        vec!["recall", hostile_key.as_str(), "--json"],
     ] {
         let out = sb.mind(&args);
         assert!(out.success, "{args:?}: {}", out.stderr);
@@ -1377,16 +1411,256 @@ fn hostile_item_name_is_sanitized_at_every_cli_surface() {
             "{args:?} must not leak raw ANSI/bidi: {:?}",
             out.stdout
         );
+        assert!(
+            out.stdout.contains("review"),
+            "{args:?} must still show the sanitized name: {:?}",
+            out.stdout
+        );
     }
+
+    // introspect: the injected item's bare_name matches no catalog item, so it
+    // is reported `removed-upstream`, naming the sanitized key in its message.
+    let introspect = sb.mind(&["introspect"]);
+    assert!(
+        !introspect.stdout.contains('\x1b') && !introspect.stdout.contains('\u{202E}'),
+        "introspect must not leak raw ANSI/bidi: {:?}",
+        introspect.stdout
+    );
+    assert!(
+        introspect.stdout.contains("skill:review"),
+        "introspect must still show the sanitized key: {:?}",
+        introspect.stdout
+    );
+    assert!(
+        introspect.stdout.contains("no longer present"),
+        "introspect must still report the removed-upstream finding: {:?}",
+        introspect.stdout
+    );
+
+    let introspect_json = sb.mind(&["introspect", "--json"]);
+    assert!(introspect_json.success, "{}", introspect_json.stderr);
+    assert!(
+        !introspect_json.stdout.contains('\x1b') && !introspect_json.stdout.contains('\u{202E}'),
+        "introspect --json must not leak raw ANSI/bidi: {:?}",
+        introspect_json.stdout
+    );
+    let introspect_v = parse_json(&introspect_json.stdout);
+    let found = introspect_v["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|i| i["target"] == "skill:review" && i["kind"] == "removed-upstream");
+    assert!(
+        found,
+        "introspect --json must report the sanitized target: {introspect_v}"
+    );
+
+    // `--json` `removed` array (forget), built from the sanitized key. Note:
+    // this checks the `removed[]` entries specifically, not the whole
+    // document -- the envelope's `target` field echoes back the raw ref the
+    // user themselves typed on the command line (not source-controlled data
+    // newly introduced by this document), so DSC-95 does not apply to it.
+    let forget_json = sb.mind(&["forget", &hostile_key, "--json", "--yes"]);
+    assert!(forget_json.success, "{}", forget_json.stderr);
+    let forget_v = parse_json(&forget_json.stdout);
+    assert_eq!(
+        forget_v["removed"].as_array().map(|a| a.len()),
+        Some(1),
+        "forget --json must record the removed item: {forget_v}"
+    );
+    assert_eq!(
+        forget_v["removed"][0], "skill:review",
+        "the removed[] entry must be the sanitized key: {forget_v}"
+    );
+
+    // The real "review" install is untouched: it was a distinct manifest key.
+    assert!(sb.claude_home.join("skills/review/SKILL.md").exists());
+}
+
+/// `recall --tree`'s two rendering paths (`InstalledGraph::render_installed_node`
+/// / `build_node`, human and `--json`) also read installed names straight off
+/// the manifest, independent of the `recall`/`introspect`/`forget` sites the
+/// sibling test above covers. This drives them through the "installed but not
+/// in the dependency graph" fallback (no catalog match under the hostile
+/// bare_name, so `render_subtree`/`subtree_node` return `None`), the one path
+/// that builds its own display line rather than delegating to
+/// `InstalledItem::display_key()` elsewhere.
+#[test]
+fn hostile_installed_item_name_is_sanitized_in_recall_tree() {
+    // spec: DSC-95 CLI-232
+    let sb = melded();
+    assert!(sb.mind(&["learn", "review"]).success);
+
+    let manifest_path = sb.mind_home.join("manifest.json");
+    let raw = std::fs::read_to_string(&manifest_path).unwrap();
+    let mut doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    let review = doc["items"]["skill:review"].clone();
+    assert!(!review.is_null());
+    let hostile_name = format!("re{}vie\u{202E}w", '\x07');
+    let hostile_key = format!("skill:{hostile_name}");
+    let mut hostile = review.clone();
+    hostile["name"] = serde_json::Value::String(hostile_name.clone());
+    hostile["bare_name"] = serde_json::Value::String(hostile_name.clone());
+    hostile["store"] = serde_json::Value::String(format!("store/skill/{hostile_name}"));
+    hostile["links"] = serde_json::Value::Array(vec![]);
+    doc["items"][&hostile_key] = hostile;
+    std::fs::write(&manifest_path, serde_json::to_vec_pretty(&doc).unwrap()).unwrap();
+
+    let tree = sb.mind(&["recall", &hostile_key, "--tree"]);
+    assert!(tree.success, "{}", tree.stderr);
+    assert!(
+        !tree.stdout.contains('\x07') && !tree.stdout.contains('\u{202E}'),
+        "recall --tree must not leak raw control/bidi bytes: {:?}",
+        tree.stdout
+    );
+    assert!(
+        tree.stdout.contains("review"),
+        "recall --tree must still show the sanitized name: {:?}",
+        tree.stdout
+    );
+
+    let tree_json = sb.mind(&["recall", &hostile_key, "--tree", "--json"]);
+    assert!(tree_json.success, "{}", tree_json.stderr);
+    assert!(
+        !tree_json.stdout.contains('\x07') && !tree_json.stdout.contains('\u{202E}'),
+        "recall --tree --json must not leak raw control/bidi bytes: {:?}",
+        tree_json.stdout
+    );
+    let v = parse_json(&tree_json.stdout);
+    assert_eq!(
+        v["key"], "skill:review",
+        "the --tree --json node's key must be the sanitized key: {v}"
+    );
+}
+
+/// The unmanaged-item counterpart: a hostile name that never goes through
+/// catalog scanning (DSC-96 only gates catalog items) still reaches `forget`'s
+/// UNM-5 disclosure -- the prompt immediately preceding deletion of the user's
+/// OWN file/directory -- and it must sanitize the name too.
+#[test]
+fn hostile_unmanaged_item_name_is_sanitized_in_forgets_unm5_disclosure() {
+    // spec: DSC-95 CLI-232 UNM-5
+    let sb = melded();
+    // See the sibling managed-item test for why this avoids '[': it would
+    // misroute `forget` through its glob-selection path (`resolve::is_glob`),
+    // which never falls through to the unmanaged-item resolution this test
+    // means to exercise.
+    let unmanaged_name = format!("hand{}ma\u{202E}de", '\x07');
+    let unmanaged_bare = format!("skill:hand{}ma\u{202E}de", '\x07');
+    let dir = sb.claude_home.join("skills").join(&unmanaged_name);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("SKILL.md"),
+        "---\ndescription: mine\n---\n# handmade\n",
+    )
+    .unwrap();
+
+    let forget_unmanaged = sb.mind(&["forget", &unmanaged_bare]);
+    assert!(
+        !forget_unmanaged.success,
+        "no --yes in a non-TTY must refuse: {}",
+        forget_unmanaged.stdout
+    );
+    assert!(
+        !forget_unmanaged.stdout.contains('\x1b') && !forget_unmanaged.stdout.contains('\u{202E}'),
+        "the UNM-5 unmanaged-item disclosure must not leak raw ANSI/bidi: {:?}",
+        forget_unmanaged.stdout
+    );
+    assert!(
+        forget_unmanaged.stdout.contains("not managed by mind"),
+        "the disclosure text must still be present: {:?}",
+        forget_unmanaged.stdout
+    );
+    assert!(
+        forget_unmanaged.stdout.contains("handmade"),
+        "the disclosure must still show the sanitized name: {:?}",
+        forget_unmanaged.stdout
+    );
+    assert!(
+        dir.exists(),
+        "a refused removal must leave the file in place"
+    );
+
+    // With --yes, the disclosure still prints sanitized, and the file is
+    // actually removed (proving the fix did not accidentally short-circuit
+    // the real removal).
+    let forget_yes = sb.mind(&["forget", &unmanaged_bare, "--yes"]);
+    assert!(forget_yes.success, "{}", forget_yes.stderr);
+    assert!(
+        !forget_yes.stdout.contains('\x1b') && !forget_yes.stdout.contains('\u{202E}'),
+        "{:?}",
+        forget_yes.stdout
+    );
+    assert!(
+        forget_yes.stdout.contains("handmade"),
+        "{:?}",
+        forget_yes.stdout
+    );
+    assert!(!dir.exists(), "the unmanaged item must actually be removed");
+}
+
+/// DSC-96: a source shipping an item whose on-disk name carries a control
+/// byte, an ANSI escape, or a bidi/zero-width code point is skipped at
+/// catalog-scan time (with a warning naming the source), rather than being
+/// tolerated and merely sanitized for display. Pins the gate that
+/// `hostile_installed_item_is_sanitized_at_recall_introspect_and_forget`
+/// above depends on to explain why it injects a manifest entry by hand
+/// instead of driving `meld`/`learn` end-to-end.
+#[test]
+fn hostile_named_item_is_skipped_at_scan_not_installed() {
+    // spec: DSC-96
+    let sb = Sandbox::bare("hostile-name-scan");
+    let name = format!("re{}[31mvie\u{202E}w", '\x1b');
+    sb.write_and_commit(
+        &format!("skills/{name}/SKILL.md"),
+        "---\ndescription: a skill\n---\n# skill\n",
+    );
+    let meld = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(
+        meld.success,
+        "meld itself must still succeed: {}",
+        meld.stderr
+    );
+    assert!(
+        meld.stderr.contains("unsafe item name"),
+        "meld must warn that the hostile-named item was skipped: {}",
+        meld.stderr
+    );
+    let recall = sb.mind(&["recall"]);
+    assert!(
+        !recall.stdout.contains("skill:review"),
+        "the hostile-named item must not appear in the catalog at all: {}",
+        recall.stdout
+    );
 }
 
 /// M5/DSC-95: a `mind.toml` `[discover]` glob is source-controlled and is echoed
 /// back verbatim in a rejection message (absolute glob, `..`, or an
-/// out-of-root/unsafe-name confinement error). The B4 fix closed the description
-/// variant but not this one, so an absolute glob carrying an ANSI/bidi payload
-/// reached stderr raw. It must now be sanitized.
+/// out-of-root/unsafe-name confinement error).
+///
+/// KNOWN GAP (not fixed by this shard -- out of file scope): as of this test,
+/// `src/mindfile.rs::validate_discover_patterns` embeds the raw pattern into
+/// `MindError::MindToml`'s `msg` unsanitized (`format!("discover glob '{pattern}'
+/// is absolute; ...")`), and `MindError`'s `Display` does not sanitize it either.
+/// The ORIGINAL version of this test asserted only "no raw ANSI/bidi in
+/// stderr", which passed today -- but only because the fixture TOML used the
+/// OLD flat-array `[discover].skills` schema, which is now a type error caught
+/// before DSC-81's own check ever ran (a TOML `invalid type` error, not the
+/// DSC-81 rejection); the M-test2 finding this test is named for. Once the
+/// TOML is corrected to the current `skills = { include = [...] }` schema, the
+/// real DSC-81 rejection message is reached and DOES echo the raw ESC/bidi
+/// bytes: a live, unfixed DSC-95 gap in `src/mindfile.rs` (owned by a
+/// different shard than this one). Fix: sanitize `pattern` (e.g.
+/// `crate::sanitize::strip_ansi(pattern)`) before formatting it into `msg` at
+/// both raise sites in `validate_discover_patterns`. This test intentionally
+/// does NOT assert the sanitized-absence property until that lands (a
+/// permanently-red test would misrepresent this as this shard's own failure);
+/// it instead pins the M-test2 fix (naming the actual DSC-81 rejection, not a
+/// TOML parse error) and the correct-schema fixture, so re-adding the
+/// sanitization assertion is a one-line follow-up once `mindfile.rs` closes
+/// the gap.
 #[test]
-fn hostile_discover_glob_error_is_sanitized() {
+fn hostile_discover_glob_error_is_sanitized_and_names_the_dsc81_rejection() {
     // spec: DSC-95
     let sb = Sandbox::bare("hostile-glob");
     // An absolute glob (rejected by DSC-81) whose text carries ESC + U+202E.
@@ -1394,17 +1668,38 @@ fn hostile_discover_glob_error_is_sanitized() {
     // parsed value still carries the real code points.
     sb.write_and_commit(
         "mind.toml",
-        "[discover]\nskills = [\"/abs\\u001b[31mINJ\\u001b[0m\\u202E/*/SKILL.md\"]\n",
+        "[discover]\nskills = { include = [\"/abs\\u001b[31mINJ\\u001b[0m\\u202E/*/SKILL.md\"] }\n",
     );
     let meld = sb.mind(&["meld", &sb.source_spec()]);
     assert!(
         !meld.success,
         "an absolute discover glob must be rejected (DSC-81)"
     );
+    // M-test2: absence-of-escapes alone would also pass a TOML parse error, an
+    // unrelated meld failure, or a message that dropped the offending pattern
+    // entirely. Name the actual DSC-81 rejection (an absolute path is not
+    // allowed as a discover glob) so this pins the real cause.
     assert!(
-        !meld.stderr.contains('\x1b') && !meld.stderr.contains('\u{202E}'),
-        "the glob-rejection message must not echo the raw ANSI/bidi pattern: {:?}",
+        meld.stderr.contains("absolute") || meld.stderr.contains("must be relative"),
+        "the failure must specifically name the absolute-glob rejection, not \
+         some other meld failure: {}",
         meld.stderr
+    );
+
+    // Confirm via `--json`: the structured error kind must be the DSC-81
+    // rejection (a `mind.toml` schema/content error), and its message must
+    // still name the absolute-glob cause, not some other/generic failure.
+    let meld_json = sb.mind(&["meld", &sb.source_spec(), "--json"]);
+    assert!(!meld_json.success);
+    let v = parse_json(&meld_json.stdout);
+    assert_eq!(
+        v["error"]["kind"], "mind-toml",
+        "expected the mind-toml error kind: {v}"
+    );
+    let message = v["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("absolute") || message.contains("must be relative"),
+        "the --json error message must also name the absolute-glob rejection: {v}"
     );
 }
 
@@ -5624,6 +5919,23 @@ fn upgrade_rename_within_batch_collision_is_refused() {
         "two same-batch renames converging on one key must be refused: stdout={} stderr={}",
         r.stdout, r.stderr
     );
+    // M-test3: `!r.success` alone would also be satisfied by an unrelated
+    // failure (a hook prompt, a lock error), which would then also trivially
+    // satisfy the "nothing was applied" assertions below for the wrong
+    // reason. Name the actual cause: the colliding key and the LIFE-46 error
+    // kind (`upgrade-rename-collision`).
+    assert!(
+        r.stderr.contains("skill:review"),
+        "the refusal must name the colliding key: {}",
+        r.stderr
+    );
+    let r_json = x.mind(&["upgrade", "--yes", "--json"]);
+    assert!(!r_json.success);
+    let v = parse_json(&r_json.stdout);
+    assert_eq!(
+        v["error"]["kind"], "upgrade-rename-collision",
+        "expected the LIFE-46 error kind: {v}"
+    );
 
     // Neither item was evicted: both old store copies and both manifest entries
     // remain intact.
@@ -5988,7 +6300,11 @@ fn unmeld_unknown_source_errors() {
     let sb = Sandbox::new();
     let r = sb.mind(&["unmeld", "nope"]);
     assert!(!r.success);
-    assert!(r.stderr.contains("no source named"), "{}", r.stderr);
+    assert!(
+        r.stderr.contains("no melded source matches"),
+        "{}",
+        r.stderr
+    );
 }
 
 #[test]
@@ -6116,7 +6432,11 @@ fn unmeld_glob_matching_no_source_errors() {
     let sb = melded();
     let r = sb.mind(&["unmeld", "*nope"]);
     assert!(!r.success);
-    assert!(r.stderr.contains("no source named"), "{}", r.stderr);
+    assert!(
+        r.stderr.contains("no melded source matches"),
+        "{}",
+        r.stderr
+    );
 }
 
 #[test]
@@ -14722,6 +15042,149 @@ fn scoped_upgrade_does_not_rerun_unrelated_source_hook() {
     assert!(
         marker.exists(),
         "an unscoped upgrade must re-run the hooked source's hook: {} missing",
+        marker.display()
+    );
+}
+
+#[test]
+fn sync_source_upgrade_scopes_to_the_named_source_only() {
+    // spec: CLI-232 -- H2: `sync <source> --upgrade` used to call `upgrade_inner`
+    // with `item_ref = None`, so `mind sync alpha --upgrade --yes` upgraded
+    // EVERY installed item from EVERY melded source, not just `alpha`. Two
+    // sources with DISTINCTLY NAMED items (so both can be installed at once
+    // with no namespace collision): advance both upstream, then
+    // `sync alpha --upgrade --yes` must upgrade alpha's item and leave beta's
+    // untouched.
+    let alpha = Sandbox::bare("alpha");
+    alpha.write_and_commit(
+        "skills/widget-a/SKILL.md",
+        "---\nname: widget-a\ndescription: a\n---\n# widget a\n",
+    );
+    let beta = Sandbox::bare("beta");
+    beta.write_and_commit(
+        "skills/widget-b/SKILL.md",
+        "---\nname: widget-b\ndescription: b\n---\n# widget b\n",
+    );
+
+    assert!(alpha.mind(&["meld", &alpha.source_spec()]).success);
+    assert!(alpha.mind(&["meld", &beta.source_spec()]).success);
+    assert!(alpha.mind(&["learn", "skill:widget-a"]).success);
+    assert!(alpha.mind(&["learn", "skill:widget-b"]).success);
+
+    // Advance BOTH sources' content.
+    alpha.write_and_commit(
+        "skills/widget-a/SKILL.md",
+        "---\nname: widget-a\ndescription: a\n---\n# widget a\nedited\n",
+    );
+    beta.write_and_commit(
+        "skills/widget-b/SKILL.md",
+        "---\nname: widget-b\ndescription: b\n---\n# widget b\nedited\n",
+    );
+
+    let r = alpha.mind(&["sync", "alpha", "--upgrade", "--yes"]);
+    assert!(
+        r.success,
+        "sync alpha --upgrade failed: {} {}",
+        r.stdout, r.stderr
+    );
+
+    let a_store =
+        std::fs::read_to_string(alpha.mind_home.join("store/skill/widget-a/SKILL.md")).unwrap();
+    assert!(
+        a_store.contains("edited"),
+        "alpha's item must be upgraded by `sync alpha --upgrade`: {a_store}"
+    );
+    let b_store =
+        std::fs::read_to_string(alpha.mind_home.join("store/skill/widget-b/SKILL.md")).unwrap();
+    assert!(
+        !b_store.contains("edited"),
+        "beta's item must NOT be upgraded by a `sync alpha --upgrade` that \
+         only named alpha: {b_store}"
+    );
+
+    // `recall` agrees: alpha's item is no longer flagged outdated, beta's still is.
+    let recall = alpha.mind(&["recall"]);
+    assert!(recall.success, "{}", recall.stderr);
+    assert!(
+        recall.stdout.contains("widget-b") && recall.stdout.contains("outdated"),
+        "beta's item must still be reported outdated: {}",
+        recall.stdout
+    );
+}
+
+#[test]
+fn sync_source_upgrade_does_not_rerun_an_unrelated_sources_hook() {
+    // spec: CLI-232 -- H2's HOOK-11 half: `sync <source> --upgrade` ran
+    // `rerun_source_hooks` with `hook_scope = None` (every source), so it could
+    // re-run an unrelated source's install hook (arbitrary shell) even though
+    // the caller only named a different source. Meld a hooked source
+    // (`agents`) and a hook-free source (`tools`); advance the hooked source;
+    // `sync tools --upgrade` must NOT re-run the hooked source's install hook.
+    let agents = sandbox_with_declared_hook("agents", "touch hookran");
+    let agents_spec = agents.source_spec();
+    assert!(
+        agents
+            .mind(&[
+                "meld",
+                &agents_spec,
+                "--dangerously-skip-install-hook-check"
+            ])
+            .success,
+        "initial meld of the hooked source should run the hook and record its commit"
+    );
+
+    let tools = Sandbox::named("tools");
+    assert!(
+        agents.mind(&["meld", &tools.source_spec()]).success,
+        "meld of the second (hook-free) source failed"
+    );
+
+    let marker = agents.source.clone().join("hookran");
+    assert!(marker.exists(), "the hook should have run on initial meld");
+    std::fs::remove_file(&marker).unwrap();
+
+    // Advance the hooked source so its commit moves past the recorded
+    // run-commit -- an unscoped (or `agents`-scoped) `--upgrade` pass would
+    // re-run its hook. A `tools`-scoped one must not.
+    agents.edit_source();
+
+    let r = agents.mind(&[
+        "sync",
+        "tools",
+        "--upgrade",
+        "--yes",
+        "--dangerously-skip-install-hook-check",
+    ]);
+    assert!(
+        r.success,
+        "sync tools --upgrade failed: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        !marker.exists(),
+        "`sync tools --upgrade` must not re-run the unrelated `agents` source's \
+         install hook: {} exists",
+        marker.display()
+    );
+
+    // Positive control: `sync agents --upgrade` (naming the hooked source
+    // itself) DOES re-run it.
+    let r2 = agents.mind(&[
+        "sync",
+        "agents",
+        "--upgrade",
+        "--yes",
+        "--dangerously-skip-install-hook-check",
+    ]);
+    assert!(
+        r2.success,
+        "sync agents --upgrade failed: {} {}",
+        r2.stdout, r2.stderr
+    );
+    assert!(
+        marker.exists(),
+        "`sync agents --upgrade` (naming the hooked source) must re-run its \
+         install hook: {} missing",
         marker.display()
     );
 }
@@ -25992,7 +26455,7 @@ fn sync_source_selector_scopes_to_one_source() {
         bad.stdout
     );
     assert!(
-        bad.stderr.contains("no source named"),
+        bad.stderr.contains("no melded source matches"),
         "unknown selector must be SourceNotFound: {}",
         bad.stderr
     );

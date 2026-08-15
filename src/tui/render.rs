@@ -34,7 +34,8 @@ const HELP_TEXT: &str = "Navigation\n\
   j/k, Up/Down    move selection\n\
   h/l, Left/Right collapse / expand\n\
   Space           toggle expand\n\
-  PgUp/PgDn, Ctrl-u/Ctrl-d page up/down\n\
+  PgUp/PgDn       page up/down\n\
+  Ctrl-u/Ctrl-d   page up/down\n\
   /               jump to search (Esc clears, Enter/Tab submits)\n\
   Enter           open details dialog\n\
 \n\
@@ -961,9 +962,26 @@ mod tests {
     fn help_text_lists_every_normal_mode_key() {
         // spec: TUI-64 - the help overlay must document every key that HINTS
         // only abbreviates: navigation, every mutating action, and confirm/cancel.
+        // M-test4/L8: PgUp/PgDn and Ctrl-u/Ctrl-d were added to the overlay
+        // (render.rs) without ever being added here, so this test passed
+        // identically before and after that change. Cover them too.
         for key in [
-            "j/k", "h/l", "Space", "Enter", "i ", "d ", "s ", "u ", "m ", "M ", "C ", "y / n",
-            "Esc", "q,",
+            "j/k",
+            "h/l",
+            "Space",
+            "PgUp/PgDn",
+            "Ctrl-u/Ctrl-d",
+            "Enter",
+            "i ",
+            "d ",
+            "s ",
+            "u ",
+            "m ",
+            "M ",
+            "C ",
+            "y / n",
+            "Esc",
+            "q,",
         ] {
             assert!(
                 HELP_TEXT.contains(key),

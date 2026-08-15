@@ -510,14 +510,20 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   local source (CLI-27) is not fetched or reset: `sync` only re-reads its HEAD
   and updates the recorded commit from the working tree.
 - `CLI-231` `sync` accepts an optional `[source]` selector: `mind sync <source>`
-  fetches only the melded source(s) matching it (an exact `host/owner/repo`, an
-  unambiguous trailing suffix like `repo` or `owner/repo`, or a glob), leaving
-  every other source untouched. A selector that matches no melded source (against
-  a non-empty registry) is a `SourceNotFound` error, so a typo is reported rather
-  than silently syncing nothing; a malformed glob is an `InvalidPattern` error.
-  With a selector the whole-set operations are skipped: the managed-policy
+  fetches every melded source whose name matches it -- exactly (`host/owner/repo`),
+  by trailing suffix (e.g. `repo` or `owner/repo`), or by glob -- leaving every
+  other source untouched. Unlike `unmeld`/`upgrade`'s single-item selector
+  (CLI-5), a `sync` selector is NOT required to be unambiguous: a suffix shared
+  by more than one melded source (e.g. two sources both ending in `/tools`)
+  matches and syncs all of them rather than erroring, the same way a glob does.
+  A selector that matches no melded source (against a non-empty registry) is a
+  `SourceNotFound` error, so a typo is reported rather than silently syncing
+  nothing; a malformed glob is an `InvalidPattern` error.
+  With a selector, two whole-registry passes are skipped: the managed-policy
   auto-meld provisioning (POL-32) and the `[discover].sources`/marketplace
-  nested-source re-walk (DSC-57) run only for a full `sync`. With no selector,
+  nested-source re-walk (DSC-57) run only for a full `sync`. This does NOT
+  extend to the `--upgrade` pass (CLI-53): see `CLI-232`, which scopes that
+  pass to the same selector rather than leaving it global. With no selector,
   every source is fetched (CLI-50, the unchanged default).
 - `CLI-51` With no sources melded, `sync` reports that and exits successfully.
 - `CLI-52` `sync` does not change consumer aliases.
@@ -525,6 +531,17 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   (reporting pending upgrades and prompting before applying, exactly like
   `upgrade`), so a single command both fetches upstream and applies pending
   upgrades.
+- `CLI-232` With a `[source]` selector, `sync <source> --upgrade`'s `--upgrade`
+  pass is scoped to the selected source(s) (CLI-231), the same set `sync`
+  itself just refreshed: only installed items whose recorded source is in that
+  set are considered for upgrade, and a source's install hook is re-run
+  (HOOK-11) only when its source is in that set. Without this, `--upgrade`
+  pass ran unscoped regardless of the selector: `mind sync alpha --upgrade
+  --yes` would upgrade every installed item from every melded source, and
+  re-run install hooks (arbitrary shell) for sources the caller never named --
+  exactly the protection a scoped `upgrade <item>` already provides (HOOK-11),
+  silently lost when the same scoping is expressed through `sync <source>`
+  instead. With no selector, the pass is unscoped (every source), unchanged.
 - `CLI-54` A per-source failure (e.g. a network error on one remote) does not
   abort the run: `sync` refreshes each source independently, persists the
   progress made (the recorded commits of the sources that succeeded), reports
@@ -1112,12 +1129,21 @@ release artifacts as the install script and the Homebrew formula.
 - `CLI-140` `evolve` compares the running version against the latest published
   release. With nothing newer it reports up to date and changes nothing. With a
   newer release it replaces the running executable in place with the release binary
-  for the current platform. A prerelease running version (a `-dev` source build,
-  DSC-40's version rule reads it by its numeric part alone) is treated as strictly
-  below a release target of the same numeric version: `evolve` on a `0.23.1-dev`
-  build offers the `0.23.1` release rather than reporting up to date, and an
-  explicit `--to 0.23.1` onto its own base is an update, not a no-op. A
-  numerically newer dev build (`0.24.0-dev` vs release `0.23.1`) is unaffected.
+  for the current platform. A prerelease running version (a version string carrying
+  a `-suffix`, e.g. `0.23.1-dev` or the dotted `1.0.0-rc.2` -- this repo's own
+  releases never carry one, but a fork's or packager's build might) is treated as
+  strictly below a release target of the same numeric version: `evolve` on a
+  `0.23.1-dev` build offers the `0.23.1` release rather than reporting up to date,
+  and an explicit `--to 0.23.1` onto its own base is an update, not a no-op. The
+  numeric comparison strips the `-suffix` from the WHOLE version string before
+  splitting on `.` (not per dotted component), so a dotted prerelease like
+  `1.0.0-rc.2` parses as `[1, 0, 0]` and ties with `1.0.0` in both directions,
+  rather than a per-component strip mis-parsing it as `[1, 0, 0, 2]` (reading
+  numerically ABOVE the release it should tie with, which would report up to
+  date instead of offering the update). A numerically newer prerelease
+  (`0.24.0-dev` vs release `0.23.1`) is unaffected: see `CLI-147`, which governs
+  the opposite direction (an explicit `--to` strictly below the running version)
+  and would otherwise read as the wrong case for a newer prerelease build.
 - `CLI-141` Unless `--yes` is given, `evolve` prompts `[y/N]` (default No, EOF
   counts as No) before replacing the binary, mirroring `upgrade` (CLI-60). `--check`
   reports the latest available version and whether an update is pending, then exits

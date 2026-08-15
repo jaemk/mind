@@ -256,7 +256,7 @@ pub enum MindError {
     /// cause, so name the broken link and its target instead.
     #[error(
         "cannot create {path}: '{link}' is a symlink pointing at '{target}', which does not exist; \
-         fix or remove the broken link (if it is a configured agent home, see `mind config lobes`)"
+         fix or remove the broken link (if it is a configured agent home, see `mind config lobes list`)"
     )]
     BrokenSymlinkPath {
         path: PathBuf,
@@ -336,10 +336,13 @@ pub enum MindError {
     )]
     ReservedPrefix { prefix: String },
 
-    /// NS-28: prefix contains a path-unsafe character or structure.
-    #[error(
-        "'{prefix}' cannot be used as a namespace prefix: it must be a single safe path component (no `/`, `\\`, `:`, `.`, `..`, leading `~`, NUL, or control characters)"
-    )]
+    /// NS-28/NS-72: prefix contains a path-unsafe character or structure. A
+    /// melded repo's `[source].prefix` reaches this variant, so the offending
+    /// value is sanitized before display (`unsafe_prefix_message`) rather than
+    /// interpolated raw: otherwise a hostile source's rejected prefix (e.g. one
+    /// carrying a bidi override) would still write its raw payload to the
+    /// terminal via the rejection message itself.
+    #[error("{}", unsafe_prefix_message(prefix))]
     UnsafePrefix { prefix: String },
 
     #[error(
@@ -354,9 +357,18 @@ pub enum MindError {
     #[error("source '{name}' is already melded (from {url})")]
     SourceExists { name: String, url: String },
 
-    // Names the next command, mirroring `ItemNotFound`'s house style (CLI-179).
+    /// Names the next command, mirroring `ItemNotFound`'s house style
+    /// (CLI-179). Reachable both from an exact-name source lookup and from a
+    /// glob selector (`mind sync 'acme/*'`) that matched nothing. The old
+    /// wording ("no source named '{name}' is melded") asserted something was
+    /// literally *named* the given string, which is false for a selector and
+    /// invites the reader to conclude glob selectors are not supported rather
+    /// than that the pattern matched nothing. "no melded source matches"
+    /// covers both readings without lying about either: an exact name that is
+    /// melded trivially "matches" itself, and a selector that matched nothing
+    /// is described accurately.
     #[error(
-        "no source named '{name}' is melded; run `mind recall --sources` to list melded sources"
+        "no melded source matches '{name}'; run `mind recall --sources` to list melded sources"
     )]
     SourceNotFound { name: String },
 
@@ -374,14 +386,7 @@ pub enum MindError {
     },
 
     // spec: CLI-179
-    #[error(
-        "no item matches '{query}'{}",
-        if *sources == 0 {
-            "; no sources are melded yet -- run `mind meld <repo>` to add one".to_string()
-        } else {
-            format!(" across {sources} melded source(s); run `mind probe` to search available items")
-        }
-    )]
+    #[error("{}", item_not_found_message(query, *sources))]
     ItemNotFound { query: String, sources: usize },
 
     #[error("'{query}' is ambiguous; matches: {}", candidates.join(", "))]
@@ -390,7 +395,43 @@ pub enum MindError {
         candidates: Vec<String>,
     },
 
-    #[error("'{name}' is not installed")]
+    /// LIFE-46: an `upgrade` rename would collide at its target key, either
+    /// with a DIFFERENT item that already occupies that key in the manifest,
+    /// or with another pending rename in the same upgrade batch that
+    /// converges on the same key. Distinct from [`MindError::AmbiguousItem`]:
+    /// that variant renders as a "query" with a candidate list, which reads as
+    /// something the user typed and searched for -- not as a conflict `mind
+    /// upgrade` (no query involved) discovered on its own -- and it carries no
+    /// remedy. This variant instead names the two colliding occupants plainly
+    /// and states both real remedies: forget the item occupying `key`, or
+    /// re-namespace the incoming source so its effective name no longer
+    /// collides.
+    #[error(
+        "upgrade cannot rename to '{key}': it is already claimed by the item from source \
+         '{existing_source}', and {incoming} from source '{incoming_source}' would also resolve \
+         to this key; run `mind forget {key}` to remove the item occupying it, or re-namespace \
+         the incoming source with `mind meld -N <prefix> <repo>` to avoid the collision"
+    )]
+    UpgradeRenameCollision {
+        /// The colliding target key (`kind:name`, `InstalledItem::key` form).
+        key: String,
+        /// The source of the item currently occupying `key` (either a
+        /// pre-existing manifest entry, or the first pending rename in the
+        /// same batch to claim it).
+        existing_source: String,
+        /// The (pre-rename) key of the item whose rename would also target
+        /// `key`.
+        incoming: String,
+        /// The source of the incoming (renaming) item.
+        incoming_source: String,
+    },
+
+    /// DSC-95 sanitizes the *display* of an installed name while keeping the
+    /// raw name as identity, so `recall` can show `skill:review` (sanitized)
+    /// while `forget skill:review` (the sanitized text, typed back) fails with
+    /// "not installed" -- an unfalsifiable-looking contradiction unless the
+    /// message itself explains why. See `not_installed_message`.
+    #[error("{}", not_installed_message(name))]
     NotInstalled { name: String },
 
     #[error("sync failed for {failed} of {total} source(s); see the messages above")]
@@ -451,7 +492,13 @@ pub enum MindError {
     )]
     BadPinSpec { value: String },
 
-    #[error("source '{source_name}': scan root '{root}' is not a directory in the clone")]
+    /// DSC-95: `source_name` and `root` are both source-controlled (a
+    /// `mind.toml` `[discover]` root, or the source's own identity), and
+    /// `main.rs` prints this message verbatim via `eprintln!("error: {err}")`,
+    /// so a hostile repo could otherwise write attacker escape bytes to the
+    /// terminal through its own rejection. Sanitized via
+    /// `invalid_root_message`, the same pattern `unsafe_name_message` uses.
+    #[error("{}", invalid_root_message(source_name, root))]
     InvalidRoot { source_name: String, root: String },
 
     #[error(
@@ -459,9 +506,14 @@ pub enum MindError {
     )]
     LinkNotASkill { source_name: String, path: String },
 
-    #[error(
-        "source '{source_name}': {kind} '{name}' appears under more than one scan root; roots must not yield the same item"
-    )]
+    /// DSC-95: `source_name` and `name` are both source-controlled (the
+    /// source's own identity and an item name discovered under one of its scan
+    /// roots), and `main.rs` prints this message verbatim via
+    /// `eprintln!("error: {err}")`, so a hostile repo could otherwise write
+    /// attacker escape bytes to the terminal through its own rejection.
+    /// Sanitized via `duplicate_item_message`, the same pattern
+    /// `unsafe_name_message` uses.
+    #[error("{}", duplicate_item_message(source_name, *kind, name))]
     DuplicateItem {
         source_name: String,
         kind: ItemKind,
@@ -609,8 +661,12 @@ pub enum MindError {
     SelfUpdatePolicy { detail: String },
 
     /// STO-50/STO-51: state file was written by a newer mind and uses an unknown schema version.
+    /// The realistic way to hit this is a locally built `mind` newer than the
+    /// latest release having written the state; for that case `mind evolve`
+    /// reports "up to date" and leaves the user stuck, so a second remedy
+    /// clause names the actual fix (use the newer binary that wrote it).
     #[error(
-        "{what} uses schema version {found} but this mind only supports up to version {supported}; run `mind evolve` to read it"
+        "{what} uses schema version {found} but this mind only supports up to version {supported}; run `mind evolve` to read it, or use the newer `mind` that wrote it"
     )]
     StateTooNew {
         what: &'static str,
@@ -884,10 +940,114 @@ fn skill_collision_message(conflicts: &[(String, String, String)], suggested: &s
     )
 }
 
-fn unsafe_name_message(name: &str) -> String {
+/// The [`MindError::UnsafePrefix`] message (NS-28/NS-72). `prefix` is
+/// source-controlled (a melded repo's `[source].prefix`), so it is routed
+/// through [`crate::sanitize::strip_ansi`] before display, the same pattern
+/// [`unsafe_name_message`] uses: otherwise the rejection meant to stop a
+/// bidi-spoofing or terminal-injecting prefix would itself write that raw
+/// payload to stderr. The cause list is worded generically ("an invisible,
+/// bidi, or zero-width character") rather than enumerating specific code
+/// points, since the exact blocked set lives in `sanitize.rs` and can grow.
+fn unsafe_prefix_message(prefix: &str) -> String {
     format!(
-        "unsafe effective name '{}': contains path-traversal characters or resolves to a \
-         relative component (`.`/`..`); refusing to build store or link paths from it",
+        "'{}' cannot be used as a namespace prefix: it must be a single safe path component \
+         (no `/`, `\\`, `:`, `.`, `..`, leading `~`, NUL, control character, or an invisible, \
+         bidi, or zero-width character)",
+        crate::sanitize::strip_ansi(prefix)
+    )
+}
+
+/// The [`MindError::UnsafeName`] message (NS-28). The raise site
+/// (`install.rs`) fires on path-traversal characters, an embedded NUL, and an
+/// empty name alike, so the cause list must cover all three rather than only
+/// naming path traversal -- otherwise an ordinary-looking name that failed for
+/// carrying a NUL (`foo\0bar`, itself stripped for display below) is paired
+/// with a cause ("contains path-traversal characters") that plainly does not
+/// apply to it. `name` is routed through [`crate::sanitize::strip_ansi`]
+/// before display (DSC-95); when that stripping actually changed the value,
+/// the message says so explicitly, so the reader is not left comparing the
+/// displayed name against what they typed and finding a mismatch with no
+/// explanation.
+fn unsafe_name_message(name: &str) -> String {
+    let stripped = crate::sanitize::strip_ansi(name);
+    let display_note = if stripped != name {
+        " (shown above with non-printing characters stripped for display)"
+    } else {
+        ""
+    };
+    format!(
+        "unsafe effective name '{stripped}'{display_note}: contains path-traversal characters, \
+         resolves to a relative component (`.`/`..`), contains a NUL byte, or is empty; \
+         refusing to build store or link paths from it"
+    )
+}
+
+/// The [`MindError::ItemNotFound`] message (CLI-179). When `query` itself
+/// carries a character DSC-95 would sanitize away for display (a control byte,
+/// ANSI escape, or invisible/bidi code point), a plain "no item matches"
+/// leaves the reader stuck comparing a name they can see (from `recall`,
+/// already sanitized for display) against a ref they typed that will never
+/// literally match it; a trailing hint names the likely cause instead of
+/// leaving the mismatch unexplained.
+fn item_not_found_message(query: &str, sources: usize) -> String {
+    let base = if sources == 0 {
+        format!(
+            "no item matches '{query}'; no sources are melded yet -- run `mind meld <repo>` to add one"
+        )
+    } else {
+        format!(
+            "no item matches '{query}' across {sources} melded source(s); run `mind probe` to search available items"
+        )
+    };
+    if crate::sanitize::has_blocked_chars(query) {
+        format!(
+            "{base} (note: this ref may contain a non-printing character that makes it \
+             untypeable as shown; compare it byte-for-byte with `mind probe`)"
+        )
+    } else {
+        base
+    }
+}
+
+/// The [`MindError::NotInstalled`] message. DSC-95 sanitizes the *display* of
+/// an installed name (e.g. in `recall`) while keeping the raw name as
+/// identity, so `forget <the displayed name>` can fail here even though
+/// `recall` just showed what looks like the same name -- because the raw name
+/// carries a non-printing character `recall`'s display stripped. A trailing
+/// hint names that possibility rather than leaving an unfalsifiable-looking
+/// contradiction.
+fn not_installed_message(name: &str) -> String {
+    if crate::sanitize::has_blocked_chars(name) {
+        format!(
+            "'{name}' is not installed (note: this ref may contain a non-printing character \
+             that makes it untypeable as shown; compare it byte-for-byte with `mind recall`)"
+        )
+    } else {
+        format!("'{name}' is not installed")
+    }
+}
+
+/// The [`MindError::InvalidRoot`] message (DSC-95). Both `source_name` and
+/// `root` are source-controlled and reach `main.rs`'s `eprintln!("error:
+/// {err}")` verbatim, so each is routed through [`crate::sanitize::strip_ansi`]
+/// before display -- the same pattern [`unsafe_name_message`] uses.
+fn invalid_root_message(source_name: &str, root: &str) -> String {
+    format!(
+        "source '{}': scan root '{}' is not a directory in the clone",
+        crate::sanitize::strip_ansi(source_name),
+        crate::sanitize::strip_ansi(root)
+    )
+}
+
+/// The [`MindError::DuplicateItem`] message (DSC-95). Both `source_name` and
+/// `name` are source-controlled and reach `main.rs`'s `eprintln!("error:
+/// {err}")` verbatim, so each is routed through [`crate::sanitize::strip_ansi`]
+/// before display -- the same pattern [`unsafe_name_message`] uses.
+fn duplicate_item_message(source_name: &str, kind: ItemKind, name: &str) -> String {
+    format!(
+        "source '{}': {kind} '{}' appears under more than one scan root; roots must not yield \
+         the same item",
+        crate::sanitize::strip_ansi(source_name),
         crate::sanitize::strip_ansi(name)
     )
 }
@@ -949,6 +1109,7 @@ impl MindError {
             MindError::AmbiguousSource { .. } => "ambiguous-source",
             MindError::ItemNotFound { .. } => "item-not-found",
             MindError::AmbiguousItem { .. } => "ambiguous-item",
+            MindError::UpgradeRenameCollision { .. } => "upgrade-rename-collision",
             MindError::NotInstalled { .. } => "not-installed",
             MindError::SyncFailed { .. } => "sync-failed",
             MindError::IncompatibleVersion { .. } => "incompatible-version",
@@ -1422,6 +1583,35 @@ mod tests {
         );
     }
 
+    // L18: `DuplicateItem` and `InvalidRoot` carry source-controlled fields
+    // (`source_name`, `root`, `name`) that `main.rs` prints verbatim via
+    // `eprintln!("error: {err}")`, so a hostile repo's own rejection must not
+    // carry attacker escape bytes to the terminal.
+    #[test]
+    fn duplicate_item_and_invalid_root_sanitize_source_controlled_fields() {
+        // spec: DSC-95
+        let evil = "\x1b[31mevil\u{202E}".to_string();
+
+        let dup = MindError::DuplicateItem {
+            source_name: evil.clone(),
+            kind: ItemKind::Skill,
+            name: evil.clone(),
+        }
+        .to_string();
+        assert!(!dup.contains('\x1b'), "must strip raw ESC: {dup:?}");
+        assert!(!dup.contains('\u{202E}'), "must strip raw bidi: {dup:?}");
+        assert!(dup.contains("evil"), "must still name the value: {dup}");
+
+        let root = MindError::InvalidRoot {
+            source_name: evil.clone(),
+            root: evil,
+        }
+        .to_string();
+        assert!(!root.contains('\x1b'), "must strip raw ESC: {root:?}");
+        assert!(!root.contains('\u{202E}'), "must strip raw bidi: {root:?}");
+        assert!(root.contains("evil"), "must still name the value: {root}");
+    }
+
     // spec: HOOK-30
     // printed_output=true takes priority over a non-empty stderr field (the field
     // is empty in production but this guards the priority rule explicitly).
@@ -1491,6 +1681,55 @@ mod tests {
         );
     }
 
+    // L17 (partial): a plain ASCII query gets no non-printing-character hint --
+    // the hint only fires when it would actually explain something.
+    #[test]
+    fn item_not_found_plain_query_has_no_non_printing_hint() {
+        // spec: DSC-95
+        let e = MindError::ItemNotFound {
+            query: "review".into(),
+            sources: 1,
+        }
+        .to_string();
+        assert!(
+            !e.contains("non-printing"),
+            "a plain query must not carry the non-printing-character hint: {e}"
+        );
+    }
+
+    // L17 (partial): DSC-95 sanitizes an installed name's *display* (e.g. in
+    // `recall`) while keeping the raw name as identity, so `mind recall` can
+    // show what looks like `skill:review` while `mind forget skill:review`
+    // (the sanitized text, typed back) fails with "not installed" -- an
+    // unfalsifiable-looking contradiction unless the message explains why. A
+    // ref carrying a character DSC-95 would strip gets a hint naming that
+    // possibility.
+    #[test]
+    fn item_not_found_and_not_installed_hint_non_printing_characters() {
+        // spec: DSC-95
+        let evil = "review\u{200B}".to_string(); // zero-width space: invisible
+
+        let not_found = MindError::ItemNotFound {
+            query: evil.clone(),
+            sources: 2,
+        }
+        .to_string();
+        assert!(
+            not_found.contains("non-printing"),
+            "ItemNotFound must hint at a non-printing character: {not_found}"
+        );
+
+        let not_installed = MindError::NotInstalled { name: evil }.to_string();
+        assert!(
+            not_installed.contains("not installed"),
+            "must still say 'not installed': {not_installed}"
+        );
+        assert!(
+            not_installed.contains("non-printing"),
+            "NotInstalled must hint at a non-printing character: {not_installed}"
+        );
+    }
+
     // U37: SourceNotFound must name the next command, mirroring ItemNotFound's
     // house style (CLI-179), so a typo'd source name points somewhere useful.
     #[test]
@@ -1503,6 +1742,31 @@ mod tests {
         assert!(
             e.contains("mind recall --sources"),
             "must hint the exact next command: {e}"
+        );
+    }
+
+    // L9: `SourceNotFound` is reachable both from an exact-name source lookup
+    // and from a glob selector (`mind sync 'acme/*'`) that matched nothing.
+    // The old wording ("no source named '{name}' is melded") asserts
+    // something is literally *named* the given string -- false for a
+    // selector, and it invites the reader to conclude glob selectors are
+    // unsupported. The new wording must not claim anything is "named" the
+    // selector.
+    #[test]
+    fn source_not_found_selector_wording_does_not_claim_a_name() {
+        let e = MindError::SourceNotFound {
+            name: "acme/*".into(),
+        }
+        .to_string();
+        assert!(e.contains("acme/*"), "must include the selector: {e}");
+        assert!(
+            !e.contains("no source named"),
+            "must not claim a selector is a literal name: {e}"
+        );
+        assert!(
+            e.contains("no melded source matches"),
+            "must phrase this as 'matches', covering both an exact name and a \
+             selector without lying about either: {e}"
         );
     }
 
@@ -1587,6 +1851,13 @@ mod tests {
         // The remedy points at the actual self-update verb (`mind evolve`);
         // `mind upgrade` upgrades installed items, not the binary.
         assert!(e.contains("mind evolve"), "must suggest `mind evolve`: {e}");
+        // L11: `mind evolve` alone strands a user whose state was written by a
+        // locally built binary newer than the latest release (`evolve` would
+        // just report "up to date"), so a second remedy names the real fix.
+        assert!(
+            e.contains("newer") && e.contains("that wrote it"),
+            "must also suggest using the newer mind that wrote the state: {e}"
+        );
     }
 
     // The self-update verb is `evolve`, not `upgrade` (which upgrades installed
@@ -1612,6 +1883,90 @@ mod tests {
         );
     }
 
+    // spec: LIFE-46 -- the rename-collision refusal names both colliding
+    // occupants and both real remedies, rather than reusing `AmbiguousItem`'s
+    // "query"/"matches" phrasing (which implies a search the user never
+    // performed) with no remedy at all.
+    #[test]
+    fn upgrade_rename_collision_names_both_occupants_and_both_remedies() {
+        let e = MindError::UpgradeRenameCollision {
+            key: "skill:review".into(),
+            existing_source: "github.com/acme/x".into(),
+            incoming: "skill:jx:review".into(),
+            incoming_source: "github.com/acme/y".into(),
+        };
+        let msg = e.to_string();
+        assert!(
+            msg.contains("skill:review"),
+            "must name the target key: {msg}"
+        );
+        assert!(
+            msg.contains("github.com/acme/x"),
+            "must name the existing occupant's source: {msg}"
+        );
+        assert!(
+            msg.contains("skill:jx:review"),
+            "must name the incoming item: {msg}"
+        );
+        assert!(
+            msg.contains("github.com/acme/y"),
+            "must name the incoming item's source: {msg}"
+        );
+        assert!(
+            msg.contains("mind forget skill:review"),
+            "must give the forget remedy: {msg}"
+        );
+        assert!(
+            msg.contains("mind meld -N"),
+            "must give the re-namespace remedy: {msg}"
+        );
+        // Must not be phrased as a user-typed query/match list (AmbiguousItem's
+        // house style), since no query was ever typed here.
+        assert!(
+            !msg.contains("is ambiguous; matches:"),
+            "must not reuse AmbiguousItem's query/matches phrasing: {msg}"
+        );
+        assert_eq!(e.kind(), "upgrade-rename-collision");
+    }
+
+    // M14: `UnsafeName`'s Display strips ANSI/control/bidi characters for
+    // display (the pattern `unsafe_prefix_error_mentions_prefix` below pins
+    // for `UnsafePrefix`) while still naming the value, and the cause list
+    // covers a NUL byte and an empty name, not just path traversal --
+    // `install.rs`'s raise site fires on all three, so a name that failed for
+    // carrying a NUL must not be paired with a cause that plainly does not
+    // apply to it.
+    #[test]
+    fn unsafe_name_error_strips_escape_and_bidi_characters_but_still_names_the_value() {
+        // spec: NS-28
+        let e = MindError::UnsafeName {
+            name: "..\u{202E}\x1b[31m".into(),
+        }
+        .to_string();
+        assert!(
+            !e.contains('\x1b'),
+            "must not carry the raw ESC byte: {e:?}"
+        );
+        assert!(
+            !e.contains('\u{202E}'),
+            "must not carry the raw bidi-override code point: {e:?}"
+        );
+        // The path-traversal prefix (the printable part of the payload) still
+        // appears, so the value is nameable rather than fully swallowed.
+        assert!(e.contains(".."), "must still name the value: {e}");
+        // The cause list must cover NUL and empty, not just path traversal
+        // (install.rs's raise site fires on all three).
+        assert!(
+            e.contains("NUL") && e.contains("empty"),
+            "cause list must mention NUL and empty: {e}"
+        );
+        // Since stripping changed the displayed value, the message must say so.
+        assert!(
+            e.contains("stripped"),
+            "must note the name was stripped for display: {e}"
+        );
+    }
+
     #[test]
     fn unsafe_prefix_error_mentions_prefix() {
         // spec: NS-28
@@ -1620,6 +1975,35 @@ mod tests {
         }
         .to_string();
         assert!(e.contains("../evil"), "must include the prefix: {e}");
+    }
+
+    // M13: a melded repo's `[source].prefix` reaches `UnsafePrefix`, so a
+    // rejected prefix carrying a bidi-spoofing/ANSI payload must not be
+    // interpolated raw into the rejection message itself -- otherwise the
+    // rejection meant to stop the spoofing attempt becomes the delivery
+    // mechanism for it. The cause list must also mention invisible/bidi/
+    // zero-width characters generically (not a fixed enumeration), since the
+    // blocked set lives in `sanitize.rs` and can grow.
+    #[test]
+    fn unsafe_prefix_error_strips_bidi_and_ansi_payload_from_the_prefix() {
+        // spec: NS-28
+        let e = MindError::UnsafePrefix {
+            prefix: "\u{202E}\x1b[31mevil".into(),
+        }
+        .to_string();
+        assert!(
+            !e.contains('\x1b'),
+            "must not carry the raw ESC byte: {e:?}"
+        );
+        assert!(
+            !e.contains('\u{202E}'),
+            "must not carry the raw bidi-override code point: {e:?}"
+        );
+        assert!(e.contains("evil"), "must still name the value: {e}");
+        assert!(
+            e.contains("invisible") || e.contains("bidi") || e.contains("zero-width"),
+            "cause list must mention invisible/bidi/zero-width characters: {e}"
+        );
     }
 
     // spec: CLI-182
@@ -2061,10 +2445,12 @@ mod tests {
         );
 
         // spec: POL-53 -- the pin-mismatch case names the pin and the conflict.
+        // `--to` is the flag's current name (`--version` is now a hidden
+        // deprecated alias, src/cli.rs); this pins the message shape the
+        // real `src/selfupdate.rs` pin-conflict path produces.
         let mismatch = MindError::SelfUpdatePolicy {
-            detail:
-                "managed policy pins self-update to 0.14.0; --version 0.15.0 conflicts with the pin"
-                    .into(),
+            detail: "managed policy pins self-update to 0.14.0; --to 0.15.0 conflicts with the pin"
+                .into(),
         }
         .to_string();
         assert!(mismatch.contains("0.14.0"), "must name the pin: {mismatch}");

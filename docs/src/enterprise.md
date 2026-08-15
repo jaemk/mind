@@ -137,7 +137,7 @@ self-update = "0.14.0"
 ```
 
 `mind evolve` then resolves to that exact version offline (no `api.github.com`
-call), and `evolve --version` with any other value is refused. Absent or
+call), and `evolve --to` with any other value is refused. Absent or
 `self-update = true` leaves `evolve` unrestricted. See [Managed
 policy](policy.md) for where the policy file lives and how it is enforced.
 
@@ -190,7 +190,7 @@ curl --proto '=https' --tlsv1.2 -fsSL \
 
 `install.sh` resolves the latest tag from `api.github.com` only when
 `MIND_VERSION` is unset; pinning it downloads the release asset from `github.com`
-directly. `mind evolve --version <v>` is the same: the version bypasses the API.
+directly. `mind evolve --to <v>` is the same: the version bypasses the API.
 
 For fully air-gapped mirrors, meld from a local path or a `file://` remote
 pointing at an internal clone. Source melding accepts any git remote git can

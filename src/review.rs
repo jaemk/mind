@@ -495,6 +495,26 @@ fn run_checks(
         }
     }
 
+    // --- Check 8a: per-item custom `link` target (advisory) ---
+    // spec: DSC-97
+    // Surface every item that declares a `[[items]] link` override so a
+    // consumer sees, before melding, exactly where each item will symlink
+    // into their agent home. `catalog::scan_source_at` above already refused
+    // the meld if `link` reached outside a kind directory (a hard failure,
+    // not a finding here), so this is disclosure of an admitted-but-custom
+    // target, not a safety check in itself.
+    for item in &items {
+        if let Some(link) = &item.link_rel {
+            advisory.push(Finding::advisory(
+                "custom-link",
+                format!(
+                    "{}: links to a custom target '{link}' instead of the default location",
+                    item.key()
+                ),
+            ));
+        }
+    }
+
     // --- Check 8: per-item install/uninstall hooks (advisory) ---
     // spec: HOOK-85
     // Surface each item that declares an install or uninstall hook so a consumer
@@ -1630,6 +1650,98 @@ mod tests {
                 .iter()
                 .any(|f| f.kind == "missing-description"),
             "expected missing-description advisory: {:?}",
+            result.advisory
+        );
+    }
+
+    /// An item declaring a `[[items]] link` override gets a `custom-link`
+    /// advisory disclosing the target, so a consumer sees where the item will
+    /// symlink into their agent home before melding.
+    /// spec: DSC-97
+    #[test]
+    fn custom_link_target_is_disclosed() {
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let source_dir = base.join("src");
+        write_file(
+            &source_dir.join("rules/house-style.md"),
+            "---\ndescription: House style\n---\n# house style\n",
+        );
+        write_file(
+            &source_dir.join("mind.toml"),
+            "[[items]]\nkind = \"rule\"\nname = \"house-style\"\npath = \"rules/house-style.md\"\n\
+             link = \"rules/style.md\"\n",
+        );
+        let paths = paths_for(base);
+
+        let result = run_checks(&paths, &source_dir, None, false, true).unwrap();
+        assert!(
+            result.hard.is_empty(),
+            "a confined link must not be a hard finding: {:?}",
+            result.hard
+        );
+        let finding = result
+            .advisory
+            .iter()
+            .find(|f| f.kind == "custom-link")
+            .unwrap_or_else(|| panic!("expected a custom-link advisory: {:?}", result.advisory));
+        assert!(
+            finding.message.contains("rules/style.md"),
+            "must name the link target: {}",
+            finding.message
+        );
+    }
+
+    /// An item with no `link` override gets no `custom-link` advisory.
+    /// spec: DSC-97
+    #[test]
+    fn no_custom_link_target_yields_no_disclosure() {
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let source_dir = base.join("src");
+        write_file(
+            &source_dir.join("rules/x.md"),
+            "---\ndescription: x\n---\n# x\n",
+        );
+        let paths = paths_for(base);
+
+        let result = run_checks(&paths, &source_dir, None, false, true).unwrap();
+        assert!(
+            result.advisory.iter().all(|f| f.kind != "custom-link"),
+            "no link override => no custom-link advisory: {:?}",
+            result.advisory
+        );
+    }
+
+    /// A `[[items]] link` outside a kind directory is a hard scan error (DSC-97
+    /// is enforced by the catalog scan, so `review` surfaces it via the
+    /// existing `scan-error` path rather than emitting a `custom-link`
+    /// advisory for a link that was never admitted).
+    /// spec: DSC-97
+    #[test]
+    fn link_outside_kind_directory_is_a_hard_finding() {
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let source_dir = base.join("src");
+        write_file(
+            &source_dir.join("rules/x.md"),
+            "---\ndescription: x\n---\n# x\n",
+        );
+        write_file(
+            &source_dir.join("mind.toml"),
+            "[[items]]\nkind = \"rule\"\nname = \"x\"\npath = \"rules/x.md\"\n\
+             link = \"settings.json\"\n",
+        );
+        let paths = paths_for(base);
+
+        let result = run_checks(&paths, &source_dir, None, false, true).unwrap();
+        assert!(
+            !result.hard.is_empty(),
+            "a link outside a kind directory must be a hard finding"
+        );
+        assert!(
+            result.advisory.iter().all(|f| f.kind != "custom-link"),
+            "a refused link must not also produce a custom-link advisory: {:?}",
             result.advisory
         );
     }

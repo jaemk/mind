@@ -221,20 +221,44 @@ manifest, and store.
   an `out of date` status line. The upgrade confirm (`u`, TUI-22) is no longer
   blind: instead of a bare "Upgrade all pending items?", it lists every stale
   item by key and source (mirroring the per-item delta the CLI's `upgrade`
-  reports before applying, DEP-40), or states explicitly that nothing is out of
-  date when the stale set is empty, so the user always confirms a specific,
-  named set of changes rather than an opaque bulk action. Applying the confirmed
-  upgrade runs the NO-SYNC upgrade (CLI-169): the pending list was computed from
-  the current poll snapshot, so a sync-first apply could pull new upstream
-  commits and act on items the modal never named. Refreshing drift is the job of
-  the separate `s` (Sync) action plus the ~1s re-poll, not of the apply step.
-  Because the poll recomputes this for every installed item about once a second,
-  the content hash is memoized against a cheap stat fingerprint (the same tree
-  walk reading only each entry's mtime/size, plus a symlink's target), and the
-  content is re-read only when that fingerprint changes. The memo is display-only:
-  every verb that ACTS on a hash (`upgrade`, `introspect`, `recall`) hashes
-  directly, so a fingerprint that missed a same-second, same-size edit could at
-  most delay the drift marker by a tick, never change what a verb does.
+  reports before applying, DEP-40), so the user always confirms a specific,
+  named set of changes rather than an opaque bulk action. What the confirm says
+  when the stale set is empty, and what applying it actually does, are TUI-73;
+  how the stale flag itself is kept cheap to recompute on every poll tick is
+  TUI-72.
+- `TUI-72` Because the poll (TUI-15) recomputes the TUI-63 stale flag for every
+  installed item about once a second, its content hash is memoized per item path
+  against a cheap stat fingerprint (`hash::stat_fingerprint`): the same tree walk
+  [`hash_path`] uses, but reading each entry's `mtime`, `size`, and -- under
+  `cfg(unix)` -- `ctime` and inode number, plus a symlink's target string,
+  instead of its content. Content is re-read only when that fingerprint changes.
+  `ctime` cannot be set from userland and changes on every write, closing the
+  fingerprint's realistic blind spot: an mtime-PRESERVING replacement at
+  unchanged size (`cp -p`, `rsync -a`, `tar -p`, `touch -r`, some FUSE/network
+  mounts) -- not, as such a scheme is sometimes assumed to be limited by,
+  filesystem mtime granularity. The memo is display-only: every verb that ACTS
+  on a hash (`upgrade`, `introspect`, `recall`) calls `hash_path` directly,
+  never the memo, so a missed fingerprint change can never change what a verb
+  does -- at most it can make this row's drift marker, and the TUI-63 confirm
+  list, lag behind what a `upgrade_no_sync` apply (TUI-73) itself re-hashes and
+  acts on. That lag is NOT bounded to "one tick": the memo has no TTL, so once a
+  fingerprint fails to move, its content hash is served for the life of the
+  process -- not refreshed on the next poll -- until the item's path leaves the
+  current catalog (its source is unmelded, or the item is removed upstream), at
+  which point the next full load prunes it from the memo. `stat_fingerprint` is
+  not a content hash and is never compared against a recorded manifest hash.
+- `TUI-73` Applying the TUI-63 upgrade confirm (`u`, TUI-22) runs the NO-SYNC
+  upgrade (`commands::upgrade_no_sync`, CLI-169), not the plain sync-first
+  `upgrade`: the confirm's pending list was computed from the current poll
+  snapshot, so a sync-first apply could pull new upstream commits between the
+  confirm and the apply and act on an item the modal never named. Refreshing
+  drift is the job of the separate `s` (Sync) action plus the ~1s re-poll
+  (TUI-15), not of the apply step. Because upgrade itself never fetches, the
+  confirm's empty-state wording says so explicitly rather than implying full
+  currency: "nothing is out of date since the last sync" (naming `s` as the
+  remedy), not a bare "nothing is out of date" that a user who applies
+  immediately after opening the TUI could misread as "you are current" even
+  when upstream has moved.
 - `TUI-64` Pressing `?` in normal mode opens a keymap help overlay listing every
   binding grouped by category (navigation, actions, general); any key closes it,
   intercepted ahead of normal-mode routing so it never leaks into search or an
@@ -260,13 +284,18 @@ manifest, and store.
   description reads as "more text exists here" rather than looking like the
   description simply ends there; untruncated text is returned unchanged.
 - `TUI-68` An empty Installed or Available group shows a call-to-action row
-  instead of a bare, unexplained blank list, using the same wording the CLI's
-  plain listing already uses (CLI-187) so the message is consistent across
-  surfaces: `no sources melded; run \`mind meld <owner/repo>\` to add one` when
-  no source is melded at all, or `no items match '<query>'` when a search
-  matched nothing. A group that is empty for a legitimate reason (sources are
-  melded, nothing has been installed yet, and no search is active) gets no
-  synthetic row -- that state needs no explanation.
+  instead of a bare, unexplained blank list. When no source is melded at all,
+  the wording matches the CLI's plain listing (CLI-187): `no sources melded;
+  run \`mind meld <owner/repo>\` to add one`. When a search matched nothing, the
+  wording is GROUP-SCOPED -- `no installed items match '<query>'` or `no
+  available items match '<query>'` -- a deliberate divergence from CLI-187's
+  ungrouped `no items match '<query>'`: the CLI's plain listing has no separate
+  groups to scope by, but the TUI does, and an ungrouped message on an empty
+  Installed group would misleadingly read as "nothing matched anywhere" while
+  the search may still have matches sitting in Available (or vice versa). A
+  group that is empty for a legitimate reason (sources are melded, nothing has
+  been installed yet, and no search is active) gets no synthetic row -- that
+  state needs no explanation.
 - `TUI-69` Esc on a settled search filter (non-empty, not focused -- the user
   already submitted it with Tab/Enter, TUI-14) is a two-step clear: the first
   Esc in normal mode arms the clear and shows a status hint instead of wiping

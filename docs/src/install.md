@@ -63,7 +63,7 @@ on Windows. On Windows, run `mind` under WSL (Windows Subsystem for Linux).
 `mind evolve` updates the binary itself to the latest release. It reports the
 target version and the resolved target triple (the exact artifact it would
 fetch) and prompts before downloading, unless `--yes` is given (`--check`
-reports without changing anything, `--version <v>` pins a target). It uses the
+reports without changing anything, `--to <v>` pins a target). It uses the
 same download path as the install script and verifies the `SHA256SUMS` asset
 before swapping in the new binary.
 

@@ -12,11 +12,31 @@ fn is_control(c: char) -> bool {
 }
 
 /// Whether `c` is a security-blocked Unicode code point: a bidi-override,
-/// directional-mark, or zero-width character (spoofing vectors), or a line/
-/// paragraph separator. Silently dropped by [`strip_ansi`], with no space
+/// directional-mark, or zero-width/invisible character (spoofing vectors), a
+/// line/paragraph separator, or a member of the Unicode tag block or the
+/// variation-selector block. Silently dropped by [`strip_ansi`], with no space
 /// substituted -- unlike a control character, none of these represents a word
 /// boundary, so inserting a space where one of them sat would add whitespace
 /// that was never there.
+///
+/// This is the Unicode format category (Cf) -- code points that affect layout
+/// or rendering but carry no visible glyph of their own -- plus two blocks that
+/// are not Cf but are equally invisible: the tag block (U+E0000-U+E007F,
+/// nominally deprecated but the standard "invisible ASCII smuggling" vector: a
+/// payload hidden in tag characters renders as nothing to a human at a
+/// terminal, yet is plain text to a parser or an AI agent reading the same
+/// string) and the variation selectors (U+FE00-U+FE0F, U+E0100-U+E01EF: they
+/// modify the glyph of the character before them and are themselves invisible,
+/// so they can be smuggled between two characters to defeat a substring
+/// comparison the same way a zero-width character can). Deliberately NOT
+/// blocked: combining marks (U+0300 range) and printable non-ASCII generally --
+/// both are visible, so stripping them would corrupt legitimate non-English
+/// text (see [`strip_ansi`]'s doc comment) without closing an invisibility
+/// vector.
+///
+/// M5 (NS-73) broadened this from the original bidi/zero-width/separator set;
+/// every code point blocked before that change is still blocked (a superset),
+/// so DSC-96-era callers that only exercise the older set keep working.
 fn is_blocked_unicode(c: char) -> bool {
     matches!(
         c,
@@ -33,18 +53,55 @@ fn is_blocked_unicode(c: char) -> bool {
         // Zero-width characters: invisible, so a hostile source can use them
         // to defeat a visual/substring comparison of a sanitized string.
         | '\u{200B}' | '\u{2060}' | '\u{FEFF}'
+        // Soft hyphen: renders as nothing unless a line break falls there.
+        | '\u{00AD}'
+        // Mongolian vowel separator: a zero-width format character.
+        | '\u{180E}'
+        // Invisible mathematical operators (function application, invisible
+        // times/separator/plus): U+2060 (word joiner) is listed above; these
+        // fill out the rest of the same Cf run.
+        | '\u{2061}'..='\u{2064}'
+        // Deprecated Cf format characters (inhibit/activate symmetric
+        // swapping, national digit shapes, nominal digit shapes): invisible
+        // layout-affecting code points, same rationale as the bidi marks.
+        | '\u{206A}'..='\u{206F}'
+        // Variation selectors: modify the glyph of the preceding character
+        // and are themselves invisible, so one can be smuggled between two
+        // characters to defeat a substring comparison.
+        | '\u{FE00}'..='\u{FE0F}' | '\u{E0100}'..='\u{E01EF}'
+        // Interlinear annotation characters: invisible markup, never meant to
+        // reach a plain-text display.
+        | '\u{FFF9}'..='\u{FFFB}'
+        // Hangul fillers: assigned code points that render as blank.
+        | '\u{115F}' | '\u{3164}'
+        // The Unicode tag block: nominally deprecated, but the standard
+        // "invisible ASCII smuggling" vector -- a payload hidden here renders
+        // as nothing to a human at a terminal, yet is plain text to a parser
+        // or an AI agent reading the same string. The most important addition
+        // in this broadening (M5): this text is read by both.
+        | '\u{E0000}'..='\u{E007F}'
     )
 }
 
 /// Strip ANSI escape sequences, C0/DEL/C1 control characters, and Unicode
-/// bidi-override/separator/zero-width code points from `s`.
+/// bidi-override/separator/zero-width/invisible code points from `s`
+/// (DSC-69, MKT-9; the invisible/format set is [`is_blocked_unicode`], NS-73).
 ///
 /// Printable non-ASCII (U+00A0 and above, minus the blocked ranges) is
-/// preserved so non-English curator messages are not corrupted. The logic
-/// mirrors the private `strip_ansi` in commands.rs; both implement the same
-/// sanitization rule (DSC-69, MKT-9), except for the space-collapsing this
-/// function does for a run of removed control characters (next paragraph):
-/// commands.rs's copy still deletes them outright.
+/// preserved so non-English curator messages are not corrupted.
+///
+/// The first pass, `strip_ansi_escapes::strip`, is itself a small terminal
+/// emulator: it does not merely delete a recognized escape sequence, it
+/// *executes* it against a virtual terminal state and forwards only what that
+/// terminal would have printed. One consequence a caller composing a display
+/// string must know about: a bare OSC introducer (`\x1b]`) with no terminator
+/// is treated as "sequence still open" and consumes everything after it to the
+/// end of input -- so a value ending in an unterminated OSC (e.g. an item named
+/// `evil\x1b]`) silently swallows whatever a caller appends *after* it in the
+/// same composed string, not just the item name itself. Sanitize each field
+/// with this function BEFORE composing a line out of several fields, never
+/// after: compose-then-sanitize lets one field's dangling escape eat its
+/// neighbors.
 ///
 /// A maximal run of consecutive control characters that reach this function's
 /// own filter collapses to a single space rather than vanishing, so text
@@ -85,13 +142,18 @@ pub(crate) fn strip_ansi(s: &str) -> String {
 
 /// Whether `s` contains any character [`strip_ansi`] would remove or collapse: a
 /// C0/DEL/C1 control character (ESC, `\x1b`, is one, so any ANSI escape sequence
-/// makes this true) or a security-blocked Unicode code point (bidi override,
-/// directional mark, zero-width, line/paragraph separator).
+/// makes this true) or a security-blocked Unicode code point -- bidi override,
+/// directional mark, zero-width/invisible format character, line/paragraph
+/// separator, or a member of the Unicode tag block or the variation-selector
+/// block ([`is_blocked_unicode`], broadened by NS-73).
 ///
 /// Use this to *reject* a source-controlled value that will key a filesystem
-/// path or a namespace prefix (DSC-95, NS-72), where sanitizing in place would
-/// silently mutate identity. To clean a value that is only ever displayed, use
-/// [`strip_ansi`] instead.
+/// path, a namespace prefix, or an item's identity (DSC-95, DSC-96, NS-72,
+/// NS-73), where sanitizing in place would silently mutate identity -- e.g. two
+/// item names that differ only by a tag-block code point would otherwise
+/// render identically after display sanitization, making them indistinguishable
+/// in `recall`/`probe` while remaining distinct on disk. To clean a value that
+/// is only ever displayed, use [`strip_ansi`] instead.
 pub(crate) fn has_blocked_chars(s: &str) -> bool {
     s.chars().any(|c| is_control(c) || is_blocked_unicode(c))
 }
@@ -211,22 +273,83 @@ mod tests {
         );
     }
 
+    // spec: NS-73
+    #[test]
+    fn strip_ansi_removes_m5_broadened_set() {
+        // M5: the blocked set is broadened to cover the rest of the Unicode
+        // format category (Cf) plus the tag block and the variation
+        // selectors. Each of these was invisible before this change and is
+        // now removed with no space substituted, same as the rest of
+        // `is_blocked_unicode`.
+        assert_eq!(strip_ansi("a\u{00AD}b"), "ab", "soft hyphen");
+        assert_eq!(strip_ansi("a\u{180E}b"), "ab", "Mongolian vowel separator");
+        assert_eq!(
+            strip_ansi("a\u{2061}\u{2062}\u{2063}\u{2064}b"),
+            "ab",
+            "invisible math operators"
+        );
+        assert_eq!(
+            strip_ansi("a\u{206A}b"),
+            "ab",
+            "deprecated Cf format character"
+        );
+        assert_eq!(strip_ansi("a\u{FE0F}b"), "ab", "variation selector");
+        assert_eq!(
+            strip_ansi("a\u{E0100}b"),
+            "ab",
+            "supplementary variation selector"
+        );
+        assert_eq!(strip_ansi("a\u{FFF9}b"), "ab", "interlinear annotation");
+        assert_eq!(strip_ansi("a\u{115F}b"), "ab", "Hangul choseong filler");
+        assert_eq!(strip_ansi("a\u{3164}b"), "ab", "Hangul filler");
+        // The Unicode tag block (M5's headline addition): renders as nothing
+        // in a terminal, so a name like `review\u{E0041}` (TAG LATIN SMALL
+        // LETTER A appended) would otherwise sanitize identically to `review`
+        // while remaining a distinct raw string -- exactly the ambiguity
+        // DSC-96 relies on this module to close.
+        assert_eq!(
+            strip_ansi("review\u{E0041}"),
+            "review",
+            "Unicode tag block character"
+        );
+        assert_eq!(
+            strip_ansi("\u{E0001}\u{E007F}"),
+            "",
+            "tag-block language tag and cancel tag"
+        );
+    }
+
     // spec: TUI-60
     #[test]
     fn strip_ansi_empty_string() {
         assert_eq!(strip_ansi(""), "");
     }
 
-    // spec: DSC-95
+    // spec: DSC-95 NS-73
     #[test]
     fn has_blocked_chars_flags_exactly_what_strip_removes() {
-        // Clean strings (including printable non-ASCII) are not flagged.
-        for ok in ["", "hello", "my-skill", "caf\u{00e9}", "a.b_c-2"] {
-            assert!(!has_blocked_chars(ok), "{ok:?} should be clean");
+        // Clean strings (including printable non-ASCII) are not flagged, and
+        // `strip_ansi` is a no-op on them -- the two must agree in both
+        // directions (M5b), not merely on membership in these sample lists.
+        let ok = ["", "hello", "my-skill", "caf\u{00e9}", "a.b_c-2"];
+        for s in ok {
+            assert!(!has_blocked_chars(s), "{s:?} should be clean");
+            assert_eq!(
+                has_blocked_chars(s),
+                strip_ansi(s) != s,
+                "has_blocked_chars/strip_ansi disagree on {s:?}"
+            );
         }
         // Control characters, ANSI escapes (ESC is a control char), and the
-        // security-blocked Unicode set are all flagged.
-        for bad in [
+        // security-blocked Unicode set (the original bidi/zero-width/separator
+        // set plus the NS-73 broadening: soft hyphen, Mongolian vowel
+        // separator, invisible math operators, deprecated Cf format chars,
+        // variation selectors, interlinear annotation, Hangul fillers, and the
+        // Unicode tag block) are all flagged, and every one of them is also a
+        // case where `strip_ansi` actually changes the string -- pinning that
+        // the predicate flags EXACTLY what the stripper removes, not a
+        // superset or subset of it (M5b).
+        let bad = [
             "a\x00b",
             "a\nb",
             "a\x1b[0mb",
@@ -237,8 +360,25 @@ mod tests {
             "a\u{FEFF}b",
             "a\u{2028}b",
             "a\u{0085}b",
-        ] {
-            assert!(has_blocked_chars(bad), "{bad:?} should be flagged");
+            // NS-73 additions.
+            "a\u{00AD}b",
+            "a\u{180E}b",
+            "a\u{2061}b",
+            "a\u{206A}b",
+            "a\u{FE0F}b",
+            "a\u{E0100}b",
+            "a\u{FFF9}b",
+            "a\u{115F}b",
+            "a\u{3164}b",
+            "review\u{E0041}",
+        ];
+        for s in bad {
+            assert!(has_blocked_chars(s), "{s:?} should be flagged");
+            assert_eq!(
+                has_blocked_chars(s),
+                strip_ansi(s) != s,
+                "has_blocked_chars/strip_ansi disagree on {s:?}"
+            );
         }
     }
 

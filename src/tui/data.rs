@@ -105,14 +105,49 @@ pub struct SnapshotUnmanaged {
 /// every installed item, which means a full content hash of every item's source
 /// tree. For a markdown skill that is trivial; for a `tool` directory carrying a
 /// vendored binary it is tens of megabytes re-read per second. The memo replaces
-/// that with the same directory walk reading only `(mtime, size)`
-/// (`hash::stat_fingerprint`), and re-reads content only when that changes.
+/// that with the same directory walk reading only a cheap stat fingerprint
+/// (`hash::stat_fingerprint`: `mtime`, `size`, and -- under `cfg(unix)` -- `ctime`
+/// and inode number), and re-reads content only when that fingerprint changes.
 ///
-/// Display-side only: `upgrade`/`introspect`/`recall` all call `hash_path`
-/// directly, so a fingerprint that missed a same-second, same-size edit could at
-/// worst delay a drift MARKER by one tick, never change what a verb does.
+/// Display-side only (TUI-72): `upgrade`/`introspect`/`recall` all call
+/// `hash_path` directly, never this memo, so a missed fingerprint change can
+/// never change what a verb ACTS on -- at most it makes the TUI-63 confirm
+/// modal list fewer stale items than the no-sync apply (TUI-73) then acts on,
+/// since that apply always re-hashes for real. A miss is NOT bounded to "one
+/// tick": with no TTL, it is served for the life of the process, until the
+/// item's path leaves the current catalog (its source is unmelded, or the item
+/// is removed upstream), at which point the next full load's
+/// [`prune_hash_memo`] evicts it. `stat_fingerprint`'s `ctime`/inode fields
+/// close the realistic miss case -- a same-size, mtime-preserving replace
+/// (`cp -p`, `rsync -a`, `tar -p`, `touch -r`) -- but the fingerprint is still
+/// not a content hash and must never be compared against a recorded manifest
+/// hash.
 static HASH_MEMO: std::sync::Mutex<std::collections::BTreeMap<PathBuf, (String, String)>> =
     std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// Bound `HASH_MEMO` to the paths currently present in the catalog (TUI-72,
+/// L14): without this, an unmelded source or a removed item leaves its entry
+/// in the memo for the life of the process, since the memo is otherwise
+/// insert-only and nothing else ever evicts a key. Called once per full load
+/// with the freshly scanned catalog's item paths, so the memo's size tracks
+/// "items observed in the current catalog", not "every path ever seen this
+/// session".
+fn prune_hash_memo(live_paths: &std::collections::HashSet<PathBuf>) {
+    if let Ok(mut memo) = HASH_MEMO.lock() {
+        prune_memo_map(&mut memo, live_paths);
+    }
+}
+
+/// The actual eviction logic behind [`prune_hash_memo`], split out so it can
+/// be unit-tested against a local map rather than the process-global
+/// `HASH_MEMO` (which every test in this module shares, so a test that pruned
+/// the real static could race a concurrently running test's own `load` call).
+fn prune_memo_map(
+    memo: &mut std::collections::BTreeMap<PathBuf, (String, String)>,
+    live_paths: &std::collections::HashSet<PathBuf>,
+) {
+    memo.retain(|path, _| live_paths.contains(path));
+}
 
 /// The content hash of `path`, reusing the memo when the cheap stat fingerprint
 /// is unchanged. `None` on any hash failure, which callers treat as drift
@@ -156,6 +191,19 @@ pub fn try_poll(paths: &Paths) -> Option<Snapshot> {
     load_inner(paths).ok()
 }
 
+/// Sanitize a set of dependency keys (`kind:name`) through the same TUI-60
+/// model boundary as the sibling `name`/`source`/`description` fields on
+/// `SnapshotInstalled`/`SnapshotAvailable` -- L15: dep keys were the only
+/// source-derived strings on those structs that skipped `strip_ansi`.
+/// `catalog::scan` already rejects an unsafe item NAME outright (a control
+/// character or bidi/zero-width code point never survives into a `CatalogItem`
+/// in the first place), so today this is defense-in-depth rather than a live
+/// path: it closes the gap the moment a label reaches a non-ratatui sink, or a
+/// future dep-key source that is not name-gated the same way.
+fn sanitize_dep_keys(keys: Vec<String>) -> Vec<String> {
+    keys.iter().map(|k| strip_ansi(k)).collect()
+}
+
 /// Read all of a catalog item's text files into one buffer, for dependency
 /// detection (mirrors `commands::read_item_text`, kept local so data.rs stays
 /// independent of commands.rs and avoids a cross-module dep).
@@ -176,6 +224,13 @@ fn load_inner(paths: &Paths) -> Result<Snapshot> {
     let registry = Registry::load(paths)?;
     let manifest = Manifest::load(paths)?;
     let catalog_items = catalog::scan(paths, &registry)?;
+
+    // spec: TUI-72 - bound HASH_MEMO to the current catalog's paths before it
+    // is consulted below, so an unmelded source's or a removed item's stale
+    // entry does not linger for the rest of the process.
+    let live_paths: std::collections::HashSet<PathBuf> =
+        catalog_items.iter().map(|c| c.path.clone()).collect();
+    prune_hash_memo(&live_paths);
 
     // spec: TUI-60 - source names are source-controlled and must be sanitized.
     let source_names: Vec<String> = registry
@@ -202,8 +257,18 @@ fn load_inner(paths: &Paths) -> Result<Snapshot> {
             let matched = catalog_items
                 .iter()
                 .find(|ci| ci.source == it.source && ci.kind == it.kind && ci.name == it.bare_name);
-            let deps = matched
-                .map(|ci| crate::deps::direct_dependency_keys(ci, &catalog_items, &read_item_text))
+            // spec: TUI-60 - dep keys are catalog-derived (a `kind:name` built
+            // from source-controlled item names) like every sibling field on
+            // this struct, so they get the same strip_ansi treatment at the
+            // model boundary (`sanitize_dep_keys`).
+            let deps: Vec<String> = matched
+                .map(|ci| {
+                    sanitize_dep_keys(crate::deps::direct_dependency_keys(
+                        ci,
+                        &catalog_items,
+                        &read_item_text,
+                    ))
+                })
                 .unwrap_or_default();
             let stale = matched.is_some_and(|ci| {
                 // Memoized on the cheap stat fingerprint: the poll tick would
@@ -228,11 +293,17 @@ fn load_inner(paths: &Paths) -> Result<Snapshot> {
 
     // Build available list (all catalog items; de-dup vs installed happens in tree.rs).
     // spec: TUI-50 - compute direct dep keys for each available item.
-    // spec: TUI-60 - strip_ansi on all source-derived display strings.
+    // spec: TUI-60 - strip_ansi on all source-derived display strings, deps
+    // included (they are catalog-derived `kind:name` keys, same as `installed`
+    // above; `sanitize_dep_keys`).
     let available: Vec<SnapshotAvailable> = catalog_items
         .iter()
         .map(|it| {
-            let deps = crate::deps::direct_dependency_keys(it, &catalog_items, &read_item_text);
+            let deps = sanitize_dep_keys(crate::deps::direct_dependency_keys(
+                it,
+                &catalog_items,
+                &read_item_text,
+            ));
             SnapshotAvailable {
                 key: it.key(),
                 name: strip_ansi(&it.effective_name()),
@@ -378,7 +449,7 @@ mod tests {
         cleanup(&base);
     }
 
-    // spec: TUI-63
+    // spec: TUI-72
     #[test]
     fn memoized_hash_matches_hash_path_and_refreshes_on_change() {
         // The memo must be transparent: the value it returns is always the value
@@ -415,6 +486,66 @@ mod tests {
         cleanup(&base);
     }
 
+    // spec: TUI-72
+    #[test]
+    fn memoized_hash_detects_same_size_content_change() {
+        // M3(d): the test above only edits content in a way that also changes
+        // SIZE. A same-size rewrite (mtime advances, size does not) exercises
+        // the other half of the fingerprint and must still invalidate the memo.
+        let (paths, base) = temp_paths();
+        crate::paths::mkdir_p(&paths.mind_home).unwrap();
+        let item = base.join("item-same-size");
+        crate::paths::mkdir_p(&item).unwrap();
+        std::fs::write(item.join("SKILL.md"), b"aaaaa").unwrap();
+
+        let first = memoized_hash(&item).expect("hash");
+        std::fs::write(item.join("SKILL.md"), b"bbbbb").unwrap();
+        let after = memoized_hash(&item).expect("hash");
+        assert_ne!(
+            first, after,
+            "a same-size content rewrite must invalidate the memo"
+        );
+        assert_eq!(
+            after,
+            hash_path(&item).unwrap(),
+            "the refreshed memo value must equal a direct hash_path"
+        );
+
+        cleanup(&base);
+    }
+
+    // spec: TUI-72
+    #[test]
+    fn prune_memo_map_evicts_paths_no_longer_in_the_catalog() {
+        // L14: HASH_MEMO is otherwise insert-only, so a path whose item was
+        // unmelded or removed upstream would sit in the memo for the life of
+        // the process. `prune_memo_map` (the logic behind `prune_hash_memo`)
+        // bounds it to the live path set. Exercised against a LOCAL map, not
+        // the process-global `HASH_MEMO`: every test in this module shares
+        // that static, so pruning it directly here could race a concurrently
+        // running test's own `load` call, which prunes it too.
+        let p1 = PathBuf::from("/fake/still-in-catalog");
+        let p2 = PathBuf::from("/fake/dropped-from-catalog");
+        let mut memo = std::collections::BTreeMap::new();
+        memo.insert(p1.clone(), ("fp1".to_string(), "hash1".to_string()));
+        memo.insert(p2.clone(), ("fp2".to_string(), "hash2".to_string()));
+
+        // Prune to a live set that no longer includes p2 (as if its source
+        // was unmelded or the item was removed upstream).
+        let mut live = std::collections::HashSet::new();
+        live.insert(p1.clone());
+        prune_memo_map(&mut memo, &live);
+
+        assert!(
+            memo.contains_key(&p1),
+            "a path still in the catalog must survive pruning"
+        );
+        assert!(
+            !memo.contains_key(&p2),
+            "a path no longer in the catalog must be evicted, not retained forever"
+        );
+    }
+
     #[test]
     fn two_loads_with_no_change_produce_equal_snapshots() {
         // spec: TUI-15 - change detection is by VALUE, so two loads over
@@ -422,13 +553,92 @@ mod tests {
         // `apply_snapshot_if_changed` gate can never fire and every tick
         // rebuilds the tree. (The previous `generation` counter was minted
         // fresh per load, which is exactly the bug this pins against.)
+        //
+        // M-test5: a fresh, empty MIND_HOME makes every snapshot vector empty,
+        // so the comparison would pass trivially even if `installed`/
+        // `available` ordering were nondeterministic (a future switch away
+        // from the current BTreeMap/sorted-scan ordering would silently
+        // reinstate the "every tick rebuilds" bug with no failing test). Seed
+        // a melded source (with an installed AND an uninstalled item, so both
+        // `installed` and `available` are non-empty) before comparing.
+        use std::process::Command;
+
         let (paths, base) = temp_paths();
         crate::paths::mkdir_p(&paths.mind_home).unwrap();
+        crate::config::Config {
+            lobes: vec![crate::config::LobeEntry::bare(
+                paths.claude_home.to_str().unwrap(),
+            )],
+            ..Default::default()
+        }
+        .save(&paths)
+        .unwrap();
+
+        let src = base.join("determinism-source");
+        std::fs::create_dir_all(src.join("skills/review")).unwrap();
+        std::fs::write(
+            src.join("skills/review/SKILL.md"),
+            "---\ndescription: review skill\n---\n# review\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(src.join("skills/extra")).unwrap();
+        std::fs::write(
+            src.join("skills/extra/SKILL.md"),
+            "---\ndescription: extra skill\n---\n# extra\n",
+        )
+        .unwrap();
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(&src)
+                .output()
+                .expect("git");
+        };
+        git(&["-c", "init.defaultBranch=main", "init", "-q"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "initial"]);
+
+        crate::commands::meld(
+            &paths,
+            src.to_str().unwrap(),
+            None,
+            vec![],
+            vec![],
+            false,
+            crate::commands::PinRequest::None,
+            None,
+            false,
+        )
+        .expect("meld");
+        crate::commands::learn(
+            &paths,
+            "skill:review",
+            false,
+            crate::commands::InstallFlow {
+                yes: true,
+                clobber: crate::commands::Clobber::Force,
+                dangerously_skip: true,
+                dangerously_skip_build: true,
+            },
+        )
+        .expect("learn");
+
         let snap1 = load(&paths).unwrap();
         let snap2 = load(&paths).unwrap();
+        assert!(
+            !snap1.installed.is_empty(),
+            "fixture must have an installed item for this test to be meaningful"
+        );
+        assert!(
+            !snap1.available.is_empty(),
+            "fixture must have an available item for this test to be meaningful"
+        );
         assert_eq!(
             snap1, snap2,
-            "two loads over unchanged state must be equal so the poll gate can skip the rebuild"
+            "two loads over unchanged state (melded source + installed item) must be \
+             equal so the poll gate can skip the rebuild"
         );
         cleanup(&base);
     }
@@ -499,6 +709,39 @@ mod tests {
         assert_eq!(item.kind, ItemKind::Skill, "kind field must be preserved");
 
         cleanup(&base);
+    }
+
+    // spec: TUI-60
+    #[test]
+    fn sanitize_dep_keys_strips_ansi_and_bidi() {
+        // L15: dep keys were the only source-derived strings on
+        // SnapshotInstalled/SnapshotAvailable that skipped strip_ansi, unlike
+        // the sibling name/source/description fields on the same structs.
+        // `catalog::scan` already rejects an unsafe item NAME outright, so a
+        // full end-to-end reproduction through a real catalog scan can no
+        // longer smuggle an escape into a dep key; test the mapping function
+        // itself (what `load_inner` actually calls) directly instead.
+        let bidi = '\u{202E}';
+        let raw = vec![
+            format!("skill:re\x1b[31mview"),
+            format!("agent:d{bidi}ev"),
+            "rule:clean".to_string(),
+        ];
+        let sanitized = sanitize_dep_keys(raw);
+        assert_eq!(
+            sanitized,
+            vec![
+                "skill:review".to_string(),
+                "agent:dev".to_string(),
+                "rule:clean".to_string(),
+            ]
+        );
+        assert!(
+            sanitized
+                .iter()
+                .all(|s| !s.contains('\x1b') && !s.contains(bidi)),
+            "no dep key may retain a raw ANSI escape or bidi override: {sanitized:?}"
+        );
     }
 
     /// M2/TUI-63: `SnapshotInstalled.stale` mirrors the CLI's CLI-75 outdated

@@ -130,7 +130,7 @@ fn dispatch(paths: &Paths, kind: ActionKind) -> Result<()> {
         // (LIFE-49/M1) is inert; passed `false` to match the plain `mind sync`
         // (no --upgrade) this action mirrors.
         ActionKind::Sync => commands::sync(paths, false, false, false, false)?,
-        // spec: TUI-63 - `yes: true` so it applies without prompting on stdin.
+        // spec: TUI-73 - `yes: true` so it applies without prompting on stdin.
         // Use the NO-SYNC upgrade: the confirm modal's pending list was computed
         // from the last poll snapshot (pre-sync), so a sync-first upgrade could
         // pull new upstream commits and apply items the modal never named. The
@@ -603,12 +603,141 @@ mod tests {
         );
     }
 
-    // Note: the TUI upgrade action routes to `commands::upgrade_no_sync` (TUI-63)
-    // so the applied set matches the confirm modal's pre-sync pending list. The
-    // no-fetch behavior is covered by `upgrade_no_sync_flag_is_accepted`
-    // (CLI-169) and the policy suite; it is not separately exercised here because
-    // a hermetic local source is read live from its working tree (CLI-27
-    // `is_linked`), so sync-vs-no-sync is indistinguishable without a real remote.
+    #[test]
+    fn action_upgrade_routes_through_no_sync_so_recorded_commit_stays_stale() {
+        // spec: TUI-73 - M-test6: a previous comment here claimed sync-vs-no-sync
+        // is INDISTINGUISHABLE for a hermetic local source because it is read
+        // live from its working tree (CLI-27 `is_linked`). That claim is wrong:
+        // `sync` still re-reads and records the linked source's live HEAD into
+        // the registry (`commands.rs`, the `source.is_linked()` branch), and
+        // `upgrade`'s per-item pass records whatever commit is CURRENTLY in the
+        // registry at that moment (`registry.find(&installed.source)...commit`),
+        // not a fresh read of its own. So:
+        //   - a no-sync apply (what the TUI's `u` action calls, `execute` here)
+        //     detects the content drift (hash differs) but records the STALE
+        //     commit, because nothing re-read the source's HEAD first;
+        //   - a sync-first apply (`commands::upgrade`) records the NEW commit,
+        //     because `sync_sources_for_upgrade` ran first.
+        // That divergence is directly assertable without any network access.
+        use std::process::Command;
+
+        fn make_stale_fixture(paths: &Paths, base: &std::path::Path) {
+            crate::paths::mkdir_p(&paths.mind_home).unwrap();
+            // Pin the lobe to the isolated claude_home so the install never
+            // touches the real ~/.claude (agent_homes() otherwise defaults to
+            // ~/.claude when no lobes are configured).
+            crate::config::Config {
+                lobes: vec![crate::config::LobeEntry::bare(
+                    paths.claude_home.to_str().unwrap(),
+                )],
+                ..Default::default()
+            }
+            .save(paths)
+            .unwrap();
+            let src = base.join("source");
+            std::fs::create_dir_all(src.join("skills/review")).unwrap();
+            std::fs::write(
+                src.join("skills/review/SKILL.md"),
+                "---\ndescription: review skill\n---\n# review\noriginal\n",
+            )
+            .unwrap();
+            init_git_repo(&src);
+            let git = |args: &[&str]| {
+                Command::new("git")
+                    .args(args)
+                    .current_dir(&src)
+                    .output()
+                    .expect("git");
+            };
+            git(&["add", "-A"]);
+            git(&["commit", "-qm", "initial"]);
+
+            commands::meld(
+                paths,
+                src.to_str().unwrap(),
+                None,
+                vec![],
+                vec![],
+                false,
+                commands::PinRequest::None,
+                None,
+                false,
+            )
+            .expect("meld");
+            commands::learn(
+                paths,
+                "skill:review",
+                false,
+                commands::InstallFlow {
+                    yes: true,
+                    clobber: commands::Clobber::Force,
+                    dangerously_skip: true,
+                    dangerously_skip_build: true,
+                },
+            )
+            .expect("learn");
+
+            // Edit content and advance the source's own git HEAD WITHOUT
+            // syncing: the registry's recorded `source.commit` still points at
+            // the pre-edit HEAD.
+            std::fs::write(
+                src.join("skills/review/SKILL.md"),
+                "---\ndescription: review skill\n---\n# review\nedited\n",
+            )
+            .unwrap();
+            git(&["add", "-A"]);
+            git(&["commit", "-qm", "edit"]);
+        }
+
+        let recorded_commit = |paths: &Paths| {
+            crate::manifest::Manifest::load(paths)
+                .unwrap()
+                .items
+                .get("skill:review")
+                .expect("skill:review must be installed")
+                .commit
+                .clone()
+        };
+
+        // Fixture 1: the no-sync path (what the TUI's `u` action calls).
+        let (no_sync_paths, _td1) = temp_paths();
+        make_stale_fixture(&no_sync_paths, &_td1);
+        let old_commit = recorded_commit(&no_sync_paths);
+
+        let action = PendingAction {
+            kind: ActionKind::Upgrade,
+            description: "upgrade?".to_string(),
+            dep_tree: None,
+        };
+        execute(&no_sync_paths, action).expect("no-sync upgrade should succeed");
+        let no_sync_commit = recorded_commit(&no_sync_paths);
+        assert_eq!(
+            no_sync_commit, old_commit,
+            "a no-sync upgrade (the TUI's `u` action) must record the STALE \
+             commit: it never re-reads the source's HEAD, only `sync` does. \
+             got {no_sync_commit:?}, expected the pre-edit commit {old_commit:?}"
+        );
+
+        // Fixture 2: the sync-first path (the plain CLI `upgrade` verb),
+        // independent so applying the first fixture's upgrade cannot affect it.
+        // (Each fixture is its own fresh git repo, so its commit hash has no
+        // relation to fixture 1's -- only the before/after within EACH fixture
+        // is meaningful.)
+        let (sync_paths, _td2) = temp_paths();
+        make_stale_fixture(&sync_paths, &_td2);
+        let old_commit_2 = recorded_commit(&sync_paths);
+
+        commands::upgrade(&sync_paths, true, None, false, false)
+            .expect("sync-first upgrade should succeed");
+        let sync_commit = recorded_commit(&sync_paths);
+        assert_ne!(
+            sync_commit, old_commit_2,
+            "a sync-first upgrade must record the NEW commit: `sync` re-reads \
+             the linked source's live HEAD before upgrade computes what to \
+             record. got {sync_commit:?}, expected it to differ from the \
+             pre-edit commit {old_commit_2:?}"
+        );
+    }
 
     fn init_git_repo(dir: &std::path::Path) {
         use std::process::Command;

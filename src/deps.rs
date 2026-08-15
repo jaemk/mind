@@ -336,7 +336,11 @@ impl Resolution {
             out.push_str("  ");
         }
         out.push_str("- ");
-        out.push_str(&items[node].key());
+        // DSC-95: sanitize before composing the line so a hostile name cannot
+        // consume the " [role]"/"(cycle)" suffix appended after it (an
+        // unterminated OSC sequence puts the ANSI stripper into a state that
+        // eats the rest of the string if sanitized post-composition).
+        out.push_str(&items[node].display_key());
 
         if path.contains(&node) {
             // Back-edge: do not expand again (DEP-22).
@@ -670,7 +674,11 @@ impl InstalledGraph {
             out.push_str("  ");
         }
         out.push_str("- ");
-        out.push_str(&self.nodes[node].key());
+        // spec: CLI-232 DSC-95 -- sanitize before composing (see the identical
+        // note on `Resolution::render_node`): an unterminated escape in the
+        // name must not be able to consume the " (cycle)"/indentation of
+        // whatever follows.
+        out.push_str(&self.nodes[node].display_key());
 
         if path.contains(&node) {
             // Back-edge: do not expand again (DEP-22).
@@ -742,7 +750,8 @@ impl InstalledGraph {
     /// Mirrors the traversal of [`render_installed_node`] exactly:
     /// same path-based cycle detection (DEP-22), same child expansion.
     fn build_node(&self, node: usize, path: &mut Vec<usize>) -> DepNode {
-        let key = self.nodes[node].key();
+        // spec: CLI-232 DSC-95
+        let key = self.nodes[node].display_key();
 
         if path.contains(&node) {
             // Back-edge: cycle leaf, not expanded (DEP-22).

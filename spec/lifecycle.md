@@ -87,18 +87,28 @@ agent homes (a store-only tool is not linked; tooling.md TOOL-3).
 - `LIFE-46` Before applying a rename (LIFE-14), `upgrade` looks up the rename's
   new effective key in the manifest. If an item is already installed under that
   key with a DIFFERENT stable identity `(source, kind, bare_name)` than the item
-  being renamed, `upgrade` refuses (an `AmbiguousItem` error naming both
-  identities) instead of evicting the occupant. `upgrade` ALSO refuses when two
-  items in the SAME batch resolve to one target key with different identities
-  (e.g. two sources each dropping their namespace prefix in one upgrade so both
-  land on the bare key): the pre-existing-manifest check alone would pass both,
-  since neither key is occupied yet, and the first install would then become the
-  second's evicted "previous version". Both checks run before any item in the
-  batch is touched, so a detected collision aborts the whole run leaving nothing
-  changed (a scoped `upgrade <item>` upgrades one identity at a time as the
-  workaround). This mirrors `learn`'s own collision guard (DEP-23): a
-  third-party source's `mind.toml` edit must not let an upgrade silently delete
-  a different, unrelated source's installed item -- no hook, no prompt.
+  being renamed, `upgrade` refuses with `UpgradeRenameCollision` -- naming the
+  colliding key, the existing occupant's source, and the incoming (pre-rename)
+  item and its source, plus both real remedies in its own message: `mind forget
+  <key>` to remove the occupant, or re-namespace the incoming source with `mind
+  meld -N <prefix> <repo>` to avoid the collision -- instead of evicting the
+  occupant. `upgrade` ALSO refuses when two items in the SAME batch resolve to
+  one target key with different identities (e.g. two sources each dropping
+  their namespace prefix in one upgrade so both land on the bare key): the
+  pre-existing-manifest check alone would pass both, since neither key is
+  occupied yet, and the first install would then become the second's evicted
+  "previous version". Both checks run after the pending report is printed
+  (CLI-232: a human run always sees the full pending list before an abort, not
+  just the collision) but before any item in the batch is applied, so a
+  detected collision leaves nothing changed. There is no single-item workaround
+  that resolves the SAME-BATCH collision by scoping to one identity at a time:
+  once the first `upgrade <item>` lands on the shared target key, the
+  pre-existing-manifest check then refuses the second identity permanently --
+  only the two remedies named in the error (`mind forget`, or re-namespacing
+  with `mind meld -N`) actually clear it. This mirrors `learn`'s own collision
+  guard (DEP-23): a third-party source's `mind.toml` edit must not let an
+  upgrade silently delete a different, unrelated source's installed item -- no
+  hook, no prompt.
 - `LIFE-47` When applying a rename (LIFE-14) whose new install's links overlap
   the old item's links (e.g. an agent, which links under its bare harness name
   regardless of the item's effective name, NS-40), the old item's link removal
@@ -117,7 +127,13 @@ agent homes (a store-only tool is not linked; tooling.md TOOL-3).
   separate from the per-item loop) and to a re-meld's hook re-run: an earlier
   hook's recorded run must not be lost when a later hook in the same pass
   fails, or its side effect is silently re-offered next time (mirroring
-  HOOK-53's item-level guarantee at the source level).
+  HOOK-53's item-level guarantee at the source level). When the save ITSELF
+  also fails (the double-failure outcome), the root cause still propagates
+  unchanged; the save failure is reported as a separate sanitized warning
+  (not a second line starting `error: `, which would read as a second
+  candidate for "the" error alongside the one `main.rs` prints for the
+  propagated root cause) naming `mind introspect --fix` as the remedy for the
+  resulting drift between disk and `manifest.json`.
 - `LIFE-49` `sync --upgrade` forwards the same `--yes` the CLI already threads
   into `mind upgrade`/`mind forget` to the `--upgrade` pass, instead of forcing
   it off. `sync --upgrade --yes` therefore applies pending upgrades without
@@ -136,8 +152,10 @@ agent homes (a store-only tool is not linked; tooling.md TOOL-3).
   `unmeld`'s multi-source and multi-item confirmations (CLI-28, CLI-21),
   `forget --unmanaged`'s single-item and bulk confirmations (UNM-5, UNM-8) --
   the worst case, since an unmanaged item is the user's own file or directory,
-  not a mind-owned symlink -- `upgrade`'s apply confirmation (LIFE-14), and
-  `evolve`'s binary-swap confirmation. `upgrade`'s own text-mode (non-`--json`)
+  not a mind-owned symlink -- `upgrade`'s apply confirmation (LIFE-14),
+  `learn`'s dependency-closure confirmation (DEP-31: a `learn` whose closure
+  pulls in dependencies beyond the explicit selection), and `evolve`'s
+  binary-swap confirmation. `upgrade`'s own text-mode (non-`--json`)
   prompt is unaffected: it reads stdin directly and already treats EOF/no-input
   as a safe decline, so it does not additionally require a real TTY the way the
   other sites above do (mirroring DEP-60's TTY check) -- only `--json` could

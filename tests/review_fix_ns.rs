@@ -1541,18 +1541,18 @@ fn hard_finding_message_strips_a_bidi_override_in_text_and_json_output() {
 }
 
 /// A token whose inner text carries a bidi-override character (U+202E) is
-/// source-controlled, and it flows verbatim into an `inert-token` advisory
+/// source-controlled, and it flows verbatim into the advisory finding's
 /// message. Both the human-readable text output and the `--json` document
 /// must have it stripped, not just serde-escaped: a bidi override renders
 /// visually even when it round-trips through valid JSON.
 ///
-/// The token names a REAL sibling tool (the tool dir/entrypoint carry the
-/// same bidi-laced name), so it resolves and Check 8 has no reason to flag it
-/// as `bad-reference`: `inert-token` is the only check that fires here, which
-/// keeps this test isolated to the sanitize boundary on that finding path
-/// (CLI-223's Check-5/8-vs-14 suppression -- reviewed separately -- would
-/// otherwise remove an unresolved token from `inert-token`'s report).
-/// spec: CLI-224
+/// The fixture still writes a sibling tool dir carrying the same bidi-laced
+/// name, but DSC-96 now rejects that name at scan, so the sibling never enters
+/// the catalog and the token no longer resolves: the advisory that fires is
+/// `bad-reference`, not `inert-token`. The sanitize boundary under test is the
+/// same either way -- the finding message is source-controlled text on its way
+/// to the terminal -- so this asserts on that, not on which check fired.
+/// spec: CLI-224, DSC-96
 #[test]
 fn finding_message_strips_a_bidi_override_in_text_and_json_output() {
     let sb = fixture();
@@ -1578,7 +1578,7 @@ fn finding_message_strips_a_bidi_override_in_text_and_json_output() {
         text.stdout
     );
     assert!(
-        text.stdout.contains("[inert-token]"),
+        text.stdout.contains("[bad-reference]"),
         "the finding must still fire (only the character is stripped): {}",
         text.stdout
     );
@@ -1597,8 +1597,8 @@ fn finding_message_strips_a_bidi_override_in_text_and_json_output() {
     let advisory = doc["advisory"].as_array().expect("advisory array present");
     let msg = advisory
         .iter()
-        .find(|f| f["kind"] == "inert-token")
-        .expect("an inert-token advisory is present")["message"]
+        .find(|f| f["kind"] == "bad-reference")
+        .expect("a bad-reference advisory is present")["message"]
         .as_str()
         .expect("message is a string");
     assert!(

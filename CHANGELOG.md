@@ -6,6 +6,14 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Breaking for JSON consumers: `learn --json` of an item that pulls in
+  dependencies beyond the explicit selection now refuses with
+  `confirmation-required` unless `--yes` is also given, instead of installing
+  the closure unprompted. A script driving `mind learn --json <item>` against an
+  item with dependencies must add `--yes` (DEP-31).
+
 ## [0.23.0] - 2026-08-05
 
 ### Added

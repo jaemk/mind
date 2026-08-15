@@ -459,18 +459,24 @@ EXAMPLES:
         dangerously_skip_install_hook_check: bool,
     },
 
-    /// Refresh every melded source's clone and catalog.
+    /// Refresh melded source clones and catalogs (all, or only those matching
+    /// `[source]`).
     // spec: CLI-172
     #[command(visible_alias = "update")]
     Sync {
-        /// Only sync the source(s) matching this selector (exact name, an
-        /// unambiguous trailing suffix like `repo` or `owner/repo`, or a glob).
-        /// With no selector, every melded source is synced.
+        /// Only sync the source(s) matching this selector: an exact name, a
+        /// trailing suffix like `repo` or `owner/repo` (every source it
+        /// matches is synced), or a glob. With no selector, every melded
+        /// source is synced. A selector also skips the whole-set-only steps:
+        /// managed-policy auto-meld provisioning and the nested-source
+        /// re-walk run only on an unscoped `sync`.
         // spec: CLI-231 CLI-50
         source: Option<String>,
 
-        /// After refreshing, run an `upgrade` pass (report + prompt) to apply upgrades.
-        /// Deprecated: prefer `mind upgrade`, which now syncs first by default.
+        /// After refreshing, run an `upgrade` pass (report + prompt) to apply
+        /// upgrades, scoped to the source(s) the selector matched (every
+        /// installed item when no selector is given). Deprecated: prefer
+        /// `mind upgrade`, which now syncs first by default.
         // spec: CLI-169
         #[arg(long)]
         upgrade: bool,
@@ -526,7 +532,9 @@ EXAMPLES:
     ///
     /// Downloads the release binary for this platform and replaces the running
     /// executable in place. `--check` reports whether a newer release is
-    /// available and changes nothing. Without `--yes` it prompts before replacing.
+    /// available and changes nothing. A prerelease running version (e.g. a
+    /// `-dev` source build) is offered its own matching release even though
+    /// the version numbers match. Without `--yes` it prompts before replacing.
     // Disable clap's auto `--version` flag on this subcommand so the explicit
     // `--to <VERSION>` argument below (pin a target release) owns the name
     // rather than shadowing the global `-V`/`--version` flag other verbs carry.
