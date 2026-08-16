@@ -366,11 +366,11 @@ prevent the lost-update and torn-read races a plain read-modify-write would allo
   the pinned release's `SHA256SUMS`.
 - `STO-76` The resolved `evolve` target version -- from an explicit `--to`, a
   managed-policy pin, or a fetched `releases/latest` `tag_name` -- is validated
-  as a plausible dotted-numeric version string
-  (`mindfile::is_plausible_version`) before it is interpolated into either URL
-  it drives: the release asset URL (STO-47's download) and the `SHA256SUMS`
-  URL. This runs before either URL is built and before any download-step
-  network call. Without it, a value carrying path segments (e.g.
+  as safe to use as a single URL path segment
+  (`mindfile::is_plausible_release_tag`) before it is interpolated into either
+  URL it drives: the release asset URL (STO-47's download) and the
+  `SHA256SUMS` URL. This runs before either URL is built and before any
+  download-step network call. Without it, a value carrying path segments (e.g.
   `1/../../../../attacker/mind/releases/download/v1`, from a repo/release
   takeover, a TLS-intercepting proxy, or a `--to` value copied from a
   malicious "install these steps" doc) re-points BOTH URLs at the same
@@ -379,6 +379,21 @@ prevent the lost-update and torn-read races a plain read-modify-write would allo
   attacker's own digest file and silently pass. A rejected value fails with a
   structured `SelfUpdatePolicy` error naming the value, refused before any
   network call the download step would make.
+
+  `is_plausible_release_tag` is a purpose-built sibling of
+  `mindfile::is_plausible_version` (used for `min-mind-version` and policy
+  version pins, spec/discovery.md DSC-40 and spec/policy.md POL-5x), not a
+  reuse of it: that validator is digits-and-dots only, which is correct for a
+  version pin but is stricter than a release tag needs to be, since it also
+  refuses a legitimate semver prerelease/build suffix (e.g. `1.2.3-rc1`).
+  Testing a prerelease before promoting it is a legitimate thing to want, and
+  since GitHub's `releases/latest` never surfaces a prerelease, an explicit
+  `--to` is the only way to reach one, so the release-tag validator accepts
+  `\d+(\.\d+)*(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?` while still rejecting `/`,
+  `\`, whitespace, control characters, and a `..` run anywhere in the string
+  -- including inside the prerelease/build suffix (e.g. `1.0.0-../..`), which
+  would otherwise smuggle a traversal segment past a naive "digits-and-dots is
+  gone, so a dash is safe" reading of the fix.
 - `STO-65` `evolve --check` (and the run path's equivalent report) names the
   resolved release target triple (`target_triple`, e.g.
   `x86_64-unknown-linux-musl`) alongside the version comparison, so the exact

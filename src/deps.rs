@@ -156,7 +156,7 @@ pub fn direct_dependency_keys(
     let text = read(item);
     item_edges(node, items, &by_name, &text)
         .into_iter()
-        .map(|i| items[i].key())
+        .map(|i| items[i].key().as_str().to_string())
         .collect()
 }
 
@@ -198,7 +198,7 @@ pub fn resolve(
     read: impl Fn(&CatalogItem) -> String,
 ) -> Resolution {
     let installed_idx: HashSet<usize> = (0..items.len())
-        .filter(|&i| installed.contains(&items[i].key()))
+        .filter(|&i| installed.contains(items[i].key().as_str()))
         .collect();
 
     // DEP-10: per source, decide whether to expand. A source is expanded only
@@ -486,7 +486,7 @@ pub fn installed_graph(
     // Filter catalog to installed items only.
     let nodes: Vec<CatalogItem> = items
         .iter()
-        .filter(|it| installed_keys.contains(&it.key()))
+        .filter(|it| installed_keys.contains(it.key().as_str()))
         .cloned()
         .collect();
 
@@ -497,7 +497,7 @@ pub fn installed_graph(
     let key_to_idx: HashMap<String, usize> = nodes
         .iter()
         .enumerate()
-        .map(|(i, it)| (it.key(), i))
+        .map(|(i, it)| (it.key().as_str().to_string(), i))
         .collect();
 
     // Build the full catalog by_name lookup (edges_of uses the full catalog for
@@ -512,12 +512,12 @@ pub fn installed_graph(
     let installed_to_full: HashMap<String, usize> = items
         .iter()
         .enumerate()
-        .filter(|(_, it)| installed_keys.contains(&it.key()))
-        .map(|(full_i, it)| (it.key(), full_i))
+        .filter(|(_, it)| installed_keys.contains(it.key().as_str()))
+        .map(|(full_i, it)| (it.key().as_str().to_string(), full_i))
         .collect();
 
     for (installed_i, node_item) in nodes.iter().enumerate() {
-        let full_i = match installed_to_full.get(&node_item.key()) {
+        let full_i = match installed_to_full.get(node_item.key().as_str()) {
             Some(&idx) => idx,
             None => continue,
         };
@@ -526,7 +526,7 @@ pub fn installed_graph(
 
         for dep_full_idx in dep_full_indices {
             let dep_key = items[dep_full_idx].key();
-            if let Some(&dep_installed_i) = key_to_idx.get(&dep_key)
+            if let Some(&dep_installed_i) = key_to_idx.get(dep_key.as_str())
                 && dep_installed_i != installed_i
                 && !edges[installed_i].contains(&dep_installed_i)
             {
@@ -560,7 +560,7 @@ impl InstalledGraph {
         let mut out = Vec::new();
         for (i, dep_list) in self.edges.iter().enumerate() {
             if dep_list.contains(&target_idx) {
-                let key = self.nodes[i].key();
+                let key = self.nodes[i].key().as_str().to_string();
                 if !out.contains(&key) {
                     out.push(key);
                 }

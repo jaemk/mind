@@ -236,29 +236,61 @@ manifest, and store.
   fingerprint's realistic blind spot: an mtime-PRESERVING replacement at
   unchanged size (`cp -p`, `rsync -a`, `tar -p`, `touch -r`, some FUSE/network
   mounts) -- not, as such a scheme is sometimes assumed to be limited by,
-  filesystem mtime granularity. The memo is display-only: every verb that ACTS
-  on a hash (`upgrade`, `introspect`, `recall`) calls `hash_path` directly,
-  never the memo, so a missed fingerprint change can never change what a verb
-  does -- at most it can make this row's drift marker, and the TUI-63 confirm
-  list, lag behind what a `upgrade_no_sync` apply (TUI-73) itself re-hashes and
-  acts on. That lag is NOT bounded to "one tick": the memo has no TTL, so once a
-  fingerprint fails to move, its content hash is served for the life of the
-  process -- not refreshed on the next poll -- until the item's path leaves the
-  current catalog (its source is unmelded, or the item is removed upstream), at
-  which point the next full load prunes it from the memo. `stat_fingerprint` is
-  not a content hash and is never compared against a recorded manifest hash.
-- `TUI-73` Applying the TUI-63 upgrade confirm (`u`, TUI-22) runs the NO-SYNC
-  upgrade (`commands::upgrade_no_sync`, CLI-169), not the plain sync-first
-  `upgrade`: the confirm's pending list was computed from the current poll
-  snapshot, so a sync-first apply could pull new upstream commits between the
+  filesystem mtime granularity. The memo is DISPLAY-ONLY, and its reach is
+  strictly bounded to the once-a-second poll's own row marker: every verb that
+  ACTS on a hash (`upgrade`, `introspect`, `recall`), and the TUI's own
+  authoritative recompute on `u` (TUI-74), calls `hash_path` directly, never the
+  memo, so a missed fingerprint change can never change what a verb does or what
+  the TUI-63 confirm list shows -- at most it can make a row's drift marker (the
+  TUI-63 trailing glyph, between polls) lag behind reality until the next poll
+  or the next `u` keypress, whichever comes first. That row-marker lag is NOT
+  bounded to "one tick": the memo has no TTL, so once a fingerprint fails to
+  move, its content hash is served for the life of the process -- not refreshed
+  on the next poll -- until the item's path leaves the current catalog (its
+  source is unmelded, or the item is removed upstream), at which point the next
+  full load prunes it from the memo. `stat_fingerprint` is not a content hash
+  and is never compared against a recorded manifest hash.
+- `TUI-73` Applying the TUI-63 upgrade confirm (`u`, TUI-22) runs the NO-SYNC,
+  KEY-SCOPED upgrade (`commands::upgrade_no_sync_keys`, extending CLI-169's
+  no-sync form with an exact-key restriction), never the plain sync-first
+  `upgrade`: a sync-first apply could pull new upstream commits between the
   confirm and the apply and act on an item the modal never named. Refreshing
   drift is the job of the separate `s` (Sync) action plus the ~1s re-poll
-  (TUI-15), not of the apply step. Because upgrade itself never fetches, the
-  confirm's empty-state wording says so explicitly rather than implying full
-  currency: "nothing is out of date since the last sync" (naming `s` as the
-  remedy), not a bare "nothing is out of date" that a user who applies
-  immediately after opening the TUI could misread as "you are current" even
-  when upstream has moved.
+  (TUI-15) or the `u` keypress's own recompute (TUI-74), not of the apply step.
+  The applied set equals the confirmed set BY CONSTRUCTION, not by two
+  independent computations happening to agree: `initiate_upgrade` (TUI-74)
+  stashes the exact item keys its confirm list names onto the pending action,
+  and the apply is scoped to precisely that key set, so it can act on strictly
+  fewer items than a fresh recompute would find stale (one drifted since the
+  confirm) but never on an item the modal never named. A confirmed key that has
+  become inapplicable by apply time -- forgotten, its source unmelded, or the
+  drift that made it stale already resolved -- is silently skipped rather than
+  aborting the batch (the same "silent skip" the CLI already gives an
+  out-of-scope item under a glob-filtered `upgrade <item>`); when every
+  confirmed key has become inapplicable this reports the ordinary "everything is
+  up to date", not an error. Because upgrade itself never fetches, the confirm's
+  empty-state wording says so explicitly rather than implying full currency:
+  "nothing is out of date since the last sync" (naming `s` as the remedy), not a
+  bare "nothing is out of date" that a user who applies immediately after
+  opening the TUI could misread as "you are current" even when upstream has
+  moved.
+- `TUI-74` Pressing `u` (`initiate_upgrade`, TUI-22) does not read the TUI-63
+  confirm list off the last poll snapshot's `stale` flags verbatim: it
+  recomputes staleness for every installed item first, bypassing the TUI-72
+  memo for any item the last poll's flag did not already catch. An item whose
+  flag is already `stale` (a rename, or content drift the memo did catch) stays
+  stale; for every other item, the keypress looks up its live catalog path and
+  recorded manifest hash and calls `hash_path` on that path directly, exactly as
+  `upgrade`/`introspect`/`recall` do (TUI-72), rather than trusting the memo.
+  This costs one extra content hash per installed item the poll's flag had not
+  already flagged -- the same read the no-sync apply (TUI-73) would pay anyway
+  -- paid once on the keypress rather than deferred to (at most) the next ~1s
+  poll tick. It closes a usability gap TUI-72's memo would otherwise leave open:
+  without this recompute, a memo-lagged item's drift is invisible to the TUI
+  until the next poll happens to catch it, so the confirm list can omit an item
+  that IS actually out of date and the user has no way to upgrade it from the
+  TUI in the meantime. The recomputed set is exactly what TUI-63's confirm list
+  names and exactly what TUI-73's apply is scoped to.
 - `TUI-64` Pressing `?` in normal mode opens a keymap help overlay listing every
   binding grouped by category (navigation, actions, general); any key closes it,
   intercepted ahead of normal-mode routing so it never leaks into search or an

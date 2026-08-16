@@ -15116,6 +15116,106 @@ fn sync_source_upgrade_scopes_to_the_named_source_only() {
 }
 
 #[test]
+fn sync_multi_match_filter_upgrade_names_every_matched_source_before_consent() {
+    // spec: CLI-233 -- CLI-232 scoped `sync <filter> --upgrade` to the matched
+    // sources, but a FILTER can match more sources than the user pictured while
+    // reading as if it named one. Two sources whose identities share the
+    // trailing component `skills` (the sandbox identity is
+    // `<base_name>/<source dir name>`, and each Sandbox gets its own base), so
+    // the filter `skills` matches BOTH: the blast radius (each matched source's
+    // items upgraded, and its install hook possibly re-run, HOOK-11) must be
+    // named before consent, in the text prompt and in the `--json` refusal.
+    let one = Sandbox::bare("skills");
+    one.write_and_commit(
+        "skills/widget-a/SKILL.md",
+        "---\nname: widget-a\ndescription: a\n---\n# widget a\n",
+    );
+    let two = Sandbox::bare("skills");
+    two.write_and_commit(
+        "skills/widget-b/SKILL.md",
+        "---\nname: widget-b\ndescription: b\n---\n# widget b\n",
+    );
+
+    assert!(one.mind(&["meld", &one.source_spec()]).success);
+    assert!(one.mind(&["meld", &two.source_spec()]).success);
+    assert!(one.mind(&["learn", "skill:widget-a"]).success);
+    assert!(one.mind(&["learn", "skill:widget-b"]).success);
+
+    // Both sources drift, so both have a pending upgrade for the filter to hit.
+    one.write_and_commit(
+        "skills/widget-a/SKILL.md",
+        "---\nname: widget-a\ndescription: a\n---\n# widget a\nedited\n",
+    );
+    two.write_and_commit(
+        "skills/widget-b/SKILL.md",
+        "---\nname: widget-b\ndescription: b\n---\n# widget b\nedited\n",
+    );
+
+    let one_id = format!("{}/skills", one.base_name());
+    let two_id = format!("{}/skills", two.base_name());
+
+    // Text mode, no `--yes`: the note is printed BEFORE the confirmation is
+    // sought, so it lands on stdout even though the non-TTY confirm then
+    // refuses (LIFE-45). Both matched identities must be named.
+    let r = one.mind(&["sync", "skills", "--upgrade"]);
+    assert!(
+        r.stdout.contains(&one_id) && r.stdout.contains(&two_id),
+        "the confirmation must name every matched source ({one_id}, {two_id}): {}",
+        r.stdout
+    );
+    // A non-TTY `confirm_default_yes` declines rather than erroring, so the run
+    // exits 0 having changed nothing. The invariant that matters is that it did
+    // not apply without consent.
+    let unapplied =
+        std::fs::read_to_string(one.mind_home.join("store/skill/widget-a/SKILL.md")).unwrap();
+    assert!(
+        !unapplied.contains("edited"),
+        "nothing may be applied without consent: {unapplied}"
+    );
+
+    // `--json` never prompts, so the same disclosure must ride the refusal's
+    // `action` text instead.
+    let j = one.mind(&["sync", "skills", "--upgrade", "--json"]);
+    assert!(!j.success);
+    let v = parse_json(&j.stdout);
+    assert_eq!(
+        v["error"]["kind"], "confirmation-required",
+        "expected the LIFE-45 refusal: {v}"
+    );
+    let action = v["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        action.contains(&one_id) && action.contains(&two_id),
+        "the --json refusal must name every matched source: {action}"
+    );
+
+    // A filter that resolves to ONE source reads like naming it already, so it
+    // must not grow the note.
+    let single = one.mind(&["sync", &one_id, "--upgrade"]);
+    assert!(
+        !single.stdout.contains("this filter matched"),
+        "a single-match filter must not grow the confirmation: {}",
+        single.stdout
+    );
+
+    // With consent, the multi-match filter really does upgrade both.
+    let applied = one.mind(&["sync", "skills", "--upgrade", "--yes"]);
+    assert!(
+        applied.success,
+        "sync skills --upgrade --yes failed: {} {}",
+        applied.stdout, applied.stderr
+    );
+    for item in ["widget-a", "widget-b"] {
+        let store =
+            std::fs::read_to_string(one.mind_home.join(format!("store/skill/{item}/SKILL.md")))
+                .unwrap();
+        assert!(
+            store.contains("edited"),
+            "{item} must be upgraded by the multi-match filter: {store}"
+        );
+    }
+}
+
+#[test]
 fn sync_source_upgrade_does_not_rerun_an_unrelated_sources_hook() {
     // spec: CLI-232 -- H2's HOOK-11 half: `sync <source> --upgrade` ran
     // `rerun_source_hooks` with `hook_scope = None` (every source), so it could

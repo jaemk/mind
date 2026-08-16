@@ -616,7 +616,10 @@ fn run_item_build(
     // at stderr (main.rs's `json_stdout`). See
     // `tests/cli_hooks.rs::hooks_run_build_rebuilding_note_is_one_document`.
     // spec: CLI-217
-    println!("rebuilding {} via transactional reinstall", installed.key());
+    println!(
+        "rebuilding {} via transactional reinstall",
+        installed.display_key()
+    );
     let new_installed = crate::install::install(
         paths,
         catalog_item,
@@ -678,7 +681,7 @@ fn run_item_lifecycle_hooks(
                 // spec: CLI-217
                 crate::render::note(format!(
                     "note: no install hooks declared for {}",
-                    installed.key()
+                    installed.display_key()
                 ));
                 return Ok(());
             }
@@ -718,7 +721,7 @@ fn run_item_lifecycle_hooks(
             // record of an earlier hook that already ran its side effect (it
             // would otherwise be offered, and its side effect re-applied, on
             // retry).
-            record_item_hooks_run(paths, &installed.key(), &recorded)?;
+            record_item_hooks_run(paths, installed.key().as_str(), &recorded)?;
             outcome?;
         }
         HookEventArg::Uninstall => {
@@ -727,7 +730,7 @@ fn run_item_lifecycle_hooks(
                 // spec: CLI-217
                 crate::render::note(format!(
                     "note: no uninstall hooks declared for {}",
-                    installed.key()
+                    installed.display_key()
                 ));
                 return Ok(());
             }
@@ -836,7 +839,7 @@ fn list_source_hooks(paths: &Paths, target: &str, selector: &str) -> Result<()> 
                 };
 
                 if !item_hooks.is_empty() {
-                    println!("  item: {}", installed.key());
+                    println!("  item: {}", installed.display_key());
                     let mut item_hooks_json: Vec<ItemHookJson> = Vec::new();
                     for h in item_hooks {
                         let kind_str = if h.optional { "optional" } else { "required" };
@@ -852,7 +855,8 @@ fn list_source_hooks(paths: &Paths, target: &str, selector: &str) -> Result<()> 
                         });
                     }
                     items_json.push(ItemHooksJson {
-                        item: installed.key(),
+                        // spec: DSC-95 -- `--json` field.
+                        item: installed.display_key(),
                         source: None,
                         hooks: item_hooks_json,
                     });
@@ -900,7 +904,11 @@ fn list_item_hooks(paths: &Paths, target: &str, item_ref: &crate::resolve::ItemR
     let mut items_json: Vec<ItemHooksJson> = Vec::new();
 
     for installed in matches {
-        println!("item: {} (source {})", installed.key(), installed.source);
+        println!(
+            "item: {} (source {})",
+            installed.display_key(),
+            installed.source
+        );
 
         let source = registry.sources.iter().find(|s| s.name == installed.source);
         let hooks: Vec<ResolvedHook> = if let Some(src) = source {
@@ -935,7 +943,8 @@ fn list_item_hooks(paths: &Paths, target: &str, item_ref: &crate::resolve::ItemR
         }
 
         items_json.push(ItemHooksJson {
-            item: installed.key(),
+            // spec: DSC-95 -- `--json` field.
+            item: installed.display_key(),
             source: Some(installed.source.clone()),
             hooks: hooks_json,
         });

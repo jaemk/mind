@@ -587,8 +587,10 @@ fn expand_references(
 
     // DEP-6: validate every `requires` entry before touching any file. A bad
     // entry here aborts the staged install (the live copy is still untouched).
+    // spec: DSC-95 -- `MindError::BadReference`'s `#[error(...)]` Display
+    // interpolates `item` verbatim, with no sanitizing step of its own.
     let bad_ref = |referent: String, reason: crate::error::BadRefReason| MindError::BadReference {
-        item: item.key(),
+        item: item.key().display(),
         referent,
         reason,
         in_source: item.source.clone(),
@@ -721,7 +723,7 @@ fn run_build_hook(
         // spec: CLI-217
         crate::render::note(format!(
             "note: skipped build hook for {} in a non-interactive context; its tooling is not built",
-            item.key()
+            item.display_key()
         ));
         false
     } else {
@@ -744,13 +746,13 @@ fn run_build_hook(
         // under `--json` the whole run's fd 1 already points at stderr
         // (main.rs's `json_stdout`), so it cannot reach the result document.
         // spec: CLI-217
-        println!("running build hook for {}", item.key());
+        println!("running build hook for {}", item.display_key());
         crate::hook::run_hook(build, staging, &item.source, "build")?;
     } else if crate::hook::is_tty() && !dangerously_skip {
         // spec: CLI-217
         crate::render::note(format!(
             "note: skipped build hook for {}; its tooling is not built",
-            item.key()
+            item.display_key()
         ));
     }
     Ok(())
@@ -905,9 +907,11 @@ fn run_item_install_hooks_recording(
     recorded: &mut Vec<crate::source::RecordedHook>,
 ) -> Result<()> {
     for hook in hooks {
+        // spec: DSC-95 -- `run_item_hook`'s `key` param is display-only (it
+        // lands straight in a `println!`/`note`), so pass the sanitized form.
         let ran = run_item_hook(
             "install",
-            &item.key(),
+            &item.display_key(),
             &item.source,
             &hook.run,
             store,
@@ -933,9 +937,11 @@ pub fn run_item_uninstall_hooks(
     dangerously_skip: bool,
 ) -> Result<()> {
     for hook in hooks {
+        // spec: DSC-95 -- see the identical note in
+        // `run_item_install_hooks_recording`.
         run_item_hook(
             "uninstall",
-            &item.key(),
+            &item.display_key(),
             &item.source,
             &hook.run,
             store,

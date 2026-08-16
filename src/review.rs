@@ -490,7 +490,10 @@ fn run_checks(
         if item.description.is_none() {
             advisory.push(Finding::advisory(
                 "missing-description",
-                format!("{}: no description in frontmatter or mind.toml", item.key()),
+                format!(
+                    "{}: no description in frontmatter or mind.toml",
+                    item.key().as_str()
+                ),
             ));
         }
     }
@@ -509,7 +512,7 @@ fn run_checks(
                 "custom-link",
                 format!(
                     "{}: links to a custom target '{link}' instead of the default location",
-                    item.key()
+                    item.key().as_str()
                 ),
             ));
         }
@@ -528,7 +531,7 @@ fn run_checks(
             if let Some(cmd) = cmd {
                 advisory.push(Finding::advisory(
                     "item-hook",
-                    format!("{}: declares an {event} hook '{cmd}'", item.key()),
+                    format!("{}: declares an {event} hook '{cmd}'", item.key().as_str()),
                 ));
             }
         }
@@ -570,7 +573,7 @@ fn run_checks(
                         "bad-reference",
                         format!(
                             "{}: {{{{ns:{}}}}} does not resolve to any sibling in this source",
-                            item.key(),
+                            item.key().as_str(),
                             bad_ref
                         ),
                     ));
@@ -581,7 +584,7 @@ fn run_checks(
                             "{}: {{{{ns:{}}}}} does not resolve to any sibling in this source, but \
                              it will not expand here anyway -- tokens expand in markdown only, so \
                              this is dead text, not a defect that would break an install",
-                            item.key(),
+                            item.key().as_str(),
                             bad_ref
                         ),
                     ));
@@ -604,7 +607,7 @@ fn run_checks(
                         "bad-reference",
                         format!(
                             "{}: requires: {} is not a valid item ref",
-                            item.key(),
+                            item.key().as_str(),
                             entry
                         ),
                     ));
@@ -617,7 +620,7 @@ fn run_checks(
                     "bad-reference",
                     format!(
                         "{}: requires: {} crosses sources; `requires` is intra-source only",
-                        item.key(),
+                        item.key().as_str(),
                         entry
                     ),
                 ));
@@ -632,7 +635,7 @@ fn run_checks(
                     "bad-reference",
                     format!(
                         "{}: requires: {} does not resolve to any sibling in this source",
-                        item.key(),
+                        item.key().as_str(),
                         entry
                     ),
                 ));
@@ -641,7 +644,7 @@ fn run_checks(
                     "bad-reference",
                     format!(
                         "{}: requires: {} is ambiguous (matches {} siblings); use kind:name to narrow",
-                        item.key(),
+                        item.key().as_str(),
                         entry,
                         matches.len()
                     ),
@@ -670,7 +673,7 @@ fn run_checks(
                     "unguarded-reference",
                     format!(
                         "{}: references sibling(s) in prose: {}; prefixing may break them at runtime (use {{{{ns:name}}}})",
-                        item.key(),
+                        item.key().as_str(),
                         refs.join(", ")
                     ),
                 ));
@@ -734,7 +737,7 @@ fn run_checks(
                 if expands {
                     hard.push(Finding::hard(
                         "bad-reference",
-                        format!("{}: {token} {detail} in this source", item.key()),
+                        format!("{}: {token} {detail} in this source", item.key().as_str()),
                     ));
                 } else {
                     advisory.push(Finding::advisory(
@@ -743,7 +746,7 @@ fn run_checks(
                             "{}: {token} {detail} in this source, but it will not expand here \
                              anyway -- tokens expand in markdown only, so this is dead text, not \
                              a defect that would break an install",
-                            item.key()
+                            item.key().as_str()
                         ),
                     ));
                     check8_bad_token = Some(token);
@@ -765,19 +768,19 @@ fn run_checks(
                 let msg = match hp.kind {
                     crate::namespace::HardcodedKind::OwnResource => format!(
                         "{}: hardcodes its own resource path '{}'; this works but assumes every install lands at that exact agent-home path, so it breaks under a prefix or a second home{}",
-                        item.key(),
+                        item.key().as_str(),
                         hp.matched,
                         suggestion
                     ),
                     crate::namespace::HardcodedKind::SharedTool => format!(
                         "{}: hardcodes a shared tool path '{}'; a tool is store-only and never linked into an agent home, so this will not resolve{}",
-                        item.key(),
+                        item.key().as_str(),
                         hp.matched,
                         suggestion
                     ),
                     crate::namespace::HardcodedKind::OtherItem => format!(
                         "{}: hardcoded install path '{}'; a literal mind install path is fragile - use a path token to track it dynamically, or if a [source].install / [[hooks]] step places the resource at that path the reference is intentional and safe{}",
-                        item.key(),
+                        item.key().as_str(),
                         hp.matched,
                         suggestion
                     ),
@@ -816,13 +819,13 @@ fn run_checks(
                 let msg = if where_ == "a non-markdown file" {
                     format!(
                         "{}: {{{{ns:{}}}}} will not expand here; tokens expand in markdown only",
-                        item.key(),
+                        item.key().as_str(),
                         r.name
                     )
                 } else {
                     format!(
                         "{}: {{{{ns:{}}}}} in {where_}; a name token belongs in prose (code/paths use {{{{tools:}}}}/{{{{self}}}}/{{{{path:}}}})",
-                        item.key(),
+                        item.key().as_str(),
                         r.name
                     )
                 };
@@ -874,7 +877,7 @@ fn run_checks(
                              tokens expand in markdown only, so move the reference into markdown \
                              prose, have the script self-locate, or list this file in the item's \
                              `expand:` frontmatter to expand it here",
-                            item.key(),
+                            item.key().as_str(),
                             tokens.join(", ")
                         ),
                     ));
@@ -886,7 +889,7 @@ fn run_checks(
                 "bare-tool-reference",
                 format!(
                     "{}: names tool item(s) in prose: {}; a tool item is reached by a token ({{{{tools:name}}}}), or if a [source].install / [[hooks]] step places the helper at a known location calling it there is intentional and safe",
-                    item.key(),
+                    item.key().as_str(),
                     bare_tools.join(", ")
                 ),
             ));
@@ -909,7 +912,7 @@ fn run_checks(
                     "bad-expand",
                     format!(
                         "{}: expand: {entry} does not name a file this item ships",
-                        item.key()
+                        item.key().as_str()
                     ),
                 ));
             }
@@ -956,7 +959,7 @@ fn run_checks(
                     "unshipped-tooling",
                     format!(
                         "{}: git does not track {}; the file resolves this tool's entrypoint in your working tree but is absent from a clone, so {{{{tools:{}}}}} references break on a remote meld. Commit it (or produce it with a build hook).",
-                        item.key(),
+                        item.key().as_str(),
                         untracked.join(", "),
                         item.name
                     ),
@@ -985,7 +988,7 @@ fn run_checks(
                     if !target.is_file() || crate::git::is_tracked(source_dir, &target) {
                         continue;
                     }
-                    if !seen.insert((item.key(), target.clone())) {
+                    if !seen.insert((item.key().as_str().to_string(), target.clone())) {
                         continue;
                     }
                     let shown = target
@@ -997,7 +1000,7 @@ fn run_checks(
                         "unshipped-tooling",
                         format!(
                             "{}: git does not track {shown}, referenced as {token}; it resolves in your working tree but is absent from a clone, so the reference breaks on a remote meld. Commit it.",
-                            item.key(),
+                            item.key().as_str(),
                         ),
                     ));
                 }
@@ -1034,7 +1037,7 @@ fn run_checks(
                             "ns-tool-reference",
                             format!(
                                 "{}: {{{{ns:{name}}}}} names the tool '{name}' by its bare name; a tool is store-only and its bare name resolves to nothing runnable -- use {{{{tools:{name}}}}} for its entrypoint or {{{{path:tool:{name}}}}} for its directory.",
-                                item.key(),
+                                item.key().as_str(),
                             ),
                         ));
                     }
@@ -1204,7 +1207,7 @@ pub(crate) fn duplicate_tooling_findings(items: &[CatalogItem]) -> Vec<Finding> 
             let entry = groups
                 .entry(hash)
                 .or_insert_with(|| (base, BTreeSet::new()));
-            entry.1.insert(item.key());
+            entry.1.insert(item.key().as_str().to_string());
         }
     }
     groups

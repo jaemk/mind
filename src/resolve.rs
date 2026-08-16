@@ -227,9 +227,22 @@ pub fn resolve<'a>(
         [only] => Ok(only),
         many => Err(MindError::AmbiguousItem {
             query: r.name.clone(),
+            // spec: DSC-95 -- `MindError::AmbiguousItem`'s `#[error(...)]`
+            // Display joins `candidates` verbatim into the rejection message
+            // with no sanitizing step of its own, so each entry (both the
+            // source name and the item key, both source-controlled) must
+            // already be display-safe here. Sanitize each field individually,
+            // before composing, per `strip_ansi`'s own caveat: a dangling
+            // escape in one field must not be able to swallow the next.
             candidates: many
                 .iter()
-                .map(|it| format!("{}#{}", it.source, it.key()))
+                .map(|it| {
+                    format!(
+                        "{}#{}",
+                        crate::sanitize::strip_ansi(&it.source),
+                        it.key().display()
+                    )
+                })
                 .collect(),
         }),
     }
@@ -320,9 +333,22 @@ pub fn resolve_installed<'a>(
         [only] => Ok(only),
         many => Err(MindError::AmbiguousItem {
             query: r.name.clone(),
+            // spec: DSC-95 -- `MindError::AmbiguousItem`'s `#[error(...)]`
+            // Display joins `candidates` verbatim into the rejection message
+            // with no sanitizing step of its own, so each entry (both the
+            // source name and the item key, both source-controlled) must
+            // already be display-safe here. Sanitize each field individually,
+            // before composing, per `strip_ansi`'s own caveat: a dangling
+            // escape in one field must not be able to swallow the next.
             candidates: many
                 .iter()
-                .map(|it| format!("{}#{}", it.source, it.key()))
+                .map(|it| {
+                    format!(
+                        "{}#{}",
+                        crate::sanitize::strip_ansi(&it.source),
+                        it.key().display()
+                    )
+                })
                 .collect(),
         }),
     }
@@ -645,6 +671,26 @@ mod tests {
         ));
     }
 
+    /// DSC-95: `AmbiguousItem`'s `candidates` (built from `it.source` and
+    /// `it.key()`, both source-controlled) must reach the caller already
+    /// sanitized -- `MindError::AmbiguousItem`'s `#[error(...)]` Display has
+    /// no sanitizing step of its own, so a raw ESC byte in the source name
+    /// would otherwise ride straight to a terminal via `main.rs`'s
+    /// `eprintln!("error: {err}")`.
+    // spec: DSC-95
+    #[test]
+    fn ambiguous_item_candidates_are_sanitized_for_display() {
+        let items = vec![
+            cat(ItemKind::Skill, "review", "evil\x1b[31msource"),
+            cat(ItemKind::Skill, "review", "other"),
+        ];
+        let r = parse_item_ref("review").unwrap();
+        let err = resolve(&items, &r, 2).unwrap_err();
+        let msg = err.to_string();
+        assert!(!msg.contains('\x1b'), "must strip raw ESC: {msg:?}");
+        assert!(msg.contains("evil"), "must still name the source: {msg}");
+    }
+
     #[test]
     fn kind_prefix_disambiguates() {
         let items = vec![
@@ -671,7 +717,24 @@ mod tests {
     }
 
     fn manifest(items: Vec<InstalledItem>) -> std::collections::BTreeMap<String, InstalledItem> {
-        items.into_iter().map(|it| (it.key(), it)).collect()
+        items.into_iter().map(|it| (it.key().into(), it)).collect()
+    }
+
+    /// DSC-95: `resolve_installed`'s `AmbiguousItem` candidates must reach the
+    /// caller already sanitized, mirroring `ambiguous_item_candidates_are_sanitized_for_display`
+    /// for the catalog-side `resolve` above.
+    // spec: DSC-95
+    #[test]
+    fn resolve_installed_ambiguous_item_candidates_are_sanitized_for_display() {
+        let m = manifest(vec![
+            inst(ItemKind::Skill, "review", "evil\x1b[31msource"),
+            inst(ItemKind::Agent, "review", "other"),
+        ]);
+        let bare = parse_item_ref("review").unwrap();
+        let err = resolve_installed(&m, &bare).unwrap_err();
+        let msg = err.to_string();
+        assert!(!msg.contains('\x1b'), "must strip raw ESC: {msg:?}");
+        assert!(msg.contains("evil"), "must still name the source: {msg}");
     }
 
     #[test]

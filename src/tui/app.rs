@@ -22,16 +22,28 @@ pub struct PendingAction {
     /// nothing extra (the confirm stays as before in that case).
     // spec: DEP-40
     pub dep_tree: Option<String>,
+    /// For `ActionKind::Upgrade` only: the exact item keys (`kind:name`) the
+    /// confirm modal listed and the user consented to, computed by
+    /// `initiate_upgrade`'s authoritative (memo-bypassing) recompute. The apply
+    /// is scoped to exactly this set (`commands::upgrade_no_sync_keys`), so the
+    /// applied set equals the confirmed set BY CONSTRUCTION rather than by two
+    /// independent computations happening to agree (TUI-72, TUI-73). Unused
+    /// (left empty) for every other action kind.
+    // spec: TUI-72 TUI-73
+    pub upgrade_keys: Vec<String>,
 }
 
 impl PendingAction {
-    /// Construct a pending action with no dependency tree (the common case for
-    /// every non-Learn action and for a Learn that adds no dependencies).
+    /// Construct a pending action with no dependency tree and no upgrade-key
+    /// scope (the common case for every non-Learn, non-Upgrade action, for a
+    /// Learn that adds no dependencies, and for any Upgrade built directly
+    /// rather than through `initiate_upgrade`, e.g. in tests).
     pub fn new(kind: ActionKind, description: String) -> Self {
         PendingAction {
             kind,
             description,
             dep_tree: None,
+            upgrade_keys: Vec::new(),
         }
     }
 }
@@ -948,35 +960,64 @@ impl App {
         self.modal_visible = true;
     }
 
-    /// Build the per-item pending-upgrade list for the confirm modal (TUI-63,
-    /// M2): the CLI shows a hash/commit delta before an upgrade applies
-    /// (DEP-40's CLI report); the TUI previously showed only "Upgrade all
-    /// pending items?" with no indication of what that would touch. Every
-    /// installed item whose snapshot `stale` flag is set (computed in data.rs
-    /// against the CLI's own CLI-75 comparison) is listed by key and source,
-    /// pure (reads `last_snapshot`, no I/O).
-    // spec: TUI-63
-    fn pending_upgrade_items(&self) -> Vec<String> {
+    /// Whether `it` is out of date RIGHT NOW, bypassing the TUI-72 memo rather
+    /// than trusting the (possibly memo-lagged) `SnapshotInstalled.stale` flag
+    /// the last poll computed. If the poll already found it stale (content
+    /// drift the memo did catch, or a rename -- rename detection is never
+    /// memoized, so it is always as fresh as the last poll), that stands.
+    /// Otherwise, look up its live catalog path and recorded manifest hash
+    /// (`data::item_path_and_hash`, populated by the same load/poll) and hash
+    /// the path directly (`hash_path`, never the memo): this is the one extra
+    /// disk read per installed item that closes the memo's display lag before
+    /// it ever reaches the confirm modal (TUI-72's usability corner).
+    // spec: TUI-72 TUI-73
+    fn is_actually_stale(it: &crate::tui::data::SnapshotInstalled) -> bool {
+        if it.stale {
+            return true;
+        }
+        match crate::tui::data::item_path_and_hash(&it.key) {
+            Some((path, recorded_hash)) => crate::hash::hash_path(&path)
+                .ok()
+                .is_none_or(|h| h != recorded_hash),
+            // No matching catalog item as of the last load/poll: nothing to
+            // hash, and `stale` was already false for the same reason.
+            None => false,
+        }
+    }
+
+    /// Authoritative per-item pending-upgrade list for the confirm modal
+    /// (TUI-63, TUI-72, TUI-73): recomputes staleness for every installed item
+    /// via [`is_actually_stale`] rather than trusting the last poll's
+    /// (possibly memo-lagged) `stale` flags. Returns the stale items
+    /// themselves so `initiate_upgrade` can build both the display list and
+    /// the exact key set the apply will be scoped to from ONE recompute.
+    // spec: TUI-63 TUI-72 TUI-73
+    fn recompute_stale_items(&self) -> Vec<&crate::tui::data::SnapshotInstalled> {
         let Some(snap) = &self.last_snapshot else {
             return Vec::new();
         };
         snap.installed
             .iter()
-            .filter(|it| it.stale)
-            .map(|it| format!("{} ({})", it.key, it.source))
+            .filter(|it| Self::is_actually_stale(it))
             .collect()
     }
 
     fn initiate_upgrade(&mut self) {
-        let pending = self.pending_upgrade_items();
+        let stale_items = self.recompute_stale_items();
+        let keys: Vec<String> = stale_items.iter().map(|it| it.key.clone()).collect();
+        let pending: Vec<String> = stale_items
+            .iter()
+            .map(|it| format!("{} ({})", it.key, it.source))
+            .collect();
         let description = if pending.is_empty() {
             // Nothing is out of date; still confirm (mirrors the CLI, which
             // reports "nothing to upgrade" rather than silently no-op'ing).
-            // spec: TUI-73 - the pending set is only as fresh as the last sync
-            // or poll: `u` itself never fetches (`upgrade_no_sync`), so a bare
-            // "nothing is out of date" would read as "you are current" even
-            // when upstream has moved and nobody has synced yet. Name the
-            // qualifier and the remedy explicitly.
+            // spec: TUI-73 - the recompute above bypasses the TUI-72 memo, but
+            // it is still only as fresh as the last SYNC: `u` itself never
+            // fetches (`upgrade_no_sync_keys`), so a bare "nothing is out of
+            // date" would read as "you are current" even when upstream has
+            // moved and nobody has synced yet. Name the qualifier and the
+            // remedy explicitly.
             "Upgrade: nothing is out of date since the last sync. Press `s` to \
              sync and check for updates. Proceed with upgrade anyway?"
                 .to_string()
@@ -987,7 +1028,16 @@ impl App {
                 pending.join("\n")
             )
         };
-        self.pending_action = Some(PendingAction::new(ActionKind::Upgrade, description));
+        // spec: TUI-73 - the apply is given exactly `keys`, the same set just
+        // listed above, so the applied set equals the confirmed set BY
+        // CONSTRUCTION rather than by two independent computations (this one,
+        // and whatever the apply would otherwise re-derive) happening to agree.
+        self.pending_action = Some(PendingAction {
+            kind: ActionKind::Upgrade,
+            description,
+            dep_tree: None,
+            upgrade_keys: keys,
+        });
         self.modal_visible = true;
     }
 
@@ -2525,6 +2575,13 @@ mod tests {
             desc.contains("local/agents"),
             "confirm must name the stale item's source: {desc:?}"
         );
+        // spec: TUI-73 - the confirm stashes the exact key(s) it listed onto
+        // the pending action, so the apply can be scoped to precisely that set.
+        assert_eq!(
+            app.pending_action.as_ref().unwrap().upgrade_keys,
+            vec!["skill:review".to_string()],
+            "the confirmed key set must name exactly the stale item shown"
+        );
     }
 
     #[test]
@@ -2560,14 +2617,186 @@ mod tests {
             desc.contains("`s`"),
             "confirm must name the sync remedy key: {desc:?}"
         );
+        // spec: TUI-73 - nothing confirmed means nothing to scope the apply to.
+        assert!(
+            app.pending_action.as_ref().unwrap().upgrade_keys.is_empty(),
+            "no stale items means the confirmed key set must be empty"
+        );
+    }
+
+    /// A temp base dir + `Paths` pointed at it, mirroring the sibling helper in
+    /// `data.rs`'s own test module (each TUI test file keeps its own copy
+    /// rather than sharing one across files).
+    fn upgrade_temp_paths() -> (crate::paths::Paths, std::path::PathBuf) {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let base =
+            std::env::temp_dir().join(format!("mind-tui-app-upgrade-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let paths = crate::paths::Paths {
+            mind_home: base.join("mind"),
+            claude_home: base.join("claude"),
+        };
+        (paths, base)
+    }
+
+    fn upgrade_init_git_repo(dir: &std::path::Path) {
+        use std::process::Command;
+        let run = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .expect("git");
+        };
+        run(&["-c", "init.defaultBranch=main", "init", "-q"]);
+        run(&["config", "user.email", "t@t"]);
+        run(&["config", "user.name", "t"]);
+    }
+
+    #[test]
+    fn initiate_upgrade_recomputes_authoritatively_bypassing_a_poisoned_memo() {
+        // spec: TUI-72 TUI-74 - the entire point of the fix: the TUI-72 memo is
+        // display-only and may lag, but the `u` keypress must NOT read the
+        // last poll snapshot's `stale` flag verbatim. It recomputes via
+        // `hash_path` directly (through `data::item_path_and_hash`), so a
+        // memo-lagged item still shows up in the confirm list and its key is
+        // still stashed for the apply -- closing the usability corner where a
+        // stale memo would otherwise hide an out-of-date item from the TUI
+        // entirely.
+        //
+        // A real filesystem edit always moves `ctime`/inode (hash.rs closed
+        // the mtime-preserving blind spot), so the memo can no longer be
+        // fooled by any real sequence of filesystem calls; the ONLY way to
+        // construct "memo says clean, real content differs" is to poison the
+        // memo's cache directly (`data::poison_memo_for_test`), which is
+        // exactly what a missed fingerprint change would have looked like
+        // before that fix.
+        use std::process::Command;
+
+        let (paths, base) = upgrade_temp_paths();
+        crate::paths::mkdir_p(&paths.mind_home).unwrap();
+        crate::config::Config {
+            lobes: vec![crate::config::LobeEntry::bare(
+                paths.claude_home.to_str().unwrap(),
+            )],
+            ..Default::default()
+        }
+        .save(&paths)
+        .unwrap();
+
+        let src = base.join("poisoned-memo-source");
+        std::fs::create_dir_all(src.join("skills/review")).unwrap();
+        let item_path = src.join("skills/review");
+        std::fs::write(
+            item_path.join("SKILL.md"),
+            "---\ndescription: review skill\n---\n# review\noriginal content\n",
+        )
+        .unwrap();
+        upgrade_init_git_repo(&src);
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(&src)
+                .output()
+                .expect("git");
+        };
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "initial"]);
+
+        crate::commands::meld(
+            &paths,
+            src.to_str().unwrap(),
+            None,
+            vec![],
+            vec![],
+            false,
+            crate::commands::PinRequest::None,
+            None,
+            false,
+        )
+        .expect("meld");
+        crate::commands::learn(
+            &paths,
+            "skill:review",
+            false,
+            crate::commands::InstallFlow {
+                yes: true,
+                clobber: crate::commands::Clobber::Force,
+                dangerously_skip: true,
+                dangerously_skip_build: true,
+            },
+        )
+        .expect("learn");
+
+        // A prime load: not stale yet, and populates HASH_MEMO + the
+        // item-path index for this thread with the correct, matching hash.
+        let snap0 = crate::tui::data::load(&paths).expect("prime load");
+        assert!(
+            !snap0.installed[0].stale,
+            "freshly installed item must not be stale before the edit"
+        );
+
+        // Real content edit: content hash changes for real (also moves
+        // ctime/fingerprint for real, but that is irrelevant here -- we poison
+        // the memo directly rather than relying on the fingerprint missing it).
+        std::fs::write(
+            item_path.join("SKILL.md"),
+            "---\ndescription: review skill\n---\n# review\nEDITED content\n",
+        )
+        .unwrap();
+
+        // Poison the memo: seed it with the item's CURRENT (post-edit) stat
+        // fingerprint but the ORIGINAL (pre-edit, matches-the-manifest) hash,
+        // so `memoized_hash` -- and therefore the next `data::load`'s `stale`
+        // flag -- reports "clean" even though the real content has changed.
+        let manifest = crate::manifest::Manifest::load(&paths).unwrap();
+        let recorded_hash = manifest.items.get("skill:review").unwrap().hash.clone();
+        crate::tui::data::poison_memo_for_test(&item_path, &recorded_hash);
+
+        // Confirm the poisoned condition: a plain load now (wrongly) reports
+        // this item as NOT stale, exactly the bug scenario this test targets.
+        let poisoned_snap = crate::tui::data::load(&paths).expect("poisoned load");
+        assert!(
+            !poisoned_snap.installed[0].stale,
+            "the poisoned memo must make the poll snapshot report this item as \
+             clean -- otherwise this test is not exercising the memo-lag case"
+        );
+
+        // Now the actual TUI flow: apply the (memo-lagged) snapshot and press `u`.
+        let mut app = App::new(String::new(), None, None);
+        app.apply_snapshot(poisoned_snap);
+        app.apply_intent(Intent::ActionUpgrade);
+
+        let pending = app
+            .pending_action
+            .as_ref()
+            .expect("ActionUpgrade must arm a pending confirm");
+        assert!(
+            pending.description.contains("skill:review"),
+            "the authoritative recompute must surface the memo-lagged item in \
+             the confirm list even though the poll snapshot's `stale` flag was \
+             false: {:?}",
+            pending.description
+        );
+        assert_eq!(
+            pending.upgrade_keys,
+            vec!["skill:review".to_string()],
+            "the memo-lagged item's key must be stashed for the apply too, not \
+             just shown in the description"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
     fn pending_upgrade_items_empty_without_a_snapshot() {
-        // spec: TUI-63 - before any snapshot has loaded, pending_upgrade_items
-        // must return empty rather than panicking on last_snapshot being None.
+        // spec: TUI-63 TUI-72 - before any snapshot has loaded,
+        // recompute_stale_items must return empty rather than panicking on
+        // last_snapshot being None.
         let app = App::new(String::new(), None, None);
-        assert!(app.pending_upgrade_items().is_empty());
+        assert!(app.recompute_stale_items().is_empty());
     }
 
     // --- TUI-64: `?` keymap help overlay ---

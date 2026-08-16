@@ -286,9 +286,12 @@ EXAMPLES:
     /// Unmelds a source and uninstalls every item the source installed; use
     /// `--keep-items` to keep them.
     ///
-    /// The source name may be the full `host/owner/repo` or an unambiguous
-    /// trailing suffix (e.g. `repo` or `owner/repo`). A glob removes all
-    /// matching sources.
+    /// `<name>` is a REF: it must resolve to exactly one source. It may be the
+    /// full `host/owner/repo` or an unambiguous trailing suffix (e.g. `repo`
+    /// or `owner/repo`); a non-glob name matching more than one source errors
+    /// instead of guessing. A glob (`*`, `?`, `[`) removes every matching
+    /// source. Contrast `sync`'s `[source]`, which is a FILTER: it may match
+    /// several sources even without a glob, and every match is acted on.
     // spec: CLI-174 - long_about leads with the uninstall default.
     // spec: CLI-172 - the former `detach` alias is removed.
     // spec: CLI-230 - `remove`/`rm` visible aliases, for symmetry with learn's
@@ -299,7 +302,8 @@ EXAMPLES:
     mind unmeld acme/agents --keep-items
     mind unmeld '*agents' --yes")]
     Unmeld {
-        /// The source name (see `mind recall --sources`).
+        /// The source ref (see `mind recall --sources`): must resolve to
+        /// exactly one source, unless it is a glob.
         name: String,
 
         /// Remove only the source, leaving its installed items in place (the
@@ -461,23 +465,33 @@ EXAMPLES:
 
     /// Refresh melded source clones and catalogs (all, or only those matching
     /// `[source]`).
+    ///
+    /// `[source]` is a FILTER, not a ref (contrast `unmeld`'s/`upgrade`'s
+    /// source-name selection): it may match several sources with no
+    /// ambiguity check, and every match is synced -- that is intentional,
+    /// since `sync` is a non-destructive refresh.
     // spec: CLI-172
     #[command(visible_alias = "update")]
     Sync {
-        /// Only sync the source(s) matching this selector: an exact name, a
+        /// Only sync the source(s) matching this filter: an exact name, a
         /// trailing suffix like `repo` or `owner/repo` (every source it
-        /// matches is synced), or a glob. With no selector, every melded
-        /// source is synced. A selector also skips the whole-set-only steps:
+        /// matches is synced -- unlike `unmeld`'s/`upgrade`'s ref-style source
+        /// selection, a filter is never ambiguous: more than one match is
+        /// normal, not an error), or a glob. With no filter, every melded
+        /// source is synced. A filter also skips the whole-set-only steps:
         /// managed-policy auto-meld provisioning and the nested-source
         /// re-walk run only on an unscoped `sync`.
         // spec: CLI-231 CLI-50
         source: Option<String>,
 
         /// After refreshing, run an `upgrade` pass (report + prompt) to apply
-        /// upgrades, scoped to the source(s) the selector matched (every
-        /// installed item when no selector is given). Deprecated: prefer
-        /// `mind upgrade`, which now syncs first by default.
-        // spec: CLI-169
+        /// upgrades, scoped to the source(s) the filter matched (every
+        /// installed item when no filter is given). When the filter matched
+        /// more than one source, the confirmation names all of them before
+        /// applying, since a filter's blast radius can exceed what the name
+        /// alone suggests. Deprecated: prefer `mind upgrade`, which now syncs
+        /// first by default.
+        // spec: CLI-169 CLI-232 CLI-233
         #[arg(long)]
         upgrade: bool,
 
@@ -501,7 +515,12 @@ EXAMPLES:
     /// skip the fetch and compute deltas from the current clone.
     // spec: CLI-169
     Upgrade {
-        /// Only upgrade this item; default is every installed item.
+        /// Only upgrade this item; default is every installed item. This is a
+        /// filter over installed items: a shared name/suffix or a glob may
+        /// match several, and all matches are upgraded. An embedded
+        /// `owner/repo#` source qualifier, however, IS a ref: it must resolve
+        /// to exactly one source (erroring rather than matching several),
+        /// exactly like `unmeld`'s source name.
         item: Option<String>,
 
         /// Skip the automatic source sync before computing deltas. By default,

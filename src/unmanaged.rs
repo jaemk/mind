@@ -9,6 +9,7 @@ use crate::error::{ItemKind, MindError, Result};
 use crate::manifest::Manifest;
 use crate::paths::Paths;
 use crate::resolve::ItemRef;
+use crate::sanitize::ItemKey;
 
 /// A skill/agent/rule present in an agent home that `mind` did not install.
 #[derive(Debug, Clone)]
@@ -23,15 +24,20 @@ pub struct UnmanagedItem {
 
 impl UnmanagedItem {
     /// `kind:name`, matching the manifest key form so refs resolve uniformly.
-    pub fn key(&self) -> String {
-        format!("{}:{}", self.kind.as_str(), self.name)
+    ///
+    /// Returns an [`ItemKey`] (DSC-95): the name is a lobe filesystem
+    /// component and can carry ANSI/control/bidi code points, so the raw and
+    /// display readings are distinct types. `.as_str()` for identity (ref
+    /// resolution); `.display()` at every human/`--json` print site --
+    /// `ItemKey` has no `Display`, so passing it straight to
+    /// `println!`/`format!` is a compile error.
+    pub fn key(&self) -> ItemKey {
+        ItemKey::new(format!("{}:{}", self.kind.as_str(), self.name))
     }
 
-    /// The key sanitized for a terminal (DSC-95): the name is a lobe filesystem
-    /// component and can carry ANSI/control/bidi code points. Use this at
-    /// human/`--json` print sites; `key()` stays raw for ref resolution.
+    /// Convenience for [`ItemKey::display`] on `self.key()` (DSC-95).
     pub fn display_key(&self) -> String {
-        crate::sanitize::strip_ansi(&self.key())
+        self.key().display()
     }
 }
 
@@ -153,7 +159,11 @@ pub fn resolve<'a>(items: &'a [UnmanagedItem], r: &ItemRef) -> Result<&'a Unmana
         [only] => Ok(only),
         many => Err(MindError::AmbiguousItem {
             query: r.name.clone(),
-            candidates: many.iter().map(|it| it.key()).collect(),
+            // spec: DSC-95 -- `MindError::AmbiguousItem`'s `#[error(...)]`
+            // Display joins `candidates` verbatim, with no sanitizing step of
+            // its own; a lobe filesystem entry name is not restricted against
+            // ANSI/control/bidi code points the way a catalog item name is.
+            candidates: many.iter().map(|it| it.key().display()).collect(),
         }),
     }
 }

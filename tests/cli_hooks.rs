@@ -305,6 +305,76 @@ fn hooks_list_source_shows_declared_hooks() {
     );
 }
 
+/// `hooks list --json` serialized `ItemHooksJson.item` from the RAW installed
+/// key, so a source-controlled item name reached a machine-readable envelope
+/// unsanitized. The compiler found this when `key()` became `ItemKey` (no
+/// `Display`), and it is the reason that refactor was worth doing: every
+/// sibling `--json` assembly in the codebase already sanitized, and this one
+/// silently did not.
+///
+/// Driven through an injected manifest entry rather than `meld`/`learn`,
+/// because DSC-96 now rejects a name carrying control/bidi code points at
+/// scan, so such an item can no longer be created through the normal path.
+/// The case that remains real is a LEGACY install: a manifest written by a
+/// pre-DSC-96 `mind`, which DSC-95's display-side guarantee is exactly what
+/// protects. Selected with a glob, since a sanitized name does not round-trip
+/// as a typed ref (the DSC-95 caveat).
+#[test]
+fn hooks_list_json_sanitizes_a_hostile_item_name() {
+    // spec: DSC-95 CLI-220
+    let sb = Sandbox::new("hooks-list-hostile");
+    sb.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\nname: review\ndescription: reviewer\n---\n# review\n",
+    );
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    assert!(sb.mind(&["learn", "skill:review"]).success);
+
+    // Clone the installed entry under a hostile key. BEL + a bidi override,
+    // avoiding '[' so the ref does not read as a glob metacharacter.
+    let manifest_path = sb.mind_home.join("manifest.json");
+    let raw = std::fs::read_to_string(&manifest_path).unwrap();
+    let mut doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    let entry = doc["items"]["skill:review"].clone();
+    assert!(!entry.is_null(), "the review entry must exist: {doc}");
+    let hostile_name = format!("re{}vie\u{202E}w", '\x07');
+    let mut hostile = entry.clone();
+    hostile["name"] = serde_json::Value::String(hostile_name.clone());
+    hostile["bare_name"] = serde_json::Value::String(hostile_name.clone());
+    hostile["store"] = serde_json::Value::String(format!("store/skill/{hostile_name}"));
+    doc["items"][format!("skill:{hostile_name}")] = hostile;
+    std::fs::write(&manifest_path, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+
+    let json = sb.mind(&["--json", "hooks", "list", "hooks-list-hostile#skill:*"]);
+    assert!(
+        json.success,
+        "hooks list --json: {} {}",
+        json.stdout, json.stderr
+    );
+    assert!(
+        !json.stdout.contains('\x07') && !json.stdout.contains('\u{202E}'),
+        "no raw control or bidi byte may reach the --json envelope: {:?}",
+        json.stdout
+    );
+    // The item is still listed, not dropped: sanitizing is a rendering step,
+    // never a filter.
+    let doc: serde_json::Value = serde_json::from_str(json.stdout.trim()).unwrap();
+    let listed = doc.to_string();
+    assert!(
+        listed.contains("vie") && listed.contains("review"),
+        "both the hostile (sanitized) and the clean item must be listed: {listed}"
+    );
+
+    // Text mode carries the same guarantee.
+    let plain = sb.mind(&["hooks", "list", "hooks-list-hostile#skill:*"]);
+    assert!(plain.success, "{} {}", plain.stdout, plain.stderr);
+    assert!(
+        !plain.stdout.contains('\x07') && !plain.stdout.contains('\u{202E}'),
+        "no raw control or bidi byte may reach the text listing: {:?}",
+        plain.stdout
+    );
+}
+
 /// `hooks list --json` answers with the CLI-220 document instead of the plain
 /// text listing: text mode is unaffected (byte for byte what it always
 /// printed), but `--json` now yields exactly one JSON document naming the

@@ -19,6 +19,7 @@ use crate::mindfile::{Discover, HookEvent, ItemDecl, KindGlobs, MindToml, Resolv
 use crate::namespace;
 use crate::paths::Paths;
 use crate::plugin_manifest;
+use crate::sanitize::ItemKey;
 use crate::source::{Registry, Source};
 
 /// One installable item discovered in a source.
@@ -139,19 +140,23 @@ impl CatalogItem {
     }
 
     /// User-facing key, using the effective (possibly prefixed) name.
-    pub fn key(&self) -> String {
-        format!("{}:{}", self.kind.as_str(), self.effective_name())
+    ///
+    /// Returns an [`ItemKey`] (DSC-95): `key()` embeds the bare name, which is
+    /// source-controlled (a filename or `[[items]]` value) and can carry
+    /// ANSI/control/bidi code points, so the raw and display readings are
+    /// distinct types. `.as_str()` for identity (matching store/manifest
+    /// identity); `.display()` at every human/`--json` print site -- `ItemKey`
+    /// has no `Display`, so passing it straight to `println!`/`format!` is a
+    /// compile error. This mirrors the single-capture-point sanitize the
+    /// description gets in `build_item` (DSC-94), for the field that keys
+    /// identity and so cannot be sanitized in place.
+    pub fn key(&self) -> ItemKey {
+        ItemKey::new(format!("{}:{}", self.kind.as_str(), self.effective_name()))
     }
 
-    /// The key sanitized for a terminal (DSC-95): `key()` embeds the bare name,
-    /// which is source-controlled (a filename or `[[items]]` value) and can carry
-    /// ANSI/control/bidi code points. Use this at every human/`--json` print
-    /// site; `key()` itself stays raw so it keeps matching the store/manifest
-    /// identity. This mirrors the single-capture-point sanitize the description
-    /// gets in `build_item` (DSC-94), for the field that keys identity and so
-    /// cannot be sanitized in place.
+    /// Convenience for [`ItemKey::display`] on `self.key()` (DSC-95).
     pub fn display_key(&self) -> String {
-        crate::sanitize::strip_ansi(&self.key())
+        self.key().display()
     }
 
     /// The bare name sanitized for display (DSC-95); see [`Self::display_key`].

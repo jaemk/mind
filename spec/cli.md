@@ -44,10 +44,15 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 - `CLI-3` A ref that matches no catalog item is an error (`ItemNotFound`). A ref
   that matches more than one is an error (`AmbiguousItem`) listing the candidates.
 - `CLI-4` A malformed ref is an error (`InvalidItemRef`).
-- `CLI-5` The source qualifier in `owner/repo#name` matches a source by its full
-  `host/owner/repo` identity or any trailing component suffix (`repo`,
-  `owner/repo`, `host/owner/repo`). An ambiguous suffix leaves multiple matches
-  and resolves to `AmbiguousItem`.
+- `CLI-5` The source qualifier in `owner/repo#name` is a **ref**: it matches a
+  source by its full `host/owner/repo` identity or any trailing component
+  suffix (`repo`, `owner/repo`, `host/owner/repo`), and must resolve to
+  exactly one source. An ambiguous suffix leaves multiple matches and resolves
+  to `AmbiguousItem` rather than matching (or silently narrowing to) any of
+  them. Contrast `sync`'s `[source]` argument (CLI-231), which is a
+  **filter**: it intentionally allows more than one match, acting on every
+  source it matches. "Ref" and "filter" name this distinction wherever it
+  recurs below (`unmeld`'s `<name>`, CLI-20; `upgrade`'s `item`, CLI-63/65).
 
 ## meld
 
@@ -378,16 +383,19 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 
 ## unmeld
 
-- `CLI-20` `unmeld <name>` removes the source's clone and registry entry. `name`
-  is the full identity (`host/owner/repo`, plus the `@<alias>` suffix for an
+- `CLI-20` `unmeld <name>` removes the source's clone and registry entry.
+  `name` is a **ref** (CLI-5): it must resolve to exactly one source. It is
+  the full identity (`host/owner/repo`, plus the `@<alias>` suffix for an
   identity-aliased instance, STO-58) or an unambiguous trailing suffix (e.g.
   `repo`, `owner/repo`, or `repo@<alias>`). The `@<alias>` is part of the
   identity, so a bare suffix reaches only the un-aliased instance: with both a
   bare `repo` and a `repo@jk` melded, `unmeld repo` targets only the bare one and
   `unmeld repo@jk` the aliased one (use a glob, CLI-28, to remove several at
   once). An unknown name is `SourceNotFound` and an ambiguous suffix is
-  `AmbiguousSource`. The former visible alias `detach` is removed and is now a
-  usage error (CLI-172).
+  `AmbiguousSource` -- unlike `sync`'s `[source]` **filter** (CLI-231), which
+  intentionally allows a plain name or suffix to match several sources, a
+  non-glob `unmeld` ref never widens to more than one. The former visible
+  alias `detach` is removed and is now a usage error (CLI-172).
 - `CLI-21` `unmeld <name>` by default uninstalls every item installed from the
   source (each via its file registry, then its manifest entry), mirroring meld's
   install-by-default (CLI-23): dropping a source cleans up after itself in one
@@ -420,12 +428,12 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   so `*` spans any run including `/`: `mind unmeld '*agents'` removes
   `github.com/jaemk/agents`. Every matching source is unmelded, each per its normal
   path (CLI-21 by default, or CLI-22 under `--unlink-only`). A glob is what permits
-  a multi-source match: a plain name or suffix that resolves to several sources is
-  still `AmbiguousSource` (CLI-20), but a glob removes all it matches. A glob
-  matching no source is `SourceNotFound`. When a glob matches more than one source,
-  `unmeld` lists the matched sources and confirms before removing them (the
-  multi-item confirmation of CLI-42, applied at source granularity); `--yes` skips
-  the confirmation.
+  a multi-source match: a plain name or suffix (the CLI-20 ref) that resolves to
+  several sources is still `AmbiguousSource` (CLI-20), but a glob removes all it
+  matches. A glob matching no source is `SourceNotFound`. When a glob matches more
+  than one source, `unmeld` lists the matched sources and confirms before removing
+  them (the multi-item confirmation of CLI-42, applied at source granularity);
+  `--yes` skips the confirmation.
 
 ## learn
 
@@ -509,39 +517,61 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   branch, and updates the recorded commit and `[source].description`. A linked
   local source (CLI-27) is not fetched or reset: `sync` only re-reads its HEAD
   and updates the recorded commit from the working tree.
-- `CLI-231` `sync` accepts an optional `[source]` selector: `mind sync <source>`
-  fetches every melded source whose name matches it -- exactly (`host/owner/repo`),
-  by trailing suffix (e.g. `repo` or `owner/repo`), or by glob -- leaving every
-  other source untouched. Unlike `unmeld`/`upgrade`'s single-item selector
-  (CLI-5), a `sync` selector is NOT required to be unambiguous: a suffix shared
-  by more than one melded source (e.g. two sources both ending in `/tools`)
-  matches and syncs all of them rather than erroring, the same way a glob does.
-  A selector that matches no melded source (against a non-empty registry) is a
-  `SourceNotFound` error, so a typo is reported rather than silently syncing
-  nothing; a malformed glob is an `InvalidPattern` error.
-  With a selector, two whole-registry passes are skipped: the managed-policy
+- `CLI-231` `sync` accepts an optional `[source]` **filter**: `mind sync
+  <source>` fetches every melded source whose name matches it -- exactly
+  (`host/owner/repo`), by trailing suffix (e.g. `repo` or `owner/repo`), or by
+  glob -- leaving every other source untouched. A `sync` filter is a
+  deliberately different concept from `unmeld`'s/`upgrade`'s **ref** (CLI-5,
+  CLI-20): a filter is NOT required to be unambiguous, and is not an error
+  when it is not. A suffix shared by more than one melded source (e.g. two
+  sources both ending in `/tools`) matches and syncs all of them rather than
+  erroring, the same way a glob does -- appropriate because `sync` is a
+  non-destructive refresh, unlike `unmeld` (destroys) or `upgrade` (mutates a
+  specific identity), which both refuse to guess. A filter that matches no
+  melded source (against a non-empty registry) is a `SourceNotFound` error,
+  so a typo is reported rather than silently syncing nothing; a malformed
+  glob is an `InvalidPattern` error.
+  With a filter, two whole-registry passes are skipped: the managed-policy
   auto-meld provisioning (POL-32) and the `[discover].sources`/marketplace
   nested-source re-walk (DSC-57) run only for a full `sync`. This does NOT
   extend to the `--upgrade` pass (CLI-53): see `CLI-232`, which scopes that
-  pass to the same selector rather than leaving it global. With no selector,
-  every source is fetched (CLI-50, the unchanged default).
+  pass to the same filter rather than leaving it global, and `CLI-233`, which
+  names the filter's matches in the confirmation when it matched more than
+  one. With no filter, every source is fetched (CLI-50, the unchanged
+  default).
 - `CLI-51` With no sources melded, `sync` reports that and exits successfully.
 - `CLI-52` `sync` does not change consumer aliases.
 - `CLI-53` `sync --upgrade` runs an `upgrade` pass after refreshing sources
   (reporting pending upgrades and prompting before applying, exactly like
   `upgrade`), so a single command both fetches upstream and applies pending
   upgrades.
-- `CLI-232` With a `[source]` selector, `sync <source> --upgrade`'s `--upgrade`
-  pass is scoped to the selected source(s) (CLI-231), the same set `sync`
-  itself just refreshed: only installed items whose recorded source is in that
-  set are considered for upgrade, and a source's install hook is re-run
-  (HOOK-11) only when its source is in that set. Without this, `--upgrade`
-  pass ran unscoped regardless of the selector: `mind sync alpha --upgrade
-  --yes` would upgrade every installed item from every melded source, and
-  re-run install hooks (arbitrary shell) for sources the caller never named --
-  exactly the protection a scoped `upgrade <item>` already provides (HOOK-11),
-  silently lost when the same scoping is expressed through `sync <source>`
-  instead. With no selector, the pass is unscoped (every source), unchanged.
+- `CLI-232` With a `[source]` filter, `sync <source> --upgrade`'s `--upgrade`
+  pass is scoped to the filter's matched source(s) (CLI-231), the same set
+  `sync` itself just refreshed: only installed items whose recorded source is
+  in that set are considered for upgrade, and a source's install hook is
+  re-run (HOOK-11) only when its source is in that set. Without this,
+  `--upgrade` pass ran unscoped regardless of the filter: `mind sync alpha
+  --upgrade --yes` would upgrade every installed item from every melded
+  source, and re-run install hooks (arbitrary shell) for sources the caller
+  never named -- exactly the protection a scoped `upgrade <item>` already
+  provides (HOOK-11), silently lost when the same scoping is expressed
+  through `sync <source>` instead. With no filter, the pass is unscoped
+  (every source), unchanged.
+- `CLI-233` When a `[source]` filter matches more than one source and
+  `--upgrade` reaches its confirmation, `sync <source> --upgrade` names every
+  matched source in that confirmation, before the user consents: a filter is
+  allowed to match more sources than a plain name suggests (CLI-231), so
+  applying the upgrade pass to all of them -- and possibly re-running each
+  one's install hook (HOOK-11), arbitrary shell -- can silently widen past
+  what `mind sync skills --upgrade` reads as. A filter matching exactly one
+  source, or no filter at all (an unscoped `--upgrade` pass), leaves the
+  confirmation unchanged: naming a single match is not new information. This
+  applies in text mode (a line naming the matches, printed before the `[Y/n]`
+  prompt) and under `--json` (the matches are folded into the
+  `ConfirmationRequired` error's `action` text; `--json` never prompts,
+  LIFE-45, so this is the only channel a `--json` caller sees them through).
+  `--yes` is unaffected either way: it skips the confirmation step entirely,
+  so there is no prompt to name the matches in.
 - `CLI-54` A per-source failure (e.g. a network error on one remote) does not
   abort the run: `sync` refreshes each source independently, persists the
   progress made (the recorded commits of the sources that succeeded), reports
@@ -579,18 +609,23 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 - `CLI-62` `--yes` applies upgrades without prompting.
 - `CLI-63` An optional `item` limits upgrade to the matching installed item(s),
   matched against the manifest by effective name and honoring a `kind:` prefix
-  and an `owner/repo#` source qualifier. The ref may match several installed
-  items, all of which are upgraded.
+  and an `owner/repo#` source qualifier. `item` is itself a **filter** over
+  installed items, not a `unmeld`-style ref: it may match several installed
+  items and, unlike `unmeld`'s `<name>` (CLI-20), that is never an error --
+  every match is upgraded. The embedded `owner/repo#` qualifier, when present,
+  IS a ref, though (CLI-5): it must resolve to exactly one source, or
+  `AmbiguousItem`.
 - `CLI-64` With nothing pending, `upgrade` reports up to date and changes nothing.
-- `CLI-65` When the `item` ref name is a glob (`*`, `?`, `[`), `upgrade` limits the
-  pass to every installed item whose effective name matches the glob, mirroring
-  `forget`'s glob selection (CLI-41). The `kind:` prefix and `owner/repo#` source
-  qualifier compose with the glob exactly as they do for an exact ref (CLI-63), so
-  `upgrade 'jk:*'` upgrades a namespace, `upgrade 'skill:*'` a kind, and
-  `upgrade 'owner/repo#*'` a whole source in one pass. Like any ref, a glob that
-  matches no installed item -- or matches only items already up to date -- reports
-  nothing pending and changes nothing (CLI-64); it is not an error (this is where
-  `upgrade` differs from `forget`, whose no-match glob is `NotInstalled`, CLI-41).
+- `CLI-65` When the `item` filter's name is a glob (`*`, `?`, `[`), `upgrade`
+  limits the pass to every installed item whose effective name matches the
+  glob, mirroring `forget`'s glob selection (CLI-41). The `kind:` prefix and
+  `owner/repo#` source qualifier compose with the glob exactly as they do for
+  an exact match (CLI-63), so `upgrade 'jk:*'` upgrades a namespace, `upgrade
+  'skill:*'` a kind, and `upgrade 'owner/repo#*'` a whole source in one pass.
+  Like any filter, a glob that matches no installed item -- or matches only
+  items already up to date -- reports nothing pending and changes nothing
+  (CLI-64); it is not an error (this is where `upgrade` differs from
+  `forget`, whose no-match glob is `NotInstalled`, CLI-41).
 - `CLI-211` A source `upgrade` cannot scan (its clone is missing, or scanning it
   otherwise fails, e.g. an item-link instance whose linked path vanished) does not
   silently drop out of the delta computation: `upgrade` prints a warning naming the
@@ -1129,21 +1164,34 @@ release artifacts as the install script and the Homebrew formula.
 - `CLI-140` `evolve` compares the running version against the latest published
   release. With nothing newer it reports up to date and changes nothing. With a
   newer release it replaces the running executable in place with the release binary
-  for the current platform. A prerelease running version (a version string carrying
-  a `-suffix`, e.g. `0.23.1-dev` or the dotted `1.0.0-rc.2` -- this repo's own
-  releases never carry one, but a fork's or packager's build might) is treated as
-  strictly below a release target of the same numeric version: `evolve` on a
-  `0.23.1-dev` build offers the `0.23.1` release rather than reporting up to date,
-  and an explicit `--to 0.23.1` onto its own base is an update, not a no-op. The
-  numeric comparison strips the `-suffix` from the WHOLE version string before
-  splitting on `.` (not per dotted component), so a dotted prerelease like
-  `1.0.0-rc.2` parses as `[1, 0, 0]` and ties with `1.0.0` in both directions,
-  rather than a per-component strip mis-parsing it as `[1, 0, 0, 2]` (reading
-  numerically ABOVE the release it should tie with, which would report up to
-  date instead of offering the update). A numerically newer prerelease
-  (`0.24.0-dev` vs release `0.23.1`) is unaffected: see `CLI-147`, which governs
-  the opposite direction (an explicit `--to` strictly below the running version)
-  and would otherwise read as the wrong case for a newer prerelease build.
+  for the current platform. The target passed to `decision()` is not a plain
+  dotted-numeric string: it is the release tag `evolve` resolved (the latest
+  `releases/latest` tag, or an explicit `--to`), validated by
+  `mindfile::is_plausible_release_tag` -- not `is_plausible_version`, which still
+  governs `min-mind-version` and policy version pins (STO-76) -- before
+  `decision()` ever sees it, so it may itself carry a semver prerelease/build
+  suffix: `evolve --to 1.2.3-rc1` is accepted. A prerelease running version (a
+  version string carrying a `-suffix`, e.g. `0.23.1-dev` or the dotted
+  `1.0.0-rc.2` -- this repo's own releases never carry one, but a fork's or
+  packager's build might) is treated as strictly below a release target of the
+  same numeric version: `evolve` on a `0.23.1-dev` build offers the `0.23.1`
+  release rather than reporting up to date, and an explicit `--to 0.23.1` onto
+  its own base is an update, not a no-op. This tie-break requires the target to
+  NOT itself be a prerelease (the `!is_prerelease(target)` guard at
+  `decision()`'s numeric-tie branch): a target that is itself a prerelease is
+  excluded from the tie-break and falls through to the ordinary numeric
+  comparison instead, rather than being offered as an update onto another
+  prerelease at the same numeric version.
+  The numeric comparison strips the `-suffix` from the WHOLE version string
+  before splitting on `.` (not per dotted component), so a dotted prerelease
+  like `1.0.0-rc.2` parses as `[1, 0, 0]` and ties with `1.0.0` in both
+  directions, rather than a per-component strip mis-parsing it as `[1, 0, 0,
+  2]` (reading numerically ABOVE the release it should tie with, which would
+  report up to date instead of offering the update). A numerically newer
+  prerelease (`0.24.0-dev` vs release `0.23.1`) is unaffected: see `CLI-147`,
+  which governs the opposite direction (an explicit `--to` strictly below the
+  running version) and would otherwise read as the wrong case for a newer
+  prerelease build.
 - `CLI-141` Unless `--yes` is given, `evolve` prompts `[y/N]` (default No, EOF
   counts as No) before replacing the binary, mirroring `upgrade` (CLI-60). `--check`
   reports the latest available version and whether an update is pending, then exits

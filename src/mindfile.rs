@@ -554,6 +554,73 @@ pub fn is_plausible_version(s: &str) -> bool {
             .all(|c| !c.is_empty() && c.bytes().all(|b| b.is_ascii_digit()))
 }
 
+/// Returns `true` if `s` is safe to interpolate as a single URL path segment
+/// naming a resolved `evolve` release tag (STO-76): a dotted numeric version
+/// (as accepted by [`is_plausible_version`]) optionally followed by a
+/// semver-shaped prerelease suffix (`-...`) and/or build-metadata suffix
+/// (`+...`), e.g. `"1.2.3"`, `"1.2.3-rc1"`, `"1.2.3-rc.2"`, `"1.2.3+build.5"`.
+///
+/// This is a DIFFERENT question from [`is_plausible_version`], which answers
+/// "is this a valid `min-mind-version` / policy version pin" and correctly
+/// excludes a prerelease suffix there (meaningless for those fields). Reusing
+/// that validator for a resolved `evolve` target refuses a legitimate
+/// `evolve --to 1.2.3-rc1` outright -- testing a prerelease before promoting
+/// it is a legitimate thing to want, and since GitHub's `releases/latest`
+/// excludes prereleases, an explicit `--to` is the only way to reach one. This
+/// validator accepts that shape while still rejecting anything that could
+/// escape or split a URL path segment: `/`, `\`, whitespace, control
+/// characters, and -- critically -- a run of two or more consecutive `.`
+/// characters ANYWHERE in the string, including inside the suffix (e.g.
+/// `1.0.0-../..`), which would otherwise smuggle a `..` traversal segment into
+/// the release-asset or `SHA256SUMS` URL once curl normalizes it.
+///
+/// The `-`/`+` suffixes are validated the same way as the base version: split
+/// on `.`, every component must be non-empty. A `..` produces an empty
+/// component between the two dots, so it is rejected there exactly as it is
+/// in the base version, and any character outside `[0-9A-Za-z-]` (in
+/// particular `/` and `\`) fails the per-component check regardless of `.`
+/// placement.
+///
+/// Grammar (informally): `\d+(\.\d+)*(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?`
+pub fn is_plausible_release_tag(s: &str) -> bool {
+    let (rest, build) = match s.split_once('+') {
+        Some((rest, build)) => (rest, Some(build)),
+        None => (s, None),
+    };
+    let (base, prerelease) = match rest.split_once('-') {
+        Some((base, pre)) => (base, Some(pre)),
+        None => (rest, None),
+    };
+    if !is_plausible_version(base) {
+        return false;
+    }
+    if let Some(pre) = prerelease
+        && !is_valid_semver_identifiers(pre)
+    {
+        return false;
+    }
+    if let Some(build) = build
+        && !is_valid_semver_identifiers(build)
+    {
+        return false;
+    }
+    true
+}
+
+/// Whether `s` is a valid dot-separated run of semver identifiers: every
+/// component (as split by `.`) must be non-empty and consist solely of ASCII
+/// alphanumerics and `-`. An empty component (from a leading/trailing/doubled
+/// `.`, as in `..`) is rejected, and so is any other character -- in
+/// particular `/`, `\`, whitespace, and control characters -- wherever it
+/// appears, even inside a single dot-free component. Used by
+/// [`is_plausible_release_tag`] to validate the prerelease and build-metadata
+/// suffixes.
+fn is_valid_semver_identifiers(s: &str) -> bool {
+    !s.is_empty()
+        && s.split('.')
+            .all(|c| !c.is_empty() && c.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))
+}
+
 /// Validate that `val` is a well-formed dotted numeric version string, as
 /// required for `min-mind-version` (DSC-40). A valid string is non-empty, and
 /// every dot-separated component is itself non-empty and consists solely of
@@ -1056,6 +1123,81 @@ mod tests {
         // A dotted prerelease of a genuinely lower version is still refused.
         assert!(!version_at_least("1.0.0-rc.2", "1.0.1"));
         assert!(!version_at_least("0.9.0-rc.2", "1.0.0"));
+    }
+
+    #[test]
+    // spec: STO-76
+    fn is_plausible_version_unaffected_by_the_release_tag_sibling() {
+        // is_plausible_version keeps answering its ORIGINAL question (a valid
+        // version pin / min-mind-version): digits and dots only, no
+        // prerelease/build suffix. Adding is_plausible_release_tag alongside
+        // it must not change this behavior at all -- policy.rs's two call
+        // sites (version pin validation) depend on it staying exactly this
+        // strict.
+        for v in ["1", "0.7", "2.3.1", "10.0.1"] {
+            assert!(is_plausible_version(v), "{v:?} must still be plausible");
+        }
+        for v in ["1.2.3-rc1", "1.2.3+build", "", "1..0", "1.x", "abc", "1/2"] {
+            assert!(
+                !is_plausible_version(v),
+                "{v:?} must still be rejected by is_plausible_version"
+            );
+        }
+    }
+
+    #[test]
+    // spec: STO-76
+    fn is_plausible_release_tag_accepts_dotted_numeric_and_semver_prerelease_build() {
+        // The base dotted-numeric shape (identical to is_plausible_version)
+        // and a semver-shaped prerelease and/or build suffix are all accepted
+        // -- this is what lets `evolve --to 1.2.3-rc1` reach an rc release,
+        // which GitHub's `releases/latest` never surfaces.
+        for v in [
+            "1",
+            "0.7",
+            "2.3.1",
+            "1.2.3-rc1",
+            "1.2.3-rc.2",
+            "1.2.3-alpha-1",
+            "1.2.3+build.5",
+            "1.2.3-rc1+build.5",
+            "1.2.3-0",
+        ] {
+            assert!(is_plausible_release_tag(v), "{v:?} must be accepted");
+        }
+    }
+
+    #[test]
+    // spec: STO-76
+    fn is_plausible_release_tag_rejects_path_segments_and_traversal() {
+        // A bare path-traversal payload (no dash) must still be rejected,
+        // exactly as before this validator existed.
+        assert!(!is_plausible_release_tag(
+            "1/../../../../attacker/mind/releases/download/v1"
+        ));
+        assert!(!is_plausible_release_tag("../etc/passwd"));
+        assert!(!is_plausible_release_tag("1.0.0/evil"));
+        // A traversal payload smuggled INSIDE the prerelease suffix must be
+        // rejected too: a `-`-prefixed suffix of dots and slashes is not
+        // meaningfully different from a bare traversal payload, so the dash
+        // must not become an escape hatch.
+        assert!(!is_plausible_release_tag("1.0.0-../.."));
+        assert!(!is_plausible_release_tag("1.0.0-rc1/../.."));
+        assert!(!is_plausible_release_tag("1.0.0-rc1/etc/passwd"));
+        // Smuggled inside the build-metadata suffix too.
+        assert!(!is_plausible_release_tag("1.0.0+../.."));
+        assert!(!is_plausible_release_tag("1.0.0+build/../.."));
+        // Backslash, whitespace, and control characters must be rejected
+        // wherever they appear, not only as a bare `/`.
+        assert!(!is_plausible_release_tag("1.0.0-rc1\\..\\.."));
+        assert!(!is_plausible_release_tag("1.0.0-rc 1"));
+        assert!(!is_plausible_release_tag("1.0.0-rc\n1"));
+        assert!(!is_plausible_release_tag("1.0.0-rc\x001"));
+        // Empty, and a base that itself is not dotted-numeric.
+        assert!(!is_plausible_release_tag(""));
+        assert!(!is_plausible_release_tag("-rc1"));
+        assert!(!is_plausible_release_tag("v1.2.3"));
+        assert!(!is_plausible_release_tag("1.x.0"));
     }
 
     #[test]

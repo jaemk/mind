@@ -136,6 +136,22 @@ run = "make build"
   a confinement error) is sanitized (DSC-94 rule) before it reaches stderr, so a
   rejection cannot itself carry an injection payload.
 
+  This guarantee is enforced by the type system, not by call-site discipline
+  alone: `InstalledItem::key()`, `CatalogItem::key()`, and `UnmanagedItem::key()`
+  return an `ItemKey` newtype (`sanitize::ItemKey`), not a plain `String`.
+  `ItemKey` deliberately carries no `Display` impl, so `println!("{}", key)` /
+  `format!("{key}")` is a compile error, not a lint or a review-time habit that
+  a new print site can silently skip. `ItemKey::as_str()` is the raw identity
+  reading (map/set lookups, comparisons, a manifest key, a path component);
+  `ItemKey::display()` is the only accessor that produces a printable `String`,
+  and it routes through the same `strip_ansi` `display_key`/`display_name`
+  already used. `ItemKey` still derives `Debug` (safe: `Debug for str` escapes
+  a control character, so `{:?}` cannot forge a terminal escape sequence the
+  way `Display` could) and serializes/deserializes transparently as the raw
+  string, so the on-disk manifest format (a bare `kind:name` object key) is
+  unchanged by this type -- the enforcement is compile-time only, with no
+  runtime or persisted-format consequence.
+
   Caveat: sanitizing only at display means a
   sanitized name may not round-trip as an item ref. `mind recall`/`probe` show
   the display-sanitized `skill:review`, but `mind forget skill:review` matches

@@ -1576,7 +1576,7 @@ fn meld_recursive(
 // failure messages, git stderr), so the divergence meant only half of those
 // call sites got the newer hardening. Now a plain re-export: every call site
 // below routes through the one shared, hardened implementation.
-use crate::sanitize::strip_ansi;
+use crate::sanitize::{display_path, strip_ansi};
 
 /// Return the path of the managed policy file currently in effect, if any.
 ///
@@ -1930,12 +1930,13 @@ fn warn_agent_collisions(paths: &Paths, items: &[CatalogItem]) {
                     .any(|p| p.as_path() == std::path::Path::new(link.as_str()))
             });
             if collides {
-                // spec: CLI-225 -- `entry.key()` is `kind:name` built from the
-                // installed item's (source-influenced) name, which
+                // spec: CLI-225 DSC-95 -- `entry.key()` is `kind:name` built from
+                // the installed item's (source-influenced) name, which
                 // `is_safe_item_name` does not restrict against shell
-                // metacharacters, and lands in a pasteable `mind forget`
-                // remedy, so it is shell-quoted before printing.
-                let quoted_key = crate::error::shell_quote(&entry.key());
+                // metacharacters OR ANSI/control/bidi code points, and lands in a
+                // pasteable `mind forget` remedy, so it is sanitized (DSC-95) and
+                // then shell-quoted before printing.
+                let quoted_key = crate::error::shell_quote(&entry.display_key());
                 eprintln!(
                     "warning: agent '{harness_name}' from '{}' would collide with the installed \
                      agent from '{}' at agents/{harness_name}.md -- run `mind forget {quoted_key}` to \
@@ -2102,7 +2103,7 @@ pub fn init_source(
                 "unguarded-reference",
                 format!(
                     "{}: references sibling(s) in prose: {}; prefixing may break them at runtime (use {{{{ns:name}}}})",
-                    it.key(),
+                    it.key().as_str(),
                     bare.join(", ")
                 ),
             ));
@@ -2498,7 +2499,7 @@ fn unmeld_one(
         .items
         .values()
         .filter(|it| it.source == source_name)
-        .map(|it| it.key())
+        .map(|it| it.key().into())
         .collect();
 
     // CLI-22: `--unlink-only` removes only the source, leaving its items in place,
@@ -3148,7 +3149,7 @@ pub fn learn(paths: &Paths, item_ref: &str, dry_run: bool, flow: InstallFlow) ->
         }
         match result {
             Ok(installed) => {
-                installed_keys.push(installed.key());
+                installed_keys.push(installed.key().into());
                 if !out.json {
                     // Keep the line starting with "learned <key>" (tests assert the
                     // prefix); the commit is greened (no-op when color is off).
@@ -3256,7 +3257,7 @@ fn learn_collecting(paths: &Paths, item_ref: &str, flow: InstallFlow) -> Result<
         );
         match result {
             Ok(installed) => {
-                installed_keys.push(installed.key());
+                installed_keys.push(installed.key().into());
                 manifest.insert(installed);
             }
             Err(e) => {
@@ -3360,7 +3361,7 @@ pub fn install_source_items_subset(
     // Filter to not-yet-installed items only.
     let to_install: Vec<&CatalogItem> = subset
         .into_iter()
-        .filter(|it| !installed_keys.contains(&it.key()))
+        .filter(|it| !installed_keys.contains(it.key().as_str()))
         .collect();
 
     if to_install.is_empty() {
@@ -3375,7 +3376,7 @@ pub fn install_source_items_subset(
     let count = to_install.len();
     let refs: Vec<String> = to_install
         .iter()
-        .map(|it| format!("{source_name}#{}", it.key()))
+        .map(|it| format!("{source_name}#{}", it.key().as_str()))
         .collect();
 
     if flow.yes {
@@ -3495,10 +3496,10 @@ pub fn install_provisioned_items(
     let mut installed_keys: Vec<String> = Vec::new();
     for item in &source_items {
         let key = item.key();
-        if installed.contains(&key) {
+        if installed.contains(key.as_str()) {
             continue; // already installed; no-op
         }
-        let item_ref = format!("{source_name}#{key}");
+        let item_ref = format!("{source_name}#{}", key.as_str());
         // spec: CLI-217 -- silent under `--json` (keys are returned instead of
         // a per-item document); the ordinary `learn` in text mode, so an
         // interactive `mind sync` still narrates what it installed.
@@ -3508,7 +3509,7 @@ pub fn install_provisioned_items(
             learn(paths, &item_ref, false, flow)
         };
         if let Err(e) = outcome {
-            failures.push((key, e));
+            failures.push((key.into(), e));
         }
     }
     (installed_keys, failures)
@@ -4204,12 +4205,15 @@ pub fn set_source_namespace(
         return Ok(()); // no change; nothing to do
     }
     // NS-30/CLI-161: check whether any of this source's items are installed.
+    // DSC-95: `MindError::NamespaceLocked`'s `#[error(...)]` Display joins
+    // `items` verbatim into the rejection message with no sanitizing step of
+    // its own, so each key must already be display-safe here.
     let manifest = Manifest::load(paths)?;
     let installed_names: Vec<String> = manifest
         .items
         .values()
         .filter(|it| it.source == source_name)
-        .map(|it| it.key())
+        .map(|it| it.key().display())
         .collect();
     if !installed_names.is_empty() {
         return Err(MindError::NamespaceLocked {
@@ -4226,9 +4230,30 @@ pub fn set_source_namespace(
 fn colliding_install(targets: &[&CatalogItem]) -> Option<(String, Vec<String>)> {
     let mut by_key: std::collections::BTreeMap<String, Vec<String>> = Default::default();
     for t in targets {
-        by_key.entry(t.key()).or_default().push(t.source.clone());
+        // Group by the raw (identity) key: sanitizing before grouping could
+        // merge two distinct identities that differ only by a stripped
+        // character, silently changing which items are reported as colliding.
+        by_key
+            .entry(t.key().as_str().to_string())
+            .or_default()
+            .push(t.source.clone());
     }
-    by_key.into_iter().find(|(_, sources)| sources.len() > 1)
+    by_key
+        .into_iter()
+        .find(|(_, sources)| sources.len() > 1)
+        .map(|(key, sources)| {
+            // spec: DSC-95 -- sanitize for display here, at the boundary:
+            // both callers feed this straight into `MindError::AmbiguousItem`,
+            // whose `#[error(...)]` Display joins `candidates` (and interpolates
+            // `query`) verbatim, with no sanitizing step of its own.
+            (
+                crate::sanitize::strip_ansi(&key),
+                sources
+                    .iter()
+                    .map(|s| crate::sanitize::strip_ansi(s))
+                    .collect(),
+            )
+        })
 }
 
 /// Install one item, then run its install hook (HOOK-81) as the final step. On a
@@ -4494,7 +4519,9 @@ pub fn absorb(
     let source_lobe_path = item
         .paths
         .first()
-        .ok_or_else(|| MindError::NotInstalled { name: item.key() })?
+        .ok_or_else(|| MindError::NotInstalled {
+            name: item.key().into(),
+        })?
         .clone();
     let stray_paths: Vec<&std::path::PathBuf> = item.paths.iter().skip(1).collect();
 
@@ -4661,7 +4688,7 @@ pub fn absorb(
     println!(
         "{} absorbed {} -> managed as {effective_key}",
         out.ok(),
-        item.key()
+        item.key().display()
     );
     Ok(())
 }
@@ -4841,10 +4868,10 @@ pub fn forget(
                 name: parsed.name.clone(),
             });
         }
-        matches.iter().map(|it| it.key()).collect()
+        matches.iter().map(|it| it.key().into()).collect()
     } else {
         match crate::resolve::resolve_installed(&manifest.items, &parsed) {
-            Ok(it) => vec![it.key()],
+            Ok(it) => vec![it.key().into()],
             // UNM-4: an exact ref that names no managed item may name an
             // unmanaged lobe item; a glob never sweeps unmanaged entries.
             Err(MindError::NotInstalled { .. }) => {
@@ -5750,6 +5777,7 @@ pub fn sync_with_selector(
             None,
             true,
             selected.as_deref(),
+            None,
             dangerously_skip_hook_check,
             dangerously_skip_build_hook_check,
         )?;
@@ -5890,6 +5918,48 @@ pub fn upgrade_no_sync(
     )?)
 }
 
+/// A no-sync upgrade restricted to an explicit set of item KEYS (`kind:name`),
+/// exact match rather than the glob `item_ref` restricts by (TUI-72, TUI-73).
+///
+/// This is what the TUI's `u` action applies: `app.rs`'s `initiate_upgrade`
+/// stashes the exact keys its confirm modal listed onto the pending action, and
+/// this is what applies exactly that set, so the applied set equals the
+/// confirmed set BY CONSTRUCTION rather than by two independent computations
+/// (the confirm-time recompute and the apply-time re-hash) happening to agree.
+/// Never fetches (`no_sync = true`, mirroring `upgrade_no_sync`): the TUI
+/// offers `s` (Sync) and a ~1s re-poll separately, so refreshing drift is not
+/// this call's job.
+///
+/// A confirmed key that is no longer applicable by the time this runs -- no
+/// longer installed (forgotten), no longer has a matching catalog item (its
+/// source was unmelded), or no longer out of date (already resolved by a
+/// concurrent upgrade, or the edit that caused the drift was reverted) -- is
+/// silently skipped, exactly like an out-of-scope item is for a glob-filtered
+/// `mind upgrade <item>`: the confirm-to-apply window is real and a benign
+/// race must not abort the whole batch. The report (and the TUI's captured
+/// status line) simply reflects whatever subset of `keys` is still applicable;
+/// when that subset is empty this prints the ordinary "everything is up to
+/// date" the CLI already uses, not an error.
+// spec: TUI-72 TUI-73
+pub fn upgrade_no_sync_keys(
+    paths: &Paths,
+    yes: bool,
+    keys: &[String],
+    dangerously_skip_hook_check: bool,
+    dangerously_skip_build_hook_check: bool,
+) -> Result<()> {
+    emit_upgrade_result(upgrade_inner_scoped(
+        paths,
+        yes,
+        None,
+        true,
+        None,
+        Some(keys),
+        dangerously_skip_hook_check,
+        dangerously_skip_build_hook_check,
+    )?)
+}
+
 /// Emit an upgrade pass's result when `upgrade` was the verb the user invoked.
 ///
 /// `upgrade_inner` RETURNS its `--json` result rather than printing it, because
@@ -5921,28 +5991,43 @@ fn upgrade_inner(
         item_ref,
         no_sync,
         None,
+        None,
         dangerously_skip_hook_check,
         dangerously_skip_build_hook_check,
     )
 }
 
 /// The upgrade pass, additionally restricted to a `source_scope` (CLI-232, H2
-/// fix). `source_scope` is threaded from `sync <source> --upgrade`'s already-
-/// computed selector (`sync_inner`'s `selected`): `None` means every source is
-/// in scope (unscoped `mind upgrade`, unchanged); `Some(names)` restricts both
-/// the per-item delta loop AND the HOOK-11 install-hook re-run to sources in
-/// `names`, so `sync <source> --upgrade` cannot silently upgrade items from
-/// (or re-run install hooks for, HOOK-11) a source the caller never named.
+/// fix) and/or a `key_scope` (TUI-72, TUI-73). `source_scope` is threaded from
+/// `sync <source> --upgrade`'s already-computed selector (`sync_inner`'s
+/// `selected`): `None` means every source is in scope (unscoped `mind
+/// upgrade`, unchanged); `Some(names)` restricts both the per-item delta loop
+/// AND the HOOK-11 install-hook re-run to sources in `names`, so `sync
+/// <source> --upgrade` cannot silently upgrade items from (or re-run install
+/// hooks for, HOOK-11) a source the caller never named. `key_scope` is the
+/// analogous restriction by exact item KEY (`kind:name`) rather than by
+/// source or by `item_ref` glob, threaded from the TUI's confirmed-set apply
+/// (`upgrade_no_sync_keys`); `None` means unrestricted by key (every other
+/// caller, unchanged).
+#[allow(clippy::too_many_arguments)]
 fn upgrade_inner_scoped(
     paths: &Paths,
     yes: bool,
     item_ref: Option<&str>,
     no_sync: bool,
     source_scope: Option<&[String]>,
+    key_scope: Option<&[String]>,
     dangerously_skip_hook_check: bool,
     dangerously_skip_build_hook_check: bool,
 ) -> Result<Option<MutationResult>> {
     let out = crate::render::ctx();
+    // spec: CLI-233 -- captured before `source_scope` is reshaped into a
+    // `HashSet` below (order lost, display no longer possible): only a
+    // filter-driven scope (`sync <filter> --upgrade`'s already-resolved
+    // `selected`, threaded in as `source_scope`) is ever `Some` here with
+    // more than one name, so this is exactly the "filter matched more
+    // sources than the caller pictured" case the confirmation must name.
+    let scope_names: Vec<String> = source_scope.map(<[String]>::to_vec).unwrap_or_default();
     // POL-3: load the managed policy once (fail closed on Err; None = inert).
     let policy = Policy::load()?;
     let mut registry = Registry::load(paths)?;
@@ -5959,16 +6044,22 @@ fn upgrade_inner_scoped(
     let filter = item_ref.map(parse_item_ref).transpose()?;
     let source_scope: Option<HashSet<String>> =
         source_scope.map(|names| names.iter().cloned().collect());
+    // spec: TUI-72 TUI-73 - the TUI's confirmed-key scope (exact `kind:name`
+    // match), analogous to `source_scope` but by item identity rather than by
+    // source or by `filter`'s glob.
+    let key_scope: Option<HashSet<String>> = key_scope.map(|keys| keys.iter().cloned().collect());
 
     // HOOK-11 scope: a scoped `upgrade <item>` (or a scoped `sync <source>
-    // --upgrade`, CLI-232) must not re-run install hooks (arbitrary code) for
-    // sources unrelated to the targeted item/source. When a filter is present,
-    // restrict the hook re-run to sources that have at least one INSTALLED item
-    // matching the filter (the same scoping the per-item loop uses via
-    // `installed_matches_glob`); when a source scope is present, intersect with
-    // it too (a `sync <source> --upgrade` names the source directly). With
-    // neither, `None` means every source is in scope, leaving the unscoped
-    // behavior unchanged.
+    // --upgrade`, CLI-232, or a scoped TUI key-set apply, TUI-73) must not
+    // re-run install hooks (arbitrary code) for sources unrelated to the
+    // targeted item/source. When a filter is present, restrict the hook
+    // re-run to sources that have at least one INSTALLED item matching the
+    // filter (the same scoping the per-item loop uses via
+    // `installed_matches_glob`); same for a key scope, restricted to sources
+    // that have at least one installed item whose KEY is in the set; when a
+    // source scope is present, intersect with it too (a `sync <source>
+    // --upgrade` names the source directly). With none of the three, `None`
+    // means every source is in scope, leaving the unscoped behavior unchanged.
     let hook_scope: Option<HashSet<String>> = {
         let from_filter = filter.as_ref().map(|f| {
             manifest
@@ -5978,12 +6069,22 @@ fn upgrade_inner_scoped(
                 .map(|it| it.source.clone())
                 .collect::<HashSet<String>>()
         });
-        match (from_filter, source_scope.clone()) {
-            (Some(a), Some(b)) => Some(a.intersection(&b).cloned().collect()),
-            (Some(a), None) => Some(a),
-            (None, Some(b)) => Some(b),
-            (None, None) => None,
-        }
+        let from_keys = key_scope.as_ref().map(|keys| {
+            manifest
+                .items
+                .values()
+                .filter(|it| keys.contains(it.key().as_str()))
+                .map(|it| it.source.clone())
+                .collect::<HashSet<String>>()
+        });
+        let candidates: Vec<HashSet<String>> = [from_filter, source_scope.clone(), from_keys]
+            .into_iter()
+            .flatten()
+            .collect();
+        let mut candidates = candidates.into_iter();
+        candidates
+            .next()
+            .map(|first| candidates.fold(first, |acc, c| acc.intersection(&c).cloned().collect()))
     };
 
     // HOOK-11: re-run a source's install hook when its commit has advanced past
@@ -6025,6 +6126,7 @@ fn upgrade_inner_scoped(
             installed,
             filter.as_ref(),
             source_scope.as_ref(),
+            key_scope.as_ref(),
             policy.as_ref(),
             &registry,
         ) {
@@ -6157,7 +6259,7 @@ fn upgrade_inner_scoped(
                 return Err(MindError::UpgradeRenameCollision {
                     key: strip_ansi(&new_key),
                     existing_source: strip_ansi(&occupant.source),
-                    incoming: strip_ansi(&up.old.key()),
+                    incoming: strip_ansi(up.old.key().as_str()),
                     incoming_source: strip_ansi(&up.old.source),
                 });
             }
@@ -6187,7 +6289,7 @@ fn upgrade_inner_scoped(
                     return Err(MindError::UpgradeRenameCollision {
                         key: strip_ansi(&key),
                         existing_source: strip_ansi(&prev.old.source),
-                        incoming: strip_ansi(&up.old.key()),
+                        incoming: strip_ansi(up.old.key().as_str()),
                         incoming_source: strip_ansi(&up.old.source),
                     });
                 }
@@ -6206,11 +6308,26 @@ fn upgrade_inner_scoped(
         // non-interactive *text*-mode run (e.g. piped stdin with no reply) was
         // never able to apply an upgrade unprompted -- only `--json` could
         // bypass it, by skipping the confirm call entirely.
+        // spec: CLI-233 -- a filter (`sync <filter> --upgrade`) can match more
+        // sources than the caller pictured; when it matched more than one,
+        // name them here so the blast radius (every matched source's items
+        // upgraded, and its install hook possibly re-run, HOOK-11) is visible
+        // BEFORE consent, in both the text prompt and the `--json` refusal's
+        // action text. A single-match filter (or no filter at all, e.g. plain
+        // `mind upgrade`) leaves the prompt exactly as before CLI-233.
+        let multi_source_note = multi_source_upgrade_note(&scope_names);
         if out.json {
-            // spec: CLI-232
-            return Err(MindError::ConfirmationRequired {
-                action: json_confirmation_action("applying pending upgrades", true),
-            });
+            // spec: CLI-232 CLI-233
+            let action = match &multi_source_note {
+                Some(note) => {
+                    json_confirmation_action(format!("applying pending upgrades ({note})"), true)
+                }
+                None => json_confirmation_action("applying pending upgrades", true),
+            };
+            return Err(MindError::ConfirmationRequired { action });
+        }
+        if let Some(note) = &multi_source_note {
+            println!("  {} {note}", out.warn());
         }
         if !confirm_default_yes("apply these upgrades?")? {
             println!("aborted; nothing changed");
@@ -6289,7 +6406,7 @@ fn upgrade_inner_scoped(
                 }
                 return Err(e);
             }
-            manifest.items.remove(&up.old.key());
+            manifest.items.remove(up.old.key().as_str());
             renamed = true;
             if !out.json {
                 println!(
@@ -6519,6 +6636,11 @@ fn upgrade_item_disposition(
     // unchanged); `Some(set)` restricts consideration to installed items whose
     // recorded source name is in `set`, exactly like `filter` restricts by item.
     source_scope: Option<&HashSet<String>>,
+    // spec: TUI-72 TUI-73 - the TUI's confirmed-set apply scope: `None` means
+    // unrestricted by key (every non-TUI caller); `Some(set)` restricts
+    // consideration to installed items whose exact key (`kind:name`) is in
+    // `set`, so `upgrade_no_sync_keys` acts on precisely the confirmed items.
+    key_scope: Option<&HashSet<String>>,
     policy: Option<&Policy>,
     registry: &Registry,
 ) -> UpgradeDisposition {
@@ -6529,6 +6651,11 @@ fn upgrade_item_disposition(
     }
     if let Some(scope) = source_scope
         && !scope.contains(&installed.source)
+    {
+        return UpgradeDisposition::OutOfScope;
+    }
+    if let Some(scope) = key_scope
+        && !scope.contains(installed.key().as_str())
     {
         return UpgradeDisposition::OutOfScope;
     }
@@ -6667,7 +6794,7 @@ pub fn recall(
                 // spec: CLI-232 DSC-95 -- the fallback's own key must be
                 // sanitized too (the lookup itself needs the raw key).
                 let node = graph
-                    .subtree_node(&key)
+                    .subtree_node(key.as_str())
                     .unwrap_or_else(|| crate::deps::DepNode::normal(found.display_key(), vec![]));
                 return print_json(&node);
             } else {
@@ -6681,7 +6808,7 @@ pub fn recall(
             let parsed = parse_item_ref(item_ref)?;
             let found = crate::resolve::resolve_installed(&manifest.items, &parsed)?;
             let key = found.key();
-            match graph.render_subtree(&key) {
+            match graph.render_subtree(key.as_str()) {
                 Some(subtree) => print!("{subtree}"),
                 // spec: CLI-232 DSC-95
                 None => println!("{}", found.display_key()),
@@ -7138,7 +7265,10 @@ pub fn probe(
     // Human listing: nest each hit's transitive dependencies beneath it. Build a
     // graph over all catalog items (passing every catalog key as the "installed"
     // set makes every item a node), then render_subtree for each hit.
-    let all_catalog_keys: HashSet<String> = items.iter().map(|it| it.key()).collect();
+    let all_catalog_keys: HashSet<String> = items
+        .iter()
+        .map(|it| it.key().as_str().to_string())
+        .collect();
     let catalog_graph = crate::deps::installed_graph(&items, &all_catalog_keys, read_item_text);
 
     let mut rows = Vec::new();
@@ -7186,7 +7316,7 @@ pub fn probe(
         // catalog graph to render a subtree; each dependency line is indented
         // with two leading spaces so it reads as a child of the hit above.
         // Cycle back-edges are marked (cycle) by render_subtree/render_forest.
-        if let Some(subtree) = catalog_graph.render_subtree(&it.key()) {
+        if let Some(subtree) = catalog_graph.render_subtree(it.key().as_str()) {
             // The subtree includes the root (it.key()) at depth 0; skip it
             // and emit only the nested child lines (depth >= 1).
             for line in subtree.lines().skip(1) {
@@ -7387,14 +7517,17 @@ pub fn introspect(paths: &Paths, fix: bool, json: bool) -> Result<()> {
             // be repaired (e.g. the store copy itself is gone).
             let n = if fix { install::relink(paths, it)? } else { 0 };
             if n > 0 {
-                repaired.push(format!("{}: relinked {n} missing symlink(s)", it.key()));
+                repaired.push(format!(
+                    "{}: relinked {n} missing symlink(s)",
+                    it.key().as_str()
+                ));
             }
             for link in &missing {
                 if std::fs::symlink_metadata(link).is_err() {
                     issues.push(Issue {
                         kind: "missing-link",
-                        target: it.key(),
-                        message: format!("{}: symlink missing at {link}", it.key()),
+                        target: it.key().into(),
+                        message: format!("{}: symlink missing at {link}", it.key().as_str()),
                     });
                 }
             }
@@ -7443,24 +7576,24 @@ pub fn introspect(paths: &Paths, fix: bool, json: bool) -> Result<()> {
                         manifest_dirty = true;
                         repaired.push(format!(
                             "{}: linked into new lobe {}",
-                            it.key(),
+                            it.key().as_str(),
                             lobe.path.display()
                         ));
                     }
                     for (p, e) in errs {
                         issues.push(Issue {
                             kind: "missing-lobe-link",
-                            target: it.key(),
+                            target: it.key().into(),
                             message: format!("{}: {e}", p.display()),
                         });
                     }
                 } else {
                     issues.push(Issue {
                         kind: "missing-lobe-link",
-                        target: it.key(),
+                        target: it.key().into(),
                         message: format!(
                             "{}: not linked into lobe {}; run `mind introspect --fix`",
-                            it.key(),
+                            it.key().as_str(),
                             lobe.path.display()
                         ),
                     });
@@ -7474,17 +7607,21 @@ pub fn introspect(paths: &Paths, fix: bool, json: bool) -> Result<()> {
         {
             None => issues.push(Issue {
                 kind: "removed-upstream",
-                target: it.key(),
-                message: format!("{}: no longer present in source '{}'", it.key(), it.source),
+                target: it.key().into(),
+                message: format!(
+                    "{}: no longer present in source '{}'",
+                    it.key().as_str(),
+                    it.source
+                ),
             }),
             Some(cat) => {
                 if cat.effective_name() != it.name {
                     issues.push(Issue {
                         kind: "namespace-changed",
-                        target: it.key(),
+                        target: it.key().into(),
                         message: format!(
                             "{}: namespace changed to '{}'; run `mind upgrade`",
-                            it.key(),
+                            it.key().as_str(),
                             cat.effective_name()
                         ),
                     });
@@ -7493,8 +7630,11 @@ pub fn introspect(paths: &Paths, fix: bool, json: bool) -> Result<()> {
                 {
                     issues.push(Issue {
                         kind: "drifted",
-                        target: it.key(),
-                        message: format!("{}: upstream changed; run `mind upgrade`", it.key()),
+                        target: it.key().into(),
+                        message: format!(
+                            "{}: upstream changed; run `mind upgrade`",
+                            it.key().as_str()
+                        ),
                     });
                 }
             }
@@ -7872,7 +8012,11 @@ pub fn lobe_add_resolved(
             }
             install::copy_recursive(&store_src, &dst)?;
             copied += 1;
-            frozen_keys.push(item.key());
+            // spec: DSC-95 -- `result.installed` below rides straight into the
+            // `--json` envelope with no sanitizing step of its own (mirrors the
+            // `learn()`/`sync` pattern of sanitizing before assigning to a
+            // `--json` field), so sanitize here at collection.
+            frozen_keys.push(item.key().display());
         }
         // spec: HARN-14 -- machine-readable snapshot result under --json, in place
         // of the prose lines. `outcome` is `snapshot` when anything was frozen,
@@ -8496,14 +8640,31 @@ fn json_confirmation_action(base: impl std::fmt::Display, json: bool) -> String 
     }
 }
 
-/// Sanitize a filesystem path for display (DSC-95): a path built from a
-/// source-controlled item name (a store path, a lobe link target) can embed
-/// ANSI/control/bidi bytes just as much as the name itself. Local to this
-/// module -- `sanitize.rs` is owned by a different shard -- and a candidate to
-/// promote there later.
-// spec: CLI-232 DSC-95
-fn display_path(p: &std::path::Path) -> String {
-    crate::sanitize::strip_ansi(&p.display().to_string())
+/// Build the note naming an `--upgrade` filter's matched sources when it
+/// matched more than one (CLI-233). `sync <filter> --upgrade` threads its
+/// already-resolved matches into `upgrade_inner_scoped` as `source_scope`; a
+/// filter (unlike `unmeld`'s/`upgrade`'s ref-style source selection, CLI-20)
+/// intentionally allows more than one match, so a name like `mind sync skills
+/// --upgrade` can silently widen to upgrading -- and re-running the install
+/// hook of (HOOK-11) -- every source the filter happened to match, while
+/// reading as if it named one. Naming the matched sources here, right before
+/// the confirmation, makes that blast radius visible before the user
+/// consents. `None` when `names` has zero or one entries: an unscoped
+/// `--upgrade` pass (bare `mind upgrade`, or `sync --upgrade` with no
+/// filter) and a single-match filter both leave the prompt exactly as it was
+/// before CLI-233 -- a single match already reads as naming that one source,
+/// so growing the prompt there would be noise, not signal.
+// spec: CLI-233
+fn multi_source_upgrade_note(names: &[String]) -> Option<String> {
+    if names.len() <= 1 {
+        return None;
+    }
+    let sanitized: Vec<String> = names.iter().map(|n| strip_ansi(n)).collect();
+    Some(format!(
+        "this filter matched {} sources; upgrading (and possibly re-running the install hook of) all of them: {}",
+        sanitized.len(),
+        sanitized.join(", ")
+    ))
 }
 
 /// First 8 chars of a hash/commit, for compact display.
@@ -9042,20 +9203,27 @@ mod tests {
 
         // Out-of-scope item: silently skipped, never reported as PolicyBlocked.
         assert_eq!(
-            upgrade_item_disposition(&other, Some(&filter), None, Some(&policy), &registry),
+            upgrade_item_disposition(&other, Some(&filter), None, None, Some(&policy), &registry),
             UpgradeDisposition::OutOfScope,
             "POL-12: an unselected item must not be policy-skipped (no skip line)"
         );
         // The selected, allowed item is considered for upgrade.
         assert_eq!(
-            upgrade_item_disposition(&selected, Some(&filter), None, Some(&policy), &registry),
+            upgrade_item_disposition(
+                &selected,
+                Some(&filter),
+                None,
+                None,
+                Some(&policy),
+                &registry
+            ),
             UpgradeDisposition::Consider,
         );
 
         // Sanity: with no scope filter, the disallowed item IS policy-blocked
         // (the existing unscoped behavior is preserved).
         assert_eq!(
-            upgrade_item_disposition(&other, None, None, Some(&policy), &registry),
+            upgrade_item_disposition(&other, None, None, None, Some(&policy), &registry),
             UpgradeDisposition::PolicyBlocked,
         );
 
@@ -9095,7 +9263,14 @@ mod tests {
 
         for name in [&link_name, &aliased_name] {
             assert_eq!(
-                upgrade_item_disposition(&item("foo", name), None, None, Some(&policy), &registry),
+                upgrade_item_disposition(
+                    &item("foo", name),
+                    None,
+                    None,
+                    None,
+                    Some(&policy),
+                    &registry
+                ),
                 UpgradeDisposition::Consider,
                 "{name}: an instance of an allowed repo stays allowed"
             );
@@ -9109,6 +9284,7 @@ mod tests {
         assert_eq!(
             upgrade_item_disposition(
                 &item("foo", "github.com/me/allowed-src#skills/foo"),
+                None,
                 None,
                 None,
                 Some(&policy),
@@ -9144,6 +9320,7 @@ mod tests {
                 &item("foo", "github.com/them/blocked-src"),
                 None,
                 None,
+                None,
                 Some(&policy),
                 &registry,
             ),
@@ -9157,6 +9334,7 @@ mod tests {
         assert_eq!(
             upgrade_item_disposition(
                 &item("foo", "github.com/gone/unmelded-src"),
+                None,
                 None,
                 None,
                 Some(&policy),
@@ -9188,10 +9366,174 @@ mod tests {
         let registry = registry_of(&["me/allowed-src", "them/blocked-src"]);
 
         assert_eq!(
-            upgrade_item_disposition(&selected, Some(&filter), None, Some(&policy), &registry),
+            upgrade_item_disposition(
+                &selected,
+                Some(&filter),
+                None,
+                None,
+                Some(&policy),
+                &registry
+            ),
             UpgradeDisposition::PolicyBlocked,
             "a selected item from a disallowed source is still reported"
         );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // spec: TUI-72 TUI-73
+    #[test]
+    fn upgrade_no_sync_keys_skips_inapplicable_confirmed_keys_without_aborting() {
+        // The TUI's confirm-to-apply window is real: by the time
+        // `upgrade_no_sync_keys` runs, a confirmed key may no longer be
+        // applicable -- its drift already resolved, or the item never existed
+        // at all (forgotten, or a stale reference). Neither case may abort the
+        // batch; each confirmed key is considered independently and an
+        // inapplicable one is silently dropped, exactly like an out-of-scope
+        // item already is for a glob-filtered `upgrade <item>`.
+        use std::process::Command;
+
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let base = std::env::temp_dir().join(format!(
+            "mind-cmd-upgrade-keys-skip-{}-{n}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        let paths = Paths {
+            mind_home: base.join("mind"),
+            claude_home: base.join("claude"),
+        };
+        crate::paths::mkdir_p(&paths.mind_home).unwrap();
+        crate::config::Config {
+            lobes: vec![crate::config::LobeEntry::bare(
+                paths.claude_home.to_str().unwrap(),
+            )],
+            ..Default::default()
+        }
+        .save(&paths)
+        .unwrap();
+
+        let src = base.join("skip-source");
+        std::fs::create_dir_all(src.join("skills/applies")).unwrap();
+        std::fs::write(
+            src.join("skills/applies/SKILL.md"),
+            "---\ndescription: applies skill\n---\n# applies\noriginal\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(src.join("skills/resolved")).unwrap();
+        let resolved_original = "---\ndescription: resolved skill\n---\n# resolved\noriginal\n";
+        std::fs::write(src.join("skills/resolved/SKILL.md"), resolved_original).unwrap();
+        let run = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(&src)
+                .output()
+                .expect("git");
+        };
+        run(&["-c", "init.defaultBranch=main", "init", "-q"]);
+        run(&["config", "user.email", "t@t"]);
+        run(&["config", "user.name", "t"]);
+        run(&["add", "-A"]);
+        run(&["commit", "-qm", "initial"]);
+
+        meld(
+            &paths,
+            src.to_str().unwrap(),
+            None,
+            vec![],
+            vec![],
+            false,
+            PinRequest::None,
+            None,
+            false,
+        )
+        .expect("meld");
+        for item_key in ["skill:applies", "skill:resolved"] {
+            learn(
+                &paths,
+                item_key,
+                false,
+                InstallFlow {
+                    yes: true,
+                    clobber: Clobber::Force,
+                    dangerously_skip: true,
+                    dangerously_skip_build: true,
+                },
+            )
+            .expect("learn");
+        }
+
+        let manifest_before = crate::manifest::Manifest::load(&paths).unwrap();
+        let applies_hash_before = manifest_before
+            .items
+            .get("skill:applies")
+            .unwrap()
+            .hash
+            .clone();
+        let resolved_hash_before = manifest_before
+            .items
+            .get("skill:resolved")
+            .unwrap()
+            .hash
+            .clone();
+
+        // `skill:applies` drifts for real and stays drifted -- this is the
+        // confirmed key that must actually apply.
+        std::fs::write(
+            src.join("skills/applies/SKILL.md"),
+            "---\ndescription: applies skill\n---\n# applies\nedited\n",
+        )
+        .unwrap();
+        // `skill:resolved` drifts, was confirmed while drifted, but is reverted
+        // to its original content before the apply runs -- no longer out of
+        // date by the time `upgrade_no_sync_keys` looks at it.
+        std::fs::write(
+            src.join("skills/resolved/SKILL.md"),
+            "---\ndescription: resolved skill\n---\n# resolved\ntemporarily edited\n",
+        )
+        .unwrap();
+        std::fs::write(src.join("skills/resolved/SKILL.md"), resolved_original).unwrap();
+
+        // The confirmed set also names a key that was never installed at all
+        // (e.g. forgotten between confirm and apply, or a stale reference).
+        let confirmed_keys = vec![
+            "skill:applies".to_string(),
+            "skill:resolved".to_string(),
+            "skill:ghost".to_string(),
+        ];
+
+        let result = upgrade_no_sync_keys(&paths, true, &confirmed_keys, false, false);
+        assert!(
+            result.is_ok(),
+            "a partially-inapplicable confirmed set must not abort the run: {:?}",
+            result.err()
+        );
+
+        let manifest_after = crate::manifest::Manifest::load(&paths).unwrap();
+        let applies_hash_after = manifest_after
+            .items
+            .get("skill:applies")
+            .unwrap()
+            .hash
+            .clone();
+        let resolved_hash_after = manifest_after
+            .items
+            .get("skill:resolved")
+            .unwrap()
+            .hash
+            .clone();
+
+        assert_ne!(
+            applies_hash_after, applies_hash_before,
+            "the still-applicable confirmed key must still be upgraded"
+        );
+        assert_eq!(
+            resolved_hash_after, resolved_hash_before,
+            "a confirmed key whose drift already resolved must be skipped, not \
+             re-recorded"
+        );
+        // No panic and no error for `skill:ghost`, which was never installed:
+        // reaching this point at all is the assertion.
 
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -9768,6 +10110,28 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// DSC-95: `NamespaceLocked`'s `items` list (built from each locked item's
+    /// `key()`) must reach the caller already sanitized -- `MindError::
+    /// NamespaceLocked`'s `#[error(...)]` Display joins `items` verbatim into
+    /// the rejection message with no sanitizing step of its own, so a raw ESC
+    /// byte in an installed name would otherwise ride straight to a terminal
+    /// via `main.rs`'s `eprintln!("error: {err}")`.
+    // spec: DSC-95
+    #[test]
+    fn set_source_namespace_locked_message_sanitizes_installed_item_key() {
+        let (paths, base) = ns_paths();
+        let name = seed_source(&paths, "agents", None);
+        seed_installed_item(&paths, &name, ItemKind::Skill, "evil\x1b[31mname");
+        let r = set_source_namespace(&paths, &name, Some("jk".into()));
+        let msg = match r {
+            Err(e @ MindError::NamespaceLocked { .. }) => e.to_string(),
+            other => panic!("expected NamespaceLocked, got {other:?}"),
+        };
+        assert!(!msg.contains('\x1b'), "must strip raw ESC: {msg:?}");
+        assert!(msg.contains("evil"), "must still name the item: {msg}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[test]
     fn set_source_namespace_unchanged_alias_with_items_is_noop() {
         // spec: NS-30 CLI-161 - re-applying the SAME alias is allowed even with
@@ -10308,5 +10672,113 @@ mod tests {
             dir.display()
         );
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ----- CLI-233: naming a filter's matched sources before an --upgrade
+    // confirmation -----
+
+    #[test]
+    fn multi_source_upgrade_note_none_for_empty_scope() {
+        // spec: CLI-233 -- an unscoped `--upgrade` pass (bare `mind upgrade`,
+        // or `sync --upgrade` with no `[source]` filter) must not grow the
+        // prompt: `source_scope` is `None` in that case, threaded here as an
+        // empty slice.
+        assert!(multi_source_upgrade_note(&[]).is_none());
+    }
+
+    #[test]
+    fn multi_source_upgrade_note_none_for_single_match() {
+        // spec: CLI-233 -- a filter that resolved to exactly one source reads
+        // like naming that source already; the prompt must not grow.
+        let names = vec!["github.com/acme/skills".to_string()];
+        assert!(
+            multi_source_upgrade_note(&names).is_none(),
+            "a single-match filter must not grow the confirmation"
+        );
+    }
+
+    #[test]
+    fn multi_source_upgrade_note_names_every_match_for_multi_match() {
+        // spec: CLI-233 -- the defect this covers: `mind sync skills
+        // --upgrade` can match several sources while reading as if it named
+        // one. When the filter matches more than one source, the note must
+        // name every one of them so the blast radius (each matched source's
+        // items upgraded, and its install hook possibly re-run) is visible
+        // before consent.
+        let names = vec![
+            "github.com/acme/skills".to_string(),
+            "github.com/other/skills".to_string(),
+        ];
+        let note = multi_source_upgrade_note(&names)
+            .expect("a multi-match filter must produce a naming note");
+        assert!(
+            note.contains("github.com/acme/skills"),
+            "note must name the first matched source: {note}"
+        );
+        assert!(
+            note.contains("github.com/other/skills"),
+            "note must name the second matched source: {note}"
+        );
+        assert!(
+            note.contains('2'),
+            "note must state the match count: {note}"
+        );
+    }
+
+    #[test]
+    fn multi_source_upgrade_note_strips_ansi_from_source_names() {
+        // spec: CLI-233 DSC-95 -- a source name is source-controlled (an
+        // `[source].description`-adjacent identity string can be influenced by
+        // the melded repo); sanitize each name before composing the note,
+        // mirroring every other DSC-95 print site in this module.
+        let names = vec![
+            "\x1b[2Jevil".to_string(),
+            "github.com/other/skills".to_string(),
+        ];
+        let note = multi_source_upgrade_note(&names).expect("multi-match note");
+        assert!(
+            !note.contains('\x1b'),
+            "ANSI escape byte must be stripped: {note:?}"
+        );
+        assert!(note.contains("evil"), "printable text must survive: {note}");
+    }
+
+    #[test]
+    fn json_confirmation_action_embeds_multi_source_note() {
+        // spec: CLI-233 -- under `--json`, `sync <filter> --upgrade`'s
+        // `ConfirmationRequired` (LIFE-45: --json never prompts) still names
+        // the matched sources in its `action` text, so a machine caller sees
+        // the same blast-radius disclosure a human would at the text prompt,
+        // rather than a generic message that reads as a single-source
+        // upgrade regardless of how many sources the filter actually matched.
+        let names = vec![
+            "github.com/acme/skills".to_string(),
+            "github.com/other/skills".to_string(),
+        ];
+        let note = multi_source_upgrade_note(&names).expect("multi-match note");
+        let action = json_confirmation_action(format!("applying pending upgrades ({note})"), true);
+        assert!(
+            action.contains("github.com/acme/skills"),
+            "action: {action}"
+        );
+        assert!(
+            action.contains("github.com/other/skills"),
+            "action: {action}"
+        );
+        assert!(
+            action.contains("--json is always non-interactive"),
+            "action must still carry the LIFE-45 --json remedy text: {action}"
+        );
+    }
+
+    #[test]
+    fn json_confirmation_action_unchanged_for_single_source() {
+        // spec: CLI-233 -- a single-match filter (or no filter) must not
+        // widen the --json refusal's action text either.
+        let action = json_confirmation_action("applying pending upgrades", true);
+        assert_eq!(
+            action,
+            "applying pending upgrades (--json is always non-interactive; --yes is the only way to proceed)"
+        );
     }
 }

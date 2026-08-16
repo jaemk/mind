@@ -5,6 +5,104 @@
 //! `pub(crate)` so the TUI data layer can sanitize at its model boundary
 //! (TUI-60) without depending on commands.rs.
 
+/// An item's identity key (`kind:name`), where `name` is attacker-controlled:
+/// a directory name in a melded repo, or a `[[items]] name` in its
+/// `mind.toml` (DSC-95). This wraps the raw string so the two readings of a
+/// key -- identity (map/set lookups, comparisons, the manifest key, a path
+/// component) and display (a human/`--json` print site) -- are distinct
+/// types, not two methods on `String` that happen to look alike at a call
+/// site. Deliberately has NO `Display` impl: `println!("{}", key)` and
+/// `format!("{key}")` are compile errors, not a call-site discipline that a
+/// 19th print site can quietly skip. The only way to print an `ItemKey` is
+/// [`ItemKey::display`], which routes it through [`strip_ansi`].
+///
+/// `Debug` is still derived and is safe to use in a `{:?}` (e.g. a panic
+/// message or an `expect`): `Debug for str` escapes control characters (an
+/// ESC becomes `\u{1b}`), so it cannot forge a terminal escape sequence the
+/// way `Display` could.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct ItemKey(String);
+
+impl ItemKey {
+    /// Build a key from its raw `kind:name` (or similar) string. Callers are
+    /// the three `key()` constructors (`InstalledItem`, `CatalogItem`,
+    /// `UnmanagedItem`); construct via those rather than directly where a
+    /// `CatalogItem`/`InstalledItem`/`UnmanagedItem` is available.
+    pub(crate) fn new(raw: impl Into<String>) -> Self {
+        ItemKey(raw.into())
+    }
+
+    /// The raw key, for identity use only: map/set lookups, equality
+    /// comparisons, a manifest key, a path component. NEVER pass this to a
+    /// `println!`/`format!`/`eprintln!` or a `--json` field -- use
+    /// [`Self::display`] there instead.
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The key sanitized for a terminal (DSC-95): the only string this type
+    /// produces that may reach a human/`--json` print site.
+    pub(crate) fn display(&self) -> String {
+        strip_ansi(&self.0)
+    }
+}
+
+impl std::borrow::Borrow<str> for ItemKey {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
+impl PartialEq<str> for ItemKey {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
+impl PartialEq<&str> for ItemKey {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
+impl PartialEq<ItemKey> for str {
+    fn eq(&self, other: &ItemKey) -> bool {
+        self == other.0
+    }
+}
+
+impl PartialEq<ItemKey> for &str {
+    fn eq(&self, other: &ItemKey) -> bool {
+        *self == other.0
+    }
+}
+
+/// Escape hatch for a call site that genuinely needs to own the raw string
+/// as a plain `String` (e.g. to insert as a `BTreeMap<String, _>` key so an
+/// on-disk format stays unchanged). Still the raw, unsanitized value --
+/// identity, not display.
+impl From<ItemKey> for String {
+    fn from(k: ItemKey) -> String {
+        k.0
+    }
+}
+
+/// Serializes exactly like the raw `String` it wraps, so a manifest/JSON
+/// document keyed or valued by an `ItemKey` is byte-identical to one keyed by
+/// a plain `String` -- this type is a compile-time discipline, not an
+/// on-disk format change.
+impl serde::Serialize for ItemKey {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        s.serialize_str(&self.0)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ItemKey {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        Ok(ItemKey(String::deserialize(d)?))
+    }
+}
+
 /// Whether `c` is a C0, DEL, or C1 control character (the "collapse to a
 /// space" bucket [`strip_ansi`] uses for a run of these -- see there).
 fn is_control(c: char) -> bool {
@@ -138,6 +236,14 @@ pub(crate) fn strip_ansi(s: &str) -> String {
         in_control_run = false;
     }
     out
+}
+
+/// Sanitize a filesystem path for display (DSC-95): a path built from a
+/// source-controlled item name (a store path, a lobe link target) can embed
+/// ANSI/control/bidi bytes just as much as the name itself.
+// spec: CLI-232 DSC-95
+pub(crate) fn display_path(p: &std::path::Path) -> String {
+    strip_ansi(&p.display().to_string())
 }
 
 /// Whether `s` contains any character [`strip_ansi`] would remove or collapse: a
@@ -435,5 +541,70 @@ mod tests {
             "a b",
             "newline is the sole survivor and becomes a space"
         );
+    }
+
+    // spec: DSC-95
+    // `ItemKey::display` must strip EXACTLY what `strip_ansi` strips, on both a
+    // clean key and a hostile one -- the two must never drift apart, since
+    // `display()` is the only sanctioned path from an item key to a terminal.
+    #[test]
+    fn item_key_display_matches_strip_ansi() {
+        for raw in [
+            "skill:review",
+            "skill:evil\x1b[31mred\x1b[0m",
+            "agent:pay\u{202E}oot",
+            "rule:wo\u{200B}rd",
+            "tool:a\nb",
+            "",
+        ] {
+            let key = ItemKey::new(raw);
+            assert_eq!(
+                key.display(),
+                strip_ansi(raw),
+                "ItemKey::display() must equal strip_ansi() for {raw:?}"
+            );
+        }
+    }
+
+    // spec: DSC-95
+    // `as_str()` returns the raw, unsanitized value unchanged -- it is the
+    // identity accessor, not display.
+    #[test]
+    fn item_key_as_str_is_raw() {
+        let raw = "skill:evil\x1b[31m";
+        let key = ItemKey::new(raw);
+        assert_eq!(key.as_str(), raw);
+    }
+
+    // spec: DSC-95
+    // `ItemKey` compares and hashes as identity: two keys built from the same
+    // raw string are equal and a `Borrow<str>`/`PartialEq<str>` lookup by the
+    // raw string succeeds, so map/set membership call sites keep working.
+    #[test]
+    fn item_key_identity_equality_and_str_borrow() {
+        use std::collections::HashSet;
+
+        let a = ItemKey::new("skill:review");
+        let b = ItemKey::new("skill:review");
+        assert_eq!(a, b);
+        assert_eq!(a, *"skill:review");
+        assert_eq!("skill:review", a);
+
+        let mut set: HashSet<ItemKey> = HashSet::new();
+        set.insert(a.clone());
+        assert!(set.contains("skill:review"));
+    }
+
+    // spec: DSC-95
+    // `ItemKey` serializes as a bare JSON string -- transparent, so a struct
+    // or map keyed/valued by it round-trips identically to one using a plain
+    // `String` (the on-disk manifest format must not change).
+    #[test]
+    fn item_key_serializes_as_bare_string() {
+        let key = ItemKey::new("skill:review");
+        let json = serde_json::to_string(&key).unwrap();
+        assert_eq!(json, "\"skill:review\"");
+        let back: ItemKey = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, key);
     }
 }

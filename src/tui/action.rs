@@ -57,10 +57,13 @@ fn execute_inner(
 
     let (result, captured) = if capture {
         // Run the verb with stdout captured so nothing leaks onto the alt-screen.
-        with_captured_stdout(|| dispatch(paths, action.kind))
+        with_captured_stdout(|| dispatch(paths, action.kind, &action.upgrade_keys))
     } else {
         // Interactive: the TUI is suspended, so let the verb own the terminal.
-        (dispatch(paths, action.kind), String::new())
+        (
+            dispatch(paths, action.kind, &action.upgrade_keys),
+            String::new(),
+        )
     };
     result?;
 
@@ -73,8 +76,10 @@ fn execute_inner(
 }
 
 /// Dispatch one confirmed action to its command function. No verb logic is
-/// reimplemented here (TUI-20..23).
-fn dispatch(paths: &Paths, kind: ActionKind) -> Result<()> {
+/// reimplemented here (TUI-20..23). `upgrade_keys` is only meaningful for
+/// `ActionKind::Upgrade` (TUI-72, TUI-73): the exact item keys the confirm
+/// modal listed and the user consented to.
+fn dispatch(paths: &Paths, kind: ActionKind, upgrade_keys: &[String]) -> Result<()> {
     match kind {
         ActionKind::Learn { item_key, source } => {
             // When the user picked an item from a specific source (captured at
@@ -130,13 +135,22 @@ fn dispatch(paths: &Paths, kind: ActionKind) -> Result<()> {
         // (LIFE-49/M1) is inert; passed `false` to match the plain `mind sync`
         // (no --upgrade) this action mirrors.
         ActionKind::Sync => commands::sync(paths, false, false, false, false)?,
-        // spec: TUI-73 - `yes: true` so it applies without prompting on stdin.
-        // Use the NO-SYNC upgrade: the confirm modal's pending list was computed
-        // from the last poll snapshot (pre-sync), so a sync-first upgrade could
-        // pull new upstream commits and apply items the modal never named. The
-        // TUI offers `s` (Sync) separately and re-polls ~1s, so drift is
-        // refreshed there; here the applied set must match what was shown.
-        ActionKind::Upgrade => commands::upgrade_no_sync(paths, true, None, false, false)?,
+        // spec: TUI-72 TUI-73 - `yes: true` so it applies without prompting on
+        // stdin. Use the NO-SYNC, KEY-SCOPED upgrade: the confirm modal's
+        // pending list was computed from an authoritative (memo-bypassing)
+        // recompute at `u` keypress time, and `upgrade_keys` is exactly the set
+        // it listed and the user consented to (stashed onto the pending action
+        // by `app.rs`'s `initiate_upgrade`). Scoping the apply to that exact set
+        // -- rather than letting a bare `item_ref: None` upgrade independently
+        // re-derive "everything found stale right now" -- is what makes the
+        // applied set equal the confirmed set BY CONSTRUCTION. Never syncs: a
+        // sync-first apply could pull new upstream commits between confirm and
+        // apply and act on an item the modal never named; the TUI offers `s`
+        // (Sync) separately and re-polls ~1s, so refreshing drift is not this
+        // call's job.
+        ActionKind::Upgrade => {
+            commands::upgrade_no_sync_keys(paths, true, upgrade_keys, false, false)?
+        }
         // spec: TUI-23 CLI-112
         // `yes: true` so backfill applies without prompting on stdin in the TUI.
         ActionKind::LobeAdd { path } => commands::lobe_add(paths, &path, true)?,
@@ -447,6 +461,7 @@ mod tests {
             },
             description: "test".to_string(),
             dep_tree: None,
+            upgrade_keys: Vec::new(),
         };
         let result = execute(&paths, action);
         // Should return an error (NotInstalled), not panic.
@@ -467,6 +482,7 @@ mod tests {
             kind: ActionKind::Sync,
             description: "sync?".to_string(),
             dep_tree: None,
+            upgrade_keys: Vec::new(),
         };
         let result = execute(&paths, action);
         assert!(
@@ -497,6 +513,7 @@ mod tests {
                 kind: ActionKind::Sync,
                 description: "sync".to_string(),
                 dep_tree: None,
+                upgrade_keys: Vec::new(),
             };
             // The sync itself is fast (no sources); verify it runs under the
             // lock and returns a valid snapshot.
@@ -561,6 +578,7 @@ mod tests {
                 kind: ActionKind::Sync,
                 description: "sync".to_string(),
                 dep_tree: None,
+                upgrade_keys: Vec::new(),
             },
         );
         let waited = start.elapsed();
@@ -594,12 +612,165 @@ mod tests {
             kind: ActionKind::Upgrade,
             description: "upgrade?".to_string(),
             dep_tree: None,
+            upgrade_keys: Vec::new(),
         };
         let result = execute(&paths, action);
         assert!(
             result.is_ok(),
             "upgrade with nothing to do should succeed: {:?}",
             result.err()
+        );
+    }
+
+    #[test]
+    fn action_upgrade_applies_only_the_confirmed_keys_not_a_newly_stale_item() {
+        // spec: TUI-72 TUI-73 - the entire point of the fix: the apply must act
+        // on EXACTLY the keys the confirm modal named, not on "everything found
+        // stale right now" the way a bare `item_ref: None` upgrade would. Two
+        // installed items start clean; only `skill:alpha` is edited before the
+        // (simulated) confirm, so the pending action's `upgrade_keys` names only
+        // `skill:alpha`. Between confirm and apply, `skill:beta` is ALSO edited
+        // (a real race: some other change lands in the confirm-to-apply window).
+        // Applying the frozen pending action must upgrade `skill:alpha` (it was
+        // confirmed) but leave `skill:beta` untouched (it was never named),
+        // even though `skill:beta` is independently stale by the time the apply
+        // runs. Before TUI-72/TUI-73, `dispatch` called
+        // `commands::upgrade_no_sync(paths, true, None, ..)`, which re-derives
+        // the stale set at apply time and would have upgraded BOTH.
+        use std::process::Command;
+
+        let (paths, base) = temp_paths();
+        crate::paths::mkdir_p(&paths.mind_home).unwrap();
+        crate::config::Config {
+            lobes: vec![crate::config::LobeEntry::bare(
+                paths.claude_home.to_str().unwrap(),
+            )],
+            ..Default::default()
+        }
+        .save(&paths)
+        .unwrap();
+
+        let src = base.join("two-item-source");
+        std::fs::create_dir_all(src.join("skills/alpha")).unwrap();
+        std::fs::write(
+            src.join("skills/alpha/SKILL.md"),
+            "---\ndescription: alpha skill\n---\n# alpha\noriginal\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(src.join("skills/beta")).unwrap();
+        std::fs::write(
+            src.join("skills/beta/SKILL.md"),
+            "---\ndescription: beta skill\n---\n# beta\noriginal\n",
+        )
+        .unwrap();
+        init_git_repo(&src);
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(&src)
+                .output()
+                .expect("git");
+        };
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "initial"]);
+
+        commands::meld(
+            &paths,
+            src.to_str().unwrap(),
+            None,
+            vec![],
+            vec![],
+            false,
+            commands::PinRequest::None,
+            None,
+            false,
+        )
+        .expect("meld");
+        commands::learn(
+            &paths,
+            "skill:alpha",
+            false,
+            commands::InstallFlow {
+                yes: true,
+                clobber: commands::Clobber::Force,
+                dangerously_skip: true,
+                dangerously_skip_build: true,
+            },
+        )
+        .expect("learn alpha");
+        commands::learn(
+            &paths,
+            "skill:beta",
+            false,
+            commands::InstallFlow {
+                yes: true,
+                clobber: commands::Clobber::Force,
+                dangerously_skip: true,
+                dangerously_skip_build: true,
+            },
+        )
+        .expect("learn beta");
+
+        let manifest_before = crate::manifest::Manifest::load(&paths).unwrap();
+        let alpha_hash_before = manifest_before
+            .items
+            .get("skill:alpha")
+            .unwrap()
+            .hash
+            .clone();
+        let beta_hash_before = manifest_before
+            .items
+            .get("skill:beta")
+            .unwrap()
+            .hash
+            .clone();
+
+        // Edit alpha only, "before confirm": this is the item the (simulated)
+        // confirm modal names and the only key the pending action carries.
+        std::fs::write(
+            src.join("skills/alpha/SKILL.md"),
+            "---\ndescription: alpha skill\n---\n# alpha\nedited before confirm\n",
+        )
+        .unwrap();
+        let action = PendingAction {
+            kind: ActionKind::Upgrade,
+            description: "Upgrade 1 pending item(s)?\n\nskill:alpha (...)".to_string(),
+            dep_tree: None,
+            upgrade_keys: vec!["skill:alpha".to_string()],
+        };
+
+        // Edit beta "after confirm, before apply": a race the confirmed key set
+        // must not silently absorb.
+        std::fs::write(
+            src.join("skills/beta/SKILL.md"),
+            "---\ndescription: beta skill\n---\n# beta\nedited after confirm\n",
+        )
+        .unwrap();
+
+        let result = execute(&paths, action);
+        assert!(
+            result.is_ok(),
+            "scoped upgrade must succeed: {:?}",
+            result.err()
+        );
+
+        let manifest_after = crate::manifest::Manifest::load(&paths).unwrap();
+        let alpha_hash_after = manifest_after
+            .items
+            .get("skill:alpha")
+            .unwrap()
+            .hash
+            .clone();
+        let beta_hash_after = manifest_after.items.get("skill:beta").unwrap().hash.clone();
+
+        assert_ne!(
+            alpha_hash_after, alpha_hash_before,
+            "the confirmed item (skill:alpha) must be upgraded"
+        );
+        assert_eq!(
+            beta_hash_after, beta_hash_before,
+            "an item the modal never named (skill:beta) must NOT be upgraded, \
+             even though it independently became stale before the apply ran"
         );
     }
 
@@ -708,6 +879,11 @@ mod tests {
             kind: ActionKind::Upgrade,
             description: "upgrade?".to_string(),
             dep_tree: None,
+            // TUI-73: the apply is scoped to exactly the confirmed keys now, so
+            // this must name skill:review the same way `initiate_upgrade` would
+            // have stashed it, or the scoped apply would upgrade nothing and the
+            // assertions below would pass vacuously.
+            upgrade_keys: vec!["skill:review".to_string()],
         };
         execute(&no_sync_paths, action).expect("no-sync upgrade should succeed");
         let no_sync_commit = recorded_commit(&no_sync_paths);
@@ -790,6 +966,7 @@ mod tests {
             kind: ActionKind::Meld { spec: spec.clone() },
             description: format!("Meld {spec}?"),
             dep_tree: None,
+            upgrade_keys: Vec::new(),
         };
         let result = execute(&paths, action);
         assert!(result.is_ok(), "meld should succeed: {:?}", result.err());
@@ -819,6 +996,7 @@ mod tests {
             kind: ActionKind::Meld { spec: spec.clone() },
             description: format!("Meld {spec}?"),
             dep_tree: None,
+            upgrade_keys: Vec::new(),
         };
         let result = execute_interactive(&paths, action);
         assert!(
@@ -875,6 +1053,7 @@ mod tests {
             },
             description: format!("Unmeld {source_name}?"),
             dep_tree: None,
+            upgrade_keys: Vec::new(),
         };
         let result = execute_interactive(&paths, action);
         assert!(
@@ -949,6 +1128,7 @@ mod tests {
             },
             description: format!("Unmeld {source_name} --forget?"),
             dep_tree: None,
+            upgrade_keys: Vec::new(),
         };
         let result = execute(&paths, action);
         assert!(
@@ -988,6 +1168,7 @@ mod tests {
             },
             description: format!("Unmeld {source_name}?"),
             dep_tree: None,
+            upgrade_keys: Vec::new(),
         };
         let result = execute(&paths, action);
         assert!(result.is_ok(), "unmeld should succeed: {:?}", result.err());
@@ -1054,6 +1235,7 @@ mod tests {
             },
             description: format!("Add lobe {lobe_path}?"),
             dep_tree: None,
+            upgrade_keys: Vec::new(),
         };
         let result = execute(&paths, action);
         assert!(result.is_ok(), "LobeAdd should succeed: {:?}", result.err());
@@ -1082,6 +1264,7 @@ mod tests {
             },
             description: format!("Add {lobe_path}?"),
             dep_tree: None,
+            upgrade_keys: Vec::new(),
         };
         execute(&paths, add_action).expect("LobeAdd prerequisite");
 
@@ -1092,6 +1275,7 @@ mod tests {
             },
             description: format!("Remove lobe {lobe_path}?"),
             dep_tree: None,
+            upgrade_keys: Vec::new(),
         };
         let result = execute(&paths, remove_action);
         assert!(
@@ -1121,6 +1305,7 @@ mod tests {
             },
             description: "Remove nonexistent lobe?".to_string(),
             dep_tree: None,
+            upgrade_keys: Vec::new(),
         };
         let result = execute(&paths, action);
         assert!(
@@ -1150,6 +1335,7 @@ mod tests {
                 },
                 description: format!("Add {lobe_path}?"),
                 dep_tree: None,
+                upgrade_keys: Vec::new(),
             };
             execute(&paths, action).expect("LobeAdd must succeed");
         }
@@ -1219,6 +1405,7 @@ mod tests {
             },
             description: "Add lobe?".to_string(),
             dep_tree: None,
+            upgrade_keys: Vec::new(),
         };
         let result = execute(&paths, action);
         assert!(result.is_ok(), "LobeAdd should succeed: {:?}", result.err());
@@ -1302,6 +1489,7 @@ mod tests {
             },
             description: "Add lobe?".to_string(),
             dep_tree: None,
+            upgrade_keys: Vec::new(),
         };
         let result = execute(&paths, action);
         assert!(
@@ -1447,6 +1635,7 @@ mod tests {
             },
             description: format!("Add {lobe_path}?"),
             dep_tree: None,
+            upgrade_keys: Vec::new(),
         };
         let (snap, _msg) = execute(&paths, action).expect("LobeAdd must succeed");
         assert!(
@@ -1565,6 +1754,7 @@ mod tests {
             },
             description: "Install skill:review?".to_string(),
             dep_tree: Some("review (selected)\n  dev (dependency)".to_string()),
+            upgrade_keys: Vec::new(),
         };
         let pre = crate::manifest::Manifest::load(&paths).unwrap();
         assert!(
@@ -1581,6 +1771,7 @@ mod tests {
             },
             description: "Install skill:review?".to_string(),
             dep_tree: Some("review (selected)\n  dev (dependency)".to_string()),
+            upgrade_keys: Vec::new(),
         };
         let result = execute(&paths, action);
         assert!(
@@ -1691,6 +1882,7 @@ mod tests {
                 "- skill:review [selected]\n  - agent:dev [dep]\n    - skill:build [dep]"
                     .to_string(),
             ),
+            upgrade_keys: Vec::new(),
         };
         let result = execute(&paths, action);
         assert!(
@@ -1768,6 +1960,7 @@ mod tests {
             },
             description: "Install agent:dev?".to_string(),
             dep_tree: None,
+            upgrade_keys: Vec::new(),
         };
         execute(&paths, pre).expect("pre-install of agent:dev must succeed");
 
@@ -1811,6 +2004,7 @@ mod tests {
             },
             description: "Install skill:review?".to_string(),
             dep_tree: Some("- skill:review [selected]\n  - agent:dev [installed]".to_string()),
+            upgrade_keys: Vec::new(),
         };
         execute(&paths, action).expect("learn of review must succeed");
 
@@ -1913,6 +2107,7 @@ mod tests {
             },
             description: "Learn skill:review from source-alpha?".to_string(),
             dep_tree: None,
+            upgrade_keys: Vec::new(),
         };
 
         // Without the fix this returned MindError::AmbiguousItem.

@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{ItemKind, MindError, Result};
 use crate::paths::Paths;
+use crate::sanitize::ItemKey;
 use crate::source::RecordedHook;
 
 /// `serde` shim so [`ItemKind`] round-trips through JSON as a lowercase string.
@@ -58,16 +59,20 @@ pub struct InstalledItem {
 
 impl InstalledItem {
     /// Manifest key, using the effective installed name, e.g. `skill:jk:review`.
-    pub fn key(&self) -> String {
-        format!("{}:{}", self.kind.as_str(), self.name)
+    ///
+    /// Returns an [`ItemKey`] (DSC-95): the installed name is source-derived
+    /// and can carry ANSI/control/bidi code points, so the raw and display
+    /// readings are distinct types. `.as_str()` for identity (map/set lookups,
+    /// the manifest key, path composition); `.display()` at every
+    /// human/`--json` print site -- `ItemKey` has no `Display`, so passing it
+    /// straight to `println!`/`format!` is a compile error.
+    pub fn key(&self) -> ItemKey {
+        ItemKey::new(format!("{}:{}", self.kind.as_str(), self.name))
     }
 
-    /// The key sanitized for a terminal (DSC-95): the installed name is
-    /// source-derived and can carry ANSI/control/bidi code points. Use this at
-    /// every human/`--json` print site; `key()` stays raw so it keeps matching
-    /// the manifest map and the store/link paths.
+    /// Convenience for [`ItemKey::display`] on `self.key()` (DSC-95).
     pub fn display_key(&self) -> String {
-        crate::sanitize::strip_ansi(&self.key())
+        self.key().display()
     }
 
     /// A display copy with every source-controlled string sanitized (DSC-95).
@@ -169,7 +174,7 @@ impl Manifest {
     }
 
     pub fn insert(&mut self, item: InstalledItem) {
-        self.items.insert(item.key(), item);
+        self.items.insert(item.key().into(), item);
     }
 }
 
@@ -295,7 +300,7 @@ mod tests {
         manifest.save(&paths).expect("save manifest");
 
         let loaded = Manifest::load(&paths).expect("load manifest");
-        let back = loaded.items.get(&item.key()).expect("item present");
+        let back = loaded.items.get(item.key().as_str()).expect("item present");
         assert_eq!(
             back.install_hooks, item.install_hooks,
             "install_hooks must round-trip unchanged"
@@ -327,6 +332,67 @@ mod tests {
             "a missing install_hooks field must default to empty, got {:?}",
             item.install_hooks
         );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// DSC-95 format-pin: the `ItemKey` newtype introduced for `key()`/
+    /// `display_key()` is a compile-time discipline only, not an on-disk
+    /// format change. A `manifest.json` written in the pre-`ItemKey` shape (a
+    /// bare `kind:name` object key, ordinary string fields) must still load,
+    /// and a manifest saved back out must still key `items` by that same bare
+    /// string -- not, say, a `{"key": "..."}` wrapper object, which is what a
+    /// naive derive on a type wrapping `ItemKey` would produce if `ItemKey`'s
+    /// custom transparent `Serialize`/`Deserialize` impl were ever dropped.
+    // spec: DSC-95 STO-50
+    #[test]
+    fn manifest_format_is_unchanged_by_the_itemkey_refactor() {
+        let (base, paths) = tmp_paths();
+        let before = r#"{"version":1,"items":{"skill:review":{
+            "kind":"skill","name":"review","bare_name":"review",
+            "source":"local/test","commit":"abc123","hash":"deadbeef",
+            "store":"store/skill/review","links":["/home/x/.claude/skills/review"],
+            "description":"a review skill"
+        }}}"#;
+        std::fs::write(base.join("manifest.json"), before).unwrap();
+
+        let loaded = Manifest::load(&paths).expect("load pre-refactor-shaped manifest");
+        // The map is still keyed by the bare `kind:name` string, not by an
+        // ItemKey wrapper object or anything else -- a plain `&str` lookup
+        // resolves it directly.
+        let item = loaded
+            .items
+            .get("skill:review")
+            .expect("bare `kind:name` string key must resolve directly");
+        assert_eq!(item.key().as_str(), "skill:review");
+
+        // Re-save and inspect the raw bytes: the round trip must still be a
+        // bare-string-keyed items object, byte-for-byte the same shape.
+        loaded.save(&paths).expect("save");
+        let raw = std::fs::read_to_string(paths.manifest_file()).expect("read back");
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("valid json");
+        let items = value
+            .get("items")
+            .and_then(|v| v.as_object())
+            .expect("items must be a JSON object");
+        match items.get("skill:review") {
+            Some(serde_json::Value::Object(obj)) => {
+                assert_eq!(
+                    obj.get("name").and_then(|v| v.as_str()),
+                    Some("review"),
+                    "the item object's own fields must be unaffected: {raw}"
+                );
+            }
+            other => panic!(
+                "expected 'skill:review' to key the item object directly (not a wrapper), got {other:?}: {raw}"
+            ),
+        }
+
+        // A fresh load of the round-tripped file resolves the same item the
+        // same way.
+        let reloaded = Manifest::load(&paths).expect("reload");
+        let reloaded_item = reloaded.items.get("skill:review").expect("item present");
+        assert_eq!(reloaded_item.name, item.name);
+        assert_eq!(reloaded_item.key().as_str(), item.key().as_str());
         let _ = std::fs::remove_dir_all(&base);
     }
 

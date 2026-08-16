@@ -248,11 +248,19 @@ pub fn run(check: bool, yes: bool, mut version: Option<String>) -> Result<()> {
     // SHA256SUMS digest check would silently compare the attacker's binary
     // against the attacker's own digest file. Reject before any URL is built
     // and before any download-step network call.
-    if !crate::mindfile::is_plausible_version(&target_version) {
+    //
+    // This uses `is_plausible_release_tag`, NOT `is_plausible_version`: the
+    // two answer different questions (see `is_plausible_release_tag`'s doc).
+    // A release tag legitimately carries a semver prerelease/build suffix
+    // (`evolve --to 1.2.3-rc1` is the only way to reach a prerelease, since
+    // `releases/latest` never surfaces one), so the validator here accepts
+    // that shape while still rejecting anything that could escape or split a
+    // URL path segment.
+    if !crate::mindfile::is_plausible_release_tag(&target_version) {
         return Err(MindError::SelfUpdatePolicy {
             detail: format!(
                 "self-update target version {target_version:?} is not a plausible \
-                 dotted-numeric version string (e.g. \"1.2.3\"); refusing before \
+                 release tag (e.g. \"1.2.3\" or \"1.2.3-rc1\"); refusing before \
                  building the release URL"
             ),
         });
@@ -1751,6 +1759,107 @@ mod tests {
                 );
                 assert!(
                     detail.contains("attacker"),
+                    "must name the rejected --to value: {detail}"
+                );
+            }
+            other => panic!("expected a SelfUpdatePolicy refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    // spec: STO-76 CLI-140
+    fn run_accepts_an_explicit_prerelease_to_target_and_reaches_decision_end_to_end() {
+        // Before the STO-76 fix reused `is_plausible_version` (digits and dots
+        // only) at this site, `evolve --to 1.2.3-rc1` was refused outright --
+        // testing a prerelease before promoting it is legitimate, and since
+        // GitHub's `releases/latest` never surfaces a prerelease, an explicit
+        // `--to` is the only way to reach one. This drives the real `run()`
+        // entry path (not `decision()` directly, which would mask a
+        // regression at the validation site upstream of it): a prerelease
+        // `--to` value must pass the STO-76 validation, reach `decision()`,
+        // and (since "1.2.3-rc1" is numerically far above the running
+        // version) come back `Decision::Update`. No network call is possible
+        // here at all (no curl/wget stub is put on PATH), so reaching the
+        // `!yes` confirmation gate -- rather than a `DownloadFailed`/`Io`
+        // error from an attempted shell-out, or a `SelfUpdatePolicy`
+        // "not a plausible" refusal -- proves both that validation accepted
+        // the value AND that `decision()` classified it as an update,
+        // end-to-end through production code.
+        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let orig_policy_file = std::env::var("MIND_POLICY_FILE").ok();
+        let orig_tty = std::env::var("MIND_TTY").ok();
+        // SAFETY: ENV_LOCK is held for the duration of the mutation and the
+        // `run()` call below.
+        unsafe {
+            std::env::remove_var("MIND_POLICY_FILE");
+            std::env::set_var("MIND_TTY", "0");
+        }
+
+        let result = run(false, false, Some("1.2.3-rc1".to_string()));
+
+        // SAFETY: ENV_LOCK is still held.
+        unsafe {
+            match orig_policy_file {
+                Some(v) => std::env::set_var("MIND_POLICY_FILE", v),
+                None => std::env::remove_var("MIND_POLICY_FILE"),
+            }
+            match orig_tty {
+                Some(v) => std::env::set_var("MIND_TTY", v),
+                None => std::env::remove_var("MIND_TTY"),
+            }
+        }
+        drop(guard);
+
+        match result {
+            Err(MindError::ConfirmationRequired { action }) => {
+                assert!(
+                    action.contains("1.2.3-rc1"),
+                    "must be prompting to update to the resolved prerelease target: {action}"
+                );
+            }
+            other => panic!(
+                "expected ConfirmationRequired (proving the prerelease target passed \
+                 validation and reached an Update decision), got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    // spec: STO-76
+    fn run_refuses_traversal_smuggled_inside_an_explicit_prerelease_suffix() {
+        // A `-`-prefixed suffix of dots and slashes must not become an escape
+        // hatch around the STO-76 URL-path-segment check just because a
+        // legitimate prerelease suffix is now accepted. Exercised through the
+        // real `run()` entry path with no curl/wget stub on PATH, so any
+        // attempt to shell out before validation would surface as a
+        // DownloadFailed/Io error instead, which the match below would catch.
+        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let orig_policy_file = std::env::var("MIND_POLICY_FILE").ok();
+        // SAFETY: ENV_LOCK is held for the duration of the mutation and the
+        // `run()` call below.
+        unsafe {
+            std::env::remove_var("MIND_POLICY_FILE");
+        }
+
+        let result = run(true, false, Some("1.0.0-../..".to_string()));
+
+        // SAFETY: ENV_LOCK is still held.
+        unsafe {
+            match orig_policy_file {
+                Some(v) => std::env::set_var("MIND_POLICY_FILE", v),
+                None => std::env::remove_var("MIND_POLICY_FILE"),
+            }
+        }
+        drop(guard);
+
+        match result {
+            Err(MindError::SelfUpdatePolicy { detail }) => {
+                assert!(
+                    detail.contains("not a plausible"),
+                    "must explain the version is implausible: {detail}"
+                );
+                assert!(
+                    detail.contains("1.0.0-../.."),
                     "must name the rejected --to value: {detail}"
                 );
             }
