@@ -405,12 +405,12 @@ pub enum MindError {
     /// remedy. This variant instead names the two colliding occupants plainly
     /// and states both real remedies: forget the item occupying `key`, or
     /// re-namespace the incoming source so its effective name no longer
-    /// collides.
+    /// collides. See [`upgrade_rename_collision_message`] for the CLI-225
+    /// shell-quoting this message applies to `key` inside the runnable
+    /// `mind forget` remedy.
     #[error(
-        "upgrade cannot rename to '{key}': it is already claimed by the item from source \
-         '{existing_source}', and {incoming} from source '{incoming_source}' would also resolve \
-         to this key; run `mind forget {key}` to remove the item occupying it, or re-namespace \
-         the incoming source with `mind meld -N <prefix> <repo>` to avoid the collision"
+        "{}",
+        upgrade_rename_collision_message(key, existing_source, incoming, incoming_source)
     )]
     UpgradeRenameCollision {
         /// The colliding target key (`kind:name`, `InstalledItem::key` form).
@@ -659,6 +659,26 @@ pub enum MindError {
     /// specific mismatch message for the pinned-version-conflict case (POL-53).
     #[error("{detail}")]
     SelfUpdatePolicy { detail: String },
+
+    /// STO-77: the resolved `evolve` target version (an explicit `--to`, a
+    /// managed-policy pin, or a fetched `releases/latest` tag) failed
+    /// `mindfile::is_plausible_release_tag` (STO-76's URL-path-segment safety
+    /// check). Deliberately a DIFFERENT variant from [`MindError::SelfUpdatePolicy`]
+    /// even though both can originate from the same `evolve` call: that
+    /// variant's JSON `kind` is `self-update-policy`, and a value rejected for
+    /// being malformed (not a plausible version/tag shape at all) is not a
+    /// managed-policy refusal -- a reader (human or a CI log parser) seeing
+    /// `self-update-policy` under a bad `--to` string would wrongly conclude
+    /// "my managed policy blocks self-update" rather than "the argument itself
+    /// is malformed". Genuine policy conflicts -- disabled (POL-52) or a
+    /// pinned-version mismatch (POL-53) -- keep `SelfUpdatePolicy`; this
+    /// variant is reserved for the STO-76 shape check alone, which runs before
+    /// policy evaluation even has a chance to matter for the malformed value.
+    #[error(
+        "self-update target version {value:?} is not a plausible release tag (e.g. \
+         \"1.2.3\" or \"1.2.3-rc1\"); refusing before building the release URL"
+    )]
+    SelfUpdateInvalidTarget { value: String },
 
     /// STO-50/STO-51: state file was written by a newer mind and uses an unknown schema version.
     /// The realistic way to hit this is a locally built `mind` newer than the
@@ -930,6 +950,39 @@ fn agent_collision_message(name: &str, existing: &str, incoming: &str) -> String
 /// before it lands in the runnable command (CLI-225, the same rule as
 /// HOOK-106). The conflict list built by `format_conflicts` is a bulleted
 /// listing, not a command a reader pastes, so its names are not quoted here.
+/// The [`MindError::UpgradeRenameCollision`] message (LIFE-46, CLI-225). The
+/// `mind forget <key>` remedy is a copy-paste command, and `key` is the
+/// colliding manifest key (`kind:name`, the effective name) -- derived from a
+/// source-controlled item name. `catalog::is_safe_item_name` rejects only `/`,
+/// `\`, a NUL byte, and blocked Unicode; it does NOT restrict shell
+/// metacharacters (`;`, whitespace, `$(...)`, a backtick), so `key` is exactly
+/// as attacker-influenced as the identities the sibling CLI-225 remedies
+/// (`LinkedSourceGone`, `AgentCollision`, `SkillCollision`) already quote. The
+/// old message spliced `key` straight into the backticked `mind forget {key}`
+/// command: a skill named e.g. `x; touch /tmp/pwned` (or one melded via a
+/// curated super-source that pulls in two hostile repos shipping it under a
+/// prefix, both dropping their prefix upstream so `mind upgrade` hits the
+/// batch-convergence branch that raises this variant) produced a remedy that
+/// ran the attacker's command when pasted. `key` is passed through
+/// [`shell_quote`] before it lands in the runnable command; the earlier bare
+/// `'{key}'` mention at the start of the sentence is prose naming what
+/// collided, not a command, so it is left unquoted.
+fn upgrade_rename_collision_message(
+    key: &str,
+    existing_source: &str,
+    incoming: &str,
+    incoming_source: &str,
+) -> String {
+    let forget_arg = shell_quote(key);
+    format!(
+        "upgrade cannot rename to '{key}': it is already claimed by the item from source \
+         '{existing_source}', and {incoming} from source '{incoming_source}' would also resolve \
+         to this key; run `mind forget {forget_arg}` to remove the item occupying it, or \
+         re-namespace the incoming source with `mind meld -N <prefix> <repo>` to avoid the \
+         collision"
+    )
+}
+
 fn skill_collision_message(conflicts: &[(String, String, String)], suggested: &str) -> String {
     let ns = shell_quote(suggested);
     format!(
@@ -1145,6 +1198,7 @@ impl MindError {
             MindError::DigestMismatch { .. } => "digest-mismatch",
             MindError::AttestationVerificationFailed { .. } => "attestation-verification-failed",
             MindError::SelfUpdatePolicy { .. } => "self-update-policy",
+            MindError::SelfUpdateInvalidTarget { .. } => "self-update-invalid-target",
             MindError::StateTooNew { .. } => "state-too-new",
             MindError::BuildEventRequiresItemTarget => "build-event-requires-item-target",
             MindError::HookAborted { .. } => "hook-aborted",
@@ -1883,10 +1937,13 @@ mod tests {
         );
     }
 
-    // spec: LIFE-46 -- the rename-collision refusal names both colliding
-    // occupants and both real remedies, rather than reusing `AmbiguousItem`'s
-    // "query"/"matches" phrasing (which implies a search the user never
-    // performed) with no remedy at all.
+    // spec: LIFE-46 CLI-225 -- the rename-collision refusal names both
+    // colliding occupants and both real remedies, rather than reusing
+    // `AmbiguousItem`'s "query"/"matches" phrasing (which implies a search the
+    // user never performed) with no remedy at all. The forget remedy also
+    // shell-quotes `key` (CLI-225); see
+    // `upgrade_rename_collision_remedy_shell_quotes_the_forget_argument` below
+    // for the full injection-inertness proof.
     #[test]
     fn upgrade_rename_collision_names_both_occupants_and_both_remedies() {
         let e = MindError::UpgradeRenameCollision {
@@ -1913,8 +1970,8 @@ mod tests {
             "must name the incoming item's source: {msg}"
         );
         assert!(
-            msg.contains("mind forget skill:review"),
-            "must give the forget remedy: {msg}"
+            msg.contains(&format!("mind forget {}", shell_quote("skill:review"))),
+            "must give the forget remedy, shell-quoted per CLI-225: {msg}"
         );
         assert!(
             msg.contains("mind meld -N"),
@@ -2464,6 +2521,40 @@ mod tests {
         );
     }
 
+    /// M21 / STO-77: a malformed `--to` target must surface as
+    /// `SelfUpdateInvalidTarget`, NOT `SelfUpdatePolicy` -- a distinct `kind`
+    /// so a reader (human or a CI log parser) does not read a bad argument as
+    /// a managed-policy refusal. Checks the message names the value and the
+    /// reason, and that the two variants' `kind()` slugs are both stable AND
+    /// different from each other.
+    #[test]
+    fn self_update_invalid_target_is_a_distinct_kind_from_self_update_policy() {
+        // spec: STO-77
+        let e = MindError::SelfUpdateInvalidTarget {
+            value: "1/../../../../attacker/mind/releases/download/v1".to_string(),
+        };
+        let msg = e.to_string();
+        assert!(
+            msg.contains("attacker"),
+            "message must name the rejected value: {msg}"
+        );
+        assert!(
+            msg.contains("not a plausible"),
+            "message must explain the value is implausible: {msg}"
+        );
+        assert_eq!(
+            e.kind(),
+            "self-update-invalid-target",
+            "kind must be its own stable slug"
+        );
+        assert_ne!(
+            e.kind(),
+            MindError::SelfUpdatePolicy { detail: "d".into() }.kind(),
+            "a malformed target must NOT share SelfUpdatePolicy's kind -- otherwise a bad \
+             --to argument reads as a managed-policy refusal"
+        );
+    }
+
     // ---- CLI-225: printed remedies shell-quote interpolated identities -----
 
     /// Prove a printed remedy is inert when pasted into a real shell: swap the
@@ -2609,6 +2700,41 @@ mod tests {
         // `--namespace <prefix>` segment under test through the round-trip.
         let command = format!("mind meld --namespace {}", shell_quote(evil));
         assert_command_inert(&command, "mind meld", "/tmp/mind-skillcol-pwned", evil);
+    }
+
+    /// CLI-225 / M5 (P1 injection sweep): `UpgradeRenameCollision`'s
+    /// `mind forget <key>` remedy must shell-quote `key`. `key` is a manifest
+    /// key (`kind:name`) built from a source-controlled item name --
+    /// `catalog::is_safe_item_name` rejects only `/`, `\`, NUL, and blocked
+    /// Unicode, never shell metacharacters -- and the old message spliced it
+    /// straight into the backticked `mind forget {key}` command, so a skill
+    /// named e.g. `x; touch /tmp/pwned` produced a remedy that ran the
+    /// attacker's command when pasted. Proved two ways, mirroring the sibling
+    /// sweep tests above: the message carries the properly `shell_quote`d
+    /// form (not the broken bare splice), and running the printed command
+    /// through a real shell leaves the key intact with the injected `touch`
+    /// never firing.
+    // spec: CLI-225
+    #[test]
+    fn upgrade_rename_collision_remedy_shell_quotes_the_forget_argument() {
+        let evil = "skill:x; touch /tmp/mind-renamecol-pwned; echo '`id`$(id)";
+        let e = MindError::UpgradeRenameCollision {
+            key: evil.to_string(),
+            existing_source: "github.com/acme/one".into(),
+            incoming: "skill:jx:x".into(),
+            incoming_source: "github.com/acme/two".into(),
+        };
+        let msg = e.to_string();
+        let command = format!("mind forget {}", shell_quote(evil));
+        assert!(
+            msg.contains(&command),
+            "the forget remedy must carry the shell-quoted key: {msg}"
+        );
+        assert!(
+            !msg.contains(&format!("mind forget {evil}")),
+            "must never splice the raw key into the runnable command: {msg}"
+        );
+        assert_command_inert(&command, "mind forget", "/tmp/mind-renamecol-pwned", evil);
     }
 
     // ---- DSC-91: shared metadata size cap ----------------------------------

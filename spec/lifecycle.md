@@ -98,7 +98,7 @@ agent homes (a store-only tool is not linked; tooling.md TOOL-3).
   pre-existing-manifest check alone would pass both, since neither key is
   occupied yet, and the first install would then become the second's evicted
   "previous version". Both checks run after the pending report is printed
-  (CLI-232: a human run always sees the full pending list before an abort, not
+  (LIFE-51: a human run always sees the full pending list before an abort, not
   just the collision) but before any item in the batch is applied, so a
   detected collision leaves nothing changed. There is no single-item workaround
   that resolves the SAME-BATCH collision by scoping to one identity at a time:
@@ -141,6 +141,13 @@ agent homes (a store-only tool is not linked; tooling.md TOOL-3).
   this, `--yes` is silently dropped and a non-interactive `sync --upgrade` run
   either prompts (a TTY) or refuses (LIFE-45, `--json` or non-TTY) regardless
   of the flag.
+- `LIFE-51` `upgrade`'s two `UpgradeRenameCollision` checks (LIFE-46) run AFTER
+  the pending-upgrade report is printed, not before: a batch that hits either
+  collision still shows the full pending list first, so a human run always
+  sees what else was pending before the abort, rather than aborting on the
+  collision line alone with no visibility into the rest of the batch. Both
+  checks still run before any item in the batch is applied (LIFE-46), so a
+  detected collision leaves nothing changed either way.
 
 ## Non-interactive confirmation (`--json`)
 

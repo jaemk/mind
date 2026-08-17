@@ -369,14 +369,18 @@ fn run_checks(
                     } else {
                         "required"
                     };
+                    // CLI-224: sanitize each source-derived field (the hook
+                    // label, the hook command) BEFORE composing them into the
+                    // message -- a dangling escape in one field must not eat
+                    // its neighbors ahead of `Finding`'s own (idempotent)
+                    // backstop strip at construction.
+                    let label = crate::sanitize::strip_ansi(hook.label());
+                    let run = crate::sanitize::strip_ansi(&hook.run);
                     advisory.push(Finding::advisory(
                         "install-hook",
                         format!(
                             "source declares a {} {} hook '{}': {}",
-                            req_str,
-                            event_str,
-                            hook.label(),
-                            hook.run,
+                            req_str, event_str, label, run,
                         ),
                     ));
                 }
@@ -386,6 +390,8 @@ fn run_checks(
                 if let Some(raw) = &mf.source.install {
                     let cmd = raw.trim();
                     if !cmd.is_empty() {
+                        // spec: CLI-224 -- sanitize before composing.
+                        let cmd = crate::sanitize::strip_ansi(cmd);
                         advisory.push(Finding::advisory(
                             "deprecated-field",
                             format!(
@@ -422,12 +428,14 @@ fn run_checks(
     {
         for entry in &d.sources {
             if entry.alias.is_some() && entry.namespace.is_none() {
+                // spec: CLI-224 -- sanitize before composing.
+                let source = crate::sanitize::strip_ansi(&entry.source);
                 advisory.push(Finding::advisory(
                     "deprecated-field",
                     format!(
                         "[discover.sources] entry for '{}': use 'namespace = ...' instead of \
                          the deprecated 'as = ...' key",
-                        entry.source
+                        source
                     ),
                 ));
             }
@@ -508,6 +516,11 @@ fn run_checks(
     // target, not a safety check in itself.
     for item in &items {
         if let Some(link) = &item.link_rel {
+            // spec: CLI-224 -- `link_rel` is unvalidated for control
+            // characters (`is_safe_link_rel` only checks path shape), so
+            // sanitize it before composing the rest of the message: a
+            // dangling escape here must not eat this disclosure.
+            let link = crate::sanitize::strip_ansi(link);
             advisory.push(Finding::advisory(
                 "custom-link",
                 format!(
@@ -529,6 +542,8 @@ fn run_checks(
             ("uninstall", item.uninstall.as_deref()),
         ] {
             if let Some(cmd) = cmd {
+                // spec: CLI-224 -- sanitize before composing.
+                let cmd = crate::sanitize::strip_ansi(cmd);
                 advisory.push(Finding::advisory(
                     "item-hook",
                     format!("{}: declares an {event} hook '{cmd}'", item.key().as_str()),
@@ -568,6 +583,11 @@ fn run_checks(
             // prefixed output is irrelevant for this check.
             let no_bare = std::collections::HashSet::<String>::new();
             if let Err(bad_ref) = crate::namespace::expand(&content, &prefix, &siblings, &no_bare) {
+                // spec: CLI-224 -- `bad_ref` is the raw, unresolved `{{ns:}}`
+                // referent as typed in prose (by construction not a validated
+                // sibling name), so sanitize it before composing the rest of
+                // the message.
+                let bad_ref = crate::sanitize::strip_ansi(&bad_ref);
                 if expands {
                     hard.push(Finding::hard(
                         "bad-reference",
@@ -600,6 +620,11 @@ fn run_checks(
         items.iter().filter(|it| it.source == source_name).collect();
     for item in &items {
         for entry in &item.requires {
+            // spec: CLI-224 -- `requires` is a free-text frontmatter list, not
+            // validated for control characters; sanitize the display copy
+            // before composing, while parsing/matching still uses the raw
+            // `entry`.
+            let entry_display = crate::sanitize::strip_ansi(entry);
             let r = match crate::resolve::parse_item_ref(entry) {
                 Ok(r) => r,
                 Err(_) => {
@@ -608,7 +633,7 @@ fn run_checks(
                         format!(
                             "{}: requires: {} is not a valid item ref",
                             item.key().as_str(),
-                            entry
+                            entry_display
                         ),
                     ));
                     continue;
@@ -621,7 +646,7 @@ fn run_checks(
                     format!(
                         "{}: requires: {} crosses sources; `requires` is intra-source only",
                         item.key().as_str(),
-                        entry
+                        entry_display
                     ),
                 ));
                 continue;
@@ -636,7 +661,7 @@ fn run_checks(
                     format!(
                         "{}: requires: {} does not resolve to any sibling in this source",
                         item.key().as_str(),
-                        entry
+                        entry_display
                     ),
                 ));
             } else if matches.len() > 1 && r.kind.is_none() {
@@ -645,7 +670,7 @@ fn run_checks(
                     format!(
                         "{}: requires: {} is ambiguous (matches {} siblings); use kind:name to narrow",
                         item.key().as_str(),
-                        entry,
+                        entry_display,
                         matches.len()
                     ),
                 ));
@@ -734,18 +759,26 @@ fn run_checks(
                     CrossSource => "crosses sources; a requires entry is intra-source only",
                     InvalidRef => "is not a valid item ref",
                 };
+                // spec: CLI-224 -- `token` is the offending path token exactly
+                // as written in prose, unvalidated; sanitize a display copy
+                // before composing, but keep the raw `token` for the CLI-223
+                // exclusion match against `inert_tokens`' raw output below.
+                let token_display = crate::sanitize::strip_ansi(&token);
                 if expands {
                     hard.push(Finding::hard(
                         "bad-reference",
-                        format!("{}: {token} {detail} in this source", item.key().as_str()),
+                        format!(
+                            "{}: {token_display} {detail} in this source",
+                            item.key().as_str()
+                        ),
                     ));
                 } else {
                     advisory.push(Finding::advisory(
                         "bad-reference",
                         format!(
-                            "{}: {token} {detail} in this source, but it will not expand here \
-                             anyway -- tokens expand in markdown only, so this is dead text, not \
-                             a defect that would break an install",
+                            "{}: {token_display} {detail} in this source, but it will not expand \
+                             here anyway -- tokens expand in markdown only, so this is dead text, \
+                             not a defect that would break an install",
                             item.key().as_str()
                         ),
                     ));
@@ -758,10 +791,22 @@ fn run_checks(
             // non-markdown file's suggestion says so instead of implying `--fix`
             // would rewrite it there (it never does, per Check "Fix" below).
             for hp in crate::namespace::detect_hardcoded_paths(&content, &ctx) {
+                // spec: CLI-224 -- `matched` (the offending path substring) and
+                // the suggested token both derive from unvalidated prose text
+                // (the token's path remainder can carry attacker text even
+                // when the sibling name it maps to is trusted); sanitize each
+                // one before composing.
+                let matched = crate::sanitize::strip_ansi(&hp.matched);
                 let suggestion = match &hp.suggestion {
-                    Some(tok) if expands => format!("; use {tok}"),
                     Some(tok) => {
-                        format!("; {tok} would not expand here -- tokens expand in markdown only")
+                        let tok = crate::sanitize::strip_ansi(tok);
+                        if expands {
+                            format!("; use {tok}")
+                        } else {
+                            format!(
+                                "; {tok} would not expand here -- tokens expand in markdown only"
+                            )
+                        }
                     }
                     None => String::new(),
                 };
@@ -769,19 +814,19 @@ fn run_checks(
                     crate::namespace::HardcodedKind::OwnResource => format!(
                         "{}: hardcodes its own resource path '{}'; this works but assumes every install lands at that exact agent-home path, so it breaks under a prefix or a second home{}",
                         item.key().as_str(),
-                        hp.matched,
+                        matched,
                         suggestion
                     ),
                     crate::namespace::HardcodedKind::SharedTool => format!(
                         "{}: hardcodes a shared tool path '{}'; a tool is store-only and never linked into an agent home, so this will not resolve{}",
                         item.key().as_str(),
-                        hp.matched,
+                        matched,
                         suggestion
                     ),
                     crate::namespace::HardcodedKind::OtherItem => format!(
                         "{}: hardcoded install path '{}'; a literal mind install path is fragile - use a path token to track it dynamically, or if a [source].install / [[hooks]] step places the resource at that path the reference is intentional and safe{}",
                         item.key().as_str(),
-                        hp.matched,
+                        matched,
                         suggestion
                     ),
                 };
@@ -797,6 +842,9 @@ fn run_checks(
             // the frontmatter `name:` field -> hard (an item must not namespace
             // its own name).
             for r in crate::namespace::scan_ns_refs(&content) {
+                // spec: CLI-224 -- `r.name` is the raw `{{ns:...}}` referent as
+                // typed in prose, unvalidated; sanitize before composing.
+                let name = crate::sanitize::strip_ansi(&r.name);
                 // In a non-markdown file the whole text is code, so treat any
                 // token as code-block context. An `expand:`-listed file expands
                 // like markdown (NS-57), so it keeps its parsed context.
@@ -820,13 +868,13 @@ fn run_checks(
                     format!(
                         "{}: {{{{ns:{}}}}} will not expand here; tokens expand in markdown only",
                         item.key().as_str(),
-                        r.name
+                        name
                     )
                 } else {
                     format!(
                         "{}: {{{{ns:{}}}}} in {where_}; a name token belongs in prose (code/paths use {{{{tools:}}}}/{{{{self}}}}/{{{{path:}}}})",
                         item.key().as_str(),
-                        r.name
+                        name
                     )
                 };
                 if context == crate::namespace::NsContext::FrontmatterName {
@@ -864,12 +912,19 @@ fn run_checks(
                             .trim();
                         !inner.starts_with("ns:") && Some(tok) != check8_bad_token.as_ref()
                     })
+                    // spec: CLI-224 -- each inert token is raw, unvalidated
+                    // prose text; sanitize each one before joining/composing.
+                    .map(|tok| crate::sanitize::strip_ansi(&tok))
                     .collect();
                 if !tokens.is_empty() {
                     let file_name = file
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_else(|| file.display().to_string());
+                    // spec: CLI-224 -- the file name comes from the cloned
+                    // source's working tree, not validated by mind; sanitize
+                    // before composing.
+                    let file_name = crate::sanitize::strip_ansi(&file_name);
                     advisory.push(Finding::advisory(
                         "inert-token",
                         format!(
@@ -908,6 +963,9 @@ fn run_checks(
                 )
             });
             if unsafe_path || !(item.path.is_dir() && item.path.join(rel).is_file()) {
+                // spec: CLI-224 -- `entry` is a free-text frontmatter list
+                // entry, unvalidated; sanitize before composing.
+                let entry = crate::sanitize::strip_ansi(entry);
                 hard.push(Finding::hard(
                     "bad-expand",
                     format!(
@@ -955,6 +1013,13 @@ fn run_checks(
                 }
             }
             if !untracked.is_empty() {
+                // spec: CLI-224 -- `untracked` may include `bin` (a free-text
+                // `TOOL.md` frontmatter field, unvalidated); sanitize each
+                // entry before joining/composing.
+                let untracked: Vec<String> = untracked
+                    .iter()
+                    .map(|s| crate::sanitize::strip_ansi(s))
+                    .collect();
                 advisory.push(Finding::advisory(
                     "unshipped-tooling",
                     format!(
@@ -996,6 +1061,12 @@ fn run_checks(
                         .unwrap_or(&target)
                         .to_string_lossy()
                         .into_owned();
+                    // spec: CLI-224 -- `shown` (a working-tree relative path)
+                    // and `token` (its `{{self}}`/`{{path:}}` reference, which
+                    // embeds an unvalidated path remainder from prose) are
+                    // both source-derived; sanitize before composing.
+                    let shown = crate::sanitize::strip_ansi(&shown);
+                    let token = crate::sanitize::strip_ansi(&token);
                     advisory.push(Finding::advisory(
                         "unshipped-tooling",
                         format!(
@@ -1214,6 +1285,10 @@ pub(crate) fn duplicate_tooling_findings(items: &[CatalogItem]) -> Vec<Finding> 
         .into_values()
         .filter(|(_, owners)| owners.len() >= 2)
         .map(|(base, owners)| {
+            // spec: CLI-224 -- `base` is a filesystem-derived basename from
+            // the cloned source, unvalidated; sanitize before composing (the
+            // item keys in `owners` are already-validated names, DSC-95/96).
+            let base = crate::sanitize::strip_ansi(&base);
             Finding::advisory(
                 "duplicate-tooling",
                 format!(

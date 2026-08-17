@@ -783,6 +783,7 @@ mod tests {
     fn installed_node(stale: bool) -> TreeNode {
         TreeNode::InstalledItem(InstalledInfo {
             key: "skill:review".to_string(),
+            display_key: "skill:review".to_string(),
             name: "review".to_string(),
             source: "local/agents".to_string(),
             kind: crate::error::ItemKind::Skill,

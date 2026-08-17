@@ -335,14 +335,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// DSC-95 format-pin: the `ItemKey` newtype introduced for `key()`/
-    /// `display_key()` is a compile-time discipline only, not an on-disk
-    /// format change. A `manifest.json` written in the pre-`ItemKey` shape (a
-    /// bare `kind:name` object key, ordinary string fields) must still load,
-    /// and a manifest saved back out must still key `items` by that same bare
-    /// string -- not, say, a `{"key": "..."}` wrapper object, which is what a
-    /// naive derive on a type wrapping `ItemKey` would produce if `ItemKey`'s
-    /// custom transparent `Serialize`/`Deserialize` impl were ever dropped.
+    /// DSC-95 format-pin: `Manifest.items` is `BTreeMap<String, InstalledItem>`
+    /// -- `ItemKey` never appears as a field type anywhere in the persisted
+    /// shape, only as a transient value built by `key()`/`display_key()` and
+    /// immediately converted back to a plain `String` (`.into()`, at
+    /// `insert`). So the `ItemKey` newtype is a compile-time discipline on
+    /// call sites, not a change to what gets written to disk. This test pins
+    /// that plain fact: a `manifest.json` written in the pre-`ItemKey` shape
+    /// (a bare `kind:name` object key, ordinary string fields) must still
+    /// load, and a manifest saved back out must still key `items` by that
+    /// same bare string, byte-for-byte the same shape as before this type
+    /// existed.
     // spec: DSC-95 STO-50
     #[test]
     fn manifest_format_is_unchanged_by_the_itemkey_refactor() {

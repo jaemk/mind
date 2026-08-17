@@ -103,10 +103,10 @@ anything; `evolve` updates the `mind` binary itself.
 | `mind unmeld <name> [--keep-items] [--yes] [--uninstall-hook <cmd>] [--dangerously-skip-hook-check]` | uninstall every item the source installed and drop the source (`--keep-items` skips the uninstall step). `<name>` is a ref: it must resolve to exactly one source (a non-glob name matching several errors instead of guessing; use a glob to act on several). It may be a bare source name or, to address one specific instance, its full identity: `host/owner/repo@<prefix>` for an aliased instance, `host/owner/repo#<path>` for an item-link instance. The same identity forms select an instance for `upgrade` and `recall`, e.g. `mind unmeld github.com/acme/skills@jk`. Contrast `sync [source]` below, a filter that may match, and act on, several sources at once |
 | `mind learn [--yes] [-f\|--force] [-n\|--dry-run] [--all] [--pin] [--dangerously-skip-install-hook-check] [--dangerously-skip-build-hook-check] <item>` | install a skill/agent/rule/tool (glob installs many); a partial selection also pulls in the source siblings it references. `<item>` may also be a deep `tree`/`blob` URL to one skill in a repo: the repo registers as a single-item [item link](#item-links-install-one-skill-by-url) and the skill installs in the same step. `--force` overwrites a conflicting non-mind link target (without it, a conflict prompts on a TTY); `--all` installs every item of the named source (shorthand for `<source>#*`); `--pin` freezes a deep-link URL to the ref's current commit (ignored for a plain ref); `-n`/`--dry-run` previews the dependency closure without installing anything; under `--json`, installing an item whose closure pulls in dependencies beyond the explicit selection requires `--yes`, since there is no prompt to answer (refuses with `confirmation-required` otherwise) |
 | `mind forget [--yes] [-f\|--force] [--unmanaged] [--dangerously-skip-hook-check] [<item>]` (alias `unlearn`) | remove an installed item (glob removes many; a multi-match glob confirms first, `--yes` skips). `--unmanaged` scopes removal to unmanaged lobe items only; with no `<item>`, removes every unmanaged item across all lobes. `-f`/`--force` skips the dependents confirmation when the item being removed has dependents. `--dangerously-skip-hook-check` runs uninstall hooks without the safety prompt |
-| `mind sync [source] [--upgrade] [--dangerously-skip-install-hook-check] [--dangerously-skip-build-hook-check]` | refresh source clones (all, or every source whose name matches the optional `[source]` filter: exactly, by trailing suffix, or by glob; a suffix shared by several sources matches, and syncs, all of them, unlike `unmeld`'s/`upgrade`'s ref-style source selection, since `sync` has no ambiguity check and is a non-destructive refresh). `--upgrade` is deprecated sugar for `sync` followed by `upgrade`, scoped to the matched sources when `[source]` is given; when the filter matched more than one source, the confirmation names all of them before applying (the two hook-check flags are valid only with `--upgrade`) |
-| `mind upgrade [--yes] [--no-sync] [--dangerously-skip-install-hook-check] [--dangerously-skip-build-hook-check] [item]` | fetch each involved source, then upgrade installed items to their latest version (re-runs install hooks on sources that advance); `item` is a filter over installed items (a glob or shared name/suffix may match several, all upgraded), though an embedded `owner/repo#` source qualifier must resolve to exactly one source; `--no-sync` skips the fetch step |
-| `mind hooks run <target> [--event install\|uninstall\|build] [--force\|--rerun] [--dangerously-skip-install-hook-check] [--dangerously-skip-build-hook-check] [--json]` / `mind hooks list <target> [--json]` | run a source's or an item's hooks on demand (outside meld/learn/forget/upgrade), or list the hooks in effect without running any. `--rerun` is a visible alias for `--force` (re-run a hook already recorded as run, mirroring `meld --force`). `<target>` is a source selector or an `owner/repo#item` ref. See [Install hooks](install-hooks.md#running-hooks-on-demand) |
-| `mind evolve [--check] [--yes] [--to <v>]` | upgrade the mind binary itself to the latest release (or to `--to <v>`; `--version` is a deprecated alias) |
+| `mind sync [source] [--upgrade] [--dangerously-skip-install-hook-check] [--dangerously-skip-build-hook-check]` | refresh source clones (all, or every source whose name matches the optional `[source]` filter: exactly, by trailing suffix, or by glob; a suffix shared by several sources matches, and syncs, all of them, unlike `unmeld`'s ref-style source selection, since `sync` has no ambiguity check and is a non-destructive refresh). `--upgrade` is deprecated sugar for `sync` followed by `upgrade`, scoped to the matched sources when `[source]` is given; when the scope spans more than one source, a disclosure names every matched source before the install-hook re-run pass -- even with nothing pending -- and this is not suppressed by `--yes` (the two hook-check flags are valid only with `--upgrade`) |
+| `mind upgrade [--yes] [--no-sync] [--dangerously-skip-install-hook-check] [--dangerously-skip-build-hook-check] [item]` | fetch each involved source, then upgrade installed items to their latest version (re-runs install hooks on sources that advance); `item` is a filter over installed items (a glob matches several, and a bare non-glob name multi-matches only across kinds, e.g. `upgrade greet` hitting both `skill:greet` and `agent:greet`); an embedded `owner/repo#` source qualifier is also a filter, not a ref -- a trailing-suffix match with no ambiguity check, so it can span several sources and re-run each one's install hook; when the scope spans more than one source, a disclosure names every matched source before the hook re-run pass, even with nothing pending, and `--yes` does not suppress it; `--no-sync` skips the fetch step |
+| `mind hooks run <target> [--event install\|uninstall\|build] [--force\|--rerun] [--dangerously-skip-install-hook-check] [--dangerously-skip-build-hook-check] [--json]` / `mind hooks list <target> [--json]` | run a source's or an item's hooks on demand (outside meld/learn/forget/upgrade), or list the hooks in effect without running any. `--rerun` is a visible alias for `--force` (re-run a hook already recorded as run, mirroring `meld --force`). `<target>` is a source filter or an `owner/repo#item` ref; there is no ambiguity check, so a filter matching several sources, or a ref matching several items, runs the hook for each in turn. See [Install hooks](install-hooks.md#running-hooks-on-demand) |
+| `mind evolve [--check] [--yes] [--to <v>]` | upgrade the mind binary itself to the latest release, or to a pinned `--to <v>` (accepts a prerelease like `1.2.3-rc1` -- the only way to reach one, since the latest-release lookup never surfaces a prerelease -- and strips a single leading `v`; `--version` is a deprecated alias) |
 | `mind recall [item] [--sources] [--kind K] [--source S] [--tree] [--json]` (alias `status`) | status: each source with its items, marked installed or available; `--sources` narrows to sources; `<item>` shows one item's details; `--tree` renders installed items as a dependency forest (with an item ref, scopes to that item's subtree) |
 | `mind probe [query] [--kind K] [--source S] [--json] [--no-tui]` | browse and search items (interactive TUI on a terminal) |
 | `mind review <target> [-N\|--namespace <ns>] [--json]` / `mind review --policy <path> [--json]` | validate a source for publishing, or validate a managed policy file (read-only); a `<target>` naming an existing directory is read as that local path unless it first matches a melded source's identity, even when it also looks like a valid `owner/repo` spec |
@@ -211,9 +211,9 @@ the listing instead.
 
 ## Selecting items (globs)
 
-`learn`, `forget`, `upgrade`, `unmeld`, `probe`, and `recall` all accept a glob
-in place of an exact item ref. The kind prefix, source qualifier, and glob
-compose:
+`learn`, `forget`, `upgrade`, `unmeld`, `probe`, `recall`, and `sync` all
+accept a glob in place of an exact ref or filter argument. The kind prefix,
+source qualifier, and glob compose:
 
 | pattern | selects |
 |---------|---------|
@@ -236,6 +236,29 @@ mind forget 'owner/repo#*'
 ```
 
 Spec: CLI-31, CLI-41, CLI-65.
+
+### Refs vs filters
+
+- **Ref** must resolve to exactly one target, erroring rather than guessing:
+  `unmeld <name>` (a non-glob source name; `AmbiguousSource`), and a bare
+  non-glob item name given to `learn`/`forget`/`upgrade` (`AmbiguousItem`).
+  Item names are never suffix-matched, so this last case only fires across
+  kinds (the manifest is keyed `kind:name`), e.g. `upgrade greet` hitting
+  both `skill:greet` and `agent:greet`.
+- **Filter** may match several targets with no ambiguity check, and every
+  match is acted on: `sync`'s `[source]`, `recall`/`probe`'s `--source
+  <filter>`, `hooks run <target>`'s source form, and any glob (`'*'`,
+  `'skill:*'`, `'owner/repo#*'`) given to any of the verbs above. The
+  embedded `owner/repo#` source qualifier inside `upgrade`'s item argument is
+  a filter too, not a ref: it is a trailing-suffix match with no ambiguity
+  check, so it can span several sources, upgrading each one's items and
+  re-running each one's install hook.
+
+No-match behavior differs by verb:
+
+- `sync <filter>` with no match: a hard `SourceNotFound` error.
+- `upgrade <filter>` with no match: reports up to date and exits 0.
+- `--source <filter>` (`recall`/`probe`) with no match: an empty listing.
 
 ## Item links: install one skill by URL
 
@@ -272,9 +295,10 @@ Spec: [spec/item-link.md](https://github.com/jaemk/mind/blob/main/spec/item-link
 `recall` and `probe` accept two composable filters:
 
 - `--kind <skill|agent|rule|tool>` narrows to one item kind.
-- `--source <selector>` narrows to items from a matching source. The selector is
-  an exact name, an unambiguous trailing suffix (`repo` or `owner/repo`), or a
-  glob matched against the full `host/owner/repo` identity (so `*` spans `/`):
+- `--source <filter>` narrows to items from a matching source. The filter is
+  an exact name, a trailing suffix (`repo` or `owner/repo`; a multi-source
+  match is normal, not an error), or a glob matched against the full
+  `host/owner/repo` identity (so `*` spans `/`):
 
 ```
 mind recall --kind skill

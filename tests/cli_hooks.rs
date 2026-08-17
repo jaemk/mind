@@ -319,16 +319,43 @@ fn hooks_list_source_shows_declared_hooks() {
 /// pre-DSC-96 `mind`, which DSC-95's display-side guarantee is exactly what
 /// protects. Selected with a glob, since a sanitized name does not round-trip
 /// as a typed ref (the DSC-95 caveat).
+///
+/// The fixture declares an item-level install hook, so the JSON path this
+/// proves is the SAME one that actually carries hook data (a `hooks` array
+/// element, not an item with nothing declared either way). Every assertion is
+/// on parsed field values, not a substring search over the whole document:
+/// `listed.contains("vie") && listed.contains("review")` (the original form
+/// of this test) is satisfied by the CLEAN `skill:review` entry ALONE --
+/// "review" contains "vie" -- and `strip_ansi` maps the hostile name to
+/// exactly "review", indistinguishable from the clean entry by content. The
+/// only assertion that can prove the hostile entry was not DROPPED is a count.
 #[test]
 fn hooks_list_json_sanitizes_a_hostile_item_name() {
     // spec: DSC-95 CLI-220
     let sb = Sandbox::new("hooks-list-hostile");
     sb.write_and_commit(
+        "mind.toml",
+        concat!(
+            "[[items]]\n",
+            "kind = \"skill\"\n",
+            "name = \"review\"\n",
+            "path = \"skills/review\"\n",
+            "install = \"echo review-installed\"\n",
+        ),
+    );
+    sb.write_and_commit(
         "skills/review/SKILL.md",
         "---\nname: review\ndescription: reviewer\n---\n# review\n",
     );
     assert!(sb.mind(&["meld", &sb.source_spec()]).success);
-    assert!(sb.mind(&["learn", "skill:review"]).success);
+    assert!(
+        sb.mind(&[
+            "learn",
+            "skill:review",
+            "--dangerously-skip-install-hook-check"
+        ])
+        .success
+    );
 
     // Clone the installed entry under a hostile key. BEL + a bidi override,
     // avoiding '[' so the ref does not read as a glob metacharacter.
@@ -351,19 +378,53 @@ fn hooks_list_json_sanitizes_a_hostile_item_name() {
         "hooks list --json: {} {}",
         json.stdout, json.stderr
     );
+    // L2: of the two clauses below, only the U+202E one is load-bearing.
+    // serde_json escapes a C0 control byte (BEL, `\x07`) as `` in its
+    // string output REGARDLESS of whether the DSC-95 fix is applied, so
+    // `!json.stdout.contains('\x07')` can never fail either way -- it stays
+    // for documentation/readability only. Do not "simplify" this assertion by
+    // dropping the bidi clause: that is the ONLY half that actually proves
+    // the fix, because serde emits non-ASCII (including U+202E) unescaped by
+    // default.
     assert!(
         !json.stdout.contains('\x07') && !json.stdout.contains('\u{202E}'),
         "no raw control or bidi byte may reach the --json envelope: {:?}",
         json.stdout
     );
-    // The item is still listed, not dropped: sanitizing is a rendering step,
-    // never a filter.
     let doc: serde_json::Value = serde_json::from_str(json.stdout.trim()).unwrap();
-    let listed = doc.to_string();
-    assert!(
-        listed.contains("vie") && listed.contains("review"),
-        "both the hostile (sanitized) and the clean item must be listed: {listed}"
+    // L1: the only way to prove the hostile entry was listed rather than
+    // dropped is a count -- both entries render identically once sanitized.
+    let items = doc["items"]
+        .as_array()
+        .unwrap_or_else(|| panic!("items must be an array: {doc}"));
+    assert_eq!(
+        items.len(),
+        2,
+        "both the hostile (sanitized) and the clean item must be listed, \
+         neither dropped by the fix: {doc}"
     );
+
+    // L3: assert on the parsed per-item fields of the REAL entry, proving the
+    // hook data (not just the bare `item`/`source` strings) survives through
+    // the same JSON path the hostile entry exercises. Both entries sanitize to
+    // the SAME `item` value ("skill:review"), so `item` alone cannot pick out
+    // the real one -- it is the one with a non-empty `hooks` array (the
+    // hostile clone, injected straight into the manifest, carries none).
+    let real = items
+        .iter()
+        .find(|it| it["item"] == "skill:review" && !it["hooks"].as_array().unwrap().is_empty())
+        .unwrap_or_else(|| panic!("the clean review entry (with its hook) must be present: {doc}"));
+    assert!(
+        real["source"]
+            .as_str()
+            .is_some_and(|s| s.ends_with("hooks-list-hostile")),
+        "{doc}"
+    );
+    let hooks = real["hooks"]
+        .as_array()
+        .unwrap_or_else(|| panic!("hooks must be an array: {doc}"));
+    assert_eq!(hooks.len(), 1, "{doc}");
+    assert_eq!(hooks[0]["command"], "echo review-installed", "{doc}");
 
     // Text mode carries the same guarantee.
     let plain = sb.mind(&["hooks", "list", "hooks-list-hostile#skill:*"]);
@@ -372,6 +433,233 @@ fn hooks_list_json_sanitizes_a_hostile_item_name() {
         !plain.stdout.contains('\x07') && !plain.stdout.contains('\u{202E}'),
         "no raw control or bidi byte may reach the text listing: {:?}",
         plain.stdout
+    );
+}
+
+/// M4/M17 (DSC-95): a hostile SOURCE name -- a melded local path whose
+/// directory name carries a bidi override, exactly as attacker-controlled as
+/// an item name (a local-path meld derives the source identity from
+/// directory names, `local/<parent>/<dir>`) -- must not reach `hooks list`
+/// output in EITHER mode (`--json` or text), and in EITHER resolution branch:
+/// the source-target listing (`list_source_hooks`, whose `SourceHooksJson.source`
+/// and `source: {}` header line are M4's other two leak sites) and the
+/// item-target listing (`list_item_hooks`, whose `ItemHooksJson.source` and
+/// `item: ... (source ...)` line are the other two). The fixture declares
+/// BOTH a source-level hook and an item-level one, so `list_source_hooks`'s
+/// item-nesting branch (only reached when the item actually declares a hook)
+/// is exercised too, not just the source-level one.
+///
+/// A plain ASCII control byte (e.g. ESC) cannot reach a source's identity
+/// this way: `source::bad_repo_spec` already rejects a repo-spec path
+/// component containing one (`c.is_control()`) before `meld` gets anywhere
+/// near a catalog scan, independent of DSC-95. That leaves the bidi/invisible
+/// Unicode class (`Cf`, [`is_blocked_unicode`] in `sanitize.rs`) as the
+/// surface that actually reaches a source identity through a real `meld` --
+/// exactly what this fixture uses.
+#[test]
+fn hooks_list_sanitizes_a_hostile_source_name_in_every_form() {
+    // spec: DSC-95 CLI-220 HOOK-104
+    let hostile_dir = format!("hostsrc{}elmrc", '\u{202E}');
+    let sb = Sandbox::new(&hostile_dir);
+    sb.write_and_commit(
+        "mind.toml",
+        concat!(
+            "[[hooks]]\n",
+            "name = \"setup\"\n",
+            "run = \"echo setup\"\n",
+            "event = \"install\"\n",
+            "\n",
+            "[[items]]\n",
+            "kind = \"skill\"\n",
+            "name = \"widget\"\n",
+            "path = \"skills/widget\"\n",
+            "install = \"echo widget-installed\"\n",
+        ),
+    );
+    sb.write_and_commit("skills/widget/SKILL.md", "---\ndescription: w\n---\n# w\n");
+
+    let r = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(r.success, "meld: {}\n{}", r.stdout, r.stderr);
+    let r = sb.mind(&["learn", "widget", "--dangerously-skip-install-hook-check"]);
+    assert!(r.success, "learn: {}\n{}", r.stdout, r.stderr);
+
+    // The registered source identity, `local/<base-name>/<hostile_dir>`
+    // (mirrors `hooks_run_source_install_skips_in_non_tty`'s `identity`),
+    // used below for the item-ref target: `installed_matches_glob`'s source
+    // filter (`resolve.rs`) matches by exact/suffix equality, NOT as a glob,
+    // so a bare `*` cannot stand in for the source half of a `<source>#<item>`
+    // ref the way it can for a plain source selector.
+    let identity = format!(
+        "local/{}/{hostile_dir}",
+        sb.base.file_name().unwrap().to_string_lossy()
+    );
+
+    // A `*` selector reaches the hostile source without ever having to spell
+    // its identity out on the command line.
+    let json = sb.mind(&["--json", "hooks", "list", "*"]);
+    assert!(json.success, "{} {}", json.stdout, json.stderr);
+    assert!(
+        !json.stdout.contains('\u{202E}'),
+        "no raw bidi byte may reach the --json envelope: {:?}",
+        json.stdout
+    );
+    let doc: serde_json::Value = serde_json::from_str(json.stdout.trim())
+        .unwrap_or_else(|e| panic!("one JSON document ({e}): {:?}", json.stdout));
+    let sources = doc["sources"]
+        .as_array()
+        .unwrap_or_else(|| panic!("sources must be an array: {doc}"));
+    assert_eq!(sources.len(), 1, "{doc}");
+    let source_field = sources[0]["source"]
+        .as_str()
+        .unwrap_or_else(|| panic!("source must be a string: {doc}"));
+    // `.contains("hostsrc")`/`.contains("elmrc")` alone would pass on the RAW
+    // (unsanitized) value too -- "elmrc" is a contiguous substring of
+    // "hostsrc\u{202E}elmrc" regardless of whether the bidi override in the
+    // middle was stripped. The `!contains('\u{202E}')` clause is the one that
+    // actually proves sanitization; the other two prove the identity was not
+    // simply dropped/blanked.
+    assert!(
+        !source_field.contains('\u{202E}')
+            && source_field.contains("hostsrc")
+            && source_field.contains("elmrc"),
+        "the source field must be sanitized (no raw bidi byte) but not dropped: {source_field:?}"
+    );
+    // `list_source_hooks`'s item-nesting branch: the installed widget's own
+    // hooks, reached only because it declares one (:841's guard).
+    let nested = &sources[0]["items"][0];
+    assert_eq!(nested["item"], "skill:widget", "{doc}");
+    assert!(
+        nested.get("source").is_none(),
+        "a nested item's source is the enclosing object: {doc}"
+    );
+    assert_eq!(
+        nested["hooks"][0]["command"], "echo widget-installed",
+        "{doc}"
+    );
+
+    // Text mode: the `source: {}` header line and the nested `item: {}` line.
+    let plain = sb.mind(&["hooks", "list", "*"]);
+    assert!(plain.success, "{} {}", plain.stdout, plain.stderr);
+    assert!(
+        !plain.stdout.contains('\u{202E}'),
+        "no raw bidi byte may reach the text listing: {:?}",
+        plain.stdout
+    );
+
+    // The item-target listing path (`list_item_hooks`): its own `source: Some(...)`
+    // field and its `item: ... (source ...)` text line.
+    //
+    // Unlike the `*` source-selector queries above, this query's OWN target
+    // string must spell out the hostile identity verbatim (an item ref's
+    // source half matches by exact/suffix equality, not a glob -- see the
+    // `identity` comment above), and `HooksListResult.target` echoes back
+    // whatever the caller typed verbatim (by design; not one of M4's leak
+    // sites -- it is not source/item DATA, it is the query itself, the same
+    // way `HooksNotRun.target` is left unsanitized in `error.rs`). So the
+    // whole-document raw-bidi-byte check used elsewhere in this test does not
+    // apply here; only the `source`/`item` DISPLAY fields are asserted on.
+    let item_target = format!("{identity}#widget");
+    let item_json = sb.mind(&["--json", "hooks", "list", &item_target]);
+    assert!(
+        item_json.success,
+        "{} {}",
+        item_json.stdout, item_json.stderr
+    );
+    let idoc: serde_json::Value = serde_json::from_str(item_json.stdout.trim())
+        .unwrap_or_else(|e| panic!("one JSON document ({e}): {:?}", item_json.stdout));
+    let items = idoc["items"]
+        .as_array()
+        .unwrap_or_else(|| panic!("items must be an array: {idoc}"));
+    assert_eq!(items.len(), 1, "{idoc}");
+    let item_source = items[0]["source"]
+        .as_str()
+        .unwrap_or_else(|| panic!("source must be a string: {idoc}"));
+    assert!(
+        !item_source.contains('\u{202E}')
+            && item_source.contains("hostsrc")
+            && item_source.contains("elmrc"),
+        "the `source` field must be sanitized (no raw bidi byte) but not dropped: {item_source:?}"
+    );
+
+    let item_plain = sb.mind(&["hooks", "list", &item_target]);
+    assert!(
+        item_plain.success,
+        "{} {}",
+        item_plain.stdout, item_plain.stderr
+    );
+    assert!(
+        !item_plain.stdout.contains('\u{202E}'),
+        "no raw bidi byte may reach the item text listing: {:?}",
+        item_plain.stdout
+    );
+}
+
+/// M17 (DSC-95): `item_hook_target`'s `<source>#<kind>:<name>` composition
+/// feeds the `HooksNotRun` remedy (HOOK-106/107/108) that `main.rs` prints on
+/// stderr -- a hand-built `format!` the compiler cannot flag the way it flags
+/// a raw `ItemKey`. `installed.source` is exactly as attacker-controlled as an
+/// item name (a melded local path's directory name); prove the printed
+/// remedy carries the SANITIZED identity, not the raw bidi byte. As in
+/// `hooks_list_sanitizes_a_hostile_source_name_in_every_form`, only the
+/// bidi/invisible Unicode class reaches a source identity through a real
+/// `meld` -- a plain ASCII control byte is rejected earlier by
+/// `source::bad_repo_spec`, independent of DSC-95.
+#[test]
+fn hooks_run_hooks_not_run_remedy_sanitizes_a_hostile_item_hook_target() {
+    // spec: DSC-95 HOOK-106 HOOK-108
+    let hostile_dir = format!("m17{}srcend", '\u{202E}');
+    let sb = Sandbox::new(&hostile_dir);
+    sb.write_and_commit(
+        "mind.toml",
+        concat!(
+            "[[items]]\n",
+            "kind = \"skill\"\n",
+            "name = \"gadget\"\n",
+            "path = \"skills/gadget\"\n",
+            "uninstall = \"echo gadget-removed\"\n",
+        ),
+    );
+    sb.write_and_commit(
+        "skills/gadget/SKILL.md",
+        "---\ndescription: gadget\n---\n# gadget\n",
+    );
+    let r = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(r.success, "meld: {}\n{}", r.stdout, r.stderr);
+    let r = sb.mind(&["learn", "gadget"]);
+    assert!(r.success, "learn: {}\n{}", r.stdout, r.stderr);
+
+    // The registered source identity (see the sibling `hooks list` test's
+    // `identity` for why `*` cannot stand in for the source half of a
+    // `<source>#<item>` ref). The NAME half is a glob (`gad*`) rather than
+    // the exact `gadget`: `run_item_hooks`'s `resolved` only substitutes the
+    // sanitized `item_hook_target` identity when the WHOLE typed target
+    // carries a glob metacharacter (`is_glob(target)`) -- an exact,
+    // already-concrete target is echoed back verbatim instead (deliberately,
+    // HOOK-106/107: it already resolves deterministically), which would
+    // reflect the raw typed identity rather than exercising the sanitized
+    // composition this test targets.
+    let identity = format!(
+        "local/{}/{hostile_dir}",
+        sb.base.file_name().unwrap().to_string_lossy()
+    );
+    let target = format!("{identity}#gad*");
+
+    // In non-TTY the uninstall hook is skipped for want of consent; the
+    // `HooksNotRun` remedy names the resolved item via `item_hook_target`.
+    let r = sb.mind(&["hooks", "run", "--event", "uninstall", &target]);
+    assert!(
+        !r.success,
+        "a skip with a hook that existed must be a non-zero exit: {}\n{}",
+        r.stdout, r.stderr
+    );
+    let combined = format!("{}{}", r.stdout, r.stderr);
+    assert!(
+        !combined.contains('\u{202E}'),
+        "no raw bidi byte from the source name may reach the printed remedy: {combined:?}"
+    );
+    assert!(
+        combined.contains("srcend") && combined.contains("gadget"),
+        "the sanitized identity must still be present, not dropped: {combined:?}"
     );
 }
 

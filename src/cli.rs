@@ -466,16 +466,16 @@ EXAMPLES:
     /// Refresh melded source clones and catalogs (all, or only those matching
     /// `[source]`).
     ///
-    /// `[source]` is a FILTER, not a ref (contrast `unmeld`'s/`upgrade`'s
-    /// source-name selection): it may match several sources with no
-    /// ambiguity check, and every match is synced -- that is intentional,
-    /// since `sync` is a non-destructive refresh.
+    /// `[source]` is a FILTER, not a ref (contrast `unmeld`'s source-name
+    /// selection, which must resolve to exactly one source): it may match
+    /// several sources with no ambiguity check, and every match is synced --
+    /// that is intentional, since `sync` is a non-destructive refresh.
     // spec: CLI-172
     #[command(visible_alias = "update")]
     Sync {
         /// Only sync the source(s) matching this filter: an exact name, a
         /// trailing suffix like `repo` or `owner/repo` (every source it
-        /// matches is synced -- unlike `unmeld`'s/`upgrade`'s ref-style source
+        /// matches is synced -- unlike `unmeld`'s ref-style source
         /// selection, a filter is never ambiguous: more than one match is
         /// normal, not an error), or a glob. With no filter, every melded
         /// source is synced. A filter also skips the whole-set-only steps:
@@ -486,11 +486,13 @@ EXAMPLES:
 
         /// After refreshing, run an `upgrade` pass (report + prompt) to apply
         /// upgrades, scoped to the source(s) the filter matched (every
-        /// installed item when no filter is given). When the filter matched
-        /// more than one source, the confirmation names all of them before
-        /// applying, since a filter's blast radius can exceed what the name
-        /// alone suggests. Deprecated: prefer `mind upgrade`, which now syncs
-        /// first by default.
+        /// installed item when no filter is given). When the scope spans more
+        /// than one source, a disclosure names every matched source before
+        /// the install-hook re-run pass -- even when nothing is pending --
+        /// since a filter's blast radius can exceed what the name alone
+        /// suggests; unlike the `[Y/n]` confirmation itself, this disclosure
+        /// is NOT suppressed by `--yes`. Deprecated: prefer `mind upgrade`,
+        /// which now syncs first by default.
         // spec: CLI-169 CLI-232 CLI-233
         #[arg(long)]
         upgrade: bool,
@@ -516,11 +518,18 @@ EXAMPLES:
     // spec: CLI-169
     Upgrade {
         /// Only upgrade this item; default is every installed item. This is a
-        /// filter over installed items: a shared name/suffix or a glob may
-        /// match several, and all matches are upgraded. An embedded
-        /// `owner/repo#` source qualifier, however, IS a ref: it must resolve
-        /// to exactly one source (erroring rather than matching several),
-        /// exactly like `unmeld`'s source name.
+        /// filter over installed items: a glob may match several, and a bare
+        /// non-glob name multi-matches only across kinds (the manifest is
+        /// keyed `kind:name`, e.g. `upgrade greet` hitting both `skill:greet`
+        /// and `agent:greet`) -- item names themselves are never
+        /// suffix-matched. An embedded `owner/repo#` source qualifier is a
+        /// filter too, not a ref like `unmeld`'s source name: it is a
+        /// trailing-suffix match with no ambiguity check, so it can match
+        /// several sources at once, upgrading every matched source's items
+        /// and re-running each one's install hook. When the resolved scope
+        /// spans more than one source, a disclosure names every matched
+        /// source before the install-hook re-run pass -- even when nothing is
+        /// pending -- and this disclosure is NOT suppressed by `--yes`.
         item: Option<String>,
 
         /// Skip the automatic source sync before computing deltas. By default,
@@ -564,7 +573,10 @@ EXAMPLES:
         /// changing anything.
         #[arg(long)]
         check: bool,
-        /// Upgrade to this exact version instead of the latest release.
+        /// Upgrade to this exact version instead of the latest release. This
+        /// is the only way to reach a prerelease (e.g. `--to 1.2.3-rc1`),
+        /// since the latest-release lookup never surfaces one. A single
+        /// leading `v` is accepted and stripped (`--to v1.2.3` works).
         /// `--version` is a deprecated alias kept for backwards compatibility.
         // spec: CLI-229 - renamed from --version, which shadowed the global
         // -V/--version flag other verbs carry; old spelling is a hidden alias.
@@ -587,7 +599,9 @@ EXAMPLES:
         #[arg(long, value_enum)]
         kind: Option<KindArg>,
 
-        /// Only list items from a source matching this selector (listing only).
+        /// Only list items from a source matching this filter: an exact
+        /// name, a trailing suffix, or a glob (listing only; a multi-source
+        /// match is normal, not an error).
         #[arg(long)]
         source: Option<String>,
 
@@ -614,7 +628,9 @@ EXAMPLES:
         #[arg(long, value_enum)]
         kind: Option<KindArg>,
 
-        /// Only list items from a source matching this selector.
+        /// Only list items from a source matching this filter: an exact
+        /// name, a trailing suffix, or a glob (a multi-source match is
+        /// normal, not an error).
         #[arg(long)]
         source: Option<String>,
 
@@ -884,9 +900,10 @@ pub enum LobesCmd {
 pub enum HooksCmd {
     /// Run a source's or item's hooks on demand, outside meld/learn/forget/upgrade.
     ///
-    /// `<target>` is a source selector (e.g. `repo`, `owner/repo`, or a glob
+    /// `<target>` is a source FILTER (e.g. `repo`, `owner/repo`, or a glob
     /// like `'*'`) or an item ref `<source>#<item>` (e.g. `agents#skill:scan`).
-    /// A ref that matches several sources or items runs each in turn.
+    /// There is no ambiguity check: a filter matching several sources, or an
+    /// item ref matching several items, runs the hook for each in turn.
     ///
     /// For a source or item target with `--event install` (the default), only
     /// *pending* hooks run by default -- those that never ran or did not run at
@@ -898,7 +915,7 @@ pub enum HooksCmd {
     /// automatic run; it is never more silently than meld/learn would run it.
     // spec: CLI-194 CLI-195
     Run {
-        /// The hook target: a source selector (e.g. `repo`, `owner/repo`, `'*'`)
+        /// The hook target: a source filter (e.g. `repo`, `owner/repo`, `'*'`)
         /// or an item ref `<source>#<item>` (e.g. `agents#skill:scan`).
         target: String,
 
@@ -944,7 +961,7 @@ pub enum HooksCmd {
     /// For an item ref `<source>#<item>`, shows only that item's hooks.
     // spec: CLI-196
     List {
-        /// The hook target: a source selector or `<source>#<item>` item ref.
+        /// The hook target: a source filter or `<source>#<item>` item ref.
         target: String,
     },
 }

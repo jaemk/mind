@@ -148,6 +148,22 @@ fn dispatch(paths: &Paths, kind: ActionKind, upgrade_keys: &[String]) -> Result<
         // apply and act on an item the modal never named; the TUI offers `s`
         // (Sync) separately and re-polls ~1s, so refreshing drift is not this
         // call's job.
+        //
+        // M2: an EMPTY `upgrade_keys` is exactly `initiate_upgrade`'s
+        // "nothing is out of date since the last sync ... Proceed with upgrade
+        // anyway?" case (a non-empty confirm always names at least one key).
+        // The key-scoped call with an empty key set is a no-op by definition
+        // (`key_scope = Some(<empty set>)` makes every item `OutOfScope`), so
+        // routing it there would make "anyway" a guaranteed no-op -- silently
+        // different from what it meant before TUI-72/73 (a plain
+        // `upgrade_no_sync(.., None, ..)`, which re-derives staleness at apply
+        // time and so COULD catch a drift the snapshot had missed). Route the
+        // empty case through that unscoped call instead, restoring "anyway"'s
+        // actual meaning; keep the key-scoped call for the named, non-empty set.
+        // spec: TUI-76
+        ActionKind::Upgrade if upgrade_keys.is_empty() => {
+            commands::upgrade_no_sync(paths, true, None, false, false)?
+        }
         ActionKind::Upgrade => {
             commands::upgrade_no_sync_keys(paths, true, upgrade_keys, false, false)?
         }
@@ -619,6 +635,123 @@ mod tests {
             result.is_ok(),
             "upgrade with nothing to do should succeed: {:?}",
             result.err()
+        );
+    }
+
+    #[test]
+    fn action_upgrade_with_empty_keys_still_applies_real_drift_not_a_guaranteed_noop() {
+        // spec: TUI-76 - M2: `initiate_upgrade` arms `upgrade_keys: []` when its
+        // recompute found nothing stale, and the confirm text is "nothing is
+        // out of date since the last sync ... Proceed with upgrade anyway?".
+        // Before this fix, `dispatch` always routed ANY `ActionKind::Upgrade`
+        // through the KEY-SCOPED `upgrade_no_sync_keys`, so an empty key set
+        // built `key_scope = Some(<empty set>)`: every item is `OutOfScope` by
+        // construction, and "anyway" provably applied nothing, no matter what
+        // had drifted on disk. This seeds a real, on-disk content edit AFTER
+        // the (empty-keys) pending action is built -- mirroring the confirm
+        // text's own scenario, drift the last poll/sync missed -- and applies
+        // it. The pre-fix behavior would leave the manifest hash unchanged;
+        // the fix (routing the empty case through the UNSCOPED
+        // `commands::upgrade_no_sync`, which re-derives staleness at apply
+        // time) must actually upgrade the item.
+        use std::process::Command;
+
+        let (paths, base) = temp_paths();
+        crate::paths::mkdir_p(&paths.mind_home).unwrap();
+        crate::config::Config {
+            lobes: vec![crate::config::LobeEntry::bare(
+                paths.claude_home.to_str().unwrap(),
+            )],
+            ..Default::default()
+        }
+        .save(&paths)
+        .unwrap();
+
+        let src = base.join("empty-keys-anyway-source");
+        std::fs::create_dir_all(src.join("skills/review")).unwrap();
+        std::fs::write(
+            src.join("skills/review/SKILL.md"),
+            "---\ndescription: review skill\n---\n# review\noriginal\n",
+        )
+        .unwrap();
+        init_git_repo(&src);
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(&src)
+                .output()
+                .expect("git");
+        };
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "initial"]);
+
+        commands::meld(
+            &paths,
+            src.to_str().unwrap(),
+            None,
+            vec![],
+            vec![],
+            false,
+            commands::PinRequest::None,
+            None,
+            false,
+        )
+        .expect("meld");
+        commands::learn(
+            &paths,
+            "skill:review",
+            false,
+            commands::InstallFlow {
+                yes: true,
+                clobber: commands::Clobber::Force,
+                dangerously_skip: true,
+                dangerously_skip_build: true,
+            },
+        )
+        .expect("learn");
+
+        let hash_before = crate::manifest::Manifest::load(&paths)
+            .unwrap()
+            .items
+            .get("skill:review")
+            .unwrap()
+            .hash
+            .clone();
+
+        // Drift the last poll/sync missed: an on-disk edit after the (empty)
+        // pending action would have been built.
+        std::fs::write(
+            src.join("skills/review/SKILL.md"),
+            "---\ndescription: review skill\n---\n# review\nedited after the empty confirm\n",
+        )
+        .unwrap();
+
+        let action = PendingAction {
+            kind: ActionKind::Upgrade,
+            description: "Upgrade: nothing is out of date since the last sync. Press `s` to \
+                           sync and check for updates. Proceed with upgrade anyway?"
+                .to_string(),
+            dep_tree: None,
+            upgrade_keys: Vec::new(),
+        };
+        let result = execute(&paths, action);
+        assert!(
+            result.is_ok(),
+            "the empty-keys 'anyway' apply must succeed: {:?}",
+            result.err()
+        );
+
+        let hash_after = crate::manifest::Manifest::load(&paths)
+            .unwrap()
+            .items
+            .get("skill:review")
+            .unwrap()
+            .hash
+            .clone();
+        assert_ne!(
+            hash_before, hash_after,
+            "an empty-keys 'anyway' apply must re-derive staleness and actually \
+             upgrade the drifted item, not silently apply nothing"
         );
     }
 

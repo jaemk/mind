@@ -89,27 +89,24 @@ pub fn parse_latest_tag(json: &str) -> Result<String> {
 /// clear "not downgrading" message (CLI-147) rather than a misleading "up to date".
 /// When the target equals the running version, `UpToDate` is always returned,
 /// regardless of `explicit`. When the target is above `current`, `Update` is
-/// returned regardless of `explicit`.
-// spec: CLI-140
+/// returned regardless of `explicit`. When `current` and `target` share the
+/// same NUMERIC base version (a "tie") but differ in their prerelease suffix
+/// (or exactly one of them carries one), the tie is broken by prerelease
+/// precedence -- see [`tie_break`] -- rather than assumed `UpToDate` (STO-77).
+// spec: CLI-140 STO-77
 pub fn decision(current: &str, target: &str, explicit: bool) -> Decision {
     if version_at_least(current, target) {
-        // A prerelease `current` (e.g. `0.23.1-dev`, a prerelease version
-        // string such as one from a fork or a packager -- this repo's own
-        // releases never carry one, see CARGO_PKG_VERSION in `run`) has the
-        // same NUMERIC view as its base release `0.23.1`, so `version_at_least`
-        // reads them as equal in both directions. But a prerelease predates
-        // its base release, so treat a prerelease current as strictly below a
-        // release target of the same numeric version: offer the update
-        // (including an explicit `--to 0.23.1` onto its own base) rather than
-        // claiming up-to-date. The `version_at_least(target, current)` guard
-        // restricts this to a numeric TIE, so a genuinely newer prerelease
-        // (`0.24.0-dev` vs release `0.23.1`) is unaffected.
-        if is_prerelease(current) && !is_prerelease(target) && version_at_least(target, current) {
-            return Decision::Update;
+        if version_at_least(target, current) {
+            // Both directions hold: current and target share the same
+            // numeric base version. A byte-identical match aside, this is
+            // NOT necessarily "up to date" -- a prerelease predates its base
+            // release, and two prereleases of the same base order against
+            // each other by semver precedence, so hand off to `tie_break`
+            // rather than assuming `UpToDate` outright.
+            return tie_break(current, target, explicit);
         }
-        // current >= target; check whether the target is strictly BELOW current
-        // and was given as an explicit pin.
-        if explicit && !version_at_least(target, current) {
+        // current is STRICTLY above target numerically.
+        if explicit {
             // target < current: explicit downgrade request we refuse.
             Decision::PinnedBelowCurrent
         } else {
@@ -120,12 +117,131 @@ pub fn decision(current: &str, target: &str, explicit: bool) -> Decision {
     }
 }
 
+/// Resolve a NUMERIC TIE between `current` and `target` (the same dotted base
+/// version, as already established by the caller via `version_at_least` in
+/// both directions) into a `Decision`, breaking the tie by prerelease
+/// precedence instead of assuming `UpToDate` outright (STO-77).
+///
+/// Before this existed, `decision` only ever moved off a numeric tie in ONE
+/// direction: a prerelease `current` onto its own (non-prerelease) base
+/// `target`. Two other same-base pairings silently fell through to
+/// `UpToDate`/no-op even under an explicit `--to`: two prereleases of the
+/// same base ordered against each other (e.g. running `0.24.0-rc1`, pinning
+/// `--to 0.24.0-rc2` -- the main reason to pin an rc at all), and a release
+/// `current` explicitly pinned onto a same-base prerelease `target` (e.g.
+/// running the released `0.24.0`, `--to 0.24.0-rc1`). Both are handled here.
+///
+/// - Byte-identical `current`/`target` strings are always `UpToDate`.
+/// - A prerelease `current` vs. a plain-release `target` of the same base:
+///   the prerelease predates the release, so `Update` (unconditional on
+///   `explicit`, matching the pre-existing behavior this generalizes).
+/// - A plain-release `current` vs. a same-base prerelease `target`: the
+///   prerelease predates `current`, so an EXPLICIT pin here is a downgrade
+///   request (`PinnedBelowCurrent`); a non-explicit target never reaches this
+///   arm in practice (`releases/latest` never returns a prerelease), so it
+///   degrades to `UpToDate` rather than a spurious refusal if it ever did.
+/// - Two prereleases of the same base: compared via [`prerelease_cmp`]
+///   (semver precedence). `target` ordering ABOVE `current` is `Update`;
+///   BELOW is an explicit downgrade (`PinnedBelowCurrent`) or a non-explicit
+///   `UpToDate`; equal precedence (but non-identical strings, e.g. differing
+///   only in build metadata) is `UpToDate`.
+fn tie_break(current: &str, target: &str, explicit: bool) -> Decision {
+    if current == target {
+        return Decision::UpToDate;
+    }
+    match (is_prerelease(current), is_prerelease(target)) {
+        (false, false) => Decision::UpToDate,
+        (true, false) => Decision::Update,
+        (false, true) => {
+            if explicit {
+                Decision::PinnedBelowCurrent
+            } else {
+                Decision::UpToDate
+            }
+        }
+        (true, true) => {
+            let cp = prerelease_suffix(current).unwrap_or_default();
+            let tp = prerelease_suffix(target).unwrap_or_default();
+            match prerelease_cmp(cp, tp) {
+                std::cmp::Ordering::Less => Decision::Update,
+                std::cmp::Ordering::Equal => Decision::UpToDate,
+                std::cmp::Ordering::Greater => {
+                    if explicit {
+                        Decision::PinnedBelowCurrent
+                    } else {
+                        Decision::UpToDate
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Whether `v` carries a prerelease suffix (a `-` segment, e.g. `-dev` or
 /// `-rc.2`, such as a fork or packager might append). Build metadata (`+...`)
-/// is not a prerelease. Used by [`decision`] to break a numeric tie between a
-/// prerelease and its base release.
+/// is not a prerelease. Used by [`tie_break`] to classify a numeric-tie pair
+/// before ordering it.
 fn is_prerelease(v: &str) -> bool {
     v.split_once('+').map_or(v, |(base, _)| base).contains('-')
+}
+
+/// The prerelease suffix of `v` (the text after its first `-`, before any
+/// `+build` segment), if any. `None` when `v` carries no prerelease.
+///
+/// Whole-string build-metadata stripping happens first (mirroring
+/// `version_at_least`'s rationale): a `+` inside a dotted build-metadata
+/// segment must never be mistaken for part of the prerelease suffix.
+fn prerelease_suffix(v: &str) -> Option<&str> {
+    let base_and_pre = v.split_once('+').map_or(v, |(base, _)| base);
+    base_and_pre.split_once('-').map(|(_, pre)| pre)
+}
+
+/// Compare two semver-shaped dot-identifiers by semver precedence (informally
+/// mirroring semver.org's precedence rule #11): a purely-numeric identifier
+/// (all ASCII digits) compares numerically; anything else compares as ASCII
+/// bytes; a numeric identifier ALWAYS has lower precedence than a
+/// non-numeric one when the two are compared against each other (so `"9"` <
+/// `"rc"`, not just `"9"` < `"9a"`).
+fn semver_identifier_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    let a_numeric = !a.is_empty() && a.bytes().all(|c| c.is_ascii_digit());
+    let b_numeric = !b.is_empty() && b.bytes().all(|c| c.is_ascii_digit());
+    match (a_numeric, b_numeric) {
+        (true, true) => {
+            // Values reaching here are already validated by
+            // `is_plausible_release_tag`, but parse defensively (u128, with a
+            // MAX fallback) rather than panicking on an implausibly long
+            // numeric identifier.
+            let an: u128 = a.parse().unwrap_or(u128::MAX);
+            let bn: u128 = b.parse().unwrap_or(u128::MAX);
+            an.cmp(&bn)
+        }
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        (false, false) => a.cmp(b),
+    }
+}
+
+/// Compare two prerelease suffixes (the text after `-`, before any `+build`)
+/// by semver precedence: dot-separated identifiers compared pairwise via
+/// [`semver_identifier_cmp`]; when one is a strict prefix of the other in
+/// dot-identifiers (fewer fields), the SHORTER one has lower precedence
+/// (`rc.1` < `rc.1.2`), matching semver.org's precedence rule #11.
+fn prerelease_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    let mut ai = a.split('.');
+    let mut bi = b.split('.');
+    loop {
+        match (ai.next(), bi.next()) {
+            (None, None) => return std::cmp::Ordering::Equal,
+            (None, Some(_)) => return std::cmp::Ordering::Less,
+            (Some(_), None) => return std::cmp::Ordering::Greater,
+            (Some(x), Some(y)) => {
+                let c = semver_identifier_cmp(x, y);
+                if c != std::cmp::Ordering::Equal {
+                    return c;
+                }
+            }
+        }
+    }
 }
 
 /// The one-line status `--check` (and the run path) reports: the running version,
@@ -256,13 +372,15 @@ pub fn run(check: bool, yes: bool, mut version: Option<String>) -> Result<()> {
     // `releases/latest` never surfaces one), so the validator here accepts
     // that shape while still rejecting anything that could escape or split a
     // URL path segment.
+    //
+    // spec: STO-77 -- a rejected value is `SelfUpdateInvalidTarget`, NOT
+    // `SelfUpdatePolicy`: the latter's JSON `kind` (`self-update-policy`)
+    // reads as a managed-policy refusal, which this is not -- it never even
+    // reached policy evaluation's business logic, it just isn't a plausible
+    // version/tag shape.
     if !crate::mindfile::is_plausible_release_tag(&target_version) {
-        return Err(MindError::SelfUpdatePolicy {
-            detail: format!(
-                "self-update target version {target_version:?} is not a plausible \
-                 release tag (e.g. \"1.2.3\" or \"1.2.3-rc1\"); refusing before \
-                 building the release URL"
-            ),
+        return Err(MindError::SelfUpdateInvalidTarget {
+            value: target_version,
         });
     }
 
@@ -1630,7 +1748,7 @@ mod tests {
     }
 
     #[test]
-    // spec: STO-76
+    // spec: STO-76 STO-77
     fn run_refuses_a_malicious_latest_tag_before_any_second_network_call() {
         // A stubbed GitHub "latest release" response whose tag_name carries
         // path segments (e.g. from a repo/release takeover, or a TLS-
@@ -1692,17 +1810,24 @@ mod tests {
         drop(guard);
 
         match result {
-            Err(MindError::SelfUpdatePolicy { detail }) => {
+            // spec: STO-77 -- a malformed target is `SelfUpdateInvalidTarget`,
+            // NOT `SelfUpdatePolicy` (a distinct kind, so it does not read as
+            // a managed-policy refusal).
+            Err(MindError::SelfUpdateInvalidTarget { value }) => {
                 assert!(
-                    detail.contains("not a plausible"),
-                    "must explain the version is implausible: {detail}"
+                    value.contains("attacker"),
+                    "must name the rejected value: {value}"
                 );
+                let msg = MindError::SelfUpdateInvalidTarget {
+                    value: value.clone(),
+                }
+                .to_string();
                 assert!(
-                    detail.contains("attacker"),
-                    "must name the rejected value: {detail}"
+                    msg.contains("not a plausible"),
+                    "must explain the version is implausible: {msg}"
                 );
             }
-            other => panic!("expected a SelfUpdatePolicy refusal, got {other:?}"),
+            other => panic!("expected a SelfUpdateInvalidTarget refusal, got {other:?}"),
         }
 
         let call_count =
@@ -1719,15 +1844,15 @@ mod tests {
     }
 
     #[test]
-    // spec: STO-76
+    // spec: STO-76 STO-77
     fn run_refuses_an_explicit_to_target_with_path_segments_with_no_network_call() {
         // An explicit `--to` value bypasses the network entirely for target
         // resolution (no `latest` lookup), so a malicious value must still be
         // refused purely from local validation -- no PATH stub needed; if
         // `run` somehow tried to shell out despite there being no curl/wget
         // stub on PATH, it would fail with a `DownloadFailed`/`Io` error
-        // instead of `SelfUpdatePolicy`, and the assertion below would catch
-        // that misbehavior.
+        // instead of `SelfUpdateInvalidTarget`, and the assertion below would
+        // catch that misbehavior.
         let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let orig_policy_file = std::env::var("MIND_POLICY_FILE").ok();
         // SAFETY: ENV_LOCK is held for the duration of the mutation and the
@@ -1752,17 +1877,14 @@ mod tests {
         drop(guard);
 
         match result {
-            Err(MindError::SelfUpdatePolicy { detail }) => {
+            // spec: STO-77
+            Err(MindError::SelfUpdateInvalidTarget { value }) => {
                 assert!(
-                    detail.contains("not a plausible"),
-                    "must explain the version is implausible: {detail}"
-                );
-                assert!(
-                    detail.contains("attacker"),
-                    "must name the rejected --to value: {detail}"
+                    value.contains("attacker"),
+                    "must name the rejected --to value: {value}"
                 );
             }
-            other => panic!("expected a SelfUpdatePolicy refusal, got {other:?}"),
+            other => panic!("expected a SelfUpdateInvalidTarget refusal, got {other:?}"),
         }
     }
 
@@ -1777,14 +1899,31 @@ mod tests {
         // entry path (not `decision()` directly, which would mask a
         // regression at the validation site upstream of it): a prerelease
         // `--to` value must pass the STO-76 validation, reach `decision()`,
-        // and (since "1.2.3-rc1" is numerically far above the running
+        // and (since the target is built numerically ABOVE the running
         // version) come back `Decision::Update`. No network call is possible
         // here at all (no curl/wget stub is put on PATH), so reaching the
         // `!yes` confirmation gate -- rather than a `DownloadFailed`/`Io`
-        // error from an attempted shell-out, or a `SelfUpdatePolicy`
+        // error from an attempted shell-out, or a `SelfUpdateInvalidTarget`
         // "not a plausible" refusal -- proves both that validation accepted
         // the value AND that `decision()` classified it as an update,
         // end-to-end through production code.
+        //
+        // L8: the target is DERIVED from `CARGO_PKG_VERSION` (bumping the
+        // major component) rather than hardcoded as `"1.2.3-rc1"`. A
+        // hardcoded literal only worked because it happened to sit
+        // numerically above this crate's version at the time it was written
+        // (0.23.0); once the crate's own version reaches 1.2.3, the same
+        // literal ties instead of exceeding it, `decision()` flips outcome,
+        // and this test would fail with an unrelated-looking message far
+        // from its real cause.
+        let current = env!("CARGO_PKG_VERSION");
+        let major: u64 = current
+            .split(['.', '-', '+'])
+            .next()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let target = format!("{}.0.0-rc1", major + 1);
+
         let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let orig_policy_file = std::env::var("MIND_POLICY_FILE").ok();
         let orig_tty = std::env::var("MIND_TTY").ok();
@@ -1795,7 +1934,7 @@ mod tests {
             std::env::set_var("MIND_TTY", "0");
         }
 
-        let result = run(false, false, Some("1.2.3-rc1".to_string()));
+        let result = run(false, false, Some(target.clone()));
 
         // SAFETY: ENV_LOCK is still held.
         unsafe {
@@ -1813,7 +1952,7 @@ mod tests {
         match result {
             Err(MindError::ConfirmationRequired { action }) => {
                 assert!(
-                    action.contains("1.2.3-rc1"),
+                    action.contains(&target),
                     "must be prompting to update to the resolved prerelease target: {action}"
                 );
             }
@@ -1825,7 +1964,7 @@ mod tests {
     }
 
     #[test]
-    // spec: STO-76
+    // spec: STO-76 STO-77
     fn run_refuses_traversal_smuggled_inside_an_explicit_prerelease_suffix() {
         // A `-`-prefixed suffix of dots and slashes must not become an escape
         // hatch around the STO-76 URL-path-segment check just because a
@@ -1853,17 +1992,67 @@ mod tests {
         drop(guard);
 
         match result {
-            Err(MindError::SelfUpdatePolicy { detail }) => {
+            // spec: STO-77
+            Err(MindError::SelfUpdateInvalidTarget { value }) => {
                 assert!(
-                    detail.contains("not a plausible"),
-                    "must explain the version is implausible: {detail}"
-                );
-                assert!(
-                    detail.contains("1.0.0-../.."),
-                    "must name the rejected --to value: {detail}"
+                    value.contains("1.0.0-../.."),
+                    "must name the rejected --to value: {value}"
                 );
             }
-            other => panic!("expected a SelfUpdatePolicy refusal, got {other:?}"),
+            other => panic!("expected a SelfUpdateInvalidTarget refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    // spec: STO-76
+    fn run_refuses_a_pure_dot_run_smuggled_inside_an_explicit_prerelease_suffix() {
+        // L9: `run_refuses_traversal_smuggled_inside_an_explicit_prerelease_suffix`
+        // (above) uses a `/`-carrying payload, which `is_plausible_version`
+        // (the OLD, pre-STO-76 validator) also rejects outright -- ANY dash
+        // fails that validator, since it is digits-and-dots only. So that
+        // test would stay green even if the `run()` call site regressed back
+        // to calling `is_plausible_version` instead of
+        // `is_plausible_release_tag`, which would ALSO wrongly break every
+        // legitimate `--to X-rc1` pin (covered separately by
+        // `run_accepts_an_explicit_prerelease_to_target_and_reaches_decision_end_to_end`).
+        //
+        // This test instead pins the SPLIT ITSELF: a prerelease suffix built
+        // from nothing but dots (no slash at all) is exactly the shape a
+        // naive "every character is in the allowed charset" reading of
+        // `is_plausible_release_tag`'s grammar would wrongly accept (`.` is
+        // itself a member of the allowed suffix charset), but the real
+        // implementation splits the suffix on `.` and rejects any EMPTY
+        // identifier between two dots -- so it is still refused. A validator
+        // that dropped that non-empty-identifier check (while still using
+        // the right function at the call site) would pass this test's
+        // predecessor but fail this one.
+        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let orig_policy_file = std::env::var("MIND_POLICY_FILE").ok();
+        // SAFETY: ENV_LOCK is held for the duration of the mutation and the
+        // `run()` call below.
+        unsafe {
+            std::env::remove_var("MIND_POLICY_FILE");
+        }
+
+        let result = run(true, false, Some("1.0.0-..".to_string()));
+
+        // SAFETY: ENV_LOCK is still held.
+        unsafe {
+            match orig_policy_file {
+                Some(v) => std::env::set_var("MIND_POLICY_FILE", v),
+                None => std::env::remove_var("MIND_POLICY_FILE"),
+            }
+        }
+        drop(guard);
+
+        match result {
+            Err(MindError::SelfUpdateInvalidTarget { value }) => {
+                assert!(
+                    value.contains("1.0.0-.."),
+                    "must name the rejected --to value: {value}"
+                );
+            }
+            other => panic!("expected a SelfUpdateInvalidTarget refusal, got {other:?}"),
         }
     }
 
@@ -2445,6 +2634,86 @@ mod tests {
             decision("1.0.0-rc.2", "1.0.0-rc.2", false),
             Decision::UpToDate
         );
+    }
+
+    // ---- STO-77 / M8: numeric-tie prerelease ordering -------------------
+
+    #[test]
+    // spec: STO-77 CLI-140
+    fn decision_explicit_prerelease_to_prerelease_tie_break_orders_by_precedence() {
+        // M8: before this fix, `evolve --to 0.24.0-rc2` while running
+        // `0.24.0-rc1` tied numerically, and since `target` ALSO carried a
+        // prerelease suffix, the old `is_prerelease(current) &&
+        // !is_prerelease(target)` guard never fired -- the whole point of
+        // pinning an rc release. `decision` silently returned `UpToDate`
+        // ("already up to date", exit 0, nothing changed) instead of
+        // offering the update. This is the headline case the fix restores:
+        // moving forward between two prereleases of the same base must
+        // offer `Update`, and moving backward must be refused as an explicit
+        // downgrade, not silently ignored.
+        assert_eq!(
+            decision("0.24.0-rc1", "0.24.0-rc2", true),
+            Decision::Update,
+            "pinning a HIGHER rc of the same base must offer the update"
+        );
+        assert_eq!(
+            decision("0.24.0-rc2", "0.24.0-rc1", true),
+            Decision::PinnedBelowCurrent,
+            "pinning a LOWER rc of the same base must be a refused downgrade, not UpToDate"
+        );
+        // The non-explicit path (a fetched `latest` tag, which never carries
+        // a prerelease in practice) still degrades to `UpToDate` rather than
+        // ever reporting a spurious downgrade refusal.
+        assert_eq!(
+            decision("0.24.0-rc2", "0.24.0-rc1", false),
+            Decision::UpToDate
+        );
+        // Byte-identical prerelease strings are always up to date.
+        assert_eq!(
+            decision("0.24.0-rc1", "0.24.0-rc1", true),
+            Decision::UpToDate
+        );
+
+        // Numeric-identifier precedence is compared NUMERICALLY, not
+        // lexicographically: "9" must order below "10" (a naive string
+        // compare would read "10" < "9").
+        assert_eq!(decision("0.24.0-9", "0.24.0-10", true), Decision::Update);
+        assert_eq!(
+            decision("0.24.0-10", "0.24.0-9", true),
+            Decision::PinnedBelowCurrent
+        );
+
+        // A shorter dot-identifier list has LOWER precedence than a longer
+        // one that extends it (semver.org precedence rule #11: `rc.1` <
+        // `rc.1.2`).
+        assert_eq!(
+            decision("0.24.0-rc.1", "0.24.0-rc.1.2", true),
+            Decision::Update
+        );
+        assert_eq!(
+            decision("0.24.0-rc.1.2", "0.24.0-rc.1", true),
+            Decision::PinnedBelowCurrent
+        );
+    }
+
+    #[test]
+    // spec: STO-77 CLI-140
+    fn decision_explicit_release_to_same_base_prerelease_is_pinned_below_current() {
+        // M8's second silent no-op: running the RELEASED `0.24.0` and pinning
+        // `--to 0.24.0-rc1` also ties numerically. A prerelease predates its
+        // base release (the same rule the pre-existing "prerelease current ->
+        // release target" arm already encoded in the other direction), so an
+        // EXPLICIT pin back onto a same-base prerelease is a downgrade
+        // request and must be refused as such, not silently reported
+        // "already up to date".
+        assert_eq!(
+            decision("0.24.0", "0.24.0-rc1", true),
+            Decision::PinnedBelowCurrent
+        );
+        // Without an explicit pin (unreachable in practice -- `releases/latest`
+        // never returns a prerelease -- but must degrade safely rather than
+        // spuriously refuse) it stays UpToDate.
+        assert_eq!(decision("0.24.0", "0.24.0-rc1", false), Decision::UpToDate);
     }
 
     #[test]

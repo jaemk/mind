@@ -44,15 +44,30 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 - `CLI-3` A ref that matches no catalog item is an error (`ItemNotFound`). A ref
   that matches more than one is an error (`AmbiguousItem`) listing the candidates.
 - `CLI-4` A malformed ref is an error (`InvalidItemRef`).
-- `CLI-5` The source qualifier in `owner/repo#name` is a **ref**: it matches a
-  source by its full `host/owner/repo` identity or any trailing component
-  suffix (`repo`, `owner/repo`, `host/owner/repo`), and must resolve to
-  exactly one source. An ambiguous suffix leaves multiple matches and resolves
-  to `AmbiguousItem` rather than matching (or silently narrowing to) any of
-  them. Contrast `sync`'s `[source]` argument (CLI-231), which is a
-  **filter**: it intentionally allows more than one match, acting on every
-  source it matches. "Ref" and "filter" name this distinction wherever it
-  recurs below (`unmeld`'s `<name>`, CLI-20; `upgrade`'s `item`, CLI-63/65).
+- `CLI-5` The source qualifier in `owner/repo#name` is a **filter**, not a
+  `unmeld`-style ref requiring the SOURCE itself to resolve uniquely:
+  `source_matches` (`resolve.rs`) tests each candidate source's full
+  `host/owner/repo` identity or any trailing component suffix (`repo`,
+  `owner/repo`, `host/owner/repo`) independently, with no uniqueness check of
+  its own -- a suffix shared by more than one melded source (e.g. two sources
+  both ending in `/tools`) matches all of them. What `resolve()`/
+  `resolve_installed()`/`select()` actually require unique is the resulting
+  ITEM set (by kind and effective name), not the source set: with `a/tools`
+  and `b/tools` both melded but only `a/tools` shipping an item named `greet`,
+  `tools#greet` resolves silently to that one item even though the qualifier
+  matched both sources -- the qualifier's ambiguity across sources is never
+  itself reported. An ambiguous suffix is an error only when it also yields
+  more than one matching ITEM, and even then the result is `AmbiguousItem`
+  (naming each candidate as `source#kind:name`), never `AmbiguousSource` --
+  this ref form does not raise `AmbiguousSource` at all. Contrast `unmeld`'s
+  `<name>` (CLI-20), which resolves against sources directly (no item identity
+  to fall back on for disambiguation) and so DOES require the source match to
+  be unique, raising `AmbiguousSource` on a shared suffix; and `sync`'s
+  `[source]` argument (CLI-231), a **filter** in the same sense, over sources
+  rather than items, acting on every source it matches with no uniqueness
+  requirement at all. "Ref" and "filter" name this distinction wherever it
+  recurs below (`upgrade`'s `item`, CLI-63/65, whose embedded `owner/repo#`
+  qualifier is this same source filter).
 
 ## meld
 
@@ -340,7 +355,12 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   stripped. A security-blocked Unicode code point (a bidi override, a
   directional mark U+200E/U+200F/U+061C, or a zero-width character
   U+200B/U+2060/U+FEFF) is still dropped with no space substituted, since none
-  of those is a word boundary.
+  of those is a word boundary. A finding or disclosure built from more than
+  one source-controlled field sanitizes EACH FIELD before composing them
+  together, never the already-composed line: a dangling/incomplete escape
+  sequence in one field can otherwise swallow a later field (or the literal
+  text between them) once the two are joined, so sanitizing post-composition
+  does not reliably clean every field individually.
 - `CLI-225` Every error message or printed note that interpolates a
   source-or-user-influenced identity (a source name, a `meld --as`/
   `[source].prefix` alias, an item-link `#<path>` segment, an agent's harness
@@ -557,21 +577,53 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   provides (HOOK-11), silently lost when the same scoping is expressed
   through `sync <source>` instead. With no filter, the pass is unscoped
   (every source), unchanged.
-- `CLI-233` When a `[source]` filter matches more than one source and
-  `--upgrade` reaches its confirmation, `sync <source> --upgrade` names every
-  matched source in that confirmation, before the user consents: a filter is
-  allowed to match more sources than a plain name suggests (CLI-231), so
-  applying the upgrade pass to all of them -- and possibly re-running each
-  one's install hook (HOOK-11), arbitrary shell -- can silently widen past
-  what `mind sync skills --upgrade` reads as. A filter matching exactly one
-  source, or no filter at all (an unscoped `--upgrade` pass), leaves the
-  confirmation unchanged: naming a single match is not new information. This
-  applies in text mode (a line naming the matches, printed before the `[Y/n]`
-  prompt) and under `--json` (the matches are folded into the
-  `ConfirmationRequired` error's `action` text; `--json` never prompts,
-  LIFE-45, so this is the only channel a `--json` caller sees them through).
-  `--yes` is unaffected either way: it skips the confirmation step entirely,
-  so there is no prompt to name the matches in.
+- `CLI-233` When an upgrade pass's scope (CLI-234) spans more than one source,
+  the multi-source disclosure (CLI-235) names every source in that scope: a
+  filter is allowed to match more sources than a plain name suggests
+  (CLI-231), so applying the upgrade pass to all of them -- and possibly
+  re-running each one's install hook (HOOK-11), arbitrary shell -- can
+  silently widen past what `mind sync skills --upgrade` (or `mind upgrade
+  'suffix#*'`, CLI-234) reads as. A scope of exactly one source, or an
+  unscoped `--upgrade` pass, leaves the confirmation unchanged: naming a
+  single match is not new information. `--yes` does not suppress the
+  disclosure (CLI-235): unlike a `[Y/n]` prompt, this is not a confirmation
+  step to skip.
+- `CLI-234` The multi-source disclosure's scope (CLI-233) is not
+  `sync <source> --upgrade`'s filter alone: it is the UNION of every scoping
+  mechanism in play for the pass -- a `sync`/`upgrade` source filter, an
+  `upgrade <item>` item-ref filter (whose embedded `owner/repo#` qualifier is
+  itself a filter over sources, CLI-63/CLI-5), and the TUI's confirmed-key
+  scope (TUI-72/TUI-73) -- each of which can independently span more than one
+  source. `mind upgrade '<suffix>#*'` has the identical HOOK-11 blast radius
+  as a multi-match `sync <filter> --upgrade` (every source the filter matched
+  has its items upgraded and its install hook possibly re-run), so it
+  discloses the same way: naming every source its item-ref filter matched,
+  before consent.
+- `CLI-235` The multi-source disclosure (CLI-233/CLI-234) fires BEFORE
+  `upgrade`'s HOOK-11 install-hook re-run pass runs, and unconditionally
+  whenever the scope spans more than one source -- independent of whether any
+  upgrade ends up pending, and independent of `--yes`. Earlier, the
+  disclosure printed only from inside the `--yes`-absent confirmation branch,
+  which is reached AFTER the hook re-run pass already ran and only when a
+  pending upgrade existed: a filter that re-ran two sources' install hooks
+  and then found nothing pending reported "everything is up to date" with no
+  disclosure at all, and `--yes` (the common unattended/CI form) skipped the
+  confirmation branch entirely, so it never disclosed either -- in both cases
+  the wording ("possibly re-running the install hook of") read as a
+  forward-looking warning for a side effect that, by the time it printed
+  (or would have printed), had either not printed at all or had already run.
+  In text mode the disclosure prints directly (before any hook-execution
+  output); under `--json`, whose stdout carries exactly one JSON document
+  (CLI-181), it prints to stderr instead, since `--json --yes` has no
+  `ConfirmationRequired` error to carry it and even `--json` without `--yes`
+  reaches the confirmation (where the note is still folded into
+  `ConfirmationRequired.action`, CLI-233) only after the hook pass has
+  already run. The disclosure names the filter/selector TEXT that produced
+  the scope (when the caller has one to offer; the TUI's key-scoped apply
+  does not) and every source in that scope -- not only the sources that end
+  up contributing a pending upgrade, since the disclosure fires before
+  `pending` is computed -- and ends by naming the remedy: narrow with a
+  longer suffix, or the full `host/owner/repo` identity.
 - `CLI-54` A per-source failure (e.g. a network error on one remote) does not
   abort the run: `sync` refreshes each source independently, persists the
   progress made (the recorded commits of the sources that succeeded), reports
@@ -609,12 +661,20 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 - `CLI-62` `--yes` applies upgrades without prompting.
 - `CLI-63` An optional `item` limits upgrade to the matching installed item(s),
   matched against the manifest by effective name and honoring a `kind:` prefix
-  and an `owner/repo#` source qualifier. `item` is itself a **filter** over
-  installed items, not a `unmeld`-style ref: it may match several installed
-  items and, unlike `unmeld`'s `<name>` (CLI-20), that is never an error --
-  every match is upgraded. The embedded `owner/repo#` qualifier, when present,
-  IS a ref, though (CLI-5): it must resolve to exactly one source, or
-  `AmbiguousItem`.
+  and an `owner/repo#` source qualifier (`installed_matches_glob`, `resolve.rs`).
+  `item` is itself a **filter** over installed items, not a `unmeld`-style ref:
+  it may match several installed items and, unlike `unmeld`'s `<name>`
+  (CLI-20), that is never an error -- every match is upgraded, from every
+  source it matches. The embedded `owner/repo#` qualifier is this same kind of
+  filter, not a ref (CLI-5): `source_matches` tests each candidate source's
+  suffix independently, so when it matches more than one source (e.g. two
+  melded sources both ending in `/tools`), `upgrade`'s selection spans every
+  installed item from every one of them -- silently, in the sense that it is
+  not itself an error; CLI-234 separately discloses that scope before the
+  confirmation when it spans more than one source. This is never
+  `AmbiguousItem` on account of the qualifier alone: `upgrade`'s filter always
+  selects every match (CLI-65) rather than requiring a single one, so it never
+  goes through the single-match `resolve()` path (CLI-3) that could raise it.
 - `CLI-64` With nothing pending, `upgrade` reports up to date and changes nothing.
 - `CLI-65` When the `item` filter's name is a glob (`*`, `?`, `[`), `upgrade`
   limits the pass to every installed item whose effective name matches the

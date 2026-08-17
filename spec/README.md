@@ -108,7 +108,7 @@ and verified.
 | `[discover].sources` `install-items`: install only a named subset of a nested source | done | DSC-62, DSC-63, DSC-64 |
 | Pin/ref value validation at parse time + `--` terminator in git subcommands | done | DSC-66 |
 | `[[items]]` traversal guard: reject an unsafe `name`, escaping `link`, or out-of-clone `path` | done | DSC-71, DSC-72, DSC-73 |
-| Source-controlled item names sanitized at every CLI human/`--json` print site (display accessors, compiler-enforced via the `ItemKey` newtype with no `Display` impl); scan-error messages sanitize echoed source strings | done | DSC-95 |
+| Source-controlled item names sanitized at every CLI human/`--json` print site (display accessors; the `ItemKey` newtype withholds `Display` so the default formatting path can't leak, while `as_str()`/`Into<String>` remain explicit, discipline-guarded escape hatches); scan-error messages sanitize echoed source strings | done | DSC-95 |
 | auth failure handling for nested sources: `on-auth-failure = { action, message }` per entry | done | DSC-68, DSC-69 |
 | `on-auth-failure` scope: descendant auth failures are not attributed to the entry | done | DSC-70 |
 | Rename `[discover].sources` alias key to `namespace`; `as` stays as backward-compat alias; `dump` emits canonical `namespace =` | done | DSC-78 |
@@ -212,6 +212,7 @@ and verified.
 | A mid-batch `upgrade`/hook-rerun failure saves the manifest/registry for every already-applied item before the error propagates | done | LIFE-48 |
 | `sync --upgrade --yes` forwards `--yes` into the upgrade pass instead of forcing it off | done | LIFE-49 |
 | mind refuses an item install up front on a non-unix platform instead of falling back to an unrecognized copy | done | LIFE-50 |
+| `upgrade`'s rename-collision checks run after the pending report, so an aborting batch still shows what else was pending | done | LIFE-51 |
 | Source-derived item descriptions (frontmatter and `[[items]]` overrides) are sanitized (ANSI/control/bidi stripped) at catalog capture, not per display site | done | DSC-94 |
 | TUI: installed rows carry a `stale` flag with a drift marker and an explicit per-item upgrade-confirm list | done | TUI-63 |
 | TUI: `?` opens a keymap help overlay; hint line names `/`, `h`/`l`, paging, and `?` | done | TUI-64 |
@@ -225,7 +226,7 @@ and verified.
 | `mind hooks run --rerun` is a visible alias for `--force` | done | CLI-228 |
 | `evolve`'s pin-a-version flag renamed `--to <VERSION>`; `--version` kept as a hidden alias | done | CLI-229 |
 | `unmeld` accepts `remove`/`rm` as additional visible aliases | done | CLI-230 |
-| `sync [source]` accepts an optional source filter, syncing every matching source (unlike `unmeld`'s/`upgrade`'s ref, a filter is never ambiguous) | done | CLI-231 |
+| `sync [source]` accepts an optional source filter, syncing every matching source | done | CLI-231 |
 | `sync <filter> --upgrade`'s upgrade pass and its hook re-run are scoped to the filter's matched sources | done | CLI-232 |
 | `sync <filter> --upgrade` names the filter's matched sources in the confirmation when it matched more than one | done | CLI-233 |
 | Item-name capture rejects control/bidi/zero-width code points: a hard error for a `mind.toml` declaration, skip-with-warning in the convention scan | done | DSC-96 |
@@ -234,8 +235,14 @@ and verified.
 | Broken-symlink diagnosis is substituted only for an `AlreadyExists` mkdir failure whose offending component is a `NotFound` symlink | done | HARN-23 |
 | Resolved `evolve` target version is validated as a plausible release tag (which may carry a semver prerelease/build suffix) before any URL is built | done | STO-76 |
 | TUI: staleness flag is memoized against a fingerprint of a stat-derived hash | done | TUI-72 |
-| TUI: `u` applies pending upgrades without syncing first; the confirm modal says so | done | TUI-73 |
+| TUI: `u` applies pending upgrades without syncing first (the confirm modal says so); the applied set is exactly the confirmed key set by construction, and a confirmed key that became inapplicable before apply is skipped silently | done | TUI-73 |
 | TUI: `u` recomputes staleness authoritatively before building the upgrade confirm list, bypassing the display-only hash memo | done | TUI-74 |
+| The multi-source disclosure also fires when an `upgrade <filter>` (including the `'<suffix>#*'` form) resolves to installed items spanning more than one source | done | CLI-234 |
+| The multi-source disclosure is emitted before the install-hook re-run pass, even with nothing pending, and is not suppressed by `--yes` | done | CLI-235 |
+| TUI confirm/dialog strings render the sanitized display key; the identity key on a queued action stays raw | done | TUI-75 |
+| TUI: what `u` offers and what applying it does when the recomputed stale set is empty | done | TUI-76 |
+| `evolve --to` prerelease target ordering, and the leading-`v` strip | done | STO-77 |
+| Dependency-tree rendering is bounded: each node's subtree renders once, a later occurrence is a `(seen)` leaf, with a depth/line cap and a truncation notice | done | DEP-64 |
 
 ## Documents
 

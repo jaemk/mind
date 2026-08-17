@@ -11,10 +11,22 @@
 /// key -- identity (map/set lookups, comparisons, the manifest key, a path
 /// component) and display (a human/`--json` print site) -- are distinct
 /// types, not two methods on `String` that happen to look alike at a call
-/// site. Deliberately has NO `Display` impl: `println!("{}", key)` and
-/// `format!("{key}")` are compile errors, not a call-site discipline that a
-/// 19th print site can quietly skip. The only way to print an `ItemKey` is
-/// [`ItemKey::display`], which routes it through [`strip_ansi`].
+/// site.
+///
+/// The actual property this type provides: `Display` is withheld, so the
+/// DEFAULT formatting path (`println!("{}", key)`, `format!("{key}")`,
+/// `{}` inside a `--json` struct via `#[derive(Serialize)]` on a `String`
+/// field) cannot leak a raw key -- those are compile errors instead of a
+/// call-site discipline a 19th print site could quietly skip. `.as_str()`
+/// (identity) and `impl From<ItemKey> for String` (identity, e.g. to key a
+/// `BTreeMap<String, _>`) remain as explicit, EXPLICITLY NAMED escape
+/// hatches: each call site that reaches for one is stating, in its own
+/// text, "I want the raw reading" -- the type does not stop a caller from
+/// asking for the raw string, it only stops that string from reaching a
+/// terminal by accident via the default path. Discipline is still required
+/// at each `as_str()`/`.into()` call site; this type narrows where that
+/// discipline is needed to those explicit sites instead of every print site
+/// in the codebase.
 ///
 /// `Debug` is still derived and is safe to use in a `{:?}` (e.g. a panic
 /// message or an `expect`): `Debug for str` escapes control characters (an
@@ -33,9 +45,11 @@ impl ItemKey {
     }
 
     /// The raw key, for identity use only: map/set lookups, equality
-    /// comparisons, a manifest key, a path component. NEVER pass this to a
-    /// `println!`/`format!`/`eprintln!` or a `--json` field -- use
-    /// [`Self::display`] there instead.
+    /// comparisons, a manifest key, a path component. An explicit,
+    /// discipline-guarded escape hatch (see the type doc above) -- it does
+    /// not sanitize, so a caller reaching for it is asking for the raw
+    /// reading and must not hand the result to a `println!`/`format!`/
+    /// `eprintln!` or a `--json` field; use [`Self::display`] there instead.
     pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
@@ -80,26 +94,21 @@ impl PartialEq<ItemKey> for &str {
 /// Escape hatch for a call site that genuinely needs to own the raw string
 /// as a plain `String` (e.g. to insert as a `BTreeMap<String, _>` key so an
 /// on-disk format stays unchanged). Still the raw, unsanitized value --
-/// identity, not display.
+/// identity, not display; see the type doc above for why this and
+/// [`ItemKey::as_str`] are the two named, explicit ways to reach it.
+///
+/// No `Serialize`/`Deserialize` impl exists for `ItemKey` itself, and
+/// deliberately so: nothing in this codebase serializes an `ItemKey`
+/// directly today (every persisted/JSON site goes through this `Into<String>`
+/// or `.as_str()` first), and adding a transparent `Serialize` impl would
+/// reopen exactly the leak this type exists to close -- a future
+/// `#[derive(Serialize)]` struct with a raw `ItemKey` field would silently
+/// emit the unsanitized string into a `--json` envelope with no compile
+/// error, the same class of miss (`ItemHooksJson`-style) this refactor was
+/// written to catch.
 impl From<ItemKey> for String {
     fn from(k: ItemKey) -> String {
         k.0
-    }
-}
-
-/// Serializes exactly like the raw `String` it wraps, so a manifest/JSON
-/// document keyed or valued by an `ItemKey` is byte-identical to one keyed by
-/// a plain `String` -- this type is a compile-time discipline, not an
-/// on-disk format change.
-impl serde::Serialize for ItemKey {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
-        s.serialize_str(&self.0)
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for ItemKey {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
-        Ok(ItemKey(String::deserialize(d)?))
     }
 }
 
@@ -544,9 +553,13 @@ mod tests {
     }
 
     // spec: DSC-95
-    // `ItemKey::display` must strip EXACTLY what `strip_ansi` strips, on both a
-    // clean key and a hostile one -- the two must never drift apart, since
-    // `display()` is the only sanctioned path from an item key to a terminal.
+    // NOTE: `ItemKey::display` is implemented as a direct call to
+    // `strip_ansi(&self.0)`, so this assertion holds by construction for
+    // every input -- it is a tautology today, not independent verification
+    // that the sanitization is correct (that coverage lives in
+    // `strip_ansi`'s own tests above). Its value is as a change-detector: if
+    // `display()` were ever reimplemented to call something other than
+    // `strip_ansi` (or to skip a field), this would catch the drift.
     #[test]
     fn item_key_display_matches_strip_ansi() {
         for raw in [
@@ -593,18 +606,5 @@ mod tests {
         let mut set: HashSet<ItemKey> = HashSet::new();
         set.insert(a.clone());
         assert!(set.contains("skill:review"));
-    }
-
-    // spec: DSC-95
-    // `ItemKey` serializes as a bare JSON string -- transparent, so a struct
-    // or map keyed/valued by it round-trips identically to one using a plain
-    // `String` (the on-disk manifest format must not change).
-    #[test]
-    fn item_key_serializes_as_bare_string() {
-        let key = ItemKey::new("skill:review");
-        let json = serde_json::to_string(&key).unwrap();
-        assert_eq!(json, "\"skill:review\"");
-        let back: ItemKey = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, key);
     }
 }

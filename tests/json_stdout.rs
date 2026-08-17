@@ -894,6 +894,84 @@ fn cli_218_every_driven_verb_is_json_or_a_named_exclusion() {
     // it proves the classification is honored by the real binary.
 }
 
+/// A second, independent source repo -- git-initialized under its own parent
+/// directory (so its `<parent>/<name>` identity is distinct from any other
+/// source sharing the same final path component `name`) but not tied to its
+/// own mind/claude home. Melded into the CALLER's `Sandbox` instead, so two
+/// such repos can share a trailing identity suffix within ONE environment
+/// (the CLI-233/CLI-234/CLI-235 multi-source-match scenario).
+fn extra_source_repo(parent: &Path, name: &str) -> PathBuf {
+    let dir = parent.join(name);
+    write(&dir.join("README.md"), "# extra source\n");
+    git(&dir, &["-c", "init.defaultBranch=main", "init", "-q"]);
+    git(&dir, &["config", "user.email", "t@t"]);
+    git(&dir, &["config", "user.name", "t"]);
+    git(&dir, &["add", "-A"]);
+    git(&dir, &["commit", "-qm", "initial"]);
+    dir
+}
+
+/// CLI-235(d): `mind upgrade '<suffix>#*' --json --yes` scoped to more than
+/// one source keeps stdout a single valid JSON document (the CLI-217
+/// invariant this whole file gates) while still disclosing the multi-source
+/// scope -- on stderr, since `--yes` skips the `ConfirmationRequired` error
+/// that is the only OTHER channel (CLI-233) a `--json` caller sees the
+/// disclosure through, and printing it to stdout directly would break the
+/// one-document invariant.
+#[test]
+fn upgrade_json_yes_keeps_stdout_one_document_with_disclosure_on_stderr() {
+    // spec: CLI-234 CLI-235 CLI-217
+    let sb = Sandbox::new("skills");
+    sb.write_and_commit(
+        "skills/widget-a/SKILL.md",
+        "---\nname: widget-a\ndescription: a\n---\n# widget a\n",
+    );
+    let two = extra_source_repo(&sb.base.join("other"), "skills");
+    write(
+        &two.join("skills/widget-b/SKILL.md"),
+        "---\nname: widget-b\ndescription: b\n---\n# widget b\n",
+    );
+    git(&two, &["add", "-A"]);
+    git(&two, &["commit", "-qm", "widget-b"]);
+    let two_spec = two.to_string_lossy().into_owned();
+
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    assert!(sb.mind(&["meld", &two_spec]).success);
+    assert!(sb.mind(&["learn", "skill:widget-a"]).success);
+    assert!(sb.mind(&["learn", "skill:widget-b"]).success);
+
+    // Both sources drift, so both have a pending upgrade for the filter.
+    sb.write_and_commit(
+        "skills/widget-a/SKILL.md",
+        "---\nname: widget-a\ndescription: a\n---\n# widget a\nedited\n",
+    );
+    write(
+        &two.join("skills/widget-b/SKILL.md"),
+        "---\nname: widget-b\ndescription: b\n---\n# widget b\nedited\n",
+    );
+    git(&two, &["add", "-A"]);
+    git(&two, &["commit", "-qm", "edit widget-b"]);
+
+    let r = sb.mind(&["--json", "upgrade", "skills#*", "--yes"]);
+    assert!(
+        r.success,
+        "upgrade 'skills#*' --json --yes: {} {}",
+        r.stdout, r.stderr
+    );
+    let v = assert_stdout_is_one_json_document(&r.stdout);
+    assert_eq!(v["action"], "upgrade", "{v}");
+    assert!(
+        r.stderr.contains("matched 2 sources"),
+        "the multi-source disclosure must still reach the user, on stderr: {:?}",
+        r.stderr
+    );
+    assert!(
+        !r.stdout.contains("matched 2 sources"),
+        "the disclosure must not also land on stdout: {:?}",
+        r.stdout
+    );
+}
+
 // ---------------------------------------------------------------------------
 // CLI-221: the `details` member is optional, and the slot behind it is a
 // process-global static. These pin its ABSENCE as carefully as its presence.

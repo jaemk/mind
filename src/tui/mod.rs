@@ -542,6 +542,7 @@ mod tests {
         app.apply_snapshot(Snapshot {
             installed: vec![SnapshotInstalled {
                 key: "skill:review".to_string(),
+                display_key: "skill:review".to_string(),
                 name: "review".to_string(),
                 source: "local/agents".to_string(),
                 kind: ItemKind::Skill,
@@ -549,9 +550,12 @@ mod tests {
                 description: Some("Review skill".to_string()),
                 deps: vec![],
                 stale: false,
+                path: None,
+                recorded_hash: String::new(),
             }],
             available: vec![SnapshotAvailable {
                 key: "agent:dev".to_string(),
+                display_key: "agent:dev".to_string(),
                 name: "dev".to_string(),
                 source: "local/agents".to_string(),
                 kind: ItemKind::Agent,

@@ -761,6 +761,10 @@ impl App {
     // spec: TUI-20 TUI-21 TUI-26
     fn node_actions(&self, node: &TreeNode) -> Vec<ItemAction> {
         match node {
+            // spec: TUI-75 - the confirm description renders `display_key`
+            // (sanitized), never the raw `key`; `item_key`/`ActionKind` below
+            // still carry the raw `key`, since dispatch and dedup depend on
+            // exact identity, not the display form.
             TreeNode::AvailableItem(item) => {
                 let lr = learn_ref(&item.key, &item.source);
                 vec![ItemAction {
@@ -768,13 +772,16 @@ impl App {
                         item_key: item.key.clone(),
                         source: item.source.clone(),
                     },
-                    description: format!("Install {} from {}?", item.key, item.source),
+                    description: format!("Install {} from {}?", item.display_key, item.source),
                     learn_ref: Some(lr),
                 }]
             }
             TreeNode::InstalledItem(item) => {
                 // spec: TUI-52 - warn about installed dependents in the confirm description
                 // (DEP-60 adapted for the TUI's confirm-then-act flow).
+                // spec: TUI-75 - the dependent list renders each dependent's
+                // `display_key` (sanitized); membership itself is still tested
+                // against the raw `item.key` (identity, TUI-50 dep keys).
                 let dependents: Vec<String> = self
                     .last_snapshot
                     .as_ref()
@@ -782,24 +789,24 @@ impl App {
                         snap.installed
                             .iter()
                             .filter(|other| other.deps.contains(&item.key))
-                            .map(|other| other.key.clone())
+                            .map(|other| other.display_key.clone())
                             .collect()
                     })
                     .unwrap_or_default();
                 let description = if dependents.is_empty() {
-                    format!("Forget (uninstall) {}?", item.key)
+                    format!("Forget (uninstall) {}?", item.display_key)
                 } else {
                     let count = dependents.len();
                     let list = dependents.join(", ");
                     if count == 1 {
                         format!(
                             "Forget (uninstall) {}? 1 installed item depends on it: {}",
-                            item.key, list
+                            item.display_key, list
                         )
                     } else {
                         format!(
                             "Forget (uninstall) {}? {count} installed items depend on it: {}",
-                            item.key, list
+                            item.display_key, list
                         )
                     }
                 };
@@ -817,7 +824,7 @@ impl App {
                 },
                 description: format!(
                     "Forget {} (NOT managed by mind: deletes your own file)?",
-                    item.key
+                    item.display_key
                 ),
                 learn_ref: None,
             }],
@@ -964,21 +971,33 @@ impl App {
     /// than trusting the (possibly memo-lagged) `SnapshotInstalled.stale` flag
     /// the last poll computed. If the poll already found it stale (content
     /// drift the memo did catch, or a rename -- rename detection is never
-    /// memoized, so it is always as fresh as the last poll), that stands.
-    /// Otherwise, look up its live catalog path and recorded manifest hash
-    /// (`data::item_path_and_hash`, populated by the same load/poll) and hash
-    /// the path directly (`hash_path`, never the memo): this is the one extra
-    /// disk read per installed item that closes the memo's display lag before
-    /// it ever reaches the confirm modal (TUI-72's usability corner).
-    // spec: TUI-72 TUI-73
+    /// memoized, so it is always as fresh as the last poll), that stands
+    /// WITHOUT reverification -- see the false-positive note below. Otherwise,
+    /// read `it`'s own `path`/`recorded_hash` (carried on the snapshot itself,
+    /// M10: set in the same `load_inner` pass as every other field on this
+    /// struct, so it is never staler than `last_snapshot` BY CONSTRUCTION, not
+    /// by an argument about call ordering on a side index) and hash the path
+    /// directly (`hash_path`, never the memo): this is the one extra disk read
+    /// per installed item that closes the memo's display lag before it ever
+    /// reaches the confirm modal (TUI-72's usability corner).
+    ///
+    /// FALSE POSITIVE (TUI-74): because an already-`stale` item returns `true`
+    /// immediately with no reverification, an item whose memo-served drift was
+    /// since reverted (edited, then edited back, before the next poll) stays
+    /// in the confirm list as a phantom until the next poll clears
+    /// `SnapshotInstalled.stale`. The no-sync apply then silently drops it
+    /// (`upgrade_item_disposition` finds no real drift), so this is a display
+    /// inaccuracy in the confirm list, not a correctness bug in what gets
+    /// applied.
+    // spec: TUI-72 TUI-73 TUI-74
     fn is_actually_stale(it: &crate::tui::data::SnapshotInstalled) -> bool {
         if it.stale {
             return true;
         }
-        match crate::tui::data::item_path_and_hash(&it.key) {
-            Some((path, recorded_hash)) => crate::hash::hash_path(&path)
+        match &it.path {
+            Some(path) => crate::hash::hash_path(path)
                 .ok()
-                .is_none_or(|h| h != recorded_hash),
+                .is_none_or(|h| h != it.recorded_hash),
             // No matching catalog item as of the last load/poll: nothing to
             // hash, and `stale` was already false for the same reason.
             None => false,
@@ -1005,9 +1024,11 @@ impl App {
     fn initiate_upgrade(&mut self) {
         let stale_items = self.recompute_stale_items();
         let keys: Vec<String> = stale_items.iter().map(|it| it.key.clone()).collect();
+        // spec: TUI-75 - the confirm list renders each item's `display_key`
+        // (sanitized); `keys` above (the apply scope) keeps the raw identity.
         let pending: Vec<String> = stale_items
             .iter()
-            .map(|it| format!("{} ({})", it.key, it.source))
+            .map(|it| format!("{} ({})", it.display_key, it.source))
             .collect();
         let description = if pending.is_empty() {
             // Nothing is out of date; still confirm (mirrors the CLI, which
@@ -1441,6 +1462,7 @@ mod tests {
         Snapshot {
             installed: vec![SnapshotInstalled {
                 key: "skill:review".to_string(),
+                display_key: "skill:review".to_string(),
                 name: "review".to_string(),
                 source: "local/agents".to_string(),
                 kind: ItemKind::Skill,
@@ -1448,9 +1470,12 @@ mod tests {
                 description: Some("Review skill".to_string()),
                 deps: vec![],
                 stale: false,
+                path: None,
+                recorded_hash: String::new(),
             }],
             available: vec![SnapshotAvailable {
                 key: "agent:dev".to_string(),
+                display_key: "agent:dev".to_string(),
                 name: "dev".to_string(),
                 source: "local/agents".to_string(),
                 kind: ItemKind::Agent,
@@ -1906,6 +1931,7 @@ mod tests {
         let mut snap = make_snapshot();
         snap.unmanaged = vec![crate::tui::data::SnapshotUnmanaged {
             key: "skill:hand-written".to_string(),
+            display_key: "skill:hand-written".to_string(),
             name: "hand-written".to_string(),
             kind: ItemKind::Skill,
             paths: vec![std::path::PathBuf::from("/lobe/skills/hand-written")],
@@ -1945,6 +1971,7 @@ mod tests {
         let mut snap = make_snapshot(); // installs managed skill:review
         snap.unmanaged = vec![crate::tui::data::SnapshotUnmanaged {
             key: "skill:review".to_string(),
+            display_key: "skill:review".to_string(),
             name: "review".to_string(),
             kind: ItemKind::Skill,
             paths: vec![std::path::PathBuf::from("/lobe/skills/review")],
@@ -2008,6 +2035,7 @@ mod tests {
         // Add a second installed item that depends on skill:review.
         snap.installed.push(SnapshotInstalled {
             key: "skill:do".to_string(),
+            display_key: "skill:do".to_string(),
             name: "do".to_string(),
             source: "local/agents".to_string(),
             kind: ItemKind::Skill,
@@ -2015,6 +2043,8 @@ mod tests {
             description: None,
             deps: vec!["skill:review".to_string()],
             stale: false,
+            path: None,
+            recorded_hash: String::new(),
         });
         app.apply_snapshot(snap);
         let idx = app
@@ -2060,6 +2090,167 @@ mod tests {
         assert!(
             !pending.description.contains("depend"),
             "no-dependent forget must not include a warning: {:?}",
+            pending.description
+        );
+    }
+
+    // --- H1/TUI-75: a hostile item key must never reach a rendered confirm
+    // description, but its RAW form must still drive the queued action. ---
+
+    /// A key carrying an ANSI cursor-reposition escape and a `\x1b]52;` OSC 52
+    /// clipboard-write introducer, exactly the exploit named in the H1 threat
+    /// model: an unmanaged lobe directory name is read straight off the
+    /// filesystem with NO validation gate equivalent to DSC-96's catalog-scan
+    /// rejection. Every assertion below checks BOTH halves: the rendered
+    /// description must carry none of this payload, and the queued
+    /// `ActionKind` must still carry it byte-for-byte (sanitizing the identity
+    /// field would break dispatch, and could collapse two distinct hostile
+    /// names into one -- its own vulnerability).
+    const HOSTILE_NAME: &str = "notes\x1b[1A\x1b[2K\x1b]52;c;evil\x07(a managed symlink)";
+
+    #[test]
+    fn unmanaged_forget_description_sanitizes_hostile_key_but_action_keeps_raw() {
+        // spec: TUI-75 - the exact scenario the H1 finding names: a third-party
+        // skill pack unzipped into a lobe directory carries an escape-laden
+        // name, and the unmanaged-forget confirm must not repaint over its own
+        // disclosure or exfiltrate via OSC 52 while displaying it.
+        let hostile_key = format!("skill:{HOSTILE_NAME}");
+        let mut app = App::new(String::new(), None, None);
+        let mut snap = make_snapshot();
+        snap.unmanaged = vec![crate::tui::data::SnapshotUnmanaged {
+            key: hostile_key.clone(),
+            display_key: crate::sanitize::strip_ansi(&hostile_key),
+            name: HOSTILE_NAME.to_string(),
+            kind: ItemKind::Skill,
+            paths: vec![std::path::PathBuf::from("/lobe/skills/hostile")],
+        }];
+        app.apply_snapshot(snap);
+        let idx = app
+            .visible
+            .iter()
+            .position(|n| matches!(&n.node, crate::tui::tree::TreeNode::UnmanagedItem(_)))
+            .expect("unmanaged item should be visible");
+        app.selected = idx;
+        app.apply_intent(Intent::ActionForget);
+        let pending = app
+            .pending_action
+            .as_ref()
+            .expect("forget must set a pending action");
+
+        // Half 1: the rendered description carries no raw ESC or OSC-52 byte.
+        assert!(
+            !pending.description.contains('\x1b'),
+            "confirm description must not contain a raw ESC byte: {:?}",
+            pending.description
+        );
+        assert!(
+            !pending.description.contains("\x1b]52"),
+            "confirm description must not contain an OSC 52 introducer: {:?}",
+            pending.description
+        );
+
+        // Half 2: the queued action's item_key is BYTE-IDENTICAL to the raw
+        // hostile key -- dispatch (commands::forget) must resolve the exact
+        // item, not a sanitized lookalike.
+        match &pending.kind {
+            ActionKind::Forget { item_key } => {
+                assert_eq!(
+                    item_key, &hostile_key,
+                    "the queued Forget action must carry the RAW key unchanged"
+                );
+            }
+            other => panic!("expected ActionKind::Forget, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn install_description_sanitizes_hostile_key_but_action_keeps_raw() {
+        // spec: TUI-75 - the AvailableItem "Install ... from ...?" confirm
+        // (app.rs:771 in the H1 finding) is the same pattern for a catalog item.
+        let hostile_key = format!("skill:{HOSTILE_NAME}");
+        let mut snap = make_snapshot();
+        snap.available.push(crate::tui::data::SnapshotAvailable {
+            key: hostile_key.clone(),
+            display_key: crate::sanitize::strip_ansi(&hostile_key),
+            name: HOSTILE_NAME.to_string(),
+            source: "local/agents".to_string(),
+            kind: ItemKind::Skill,
+            description: None,
+            path: std::path::PathBuf::from("/fake/hostile"),
+            deps: vec![],
+        });
+        let mut app = App::new(String::new(), None, None);
+        app.apply_snapshot(snap);
+        let idx = app
+            .visible
+            .iter()
+            .position(|n| matches!(&n.node, TreeNode::AvailableItem(i) if i.key == hostile_key))
+            .expect("hostile available item should be visible");
+        app.selected = idx;
+        app.apply_intent(Intent::ActionLearn);
+        let pending = app
+            .pending_action
+            .as_ref()
+            .expect("learn must set a pending action");
+
+        assert!(
+            !pending.description.contains('\x1b'),
+            "confirm description must not contain a raw ESC byte: {:?}",
+            pending.description
+        );
+        match &pending.kind {
+            ActionKind::Learn { item_key, .. } => {
+                assert_eq!(
+                    item_key, &hostile_key,
+                    "the queued Learn action must carry the RAW key unchanged"
+                );
+            }
+            other => panic!("expected ActionKind::Learn, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dependents_list_sanitizes_hostile_dependent_key() {
+        // spec: TUI-75 TUI-52 - the dependents list (app.rs:778-788 in the H1
+        // finding) joins OTHER installed items' keys into the confirm
+        // description; a hostile dependent name must be sanitized there too.
+        let hostile_key = "skill:evil\x1b[31mdo\x1b[0m";
+        let mut app = App::new(String::new(), None, None);
+        let mut snap = make_snapshot();
+        snap.installed.push(SnapshotInstalled {
+            key: hostile_key.to_string(),
+            display_key: crate::sanitize::strip_ansi(hostile_key),
+            name: "evildo".to_string(),
+            source: "local/agents".to_string(),
+            kind: ItemKind::Skill,
+            commit: "def67890".to_string(),
+            description: None,
+            deps: vec!["skill:review".to_string()],
+            stale: false,
+            path: None,
+            recorded_hash: String::new(),
+        });
+        app.apply_snapshot(snap);
+        let idx = app
+            .visible
+            .iter()
+            .position(|n| matches!(&n.node, crate::tui::tree::TreeNode::InstalledItem(i) if i.key == "skill:review"))
+            .expect("skill:review must be visible");
+        app.selected = idx;
+        app.apply_intent(Intent::ActionForget);
+        let pending = app
+            .pending_action
+            .as_ref()
+            .expect("forget must set a pending action");
+
+        assert!(
+            !pending.description.contains('\x1b'),
+            "dependents list must not contain a raw ESC byte: {:?}",
+            pending.description
+        );
+        assert!(
+            pending.description.contains("evildo"),
+            "the sanitized dependent name must still be visible: {:?}",
             pending.description
         );
     }
@@ -2660,19 +2851,23 @@ mod tests {
         // spec: TUI-72 TUI-74 - the entire point of the fix: the TUI-72 memo is
         // display-only and may lag, but the `u` keypress must NOT read the
         // last poll snapshot's `stale` flag verbatim. It recomputes via
-        // `hash_path` directly (through `data::item_path_and_hash`), so a
-        // memo-lagged item still shows up in the confirm list and its key is
-        // still stashed for the apply -- closing the usability corner where a
-        // stale memo would otherwise hide an out-of-date item from the TUI
-        // entirely.
+        // `hash_path` directly against `SnapshotInstalled::path`/`recorded_hash`
+        // (M10: carried on the snapshot itself, not a side index), so an item
+        // whose poll snapshot predates a real edit still shows up in the
+        // confirm list and its key is still stashed for the apply -- closing
+        // the usability corner where a stale snapshot would otherwise hide an
+        // out-of-date item from the TUI entirely.
         //
-        // A real filesystem edit always moves `ctime`/inode (hash.rs closed
-        // the mtime-preserving blind spot), so the memo can no longer be
-        // fooled by any real sequence of filesystem calls; the ONLY way to
-        // construct "memo says clean, real content differs" is to poison the
-        // memo's cache directly (`data::poison_memo_for_test`), which is
-        // exactly what a missed fingerprint change would have looked like
-        // before that fix.
+        // M11: this reuses the PRE-EDIT snapshot (`snap0`) directly rather than
+        // poisoning `data::HASH_MEMO` and reloading -- the load/reload pattern
+        // is racy (`HASH_MEMO` is one `static` shared by every concurrently
+        // running test; any of them reaching `load_inner` prunes the memo down
+        // to ITS OWN catalog, which can evict this test's poisoned entry before
+        // the reload observes it). Editing the source file AFTER `snap0` is
+        // already loaded reproduces the exact same "poll snapshot says clean,
+        // real content differs" condition without touching the memo at all:
+        // `snap0`'s own `path`/`recorded_hash` (set at load time, unaffected by
+        // a later on-disk edit) are exactly what `is_actually_stale` reads.
         use std::process::Command;
 
         let (paths, base) = upgrade_temp_paths();
@@ -2730,43 +2925,31 @@ mod tests {
         )
         .expect("learn");
 
-        // A prime load: not stale yet, and populates HASH_MEMO + the
-        // item-path index for this thread with the correct, matching hash.
+        // A prime load: not stale yet. Its `path`/`recorded_hash` (M10) are
+        // exactly what `is_actually_stale` will later read.
         let snap0 = crate::tui::data::load(&paths).expect("prime load");
         assert!(
             !snap0.installed[0].stale,
             "freshly installed item must not be stale before the edit"
         );
+        assert!(
+            snap0.installed[0].path.is_some(),
+            "the prime load must resolve the item's live catalog path"
+        );
 
-        // Real content edit: content hash changes for real (also moves
-        // ctime/fingerprint for real, but that is irrelevant here -- we poison
-        // the memo directly rather than relying on the fingerprint missing it).
+        // Real content edit AFTER snap0 was already loaded: the snapshot in
+        // hand is now stale-but-doesn't-know-it, exactly like a poll snapshot
+        // that predates a since-happened edit.
         std::fs::write(
             item_path.join("SKILL.md"),
             "---\ndescription: review skill\n---\n# review\nEDITED content\n",
         )
         .unwrap();
 
-        // Poison the memo: seed it with the item's CURRENT (post-edit) stat
-        // fingerprint but the ORIGINAL (pre-edit, matches-the-manifest) hash,
-        // so `memoized_hash` -- and therefore the next `data::load`'s `stale`
-        // flag -- reports "clean" even though the real content has changed.
-        let manifest = crate::manifest::Manifest::load(&paths).unwrap();
-        let recorded_hash = manifest.items.get("skill:review").unwrap().hash.clone();
-        crate::tui::data::poison_memo_for_test(&item_path, &recorded_hash);
-
-        // Confirm the poisoned condition: a plain load now (wrongly) reports
-        // this item as NOT stale, exactly the bug scenario this test targets.
-        let poisoned_snap = crate::tui::data::load(&paths).expect("poisoned load");
-        assert!(
-            !poisoned_snap.installed[0].stale,
-            "the poisoned memo must make the poll snapshot report this item as \
-             clean -- otherwise this test is not exercising the memo-lag case"
-        );
-
-        // Now the actual TUI flow: apply the (memo-lagged) snapshot and press `u`.
+        // Now the actual TUI flow: apply the (now-stale-but-unaware) snapshot
+        // and press `u`.
         let mut app = App::new(String::new(), None, None);
-        app.apply_snapshot(poisoned_snap);
+        app.apply_snapshot(snap0);
         app.apply_intent(Intent::ActionUpgrade);
 
         let pending = app
@@ -2775,16 +2958,15 @@ mod tests {
             .expect("ActionUpgrade must arm a pending confirm");
         assert!(
             pending.description.contains("skill:review"),
-            "the authoritative recompute must surface the memo-lagged item in \
-             the confirm list even though the poll snapshot's `stale` flag was \
-             false: {:?}",
+            "the authoritative recompute must surface the item in the confirm \
+             list even though the applied snapshot's `stale` flag was false: {:?}",
             pending.description
         );
         assert_eq!(
             pending.upgrade_keys,
             vec!["skill:review".to_string()],
-            "the memo-lagged item's key must be stashed for the apply too, not \
-             just shown in the description"
+            "the item's key must be stashed for the apply too, not just shown \
+             in the description"
         );
 
         let _ = std::fs::remove_dir_all(&base);
@@ -3084,6 +3266,7 @@ mod tests {
             installed: vec![],
             available: vec![SnapshotAvailable {
                 key: "agent:dev".to_string(),
+                display_key: "agent:dev".to_string(),
                 name: "dev".to_string(),
                 source: "local/agents".to_string(),
                 kind: ItemKind::Agent,
@@ -3199,6 +3382,7 @@ mod tests {
         app.apply_snapshot(Snapshot {
             installed: vec![SnapshotInstalled {
                 key: "agent:jk:dev".to_string(),
+                display_key: "agent:jk:dev".to_string(),
                 name: "jk:dev".to_string(),
                 source: "local/agents".to_string(),
                 kind: ItemKind::Agent,
@@ -3206,6 +3390,8 @@ mod tests {
                 description: None,
                 deps: vec![],
                 stale: false,
+                path: None,
+                recorded_hash: String::new(),
             }],
             available: vec![],
             unmanaged: vec![],
@@ -3653,6 +3839,7 @@ mod tests {
                 expanded: false,
                 node: TreeNode::InstalledItem(crate::tui::tree::InstalledInfo {
                     key: "skill:review".into(),
+                    display_key: "skill:review".into(),
                     name: "review".into(),
                     source: "local/agents".into(),
                     kind: ItemKind::Skill,
@@ -3713,6 +3900,7 @@ mod tests {
                 expanded: true,
                 node: TreeNode::InstalledItem(crate::tui::tree::InstalledInfo {
                     key: "skill:review".into(),
+                    display_key: "skill:review".into(),
                     name: "review".into(),
                     source: "local/agents".into(),
                     kind: ItemKind::Skill,
@@ -4030,6 +4218,7 @@ mod tests {
         Snapshot {
             installed: vec![SnapshotInstalled {
                 key: "skill:review".to_string(),
+                display_key: "skill:review".to_string(),
                 name: "review".to_string(),
                 source: "local/agents".to_string(),
                 kind: ItemKind::Skill,
@@ -4037,6 +4226,8 @@ mod tests {
                 description: Some("Review skill".to_string()),
                 deps: vec![],
                 stale: false,
+                path: None,
+                recorded_hash: String::new(),
             }],
             available: vec![],
             unmanaged: vec![],
@@ -4054,6 +4245,7 @@ mod tests {
             installed: vec![],
             available: vec![SnapshotAvailable {
                 key: "agent:dev".to_string(),
+                display_key: "agent:dev".to_string(),
                 name: "dev".to_string(),
                 source: "local/agents".to_string(),
                 kind: ItemKind::Agent,
@@ -4079,6 +4271,7 @@ mod tests {
         let mut snap = make_snapshot();
         snap.unmanaged = vec![crate::tui::data::SnapshotUnmanaged {
             key: "skill:hand-written".to_string(),
+            display_key: "skill:hand-written".to_string(),
             name: "hand-written".to_string(),
             kind: ItemKind::Skill,
             paths: vec![std::path::PathBuf::from("/lobe/skills/hand-written")],
@@ -4222,6 +4415,7 @@ mod tests {
             expanded: false,
             node: TreeNode::AvailableItem(crate::tui::tree::AvailableInfo {
                 key: "agent:dev".into(),
+                display_key: "agent:dev".into(),
                 name: "dev".into(),
                 source: "local/agents".into(),
                 kind: ItemKind::Agent,
@@ -4407,6 +4601,7 @@ mod tests {
             installed: vec![
                 SnapshotInstalled {
                     key: "skill:review".to_string(),
+                    display_key: "skill:review".to_string(),
                     name: "review".to_string(),
                     source: "local/agents".to_string(),
                     kind: ItemKind::Skill,
@@ -4414,9 +4609,12 @@ mod tests {
                     description: None,
                     deps: vec!["agent:dev".to_string()],
                     stale: false,
+                    path: None,
+                    recorded_hash: String::new(),
                 },
                 SnapshotInstalled {
                     key: "agent:dev".to_string(),
+                    display_key: "agent:dev".to_string(),
                     name: "dev".to_string(),
                     source: "local/agents".to_string(),
                     kind: ItemKind::Agent,
@@ -4424,6 +4622,8 @@ mod tests {
                     description: None,
                     deps: vec![],
                     stale: false,
+                    path: None,
+                    recorded_hash: String::new(),
                 },
             ],
             available: vec![],
@@ -4571,6 +4771,7 @@ mod tests {
         Snapshot {
             installed: vec![SnapshotInstalled {
                 key: "agent:dev".to_string(),
+                display_key: "agent:dev".to_string(),
                 name: "dev".to_string(),
                 source: "local/agents".to_string(),
                 kind: ItemKind::Agent,
@@ -4578,9 +4779,12 @@ mod tests {
                 description: None,
                 deps: vec![],
                 stale: false,
+                path: None,
+                recorded_hash: String::new(),
             }],
             available: vec![SnapshotAvailable {
                 key: "skill:review".to_string(),
+                display_key: "skill:review".to_string(),
                 name: "review".to_string(),
                 source: "local/agents".to_string(),
                 kind: ItemKind::Skill,
@@ -4631,6 +4835,7 @@ mod tests {
             installed: vec![
                 SnapshotInstalled {
                     key: "skill:review".to_string(),
+                    display_key: "skill:review".to_string(),
                     name: "review".to_string(),
                     source: "local/agents".to_string(),
                     kind: ItemKind::Skill,
@@ -4638,9 +4843,12 @@ mod tests {
                     description: None,
                     deps: vec!["agent:dev".to_string()],
                     stale: false,
+                    path: None,
+                    recorded_hash: String::new(),
                 },
                 SnapshotInstalled {
                     key: "agent:dev".to_string(),
+                    display_key: "agent:dev".to_string(),
                     name: "dev".to_string(),
                     source: "local/agents".to_string(),
                     kind: ItemKind::Agent,
@@ -4648,9 +4856,12 @@ mod tests {
                     description: None,
                     deps: vec!["skill:build".to_string()],
                     stale: false,
+                    path: None,
+                    recorded_hash: String::new(),
                 },
                 SnapshotInstalled {
                     key: "skill:build".to_string(),
+                    display_key: "skill:build".to_string(),
                     name: "build".to_string(),
                     source: "local/agents".to_string(),
                     kind: ItemKind::Skill,
@@ -4658,6 +4869,8 @@ mod tests {
                     description: None,
                     deps: vec![],
                     stale: false,
+                    path: None,
+                    recorded_hash: String::new(),
                 },
             ],
             available: vec![],

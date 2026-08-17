@@ -54,7 +54,18 @@ pub struct Snapshot {
 /// One installed item in the snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotInstalled {
+    /// Identity, NOT display: drives TUI action dispatch (`ActionKind::Forget
+    /// { item_key }`, `upgrade_keys`, tree.rs node ids) and the manifest/store
+    /// path lookup. The name is source-derived (a directory name, or a
+    /// `[[items]] name`) and can carry ANSI/control/bidi code points, so it is
+    /// NEVER rendered directly -- see [`Self::display_key`] for the sanitized
+    /// counterpart (H1/TUI-75).
     pub key: String,
+    /// The sanitized form of `key` (`ItemKey::display`, DSC-95): the ONLY
+    /// reading of this item's key that may reach a confirm-modal description,
+    /// dependents list, or any other terminal/`--json` print site (TUI-75).
+    // spec: TUI-75
+    pub display_key: String,
     pub name: String,
     pub source: String,
     pub kind: ItemKind,
@@ -71,12 +82,31 @@ pub struct SnapshotInstalled {
     /// see from `recall`, without re-deriving the comparison at draw time.
     // spec: TUI-63
     pub stale: bool,
+    /// The item's live catalog path as of the last load/poll, or `None` when
+    /// it currently has no matching catalog entry (its source was unmelded,
+    /// or the item was removed upstream) -- the same condition under which
+    /// `stale` is false above. Carried on the snapshot itself (not a
+    /// thread-local side index) so the "never staler than `last_snapshot`"
+    /// property `is_actually_stale` relies on holds by construction: it is
+    /// set in the same `load_inner` pass that computes every other field on
+    /// this struct, from the exact same snapshot generation.
+    pub path: Option<PathBuf>,
+    /// The recorded manifest hash for this item as of the last load/poll,
+    /// paired with `path` above for the TUI-74 authoritative recompute
+    /// (`hash_path(path) != recorded_hash`).
+    pub recorded_hash: String,
 }
 
 /// One available (catalog) item in the snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotAvailable {
+    /// Identity, NOT display: see the identical note on
+    /// [`SnapshotInstalled::key`].
     pub key: String,
+    /// The sanitized form of `key` (TUI-75); see
+    /// [`SnapshotInstalled::display_key`].
+    // spec: TUI-75
+    pub display_key: String,
     pub name: String,
     pub source: String,
     pub kind: ItemKind,
@@ -92,7 +122,16 @@ pub struct SnapshotAvailable {
 // spec: UNM-6
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotUnmanaged {
+    /// Identity, NOT display: see the identical note on
+    /// [`SnapshotInstalled::key`]. Unmanaged names come straight off the
+    /// filesystem (a lobe directory/file entry) with NO validation gate
+    /// equivalent to DSC-96's catalog-scan rejection (H1/TUI-75) -- the one
+    /// name class where a hostile value is guaranteed to reach this struct.
     pub key: String,
+    /// The sanitized form of `key` (TUI-75); see
+    /// [`SnapshotInstalled::display_key`].
+    // spec: TUI-75
+    pub display_key: String,
     pub name: String,
     pub kind: ItemKind,
     pub paths: Vec<PathBuf>,
@@ -125,59 +164,6 @@ pub struct SnapshotUnmanaged {
 static HASH_MEMO: std::sync::Mutex<std::collections::BTreeMap<PathBuf, (String, String)>> =
     std::sync::Mutex::new(std::collections::BTreeMap::new());
 
-thread_local! {
-    /// Item-key (`kind:name`) -> (live catalog path, recorded manifest hash)
-    /// index, rebuilt wholesale by every `load_inner` call (i.e. every
-    /// load/poll tick, TUI-15). This lets the TUI's `u` keypress (`app.rs`'s
-    /// `initiate_upgrade`, TUI-72/TUI-73) look up an installed item's on-disk
-    /// path and recorded hash, and call `hash_path` on it DIRECTLY --
-    /// bypassing `HASH_MEMO` -- without threading `Paths` into the otherwise
-    /// I/O-free `App` model: the App only ever needs a single already-known
-    /// filesystem path plus a manifest hash to compare against, and
-    /// `App::apply_snapshot` already runs once per load/poll, so this index is
-    /// never staler than `last_snapshot` itself. The value that actually
-    /// decides staleness -- `hash_path`'s result -- is always read live off
-    /// disk at recompute time, never served from this index or from
-    /// `HASH_MEMO`. Absent an entry (no matching catalog item, e.g. the
-    /// item's source was unmelded or it was removed upstream) mirrors why
-    /// `SnapshotInstalled.stale` is false in that same case.
-    ///
-    /// THREAD-LOCAL, unlike `HASH_MEMO`: `HASH_MEMO` is keyed by an absolute
-    /// filesystem PATH, which is unique per real install (and per test
-    /// fixture's own temp dir) regardless of process-wide sharing. This index
-    /// is keyed by the bare item KEY (`kind:name`) instead, which routinely
-    /// repeats across unrelated test fixtures (`skill:review` is the most
-    /// common one in this crate's own test suite) -- a `static` here would let
-    /// one test's `load_inner` call overwrite another concurrently-running
-    /// test's entry for the same key, pointing it at the wrong fixture's path.
-    /// The real TUI is single-threaded (`data::load`/`try_poll` and every
-    /// `App` method run on the same main thread, tui/mod.rs), so thread-local
-    /// storage behaves exactly like the process-global it replaces there; it
-    /// only changes behavior for the multi-threaded test harness, where it is
-    /// the difference between correct isolation and a rare cross-test race.
-    // spec: TUI-72 TUI-73
-    static ITEM_PATH_INDEX: std::cell::RefCell<std::collections::BTreeMap<String, (PathBuf, String)>> =
-        const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
-}
-
-/// Replace `ITEM_PATH_INDEX` wholesale with `map` (called once per
-/// `load_inner`, so a key whose item left the catalog is dropped along with
-/// everything else from the previous load rather than lingering).
-fn update_item_path_index(map: std::collections::BTreeMap<String, (PathBuf, String)>) {
-    ITEM_PATH_INDEX.with(|idx| *idx.borrow_mut() = map);
-}
-
-/// The live catalog path and recorded manifest hash for the installed item
-/// keyed `key` (`kind:name`), as of the last load/poll ON THIS THREAD. `None`
-/// when the item currently has no matching catalog entry (source unmelded,
-/// item removed upstream) -- the same condition under which
-/// `SnapshotInstalled.stale` is false in `load_inner` -- or when no load has
-/// happened yet on this thread.
-// spec: TUI-72 TUI-73
-pub fn item_path_and_hash(key: &str) -> Option<(PathBuf, String)> {
-    ITEM_PATH_INDEX.with(|idx| idx.borrow().get(key).cloned())
-}
-
 /// Test-only: directly seed `HASH_MEMO` with a `(fingerprint, hash)` pair
 /// computed against `path`'s CURRENT stat fingerprint, but an arbitrary
 /// (possibly wrong) `fake_hash`. This simulates "the memo believes this path
@@ -189,8 +175,17 @@ pub fn item_path_and_hash(key: &str) -> Option<(PathBuf, String)> {
 /// recomputes -- there is no longer a realistic sequence of filesystem calls
 /// that reproduces "memo says clean, real content differs". Poisoning the
 /// memo directly is the only way to construct that condition in a test, to
-/// prove the TUI-72/TUI-73 authoritative recompute really bypasses the memo
-/// rather than happening to agree with it.
+/// prove the display-only `stale` flag `load_inner` computes via
+/// `memoized_hash` really can lag reality (TUI-72).
+///
+/// M11: a caller must assert directly against [`memoized_hash`] (or another
+/// call that never reaches [`load_inner`]/`prune_hash_memo`), never through a
+/// full `load`/`try_poll` with other work interleaved between the poison and
+/// the read. `HASH_MEMO` is one `static` shared by the whole test binary, and
+/// any concurrently running test that reaches `load_inner` prunes it down to
+/// ITS OWN catalog's paths (`prune_hash_memo`), evicting this entry along the
+/// way; the shorter the gap between poisoning and reading, the smaller that
+/// window.
 #[cfg(test)]
 pub(crate) fn poison_memo_for_test(path: &std::path::Path, fake_hash: &str) {
     if let Ok(fp) = crate::hash::stat_fingerprint(path)
@@ -325,10 +320,6 @@ fn load_inner(paths: &Paths) -> Result<Snapshot> {
     // no longer matches the recorded manifest name), computed against the
     // matching catalog item.
     let mut installed: Vec<SnapshotInstalled> = Vec::with_capacity(manifest.items.len());
-    // spec: TUI-72 TUI-73 - rebuilt alongside `installed` below and swapped into
-    // ITEM_PATH_INDEX once, wholesale, at the end of this loop (`update_item_path_index`).
-    let mut path_index: std::collections::BTreeMap<String, (PathBuf, String)> =
-        std::collections::BTreeMap::new();
     for it in manifest.items.values() {
         // Find the matching catalog item to get direct deps + drift.
         let matched = catalog_items
@@ -355,16 +346,16 @@ fn load_inner(paths: &Paths) -> Result<Snapshot> {
             let rename_drift = ci.effective_name() != it.name;
             hash_drift || rename_drift
         });
-        if let Some(ci) = matched {
-            path_index.insert(it.key().into(), (ci.path.clone(), it.hash.clone()));
-        }
         installed.push(SnapshotInstalled {
             // `key` is identity, not display: it drives TUI action dispatch
-            // (learn/forget refs) and the `ITEM_PATH_INDEX` lookup above, both
-            // keyed on the raw string. Every OTHER field here is sanitized
-            // (TUI-60) since it is rendered; `key` itself is never rendered
-            // directly (the tree shows `name`, see `tree.rs`).
+            // (learn/forget refs), tree.rs node ids, and `manifest`/store
+            // lookups, all keyed on the raw string. It is NEVER rendered
+            // directly -- `display_key` below is the sanitized reading a
+            // confirm-modal description or any other print site must use
+            // instead (H1/TUI-75).
             key: it.key().into(),
+            // spec: TUI-75
+            display_key: it.display_key(),
             name: strip_ansi(&it.name),
             source: strip_ansi(&it.source),
             kind: it.kind,
@@ -372,9 +363,14 @@ fn load_inner(paths: &Paths) -> Result<Snapshot> {
             description: it.description.as_deref().map(strip_ansi),
             deps,
             stale,
+            // spec: TUI-72 TUI-73 TUI-74 - carried on the snapshot itself
+            // (M10), not a side thread-local index, so `is_actually_stale`'s
+            // "never staler than `last_snapshot`" property holds by
+            // construction: both are set in this same `load_inner` pass.
+            path: matched.map(|ci| ci.path.clone()),
+            recorded_hash: it.hash.clone(),
         });
     }
-    update_item_path_index(path_index);
 
     // Build available list (all catalog items; de-dup vs installed happens in tree.rs).
     // spec: TUI-50 - compute direct dep keys for each available item.
@@ -392,6 +388,8 @@ fn load_inner(paths: &Paths) -> Result<Snapshot> {
             SnapshotAvailable {
                 // See the identical `key` note on `SnapshotInstalled` above.
                 key: it.key().into(),
+                // spec: TUI-75
+                display_key: it.display_key(),
                 name: strip_ansi(&it.effective_name()),
                 source: strip_ansi(&it.source),
                 kind: it.kind,
@@ -413,6 +411,8 @@ fn load_inner(paths: &Paths) -> Result<Snapshot> {
         .map(|u| SnapshotUnmanaged {
             // See the identical `key` note on `SnapshotInstalled` above.
             key: u.key().into(),
+            // spec: TUI-75
+            display_key: u.display_key(),
             name: strip_ansi(&u.name),
             kind: u.kind,
             paths: u.paths,
@@ -631,6 +631,48 @@ mod tests {
             !memo.contains_key(&p2),
             "a path no longer in the catalog must be evicted, not retained forever"
         );
+    }
+
+    // spec: TUI-72
+    #[test]
+    fn poisoned_memo_serves_the_seeded_hash_instead_of_the_real_one() {
+        // M11: this asserts `poison_memo_for_test`'s effect DIRECTLY against
+        // `memoized_hash`, with no intervening `load`/`try_poll` call between
+        // the poison and the read. `HASH_MEMO` is one `static` shared by every
+        // concurrently running test in this binary, and any of them reaching
+        // `load_inner` prunes it down to ITS OWN catalog's live paths
+        // (`prune_hash_memo`) -- evicting this test's entry along the way if
+        // it interleaves. Keeping the gap between poisoning and reading to
+        // exactly these two calls (no catalog scan, no meld/learn I/O)
+        // minimizes that window; a full `load()` round trip (the pattern this
+        // replaces, formerly in `app.rs`) held it open far longer.
+        let (paths, base) = temp_paths();
+        crate::paths::mkdir_p(&paths.mind_home).unwrap();
+        let item = base.join("poison-target");
+        crate::paths::mkdir_p(&item).unwrap();
+        std::fs::write(item.join("SKILL.md"), b"v1").unwrap();
+
+        // A real edit, so the poisoned value and the real value are provably
+        // different (not just "the memo returned SOMETHING").
+        std::fs::write(item.join("SKILL.md"), b"v2 is longer than v1").unwrap();
+        let real_hash = hash_path(&item).expect("real hash");
+
+        let fake_hash = "0000000000000000000000000000000000000000000000000000000000000000";
+        poison_memo_for_test(&item, fake_hash);
+        let served = memoized_hash(&item).expect("memoized_hash after poisoning");
+
+        assert_eq!(
+            served, fake_hash,
+            "a poisoned memo must serve the seeded fake hash, not recompute"
+        );
+        assert_ne!(
+            served, real_hash,
+            "the seeded fake hash must differ from the item's real current hash \
+             -- otherwise this test cannot distinguish 'served from memo' from \
+             'recomputed and happened to match'"
+        );
+
+        cleanup(&base);
     }
 
     #[test]

@@ -674,21 +674,52 @@ mod tests {
     /// DSC-95: `AmbiguousItem`'s `candidates` (built from `it.source` and
     /// `it.key()`, both source-controlled) must reach the caller already
     /// sanitized -- `MindError::AmbiguousItem`'s `#[error(...)]` Display has
-    /// no sanitizing step of its own, so a raw ESC byte in the source name
-    /// would otherwise ride straight to a terminal via `main.rs`'s
-    /// `eprintln!("error: {err}")`.
+    /// no sanitizing step of its own, so a raw ESC byte in either half of
+    /// the composed `source#kind:name` candidate would otherwise ride
+    /// straight to a terminal via `main.rs`'s `eprintln!("error: {err}")`.
+    /// The candidate string is built from TWO independently sanitized
+    /// fields (`strip_ansi(&it.source)` and `it.key().display()`), so an ESC
+    /// is planted in BOTH the source AND the item name here: sanitizing only
+    /// the source half (e.g. reverting `it.key().display()` back to
+    /// `it.key().as_str()`) would still compile and would still pass a test
+    /// that only puts the ESC in `source`.
+    ///
+    /// Asserts against the `candidates` field directly, not the full
+    /// `Display` message: `query` echoes the ref the caller passed in
+    /// verbatim (a CLI-typed string, not source-controlled catalog content)
+    /// and is a separate, out-of-scope concern from the candidate list this
+    /// test targets.
     // spec: DSC-95
     #[test]
     fn ambiguous_item_candidates_are_sanitized_for_display() {
         let items = vec![
-            cat(ItemKind::Skill, "review", "evil\x1b[31msource"),
-            cat(ItemKind::Skill, "review", "other"),
+            cat(ItemKind::Skill, "evil\x1b[32mname", "evil\x1b[31msource"),
+            cat(ItemKind::Skill, "evil\x1b[32mname", "other"),
         ];
-        let r = parse_item_ref("review").unwrap();
+        let r = parse_item_ref("evil\x1b[32mname").unwrap();
         let err = resolve(&items, &r, 2).unwrap_err();
-        let msg = err.to_string();
-        assert!(!msg.contains('\x1b'), "must strip raw ESC: {msg:?}");
-        assert!(msg.contains("evil"), "must still name the source: {msg}");
+        match err {
+            MindError::AmbiguousItem { candidates, .. } => {
+                assert!(
+                    candidates.iter().all(|c| !c.contains('\x1b')),
+                    "candidates must not carry a raw ESC byte: {candidates:?}"
+                );
+                // The sanitized source half (only the first item's source
+                // carries the ESC) and the sanitized item name half (every
+                // candidate carries it, since both items share the name)
+                // must each still be readable post-sanitization.
+                assert!(
+                    candidates.iter().any(|c| c.contains("evilsource")),
+                    "must still name the sanitized source: {candidates:?}"
+                );
+                assert!(
+                    candidates.iter().all(|c| c.contains("evilname")),
+                    "must still name the sanitized item name in every \
+                     candidate: {candidates:?}"
+                );
+            }
+            other => panic!("expected AmbiguousItem, got {other:?}"),
+        }
     }
 
     #[test]
@@ -722,19 +753,43 @@ mod tests {
 
     /// DSC-95: `resolve_installed`'s `AmbiguousItem` candidates must reach the
     /// caller already sanitized, mirroring `ambiguous_item_candidates_are_sanitized_for_display`
-    /// for the catalog-side `resolve` above.
+    /// for the catalog-side `resolve` above. As there, the ESC is planted in
+    /// BOTH the source and the item name so both halves of the composed
+    /// candidate string are exercised -- an ESC in `source` alone would not
+    /// catch a reversion of the item-name half back to `as_str()`. Asserts
+    /// against `candidates` directly (see the sibling test's doc for why
+    /// `query` is out of scope here).
     // spec: DSC-95
     #[test]
     fn resolve_installed_ambiguous_item_candidates_are_sanitized_for_display() {
         let m = manifest(vec![
-            inst(ItemKind::Skill, "review", "evil\x1b[31msource"),
-            inst(ItemKind::Agent, "review", "other"),
+            inst(ItemKind::Skill, "evil\x1b[32mname", "evil\x1b[31msource"),
+            inst(ItemKind::Agent, "evil\x1b[32mname", "other"),
         ]);
-        let bare = parse_item_ref("review").unwrap();
+        let bare = parse_item_ref("evil\x1b[32mname").unwrap();
         let err = resolve_installed(&m, &bare).unwrap_err();
-        let msg = err.to_string();
-        assert!(!msg.contains('\x1b'), "must strip raw ESC: {msg:?}");
-        assert!(msg.contains("evil"), "must still name the source: {msg}");
+        match err {
+            MindError::AmbiguousItem { candidates, .. } => {
+                assert!(
+                    candidates.iter().all(|c| !c.contains('\x1b')),
+                    "candidates must not carry a raw ESC byte: {candidates:?}"
+                );
+                // As in the catalog-side sibling test: only the first item's
+                // source carries the ESC, but both items share the ESC-laden
+                // name, so the sanitized source half must appear in some
+                // candidate and the sanitized name half in all of them.
+                assert!(
+                    candidates.iter().any(|c| c.contains("evilsource")),
+                    "must still name the sanitized source: {candidates:?}"
+                );
+                assert!(
+                    candidates.iter().all(|c| c.contains("evilname")),
+                    "must still name the sanitized item name in every \
+                     candidate: {candidates:?}"
+                );
+            }
+            other => panic!("expected AmbiguousItem, got {other:?}"),
+        }
     }
 
     #[test]

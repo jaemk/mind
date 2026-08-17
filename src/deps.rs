@@ -136,8 +136,19 @@ fn item_edges(
 ///
 /// This is the primitive the DEP-62 `probe --json` adjacency field uses and
 /// TUI-50 uses to list an item's children.
-// Consuming shards (commands.rs probe/recall/forget) will call this; allow
-// dead_code until those shards land.
+///
+/// L10: the returned `String`s are raw, source-derived identity keys (not an
+/// `ItemKey`, and not sanitized). A caller MUST sanitize (`strip_ansi` /
+/// `.display()`) before putting any of them on a display surface (terminal,
+/// JSON meant for a terminal, etc.) -- the same discipline every current
+/// caller (`commands.rs`, `tui/data.rs`'s `sanitize_dep_keys`) already
+/// applies. This function does not do it for you.
+///
+/// L10: this is a compatibility wrapper that rebuilds the `by_name` index on
+/// every call. A caller that invokes this once per row over a shared catalog
+/// (e.g. `probe --json` over every matched item) should instead call
+/// [`direct_dependency_keys_with_index`] with one index built up front, to
+/// avoid rebuilding an O(catalog) index per row.
 #[allow(dead_code)]
 pub fn direct_dependency_keys(
     item: &CatalogItem,
@@ -145,6 +156,24 @@ pub fn direct_dependency_keys(
     read: &impl Fn(&CatalogItem) -> String,
 ) -> Vec<String> {
     let by_name = make_by_name(items);
+    direct_dependency_keys_with_index(item, items, &by_name, read)
+}
+
+/// Same contract as [`direct_dependency_keys`], but takes a prebuilt
+/// `by_name` index (from [`make_by_name`]) rather than building one from
+/// scratch. Use this when calling once per item over a shared catalog (L10):
+/// build the index once and pass it to every call instead of paying an
+/// O(catalog) index build per row.
+///
+/// L10: like [`direct_dependency_keys`], the returned keys are raw and
+/// unsanitized; sanitize before display.
+#[allow(dead_code)]
+pub fn direct_dependency_keys_with_index(
+    item: &CatalogItem,
+    items: &[CatalogItem],
+    by_name: &HashMap<(&str, &str), Vec<usize>>,
+    read: &impl Fn(&CatalogItem) -> String,
+) -> Vec<String> {
     // Find this item's index.
     let node = items
         .iter()
@@ -154,7 +183,7 @@ pub fn direct_dependency_keys(
         return Vec::new();
     }
     let text = read(item);
-    item_edges(node, items, &by_name, &text)
+    item_edges(node, items, by_name, &text)
         .into_iter()
         .map(|i| items[i].key().as_str().to_string())
         .collect()
@@ -295,6 +324,33 @@ pub fn resolve(
     }
 }
 
+// ---------------------------------------------------------------------------
+// DEP-64: bounded rendering, shared by every tree/forest renderer below.
+// ---------------------------------------------------------------------------
+
+/// Cap on how deeply a dependency tree/forest renderer will recurse before
+/// truncating (DEP-64). A real dependency chain never remotely approaches
+/// this; it exists only to bound stack usage against a pathological chain
+/// whose length is proportional to node count (which the `rendered`-set dedup
+/// below cannot help with, since each node on a plain chain is visited
+/// exactly once).
+const MAX_RENDER_DEPTH: usize = 200;
+
+/// The literal line appended (at the appropriate indent, as a synthetic child
+/// bullet) when [`MAX_RENDER_DEPTH`] is reached, shared by every text
+/// renderer so the wording is identical everywhere it can appear.
+const TRUNCATION_NOTICE: &str = "(truncated: max depth reached)";
+
+/// Push the `TRUNCATION_NOTICE` as a synthetic child bullet at `depth`.
+fn push_truncation_notice(out: &mut String, depth: usize) {
+    for _ in 0..depth {
+        out.push_str("  ");
+    }
+    out.push_str("- ");
+    out.push_str(TRUNCATION_NOTICE);
+    out.push('\n');
+}
+
 impl Resolution {
     /// Indices into `items` to install, dependency-first (each dependency
     /// precedes any item that depends on it), excluding items already installed
@@ -315,15 +371,28 @@ impl Resolution {
     /// Each node is tagged `[selected]`, `[dep]`, or `[installed]`; a reference
     /// back to an item already on the current path is shown as a `(cycle)`
     /// back-edge rather than expanded again (DEP-22, DEP-23).
+    ///
+    /// DEP-64: a node whose full subtree has already been rendered once
+    /// elsewhere in this call (a different branch, or a different root) is
+    /// shown as a `(seen)` leaf instead of being expanded again, and nesting
+    /// stops at a fixed depth cap with a truncation notice. This bounds total
+    /// output to the graph's edge count rather than growing exponentially with
+    /// tree depth, and bounds recursion so a very long chain cannot overflow
+    /// the stack.
     pub fn render_tree(&self, items: &[CatalogItem]) -> String {
         let mut out = String::new();
+        // DEP-64: shared across every root and every branch of this call so a
+        // node already fully printed once is a `(seen)` leaf rather than
+        // re-expanded.
+        let mut rendered: HashSet<usize> = HashSet::new();
         for &root in &self.roots {
             let mut path: Vec<usize> = Vec::new();
-            self.render_node(items, root, 0, &mut path, &mut out);
+            self.render_node(items, root, 0, &mut path, &mut out, &mut rendered);
         }
         out
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_node(
         &self,
         items: &[CatalogItem],
@@ -331,20 +400,32 @@ impl Resolution {
         depth: usize,
         path: &mut Vec<usize>,
         out: &mut String,
+        rendered: &mut HashSet<usize>,
     ) {
         for _ in 0..depth {
             out.push_str("  ");
         }
         out.push_str("- ");
         // DSC-95: sanitize before composing the line so a hostile name cannot
-        // consume the " [role]"/"(cycle)" suffix appended after it (an
-        // unterminated OSC sequence puts the ANSI stripper into a state that
-        // eats the rest of the string if sanitized post-composition).
+        // consume the " [role]"/"(cycle)"/"(seen)" suffix appended after it
+        // (an unterminated OSC sequence puts the ANSI stripper into a state
+        // that eats the rest of the string if sanitized post-composition).
         out.push_str(&items[node].display_key());
 
         if path.contains(&node) {
-            // Back-edge: do not expand again (DEP-22).
+            // Back-edge to a live ancestor: do not expand again (DEP-22).
             out.push_str(" (cycle)\n");
+            return;
+        }
+
+        // DEP-64: a node already fully rendered elsewhere in this output (not
+        // on the current path, so not a cycle -- reached again via a
+        // different branch or root, e.g. a diamond) is a `(seen)` leaf, not
+        // re-expanded. Without this, a source-controlled diamond DAG renders
+        // exponentially many lines (one full copy of the shared subtree per
+        // path that reaches it).
+        if !rendered.insert(node) {
+            out.push_str(" (seen)\n");
             return;
         }
 
@@ -359,10 +440,19 @@ impl Resolution {
         out.push_str(role);
         out.push_str("]\n");
 
+        if depth >= MAX_RENDER_DEPTH {
+            // DEP-64: stop expanding at the depth cap so a pathological chain
+            // (no repeats, so the `rendered` dedup above cannot help) cannot
+            // recurse to a depth proportional to node count and overflow the
+            // stack.
+            push_truncation_notice(out, depth + 1);
+            return;
+        }
+
         path.push(node);
         if let Some(children) = self.deps.get(&node) {
             for &child in children {
-                self.render_node(items, child, depth + 1, path, out);
+                self.render_node(items, child, depth + 1, path, out, rendered);
             }
         }
         path.pop();
@@ -378,12 +468,15 @@ impl Resolution {
 ///
 /// Serializes as:
 /// - Normal node: `{"key": "kind:name", "dependencies": [...]}`
-///   (`cycle` field absent, `dependencies` present, possibly empty)
+///   (`cycle`/`seen` fields absent, `dependencies` present, possibly empty)
 /// - Cycle back-edge: `{"key": "kind:name", "cycle": true}`
 ///   (`dependencies` field absent, `cycle` present and `true`)
+/// - Seen leaf (DEP-64): `{"key": "kind:name", "seen": true}`
+///   (`dependencies` field absent, `seen` present and `true`)
 ///
 /// This is the machine-readable counterpart of the human `- key (cycle)` /
-/// `- key` lines produced by `render_forest` / `render_subtree` (DEP-63).
+/// `- key (seen)` / `- key` lines produced by `render_forest` /
+/// `render_subtree` (DEP-63, DEP-64).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct DepNode {
     /// The `kind:effective_name` key for this node, identical to the key used
@@ -396,9 +489,18 @@ pub struct DepNode {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub cycle: bool,
 
+    /// Present and `true` only for a "seen" leaf (DEP-64): a node whose full
+    /// subtree was already emitted once elsewhere in this same output (a
+    /// shared dependency reached again via a different branch or root, not
+    /// the current ancestor path -- distinct from `cycle`, which marks a
+    /// back-edge to a *live* ancestor, DEP-22). Omitted for normal nodes and
+    /// cycle leaves. When `true`, `dependencies` is `None`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub seen: bool,
+
     /// The child nodes (transitive installed dependencies) of this node.
-    /// `None` only for a cycle leaf (to keep the field absent in JSON).
-    /// Present (possibly empty) for every normal node.
+    /// `None` only for a cycle or seen leaf (to keep the field absent in
+    /// JSON). Present (possibly empty) for every normal node.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dependencies: Option<Vec<DepNode>>,
 }
@@ -408,6 +510,7 @@ impl DepNode {
         Self {
             key,
             cycle: false,
+            seen: false,
             dependencies: Some(dependencies),
         }
     }
@@ -416,6 +519,18 @@ impl DepNode {
         Self {
             key,
             cycle: true,
+            seen: false,
+            dependencies: None,
+        }
+    }
+
+    /// A DEP-64 "seen" leaf: `key`'s full subtree was already emitted once
+    /// elsewhere in this output, so it is not expanded again here.
+    fn seen_leaf(key: String) -> Self {
+        Self {
+            key,
+            cycle: false,
+            seen: true,
             dependencies: None,
         }
     }
@@ -589,6 +704,11 @@ impl InstalledGraph {
     /// guarantees every installed item appears in the forest output.
     ///
     /// See the [`InstalledGraph`] doc comment for the exact line format.
+    ///
+    /// DEP-64: a node whose full subtree has already been rendered once
+    /// elsewhere in this call (a different branch, or a different root) is
+    /// shown as a `(seen)` leaf instead of being expanded again, and nesting
+    /// stops at a fixed depth cap with a truncation notice.
     pub fn render_forest(&self) -> String {
         // Compute in-degree (number of installed items that depend on each node).
         let mut in_degree = vec![0usize; self.nodes.len()];
@@ -604,6 +724,11 @@ impl InstalledGraph {
         // starts on it at depth 0; descendants are reached recursively but we
         // only need to avoid re-promoting them as secondary roots.
         let mut emitted: HashSet<usize> = HashSet::new();
+        // DEP-64: shared across every root's render call (distinct from
+        // `emitted` above, which is only for root-promotion bookkeeping) so a
+        // node already fully printed once is a `(seen)` leaf rather than
+        // re-expanded.
+        let mut rendered: HashSet<usize> = HashSet::new();
 
         // Pass 1: natural roots (in-degree == 0).
         for (i, &deg) in in_degree.iter().enumerate() {
@@ -613,7 +738,7 @@ impl InstalledGraph {
                 // a real root are not re-promoted.
                 self.mark_reachable(i, &mut emitted);
                 let mut path = Vec::new();
-                self.render_installed_node(i, 0, &mut path, &mut out);
+                self.render_installed_node(i, 0, &mut path, &mut out, &mut rendered);
             }
         }
 
@@ -623,7 +748,7 @@ impl InstalledGraph {
             if !emitted.contains(&i) {
                 self.mark_reachable(i, &mut emitted);
                 let mut path = Vec::new();
-                self.render_installed_node(i, 0, &mut path, &mut out);
+                self.render_installed_node(i, 0, &mut path, &mut out, &mut rendered);
             }
         }
 
@@ -657,40 +782,62 @@ impl InstalledGraph {
         let &root_idx = self.key_to_idx.get(root_key)?;
         let mut out = String::new();
         let mut path = Vec::new();
-        self.render_installed_node(root_idx, 0, &mut path, &mut out);
+        // DEP-64: fresh per call, since a single-subtree render starts its
+        // own bounded output.
+        let mut rendered: HashSet<usize> = HashSet::new();
+        self.render_installed_node(root_idx, 0, &mut path, &mut out, &mut rendered);
         Some(out)
     }
 
     /// Recursive (path-tracked) renderer for one installed node, reused by
     /// both [`render_forest`] and [`render_subtree`].
+    ///
+    /// DEP-64: `rendered` tracks every node index already fully rendered in
+    /// this call (across branches/roots); a repeat is a `(seen)` leaf, and
+    /// recursion stops at [`MAX_RENDER_DEPTH`] with a truncation notice.
+    #[allow(clippy::too_many_arguments)]
     fn render_installed_node(
         &self,
         node: usize,
         depth: usize,
         path: &mut Vec<usize>,
         out: &mut String,
+        rendered: &mut HashSet<usize>,
     ) {
         for _ in 0..depth {
             out.push_str("  ");
         }
         out.push_str("- ");
-        // spec: CLI-232 DSC-95 -- sanitize before composing (see the identical
+        // spec: DSC-95 -- sanitize before composing (see the identical
         // note on `Resolution::render_node`): an unterminated escape in the
-        // name must not be able to consume the " (cycle)"/indentation of
-        // whatever follows.
+        // name must not be able to consume the " (cycle)"/"(seen)"/
+        // indentation of whatever follows.
         out.push_str(&self.nodes[node].display_key());
 
         if path.contains(&node) {
-            // Back-edge: do not expand again (DEP-22).
+            // Back-edge to a live ancestor: do not expand again (DEP-22).
             out.push_str(" (cycle)\n");
+            return;
+        }
+
+        // DEP-64: a node already fully rendered elsewhere in this output is a
+        // `(seen)` leaf rather than being expanded again (see the identical
+        // rationale on `Resolution::render_node`).
+        if !rendered.insert(node) {
+            out.push_str(" (seen)\n");
             return;
         }
 
         out.push('\n');
 
+        if depth >= MAX_RENDER_DEPTH {
+            push_truncation_notice(out, depth + 1);
+            return;
+        }
+
         path.push(node);
         for &child in &self.edges[node] {
-            self.render_installed_node(child, depth + 1, path, out);
+            self.render_installed_node(child, depth + 1, path, out, rendered);
         }
         path.pop();
     }
@@ -702,6 +849,11 @@ impl InstalledGraph {
     /// A normal node carries `{"key": ..., "dependencies": [...]}`.
     /// A cycle back-edge carries `{"key": ..., "cycle": true}` (no
     /// `dependencies` field) and is not expanded further (DEP-22).
+    ///
+    /// DEP-64: a node whose full subtree has already been emitted once
+    /// elsewhere in this call is a `{"key": ..., "seen": true}` leaf instead
+    /// of being expanded again, and nesting stops at a fixed depth cap
+    /// (represented as a synthetic truncation-notice child).
     pub fn forest_nodes(&self) -> Vec<DepNode> {
         // spec: DEP-63
         let mut in_degree = vec![0usize; self.nodes.len()];
@@ -712,6 +864,9 @@ impl InstalledGraph {
         }
 
         let mut emitted: HashSet<usize> = HashSet::new();
+        // DEP-64: shared across every root's build call, mirroring
+        // `render_forest`'s `rendered` set.
+        let mut rendered: HashSet<usize> = HashSet::new();
         let mut roots: Vec<DepNode> = Vec::new();
 
         // Pass 1: natural roots (in-degree == 0).
@@ -719,7 +874,7 @@ impl InstalledGraph {
             if deg == 0 {
                 self.mark_reachable(i, &mut emitted);
                 let mut path = Vec::new();
-                roots.push(self.build_node(i, &mut path));
+                roots.push(self.build_node(i, 0, &mut path, &mut rendered));
             }
         }
 
@@ -729,7 +884,7 @@ impl InstalledGraph {
             if !emitted.contains(&i) {
                 self.mark_reachable(i, &mut emitted);
                 let mut path = Vec::new();
-                roots.push(self.build_node(i, &mut path));
+                roots.push(self.build_node(i, 0, &mut path, &mut rendered));
             }
         }
 
@@ -743,25 +898,50 @@ impl InstalledGraph {
         // spec: DEP-63
         let &root_idx = self.key_to_idx.get(root_key)?;
         let mut path = Vec::new();
-        Some(self.build_node(root_idx, &mut path))
+        // DEP-64: fresh per call, mirroring `render_subtree`.
+        let mut rendered: HashSet<usize> = HashSet::new();
+        Some(self.build_node(root_idx, 0, &mut path, &mut rendered))
     }
 
     /// Recursive (path-tracked) builder for one structured [`DepNode`].
     /// Mirrors the traversal of [`render_installed_node`] exactly:
-    /// same path-based cycle detection (DEP-22), same child expansion.
-    fn build_node(&self, node: usize, path: &mut Vec<usize>) -> DepNode {
-        // spec: CLI-232 DSC-95
+    /// same path-based cycle detection (DEP-22), same "seen"/depth-cap
+    /// bounding (DEP-64), same child expansion.
+    fn build_node(
+        &self,
+        node: usize,
+        depth: usize,
+        path: &mut Vec<usize>,
+        rendered: &mut HashSet<usize>,
+    ) -> DepNode {
+        // spec: DSC-95
         let key = self.nodes[node].display_key();
 
         if path.contains(&node) {
-            // Back-edge: cycle leaf, not expanded (DEP-22).
+            // Back-edge to a live ancestor: cycle leaf, not expanded (DEP-22).
             return DepNode::cycle_leaf(key);
+        }
+
+        // DEP-64: a node already fully built elsewhere in this output is a
+        // "seen" leaf rather than being expanded again.
+        if !rendered.insert(node) {
+            return DepNode::seen_leaf(key);
+        }
+
+        if depth >= MAX_RENDER_DEPTH {
+            // DEP-64: represent the depth-cap truncation as a single
+            // synthetic child node, mirroring the text renderer's synthetic
+            // truncation-notice line.
+            return DepNode::normal(
+                key,
+                vec![DepNode::normal(TRUNCATION_NOTICE.to_string(), Vec::new())],
+            );
         }
 
         path.push(node);
         let children: Vec<DepNode> = self.edges[node]
             .iter()
-            .map(|&child| self.build_node(child, path))
+            .map(|&child| self.build_node(child, depth + 1, path, rendered))
             .collect();
         path.pop();
 
@@ -811,6 +991,16 @@ mod tests {
 
     fn no_installed() -> HashSet<String> {
         HashSet::new()
+    }
+
+    /// Build a literal `{{ns:name}}` reference token without fighting
+    /// `format!`'s brace-escaping rules.
+    fn ns_token(name: &str) -> String {
+        let mut s = String::new();
+        s.push_str("{{ns:");
+        s.push_str(name);
+        s.push_str("}}");
+        s
     }
 
     #[test]
@@ -1142,11 +1332,14 @@ mod tests {
 
     #[test]
     fn render_tree_exact_nested_format_is_locked() {
-        // spec: DEP-21
+        // spec: DEP-21 DEP-64
         // Lock the full multi-line tree string for a two-level nesting: two-space
         // indent per depth, "- " bullet, item key, then a [role] tag. The shared
-        // dependency in a diamond is rendered once per path (the tree mirrors the
-        // graph structure, not the deduplicated install order).
+        // dependency in a diamond is expanded in full the FIRST time it is
+        // reached (under b) and rendered as a `(seen)` leaf every subsequent
+        // time (under c) rather than being re-expanded (DEP-64): the tree
+        // still shows every path that reaches it, but each node's subtree is
+        // printed at most once.
         let items = vec![
             item(ItemKind::Skill, "a", "s"),
             item(ItemKind::Skill, "b", "s"),
@@ -1164,7 +1357,7 @@ mod tests {
   - skill:b [dep]
     - skill:d [dep]
   - skill:c [dep]
-    - skill:d [dep]
+    - skill:d (seen)
 ";
         assert_eq!(r.render_tree(&items), expected);
     }
@@ -2005,11 +2198,13 @@ mod tests {
 
     #[test]
     fn installed_graph_diamond_forest_nests_shared_dep_under_both_dependents() {
-        // spec: DEP-1 DEP-21
+        // spec: DEP-1 DEP-21 DEP-64
         // Diamond a->b, a->c, b->d, c->d over installed items. The forest must
         // mirror graph STRUCTURE (like render_tree_exact_nested_format_is_locked):
-        // a is the sole root (in-degree 0), and d nests under BOTH b and c. d must
-        // never be its own root (it has incoming edges). Lock the exact string.
+        // a is the sole root (in-degree 0), and d nests under BOTH b and c: the
+        // first occurrence (under b) expands in full, and the second (under c)
+        // is a `(seen)` leaf rather than a re-expansion (DEP-64). d must never
+        // be its own root (it has incoming edges). Lock the exact string.
         let items = vec![
             item(ItemKind::Skill, "a", "s"),
             item(ItemKind::Skill, "b", "s"),
@@ -2032,7 +2227,7 @@ mod tests {
   - skill:b
     - skill:d
   - skill:c
-    - skill:d
+    - skill:d (seen)
 ";
         assert_eq!(
             g.render_forest(),
@@ -2175,11 +2370,13 @@ mod tests {
 
     #[test]
     fn forest_dependency_only_item_never_appears_as_root_two_dependents() {
-        // spec: DEP-21
+        // spec: DEP-21 DEP-64
         // A single dependency-only item shared by TWO independent roots must nest
         // under each dependent but NEVER appear at the top level. roots r1, r2 both
-        // depend on `lib`; lib has in-degree 2, so it is not a root. Lock the
-        // exact multi-line forest string.
+        // depend on `lib`; lib has in-degree 2, so it is not a root. The first
+        // occurrence (under r1) expands in full; the second (under r2) is a
+        // `(seen)` leaf rather than a re-expansion (DEP-64). Lock the exact
+        // multi-line forest string.
         let items = vec![
             item(ItemKind::Skill, "r1", "s"),
             item(ItemKind::Skill, "r2", "s"),
@@ -2198,7 +2395,7 @@ mod tests {
 - skill:r1
   - skill:lib
 - skill:r2
-  - skill:lib
+  - skill:lib (seen)
 ";
         assert_eq!(
             g.render_forest(),
@@ -2581,13 +2778,15 @@ mod tests {
 
     #[test]
     fn forest_nodes_diamond_nests_shared_dep_under_both_dependents() {
-        // spec: DEP-63
+        // spec: DEP-63 DEP-64
         // PARITY (load-bearing): the structured forest must mirror the human
         // render_forest STRUCTURE, not just cover the same key set. Diamond
         // a->b, a->c, b->d, c->d: `a` is the sole root (in-degree 0), and `d`
-        // must be nested under BOTH `b` and `c` -- emitted twice -- exactly as
-        // render_forest renders d twice (see
-        // installed_graph_diamond_forest_nests_shared_dep_under_both_dependents).
+        // appears under BOTH `b` and `c` -- the first occurrence (under b)
+        // expands in full, the second (under c) is a `seen: true` leaf rather
+        // than a re-expansion (DEP-64) -- exactly mirroring how render_forest
+        // renders d's first occurrence in full and the second as `(seen)`
+        // (see installed_graph_diamond_forest_nests_shared_dep_under_both_dependents).
         // This is the JSON counterpart of render_tree_exact_nested_format_is_locked.
         let items = vec![
             item(ItemKind::Skill, "a", "s"),
@@ -2625,42 +2824,71 @@ mod tests {
             "a's children must be b then c in discovery order"
         );
 
-        // d nests under BOTH b and c, as a distinct (non-cycle) leaf each time.
-        for (i, parent) in ["skill:b", "skill:c"].iter().enumerate() {
-            let p = &a_children[i];
-            assert_eq!(&p.key, parent);
-            assert!(!p.cycle, "{parent} must not be a cycle leaf");
-            let p_children = p.dependencies.as_ref().expect("parent has deps");
-            assert_eq!(p_children.len(), 1, "{parent} must have exactly one child");
-            let d = &p_children[0];
-            assert_eq!(d.key, "skill:d", "{parent}'s child must be d");
-            assert!(
-                !d.cycle,
-                "d under {parent} must be a normal node, not a cycle"
-            );
-            assert!(
-                d.dependencies.as_ref().is_some_and(|v| v.is_empty()),
-                "d is a leaf: empty dependencies, not absent or a cycle"
-            );
-        }
+        // d nests under BOTH b and c: the first occurrence (under b) is a
+        // normal, fully expanded leaf; the second (under c) is a DEP-64
+        // `seen` leaf rather than a re-expansion.
+        let b_child = &a_children[0];
+        assert_eq!(&b_child.key, "skill:b");
+        let b_children = b_child.dependencies.as_ref().expect("b has deps");
+        assert_eq!(b_children.len(), 1, "b must have exactly one child");
+        let d_under_b = &b_children[0];
+        assert_eq!(d_under_b.key, "skill:d", "b's child must be d");
+        assert!(!d_under_b.cycle, "d under b must not be a cycle leaf");
+        assert!(!d_under_b.seen, "d's FIRST occurrence must not be `seen`");
+        assert!(
+            d_under_b
+                .dependencies
+                .as_ref()
+                .is_some_and(|v| v.is_empty()),
+            "d under b is a fully expanded leaf: empty dependencies, not absent"
+        );
 
-        // Serialized shape parity: d appears as a nested object under both b and c.
+        let c_child = &a_children[1];
+        assert_eq!(&c_child.key, "skill:c");
+        let c_children = c_child.dependencies.as_ref().expect("c has deps");
+        assert_eq!(c_children.len(), 1, "c must have exactly one child");
+        let d_under_c = &c_children[0];
+        assert_eq!(d_under_c.key, "skill:d", "c's child must be d");
+        assert!(!d_under_c.cycle, "d under c must not be a cycle leaf");
+        assert!(
+            d_under_c.seen,
+            "d's SECOND occurrence (under c) must be a DEP-64 `seen` leaf"
+        );
+        assert!(
+            d_under_c.dependencies.is_none(),
+            "a `seen` leaf must have no dependencies field"
+        );
+
+        // Serialized shape parity: d appears once fully expanded (under b) and
+        // once as a `seen` leaf (under c).
         let v: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&nodes).unwrap()).unwrap();
         assert_eq!(v[0]["key"], "skill:a");
         assert_eq!(v[0]["dependencies"][0]["key"], "skill:b");
         assert_eq!(v[0]["dependencies"][0]["dependencies"][0]["key"], "skill:d");
+        assert!(
+            v[0]["dependencies"][0]["dependencies"][0]
+                .get("seen")
+                .is_none()
+        );
         assert_eq!(v[0]["dependencies"][1]["key"], "skill:c");
         assert_eq!(v[0]["dependencies"][1]["dependencies"][0]["key"], "skill:d");
+        assert_eq!(v[0]["dependencies"][1]["dependencies"][0]["seen"], true);
 
         // Cross-check against the human renderer: same nodes, same structure.
-        // The human forest renders d twice (once per path); the structured form
-        // must too. Counting "skill:d" occurrences pins the duplication parity.
+        // The human forest shows d twice (once per path: full, then `(seen)`);
+        // the structured form must too. Counting "skill:d" occurrences pins
+        // the parity (the `(seen)` line's text still contains "- skill:d" as a
+        // prefix, so this substring count is unaffected by the DEP-64 change).
         let forest = g.render_forest();
         assert_eq!(
             forest.matches("- skill:d").count(),
             2,
-            "human forest renders d twice (under b and under c): {forest:?}"
+            "human forest shows d twice (under b in full, under c as (seen)): {forest:?}"
+        );
+        assert!(
+            forest.contains("- skill:d (seen)"),
+            "the second occurrence must be marked (seen): {forest:?}"
         );
     }
 
@@ -2965,5 +3193,258 @@ mod tests {
             "[]",
             "empty forest must serialize to a JSON empty array"
         );
+    }
+
+    // ---- DEP-64: bounded rendering (M20 DoS fix) ---------------------------
+
+    /// Build the M20 exploit-shape catalog: for i in 0..levels, `a<i>`
+    /// references `b<i>` and `c<i>`; `b<i>` and `c<i>` each reference
+    /// `a<i+1>` (the last level's b/c terminate the DAG). This is a diamond
+    /// at every level: `a<i+1>` is reachable via two paths (through `b<i>`
+    /// and through `c<i>`), so a renderer that re-expands a node's full
+    /// subtree on every path reaching it produces output that DOUBLES per
+    /// level (exponential in `levels`).
+    fn diamond_chain(levels: usize) -> (Vec<CatalogItem>, HashMap<String, String>) {
+        let mut items = Vec::new();
+        let mut content = HashMap::new();
+        for i in 0..levels {
+            for name in [format!("a{i}"), format!("b{i}"), format!("c{i}")] {
+                items.push(item(ItemKind::Skill, &name, "s"));
+            }
+            content.insert(
+                format!("skill:a{i}"),
+                format!(
+                    "{} {}",
+                    ns_token(&format!("b{i}")),
+                    ns_token(&format!("c{i}"))
+                ),
+            );
+            if i + 1 < levels {
+                content.insert(format!("skill:b{i}"), ns_token(&format!("a{}", i + 1)));
+                content.insert(format!("skill:c{i}"), ns_token(&format!("a{}", i + 1)));
+            }
+            // The last level's b/c get no content, so they reference nothing
+            // and terminate the DAG.
+        }
+        (items, content)
+    }
+
+    /// Build a plain (non-diamond) chain of `len` skills, `n0 -> n1 -> ... ->
+    /// n<len-1>`. Every node is reached exactly once, so DEP-64's `(seen)`
+    /// dedup cannot bound recursion depth here (there is nothing to dedup);
+    /// only the depth cap can.
+    fn plain_chain(len: usize) -> (Vec<CatalogItem>, HashMap<String, String>) {
+        let mut items = Vec::new();
+        let mut content = HashMap::new();
+        for i in 0..len {
+            let name = format!("n{i}");
+            items.push(item(ItemKind::Skill, &name, "s"));
+            if i + 1 < len {
+                content.insert(format!("skill:{name}"), ns_token(&format!("n{}", i + 1)));
+            }
+        }
+        (items, content)
+    }
+
+    #[test]
+    fn diamond_chain_render_tree_is_linear_not_exponential() {
+        // spec: DEP-64
+        // Resolution::render_tree over the M20 exploit shape. `levels = 20`
+        // is chosen so the OLD (pre-DEP-64) exponential renderer would still
+        // finish in a test run -- it would emit on the order of 2^20
+        // (~1,000,000+) lines -- while the linear bound this test asserts
+        // makes that blowup fail immediately rather than requiring the test
+        // to actually wait it out.
+        const LEVELS: usize = 20;
+        let (items, content) = diamond_chain(LEVELS);
+        let total_nodes = items.len();
+
+        let r = resolve(&items, &[0], &no_installed(), reader(content));
+        let tree = r.render_tree(&items);
+        let line_count = tree.lines().count();
+
+        // Fixed behavior: each node's subtree is printed at most once, so
+        // total lines are bounded by the edge count, which is linear in node
+        // count for this graph shape. A generous 4x-node-count bound is still
+        // far below the millions of lines an unfixed exponential renderer
+        // would produce.
+        assert!(
+            line_count <= total_nodes * 4,
+            "rendered tree must be linear in node count, not exponential: \
+             {line_count} lines for {total_nodes} nodes"
+        );
+        assert!(
+            tree.contains("(seen)"),
+            "a diamond of this shape must produce at least one (seen) leaf: {tree:?}"
+        );
+    }
+
+    #[test]
+    fn deep_chain_render_tree_no_stack_overflow_with_truncation_notice() {
+        // spec: DEP-64
+        // A plain chain far longer than MAX_RENDER_DEPTH. Every node is
+        // visited exactly once (no diamond), so the `(seen)` dedup cannot
+        // bound recursion; only the depth cap can. If the depth cap were
+        // absent, this recurses to CHAIN_LEN stack frames and this test
+        // process would abort with a stack overflow rather than reporting a
+        // normal pass/fail -- so simply completing (with the assertions
+        // below) is itself proof the recursion is bounded.
+        const CHAIN_LEN: usize = 5_000;
+        let (items, content) = plain_chain(CHAIN_LEN);
+
+        let r = resolve(&items, &[0], &no_installed(), reader(content));
+        let tree = r.render_tree(&items);
+
+        assert!(
+            tree.contains("(truncated: max depth reached)"),
+            "a chain past the depth cap must end in an explicit truncation notice: {:?}",
+            &tree[tree.len().saturating_sub(200)..]
+        );
+        let line_count = tree.lines().count();
+        assert!(
+            line_count < CHAIN_LEN / 2,
+            "rendering must stop well short of the full chain length: \
+             {line_count} lines for a {CHAIN_LEN}-node chain"
+        );
+    }
+
+    #[test]
+    fn diamond_chain_forest_is_linear_not_exponential() {
+        // spec: DEP-64
+        // InstalledGraph::render_forest (the `recall --tree` / non-interactive
+        // `probe` path, reachable post-install) over the same M20 exploit
+        // shape as diamond_chain_render_tree_is_linear_not_exponential.
+        const LEVELS: usize = 20;
+        let (items, content) = diamond_chain(LEVELS);
+        let total_nodes = items.len();
+        let installed_keys: HashSet<String> = items
+            .iter()
+            .map(|it| it.key().as_str().to_string())
+            .collect();
+
+        let g = installed_graph(&items, &installed_keys, reader(content));
+        let forest = g.render_forest();
+        let line_count = forest.lines().count();
+
+        assert!(
+            line_count <= total_nodes * 4,
+            "installed forest must be linear in node count, not exponential: \
+             {line_count} lines for {total_nodes} nodes"
+        );
+        assert!(
+            forest.contains("(seen)"),
+            "a diamond of this shape must produce at least one (seen) leaf: {forest:?}"
+        );
+    }
+
+    #[test]
+    fn deep_chain_forest_no_stack_overflow_with_truncation_notice() {
+        // spec: DEP-64
+        // InstalledGraph::render_forest / render_installed_node companion to
+        // deep_chain_render_tree_no_stack_overflow_with_truncation_notice.
+        const CHAIN_LEN: usize = 5_000;
+        let (items, content) = plain_chain(CHAIN_LEN);
+        let installed_keys: HashSet<String> = items
+            .iter()
+            .map(|it| it.key().as_str().to_string())
+            .collect();
+
+        let g = installed_graph(&items, &installed_keys, reader(content));
+        let forest = g.render_forest();
+
+        assert!(
+            forest.contains("(truncated: max depth reached)"),
+            "a chain past the depth cap must end in an explicit truncation notice"
+        );
+        let line_count = forest.lines().count();
+        assert!(
+            line_count < CHAIN_LEN / 2,
+            "rendering must stop well short of the full chain length: \
+             {line_count} lines for a {CHAIN_LEN}-node chain"
+        );
+    }
+
+    #[test]
+    fn diamond_chain_forest_nodes_is_linear_not_exponential() {
+        // spec: DEP-64
+        // The structured JSON counterpart (`recall --tree --json`,
+        // InstalledGraph::forest_nodes / build_node) over the same M20
+        // exploit shape: total DepNode count must stay linear in the
+        // catalog's node count, and at least one `seen: true` leaf must
+        // appear (proving the dedup actually fired).
+        const LEVELS: usize = 20;
+        let (items, content) = diamond_chain(LEVELS);
+        let total_nodes = items.len();
+        let installed_keys: HashSet<String> = items
+            .iter()
+            .map(|it| it.key().as_str().to_string())
+            .collect();
+
+        let g = installed_graph(&items, &installed_keys, reader(content));
+        let nodes = g.forest_nodes();
+
+        fn count_nodes(nodes: &[DepNode]) -> usize {
+            nodes
+                .iter()
+                .map(|n| 1 + n.dependencies.as_deref().map(count_nodes).unwrap_or(0))
+                .sum()
+        }
+        fn has_seen(nodes: &[DepNode]) -> bool {
+            nodes
+                .iter()
+                .any(|n| n.seen || n.dependencies.as_deref().is_some_and(has_seen))
+        }
+
+        let node_count = count_nodes(&nodes);
+        assert!(
+            node_count <= total_nodes * 4,
+            "structured forest must be linear in node count, not exponential: \
+             {node_count} DepNode instances for {total_nodes} catalog nodes"
+        );
+        assert!(
+            has_seen(&nodes),
+            "a diamond of this shape must produce at least one seen leaf"
+        );
+    }
+
+    #[test]
+    fn deep_chain_forest_nodes_truncates_without_stack_overflow() {
+        // spec: DEP-64
+        // build_node's companion to
+        // deep_chain_forest_no_stack_overflow_with_truncation_notice: a long
+        // chain must truncate via a synthetic marker DepNode well short of
+        // the full chain depth rather than recursing to node-count depth.
+        const CHAIN_LEN: usize = 5_000;
+        let (items, content) = plain_chain(CHAIN_LEN);
+        let installed_keys: HashSet<String> = items
+            .iter()
+            .map(|it| it.key().as_str().to_string())
+            .collect();
+
+        let g = installed_graph(&items, &installed_keys, reader(content));
+        let nodes = g.forest_nodes();
+        assert_eq!(nodes.len(), 1, "a plain chain has exactly one root");
+
+        let mut cur = &nodes[0];
+        let mut depth = 0usize;
+        loop {
+            let children = cur
+                .dependencies
+                .as_ref()
+                .expect("a non-truncated, non-leaf node has a dependencies field");
+            assert!(
+                !children.is_empty(),
+                "chain ended without a truncation marker at depth {depth}"
+            );
+            if children[0].key.contains("truncated") {
+                break;
+            }
+            cur = &children[0];
+            depth += 1;
+            assert!(
+                depth < CHAIN_LEN / 2,
+                "must truncate well before the full chain depth (stuck at depth {depth})"
+            );
+        }
     }
 }

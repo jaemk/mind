@@ -73,7 +73,14 @@ pub struct SourceInfo {
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct InstalledInfo {
+    /// Identity, NOT display: drives action dispatch (learn/forget refs). See
+    /// `display_key` below and `SnapshotInstalled::key`'s doc (data.rs) for
+    /// why the two are distinct (H1/TUI-75).
     pub key: String,
+    /// The sanitized form of `key` (TUI-75): the only reading a confirm-modal
+    /// description or dependents list may render.
+    // spec: TUI-75
+    pub display_key: String,
     pub name: String,
     pub source: String,
     pub kind: ItemKind,
@@ -92,7 +99,11 @@ pub struct InstalledInfo {
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct AvailableInfo {
+    /// Identity, NOT display: see the identical note on `InstalledInfo::key`.
     pub key: String,
+    /// The sanitized form of `key` (TUI-75); see `InstalledInfo::display_key`.
+    // spec: TUI-75
+    pub display_key: String,
     pub name: String,
     pub source: String,
     pub kind: ItemKind,
@@ -109,7 +120,14 @@ pub struct AvailableInfo {
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct UnmanagedInfo {
+    /// Identity, NOT display: see the identical note on `InstalledInfo::key`.
+    /// UNMANAGED names in particular carry NO validation gate equivalent to
+    /// DSC-96's catalog-scan rejection (H1/TUI-75) -- they come straight off
+    /// the filesystem.
     pub key: String,
+    /// The sanitized form of `key` (TUI-75); see `InstalledInfo::display_key`.
+    // spec: TUI-75
+    pub display_key: String,
     pub name: String,
     pub kind: ItemKind,
     pub paths: Vec<PathBuf>,
@@ -365,6 +383,7 @@ fn build_installed_group(
                         ),
                         node: TreeNode::InstalledItem(InstalledInfo {
                             key: it.key.clone(),
+                            display_key: it.display_key.clone(),
                             name: it.name.clone(),
                             source: it.source.clone(),
                             kind: it.kind,
@@ -528,6 +547,7 @@ fn build_available_group(
                         ),
                         node: TreeNode::AvailableItem(AvailableInfo {
                             key: it.key.clone(),
+                            display_key: it.display_key.clone(),
                             name: it.name.clone(),
                             source: it.source.clone(),
                             kind: it.kind,
@@ -625,6 +645,7 @@ fn build_unmanaged_children(
             label: format!("{} [{}] (unmanaged)", it.name, it.kind.as_str()),
             node: TreeNode::UnmanagedItem(UnmanagedInfo {
                 key: it.key.clone(),
+                display_key: it.display_key.clone(),
                 name: it.name.clone(),
                 kind: it.kind,
                 paths: it.paths.clone(),
@@ -805,6 +826,7 @@ mod tests {
     fn make_installed(key: &str, name: &str, source: &str, kind: ItemKind) -> SnapshotInstalled {
         SnapshotInstalled {
             key: key.to_string(),
+            display_key: key.to_string(),
             name: name.to_string(),
             source: source.to_string(),
             kind,
@@ -812,12 +834,15 @@ mod tests {
             description: Some(format!("{name} description")),
             deps: vec![],
             stale: false,
+            path: None,
+            recorded_hash: String::new(),
         }
     }
 
     fn make_available(key: &str, name: &str, source: &str, kind: ItemKind) -> SnapshotAvailable {
         SnapshotAvailable {
             key: key.to_string(),
+            display_key: key.to_string(),
             name: name.to_string(),
             source: source.to_string(),
             kind,
@@ -842,6 +867,7 @@ mod tests {
     fn make_unmanaged(name: &str, kind: ItemKind) -> crate::tui::data::SnapshotUnmanaged {
         crate::tui::data::SnapshotUnmanaged {
             key: format!("{}:{}", kind.as_str(), name),
+            display_key: format!("{}:{}", kind.as_str(), name),
             name: name.to_string(),
             kind,
             paths: vec![std::path::PathBuf::from(format!("/lobe/{name}"))],
@@ -1657,6 +1683,7 @@ mod tests {
             label: "parent".to_string(),
             node: TreeNode::InstalledItem(InstalledInfo {
                 key: "skill:parent".to_string(),
+                display_key: "skill:parent".to_string(),
                 name: "parent".to_string(),
                 source: "src/a".to_string(),
                 kind: ItemKind::Skill,
@@ -1670,6 +1697,7 @@ mod tests {
                 label: "child".to_string(),
                 node: TreeNode::InstalledItem(InstalledInfo {
                     key: "skill:child".to_string(),
+                    display_key: "skill:child".to_string(),
                     name: "child".to_string(),
                     source: "src/a".to_string(),
                     kind: ItemKind::Skill,
@@ -2008,6 +2036,7 @@ mod tests {
     ) -> SnapshotInstalled {
         SnapshotInstalled {
             key: key.to_string(),
+            display_key: key.to_string(),
             name: name.to_string(),
             source: source.to_string(),
             kind,
@@ -2015,6 +2044,8 @@ mod tests {
             description: None,
             deps: deps.into_iter().map(|s| s.to_string()).collect(),
             stale: false,
+            path: None,
+            recorded_hash: String::new(),
         }
     }
 
@@ -2290,6 +2321,7 @@ mod tests {
     ) -> SnapshotAvailable {
         SnapshotAvailable {
             key: key.to_string(),
+            display_key: key.to_string(),
             name: name.to_string(),
             source: source.to_string(),
             kind,

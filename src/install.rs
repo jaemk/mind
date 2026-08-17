@@ -283,9 +283,13 @@ pub fn uninstall(paths: &Paths, item: &InstalledItem) -> Result<()> {
             // currently-configured lobe). This handles the case where a lobe
             // was removed from config after install.
             if !p.is_absolute() || p.components().any(|c| c == std::path::Component::ParentDir) {
+                // spec: DSC-95 -- `p` is built from the manifest-recorded link
+                // path, which for an item installed by a pre-DSC-96 binary can
+                // carry an unsanitized name; route it through `display_path`
+                // like every other source-derived path print site.
                 eprintln!(
                     "mind: warning: skipping removal of '{}' -- path is outside all configured agent homes",
-                    p.display()
+                    crate::sanitize::display_path(p)
                 );
                 continue;
             }
@@ -294,9 +298,10 @@ pub fn uninstall(paths: &Paths, item: &InstalledItem) -> Result<()> {
     }
     let store_path = paths.mind_home.join(&item.store);
     if !is_confined_under(&store_path, &store_root) {
+        // spec: DSC-95
         eprintln!(
             "mind: warning: skipping removal of '{}' -- path is outside the mind store root",
-            store_path.display()
+            crate::sanitize::display_path(&store_path)
         );
         return Ok(());
     }
@@ -588,18 +593,32 @@ fn expand_references(
     // DEP-6: validate every `requires` entry before touching any file. A bad
     // entry here aborts the staged install (the live copy is still untouched).
     // spec: DSC-95 -- `MindError::BadReference`'s `#[error(...)]` Display
-    // interpolates `item` verbatim, with no sanitizing step of its own.
+    // interpolates `item`, `referent`, and `in_source` verbatim, with no
+    // sanitizing step of its own, so every field handed to it here is
+    // sanitized at construction. `item.key()` was already validated by
+    // `is_safe_item_name` (DSC-96), so `.display()` there is defense-in-depth
+    // only; `referent` and `in_source` are NOT pre-validated (an `{{ns:}}`
+    // token's inner text, or a `requires`/`expand` entry, or a source name
+    // read from an arbitrary directory), so each is run through
+    // `sanitize::strip_ansi` at its call site, BEFORE it is composed into a
+    // larger wrapper string (sanitize.rs's doc: compose-then-sanitize lets one
+    // field's dangling escape eat its neighbors).
     let bad_ref = |referent: String, reason: crate::error::BadRefReason| MindError::BadReference {
         item: item.key().display(),
         referent,
         reason,
-        in_source: item.source.clone(),
+        in_source: crate::sanitize::strip_ansi(&item.source),
     };
     // A `requires` entry that fails to resolve names the specific cause (DEP-7),
     // mirroring what `review` reports, so the install-time error is not the blunt
     // "does not match any item" for a ref that in fact crosses sources, is
     // malformed, or is merely ambiguous.
-    let bad_requires = |entry: &str, reason| bad_ref(format!("requires: {entry}"), reason);
+    let bad_requires = |entry: &str, reason| {
+        // spec: DSC-95 -- sanitize the raw mind.toml `requires` entry before
+        // composing it into the `"requires: {entry}"` wrapper.
+        let entry = crate::sanitize::strip_ansi(entry);
+        bad_ref(format!("requires: {entry}"), reason)
+    };
     for entry in &item.requires {
         // spec: DEP-6 DEP-7
         use crate::error::BadRefReason::{AmbiguousKind, CrossSource, InvalidRef};
@@ -629,6 +648,13 @@ fn expand_references(
     // ships; a bad entry aborts the staged install as a BadReference, the same
     // transactional pre-swap failure a bad `requires` or `{{ns:}}` raises, so a
     // typo is caught loudly rather than left as an un-expanded literal.
+    // spec: DSC-95 -- sanitize the raw mind.toml `expand` entry before
+    // composing it into the `"expand: {entry}"` wrapper (same rationale as
+    // `bad_requires` above).
+    let bad_expand = |entry: &str, reason| {
+        let entry = crate::sanitize::strip_ansi(entry);
+        bad_ref(format!("expand: {entry}"), reason)
+    };
     let mut expand_set: std::collections::HashSet<std::path::PathBuf> =
         std::collections::HashSet::new();
     for entry in &item.expand {
@@ -644,12 +670,12 @@ fn expand_references(
             )
         });
         if unsafe_path {
-            return Err(bad_ref(format!("expand: {entry}"), InvalidRef));
+            return Err(bad_expand(entry, InvalidRef));
         }
         // Must name a real file within the staged item. A single-file item
         // (agent/rule) has no bundled files, so any entry is a miss.
         if !(root.is_dir() && root.join(rel).is_file()) {
-            return Err(bad_ref(format!("expand: {entry}"), NoMatch));
+            return Err(bad_expand(entry, NoMatch));
         }
         expand_set.insert(rel.to_path_buf());
     }
@@ -696,10 +722,21 @@ fn expand_references(
         // TOOL-20: a listed non-markdown file renders path tokens absolute; a
         // markdown file keeps the TOOL-16 `~` form.
         let path_ctx = if is_listed && !is_md { &ctx_abs } else { &ctx };
-        let expanded = namespace::expand(&content, &item.prefix, &names, &bare_names)
-            .map_err(|name| bad_ref(format!("{{{{ns:{name}}}}}"), NoMatch))?;
-        let expanded = namespace::expand_paths(&expanded, path_ctx)
-            .map_err(|(referent, reason)| bad_ref(referent, reason))?;
+        let expanded =
+            namespace::expand(&content, &item.prefix, &names, &bare_names).map_err(|name| {
+                // spec: DSC-95 -- `name` is the raw `{{ns:name}}` inner text
+                // (`namespace::expand` enforces no character class on it), so
+                // sanitize it BEFORE composing the `{{ns:...}}` wrapper below.
+                let name = crate::sanitize::strip_ansi(&name);
+                bad_ref(format!("{{{{ns:{name}}}}}"), NoMatch)
+            })?;
+        let expanded =
+            namespace::expand_paths(&expanded, path_ctx).map_err(|(referent, reason)| {
+                // spec: DSC-95 -- `referent` arrives already composed by
+                // `namespace::expand_paths`; sanitize the whole (single, final)
+                // value here since nothing further is appended to it afterward.
+                bad_ref(crate::sanitize::strip_ansi(&referent), reason)
+            })?;
         std::fs::write(&file, expanded).map_err(|e| MindError::io(&file, e))?;
     }
     Ok(())
@@ -781,9 +818,15 @@ fn hook_cwd(store: &Path) -> std::path::PathBuf {
 ///
 /// Returns whether the hook actually RAN (`true`) or was skipped (`false`),
 /// so an install-hook caller can record the outcome (HOOK-110).
+///
+/// `display_key` is display-only (DSC-95): it lands straight in a
+/// `println!`/[`crate::render::note`] below, never in an identity comparison
+/// or a filesystem path, so a caller MUST pass an already-sanitized value
+/// (e.g. [`CatalogItem::display_key`]/[`InstalledItem::display_key`]), never a
+/// raw item key.
 fn run_item_hook(
     event: &str,
-    key: &str,
+    display_key: &str,
     source: &str,
     cmd: &str,
     store: &Path,
@@ -802,7 +845,7 @@ fn run_item_hook(
     } else if !crate::hook::is_tty() {
         // spec: CLI-217
         crate::render::note(format!(
-            "note: skipped {event} hook for {key} in a non-interactive context; {effect}"
+            "note: skipped {event} hook for {display_key} in a non-interactive context; {effect}"
         ));
         false
     } else {
@@ -824,11 +867,13 @@ fn run_item_hook(
         // Same as the build-hook line above: a progress line on stdout in text
         // mode, unreachable from `--json` stdout by the process-wide redirect.
         // spec: CLI-217
-        println!("running {event} hook for {key}");
+        println!("running {event} hook for {display_key}");
         crate::hook::run_hook(cmd, &cwd, source, event)?;
     } else if crate::hook::is_tty() && !dangerously_skip {
         // spec: CLI-217
-        crate::render::note(format!("note: skipped {event} hook for {key}; {effect}"));
+        crate::render::note(format!(
+            "note: skipped {event} hook for {display_key}; {effect}"
+        ));
     }
     Ok(run)
 }
@@ -907,8 +952,6 @@ fn run_item_install_hooks_recording(
     recorded: &mut Vec<crate::source::RecordedHook>,
 ) -> Result<()> {
     for hook in hooks {
-        // spec: DSC-95 -- `run_item_hook`'s `key` param is display-only (it
-        // lands straight in a `println!`/`note`), so pass the sanitized form.
         let ran = run_item_hook(
             "install",
             &item.display_key(),
@@ -937,8 +980,6 @@ pub fn run_item_uninstall_hooks(
     dangerously_skip: bool,
 ) -> Result<()> {
     for hook in hooks {
-        // spec: DSC-95 -- see the identical note in
-        // `run_item_install_hooks_recording`.
         run_item_hook(
             "uninstall",
             &item.display_key(),
@@ -1667,6 +1708,183 @@ mod tests {
         assert!(
             matches!(err, crate::error::MindError::BadReference { .. }),
             "an unresolved token in a listed file must be a hard BadReference: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+
+    // ---- DSC-95: BadReference field sanitization -----------------------------
+    //
+    // `MindError::BadReference`'s Display interpolates `item`, `referent`, and
+    // `in_source` verbatim (error.rs owns that -- it does no sanitizing of its
+    // own by design). `item` is always safe (it comes from `CatalogItem::key()`,
+    // already validated by `is_safe_item_name`, DSC-96), but `referent` and
+    // `in_source` are NOT pre-validated: `referent` is built from a `{{ns:}}`
+    // token's raw inner text or a raw `requires`/`expand` mind.toml entry, and
+    // `in_source` is the raw source name. These tests pin that `install.rs`
+    // sanitizes each at its construction site, before composing a wrapper
+    // string, so a hostile source cannot smuggle an ANSI/OSC payload into the
+    // error text `main.rs` prints with a bare `eprintln!`.
+
+    /// A `{{ns:name}}` token whose inner text carries an OSC-52 (clipboard
+    /// write) payload, naming a sibling that does not exist. The unresolved
+    /// name comes straight from `namespace::expand`'s raw `after[..end].trim()`
+    /// (namespace.rs enforces no character class on it), so this is the exact
+    /// vector M3 describes: an ordinary `mind learn` of a hostile repo could
+    /// otherwise write the terminal's clipboard or repaint the screen through
+    /// the resulting error message.
+    #[test]
+    fn hostile_ns_token_referent_is_sanitized_in_bad_reference() {
+        // spec: DSC-95
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let staging =
+            std::env::temp_dir().join(format!("mind-ns-hostile-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&staging);
+        std::fs::create_dir_all(&staging).unwrap();
+        // OSC 52 clipboard-write sequence (ESC ] 52 ; c ; <base64> BEL), naming a
+        // sibling ("evil") that does not exist in this source.
+        let payload = "\x1b]52;c;UEFZTE9BRA==\x07evil";
+        std::fs::write(
+            staging.join("SKILL.md"),
+            format!("# hello\n{{{{ns:{payload}}}}}\n"),
+        )
+        .unwrap();
+
+        let item = skill_item_at(
+            "review",
+            std::path::PathBuf::from("/src/skills/review"),
+            Vec::new(),
+        );
+        let siblings = vec![item.clone()]; // no "evil..." sibling
+
+        let err = expand_references(&staging, &item, &siblings, std::path::Path::new("/store"))
+            .unwrap_err();
+        let crate::error::MindError::BadReference { referent, .. } = &err else {
+            panic!("expected a BadReference, got {err:?}");
+        };
+        assert!(
+            !referent.contains('\x1b') && !referent.contains('\u{07}'),
+            "the referent must not carry the raw ESC/BEL bytes of the OSC \
+             payload: {referent:?}"
+        );
+        // Still actionable: the sibling name that failed to resolve survives
+        // sanitizing (it sits in a run of plain letters).
+        assert!(
+            referent.contains("evil"),
+            "the referent must still name enough of the token to be \
+             actionable: {referent:?}"
+        );
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+
+    /// A `requires:` entry carrying a raw ANSI escape (not merely a typo'd
+    /// name) must not reach `BadReference.referent` unsanitized either -- the
+    /// same construction-site discipline as the `{{ns:}}` case above, but for
+    /// the `bad_requires` closure.
+    #[test]
+    fn hostile_requires_entry_referent_is_sanitized_in_bad_reference() {
+        // spec: DSC-95
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let staging =
+            std::env::temp_dir().join(format!("mind-requires-hostile-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&staging);
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("SKILL.md"), "# hello\n").unwrap();
+
+        let hostile_entry = "agent:nonexistent\x1b[31mRED\x1b[0m";
+        let item = skill_item_at(
+            "review",
+            std::path::PathBuf::from("/src/skills/review"),
+            vec![hostile_entry.to_string()],
+        );
+        let siblings = vec![item.clone()]; // no matching sibling
+
+        let err = expand_references(&staging, &item, &siblings, std::path::Path::new("/store"))
+            .unwrap_err();
+        let crate::error::MindError::BadReference { referent, .. } = &err else {
+            panic!("expected a BadReference, got {err:?}");
+        };
+        assert!(
+            !referent.contains('\x1b'),
+            "a hostile requires entry must not leak a raw ESC byte into the \
+             referent: {referent:?}"
+        );
+        assert!(
+            referent.contains("agent:nonexistent") && referent.contains("RED"),
+            "the referent must still name the entry: {referent:?}"
+        );
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+
+    /// Same discipline for `expand:` entries (the `bad_expand` closure), on
+    /// both the unsafe-path and the missing-file branches.
+    #[test]
+    fn hostile_expand_entry_referent_is_sanitized_in_bad_reference() {
+        // spec: DSC-95
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let staging =
+            std::env::temp_dir().join(format!("mind-expand-hostile-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&staging);
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("SKILL.md"), "# hi\n").unwrap();
+
+        let hostile_entry = "resources/missing\x1b[31mRED\x1b[0m.py";
+        let item = skill_item_expand(
+            "review",
+            std::path::PathBuf::from("/src/skills/review"),
+            vec![hostile_entry.to_string()],
+        );
+        let siblings = vec![item.clone()];
+        let err = expand_references(&staging, &item, &siblings, std::path::Path::new("/store"))
+            .unwrap_err();
+        let crate::error::MindError::BadReference { referent, .. } = &err else {
+            panic!("expected a BadReference, got {err:?}");
+        };
+        assert!(
+            !referent.contains('\x1b'),
+            "a hostile expand entry must not leak a raw ESC byte into the \
+             referent: {referent:?}"
+        );
+        assert!(
+            referent.contains("resources/missing") && referent.contains("RED"),
+            "the referent must still name the entry: {referent:?}"
+        );
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+
+    /// `in_source` is the raw source name (for a local-path meld, a directory
+    /// name), which is just as unvalidated as `referent`. This pins it is
+    /// sanitized at the same `bad_ref` construction site.
+    #[test]
+    fn hostile_source_name_is_sanitized_as_in_source_in_bad_reference() {
+        // spec: DSC-95
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let staging =
+            std::env::temp_dir().join(format!("mind-in-source-hostile-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&staging);
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("SKILL.md"), "# hello\n").unwrap();
+
+        let mut item = skill_item_at(
+            "review",
+            std::path::PathBuf::from("/src/skills/review"),
+            vec!["agent:nonexistent".to_string()],
+        );
+        item.source = "local\x1b[31m/test/repo\x1b[0m".to_string();
+        let siblings = vec![item.clone()];
+
+        let err = expand_references(&staging, &item, &siblings, std::path::Path::new("/store"))
+            .unwrap_err();
+        let crate::error::MindError::BadReference { in_source, .. } = &err else {
+            panic!("expected a BadReference, got {err:?}");
+        };
+        assert!(
+            !in_source.contains('\x1b'),
+            "in_source must not leak a raw ESC byte from the source name: \
+             {in_source:?}"
+        );
+        assert!(
+            in_source.contains("local") && in_source.contains("test/repo"),
+            "in_source must still name the source: {in_source:?}"
         );
         let _ = std::fs::remove_dir_all(&staging);
     }

@@ -901,3 +901,152 @@ fn dsc91_normal_plugin_manifest_is_unaffected_by_the_cap() {
         r.stdout, r.stderr
     );
 }
+
+// ----- DSC-95: BadReference / uninstall-warning field sanitization -----
+//
+// `MindError::BadReference`'s Display interpolates `item`, `referent`, and
+// `in_source` verbatim (error.rs owns that print format, not install.rs), so
+// install.rs must sanitize each field at its construction site before a
+// hostile source's raw bytes ever reach it. And the uninstall confinement
+// warnings print a manifest-recorded path directly, which for an item
+// installed by a pre-DSC-96 binary can carry the same kind of payload. Each
+// test below is a PAIR of assertions: the raw ESC/BEL byte is gone from the
+// full process output, AND enough of the value survives sanitizing to remain
+// actionable -- proving the value was cleaned, not silently dropped.
+
+#[test]
+fn learn_with_hostile_ns_token_fails_without_leaking_escape_bytes() {
+    // spec: DSC-95 -- a `{{ns:name}}` token whose inner text carries an OSC-52
+    // (clipboard-write) escape payload, naming a sibling that does not exist,
+    // must fail `mind learn` with output carrying no raw ESC/BEL byte.
+    // Otherwise an ordinary `mind learn` of a hostile repo could repaint the
+    // terminal or write the clipboard through the resulting BadReference text.
+    let source = Sandbox::bare("ns-hostile");
+    source.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\nname: review\ndescription: Review the diff\n---\n# review\n\
+         {{ns:\x1b]52;c;UEFZTE9BRA==\x07evil}}\n",
+    );
+
+    let meld = source.mind(&["meld", &source.source_spec(), "--link-only"]);
+    assert!(
+        meld.success,
+        "meld --link-only must register the source (the hostile token is only \
+         validated at install time): {} {}",
+        meld.stdout, meld.stderr
+    );
+
+    let learn = source.mind(&["learn", "skill:review"]);
+    assert!(
+        !learn.success,
+        "learning an item with an unresolvable hostile {{{{ns:}}}} token must fail"
+    );
+    let combined = format!("{}{}", learn.stdout, learn.stderr);
+    assert!(
+        !combined.contains('\x1b') && !combined.contains('\u{07}'),
+        "the BadReference error must not leak the raw ESC/BEL bytes of the \
+         OSC payload: {combined:?}"
+    );
+    assert!(
+        combined.contains("evil"),
+        "the error should still name enough of the referent to be \
+         actionable: {combined}"
+    );
+}
+
+#[test]
+fn forget_with_hostile_link_outside_agent_homes_warns_without_leaking_escape() {
+    // spec: DSC-95 -- the uninstall confinement warning at a `links` entry
+    // that escapes every configured agent home must route the recorded path
+    // through `sanitize::display_path`, not print it raw.
+    let sb = Sandbox::new("m9-link");
+    let r = sb.mind(&["meld", &sb.source_spec(), "--yes"]);
+    assert!(r.success, "meld --yes failed: {} {}", r.stdout, r.stderr);
+    assert!(
+        sb.claude_home.join("skills/review").exists(),
+        "the real review install must exist before the manifest hand-edit"
+    );
+
+    // Hand-edit manifest.json: clone the real "review" entry under a distinct
+    // key, with a hostile ANSI-carrying `links` path that both escapes every
+    // configured agent home (a `..` component) and differs from the real
+    // install's recorded link, so removing it cannot touch the real files.
+    let manifest_path = sb.mind_home.join("manifest.json");
+    let raw = std::fs::read_to_string(&manifest_path).unwrap();
+    let mut doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    let review = doc["items"]["skill:review"].clone();
+    assert!(!review.is_null(), "the review entry must exist: {doc}");
+    let mut hostile = review.clone();
+    hostile["name"] = serde_json::Value::String("hostile-link".to_string());
+    hostile["bare_name"] = serde_json::Value::String("hostile-link".to_string());
+    hostile["store"] = serde_json::Value::String("store/skill/hostile-link".to_string());
+    let hostile_link = "/does-not-exist-mind-test-root\x1b[31mRED\x1b[0m/../evil".to_string();
+    hostile["links"] = serde_json::Value::Array(vec![serde_json::Value::String(hostile_link)]);
+    doc["items"]["skill:hostile-link"] = hostile;
+    std::fs::write(&manifest_path, serde_json::to_vec_pretty(&doc).unwrap()).unwrap();
+
+    let forget = sb.mind(&["forget", "skill:hostile-link"]);
+    let combined = format!("{}{}", forget.stdout, forget.stderr);
+    assert!(
+        !combined.contains('\x1b'),
+        "the uninstall confinement warning must not leak a raw ESC byte: {combined:?}"
+    );
+    assert!(
+        combined.contains("outside all configured agent homes"),
+        "the warning text must still appear: {combined}"
+    );
+    assert!(
+        combined.contains("RED"),
+        "the warning must still show enough of the sanitized path to be \
+         actionable: {combined}"
+    );
+
+    // The real "review" install is untouched: it was a distinct manifest key
+    // with a distinct recorded link.
+    assert!(sb.claude_home.join("skills/review").exists());
+}
+
+#[test]
+fn forget_with_hostile_store_outside_root_warns_without_leaking_escape() {
+    // spec: DSC-95 -- the uninstall confinement warning at a `store` entry
+    // that escapes the mind store root must route the recorded path through
+    // `sanitize::display_path`, not print it raw.
+    let sb = Sandbox::new("m9-store");
+    let r = sb.mind(&["meld", &sb.source_spec(), "--yes"]);
+    assert!(r.success, "meld --yes failed: {} {}", r.stdout, r.stderr);
+
+    let manifest_path = sb.mind_home.join("manifest.json");
+    let raw = std::fs::read_to_string(&manifest_path).unwrap();
+    let mut doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    let review = doc["items"]["skill:review"].clone();
+    assert!(!review.is_null(), "the review entry must exist: {doc}");
+    let mut hostile = review.clone();
+    hostile["name"] = serde_json::Value::String("hostile-store".to_string());
+    hostile["bare_name"] = serde_json::Value::String("hostile-store".to_string());
+    // A `..` component lexically escapes `~/.mind/store` entirely (LIFE-44's
+    // `is_confined_under` rejects any `..` outright), and an ANSI escape is
+    // embedded in the path text itself.
+    hostile["store"] =
+        serde_json::Value::String("../outside-mind-store-root\x1b[31mRED\x1b[0m".to_string());
+    hostile["links"] = serde_json::Value::Array(vec![]);
+    doc["items"]["skill:hostile-store"] = hostile;
+    std::fs::write(&manifest_path, serde_json::to_vec_pretty(&doc).unwrap()).unwrap();
+
+    let forget = sb.mind(&["forget", "skill:hostile-store"]);
+    let combined = format!("{}{}", forget.stdout, forget.stderr);
+    assert!(
+        !combined.contains('\x1b'),
+        "the uninstall confinement warning must not leak a raw ESC byte: {combined:?}"
+    );
+    assert!(
+        combined.contains("outside the mind store root"),
+        "the warning text must still appear: {combined}"
+    );
+    assert!(
+        combined.contains("RED"),
+        "the warning must still show enough of the sanitized path to be \
+         actionable: {combined}"
+    );
+
+    assert!(sb.claude_home.join("skills/review").exists());
+}

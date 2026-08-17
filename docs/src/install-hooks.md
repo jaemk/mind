@@ -88,9 +88,10 @@ mind hooks run <source>#<item> --event build  # rebuild the item (transactional)
 mind hooks list <source>                    # list hooks in effect, run nothing
 ```
 
-`<target>` is a source selector (the source's own `[[hooks]]`) or an
-`owner/repo#item` ref (that item's hooks); a ref that matches several sources or
-items runs each in turn. `--event` selects the lifecycle event (`install`,
+`<target>` is a source filter (the source's own `[[hooks]]`) or an
+`owner/repo#item` ref (that item's hooks); there is no ambiguity check, so a
+filter matching several sources, or a ref matching several items, runs the
+hook for each in turn. `--event` selects the lifecycle event (`install`,
 `uninstall`, or `build`); `build` is valid only for an item target.
 
 An item-link instance's own identity is `owner/repo#<path>` (see

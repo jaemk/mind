@@ -377,8 +377,15 @@ prevent the lost-update and torn-read races a plain read-modify-write would allo
   attacker-controlled location once curl normalizes the `..` segments, so the
   `SHA256SUMS` digest check would compare the attacker's binary against the
   attacker's own digest file and silently pass. A rejected value fails with a
-  structured `SelfUpdatePolicy` error naming the value, refused before any
+  structured error naming the value (`SelfUpdateInvalidTarget`, a DIFFERENT
+  kind from a managed-policy refusal -- see STO-77), refused before any
   network call the download step would make.
+
+  A single leading `v` on the raw `--to` value (or a managed-policy pin) is
+  stripped BEFORE this validation runs (and before the `decision` comparison),
+  so `evolve --to v1.2.3` behaves identically to `--to 1.2.3`; only one
+  leading `v` is stripped, not repeated ones (`--to vv1.2.3` still fails
+  validation, since the un-stripped second `v` is not a digit).
 
   `is_plausible_release_tag` is a purpose-built sibling of
   `mindfile::is_plausible_version` (used for `min-mind-version` and policy
@@ -388,12 +395,63 @@ prevent the lost-update and torn-read races a plain read-modify-write would allo
   refuses a legitimate semver prerelease/build suffix (e.g. `1.2.3-rc1`).
   Testing a prerelease before promoting it is a legitimate thing to want, and
   since GitHub's `releases/latest` never surfaces a prerelease, an explicit
-  `--to` is the only way to reach one, so the release-tag validator accepts
-  `\d+(\.\d+)*(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?` while still rejecting `/`,
-  `\`, whitespace, control characters, and a `..` run anywhere in the string
-  -- including inside the prerelease/build suffix (e.g. `1.0.0-../..`), which
-  would otherwise smuggle a traversal segment past a naive "digits-and-dots is
-  gone, so a dash is safe" reading of the fix.
+  `--to` is the only way to reach one, so the release-tag validator accepts an
+  IDENTIFIER-LIST grammar, not a bare character class: a dotted-numeric base
+  (`\d+(\.\d+)*`) optionally followed by a semver-shaped prerelease suffix
+  (`-...`) and/or build-metadata suffix (`+...`), each suffix itself
+  `ident(\.ident)*` with `ident = [0-9A-Za-z-]+` -- i.e. EVERY dot-separated
+  identifier in a suffix must be non-empty. This is deliberately not the same
+  shape as "one run of `[0-9A-Za-z.-]+`" (a bare character class): since `.`
+  is itself a member of that charset, a bare-character-class reading would
+  also "match" a suffix built of nothing but dots, saying nothing about a
+  component between two dots being non-empty. The identifier-list grammar
+  rejects `/`, `\`, whitespace, control characters, and -- via the
+  non-empty-identifier rule -- any `..` run anywhere in the string, including
+  inside the prerelease/build suffix (e.g. `1.0.0-../..`, `1.0.0-..`), which
+  would otherwise smuggle a traversal segment (or an ambiguous empty
+  identifier) past a naive "digits-and-dots is gone, so a dash is safe"
+  reading of the fix.
+- `STO-77` Two follow-on corrections to `evolve`'s target-version handling,
+  both driven by the STO-76 prerelease grammar:
+
+  - **A malformed target is a distinct error from a policy refusal.** A
+    `--to` (or resolved) value that fails STO-76's `is_plausible_release_tag`
+    check is `SelfUpdateInvalidTarget`, never `SelfUpdatePolicy`. The two are
+    different failures: `SelfUpdatePolicy` (JSON `kind`
+    `self-update-policy`) means the managed policy disabled self-update
+    (POL-52) or the requested version conflicts with a policy pin (POL-53);
+    `SelfUpdateInvalidTarget` (JSON `kind` `self-update-invalid-target`)
+    means the value never had a chance to reach policy evaluation at all --
+    it is not a plausible version/tag shape. Reporting the malformed-value
+    case under the policy kind would read, to a human or a CI log parser
+    matching on `kind`, as "the managed policy blocks self-update" when the
+    real problem is a bad argument.
+
+  - **A numeric tie between `current` and `target` is resolved by prerelease
+    precedence, not assumed up to date.** `decision` (STO-76's caller) treats
+    two versions sharing the same dotted numeric base as a "tie". Before this
+    fix, the tie was broken in only ONE direction: a prerelease `current`
+    moving onto its own (non-prerelease) base `target` offered `Update`.
+    Two other same-base pairings fell through to `UpToDate` even under an
+    EXPLICIT `--to`, silently doing nothing: two prereleases of the same base
+    pinned against each other (e.g. running `0.24.0-rc1`, `--to
+    0.24.0-rc2` -- the main reason to pin an rc release at all), and a
+    plain-release `current` explicitly pinned onto a same-base prerelease
+    `target` (e.g. running the released `0.24.0`, `--to 0.24.0-rc1`). Both
+    are now resolved: a prerelease predates its own base release (in either
+    direction), and two prereleases of the same base are ordered against
+    each other by semver precedence (semver.org precedence rule #11 --
+    dot-separated identifiers compared pairwise, a purely-numeric identifier
+    compared numerically and always ordering below a non-numeric one, a
+    shorter identifier list ordering below one that extends it). The target
+    ordering ABOVE `current` is `Update`; ordering BELOW `current` is a
+    refused explicit downgrade (`PinnedBelowCurrent`, CLI-147) when
+    `explicit` is true, or `UpToDate` when it is not (the non-explicit path,
+    a fetched `latest` tag, never carries a prerelease in practice, so this
+    arm is a safety net, not a normally-reached case). Byte-identical
+    `current`/`target` strings, and two same-base versions differing only in
+    build metadata (`+...`, which semver does not order on), stay
+    `UpToDate`.
 - `STO-65` `evolve --check` (and the run path's equivalent report) names the
   resolved release target triple (`target_triple`, e.g.
   `x86_64-unknown-linux-musl`) alongside the version comparison, so the exact

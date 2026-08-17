@@ -581,7 +581,18 @@ pub fn is_plausible_version(s: &str) -> bool {
 /// particular `/` and `\`) fails the per-component check regardless of `.`
 /// placement.
 ///
-/// Grammar (informally): `\d+(\.\d+)*(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?`
+/// Grammar (informally, an IDENTIFIER LIST, not a bare character class): the
+/// base is `\d+(\.\d+)*`; each optional suffix is `ident(\.ident)*` with
+/// `ident = [0-9A-Za-z-]+` (one or more of that charset, so EVERY
+/// dot-separated identifier must itself be non-empty). This is deliberately
+/// NOT the same shape as `(-[0-9A-Za-z.-]+)?` (a single run of the charset
+/// including `.`): that looser reading would also "accept" a suffix built
+/// entirely of dots (e.g. `..`, `-[dot][dot]`), since `.` is itself a member
+/// of the charset -- it says nothing about a component between two dots
+/// being non-empty. The identifier-list form is what the implementation
+/// above actually enforces (`is_valid_semver_identifiers` splits on `.` and
+/// rejects any empty piece), and it is what excludes STO-76's traversal
+/// payload smuggled inside a suffix (e.g. `1.0.0-../..`).
 pub fn is_plausible_release_tag(s: &str) -> bool {
     let (rest, build) = match s.split_once('+') {
         Some((rest, build)) => (rest, Some(build)),
@@ -1198,6 +1209,48 @@ mod tests {
         assert!(!is_plausible_release_tag("-rc1"));
         assert!(!is_plausible_release_tag("v1.2.3"));
         assert!(!is_plausible_release_tag("1.x.0"));
+    }
+
+    #[test]
+    // spec: STO-76
+    fn is_plausible_release_tag_rejects_further_boundary_cases() {
+        // L7: boundary cases the doc grammar implies but the existing test
+        // suite did not exercise. Each behaves correctly today; pinned here
+        // so a future rewrite of the split-based validator cannot silently
+        // change the ordering/behavior at these edges.
+
+        // A pure dot-run suffix with NO slash: under a naive reading of the
+        // OLD doc comment's bare character-class grammar (`.` is a member of
+        // `[0-9A-Za-z.-]`), a suffix of only dots would look "in charset" and
+        // could seem plausible. The real implementation splits on `.` and
+        // rejects any EMPTY identifier, so a run of two (or more) consecutive
+        // dots -- with no other characters between them -- is still refused.
+        // This is the precise grammar gap the corrected doc comment above
+        // calls out: it is the difference between "every char is in the
+        // charset" and "every dot-separated identifier is non-empty".
+        assert!(!is_plausible_release_tag("1.0.0-.."));
+        assert!(!is_plausible_release_tag("1.0.0+.."));
+
+        // A trailing `-` (an empty prerelease identifier: split_once yields
+        // prerelease = "").
+        assert!(!is_plausible_release_tag("1.2.3-"));
+        // A trailing `+` (an empty build identifier).
+        assert!(!is_plausible_release_tag("1.2.3+"));
+        // A SECOND `+`: split_once('+') takes the FIRST '+', so the build
+        // identifier becomes "a+b" (embedding a literal '+', which is
+        // outside the semver-identifier charset) -- not "a" with a silently
+        // dropped "+b" tail.
+        assert!(!is_plausible_release_tag("1.2.3+a+b"));
+        assert!(
+            is_plausible_release_tag("1.2.3+a"),
+            "sanity: a clean single build identifier is accepted"
+        );
+
+        // A multi-byte (non-ASCII) component inside the prerelease suffix:
+        // `is_valid_semver_identifiers` checks `b.is_ascii_alphanumeric()`
+        // per BYTE, so a UTF-8 multi-byte character (whose continuation
+        // bytes are never ASCII-alphanumeric) is rejected.
+        assert!(!is_plausible_release_tag("1.2.3-rc\u{e9}"));
     }
 
     #[test]

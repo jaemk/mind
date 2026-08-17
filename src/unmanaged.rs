@@ -342,6 +342,50 @@ mod tests {
         );
     }
 
+    /// `resolve`'s `AmbiguousItem` candidates must reach the caller already
+    /// sanitized (DSC-95). This is the ONE unrestricted sanitize site in the
+    /// codebase: an unmanaged item's `name` is a lobe filesystem entry read
+    /// straight off disk, not gated by `is_safe_item_name` the way a catalog
+    /// name is (DSC-96 only guards catalog names). So an ESC byte can
+    /// actually reach `it.key().display()` here in practice, unlike most
+    /// other sanitize call sites which are defense-in-depth against an input
+    /// that is already restricted upstream. Reverting `key().display()` to
+    /// `key().as_str().to_string()` at the `candidates` call site would still
+    /// compile and would still pass every OTHER test in this module -- only
+    /// this one exercises the raw ESC byte actually surviving to the
+    /// `candidates` list.
+    // spec: DSC-95
+    #[test]
+    fn resolve_candidates_are_sanitized_for_a_hostile_unmanaged_name() {
+        let items = vec![
+            UnmanagedItem {
+                kind: ItemKind::Skill,
+                name: "evil\x1b[31mname".to_string(),
+                paths: vec![],
+            },
+            UnmanagedItem {
+                kind: ItemKind::Agent,
+                name: "evil\x1b[31mname".to_string(),
+                paths: vec![],
+            },
+        ];
+        let r = parse_item_ref("evil\x1b[31mname").unwrap();
+        let err = resolve(&items, &r).unwrap_err();
+        match err {
+            MindError::AmbiguousItem { candidates, .. } => {
+                assert!(
+                    candidates.iter().all(|c| !c.contains('\x1b')),
+                    "candidates must not carry a raw ESC byte: {candidates:?}"
+                );
+                assert!(
+                    candidates.iter().any(|c| c.contains("evil")),
+                    "candidates must still name the item: {candidates:?}"
+                );
+            }
+            other => panic!("expected AmbiguousItem, got {other:?}"),
+        }
+    }
+
     /// resolve matches by name (kind-qualified disambiguates), rejects a
     /// source-qualified ref, and errors on ambiguity.
     /// spec: UNM-4

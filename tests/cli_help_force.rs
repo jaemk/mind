@@ -621,3 +621,89 @@ fn evolve_help_mentions_prerelease_offered_its_matching_release() {
          its matching release: {out}"
     );
 }
+
+// ---- H2: `upgrade`'s `owner/repo#` source qualifier is a filter, not a ref,
+// and `evolve --to`'s prerelease form is now documented -------------------
+
+#[test]
+fn upgrade_help_does_not_claim_the_qualifier_resolves_to_one_source() {
+    // spec: CLI-63 -- `upgrade`'s embedded `owner/repo#` source qualifier is
+    // matched by `resolve::source_matches` (a per-item trailing-suffix test,
+    // same as `sync`'s filter) with no uniqueness check; it is NOT a ref like
+    // `unmeld`'s source name. The old help text claimed the opposite -- that
+    // it "must resolve to exactly one source (erroring rather than matching
+    // several)" -- which is false (a suffix shared by several sources matches
+    // and upgrades all of them, re-running each one's install hook) and must
+    // not reappear.
+    let sb = Sandbox::new();
+    let out = sb.help(&["upgrade", "--help"]);
+    assert!(
+        !out.contains("must resolve to exactly one source"),
+        "upgrade --help must not claim the owner/repo# qualifier resolves to \
+         exactly one source (it has no ambiguity check): {out}"
+    );
+    assert!(
+        out.contains("filter"),
+        "upgrade --help must describe the owner/repo# qualifier as a filter: {out}"
+    );
+}
+
+#[test]
+fn evolve_help_mentions_the_to_flag_can_pin_a_prerelease() {
+    // spec: CLI-229 -- `--to` is the only way to reach a prerelease, since
+    // the latest-release lookup (`releases/latest`) never surfaces one;
+    // `evolve --help` must say so, and note the accepted leading-`v` form.
+    let sb = Sandbox::new();
+    let out = sb.help(&["evolve", "--help"]);
+    assert!(
+        out.to_lowercase().contains("prerelease"),
+        "evolve --help must mention the --to flag's prerelease form: {out}"
+    );
+    assert!(
+        out.contains("leading `v`") || out.contains("leading v"),
+        "evolve --help should note that a single leading v is accepted/stripped: {out}"
+    );
+}
+
+// ---- M14: `hooks run <target>` is a filter, not a ref ---------------------
+
+#[test]
+fn hooks_run_help_calls_target_a_filter_not_a_ref() {
+    // spec: CLI-194 -- `hooks run <target>`'s source form is matched via
+    // `source_matches_glob` with no uniqueness check (a filter), and an item
+    // ref may itself match several items too, running the hook for each. The
+    // old help text called this "A ref that matches several sources or items
+    // runs each in turn" -- the exact inversion of the ref/filter vocabulary,
+    // on the highest-consequence filter on the surface (it runs arbitrary
+    // shell for every match).
+    let sb = Sandbox::new();
+    let out = sb.help(&["hooks", "run", "--help"]);
+    assert!(
+        !out.contains("A ref that matches several"),
+        "hooks run --help must not call its multi-match target a ref: {out}"
+    );
+    assert!(
+        out.to_lowercase().contains("filter"),
+        "hooks run --help must call its source target a filter: {out}"
+    );
+}
+
+// ---- H2: `sync --upgrade`'s disclosure is not suppressed by --yes --------
+
+#[test]
+fn sync_upgrade_help_notes_disclosure_not_suppressed_by_yes() {
+    // spec: CLI-233 -- the multi-source disclosure printed before the
+    // `--upgrade` pass's install-hook re-run is NOT suppressed by `--yes`
+    // (only the `[Y/n]` confirmation itself is). The old help text said
+    // nothing about `--yes` here, reading as if `--yes` silenced this too.
+    let sb = Sandbox::new();
+    let out = sb.help(&["sync", "--help"]);
+    let upgrade_block = out
+        .split("--upgrade")
+        .nth(1)
+        .expect("sync --help must document --upgrade");
+    assert!(
+        upgrade_block.contains("--yes"),
+        "sync --help's --upgrade doc must carry the --yes caveat: {out}"
+    );
+}

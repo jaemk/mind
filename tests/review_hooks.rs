@@ -423,3 +423,105 @@ fn review_hardcoded_path_shared_tool_wording_distinct_from_other_item() {
          {hardcoded_line}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// M6 / CLI-224: sanitize each source-derived field BEFORE composing it into a
+// finding message, never after -- `strip_ansi_escapes::strip` treats a bare
+// OSC introducer (`\x1b]`) with no terminator as "sequence still open" and
+// consumes everything after it to end of input, so composing an unsanitized
+// field ahead of the rest of the message (then sanitizing the whole composed
+// string once, at `Finding` construction) lets that field's dangling escape
+// eat its neighbors -- precisely the explanatory text a disclosure exists to
+// print. These assert the trailing explanatory text SURVIVES, not merely
+// that no ESC byte reaches stdout: eating the text also eats the escape, so
+// an absence-of-ESC-only assertion would pass on the broken (compose-then-
+// sanitize) code too.
+// ---------------------------------------------------------------------------
+
+/// A `[[items]] link` override ending in a dangling OSC introducer must not
+/// swallow the rest of the DSC-97 custom-link disclosure. `is_safe_link_rel`
+/// checks path shape only (never control characters), so a link value like
+/// `skills/greet\x1b]` is accepted by the scan and reaches `review`'s
+/// custom-link advisory unsanitized unless the composition-order fix is
+/// applied.
+/// spec: CLI-224, DSC-95
+#[test]
+fn review_custom_link_dangling_osc_does_not_eat_disclosure() {
+    let sb = Sandbox::new("agents");
+    write(
+        &sb.source.join("mind.toml"),
+        "[[items]]\nkind = \"skill\"\nname = \"greet\"\npath = \"greet\"\n\
+         link = \"skills/greet\\u001B]\"\n",
+    );
+    write(
+        &sb.source.join("greet/SKILL.md"),
+        "---\ndescription: greet\n---\n# greet\n",
+    );
+
+    let target = sb.source_spec();
+    let r = sb.mind(&["review", &target]);
+
+    assert!(r.success, "custom-link is advisory only: {}", r.stdout);
+    assert!(
+        r.stdout.contains("custom-link"),
+        "expected a custom-link advisory: {}",
+        r.stdout
+    );
+    // The regression: the disclosure's trailing explanatory text must survive
+    // a dangling OSC escape planted in the `link` field.
+    assert!(
+        r.stdout.contains("instead of the default location"),
+        "custom-link disclosure must not be truncated by a dangling OSC \
+         escape in `link`: {}",
+        r.stdout
+    );
+    // No raw ESC byte should reach stdout either (belt and braces, but not
+    // the load-bearing assertion above -- see the comment on this section).
+    assert!(
+        !r.stdout.contains('\x1b'),
+        "no raw ESC byte should reach stdout: {:?}",
+        r.stdout
+    );
+}
+
+/// A per-item `install` hook command ending in a dangling OSC introducer must
+/// not swallow the rest of the HOOK-85 item-hook disclosure -- specifically
+/// the closing quote that follows the command in the message. `mind review`
+/// is the pre-meld safety check for exactly this kind of hook, so silently
+/// truncating its warning is the worst place for the M6 compose-then-
+/// sanitize bug to live.
+/// spec: CLI-224, HOOK-85
+#[test]
+fn review_item_hook_dangling_osc_does_not_eat_disclosure() {
+    let sb = Sandbox::new("agents");
+    write(
+        &sb.source.join("mind.toml"),
+        "[[items]]\nkind = \"skill\"\nname = \"greet\"\npath = \"greet\"\n\
+         install = \"echo hi\\u001B]\"\n",
+    );
+    write(
+        &sb.source.join("greet/SKILL.md"),
+        "---\ndescription: greet\n---\n# greet\n",
+    );
+
+    let target = sb.source_spec();
+    let r = sb.mind(&["review", &target]);
+
+    assert!(r.success, "item-hook is advisory only: {}", r.stdout);
+    let line = r
+        .stdout
+        .lines()
+        .find(|l| l.contains("item-hook"))
+        .unwrap_or_else(|| panic!("expected an item-hook advisory: {}", r.stdout));
+    // The regression: the full disclosure, including the closing quote after
+    // the command, must survive a dangling OSC escape in the hook command.
+    assert!(
+        line.contains("declares an install hook 'echo hi'"),
+        "item-hook disclosure must not be truncated by a dangling OSC escape \
+         in the hook command: {line}"
+    );
+    assert!(
+        !line.contains('\x1b'),
+        "no raw ESC byte should reach stdout: {line:?}"
+    );
+}

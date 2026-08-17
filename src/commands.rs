@@ -941,7 +941,7 @@ fn meld_recursive(
         let preview = if items.is_empty() {
             String::new()
         } else {
-            // spec: CLI-232 DSC-95 -- sanitize each name before joining (not the
+            // spec: DSC-95 -- sanitize each name before joining (not the
             // composed preview afterward): an unterminated escape in one name
             // would otherwise consume the rest of the joined list.
             let names: Vec<String> = items.iter().map(|it| it.display_key()).collect();
@@ -1869,7 +1869,7 @@ fn warn_unguarded_references(items: &[CatalogItem]) {
             }
         }
         if !refs.is_empty() {
-            // spec: CLI-232 DSC-95 -- sanitize each field before composing (not
+            // spec: DSC-95 -- sanitize each field before composing (not
             // the finished line): both the item key and each sibling name are
             // source-controlled, and an unterminated escape in one would
             // otherwise consume the trailing advisory text.
@@ -2541,7 +2541,10 @@ fn unmeld_one(
                 item_keys.len()
             );
             for k in &item_keys {
-                println!("  {} {k}", out.bullet());
+                // spec: DSC-95 -- an item key embeds a source-controlled bare
+                // name; sanitize before printing, mirroring the identical
+                // listing 23 lines below (the `item_keys.len() > 1` case).
+                println!("  {} {}", out.bullet(), strip_ansi(k));
             }
             // spec: CLI-225 -- `source_name` is source-influenced and lands
             // in a pasteable `mind forget` remedy, so it is shell-quoted
@@ -2563,7 +2566,7 @@ fn unmeld_one(
                 item_keys.len()
             );
             for k in &item_keys {
-                // spec: CLI-232 DSC-95
+                // spec: DSC-95
                 println!("  {} {}", out.warn(), strip_ansi(k));
             }
         }
@@ -3024,7 +3027,7 @@ pub fn learn(paths: &Paths, item_ref: &str, dry_run: bool, flow: InstallFlow) ->
     if dry_run {
         if out.json {
             let mut result = MutationResult::new("learn", item_ref, "dry-run");
-            // spec: CLI-232 DSC-95
+            // spec: DSC-95
             result.installed = closure.iter().map(|t| t.display_key()).collect();
             return print_json(&result);
         }
@@ -3032,7 +3035,7 @@ pub fn learn(paths: &Paths, item_ref: &str, dry_run: bool, flow: InstallFlow) ->
             print!("{}", resolution.render_tree(&items));
         }
         println!("would learn {} item(s):", closure.len());
-        // spec: CLI-232 DSC-95 -- sanitize each cell before `print_rows` composes
+        // spec: DSC-95 -- sanitize each cell before `print_rows` composes
         // the line.
         let rows = closure
             .iter()
@@ -3080,7 +3083,7 @@ pub fn learn(paths: &Paths, item_ref: &str, dry_run: bool, flow: InstallFlow) ->
             && !policy.allow_matches(&policy_identity(&registry, &target.source))
         {
             if !out.json {
-                // spec: CLI-232 DSC-95
+                // spec: DSC-95
                 println!(
                     "{} skipping {} from {}: source not permitted by the managed policy's allowlist",
                     out.warn(),
@@ -3126,7 +3129,7 @@ pub fn learn(paths: &Paths, item_ref: &str, dry_run: bool, flow: InstallFlow) ->
             && !out.json
         {
             let path = path.clone();
-            // spec: CLI-232 DSC-95 -- sanitize the path component before
+            // spec: DSC-95 -- sanitize the path component before
             // composing the prompt (not the whole prompt after), so the
             // trailing "exists and is not..." text cannot be swallowed by an
             // unterminated escape in the path.
@@ -3394,8 +3397,12 @@ pub fn install_source_items_subset(
             // metacharacters, and lands in a pasteable `mind learn` remedy,
             // so it is shell-quoted before printing rather than framed in
             // bare single quotes.
+            // spec: DSC-95 -- `shell_quote` neutralizes shell metacharacters
+            // only; it does not strip an ANSI escape, which can still ride
+            // out inside the single quotes it wraps `ref_str` in. Sanitize
+            // first, then shell-quote the already-sanitized string.
             let ref_str = if refs.len() == 1 {
-                refs[0].clone()
+                strip_ansi(&refs[0])
             } else {
                 format!("{source_name}#*")
             };
@@ -3509,7 +3516,10 @@ pub fn install_provisioned_items(
             learn(paths, &item_ref, false, flow)
         };
         if let Err(e) = outcome {
-            failures.push((key.into(), e));
+            // spec: DSC-95 -- `key` is source-controlled; sanitize before it
+            // rides into the (source_name, key) pair that the `sync` caller
+            // below prints raw otherwise.
+            failures.push((key.display(), e));
         }
     }
     (installed_keys, failures)
@@ -4084,7 +4094,10 @@ pub(crate) fn emit_meld_json_result(
     let mut result = MutationResult::new("meld", &summary.source_name, "melded");
     result.count = Some(summary.added);
     result.skipped = summary.skipped;
-    result.installed = installed;
+    // spec: DSC-95 -- `installed` rides straight off `learn_collecting`'s raw
+    // (unsanitized) keys; sanitize each one before it lands in the `--json`
+    // envelope, mirroring `learn()`'s own `result.installed` assignment.
+    result.installed = installed.iter().map(|k| strip_ansi(k)).collect();
     if pending > 0 {
         result.pending_items = Some(pending);
     }
@@ -4150,7 +4163,7 @@ fn source_status(paths: &Paths, source_name: &str) -> Result<()> {
                 };
                 // Stale installs use the ↑ marker, distinct from ✓ for current.
                 let marker = if stale { out.stale() } else { out.ok() };
-                // spec: CLI-232 DSC-95
+                // spec: DSC-95
                 println!(
                     "  {} {}  installed @ {}{}",
                     marker,
@@ -4163,7 +4176,7 @@ fn source_status(paths: &Paths, source_name: &str) -> Result<()> {
             // identity and lands in a pasteable `mind learn` remedy, so it is
             // shell-quoted before printing rather than framed in bare single
             // quotes.
-            // spec: CLI-232 DSC-95 -- sanitize before shell-quoting too, so a
+            // spec: DSC-95 -- sanitize before shell-quoting too, so a
             // control/ANSI byte cannot ride the pasteable remedy either.
             None => println!(
                 "  {} {}  not installed (run `mind learn {}`)",
@@ -4446,6 +4459,23 @@ fn dest_source_prefix(dest_path: &std::path::Path, registry: &Registry) -> Optio
         .filter(|p| !p.is_empty())
 }
 
+/// Build `absorb`'s reported `kind:name` key (the human "absorbed ... -> managed
+/// as {key}" line and the `--json` `result.key` field) from the item's kind and
+/// its destination-prefixed effective name.
+///
+/// spec: DSC-95 -- M7: `effective_name` is derived (via `crate::namespace::apply`)
+/// from the unmanaged item's on-disk NAME, which comes off the lobe filesystem
+/// and is NOT DSC-96-gated (that gate only runs at catalog-scan time for a
+/// managed source's items, not for an unmanaged lobe entry `absorb` claims).
+/// This used to compose the raw name straight into the printed/JSON key, right
+/// alongside the ALREADY-sanitized `item.key().display()` used two lines away
+/// in the same message -- one field sanitized, the other not, in the same
+/// line. Sanitize here, at the one composition site, mirroring `item.key()
+/// .display()`.
+fn absorb_effective_key(kind: ItemKind, effective_name: &str) -> String {
+    format!("{}:{}", kind.as_str(), strip_ansi(effective_name))
+}
+
 /// `mind absorb <ref> [--to <path>] [--force]` — claim a single unmanaged lobe
 /// item into a version-controlled source and install it as a managed item.
 ///
@@ -4529,7 +4559,7 @@ pub fn absorb(
         // Print what we will do.
         if !out.json {
             println!("absorb will:");
-            // spec: CLI-232 DSC-95
+            // spec: DSC-95
             println!(
                 "  move  {} -> {}",
                 display_path(&source_lobe_path),
@@ -4642,7 +4672,7 @@ pub fn absorb(
     let registry_for_prefix = Registry::load(paths)?;
     let effective_prefix = dest_source_prefix(&dest_path, &registry_for_prefix);
     let effective_name = crate::namespace::apply(&item.name, &effective_prefix);
-    let effective_key = format!("{}:{}", item.kind.as_str(), effective_name);
+    let effective_key = absorb_effective_key(item.kind, &effective_name);
 
     // ABS-1 / ABS-8: learn the item under the destination source.
     // When `--json` is in effect use `learn_collecting` (no JSON emitted by
@@ -4890,7 +4920,7 @@ pub fn forget(
         if !out.json {
             println!("forget would remove {} item(s):", keys.len());
             for key in &keys {
-                // spec: CLI-232 DSC-95
+                // spec: DSC-95
                 println!("  {} {}", out.warn(), crate::sanitize::strip_ansi(key));
             }
         }
@@ -4928,7 +4958,7 @@ pub fn forget(
         let graph = crate::deps::installed_graph(&catalog, &installed_keys, read_item_text);
         let dependents = graph.dependents(removed_key);
         if !dependents.is_empty() && !yes && !force {
-            // spec: CLI-232 DSC-95 -- sanitize each field before composing, not
+            // spec: DSC-95 -- sanitize each field before composing, not
             // the finished line.
             let removed_display = crate::sanitize::strip_ansi(removed_key);
             if !out.json {
@@ -4985,7 +5015,7 @@ pub fn forget(
             return Err(e);
         }
         removed_sources.insert(item.source.clone());
-        // spec: CLI-232 DSC-95 -- the display copy pushed for `--json`'s
+        // spec: DSC-95 -- the display copy pushed for `--json`'s
         // `removed` array and the human line are sanitized; `key` itself stays
         // raw (used above to key `manifest.items`).
         let key_display = crate::sanitize::strip_ansi(&key);
@@ -5027,7 +5057,7 @@ pub fn forget(
 /// store copy or manifest entry, so the manifest is left untouched.
 fn forget_unmanaged_single(item: &crate::unmanaged::UnmanagedItem, yes: bool) -> Result<()> {
     let out = crate::render::ctx();
-    // spec: CLI-232 DSC-95 -- sanitize each path before joining, not the
+    // spec: DSC-95 -- sanitize each path before joining, not the
     // joined string after (an unterminated escape in one path would
     // otherwise consume the remaining paths in the list).
     let where_ = item
@@ -5039,7 +5069,7 @@ fn forget_unmanaged_single(item: &crate::unmanaged::UnmanagedItem, yes: bool) ->
     // UNM-5: always state explicitly that the item is not mind-managed and that
     // removal deletes the user's own file or directory. This is the disclosure
     // that immediately precedes deletion of the user's OWN files, so it must
-    // use the sanitized key like every other print site (CLI-232 DSC-95).
+    // use the sanitized key like every other print site (DSC-95).
     if !out.json {
         println!(
             "{} {} is not managed by mind: it is your own file or directory at {where_}, not a mind install. Removing it deletes it.",
@@ -5052,7 +5082,7 @@ fn forget_unmanaged_single(item: &crate::unmanaged::UnmanagedItem, yes: bool) ->
         // this is the worst-case site (UNM-5): without this, `--json` on a TTY
         // would delete the user's own unmanaged file with zero consent.
         if !crate::hook::is_tty() || out.json {
-            // spec: CLI-232 DSC-95
+            // spec: DSC-95
             return Err(MindError::ConfirmationRequired {
                 action: json_confirmation_action(
                     format!("removing unmanaged {}", item.display_key()),
@@ -5771,12 +5801,16 @@ pub fn sync_with_selector(
         // so `sync <source> --upgrade` upgrades (and re-runs install hooks
         // for, HOOK-11) only the named source(s), not every installed item
         // from every melded source.
+        // spec: CLI-235 -- also thread the raw `source_selector` TEXT (not
+        // just the names it resolved to) so the multi-source disclosure can
+        // echo the filter that did the matching (M19).
         let pass = upgrade_inner_scoped(
             paths,
             yes,
             None,
             true,
             selected.as_deref(),
+            source_selector,
             None,
             dangerously_skip_hook_check,
             dangerously_skip_build_hook_check,
@@ -5796,7 +5830,12 @@ pub fn sync_with_selector(
         result.skipped = sync_skipped;
         // Everything this run installed or re-installed: the POL-58 auto_meld
         // provisioning pass, then the `--upgrade` pass.
-        result.installed = provisioned_keys;
+        //
+        // spec: DSC-95 -- `provisioned_keys` rides off `learn_collecting`'s
+        // raw (unsanitized) keys (via `install_provisioned_items`); sanitize
+        // before assigning to the `--json` field. `upgraded` is already
+        // sanitized (`upgrade_inner_scoped` pushes `display_key()`).
+        result.installed = provisioned_keys.iter().map(|k| strip_ansi(k)).collect();
         result.installed.extend(upgraded);
         print_json(&result)?;
     }
@@ -5954,6 +5993,7 @@ pub fn upgrade_no_sync_keys(
         None,
         true,
         None,
+        None,
         Some(keys),
         dangerously_skip_hook_check,
         dangerously_skip_build_hook_check,
@@ -5992,6 +6032,7 @@ fn upgrade_inner(
         no_sync,
         None,
         None,
+        None,
         dangerously_skip_hook_check,
         dangerously_skip_build_hook_check,
     )
@@ -6004,11 +6045,15 @@ fn upgrade_inner(
 /// upgrade`, unchanged); `Some(names)` restricts both the per-item delta loop
 /// AND the HOOK-11 install-hook re-run to sources in `names`, so `sync
 /// <source> --upgrade` cannot silently upgrade items from (or re-run install
-/// hooks for, HOOK-11) a source the caller never named. `key_scope` is the
-/// analogous restriction by exact item KEY (`kind:name`) rather than by
-/// source or by `item_ref` glob, threaded from the TUI's confirmed-set apply
-/// (`upgrade_no_sync_keys`); `None` means unrestricted by key (every other
-/// caller, unchanged).
+/// hooks for, HOOK-11) a source the caller never named. `source_filter_desc`
+/// is the raw filter TEXT that produced `source_scope` (the `sync <source>`
+/// selector string), used only to echo it in the CLI-234/CLI-235 disclosure
+/// below (M19); `item_ref` doubles as its own filter text when given (the
+/// `upgrade <item>` case), so callers with an `item_ref` pass `None` here.
+/// `key_scope` is the analogous restriction by exact item KEY (`kind:name`)
+/// rather than by source or by `item_ref` glob, threaded from the TUI's
+/// confirmed-set apply (`upgrade_no_sync_keys`); `None` means unrestricted by
+/// key (every other caller, unchanged).
 #[allow(clippy::too_many_arguments)]
 fn upgrade_inner_scoped(
     paths: &Paths,
@@ -6016,18 +6061,12 @@ fn upgrade_inner_scoped(
     item_ref: Option<&str>,
     no_sync: bool,
     source_scope: Option<&[String]>,
+    source_filter_desc: Option<&str>,
     key_scope: Option<&[String]>,
     dangerously_skip_hook_check: bool,
     dangerously_skip_build_hook_check: bool,
 ) -> Result<Option<MutationResult>> {
     let out = crate::render::ctx();
-    // spec: CLI-233 -- captured before `source_scope` is reshaped into a
-    // `HashSet` below (order lost, display no longer possible): only a
-    // filter-driven scope (`sync <filter> --upgrade`'s already-resolved
-    // `selected`, threaded in as `source_scope`) is ever `Some` here with
-    // more than one name, so this is exactly the "filter matched more
-    // sources than the caller pictured" case the confirmation must name.
-    let scope_names: Vec<String> = source_scope.map(<[String]>::to_vec).unwrap_or_default();
     // POL-3: load the managed policy once (fail closed on Err; None = inert).
     let policy = Policy::load()?;
     let mut registry = Registry::load(paths)?;
@@ -6060,23 +6099,81 @@ fn upgrade_inner_scoped(
     // source scope is present, intersect with it too (a `sync <source>
     // --upgrade` names the source directly). With none of the three, `None`
     // means every source is in scope, leaving the unscoped behavior unchanged.
+    let from_filter: Option<HashSet<String>> = filter.as_ref().map(|f| {
+        manifest
+            .items
+            .values()
+            .filter(|it| crate::resolve::installed_matches_glob(it, f))
+            .map(|it| it.source.clone())
+            .collect::<HashSet<String>>()
+    });
+    let from_keys: Option<HashSet<String>> = key_scope.as_ref().map(|keys| {
+        manifest
+            .items
+            .values()
+            .filter(|it| keys.contains(it.key().as_str()))
+            .map(|it| it.source.clone())
+            .collect::<HashSet<String>>()
+    });
+
+    // spec: CLI-234 -- the multi-source disclosure's scope is the UNION of
+    // every scoping mechanism in play (a filter, a source scope, or a key
+    // scope), computed here BEFORE `hook_scope` below consumes `from_filter`/
+    // `from_keys` by moving them into its (intersecting, not union-ing)
+    // candidate set. `CLI-233`'s original form derived the note's names from
+    // `source_scope` alone (the `sync <filter> --upgrade` case only), so
+    // `upgrade '<suffix>#*'` -- an identical HOOK-11 blast radius, every
+    // matched source's items upgraded and its install hook possibly re-run --
+    // never populated it: `source_scope` is always `None` for a plain
+    // `upgrade <item>` call, so `scope_names` stayed empty and the note never
+    // fired no matter how many sources the item-ref filter actually matched.
+    let scope_names: Vec<String> = {
+        let mut set: HashSet<String> = HashSet::new();
+        for s in [
+            from_filter.as_ref(),
+            source_scope.as_ref(),
+            from_keys.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            set.extend(s.iter().cloned());
+        }
+        let mut v: Vec<String> = set.into_iter().collect();
+        v.sort();
+        v
+    };
+    // spec: CLI-235 -- the raw filter TEXT to echo in the note (M19): an
+    // `item_ref` (the `upgrade <item>` case) doubles as its own filter text;
+    // otherwise fall back to `source_filter_desc` (the `sync <source>`
+    // selector string). Both `None` for the TUI's key-scoped apply, which has
+    // no textual filter to echo.
+    let filter_desc = item_ref.or(source_filter_desc);
+    let multi_source_note = multi_source_upgrade_note(&scope_names, filter_desc);
+    // spec: CLI-235 -- hoisted ABOVE `rerun_source_hooks` and unconditional on
+    // `yes`/`pending` (M1: this used to print only from inside the `!yes`
+    // confirmation block below, which is reached AFTER `rerun_source_hooks`
+    // already ran -- future-tense wording ("possibly re-running") describing
+    // a side effect already taken -- and only when a pending upgrade existed;
+    // a re-run that found nothing pending, or any `--yes` run, never
+    // disclosed the multi-source blast radius at all). Fires whenever the
+    // scope spans more than one source, independent of `pending`/`yes`.
+    // `--json`'s stdout carries exactly one JSON document (tests/json_stdout.rs),
+    // so the disclosure goes to stderr there instead of stdout (also covers
+    // `--json --yes`, which has no `ConfirmationRequired` to carry it at
+    // all); text mode prints it directly. The `!yes` `--json` refusal further
+    // below still folds this same note into `ConfirmationRequired.action`
+    // (CLI-233, unchanged), so a `--json` caller without `--yes` sees it
+    // through that channel too.
+    if let Some(note) = &multi_source_note {
+        if out.json {
+            eprintln!("{} {note}", out.warn());
+        } else {
+            println!("  {} {note}", out.warn());
+        }
+    }
+
     let hook_scope: Option<HashSet<String>> = {
-        let from_filter = filter.as_ref().map(|f| {
-            manifest
-                .items
-                .values()
-                .filter(|it| crate::resolve::installed_matches_glob(it, f))
-                .map(|it| it.source.clone())
-                .collect::<HashSet<String>>()
-        });
-        let from_keys = key_scope.as_ref().map(|keys| {
-            manifest
-                .items
-                .values()
-                .filter(|it| keys.contains(it.key().as_str()))
-                .map(|it| it.source.clone())
-                .collect::<HashSet<String>>()
-        });
         let candidates: Vec<HashSet<String>> = [from_filter, source_scope.clone(), from_keys]
             .into_iter()
             .flatten()
@@ -6138,7 +6235,7 @@ fn upgrade_inner_scoped(
             // the user never selected.
             UpgradeDisposition::PolicyBlocked => {
                 if !out.json {
-                    // spec: CLI-232 DSC-95
+                    // spec: DSC-95
                     println!(
                         "{} skipping {} from {}: source not permitted by the managed policy's allowlist",
                         out.warn(),
@@ -6154,7 +6251,7 @@ fn upgrade_inner_scoped(
             // and point at `introspect` to diagnose the drift.
             UpgradeDisposition::SourceNotRegistered => {
                 if !out.json {
-                    // spec: CLI-232 DSC-95
+                    // spec: DSC-95
                     println!(
                         "{} skipping {} from {}: source is not registered (not currently melded); run `mind introspect` to check for drift",
                         out.warn(),
@@ -6253,7 +6350,7 @@ fn upgrade_inner_scoped(
                 && occupant.bare_name == up.old.bare_name
                 && occupant.source == up.old.source;
             if !same_identity {
-                // spec: CLI-232 DSC-95 -- sanitize each field passed into the
+                // spec: DSC-95 -- sanitize each field passed into the
                 // error before it is embedded in the (source-controlled-name
                 // carrying) Display message.
                 return Err(MindError::UpgradeRenameCollision {
@@ -6285,7 +6382,7 @@ fn upgrade_inner_scoped(
                     && prev.old.bare_name == up.old.bare_name
                     && prev.old.source == up.old.source;
                 if !same_identity {
-                    // spec: CLI-232 DSC-95
+                    // spec: DSC-95
                     return Err(MindError::UpgradeRenameCollision {
                         key: strip_ansi(&key),
                         existing_source: strip_ansi(&prev.old.source),
@@ -6308,16 +6405,18 @@ fn upgrade_inner_scoped(
         // non-interactive *text*-mode run (e.g. piped stdin with no reply) was
         // never able to apply an upgrade unprompted -- only `--json` could
         // bypass it, by skipping the confirm call entirely.
-        // spec: CLI-233 -- a filter (`sync <filter> --upgrade`) can match more
-        // sources than the caller pictured; when it matched more than one,
-        // name them here so the blast radius (every matched source's items
-        // upgraded, and its install hook possibly re-run, HOOK-11) is visible
-        // BEFORE consent, in both the text prompt and the `--json` refusal's
-        // action text. A single-match filter (or no filter at all, e.g. plain
-        // `mind upgrade`) leaves the prompt exactly as before CLI-233.
-        let multi_source_note = multi_source_upgrade_note(&scope_names);
+        // spec: CLI-233 CLI-234 CLI-235 -- a filter (`sync <filter> --upgrade`,
+        // or `upgrade <item>`) can match more sources than the caller
+        // pictured; when it matched more than one, `multi_source_note` (built
+        // above, and already disclosed once -- stdout in text mode, stderr
+        // under `--json` -- before `rerun_source_hooks` ran) names them. The
+        // `!yes` `--json` refusal still folds the SAME note into
+        // `ConfirmationRequired.action`, so a `--json` caller without `--yes`
+        // sees it there too, alongside the earlier stderr disclosure. Text
+        // mode does NOT print it again here: CLI-235 already printed it once,
+        // above, before the hooks it warns about ran.
         if out.json {
-            // spec: CLI-232 CLI-233
+            // spec: CLI-232 CLI-233 CLI-234 CLI-235
             let action = match &multi_source_note {
                 Some(note) => {
                     json_confirmation_action(format!("applying pending upgrades ({note})"), true)
@@ -6325,9 +6424,6 @@ fn upgrade_inner_scoped(
                 None => json_confirmation_action("applying pending upgrades", true),
             };
             return Err(MindError::ConfirmationRequired { action });
-        }
-        if let Some(note) = &multi_source_note {
-            println!("  {} {note}", out.warn());
         }
         if !confirm_default_yes("apply these upgrades?")? {
             println!("aborted; nothing changed");
@@ -6442,7 +6538,7 @@ fn upgrade_inner_scoped(
                 );
             }
         }
-        // spec: CLI-232 DSC-95
+        // spec: DSC-95
         applied.push(installed.display_key());
         manifest.insert(installed);
     }
@@ -6695,7 +6791,7 @@ fn print_upgrade_report(registry: &Registry, pending: &[Upgrade]) {
     };
     println!("{n} {noun} {verb} upstream changes:\n");
     for up in pending {
-        // spec: CLI-232 DSC-95 -- sanitize every source-controlled field before
+        // spec: DSC-95 -- sanitize every source-controlled field before
         // composing the line (not the composed line after): this report
         // prints right before a default-yes confirmation, so an unterminated
         // escape in one field must not be able to consume a later one and
@@ -6791,7 +6887,7 @@ pub fn recall(
                 // subtree_node returns None when the item is installed but has
                 // no catalog entry (and thus no node in the graph); fall back
                 // to a no-dependency node so the caller always gets valid JSON.
-                // spec: CLI-232 DSC-95 -- the fallback's own key must be
+                // spec: DSC-95 -- the fallback's own key must be
                 // sanitized too (the lookup itself needs the raw key).
                 let node = graph
                     .subtree_node(key.as_str())
@@ -6810,7 +6906,7 @@ pub fn recall(
             let key = found.key();
             match graph.render_subtree(key.as_str()) {
                 Some(subtree) => print!("{subtree}"),
-                // spec: CLI-232 DSC-95
+                // spec: DSC-95
                 None => println!("{}", found.display_key()),
             }
         } else {
@@ -7106,7 +7202,7 @@ pub fn recall(
             }
         }
         for m in orphans {
-            // spec: CLI-232 DSC-95
+            // spec: DSC-95
             rows.push(vec![
                 format!("  {}", out.warn()),
                 m.display_key(),
@@ -7138,7 +7234,7 @@ pub fn recall(
             let rows: Vec<Vec<String>> = unmanaged
                 .iter()
                 .map(|u| {
-                    // spec: CLI-232 DSC-95 -- sanitize each path before
+                    // spec: DSC-95 -- sanitize each path before
                     // joining, not the joined string after.
                     let where_ = u
                         .paths
@@ -7334,7 +7430,7 @@ pub fn probe(
     // UNM-3: unmanaged rows are marked in the source column and carry their lobe
     // path in place of a description. No dependency nesting for unmanaged items.
     for u in &unmanaged {
-        // spec: CLI-232 DSC-95 -- sanitize each path before joining, not the
+        // spec: DSC-95 -- sanitize each path before joining, not the
         // joined string after.
         let where_ = u
             .paths
@@ -7363,7 +7459,7 @@ struct ProbeRow<'a> {
     installed: bool,
     kind: &'a str,
     name: String,
-    // spec: CLI-232 DSC-95 -- owned and sanitized (not `&'a str` borrowed
+    // spec: DSC-95 -- owned and sanitized (not `&'a str` borrowed
     // straight from the catalog item): the source name and description are
     // both source-controlled text.
     source: String,
@@ -7645,7 +7741,7 @@ pub fn introspect(paths: &Paths, fix: bool, json: bool) -> Result<()> {
         manifest.save(paths)?;
     }
 
-    // spec: CLI-232 DSC-95 -- every issue's `target`/`message`, and every
+    // spec: DSC-95 -- every issue's `target`/`message`, and every
     // `repaired` note, can embed a source-controlled name (an item key, a
     // source name, a lobe path): sanitize once here, covering both the
     // `--json` `Report` below and the human `println!` loop further down,
@@ -8640,30 +8736,52 @@ fn json_confirmation_action(base: impl std::fmt::Display, json: bool) -> String 
     }
 }
 
-/// Build the note naming an `--upgrade` filter's matched sources when it
-/// matched more than one (CLI-233). `sync <filter> --upgrade` threads its
-/// already-resolved matches into `upgrade_inner_scoped` as `source_scope`; a
-/// filter (unlike `unmeld`'s/`upgrade`'s ref-style source selection, CLI-20)
-/// intentionally allows more than one match, so a name like `mind sync skills
-/// --upgrade` can silently widen to upgrading -- and re-running the install
-/// hook of (HOOK-11) -- every source the filter happened to match, while
-/// reading as if it named one. Naming the matched sources here, right before
-/// the confirmation, makes that blast radius visible before the user
-/// consents. `None` when `names` has zero or one entries: an unscoped
-/// `--upgrade` pass (bare `mind upgrade`, or `sync --upgrade` with no
-/// filter) and a single-match filter both leave the prompt exactly as it was
-/// before CLI-233 -- a single match already reads as naming that one source,
-/// so growing the prompt there would be noise, not signal.
-// spec: CLI-233
-fn multi_source_upgrade_note(names: &[String]) -> Option<String> {
+/// Build the note naming an upgrade pass's matched sources when the scope
+/// spans more than one source (CLI-233; extended from `sync <filter>
+/// --upgrade`-only to `upgrade <item>` too by CLI-234). `names` is the union
+/// of every scoping mechanism in play, computed once by the caller
+/// (`upgrade_inner_scoped`'s `scope_names`); a filter (unlike `unmeld`'s/
+/// `upgrade`'s ref-style SOURCE selection, CLI-20) intentionally allows more
+/// than one match, so a name like `mind sync skills --upgrade` or `mind
+/// upgrade 'suffix#*'` can silently widen to upgrading -- and re-running the
+/// install hook of (HOOK-11) -- every source the filter happened to match,
+/// while reading as if it named one.
+///
+/// `filter_desc`, when given, is the raw filter TEXT that produced the match
+/// (the `sync` selector string or the `upgrade` item-ref string, M19),
+/// echoed so the disclosure names what did the matching, not just how many
+/// sources it hit.
+///
+/// spec: CLI-235 -- this now fires BEFORE `pending` is computed (hoisted
+/// above `rerun_source_hooks`, M1), so it can no longer claim to name only
+/// the sources that end up contributing a pending upgrade: it says plainly
+/// that every matched source is in scope for this pass, present tense (not
+/// "possibly re-running", which read as a future warning for a hook re-run
+/// that, before the M1 fix, had already happened by the time this printed).
+///
+/// `None` when `names` has zero or one entries: an unscoped `--upgrade` pass
+/// (bare `mind upgrade`, or `sync`/`upgrade` with no filter) and a
+/// single-match filter both leave the confirmation exactly as it was before
+/// CLI-233 -- a single match already reads as naming that one source, so
+/// growing the disclosure there would be noise, not signal.
+// spec: CLI-233 CLI-234 CLI-235
+fn multi_source_upgrade_note(names: &[String], filter_desc: Option<&str>) -> Option<String> {
     if names.len() <= 1 {
         return None;
     }
-    let sanitized: Vec<String> = names.iter().map(|n| strip_ansi(n)).collect();
+    let mut sanitized: Vec<String> = names.iter().map(|n| strip_ansi(n)).collect();
+    sanitized.sort();
+    // spec: M19 -- end with the narrowing remedy (a longer suffix, or the
+    // full `host/owner/repo` identity), matching every other confirmation in
+    // this module that states a real next step rather than just a warning.
+    let scope = match filter_desc {
+        Some(f) => format!("the filter \"{}\"", strip_ansi(f)),
+        None => "this upgrade's scope".to_string(),
+    };
     Some(format!(
-        "this filter matched {} sources; upgrading (and possibly re-running the install hook of) all of them: {}",
+        "{scope} matched {} sources; every matched source's items are in scope for this pass, and its install hook may be re-run: {}. Narrow with a longer suffix, or the full host/owner/repo identity, to target fewer.",
         sanitized.len(),
-        sanitized.join(", ")
+        sanitized.join(", "),
     ))
 }
 
@@ -8692,7 +8810,7 @@ fn summary(desc: Option<&str>, max: usize) -> String {
 /// yields an empty string. Used for free-form answers like the prefix prompt
 /// (CLI-24), where `[y/N]` is not enough.
 fn prompt_line(prompt: &str) -> Result<String> {
-    // spec: CLI-232 DSC-95 -- a prompt built from a source-controlled name (the
+    // spec: DSC-95 -- a prompt built from a source-controlled name (the
     // meld prefix preview, CLI-24) can carry ANSI/control/bidi bytes; sanitize
     // before it reaches the terminal.
     let prompt = crate::sanitize::strip_ansi(prompt);
@@ -8722,7 +8840,7 @@ fn parse_confirm(input: &str, default_yes: bool) -> bool {
 /// Print `prompt {hint}`, read one line from stdin, and resolve it against
 /// `default_yes`. EOF (no input) is always No.
 fn read_confirm(prompt: &str, hint: &str, default_yes: bool) -> Result<bool> {
-    // spec: CLI-232 DSC-95 -- the single chokepoint every `confirm`/
+    // spec: DSC-95 -- the single chokepoint every `confirm`/
     // `confirm_default_yes` call routes through; sanitize here so a
     // source-controlled name baked into a prompt string cannot carry ANSI/
     // control/bidi bytes to the terminal.
@@ -9484,23 +9602,26 @@ mod tests {
             "---\ndescription: applies skill\n---\n# applies\nedited\n",
         )
         .unwrap();
-        // `skill:resolved` drifts, was confirmed while drifted, but is reverted
-        // to its original content before the apply runs -- no longer out of
-        // date by the time `upgrade_no_sync_keys` looks at it.
+        // spec: TUI-72 TUI-73 -- L12: `skill:resolved` also drifts for real and
+        // STAYS drifted (unlike the old version of this test, which reverted it
+        // back to `resolved_original` before the apply ran -- with the content
+        // unchanged, `resolved_hash_after == resolved_hash_before` could never
+        // fail regardless of whether `key_scope` worked, since the item was
+        // never in `pending` at all to begin with). `skill:resolved` is
+        // deliberately left OUT of `confirmed_keys` below, so this is now a
+        // real exercise of `key_scope`: an item that genuinely IS pending but
+        // was never confirmed must come out of the apply untouched.
         std::fs::write(
             src.join("skills/resolved/SKILL.md"),
-            "---\ndescription: resolved skill\n---\n# resolved\ntemporarily edited\n",
+            "---\ndescription: resolved skill\n---\n# resolved\nedited\n",
         )
         .unwrap();
-        std::fs::write(src.join("skills/resolved/SKILL.md"), resolved_original).unwrap();
 
         // The confirmed set also names a key that was never installed at all
         // (e.g. forgotten between confirm and apply, or a stale reference).
-        let confirmed_keys = vec![
-            "skill:applies".to_string(),
-            "skill:resolved".to_string(),
-            "skill:ghost".to_string(),
-        ];
+        // `skill:resolved` is NOT in this set, even though it is genuinely
+        // out of date (see above).
+        let confirmed_keys = vec!["skill:applies".to_string(), "skill:ghost".to_string()];
 
         let result = upgrade_no_sync_keys(&paths, true, &confirmed_keys, false, false);
         assert!(
@@ -9529,8 +9650,10 @@ mod tests {
         );
         assert_eq!(
             resolved_hash_after, resolved_hash_before,
-            "a confirmed key whose drift already resolved must be skipped, not \
-             re-recorded"
+            "a genuinely pending item that was never in the confirmed key set \
+             must be left untouched by `key_scope` -- unlike `skill:applies`, \
+             its content really did drift, so this only holds if `key_scope` \
+             actually excluded it"
         );
         // No panic and no error for `skill:ghost`, which was never installed:
         // reaching this point at all is the assertion.
@@ -9780,6 +9903,33 @@ mod tests {
             convention_path_in_root(root, ItemKind::Rule, "style"),
             PathBuf::from("/repo/rules/style.md"),
             "rule convention path is rules/<name>.md"
+        );
+    }
+
+    /// M7: `absorb_effective_key` sanitizes the on-disk unmanaged-item name
+    /// before composing it into the reported `kind:name` key. A hostile name
+    /// (a control byte, an ANSI escape, or a bidi override) is NOT
+    /// DSC-96-gated at this point -- that gate only runs at catalog-scan time
+    /// for a managed source's items, not for an unmanaged lobe entry `absorb`
+    /// claims -- so an end-to-end CLI drive of `absorb` on a hostile-named
+    /// unmanaged item cannot exercise this: `absorb`'s internal `learn()`
+    /// call re-scans the destination source's catalog, and DSC-96 skips the
+    /// hostile-named item there before `absorb` ever reaches the success path
+    /// this key is built for. This unit test exercises the composition
+    /// directly instead, pinning the fix independent of that (unrelated,
+    /// upstream) gate.
+    // spec: DSC-95
+    #[test]
+    fn absorb_effective_key_sanitizes_a_hostile_name() {
+        let hostile_name = format!("hand{}ma\u{202E}de", '\x07');
+        let key = absorb_effective_key(ItemKind::Skill, &hostile_name);
+        assert!(
+            !key.contains('\x07') && !key.contains('\u{202E}'),
+            "the composed key must not carry a raw control byte or bidi override: {key:?}"
+        );
+        assert_eq!(
+            key, "skill:handmade",
+            "the sanitized key must still read as the intended name"
         );
     }
 
@@ -10674,16 +10824,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    // ----- CLI-233: naming a filter's matched sources before an --upgrade
-    // confirmation -----
+    // ----- CLI-233/CLI-234/CLI-235: naming an upgrade pass's matched sources
+    // before consent -----
 
     #[test]
     fn multi_source_upgrade_note_none_for_empty_scope() {
         // spec: CLI-233 -- an unscoped `--upgrade` pass (bare `mind upgrade`,
         // or `sync --upgrade` with no `[source]` filter) must not grow the
-        // prompt: `source_scope` is `None` in that case, threaded here as an
-        // empty slice.
-        assert!(multi_source_upgrade_note(&[]).is_none());
+        // prompt: `scope_names` is empty in that case.
+        assert!(multi_source_upgrade_note(&[], None).is_none());
     }
 
     #[test]
@@ -10692,7 +10841,7 @@ mod tests {
         // like naming that source already; the prompt must not grow.
         let names = vec!["github.com/acme/skills".to_string()];
         assert!(
-            multi_source_upgrade_note(&names).is_none(),
+            multi_source_upgrade_note(&names, Some("skills")).is_none(),
             "a single-match filter must not grow the confirmation"
         );
     }
@@ -10709,7 +10858,7 @@ mod tests {
             "github.com/acme/skills".to_string(),
             "github.com/other/skills".to_string(),
         ];
-        let note = multi_source_upgrade_note(&names)
+        let note = multi_source_upgrade_note(&names, Some("skills"))
             .expect("a multi-match filter must produce a naming note");
         assert!(
             note.contains("github.com/acme/skills"),
@@ -10726,6 +10875,54 @@ mod tests {
     }
 
     #[test]
+    fn multi_source_upgrade_note_echoes_the_filter_string() {
+        // spec: CLI-235 -- M19: the note must echo the filter TEXT that did
+        // the matching, not just the count/names of what it matched.
+        let names = vec![
+            "github.com/acme/skills".to_string(),
+            "github.com/other/skills".to_string(),
+        ];
+        let note = multi_source_upgrade_note(&names, Some("skills")).expect("multi-match note");
+        assert!(
+            note.contains("skills"),
+            "note must echo the filter string: {note}"
+        );
+    }
+
+    #[test]
+    fn multi_source_upgrade_note_names_a_narrowing_remedy() {
+        // spec: CLI-235 -- M19: the note must end with a real next step (a
+        // longer suffix, or the full `host/owner/repo` identity), matching
+        // every other confirmation in this module.
+        let names = vec![
+            "github.com/acme/skills".to_string(),
+            "github.com/other/skills".to_string(),
+        ];
+        let note = multi_source_upgrade_note(&names, Some("skills")).expect("multi-match note");
+        assert!(
+            note.contains("host/owner/repo") || note.to_lowercase().contains("narrow"),
+            "note must state a narrowing remedy: {note}"
+        );
+    }
+
+    #[test]
+    fn multi_source_upgrade_note_omits_filter_clause_when_no_filter_text() {
+        // spec: CLI-234 -- the TUI's key-scoped apply has no textual filter
+        // to echo (`filter_desc = None`); the note must still fire (the union
+        // scope can still span more than one source) without claiming to
+        // quote a filter that was never given.
+        let names = vec![
+            "github.com/acme/skills".to_string(),
+            "github.com/other/skills".to_string(),
+        ];
+        let note = multi_source_upgrade_note(&names, None).expect("multi-match note");
+        assert!(
+            !note.contains('"'),
+            "must not fabricate a quoted filter string: {note}"
+        );
+    }
+
+    #[test]
     fn multi_source_upgrade_note_strips_ansi_from_source_names() {
         // spec: CLI-233 DSC-95 -- a source name is source-controlled (an
         // `[source].description`-adjacent identity string can be influenced by
@@ -10735,7 +10932,7 @@ mod tests {
             "\x1b[2Jevil".to_string(),
             "github.com/other/skills".to_string(),
         ];
-        let note = multi_source_upgrade_note(&names).expect("multi-match note");
+        let note = multi_source_upgrade_note(&names, None).expect("multi-match note");
         assert!(
             !note.contains('\x1b'),
             "ANSI escape byte must be stripped: {note:?}"
@@ -10755,7 +10952,7 @@ mod tests {
             "github.com/acme/skills".to_string(),
             "github.com/other/skills".to_string(),
         ];
-        let note = multi_source_upgrade_note(&names).expect("multi-match note");
+        let note = multi_source_upgrade_note(&names, Some("skills")).expect("multi-match note");
         let action = json_confirmation_action(format!("applying pending upgrades ({note})"), true);
         assert!(
             action.contains("github.com/acme/skills"),

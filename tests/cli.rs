@@ -1335,7 +1335,7 @@ fn hostile_mind_toml_source_description_is_sanitized_everywhere() {
 /// with a placeholder.
 #[test]
 fn hostile_installed_item_is_sanitized_at_recall_introspect_and_forget() {
-    // spec: DSC-95 CLI-232
+    // spec: DSC-95
     let sb = melded();
     assert!(sb.mind(&["learn", "review"]).success);
 
@@ -1487,7 +1487,7 @@ fn hostile_installed_item_is_sanitized_at_recall_introspect_and_forget() {
 /// `InstalledItem::display_key()` elsewhere.
 #[test]
 fn hostile_installed_item_name_is_sanitized_in_recall_tree() {
-    // spec: DSC-95 CLI-232
+    // spec: DSC-95
     let sb = melded();
     assert!(sb.mind(&["learn", "review"]).success);
 
@@ -1539,7 +1539,7 @@ fn hostile_installed_item_name_is_sanitized_in_recall_tree() {
 /// OWN file/directory -- and it must sanitize the name too.
 #[test]
 fn hostile_unmanaged_item_name_is_sanitized_in_forgets_unm5_disclosure() {
-    // spec: DSC-95 CLI-232 UNM-5
+    // spec: DSC-95 UNM-5
     let sb = melded();
     // See the sibling managed-item test for why this avoids '[': it would
     // misroute `forget` through its glob-selection path (`resolve::is_glob`),
@@ -1598,6 +1598,19 @@ fn hostile_unmanaged_item_name_is_sanitized_in_forgets_unm5_disclosure() {
     );
     assert!(!dir.exists(), "the unmanaged item must actually be removed");
 }
+
+// M7: `absorb`'s reported `kind:name` key (`absorb_effective_key` in
+// `src/commands.rs`) is built from the unmanaged item's on-disk NAME, which
+// comes off the lobe filesystem and is NOT DSC-96-gated (that gate only runs
+// at catalog-scan time for a managed source's items, not for an unmanaged
+// lobe entry `absorb` claims). A CLI-level drive of this with a genuinely
+// hostile (control/bidi) name cannot actually reach the fix: `absorb`'s
+// internal `learn()` call re-scans the destination source's catalog, and
+// DSC-96 skips a hostile-named item there before `absorb` ever reaches the
+// success path this key is built for (confirmed: driving `absorb` on such a
+// name here fails with `ItemNotFound`, not a leaked escape). The fix is
+// covered directly instead by the `absorb_effective_key_sanitizes_a_hostile_name`
+// unit test in `src/commands.rs` (spec: DSC-95).
 
 /// DSC-96: a source shipping an item whose on-disk name carries a control
 /// byte, an ANSI escape, or a bidi/zero-width code point is skipped at
@@ -5931,6 +5944,16 @@ fn upgrade_rename_within_batch_collision_is_refused() {
         r.stderr.contains("skill:review"),
         "the refusal must name the colliding key: {}",
         r.stderr
+    );
+    // spec: LIFE-51 -- the pending-upgrade report prints to stdout BEFORE
+    // this batch's collision check runs (and refuses via stderr/exit code),
+    // so a human run always sees the full pending list first, even though
+    // the batch then aborts.
+    assert!(
+        r.stdout.contains("upstream changes"),
+        "the pending report must still print before the collision aborts \
+         the batch: {}",
+        r.stdout
     );
     let r_json = x.mind(&["upgrade", "--yes", "--json"]);
     assert!(!r_json.success);
@@ -15157,10 +15180,35 @@ fn sync_multi_match_filter_upgrade_names_every_matched_source_before_consent() {
     // Text mode, no `--yes`: the note is printed BEFORE the confirmation is
     // sought, so it lands on stdout even though the non-TTY confirm then
     // refuses (LIFE-45). Both matched identities must be named.
+    //
+    // spec: CLI-233 CLI-235 -- H3: `sync_with_selector` already prints
+    // "syncing {source.name} ..." for EVERY in-scope source before the
+    // `--upgrade` pass even starts (`sync_inner`), so both identities land on
+    // stdout regardless of whether the CLI-233/CLI-235 disclosure fires at
+    // all. Asserting only `contains(&one_id) && contains(&two_id)` is
+    // therefore vacuous: reverting `multi_source_upgrade_note` entirely still
+    // leaves it green. Anchor on the discriminating substring the
+    // disclosure itself introduces ("this filter matched"/the filter text),
+    // and require it to precede the confirm prompt.
     let r = one.mind(&["sync", "skills", "--upgrade"]);
+    assert!(
+        r.stdout.contains("matched 2 sources"),
+        "the disclosure's discriminating substring must appear on stdout: {}",
+        r.stdout
+    );
     assert!(
         r.stdout.contains(&one_id) && r.stdout.contains(&two_id),
         "the confirmation must name every matched source ({one_id}, {two_id}): {}",
+        r.stdout
+    );
+    let disclosure_pos = r.stdout.find("matched 2 sources").expect("checked above");
+    let prompt_pos = r
+        .stdout
+        .find("apply these upgrades?")
+        .expect("the confirm prompt must still be reached (both sources have a pending upgrade)");
+    assert!(
+        disclosure_pos < prompt_pos,
+        "the disclosure must precede the confirm prompt: {}",
         r.stdout
     );
     // A non-TTY `confirm_default_yes` declines rather than erroring, so the run
@@ -15190,9 +15238,21 @@ fn sync_multi_match_filter_upgrade_names_every_matched_source_before_consent() {
 
     // A filter that resolves to ONE source reads like naming it already, so it
     // must not grow the note.
+    //
+    // spec: CLI-233 CLI-235 -- H3: the negative assertion below is purely
+    // negative (absence of "matched N sources"); on its own it would also
+    // pass a regression where this run errored early or never reached the
+    // confirm block at all. Anchor it with a positive assertion that the
+    // run really did reach the (unscoped) confirmation prompt.
     let single = one.mind(&["sync", &one_id, "--upgrade"]);
     assert!(
-        !single.stdout.contains("this filter matched"),
+        single.stdout.contains("apply these upgrades?"),
+        "the single-match run must still reach the confirm prompt \
+         (positive anchor for the negative assertion below): {}",
+        single.stdout
+    );
+    assert!(
+        !(single.stdout.contains("matched") && single.stdout.contains("sources;")),
         "a single-match filter must not grow the confirmation: {}",
         single.stdout
     );
@@ -15213,6 +15273,209 @@ fn sync_multi_match_filter_upgrade_names_every_matched_source_before_consent() {
             "{item} must be upgraded by the multi-match filter: {store}"
         );
     }
+}
+
+#[test]
+fn upgrade_item_ref_filter_names_every_matched_source_before_consent() {
+    // spec: CLI-234 -- H2's HOOK-11 half of CLI-233 also applies to `upgrade
+    // <item>` directly, not only to `sync <filter> --upgrade`: an item-ref's
+    // embedded `owner/repo#` qualifier is a FILTER over sources (CLI-5,
+    // CLI-63), so `mind upgrade '<suffix>#*'` can match more than one source
+    // exactly like a `sync` filter can. Before CLI-234, `source_scope` (the
+    // only input to the old `scope_names`) is always `None` for a plain
+    // `upgrade <item>` call, so this note never fired no matter how many
+    // sources the item-ref filter matched. Two sources sharing the trailing
+    // identity component `skills`, both with an installed, drifted item:
+    // `mind upgrade 'skills#*'` must name both before the confirm prompt.
+    let one = Sandbox::bare("skills");
+    one.write_and_commit(
+        "skills/widget-a/SKILL.md",
+        "---\nname: widget-a\ndescription: a\n---\n# widget a\n",
+    );
+    let two = Sandbox::bare("skills");
+    two.write_and_commit(
+        "skills/widget-b/SKILL.md",
+        "---\nname: widget-b\ndescription: b\n---\n# widget b\n",
+    );
+
+    assert!(one.mind(&["meld", &one.source_spec()]).success);
+    assert!(one.mind(&["meld", &two.source_spec()]).success);
+    assert!(one.mind(&["learn", "skill:widget-a"]).success);
+    assert!(one.mind(&["learn", "skill:widget-b"]).success);
+
+    one.write_and_commit(
+        "skills/widget-a/SKILL.md",
+        "---\nname: widget-a\ndescription: a\n---\n# widget a\nedited\n",
+    );
+    two.write_and_commit(
+        "skills/widget-b/SKILL.md",
+        "---\nname: widget-b\ndescription: b\n---\n# widget b\nedited\n",
+    );
+
+    let one_id = format!("{}/skills", one.base_name());
+    let two_id = format!("{}/skills", two.base_name());
+
+    let r = one.mind(&["upgrade", "skills#*"]);
+    assert!(
+        r.stdout.contains("matched 2 sources"),
+        "the disclosure's discriminating substring must appear on stdout: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains(&one_id) && r.stdout.contains(&two_id),
+        "the disclosure must name every matched source ({one_id}, {two_id}): {}",
+        r.stdout
+    );
+    let disclosure_pos = r.stdout.find("matched 2 sources").expect("checked above");
+    let prompt_pos = r
+        .stdout
+        .find("apply these upgrades?")
+        .expect("both sources have a pending upgrade, so the confirm prompt must be reached");
+    assert!(
+        disclosure_pos < prompt_pos,
+        "the disclosure must precede the confirm prompt: {}",
+        r.stdout
+    );
+
+    // Nothing applied without consent (non-TTY confirm declines, LIFE-45).
+    let unapplied =
+        std::fs::read_to_string(one.mind_home.join("store/skill/widget-a/SKILL.md")).unwrap();
+    assert!(
+        !unapplied.contains("edited"),
+        "nothing may be applied without consent: {unapplied}"
+    );
+}
+
+#[test]
+fn upgrade_disclosure_fires_before_the_hook_rerun_pass_and_under_yes() {
+    // spec: CLI-235 -- (a) the disclosure must precede the first hook-execution
+    // marker in stdout (M1: it used to print only from inside the `!yes`
+    // confirmation block, which runs AFTER `rerun_source_hooks`, so a human
+    // reading the transcript saw the hook already run before ever being told
+    // more than one source was in scope). (c) `--yes` must not suppress the
+    // disclosure either, even though it skips the confirmation prompt
+    // entirely (unlike a `[Y/n]` prompt, this is a disclosure, not a
+    // confirmation step).
+    let one = sandbox_with_declared_hook("skills", "touch hookran-one");
+    let two = sandbox_with_declared_hook("skills", "touch hookran-two");
+    // Distinctly-named items (beyond the shared "review"/"dev"/"style"
+    // fixture both sources carry) so `mind learn` does not collide, and so
+    // the `skills#*` item-ref filter's `hook_scope` (computed from installed
+    // items matching the filter) includes BOTH sources: with no installed
+    // item at all, `hook_scope` would be the empty set and neither hook
+    // would be considered due, defeating this test.
+    one.write_and_commit(
+        "skills/widget-a/SKILL.md",
+        "---\nname: widget-a\ndescription: a\n---\n# widget a\n",
+    );
+    two.write_and_commit(
+        "skills/widget-b/SKILL.md",
+        "---\nname: widget-b\ndescription: b\n---\n# widget b\n",
+    );
+    assert!(
+        one.mind(&[
+            "meld",
+            &one.source_spec(),
+            "--dangerously-skip-install-hook-check"
+        ])
+        .success
+    );
+    assert!(
+        one.mind(&[
+            "meld",
+            &two.source_spec(),
+            "--dangerously-skip-install-hook-check"
+        ])
+        .success
+    );
+    assert!(one.mind(&["learn", "skill:widget-a"]).success);
+    assert!(one.mind(&["learn", "skill:widget-b"]).success);
+    let marker_one = one.source.join("hookran-one");
+    let marker_two = two.source.join("hookran-two");
+    assert!(marker_one.exists() && marker_two.exists());
+    std::fs::remove_file(&marker_one).unwrap();
+    std::fs::remove_file(&marker_two).unwrap();
+
+    // Advance both sources so each source's install hook is due to re-run
+    // (`hook_rerun_warranted`: commit moved past the hook's last-run commit).
+    one.edit_source();
+    two.edit_source();
+
+    // (c): `--yes` applies without a confirmation prompt, but the disclosure
+    // must still print.
+    let r = one.mind(&[
+        "upgrade",
+        "skills#*",
+        "--yes",
+        "--dangerously-skip-install-hook-check",
+    ]);
+    assert!(
+        r.success,
+        "upgrade 'skills#*' --yes failed: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stdout.contains("matched 2 sources"),
+        "--yes must not suppress the multi-source disclosure: {}",
+        r.stdout
+    );
+
+    // (a): the disclosure precedes the first hook-execution marker
+    // ("note: re-running install hook for ..." / "re-ran install hook for
+    // ..."), both of which contain "install hook for".
+    let disclosure_pos = r.stdout.find("matched 2 sources").expect("checked above");
+    let hook_marker_pos = r.stdout.find("install hook for").expect(
+        "both sources' hooks are due to re-run under --dangerously-skip-install-hook-check",
+    );
+    assert!(
+        disclosure_pos < hook_marker_pos,
+        "the disclosure must precede the first hook-execution marker: {}",
+        r.stdout
+    );
+    assert!(marker_one.exists() && marker_two.exists());
+}
+
+#[test]
+fn upgrade_disclosure_fires_even_with_nothing_pending() {
+    // spec: CLI-235 -- (b) a filter matching more than one source must still
+    // disclose even when neither matched source ends up with a pending
+    // upgrade: M1's bug was that the note lived inside the `pending.is_empty()`
+    // early-return's unreachable tail, so a re-run that found nothing pending
+    // (after possibly re-running install hooks for every matched source)
+    // reported "everything is up to date" with no disclosure at all.
+    let one = Sandbox::bare("skills");
+    one.write_and_commit(
+        "skills/widget-a/SKILL.md",
+        "---\nname: widget-a\ndescription: a\n---\n# widget a\n",
+    );
+    let two = Sandbox::bare("skills");
+    two.write_and_commit(
+        "skills/widget-b/SKILL.md",
+        "---\nname: widget-b\ndescription: b\n---\n# widget b\n",
+    );
+
+    assert!(one.mind(&["meld", &one.source_spec()]).success);
+    assert!(one.mind(&["meld", &two.source_spec()]).success);
+    assert!(one.mind(&["learn", "skill:widget-a"]).success);
+    assert!(one.mind(&["learn", "skill:widget-b"]).success);
+
+    // Neither source drifts: both installed items stay up to date.
+    let r = one.mind(&["upgrade", "skills#*"]);
+    assert!(
+        r.success,
+        "upgrade 'skills#*' failed: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stdout.contains("matched 2 sources"),
+        "the disclosure must fire even with nothing pending: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("up to date"),
+        "the run must still report up to date: {}",
+        r.stdout
+    );
 }
 
 #[test]

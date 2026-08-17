@@ -14,6 +14,7 @@ use crate::paths::Paths;
 use crate::resolve::{
     HookTarget, parse_hook_target, parse_item_ref, select_installed, source_matches_glob,
 };
+use crate::sanitize::strip_ansi;
 use crate::source::{Pin, RecordedHook, Registry, Source};
 
 /// [`crate::commands`]'s `print_json`, mirrored here so `hooks_cmd` stays
@@ -217,9 +218,20 @@ fn resolve_hook_target(paths: &Paths, target: &str) -> Result<HookTarget> {
         let manifest = Manifest::load(paths)?;
         let matches = select_installed(&manifest.items, &item_ref);
         if !matches.is_empty() {
+            // spec: DSC-95 -- `it.source`/`it.name` are attacker-controlled (a
+            // source name or a `[[items]] name`); sanitize each field BEFORE
+            // composing, never the composed string (an unterminated OSC in one
+            // field would otherwise swallow the fields appended after it).
             let item_forms: Vec<String> = matches
                 .iter()
-                .map(|it| format!("{}#{}:{}", it.source, it.kind.as_str(), it.name))
+                .map(|it| {
+                    format!(
+                        "{}#{}:{}",
+                        strip_ansi(&it.source),
+                        it.kind.as_str(),
+                        strip_ansi(&it.name)
+                    )
+                })
                 .collect();
             return Err(MindError::AmbiguousHookTarget {
                 target: trimmed.to_string(),
@@ -784,7 +796,9 @@ fn list_source_hooks(paths: &Paths, target: &str, selector: &str) -> Result<()> 
             .transpose()?
             .unwrap_or_default();
 
-        println!("source: {}", source.name);
+        // spec: DSC-95 -- `source.name` is attacker-controlled (a local-path
+        // meld derives it from directory names).
+        println!("source: {}", strip_ansi(&source.name));
         let current = source.commit.as_deref();
 
         let mut hooks_json: Vec<SourceHookJson> = Vec::new();
@@ -865,7 +879,8 @@ fn list_source_hooks(paths: &Paths, target: &str, selector: &str) -> Result<()> 
         }
 
         sources_json.push(SourceHooksJson {
-            source: source.name.clone(),
+            // spec: DSC-95 -- `--json` field.
+            source: strip_ansi(&source.name),
             hooks: hooks_json,
             items: items_json,
         });
@@ -904,10 +919,11 @@ fn list_item_hooks(paths: &Paths, target: &str, item_ref: &crate::resolve::ItemR
     let mut items_json: Vec<ItemHooksJson> = Vec::new();
 
     for installed in matches {
+        // spec: DSC-95 -- `installed.source` is attacker-controlled.
         println!(
             "item: {} (source {})",
             installed.display_key(),
-            installed.source
+            strip_ansi(&installed.source)
         );
 
         let source = registry.sources.iter().find(|s| s.name == installed.source);
@@ -945,7 +961,7 @@ fn list_item_hooks(paths: &Paths, target: &str, item_ref: &crate::resolve::ItemR
         items_json.push(ItemHooksJson {
             // spec: DSC-95 -- `--json` field.
             item: installed.display_key(),
-            source: Some(installed.source.clone()),
+            source: Some(strip_ansi(&installed.source)),
             hooks: hooks_json,
         });
     }
@@ -984,11 +1000,14 @@ fn pin_description(pin: &Pin) -> String {
 /// command it prints to actually be runnable. Mirrors the `item_forms`
 /// construction in `resolve_hook_target`'s `AmbiguousHookTarget` path.
 fn item_hook_target(installed: &InstalledItem) -> String {
+    // spec: DSC-95 -- `installed.source`/`installed.name` are attacker-controlled;
+    // sanitize each field BEFORE composing (never the composed string), same
+    // reasoning as `resolve_hook_target`'s `item_forms`.
     format!(
         "{}#{}:{}",
-        installed.source,
+        strip_ansi(&installed.source),
         installed.kind.as_str(),
-        installed.name
+        strip_ansi(&installed.name)
     )
 }
 

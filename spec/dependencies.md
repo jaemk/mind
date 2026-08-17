@@ -177,6 +177,34 @@ identified by stable identity `(source, kind, bare_name)` (see namespacing.md).
   This is the nested-tree counterpart of the human `recall --tree` (DEP-61); the
   flat-adjacency form stays `probe --json` (DEP-62).
 
+## Bounded rendering
+
+- `DEP-64` Every dependency tree/forest renderer -- `Resolution::render_tree`
+  (DEP-21), `InstalledGraph::render_forest` / `render_subtree` (DEP-61), and
+  `InstalledGraph::forest_nodes` / `subtree_node` (DEP-63) -- renders a given
+  node's full subtree at most once per call. The first time a node is reached,
+  it expands normally. Any later time the *same* node is reached in that same
+  call -- via a different branch of the same tree, a different root in a
+  forest, or the structured JSON equivalent -- it is rendered as a leaf marked
+  `(seen)` (text) or `{"seen": true}` (JSON) instead of being expanded again.
+  This is distinct from the `(cycle)` / `{"cycle": true}` back-edge marker
+  (DEP-22): a cycle is a reference back to an item still on the current
+  ancestor path; `seen` is a node whose rendering already finished elsewhere.
+  Without this bound, a source-controlled diamond-shaped reference graph (an
+  item reachable by more than one path) renders exponentially many lines --
+  the whole shared subtree is re-printed once per path that reaches it -- which
+  is a denial-of-service reachable before any install consent is given
+  (`learn --dry-run`, and the tree shown ahead of the `learn` confirmation
+  prompt, DEP-31). DEP-64 bounds total rendered output to the underlying
+  graph's edge count instead. Independently, since a plain (non-diamond) chain
+  visits each node exactly once and so `(seen)` cannot bound it, every
+  renderer additionally caps recursion at a fixed depth: past the cap,
+  expansion stops with an explicit truncation notice (text: a synthetic
+  `(truncated: max depth reached)` bullet; JSON: a synthetic child node
+  carrying that same text as its key) rather than continuing to recurse to a
+  depth proportional to node count, which would otherwise risk a stack
+  overflow on a sufficiently long chain.
+
 ## Non-goals
 
 - `DEP-50` `forget` does not automatically remove an item's dependencies: a
