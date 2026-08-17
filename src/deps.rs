@@ -144,49 +144,66 @@ fn item_edges(
 /// caller (`commands.rs`, `tui/data.rs`'s `sanitize_dep_keys`) already
 /// applies. This function does not do it for you.
 ///
-/// L10: this is a compatibility wrapper that rebuilds the `by_name` index on
-/// every call. A caller that invokes this once per row over a shared catalog
-/// (e.g. `probe --json` over every matched item) should instead call
-/// [`direct_dependency_keys_with_index`] with one index built up front, to
-/// avoid rebuilding an O(catalog) index per row.
-#[allow(dead_code)]
-pub fn direct_dependency_keys(
-    item: &CatalogItem,
-    items: &[CatalogItem],
-    read: &impl Fn(&CatalogItem) -> String,
-) -> Vec<String> {
-    let by_name = make_by_name(items);
-    direct_dependency_keys_with_index(item, items, &by_name, read)
+/// A sibling-lookup index over one catalog slice, built once and reused for
+/// every row (L10).
+///
+/// Both production callers (`probe --json`'s DEP-62 adjacency field and the
+/// TUI's snapshot load) walk every catalog item, so they build one `DepIndex`
+/// up front and call [`direct_keys`](Self::direct_keys) with the row's index.
+/// Rebuilding the index per row -- and rescanning the slice to recover each
+/// item's position -- made those loops quadratic in the catalog size.
+pub struct DepIndex<'a> {
+    items: &'a [CatalogItem],
+    by_name: HashMap<(&'a str, &'a str), Vec<usize>>,
 }
 
-/// Same contract as [`direct_dependency_keys`], but takes a prebuilt
-/// `by_name` index (from [`make_by_name`]) rather than building one from
-/// scratch. Use this when calling once per item over a shared catalog (L10):
-/// build the index once and pass it to every call instead of paying an
-/// O(catalog) index build per row.
-///
-/// L10: like [`direct_dependency_keys`], the returned keys are raw and
-/// unsanitized; sanitize before display.
-#[allow(dead_code)]
-pub fn direct_dependency_keys_with_index(
-    item: &CatalogItem,
-    items: &[CatalogItem],
-    by_name: &HashMap<(&str, &str), Vec<usize>>,
-    read: &impl Fn(&CatalogItem) -> String,
-) -> Vec<String> {
-    // Find this item's index.
-    let node = items
-        .iter()
-        .position(|it| std::ptr::eq(it, item))
-        .unwrap_or(usize::MAX);
-    if node == usize::MAX {
-        return Vec::new();
+impl<'a> DepIndex<'a> {
+    /// Build the index. O(items), done once per catalog.
+    pub fn new(items: &'a [CatalogItem]) -> Self {
+        Self {
+            by_name: make_by_name(items),
+            items,
+        }
     }
-    let text = read(item);
-    item_edges(node, items, by_name, &text)
-        .into_iter()
-        .map(|i| items[i].key().as_str().to_string())
-        .collect()
+
+    /// The direct dependency keys of the item at `node` (its index in the
+    /// slice this index was built over).
+    ///
+    /// L10: the returned `String`s are raw, source-derived identity keys (not
+    /// an `ItemKey`, and not sanitized). A caller MUST sanitize (`strip_ansi`
+    /// / `.display()`) before putting any of them on a display surface. This
+    /// does not do it for you.
+    pub fn direct_keys(&self, node: usize, read: &impl Fn(&CatalogItem) -> String) -> Vec<String> {
+        let Some(item) = self.items.get(node) else {
+            return Vec::new();
+        };
+        let text = read(item);
+        item_edges(node, self.items, &self.by_name, &text)
+            .into_iter()
+            .map(|i| self.items[i].key().as_str().to_string())
+            .collect()
+    }
+
+    /// Same, for a caller holding a reference rather than an index. Costs an
+    /// O(items) scan to recover the position, so prefer
+    /// [`direct_keys`](Self::direct_keys) when the index is already in hand.
+    ///
+    /// Test-only: every production caller iterates the catalog and already has
+    /// the index. Kept because the test fixtures read more clearly by
+    /// reference, and because pointer identity (not value equality) is the
+    /// property a foreign item must fail on.
+    #[cfg(test)]
+    pub fn direct_keys_for(
+        &self,
+        item: &CatalogItem,
+        read: &impl Fn(&CatalogItem) -> String,
+    ) -> Vec<String> {
+        match self.items.iter().position(|it| std::ptr::eq(it, item)) {
+            Some(node) => self.direct_keys(node, read),
+            // Not an element of this catalog: no siblings to resolve against.
+            None => Vec::new(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -959,6 +976,23 @@ mod tests {
     use crate::error::ItemKind;
     use std::collections::HashMap;
     use std::path::PathBuf;
+
+    /// One-shot direct-dependency lookup, building a throwaway [`DepIndex`].
+    ///
+    /// Test-only: this is the shape production used before L10, and it is
+    /// quadratic in a per-row loop (an O(catalog) index build plus an
+    /// O(catalog) position scan per call), which is exactly why `probe --json`
+    /// and the TUI snapshot load now hoist one `DepIndex` instead. Kept here
+    /// because the fixtures are small and read better by reference;
+    /// `dep_index_direct_keys_match_the_per_call_wrapper_for_every_item` pins
+    /// it against the indexed path so the two cannot drift.
+    fn direct_dependency_keys(
+        item: &CatalogItem,
+        items: &[CatalogItem],
+        read: &impl Fn(&CatalogItem) -> String,
+    ) -> Vec<String> {
+        DepIndex::new(items).direct_keys_for(item, read)
+    }
 
     /// Build a synthetic catalog item.
     fn item(kind: ItemKind, name: &str, source: &str) -> CatalogItem {
@@ -1733,6 +1767,72 @@ mod tests {
     }
 
     // ---- direct_dependency_keys --------------------------------------------
+
+    #[test]
+    fn dep_index_direct_keys_match_the_per_call_wrapper_for_every_item() {
+        // L10: `probe --json` and the TUI snapshot load switched from
+        // `direct_dependency_keys` (which rebuilds the sibling index and
+        // rescans for the item's position on EVERY call, making a per-row loop
+        // quadratic) to one `DepIndex` built up front. That is only a safe
+        // swap if the indexed path returns exactly what the wrapper did, so
+        // pin the equivalence across a catalog exercising both edge kinds
+        // ({{ns:}} tokens and `requires`), a multi-edge item, a leaf, and two
+        // sources (edges never cross a source boundary, DEP-3).
+        let items = vec![
+            item(ItemKind::Skill, "review", "s"),
+            item(ItemKind::Agent, "test", "s"),
+            item(ItemKind::Rule, "style", "s"),
+            item(ItemKind::Skill, "review", "other"),
+        ];
+        let mut content = HashMap::new();
+        content.insert(
+            "skill:review".into(),
+            "see {{ns:test}} and {{ns:style}}".into(),
+        );
+        content.insert("agent:test".into(), "requires: style\n".into());
+        let read = reader(content);
+
+        let index = DepIndex::new(&items);
+        for (node, it) in items.iter().enumerate() {
+            assert_eq!(
+                index.direct_keys(node, &read),
+                direct_dependency_keys(it, &items, &read),
+                "indexed and per-call keys must agree for {}",
+                it.key().as_str()
+            );
+        }
+        // The fixture is non-trivial: the swap would be vacuous if every item
+        // had an empty edge set.
+        assert_eq!(
+            index.direct_keys(0, &read),
+            vec!["agent:test".to_string(), "rule:style".to_string()]
+        );
+        // A node outside the slice yields no edges rather than panicking.
+        assert!(index.direct_keys(items.len(), &read).is_empty());
+    }
+
+    #[test]
+    fn dep_index_direct_keys_for_a_foreign_item_is_empty() {
+        // `direct_keys_for` recovers the position by pointer identity, so an
+        // item that is not an element of the indexed slice has no siblings to
+        // resolve against and must return empty rather than matching a
+        // same-named element by value.
+        let items = vec![
+            item(ItemKind::Skill, "review", "s"),
+            item(ItemKind::Agent, "test", "s"),
+        ];
+        let outsider = item(ItemKind::Skill, "review", "s");
+        let mut content = HashMap::new();
+        content.insert("skill:review".into(), "hand off to {{ns:test}}".into());
+        let read = reader(content);
+
+        let index = DepIndex::new(&items);
+        assert_eq!(
+            index.direct_keys_for(&items[0], &read),
+            vec!["agent:test".to_string()]
+        );
+        assert!(index.direct_keys_for(&outsider, &read).is_empty());
+    }
 
     #[test]
     fn direct_dependency_keys_ns_token_edge() {

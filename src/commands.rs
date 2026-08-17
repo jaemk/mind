@@ -7276,16 +7276,20 @@ pub fn probe(
     let items = catalog::scan(paths, &registry)?;
     let manifest = Manifest::load(paths)?;
     let q = query.unwrap_or("");
-    let mut hits: Vec<&CatalogItem> = items
+    // Carry each hit's index in `items` alongside the reference: the DEP-62
+    // adjacency field below needs it, and recovering it later would cost an
+    // O(catalog) scan per row (L10).
+    let mut hits: Vec<(usize, &CatalogItem)> = items
         .iter()
-        .filter(|it| {
+        .enumerate()
+        .filter(|(_, it)| {
             catalog::matches_query(it, q) // spec: CLI-85
                 && kind.is_none_or(|k| it.kind == k)
                 // CLI-86: `--source` accepts a glob over source identities.
                 && source.is_none_or(|s| source_matches_glob(&it.source, s))
         })
         .collect();
-    hits.sort_by_key(|a| a.key());
+    hits.sort_by_key(|(_, a)| a.key());
 
     let installed = |it: &CatalogItem| {
         manifest
@@ -7309,13 +7313,18 @@ pub fn probe(
 
     if json {
         // spec: DEP-62
+        // L10: one index for the whole document. Built per row this was an
+        // O(catalog) index build plus an O(catalog) position scan each time,
+        // i.e. quadratic in the catalog for a verb that lists every match.
+        let dep_index = crate::deps::DepIndex::new(&items);
         let mut rows: Vec<ProbeRow> = hits
             .iter()
-            .map(|it| {
+            .map(|(node, it)| {
                 // DEP-62: add direct dependency keys to each catalog row.
                 // DSC-95: keys embed source-controlled names; sanitize for the
                 // `--json` document.
-                let dependencies = crate::deps::direct_dependency_keys(it, &items, &read_item_text)
+                let dependencies = dep_index
+                    .direct_keys(*node, &read_item_text)
                     .iter()
                     .map(|k| crate::sanitize::strip_ansi(k))
                     .collect();
@@ -7368,7 +7377,7 @@ pub fn probe(
     let catalog_graph = crate::deps::installed_graph(&items, &all_catalog_keys, read_item_text);
 
     let mut rows = Vec::new();
-    for it in &hits {
+    for (_, it) in &hits {
         let cur = hash_path(&it.path).ok();
         let hash = cur.as_deref().map(short).unwrap_or_else(|| "-".into());
         // The matched installed item, if any, for the install marker and the

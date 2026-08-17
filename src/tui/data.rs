@@ -302,6 +302,11 @@ fn load_inner(paths: &Paths) -> Result<Snapshot> {
         catalog_items.iter().map(|c| c.path.clone()).collect();
     prune_hash_memo(&live_paths);
 
+    // L10: one sibling index for both passes below. Each walks every item, so
+    // rebuilding it per row (what `deps::direct_dependency_keys` does) made a
+    // poll tick quadratic in the catalog size.
+    let dep_index = crate::deps::DepIndex::new(&catalog_items);
+
     // spec: TUI-60 - source names are source-controlled and must be sanitized.
     let source_names: Vec<String> = registry
         .sources
@@ -322,21 +327,17 @@ fn load_inner(paths: &Paths) -> Result<Snapshot> {
     let mut installed: Vec<SnapshotInstalled> = Vec::with_capacity(manifest.items.len());
     for it in manifest.items.values() {
         // Find the matching catalog item to get direct deps + drift.
-        let matched = catalog_items
+        // Keep the position, not just the reference: `DepIndex` keys on it.
+        let matched_node = catalog_items
             .iter()
-            .find(|ci| ci.source == it.source && ci.kind == it.kind && ci.name == it.bare_name);
+            .position(|ci| ci.source == it.source && ci.kind == it.kind && ci.name == it.bare_name);
+        let matched = matched_node.map(|n| &catalog_items[n]);
         // spec: TUI-60 - dep keys are catalog-derived (a `kind:name` built
         // from source-controlled item names) like every sibling field on
         // this struct, so they get the same strip_ansi treatment at the
         // model boundary (`sanitize_dep_keys`).
-        let deps: Vec<String> = matched
-            .map(|ci| {
-                sanitize_dep_keys(crate::deps::direct_dependency_keys(
-                    ci,
-                    &catalog_items,
-                    &read_item_text,
-                ))
-            })
+        let deps: Vec<String> = matched_node
+            .map(|n| sanitize_dep_keys(dep_index.direct_keys(n, &read_item_text)))
             .unwrap_or_default();
         let stale = matched.is_some_and(|ci| {
             // Memoized on the cheap stat fingerprint: the poll tick would
@@ -379,12 +380,9 @@ fn load_inner(paths: &Paths) -> Result<Snapshot> {
     // above; `sanitize_dep_keys`).
     let available: Vec<SnapshotAvailable> = catalog_items
         .iter()
-        .map(|it| {
-            let deps = sanitize_dep_keys(crate::deps::direct_dependency_keys(
-                it,
-                &catalog_items,
-                &read_item_text,
-            ));
+        .enumerate()
+        .map(|(node, it)| {
+            let deps = sanitize_dep_keys(dep_index.direct_keys(node, &read_item_text));
             SnapshotAvailable {
                 // See the identical `key` note on `SnapshotInstalled` above.
                 key: it.key().into(),
