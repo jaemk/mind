@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-08-17
+
 ### Changed
 
 - Breaking for JSON consumers: `learn --json` of an item that pulls in
@@ -17,6 +19,25 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   plugin-name default prefix alongside the plugin's own items, instead of
   unprefixed; a marketplace source's per-entry namespaces still do not reach
   add-root items (DSC-86).
+- Source-controlled item names render through sanitizing display accessors at
+  every CLI and TUI print site, and an item key is a dedicated type without
+  `Display`, so printing a raw key no longer compiles; identity and matching
+  stay raw (DSC-95, TUI-75).
+- `is_safe_item_name` rejects control, bidi, zero-width, and other invisible
+  code points, and an `[[items]] link` target is confined to its kind
+  directory, so a source cannot plant a file at the agent home root (DSC-96,
+  DSC-97). The blocked-character set covers the Unicode format class, the tag
+  block, and variation selectors (NS-73).
+- `sync <source> --upgrade` scopes the upgrade pass and its install-hook
+  re-runs to the matched sources; a scope spanning more than one source is
+  disclosed before its hooks run, `--yes` included (CLI-232..235).
+- The `probe` TUI applies upgrades without syncing first, applies exactly the
+  key set the confirm modal listed, and memoizes the ~1s staleness poll
+  against a stat fingerprint instead of re-hashing every item tree each tick
+  (TUI-63, TUI-72..76).
+- `evolve` offers a source-built dev binary its own base release, orders
+  same-base prereleases by semver precedence, and validates the resolved
+  target tag before building download URLs (CLI-140, STO-76, STO-77).
 - `mind man` emits one roff page per visible subcommand after the top-level
   page, so the SUBCOMMANDS cross-references (`mind-meld(1)`, ...) resolve
   within the output (CLI-121).
@@ -42,6 +63,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - An item-link URL with `.` path segments (`tree/main/./skills/foo`) parses to
   the same source instance as the plain form instead of registering a
   duplicate (LNK-17).
+- Two items in one `upgrade` batch renaming onto the same key are refused
+  before any item is applied, instead of the second install silently evicting
+  the first (LIFE-46).
+- The TUI poll rebuilds the tree only when the snapshot actually changed;
+  previously a fresh generation counter forced a rebuild every tick (TUI-15).
+- The dependency tree renders a diamond DAG once per subtree with a `(seen)`
+  marker and a depth cap, instead of expanding exponentially before the
+  install-consent prompt (DEP-64).
+- A dangling symlink in an agent-home path is diagnosed with the link and its
+  missing target instead of a bare `File exists` (HARN-22, HARN-23).
+- `review` findings and error messages sanitize each source-derived field
+  before composing the line, so a dangling escape sequence in one field cannot
+  swallow the disclosure that follows it.
 
 ## [0.23.0] - 2026-08-05
 
@@ -1395,7 +1429,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovery, frontmatter descriptions, transactional install/upgrade/uninstall
   with a file registry, and a tag-driven release pipeline with a Homebrew tap.
 
-[Unreleased]: https://github.com/jaemk/mind/compare/v0.23.0...HEAD
+[Unreleased]: https://github.com/jaemk/mind/compare/v0.24.0...HEAD
+[0.24.0]: https://github.com/jaemk/mind/compare/v0.23.0...v0.24.0
 [0.23.0]: https://github.com/jaemk/mind/compare/v0.22.0...v0.23.0
 [0.22.0]: https://github.com/jaemk/mind/compare/v0.21.0...v0.22.0
 [0.21.0]: https://github.com/jaemk/mind/compare/v0.20.0...v0.21.0
