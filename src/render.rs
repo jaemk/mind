@@ -69,6 +69,7 @@ pub fn ctx() -> OutputCtx {
         json: false,
         color: false,
         unicode: false,
+        tui_unicode: false,
         verbose: false,
     })
 }
@@ -79,6 +80,12 @@ pub struct OutputCtx {
     pub json: bool,
     pub color: bool,
     pub unicode: bool,
+    /// The TUI's Unicode-glyph capability (TUI-65). Unlike `unicode` (the CLI
+    /// gate, CLI-151, which couples color and glyphs), this does NOT fold in
+    /// `NO_COLOR`: in the TUI, `NO_COLOR` disables only color and the Unicode
+    /// markers stay. Only a non-UTF-8 locale, `--ascii`, `--json`, or a non-TTY
+    /// stdout force the ASCII glyph fallback.
+    pub tui_unicode: bool,
     pub verbose: bool,
 }
 
@@ -112,6 +119,9 @@ impl OutputCtx {
             json,
             color: rich,
             unicode: rich,
+            // spec: TUI-65 - the TUI glyph gate omits no_color: NO_COLOR must
+            // drop color only, never the Unicode markers.
+            tui_unicode: is_tty && utf8_locale && !json && !ascii,
             verbose: false,
         }
     }
@@ -395,7 +405,45 @@ mod tests {
         assert!(!ctx.unicode, "non-utf8 locale disables unicode");
     }
 
-    /// color and unicode are always equal (same conjunction).
+    /// NO_COLOR keeps the TUI glyph capability: `tui_unicode` stays true when
+    /// only `no_color` is hostile, while the CLI gate (`color`/`unicode`) goes
+    /// off. This is the wiring the TUI reads for its markers, so it pins that
+    /// `NO_COLOR=1 mind probe` renders monochrome Unicode, not ASCII fallback.
+    // spec: TUI-65
+    #[test]
+    fn compute_no_color_keeps_tui_unicode() {
+        let ctx = OutputCtx::compute(false, false, true, true, true);
+        assert!(!ctx.color, "NO_COLOR disables color");
+        assert!(!ctx.unicode, "NO_COLOR disables the CLI unicode gate");
+        assert!(
+            ctx.tui_unicode,
+            "NO_COLOR must NOT disable the TUI glyph capability (TUI-65)"
+        );
+    }
+
+    /// Each genuinely Unicode-hostile signal forces the TUI glyph fallback.
+    // spec: TUI-65
+    #[test]
+    fn compute_tui_unicode_off_for_hostile_modes() {
+        // json, ascii, non-tty, non-utf8 locale.
+        for (json, ascii, tty, utf8) in [
+            (true, false, true, true),
+            (false, true, true, true),
+            (false, false, false, true),
+            (false, false, true, false),
+        ] {
+            let ctx = OutputCtx::compute(json, ascii, tty, false, utf8);
+            assert!(
+                !ctx.tui_unicode,
+                "tui_unicode must be false (json={json} ascii={ascii} tty={tty} utf8={utf8})"
+            );
+        }
+    }
+
+    /// color and unicode are always equal (same conjunction). This is the CLI
+    /// contract (CLI-151 couples them); the TUI's glyph capability is the
+    /// separate `tui_unicode` field, which deliberately diverges under
+    /// NO_COLOR (TUI-65).
     #[test]
     fn compute_color_and_unicode_always_equal() {
         for json in [false, true] {
@@ -932,6 +980,7 @@ mod tests {
                 json: mode == "json",
                 color: false,
                 unicode: false,
+                tui_unicode: false,
                 verbose: false,
             });
             note(NOTE_SENTINEL);
@@ -996,6 +1045,7 @@ mod tests {
             json: false,
             color: false,
             unicode: false,
+            tui_unicode: false,
             verbose: false,
         };
         set_ctx(installed);

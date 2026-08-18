@@ -328,7 +328,7 @@ fn draw_tree(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         Style::default().add_modifier(Modifier::REVERSED)
     };
-    let highlight_symbol = if rc.unicode { "\u{276f} " } else { "> " };
+    let highlight_symbol = if rc.tui_unicode { "\u{276f} " } else { "> " };
 
     let list = List::new(items)
         .block(titled_block("Items"))
@@ -489,13 +489,13 @@ fn stale_suffix(node: &TreeNode, unicode: bool) -> Option<&'static str> {
 
 fn flat_node_to_list_item(node: &FlatNode, rc: crate::render::OutputCtx) -> ListItem<'_> {
     let indent = "  ".repeat(node.depth);
-    let expand_marker = expand_marker(node.expandable, node.expanded, rc.unicode);
-    let icon = node_icon(&node.node, rc.unicode);
+    let expand_marker = expand_marker(node.expandable, node.expanded, rc.tui_unicode);
+    let icon = node_icon(&node.node, rc.tui_unicode);
     let style = node_style(&node.node, rc.color);
 
     let mut label = format!("{indent}{expand_marker}{icon}{}", node.label);
     // spec: TUI-63 - append the out-of-date marker for a stale installed item.
-    if let Some(suffix) = stale_suffix(&node.node, rc.unicode) {
+    if let Some(suffix) = stale_suffix(&node.node, rc.tui_unicode) {
         label.push_str(suffix);
     }
     ListItem::new(Line::from(vec![Span::styled(label, style)]))
@@ -644,8 +644,9 @@ fn draw_dialog(frame: &mut Frame, dialog: &crate::tui::app::Dialog, area: Rect) 
         .wrap(Wrap { trim: false });
     frame.render_widget(detail, splits[0]);
 
-    // spec: TUI-65 - the marker glyph respects the unicode capability.
-    let marker_glyph = if rc.unicode { "\u{276f} " } else { "> " };
+    // spec: TUI-65 - the marker glyph respects the TUI glyph capability
+    // (tui_unicode, which NO_COLOR does not turn off).
+    let marker_glyph = if rc.tui_unicode { "\u{276f} " } else { "> " };
     let items: Vec<ListItem> = dialog
         .actions
         .iter()
