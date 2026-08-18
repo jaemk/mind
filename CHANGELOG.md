@@ -13,6 +13,35 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `confirmation-required` unless `--yes` is also given, instead of installing
   the closure unprompted. A script driving `mind learn --json <item>` against an
   item with dependencies must add `--yes` (DEP-31).
+- `meld --add-root` items on a single-plugin source now install under the
+  plugin-name default prefix alongside the plugin's own items, instead of
+  unprefixed; a marketplace source's per-entry namespaces still do not reach
+  add-root items (DSC-86).
+- `mind man` emits one roff page per visible subcommand after the top-level
+  page, so the SUBCOMMANDS cross-references (`mind-meld(1)`, ...) resolve
+  within the output (CLI-121).
+- The recursive item-tree walks (staging copy, file registry, content hash)
+  are depth-capped at 128 nested directories; a deeper tree errors instead of
+  overflowing the stack (LIFE-52).
+
+### Fixed
+
+- `NO_COLOR=1 mind probe` keeps the TUI's Unicode markers and drops only
+  color, as TUI-65 specifies; previously it drew the ASCII fallback glyphs.
+- A `forget` whose uninstall hook fails and whose failure-path manifest save
+  also fails now propagates the hook error and reports the save failure as a
+  warning, instead of masking the root cause (LIFE-48).
+- `install` records the source content hash before the store swap drops its
+  backup, closing a window where a source read error left the new copy
+  installed but unrecorded.
+- A failed `absorb` unregisters a destination source it melded itself and
+  names the residual destination commit in a warning (ABS-12).
+- `recall --tree` no longer renders duplicate nodes when two melded sources
+  offer the same unprefixed name and one copy is installed; graph membership
+  matches the manifest entry's source as well as its key (DEP-61).
+- An item-link URL with `.` path segments (`tree/main/./skills/foo`) parses to
+  the same source instance as the plain form instead of registering a
+  duplicate (LNK-17).
 
 ## [0.23.0] - 2026-08-05
 
