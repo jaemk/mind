@@ -1724,3 +1724,63 @@ fn c5_dest_roots_escaping_repo_is_error_nothing_moved() {
         "rule:escaperule must not be in manifest after failed absorb"
     );
 }
+
+/// A learn failure after the dest commit and a fresh meld restores the lobe
+/// entry, unregisters the source this absorb call melded, and names the
+/// residual dest commit in a warning.
+// spec: ABS-12
+#[test]
+fn abs12_learn_failure_restores_lobe_and_unregisters_fresh_meld() {
+    let sb = Sandbox::new();
+    let lobe_path = sb.place_unmanaged_skill("probe");
+    let original = std::fs::read_to_string(lobe_path.join("SKILL.md")).unwrap();
+    let dest = sb.dest_spec();
+
+    // An authoritative mind.toml whose [discover] skill glob matches nothing:
+    // the absorbed skill is committed into dest but never offered by the
+    // catalog, so the learn step fails after the commit and the fresh meld.
+    // absorb's own add_all commits this file alongside the item.
+    write_file(
+        &sb.dest.join("mind.toml"),
+        "[discover.skills]\ninclude = [\"nomatch/*/SKILL.md\"]\n",
+    );
+
+    let r = sb.mind(&["absorb", "skill:probe", "--to", &dest, "--yes"]);
+    assert!(
+        !r.success,
+        "absorb must fail when learn cannot resolve the item: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+
+    // The lobe entry is restored as a real file (ABS-10), same content.
+    assert!(
+        lobe_path.exists() && !is_symlink(&lobe_path),
+        "lobe entry must be restored after the failed learn: {lobe_path:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(lobe_path.join("SKILL.md")).unwrap(),
+        original,
+        "restored lobe content must match the original"
+    );
+
+    // The dest source registered by this call is unregistered again.
+    let sources = sb.mind(&["recall", "--sources"]);
+    assert!(
+        !sources.stdout.contains("personal"),
+        "the freshly-melded dest source must be unregistered after the \
+         failed learn: {}",
+        sources.stdout
+    );
+
+    // The dest commit is left in place and named in a warning.
+    assert_eq!(
+        last_commit_msg(&sb.dest),
+        "absorb skill:probe",
+        "the dest commit must be left in place"
+    );
+    let combined = format!("{}{}", r.stdout, r.stderr);
+    assert!(
+        combined.contains("absorb left commit 'absorb skill:probe'"),
+        "the residual commit must be named in a warning: {combined}"
+    );
+}

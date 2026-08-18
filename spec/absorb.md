@@ -86,3 +86,10 @@ Unmanaged items, their detection, and single-ref resolution are defined in
   the item is now managed under. Without `--yes`, `absorb --json` refuses with
   `ConfirmationRequired` (json mode is non-interactive, ABS-7) and writes
   nothing to stdout.
+- `ABS-12` When the `learn` step itself fails, `absorb` restores the original
+  lobe entry from its backup (ABS-10) and additionally unwinds what it can of
+  the earlier steps: a destination source that was melded by this absorb call
+  (rather than already registered) is unregistered again, best-effort. The
+  destination commit (ABS-5) is never reverted, because the destination repo
+  belongs to the user; instead the commit is named in a warning so the residue
+  is visible rather than silent. The learn error itself is what propagates.

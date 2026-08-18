@@ -4614,9 +4614,9 @@ pub fn absorb(
     copy_path_recursive(&source_lobe_path, &dest_item_path)?;
 
     // 2. ABS-5: stage and commit in the destination repo.
+    let commit_msg = format!("absorb {}:{}", item.kind.as_str(), item.name);
     let git_err = (|| {
         crate::git::add_all(&dest_path)?;
-        let commit_msg = format!("absorb {}:{}", item.kind.as_str(), item.name);
         crate::git::commit(&dest_path, &commit_msg)
     })();
     if let Err(e) = git_err {
@@ -4625,9 +4625,12 @@ pub fn absorb(
         return Err(e);
     }
 
-    // 3. ABS-1: meld the destination if not yet registered.
+    // 3. ABS-1: meld the destination if not yet registered. Remember whether
+    //    THIS call registered it, so a later learn failure can unwind the
+    //    registration (ABS-12) without touching a pre-existing source.
     let dest_spec = dest_path.to_string_lossy().into_owned();
-    if !is_melded(paths, &dest_spec, None)? {
+    let freshly_melded = !is_melded(paths, &dest_spec, None)?;
+    if freshly_melded {
         let meld_err = meld(
             paths,
             &dest_spec,
@@ -4703,6 +4706,17 @@ pub fn absorb(
         }
         let _ = copy_path_recursive(&backup, &source_lobe_path);
         let _ = crate::install::remove_path(&backup);
+        // spec: ABS-12 -- unwind a registration this call made (best-effort;
+        // nothing was installed from it, learn failed) and name the dest
+        // commit, which is left in place because the dest repo is the user's.
+        if freshly_melded {
+            let _ = unmeld_one(paths, &dest_source_name, false, true, false, None);
+        }
+        crate::render::warn(format!(
+            "absorb left commit '{}' in {}; remove it with git if unwanted",
+            strip_ansi(&commit_msg),
+            display_path(&dest_path)
+        ));
         return Err(e);
     }
 
