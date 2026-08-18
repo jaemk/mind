@@ -239,6 +239,21 @@ fn collect_stats(
 /// separate type tag prevents a file named `"symlink:foo"` from producing the
 /// same triple as a symlink named `"foo"` (LIFE-35).
 fn collect_files(root: &Path, dir: &Path, out: &mut Vec<(u8, String, Vec<u8>)>) -> Result<()> {
+    collect_files_at(root, dir, out, 0)
+}
+
+// spec: LIFE-52 -- depth-capped like install.rs's walks; the not-followed
+// symlinks (LIFE-34) already prevent cycle recursion, the cap covers plain
+// deep nesting.
+fn collect_files_at(
+    root: &Path,
+    dir: &Path,
+    out: &mut Vec<(u8, String, Vec<u8>)>,
+    depth: usize,
+) -> Result<()> {
+    if depth > crate::install::MAX_ITEM_TREE_DEPTH {
+        return Err(crate::install::depth_exceeded(dir));
+    }
     let rd = std::fs::read_dir(dir).map_err(|e| MindError::io(dir, e))?;
     for entry in rd {
         let entry = entry.map_err(|e| MindError::io(dir, e))?;
@@ -259,7 +274,7 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<(u8, String, Vec<u8>)>) 
                 target.to_string_lossy().into_owned().into_bytes(),
             ));
         } else if ft.is_dir() {
-            collect_files(root, &path, out)?;
+            collect_files_at(root, &path, out, depth + 1)?;
         } else {
             // spec: LIFE-35
             let rel = path
@@ -501,6 +516,29 @@ mod tests {
         assert!(
             result.is_ok(),
             "symlink cycle must not overflow: {result:?}"
+        );
+    }
+
+    /// A tree nested deeper than the LIFE-52 cap fails with a structured
+    /// error instead of overflowing the stack.
+    #[test]
+    fn hash_path_depth_caps_a_pathological_tree() {
+        // spec: LIFE-52
+        let dir = tmp("deep-tree");
+        let mut deep = dir.to_path_buf();
+        for _ in 0..(crate::install::MAX_ITEM_TREE_DEPTH + 2) {
+            deep.push("d");
+        }
+        std::fs::create_dir_all(&deep).unwrap();
+        let result = hash_path(&dir);
+        assert!(
+            result.is_err(),
+            "hash_path must refuse a tree deeper than the cap: {result:?}"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("nested directories"),
+            "error message must name the depth cap: {msg}"
         );
     }
 

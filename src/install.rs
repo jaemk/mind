@@ -999,13 +999,38 @@ pub fn run_item_uninstall_hooks(
     Ok(())
 }
 
+/// Maximum directory nesting inside a single item tree (LIFE-52), far above
+/// any real layout. Converts a pathological or crafted deeply-nested source
+/// into a structured error instead of a stack overflow. Shared with the
+/// `hash_path` walk in `hash.rs`.
+pub(crate) const MAX_ITEM_TREE_DEPTH: usize = 128;
+
+/// The LIFE-52 depth-cap error, naming the path where the cap was hit.
+pub(crate) fn depth_exceeded(path: &Path) -> MindError {
+    MindError::io(
+        path,
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("item tree exceeds {MAX_ITEM_TREE_DEPTH} nested directories"),
+        ),
+    )
+}
+
 fn collect_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> Result<()> {
+    collect_files_at(dir, out, 0)
+}
+
+// spec: LIFE-52
+fn collect_files_at(dir: &Path, out: &mut Vec<std::path::PathBuf>, depth: usize) -> Result<()> {
+    if depth > MAX_ITEM_TREE_DEPTH {
+        return Err(depth_exceeded(dir));
+    }
     let rd = std::fs::read_dir(dir).map_err(|e| MindError::io(dir, e))?;
     for entry in rd {
         let entry = entry.map_err(|e| MindError::io(dir, e))?;
         let path = entry.path();
         if path.is_dir() {
-            collect_files(&path, out)?;
+            collect_files_at(&path, out, depth + 1)?;
         } else {
             out.push(path);
         }
@@ -1042,6 +1067,15 @@ pub(crate) fn remove_path(path: &Path) -> Result<()> {
 /// Exported as `pub(crate)` so the surface shard's `--snapshot` frozen-copy can
 /// reuse this implementation without duplicating the symlink-rejection logic.
 pub(crate) fn copy_recursive(src: &Path, dst: &Path) -> Result<()> {
+    copy_recursive_at(src, dst, 0)
+}
+
+// spec: LIFE-52 -- depth-capped; LIFE-42's symlink rejection already blocks
+// cycle-driven recursion, the cap covers plain deep nesting.
+fn copy_recursive_at(src: &Path, dst: &Path, depth: usize) -> Result<()> {
+    if depth > MAX_ITEM_TREE_DEPTH {
+        return Err(depth_exceeded(src));
+    }
     let meta = std::fs::symlink_metadata(src).map_err(|e| MindError::io(src, e))?;
     if meta.file_type().is_symlink() {
         return Err(MindError::io(
@@ -1059,7 +1093,7 @@ pub(crate) fn copy_recursive(src: &Path, dst: &Path) -> Result<()> {
             let entry = entry.map_err(|e| MindError::io(src, e))?;
             let from = entry.path();
             let to = dst.join(entry.file_name());
-            copy_recursive(&from, &to)?;
+            copy_recursive_at(&from, &to, depth + 1)?;
         }
     } else {
         if let Some(parent) = dst.parent() {
@@ -2203,6 +2237,37 @@ mod tests {
         assert!(
             msg.contains("symlink"),
             "error message must mention 'symlink': {msg}"
+        );
+        let _ = std::fs::remove_dir_all(&src);
+        let _ = std::fs::remove_dir_all(&dst);
+    }
+
+    /// A source tree nested deeper than the LIFE-52 cap fails with a
+    /// structured error instead of overflowing the stack.
+    #[test]
+    fn copy_recursive_depth_caps_a_pathological_tree() {
+        // spec: LIFE-52
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let src = std::env::temp_dir().join(format!("mind-cpdeep-src-{}-{n}", std::process::id()));
+        let dst = std::env::temp_dir().join(format!("mind-cpdeep-dst-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&src);
+        let _ = std::fs::remove_dir_all(&dst);
+        let mut deep = src.clone();
+        for _ in 0..(MAX_ITEM_TREE_DEPTH + 2) {
+            deep.push("d");
+        }
+        std::fs::create_dir_all(&deep).unwrap();
+
+        let result = copy_recursive(&src, &dst);
+
+        assert!(
+            result.is_err(),
+            "copy_recursive must refuse a tree deeper than the cap"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("nested directories"),
+            "error message must name the depth cap: {msg}"
         );
         let _ = std::fs::remove_dir_all(&src);
         let _ = std::fs::remove_dir_all(&dst);

@@ -41,6 +41,13 @@ agent homes (a store-only tool is not linked; tooling.md TOOL-3).
   carrying the offending path. This prevents a crafted source from exfiltrating
   files outside the item tree or causing unbounded recursion via a symlink to an
   ancestor directory.
+- `LIFE-52` The recursive item-tree walks (`copy_recursive` and
+  `collect_files` in `install.rs`, and the `hash_path` walk in `hash.rs`,
+  LIFE-34) are depth-capped at 128 nested directories, far above any real
+  item layout. A deeper tree (a pathological or crafted source) fails with a
+  structured `Io` error naming the offending path instead of overflowing the
+  stack. LIFE-42's symlink rejection already prevents cycle-driven recursion;
+  the cap covers plain deep nesting.
 - `LIFE-43` A forced install (`learn --force`, CLI-35) that replaces a
   pre-existing foreign target at one link path and then fails on a later link
   leaves every clobbered foreign target restored to its original content. Before
