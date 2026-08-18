@@ -1329,8 +1329,11 @@ and per-harness `kinds` defaults.
 - `CLI-120` `completions <shell>` writes a shell completion script for the named
   shell (bash, zsh, fish, elvish, powershell) to stdout, generated from the
   command tree.
-- `CLI-121` `man` writes the roff man page for `mind` to stdout, generated from
-  the command tree.
+- `CLI-121` `man` writes the roff man pages for `mind` to stdout, generated
+  from the command tree: the top-level page followed by one page per visible
+  subcommand (`mind-meld(1)`, `mind-learn(1)`, ...), so the top-level page's
+  SUBCOMMANDS cross-references resolve within the same output rather than
+  dangling. Hidden subcommands get no page.
 
 ## Output and global flags
 

@@ -8561,13 +8561,28 @@ pub fn completions(shell: clap_complete::Shell) {
     clap_complete::generate(shell, &mut cmd, "mind", &mut std::io::stdout());
 }
 
-/// `mind man` — write the roff man page to stdout.
+/// `mind man` — write the roff man pages to stdout: the top-level page, then
+/// one page per visible subcommand, so the SUBCOMMANDS cross-references
+/// (`mind-meld(1)`, ...) resolve within the same output instead of dangling.
+// spec: CLI-121
 pub fn man() -> Result<()> {
     use clap::CommandFactory;
     let mut out = Vec::new();
-    clap_mangen::Man::new(crate::cli::Cli::command())
+    let cmd = crate::cli::Cli::command();
+    clap_mangen::Man::new(cmd.clone())
         .render(&mut out)
         .map_err(|e| MindError::io("<man>", e))?;
+    for sub in cmd.get_subcommands() {
+        if sub.is_hide_set() {
+            continue;
+        }
+        // clap's Str only takes &'static str without its `string` feature;
+        // leaking a handful of short page names once per `man` run is fine.
+        let name: &'static str = Box::leak(format!("mind-{}", sub.get_name()).into_boxed_str());
+        clap_mangen::Man::new(sub.clone().name(name))
+            .render(&mut out)
+            .map_err(|e| MindError::io("<man>", e))?;
+    }
     std::io::stdout()
         .write_all(&out)
         .map_err(|e| MindError::io("<stdout>", e))

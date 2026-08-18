@@ -15,6 +15,13 @@ homes (lobes; default `~/.claude`).
 mind meld jaemk/mind
 ```
 
+This melds the mind repo itself: it offers the `hello-mind` example skill and
+registers two curated skill libraries
+([anthropics/skills](https://github.com/anthropics/skills) and
+[ComposioHQ/awesome-claude-skills](https://github.com/ComposioHQ/awesome-claude-skills))
+as browsable sources. Nothing installs without a prompt; `mind unmeld` drops
+any of the three.
+
 [![asciicast](https://asciinema.org/a/qcAxP5PD7H6cuLTE.svg)](https://asciinema.org/a/qcAxP5PD7H6cuLTE)
 
 Each installed item is tracked and checked for drift from its source, install /
@@ -67,6 +74,11 @@ mind recall            # list what's installed
 mind unmeld owner/repo # drop the source and uninstall what it installed
 ```
 
+A source can declare install hooks (shell commands run at install); mind shows
+each command and asks before running it. `mind review <repo>` reports a repo's
+hooks and risky references before melding. See the
+[install hooks guide](https://jaemk.github.io/mind/guide/install-hooks.html).
+
 `meld` presents available items and prompts to install. To register without
 installing and choose items individually:
 
@@ -103,6 +115,23 @@ The [documentation](https://jaemk.github.io/mind/) is the full reference: the
 [troubleshooting](https://jaemk.github.io/mind/guide/troubleshooting.html). The
 [spec/](https://github.com/jaemk/mind/tree/main/spec) directory is the normative
 behavioral spec.
+
+## Uninstall
+
+Remove installed items and sources first if you want a clean lobe
+(`mind unmeld <source>` per source, or `mind forget <item>` per item), then
+remove the binary by the method that installed it:
+
+```
+brew uninstall mind        # Homebrew
+cargo uninstall mind-cli   # cargo
+rm ~/.local/bin/mind       # install script (default location)
+```
+
+`mind`'s own state lives in `~/.mind` (store, clones, config); remove that
+directory last. Items were linked into your lobes as symlinks into the store,
+so unmeld/forget before deleting `~/.mind` or those links dangle
+(`mind introspect` reports them).
 
 ## Develop
 

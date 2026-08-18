@@ -9932,6 +9932,17 @@ fn man_page_renders_roff() {
     // roff man pages open with a .TH title header.
     assert!(r.stdout.contains(".TH"), "{}", r.stdout);
     assert!(r.stdout.to_lowercase().contains("mind"), "{}", r.stdout);
+    // The subcommand pages the top-level SUBCOMMANDS section references are
+    // present in the same output rather than dangling.
+    assert!(
+        r.stdout.contains(".TH mind-meld") || r.stdout.contains(".TH MIND-MELD"),
+        "mind-meld page must follow the top-level page: {}",
+        &r.stdout[..r.stdout.len().min(2000)]
+    );
+    assert!(
+        r.stdout.contains(".TH mind-learn") || r.stdout.contains(".TH MIND-LEARN"),
+        "mind-learn page must follow the top-level page"
+    );
 }
 
 // ---- concurrency tests -------------------------------------------------------

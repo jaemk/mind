@@ -17,7 +17,11 @@ Simplest to most advanced:
 - [starter/](starter/) - zero-config: meld an unmodified repo, items found by
   convention. START HERE.
 - [hello/](hello/) - the `hello-mind` hello-world skill the repo-root
-  `mind.toml` exposes via `[source].roots`; what `mind meld jaemk/mind` offers.
+  `mind.toml` exposes via `[source].roots`; what `mind meld jaemk/mind` offers
+  to install. Note that the same `mind.toml` also registers two curated skill
+  libraries (anthropics/skills, ComposioHQ/awesome-claude-skills) as
+  register-only `[discover].sources`: browsable via `mind probe`, nothing
+  installed on meld.
 - [namespacing/](namespacing/) - prefix namespacing and `{{ns:}}` reference
   tokens for colliding item names.
 - [explicit/](explicit/) - an authoritative `[[items]]` inventory with a custom
