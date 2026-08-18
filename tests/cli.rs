@@ -16257,16 +16257,19 @@ fn evolve_policy_pin_skew_non_check_json_no_warning_valid_json() {
 
 #[test]
 fn evolve_policy_pin_equal_to_running_no_skew_warning() {
-    // spec: POL-66 -- when pin == running, the decision is UpToDate, not
-    // PinnedBelowCurrent, so no skew warning is emitted.
+    // spec: POL-66 -- the skew warning fires only when the running version is
+    // strictly ABOVE the pin (PinnedBelowCurrent). A pin at the running
+    // version's numeric base is never above it, so no warning either way.
     let sb = Sandbox::new();
-    // A policy pin must be dotted numeric, and between releases the running
-    // binary carries a `-dev` pre-release suffix, so pin the numeric base. A
-    // `-dev` build compares equal to its own base version: `version_at_least`
-    // strips a trailing `-suffix` from each component before parsing (H1), so
-    // `0.22.1-dev` compares equal to `0.22.1` for any dev patch number.
-    let current = env!("CARGO_PKG_VERSION").split('-').next().unwrap();
-    let policy = write_policy(&sb, &format!("[binary]\nself-update = \"{current}\"\n"));
+    // A policy pin must be dotted numeric, so pin the numeric base of the
+    // running version. On a release build that pin equals the running version
+    // (UpToDate); on a `-dev` build the prerelease compares strictly below its
+    // own base (CLI-140: a dev build is offered its base release), so the pin
+    // sits above and the base release is reported available. Neither case is
+    // PinnedBelowCurrent.
+    let running = env!("CARGO_PKG_VERSION");
+    let base = running.split('-').next().unwrap();
+    let policy = write_policy(&sb, &format!("[binary]\nself-update = \"{base}\"\n"));
 
     let r = sb.mind_env(
         &["evolve", "--check"],
@@ -16274,19 +16277,28 @@ fn evolve_policy_pin_equal_to_running_no_skew_warning() {
     );
     assert!(
         r.success,
-        "evolve --check with pin == running must exit 0: {} {}",
+        "evolve --check with pin at the running base must exit 0: {} {}",
         r.stdout, r.stderr
     );
     assert!(
         !r.stdout.contains("warning:"),
-        "no skew warning when pin equals the running version: {}",
+        "no skew warning when the pin is not below the running version: {}",
         r.stdout
     );
-    assert!(
-        r.stdout.contains("up to date"),
-        "output must say 'up to date' when pin == running: {}",
-        r.stdout
-    );
+    if running.contains('-') {
+        // Dev build: strictly below its own base release (CLI-140).
+        assert!(
+            r.stdout.contains("available"),
+            "a dev build must be offered its base release: {}",
+            r.stdout
+        );
+    } else {
+        assert!(
+            r.stdout.contains("up to date"),
+            "output must say 'up to date' when pin == running: {}",
+            r.stdout
+        );
+    }
 }
 
 #[test]
