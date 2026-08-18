@@ -151,6 +151,10 @@ identified by stable identity `(source, kind, bare_name)` (see namespacing.md).
   broken with a marked back-edge rather than expanded again (DEP-22). An optional
   `recall <item> --tree` scopes the forest to one item's subtree. Items reachable
   only as a dependency appear nested under their dependents, not as their own root.
+  Installed membership is matched by stable identity (the manifest entry's source
+  as well as its `kind:effective-name` key), so when two melded sources both
+  offer the same unprefixed name and one copy is installed, the uninstalled twin
+  is not a node: the item appears once, with edges from the installed source.
 
 ## Non-interactive probe shows the tree
 

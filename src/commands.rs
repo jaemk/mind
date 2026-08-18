@@ -4968,8 +4968,18 @@ pub fn forget(
     // (keys.len() == 1); the glob path already handled its CLI-42 confirmation.
     if keys.len() == 1 {
         let removed_key = &keys[0];
-        let installed_keys: HashSet<String> = manifest.items.keys().cloned().collect();
-        let graph = crate::deps::installed_graph(&catalog, &installed_keys, read_item_text);
+        // Match by stable identity (source as well as key): a key-only match
+        // would pick up an uninstalled same-key twin from another source.
+        let graph = crate::deps::installed_graph(
+            &catalog,
+            |it| {
+                manifest
+                    .items
+                    .get(it.key().as_str())
+                    .is_some_and(|m| m.source == it.source)
+            },
+            read_item_text,
+        );
         let dependents = graph.dependents(removed_key);
         if !dependents.is_empty() && !yes && !force {
             // spec: DSC-95 -- sanitize each field before composing, not
@@ -6891,8 +6901,18 @@ pub fn recall(
         let manifest = Manifest::load(paths)?;
         let registry = Registry::load(paths)?;
         let catalog = catalog::scan(paths, &registry).unwrap_or_default();
-        let installed_keys: HashSet<String> = manifest.items.keys().cloned().collect();
-        let graph = crate::deps::installed_graph(&catalog, &installed_keys, read_item_text);
+        // Match by stable identity (source as well as key), so two sources
+        // both offering an unprefixed name do not render duplicate nodes.
+        let graph = crate::deps::installed_graph(
+            &catalog,
+            |it| {
+                manifest
+                    .items
+                    .get(it.key().as_str())
+                    .is_some_and(|m| m.source == it.source)
+            },
+            read_item_text,
+        );
 
         if json {
             // spec: DEP-63 -- structured JSON output instead of the human rendering.
@@ -7385,13 +7405,9 @@ pub fn probe(
 
     // spec: DEP-62
     // Human listing: nest each hit's transitive dependencies beneath it. Build a
-    // graph over all catalog items (passing every catalog key as the "installed"
-    // set makes every item a node), then render_subtree for each hit.
-    let all_catalog_keys: HashSet<String> = items
-        .iter()
-        .map(|it| it.key().as_str().to_string())
-        .collect();
-    let catalog_graph = crate::deps::installed_graph(&items, &all_catalog_keys, read_item_text);
+    // graph over all catalog items (an always-true membership makes every item
+    // a node), then render_subtree for each hit.
+    let catalog_graph = crate::deps::installed_graph(&items, |_| true, read_item_text);
 
     let mut rows = Vec::new();
     for (_, it) in &hits {

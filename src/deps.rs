@@ -600,10 +600,15 @@ pub struct InstalledGraph {
     key_to_idx: HashMap<String, usize>,
 }
 
-/// Build an [`InstalledGraph`] from a catalog and the set of installed keys.
+/// Build an [`InstalledGraph`] from a catalog and an installed-membership
+/// predicate.
 ///
 /// - `items`: the full catalog (scanned from all melded sources).
-/// - `installed_keys`: the `kind:effective_name` keys present in the manifest.
+/// - `installed`: whether a catalog item is in the installed set. Callers
+///   matching against the manifest must compare the SOURCE as well as the
+///   `kind:effective_name` key (the stable identity the upgrade loop uses):
+///   two melded sources can both offer an unprefixed `skill:review`, and a
+///   key-only match would add the uninstalled twin as a duplicate node.
 /// - `read`: item text reader, same contract as [`resolve`].
 ///
 /// Edges are each installed item's direct dependency set restricted to other
@@ -612,15 +617,11 @@ pub struct InstalledGraph {
 #[allow(dead_code)]
 pub fn installed_graph(
     items: &[CatalogItem],
-    installed_keys: &HashSet<String>,
+    installed: impl Fn(&CatalogItem) -> bool,
     read: impl Fn(&CatalogItem) -> String,
 ) -> InstalledGraph {
     // Filter catalog to installed items only.
-    let nodes: Vec<CatalogItem> = items
-        .iter()
-        .filter(|it| installed_keys.contains(it.key().as_str()))
-        .cloned()
-        .collect();
+    let nodes: Vec<CatalogItem> = items.iter().filter(|it| installed(it)).cloned().collect();
 
     // Build key -> index for the installed node set.
     // Used both for InstalledGraph::key_to_idx lookups and to translate
@@ -644,7 +645,7 @@ pub fn installed_graph(
     let installed_to_full: HashMap<String, usize> = items
         .iter()
         .enumerate()
-        .filter(|(_, it)| installed_keys.contains(it.key().as_str()))
+        .filter(|(_, it)| installed(it))
         .map(|(full_i, it)| (it.key().as_str().to_string(), full_i))
         .collect();
 
@@ -1933,9 +1934,37 @@ mod tests {
         installed_keys.insert("skill:a".to_string());
         installed_keys.insert("skill:b".to_string());
 
-        let g = installed_graph(&items, &installed_keys, reader(content));
+        let g = installed_graph(
+            &items,
+            |it| installed_keys.contains(it.key().as_str()),
+            reader(content),
+        );
         let deps = g.dependents("skill:b");
         assert_eq!(deps, vec!["skill:a".to_string()]);
+    }
+
+    #[test]
+    fn installed_graph_source_scoped_membership_skips_same_key_twin() {
+        // spec: DEP-61
+        // Sources "a" and "b" both offer an unprefixed skill:review; only the
+        // copy from "a" is installed. A source-aware membership predicate (the
+        // stable identity the callers use) must yield exactly one node, from
+        // source "a", not a duplicate per same-key catalog item.
+        let items = vec![
+            item(ItemKind::Skill, "review", "a"),
+            item(ItemKind::Skill, "review", "b"),
+        ];
+        let g = installed_graph(
+            &items,
+            |it| it.key().as_str() == "skill:review" && it.source == "a",
+            reader(HashMap::new()),
+        );
+        let roots = g.forest_nodes();
+        assert_eq!(
+            roots.len(),
+            1,
+            "one installed copy must yield one node, got {roots:?}"
+        );
     }
 
     #[test]
@@ -1952,7 +1981,11 @@ mod tests {
         installed_keys.insert("skill:a".to_string());
         installed_keys.insert("skill:b".to_string());
 
-        let g = installed_graph(&items, &installed_keys, reader(content));
+        let g = installed_graph(
+            &items,
+            |it| installed_keys.contains(it.key().as_str()),
+            reader(content),
+        );
         // Nothing depends on "a"; a is the dependent, not the dependency.
         let deps = g.dependents("skill:a");
         assert!(
@@ -1976,7 +2009,11 @@ mod tests {
         installed_keys.insert("skill:a".to_string());
         // b is NOT installed
 
-        let g = installed_graph(&items, &installed_keys, reader(content));
+        let g = installed_graph(
+            &items,
+            |it| installed_keys.contains(it.key().as_str()),
+            reader(content),
+        );
         // b is not a node, so asking for its dependents returns empty.
         let deps = g.dependents("skill:b");
         assert!(
@@ -2000,7 +2037,11 @@ mod tests {
         installed_keys.insert("skill:a".to_string());
         installed_keys.insert("skill:b".to_string());
 
-        let g = installed_graph(&items, &installed_keys, reader(content));
+        let g = installed_graph(
+            &items,
+            |it| installed_keys.contains(it.key().as_str()),
+            reader(content),
+        );
         // b is not a dependent of a (b has no edge to a).
         assert!(
             !g.dependents("skill:a").contains(&"skill:b".to_string()),
@@ -2019,7 +2060,11 @@ mod tests {
         installed_keys.insert("skill:a".to_string());
         installed_keys.insert("skill:b".to_string());
 
-        let g = installed_graph(&items, &installed_keys, reader(HashMap::new()));
+        let g = installed_graph(
+            &items,
+            |it| installed_keys.contains(it.key().as_str()),
+            reader(HashMap::new()),
+        );
         let deps = g.dependents("skill:b");
         assert_eq!(deps, vec!["skill:a".to_string()]);
     }
@@ -2041,7 +2086,11 @@ mod tests {
         installed_keys.insert("skill:a".to_string());
         installed_keys.insert("skill:b".to_string());
 
-        let g = installed_graph(&items, &installed_keys, reader(content));
+        let g = installed_graph(
+            &items,
+            |it| installed_keys.contains(it.key().as_str()),
+            reader(content),
+        );
         let forest = g.render_forest();
         // a is the root; b is nested under it, not a separate root.
         assert!(
@@ -2074,7 +2123,11 @@ mod tests {
         installed_keys.insert("skill:b".to_string());
         installed_keys.insert("skill:c".to_string());
 
-        let g = installed_graph(&items, &installed_keys, reader(content));
+        let g = installed_graph(
+            &items,
+            |it| installed_keys.contains(it.key().as_str()),
+            reader(content),
+        );
         let expected = "- skill:a\n  - skill:b\n    - skill:c\n";
         assert_eq!(g.render_forest(), expected);
     }
@@ -2097,7 +2150,11 @@ mod tests {
         installed_keys.insert("skill:a".to_string());
         installed_keys.insert("skill:b".to_string());
 
-        let g = installed_graph(&items, &installed_keys, reader(content));
+        let g = installed_graph(
+            &items,
+            |it| installed_keys.contains(it.key().as_str()),
+            reader(content),
+        );
         // render_forest promotes a and marks the cycle.
         let forest = g.render_forest();
         assert!(
@@ -2130,7 +2187,11 @@ mod tests {
         installed_keys.insert("skill:b".to_string());
         installed_keys.insert("skill:c".to_string());
 
-        let g = installed_graph(&items, &installed_keys, reader(content));
+        let g = installed_graph(
+            &items,
+            |it| installed_keys.contains(it.key().as_str()),
+            reader(content),
+        );
         let sub = g.render_subtree("skill:a").expect("skill:a must be a node");
         let expected = "- skill:a\n  - skill:b\n    - skill:c\n";
         assert_eq!(sub, expected);
@@ -2144,7 +2205,11 @@ mod tests {
         let mut installed_keys = HashSet::new();
         installed_keys.insert("skill:a".to_string());
 
-        let g = installed_graph(&items, &installed_keys, reader(HashMap::new()));
+        let g = installed_graph(
+            &items,
+            |it| installed_keys.contains(it.key().as_str()),
+            reader(HashMap::new()),
+        );
         assert!(
             g.render_subtree("skill:nonexistent").is_none(),
             "non-installed key must return None"
@@ -2169,7 +2234,11 @@ mod tests {
         installed_keys.insert("skill:b".to_string());
         installed_keys.insert("skill:c".to_string());
 
-        let g = installed_graph(&items, &installed_keys, reader(content));
+        let g = installed_graph(
+            &items,
+            |it| installed_keys.contains(it.key().as_str()),
+            reader(content),
+        );
         let expected = "\
 - skill:a
   - skill:b
@@ -2196,7 +2265,11 @@ mod tests {
         installed_keys.insert("skill:a".to_string());
         installed_keys.insert("skill:b".to_string());
 
-        let g = installed_graph(&items, &installed_keys, reader(content));
+        let g = installed_graph(
+            &items,
+            |it| installed_keys.contains(it.key().as_str()),
+            reader(content),
+        );
         // a is promoted as the secondary root (lowest index); b nests under it;
         // the back-edge from b to a is marked (cycle).
         let expected = "\
@@ -2321,7 +2394,11 @@ mod tests {
         installed_keys.insert("skill:c".to_string());
         installed_keys.insert("skill:d".to_string());
 
-        let g = installed_graph(&items, &installed_keys, reader(content));
+        let g = installed_graph(
+            &items,
+            |it| installed_keys.contains(it.key().as_str()),
+            reader(content),
+        );
         let expected = "\
 - skill:a
   - skill:b
@@ -2360,7 +2437,11 @@ mod tests {
         installed_keys.insert("skill:b".to_string());
         // ghost is NOT installed.
 
-        let g = installed_graph(&items, &installed_keys, reader(content));
+        let g = installed_graph(
+            &items,
+            |it| installed_keys.contains(it.key().as_str()),
+            reader(content),
+        );
         let forest = g.render_forest();
         assert!(
             !forest.contains("ghost"),
@@ -2394,7 +2475,11 @@ mod tests {
         installed_keys.insert("skill:jk:a".to_string());
         installed_keys.insert("skill:jk:b".to_string());
 
-        let g = installed_graph(&items, &installed_keys, reader(content));
+        let g = installed_graph(
+            &items,
+            |it| installed_keys.contains(it.key().as_str()),
+            reader(content),
+        );
         assert_eq!(
             g.dependents("skill:jk:b"),
             vec!["skill:jk:a".to_string()],
@@ -2425,7 +2510,11 @@ mod tests {
         installed_keys.insert("skill:b".to_string());
         installed_keys.insert("skill:shared".to_string());
 
-        let g = installed_graph(&items, &installed_keys, reader(content));
+        let g = installed_graph(
+            &items,
+            |it| installed_keys.contains(it.key().as_str()),
+            reader(content),
+        );
         let deps = g.dependents("skill:shared");
         assert_eq!(
             deps,
@@ -2456,7 +2545,11 @@ mod tests {
         installed_keys.insert("skill:c".to_string());
         installed_keys.insert("skill:d".to_string());
 
-        let g = installed_graph(&items, &installed_keys, reader(content));
+        let g = installed_graph(
+            &items,
+            |it| installed_keys.contains(it.key().as_str()),
+            reader(content),
+        );
         assert!(
             g.dependents("skill:a").is_empty(),
             "the top root must have no dependents in a diamond"
@@ -2490,7 +2583,11 @@ mod tests {
         installed_keys.insert("skill:r2".to_string());
         installed_keys.insert("skill:lib".to_string());
 
-        let g = installed_graph(&items, &installed_keys, reader(content));
+        let g = installed_graph(
+            &items,
+            |it| installed_keys.contains(it.key().as_str()),
+            reader(content),
+        );
         let expected = "\
 - skill:r1
   - skill:lib
@@ -2529,7 +2626,11 @@ mod tests {
         installed_keys.insert("skill:b".to_string());
         installed_keys.insert("skill:c".to_string());
 
-        let g = installed_graph(&items, &installed_keys, reader(content));
+        let g = installed_graph(
+            &items,
+            |it| installed_keys.contains(it.key().as_str()),
+            reader(content),
+        );
         // b is a dependency-only node (in-degree 1 from a) but its subtree is its
         // own: b at depth 0 with c nested under it. a (its dependent) is absent.
         let sub = g.render_subtree("skill:b").expect("skill:b must be a node");
@@ -2560,7 +2661,11 @@ mod tests {
         installed_keys.insert("skill:b".to_string());
         installed_keys.insert("skill:c".to_string());
 
-        let g = installed_graph(&items, &installed_keys, reader(content));
+        let g = installed_graph(
+            &items,
+            |it| installed_keys.contains(it.key().as_str()),
+            reader(content),
+        );
         let forest = g.render_forest();
         // c renders first (primary root), then the cycle component with a
         // promoted (index 0 < index 1).
@@ -2594,7 +2699,11 @@ mod tests {
         installed_keys.insert("skill:a".to_string());
         installed_keys.insert("skill:b".to_string());
 
-        let g = installed_graph(&items, &installed_keys, reader(HashMap::new()));
+        let g = installed_graph(
+            &items,
+            |it| installed_keys.contains(it.key().as_str()),
+            reader(HashMap::new()),
+        );
         let forest = g.render_forest();
         assert!(
             forest.contains("- skill:a\n"),
@@ -2624,7 +2733,11 @@ mod tests {
         installed_keys.insert("skill:a".to_string());
         installed_keys.insert("skill:b".to_string());
 
-        let g = installed_graph(&items, &installed_keys, reader(content));
+        let g = installed_graph(
+            &items,
+            |it| installed_keys.contains(it.key().as_str()),
+            reader(content),
+        );
         let nodes = g.forest_nodes();
 
         // Exactly one root: skill:a (in-degree 0).
@@ -2666,7 +2779,11 @@ mod tests {
         installed_keys.insert("skill:a".to_string());
         installed_keys.insert("skill:b".to_string());
 
-        let g = installed_graph(&items, &installed_keys, reader(content));
+        let g = installed_graph(
+            &items,
+            |it| installed_keys.contains(it.key().as_str()),
+            reader(content),
+        );
         let nodes = g.forest_nodes();
 
         // One root (promoted all-cycle component).
@@ -2705,7 +2822,11 @@ mod tests {
         installed_keys.insert("skill:a".to_string());
         installed_keys.insert("skill:b".to_string());
 
-        let g = installed_graph(&items, &installed_keys, reader(content));
+        let g = installed_graph(
+            &items,
+            |it| installed_keys.contains(it.key().as_str()),
+            reader(content),
+        );
 
         let node = g.subtree_node("skill:a").expect("skill:a must be a node");
         assert_eq!(node.key, "skill:a");
@@ -2725,7 +2846,11 @@ mod tests {
         let mut installed_keys = HashSet::new();
         installed_keys.insert("skill:leaf".to_string());
 
-        let g = installed_graph(&items, &installed_keys, reader(HashMap::new()));
+        let g = installed_graph(
+            &items,
+            |it| installed_keys.contains(it.key().as_str()),
+            reader(HashMap::new()),
+        );
         let node = g.subtree_node("skill:leaf").expect("leaf must be a node");
         assert_eq!(node.key, "skill:leaf");
         assert!(!node.cycle);
@@ -2759,7 +2884,11 @@ mod tests {
         installed_keys.insert("skill:c".to_string());
         installed_keys.insert("skill:d".to_string());
 
-        let g = installed_graph(&items, &installed_keys, reader(content));
+        let g = installed_graph(
+            &items,
+            |it| installed_keys.contains(it.key().as_str()),
+            reader(content),
+        );
 
         // Collect all unique keys in the DepNode forest (non-cycle entries are
         // the installed set; cycle leaves duplicate their ancestor's key, which
@@ -2812,7 +2941,11 @@ mod tests {
         installed_keys.insert("skill:a".to_string());
         installed_keys.insert("skill:b".to_string());
 
-        let g = installed_graph(&items, &installed_keys, reader(content));
+        let g = installed_graph(
+            &items,
+            |it| installed_keys.contains(it.key().as_str()),
+            reader(content),
+        );
         let nodes = g.forest_nodes();
         let json_str = serde_json::to_string(&nodes).expect("must serialize");
         let v: serde_json::Value = serde_json::from_str(&json_str).expect("must parse");
@@ -2866,7 +2999,11 @@ mod tests {
         installed_keys.insert("skill:jk:a".to_string());
         installed_keys.insert("skill:jk:b".to_string());
 
-        let g = installed_graph(&items, &installed_keys, reader(content));
+        let g = installed_graph(
+            &items,
+            |it| installed_keys.contains(it.key().as_str()),
+            reader(content),
+        );
         let nodes = g.forest_nodes();
 
         assert_eq!(nodes.len(), 1);
@@ -2904,7 +3041,11 @@ mod tests {
         installed_keys.insert("skill:c".to_string());
         installed_keys.insert("skill:d".to_string());
 
-        let g = installed_graph(&items, &installed_keys, reader(content));
+        let g = installed_graph(
+            &items,
+            |it| installed_keys.contains(it.key().as_str()),
+            reader(content),
+        );
         let nodes = g.forest_nodes();
 
         // `a` is the sole root.
@@ -3015,7 +3156,11 @@ mod tests {
         installed_keys.insert("skill:b".to_string());
         installed_keys.insert("skill:c".to_string());
 
-        let g = installed_graph(&items, &installed_keys, reader(content));
+        let g = installed_graph(
+            &items,
+            |it| installed_keys.contains(it.key().as_str()),
+            reader(content),
+        );
         let nodes = g.forest_nodes();
 
         // Two roots: the natural root c, then the promoted cycle root a.
@@ -3153,7 +3298,11 @@ mod tests {
         installed_keys.insert("agent:shared".to_string());
         installed_keys.insert("rule:shared".to_string());
 
-        let g = installed_graph(&items, &installed_keys, reader(HashMap::new()));
+        let g = installed_graph(
+            &items,
+            |it| installed_keys.contains(it.key().as_str()),
+            reader(HashMap::new()),
+        );
         // No edge means neither shared sibling has `root` as a dependent.
         assert!(
             g.dependents("agent:shared").is_empty(),
@@ -3186,7 +3335,11 @@ mod tests {
         installed_keys.insert("skill:root".to_string());
         installed_keys.insert("agent:only".to_string());
 
-        let g = installed_graph(&items, &installed_keys, reader(HashMap::new()));
+        let g = installed_graph(
+            &items,
+            |it| installed_keys.contains(it.key().as_str()),
+            reader(HashMap::new()),
+        );
         assert_eq!(
             g.dependents("agent:only"),
             vec!["skill:root".to_string()],
@@ -3265,7 +3418,11 @@ mod tests {
         installed_keys.insert("agent:jk:shared".to_string());
         installed_keys.insert("rule:jk:shared".to_string());
 
-        let g = installed_graph(&items, &installed_keys, reader(HashMap::new()));
+        let g = installed_graph(
+            &items,
+            |it| installed_keys.contains(it.key().as_str()),
+            reader(HashMap::new()),
+        );
         assert!(
             g.dependents("agent:jk:shared").is_empty() && g.dependents("rule:jk:shared").is_empty(),
             "ambiguous bare requires must emit no edge even when prefixed"
@@ -3285,7 +3442,11 @@ mod tests {
         // behind `recall --tree --json` over an empty manifest.
         let items: Vec<CatalogItem> = vec![];
         let installed_keys: HashSet<String> = HashSet::new();
-        let g = installed_graph(&items, &installed_keys, reader(HashMap::new()));
+        let g = installed_graph(
+            &items,
+            |it| installed_keys.contains(it.key().as_str()),
+            reader(HashMap::new()),
+        );
         let nodes = g.forest_nodes();
         assert!(nodes.is_empty(), "empty graph yields no roots: {nodes:?}");
         assert_eq!(
@@ -3422,7 +3583,11 @@ mod tests {
             .map(|it| it.key().as_str().to_string())
             .collect();
 
-        let g = installed_graph(&items, &installed_keys, reader(content));
+        let g = installed_graph(
+            &items,
+            |it| installed_keys.contains(it.key().as_str()),
+            reader(content),
+        );
         let forest = g.render_forest();
         let line_count = forest.lines().count();
 
@@ -3449,7 +3614,11 @@ mod tests {
             .map(|it| it.key().as_str().to_string())
             .collect();
 
-        let g = installed_graph(&items, &installed_keys, reader(content));
+        let g = installed_graph(
+            &items,
+            |it| installed_keys.contains(it.key().as_str()),
+            reader(content),
+        );
         let forest = g.render_forest();
 
         assert!(
@@ -3480,7 +3649,11 @@ mod tests {
             .map(|it| it.key().as_str().to_string())
             .collect();
 
-        let g = installed_graph(&items, &installed_keys, reader(content));
+        let g = installed_graph(
+            &items,
+            |it| installed_keys.contains(it.key().as_str()),
+            reader(content),
+        );
         let nodes = g.forest_nodes();
 
         fn count_nodes(nodes: &[DepNode]) -> usize {
@@ -3521,7 +3694,11 @@ mod tests {
             .map(|it| it.key().as_str().to_string())
             .collect();
 
-        let g = installed_graph(&items, &installed_keys, reader(content));
+        let g = installed_graph(
+            &items,
+            |it| installed_keys.contains(it.key().as_str()),
+            reader(content),
+        );
         let nodes = g.forest_nodes();
         assert_eq!(nodes.len(), 1, "a plain chain has exactly one root");
 
