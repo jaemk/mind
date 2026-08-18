@@ -234,7 +234,7 @@ pub fn prefix_choice(answer: &str) -> Option<String> {
     }
 }
 
-/// Extended reserved prefix words (NS-29 / DEC-9): plausible future item-kind
+/// Extended reserved prefix words (NS-29): plausible future item-kind
 /// or CLI-subsystem names that are banned pre-emptively.
 const EXTRA_RESERVED: &[&str] = &[
     "command",
@@ -301,7 +301,7 @@ pub(crate) fn is_safe_prefix_component(prefix: &str) -> bool {
 ///
 /// Rejects any prefix that:
 /// - is a reserved item-kind word (`skill`, `agent`, `rule`, `tool`; NS-25), or
-/// - is in the extended DEC-9 reserved list (NS-29), or
+/// - is in the extended reserved list (NS-29), or
 /// - is not a single safe path component (NS-28).
 ///
 /// An empty prefix is always accepted -- it means "no prefix in effect" and is
@@ -326,7 +326,7 @@ pub fn validate_prefix(prefix: &str) -> crate::error::Result<()> {
             prefix: prefix.to_string(),
         });
     }
-    // NS-29: reject extended DEC-9 reserved words.
+    // NS-29: reject extended reserved words.
     if EXTRA_RESERVED.contains(&prefix) {
         return Err(crate::error::MindError::ReservedPrefix {
             prefix: prefix.to_string(),

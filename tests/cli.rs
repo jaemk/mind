@@ -25067,7 +25067,7 @@ fn sync_rewalk_respects_namespace_key_in_mindfile() {
     );
 }
 
-// ---- CLI surface: flag renames and aliases (DEC-2 through DEC-8) ------------
+// ---- CLI surface: flag renames and aliases (CLI-165, CLI-171 etc.) ----------
 
 #[test]
 fn meld_register_only_is_canonical() {

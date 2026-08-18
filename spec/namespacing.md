@@ -77,7 +77,7 @@ The rest of this document states these rules normatively.
   prefix -- `meld --namespace`, `[source].prefix` / `[source].namespace`,
   `config` -- calls `validate_prefix` before persisting the value. A violation
   is a structured `UnsafePrefix` error, distinct from the `ReservedPrefix`
-  error for the kind-word/DEC-9 reserved list (NS-25/NS-29).
+  error for the kind-word/extended reserved list (NS-25/NS-29).
 - `NS-72` The low-level `is_safe_prefix_component` guard (used by
   `validate_prefix`, and independently by catalog code that derives a prefix
   from a marketplace/catalog entry name) additionally rejects a multi-byte
@@ -107,8 +107,8 @@ The rest of this document states these rules normatively.
   character is rejected the same as one carrying a bidi override. The
   broadened set is a strict superset of the original: every code point
   blocked before NS-73 is still blocked.
-- `NS-29` The reserved-kind-word list (NS-25) is permanent and append-only
-  (DEC-9). The following additional words are reserved against plausible future
+- `NS-29` The reserved-kind-word list (NS-25) is permanent and append-only.
+  The following additional words are reserved against plausible future
   item kinds or CLI subsystem names: `command`, `hook`, `mcp`, `plugin`,
   `prompt`, `mode`, `output-style`. A prefix equal to any of these is rejected
   with the same `ReservedPrefix` error as the kind-word list.
@@ -253,7 +253,7 @@ at runtime. Prefixing changes installed names, so references must be rewritten.
   - The key lives in the item's own frontmatter, not in `mind.toml`'s inventory
     layer, so declaring it on one item leaves convention discovery on and says
     nothing about any other item; a source needing expansion on one skill does
-    not become authoritative (DSC-8) and does not have to enumerate the rest.
+    not become authoritative (DSC-3) and does not have to enumerate the rest.
   - A path token in an expand-listed file renders as an absolute store path, not
     the `~` form TOOL-16 uses for markdown, because such a file is typically read
     by a program that does not itself expand `~` (TOOL-20).
