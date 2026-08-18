@@ -71,8 +71,9 @@ an independent store and link into the host's discovery location.
   listed in the manifest. `--add-root` is therefore NOT one of the MKT-15
   own-item directives and the MKT-15 suppression note is not printed for it.
   Items an added root and the manifest both contribute (the same on-disk path)
-  de-duplicate with the manifest entry winning (DSC-85); add-root items carry no
-  per-plugin namespace (DSC-86).
+  de-duplicate with the manifest entry winning (DSC-85); add-root items carry
+  the layer's effective prefix, which for a single-plugin source includes the
+  plugin-name default, but never a marketplace's per-entry namespace (DSC-86).
 
 - `MKT-16` A co-present `mind.toml`'s `[discover].sources` (DSC-38) composes with
   the manifest rather than suppressing it. `[discover].sources` curates OTHER

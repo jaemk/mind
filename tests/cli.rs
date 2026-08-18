@@ -26602,9 +26602,43 @@ fn add_root_composes_with_marketplace_manifest() {
 }
 
 #[test]
+fn add_root_on_single_plugin_source_inherits_plugin_prefix() {
+    // spec: DSC-86
+    // A single-plugin source with no explicit override namespaces its own
+    // items under the plugin-name default (MKT-5); an added root's unlisted
+    // items share that namespace instead of installing unprefixed.
+    let sb = Sandbox::bare("plugin-addroot");
+    sb.write_and_commit(".claude-plugin/plugin.json", r#"{"name":"kit"}"#);
+    sb.write_and_commit(
+        "skills/foo/SKILL.md",
+        "---\ndescription: plugin skill\n---\n# foo\n",
+    );
+    sb.write_and_commit(
+        "community/extra/SKILL.md",
+        "---\ndescription: unlisted flat skill\n---\n# extra\n",
+    );
+    let spec = sb.source_spec();
+    let r = sb.mind(&["meld", &spec, "--add-root", "community", "--register-only"]);
+    assert!(r.success, "meld failed: {} {}", r.stdout, r.stderr);
+
+    let probe = sb.mind(&["probe"]);
+    assert!(
+        probe.stdout.contains("skill:kit:foo"),
+        "plugin item must carry the plugin-name prefix: {}",
+        probe.stdout
+    );
+    assert!(
+        probe.stdout.contains("skill:kit:extra"),
+        "add-root item must share the plugin-name prefix: {}",
+        probe.stdout
+    );
+}
+
+#[test]
 fn add_root_items_carry_source_prefix_not_plugin_prefix() {
     // spec: DSC-86
-    // An explicit --namespace layers over the manifest's per-plugin prefix
+    // On a MARKETPLACE source (per-entry namespaces, no single plugin), an
+    // explicit --namespace layers over the manifest's per-plugin prefix
     // (MKT-13) while an add-root item gets only the source prefix.
     let sb = marketplace_with_unlisted_community();
     let spec = sb.source_spec();

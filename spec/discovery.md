@@ -519,9 +519,13 @@ needs roots that compose instead of replace.
   at DISTINCT on-disk paths (DSC-53), is a `DuplicateItem` error. A same-path
   overlap between two add-root items de-duplicates instead (DSC-87).
 - `DSC-86` Add-root items are ordinary convention items: bare names derived
-  from the layout, with the source's effective prefix (alias or
-  `[source].namespace`) applied at install. A manifest's per-plugin namespace
-  (MKT-5/MKT-8) does not reach them.
+  from the layout, with the layer's effective prefix applied at install. For a
+  single-plugin source (`plugin.json`) with no explicit override, that is the
+  plugin-name default prefix (MKT-5), so the plugin's items and the added
+  roots' items share one namespace. A marketplace's per-entry namespaces
+  (MKT-8) do not reach add-root items: there is no single entry to attribute
+  an added root to, so they carry only the source's own prefix (alias or
+  `[source].namespace`).
 - `DSC-87` Two added roots can surface the SAME on-disk item AS THE SAME KIND
   through different scan mechanisms (e.g. `--add-root . --add-root skills`,
   where the `.` root finds `skills/foo` as a Skill via the `skills/` container

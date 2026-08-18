@@ -289,10 +289,13 @@ pub(crate) fn scan_source_at(
     }
 
     let base_start = out.len();
-    scan_source_layers(clone_root, source, &mindfile, &prefix, out)?;
+    let addroot_prefix = scan_source_layers(clone_root, source, &mindfile, &prefix, out)?;
     // spec: DSC-84 -- the consumer's --add-root roots compose with whatever
     // layer the match above found authoritative.
-    scan_add_roots(clone_root, source, &prefix, base_start, out)
+    // spec: DSC-86 -- add-root items use the layer's effective prefix: for a
+    // single-plugin source that is the plugin-name default, so the whole meld
+    // shares one namespace.
+    scan_add_roots(clone_root, source, &addroot_prefix, base_start, out)
 }
 
 /// Catalog an item-link source instance (LNK-7): the one skill directory at
@@ -335,13 +338,19 @@ fn scan_item_link(
 /// Scan the authoritative discovery layer for a source: an authoritative
 /// `mind.toml` (DSC-3), a `.claude-plugin/` manifest (MKT-2/MKT-14), or the
 /// convention scan (DSC-10..13), in that precedence.
+///
+/// Returns the effective prefix `--add-root` items should install under
+/// (DSC-86): the single-plugin arm's plugin-name default when that arm ran,
+/// else the outer source prefix unchanged. A marketplace's per-entry
+/// namespaces never apply (there is no single entry to attribute an added
+/// root to).
 fn scan_source_layers(
     clone_root: &Path,
     source: &Source,
     mindfile: &Option<MindToml>,
     prefix: &Option<String>,
     out: &mut Vec<CatalogItem>,
-) -> Result<()> {
+) -> Result<Option<String>> {
     match mindfile {
         Some(mt) if mt.is_authoritative() => {
             // spec: DSC-52 — authoritative mind.toml ignores scan roots entirely;
@@ -365,7 +374,7 @@ fn scan_source_layers(
             if let Some(discover) = &mt.discover {
                 scan_globs(clone_root, source, prefix, discover, out)?;
             }
-            Ok(())
+            Ok(prefix.clone())
         }
         mt => {
             // MKT-15: an own-item scan layout means the repo's own items are
@@ -437,7 +446,8 @@ fn scan_source_layers(
                 // (not each item); recording it on the Source is commands.rs's job
                 // (shard 4). Per-item descriptions continue to come from frontmatter.
 
-                return Ok(());
+                // spec: DSC-86 -- add-root items share the plugin's namespace.
+                return Ok(plugin_prefix);
             }
 
             // MKT-14: Check for a marketplace.json AFTER plugin.json (plugin.json wins
@@ -466,7 +476,9 @@ fn scan_source_layers(
                     has_explicit_prefix,
                     out,
                 )?;
-                return Ok(()); // marketplace is authoritative (MKT-2 / MKT-14)
+                // Marketplace is authoritative (MKT-2 / MKT-14); per-entry
+                // namespaces do not reach add-root items (DSC-86).
+                return Ok(prefix.clone());
             }
 
             // No plugin manifest found; fall through to the existing convention scan.
@@ -513,7 +525,7 @@ fn scan_source_layers(
                     });
                 }
             }
-            Ok(())
+            Ok(prefix.clone())
         }
     }
 }
