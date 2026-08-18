@@ -748,7 +748,10 @@ fn parse_link_tail(spec: &str, marker: &str, rest: &str) -> Result<(Pin, String)
         .ok_or_else(|| bad("missing a ref (branch, tag, or commit) after tree/blob"))?;
     // spec: LNK-1 -- a blob link must end in /SKILL.md (the skill directory is
     // its parent); a tree link naming the SKILL.md directly is also accepted.
-    let mut parts: Vec<&str> = segs.collect();
+    // spec: LNK-17 -- drop `.` segments before the path becomes identity, so a
+    // `./`-variant URL dedups to the plain form's instance instead of
+    // registering a second one for the same on-disk skill.
+    let mut parts: Vec<&str> = segs.filter(|p| *p != ".").collect();
     if parts.last() == Some(&"SKILL.md") {
         parts.pop();
     } else if marker == "blob" {
@@ -1807,6 +1810,36 @@ mod tests {
         // A path free of markers is still accepted.
         let ok = parse_spec("https://github.com/acme/repo/tree/main/skills/foo").unwrap();
         assert_eq!(ok.name, "github.com/acme/repo#skills/foo");
+    }
+
+    // LNK-17: `.` segments are dropped before the path becomes identity, so a
+    // `./`-variant URL parses to the same instance as the plain form instead
+    // of registering a duplicate for the same on-disk skill.
+    // spec: LNK-17
+    #[test]
+    fn curdir_segments_normalize_out_of_an_item_link_path() {
+        let plain = parse_spec("https://github.com/acme/repo/tree/main/skills/foo").unwrap();
+        for url in [
+            "https://github.com/acme/repo/tree/main/./skills/foo",
+            "https://github.com/acme/repo/tree/main/skills/./foo",
+            "https://github.com/acme/repo/tree/main/./skills/./foo",
+            "https://github.com/acme/repo/blob/main/skills/./foo/SKILL.md",
+        ] {
+            let s = parse_spec(url).unwrap();
+            assert_eq!(
+                s.name, plain.name,
+                "{url}: must normalize to the plain instance identity"
+            );
+            assert_eq!(s.item_path.as_deref(), Some("skills/foo"), "{url}");
+        }
+        // A path that is nothing but `.` segments has no skill directory left.
+        match parse_spec("https://github.com/acme/repo/tree/main/./.") {
+            Err(MindError::BadItemLink { reason, .. }) => assert!(
+                reason.contains("missing the skill directory"),
+                "an all-dots path must report a missing skill path, got {reason:?}"
+            ),
+            other => panic!("expected BadItemLink for an all-dots path, got {other:?}"),
+        }
     }
 
     // STO-64: `@` and `#` are now rejected in `repo` -- both collide with an

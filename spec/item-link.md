@@ -119,6 +119,11 @@ same repo, and a plain meld of that repo, coexist as separate sources.
   built from. Note that `#` reaches the path only through the `file://` form: a
   remote URL is truncated at its first `#` as a pasted browser fragment (LNK-1)
   before the path is taken, so `.../skills/foo#bar` links to `skills/foo`.
+- `LNK-17` The `<path>` is lexically normalized before it becomes identity:
+  `.` segments are dropped, so `.../tree/main/./skills/foo` and
+  `.../tree/main/skills/./foo` parse to the same `skills/foo` instance
+  (identity, clone directory, and re-meld detection) as the plain form,
+  rather than registering a duplicate instance of the same on-disk skill.
 
 ## Install
 
