@@ -128,8 +128,9 @@ agent homes (a store-only tool is not linked; tooling.md TOOL-3).
   hook's recorded run must not be lost when a later hook in the same pass
   fails, or its side effect is silently re-offered next time (mirroring
   HOOK-53's item-level guarantee at the source level). When the save ITSELF
-  also fails (the double-failure outcome), the root cause still propagates
-  unchanged; the save failure is reported as a separate sanitized warning
+  also fails (the double-failure outcome, including `forget`'s own
+  failure-path save), the root cause still propagates unchanged; the save
+  failure is reported as a separate sanitized warning
   (not a second line starting `error: `, which would read as a second
   candidate for "the" error alongside the one `main.rs` prints for the
   propagated root cause) naming `mind introspect --fix` as the remedy for the

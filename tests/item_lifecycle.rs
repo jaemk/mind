@@ -1367,3 +1367,72 @@ fn learn_url_second_item_link_instance_without_alias_does_not_print_fork_note() 
         second.stdout
     );
 }
+
+#[test]
+fn forget_double_failure_reports_hook_error_not_the_save_error() {
+    // spec: LIFE-48 -- forget's double-failure outcome: when an uninstall hook
+    // fails AND the failure-path manifest save also fails, the hook failure
+    // (the root cause) propagates, and the save failure is a separate warning
+    // naming `mind introspect --fix`. Previously the save's `?` masked the
+    // hook error with an Io error about the manifest temp file.
+    use std::os::unix::fs::PermissionsExt;
+    let sb = Sandbox::new("dblfail");
+    sb.write_and_commit(
+        "skills/greet/SKILL.md",
+        "---\ndescription: greet\n---\n# greet\n",
+    );
+    sb.write_and_commit(
+        "mind.toml",
+        concat!(
+            "[[items]]\n",
+            "kind = \"skill\"\n",
+            "name = \"greet\"\n",
+            "path = \"skills/greet\"\n",
+            "uninstall = \"exit 3\"\n",
+        ),
+    );
+    let spec = sb.source_spec();
+    assert!(sb.mind(&["meld", &spec, "--link-only"]).success);
+    assert!(
+        sb.mind(&[
+            "learn",
+            "skill:greet",
+            "--dangerously-skip-install-hook-check",
+        ])
+        .success
+    );
+
+    // A read-only MIND_HOME root blocks the manifest's same-directory atomic
+    // temp write, so the failure-path `manifest.save` fails too.
+    std::fs::set_permissions(&sb.mind_home, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let r = sb.mind(&[
+        "forget",
+        "skill:greet",
+        "--dangerously-skip-install-hook-check",
+    ]);
+    // Restore before asserting so the sandbox can be cleaned up either way.
+    std::fs::set_permissions(&sb.mind_home, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert!(!r.success, "forget must fail: {} {}", r.stdout, r.stderr);
+    // The propagated root cause is the hook failure, not the save's Io error.
+    assert!(
+        r.stderr.contains("hook"),
+        "stderr must carry the hook failure as the root error: {}",
+        r.stderr
+    );
+    assert!(
+        !r.stderr.contains(".tmp."),
+        "the manifest temp-write Io error must not be the propagated error: {}",
+        r.stderr
+    );
+    // The save failure is reported as the LIFE-48 advisory warning.
+    let combined = format!("{}{}", r.stdout, r.stderr);
+    assert!(
+        combined.contains("also failed to persist the manifest"),
+        "the save failure must surface as the persist warning: {combined}"
+    );
+    assert!(
+        combined.contains("introspect --fix"),
+        "the warning must name the remedy: {combined}"
+    );
+}

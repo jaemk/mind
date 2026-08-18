@@ -5011,7 +5011,10 @@ pub fn forget(
         // the manifest is saved with what remains.
         if let Err(e) = uninstall_item(paths, &item, &uninstall_hooks, &commit, dangerously_skip) {
             manifest.items.insert(key.clone(), item);
-            manifest.save(paths)?;
+            // spec: LIFE-48 -- a save failure here must not mask `e`.
+            if let Err(se) = manifest.save(paths) {
+                warn_manifest_save_also_failed(&se);
+            }
             return Err(e);
         }
         removed_sources.insert(item.source.clone());
