@@ -128,6 +128,12 @@ pub fn install(
         mkdir_p(parent)?;
     }
     copy_recursive(&item.path, &staging)?;
+    // Record the source hash now, while the tree just copied is still what is
+    // on disk and any failure still aborts before the step-2 swap. Hashing it
+    // after step 4 (as the InstalledItem literal used to) left a window where a
+    // source read error surfaced with the backup already dropped: the new copy
+    // swapped in and linked but never recorded in the manifest.
+    let hash = hash_path(&item.path)?;
     if let Err(e) = expand_references(&staging, item, siblings, &store_root) {
         let _ = remove_path(&staging);
         return Err(e);
@@ -237,7 +243,7 @@ pub fn install(
         bare_name: item.name.clone(),
         source: item.source.clone(),
         commit: commit.to_string(),
-        hash: hash_path(&item.path)?,
+        hash,
         store: paths.store_rel(kind, &item.effective_name()),
         links: links
             .iter()
