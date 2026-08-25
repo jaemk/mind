@@ -254,6 +254,10 @@ pub fn install(
         // commands.rs) once the item's install hooks have actually run; this
         // function runs no hooks itself.
         install_hooks: Vec::new(),
+        // spec: LNK-19 -- likewise filled in by the caller, which is where the
+        // LNK-18 reconciliation decided what to drop; this function only ever
+        // sees the already-reconciled item.
+        dropped_requires: Vec::new(),
     })
 }
 
@@ -1016,7 +1020,13 @@ pub(crate) fn depth_exceeded(path: &Path) -> MindError {
     )
 }
 
-fn collect_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> Result<()> {
+/// Every file under `dir`, recursively, depth-capped (LIFE-52).
+///
+/// `pub(crate)` so the LNK-18 pre-install reference scan in `commands.rs` walks
+/// an item tree exactly the way the install path does: one capped walker that
+/// surfaces a structured error, rather than a second, uncapped one whose
+/// failures are silent.
+pub(crate) fn collect_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> Result<()> {
     collect_files_at(dir, out, 0)
 }
 
@@ -1233,6 +1243,7 @@ mod tests {
             ],
             description: None,
             install_hooks: Vec::new(),
+            dropped_requires: Vec::new(),
         };
 
         let fixed = relink(&paths, &item).unwrap();

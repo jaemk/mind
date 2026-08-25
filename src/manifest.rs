@@ -55,6 +55,17 @@ pub struct InstalledItem {
     /// field existed).
     #[serde(default)]
     pub install_hooks: Vec<RecordedHook>,
+
+    /// `requires:` entries (DEP-4) dropped at install because the item came
+    /// from a single-skill item-link instance, whose catalog cannot contain the
+    /// sibling they name (LNK-18). Recorded so the degradation stays
+    /// discoverable after the install-time warning scrolls away: `recall` shows
+    /// it on the item, `introspect` reports it, and it rides in the `--json`
+    /// item shape (LNK-19, STO-21). Empty (and omitted from the file) for every
+    /// ordinary install, so an item installed by an older binary, or from a
+    /// normal source, deserializes exactly as before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dropped_requires: Vec<String>,
 }
 
 impl InstalledItem {
@@ -109,6 +120,10 @@ impl InstalledItem {
                     ran_at: h.ran_at.clone(),
                 })
                 .collect(),
+            // A dropped entry is raw `requires:` frontmatter text (LNK-19), so
+            // it is source-controlled exactly like `description` and is
+            // sanitized on the same terms.
+            dropped_requires: self.dropped_requires.iter().map(|e| s(e)).collect(),
         }
     }
 }
@@ -273,6 +288,7 @@ mod tests {
             links: Vec::new(),
             description: None,
             install_hooks: Vec::new(),
+            dropped_requires: Vec::new(),
         }
     }
 

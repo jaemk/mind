@@ -6,6 +6,35 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `meld <repo> --learn <NAME|GLOB>` installs only the items matching the pattern
+  instead of offering the source's whole set. The flag is repeatable; a pattern
+  matches an item's bare name as well as its effective (prefixed) name, and is
+  scoped to the source being melded: a super-source's nested `install = true`
+  sources still register, but none of their items install under `--learn`.
+  Each match installs through the ordinary `learn` path, so its dependency
+  closure comes with it. A pattern matching nothing in the source is an error
+  naming that source, an unusable pattern is rejected before the clone, and the
+  flag conflicts with `--register-only`. A re-meld honors it too (CLI-236).
+- `recall <item>`, `recall <item> --json`, and `introspect` report a `requires:`
+  entry that was dropped at install (LNK-19).
+
+### Changed
+
+- An item link's unsatisfiable intra-source references are reconciled instead of
+  failing with a generic missing-reference error. A link instance offers exactly
+  one skill, so a reference to a sibling can never resolve: a `requires:` entry
+  is now dropped (with a warning and a durable record) and the skill installs,
+  rather than being a hard `bad-reference`. A token stays a hard error, now
+  `link-ref-unsatisfiable`, and this covers `{{tools:}}` and `{{path:}}` as well
+  as `{{ns:}}`, including tokens in `expand:`-listed files. Both paths print a
+  remedy that works as pasted: `mind unmeld <identity> --yes && mind meld <url>
+  --learn 'skill:<skill>' --yes`, or, when a plain meld of the repo would not
+  discover the skill on its own, the same command with `--add-root <dir>` added
+  before `--learn`, where the directory is derived from the linked skill's path
+  (LNK-18).
+
 ## [0.24.0] - 2026-08-17
 
 ### Changed

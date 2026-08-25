@@ -1239,6 +1239,7 @@ mod tests {
             links: vec![],
             description: None,
             install_hooks: Vec::new(),
+            dropped_requires: Vec::new(),
         });
         manifest.save(paths).unwrap();
         source_name

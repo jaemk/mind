@@ -905,6 +905,98 @@ pub fn referenced_names(content: &str) -> Vec<String> {
     names
 }
 
+/// One token in an item's text that names a SIBLING item.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SiblingRef {
+    /// The token exactly as written, braces included, e.g. `{{ns:dev}}`.
+    pub token: String,
+    /// The referent's bare name (may be empty for a malformed token).
+    pub name: String,
+    /// The kind the token narrows to: `Tool` for `{{tools:}}`, the named kind
+    /// for a qualified `{{path:kind:name}}`, `None` when the token matches any
+    /// kind (`{{ns:}}`, bare `{{path:name}}`).
+    pub kind: Option<crate::error::ItemKind>,
+}
+
+/// Every token in `content` that resolves against a SIBLING: `{{ns:name}}`
+/// (NS-10), `{{tools:name}}` (TOOL-15), and `{{path:[kind:]name}}` (TOOL-18).
+///
+/// This is the union of what [`expand`] and [`expand_paths`] resolve against the
+/// sibling set, so a caller can decide up front whether a given catalog could
+/// satisfy an item's references at all (LNK-18). Each family's prefix test
+/// mirrors the expander that actually recognizes it: the `ns:` test is against
+/// the UNTRIMMED text right after `{{`, matching [`expand`]'s literal, no-space
+/// `{{ns:` scan (so `{{ ns:name }}` -- a space before `ns:` -- is not a token
+/// here either, since it never expands there); the `tools:`/`path:`/`self`
+/// tests are against the trimmed inner text, matching [`expand_paths`], which
+/// trims the whole span before testing (so a space there IS still a token, on
+/// both sides). `{{self}}` is excluded: it names the item itself and always
+/// resolves. Any other `{{...}}` span is not a reference and is skipped, and an
+/// unterminated token stops the scan, matching both expanders. Tokens are
+/// returned in first-seen order, de-duplicated by token text.
+///
+/// A malformed token whose name is empty is still returned: [`expand`] rejects
+/// an empty referent as a non-sibling, so reporting it here keeps the two in
+/// step rather than letting it fall through to a blunter error.
+pub fn sibling_reference_tokens(content: &str) -> Vec<SiblingRef> {
+    let mut out: Vec<SiblingRef> = Vec::new();
+    let mut rest = content;
+    while let Some(pos) = rest.find("{{") {
+        let after = &rest[pos + 2..];
+        let Some(end) = after.find("}}") else {
+            // Unterminated token: stop, exactly like both expanders do.
+            break;
+        };
+        // `raw` is the span between the braces, untrimmed; `inner` is its trimmed
+        // form. The `ns:` prefix test uses `raw` (matching `expand`'s literal
+        // `{{ns:` scan, which tolerates no whitespace before `ns:`); the other
+        // arms use `inner` (matching `expand_paths`, which trims the whole span
+        // first).
+        let raw = &after[..end];
+        let inner = raw.trim();
+        let token = rest[pos..pos + 2 + end + 2].to_string();
+        let parsed: Option<(String, Option<crate::error::ItemKind>)> = if inner == "self" {
+            None
+        } else if let Some(name) = raw.strip_prefix("ns:") {
+            Some((name.trim().to_string(), None))
+        } else if let Some(name) = inner.strip_prefix("tools:") {
+            Some((name.trim().to_string(), Some(crate::error::ItemKind::Tool)))
+        } else if let Some(reference) = inner.strip_prefix("path:") {
+            let reference = reference.trim();
+            // `{{path:kind:name}}` narrows by kind; a `kind` that does not parse
+            // means `resolve_token` fails immediately with `Bad(NoMatch)` (see
+            // namespace.rs:525) rather than falling back to treating the whole
+            // reference as a plain name. This scanner instead reports the whole
+            // reference text as the referent name: it will not match any real
+            // sibling either (a colon is not a legal item name), so both paths
+            // agree the token cannot resolve -- only the internal rationale for
+            // "why not" differs, which is cosmetic for this scanner's purpose.
+            match reference.split_once(':') {
+                Some((k, n)) => match crate::error::ItemKind::parse(k) {
+                    Some(kind) => Some((n.trim().to_string(), Some(kind))),
+                    None => Some((reference.to_string(), None)),
+                },
+                None => Some((reference.to_string(), None)),
+            }
+        } else {
+            None
+        };
+        match parsed {
+            Some((name, kind)) => {
+                if !out.iter().any(|r| r.token == token) {
+                    out.push(SiblingRef { token, name, kind });
+                }
+                rest = &after[end + 2..];
+            }
+            // Not a reference: resume just past the `{{`, not past the span, so
+            // a token opening inside it is still seen -- the same passthrough
+            // rule `expand_paths` follows.
+            None => rest = after,
+        }
+    }
+    out
+}
+
 /// Find sibling names referenced in bare prose (outside any `{{...}}` token).
 ///
 /// Heuristic and advisory: used to warn when a source is about to be prefixed
@@ -4981,6 +5073,215 @@ mod tests {
             found.contains(&"after".to_string()),
             "a name inside the unterminated tail is left verbatim, so it reads \
              as an ordinary bare mention: {found:?}"
+        );
+    }
+
+    // ---- sibling_reference_tokens (M2, M3) --------------------------------
+
+    fn sref(token: &str, name: &str, kind: Option<ItemKind>) -> SiblingRef {
+        SiblingRef {
+            token: token.to_string(),
+            name: name.to_string(),
+            kind,
+        }
+    }
+
+    struct SiblingRefCase {
+        label: &'static str,
+        content: &'static str,
+        expected: Vec<SiblingRef>,
+    }
+
+    #[test]
+    fn sibling_reference_tokens_table() {
+        // spec: NS-10, TOOL-15, TOOL-18
+        let cases = vec![
+            SiblingRefCase {
+                label: "a plain {{ns:name}} token, matching expand's literal scan",
+                content: "hand off to {{ns:dev}}.",
+                expected: vec![sref("{{ns:dev}}", "dev", None)],
+            },
+            SiblingRefCase {
+                label: "whitespace INSIDE the ns: token is trimmed off the name, \
+                         matching expand's trim of the name",
+                content: "see {{ns: dev }}",
+                expected: vec![sref("{{ns: dev }}", "dev", None)],
+            },
+            SiblingRefCase {
+                // M2: `expand` only scans for the literal `{{ns:` substring, so
+                // a space between the braces and `ns:` is not a token there and
+                // never expands. This scanner must agree, not over-report.
+                label: "whitespace BETWEEN the braces and ns: is not a token (M2)",
+                content: "Hand off to {{ ns:dev }}.",
+                expected: vec![],
+            },
+            SiblingRefCase {
+                label: "a {{tools:name}} token, matching expand_paths",
+                content: "run {{tools:build}}",
+                expected: vec![sref("{{tools:build}}", "build", Some(ItemKind::Tool))],
+            },
+            SiblingRefCase {
+                // expand_paths trims the WHOLE inner span before testing, so
+                // (unlike ns:) whitespace before the tools:/path: prefix is
+                // still a live token there, and this scanner must still report
+                // it.
+                label: "whitespace between the braces and tools: IS a token, \
+                         matching expand_paths' trim-then-test",
+                content: "run {{ tools:build }}",
+                expected: vec![sref("{{ tools:build }}", "build", Some(ItemKind::Tool))],
+            },
+            SiblingRefCase {
+                label: "a kind-qualified {{path:kind:name}} token",
+                content: "see {{path:skill:dev}}",
+                expected: vec![sref("{{path:skill:dev}}", "dev", Some(ItemKind::Skill))],
+            },
+            SiblingRefCase {
+                label: "an unqualified {{path:name}} token matches any kind",
+                content: "see {{path:dev}}",
+                expected: vec![sref("{{path:dev}}", "dev", None)],
+            },
+            SiblingRefCase {
+                // The `kind` segment does not parse, so it is not a qualifier:
+                // `resolve_token` fails immediately (Bad(NoMatch)), and this
+                // scanner reports the whole reference text as the (unmatchable)
+                // name -- both agree the token cannot resolve.
+                label: "{{path:notakind:name}} treats the whole reference as the name",
+                content: "see {{path:notakind:name}}",
+                expected: vec![sref("{{path:notakind:name}}", "notakind:name", None)],
+            },
+            SiblingRefCase {
+                label: "{{self}} is excluded, but the scan resumes after it",
+                content: "{{self}} then {{ns:dev}}",
+                expected: vec![sref("{{ns:dev}}", "dev", None)],
+            },
+            SiblingRefCase {
+                label: "an unrecognized token is passed through, and the scan \
+                         resumes just past its opening brace",
+                content: "{{foo}}{{ns:dev}}",
+                expected: vec![sref("{{ns:dev}}", "dev", None)],
+            },
+            SiblingRefCase {
+                // The passthrough resume rule must back up to just past the
+                // FIRST `{{`, not past the whole failed span. Here the failed
+                // reading is `{{ns:dev` (closed early by the `}}` inside
+                // `dev}}`), and only resuming right after the outermost `{{`
+                // finds the real `{{ns:dev}}` nested one brace-pair in.
+                // Resuming past the failed span instead (as if the passthrough
+                // arm were `rest = &after[end + 2..]`) skips straight past the
+                // end of content and misses it entirely -- this case must fail
+                // under that mutation (M3).
+                label: "nested {{{{ns:dev}} is still found by resuming just \
+                         past the opening brace, not past the failed span",
+                content: "{{{{ns:dev}}",
+                expected: vec![sref("{{ns:dev}}", "dev", None)],
+            },
+            SiblingRefCase {
+                label: "an unterminated token stops the scan entirely",
+                content: "{{ns:dev}} {{ns:oops and more text with no closing braces",
+                expected: vec![sref("{{ns:dev}}", "dev", None)],
+            },
+            SiblingRefCase {
+                label: "duplicate token text is deduped to the first occurrence",
+                content: "{{ns:dev}} again {{ns:dev}}",
+                expected: vec![sref("{{ns:dev}}", "dev", None)],
+            },
+            SiblingRefCase {
+                // Dedup keys on TOKEN TEXT, not referent name: these two tokens
+                // name the same sibling but are spelled differently, so both
+                // are reported.
+                label: "same referent name, different token text: both reported",
+                content: "{{ns:dev}} {{ns: dev }}",
+                expected: vec![
+                    sref("{{ns:dev}}", "dev", None),
+                    sref("{{ns: dev }}", "dev", None),
+                ],
+            },
+            SiblingRefCase {
+                label: "an empty {{ns:}} name is still reported, matching \
+                         expand's rejection of an empty referent",
+                content: "{{ns:}}",
+                expected: vec![sref("{{ns:}}", "", None)],
+            },
+        ];
+
+        for case in cases {
+            assert_eq!(
+                sibling_reference_tokens(case.content),
+                case.expected,
+                "case: {}",
+                case.label
+            );
+        }
+    }
+
+    /// Dedicated pin for the M3-required mutation catch: the passthrough arm
+    /// must resume scanning just past the FIRST `{{` (`rest = after`), not
+    /// past the whole failed reading (`rest = &after[end + 2..]`). The table
+    /// case above covers this too; this test isolates it so a regression here
+    /// fails loudly and specifically rather than as one row among many.
+    #[test]
+    fn sibling_reference_tokens_passthrough_resumes_past_the_open_brace_not_the_failed_span() {
+        // spec: NS-10
+        assert_eq!(
+            sibling_reference_tokens("{{{{ns:dev}}"),
+            vec![sref("{{ns:dev}}", "dev", None)],
+            "resuming past the failed span instead of past the opening brace \
+             would miss the nested {{{{ns:dev}} token entirely"
+        );
+    }
+
+    /// M2: the `ns:` prefix test must agree with [`expand`], the real
+    /// install-time expander, not merely with a hand-derived expectation.
+    #[test]
+    fn sibling_reference_tokens_ns_prefix_test_agrees_with_expand() {
+        // spec: NS-10, LNK-18
+        let siblings = sibs(&["dev"]);
+        let bare = HashSet::new();
+
+        // A well-formed token: both agree it references `dev`.
+        let content = "hand off to {{ns:dev}}.";
+        assert_eq!(
+            sibling_reference_tokens(content),
+            vec![sref("{{ns:dev}}", "dev", None)]
+        );
+        assert_eq!(
+            expand(content, &None, &siblings, &bare).unwrap(),
+            "hand off to dev."
+        );
+
+        // A space between the braces and `ns:`: `expand` leaves it completely
+        // untouched (dead text, never a reference), so the scanner must agree
+        // and report nothing.
+        let spaced = "hand off to {{ ns:dev }}.";
+        assert_eq!(sibling_reference_tokens(spaced), vec![]);
+        assert_eq!(expand(spaced, &None, &siblings, &bare).unwrap(), spaced);
+    }
+
+    /// M2 (converse): the `tools:`/`path:` prefix tests must keep agreeing with
+    /// [`expand_paths`], which trims the whole span before testing -- so
+    /// whitespace before those prefixes is still a live token, unlike `ns:`.
+    #[test]
+    fn sibling_reference_tokens_tools_prefix_test_agrees_with_expand_paths() {
+        // spec: TOOL-15, LNK-18
+        let sib = [psib(ItemKind::Tool, "build", Some("run.sh"))];
+        let ctx = PathCtx {
+            store_root: Path::new("/store"),
+            home: None,
+            prefix: &None,
+            self_kind: ItemKind::Skill,
+            self_name: "self-item",
+            siblings: &sib,
+        };
+
+        let content = "run {{ tools:build }}";
+        assert_eq!(
+            sibling_reference_tokens(content),
+            vec![sref("{{ tools:build }}", "build", Some(ItemKind::Tool))]
+        );
+        let expanded = expand_paths(content, &ctx).unwrap();
+        assert!(
+            expanded.contains("run.sh"),
+            "expand_paths must still resolve the spaced tools: token: {expanded}"
         );
     }
 }

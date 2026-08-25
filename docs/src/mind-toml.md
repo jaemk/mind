@@ -185,6 +185,10 @@ install = true
   non-empty `install-items` are mutually exclusive (declaring both is an error).
   The empty-list form (`install-items = []`) is never used in practice; that case
   is `install = false`.
+  This is source truth and takes literal `kind:name` refs only: globs are not
+  expanded here (`install-items = ["skill:*"]` fails at meld), unlike the
+  consumer-side `meld --learn <NAME|GLOB>`, which does accept globs and matches
+  an item's bare or effective name (see [Commands](commands.md#installing-part-of-a-source)).
 
 By default a melded super-source registers the whole chain but installs only its
 own items plus the `install = true` (or `install-items`) entries.

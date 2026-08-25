@@ -744,6 +744,7 @@ mod tests {
             links: Vec::new(),
             description: None,
             install_hooks: Vec::new(),
+            dropped_requires: Vec::new(),
         }
     }
 

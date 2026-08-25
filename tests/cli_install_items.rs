@@ -1,4 +1,5 @@
-//! Integration tests for the `install-items` subset directive (DSC-62/63/64).
+//! Integration tests for the `install-items` subset directive (DSC-62/63/64)
+//! and the consumer-side `meld --learn <glob>` subset install (CLI-236).
 //!
 //! Each test drives the real `mind` binary against a hermetic fixture: a local
 //! git repo melded by filesystem path, with `MIND_HOME`/`CLAUDE_HOME` pointed
@@ -72,15 +73,54 @@ impl Sandbox {
         self.source.to_string_lossy().into_owned()
     }
 
+    /// The registered identity `mind` derives for this repo when melded as a
+    /// plain (non-item-link) local source: `local/<base>/<repo>` (LNK-4/STO-11).
+    fn identity(&self) -> String {
+        format!(
+            "local/{}/{}",
+            self.base.file_name().unwrap().to_string_lossy(),
+            self.source.file_name().unwrap().to_string_lossy(),
+        )
+    }
+
+    /// A `file://` item link into this sandbox's source repo (LNK-1).
+    fn link(&self, tail: &str) -> String {
+        format!("file://{}/{tail}", self.source.to_string_lossy())
+    }
+
     fn mind(&self, args: &[&str]) -> Run {
+        self.mind_env(args, &[], None)
+    }
+
+    /// `mind` with extra environment (e.g. `MIND_TTY`, HOOK-109) and optional
+    /// stdin text, so the interactive CLI-23 gate `--learn` reuses is drivable
+    /// from a test. With `stdin: None` the child gets `/dev/null`, whose EOF
+    /// `read_confirm` treats as "no".
+    fn mind_env(&self, args: &[&str], envs: &[(&str, &str)], stdin: Option<&str>) -> Run {
+        use std::io::Write;
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_mind"));
         cmd.args(args)
             .env("MIND_HOME", &self.mind_home)
             .env("CLAUDE_HOME", &self.claude_home)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .stdin(Stdio::null());
-        let out = cmd.output().expect("run mind");
+            .stdin(match stdin {
+                Some(_) => Stdio::piped(),
+                None => Stdio::null(),
+            });
+        for (k, v) in envs {
+            cmd.env(k, v);
+        }
+        let mut child = cmd.spawn().expect("run mind");
+        if let Some(text) = stdin {
+            child
+                .stdin
+                .as_mut()
+                .expect("piped stdin")
+                .write_all(text.as_bytes())
+                .expect("write stdin");
+        }
+        let out = child.wait_with_output().expect("wait for mind");
         Run {
             stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
@@ -137,6 +177,95 @@ fn git_init(dir: &Path) {
             .expect("run git");
         assert!(status.success(), "git {args:?} in {dir:?}");
     }
+}
+
+/// The text between the first pair of backticks: the command mind printed for
+/// the user to paste. Tests run it VERBATIM, so a suggestion that would not
+/// work when pasted fails the test rather than passing on a substring match.
+fn backticked(text: &str) -> String {
+    let start = text.find('`').unwrap_or_else(|| {
+        panic!("expected a backticked command in: {text}");
+    });
+    let rest = &text[start + 1..];
+    let end = rest.find('`').expect("a closing backtick");
+    rest[..end].to_string()
+}
+
+/// Split a single-quoted shell command line into argv. Mirrors the splitter in
+/// tests/cli_item_link.rs; an integration test is its own crate and cannot
+/// reach the binary's own quoting helpers.
+fn shell_split(s: &str) -> Vec<String> {
+    let chars: Vec<char> = s.chars().collect();
+    let n = chars.len();
+    let mut i = 0;
+    let mut tokens = Vec::new();
+    let mut cur = String::new();
+    let mut in_token = false;
+    while i < n {
+        let c = chars[i];
+        if c.is_whitespace() {
+            if in_token {
+                tokens.push(std::mem::take(&mut cur));
+                in_token = false;
+            }
+            i += 1;
+            continue;
+        }
+        in_token = true;
+        if c == '\'' {
+            i += 1;
+            while i < n && chars[i] != '\'' {
+                cur.push(chars[i]);
+                i += 1;
+            }
+            assert!(i < n, "unterminated single quote in {s:?}");
+            i += 1;
+        } else if c == '\\' && i + 1 < n && chars[i + 1] == '\'' {
+            cur.push('\'');
+            i += 2;
+        } else {
+            cur.push(c);
+            i += 1;
+        }
+    }
+    if in_token {
+        tokens.push(cur);
+    }
+    tokens
+}
+
+/// Run a printed `mind ...` command string through the real binary.
+/// Run a command mind printed for the user to paste, exactly as printed.
+///
+/// A printed fallback may be a `&&`-joined SEQUENCE (`learn` takes one
+/// positional, so several matches are several commands); each is run in turn
+/// and the first failure is returned, which is what `&&` means in a shell.
+fn run_printed(sb: &Sandbox, command: &str) -> Run {
+    let mut last: Option<Run> = None;
+    for step in command.split("&&") {
+        let argv = shell_split(step.trim());
+        assert_eq!(
+            argv.first().map(String::as_str),
+            Some("mind"),
+            "every step of the printed command must invoke mind: {command}"
+        );
+        let args: Vec<&str> = argv[1..].iter().map(String::as_str).collect();
+        let run = sb.mind(&args);
+        if !run.success {
+            return run;
+        }
+        last = Some(run);
+    }
+    last.expect("a printed command must have at least one step")
+}
+
+/// Count the melded sources by reading sources.json (0 when absent).
+fn source_count(sb: &Sandbox) -> usize {
+    let path = sb.mind_home.join("sources.json");
+    let Ok(json) = std::fs::read_to_string(&path) else {
+        return 0;
+    };
+    json.matches("\"url\"").count()
 }
 
 fn git_commit(dir: &Path) {
@@ -224,6 +353,872 @@ fn install_items_other_items_remain_available_and_learnable() {
     assert!(
         registry.claude_home.join("agents/dev.md").exists(),
         "agent:dev must be installed after explicit `learn`"
+    );
+}
+
+// ----- CLI-236: `meld --learn <glob>` installs only the matching subset -----
+
+#[test]
+fn meld_learn_installs_only_the_matching_items() {
+    // spec: CLI-236 -- `--learn <name>` replaces the CLI-23 install-all offer
+    // with a subset install scoped to the source being melded.
+    let sb = Sandbox::new("lib");
+    let r = sb.mind(&["meld", &sb.source_spec(), "--learn", "review", "--yes"]);
+    assert!(r.success, "meld --learn failed: {} {}", r.stdout, r.stderr);
+
+    assert!(
+        sb.claude_home.join("skills/review").exists(),
+        "the matched item must be installed: {}",
+        r.stdout
+    );
+    assert!(
+        !sb.claude_home.join("agents/dev.md").exists(),
+        "an unmatched item must NOT be installed: {}",
+        r.stdout
+    );
+    assert!(
+        !sb.claude_home.join("rules/style.md").exists(),
+        "an unmatched item must NOT be installed: {}",
+        r.stdout
+    );
+
+    // The source is fully melded, so the rest stays available.
+    let probe = sb.mind(&["probe"]);
+    assert!(
+        probe.stdout.contains("rule:style"),
+        "the unmatched items must still be offered: {}",
+        probe.stdout
+    );
+}
+
+#[test]
+fn meld_learn_is_repeatable_and_accepts_a_glob() {
+    // spec: CLI-236 -- the flag is repeatable and each value may be a glob.
+    let sb = Sandbox::new("lib");
+    let r = sb.mind(&[
+        "meld",
+        &sb.source_spec(),
+        "--learn",
+        "rev*",
+        "--learn",
+        "rule:style",
+        "--yes",
+    ]);
+    assert!(r.success, "meld --learn failed: {} {}", r.stdout, r.stderr);
+    assert!(
+        sb.claude_home.join("skills/review").exists()
+            && sb.claude_home.join("rules/style.md").exists(),
+        "both patterns must install: {}",
+        r.stdout
+    );
+    assert!(
+        !sb.claude_home.join("agents/dev.md").exists(),
+        "an unmatched item must NOT be installed: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn meld_learn_matches_a_prefixed_source_by_bare_name() {
+    // spec: CLI-236 -- a pattern matches the BARE name as well as the effective
+    // one. At meld time the consumer has not necessarily seen the source's
+    // declared prefix (CLI-24 may prompt for it inside this very command), so
+    // requiring `team:review` would break the first-run case the flag is for.
+    let sb = Sandbox::new("lib");
+    sb.write_and_commit("mind.toml", "[source]\nprefix = \"team\"\n");
+
+    let r = sb.mind(&["meld", &sb.source_spec(), "--learn", "review", "--yes"]);
+    assert!(r.success, "meld --learn failed: {} {}", r.stdout, r.stderr);
+    assert!(
+        sb.claude_home.join("skills/team:review").exists(),
+        "the bare name must match the item that installs prefixed: {} {}",
+        r.stdout,
+        r.stderr
+    );
+    assert!(
+        !sb.claude_home.join("rules/team:style.md").exists(),
+        "an unmatched item must NOT be installed: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn meld_learn_matches_a_prefixed_source_by_effective_name() {
+    // spec: CLI-236 -- the effective (prefixed) name resolves too, so a user who
+    // knows the prefix is not forced to drop it.
+    let sb = Sandbox::new("lib");
+    sb.write_and_commit("mind.toml", "[source]\nprefix = \"team\"\n");
+
+    let r = sb.mind(&["meld", &sb.source_spec(), "--learn", "team:review", "--yes"]);
+    assert!(r.success, "meld --learn failed: {} {}", r.stdout, r.stderr);
+    assert!(
+        sb.claude_home.join("skills/team:review").exists(),
+        "the effective name must match: {} {}",
+        r.stdout,
+        r.stderr
+    );
+}
+
+#[test]
+fn meld_learn_pattern_matching_nothing_is_an_error() {
+    // spec: CLI-236 -- a pattern the user named explicitly must match
+    // something; unlike the install-all offer, a miss is not "nothing to do".
+    // The source stays melded (the failure is in the install pass).
+    let sb = Sandbox::new("lib");
+    let r = sb.mind(&["meld", &sb.source_spec(), "--learn", "nope*", "--yes"]);
+    assert!(!r.success, "a non-matching pattern must fail: {}", r.stdout);
+    assert!(
+        r.stderr.contains("nope*"),
+        "the error must name the pattern: {}",
+        r.stderr
+    );
+    let sources = sb.mind(&["recall", "--sources"]);
+    assert!(
+        sources.stdout.contains("lib"),
+        "the source stays melded: {}",
+        sources.stdout
+    );
+}
+
+#[test]
+fn meld_learn_rejects_a_source_qualified_pattern() {
+    // spec: CLI-236 -- `--learn` selects within the source being melded, so a
+    // `#`-carrying value is a usage error rather than a ref resolved elsewhere.
+    let sb = Sandbox::new("lib");
+    let r = sb.mind(&[
+        "meld",
+        &sb.source_spec(),
+        "--learn",
+        "other/repo#review",
+        "--yes",
+    ]);
+    assert!(!r.success, "a qualified pattern must fail: {}", r.stdout);
+    assert!(
+        r.stderr.contains("selects within the source being melded"),
+        "the error must explain the scoping: {}",
+        r.stderr
+    );
+}
+
+#[test]
+fn meld_learn_conflicts_with_register_only() {
+    // spec: CLI-236 -- the two flags ask for opposite things.
+    let sb = Sandbox::new("lib");
+    let r = sb.mind(&[
+        "meld",
+        &sb.source_spec(),
+        "--register-only",
+        "--learn",
+        "review",
+    ]);
+    assert!(
+        !r.success && r.stderr.contains("cannot be used with"),
+        "--learn with --register-only must be a usage error: {} {}",
+        r.stdout,
+        r.stderr
+    );
+}
+
+#[test]
+fn meld_learn_pulls_in_the_dependency_closure() {
+    // spec: CLI-236 -- a `--learn` match installs through the ordinary learn
+    // path, so its intra-source dependencies (DEP-30) come with it.
+    let sb = Sandbox::new("lib");
+    sb.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\nname: review\ndescription: Review the diff\nrequires: agent:dev\n---\n# review\n",
+    );
+    let r = sb.mind(&["meld", &sb.source_spec(), "--learn", "review", "--yes"]);
+    assert!(r.success, "meld --learn failed: {} {}", r.stdout, r.stderr);
+    assert!(
+        sb.claude_home.join("skills/review").exists()
+            && sb.claude_home.join("agents/dev.md").exists(),
+        "the required sibling must be pulled in: {}",
+        r.stdout
+    );
+    assert!(
+        !sb.claude_home.join("rules/style.md").exists(),
+        "an unrelated item must NOT be installed: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn meld_learn_rejects_an_unusable_pattern_before_registering_the_source() {
+    // spec: CLI-236 -- the pattern grammar is checked before the clone, so a
+    // typo does not leave a registered source behind. Each rejected form names
+    // its own reason rather than collapsing into one blunt message.
+    let sb = Sandbox::new("lib");
+    for (pattern, expect) in [
+        ("", "empty"),
+        ("[bad", "not a valid glob"),
+        (
+            "other/repo#review",
+            "selects within the source being melded",
+        ),
+    ] {
+        let r = sb.mind(&["meld", &sb.source_spec(), "--learn", pattern, "--yes"]);
+        assert!(
+            !r.success,
+            "pattern {pattern:?} must be refused: {}",
+            r.stdout
+        );
+        assert!(
+            r.stderr.contains(expect),
+            "pattern {pattern:?} must report {expect:?}: {}",
+            r.stderr
+        );
+        assert_eq!(
+            source_count(&sb),
+            0,
+            "pattern {pattern:?} must be refused before the source is registered"
+        );
+    }
+}
+
+#[test]
+fn meld_learn_no_match_names_the_source_and_the_escapes() {
+    // spec: CLI-236 -- a no-match is scoped to the one source searched, not the
+    // generic across-all-sources ItemNotFound, and names the two things that
+    // most often explain it.
+    let sb = Sandbox::new("lib");
+    let r = sb.mind(&["meld", &sb.source_spec(), "--learn", "nope*", "--yes"]);
+    assert!(!r.success, "a non-matching pattern must fail: {}", r.stdout);
+    assert!(
+        r.stderr.contains("matches no item in source")
+            && r.stderr.contains("mind probe")
+            && r.stderr.contains("--no-tui")
+            && r.stderr.contains("--add-root"),
+        "the error must be source-scoped and name the escapes: {}",
+        r.stderr
+    );
+}
+
+#[test]
+fn meld_learn_without_yes_off_a_tty_installs_nothing_and_says_how() {
+    // spec: CLI-236 -- the gate around the batch is the CLI-23 meld gate: with
+    // no TTY and no --yes, nothing installs and the note says how to install
+    // later. Every integration test is non-TTY, so this is the path a scripted
+    // user actually hits.
+    let sb = Sandbox::new("lib");
+    let r = sb.mind(&["meld", &sb.source_spec(), "--learn", "review"]);
+    assert!(r.success, "meld --learn failed: {} {}", r.stdout, r.stderr);
+    assert!(
+        !sb.claude_home.join("skills/review").exists(),
+        "nothing installs without --yes off a TTY: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("registered only, nothing installed")
+            && r.stdout.contains("mind learn")
+            && r.stdout.contains("--yes"),
+        "the note must say how to install later: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn meld_learn_reports_already_installed_once_for_the_batch() {
+    // spec: CLI-236 CLI-157 -- when every match is already installed, that is
+    // reported once for the batch, not once per pattern.
+    let sb = Sandbox::new("lib");
+    assert!(
+        sb.mind(&["meld", &sb.source_spec(), "--learn", "review", "--yes"])
+            .success
+    );
+    let r = sb.mind(&[
+        "meld",
+        &sb.source_spec(),
+        "--learn",
+        "review",
+        "--learn",
+        "skill:*",
+        "--yes",
+    ]);
+    assert!(
+        r.success,
+        "re-meld --learn failed: {} {}",
+        r.stdout, r.stderr
+    );
+    assert_eq!(
+        r.stdout.matches("already installed").count(),
+        1,
+        "the already-installed report must appear once for the batch: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn meld_learn_notes_that_it_ignores_recursive() {
+    // spec: CLI-236 -- `--learn` scopes to the melded source's own items, so the
+    // curated chain is not walked and an explicit `--recursive` has nothing to
+    // act on. Name it rather than dropping it silently (the CLI-206 discipline).
+    let nested = Sandbox::new("nested");
+    let registry = Sandbox::bare("registry");
+    registry.write_and_commit(
+        "mind.toml",
+        &format!(
+            "[discover]\nsources = [{{ source = {:?}, install = true }}]\n",
+            nested.source_spec()
+        ),
+    );
+    registry.write_and_commit(
+        "skills/curated/SKILL.md",
+        "---\ndescription: A curator's own skill\n---\n# curated\n",
+    );
+
+    let r = registry.mind(&[
+        "meld",
+        &registry.source_spec(),
+        "--learn",
+        "curated",
+        "--recursive",
+        "--yes",
+    ]);
+    assert!(r.success, "meld --learn failed: {} {}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("--recursive ignored"),
+        "the ignored flag must be named: {}",
+        r.stdout
+    );
+    assert!(
+        registry.claude_home.join("skills/curated").exists(),
+        "the named item installs: {}",
+        r.stdout
+    );
+    assert!(
+        !registry.claude_home.join("skills/review").exists(),
+        "the curated chain must NOT be installed under --learn: {}",
+        r.stdout
+    );
+    // The nested source is still registered, only its install pass is skipped.
+    let sources = registry.mind(&["recall", "--sources"]);
+    assert!(
+        sources.stdout.contains("nested"),
+        "the nested source must still be registered: {}",
+        sources.stdout
+    );
+}
+
+#[test]
+fn meld_learn_json_skips_the_curated_chain_for_a_super_source() {
+    // spec: CLI-236 -- the `--json --learn` twin of
+    // `meld_learn_notes_that_it_ignores_recursive`: the curated chain of a
+    // super-source with a nested `install = true` entry is not walked when
+    // `--learn` is given, in JSON mode too. Both of the pre-existing
+    // `--json --learn` tests meld a plain (mind.toml-less) source, so the
+    // curated-chain walk is a no-op in them either way -- this fixture (a
+    // curator with a real nested source to install) is the one that would
+    // notice the `if learn_patterns.is_empty()` guard around that walk being
+    // removed: without it, this call would install `nested`'s items too.
+    let nested = Sandbox::new("nested");
+    let registry = Sandbox::bare("registry");
+    registry.write_and_commit(
+        "mind.toml",
+        &format!(
+            "[discover]\nsources = [{{ source = {:?}, install = true }}]\n",
+            nested.source_spec()
+        ),
+    );
+    registry.write_and_commit(
+        "skills/curated/SKILL.md",
+        "---\ndescription: A curator's own skill\n---\n# curated\n",
+    );
+
+    let r = registry.mind(&[
+        "--json",
+        "meld",
+        &registry.source_spec(),
+        "--learn",
+        "curated",
+        "--yes",
+    ]);
+    assert!(
+        r.success,
+        "meld --learn --json failed: {} {}",
+        r.stdout, r.stderr
+    );
+    let doc: serde_json::Value = serde_json::from_str(&r.stdout)
+        .unwrap_or_else(|e| panic!("stdout must be one JSON document ({e}): {}", r.stdout));
+    let installed = doc["installed"].as_array().expect("installed array");
+    assert_eq!(
+        installed
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["skill:curated"],
+        "only the matched (curator's own) item is reported installed, not the \
+         nested source's items: {}",
+        r.stdout
+    );
+    assert!(
+        registry.claude_home.join("skills/curated").exists(),
+        "the matched item must actually install: {}",
+        r.stdout
+    );
+    assert!(
+        !registry.claude_home.join("skills/review").exists(),
+        "the nested source's items must NOT install under --json --learn: {}",
+        r.stdout
+    );
+    assert!(
+        !registry.claude_home.join("agents/dev.md").exists(),
+        "the nested source's items must NOT install under --json --learn: {}",
+        r.stdout
+    );
+    // The nested source is still registered; only its install pass is skipped.
+    let sources = registry.mind(&["recall", "--sources"]);
+    assert!(
+        sources.stdout.contains("nested"),
+        "the nested source must still be registered: {}",
+        sources.stdout
+    );
+}
+
+#[test]
+fn remeld_learn_json_folds_into_one_already_melded_document() {
+    // spec: CLI-236 CLI-217 -- the re-meld `--json --learn` arm
+    // (commands.rs:4131-4146) is a second, independent implementation of the
+    // CLI-156 folding that had no test at all before this one. If it called
+    // the whole-set install helper instead of the matching one, a re-meld
+    // under `--json --learn x --yes` would install (and report) the entire
+    // source undetected.
+    let sb = Sandbox::new("lib");
+    let first = sb.mind(&["meld", &sb.source_spec(), "--register-only"]);
+    assert!(first.success, "register-only meld failed: {}", first.stderr);
+    assert!(!sb.claude_home.join("skills/review").exists());
+
+    let r = sb.mind(&[
+        "--json",
+        "meld",
+        &sb.source_spec(),
+        "--learn",
+        "review",
+        "--yes",
+    ]);
+    assert!(
+        r.success,
+        "re-meld --learn --json failed: {} {}",
+        r.stdout, r.stderr
+    );
+    // `serde_json::from_str` on the whole of stdout only succeeds if it is
+    // exactly one JSON value: a second document concatenated after the first
+    // would surface as a trailing-characters parse error here (CLI-153).
+    let doc: serde_json::Value = serde_json::from_str(&r.stdout)
+        .unwrap_or_else(|e| panic!("stdout must be one JSON document ({e}): {}", r.stdout));
+    assert_eq!(
+        doc["outcome"].as_str(),
+        Some("already-melded"),
+        "a re-meld's JSON result must report the CLI-12 already-melded outcome: {}",
+        r.stdout
+    );
+    let installed = doc["installed"].as_array().expect("installed array");
+    assert_eq!(
+        installed
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["skill:review"],
+        "only the matched item must be installed on a re-meld, not the whole \
+         source: {}",
+        r.stdout
+    );
+    assert!(
+        sb.claude_home.join("skills/review").exists(),
+        "the matched item must actually install: {}",
+        r.stdout
+    );
+    assert!(
+        !sb.claude_home.join("agents/dev.md").exists(),
+        "an unmatched item must NOT be installed on a re-meld: {}",
+        r.stdout
+    );
+    assert!(
+        !sb.claude_home.join("rules/style.md").exists(),
+        "an unmatched item must NOT be installed on a re-meld: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn meld_learn_pattern_does_not_reach_a_nested_sources_item() {
+    // spec: CLI-236 -- the other half of the Scope paragraph that
+    // `meld_learn_notes_that_it_ignores_recursive` leaves untested: a pattern
+    // that NAMES an item belonging to a nested source (not the source being
+    // melded) must be `LearnPatternNoMatch`, exactly as if it matched
+    // nothing at all, rather than reaching across into the nested source and
+    // installing its item. Nothing here fails if `learn_pattern_targets`'
+    // `it.source == source_name` filter were loosened to
+    // `resolve::source_matches` (which permits a component-suffix match, the
+    // ergonomic behavior `--source` selectors elsewhere rely on): to prove
+    // that, the nested item is reached through an item-link source whose
+    // registered identity is deliberately deep enough that its trailing path
+    // components, at a `/` boundary, spell out the CURATOR's own identity --
+    // exactly the shape `source_matches` would treat as "the same source,
+    // named by a shorter suffix". The curator's own repo directory is named
+    // "review" (a skill's bare name is always its directory's basename,
+    // ignoring frontmatter `name:`, per `catalog::make_item`), so the nested
+    // item, whose item-link path is forced to end in that same "review"
+    // component to spell out the curator's identity, ends up with the SAME
+    // bare name as the `--learn` pattern below -- the one thing a reach-across
+    // needs to actually happen.
+    let registry = Sandbox::bare("review");
+    let curator_identity = registry.identity();
+
+    // The nested repo's one skill lives at a path that embeds the curator's
+    // own identity as a trailing component sequence, so a source-matches-style
+    // suffix check (but not exact equality) would treat the nested source as
+    // "the same source" as the curator.
+    let linkrepo = Sandbox::bare("linkrepo");
+    let item_path = format!("nested-item/{curator_identity}");
+    linkrepo.write_and_commit(
+        &format!("{item_path}/SKILL.md"),
+        "---\ndescription: A nested item; must not be reachable from the \
+         curator's --learn\n---\n# review\n",
+    );
+    let link_url = linkrepo.link(&format!("tree/main/{item_path}"));
+
+    registry.write_and_commit(
+        "mind.toml",
+        &format!("[discover]\nsources = [{{ source = {link_url:?}, install = true }}]\n"),
+    );
+
+    let r = registry.mind(&[
+        "meld",
+        &registry.source_spec(),
+        "--learn",
+        "review",
+        "--yes",
+    ]);
+    assert!(
+        !r.success,
+        "a pattern naming only a NESTED source's item must fail, not reach \
+         across and install it: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr.contains("matches no item in source") && r.stderr.contains("review"),
+        "the failure must be the source-scoped LearnPatternNoMatch, not some \
+         other error: {}",
+        r.stderr
+    );
+    assert!(
+        !registry.claude_home.join("skills/review").exists(),
+        "the nested source's item must NOT be installed by a pattern that \
+         only names the curator being melded: {:?}",
+        registry.claude_home
+    );
+    // The source stays melded (CLI-236), and the nested source is still
+    // registered -- only reachable through it, not through the curator.
+    let sources = registry.mind(&["recall", "--sources"]);
+    assert!(
+        sources.stdout.contains(&curator_identity) && sources.stdout.contains("linkrepo"),
+        "the curator and the nested source both stay melded after the failed \
+         install pass: {}",
+        sources.stdout
+    );
+}
+
+#[test]
+fn meld_learn_json_folds_installed_keys_into_the_one_object() {
+    // spec: CLI-236 CLI-156 -- under --json with --yes the installed keys ride
+    // in the single meld object.
+    let sb = Sandbox::new("lib");
+    let r = sb.mind(&[
+        "--json",
+        "meld",
+        &sb.source_spec(),
+        "--learn",
+        "review",
+        "--yes",
+    ]);
+    assert!(r.success, "meld --learn --json failed: {}", r.stderr);
+    let doc: serde_json::Value = serde_json::from_str(&r.stdout)
+        .unwrap_or_else(|e| panic!("stdout must be one JSON document ({e}): {}", r.stdout));
+    let installed = doc["installed"].as_array().expect("installed array");
+    assert_eq!(
+        installed
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["skill:review"],
+        "only the matched item is reported installed: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn meld_learn_json_pending_counts_the_union_not_the_sum() {
+    // spec: CLI-236 -- without --yes nothing installs between patterns, so
+    // summing per-pattern counts would count an item two patterns both match,
+    // or a shared dependency, more than once.
+    let sb = Sandbox::new("lib");
+    sb.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\nname: review\ndescription: Review the diff\nrequires: agent:dev\n---\n# review\n",
+    );
+    let r = sb.mind(&[
+        "--json",
+        "meld",
+        &sb.source_spec(),
+        "--learn",
+        "review",
+        "--learn",
+        "skill:*",
+        "--learn",
+        "agent:dev",
+    ]);
+    assert!(r.success, "meld --learn --json failed: {}", r.stderr);
+    let doc: serde_json::Value = serde_json::from_str(&r.stdout)
+        .unwrap_or_else(|e| panic!("stdout must be one JSON document ({e}): {}", r.stdout));
+    // Three patterns, but only two distinct items: skill:review and the
+    // agent:dev it requires (matched directly by the third pattern too).
+    assert_eq!(
+        doc["pending_items"].as_u64(),
+        Some(2),
+        "pending must be the union of the closures: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn meld_learn_off_a_tty_names_a_command_that_runs_verbatim() {
+    // spec: CLI-236 CLI-225 -- the non-TTY branch's fallback is a pasteable
+    // `mind learn <ref>` composed from `LearnTarget::display`. Asserting it
+    // merely CONTAINS "mind learn" would pass on a ref that names the wrong
+    // item, or on one `learn` cannot parse at all, so this runs the printed
+    // command through the real binary and checks what it installs.
+    let sb = Sandbox::new("lib");
+    let r = sb.mind(&["meld", &sb.source_spec(), "--learn", "review"]);
+    assert!(r.success, "meld --learn failed: {} {}", r.stdout, r.stderr);
+    assert!(!sb.claude_home.join("skills/review").exists());
+
+    let command = backticked(&r.stdout);
+    assert_eq!(
+        command,
+        format!("mind learn '{}#skill:review'", sb.identity()),
+        "the fallback must name the exact, source-qualified, kind-qualified \
+         identity of the match: {}",
+        r.stdout
+    );
+    let run = run_printed(&sb, &command);
+    assert!(
+        run.success,
+        "the printed fallback `{command}` must run: {} {}",
+        run.stdout, run.stderr
+    );
+    assert!(
+        sb.claude_home.join("skills/review").exists(),
+        "the printed fallback must install the item it named: {}",
+        run.stdout
+    );
+    assert!(
+        !sb.claude_home.join("agents/dev.md").exists(),
+        "and only that item: {}",
+        run.stdout
+    );
+}
+
+#[test]
+fn meld_learn_off_a_tty_names_the_literal_item_when_its_name_carries_glob_syntax() {
+    // spec: CLI-236 -- `is_safe_item_name` permits `[`, and the `mind learn`
+    // fallback is read back by `learn`, which treats `*`/`?`/`[` in the name
+    // half as glob syntax (CLI-31). `LearnTarget::display` glob-escapes the key
+    // for that reason; unescaped, the fallback printed for `pdf[x]` installs
+    // `pdfx` instead. This repo ships both, so the substitution is observable.
+    let sb = Sandbox::bare("lib");
+    sb.write_and_commit(
+        "skills/pdf[x]/SKILL.md",
+        "---\ndescription: The literal one\n---\n# pdf[x]\n",
+    );
+    sb.write_and_commit(
+        "skills/pdfx/SKILL.md",
+        "---\ndescription: The one a glob would select\n---\n# pdfx\n",
+    );
+
+    let r = sb.mind(&["meld", &sb.source_spec(), "--learn", "pdf[[]x[]]"]);
+    assert!(r.success, "meld --learn failed: {} {}", r.stdout, r.stderr);
+    let command = backticked(&r.stdout);
+    assert_eq!(
+        command,
+        format!("mind learn '{}#skill:pdf[[]x[]]'", sb.identity()),
+        "the fallback must carry the glob-escaped key: {}",
+        r.stdout
+    );
+    let run = run_printed(&sb, &command);
+    assert!(
+        run.success,
+        "the printed fallback `{command}` must run: {} {}",
+        run.stdout, run.stderr
+    );
+    assert!(
+        sb.claude_home.join("skills/pdf[x]").exists(),
+        "the fallback must install the literally named skill: {}",
+        run.stdout
+    );
+    assert!(
+        !sb.claude_home.join("skills/pdfx").exists(),
+        "and not the one a glob reading selects: {}",
+        run.stdout
+    );
+}
+
+#[test]
+fn meld_learn_off_a_tty_names_a_command_that_runs_verbatim_for_several_matches() {
+    // spec: CLI-236 CLI-225 -- the same fallback when the batch has MORE THAN
+    // ONE fresh match. `install_source_items_matching` joins every target into
+    // a single `mind learn <a> <b> ...`, but `learn` takes exactly one
+    // positional `<ITEM>` (cli.rs `Learn { item: String }`), so the joined form
+    // is rejected by clap with "unexpected argument" the moment a second match
+    // exists. CLI-236 says the non-TTY branch "prints how to install later";
+    // a command that cannot run does not. The same join is used by the
+    // interactive-decline branch's "skipped; run `mind learn ...`" line, so
+    // both branches carry it. Fixing it means emitting one `mind learn` per
+    // target (or a `&&`-joined sequence), not relaxing this test.
+    let sb = Sandbox::new("lib");
+    let r = sb.mind(&["meld", &sb.source_spec(), "--learn", "*"]);
+    assert!(r.success, "meld --learn failed: {} {}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("3 item(s) match --learn"),
+        "the fixture must produce a multi-item batch: {}",
+        r.stdout
+    );
+
+    let command = backticked(&r.stdout);
+    let run = run_printed(&sb, &command);
+    assert!(
+        run.success,
+        "the printed fallback `{command}` must run: {} {}",
+        run.stdout, run.stderr
+    );
+    assert!(
+        sb.claude_home.join("skills/review").exists()
+            && sb.claude_home.join("agents/dev.md").exists()
+            && sb.claude_home.join("rules/style.md").exists(),
+        "the printed fallback must install every item it named: {} {}",
+        run.stdout,
+        run.stderr
+    );
+}
+
+#[test]
+fn meld_learn_declined_at_the_prompt_installs_nothing_and_names_a_working_command() {
+    // spec: CLI-236 -- the interactive half of the CLI-23 gate `--learn`
+    // reuses. On a TTY the whole batch is previewed once and prompted once; a
+    // decline installs nothing and prints the same pasteable fallback. Nothing
+    // covered this branch: every other integration test is non-TTY, which takes
+    // the note branch above instead. `MIND_TTY=1` (HOOK-109) forces the TTY
+    // reading, and a `/dev/null` stdin reaches `read_confirm`'s EOF-is-No.
+    let sb = Sandbox::new("lib");
+    let r = sb.mind_env(
+        &["meld", &sb.source_spec(), "--learn", "review"],
+        &[("MIND_TTY", "1")],
+        None,
+    );
+    assert!(r.success, "meld --learn failed: {} {}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("would learn 1 item(s)"),
+        "the batch must be previewed before the prompt: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("install these 1 item(s) now?"),
+        "the batch must be prompted for once: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("skipped; run"),
+        "a decline must say so: {}",
+        r.stdout
+    );
+    assert!(
+        !sb.claude_home.join("skills/review").exists(),
+        "a decline must install nothing: {}",
+        r.stdout
+    );
+
+    let command = backticked(
+        r.stdout
+            .split("skipped; run")
+            .nth(1)
+            .expect("the skip line"),
+    );
+    assert_eq!(
+        command,
+        format!("mind learn '{}#skill:review'", sb.identity()),
+        "the decline fallback must name the exact identity: {}",
+        r.stdout
+    );
+    let run = run_printed(&sb, &command);
+    assert!(
+        run.success && sb.claude_home.join("skills/review").exists(),
+        "the decline fallback `{command}` must install what it named: {} {}",
+        run.stdout,
+        run.stderr
+    );
+}
+
+#[test]
+fn meld_learn_accepted_at_the_prompt_installs_the_whole_batch_once() {
+    // spec: CLI-236 -- the accept side of the same gate: ONE prompt for the
+    // whole batch (not one per pattern), and the closure of each match comes
+    // with it (DEP-30).
+    let sb = Sandbox::new("lib");
+    sb.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\nname: review\ndescription: Review the diff\nrequires: agent:dev\n---\n# review\n",
+    );
+    let r = sb.mind_env(
+        &[
+            "meld",
+            &sb.source_spec(),
+            "--learn",
+            "review",
+            "--learn",
+            "rule:style",
+        ],
+        &[("MIND_TTY", "1")],
+        Some("y\n"),
+    );
+    assert!(r.success, "meld --learn failed: {} {}", r.stdout, r.stderr);
+    assert_eq!(
+        r.stdout.matches("install these").count(),
+        1,
+        "one prompt for the whole batch, not one per pattern: {}",
+        r.stdout
+    );
+    assert!(
+        sb.claude_home.join("skills/review").exists()
+            && sb.claude_home.join("rules/style.md").exists()
+            && sb.claude_home.join("agents/dev.md").exists(),
+        "both matches and the closure of the first must install: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn remeld_learn_installs_the_named_subset() {
+    // spec: CLI-236 -- a re-meld (CLI-12) honors `--learn` too.
+    let sb = Sandbox::new("lib");
+    let first = sb.mind(&["meld", &sb.source_spec(), "--register-only"]);
+    assert!(first.success, "register-only meld failed: {}", first.stderr);
+    assert!(!sb.claude_home.join("skills/review").exists());
+
+    let r = sb.mind(&["meld", &sb.source_spec(), "--learn", "review", "--yes"]);
+    assert!(
+        r.success,
+        "re-meld --learn failed: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        sb.claude_home.join("skills/review").exists(),
+        "the matched item must install on a re-meld: {}",
+        r.stdout
+    );
+    assert!(
+        !sb.claude_home.join("agents/dev.md").exists(),
+        "an unmatched item must NOT be installed: {}",
+        r.stdout
     );
 }
 

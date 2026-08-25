@@ -2497,6 +2497,7 @@ mod tests {
             links: vec![], // empty: link_rel falls back to default_link_rel
             description: None,
             install_hooks: Vec::new(),
+            dropped_requires: Vec::new(),
         };
 
         // A lobe whose PARENT directory does not exist -- freshly added, not yet

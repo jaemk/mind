@@ -30,9 +30,11 @@ const ALLOWLIST: &[&str] = &[
     // reinstall, removing an absent path. (LIFE-15, the source-content hash
     // basis, is now cited by example_drift_upgrade.)
     "LIFE-3", "LIFE-6", "LIFE-21",
-    // Namespacing: install-time application and the token's written form are
-    // definitional, exercised by the expansion tests.
-    "NS-3", "NS-10",
+    // Namespacing: install-time application is definitional, exercised by the
+    // expansion tests. (NS-10, the token's written form, is now cited directly
+    // by the `sibling_reference_tokens` tests in namespace.rs, which assert the
+    // scanner recognizes exactly the literal `{{ns:` spelling `expand` does.)
+    "NS-3",
     // A curated super-source adopting an un-onboarded nested source (DSC-59/60/61)
     // is implemented and cited from tests/cli.rs (the apply, gate-with-warning,
     // and consumer-pin-override tests); no longer allowlisted.

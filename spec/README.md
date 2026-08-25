@@ -243,6 +243,9 @@ and verified.
 | TUI: what `u` offers and what applying it does when the recomputed stale set is empty | done | TUI-76 |
 | `evolve --to` prerelease target ordering, and the leading-`v` strip | done | STO-77 |
 | Dependency-tree rendering is bounded: each node's subtree renders once, a later occurrence is a `(seen)` leaf, with a depth/line cap and a truncation notice | done | DEP-64 |
+| `meld <repo> --learn <NAME\|GLOB>` installs only the matching subset (repeatable, matches bare or effective name, dependency closure applies, conflicts with `--register-only`) | done | CLI-236 |
+| An item link's unsatisfiable intra-source references: a `requires` entry is dropped with a warning, a sibling-naming token errors; both name the unmeld-then-`meld --learn` remedy | done | LNK-18 |
+| A dropped `requires` is recorded on the installed item and surfaced by `recall`, `recall --json`, and `introspect` | done | LNK-19 |
 
 ## Documents
 

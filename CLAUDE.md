@@ -44,7 +44,7 @@ maintained by hand.
 
 | command | does |
 |---------|------|
-| `meld <repo>` | clone a source repo and register it; `--add-root <dir>` composes extra convention scan roots with the source's own discovery (a plugin manifest or authoritative mind.toml keeps its items, DSC-84); `<repo>` may be a deep tree/blob skill URL (an item link, spec/item-link.md) |
+| `meld <repo>` | clone a source repo and register it; `--learn <glob>` installs only the matching items instead of offering the whole set (CLI-236); `--add-root <dir>` composes extra convention scan roots with the source's own discovery (a plugin manifest or authoritative mind.toml keeps its items, DSC-84); `<repo>` may be a deep tree/blob skill URL (an item link, spec/item-link.md) |
 | `unmeld <name>` | drop a source |
 | `learn <item>` | copy item to the store, symlink into each agent home (lobe); `learn <url>` with a deep tree/blob skill URL registers the repo as a single-item source instance (`host/owner/repo#path`) and installs that skill in one step |
 | `forget <item>` | remove symlink + store copy |

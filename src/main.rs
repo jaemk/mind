@@ -453,6 +453,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             dangerously_skip_install_hook_check,
             dangerously_skip_build_hook_check,
             register_only,
+            learn_patterns,
             recursive,
             force,
             local,
@@ -467,6 +468,9 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             // aliases) into one request; more than one is a structured
             // ConflictingPin error rather than a clap usage string.
             let pin = commands::parse_pin_flags(pin, follow_branch, pin_tag, pin_ref)?;
+            // spec: CLI-236 -- reject an unusable `--learn` value before the
+            // clone, so a typo does not leave a registered source behind.
+            commands::validate_learn_patterns(&learn_patterns)?;
             // CLI-25: no repo argument (or an explicit `.`/`./`) melds the
             // current directory. Resolve it to an absolute path so `parse_spec`
             // derives a sensible `local/<parent>/<dir>` identity.
@@ -526,6 +530,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
                     recursive,
                     &ignored_flags,
                     pin,
+                    &learn_patterns,
                 )?;
             } else {
                 let meld_sum = commands::meld(
@@ -547,20 +552,52 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
                 if !register_only {
                     if json {
                         // Install silently (no separate JSON from learn), collect keys.
-                        let (mut inst, pend) = commands::install_source_items_for_json(
-                            paths,
-                            &meld_sum.source_name,
-                            flow,
-                        )?;
-                        // Also walk the curated chain silently (DSC-54/55/58).
-                        let curated = commands::install_curated_sources_for_json(
+                        // spec: CLI-236 -- `--learn <glob>` narrows the install to
+                        // the matching subset in place of the whole set.
+                        let (mut inst, pend) = if learn_patterns.is_empty() {
+                            commands::install_source_items_for_json(paths, &source_ident, flow)?
+                        } else {
+                            // spec: STO-58 -- the same instance identity the
+                            // text arm installs against; the two arms of one
+                            // feature must not disagree on which identity they
+                            // trust, even where the two spellings coincide.
+                            // The two spellings are provably equal today, and
+                            // using one variable keeps a future change to
+                            // either derivation from breaking only the
+                            // `--learn` arm.
+                            commands::install_source_items_matching_for_json(
+                                paths,
+                                &source_ident,
+                                &learn_patterns,
+                                flow,
+                            )?
+                        };
+                        // Also walk the curated chain silently (DSC-54/55/58) --
+                        // but not under `--learn`, whose patterns are an
+                        // explicit, top-source-scoped selection (CLI-236).
+                        if learn_patterns.is_empty() {
+                            let curated = commands::install_curated_sources_for_json(
+                                paths,
+                                &source_ident,
+                                recursive,
+                                flow,
+                            )?;
+                            inst.extend(curated);
+                        }
+                        commands::emit_meld_json_result(meld_sum, inst, pend)?;
+                    } else if !learn_patterns.is_empty() {
+                        // spec: CLI-236 -- the named subset only: the curated
+                        // chain (DSC-54/55/58) is not walked, since a pattern
+                        // selects within the source being melded. Say so when
+                        // `--recursive` was passed, rather than dropping it
+                        // silently (the CLI-206 ignored-flag discipline).
+                        commands::note_learn_ignores_recursive(recursive);
+                        commands::install_source_items_matching(
                             paths,
                             &source_ident,
-                            recursive,
+                            &learn_patterns,
                             flow,
                         )?;
-                        inst.extend(curated);
-                        commands::emit_meld_json_result(meld_sum, inst, pend)?;
                     } else {
                         commands::install_source_items(paths, &source_ident, flow)?;
                         // DSC-54 installs only the top-level source by default. Walk the

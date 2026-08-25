@@ -98,7 +98,7 @@ anything; `evolve` updates the `mind` binary itself.
 
 | command | does |
 |---------|------|
-| `mind meld [<repo>] [--register-only] [--yes] [-f\|--force] [-r\|--recursive] [-N\|--namespace <ns>] [--flat-skills] [--root <dir>] [--add-root <dir>] [--pin <HEAD\|ref\|branch=NAME\|tag=NAME>] [--install-hook <cmd>] [--dangerously-skip-install-hook-check] [--dangerously-skip-build-hook-check]` | clone and register a source (default `.`), then prompt to install its items (`--register-only` registers without installing; `--yes` installs without prompting; `-f`/`--force` overwrites conflicting non-mind link targets; `-r`/`--recursive` offers to install items from every nested source a super-source curates). `--pin` sets the version tracked (see [Pinning a source version](#pinning-a-source-version)). `--root` replaces the scan roots; `--add-root` adds roots that compose with the source's own discovery (a `marketplace.json`/`plugin.json` or an authoritative `mind.toml` keeps its items and the added roots are scanned in addition, see [Claude plugin marketplaces](marketplace.md#installing-items-the-manifest-does-not-list)). `<repo>` may also be a deep `tree`/`blob` URL to one skill (an [item link](#item-links-install-one-skill-by-url)). A meld that discovers no items reports the convention paths it scanned and the flags that reach items laid out elsewhere in the repo. Re-melding an already-melded source installs any missing items, else shows each item's install state and commit. `--pin` on a re-meld re-pins the source: it resolves the new pin, re-checks-out the clone if the commit differs, and records both, leaving the source untouched if anything fails. `--root`, `--add-root`, `--flat-skills`, and `--install-hook` apply only at the meld that first registers a source, since they change what is discovered, so a re-meld notes which of them it ignored (`unmeld`, then meld again, to change them). Re-melding with a different `-N`/`--namespace` registers a new coexisting `host/owner/repo@<prefix>` instance (its own clone, pin, and items) rather than changing the existing source's prefix in place; to change a source's prefix without forking a new instance, use `mind probe`'s **Set namespace** action in the source's details dialog (only offered while the source has no installed items; see [Details dialog](tui.md#details-dialog)) |
+| `mind meld [<repo>] [--register-only] [--learn <NAME\|GLOB>] [--yes] [-f\|--force] [-r\|--recursive] [-N\|--namespace <ns>] [--flat-skills] [--root <dir>] [--add-root <dir>] [--pin <HEAD\|ref\|branch=NAME\|tag=NAME>] [--install-hook <cmd>] [--dangerously-skip-install-hook-check] [--dangerously-skip-build-hook-check]` | clone and register a source (default `.`), then prompt to install its items (`--register-only` registers without installing; `--learn <NAME\|GLOB>` installs only the items matching the pattern instead of offering the whole set, repeatable, and each match brings its dependencies with it, see [Installing part of a source](#installing-part-of-a-source); `--yes` installs without prompting; `-f`/`--force` overwrites conflicting non-mind link targets; `-r`/`--recursive` offers to install items from every nested source a super-source curates). `--pin` sets the version tracked (see [Pinning a source version](#pinning-a-source-version)). `--root` replaces the scan roots; `--add-root` adds roots that compose with the source's own discovery (a `marketplace.json`/`plugin.json` or an authoritative `mind.toml` keeps its items and the added roots are scanned in addition, see [Claude plugin marketplaces](marketplace.md#installing-items-the-manifest-does-not-list)). `<repo>` may also be a deep `tree`/`blob` URL to one skill (an [item link](#item-links-install-one-skill-by-url)). A meld that discovers no items reports the convention paths it scanned and the flags that reach items laid out elsewhere in the repo. Re-melding an already-melded source installs any missing items, else shows each item's install state and commit. `--pin` on a re-meld re-pins the source: it resolves the new pin, re-checks-out the clone if the commit differs, and records both, leaving the source untouched if anything fails. `--root`, `--add-root`, `--flat-skills`, and `--install-hook` apply only at the meld that first registers a source, since they change what is discovered, so a re-meld notes which of them it ignored (`unmeld`, then meld again, to change them). Re-melding with a different `-N`/`--namespace` registers a new coexisting `host/owner/repo@<prefix>` instance (its own clone, pin, and items) rather than changing the existing source's prefix in place; to change a source's prefix without forking a new instance, use `mind probe`'s **Set namespace** action in the source's details dialog (only offered while the source has no installed items; see [Details dialog](tui.md#details-dialog)) |
 | `mind init-source [<path>] [--template] [-N\|--namespace <ns>] [--marketplace] [--flat-skills]` | scaffold `mind.toml` + report references; `--template` rewrites bare refs as `{{ns:}}` (maintainer); `-N`/`--namespace` sets `[source].namespace` in the scaffold; `--marketplace` emits a `.claude-plugin/` marketplace scaffold; `--flat-skills` uses a flat skill layout |
 | `mind unmeld <name> [--keep-items] [--yes] [--uninstall-hook <cmd>] [--dangerously-skip-hook-check]` | uninstall every item the source installed and drop the source (`--keep-items` skips the uninstall step). `<name>` is a ref: it must resolve to exactly one source (a non-glob name matching several errors instead of guessing; use a glob to act on several). It may be a bare source name or, to address one specific instance, its full identity: `host/owner/repo@<prefix>` for an aliased instance, `host/owner/repo#<path>` for an item-link instance. The same identity forms select an instance for `upgrade` and `recall`, e.g. `mind unmeld github.com/acme/skills@jk`. Contrast `sync [source]` below, a filter that may match, and act on, several sources at once |
 | `mind learn [--yes] [-f\|--force] [-n\|--dry-run] [--all] [--pin] [--dangerously-skip-install-hook-check] [--dangerously-skip-build-hook-check] <item>` | install a skill/agent/rule/tool (glob installs many); a partial selection also pulls in the source siblings it references. `<item>` may also be a deep `tree`/`blob` URL to one skill in a repo: the repo registers as a single-item [item link](#item-links-install-one-skill-by-url) and the skill installs in the same step. `--force` overwrites a conflicting non-mind link target (without it, a conflict prompts on a TTY); `--all` installs every item of the named source (shorthand for `<source>#*`); `--pin` freezes a deep-link URL to the ref's current commit (ignored for a plain ref); `-n`/`--dry-run` previews the dependency closure without installing anything; under `--json`, installing an item whose closure pulls in dependencies beyond the explicit selection requires `--yes`, since there is no prompt to answer (refuses with `confirmation-required` otherwise) |
@@ -259,6 +259,50 @@ No-match behavior differs by verb:
 - `sync <filter>` with no match: a hard `SourceNotFound` error.
 - `upgrade <filter>` with no match: reports up to date and exits 0.
 - `--source <filter>` (`recall`/`probe`) with no match: an empty listing.
+- `meld --learn <pattern>` with no match: a hard error naming the source, and
+  the source stays melded (see [Installing part of a source](#installing-part-of-a-source)).
+
+## Installing part of a source
+
+By default `meld` offers the source's whole set. `--learn` narrows that to the
+items you name, in one command:
+
+```
+mind meld owner/repo --learn review --yes
+mind meld owner/repo --learn 'skill:*' --learn agent:dev --yes
+```
+
+The pattern selects within the source being melded, so pass an item name or
+glob, never a source-qualified ref. Quote a glob so the shell does not expand it
+first. `*`, `?`, and `[` are always glob syntax here, so an item whose name
+contains one of them cannot be selected as a literal. A name matches whether or
+not the source namespaces its items, so `--learn review` finds an item that
+installs as `team:review`.
+
+Each match installs through the ordinary `learn` path, so the siblings it
+references come with it (see [Dependencies](dependencies.md)). The rest of the
+source stays registered and available to `learn` later. This is a
+consumer-side selection with its own matching rules; a super-source's own
+`install-items` list (see
+[mind.toml](mind-toml.md#discoversources---curated-super-source)) is
+different: literal `kind:name` refs only, no globs.
+
+Notes:
+
+- `--yes` matters. Like the install-all offer it replaces, `--learn` prompts on a
+  terminal and installs nothing off one, so a scripted run without `--yes`
+  registers the source and exits 0 having installed nothing.
+- A pattern matching nothing in the source is an error naming that source, and
+  the source stays melded. An item the source's inventory does not declare is
+  not reachable this way; use `--add-root <dir>` for those, at the meld that
+  first registers the source (it is ignored on a re-meld, so an already-melded
+  repo must be unmelded first).
+- Scoped to the melded source's own items. The sources a super-source curates are
+  still registered, but none of their items are installed, so `--recursive` has
+  nothing to do here and says so.
+- Conflicts with `--register-only`.
+
+Spec: CLI-236.
 
 ## Item links: install one skill by URL
 
@@ -287,6 +331,40 @@ declared inventory: it reaches a skill an authoritative `mind.toml` or a
 (`--register-only`, `--namespace`, pin flags). `forget` of the skill leaves the
 instance registered and hints at `mind unmeld <identity>` to drop it. A local
 repo is addressable through `file:///path/to/repo/tree/<branch>/<path>`.
+
+A link instance offers exactly the linked skill, so a skill that references a
+sibling (a `requires:` frontmatter entry, or a `{{ns:}}` / `{{tools:}}` /
+`{{path:}}` token, see [Dependencies](dependencies.md)) cannot get it this way. A
+`requires:` entry is metadata, so the skill installs, mind warns which entries
+were dropped, and the drop is recorded on the item (`mind recall <item>` and
+`mind introspect` show it afterwards). A token is rewritten into the skill's
+text, so it is an error and nothing is installed. Both name the same remedy,
+which replaces the link with the whole repo and installs that one skill with its
+dependencies. `mind` checks whether a plain meld of the repo would find the
+skill on its own and prints one of two forms accordingly:
+
+```
+mind unmeld 'github.com/owner/repo#skills/foo' --yes && \
+  mind meld https://github.com/owner/repo --learn 'skill:foo' --yes
+```
+
+or, when an authoritative `mind.toml` or `.claude-plugin` manifest does not
+declare the skill:
+
+```
+mind unmeld 'github.com/owner/repo#skills/foo' --yes && \
+  mind meld https://github.com/owner/repo --add-root '.' --learn 'skill:foo' --yes
+```
+
+The `unmeld` step is what lets the command run as printed: the link instance is
+registered either way, and in the `requires` case it has already installed the
+skill the second half would install again.
+
+The scan root is derived from the link's own path, so the second form works at
+any depth: a link to `packages/foo/skills/bar` prints `--add-root
+'packages/foo'`. What it does not carry over is the rest of the source's
+configuration, since it melds the repo fresh: a `--namespace`, `--pin`, or extra
+`--add-root` the original link was melded with has to be restated by hand.
 
 Spec: [spec/item-link.md](https://github.com/jaemk/mind/blob/main/spec/item-link.md).
 

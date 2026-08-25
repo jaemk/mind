@@ -93,6 +93,7 @@ pub enum Command {
 EXAMPLES:
     mind meld owner/repo
     mind meld https://github.com/owner/repo --namespace acme
+    mind meld owner/repo --learn review --yes
     mind meld . --register-only"
     )]
     Meld {
@@ -222,6 +223,30 @@ EXAMPLES:
         // spec: CLI-165 - canonical name; --link-only is a hidden deprecated alias.
         #[arg(long, alias = "link-only")]
         register_only: bool,
+
+        /// Install only the items matching this name or glob instead of
+        /// offering the source's whole set (repeatable). The pattern selects
+        /// within the source being melded, so pass just an item name or glob
+        /// (`review`, `skill:*`, `pdf-*`), never a source-qualified ref; quote
+        /// a glob so the shell does not expand it first.
+        /// `*`, `?`, and `[` are always glob syntax here, so an item whose
+        /// name contains one of them cannot be selected as a literal.
+        /// A name matches whether or not the source namespaces its items, so
+        /// `--learn review` finds an item that installs as `team:review`.
+        /// Each match installs through the ordinary `learn` path, so its
+        /// intra-source dependencies come with it, and `--yes` (or a TTY
+        /// prompt) still gates the install. A pattern matching nothing in
+        /// the source is an error. Scoped to the melded
+        /// source's own items: the sources a super-source curates are still
+        /// registered, but none of their items are installed. Conflicts with
+        /// `--register-only`.
+        // spec: CLI-236
+        #[arg(
+            long = "learn",
+            value_name = "NAME|GLOB",
+            conflicts_with = "register_only"
+        )]
+        learn_patterns: Vec<String>,
 
         /// Offer to install the items of every nested source a super-source
         /// curates (`[discover].sources`), not just the super-source's own items

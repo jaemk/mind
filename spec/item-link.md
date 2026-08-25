@@ -144,6 +144,139 @@ same repo, and a plain meld of that repo, coexist as separate sources.
 - `LNK-8` A link instance registers no nested sources: `[discover].sources`
   entries and marketplace external plugins in the linked repo are not walked.
   The link is a single-item grab, not a super-source adoption.
+- `LNK-18` A link instance's catalog is exactly the linked skill (LNK-7), so an
+  intra-source reference (dependencies.md, tooling.md) to any other name can
+  never resolve, however the repo is laid out. The two reference FORMS are
+  handled differently, following DEP-4's own distinction between them:
+  - A `requires:` entry (DEP-4) that names something other than the linked skill
+    is NOT the DEP-6 `BadReference` error here. It is dropped, recorded
+    (LNK-19), and warned about, and the skill installs. `requires` is pure
+    metadata (DEP-4): it is never rewritten into the item body, so a dangling
+    entry degrades the item rather than corrupting it, and refusing would make a
+    skill that declares one unreachable by link at all. Other `requires`
+    failures keep their DEP-7 causes as hard errors: a malformed ref
+    (`InvalidRef`) and a source-qualified ref (`CrossSource`) are wrong
+    regardless of the catalog. `AmbiguousKind` cannot arise, since a single-item
+    catalog offers at most one match. An entry naming the linked skill's own
+    name under the WRONG kind (`agent:<skill-name>`) is a `NoMatch` like any
+    other and is dropped with the rest.
+  - A TOKEN naming a sibling stays a hard error and nothing is installed: a
+    token IS rewritten into the item's text at install, so it cannot be left
+    dangling. This covers every token family that resolves against siblings, not
+    just `{{ns:name}}` (NS-10/DEP-1): `{{tools:name}}` (TOOL-15) and
+    `{{path:[kind:]name}}` (TOOL-18) are equally unsatisfiable in a one-item
+    catalog, and a skill shipping alongside a sibling tool is a common shape.
+    `{{self}}` is not a sibling reference and always resolves. The scan covers
+    exactly the files install expands, markdown (NS-53) plus any non-markdown
+    file the item lists in `expand:` (NS-57); scanning a narrower set would let a
+    reference slip through to the blunt error this rule exists to replace. The
+    error is `LinkRefUnsatisfiable`, not the generic `BadReference`/TOOL-17
+    cause: it names the token as written, says the source is a single-skill item
+    link with no siblings, and carries the remedy, so a user who pasted a deep
+    URL is told what to run instead of being told the skill references something
+    missing.
+
+  *The remedy.* Both paths name one of two forms of the same two-step command,
+  decided by scanning the clone already on disk as an ordinary whole-repo
+  source (the same `Source`, with `item_path` cleared). When that scan finds a
+  `Skill` at the exact path the link points at (a same-named skill declared at
+  a DIFFERENT path in the repo does not count), a plain meld would discover it
+  on its own:
+
+  ```
+  mind unmeld '<identity>' --yes && mind meld '<repo-url>' --learn 'skill:<skill>' --yes
+  ```
+
+  Otherwise -- an authoritative `mind.toml` or `.claude-plugin` manifest that
+  does not declare the item, the case item links exist for -- a plain meld
+  would not reach it, so the remedy adds a scan root:
+
+  ```
+  mind unmeld '<identity>' --yes && mind meld '<repo-url>' --add-root '<root>' --learn 'skill:<skill>' --yes
+  ```
+
+  (CLI-236, DSC-84). Either form drops the link instance and then melds the
+  whole repo, installing just that skill together with its dependency closure
+  (DEP-30). Any error from the reachability scan -- an unreadable clone, a
+  malformed `mind.toml`, a version gate -- answers "not reachable" rather than
+  propagating, so the remedy falls back to the added-root form; the scan
+  runs only when a remedy is about to be printed, not on every link install.
+
+  The `<root>` is DERIVED from the link's own path, not fixed at `.`. An added
+  root is convention-scanned one level deep (flat child directories, plus a
+  `skills/` container directly under it), so the root that reaches the linked
+  skill is its parent directory, or its grandparent when that parent is the
+  `skills/` container: `skills/foo` and a flat `foo` both give `.`, while
+  `vendor/pkg/skills/foo` gives `vendor/pkg` and a flat `vendor/foo` gives
+  `vendor`. A fixed `.` would reach only a skill at the repo root, so for
+  anything deeper the meld half would fail with `LearnPatternNoMatch` AFTER the
+  unmeld half had already succeeded -- the destroy-then-fail sequence this
+  two-branch remedy exists to prevent.
+
+  The `unmeld` step is required. The link instance is registered before the
+  install runs, so it is registered on both paths when this is printed -- the
+  warning path goes on to install the skill, the error path installs nothing
+  -- and a bare `meld ... --learn` would therefore leave a second source for
+  the same repo, and collide with the name the link already installed on the
+  warning path (NS-43/CLI-33). Removing the instance first is what makes the
+  printed command work when pasted.
+
+  The `<identity>` is the instance's registered identity (LNK-4) and the
+  `<repo-url>` its recorded clone URL, never the deep link URL. The pattern is
+  kind-qualified (`skill:<name>`): an item link is always a skill (LNK-7), and
+  a bare name would additionally match a same-named agent or rule in the repo,
+  installing prompt content the user never asked for. Each of the three values
+  is sanitized (DSC-95) and shell-quoted (CLI-225) before composition, and the
+  identity and the name are also glob-escaped: `--learn`'s pattern and
+  `unmeld`'s selector (CLI-28) both read `*`, `?`, and `[` as glob syntax, and
+  `is_safe_item_name` (DSC-71/DSC-96) permits those characters. A skill named
+  `pdf[x]` would otherwise make the pattern match some OTHER item, and --
+  since a link identity embeds the skill's repo path (LNK-4) -- would make the
+  raw identity compile as a pattern matching no source, stopping the remedy at
+  its first command. Escaping is a no-op for an identity or name with no
+  metacharacters, so both commands above are unchanged for the common case.
+
+  *Where it applies.* Wherever a link instance's skill is installed: `learn
+  <url>` (LNK-6), the install pass of `meld <url>`, and a later `upgrade` of the
+  instance, so an upstream edit that adds a `requires` entry does not turn every
+  subsequent upgrade of that link into a hard failure.
+
+  *What it cannot fix.* One shape defeats the added-root form: a declared
+  inventory that offers a DIFFERENT item of the same bare name (say it declares
+  `vendor/review` while the link points at `skills/review`). The reachability
+  scan correctly answers "not reachable" there, since it matches by path, but
+  the added root then makes both items visible at once and the meld half fails
+  with the DSC-85 `DuplicateItem` guard ("appears under more than one scan
+  root"). The unmeld half has already run at that point, so this is the one
+  remaining case where the remedy leaves the user worse off than before pasting
+  it. Reaching that skill needs `--root` (replacing the inventory's roots)
+  rather than `--add-root` (composing with them), which is a choice about what
+  the whole source offers, not something a per-item remedy should make.
+
+  The added-root form otherwise reaches a skill an authoritative
+  `mind.toml` or `.claude-plugin` manifest does not declare (DSC-84) at any
+  depth, since the root is derived from the link's path. What it does not carry
+  over is the rest of the source's consumer configuration: the remedy melds the
+  repo fresh, so a `--namespace`, `--pin`, or `--flat-skills` the original link
+  was melded with is not reproduced, and neither are any `--add-root` values
+  beyond the one derived here. A link melded with extra scan roots therefore
+  needs them restated by hand on the meld half.
+
+- `LNK-19` A `requires:` entry dropped under LNK-18 is recorded on the installed
+  item (`dropped_requires` in the manifest) rather than existing only as the
+  install-time warning. The warning scrolls away, is reduced to a summary line by
+  the TUI's output capture, and goes to stderr under `--json`, so without a
+  durable record an item can carry a silently absent dependency with no way to
+  discover it later. The record is what `recall <item>` shows as a `dropped`
+  line, what `recall <item> --json` carries as a `dropped_requires` array (absent
+  when empty), and what `introspect` reports as a `dropped-requires` issue naming
+  the item and the entry. `introspect --fix` does not repair it: the only fix is
+  to replace the link with the whole repo, which changes which sources are
+  registered and so is the user's call. The field is re-derived on every install
+  and upgrade of the item, so it always describes the version on disk; it is
+  empty (and omitted from `manifest.json`) for every ordinary install, so an item
+  installed by an older binary, or from a non-link source, reads back unchanged.
+
 - `LNK-9` Namespacing and collisions are unchanged: the effective prefix is
   the alias or `[source].namespace` (NS rules), and collisions with installed
   items surface through the existing checks (NS-41, NS-43, CLI-33). Source

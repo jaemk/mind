@@ -2015,6 +2015,299 @@ fn siblings_of(items: &[CatalogItem], source: &str) -> Vec<CatalogItem> {
         .collect()
 }
 
+/// The remedy an item link's unsatisfiable reference points at (LNK-18): drop
+/// the link instance, then meld the whole repo and install just this skill,
+/// which brings the skill's dependency closure with it (DEP-30).
+///
+/// The `unmeld` step is required. The link instance is registered before the
+/// install runs, so it is registered on both paths when this is printed -- the
+/// warning path goes on to install the skill, the error path installs nothing
+/// -- and a bare `meld ... --learn` would therefore leave a second source for
+/// the same repo, and collide with the name the link already installed on the
+/// warning path (NS-43/CLI-33). Removing the instance first is what makes the
+/// printed command work when pasted.
+///
+/// `add_root` emits the `--add-root .` form (DSC-84), for the repo whose
+/// declared inventory does not offer the linked skill at all -- the case item
+/// links exist for. Without it the meld half of the command would fail with
+/// `LearnPatternNoMatch` AFTER the unmeld half already succeeded, leaving the
+/// user with the skill uninstalled, the link gone, and a stray whole-repo
+/// source. The caller decides by scanning the clone
+/// ([`plain_meld_reaches_link`]), never by name.
+///
+/// spec: DSC-95 -- the identity, the clone URL, and the item name are all
+/// source-controlled, so each is sanitized and shell-quoted BEFORE being
+/// composed into the command line handed to the user.
+/// spec: CLI-236 -- `--learn` matches its pattern as a glob when it carries
+/// glob metacharacters, and an item name may contain them (`is_safe_item_name`
+/// rejects path separators and the DSC-96 blocked classes, not `*`/`?`/`[`).
+/// A skill named `pdf[x]` would otherwise make this command install some OTHER
+/// item, so the name is glob-escaped and the emitted pattern matches literally.
+/// The pattern is also kind-qualified (`skill:`): an item link is always a
+/// skill (LNK-7), and a bare name would additionally match a same-named agent
+/// or rule in the repo, dropping prompt content the user never asked for.
+/// The `--add-root` value that would make a plain meld reach the skill at
+/// `item_path` (LNK-18, DSC-84).
+///
+/// An added root is convention-scanned two ways (`catalog::scan_add_roots`):
+/// flat, where a skill is a bare child directory of the root, and containered,
+/// where it is `<root>/skills/<name>`. Both are ONE level deep, so the root has
+/// to be the skill's own parent, or its grandparent when the parent is the
+/// `skills/` container. Always emitting `.` reaches only a skill sitting at
+/// `<repo-root>/skills/<name>` (or flat at the repo root); for anything deeper,
+/// such as `vendor/pkg/skills/foo`, the meld half of the remedy would fail with
+/// `LearnPatternNoMatch` AFTER the unmeld half already succeeded, which is the
+/// destroy-then-fail sequence the two-branch remedy exists to prevent.
+///
+/// The repo root itself is spelled `.`, which is what `validate_scan_root`
+/// accepts for "scan the whole clone".
+fn link_add_root(item_path: &str) -> String {
+    let skill_dir = std::path::Path::new(item_path);
+    let root = match skill_dir.parent() {
+        // `<...>/skills/<name>` -> the parent of the container.
+        Some(parent)
+            if parent
+                .file_name()
+                .is_some_and(|n| n == ItemKind::Skill.dir()) =>
+        {
+            parent.parent()
+        }
+        // A flat skill dir -> its own parent.
+        other => other,
+    };
+    let rendered = root
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if rendered.is_empty() {
+        ".".to_string()
+    } else {
+        rendered
+    }
+}
+
+fn link_meld_remedy(identity: &str, url: &str, item_name: &str, add_root: Option<&str>) -> String {
+    // spec: CLI-28 -- `unmeld`'s selector is glob-aware too, and a link
+    // identity embeds the skill's repo path (LNK-4), so a skill directory
+    // named `pdf[x]` yields the identity `host/o/r#skills/pdf[x]`, which
+    // `source_matches_glob` compiles as a PATTERN and matches against nothing:
+    // the unmeld half would fail with `no melded source matches ...` and the
+    // whole remedy would stop at its first command. Escaping is a no-op for an
+    // identity with no metacharacters, so the ordinary form is unchanged.
+    let identity = crate::error::shell_quote(&glob::Pattern::escape(&strip_ansi(identity)));
+    let url = crate::error::shell_quote(&strip_ansi(url));
+    let pattern = crate::error::shell_quote(&format!(
+        "skill:{}",
+        glob::Pattern::escape(&strip_ansi(item_name))
+    ));
+    // spec: CLI-225 -- the root is derived from the source-controlled link path,
+    // so it is sanitized and shell-quoted like every other value in this command.
+    let add_root = add_root
+        .map(|r| format!(" --add-root {}", crate::error::shell_quote(&strip_ansi(r))))
+        .unwrap_or_default();
+    // `--yes` on both halves: without it a non-TTY run (a script, CI, anything
+    // piping output) unmelds and then installs NOTHING while exiting 0, so the
+    // printed command would silently do half its job. It skips the install
+    // confirmations only; a source install hook keeps its own consent prompt
+    // (HOOK-20), which `--yes` does not bypass.
+    format!("mind unmeld {identity} --yes && mind meld {url}{add_root} --learn {pattern} --yes")
+}
+
+/// Whether an ordinary `meld` of the linked repo would discover the linked
+/// skill by itself, deciding which [`link_meld_remedy`] form to print (LNK-18).
+///
+/// Decided by PATH, not by name: the clone already on disk is scanned as if it
+/// were an ordinary whole-repo source (the same `Source`, with `item_path`
+/// cleared), and the answer is yes only when that scan yields a `Skill` at the
+/// very directory the link points at. Matching on the bare name instead would
+/// call a repo reachable when its inventory declares a DIFFERENT `review`
+/// (say `vendor/review`) than the one the link installed, and the remedy would
+/// then quietly install the wrong skill.
+///
+/// A hint, not a gate: any error from the scan (an unreadable clone, a
+/// malformed `mind.toml`, a version gate) answers "not reachable", so the
+/// caller falls back to the `--add-root .` form, which also works on a repo
+/// that would have been discovered anyway (DSC-85 drops the duplicate). It is
+/// called only when a remedy is about to be printed, so an ordinary link
+/// install never pays for a whole-clone scan.
+fn plain_meld_reaches_link(paths: &Paths, source: &crate::source::Source) -> bool {
+    let Some(item_path) = source.item_path.as_deref() else {
+        return true;
+    };
+    let clone_dir = source.clone_dir(paths);
+    let whole = crate::source::Source {
+        item_path: None,
+        ..source.clone()
+    };
+    let mut items: Vec<CatalogItem> = Vec::new();
+    if catalog::scan_source_at(&clone_dir, &whole, &mut items).is_err() {
+        return false;
+    }
+    let canon = |p: &std::path::Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let target = canon(&clone_dir.join(item_path));
+    items
+        .iter()
+        .any(|it| it.kind == ItemKind::Skill && canon(&it.path) == target)
+}
+
+/// Whether a `requires` entry (DEP-4) can resolve inside a single-skill item
+/// link instance, whose only sibling is the linked skill itself (LNK-7).
+///
+/// A malformed or source-qualified entry returns `true` so it stays with the
+/// item and install raises its specific DEP-7 cause; only an entry that is
+/// well-formed and intra-source but names something other than the linked
+/// skill is unsatisfiable by construction.
+fn requires_resolves_alone(entry: &str, item: &CatalogItem) -> bool {
+    let Ok(r) = crate::resolve::parse_item_ref(entry) else {
+        return true; // InvalidRef: install reports the specific cause
+    };
+    if r.source.is_some() {
+        return true; // CrossSource: same
+    }
+    r.name == item.name && r.kind.is_none_or(|k| k == item.kind)
+}
+
+/// Whether a token naming a sibling could resolve in a catalog whose only item
+/// is `item` itself (LNK-7).
+///
+/// Mirrors the two expanders' own resolution rules: `{{ns:name}}` matches a
+/// sibling of any kind by bare name (NS-11), `{{tools:name}}` matches only a
+/// `Tool` (TOOL-15), and `{{path:[kind:]name}}` matches by bare name with an
+/// optional kind narrowing (TOOL-18). With one item in the catalog, all three
+/// reduce to "names this item, under a kind this item has".
+fn sibling_token_resolves_alone(r: &crate::namespace::SiblingRef, item: &CatalogItem) -> bool {
+    r.name == item.name && r.kind.is_none_or(|k| k == item.kind)
+}
+
+/// The files an item's tokens are expanded in, mirroring `install::expand_references`:
+/// every markdown file (NS-53), plus any non-markdown file the item lists in its
+/// `expand:` frontmatter (NS-57). Scanning a narrower set than install expands
+/// would let a reference slip past the LNK-18 check and fail later with the
+/// blunt error LNK-18 exists to replace.
+///
+/// spec: LIFE-52 -- the tree walk is `install::collect_files`, the same capped
+/// walker the install path itself uses, so this pre-install scan hits the same
+/// depth cap and reports the same structured error instead of recursing
+/// unbounded on a crafted source.
+fn expandable_files(item: &CatalogItem) -> Result<Vec<std::path::PathBuf>> {
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    if item.path.is_dir() {
+        install::collect_files(&item.path, &mut files)?;
+        files.sort();
+    } else {
+        files.push(item.path.clone());
+    }
+    let expand: Vec<&str> = item.expand.iter().map(String::as_str).collect();
+    Ok(files
+        .into_iter()
+        .filter(|file| {
+            // A single-file item (agent/rule) has no bundled files, so only its
+            // own path applies and its markdown-ness is read from that path.
+            if crate::namespace::is_markdown(file) {
+                return true;
+            }
+            if !item.path.is_dir() {
+                return false;
+            }
+            file.strip_prefix(&item.path)
+                .is_ok_and(|rel| expand.iter().any(|e| std::path::Path::new(e) == rel))
+        })
+        .collect())
+}
+
+/// spec: LNK-18 -- reconcile a single-skill item-link instance's intra-source
+/// references before it is installed.
+///
+/// A link instance's catalog is exactly the linked skill (LNK-7), so a
+/// reference to any other name can never resolve however the repo is laid out.
+/// The two reference FORMS are treated differently, following DEP-4's own
+/// distinction between them:
+///
+/// - A token (`{{ns:}}`, `{{tools:}}`, `{{path:}}`) is rewritten into the item's
+///   text at install (NS-10/TOOL-15/TOOL-18), so it cannot be left dangling: it
+///   stays a hard error, with the remedy attached (`LinkRefUnsatisfiable`)
+///   instead of the blunt DEP-6/TOOL-17 `BadReference`.
+/// - A `requires:` entry is pure metadata (DEP-4). It is dropped from the item,
+///   recorded on the installed record, and warned about, so the skill still
+///   installs rather than being unreachable by link at all.
+///
+/// Returns the item unchanged (borrowed) plus an empty drop list for any source
+/// that is not a link instance, so the ordinary install path is untouched. The
+/// drop list rides back to the caller (rather than onto the catalog item) so it
+/// can be recorded on the INSTALLED record, which is what survives the command
+/// (LNK-19).
+fn link_reconciled<'a>(
+    paths: &Paths,
+    registry: &Registry,
+    item: &'a CatalogItem,
+) -> Result<(std::borrow::Cow<'a, CatalogItem>, Vec<String>)> {
+    let Some(source) = registry.find(&item.source) else {
+        return Ok((std::borrow::Cow::Borrowed(item), Vec::new()));
+    };
+    if source.item_path.is_none() {
+        return Ok((std::borrow::Cow::Borrowed(item), Vec::new()));
+    }
+    // Computed lazily: the reachability probe scans the whole clone, and most
+    // link installs never print a remedy at all.
+    let remedy = || {
+        // The added root is derived from the link's own path, not fixed at `.`:
+        // an added root is scanned only one level deep, so a skill nested under
+        // `vendor/pkg/skills/` needs that directory named (LNK-18).
+        let add_root = (!plain_meld_reaches_link(paths, source))
+            .then(|| source.item_path.as_deref().map(link_add_root))
+            .flatten();
+        link_meld_remedy(&source.name, &source.url, &item.name, add_root.as_deref())
+    };
+
+    // A token naming anything but the linked skill is a hard stop. Scan exactly
+    // the files install expands (markdown plus `expand:`-listed, NS-53/NS-57).
+    for file in expandable_files(item)? {
+        let Ok(text) = std::fs::read_to_string(&file) else {
+            continue;
+        };
+        for r in crate::namespace::sibling_reference_tokens(&text) {
+            if sibling_token_resolves_alone(&r, item) {
+                continue;
+            }
+            // spec: DSC-95 -- the token text is source-controlled and is the
+            // whole `referent` field, so sanitize it here, at the boundary,
+            // before it reaches the error's verbatim interpolation.
+            return Err(MindError::LinkRefUnsatisfiable {
+                item: item.display_key(),
+                referent: strip_ansi(&r.token),
+                in_source: strip_ansi(&item.source),
+                remedy: remedy(),
+            });
+        }
+    }
+
+    // An unsatisfiable `requires` entry is metadata: record, warn, drop, install.
+    let (keep, dropped): (Vec<String>, Vec<String>) = item
+        .requires
+        .iter()
+        .cloned()
+        .partition(|e| requires_resolves_alone(e, item));
+    if dropped.is_empty() {
+        return Ok((std::borrow::Cow::Borrowed(item), Vec::new()));
+    }
+    // spec: DSC-95 -- sanitize each raw entry BEFORE the join, so one entry's
+    // dangling escape cannot swallow the entries after it.
+    let dropped: Vec<String> = dropped.iter().map(|e| strip_ansi(e)).collect();
+    let listed = dropped.join(", ");
+    // spec: LNK-19 -- the warning is transient; the durable record on the
+    // installed item is what `recall`/`introspect`/`--json` surface later.
+    let remedy = remedy();
+    crate::render::warn(format!(
+        "{} declares requires {listed}, which was dropped: source {} is a single-skill item \
+         link with no siblings, so the requirement cannot resolve. To install this skill \
+         together with what it requires, replace the link with the whole repo: `{remedy}`",
+        item.display_key(),
+        strip_ansi(&item.source)
+    ));
+    let mut reconciled = item.clone();
+    reconciled.requires = keep;
+    Ok((std::borrow::Cow::Owned(reconciled), dropped))
+}
+
 /// `mind init-source [path] [--template]` — maintainer scaffolding. Discovers the
 /// repo's items, reports the intra-source reference graph, scaffolds a `mind.toml`
 /// if absent, and (with `--template`) rewrites bare sibling references into
@@ -2681,6 +2974,91 @@ pub struct LearnPlan {
     pub tree: String,
     pub adds_dependencies: bool,
     pub install_count: usize,
+    /// The effective `kind:name` keys that would install, in dependency-first
+    /// order (the same set `install_count` counts). Lets a caller union the
+    /// closures of several selections instead of summing counts, which would
+    /// double-count a shared dependency (CLI-236).
+    pub keys: Vec<String>,
+}
+
+/// One item of one melded source, selected by identity rather than by a ref
+/// string (CLI-236).
+///
+/// `key` is `CatalogItem::key()`, i.e. `kind:<effective name>`. The pair is
+/// carried as two fields on purpose: joining them into `<source>#<key>` and
+/// re-splitting on the last `#` is lossy, because `is_safe_item_name` permits
+/// `#` in an item name (it rejects path separators and the DSC-96 classes), so
+/// a skill named `x#skill:review` would split as source `<src>#skill:x` and key
+/// `skill:review` -- two identities that both exist and are both wrong.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LearnTarget {
+    pub source: String,
+    pub key: String,
+}
+
+impl LearnTarget {
+    /// The `<source>#<key>` spelling, for display and for a pasteable
+    /// `mind learn` remedy. Never re-parsed by mind itself.
+    ///
+    /// spec: DSC-95 -- both halves are source-controlled, so each is sanitized
+    /// BEFORE the join: running `strip_ansi` over the joined string instead
+    /// would let a dangling escape in the source name swallow the `#<key>`
+    /// behind it, printing a bare, unscoped `mind learn <name>`.
+    ///
+    /// spec: CLI-236 -- the KEY is additionally glob-escaped. mind never
+    /// re-parses this string, but the user does: it is printed as a
+    /// `mind learn '<source>#<key>'` they are invited to paste, and `learn`
+    /// reads `*`/`?`/`[` in the name half as glob syntax (CLI-31). Unescaped,
+    /// the suggested command for a matched skill named `pdf[x]` would install
+    /// `pdfx` instead. Escaping is a no-op for an ordinary name. The SOURCE
+    /// half is left alone: it is matched by `source_matches`, not as a glob,
+    /// once the ref is split at the last `#`.
+    fn display(&self) -> String {
+        format!(
+            "{}#{}",
+            strip_ansi(&self.source),
+            glob::Pattern::escape(&strip_ansi(&self.key))
+        )
+    }
+}
+
+/// How a `learn` call names what it installs.
+///
+/// spec: CLI-236 -- a `Ref` is the user's own argument, parsed by CLI-5's
+/// grammar, where `*`, `?` and `[` are glob syntax. An `Exact` selection is one
+/// mind composed itself from a catalog it had just scanned, so it resolves by
+/// identity: no parse, no `is_glob` test, and no round trip through a string.
+/// Without that split, a `--learn` match on a skill named `pdf[x]` came back
+/// through `learn` as a pattern and installed `pdfx` instead, and a match on a
+/// name containing `#` resolved to a different item or to no source at all.
+#[derive(Clone, Copy)]
+enum Selection<'a> {
+    Ref(&'a str),
+    Exact(&'a LearnTarget),
+}
+
+impl Selection<'_> {
+    /// The selection as shown to the user: the `--json` `target` field and the
+    /// text of any message naming it. Not re-parsed anywhere.
+    fn display(&self) -> String {
+        match self {
+            Selection::Ref(r) => (*r).to_string(),
+            Selection::Exact(t) => t.display(),
+        }
+    }
+}
+
+/// The catalog index an exact selection resolves to: an identity match on
+/// (source identity, effective key), with no parsing of either half.
+///
+/// spec: CLI-236 -- factored out of [`resolve_learn`] so the round trip a
+/// `--learn` match makes (catalog -> [`LearnTarget`] -> catalog) is testable in
+/// one place: it is exactly this step that used to re-parse a `<source>#<key>`
+/// string and re-read a glob-metacharacter name as a pattern.
+fn exact_index(items: &[CatalogItem], target: &LearnTarget) -> Option<usize> {
+    items
+        .iter()
+        .position(|c| c.source == target.source && c.key().as_str() == target.key)
 }
 
 /// Resolve a `learn` selection (loading the registry, scanning the catalog, and
@@ -2689,36 +3067,52 @@ pub struct LearnPlan {
 /// and `learn_preview` share one computation.
 fn resolve_learn(
     paths: &Paths,
-    item_ref: &str,
+    selection: Selection<'_>,
 ) -> Result<(Registry, Vec<CatalogItem>, crate::deps::Resolution)> {
     let registry = Registry::load(paths)?;
     let items = catalog::scan(paths, &registry)?;
-    let parsed = parse_item_ref(item_ref)?;
 
-    // A glob selects every match; an exact ref must resolve to exactly one.
-    let targets: Vec<&CatalogItem> = if is_glob(&parsed.name) {
-        let matches = select(&items, &parsed);
-        if matches.is_empty() {
-            return Err(MindError::ItemNotFound {
-                query: parsed.name.clone(),
-                sources: registry.sources.len(),
-            });
-        }
-        matches
-    } else {
-        vec![resolve(&items, &parsed, registry.sources.len())?]
-    };
-
-    // Map the explicitly selected items back to indices into `items` (by
-    // identity: a CatalogItem is a unique (source, kind, name)).
-    let selected_idx: Vec<usize> = targets
-        .iter()
-        .filter_map(|t| {
-            items
+    // Map the explicit selection to indices into `items` (by identity: a
+    // CatalogItem is a unique (source, kind, name)).
+    let selected_idx: Vec<usize> = match selection {
+        Selection::Ref(item_ref) => {
+            let parsed = parse_item_ref(item_ref)?;
+            // A glob selects every match; an exact ref must resolve to one.
+            let targets: Vec<&CatalogItem> = if is_glob(&parsed.name) {
+                let matches = select(&items, &parsed);
+                if matches.is_empty() {
+                    return Err(MindError::ItemNotFound {
+                        query: parsed.name.clone(),
+                        sources: registry.sources.len(),
+                    });
+                }
+                matches
+            } else {
+                vec![resolve(&items, &parsed, registry.sources.len())?]
+            };
+            targets
                 .iter()
-                .position(|c| c.kind == t.kind && c.name == t.name && c.source == t.source)
-        })
-        .collect();
+                .filter_map(|t| {
+                    items
+                        .iter()
+                        .position(|c| c.kind == t.kind && c.name == t.name && c.source == t.source)
+                })
+                .collect()
+        }
+        // spec: CLI-236 -- an internally composed selection is matched on
+        // (source identity, effective key), the same identity the manifest is
+        // keyed by. A miss here is not a user typo, so it reports the key
+        // rather than a pattern.
+        Selection::Exact(target) => match exact_index(&items, target) {
+            Some(i) => vec![i],
+            None => {
+                return Err(MindError::ItemNotFound {
+                    query: target.display(),
+                    sources: registry.sources.len(),
+                });
+            }
+        },
+    };
 
     // What is already installed (manifest keys are `CatalogItem::key()` form).
     let manifest = Manifest::load(paths)?;
@@ -2752,11 +3146,22 @@ fn resolve_learn(
 // Consumed by the interactive TUI confirm step (DEP-40); allow until wired.
 #[allow(dead_code)]
 pub fn learn_preview(paths: &Paths, item_ref: &str) -> Result<LearnPlan> {
-    let (_registry, items, resolution) = resolve_learn(paths, item_ref)?;
+    learn_plan(paths, Selection::Ref(item_ref))
+}
+
+/// [`learn_preview`] for any selection form, including an exact one composed by
+/// mind itself (CLI-236).
+fn learn_plan(paths: &Paths, selection: Selection<'_>) -> Result<LearnPlan> {
+    let (_registry, items, resolution) = resolve_learn(paths, selection)?;
+    let order = resolution.install_order();
     Ok(LearnPlan {
         tree: resolution.render_tree(&items),
         adds_dependencies: resolution.adds_dependencies(),
-        install_count: resolution.install_order().len(),
+        install_count: order.len(),
+        keys: order
+            .iter()
+            .map(|&i| items[i].key().as_str().to_string())
+            .collect(),
     })
 }
 
@@ -2947,6 +3352,26 @@ pub fn learn_link(
 }
 
 pub fn learn(paths: &Paths, item_ref: &str, dry_run: bool, flow: InstallFlow) -> Result<()> {
+    learn_selected(paths, Selection::Ref(item_ref), dry_run, flow)
+}
+
+/// [`learn`] for an exact, internally composed selection (CLI-236): the item is
+/// found by identity, so nothing about its name can be re-read as a pattern.
+fn learn_exact(
+    paths: &Paths,
+    target: &LearnTarget,
+    dry_run: bool,
+    flow: InstallFlow,
+) -> Result<()> {
+    learn_selected(paths, Selection::Exact(target), dry_run, flow)
+}
+
+fn learn_selected(
+    paths: &Paths,
+    selection: Selection<'_>,
+    dry_run: bool,
+    flow: InstallFlow,
+) -> Result<()> {
     let InstallFlow {
         yes,
         clobber,
@@ -2956,7 +3381,11 @@ pub fn learn(paths: &Paths, item_ref: &str, dry_run: bool, flow: InstallFlow) ->
     // POL-3: load the managed policy once (fail closed on Err; None = inert).
     let policy = Policy::load()?;
     let out = crate::render::ctx();
-    let (registry, items, resolution) = resolve_learn(paths, item_ref).map_err(|e| {
+    // The selection as text: the `--json` `target` field and the messages
+    // below. Read by a human, never re-parsed by mind.
+    let item_ref = selection.display();
+    let item_ref = item_ref.as_str();
+    let (registry, items, resolution) = resolve_learn(paths, selection).map_err(|e| {
         // spec: CLI-179 -- when sources are melded and the name is not found,
         // direct the user to `mind probe <query>` (search) rather than
         // `mind sync` (which cannot help if the item simply does not exist).
@@ -3102,6 +3531,17 @@ pub fn learn(paths: &Paths, item_ref: &str, dry_run: bool, flow: InstallFlow) ->
                 break;
             }
         };
+        // spec: LNK-18 -- a single-skill link instance has no siblings, so its
+        // intra-source references are reconciled (token: hard stop with the
+        // remedy; requires: warn and drop) before install validates them.
+        let (reconciled, dropped_requires) = match link_reconciled(paths, &registry, target) {
+            Ok(c) => c,
+            Err(e) => {
+                failure = Some(e);
+                break;
+            }
+        };
+        let target: &CatalogItem = &reconciled;
         // spec: NS-41 -- refuse to install an agent whose bare harness name
         // already maps to an installed agent from a different source.
         if let Some(err) = agent_collision(paths, &manifest, target)? {
@@ -3151,7 +3591,10 @@ pub fn learn(paths: &Paths, item_ref: &str, dry_run: bool, flow: InstallFlow) ->
             };
         }
         match result {
-            Ok(installed) => {
+            Ok(mut installed) => {
+                // spec: LNK-19 -- record what LNK-18 dropped on the installed
+                // item, so the degradation outlives the install-time warning.
+                installed.dropped_requires = dropped_requires;
                 installed_keys.push(installed.key().into());
                 if !out.json {
                     // Keep the line starting with "learned <key>" (tests assert the
@@ -3199,6 +3642,23 @@ pub fn learn(paths: &Paths, item_ref: &str, dry_run: bool, flow: InstallFlow) ->
 /// - No JSON is emitted at the end; the caller receives the keys.
 /// - The dep-prompt is skipped (callers always pass `yes=true` here).
 fn learn_collecting(paths: &Paths, item_ref: &str, flow: InstallFlow) -> Result<Vec<String>> {
+    learn_collecting_selected(paths, Selection::Ref(item_ref), flow)
+}
+
+/// [`learn_collecting`] for an exact, internally composed selection (CLI-236).
+fn learn_collecting_exact(
+    paths: &Paths,
+    target: &LearnTarget,
+    flow: InstallFlow,
+) -> Result<Vec<String>> {
+    learn_collecting_selected(paths, Selection::Exact(target), flow)
+}
+
+fn learn_collecting_selected(
+    paths: &Paths,
+    selection: Selection<'_>,
+    flow: InstallFlow,
+) -> Result<Vec<String>> {
     let InstallFlow {
         clobber,
         dangerously_skip,
@@ -3206,7 +3666,7 @@ fn learn_collecting(paths: &Paths, item_ref: &str, flow: InstallFlow) -> Result<
         ..
     } = flow;
     let policy = Policy::load()?;
-    let (registry, items, resolution) = resolve_learn(paths, item_ref)?;
+    let (registry, items, resolution) = resolve_learn(paths, selection)?;
 
     let order = resolution.install_order();
     let closure: Vec<&CatalogItem> = order.iter().map(|&i| &items[i]).collect();
@@ -3242,6 +3702,16 @@ fn learn_collecting(paths: &Paths, item_ref: &str, flow: InstallFlow) -> Result<
                 break;
             }
         };
+        // spec: LNK-18 -- same link reconciliation as `learn` (the warning it
+        // may print routes to stderr under `--json`, CLI-217).
+        let (reconciled, dropped_requires) = match link_reconciled(paths, &registry, target) {
+            Ok(c) => c,
+            Err(e) => {
+                failure = Some(e);
+                break;
+            }
+        };
+        let target: &CatalogItem = &reconciled;
         // spec: NS-41 -- refuse to install a colliding agent (same check as learn).
         if let Some(err) = agent_collision(paths, &manifest, target)? {
             failure = Some(err);
@@ -3259,7 +3729,9 @@ fn learn_collecting(paths: &Paths, item_ref: &str, flow: InstallFlow) -> Result<
             dangerously_skip_build,
         );
         match result {
-            Ok(installed) => {
+            Ok(mut installed) => {
+                // spec: LNK-19
+                installed.dropped_requires = dropped_requires;
                 installed_keys.push(installed.key().into());
                 manifest.insert(installed);
             }
@@ -3325,6 +3797,259 @@ pub fn install_source_items(paths: &Paths, source_name: &str, flow: InstallFlow)
         println!("skipped; run `mind learn {quoted_item_ref}` to install later");
         Ok(())
     }
+}
+
+/// spec: CLI-236 -- `--learn` scopes the install to the melded source's own
+/// items, so the curated chain (DSC-54/55/58) is not walked and an explicit
+/// `--recursive` has nothing to act on. Name it rather than dropping it
+/// silently, the same disclosure `remeld` gives an inapplicable flag (CLI-206).
+/// Silent under `--json`, matching the neighbouring meld notes.
+pub fn note_learn_ignores_recursive(recursive: bool) {
+    if recursive && !json_mode() {
+        println!(
+            "note: --recursive ignored; --learn installs only the matching items of the source \
+             being melded, and does not walk the sources it curates. Meld again without --learn \
+             to install from them, or name them directly."
+        );
+    }
+}
+
+/// Parse one `--learn` value into the ref it selects by and, when it carries
+/// glob metacharacters, its compiled pattern (CLI-236).
+///
+/// Pure syntax: no catalog is consulted, so `meld` can run this BEFORE cloning
+/// and reject a malformed pattern without leaving a registered source behind.
+fn parse_learn_pattern(pattern: &str) -> Result<(crate::resolve::ItemRef, Option<glob::Pattern>)> {
+    // spec: CLI-236
+    let bad = |reason: &str| MindError::InvalidLearnPattern {
+        pattern: strip_ansi(pattern),
+        reason: reason.to_string(),
+    };
+    if pattern.trim().is_empty() {
+        return Err(bad("it is empty"));
+    }
+    if pattern.contains('#') {
+        return Err(bad(
+            "it selects within the source being melded, so pass just an item name or glob \
+             (e.g. 'review', 'skill:*'), not a source-qualified ref",
+        ));
+    }
+    let parsed = crate::resolve::parse_item_ref(pattern)
+        .map_err(|_| bad("it is not a valid item name, 'kind:name', or glob"))?;
+    // A malformed glob must say so rather than silently degrading to an exact
+    // match that then reports "matches no item", which reads as a typo in the
+    // NAME rather than in the pattern syntax.
+    let matcher = if crate::resolve::is_glob(&parsed.name) {
+        Some(
+            glob::Pattern::new(&parsed.name)
+                .map_err(|e| bad(&format!("it is not a valid glob ({e})")))?,
+        )
+    } else {
+        None
+    };
+    Ok((parsed, matcher))
+}
+
+/// spec: CLI-236 -- validate every `--learn` value's syntax up front, so a
+/// typo'd pattern fails before `meld` clones and registers the source rather
+/// than after (the clap layer cannot do this: the check is not a value parse
+/// but a small grammar of its own).
+pub fn validate_learn_patterns(patterns: &[String]) -> Result<()> {
+    for pattern in patterns {
+        parse_learn_pattern(pattern)?;
+    }
+    Ok(())
+}
+
+/// Resolve every `--learn` pattern against the source's own catalog and return
+/// the EXACT identity of each matched item, in first-seen order, deduped
+/// (CLI-236).
+///
+/// Matching accepts the item's BARE name as well as its effective (prefixed)
+/// name. At meld time the consumer has not necessarily seen the source's
+/// declared `[source].prefix` yet -- CLI-24 may prompt for it inside this very
+/// command -- so requiring the effective name would make `--learn review` fail
+/// on exactly the first-run case the flag exists for. Within one source the two
+/// readings cannot disagree about which item is meant.
+///
+/// Each match is returned as a [`LearnTarget`] (source identity plus effective
+/// key), not as a ref string: the install that consumes it resolves by
+/// identity, so a name carrying `*`, `?`, `[` or `#` is never re-read as a
+/// pattern or re-split into the wrong source.
+fn learn_pattern_targets(
+    items: &[CatalogItem],
+    source_name: &str,
+    pattern: &str,
+) -> Result<Vec<LearnTarget>> {
+    // spec: CLI-236
+    let (parsed, matcher) = parse_learn_pattern(pattern)?;
+    let hit = |it: &CatalogItem| -> bool {
+        if !parsed.kind.is_none_or(|k| it.kind == k) {
+            return false;
+        }
+        match &matcher {
+            Some(p) => p.matches(&it.effective_name()) || p.matches(&it.name),
+            None => it.effective_name() == parsed.name || it.name == parsed.name,
+        }
+    };
+    let mut targets: Vec<LearnTarget> = Vec::new();
+    for it in items
+        .iter()
+        .filter(|it| it.source == source_name && hit(it))
+    {
+        // `key()` is `kind:effective_name`: exact, kind-qualified, and the same
+        // identity `learn` and the manifest are keyed by.
+        let t = LearnTarget {
+            source: source_name.to_string(),
+            key: it.key().as_str().to_string(),
+        };
+        if !targets.contains(&t) {
+            targets.push(t);
+        }
+    }
+    if targets.is_empty() {
+        return Err(MindError::LearnPatternNoMatch {
+            pattern: strip_ansi(pattern),
+            source_name: strip_ansi(source_name),
+        });
+    }
+    Ok(targets)
+}
+
+/// Resolve all `--learn` patterns for one source into a deduped target list,
+/// and the subset of those targets not installed yet (CLI-236, DEP-23).
+fn learn_targets(
+    paths: &Paths,
+    source_name: &str,
+    patterns: &[String],
+) -> Result<(Vec<LearnTarget>, Vec<LearnTarget>)> {
+    let registry = Registry::load(paths)?;
+    let items = catalog::scan(paths, &registry)?;
+    let mut targets: Vec<LearnTarget> = Vec::new();
+    for pattern in patterns {
+        for t in learn_pattern_targets(&items, source_name, pattern)? {
+            if !targets.contains(&t) {
+                targets.push(t);
+            }
+        }
+    }
+    let manifest = Manifest::load(paths)?;
+    let fresh: Vec<LearnTarget> = targets
+        .iter()
+        .filter(|t| !manifest.items.contains_key(&t.key))
+        .cloned()
+        .collect();
+    Ok((targets, fresh))
+}
+
+/// Install only the items of a just-melded source matching the `--learn`
+/// patterns (CLI-236), in place of the CLI-23 install-all offer. Each matched
+/// item runs through the ordinary `learn` path, so its dependency closure
+/// (DEP-30/31) and the collision checks (CLI-33) apply unchanged; the
+/// preview-and-prompt gate around the batch is the CLI-23 meld gate, as for the
+/// install-all offer it replaces.
+///
+/// Unlike that offer, a pattern matching nothing in the source is an error: the
+/// user named it explicitly, so a typo must not pass as "nothing to install".
+// spec: CLI-236
+pub fn install_source_items_matching(
+    paths: &Paths,
+    source_name: &str,
+    patterns: &[String],
+    flow: InstallFlow,
+) -> Result<()> {
+    let (matched, fresh) = learn_targets(paths, source_name, patterns)?;
+    if fresh.is_empty() {
+        // Every match is already installed (CLI-157), reported once for the
+        // batch rather than once per pattern.
+        if !json_mode() {
+            println!(
+                "already installed; nothing to do ({} item(s))",
+                matched.len()
+            );
+        }
+        return Ok(());
+    }
+    // spec: CLI-225 -- each printed target embeds the source-influenced source
+    // name and an item name, and lands in a pasteable `mind learn` remedy, so
+    // it is sanitized (by `LearnTarget::display`, half by half per DSC-95) and
+    // shell-quoted before printing.
+    //
+    // spec: CLI-236 -- `learn` takes exactly ONE positional (CLI-30), so a
+    // space-joined list of refs is not a command: clap rejects it with
+    // "unexpected argument". The fallback is a `&&`-joined SEQUENCE of
+    // `mind learn` calls, which runs verbatim for one match or many, and which
+    // stops at the first failure rather than continuing past it.
+    let quoted = fresh
+        .iter()
+        .map(|t| format!("mind learn {}", crate::error::shell_quote(&t.display())))
+        .collect::<Vec<_>>()
+        .join(" && ");
+    let install_all = |flow: InstallFlow| -> Result<()> {
+        for target in &fresh {
+            learn_exact(paths, target, false, flow)?;
+        }
+        Ok(())
+    };
+    if flow.yes {
+        return install_all(flow);
+    }
+    if !crate::hook::is_tty() {
+        if !json_mode() {
+            println!(
+                "note: registered only, nothing installed (not a TTY); {} item(s) match --learn; \
+                 run `{quoted}` (or re-meld with --yes)",
+                fresh.len(),
+            );
+        }
+        return Ok(());
+    }
+    // Interactive: preview the whole batch (the dry-run list, dependency
+    // closures included), then prompt once.
+    for target in &fresh {
+        learn_exact(paths, target, true, flow)?;
+    }
+    if confirm_default_yes(&format!("install these {} item(s) now?", fresh.len()))? {
+        install_all(InstallFlow { yes: true, ..flow })
+    } else {
+        println!("skipped; run `{quoted}` to install later");
+        Ok(())
+    }
+}
+
+/// The `--json` twin of [`install_source_items_matching`] (CLI-236): installs
+/// silently and returns `(installed_keys, pending_count)` so the meld
+/// dispatcher folds the outcome into ONE object (CLI-156).
+///
+/// `pending` counts the UNION of the matched items and their closures, not the
+/// sum over patterns: without `--yes` nothing installs between patterns, so
+/// summing would double-count an item two patterns both match, or a dependency
+/// shared by two of them.
+// spec: CLI-236 CLI-156
+pub(crate) fn install_source_items_matching_for_json(
+    paths: &Paths,
+    source_name: &str,
+    patterns: &[String],
+    flow: InstallFlow,
+) -> Result<(Vec<String>, usize)> {
+    let (_matched, fresh) = learn_targets(paths, source_name, patterns)?;
+    if fresh.is_empty() {
+        return Ok((Vec::new(), 0));
+    }
+    if flow.yes {
+        let mut installed: Vec<String> = Vec::new();
+        for target in &fresh {
+            installed.extend(learn_collecting_exact(paths, target, flow)?);
+        }
+        return Ok((installed, 0));
+    }
+    // No --yes in json mode: report the pending count without prompting. Union
+    // each matched item's closure so a shared dependency counts once.
+    let mut pending: BTreeSet<String> = BTreeSet::new();
+    for target in &fresh {
+        pending.extend(learn_plan(paths, Selection::Exact(target))?.keys);
+    }
+    Ok((Vec::new(), pending.len()))
 }
 
 /// Run the post-meld install flow (CLI-23) for a named subset of a registered
@@ -3576,6 +4301,7 @@ pub fn remeld(
     recursive: bool,
     ignored_flags: &[&str],
     pin: PinRequest,
+    learn_patterns: &[String],
 ) -> Result<()> {
     // `yes` rides inside `flow` for the install calls; remeld itself only needs
     // the clobber (hook force-rerun) and the dangerously-skip flag.
@@ -3670,20 +4396,39 @@ pub fn remeld(
         // invoked) and either returned before its own object or printed a second
         // one after it.
         if out.json {
-            let (mut installed, pending) =
-                install_source_items_for_json(paths, &source_name, flow)?;
-            installed.extend(install_curated_sources_for_json(
-                paths,
-                &source_name,
-                recursive,
-                flow,
-            )?);
+            // spec: CLI-236 -- a re-meld honors `--learn` too: the named subset
+            // installs instead of the whole set, and the curated chain
+            // (DSC-54/55/58) is left alone.
+            let (installed, pending) = if learn_patterns.is_empty() {
+                let (mut inst, pend) = install_source_items_for_json(paths, &source_name, flow)?;
+                inst.extend(install_curated_sources_for_json(
+                    paths,
+                    &source_name,
+                    recursive,
+                    flow,
+                )?);
+                (inst, pend)
+            } else {
+                install_source_items_matching_for_json(paths, &source_name, learn_patterns, flow)?
+            };
             let mut result = MutationResult::new("meld", &source_name, "already-melded");
-            result.installed = installed;
+            // spec: DSC-95 -- `installed` rides straight off `learn_collecting`'s
+            // raw keys, each embedding a source-controlled bare name; sanitize
+            // every one before it lands in the `--json` envelope, the same way
+            // `emit_meld_json_result` and `learn()` do for their own.
+            result.installed = installed.iter().map(|k| strip_ansi(k)).collect();
             if pending > 0 {
                 result.pending_items = Some(pending);
             }
             return print_json(&result);
+        }
+        // spec: CLI-236 -- the named subset only; a pattern matching nothing is
+        // an error, and the curated chain is not walked. The CLI-12 status
+        // report still runs afterwards, as it does for any other re-meld.
+        if !learn_patterns.is_empty() {
+            note_learn_ignores_recursive(recursive);
+            install_source_items_matching(paths, &source_name, learn_patterns, flow)?;
+            return source_status(paths, &source_name);
         }
         let item_ref = format!("{source_name}#*");
         let to_install = match learn_preview(paths, &item_ref) {
@@ -6473,16 +7218,34 @@ fn upgrade_inner_scoped(
         // Each fallible step below therefore saves whatever has been applied
         // so far before propagating, instead of letting `?` unwind straight
         // out of the loop with an unsaved manifest.
+        // spec: LNK-18 -- reconcile a link instance's unsatisfiable references
+        // here too, so an upstream edit that adds a `requires` entry does not
+        // turn every later `upgrade` of that link into a hard failure.
+        let (cat, dropped_requires) = match link_reconciled(paths, &registry, &up.cat) {
+            Ok(c) => c,
+            Err(e) => {
+                if let Err(se) = manifest.save(paths) {
+                    warn_manifest_save_also_failed(&se);
+                }
+                return Err(e);
+            }
+        };
         let installed = match install_item(
             paths,
-            &up.cat,
+            &cat,
             &up.new_commit,
             &siblings,
             false,
             dangerously_skip_hook_check,
             dangerously_skip_build_hook_check,
         ) {
-            Ok(i) => i,
+            Ok(mut i) => {
+                // spec: LNK-19 -- carry the LNK-18 drop record across the
+                // upgrade too, so it reflects the version now on disk (an
+                // upstream edit may have added or removed such an entry).
+                i.dropped_requires = dropped_requires;
+                i
+            }
             Err(e) => {
                 // spec: LIFE-48 -- persist what earlier items applied, but do not
                 // let a save failure mask the root cause `e`.
@@ -7039,6 +7802,24 @@ pub fn recall(
                 "  {}{}",
                 out.dim("link    "),
                 crate::sanitize::strip_ansi(link)
+            );
+        }
+        // spec: LNK-19 -- a requirement dropped at install (LNK-18) is part of
+        // this item's state, not a one-off install message, so it is shown here
+        // every time the item is inspected.
+        if !found.dropped_requires.is_empty() {
+            println!(
+                "  {}{}",
+                out.dim("dropped "),
+                out.yellow(&format!(
+                    "requires {} (unsatisfiable from a single-skill item link)",
+                    found
+                        .dropped_requires
+                        .iter()
+                        .map(|e| crate::sanitize::strip_ansi(e))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
             );
         }
         // CLI-75 / LIFE-11: mark out of date exactly when `upgrade` would act --
@@ -7777,6 +8558,44 @@ pub fn introspect(paths: &Paths, fix: bool, json: bool) -> Result<()> {
                 }
             }
         }
+    }
+
+    // spec: LNK-19 -- an item installed with a dropped requirement (LNK-18) is
+    // degraded, not broken, so it is reported as an issue `--fix` cannot repair:
+    // the only fix is to replace the link with the whole repo, which is the
+    // user's call (it changes which sources are registered). Reported after the
+    // structural checks so it never displaces a broken link or a missing store.
+    for it in manifest.items.values() {
+        if it.dropped_requires.is_empty() {
+            continue;
+        }
+        // spec: DSC-95 -- sanitize each source-controlled field BEFORE it is
+        // composed into the message. The batch sanitize further down runs on
+        // the already-joined string, which is too late: an identity or a
+        // `requires` entry ending in a dangling escape introducer would swallow
+        // the text that follows it.
+        let source = strip_ansi(&it.source);
+        let listed: String = it
+            .dropped_requires
+            .iter()
+            .map(|e| strip_ansi(e))
+            .collect::<Vec<_>>()
+            .join(", ");
+        issues.push(Issue {
+            kind: "dropped-requires",
+            target: it.key().into(),
+            // No pasteable command carries the source identity: `recall`'s
+            // positional resolves an ITEM against the manifest, so
+            // `mind recall <source>` is not a command at all (H2), and
+            // `mind recall --sources` needs no interpolation to be correct.
+            message: format!(
+                "{}: installed from a single-skill item link (source '{source}'), so its \
+                 `requires {listed}` was dropped and the item it names is not installed; \
+                 meld the whole repo to get both (`mind recall --sources` lists the melded \
+                 sources)",
+                it.display_key(),
+            ),
+        });
     }
 
     if fix && manifest_dirty {
@@ -8942,6 +9761,569 @@ mod tests {
 
     static COUNTER: AtomicU32 = AtomicU32::new(0);
 
+    fn link_skill(name: &str, requires: Vec<String>) -> CatalogItem {
+        CatalogItem {
+            kind: ItemKind::Skill,
+            name: name.to_string(),
+            source: "local/test/repo#skills/review".to_string(),
+            prefix: None,
+            path: PathBuf::from("/nonexistent"),
+            description: None,
+            link_rel: None,
+            bin: None,
+            build: None,
+            install: None,
+            uninstall: None,
+            requires,
+            expand: Vec::new(),
+            hooks: Vec::new(),
+        }
+    }
+
+    /// Which `requires` entries a single-skill link instance drops, and which
+    /// it keeps so install still reports their specific DEP-7 cause.
+    // spec: LNK-18
+    #[test]
+    fn link_drops_only_the_entries_a_single_item_catalog_cannot_satisfy() {
+        let item = link_skill("review", vec![]);
+        // Unsatisfiable: well-formed, intra-source, names another item.
+        assert!(!requires_resolves_alone("agent:dev", &item));
+        assert!(!requires_resolves_alone("dev", &item));
+        // The item's own name resolves (a self-require, DEP-5).
+        assert!(requires_resolves_alone("review", &item));
+        assert!(requires_resolves_alone("skill:review", &item));
+        // Its own name under the WRONG kind is still a miss.
+        assert!(!requires_resolves_alone("agent:review", &item));
+        // Kept, so install raises the specific DEP-7 cause instead of a warning:
+        // a source-qualified entry (CrossSource) and a malformed one (InvalidRef).
+        assert!(requires_resolves_alone("owner/repo#agent:dev", &item));
+        assert!(requires_resolves_alone("skill:", &item));
+    }
+
+    fn catalog_skill(name: &str, source: &str, prefix: Option<&str>) -> CatalogItem {
+        CatalogItem {
+            prefix: prefix.map(str::to_string),
+            source: source.to_string(),
+            ..link_skill(name, vec![])
+        }
+    }
+
+    /// A [`LearnTarget`] for readable assertions.
+    fn target(source: &str, key: &str) -> LearnTarget {
+        LearnTarget {
+            source: source.to_string(),
+            key: key.to_string(),
+        }
+    }
+
+    /// The `<source>#<key>` spelling mind prints for the user to paste survives
+    /// the round trip back through `learn`'s own ref grammar.
+    // spec: CLI-236 DSC-95
+    #[test]
+    fn learn_target_display_escapes_a_key_the_user_would_paste_back() {
+        let items = vec![
+            catalog_skill("pdf[x]", "s", None),
+            catalog_skill("pdfx", "s", None),
+        ];
+        let target = target("s", "skill:pdf[x]");
+        let printed = target.display();
+        // mind never re-parses this, but the user pastes it into `mind learn`,
+        // which DOES read the name half as a glob. Unescaped it would select
+        // the wrong item, exactly as the `--learn` pattern would.
+        let parsed = crate::resolve::parse_item_ref(&printed).expect("a valid ref");
+        let selected = crate::resolve::select(&items, &parsed);
+        assert_eq!(
+            selected
+                .iter()
+                .map(|it| it.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["pdf[x]"],
+            "the printed ref must select the item it names: {printed}"
+        );
+        // And the unescaped spelling really would have selected the other one.
+        let raw = format!("{}#{}", target.source, target.key);
+        let raw_parsed = crate::resolve::parse_item_ref(&raw).expect("a valid ref");
+        assert_eq!(
+            crate::resolve::select(&items, &raw_parsed)
+                .iter()
+                .map(|it| it.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["pdfx"],
+            "the unescaped spelling selects the wrong item, which is why it is escaped"
+        );
+    }
+
+    /// A `--learn` pattern matches the bare name as well as the effective one,
+    /// is scoped to the melded source, and yields exact kind-qualified
+    /// identities.
+    // spec: CLI-236
+    #[test]
+    fn learn_pattern_matches_bare_and_effective_names_within_the_source() {
+        let items = vec![
+            catalog_skill("review", "github.com/o/r", Some("jk")),
+            catalog_skill("extra", "github.com/o/r", Some("jk")),
+            catalog_skill("review", "github.com/other/r", None),
+        ];
+        // The bare name resolves even though the item installs as `jk:review`,
+        // which is what a first-time melder can actually type.
+        assert_eq!(
+            learn_pattern_targets(&items, "github.com/o/r", "review").unwrap(),
+            vec![target("github.com/o/r", "skill:jk:review")]
+        );
+        // So does the effective name.
+        assert_eq!(
+            learn_pattern_targets(&items, "github.com/o/r", "jk:review").unwrap(),
+            vec![target("github.com/o/r", "skill:jk:review")]
+        );
+        // A glob matches either reading, and never reaches another source.
+        assert_eq!(
+            learn_pattern_targets(&items, "github.com/o/r", "*e*").unwrap(),
+            vec![
+                target("github.com/o/r", "skill:jk:review"),
+                target("github.com/o/r", "skill:jk:extra"),
+            ]
+        );
+        // A kind qualifier that does not match filters everything out.
+        assert!(matches!(
+            learn_pattern_targets(&items, "github.com/o/r", "agent:review"),
+            Err(MindError::LearnPatternNoMatch { .. })
+        ));
+    }
+
+    /// A matched selection resolves back to the SAME catalog item, whatever the
+    /// item is named. The selection is carried as an identity, so the two
+    /// characters that used to break the round trip -- a glob metacharacter
+    /// (re-read as a pattern) and a `#` (re-split into the wrong source) --
+    /// resolve exactly.
+    // spec: CLI-236
+    #[test]
+    fn a_matched_selection_round_trips_to_the_same_item() {
+        let items = vec![
+            catalog_skill("pdf[x]", "s", None),
+            catalog_skill("pdfx", "s", None),
+            catalog_skill("x#skill:review", "s", None),
+            catalog_skill("review", "s", None),
+        ];
+        // A glob-metacharacter name, selected by the escaped literal pattern
+        // the LNK-18 remedy emits, resolves back to itself and not to its
+        // near-twin.
+        let escaped = format!("skill:{}", glob::Pattern::escape("pdf[x]"));
+        let matched = learn_pattern_targets(&items, "s", &escaped).unwrap();
+        assert_eq!(matched, vec![target("s", "skill:pdf[x]")]);
+        assert_eq!(
+            exact_index(&items, &matched[0]),
+            Some(0),
+            "the selection must resolve back to `pdf[x]`, not `pdfx`"
+        );
+        // A `#`-carrying name is reachable only by a glob (a `#` in the pattern
+        // itself is refused as a source-qualified ref), and its selection must
+        // still resolve to that item.
+        let matched = learn_pattern_targets(&items, "s", "skill:x*").unwrap();
+        assert_eq!(matched, vec![target("s", "skill:x#skill:review")]);
+        assert_eq!(
+            exact_index(&items, &matched[0]),
+            Some(2),
+            "the `#`-carrying selection must resolve to its own item"
+        );
+        // The failure the identity carry exists to prevent: that same key,
+        // joined into `<source>#<key>` and split on the last `#` the way the
+        // ref round trip did, names a DIFFERENT item that also exists.
+        let joined = matched[0].display();
+        let (_src, key) = joined.rsplit_once('#').unwrap();
+        assert_eq!(
+            key, "skill:review",
+            "the joined spelling really is ambiguous: {joined}"
+        );
+        assert_ne!(
+            exact_index(&items, &matched[0]),
+            exact_index(&items, &target("s", "skill:review")),
+            "the two readings must be different items"
+        );
+    }
+
+    /// The pattern forms `--learn` refuses, each with its own reason.
+    // spec: CLI-236
+    #[test]
+    fn learn_pattern_rejects_unusable_values() {
+        let items = vec![catalog_skill("review", "github.com/o/r", None)];
+        let reason = |p: &str| match learn_pattern_targets(&items, "github.com/o/r", p) {
+            Err(MindError::InvalidLearnPattern { reason, .. }) => reason,
+            other => panic!("expected InvalidLearnPattern for {p:?}, got {other:?}"),
+        };
+        assert!(reason("").contains("empty"));
+        assert!(reason("   ").contains("empty"));
+        assert!(reason("other/repo#review").contains("selects within the source being melded"));
+        assert!(reason("[bad").contains("not a valid glob"));
+    }
+
+    /// An item name carrying glob metacharacters cannot turn the remedy mind
+    /// prints into a pattern that matches some OTHER item, and the pattern it
+    /// prints is driven through the whole selection path, not just composed.
+    // spec: LNK-18 CLI-236
+    #[test]
+    fn link_remedy_escapes_glob_metacharacters_in_an_item_name() {
+        let remedy = link_meld_remedy("local/t/repo#skills/pdf[x]", "/tmp/repo", "pdf[x]", None);
+        assert!(
+            !remedy.contains("--learn 'pdf[x]'") && !remedy.contains("--learn 'skill:pdf[x]'"),
+            "the raw name would be read as a glob: {remedy}"
+        );
+        // And it must drop the link instance first, or the meld it suggests
+        // collides with the skill the link already installed.
+        //
+        // spec: CLI-28 -- the IDENTITY is glob-escaped for the same reason the
+        // pattern is: `unmeld`'s selector is glob-aware, and a link identity
+        // embeds the skill's repo path (LNK-4), so the raw
+        // `local/t/repo#skills/pdf[x]` compiles as a pattern that matches no
+        // source and stops the remedy at its first command.
+        let escaped_id = glob::Pattern::escape("local/t/repo#skills/pdf[x]");
+        assert!(
+            remedy.starts_with(&format!("mind unmeld '{escaped_id}' --yes && mind meld ")),
+            "the remedy must unmeld the link instance first, by an escaped selector: {remedy}"
+        );
+        assert!(
+            crate::resolve::source_matches_glob("local/t/repo#skills/pdf[x]", &escaped_id),
+            "the escaped selector must still resolve to the instance it names"
+        );
+        assert!(
+            !crate::resolve::source_matches_glob(
+                "local/t/repo#skills/pdf[x]",
+                "local/t/repo#skills/pdf[x]"
+            ),
+            "the unescaped selector really does fail to match, which is why it is escaped"
+        );
+        // Both halves carry --yes, or a non-TTY paste unmelds and installs
+        // nothing while still exiting 0.
+        assert_eq!(
+            remedy.matches("--yes").count(),
+            2,
+            "both halves of the remedy must be non-interactive: {remedy}"
+        );
+        // The escaped pattern the remedy emits still selects the literal name,
+        // and only it: the raw name would have selected `pdfx` instead. And the
+        // selection it produces is resolved by identity, so the metacharacters
+        // are not read as a glob a second time on the way in.
+        let items = vec![
+            catalog_skill("pdf[x]", "s", None),
+            catalog_skill("pdfx", "s", None),
+            // An agent of the same name: a bare (kind-less) pattern would drag
+            // it into the install alongside the skill (L1).
+            CatalogItem {
+                kind: ItemKind::Agent,
+                ..catalog_skill("pdf[x]", "s", None)
+            },
+        ];
+        let escaped = format!("skill:{}", glob::Pattern::escape("pdf[x]"));
+        assert!(
+            remedy.contains(&format!("--learn '{escaped}'")),
+            "the remedy must carry the kind-qualified, escaped pattern: {remedy}"
+        );
+        let matched = learn_pattern_targets(&items, "s", &escaped).unwrap();
+        assert_eq!(matched, vec![target("s", "skill:pdf[x]")]);
+        assert_eq!(
+            exact_index(&items, &matched[0]),
+            Some(0),
+            "the remedy's own selection must resolve to the linked skill"
+        );
+        // Without the `skill:` qualifier the same pattern also drags in the
+        // same-named agent, which is prompt content the user never asked for.
+        assert_eq!(
+            learn_pattern_targets(&items, "s", &glob::Pattern::escape("pdf[x]"))
+                .unwrap()
+                .len(),
+            2,
+            "the kind qualifier is what keeps the agent out"
+        );
+        // And the unescaped name really would have selected the other item.
+        assert_eq!(
+            learn_pattern_targets(&items, "s", "skill:pdf[x]").unwrap(),
+            vec![target("s", "skill:pdfx")],
+            "the unescaped name really would have selected the other item"
+        );
+    }
+
+    /// The two remedy forms differ only by `--add-root .`, which is what makes
+    /// the meld half work for a repo whose inventory does not offer the linked
+    /// skill (the case item links exist for). Without it that half fails AFTER
+    /// the unmeld half already ran.
+    // spec: LNK-18 DSC-84
+    #[test]
+    fn link_remedy_adds_a_scan_root_when_a_plain_meld_would_not_reach_the_skill() {
+        let plain = link_meld_remedy("local/t/repo#skills/review", "/tmp/repo", "review", None);
+        let rooted = link_meld_remedy(
+            "local/t/repo#skills/review",
+            "/tmp/repo",
+            "review",
+            Some(&link_add_root("skills/review")),
+        );
+        assert_eq!(
+            plain,
+            "mind unmeld 'local/t/repo#skills/review' --yes && \
+             mind meld '/tmp/repo' --learn 'skill:review' --yes"
+        );
+        assert_eq!(
+            rooted,
+            "mind unmeld 'local/t/repo#skills/review' --yes && \
+             mind meld '/tmp/repo' --add-root '.' --learn 'skill:review' --yes"
+        );
+    }
+
+    /// The `--add-root` value is derived from the linked path, because an added
+    /// root is convention-scanned only one level deep: a fixed `.` reaches a
+    /// skill at `<repo-root>/skills/<name>` and nothing deeper, so the meld half
+    /// of the remedy would fail after the unmeld half had already run.
+    // spec: LNK-18 DSC-84
+    #[test]
+    fn link_add_root_names_the_directory_the_scan_must_start_from() {
+        // The containered layout at the repo root: the whole clone.
+        assert_eq!(link_add_root("skills/review"), ".");
+        // A flat skill at the repo root: also the whole clone.
+        assert_eq!(link_add_root("review"), ".");
+        // Containered, but nested: the parent of the `skills/` container, not
+        // the container itself (which would make the skill a grandchild).
+        assert_eq!(link_add_root("vendor/pkg/skills/review"), "vendor/pkg");
+        // Flat, but nested: the skill's own parent.
+        assert_eq!(link_add_root("vendor/review"), "vendor");
+        // A directory that merely ends in something skills-like is not the
+        // container, so it is treated as the flat parent.
+        assert_eq!(link_add_root("my-skills/review"), "my-skills");
+    }
+
+    // ----- LNK-18: the reachability probe behind the two remedy forms -----
+
+    /// A scratch clone directory plus the linked-source record that points into
+    /// it, wired so `clone_dir` resolves to the directory itself (a local
+    /// source at its default pin is read live from `url`, CLI-27).
+    fn link_source_at(dir: &std::path::Path, item_path: &str) -> crate::source::Source {
+        crate::source::Source {
+            name: format!("local/test/repo#{item_path}"),
+            url: dir.to_string_lossy().into_owned(),
+            host: "local".to_string(),
+            owner: "test".to_string(),
+            repo: "repo".to_string(),
+            commit: None,
+            description: None,
+            alias: None,
+            as_alias: None,
+            pin: Pin::default(),
+            roots: None,
+            flat_skills: false,
+            add_roots: None,
+            item_path: Some(item_path.to_string()),
+            origin: None,
+            plugin_version: None,
+            install_hooks: Vec::new(),
+            install_hook: None,
+            install_hook_commit: None,
+        }
+    }
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("mind-{tag}-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_file_at(path: &std::path::Path, contents: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+
+    /// The whole point of deciding reachability BY PATH: a repo whose
+    /// authoritative inventory declares a DIFFERENT skill under the SAME bare
+    /// name as the linked one must answer "not reachable", so the remedy adds a
+    /// scan root instead of quietly melding the decoy.
+    // spec: LNK-18 DSC-84
+    #[test]
+    fn plain_meld_reaches_link_answers_by_path_not_by_bare_name() {
+        let dir = scratch("lnk18-bypath");
+        let paths = Paths {
+            mind_home: dir.join("mind"),
+            claude_home: dir.join("claude"),
+        };
+        write_file_at(
+            &dir.join("skills/review/SKILL.md"),
+            "---\ndescription: the linked one\n---\n# review\n",
+        );
+        write_file_at(
+            &dir.join("vendor/review/SKILL.md"),
+            "---\ndescription: a decoy of the same bare name\n---\n# review\n",
+        );
+        // Authoritative: convention discovery is off and the only `review` the
+        // whole-repo scan offers is the one at `vendor/review`.
+        write_file_at(
+            &dir.join("mind.toml"),
+            "[[items]]\nkind = \"skill\"\nname = \"review\"\npath = \"vendor/review\"\n",
+        );
+        let source = link_source_at(&dir, "skills/review");
+        assert!(
+            !plain_meld_reaches_link(&paths, &source),
+            "a same-named skill at a DIFFERENT path must not count as reachable, \
+             or the remedy would install the decoy"
+        );
+
+        // Drop the authoritative inventory and the ordinary convention scan
+        // finds the skill at the very path the link points at.
+        std::fs::remove_file(dir.join("mind.toml")).unwrap();
+        assert!(
+            plain_meld_reaches_link(&paths, &source),
+            "a plain convention layout really is reachable, so the plain remedy \
+             form must still be chosen for it"
+        );
+
+        // A source that is not a link instance at all short-circuits to true
+        // (there is nothing to reconcile, so no remedy is ever composed).
+        let ordinary = crate::source::Source {
+            item_path: None,
+            ..source.clone()
+        };
+        assert!(plain_meld_reaches_link(&paths, &ordinary));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The probe is a hint, not a gate: any error from the whole-clone scan
+    /// answers "not reachable" rather than propagating, so a link install never
+    /// fails because of a repo-wide scan problem it does not care about.
+    // spec: LNK-18
+    #[test]
+    fn plain_meld_reaches_link_treats_a_failed_scan_as_not_reachable() {
+        let dir = scratch("lnk18-scanfail");
+        let paths = Paths {
+            mind_home: dir.join("mind"),
+            claude_home: dir.join("claude"),
+        };
+        // The clone is gone: `scan_source_at` reports `LinkedSourceGone`
+        // (CLI-212). The probe must swallow it and answer "not reachable",
+        // which selects the `--add-root` form -- the form that also works on a
+        // repo a plain meld would have discovered anyway (DSC-85).
+        let missing = dir.join("no-such-clone");
+        let source = link_source_at(&missing, "skills/review");
+        assert!(
+            !plain_meld_reaches_link(&paths, &source),
+            "an unreadable clone must answer 'not reachable', not propagate"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ----- LNK-18: which files the pre-install token scan reads -----
+
+    /// The scan reads exactly what install expands: every markdown file
+    /// (NS-53) plus the non-markdown files the item lists in `expand:` (NS-57).
+    /// A wider set would raise `LinkRefUnsatisfiable` for a token install never
+    /// touches; a narrower one would let a real token through to the blunt
+    /// error LNK-18 exists to replace.
+    // spec: LNK-18
+    #[test]
+    fn expandable_files_reads_markdown_and_expand_listed_files_only() {
+        let dir = scratch("lnk18-expandable");
+        let skill = dir.join("skills/review");
+        write_file_at(&skill.join("SKILL.md"), "# review\n");
+        write_file_at(&skill.join("docs/notes.md"), "nested markdown\n");
+        write_file_at(&skill.join("run.py"), "# {{ns:dev}}\n");
+        write_file_at(&skill.join("data/blob.bin"), "not expanded\n");
+
+        let item = CatalogItem {
+            path: skill.clone(),
+            expand: vec!["run.py".to_string()],
+            ..link_skill("review", vec![])
+        };
+        let mut got: Vec<String> = expandable_files(&item)
+            .unwrap()
+            .iter()
+            .map(|p| {
+                p.strip_prefix(&skill)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        got.sort();
+        assert_eq!(
+            got,
+            vec!["SKILL.md", "docs/notes.md", "run.py"],
+            "markdown at any depth plus the expand:-listed file, and nothing else"
+        );
+
+        // Without the `expand:` entry the same non-markdown file drops out, so
+        // the token inside it is (correctly) not the link's problem.
+        let unlisted = CatalogItem {
+            expand: Vec::new(),
+            ..item.clone()
+        };
+        assert!(
+            !expandable_files(&unlisted)
+                .unwrap()
+                .iter()
+                .any(|p| p.ends_with("run.py")),
+            "a non-markdown file the item does not list is not expanded, so it \
+             must not be scanned either"
+        );
+
+        // A single-FILE item (an agent or rule) has no bundled tree: only its
+        // own path applies, and only when it is markdown.
+        let single = CatalogItem {
+            kind: ItemKind::Agent,
+            path: skill.join("run.py"),
+            expand: vec!["run.py".to_string()],
+            ..link_skill("review", vec![])
+        };
+        assert!(
+            expandable_files(&single).unwrap().is_empty(),
+            "a non-markdown single-file item has nothing install would expand"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The pre-install scan walks the item tree with the SAME capped walker the
+    /// install path uses, so a pathological tree gives the structured LIFE-52
+    /// error instead of a silent empty scan (which would let a token slip
+    /// through) or an unbounded recursion.
+    // spec: LIFE-52 LNK-18
+    #[test]
+    fn expandable_files_depth_caps_a_pathological_item_tree() {
+        let dir = scratch("lnk18-deep");
+        let skill = dir.join("skills/review");
+        let mut deep = skill.clone();
+        for _ in 0..(install::MAX_ITEM_TREE_DEPTH + 2) {
+            deep.push("d");
+        }
+        std::fs::create_dir_all(&deep).unwrap();
+        write_file_at(&skill.join("SKILL.md"), "# review\n");
+
+        let item = CatalogItem {
+            path: skill,
+            ..link_skill("review", vec![])
+        };
+        let err = expandable_files(&item).expect_err("the cap must be enforced");
+        assert!(
+            err.to_string().contains("nested directories"),
+            "the depth cap must surface as the structured LIFE-52 error: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The miss half of the exact-selection lookup. Unreachable in practice --
+    /// the target is composed from the very catalog it is looked up in, one
+    /// statement earlier -- but it is what stops a future caller that composes
+    /// a target from a stale scan from silently installing the wrong item.
+    // spec: CLI-236
+    #[test]
+    fn exact_index_misses_a_target_that_is_not_in_the_catalog() {
+        let items = vec![
+            catalog_skill("review", "s", None),
+            catalog_skill("review", "other", None),
+        ];
+        assert_eq!(exact_index(&items, &target("s", "skill:review")), Some(0));
+        // Right key, wrong source: identity is the PAIR, so this is a miss and
+        // not a fallback onto the same-named item of another source.
+        assert_eq!(exact_index(&items, &target("nope", "skill:review")), None);
+        // Right source, wrong kind: `key()` is kind-qualified.
+        assert_eq!(exact_index(&items, &target("s", "agent:review")), None);
+        // Right source, unknown name.
+        assert_eq!(exact_index(&items, &target("s", "skill:absent")), None);
+    }
+
     /// On a unix host the platform guard is a no-op, so an item install is not
     /// refused (LIFE-50). The non-unix refusal branch is `#[cfg(not(unix))]` and
     /// cannot run in CI here; this pins the supported-platform half of the
@@ -9250,6 +10632,7 @@ mod tests {
             links: vec![],
             description: None,
             install_hooks: Vec::new(),
+            dropped_requires: Vec::new(),
         }
     }
 
@@ -10271,6 +11654,7 @@ mod tests {
             links: vec![],
             description: None,
             install_hooks: Vec::new(),
+            dropped_requires: Vec::new(),
         });
         manifest.save(paths).expect("save manifest");
     }

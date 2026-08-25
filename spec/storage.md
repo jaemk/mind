@@ -294,8 +294,9 @@ The on-disk layout and the two persisted JSON files.
 - `STO-21` Each installed item records: `kind`, `name` (effective), `bare_name`,
   `source`, `commit`, `hash` (of source content), `store` (path relative to the
   mind root), `links` (absolute symlink paths, one per agent home; a relative
-  lobe is resolved to absolute first, see STO-16), `description`, and
-  `install_hooks` (STO-75, HOOK-110).
+  lobe is resolved to absolute first, see STO-16), `description`,
+  `install_hooks` (STO-75, HOOK-110), and `dropped_requires` (LNK-19: empty and
+  omitted for an ordinary install; re-derived on every install and upgrade).
 - `STO-22` `(source, kind, bare_name)` is the item's stable identity (see
   lifecycle.md). `store` and `links` are its file registry, used by uninstall.
 - `STO-23` A missing manifest file is treated as empty.

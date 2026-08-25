@@ -60,7 +60,12 @@ identified by stable identity `(source, kind, bare_name)` (see namespacing.md).
 - `DEP-6` A `requires` entry that resolves to no sibling (a typo, an unknown item,
   an ambiguous bare name, or a source-qualified ref) is an error (`BadReference`)
   at install, the same validation a `{{ns:}}` token receives. `review` (CLI-131)
-  reports an unresolved `requires` entry as a hard error.
+  reports an unresolved `requires` entry as a hard error. One exception, at
+  install time only: in a single-skill item-link instance (item-link.md LNK-7) a
+  `NoMatch` entry cannot resolve however the repo is laid out, so there it is
+  dropped with a warning and a durable record rather than failing the install
+  (LNK-18, LNK-19). `review` is unaffected, and correctly so: it scans the whole
+  repo (CLI-131), so its catalog holds the siblings a link instance's does not.
 - `DEP-7` The install-time `BadReference` for a bad `requires` entry names its
   specific cause, not the blanket "does not match any item": a malformed ref
   reports it "is not a valid item ref", a source-qualified ref "crosses sources; a

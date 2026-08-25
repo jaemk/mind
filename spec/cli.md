@@ -5,7 +5,7 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 | command | role |
 |---------|------|
 | `probe [query] [--no-tui]` | interactive browser (default); catalog listing with `--no-tui`/`--json` |
-| `meld [<repo>] [--register-only] [--yes] [-N\|--namespace <prefix>] [--root <dir>] [--flat-skills] [--pin <HEAD\|ref\|branch=NAME\|tag=NAME>]` | connect a source (default `.`), then install its items |
+| `meld [<repo>] [--register-only] [--learn <NAME\|GLOB>] [--yes] [-N\|--namespace <prefix>] [--root <dir>] [--flat-skills] [--pin <HEAD\|ref\|branch=NAME\|tag=NAME>]` | connect a source (default `.`), then install its items (`--learn` narrows to the matching subset) |
 | `init-source [<path>] [--template] [--marketplace] [--flat-skills] [-N\|--namespace <prefix>]` | scaffold `mind.toml` + detect references (maintainer) |
 | `unmeld <name\|glob> [--keep-items] [--yes] [--uninstall-hook <cmd>] [--dangerously-skip-hook-check]` (alias: `remove`/`rm`) | disconnect a source (or all sources matching a glob) and uninstall its items (`--keep-items` leaves them) |
 | `learn <item> [--dangerously-skip-install-hook-check]` (alias: `install`) | install |
@@ -240,6 +240,68 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   the top-level source is offered (a curated super-source's nested sources are not
   auto-installed), already-installed items are skipped (DEP-23), and a source
   install hook is still handled by its own prompt during the meld (HOOK-20).
+- `CLI-236` `meld <repo> --learn <NAME|GLOB>` replaces the CLI-23 install-all
+  offer with a subset install: only the source's items matching the patterns are
+  installed. The flag is repeatable, and each value may be an exact name
+  (`review`), a kind-qualified name (`skill:review`), or a glob (`skill:*`,
+  `pdf-*`). It conflicts with `--register-only`, which asks for the opposite. A
+  re-meld (CLI-12) honors it too, and still ends with CLI-12's status report.
+
+  *Matching.* A pattern is matched against each item's BARE name as well as its
+  effective (prefixed) name, within the melded source only. Requiring the
+  effective name would break the first-run case the flag exists for: at meld
+  time the consumer has not necessarily seen the source's declared
+  `[source].prefix`, and CLI-24 may prompt for it inside this very command, so
+  `--learn review` must still find the item that installs as `team:review`.
+  Within one source the two readings cannot disagree about which item is meant.
+  Each match is then installed by its EXACT, kind-qualified ref
+  (`<source>#<kind>:<effective-name>`), so an item name that itself contains
+  glob metacharacters is never re-read as a pattern.
+
+  *Rejected values.* A value that is empty, carries a `#` (it selects within the
+  source being melded, so a source-qualified ref is a usage error), is not a
+  parseable item ref, or is a malformed glob, is `InvalidLearnPattern`, whose
+  message names which of the four it was. The check is pure syntax and runs
+  BEFORE the clone, so a typo does not leave a registered source behind.
+
+  *No match.* A pattern that parses but matches no item in the source is
+  `LearnPatternNoMatch`, not the generic `ItemNotFound`: the user named it
+  explicitly, so a typo must not pass as "nothing to install", and the message is
+  scoped to the one source that was searched. It points at `mind probe --source
+  <name> --no-tui`, which lists what that source OFFERS; `recall` lists what is
+  INSTALLED, and after a no-match nothing from the source is installed, so it
+  would answer with an empty listing. The message names the two things that most
+  often explain a miss: an inventory that does not declare the item, which needs
+  `--add-root <dir>` at the meld that REGISTERS the source (`--add-root` is
+  ignored on a re-meld, CLI-206, so an already-melded repo must be unmelded
+  first), and a super-source whose nested sources register as their own sources.
+  The source stays melded, as it does whenever an install pass fails.
+
+  *Install.* Each matched item installs through the ordinary `learn` path, so its
+  dependency closure (DEP-30/31) and the collision checks (CLI-33) apply
+  unchanged. The gate around the batch is the CLI-23 meld gate, not `learn`'s:
+  one preview and one prompt for the whole batch on a TTY, `--yes` installs
+  without prompting, and a non-TTY run without `--yes` installs nothing and
+  prints how to install later. When every match is already installed, that is
+  reported once for the batch rather than once per pattern (CLI-157).
+
+  *Scope.* The curated chain is not walked: a pattern selects within the source
+  being melded, so DSC-54/55/58's nested install pass would install items the
+  user did not name. Nested sources are still REGISTERED by the meld; only their
+  install pass is skipped. Because `--recursive` (DSC-55) has nothing to act on
+  under `--learn`, passing both prints a note naming the ignored flag rather than
+  dropping it silently, the same disclosure a re-meld gives an inapplicable flag
+  (CLI-206).
+
+  *`--json`.* The installed keys and the pending count fold into the one meld
+  object as CLI-156 describes. `pending_items` counts the UNION of the matched
+  items and their closures, not the sum over patterns: without `--yes` nothing
+  installs between patterns, so summing would count an item two patterns both
+  match, or a dependency shared by two of them, more than once.
+
+  This is the one-command form of "meld the whole repo, install just this", which
+  is the second half of the remedy an item link's unsatisfiable reference points
+  at (LNK-18).
 - `CLI-156` In `--json` mode, `meld` is fully non-interactive and never prompts.
   When `--yes` is given the items are installed as part of the single meld result:
   the `installed` array in the JSON object lists the effective keys of every item
