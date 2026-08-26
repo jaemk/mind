@@ -850,7 +850,10 @@ mod tests {
         // itself (what `load_inner` actually calls) directly instead.
         let bidi = '\u{202E}';
         let raw = vec![
-            format!("skill:re\x1b[31mview"),
+            // Not `format!`: there is nothing to interpolate here, and clippy's
+            // `useless_format` (a hard error under `-D warnings`) rejects it.
+            // The sibling below keeps `format!` because it interpolates `bidi`.
+            "skill:re\x1b[31mview".to_string(),
             format!("agent:d{bidi}ev"),
             "rule:clean".to_string(),
         ];
