@@ -22,7 +22,12 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
+      # Pinned by rust-toolchain.toml; named here too so the action installs
+      # exactly the toolchain cargo will then select, rather than fetching
+      # stable and having cargo download the pinned one anyway.
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.98.0"
       - uses: Swatinem/rust-cache@v2
       - name: build
         run: cargo build --release --locked --bin mind

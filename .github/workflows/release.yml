@@ -17,8 +17,11 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
+      # Pinned by rust-toolchain.toml; named here too so the action installs
+      # exactly the toolchain cargo will then select. Keep the two in step.
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: "1.98.0"
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
       - run: make ci
@@ -28,8 +31,11 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
+      # Pinned by rust-toolchain.toml; named here too so the action installs
+      # exactly the toolchain cargo will then select. Keep the two in step.
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: "1.98.0"
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
       - run: make ci
@@ -39,6 +45,12 @@ jobs:
     needs: [ci, ci-macos]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 25
+    # The release binaries are built with a deliberately pinned toolchain, not
+    # the dev one. rust-toolchain.toml would otherwise win over the `toolchain:`
+    # input below and silently build the release on a different compiler than
+    # the pin names; RUSTUP_TOOLCHAIN outranks the file, so the pin holds.
+    env:
+      RUSTUP_TOOLCHAIN: "1.96.0"
     permissions:
       contents: read
       id-token: write
@@ -147,6 +159,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: release
+    # Same reason as the build job: keep the deliberate publish pin from being
+    # overridden by rust-toolchain.toml, which outranks the `toolchain:` input.
+    env:
+      RUSTUP_TOOLCHAIN: "1.96.0"
     permissions:
       contents: write
       id-token: write

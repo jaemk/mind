@@ -26,6 +26,16 @@ but formats in place (`cargo fmt`) instead of `fmt-check`, so one command both
 fixes formatting and runs the full gate. Prefer `make ci-local` over chaining
 `cargo fmt` and `make ci`.
 
+The toolchain is pinned in `rust-toolchain.toml`, so `make ci-local` and `make
+ci` lint with the same clippy. Do not bump it casually: a newer clippy adds
+lints, `-D warnings` makes each one a hard error, and the new errors usually
+land on code the bump does not touch. To bump, change `channel` there, update
+the matching `toolchain:` inputs in `.github/workflows/{ci,release,canary}.yml`,
+and run `make ci-local`. The jobs that build against a different toolchain on
+purpose (the MSRV check, the release build, the crates.io publish) set
+`RUSTUP_TOOLCHAIN`, which outranks the file; leave that in place or those gates
+quietly start testing the wrong compiler.
+
 ## Spec is mandatory for features
 
 Every feature addition MUST be documented in [spec/](spec/) in the same change:

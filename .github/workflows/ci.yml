@@ -18,8 +18,11 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
+      # Pinned by rust-toolchain.toml; named here too so the action installs
+      # exactly the toolchain cargo will then select. Keep the two in step.
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: "1.98.0"
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
       # `make ci` = fmt-check + clippy (-D warnings) + tests, including the
@@ -33,8 +36,11 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
+      # Pinned by rust-toolchain.toml; named here too so the action installs
+      # exactly the toolchain cargo will then select. Keep the two in step.
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: "1.98.0"
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
       - run: make ci
@@ -43,9 +49,16 @@ jobs:
   # Cargo.toml's `rust-version`, so a change that needs a newer compiler
   # feature is caught here instead of by a user on an older toolchain.
   # Keep the pinned toolchain below in step with Cargo.toml `rust-version`.
+  #
+  # RUSTUP_TOOLCHAIN is what makes this gate real: rust-toolchain.toml pins the
+  # dev/CI toolchain repo-wide and would otherwise win here, so `cargo check`
+  # would run on that toolchain and the MSRV check would silently pass without
+  # ever compiling against the minimum. The env var outranks the file.
   msrv:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      RUSTUP_TOOLCHAIN: "1.88"
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.88

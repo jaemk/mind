@@ -1,0 +1,22 @@
+# The toolchain used for development and for the CI lint/test gate, pinned so
+# `make ci-local` and `make ci` run the same rustc and the same clippy lint set.
+#
+# Without this, CI tracked whatever `stable` was that day while a contributor's
+# rustup did not, so a lint newly added to stable could only fail AFTER a push:
+# `clippy::useless_format` reached main that way, on a line no change had
+# touched, because `-D warnings` turns a new lint into a hard error.
+#
+# Bumping is deliberate: change `channel` here, keep the `toolchain:` inputs in
+# .github/workflows/ci.yml (check, check-macos) and release.yml (ci, ci-macos)
+# in step, then run `make ci-local` and fix what the newer lints report. That
+# turns a surprise red build into a routine, reviewable change.
+#
+# Jobs that deliberately build with a DIFFERENT toolchain set `RUSTUP_TOOLCHAIN`,
+# which outranks this file (rustup precedence: `+toolchain`, then
+# RUSTUP_TOOLCHAIN, then this file, then the default). Those are the MSRV check
+# in ci.yml, which must compile against Cargo.toml's `rust-version` for the
+# gate to mean anything, and the pinned release build and crates.io publish in
+# release.yml.
+[toolchain]
+channel = "1.98.0"
+components = ["rustfmt", "clippy"]
