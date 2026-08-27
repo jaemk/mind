@@ -1116,3 +1116,45 @@ fn review_fix_json_reports_the_rewritten_files_and_one_document() {
         r.stderr
     );
 }
+
+#[test]
+fn a_streaming_hook_cannot_reach_the_json_document_on_stdout() {
+    // spec: HOOK-32 CLI-217
+    // Hook output is streamed by INHERITING the child's stdio (HOOK-30), which
+    // would put it straight onto fd 1 -- the same descriptor the result document
+    // uses. It stays out because `--json` points fd 1 at fd 2 with a real
+    // `dup2` for the whole run, so the inherited child writes to stderr too.
+    // Without that, a hook echoing a single line would wedge itself into the
+    // one JSON document and break every machine consumer.
+    let sb = Sandbox::new("json-stream-hook");
+    sb.write_and_commit(
+        "mind.toml",
+        "[[hooks]]\nrun = \"echo NOISE-ON-STDOUT; echo NOISE-ON-STDERR 1>&2\"\n\
+         name = \"build\"\nevent = \"install\"\n",
+    );
+    let spec = sb.source_spec();
+    let r = sb.mind(&[
+        "--json",
+        "meld",
+        &spec,
+        "--register-only",
+        "--dangerously-skip-install-hook-check",
+    ]);
+    assert!(r.success, "meld failed: {} {}", r.stdout, r.stderr);
+
+    // Exactly one JSON document, and it parses: the hook's chatter is not in it.
+    let doc: serde_json::Value = serde_json::from_str(r.stdout.trim())
+        .unwrap_or_else(|e| panic!("stdout must be one JSON document ({e}): {}", r.stdout));
+    assert!(doc.get("action").is_some(), "the meld result: {}", r.stdout);
+    assert!(
+        !r.stdout.contains("NOISE-ON-STDOUT") && !r.stdout.contains("====== (hook:"),
+        "neither the hook output nor its frame may reach stdout: {}",
+        r.stdout
+    );
+    // It is not discarded, just routed: both streams land on stderr.
+    assert!(
+        r.stderr.contains("NOISE-ON-STDOUT") && r.stderr.contains("NOISE-ON-STDERR"),
+        "the hook's output must still be visible on stderr: {}",
+        r.stderr
+    );
+}

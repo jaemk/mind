@@ -33,6 +33,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Lifecycle hooks (install, uninstall, build) stream their output: stdout and
+  stderr are inherited, so a build or package install is visible as it runs
+  instead of appearing all at once when the command exits. The run is framed by
+  `====== (hook: <name>) ======` and `====== (end hook: <name>) ======`. Two
+  visible differences: the streams interleave rather than appearing under
+  separate `hook-stdout`/`hook-stderr` blocks, and a hook's stderr now goes to
+  mind's stderr instead of being replayed onto stdout, so redirecting one stream
+  no longer moves the other's output with it. Under `--json` a hook's output
+  stays off the result document, as before (HOOK-30, HOOK-32).
 - An item link's unsatisfiable intra-source references are reconciled instead of
   failing with a generic missing-reference error. A link instance offers exactly
   one skill, so a reference to a sibling can never resolve: a `requires:` entry

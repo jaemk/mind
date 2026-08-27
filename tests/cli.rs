@@ -16409,8 +16409,8 @@ fn recall_status_view_marks_install_state() {
 
 #[test]
 fn install_hook_output_is_mirrored_to_mind_stdout() {
-    // spec: HOOK-30 - a hook's stdout is mirrored to mind's own output under
-    // a labeled separator frame.
+    // spec: HOOK-30 - a hook's streams are inherited, so its stdout reaches
+    // mind's stdout as it is produced, inside one frame around the whole run.
     let sb = Sandbox::bare("hook-output");
     sb.write_and_commit(
         "mind.toml",
@@ -16425,13 +16425,20 @@ fn install_hook_output_is_mirrored_to_mind_stdout() {
     ]);
     assert!(r.success, "meld failed: {} {}", r.stdout, r.stderr);
     assert!(
-        r.stdout.contains("====== (hook-stdout: build) ======"),
-        "the stdout separator frame must appear in mind's output: {}",
+        r.stdout.contains("====== (hook: build) ======"),
+        "the opening frame must appear in mind's output: {}",
         r.stdout
     );
     assert!(
         r.stdout.contains("HELLO-FROM-HOOK"),
-        "the hook's stdout must be mirrored to mind's output: {}",
+        "the hook's stdout must reach mind's stdout: {}",
+        r.stdout
+    );
+    // The frame is one pair around the whole run: there is no separate
+    // per-stream block any more, because the streams are never separated.
+    assert!(
+        !r.stdout.contains("hook-stdout:") && !r.stdout.contains("hook-stderr:"),
+        "the per-stream capture frames are gone: {}",
         r.stdout
     );
     assert!(
@@ -16443,8 +16450,11 @@ fn install_hook_output_is_mirrored_to_mind_stdout() {
 
 #[test]
 fn install_hook_stderr_is_framed_and_mirrored() {
-    // spec: HOOK-30 - a hook's stderr is captured and printed under a labeled
-    // separator frame, visible in mind's output.
+    // spec: HOOK-30 - with the streams inherited, a hook's stderr goes to MIND's
+    // stderr rather than being captured and mirrored into stdout. That is the
+    // point of streaming (each stream keeps its identity, so a caller's
+    // redirection means what it says), and it is the visible behavior change:
+    // the old form replayed captured stderr onto stdout.
     let sb = Sandbox::bare("hook-stderr");
     sb.write_and_commit(
         "mind.toml",
@@ -16459,13 +16469,18 @@ fn install_hook_stderr_is_framed_and_mirrored() {
     ]);
     assert!(r.success, "meld failed: {} {}", r.stdout, r.stderr);
     assert!(
-        r.stdout.contains("====== (hook-stderr: warn) ======"),
-        "the stderr separator frame must appear in mind's output: {}",
+        r.stdout.contains("====== (hook: warn) ======"),
+        "the frame still opens on stdout, where mind's own output is: {}",
         r.stdout
     );
     assert!(
-        r.stdout.contains("OOPS"),
-        "the hook's stderr must be mirrored to mind's output: {}",
+        r.stderr.contains("OOPS"),
+        "the hook's stderr must reach mind's stderr: {}",
+        r.stderr
+    );
+    assert!(
+        !r.stdout.contains("OOPS"),
+        "and must NOT be copied onto stdout as the captured form did: {}",
         r.stdout
     );
     assert!(

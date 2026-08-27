@@ -109,18 +109,35 @@ CLI-17).
 ## Execution and recording
 
 - `HOOK-30` A hook runs via the shell in the clone directory with its stdin
-  closed (it cannot consume `mind`'s input). Its stdout and stderr are captured
-  and mirrored to `mind`'s output under labeled separators -- the captured stdout
-  under `====== (hook-stdout: <name>) ======` and the captured stderr under
-  `====== (hook-stderr: <name>) ======`, each block omitted when that stream is
-  empty, with a closing `====== (end hook: <name>) ======` divider when any output
-  was shown -- so the hook's output is clearly demarcated from `mind`'s own and
-  from whatever it prints next (e.g. the install preview). A
-  non-zero exit is a `HookFailed` error and fails the `meld`: the source is not
-  left registered (the clone is removed, as for any failed meld), and the error
-  points to the framed output already shown rather than repeating it. Side effects
-  the hook already had on the system (an installed binary, a global package) are
-  outside `mind`'s state and are not rolled back.
+  closed (it cannot consume `mind`'s input). Its stdout and stderr are INHERITED,
+  so its output reaches the terminal as it is produced rather than being
+  collected and replayed when it exits. A hook is often the slowest step of a
+  meld (a build, a package install); output that arrives only at the end tells
+  the user nothing while they wait, and gives them nothing to interrupt on.
+  The run is framed by `====== (hook: <name>) ======` before the spawn and
+  `====== (end hook: <name>) ======` after it, so the hook's output stays
+  demarcated from `mind`'s own and from whatever it prints next (e.g. the
+  install preview). Two consequences follow from streaming and are intended: the
+  two streams interleave exactly as they would in a terminal, so there are no
+  longer separate `hook-stdout`/`hook-stderr` blocks, and the frame is
+  unconditional, since nothing is buffered and `mind` cannot know in advance
+  whether the hook will print anything. A third consequence is the visible
+  behavior change: a hook's stderr now lands on `mind`'s STDERR instead of being
+  replayed onto stdout, so each stream keeps its identity and a caller's
+  redirection means what it says (`2>/dev/null` silences a noisy hook's warnings,
+  and a hook's diagnostics no longer contaminate a stdout pipe). A non-zero exit is a `HookFailed` error
+  and fails the `meld`: the source is not left registered (the clone is removed,
+  as for any failed meld), and the error points at the framed output already on
+  screen rather than repeating it, since nothing was captured to repeat. A
+  hook that fails to SPAWN is the exception: nothing was streamed, so that error
+  carries the spawn failure's own reason. Side effects the hook already had on
+  the system (an installed binary, a global package) are outside `mind`'s state
+  and are not rolled back.
+- `HOOK-32` Streaming is safe under `--json` (CLI-217) without a special case:
+  the whole run executes with fd 1 pointed at fd 2 by a real `dup2`, and an
+  inherited child writes to that same redirected descriptor, so a hook's output
+  cannot reach the result document on stdout. The same holds for the TUI, which
+  redirects stdout by the identical dance while an action runs.
 - `HOOK-31` `mind` records the in-effect hook command and the commit it ran at on
   the source registry entry, so `upgrade` can detect a changed command or commit
   and re-prompt (HOOK-11), and `recall` / `introspect` can report that a source

@@ -377,81 +377,75 @@ pub fn apply_install_override(
 }
 
 /// Run `command` via the shell (`sh -c <command>`) in `clone_dir` (HOOK-30).
-/// Stdout and stderr are captured separately and printed under labeled separator
-/// frames so both streams are visible in mind's output. Stdin is closed so a
-/// hook cannot consume mind's input. A non-zero exit (or spawn failure) maps to
-/// `MindError::HookFailed`.
+/// Stdout and stderr are INHERITED, so the hook's output reaches the terminal
+/// as it is produced rather than being collected and replayed at exit. Stdin is
+/// closed so a hook cannot consume mind's input. A non-zero exit (or spawn
+/// failure) maps to `MindError::HookFailed`.
 ///
-/// The framed output below is a plain `println!`/`print!` on purpose, NOT
-/// `render::note`: what it echoes is arbitrary text chosen by the source
-/// author, so no per-line routing rule could bound it (a hook that printed
-/// `note:`-prefixed lines, or a forged result envelope, would defeat one).
-/// Under `--json` the process runs with fd 1 pointed at stderr for the whole
-/// run (main.rs's `json_stdout`), which is what keeps this out of the result
-/// document; in text mode it lands on stdout exactly as before.
-// spec: CLI-217
+/// Streaming is the point: a hook is often the slowest step of a meld (a build,
+/// a package install), and a progress bar, a compiler's file-by-file output, or
+/// a prompt-looking line that arrives only after the command finishes tells the
+/// user nothing while they are waiting, and cannot be interrupted on the basis
+/// of what it says. The cost is that the two streams interleave exactly as they
+/// would in a terminal, so they can no longer be framed under separate
+/// `hook-stdout`/`hook-stderr` labels, and the frame is unconditional: nothing
+/// is buffered, so mind cannot know in advance whether the hook will print.
+///
+/// The frame below is a plain `println!` on purpose, NOT `render::note`: what
+/// it surrounds is arbitrary text chosen by the source author, so no per-line
+/// routing rule could bound it (a hook that printed `note:`-prefixed lines, or
+/// a forged result envelope, would defeat one). Under `--json` the process runs
+/// with fd 1 pointed at fd 2 for the whole run (main.rs's `json_stdout`, a real
+/// `dup2`), and an inherited child writes to that same redirected descriptor,
+/// so a streaming hook cannot corrupt the result document either.
+// spec: CLI-217 HOOK-30
 pub fn run_hook(command: &str, clone_dir: &Path, identity: &str, label: &str) -> Result<()> {
     // Flush mind's own buffered output first so it does not interleave with the
     // hook's output blocks.
     let _ = std::io::stdout().flush();
 
-    let output = Command::new("sh")
+    // Opened before the spawn so the header is on screen while the hook runs,
+    // not after it finishes.
+    println!("====== (hook: {label}) ======");
+    let _ = std::io::stdout().flush();
+
+    let status = Command::new("sh")
         .arg("-c")
         .arg(command)
         .current_dir(clone_dir)
         .stdin(Stdio::null())
-        .output()
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
         .map_err(|e| MindError::HookFailed {
             identity: identity.to_string(),
             command: command.to_string(),
             status: None,
             stderr: e.to_string(),
-            // Spawn failed before any output was shown.
+            // Spawn failed, so nothing was streamed: the error carries the
+            // reason itself rather than pointing at output that never existed.
             printed_output: false,
         })?;
 
-    let stdout_str = String::from_utf8_lossy(&output.stdout);
-    let stderr_str = String::from_utf8_lossy(&output.stderr);
+    // The hook wrote straight to the terminal, so its last line may not have
+    // ended in a newline; the divider would otherwise be glued to it.
+    println!("====== (end hook: {label}) ======");
 
-    let mut printed_any = false;
-    if !stdout_str.is_empty() {
-        println!("====== (hook-stdout: {label}) ======");
-        print!("{stdout_str}");
-        // Ensure the output ends with a newline so the next line is clean.
-        if !stdout_str.ends_with('\n') {
-            println!();
-        }
-        printed_any = true;
-    }
-
-    if !stderr_str.is_empty() {
-        println!("====== (hook-stderr: {label}) ======");
-        print!("{stderr_str}");
-        if !stderr_str.ends_with('\n') {
-            println!();
-        }
-        printed_any = true;
-    }
-
-    // Close the framed output with an end divider so the hook's output is clearly
-    // separated from whatever `mind` prints next (e.g. the install preview).
-    if printed_any {
-        println!("====== (end hook: {label}) ======");
-    }
-
-    if output.status.success() {
+    if status.success() {
         Ok(())
     } else {
-        // The hook's stdout/stderr were already streamed live to the terminal in
-        // the framed blocks above. Carry `printed_any` into the error so its
-        // Display can say "(see output above)" instead of the misleading "(no
-        // output)" when diagnostics were already shown (HOOK-30).
+        // The hook wrote straight to the terminal, so there is nothing to
+        // replay and nothing captured to attach: whatever it said is already on
+        // screen inside the frame above. `printed_output` is unconditionally
+        // true here (unlike the captured form, which could tell a silent hook
+        // from a talkative one), so the message points at the frame rather than
+        // claiming "(no output)" for a hook that printed plenty (HOOK-30).
         Err(MindError::HookFailed {
             identity: identity.to_string(),
             command: command.to_string(),
-            status: Some(output.status),
+            status: Some(status),
             stderr: String::new(),
-            printed_output: printed_any,
+            printed_output: true,
         })
     }
 }
@@ -1345,21 +1339,25 @@ mod tests {
                 );
                 let code = status.unwrap().code();
                 assert_eq!(code, Some(3), "expected exit code 3, got {code:?}");
-                // A silent hook (no output) must have an empty stderr field and
-                // printed_output=false; the rendered message must say "(no output)"
-                // rather than pointing at framed output blocks that were never printed.
+                // spec: HOOK-30 -- the hook's streams were inherited, so nothing
+                // was captured to attach and the frame is already on screen.
+                // `printed_output` is therefore true even for a hook that
+                // printed nothing: streaming cannot tell a silent hook from a
+                // talkative one, and the message points at the (empty) frame
+                // rather than claiming "(no output)" for a hook that may have
+                // printed plenty. The captured form used to distinguish these.
                 assert!(
                     stderr.is_empty(),
-                    "run_hook must set stderr to empty for a process that produced no output"
+                    "an inherited hook captures no stderr to attach"
                 );
                 assert!(
-                    !printed_output,
-                    "printed_output must be false when the hook produced no output"
+                    printed_output,
+                    "a hook that ran streamed its own output, so the error points at the frame"
                 );
                 let msg = e.to_string();
                 assert!(
-                    msg.contains("(no output)"),
-                    "silent hook failure must render '(no output)': {msg}"
+                    msg.contains("(see output above)"),
+                    "a streamed hook failure must point at the frame: {msg}"
                 );
                 assert!(
                     !msg.contains("see the hook"),
