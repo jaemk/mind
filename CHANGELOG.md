@@ -8,6 +8,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `[source].ignore` and `[[items]].ignore` in `mind.toml`: glob patterns,
+  relative to each item's own path, excluded from both the store copy and the
+  content hash. An item's own list replaces the source's for that item. Version
+  control directories (`.git`, `.hg`, `.svn`, `.bzr`) are excluded with or
+  without a declaration; build output is not implied and must be listed. This
+  makes an item whose path holds more than the item workable, such as a
+  top-level `SKILL.md` declared with `path = "."`, which previously copied the
+  repo's `.git/` into the store and reported the item as drifted after every
+  commit in the source clone. An item installed before this that has a VCS
+  directory in its tree reports as out of date once, and `upgrade` reinstalls it
+  without that directory (IGN-1..21).
 - `meld <repo> --learn <NAME|GLOB>` installs only the items matching the pattern
   instead of offering the source's whole set. The flag is repeatable; a pattern
   matches an item's bare name as well as its effective (prefixed) name, and is

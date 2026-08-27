@@ -59,6 +59,18 @@ pub(crate) fn hash_str(s: &str) -> String {
 /// ambiguous byte boundaries, and prevents a regular file whose name begins
 /// with "symlink:" from producing the same hash as a symlink of that stem.
 pub fn hash_path(path: &Path) -> Result<String> {
+    hash_path_ignoring(path, &crate::ignore::IgnoreSet::default())
+}
+
+/// [`hash_path`], excluding what `ignore` matches (IGN-10).
+///
+/// This is the hash an ITEM is measured by, and it must agree exactly with what
+/// the install copy wrote: a file hashed but not installed makes `upgrade`
+/// offer a change the user cannot see in the installed item, and a file
+/// installed but not hashed makes a change to it invisible to drift detection.
+/// Prefer `CatalogItem::content_hash`, which cannot be called without the
+/// item's own set.
+pub fn hash_path_ignoring(path: &Path, ignore: &crate::ignore::IgnoreSet) -> Result<String> {
     let mut h = Fnv::new();
     let meta = std::fs::symlink_metadata(path).map_err(|e| MindError::io(path, e))?;
     if meta.file_type().is_symlink() {
@@ -72,7 +84,7 @@ pub fn hash_path(path: &Path) -> Result<String> {
         h.write(target_bytes.as_bytes());
     } else if meta.is_dir() {
         let mut files = Vec::new();
-        collect_files(path, path, &mut files)?;
+        collect_files(path, path, &mut files, ignore)?;
         files.sort();
         // spec: LIFE-35 - length-prefixed fields prevent (path, content) split
         // collisions across entries.
@@ -116,7 +128,21 @@ pub fn hash_path(path: &Path) -> Result<String> {
 /// staleness memo (tui/data.rs, TUI-72); every path that ACTS on a hash
 /// (`upgrade`, `introspect`, `recall`) calls `hash_path` directly and is
 /// unaffected by any residual gap here.
+#[cfg(test)]
 pub(crate) fn stat_fingerprint(path: &Path) -> Result<String> {
+    stat_fingerprint_ignoring(path, &crate::ignore::IgnoreSet::default())
+}
+
+/// [`stat_fingerprint`], excluding what `ignore` matches.
+///
+/// The fingerprint gates whether the TUI re-hashes (TUI-72), so it has to see
+/// the same tree the hash does: a fingerprint that noticed an ignored file
+/// would drive a re-hash that always returns the same value, and one that
+/// missed a real change would suppress a re-hash that mattered.
+pub(crate) fn stat_fingerprint_ignoring(
+    path: &Path,
+    ignore: &crate::ignore::IgnoreSet,
+) -> Result<String> {
     let mut h = Fnv::new();
     let meta = std::fs::symlink_metadata(path).map_err(|e| MindError::io(path, e))?;
     if meta.file_type().is_symlink() {
@@ -127,7 +153,7 @@ pub(crate) fn stat_fingerprint(path: &Path) -> Result<String> {
         h.write(target_bytes.as_bytes());
     } else if meta.is_dir() {
         let mut entries = Vec::new();
-        collect_stats(path, path, &mut entries)?;
+        collect_stats(path, path, &mut entries, ignore)?;
         entries.sort();
         for (tag, rel, mtime, size, ino, ctime) in entries {
             h.write(&[tag]);
@@ -194,6 +220,7 @@ fn collect_stats(
     root: &Path,
     dir: &Path,
     out: &mut Vec<(u8, String, i128, u64, u64, i128)>,
+    ignore: &crate::ignore::IgnoreSet,
 ) -> Result<()> {
     let rd = std::fs::read_dir(dir).map_err(|e| MindError::io(dir, e))?;
     for entry in rd {
@@ -206,6 +233,10 @@ fn collect_stats(
             .unwrap_or(&path)
             .to_string_lossy()
             .into_owned();
+        // spec: IGN-10 -- the fingerprint sees exactly the tree the hash does.
+        if ignore.is_ignored(path.strip_prefix(root).unwrap_or(&path), ft.is_dir()) {
+            continue;
+        }
         if ft.is_symlink() {
             // Hash the target string, not a stat: a retarget changes it even when
             // the link's own mtime does not.
@@ -215,7 +246,7 @@ fn collect_stats(
             th.write(target_bytes.as_bytes());
             out.push((b'S', rel, 0, th.value(), 0, 0));
         } else if ft.is_dir() {
-            collect_stats(root, &path, out)?;
+            collect_stats(root, &path, out, ignore)?;
         } else {
             let (ino, ctime) = unix_stat_fields(&meta);
             out.push((
@@ -238,8 +269,13 @@ fn collect_stats(
 /// link-target string as its content; a regular file carries `b'F'`. The
 /// separate type tag prevents a file named `"symlink:foo"` from producing the
 /// same triple as a symlink named `"foo"` (LIFE-35).
-fn collect_files(root: &Path, dir: &Path, out: &mut Vec<(u8, String, Vec<u8>)>) -> Result<()> {
-    collect_files_at(root, dir, out, 0)
+fn collect_files(
+    root: &Path,
+    dir: &Path,
+    out: &mut Vec<(u8, String, Vec<u8>)>,
+    ignore: &crate::ignore::IgnoreSet,
+) -> Result<()> {
+    collect_files_at(root, dir, out, 0, ignore)
 }
 
 // spec: LIFE-52 -- depth-capped like install.rs's walks; the not-followed
@@ -250,6 +286,7 @@ fn collect_files_at(
     dir: &Path,
     out: &mut Vec<(u8, String, Vec<u8>)>,
     depth: usize,
+    ignore: &crate::ignore::IgnoreSet,
 ) -> Result<()> {
     if depth > crate::install::MAX_ITEM_TREE_DEPTH {
         return Err(crate::install::depth_exceeded(dir));
@@ -260,6 +297,12 @@ fn collect_files_at(
         let path = entry.path();
         let meta = std::fs::symlink_metadata(&path).map_err(|e| MindError::io(&path, e))?;
         let ft = meta.file_type();
+        // spec: IGN-10 -- the same exclusion the install copy applies, so what
+        // is not installed is not hashed. A matching directory is skipped whole
+        // and never descended into.
+        if ignore.is_ignored(path.strip_prefix(root).unwrap_or(&path), ft.is_dir()) {
+            continue;
+        }
         if ft.is_symlink() {
             // spec: LIFE-34 LIFE-35
             let target = std::fs::read_link(&path).map_err(|e| MindError::io(&path, e))?;
@@ -274,7 +317,7 @@ fn collect_files_at(
                 target.to_string_lossy().into_owned().into_bytes(),
             ));
         } else if ft.is_dir() {
-            collect_files_at(root, &path, out, depth + 1)?;
+            collect_files_at(root, &path, out, depth + 1, ignore)?;
         } else {
             // spec: LIFE-35
             let rel = path

@@ -107,6 +107,11 @@ pub struct SourceMeta {
     /// under each listed repo-root-relative directory instead of the repo root.
     #[serde(default)]
     pub roots: Option<Vec<String>>,
+    /// Ignore patterns applied to every item of this source (IGN-1), matched
+    /// against paths relative to each ITEM's own path, not the repo root. An
+    /// item's own `[[items]].ignore` replaces this list for that item.
+    #[serde(default)]
+    pub ignore: Option<Vec<String>>,
     /// Flat skill layout (DSC-74). When true, convention discovery finds skills
     /// as bare-name directories with a direct `SKILL.md` under each scan root,
     /// with no `skills/` container. Default false (the DSC-10 container behavior).
@@ -192,6 +197,12 @@ pub struct ItemDecl {
     /// [`ItemDecl::resolved_item_hooks`]).
     #[serde(default)]
     pub hooks: Vec<Hook>,
+    /// Ignore patterns for this item (IGN-1), matched against paths relative to
+    /// the item's own path. When present this REPLACES `[source].ignore` for
+    /// this item rather than adding to it, matching how `[[items]]` overrides
+    /// `[source]` elsewhere. The built-in VCS set (IGN-2) applies either way.
+    #[serde(default)]
+    pub ignore: Option<Vec<String>>,
 }
 
 impl ItemDecl {

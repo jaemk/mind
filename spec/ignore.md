@@ -1,6 +1,6 @@
 # Ignored files
 
-Status: planned. Which files under an item's path are excluded from the store
+Status: done. Which files under an item's path are excluded from the store
 copy and from the content hash, so an item can point at a directory that holds
 more than the item itself.
 
@@ -50,8 +50,11 @@ computed it.
   build directory from a directory a skill deliberately ships, and guessing
   would silently drop a file the author meant to install.
 - `IGN-3` An entry is a glob matched against the item-relative path with `/` as
-  the separator, using the same `glob::Pattern` semantics the item selectors use
-  (CLI-31), so `*` does not cross a `/` and `**` does. A trailing `/` marks a
+  the separator, so `*` does not cross a `/` and `**` does. This is NOT the
+  matching the item selectors use (CLI-31): those match a flat item name, where
+  a separator never arises, and so they take the `glob` crate's default, in
+  which a bare `*` spans `/`. An ignore pattern names a path, so it is matched
+  with `require_literal_separator`. A trailing `/` marks a
   directory-only match (`scratch/` ignores the directory and everything under
   it, and never a file named `scratch`); without it an entry matches either. A
   directory that matches is not descended into, so its subtree costs nothing to
@@ -86,17 +89,26 @@ computed it.
   from the item. That is an authoring mistake, so it is a hard error at scan
   naming both entries, not a silent precedence rule.
 - `IGN-13` The ignore set does not affect DISCOVERY: convention scanning still
-  finds items under a scan root (DSC-10..13) regardless of any `ignore`, and an
-  item whose declared path is itself ignored is a hard error at scan rather than
-  an item that vanishes. `ignore` narrows what an item CONTAINS, never which
-  items a source offers; `[discover]` globs and `roots` are the mechanisms for
-  the latter.
+  finds items under a scan root (DSC-10..13) regardless of any `ignore`.
+  `ignore` narrows what an item CONTAINS, never which items a source offers;
+  `[discover]` globs and `roots` are the mechanisms for the latter. An item
+  cannot exclude ITSELF either, and not by a rule that forbids it: patterns are
+  matched against paths INSIDE the item, so the item's own path is never a
+  candidate, and the empty relative path never matches (which is what IGN-5
+  protects the anchor file within).
 
 ## Reproduction and migration
 
-- `IGN-20` `dump` (DUMP-1) emits each source's effective `ignore` lists so a
-  reproduced super-source installs the same file set, and therefore computes the
-  same hashes, as the source it was dumped from.
+- `IGN-20` `dump` (DUMP-1) emits nothing for `ignore`, and does not need to. An
+  ignore list is SOURCE truth: it lives in the source repo's own `mind.toml`, so
+  re-melding the source at the pinned commit reads the same lists and installs
+  the same file set, computing the same hashes. This is the difference between
+  `ignore` and the consumer-side directives dump does emit (`roots`,
+  `add-roots`, `flat-skills`, DUMP-4/10/11): those live in the CONSUMER's
+  registry, set by a `meld` flag, and would be lost on reproduction if dump did
+  not record them. There is deliberately no consumer-side ignore flag, since a
+  hash that depended on a local flag would differ between two machines melding
+  the same pinned source.
 - `IGN-21` Adding the built-in set (IGN-2) changes the hash of any already
   installed item whose tree contains one of those directories, so such an item
   reports as out of date once and `upgrade` re-installs it without the VCS

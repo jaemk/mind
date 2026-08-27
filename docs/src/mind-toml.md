@@ -55,7 +55,7 @@ follow-branch = "main"                   # pin: track a branch ...
 # pin-tag = "v2"                          # ... or fix to a tag ...
 # pin-ref = "a1b2c3d"                     # ... or to an exact commit (pick one)
 roots = ["packages"]                     # scan under these dirs, not the repo root
-ignore = ["scratch/", "**/*.tmp"]        # planned: exclude from install + hash
+ignore = ["scratch/", "**/*.tmp"]        # exclude from install + hash
 ```
 
 - **`namespace`** (previously `prefix`): every item installs as `<namespace>:<name>`
@@ -78,7 +78,7 @@ ignore = ["scratch/", "**/*.tmp"]        # planned: exclude from install + hash
 - **`roots`**: convention discovery scans under each listed directory instead of
   the repo root, for a monorepo or subtree layout. Ignored when the file is
   authoritative (`[[items]]`/`[discover]` paths are always repo-root-relative).
-- **`ignore`** (planned, not yet implemented): glob patterns, relative to each
+- **`ignore`**: glob patterns, relative to each
   item's own path, excluded from both the store copy and the content hash. Needed
   when an item's path holds more than the item, such as a top-level `SKILL.md`
   declared with `path = "."`: without it the store gets the repo's `.git/` and the

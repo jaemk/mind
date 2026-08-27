@@ -12,7 +12,6 @@ use std::path::PathBuf;
 use crate::catalog;
 use crate::config::Config;
 use crate::error::{ItemKind, Result};
-use crate::hash::hash_path;
 use crate::lock;
 use crate::manifest::Manifest;
 use crate::paths::Paths;
@@ -224,8 +223,14 @@ fn prune_memo_map(
 /// (matching `hash_path(..).ok()`, the CLI-75 rule). When the fingerprint itself
 /// cannot be computed, this falls back to hashing every time and caches nothing,
 /// so an unsupported-mtime platform behaves exactly as before the memo existed.
-fn memoized_hash(path: &std::path::Path) -> Option<String> {
-    let fingerprint = crate::hash::stat_fingerprint(path).ok();
+///
+/// spec: IGN-10 -- both the fingerprint and the hash take the ITEM's ignore
+/// set, so the memo measures the same tree the install wrote and the recorded
+/// manifest hash was computed from. A set that changes (the source edited its
+/// `ignore` list) also changes the fingerprint, since the newly excluded
+/// entries' stats were part of it, so the memo misses and re-hashes.
+fn memoized_hash(path: &std::path::Path, ignore: &crate::ignore::IgnoreSet) -> Option<String> {
+    let fingerprint = crate::hash::stat_fingerprint_ignoring(path, ignore).ok();
     if let Some(fp) = &fingerprint
         && let Ok(memo) = HASH_MEMO.lock()
         && let Some((cached_fp, cached_hash)) = memo.get(path)
@@ -233,7 +238,7 @@ fn memoized_hash(path: &std::path::Path) -> Option<String> {
     {
         return Some(cached_hash.clone());
     }
-    let hash = hash_path(path).ok()?;
+    let hash = crate::hash::hash_path_ignoring(path, ignore).ok()?;
     if let Some(fp) = fingerprint
         && let Ok(mut memo) = HASH_MEMO.lock()
     {
@@ -342,7 +347,10 @@ fn load_inner(paths: &Paths) -> Result<Snapshot> {
         let stale = matched.is_some_and(|ci| {
             // Memoized on the cheap stat fingerprint: the poll tick would
             // otherwise re-read every installed item's content every second.
-            let cur = memoized_hash(&ci.path);
+            let cur = ci
+                .ignore_set()
+                .ok()
+                .and_then(|ig| memoized_hash(&ci.path, &ig));
             let hash_drift = cur.as_deref().is_none_or(|h| h != it.hash);
             let rename_drift = ci.effective_name() != it.name;
             hash_drift || rename_drift
@@ -459,6 +467,7 @@ fn load_inner(paths: &Paths) -> Result<Snapshot> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hash::hash_path;
     use crate::paths::Paths;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -547,20 +556,20 @@ mod tests {
         std::fs::write(item.join("SKILL.md"), b"v1").unwrap();
 
         // Cold: computes and caches.
-        let first = memoized_hash(&item).expect("hash");
+        let first = memoized_hash(&item, &crate::ignore::IgnoreSet::default()).expect("hash");
         assert_eq!(
             first,
             hash_path(&item).unwrap(),
             "cold value must be correct"
         );
         // Warm: served from the memo, same value.
-        let second = memoized_hash(&item).expect("hash");
+        let second = memoized_hash(&item, &crate::ignore::IgnoreSet::default()).expect("hash");
         assert_eq!(second, first, "a memo hit must return the same hash");
 
         // Content change (also a size change): the fingerprint moves, so the
         // memo must recompute rather than serve the cached value.
         std::fs::write(item.join("SKILL.md"), b"v2 is longer than v1").unwrap();
-        let after = memoized_hash(&item).expect("hash");
+        let after = memoized_hash(&item, &crate::ignore::IgnoreSet::default()).expect("hash");
         assert_ne!(after, first, "a content change must invalidate the memo");
         assert_eq!(
             after,
@@ -583,9 +592,9 @@ mod tests {
         crate::paths::mkdir_p(&item).unwrap();
         std::fs::write(item.join("SKILL.md"), b"aaaaa").unwrap();
 
-        let first = memoized_hash(&item).expect("hash");
+        let first = memoized_hash(&item, &crate::ignore::IgnoreSet::default()).expect("hash");
         std::fs::write(item.join("SKILL.md"), b"bbbbb").unwrap();
-        let after = memoized_hash(&item).expect("hash");
+        let after = memoized_hash(&item, &crate::ignore::IgnoreSet::default()).expect("hash");
         assert_ne!(
             first, after,
             "a same-size content rewrite must invalidate the memo"
@@ -657,7 +666,8 @@ mod tests {
 
         let fake_hash = "0000000000000000000000000000000000000000000000000000000000000000";
         poison_memo_for_test(&item, fake_hash);
-        let served = memoized_hash(&item).expect("memoized_hash after poisoning");
+        let served = memoized_hash(&item, &crate::ignore::IgnoreSet::default())
+            .expect("memoized_hash after poisoning");
 
         assert_eq!(
             served, fake_hash,

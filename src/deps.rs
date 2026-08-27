@@ -1012,6 +1012,7 @@ mod tests {
             requires: Vec::new(),
             expand: Vec::new(),
             hooks: Vec::new(),
+            ignore: None,
         }
     }
 

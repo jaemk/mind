@@ -63,6 +63,13 @@ pub struct CatalogItem {
     /// `requires:` key (DEP-4). Whitespace-split raw strings as written, e.g.
     /// `["skill:x", "agent:y"]`. Empty when absent.
     pub requires: Vec<String>,
+    /// The item's effective ignore patterns (IGN-1), resolved at scan: the
+    /// item's own `[[items]].ignore` when it declared one, else the source's
+    /// `[source].ignore`. `None` until [`resolve_ignores`] fills it in, which
+    /// `scan_source_at` does for every item it produces; read it through
+    /// [`CatalogItem::ignore_set`] rather than directly, so the built-in VCS
+    /// set (IGN-2) is never accidentally skipped.
+    pub ignore: Option<Vec<String>>,
     /// Item-relative file paths opted into token expansion via the frontmatter
     /// `expand:` key (NS-57). Whitespace-split raw strings as written, e.g.
     /// `["resources/pr.py"]`. At install these non-markdown files are expanded
@@ -152,6 +159,40 @@ impl CatalogItem {
     /// identity and so cannot be sanitized in place.
     pub fn key(&self) -> ItemKey {
         ItemKey::new(format!("{}:{}", self.kind.as_str(), self.effective_name()))
+    }
+
+    /// This item's compiled ignore set (IGN-1/IGN-2): its resolved patterns
+    /// plus the built-in VCS directories, which apply whether or not the source
+    /// declared anything.
+    pub fn ignore_set(&self) -> Result<crate::ignore::IgnoreSet> {
+        crate::ignore::IgnoreSet::new(
+            self.ignore.as_deref().unwrap_or_default(),
+            &self.key().display(),
+        )
+    }
+
+    /// This item's content hash (LIFE-15), excluding what its ignore set
+    /// removes (IGN-10).
+    ///
+    /// Every drift comparison goes through here rather than calling
+    /// `hash::hash_path` on `self.path`: the recorded manifest hash was computed
+    /// with this item's ignores applied, so a comparison hash computed without
+    /// them would differ forever and report permanent, unfixable drift.
+    pub fn content_hash(&self) -> Result<String> {
+        crate::hash::hash_path_ignoring(&self.path, &self.ignore_set()?)
+    }
+
+    /// The item's anchor file, the one an ignore pattern may not exclude
+    /// (IGN-5): `SKILL.md` / `TOOL.md` for a directory item, and for a
+    /// single-file item the file itself, which is the item.
+    pub fn anchor_file(&self) -> Option<&'static str> {
+        match self.kind {
+            ItemKind::Skill => Some("SKILL.md"),
+            ItemKind::Tool => Some("TOOL.md"),
+            // An agent/rule item IS its file: `path` names the file, so there is
+            // nothing under the item an ignore pattern could match at all.
+            ItemKind::Agent | ItemKind::Rule => None,
+        }
     }
 
     /// Convenience for [`ItemKey::display`] on `self.key()` (DSC-95).
@@ -280,12 +321,22 @@ pub(crate) fn scan_source_at(
         .or_else(|| mindfile.as_ref().and_then(|m| m.source.prefix.clone()))
         .filter(|p| !p.is_empty());
 
+    // spec: IGN-1 -- the source-level list every item falls back to when it
+    // declared none of its own. Captured before the branches below so both the
+    // item-link path and the ordinary scan resolve against the same list.
+    let source_ignore: Vec<String> = mindfile
+        .as_ref()
+        .and_then(|m| m.source.ignore.clone())
+        .unwrap_or_default();
+    let scan_start = out.len();
+
     // spec: LNK-7 -- an item-link instance's catalog is exactly the linked
     // skill. The repo's declared inventory (an authoritative mind.toml, a
     // .claude-plugin/ manifest) does not gate it; the DSC-40 version gate and
     // the [source] metadata handled above still apply.
     if let Some(item_path) = &source.item_path {
-        return scan_item_link(clone_root, source, &prefix, item_path, out);
+        scan_item_link(clone_root, source, &prefix, item_path, out)?;
+        return resolve_ignores(&mut out[scan_start..], &source_ignore);
     }
 
     let base_start = out.len();
@@ -295,7 +346,80 @@ pub(crate) fn scan_source_at(
     // spec: DSC-86 -- add-root items use the layer's effective prefix: for a
     // single-plugin source that is the plugin-name default, so the whole meld
     // shares one namespace.
-    scan_add_roots(clone_root, source, &addroot_prefix, base_start, out)
+    scan_add_roots(clone_root, source, &addroot_prefix, base_start, out)?;
+    // spec: IGN-1 -- one resolution point for every item this scan produced,
+    // whatever discovery layer found it (convention, an authoritative
+    // mind.toml, a plugin manifest, or an added root).
+    resolve_ignores(&mut out[scan_start..], &source_ignore)
+}
+
+/// Fill in each item's effective ignore list and validate it (IGN-1/4/5/12).
+///
+/// An item that declared its own list keeps it (the list REPLACES the source's
+/// rather than adding to it); an item that declared none inherits the source's.
+/// The built-in VCS set is not stored here: it lives in
+/// [`crate::ignore::IgnoreSet`] and applies to every item either way, so it
+/// cannot be lost by an item declaring an empty list.
+fn resolve_ignores(items: &mut [CatalogItem], source_ignore: &[String]) -> Result<()> {
+    for item in items.iter_mut() {
+        if item.ignore.is_none() {
+            item.ignore = Some(source_ignore.to_vec());
+        }
+        // Compiling validates every pattern (IGN-4) at scan, so a malformed or
+        // unsafe entry is reported when the source is read rather than at the
+        // install that would silently not exclude what it names.
+        let set = item.ignore_set()?;
+
+        // spec: IGN-5 -- an item may not ignore the file that defines it, which
+        // would install it as an empty directory that discovery still offers.
+        if let Some(anchor) = item.anchor_file()
+            && set.is_under_ignored(std::path::Path::new(anchor))
+        {
+            let entry = item
+                .ignore
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .find(|e| {
+                    crate::ignore::IgnoreSet::new(std::slice::from_ref(e), "")
+                        .is_ok_and(|one| one.is_under_ignored(std::path::Path::new(anchor)))
+                })
+                .cloned()
+                .unwrap_or_else(|| anchor.to_string());
+            return Err(MindError::IgnoresOwnAnchor {
+                item: item.display_key(),
+                entry: crate::sanitize::strip_ansi(&entry),
+                anchor: anchor.to_string(),
+            });
+        }
+
+        // spec: IGN-12 -- `expand:` and `ignore` naming the same file
+        // contradict each other; that is an authoring mistake, named rather
+        // than resolved by a silent precedence rule.
+        for file in &item.expand {
+            let rel = std::path::Path::new(file);
+            if !set.is_under_ignored(rel) {
+                continue;
+            }
+            let entry = item
+                .ignore
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .find(|e| {
+                    crate::ignore::IgnoreSet::new(std::slice::from_ref(e), "")
+                        .is_ok_and(|one| one.is_under_ignored(rel))
+                })
+                .cloned()
+                .unwrap_or_else(|| "a built-in ignore".to_string());
+            return Err(MindError::ExpandsIgnoredFile {
+                item: item.display_key(),
+                file: crate::sanitize::strip_ansi(file),
+                entry: crate::sanitize::strip_ansi(&entry),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Catalog an item-link source instance (LNK-7): the one skill directory at
@@ -744,6 +868,7 @@ fn from_decl(
             install: decl.install.clone(),
             uninstall: decl.uninstall.clone(),
             hooks: Some(hooks),
+            ignore: decl.ignore.clone(),
         },
     )
 }
@@ -892,6 +1017,10 @@ struct ItemOverrides {
     /// from the resolved scalar fields alone (the convention/TOOL.md path, where
     /// there is no array form, DSC-21).
     hooks: Option<Vec<ResolvedHook>>,
+    /// The item's own `[[items]].ignore` (IGN-1), when it declared one. `None`
+    /// means "not declared", which `resolve_ignores` fills from the source
+    /// list; `Some(vec![])` is an explicit "no patterns" that overrides it.
+    ignore: Option<Vec<String>>,
 }
 
 /// The single `CatalogItem` constructor: it applies the override-then-frontmatter
@@ -986,6 +1115,9 @@ fn build_item(
         install,
         uninstall,
         requires,
+        // spec: IGN-1 -- carried as declared; `resolve_ignores` fills a `None`
+        // from the source-level list once the whole scan is in hand.
+        ignore: ov.ignore,
         expand,
         hooks,
     })
@@ -2289,6 +2421,7 @@ mod tests {
             requires: Vec::new(),
             expand: Vec::new(),
             hooks: Vec::new(),
+            ignore: None,
         }
     }
 
@@ -2365,6 +2498,7 @@ mod tests {
             requires: Vec::new(),
             expand: Vec::new(),
             hooks: Vec::new(),
+            ignore: None,
         };
         assert_eq!(item.resolved_bin(), None);
     }
@@ -2430,6 +2564,7 @@ mod tests {
             install: None,
             uninstall: None,
             hooks: Vec::new(),
+            ignore: None,
         };
         let err = from_decl(root, &source, &None, &decl).unwrap_err();
         assert!(
@@ -2458,6 +2593,7 @@ mod tests {
             install: None,
             uninstall: None,
             hooks: Vec::new(),
+            ignore: None,
         };
         let err = from_decl(root, &source, &None, &decl).unwrap_err();
         assert!(
@@ -2529,6 +2665,7 @@ mod tests {
             install: None,
             uninstall: None,
             hooks: Vec::new(),
+            ignore: None,
         };
         let err = from_decl(root, &source, &None, &decl).unwrap_err();
         assert!(
@@ -2554,6 +2691,7 @@ mod tests {
             install: None,
             uninstall: None,
             hooks: Vec::new(),
+            ignore: None,
         };
         let err = from_decl(root, &source, &None, &decl).unwrap_err();
         assert!(
@@ -2580,6 +2718,7 @@ mod tests {
             install: None,
             uninstall: None,
             hooks: Vec::new(),
+            ignore: None,
         };
         let err = from_decl(root, &source, &None, &decl).unwrap_err();
         assert!(
@@ -2837,6 +2976,7 @@ mod tests {
             install: None,
             uninstall: None,
             hooks: Vec::new(),
+            ignore: None,
         };
         let err = from_decl(root, &source, &None, &decl).unwrap_err();
         assert!(
@@ -2865,6 +3005,7 @@ mod tests {
             install: None,
             uninstall: None,
             hooks: Vec::new(),
+            ignore: None,
         };
         let err = from_decl(root, &source, &None, &decl).unwrap_err();
         assert!(
@@ -2892,6 +3033,7 @@ mod tests {
             install: None,
             uninstall: None,
             hooks: Vec::new(),
+            ignore: None,
         };
         // The file need not exist; frontmatter reads return None for absent files.
         let item = from_decl(root, &source, &None, &decl).unwrap();
@@ -2957,6 +3099,7 @@ mod tests {
             requires: Vec::new(),
             expand: Vec::new(),
             hooks: Vec::new(),
+            ignore: None,
         }
     }
 

@@ -1319,6 +1319,24 @@ pub(crate) fn item_files(item: &CatalogItem) -> Vec<PathBuf> {
         let mut files = Vec::new();
         collect_files(&item.path, &mut files);
         files.sort();
+        // spec: IGN-11 -- a file the ignore set excludes is not part of the
+        // item, so it is invisible to every pass that reads an item's tree:
+        // token expansion and its NS-57 `expand:` list, the reference scans,
+        // `review`'s findings, and the duplicate-tooling advisory. mind will
+        // not install it, so it cannot be a source of references mind resolves,
+        // and a finding against a file the user never receives is noise.
+        //
+        // A set that fails to compile cannot happen after a scan (`catalog`
+        // validates every pattern there, IGN-4), but falling back to the
+        // built-ins rather than to nothing keeps `.git/` out of the listing on
+        // any path that reached here another way.
+        let ignore = item
+            .ignore_set()
+            .unwrap_or_else(|_| crate::ignore::IgnoreSet::builtin());
+        files.retain(|f| {
+            let rel = f.strip_prefix(&item.path).unwrap_or(f);
+            !ignore.is_under_ignored(rel)
+        });
         files
     } else {
         vec![item.path.clone()]

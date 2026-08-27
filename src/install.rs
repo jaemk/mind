@@ -21,7 +21,6 @@ use std::sync::{Mutex, OnceLock};
 use crate::catalog::CatalogItem;
 use crate::error::BadRefReason::NoMatch;
 use crate::error::{ItemKind, MindError, Result};
-use crate::hash::hash_path;
 use crate::manifest::InstalledItem;
 use crate::namespace;
 use crate::paths::{Paths, mkdir_p};
@@ -127,13 +126,17 @@ pub fn install(
     if let Some(parent) = staging.parent() {
         mkdir_p(parent)?;
     }
-    copy_recursive(&item.path, &staging)?;
+    // spec: IGN-10 -- the copy and the hash below take the SAME ignore set, so
+    // the store holds exactly what the recorded hash measures. Computed once
+    // and shared rather than derived twice, so the two cannot fall out of step.
+    let ignore = item.ignore_set()?;
+    copy_recursive_ignoring(&item.path, &staging, &ignore)?;
     // Record the source hash now, while the tree just copied is still what is
     // on disk and any failure still aborts before the step-2 swap. Hashing it
     // after step 4 (as the InstalledItem literal used to) left a window where a
     // source read error surfaced with the backup already dropped: the new copy
     // swapped in and linked but never recorded in the manifest.
-    let hash = hash_path(&item.path)?;
+    let hash = crate::hash::hash_path_ignoring(&item.path, &ignore)?;
     if let Err(e) = expand_references(&staging, item, siblings, &store_root) {
         let _ = remove_path(&staging);
         return Err(e);
@@ -1077,12 +1080,32 @@ pub(crate) fn remove_path(path: &Path) -> Result<()> {
 /// Exported as `pub(crate)` so the surface shard's `--snapshot` frozen-copy can
 /// reuse this implementation without duplicating the symlink-rejection logic.
 pub(crate) fn copy_recursive(src: &Path, dst: &Path) -> Result<()> {
-    copy_recursive_at(src, dst, 0)
+    copy_recursive_at(src, dst, 0, src, &crate::ignore::IgnoreSet::default())
+}
+
+/// Copy an item tree, skipping what its ignore set excludes (IGN-10).
+///
+/// `root` stays the item root across the recursion so a pattern is matched
+/// against the ITEM-relative path, which is how they are written in
+/// `mind.toml`. An ignored directory is not descended into, so its subtree
+/// costs nothing to skip and cannot contribute a file by another route.
+pub(crate) fn copy_recursive_ignoring(
+    src: &Path,
+    dst: &Path,
+    ignore: &crate::ignore::IgnoreSet,
+) -> Result<()> {
+    copy_recursive_at(src, dst, 0, src, ignore)
 }
 
 // spec: LIFE-52 -- depth-capped; LIFE-42's symlink rejection already blocks
 // cycle-driven recursion, the cap covers plain deep nesting.
-fn copy_recursive_at(src: &Path, dst: &Path, depth: usize) -> Result<()> {
+fn copy_recursive_at(
+    src: &Path,
+    dst: &Path,
+    depth: usize,
+    root: &Path,
+    ignore: &crate::ignore::IgnoreSet,
+) -> Result<()> {
     if depth > MAX_ITEM_TREE_DEPTH {
         return Err(depth_exceeded(src));
     }
@@ -1102,8 +1125,15 @@ fn copy_recursive_at(src: &Path, dst: &Path, depth: usize) -> Result<()> {
         for entry in rd {
             let entry = entry.map_err(|e| MindError::io(src, e))?;
             let from = entry.path();
+            // spec: IGN-10 -- excluded here, and by the identical test in the
+            // hash walk, so what is not installed is not hashed.
+            let rel = from.strip_prefix(root).unwrap_or(&from);
+            let is_dir = from.is_dir();
+            if ignore.is_ignored(rel, is_dir) {
+                continue;
+            }
             let to = dst.join(entry.file_name());
-            copy_recursive_at(&from, &to, depth + 1)?;
+            copy_recursive_at(&from, &to, depth + 1, root, ignore)?;
         }
     } else {
         if let Some(parent) = dst.parent() {
@@ -1281,6 +1311,7 @@ mod tests {
             requires: Vec::new(),
             expand: Vec::new(),
             hooks: Vec::new(),
+            ignore: None,
         }
     }
 
@@ -1334,6 +1365,7 @@ mod tests {
             requires,
             expand: Vec::new(),
             hooks: Vec::new(),
+            ignore: None,
         }
     }
 
@@ -1353,6 +1385,7 @@ mod tests {
             requires: Vec::new(),
             expand: Vec::new(),
             hooks: Vec::new(),
+            ignore: None,
         }
     }
 
@@ -1474,6 +1507,7 @@ mod tests {
             requires: Vec::new(),
             expand: Vec::new(),
             hooks: Vec::new(),
+            ignore: None,
         };
         let rule = CatalogItem {
             kind: ItemKind::Rule,
@@ -1490,6 +1524,7 @@ mod tests {
             requires: Vec::new(),
             expand: Vec::new(),
             hooks: Vec::new(),
+            ignore: None,
         };
         let siblings = vec![item.clone(), agent, rule];
 
@@ -1540,6 +1575,7 @@ mod tests {
             requires: Vec::new(),
             expand: Vec::new(),
             hooks: Vec::new(),
+            ignore: None,
         };
         let rule = CatalogItem {
             kind: ItemKind::Rule,
@@ -1556,6 +1592,7 @@ mod tests {
             requires: Vec::new(),
             expand: Vec::new(),
             hooks: Vec::new(),
+            ignore: None,
         };
         let siblings = vec![item.clone(), agent, rule];
 
@@ -2073,6 +2110,7 @@ mod tests {
             requires: Vec::new(),
             expand: Vec::new(),
             hooks: Vec::new(),
+            ignore: None,
         };
 
         // force=true: lobe1's link is stashed then overwritten with a symlink;

@@ -529,6 +529,48 @@ pub enum MindError {
         remedy: String,
     },
 
+    /// IGN-4: an `ignore` entry that is not usable as a pattern (empty,
+    /// absolute, `~`-rooted, escaping via `..`, NUL-carrying, or a malformed
+    /// glob). A hard error rather than a silently inert entry: an entry that
+    /// never matches reads at a glance exactly like one that does, so the
+    /// author would believe files are excluded that are being installed and
+    /// hashed.
+    ///
+    /// DSC-95: `item` and `entry` are source-controlled (`mind.toml` text), so
+    /// both are sanitized at the construction site.
+    #[error("{item}: invalid ignore pattern '{entry}': {reason}")]
+    BadIgnorePattern {
+        item: String,
+        entry: String,
+        reason: String,
+    },
+
+    /// IGN-5: an `ignore` entry that would exclude the item's own anchor file
+    /// (`SKILL.md`, `TOOL.md`, or the single file that IS an agent/rule item).
+    /// Without this an item could be declared and then install as an empty
+    /// directory, which discovery still offers and the harness cannot use.
+    #[error(
+        "{item}: ignore pattern '{entry}' would exclude the item's own {anchor}; an item cannot ignore the file that defines it"
+    )]
+    IgnoresOwnAnchor {
+        item: String,
+        entry: String,
+        anchor: String,
+    },
+
+    /// IGN-12: a file listed in `expand:` (NS-57) that the ignore set removes
+    /// from the item. The two directives contradict: `expand:` asks for token
+    /// expansion in a file `ignore` says is not part of the item. An authoring
+    /// mistake, so it names both rather than resolving silently by precedence.
+    #[error(
+        "{item}: '{file}' is listed in `expand:` but is excluded by the ignore pattern '{entry}'; a file cannot be both expanded and ignored"
+    )]
+    ExpandsIgnoredFile {
+        item: String,
+        file: String,
+        entry: String,
+    },
+
     /// CLI-236: a `meld --learn <GLOB>` value that is not usable as a pattern
     /// at all (empty, source-qualified, malformed as a ref, or a malformed
     /// glob). `reason` is a short clause naming which, so the four cases are
@@ -1258,6 +1300,9 @@ impl MindError {
             MindError::InvalidRoot { .. } => "invalid-root",
             MindError::LinkNotASkill { .. } => "link-not-a-skill",
             MindError::LinkRefUnsatisfiable { .. } => "link-ref-unsatisfiable",
+            MindError::BadIgnorePattern { .. } => "bad-ignore-pattern",
+            MindError::IgnoresOwnAnchor { .. } => "ignores-own-anchor",
+            MindError::ExpandsIgnoredFile { .. } => "expands-ignored-file",
             MindError::InvalidLearnPattern { .. } => "invalid-learn-pattern",
             MindError::LearnPatternNoMatch { .. } => "learn-pattern-no-match",
             MindError::DuplicateItem { .. } => "duplicate-item",

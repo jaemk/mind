@@ -10,6 +10,7 @@ mod git;
 mod hash;
 mod hook;
 mod hooks_cmd;
+mod ignore;
 mod install;
 mod lock;
 mod manifest;

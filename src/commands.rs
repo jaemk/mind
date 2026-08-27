@@ -9,7 +9,6 @@ use crate::catalog::{self, CatalogItem};
 use crate::config::Config;
 use crate::error::{ItemKind, MindError, Result};
 use crate::git;
-use crate::hash::hash_path;
 use crate::install;
 use crate::manifest::Manifest;
 use crate::mindfile::AuthFailureAction;
@@ -4898,7 +4897,7 @@ fn source_status(paths: &Paths, source_name: &str) -> Result<()> {
                 // rather than being silently read as "up to date". The same
                 // hash-error-counts-as-lag rule is applied at all four marker
                 // sites for consistency.
-                let hash_lag = hash_path(&it.path).map_or(true, |h| h != m.hash);
+                let hash_lag = it.content_hash().map_or(true, |h| h != m.hash);
                 let rename_lag = it.effective_name() != m.name;
                 let stale = hash_lag || rename_lag;
                 let lag = if stale {
@@ -7045,7 +7044,7 @@ fn upgrade_inner_scoped(
             // Source dropped or item removed upstream; reported by introspect.
             continue;
         };
-        let new_hash = hash_path(&cat.path)?;
+        let new_hash = cat.content_hash()?;
         let new_name = cat.effective_name();
         let new_commit = registry
             .find(&installed.source)
@@ -7832,7 +7831,7 @@ pub fn recall(
             }) {
                 // CLI-75: a hash error counts as drift (see the recall listing
                 // site); the marker errs toward flagging rather than hiding it.
-                let hash_lag = hash_path(&cat.path).map_or(true, |h| h != found.hash);
+                let hash_lag = cat.content_hash().map_or(true, |h| h != found.hash);
                 let rename_lag = cat.effective_name() != found.name;
                 if hash_lag || rename_lag {
                     println!(
@@ -7995,7 +7994,7 @@ pub fn recall(
                     // changed (rename). Commit advance alone does not trigger this.
                     // CLI-75: a hash error counts as drift (see the recall listing
                     // site); the marker errs toward flagging rather than hiding it.
-                    let hash_lag = hash_path(&it.path).map_or(true, |h| h != m.hash);
+                    let hash_lag = it.content_hash().map_or(true, |h| h != m.hash);
                     let rename_lag = it.effective_name() != m.name;
                     let lag = hash_lag || rename_lag;
                     let outdated = if lag {
@@ -8151,7 +8150,7 @@ pub fn probe(
                     kind: it.kind.as_str(),
                     name: it.display_effective_name(),
                     source: crate::sanitize::strip_ansi(&it.source),
-                    hash: hash_path(&it.path).ok(),
+                    hash: it.content_hash().ok(),
                     description: it.description.as_deref().map(crate::sanitize::strip_ansi),
                     unmanaged: false,
                     dependencies,
@@ -8192,7 +8191,7 @@ pub fn probe(
 
     let mut rows = Vec::new();
     for (_, it) in &hits {
-        let cur = hash_path(&it.path).ok();
+        let cur = it.content_hash().ok();
         let hash = cur.as_deref().map(short).unwrap_or_else(|| "-".into());
         // The matched installed item, if any, for the install marker and the
         // out-of-date check (CLI-75).
@@ -8544,7 +8543,7 @@ pub fn introspect(paths: &Paths, fix: bool, json: bool) -> Result<()> {
                             cat.effective_name()
                         ),
                     });
-                } else if let Ok(h) = hash_path(&cat.path)
+                } else if let Ok(h) = cat.content_hash()
                     && h != it.hash
                 {
                     issues.push(Issue {
@@ -9777,6 +9776,7 @@ mod tests {
             requires,
             expand: Vec::new(),
             hooks: Vec::new(),
+            ignore: None,
         }
     }
 
