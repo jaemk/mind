@@ -55,6 +55,7 @@ follow-branch = "main"                   # pin: track a branch ...
 # pin-tag = "v2"                          # ... or fix to a tag ...
 # pin-ref = "a1b2c3d"                     # ... or to an exact commit (pick one)
 roots = ["packages"]                     # scan under these dirs, not the repo root
+ignore = ["scratch/", "**/*.tmp"]        # planned: exclude from install + hash
 ```
 
 - **`namespace`** (previously `prefix`): every item installs as `<namespace>:<name>`
@@ -77,6 +78,15 @@ roots = ["packages"]                     # scan under these dirs, not the repo r
 - **`roots`**: convention discovery scans under each listed directory instead of
   the repo root, for a monorepo or subtree layout. Ignored when the file is
   authoritative (`[[items]]`/`[discover]` paths are always repo-root-relative).
+- **`ignore`** (planned, not yet implemented): glob patterns, relative to each
+  item's own path, excluded from both the store copy and the content hash. Needed
+  when an item's path holds more than the item, such as a top-level `SKILL.md`
+  declared with `path = "."`: without it the store gets the repo's `.git/` and the
+  item reads as drifted after every commit. A `[[items]].ignore` replaces this
+  list for that item. Version-control directories (`.git`, `.hg`, `.svn`, `.bzr`)
+  are excluded with or without a declaration; build output such as `target/` or
+  `node_modules/` is not, and must be listed. See
+  [spec/ignore.md](https://github.com/jaemk/mind/blob/main/spec/ignore.md).
 
 ## `[[hooks]]` - lifecycle hooks
 

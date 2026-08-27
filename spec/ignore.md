@@ -1,0 +1,106 @@
+# Ignored files
+
+Status: planned. Which files under an item's path are excluded from the store
+copy and from the content hash, so an item can point at a directory that holds
+more than the item itself.
+
+## Overview
+
+An item's path names a directory (a skill or tool) whose entire tree is copied
+into the store at install and walked to compute the content hash that drives
+drift and `upgrade` (LIFE-15). Today that tree is taken whole: `install.rs`'s
+`copy_recursive` and `hash.rs`'s `collect_files_at` both walk every entry with
+no exclusions.
+
+That is fine while an item's directory holds only the item. It breaks as soon as
+the item's path IS the repo root, which a source declares to ship a top-level
+`SKILL.md`:
+
+```toml
+[[items]]
+kind = "skill"
+name = "root-skill"
+path = "."
+```
+
+The store copy then contains `.git/`, and the hash covers it, so the item reads
+as drifted after any local commit, fetch, or even a `git gc` in the source
+clone. `upgrade` offers a change that is not a change to the skill.
+
+The fix is an ignore mechanism with one rule shared by both walks: what is not
+installed is not hashed. Ignores are source truth, declared in `mind.toml`, so
+the hash of an item is a property of the source and not of the machine that
+computed it.
+
+## What is ignored
+
+- `IGN-1` An item's ignore set is the union of a built-in set (IGN-2), the
+  source-level `[source].ignore` list, and the item's own `[[items]].ignore`
+  list, matched against paths relative to the ITEM's path (not the repo root).
+  An item-level list replaces the source-level list for that item rather than
+  adding to it, matching how `[[items]]` overrides `[source]` elsewhere; the
+  built-in set applies either way.
+- `IGN-2` The built-in set is the version-control metadata directories `.git`,
+  `.hg`, `.svn`, and `.bzr`, excluded from every item's copy and hash whether or
+  not the source declares anything. They are never part of an item: a source
+  control directory inside an installed skill is at best dead weight in the
+  store and at worst a second repository inside the user's agent home. This is
+  the whole of the built-in set: build and dependency output (`target/`,
+  `node_modules/`, `__pycache__/`) is NOT implied, since mind cannot tell a
+  build directory from a directory a skill deliberately ships, and guessing
+  would silently drop a file the author meant to install.
+- `IGN-3` An entry is a glob matched against the item-relative path with `/` as
+  the separator, using the same `glob::Pattern` semantics the item selectors use
+  (CLI-31), so `*` does not cross a `/` and `**` does. A trailing `/` marks a
+  directory-only match (`scratch/` ignores the directory and everything under
+  it, and never a file named `scratch`); without it an entry matches either. A
+  directory that matches is not descended into, so its subtree costs nothing to
+  skip.
+- `IGN-4` An ignore entry is a safe relative path pattern: not absolute, not
+  `~`-rooted, no `..` component, no NUL (the DSC-71..73 rule applied to a
+  pattern). A violation is a hard `mind.toml` error at scan, named like the
+  other malformed-declaration errors, rather than a silently inert entry.
+- `IGN-5` An ignore entry may not exclude the item's own anchor file: a skill's
+  `SKILL.md`, a tool's `TOOL.md`, or the single file that IS an agent or rule
+  item. An entry that would is a hard error at scan. Without this an item could
+  be declared and then install as an empty directory, which discovery would
+  still offer and the harness would find unusable.
+
+## Where it applies
+
+- `IGN-10` The ignore set is applied identically by the install copy and by the
+  content hash. This is the point of the feature, not an implementation detail:
+  hashing a file that is not installed makes `upgrade` offer changes the user
+  cannot see in the installed item, and installing a file that is not hashed
+  makes a change to it invisible to drift detection. Both walks are already
+  depth-capped (LIFE-52) and stay so.
+- `IGN-11` A file excluded by the ignore set is invisible to every other pass
+  that reads an item's tree: `{{ns:}}` / `{{tools:}}` / `{{path:}}` token
+  expansion and its NS-57 `expand:` list, the reference scans (NS-20, LNK-18),
+  `review`'s findings (CLI-130..139), and the `duplicate-tooling` advisory
+  (CLI-144). A file mind will not install cannot be a source of references mind
+  resolves, and reporting a finding against a file the user will never receive
+  is noise.
+- `IGN-12` `expand:` (NS-57) and `ignore` are contradictory when they name the
+  same file: `expand:` asks for token expansion in a file that `ignore` removes
+  from the item. That is an authoring mistake, so it is a hard error at scan
+  naming both entries, not a silent precedence rule.
+- `IGN-13` The ignore set does not affect DISCOVERY: convention scanning still
+  finds items under a scan root (DSC-10..13) regardless of any `ignore`, and an
+  item whose declared path is itself ignored is a hard error at scan rather than
+  an item that vanishes. `ignore` narrows what an item CONTAINS, never which
+  items a source offers; `[discover]` globs and `roots` are the mechanisms for
+  the latter.
+
+## Reproduction and migration
+
+- `IGN-20` `dump` (DUMP-1) emits each source's effective `ignore` lists so a
+  reproduced super-source installs the same file set, and therefore computes the
+  same hashes, as the source it was dumped from.
+- `IGN-21` Adding the built-in set (IGN-2) changes the hash of any already
+  installed item whose tree contains one of those directories, so such an item
+  reports as out of date once and `upgrade` re-installs it without the VCS
+  directory. That is a real content change (the store copy loses files) and is
+  reported as an ordinary upgrade, not suppressed. In practice this reaches only
+  items whose path is a repo root or a submodule, which is the case this feature
+  exists to fix.

@@ -246,6 +246,7 @@ and verified.
 | `meld <repo> --learn <NAME\|GLOB>` installs only the matching subset (repeatable, matches bare or effective name, dependency closure applies, conflicts with `--register-only`) | done | CLI-236 |
 | An item link's unsatisfiable intra-source references: a `requires` entry is dropped with a warning, a sibling-naming token errors; both name the unmeld-then-`meld --learn` remedy | done | LNK-18 |
 | A dropped `requires` is recorded on the installed item and surfaced by `recall`, `recall --json`, and `introspect` | done | LNK-19 |
+| Ignored files: `[source].ignore` / `[[items]].ignore` plus a built-in VCS set exclude paths from both the store copy and the content hash, so an item can point at a directory holding more than itself | planned | [ignore.md](ignore.md) (IGN-1..21) |
 
 ## Documents
 
@@ -289,6 +290,9 @@ and verified.
   repo published for the built-in plugin system melds without re-packaging; the
   manifest is an input (a source), not a sink, and the store+symlink install model
   is unchanged.
+- [ignore.md](ignore.md) - ignored files: which paths under an item are excluded
+  from the store copy and the content hash, so an item can point at a directory
+  that holds more than the item itself (a top-level `SKILL.md` at a repo root).
 
 ## Conventions
 
