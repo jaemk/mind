@@ -9,6 +9,8 @@
 
 use std::path::PathBuf;
 
+use cached::cached;
+
 use crate::catalog;
 use crate::config::Config;
 use crate::error::{ItemKind, Result};
@@ -148,40 +150,77 @@ pub struct SnapshotUnmanaged {
     pub paths: Vec<PathBuf>,
 }
 
-/// Memo of item content hashes for the TUI's staleness check, keyed by item
-/// path, holding `(stat_fingerprint, content_hash)`.
+/// The content hash of `path` as of `fingerprint`, memoized on both.
 ///
 /// The poll tick runs about once a second and computes TUI-63 staleness for
 /// every installed item, which means a full content hash of every item's source
 /// tree. For a markdown skill that is trivial; for a `tool` directory carrying a
-/// vendored binary it is tens of megabytes re-read per second. The memo replaces
-/// that with the same directory walk reading only a cheap stat fingerprint
-/// (`hash::stat_fingerprint`: `mtime`, `size`, and -- under `cfg(unix)` -- `ctime`
-/// and inode number), and re-reads content only when that fingerprint changes.
+/// vendored binary it is tens of megabytes re-read per second. The cheap stat
+/// fingerprint (`hash::stat_fingerprint_ignoring`: `mtime`, `size`, and -- under
+/// `cfg(unix)` -- `ctime` and inode number) stands in for the content: it is
+/// part of the KEY, not a token stored beside the value and compared by hand,
+/// so a tree that changed simply misses and re-reads. There is no validity
+/// check to get wrong, and no way to serve a value whose fingerprint does not
+/// match the one asked for.
+///
+/// `ignore` is deliberately NOT part of the key. A changed ignore set changes
+/// which entries the fingerprint walk sees, so it already moves the
+/// fingerprint; and two ignore sets that walk the identical set of files agree
+/// on the content hash too, so they are interchangeable here (IGN-10).
+///
+/// Bounded by `max_size`: an entry is added per path per distinct fingerprint
+/// it has been observed at, so a long session with many edits is capped by LRU
+/// eviction rather than growing for the life of the process. `None` is not
+/// cached (`cached`'s default for an `Option` return), so a hash failure is
+/// retried on the next tick instead of being remembered as a failure.
 ///
 /// Display-side only (TUI-72): `upgrade`/`introspect`/`recall` all call
 /// `CatalogItem::content_hash` directly, never this memo, so a missed
 /// fingerprint change can never change what a verb ACTS on -- at most it makes
 /// the TUI-63 confirm modal list fewer stale items than the no-sync apply
-/// (TUI-73) then acts on, since that apply always re-hashes for real. A miss
-/// is NOT bounded to "one tick": with no TTL, it is served for the life of
-/// the process, until the item's path leaves the current catalog (its source
-/// is unmelded, or the item is removed upstream), at which point the next
-/// full load's
-/// [`prune_hash_memo`] evicts it. `stat_fingerprint`'s `ctime`/inode fields
-/// close the realistic miss case -- a same-size, mtime-preserving replace
-/// (`cp -p`, `rsync -a`, `tar -p`, `touch -r`) -- but the fingerprint is still
-/// not a content hash and must never be compared against a recorded manifest
-/// hash.
-static HASH_MEMO: std::sync::Mutex<std::collections::BTreeMap<PathBuf, (String, String)>> =
-    std::sync::Mutex::new(std::collections::BTreeMap::new());
+/// (TUI-73) then acts on, since that apply always re-hashes for real. A miss is
+/// NOT bounded to "one tick": with no TTL it is served until the entry is
+/// evicted by LRU pressure. `stat_fingerprint`'s `ctime`/inode fields close the
+/// realistic miss case -- a same-size, mtime-preserving replace (`cp -p`,
+/// `rsync -a`, `tar -p`, `touch -r`) -- but the fingerprint is still not a
+/// content hash and must never be compared against a recorded manifest hash.
+/// The capacity has to sit above the number of installed items, not merely at
+/// a plausible one. `load_inner` calls this once per installed item per tick,
+/// in the same order every time, which is a cyclic sequential scan: the worst
+/// case for LRU. At N items with a capacity of C, the hit rate is ~100% while
+/// N <= C and collapses to ~0% the moment N > C, because each tick evicts
+/// exactly the entries the next tick reaches for first. That is a cliff, not a
+/// slope, and past it the memo costs a full re-read of every item tree every
+/// second: precisely what it exists to prevent. Entries are roughly 100 bytes,
+/// so 4096 costs well under a megabyte and clears any realistic install by a
+/// wide margin. Raise it rather than let it be approached. The number is
+/// pinned by `the_memo_capacity_clears_any_realistic_installed_item_count`;
+/// `max_size` takes a literal, so changing it means changing both. See TUI-72.
+#[cached(
+    name = "HASH_MEMO",
+    max_size = 4096,
+    key = "(PathBuf, String)",
+    convert = r#"{ (path.to_path_buf(), fingerprint.to_string()) }"#
+)]
+fn hash_at_fingerprint(
+    path: &std::path::Path,
+    fingerprint: &str,
+    ignore: &crate::ignore::IgnoreSet,
+) -> Option<String> {
+    // `fingerprint` is key-only: the `convert` above folds it into the cache
+    // key, and reaching this body at all means that key missed, so there is
+    // nothing left to compare it against. Binding it keeps the parameter from
+    // reading as dead while saying why it is not used.
+    let _ = fingerprint;
+    crate::hash::hash_path_ignoring(path, ignore).ok()
+}
 
-/// Test-only: directly seed `HASH_MEMO` with a `(fingerprint, hash)` pair
-/// computed against `path`'s CURRENT stat fingerprint, but an arbitrary
-/// (possibly wrong) `fake_hash`. This simulates "the memo believes this path
-/// is clean" independent of whatever `path`'s real content hash is right now.
+/// Test-only: seed `HASH_MEMO` with the entry `memoized_hash` would look up
+/// for `path` under `ignore`, but carrying an arbitrary (possibly wrong)
+/// `fake_hash`. This simulates "the memo believes this path is clean"
+/// independent of whatever `path`'s real content hash is right now.
 ///
-/// Needed because `hash::stat_fingerprint` now folds in `ctime`/inode under
+/// Needed because `stat_fingerprint_ignoring` folds in `ctime`/inode under
 /// `cfg(unix)` (a prior commit closed the mtime-preserving blind spot), so a
 /// real on-disk edit always moves the fingerprint and the memo always
 /// recomputes -- there is no longer a realistic sequence of filesystem calls
@@ -190,52 +229,39 @@ static HASH_MEMO: std::sync::Mutex<std::collections::BTreeMap<PathBuf, (String, 
 /// prove the display-only `stale` flag `load_inner` computes via
 /// `memoized_hash` really can lag reality (TUI-72).
 ///
-/// M11: a caller must assert directly against [`memoized_hash`] (or another
-/// call that never reaches [`load_inner`]/`prune_hash_memo`), never through a
+/// Takes the SAME `ignore` the matching `memoized_hash` call will pass, and
+/// builds the key the same way it does. The two must not diverge: the
+/// fingerprint is half the key now, so a helper that computed it from a
+/// different ignore set would seed an entry nothing ever looks up, and the
+/// test would fail reporting "served the real hash" rather than naming the
+/// mismatch.
+///
+/// A caller must assert directly against [`memoized_hash`], never through a
 /// full `load`/`try_poll` with other work interleaved between the poison and
-/// the read. `HASH_MEMO` is one `static` shared by the whole test binary, and
-/// any concurrently running test that reaches `load_inner` prunes it down to
-/// ITS OWN catalog's paths (`prune_hash_memo`), evicting this entry along the
-/// way; the shorter the gap between poisoning and reading, the smaller that
-/// window.
+/// the read. `HASH_MEMO` is one `static` shared by the whole test binary, so a
+/// concurrently running test that inserts enough entries can evict this one
+/// under LRU pressure; the shorter the gap between poisoning and reading, the
+/// smaller that window.
 #[cfg(test)]
-pub(crate) fn poison_memo_for_test(path: &std::path::Path, fake_hash: &str) {
-    if let Ok(fp) = crate::hash::stat_fingerprint(path)
-        && let Ok(mut memo) = HASH_MEMO.lock()
-    {
-        memo.insert(path.to_path_buf(), (fp, fake_hash.to_string()));
-    }
-}
-
-/// Bound `HASH_MEMO` to the paths currently present in the catalog (TUI-72,
-/// L14): without this, an unmelded source or a removed item leaves its entry
-/// in the memo for the life of the process, since the memo is otherwise
-/// insert-only and nothing else ever evicts a key. Called once per full load
-/// with the freshly scanned catalog's item paths, so the memo's size tracks
-/// "items observed in the current catalog", not "every path ever seen this
-/// session".
-fn prune_hash_memo(live_paths: &std::collections::HashSet<PathBuf>) {
-    if let Ok(mut memo) = HASH_MEMO.lock() {
-        prune_memo_map(&mut memo, live_paths);
-    }
-}
-
-/// The actual eviction logic behind [`prune_hash_memo`], split out so it can
-/// be unit-tested against a local map rather than the process-global
-/// `HASH_MEMO` (which every test in this module shares, so a test that pruned
-/// the real static could race a concurrently running test's own `load` call).
-fn prune_memo_map(
-    memo: &mut std::collections::BTreeMap<PathBuf, (String, String)>,
-    live_paths: &std::collections::HashSet<PathBuf>,
+pub(crate) fn poison_memo_for_test(
+    path: &std::path::Path,
+    ignore: &crate::ignore::IgnoreSet,
+    fake_hash: &str,
 ) {
-    memo.retain(|path, _| live_paths.contains(path));
+    use cached::Cached as _;
+    if let Ok(fp) = crate::hash::stat_fingerprint_ignoring(path, ignore) {
+        HASH_MEMO
+            .write()
+            .cache_set((path.to_path_buf(), fp), fake_hash.to_string());
+    }
 }
 
-/// The content hash of `path`, reusing the memo when the cheap stat fingerprint
-/// is unchanged. `None` on any hash failure, which callers treat as drift
-/// (matching `content_hash().ok()`, the CLI-75 rule). When the fingerprint itself
-/// cannot be computed, this falls back to hashing every time and caches nothing,
-/// so an unsupported-mtime platform behaves exactly as before the memo existed.
+/// The content hash of `path`, served from [`hash_at_fingerprint`]'s memo when
+/// the tree's cheap stat fingerprint is one already seen. `None` on any hash
+/// failure, which callers treat as drift (matching `content_hash().ok()`, the
+/// CLI-75 rule). When the fingerprint itself cannot be computed, this falls back
+/// to hashing every time and caches nothing, so an unsupported-mtime platform
+/// behaves exactly as before the memo existed.
 ///
 /// spec: IGN-10 -- both the fingerprint and the hash take the ITEM's ignore
 /// set, so the memo measures the same tree the install wrote and the recorded
@@ -243,21 +269,10 @@ fn prune_memo_map(
 /// `ignore` list) also changes the fingerprint, since the newly excluded
 /// entries' stats were part of it, so the memo misses and re-hashes.
 fn memoized_hash(path: &std::path::Path, ignore: &crate::ignore::IgnoreSet) -> Option<String> {
-    let fingerprint = crate::hash::stat_fingerprint_ignoring(path, ignore).ok();
-    if let Some(fp) = &fingerprint
-        && let Ok(memo) = HASH_MEMO.lock()
-        && let Some((cached_fp, cached_hash)) = memo.get(path)
-        && cached_fp == fp
-    {
-        return Some(cached_hash.clone());
+    match crate::hash::stat_fingerprint_ignoring(path, ignore).ok() {
+        Some(fp) => hash_at_fingerprint(path, &fp, ignore),
+        None => crate::hash::hash_path_ignoring(path, ignore).ok(),
     }
-    let hash = crate::hash::hash_path_ignoring(path, ignore).ok()?;
-    if let Some(fp) = fingerprint
-        && let Ok(mut memo) = HASH_MEMO.lock()
-    {
-        memo.insert(path.to_path_buf(), (fp, hash.clone()));
-    }
-    Some(hash)
 }
 
 /// Load the initial snapshot under a blocking shared lock (called once at
@@ -312,13 +327,6 @@ fn load_inner(paths: &Paths) -> Result<Snapshot> {
     let registry = Registry::load(paths)?;
     let manifest = Manifest::load(paths)?;
     let catalog_items = catalog::scan(paths, &registry)?;
-
-    // spec: TUI-72 - bound HASH_MEMO to the current catalog's paths before it
-    // is consulted below, so an unmelded source's or a removed item's stale
-    // entry does not linger for the rest of the process.
-    let live_paths: std::collections::HashSet<PathBuf> =
-        catalog_items.iter().map(|c| c.path.clone()).collect();
-    prune_hash_memo(&live_paths);
 
     // L10: one sibling index for both passes below. Each walks every item, so
     // rebuilding it per row (what `deps::direct_dependency_keys` does) made a
@@ -634,49 +642,69 @@ mod tests {
 
     // spec: TUI-72
     #[test]
-    fn prune_memo_map_evicts_paths_no_longer_in_the_catalog() {
-        // L14: HASH_MEMO is otherwise insert-only, so a path whose item was
-        // unmelded or removed upstream would sit in the memo for the life of
-        // the process. `prune_memo_map` (the logic behind `prune_hash_memo`)
-        // bounds it to the live path set. Exercised against a LOCAL map, not
-        // the process-global `HASH_MEMO`: every test in this module shares
-        // that static, so pruning it directly here could race a concurrently
-        // running test's own `load` call, which prunes it too.
-        let p1 = PathBuf::from("/fake/still-in-catalog");
-        let p2 = PathBuf::from("/fake/dropped-from-catalog");
-        let mut memo = std::collections::BTreeMap::new();
-        memo.insert(p1.clone(), ("fp1".to_string(), "hash1".to_string()));
-        memo.insert(p2.clone(), ("fp2".to_string(), "hash2".to_string()));
-
-        // Prune to a live set that no longer includes p2 (as if its source
-        // was unmelded or the item was removed upstream).
-        let mut live = std::collections::HashSet::new();
-        live.insert(p1.clone());
-        prune_memo_map(&mut memo, &live);
-
-        assert!(
-            memo.contains_key(&p1),
-            "a path still in the catalog must survive pruning"
-        );
-        assert!(
-            !memo.contains_key(&p2),
-            "a path no longer in the catalog must be evicted, not retained forever"
+    fn the_memo_capacity_clears_any_realistic_installed_item_count() {
+        // The number itself is the thing worth pinning. `load_inner` hashes
+        // every installed item once per tick in a stable order, so the memo
+        // sees a cyclic sequential scan: at N items over capacity C, LRU
+        // evicts exactly what the next tick wants first and the hit rate goes
+        // to ~0, re-reading every tree every second. Asserting `size <=
+        // capacity` instead would be a tautology the `cached` crate already
+        // guarantees, and would pass at a capacity of 1. This does not write
+        // to the shared static, so it cannot evict a sibling test's entry.
+        use cached::Cached as _;
+        assert_eq!(
+            HASH_MEMO.read().cache_capacity(),
+            Some(4096),
+            "the memo must stay a SIZED cache at the capacity TUI-72 documents: \
+             past it the memo does not degrade, it stops working, so lowering \
+             this number is a behavior change and not a tuning knob"
         );
     }
 
     // spec: TUI-72
     #[test]
+    fn a_failed_hash_is_not_cached_and_is_retried() {
+        // `None` is skipped by `cached`'s default for an `Option` return
+        // (`cache_none = false`). Flipping that default would make a transient
+        // failure stick for the life of the entry, and nothing else in the
+        // suite would notice. Driving `hash_at_fingerprint` directly with a
+        // literal fingerprint is the only way to hold the key fixed across the
+        // failure and the success: through `memoized_hash` any filesystem
+        // change that fixes the hash also moves the fingerprint, so the retry
+        // would land on a different key and prove nothing.
+        let (_paths, base) = temp_paths();
+        let missing = base.join("not-created-yet");
+        let ignore = crate::ignore::IgnoreSet::default();
+
+        assert!(
+            hash_at_fingerprint(&missing, "fixed-fingerprint", &ignore).is_none(),
+            "hashing a path that does not exist must fail"
+        );
+
+        crate::paths::mkdir_p(&missing).unwrap();
+        std::fs::write(missing.join("SKILL.md"), b"now it exists").unwrap();
+
+        assert!(
+            hash_at_fingerprint(&missing, "fixed-fingerprint", &ignore).is_some(),
+            "the SAME key must recompute after the failure, not serve a \
+             remembered None"
+        );
+
+        cleanup(&base);
+    }
+
+    // spec: TUI-72
+    #[test]
     fn poisoned_memo_serves_the_seeded_hash_instead_of_the_real_one() {
-        // M11: this asserts `poison_memo_for_test`'s effect DIRECTLY against
+        // This asserts `poison_memo_for_test`'s effect DIRECTLY against
         // `memoized_hash`, with no intervening `load`/`try_poll` call between
         // the poison and the read. `HASH_MEMO` is one `static` shared by every
-        // concurrently running test in this binary, and any of them reaching
-        // `load_inner` prunes it down to ITS OWN catalog's live paths
-        // (`prune_hash_memo`) -- evicting this test's entry along the way if
-        // it interleaves. Keeping the gap between poisoning and reading to
-        // exactly these two calls (no catalog scan, no meld/learn I/O)
-        // minimizes that window; a full `load()` round trip (the pattern this
-        // replaces, formerly in `app.rs`) held it open far longer.
+        // concurrently running test in this binary, so a sibling inserting
+        // enough entries could evict this one under LRU pressure. Keeping the
+        // gap between poisoning and reading to exactly these two calls (no
+        // catalog scan, no meld/learn I/O) minimizes that window; a full
+        // `load()` round trip (the pattern this replaces, formerly in
+        // `app.rs`) held it open far longer.
         let (paths, base) = temp_paths();
         crate::paths::mkdir_p(&paths.mind_home).unwrap();
         let item = base.join("poison-target");
@@ -689,7 +717,7 @@ mod tests {
         let real_hash = hash_path(&item).expect("real hash");
 
         let fake_hash = "0000000000000000000000000000000000000000000000000000000000000000";
-        poison_memo_for_test(&item, fake_hash);
+        poison_memo_for_test(&item, &crate::ignore::IgnoreSet::default(), fake_hash);
         let served = memoized_hash(&item, &crate::ignore::IgnoreSet::default())
             .expect("memoized_hash after poisoning");
 

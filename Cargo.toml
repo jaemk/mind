@@ -39,3 +39,10 @@ libc = "0.2"
 strip-ansi-escapes = "0.2"
 pulldown-cmark = { version = "0.13", default-features = false }
 unicode-width = "0.2"
+# Held at 2.x on purpose: cached 3.x requires rustc 1.92, above this crate's
+# `rust-version` above and the floor docs/src/install.md advertises. Bumping to
+# "3" turns the `msrv` CI job red with a bare rustc-version error, so raise the
+# MSRV first (and the docs with it) or stay here. `time_stores` is off with the
+# rest of the defaults; it is what would supply a TTL store, which TUI-72 notes
+# the memo does not have.
+cached = { version = "2.0.2", default-features = false, features = ["proc_macro"] }

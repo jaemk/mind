@@ -227,11 +227,12 @@ manifest, and store.
   how the stale flag itself is kept cheap to recompute on every poll tick is
   TUI-72.
 - `TUI-72` Because the poll (TUI-15) recomputes the TUI-63 stale flag for every
-  installed item about once a second, its content hash is memoized per item path
-  against a cheap stat fingerprint (`hash::stat_fingerprint`): the same tree walk
-  [`hash_path`] uses, but reading each entry's `mtime`, `size`, and -- under
-  `cfg(unix)` -- `ctime` and inode number, plus a symlink's target string,
-  instead of its content. Content is re-read only when that fingerprint changes.
+  installed item about once a second, its content hash is memoized on the pair
+  (item path, cheap stat fingerprint), the fingerprint coming from
+  `hash::stat_fingerprint_ignoring`: the same tree walk [`hash_path`] uses, but
+  reading each entry's `mtime`, `size`, and -- under `cfg(unix)` -- `ctime` and
+  inode number, plus a symlink's target string, instead of its content. Content
+  is re-read only when that fingerprint changes.
   `ctime` cannot be set from userland and changes on every write, closing the
   fingerprint's realistic blind spot: an mtime-PRESERVING replacement at
   unchanged size (`cp -p`, `rsync -a`, `tar -p`, `touch -r`, some FUSE/network
@@ -251,11 +252,27 @@ manifest, and store.
   (TUI-74) and never writes back into the row's own `stale` flag, so the glyph's
   lag is bounded strictly by the next poll, not by "or the next `u` keypress".
   That row-marker lag is NOT bounded to "one tick" either: the memo has no TTL,
-  so once a fingerprint fails to move, its content hash is served for the life of
-  the process -- not refreshed on the next poll -- until the item's path leaves
-  the current catalog (its source is unmelded, or the item is removed upstream),
-  at which point the next full load prunes it from the memo. `stat_fingerprint`
-  is not a content hash and is never compared against a recorded manifest hash.
+  so once a fingerprint fails to move, its content hash is served -- not
+  refreshed on the next poll -- until LRU pressure evicts the entry.
+  `stat_fingerprint` is not a content hash and is never compared against a
+  recorded manifest hash.
+  The fingerprint is part of the memo's KEY, alongside the item path, rather
+  than a token stored beside the value and compared by hand: a tree whose
+  fingerprint moved is simply a key that misses, so no validity check exists to
+  get wrong and a value can never be served for a fingerprint other than the one
+  asked for. The item's ignore set is deliberately not part of the key, because
+  a set that changes which entries the walk sees already moves the fingerprint,
+  and two sets that walk the identical files agree on the content hash too
+  (IGN-10). Keying this way means an entry per path per distinct fingerprint
+  observed, so the memo is bounded by a fixed LRU capacity (4096) rather than by
+  pruning to the live catalog on each full load. That capacity must stay well
+  ABOVE the installed-item count, not merely near it: the poll hashes every
+  installed item once per tick in a stable order, which is a cyclic sequential
+  scan, so at more items than capacity each tick evicts exactly the entries the
+  next tick reaches for first. The hit rate does not degrade gradually there, it
+  collapses, and the memo becomes pure overhead: a full re-read of every item
+  tree every second, the cost this rule exists to avoid. A hash FAILURE is not
+  cached, so it is retried on the next poll instead of being remembered.
 - `TUI-73` Applying the TUI-63 upgrade confirm (`u`, TUI-22) for a NON-EMPTY
   confirmed key set runs the NO-SYNC, KEY-SCOPED upgrade
   (`commands::upgrade_no_sync_keys`, extending CLI-169's no-sync form with an

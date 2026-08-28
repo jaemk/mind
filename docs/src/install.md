@@ -47,13 +47,19 @@ aarch64, glibc-linked). Intel macOS is not covered by the tap; use
 ## cargo install (Linux and macOS)
 
 ```
-cargo install mind-cli
+cargo install --locked mind-cli
 ```
 
 Builds from source using the Rust toolchain. This is the recommended path for
 Intel macOS and any other Linux or macOS host not covered by the install script
 or Homebrew tap. Requires Rust 1.88 or later (`rustup` is the standard way to
 install it).
+
+Use `--locked`. Without it `cargo install` re-resolves dependencies instead of
+using the published `Cargo.lock`, and that lockfile is the one tested against
+Rust 1.88 in CI. A fresh resolve can pick a newer dependency needing a newer
+compiler, which fails the build with a rustc-version error naming a crate you
+did not ask for.
 
 The supported platforms are Linux and macOS; the binary does not currently build
 on Windows. On Windows, run `mind` under WSL (Windows Subsystem for Linux).
