@@ -54,6 +54,17 @@ jobs:
   # dev/CI toolchain repo-wide and would otherwise win here, so `cargo check`
   # would run on that toolchain and the MSRV check would silently pass without
   # ever compiling against the minimum. The env var outranks the file.
+  #
+  # NOTE: the declared floor currently EQUALS the dev pin (both 1.98), so this
+  # job compiles with the same toolchain as `check` and gates nothing today. It
+  # is kept because it becomes load-bearing again the moment rust-toolchain.toml
+  # moves ahead of `rust-version`, which is exactly when an accidental MSRV
+  # creep would otherwise ship unnoticed.
+  #
+  # `--locked` matters: it verifies the committed Cargo.lock, which is the one
+  # `cargo publish --locked` ships and the one docs/src/install.md tells users
+  # to install with. Without it this job would re-resolve and could pass on a
+  # dependency set no consumer receives.
   msrv:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -63,7 +74,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.98
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check --all-targets
+      - run: cargo check --locked --all-targets
 
   # Advisory database scan of the dependency tree (RustSec). Informational on
   # the check-run it creates; does not fail the job for a forked PR that

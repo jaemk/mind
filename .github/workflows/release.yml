@@ -40,9 +40,26 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: make ci
 
+  # A tagged release must not ship a tree with a known advisory. ci.yml's audit
+  # job triggers on push-to-main and pull_request only, so nothing scanned the
+  # tag itself; and the `make ci` above always takes the audit target's skip
+  # branch, because the runner images do not ship cargo-audit. This is the one
+  # place the scan actually gates the artifacts.
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      checks: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: rustsec/audit-check@858dc40f52ca2b8570b7a997c1c4e35c6fc9a432
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
   build:
     name: build ${{ matrix.target }}
-    needs: [ci, ci-macos]
+    needs: [ci, ci-macos, audit]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 25
     # The release binaries are built with a deliberately pinned toolchain, not

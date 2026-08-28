@@ -4,8 +4,11 @@
 //! Uses a non-blocking shared acquire for the poll tick (TUI-15, TUI-25)
 //! so the UI never freezes behind a writer.
 //!
-//! Change detection: the source-set and manifest are compared across polls.
-//! The catalog is only re-scanned when the source set changes (TUI-15).
+//! Change detection: the source-set and manifest are compared across polls,
+//! and the freshly built snapshot is compared by value against the last
+//! applied one so an unchanged tick skips the rebuild (TUI-15). The catalog
+//! itself IS re-scanned every load, which is what lets `load_inner` size the
+//! hash memo to the current catalog before any staleness check reads it.
 
 use std::path::PathBuf;
 
@@ -197,9 +200,14 @@ static HASH_MEMO: std::sync::LazyLock<
 /// before the first [`fit_hash_memo`] call and every install smaller than it.
 const HASH_MEMO_FLOOR: usize = 1024;
 
-/// Entries per installed item. One holds the item's current fingerprint; the
-/// spare absorbs an in-flight edit without evicting a neighbour, so a user
-/// editing items in a loop does not push the working set over capacity.
+/// Entries per catalog item. One holds the item's current fingerprint; the
+/// spare covers items that SHARE a path: two `[[items]]` may declare the same
+/// `path` with different `ignore` lists, which walk different file sets and so
+/// hold different keys under one path. An in-flight edit needs no headroom of
+/// its own, contrary to what this said before: at a miss the least-recently
+/// used entry is the item's OWN superseded one, since every item ahead of it
+/// this tick has already been touched, so the edit evicts its own dead entry
+/// rather than a neighbour.
 const HASH_MEMO_PER_ITEM: usize = 2;
 
 fn new_hash_memo(capacity: usize) -> cached::LruCache<(PathBuf, String), String> {
@@ -209,9 +217,11 @@ fn new_hash_memo(capacity: usize) -> cached::LruCache<(PathBuf, String), String>
         .expect("a non-zero max_size is the only failure mode")
 }
 
-/// The capacity that fits `live_paths`, never below the floor.
-fn hash_memo_capacity_for(live_count: usize) -> usize {
-    (live_count * HASH_MEMO_PER_ITEM).max(HASH_MEMO_FLOOR)
+/// The capacity that fits `item_count` catalog items, never below the floor.
+/// Counts ITEMS rather than distinct paths: items sharing a path still need an
+/// entry each, so the deduped path count can under-size the memo.
+fn hash_memo_capacity_for(item_count: usize) -> usize {
+    (item_count * HASH_MEMO_PER_ITEM).max(HASH_MEMO_FLOOR)
 }
 
 /// Drop entries whose path left the catalog, and grow the memo if the current
@@ -224,8 +234,8 @@ fn hash_memo_capacity_for(live_count: usize) -> usize {
 /// keeps a dead path (its source unmelded, or the item removed upstream) from
 /// occupying capacity that live items need, which a bare LRU would let it do
 /// until it aged out on its own.
-fn fit_hash_memo(live_paths: &std::collections::HashSet<PathBuf>) {
-    fit_memo(&mut HASH_MEMO.write(), live_paths);
+fn fit_hash_memo(live_paths: &std::collections::HashSet<PathBuf>, item_count: usize) {
+    fit_memo(&mut HASH_MEMO.write(), live_paths, item_count);
 }
 
 /// The prune-and-resize logic behind [`fit_hash_memo`], split out so it can be
@@ -237,12 +247,13 @@ fn fit_hash_memo(live_paths: &std::collections::HashSet<PathBuf>) {
 fn fit_memo(
     memo: &mut cached::LruCache<(PathBuf, String), String>,
     live_paths: &std::collections::HashSet<PathBuf>,
+    item_count: usize,
 ) {
     memo.retain(|(path, _), _| live_paths.contains(path));
     // Resizes in place, evicting least-recently-used entries when the new bound
     // is smaller, so an install set that shrank gives its capacity back instead
     // of holding it for the rest of the session.
-    memo.set_max_size(hash_memo_capacity_for(live_paths.len()));
+    memo.set_max_size(hash_memo_capacity_for(item_count));
 }
 
 /// Test-only: seed `HASH_MEMO` with the entry `memoized_hash` would look up
@@ -268,17 +279,20 @@ fn fit_memo(
 ///
 /// A caller must assert directly against [`memoized_hash`], never through a
 /// full `load`/`try_poll` with other work interleaved between the poison and
-/// the read. `HASH_MEMO` is one `static` shared by the whole test binary, so a
-/// concurrently running test that inserts enough entries can evict this one
-/// under LRU pressure; the shorter the gap between poisoning and reading, the
-/// smaller that window.
+/// the read. `HASH_MEMO` is one `static` shared by the whole test binary, and
+/// the dominant hazard is the PRUNE, not LRU pressure: any concurrently
+/// running test that reaches `load_inner` calls [`fit_memo`], which retains
+/// only ITS OWN catalog's paths and so drops every foreign entry
+/// (`load_returns_empty_snapshot_on_fresh_home` prunes to an empty set and
+/// clears the memo outright). The shorter the gap between poisoning and
+/// reading, the smaller that window, but it cannot be closed while this drives
+/// the global memo.
 #[cfg(test)]
 pub(crate) fn poison_memo_for_test(
     path: &std::path::Path,
     ignore: &crate::ignore::IgnoreSet,
     fake_hash: &str,
 ) {
-    use cached::Cached as _;
     if let Ok(fp) = crate::hash::stat_fingerprint_ignoring(path, ignore) {
         HASH_MEMO
             .write()
@@ -286,7 +300,7 @@ pub(crate) fn poison_memo_for_test(
     }
 }
 
-/// The content hash of `path`, served from [`hash_at_fingerprint`]'s memo when
+/// The content hash of `path`, served from [`HASH_MEMO`] when
 /// the tree's cheap stat fingerprint is one already seen. `None` on any hash
 /// failure, which callers treat as drift (matching `content_hash().ok()`, the
 /// CLI-75 rule). When the fingerprint itself cannot be computed, this falls back
@@ -373,7 +387,7 @@ fn load_inner(paths: &Paths) -> Result<Snapshot> {
     // has left it, before it is consulted below.
     let live_paths: std::collections::HashSet<PathBuf> =
         catalog_items.iter().map(|c| c.path.clone()).collect();
-    fit_hash_memo(&live_paths);
+    fit_hash_memo(&live_paths, catalog_items.len());
 
     // L10: one sibling index for both passes below. Each walks every item, so
     // rebuilding it per row (what `deps::direct_dependency_keys` does) made a
@@ -702,7 +716,7 @@ mod tests {
         let many: std::collections::HashSet<PathBuf> = (0..5000)
             .map(|i| PathBuf::from(format!("/fake/item-{i}")))
             .collect();
-        fit_memo(&mut memo, &many);
+        fit_memo(&mut memo, &many, many.len());
 
         let capacity = memo.capacity();
         assert!(
@@ -714,7 +728,7 @@ mod tests {
 
         // Shrinking back gives the capacity up rather than holding a peak for
         // the rest of the session, and still never drops below the floor.
-        fit_memo(&mut memo, &std::collections::HashSet::new());
+        fit_memo(&mut memo, &std::collections::HashSet::new(), 0);
         let shrunk = memo.capacity();
         assert_eq!(
             shrunk, HASH_MEMO_FLOOR,
@@ -741,7 +755,7 @@ mod tests {
 
         let mut live_paths = std::collections::HashSet::new();
         live_paths.insert(live.clone());
-        fit_memo(&mut memo, &live_paths);
+        fit_memo(&mut memo, &live_paths, live_paths.len());
 
         assert!(
             memo.cache_get(&(live, "fp".to_string())).is_some(),
@@ -755,38 +769,96 @@ mod tests {
 
     // spec: TUI-72
     #[test]
+    fn fitting_the_memo_prunes_before_it_resizes() {
+        // The order is load-bearing and both statements are one line apart, so
+        // it is easy to swap them. Resizing FIRST applies the smaller bound
+        // while the dead entries are still present, and LRU evicts by recency
+        // rather than by liveness, so live entries get pushed out to make room
+        // for entries the prune was about to delete anyway. Pruning first means
+        // the resize only ever sees entries worth keeping.
+        let live: Vec<PathBuf> = (0..40)
+            .map(|i| PathBuf::from(format!("/live/{i}")))
+            .collect();
+        let mut memo = new_hash_memo(HASH_MEMO_FLOOR);
+
+        // Dead entries are the MOST recently used, so a resize-first
+        // implementation keeps them and evicts the live ones.
+        for path in &live {
+            memo.cache_set((path.clone(), "fp".into()), "live".into());
+        }
+        for i in 0..200 {
+            memo.cache_set(
+                (PathBuf::from(format!("/dead/{i}")), "fp".into()),
+                "dead".into(),
+            );
+        }
+
+        let live_paths: std::collections::HashSet<PathBuf> = live.iter().cloned().collect();
+        // A bound far below the pre-prune entry count, so the ordering decides
+        // which entries survive.
+        fit_memo(&mut memo, &live_paths, 1);
+
+        let survivors = live
+            .iter()
+            .filter(|p| memo.cache_get(&((*p).clone(), "fp".to_string())).is_some())
+            .count();
+        assert_eq!(
+            survivors,
+            live.len(),
+            "every live entry must survive: pruning the dead ones first leaves \
+             the resize nothing worth evicting"
+        );
+    }
+
+    // spec: TUI-72
+    #[cfg(unix)]
+    #[test]
     fn a_failed_hash_is_not_cached_and_is_retried() {
-        // `None` is skipped by `cached`'s default for an `Option` return
-        // (`cache_none = false`). Flipping that default would make a transient
-        // failure stick for the life of the entry, and nothing else in the
-        // suite would notice. Driving `hash_at_fingerprint` directly with a
-        // literal fingerprint is the only way to hold the key fixed across the
-        // failure and the success: through `memoized_hash` any filesystem
-        // change that fixes the hash also moves the fingerprint, so the retry
-        // would land on a different key and prove nothing.
+        // The failure has to happen with the FINGERPRINT intact, or the test
+        // proves nothing: a path that does not exist fails at
+        // `stat_fingerprint_ignoring` and takes `memoized_hash`'s
+        // no-fingerprint early return, never reaching the memo at all. An
+        // unreadable file is the reachable case, because `collect_stats` only
+        // stats each entry while `collect_files` reads it, so mode 000 fails
+        // the hash and not the fingerprint.
+        use std::os::unix::fs::PermissionsExt as _;
+
         let (_paths, base) = temp_paths();
-        let missing = base.join("not-created-yet");
+        let item = base.join("unreadable-item");
+        crate::paths::mkdir_p(&item).unwrap();
+        let file = item.join("SKILL.md");
+        std::fs::write(&file, b"unreadable").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
         let ignore = crate::ignore::IgnoreSet::default();
 
+        // Skip rather than assert a false pass: root reads a mode-000 file
+        // regardless, so this cannot fail the hash when the suite runs as root.
+        if crate::hash::hash_path_ignoring(&item, &ignore).is_ok() {
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+            cleanup(&base);
+            return;
+        }
+
+        let key_before = crate::hash::stat_fingerprint_ignoring(&item, &ignore)
+            .expect("the fingerprint must still succeed: only the read fails");
         assert!(
-            memoized_hash(&missing, &ignore).is_none(),
-            "hashing a path that does not exist must fail"
+            memoized_hash(&item, &ignore).is_none(),
+            "an unreadable file must fail the hash"
         );
         assert!(
-            !HASH_MEMO
-                .read()
-                .key_order()
-                .iter()
-                .any(|(path, _)| path == &missing),
-            "a failed hash must leave NO entry behind: a stored failure would \
-             be served for the life of the entry instead of being retried"
+            HASH_MEMO
+                .write()
+                .cache_get(&(item.clone(), key_before))
+                .is_none(),
+            "a failed hash must leave NO entry under the key it failed at: a \
+             stored failure would be served instead of being retried"
         );
 
-        crate::paths::mkdir_p(&missing).unwrap();
-        std::fs::write(missing.join("SKILL.md"), b"now it exists").unwrap();
-
+        // Make it readable again and re-ask. Restoring the mode moves ctime, so
+        // re-derive the key rather than assuming it held.
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert!(
-            memoized_hash(&missing, &ignore).is_some(),
+            memoized_hash(&item, &ignore).is_some(),
             "the next poll must recompute rather than serve a remembered failure"
         );
 

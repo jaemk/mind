@@ -25,7 +25,14 @@
 # RUSTUP_TOOLCHAIN, then this file, then the default). Those are the MSRV check
 # in ci.yml, which must compile against Cargo.toml's `rust-version` for the
 # gate to mean anything, and the pinned release build and crates.io publish in
-# release.yml.
+# release.yml. The release and publish pins track this channel: they are pinned
+# for reproducibility, not to hold an older floor, and cargo refuses to build a
+# package whose `rust-version` is newer than the toolchain, so leaving them
+# behind a raised MSRV breaks the release rather than the build.
+#
+# `rust-version` currently EQUALS this channel, so the MSRV job is redundant
+# until this pin moves ahead of it. Bump this one first and the gate is live
+# again.
 [toolchain]
 channel = "1.98.0"
 components = ["rustfmt", "clippy"]

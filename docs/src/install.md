@@ -38,11 +38,11 @@ brew install mind
 The repo is not named `homebrew-mind`, so the tap needs its clone URL. Homebrew
 bottles are provided for Apple Silicon macOS (arm64) and Linux (x86_64 and
 aarch64, glibc-linked). Intel macOS is not covered by the tap; use
-`cargo install mind-cli` instead (see below).
+`cargo install --locked mind-cli` instead (see below).
 
 > **Note (migration):** Earlier versions of this page said Intel macOS should use
 > the tap. That instruction was wrong: no Intel macOS bottle exists. Use
-> `cargo install mind-cli` on Intel macOS.
+> `cargo install --locked mind-cli` on Intel macOS.
 
 ## cargo install (Linux and macOS)
 

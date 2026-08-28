@@ -49,12 +49,15 @@ test:
 
 # Scan the locked dependency tree against the RustSec advisory database.
 #
-# Skipped with a note, not failed, when cargo-audit is absent: this runs inside
-# `ci`, and .github/workflows/ci.yml's `check` jobs do not install the tool.
-# They do not need to, because the dedicated `audit` job there already scans
-# every push with rustsec/audit-check; this target exists so the same scan is
-# exercised LOCALLY, before a push, rather than being first seen in CI.
-# A hard failure here would therefore break CI to re-check what CI already does.
+# Skipped with a NOTE, not failed, when cargo-audit is absent: this runs inside
+# `ci`, and the CI runner images do not ship the tool. The scan itself is gated
+# in CI by a dedicated rustsec/audit-check job, in ci.yml for pushes and pull
+# requests and in release.yml for a tag. This target exists so the same scan is
+# exercised LOCALLY, before a push, rather than being first seen in CI, and a
+# hard failure here would break CI to re-check what CI already does.
+#
+# The skip means `make ci` passing does NOT imply an advisory scan ran. Install
+# cargo-audit locally if you want the gate to mean that.
 #
 # `cargo audit` exits non-zero on a vulnerability but not on an informational
 # advisory (`unmaintained`, `unsound`, `notice`), which matches the CI job's
@@ -62,7 +65,7 @@ test:
 # dependency with no fixed release to move to.
 audit:
 	@command -v cargo-audit >/dev/null 2>&1 \
-		|| { echo "note: skipping audit; cargo-audit not installed (cargo install cargo-audit --locked)"; exit 0; }; \
+		|| { echo "note: NO advisory scan ran (cargo-audit not installed; CI scans every push and every tag). Install: cargo install cargo-audit --locked" >&2; exit 0; }; \
 	cargo audit
 
 # Local developer gate: format in place, then lint, test, and scan advisories.

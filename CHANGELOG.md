@@ -35,16 +35,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- The minimum supported Rust version is now 1.98 (it was 1.88). `mind` ships as
-  a binary, so the floor is the current stable rather than a compatibility
-  range; `cargo install --locked mind-cli` needs a toolchain at least that new.
-
-- The `probe` TUI's staleness memo now uses the `cached` crate, adding it as a
-  dependency. Its stat fingerprint became part of the cache key rather than a
-  token stored beside the value and compared by hand, so a tree whose
-  fingerprint moved is a key that misses. Entries are still pruned to the live
-  catalog on every full load, and now carry an LRU bound as well, whose capacity
-  is resized to fit the live set rather than fixed in advance.
+- SOURCE BUILDS ONLY: the minimum supported Rust version is now 1.98 (it was
+  1.88), so `cargo install --locked mind-cli` needs a toolchain at least that
+  new. The install script and the Homebrew tap ship prebuilt binaries and are
+  unaffected. `mind` ships as a binary, so this floor tracks recent stable and
+  may rise again in any release; it is a build requirement, not a compatibility
+  promise.
+- Internal: the `probe` TUI's staleness memo is now backed by the `cached`
+  crate, a new dependency. No change to what the TUI reports.
+- Dependencies refreshed to their latest semver-compatible releases.
 - Lifecycle hooks (install, uninstall, build) stream their output: stdout and
   stderr are inherited, so a build or package install is visible as it runs
   instead of appearing all at once when the command exits. The run is framed by
@@ -76,6 +75,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Under `--json`, the saved real stdout descriptor is now close-on-exec, so a
   hook cannot write to it (fd 3) and forge the result document (HOOK-32).
+
+### Security
+
+- `lru` updated to 0.18.3, clearing RUSTSEC-2026-0253 (a use-after-free from
+  missing panic safety in `LruCache::pop`). It reaches `mind` through
+  `ratatui-core`, so it is compiled into every shipped binary; the released
+  artifacts are rebuilt with it.
 
 ## [0.24.0] - 2026-08-17
 

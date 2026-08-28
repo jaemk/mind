@@ -39,6 +39,8 @@ libc = "0.2"
 strip-ansi-escapes = "0.2"
 pulldown-cmark = { version = "0.13", default-features = false }
 unicode-width = "0.2"
-# `time_stores` is off with the rest of the defaults; it is what would supply a
-# TTL store, which TUI-72 notes the memo does not have.
-cached = { version = "3", default-features = false, features = ["proc_macro"] }
+# Stores only, no features. `proc_macro` would pull a proc-macro crate plus
+# darling and a second TOML parser into the build, and nothing here uses the
+# `#[cached]` attribute: `tui::data` drives `LruCache` directly. `time_stores`
+# is what would supply a TTL store, which TUI-72 notes the memo does not have.
+cached = { version = "3", default-features = false }

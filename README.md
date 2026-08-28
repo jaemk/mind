@@ -54,12 +54,13 @@ brew install mind
 ```
 
 Bottles are provided for Apple Silicon macOS (arm64) and Linux (x86_64 and
-aarch64). Intel macOS is not covered; use `cargo install mind-cli` instead.
+aarch64). Intel macOS is not covered; use `cargo install --locked mind-cli`
+instead.
 
 Linux and macOS with the Rust toolchain:
 
 ```
-cargo install mind-cli
+cargo install --locked mind-cli
 ```
 
 mind targets Linux and macOS; on Windows, run it under WSL. See the

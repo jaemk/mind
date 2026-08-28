@@ -2877,9 +2877,9 @@ mod tests {
         // This reuses the PRE-EDIT snapshot (`snap0`) directly rather than
         // poisoning `data::HASH_MEMO` and reloading -- the load/reload pattern
         // is racy (`HASH_MEMO` is one `static` shared by every concurrently
-        // running test, so a sibling inserting enough entries can evict this
-        // test's poisoned one under LRU pressure before the reload observes
-        // it). Editing the source file AFTER `snap0` is
+        // running test, and any of them reaching `load_inner` prunes the memo
+        // to ITS OWN catalog's paths, dropping this test's entry before the
+        // reload observes it). Editing the source file AFTER `snap0` is
         // already loaded reproduces the exact same "poll snapshot says clean,
         // real content differs" condition without touching the memo at all:
         // `snap0`'s own `path`/`recorded_hash` (set at load time, unaffected by
