@@ -372,9 +372,13 @@ fn run_source_hooks(
                     );
                     // spec: HOOK-53 -- a non-zero exit is a hard stop; propagate
                     // the error after saving whatever was recorded so far.
-                    if let Err(e) =
-                        crate::hook::run_hook(&h.run, &clone_dir, &source_name, h.label())
-                    {
+                    if let Err(e) = crate::hook::run_hook(
+                        &h.run,
+                        &clone_dir,
+                        &source_name,
+                        event_name,
+                        h.label(),
+                    ) {
                         if registry_dirty {
                             let _ = registry.save(paths);
                         }

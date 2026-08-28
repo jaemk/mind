@@ -838,6 +838,7 @@ mod tests {
             stale: false,
             path: None,
             recorded_hash: String::new(),
+            ignore: vec![],
         }
     }
 
@@ -2048,6 +2049,7 @@ mod tests {
             stale: false,
             path: None,
             recorded_hash: String::new(),
+            ignore: vec![],
         }
     }
 

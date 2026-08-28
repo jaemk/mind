@@ -1,5 +1,10 @@
-# The toolchain used for development and for the CI lint/test gate, pinned so
-# `make ci-local` and `make ci` run the same rustc and the same clippy lint set.
+# This is the DEV toolchain: it pins what `make ci-local` and `make ci` build
+# and lint with locally and in CI, so they run the same rustc and the same
+# clippy lint set. It is NOT the supported minimum: that is Cargo.toml's
+# `rust-version`. This file ships excluded from the published crate (see
+# Cargo.toml's `exclude`), so a source builder is not forced onto this exact
+# version; set `RUSTUP_TOOLCHAIN` to override it (e.g. to build against MSRV
+# instead).
 #
 # Without this, CI tracked whatever `stable` was that day while a contributor's
 # rustup did not, so a lint newly added to stable could only fail AFTER a push:
@@ -7,9 +12,13 @@
 # touched, because `-D warnings` turns a new lint into a hard error.
 #
 # Bumping is deliberate: change `channel` here, keep the `toolchain:` inputs in
-# .github/workflows/ci.yml (check, check-macos) and release.yml (ci, ci-macos)
-# in step, then run `make ci-local` and fix what the newer lints report. That
-# turns a surprise red build into a routine, reviewable change.
+# .github/workflows/ci.yml (check, check-macos), release.yml (ci, ci-macos), and
+# canary.yml in step, then run `make ci-local` and fix what the newer lints
+# report. That turns a surprise red build into a routine, reviewable change.
+# Leaving one of those workflow inputs behind is a silent split: the
+# `actions-rs`/`dtolnay` toolchain action installs the OLD pinned version while
+# `cargo` (finding this file) downloads and uses the NEW one, so the job is not
+# actually testing what it claims to.
 #
 # Jobs that deliberately build with a DIFFERENT toolchain set `RUSTUP_TOOLCHAIN`,
 # which outranks this file (rustup precedence: `+toolchain`, then

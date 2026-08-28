@@ -15,7 +15,7 @@ documentation = "https://jaemk.github.io/mind/"
 readme = "README.md"
 keywords = ["agent", "ai", "cli", "automation", "tooling"]
 categories = ["command-line-utilities", "development-tools"]
-exclude = [".github", "docs/", ".claude"]
+exclude = [".github", "docs/", ".claude", "rust-toolchain.toml"]
 
 [[bin]]
 name = "mind"

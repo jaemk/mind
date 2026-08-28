@@ -92,8 +92,20 @@ pub struct SnapshotInstalled {
     pub path: Option<PathBuf>,
     /// The recorded manifest hash for this item as of the last load/poll,
     /// paired with `path` above for the TUI-74 authoritative recompute
-    /// (`hash_path(path) != recorded_hash`).
+    /// (`hash_path_ignoring(path, ignore) != recorded_hash`).
     pub recorded_hash: String,
+    /// The item's effective ignore patterns (IGN-1) as of the last load/poll,
+    /// carried alongside `path`/`recorded_hash` so the TUI-74 authoritative
+    /// recompute can build the SAME ignore set the recorded hash was computed
+    /// with (`CatalogItem::ignore_set`), not an empty one (H1): comparing
+    /// `hash_path` (zero rules, not even the IGN-2 built-ins) against a
+    /// manifest hash computed with the item's ignores applied reports
+    /// permanent, unfixable drift for any item with declared ignores, and for
+    /// every `path = "."` item (which always has a `.git` dir). Kept as
+    /// `Vec<String>` (the raw, uncompiled patterns) rather than a compiled
+    /// `IgnoreSet` so this struct's `PartialEq`/`Eq` derives stay intact.
+    // spec: TUI-74 IGN-10
+    pub ignore: Vec<String>,
 }
 
 /// One available (catalog) item in the snapshot.
@@ -148,13 +160,14 @@ pub struct SnapshotUnmanaged {
 /// and inode number), and re-reads content only when that fingerprint changes.
 ///
 /// Display-side only (TUI-72): `upgrade`/`introspect`/`recall` all call
-/// `hash_path` directly, never this memo, so a missed fingerprint change can
-/// never change what a verb ACTS on -- at most it makes the TUI-63 confirm
-/// modal list fewer stale items than the no-sync apply (TUI-73) then acts on,
-/// since that apply always re-hashes for real. A miss is NOT bounded to "one
-/// tick": with no TTL, it is served for the life of the process, until the
-/// item's path leaves the current catalog (its source is unmelded, or the item
-/// is removed upstream), at which point the next full load's
+/// `CatalogItem::content_hash` directly, never this memo, so a missed
+/// fingerprint change can never change what a verb ACTS on -- at most it makes
+/// the TUI-63 confirm modal list fewer stale items than the no-sync apply
+/// (TUI-73) then acts on, since that apply always re-hashes for real. A miss
+/// is NOT bounded to "one tick": with no TTL, it is served for the life of
+/// the process, until the item's path leaves the current catalog (its source
+/// is unmelded, or the item is removed upstream), at which point the next
+/// full load's
 /// [`prune_hash_memo`] evicts it. `stat_fingerprint`'s `ctime`/inode fields
 /// close the realistic miss case -- a same-size, mtime-preserving replace
 /// (`cp -p`, `rsync -a`, `tar -p`, `touch -r`) -- but the fingerprint is still
@@ -220,7 +233,7 @@ fn prune_memo_map(
 
 /// The content hash of `path`, reusing the memo when the cheap stat fingerprint
 /// is unchanged. `None` on any hash failure, which callers treat as drift
-/// (matching `hash_path(..).ok()`, the CLI-75 rule). When the fingerprint itself
+/// (matching `content_hash().ok()`, the CLI-75 rule). When the fingerprint itself
 /// cannot be computed, this falls back to hashing every time and caches nothing,
 /// so an unsupported-mtime platform behaves exactly as before the memo existed.
 ///
@@ -344,13 +357,17 @@ fn load_inner(paths: &Paths) -> Result<Snapshot> {
         let deps: Vec<String> = matched_node
             .map(|n| sanitize_dep_keys(dep_index.direct_keys(n, &read_item_text)))
             .unwrap_or_default();
+        // spec: TUI-74 IGN-10 - compiled once per item per load pass (L7),
+        // not inside the per-tick fast path the memo exists to keep cheap.
+        // The raw (uncompiled) patterns are taken straight from `ci.ignore`
+        // below for the snapshot field, so this is the only compile.
+        let ignore_set = matched.and_then(|ci| ci.ignore_set().ok());
         let stale = matched.is_some_and(|ci| {
             // Memoized on the cheap stat fingerprint: the poll tick would
             // otherwise re-read every installed item's content every second.
-            let cur = ci
-                .ignore_set()
-                .ok()
-                .and_then(|ig| memoized_hash(&ci.path, &ig));
+            let cur = ignore_set
+                .as_ref()
+                .and_then(|ig| memoized_hash(&ci.path, ig));
             let hash_drift = cur.as_deref().is_none_or(|h| h != it.hash);
             let rename_drift = ci.effective_name() != it.name;
             hash_drift || rename_drift
@@ -378,6 +395,13 @@ fn load_inner(paths: &Paths) -> Result<Snapshot> {
             // construction: both are set in this same `load_inner` pass.
             path: matched.map(|ci| ci.path.clone()),
             recorded_hash: it.hash.clone(),
+            // spec: TUI-74 IGN-10 - the item's effective (resolved) ignore
+            // patterns, so `is_actually_stale` (app.rs) can rebuild the SAME
+            // ignore set the recorded hash was computed with instead of
+            // comparing against a `hash_path` result computed with none (H1).
+            ignore: matched
+                .map(|ci| ci.ignore.clone().unwrap_or_default())
+                .unwrap_or_default(),
         });
     }
 

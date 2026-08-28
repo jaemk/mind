@@ -311,6 +311,32 @@ fn expanding_an_ignored_file_is_a_hard_error() {
 }
 
 #[test]
+fn expanding_a_file_under_a_builtin_ignored_directory_names_the_builtin() {
+    // spec: IGN-12 -- when no DECLARED ignore entry caused the exclusion (the
+    // built-in VCS set did instead), the error must name the specific
+    // built-in (`.git`) rather than the generic "a built-in ignore"
+    // placeholder, which promised a pattern but rendered a vague sentence.
+    let sb = Sandbox::new();
+    sb.write_and_commit(
+        "skills/a/SKILL.md",
+        "---\ndescription: a\nexpand: .git/config\n---\n# a\n",
+    );
+
+    let r = sb.mind(&["meld", &sb.spec(), "--yes"]);
+    assert!(!r.success, "must be refused: {}", r.stdout);
+    assert!(
+        r.stderr.contains("'.git'"),
+        "the error must name the specific built-in that caused the exclusion: {}",
+        r.stderr
+    );
+    assert!(
+        !r.stderr.contains("a built-in ignore"),
+        "the generic placeholder must not appear when the built-in is nameable: {}",
+        r.stderr
+    );
+}
+
+#[test]
 fn an_ignored_file_is_invisible_to_the_reference_scan() {
     // spec: IGN-11 -- mind will not install the file, so it cannot be a source
     // of references mind resolves. Without this an unresolvable token in an
@@ -409,23 +435,269 @@ fn dropping_a_vcs_directory_from_an_installed_item_is_an_ordinary_upgrade() {
     // out of date once, and `upgrade` re-installs it without that directory.
     // This is a real content change (the store copy loses files), so it is
     // reported rather than suppressed.
+    //
+    // M4: actually construct the pre-feature state rather than merely
+    // asserting the post-feature install is stable (which passes unchanged
+    // even if the migration behavior were broken). Hand-edit the manifest
+    // hash to a junk value (what an older binary's `.git`-including hash
+    // would look like next to the newer `.git`-excluding one) and drop a
+    // `.git/` into the store copy (what an older binary's copy step would
+    // have left there), matching what a pre-IGN-2 install on disk looked
+    // like.
     let sb = root_skill_sandbox();
     assert!(sb.mind(&["meld", &sb.spec(), "--yes"]).success);
 
-    // Simulate the pre-feature state: a store copy that contains `.git` and a
-    // manifest hash that measured it. Recomputing the hash is what the older
-    // binary would have recorded, so hand-editing the manifest is the only way
-    // to reach that state from here; instead assert the invariant that makes
-    // the migration ordinary, namely that the current install is stable and
-    // carries no VCS directory.
+    let manifest_path = sb.mind_home.join("manifest.json");
+    let raw = std::fs::read_to_string(&manifest_path).unwrap();
+    let mut doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    let item = &mut doc["items"]["skill:root-skill"];
+    assert!(!item.is_null(), "the installed item must exist: {doc}");
+    item["hash"] = serde_json::Value::String("pretend-pre-ign-2-hash".to_string());
+    std::fs::write(&manifest_path, serde_json::to_vec_pretty(&doc).unwrap()).unwrap();
+
     let store = sb.store("skill", "root-skill");
-    assert!(!store.join(".git").exists());
-    let first = sb.mind(&["upgrade", "--yes"]);
-    assert!(first.success, "upgrade failed: {}", first.stderr);
-    let second = sb.mind(&["introspect"]);
+    std::fs::create_dir_all(store.join(".git")).unwrap();
+    std::fs::write(store.join(".git").join("HEAD"), "ref: refs/heads/main\n").unwrap();
+
+    let recall = sb.mind(&["recall", "skill:root-skill"]);
     assert!(
-        second.stdout.contains("all good"),
-        "the install is stable across an upgrade: {}",
-        second.stdout
+        recall.stdout.contains("out of date"),
+        "the hand-edited hash must read as drift: {}",
+        recall.stdout
+    );
+
+    let upgrade = sb.mind(&["upgrade", "--yes"]);
+    assert!(upgrade.success, "upgrade failed: {}", upgrade.stderr);
+    assert!(
+        upgrade.stdout.contains("root-skill"),
+        "upgrade must report the item: {}",
+        upgrade.stdout
+    );
+    assert!(
+        !store.join(".git").exists(),
+        "the reinstalled store copy must not carry the VCS directory back"
+    );
+
+    let after = sb.mind(&["introspect"]);
+    assert!(
+        after.stdout.contains("all good"),
+        "the install is stable across the upgrade: {}",
+        after.stdout
+    );
+}
+
+#[test]
+fn a_tool_with_no_tool_md_may_still_ignore_a_file() {
+    // spec: IGN-5 -- a tool's `TOOL.md` is optional (TOOL-2); an ignore
+    // pattern must not be refused for excluding an anchor the tool never
+    // shipped in the first place.
+    let sb = Sandbox::new();
+    sb.write_and_commit("tools/mytool/run.sh", "#!/bin/sh\necho hi\n");
+    sb.write_and_commit("tools/mytool/README.md", "internal notes\n");
+    sb.write_and_commit("mind.toml", "[source]\nignore = [\"*.md\"]\n");
+
+    let r = sb.mind(&["meld", &sb.spec(), "--yes"]);
+    assert!(
+        r.success,
+        "a tool with no TOOL.md must not be refused for ignoring *.md: {} {}",
+        r.stdout, r.stderr
+    );
+    let store = sb.store("tool", "mytool");
+    assert!(
+        store.join("run.sh").is_file(),
+        "the tool's own file installs"
+    );
+    assert!(
+        !store.join("README.md").exists(),
+        "the ignored README must not be copied"
+    );
+}
+
+#[test]
+fn a_dot_git_file_is_ignored_like_a_dot_git_directory() {
+    // spec: IGN-2 IGN-21 -- `.git` is a regular FILE (not a directory) in a
+    // submodule, a `git worktree` checkout, and `git init
+    // --separate-git-dir`, exactly the trees IGN-21 names as this feature's
+    // reach. The built-in set must match a file of the same name too, or the
+    // store gets a dangling `.git` pointer file.
+    let sb = Sandbox::new();
+    sb.write_and_commit("skills/a/SKILL.md", "---\ndescription: a\n---\n# a\n");
+    // A `.git` FILE, as a submodule/worktree/separate-git-dir checkout has,
+    // rather than a directory. Written directly into the working tree instead
+    // of committed: git itself refuses to track a path literally named
+    // `.git` (a repository-confusion protection), and a local, unpinned
+    // source is a "linked" source (spec/source addressing) that `mind` scans
+    // from its working tree directly, so an untracked file here is exactly
+    // what a scan reads.
+    write(
+        &sb.source.join("skills/a/.git"),
+        "gitdir: ../../.git/modules/a\n",
+    );
+
+    let r = sb.mind(&["meld", &sb.spec(), "--yes"]);
+    assert!(r.success, "meld failed: {} {}", r.stdout, r.stderr);
+    let store = sb.store("skill", "a");
+    assert!(store.join("SKILL.md").is_file());
+    assert!(
+        !store.join(".git").exists(),
+        "a `.git` FILE must be excluded the same as a `.git` directory"
+    );
+}
+
+#[test]
+fn changing_the_ignore_list_across_installs_is_an_ordinary_upgrade() {
+    // spec: IGN-1 -- the effective ignore list is resolved from the source at
+    // every scan, not frozen at install time; adding a pattern later must
+    // drift and re-install the item without the newly-excluded content.
+    let sb = Sandbox::new();
+    sb.write_and_commit("skills/a/SKILL.md", "---\ndescription: a\n---\n# a\n");
+    sb.write_and_commit("skills/a/docs/guide.md", "guide\n");
+    assert!(sb.mind(&["meld", &sb.spec(), "--yes"]).success);
+    let store = sb.store("skill", "a");
+    assert!(
+        store.join("docs/guide.md").is_file(),
+        "docs/ installs before any ignore list is declared"
+    );
+
+    sb.write_and_commit("mind.toml", "[source]\nignore = [\"docs/\"]\n");
+    let recall = sb.mind(&["recall", "skill:a"]);
+    assert!(
+        recall.stdout.contains("out of date"),
+        "a newly-declared ignore list must read as drift: {}",
+        recall.stdout
+    );
+
+    let upgrade = sb.mind(&["upgrade", "--yes"]);
+    assert!(upgrade.success, "upgrade failed: {}", upgrade.stderr);
+    assert!(
+        !store.join("docs").exists(),
+        "the reinstalled copy must honor the newly-declared ignore list"
+    );
+}
+
+#[test]
+fn an_item_link_item_inherits_the_source_level_ignore_list() {
+    // spec: IGN-1 -- `resolve_ignores` runs at both `scan_source_at` exits: the
+    // item-link early return (LNK-7) and the ordinary scan. This covers the
+    // item-link path specifically.
+    let sb = Sandbox::new();
+    sb.write_and_commit("skills/review/SKILL.md", "---\ndescription: r\n---\n# r\n");
+    sb.write_and_commit("skills/review/scratch/notes.md", "draft\n");
+    sb.write_and_commit("mind.toml", "[source]\nignore = [\"scratch/\"]\n");
+
+    let link = format!("file://{}/tree/main/skills/review", sb.source.display());
+    let r = sb.mind(&["learn", &link]);
+    assert!(r.success, "learn failed: {} {}", r.stdout, r.stderr);
+    let store = sb.store("skill", "review");
+    assert!(store.join("SKILL.md").is_file());
+    assert!(
+        !store.join("scratch").exists(),
+        "an item-link item must inherit the source-level ignore list"
+    );
+}
+
+#[test]
+fn an_add_root_item_inherits_the_source_level_ignore_list() {
+    // spec: IGN-1 -- `resolve_ignores` runs once over EVERY item `scan_source_at`
+    // produces for the ordinary scan, whatever discovery layer found it: the
+    // authoritative/convention layer and the `--add-root` composition
+    // (DSC-84) both feed the same call. This covers the add-root path
+    // specifically; moving the resolve call so it only covers the base layer
+    // would leave an add-root item silently keeping `ignore: None` (losing
+    // both the source list and the IGN-4/5/12 validation) with the rest of
+    // the suite green.
+    let sb = Sandbox::new();
+    // No skills/agents/rules at the repo root: the base convention scan finds
+    // nothing on its own, so the item below surfaces only via --add-root.
+    sb.write_and_commit(
+        "extra/skills/foo/SKILL.md",
+        "---\ndescription: foo\n---\n# foo\n",
+    );
+    sb.write_and_commit("extra/skills/foo/scratch/notes.md", "draft\n");
+    sb.write_and_commit("mind.toml", "[source]\nignore = [\"scratch/\"]\n");
+
+    let r = sb.mind(&["meld", &sb.spec(), "--add-root", "extra", "--yes"]);
+    assert!(
+        r.success,
+        "meld --add-root failed: {} {}",
+        r.stdout, r.stderr
+    );
+    let store = sb.store("skill", "foo");
+    assert!(
+        store.join("SKILL.md").is_file(),
+        "the add-root item must install"
+    );
+    assert!(
+        !store.join("scratch").exists(),
+        "an add-root item must inherit the source-level ignore list"
+    );
+}
+
+#[test]
+fn an_item_may_declare_an_explicit_empty_ignore_list_overriding_the_source() {
+    // spec: IGN-1 -- `ignore = []` on an item is an explicit "no patterns"
+    // override, distinct from declaring none at all (which inherits the
+    // source list). Without distinguishing `None` from `Some(vec![])` an
+    // item could not opt back OUT of a source-level exclusion.
+    let sb = Sandbox::new();
+    sb.write_and_commit("a/SKILL.md", "---\ndescription: a\n---\n# a\n");
+    sb.write_and_commit("a/scratch/notes.md", "draft\n");
+    sb.write_and_commit(
+        "mind.toml",
+        "[source]\nignore = [\"scratch/\"]\n\n\
+         [[items]]\nkind = \"skill\"\nname = \"a\"\npath = \"a\"\nignore = []\n",
+    );
+
+    assert!(sb.mind(&["meld", &sb.spec(), "--yes"]).success);
+    let store = sb.store("skill", "a");
+    assert!(
+        store.join("scratch").exists(),
+        "an explicit empty ignore list must override, not inherit, the source list"
+    );
+}
+
+#[test]
+fn a_bad_source_level_ignore_pattern_is_blamed_on_the_source_declaration() {
+    // spec: IGN-4 -- `resolve_ignores` copies the source-level list into every
+    // item BEFORE validating, so a bad entry there must be blamed on
+    // `mind.toml [source].ignore`, not on whichever item's scan happened to
+    // reach the check first (which sends the author looking for an `ignore`
+    // key on that item that does not exist).
+    let sb = Sandbox::new();
+    sb.write_and_commit("skills/a/SKILL.md", "---\ndescription: a\n---\n# a\n");
+    sb.write_and_commit("mind.toml", "[source]\nignore = [\"/absolute\"]\n");
+
+    let r = sb.mind(&["meld", &sb.spec(), "--yes"]);
+    assert!(!r.success, "must be refused: {}", r.stdout);
+    assert!(
+        r.stderr.contains("mind.toml [source].ignore"),
+        "the error must blame the source declaration, not the item: {}",
+        r.stderr
+    );
+    assert!(
+        !r.stderr.contains("skill:a:"),
+        "the error must not misattribute the source-level pattern to the item: {}",
+        r.stderr
+    );
+}
+
+#[test]
+fn a_bad_item_level_ignore_pattern_is_blamed_on_the_item() {
+    // spec: IGN-4 -- the counterpart to the previous test: an item that
+    // declared its OWN bad pattern is still blamed by its item key, exactly
+    // as before.
+    let sb = Sandbox::new();
+    sb.write_and_commit("a/SKILL.md", "---\ndescription: a\n---\n# a\n");
+    sb.write_and_commit(
+        "mind.toml",
+        "[[items]]\nkind = \"skill\"\nname = \"a\"\npath = \"a\"\nignore = [\"/absolute\"]\n",
+    );
+
+    let r = sb.mind(&["meld", &sb.spec(), "--yes"]);
+    assert!(!r.success, "must be refused: {}", r.stdout);
+    assert!(
+        r.stderr.contains("skill:a:"),
+        "the error must blame the declaring item: {}",
+        r.stderr
     );
 }

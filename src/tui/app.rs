@@ -989,15 +989,28 @@ impl App {
     /// (`upgrade_item_disposition` finds no real drift), so this is a display
     /// inaccuracy in the confirm list, not a correctness bug in what gets
     /// applied.
-    // spec: TUI-72 TUI-73 TUI-74
+    ///
+    /// H1: the hash here MUST be built with `it`'s own effective ignore set
+    /// (`it.ignore`, carried on the snapshot from the same `load_inner` pass as
+    /// `path`/`recorded_hash`, TUI-74/IGN-10), not `hash::hash_path`'s empty
+    /// set. `it.recorded_hash` was computed with the item's ignores applied
+    /// (`CatalogItem::content_hash`), so comparing against a hash computed with
+    /// none would report permanent, unfixable drift for any item with declared
+    /// ignores, and for every `path = "."` item (which always has a `.git`
+    /// dir the IGN-2 built-ins exclude but an empty set would not).
+    // spec: TUI-72 TUI-73 TUI-74 IGN-10
     fn is_actually_stale(it: &crate::tui::data::SnapshotInstalled) -> bool {
         if it.stale {
             return true;
         }
         match &it.path {
-            Some(path) => crate::hash::hash_path(path)
-                .ok()
-                .is_none_or(|h| h != it.recorded_hash),
+            Some(path) => {
+                let ignore = crate::ignore::IgnoreSet::new(&it.ignore, &it.key)
+                    .unwrap_or_else(|_| crate::ignore::IgnoreSet::builtin());
+                crate::hash::hash_path_ignoring(path, &ignore)
+                    .ok()
+                    .is_none_or(|h| h != it.recorded_hash)
+            }
             // No matching catalog item as of the last load/poll: nothing to
             // hash, and `stale` was already false for the same reason.
             None => false,
@@ -1472,6 +1485,7 @@ mod tests {
                 stale: false,
                 path: None,
                 recorded_hash: String::new(),
+                ignore: vec![],
             }],
             available: vec![SnapshotAvailable {
                 key: "agent:dev".to_string(),
@@ -2045,6 +2059,7 @@ mod tests {
             stale: false,
             path: None,
             recorded_hash: String::new(),
+            ignore: vec![],
         });
         app.apply_snapshot(snap);
         let idx = app
@@ -2229,6 +2244,7 @@ mod tests {
             stale: false,
             path: None,
             recorded_hash: String::new(),
+            ignore: vec![],
         });
         app.apply_snapshot(snap);
         let idx = app
@@ -2973,6 +2989,114 @@ mod tests {
     }
 
     #[test]
+    fn is_actually_stale_does_not_report_permanent_drift_for_a_root_path_item() {
+        // spec: TUI-74 IGN-10 - H1: `is_actually_stale`'s authoritative recompute
+        // used to call `hash::hash_path` (an EMPTY ignore set, not even the
+        // IGN-2 built-ins) and compare it against `recorded_hash`, which was
+        // computed with the item's real effective ignore set applied
+        // (`CatalogItem::content_hash`). Any item with declared ignores, and
+        // every `path = "."` item (the case IGN-10 exists for: a top-level
+        // `SKILL.md` shipped at the repo root, so the item's tree includes
+        // `.git/`), would then NEVER match and would be reported pending in the
+        // upgrade confirm modal forever, even immediately after a fresh
+        // install with no real edit. This pins the fix: `is_actually_stale`
+        // must build its comparison hash with `it.ignore` (carried on the
+        // snapshot from the same load pass, TUI-74), not an empty set.
+        use std::process::Command;
+
+        let (paths, base) = upgrade_temp_paths();
+        crate::paths::mkdir_p(&paths.mind_home).unwrap();
+        crate::config::Config {
+            lobes: vec![crate::config::LobeEntry::bare(
+                paths.claude_home.to_str().unwrap(),
+            )],
+            ..Default::default()
+        }
+        .save(&paths)
+        .unwrap();
+
+        // A source whose single skill IS the repo root (mirrors
+        // tests/cli_ignore.rs's `root_skill_sandbox`): `.git/` is part of the
+        // item's tree, and the built-in ignore set (IGN-2) is what keeps it
+        // out of both the store copy and the recorded hash.
+        let src = base.join("root-skill-source");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(
+            src.join("SKILL.md"),
+            "---\ndescription: A skill at the repo root\n---\n# root-skill\n",
+        )
+        .unwrap();
+        std::fs::write(
+            src.join("mind.toml"),
+            "[[items]]\nkind = \"skill\"\nname = \"root-skill\"\npath = \".\"\n",
+        )
+        .unwrap();
+        upgrade_init_git_repo(&src);
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(&src)
+                .output()
+                .expect("git");
+        };
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "initial"]);
+
+        crate::commands::meld(
+            &paths,
+            src.to_str().unwrap(),
+            None,
+            vec![],
+            vec![],
+            false,
+            crate::commands::PinRequest::None,
+            None,
+            false,
+        )
+        .expect("meld");
+        crate::commands::learn(
+            &paths,
+            "skill:root-skill",
+            false,
+            crate::commands::InstallFlow {
+                yes: true,
+                clobber: crate::commands::Clobber::Force,
+                dangerously_skip: true,
+                dangerously_skip_build: true,
+            },
+        )
+        .expect("learn");
+
+        let snap = crate::tui::data::load(&paths).expect("load");
+        assert_eq!(snap.installed.len(), 1, "one installed item");
+        assert!(
+            !snap.installed[0].stale,
+            "a fresh install of a root-path item must not be stale per the poll snapshot"
+        );
+        let mut app = App::new(String::new(), None, None);
+        app.apply_snapshot(snap);
+        app.apply_intent(Intent::ActionUpgrade);
+
+        let desc = app
+            .pending_action
+            .as_ref()
+            .expect("ActionUpgrade must arm a pending confirm")
+            .description
+            .clone();
+        assert!(
+            desc.to_lowercase().contains("nothing is out of date"),
+            "the authoritative recompute must NOT report the root-path item as \
+             pending forever (H1): {desc:?}"
+        );
+        assert!(
+            app.pending_action.as_ref().unwrap().upgrade_keys.is_empty(),
+            "no item should be confirmed for upgrade when nothing has drifted"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn pending_upgrade_items_empty_without_a_snapshot() {
         // spec: TUI-63 TUI-72 - before any snapshot has loaded,
         // recompute_stale_items must return empty rather than panicking on
@@ -3392,6 +3516,7 @@ mod tests {
                 stale: false,
                 path: None,
                 recorded_hash: String::new(),
+                ignore: vec![],
             }],
             available: vec![],
             unmanaged: vec![],
@@ -4228,6 +4353,7 @@ mod tests {
                 stale: false,
                 path: None,
                 recorded_hash: String::new(),
+                ignore: vec![],
             }],
             available: vec![],
             unmanaged: vec![],
@@ -4611,6 +4737,7 @@ mod tests {
                     stale: false,
                     path: None,
                     recorded_hash: String::new(),
+                    ignore: vec![],
                 },
                 SnapshotInstalled {
                     key: "agent:dev".to_string(),
@@ -4624,6 +4751,7 @@ mod tests {
                     stale: false,
                     path: None,
                     recorded_hash: String::new(),
+                    ignore: vec![],
                 },
             ],
             available: vec![],
@@ -4781,6 +4909,7 @@ mod tests {
                 stale: false,
                 path: None,
                 recorded_hash: String::new(),
+                ignore: vec![],
             }],
             available: vec![SnapshotAvailable {
                 key: "skill:review".to_string(),
@@ -4845,6 +4974,7 @@ mod tests {
                     stale: false,
                     path: None,
                     recorded_hash: String::new(),
+                    ignore: vec![],
                 },
                 SnapshotInstalled {
                     key: "agent:dev".to_string(),
@@ -4858,6 +4988,7 @@ mod tests {
                     stale: false,
                     path: None,
                     recorded_hash: String::new(),
+                    ignore: vec![],
                 },
                 SnapshotInstalled {
                     key: "skill:build".to_string(),
@@ -4871,6 +5002,7 @@ mod tests {
                     stale: false,
                     path: None,
                     recorded_hash: String::new(),
+                    ignore: vec![],
                 },
             ],
             available: vec![],

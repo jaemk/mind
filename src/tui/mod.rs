@@ -552,6 +552,7 @@ mod tests {
                 stale: false,
                 path: None,
                 recorded_hash: String::new(),
+                ignore: vec![],
             }],
             available: vec![SnapshotAvailable {
                 key: "agent:dev".to_string(),

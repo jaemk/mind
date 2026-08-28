@@ -417,10 +417,12 @@ fn build_hook_output_streams_like_every_other_hook() {
     // spec: HOOK-30
     // Build hooks are not a separate execution path: `install::run_build_hook`
     // delegates to `hook::run_hook`, so they inherit their streams like source
-    // and item hooks do. This pins that funnel. A build hook is the likeliest
-    // one to be slow and chatty (it is a build), so a regression here that
-    // reintroduced capture-and-dump would hit exactly the case streaming is for,
-    // and nothing else in the suite would notice.
+    // and item hooks do. This pins the routing to the right fd, not the
+    // timing: a capture-and-replay that routed each stream back to its own fd
+    // would also pass. A build hook is the likeliest one to be slow and chatty
+    // (it is a build), so a regression here that reintroduced capture-and-dump
+    // would hit exactly the case streaming is for, and nothing else in the
+    // suite would notice.
     let sb = Sandbox::new("bld-stream");
     let toml = concat!(
         "[[items]]\n",

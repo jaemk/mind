@@ -18,7 +18,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   repo's `.git/` into the store and reported the item as drifted after every
   commit in the source clone. An item installed before this that has a VCS
   directory in its tree reports as out of date once, and `upgrade` reinstalls it
-  without that directory (IGN-1..21).
+  without that directory (IGN-1..21). Three new `--json` error `kind` codes
+  join the CLI-181 envelope: `bad-ignore-pattern`, `ignores-own-anchor`, and
+  `expands-ignored-file`.
 - `meld <repo> --learn <NAME|GLOB>` installs only the items matching the pattern
   instead of offering the source's whole set. The flag is repeatable; a pattern
   matches an item's bare name as well as its effective (prefixed) name, and is
@@ -44,7 +46,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   stays off the result document, as before. A failing hook's error points at the
   frame without claiming output exists ("its output, if any, is in the frame
   above"): with the streams inherited mind never sees them, so it cannot tell a
-  silent hook from a talkative one (HOOK-30, HOOK-32).
+  silent hook from a talkative one (HOOK-30, HOOK-32). In the `probe` TUI, a
+  hook's stderr is captured alongside its stdout, so hook output cannot smear
+  the browser's alternate screen.
 - An item link's unsatisfiable intra-source references are reconciled instead of
   failing with a generic missing-reference error. A link instance offers exactly
   one skill, so a reference to a sibling can never resolve: a `requires:` entry
@@ -57,6 +61,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discover the skill on its own, the same command with `--add-root <dir>` added
   before `--learn`, where the directory is derived from the linked skill's path
   (LNK-18).
+
+### Fixed
+
+- Under `--json`, the saved real stdout descriptor is now close-on-exec, so a
+  hook cannot write to it (fd 3) and forge the result document (HOOK-32).
 
 ## [0.24.0] - 2026-08-17
 

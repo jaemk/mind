@@ -382,7 +382,7 @@ fn run_install_hooks(
                 // `json_stdout`). spec: CLI-217
                 println!("running install hook '{}' for {}", h.label(), name);
                 // HOOK-53: a non-zero exit (optional or required) is a hard stop.
-                crate::hook::run_hook(&h.run, clone_dir, &name, h.label())?;
+                crate::hook::run_hook(&h.run, clone_dir, &name, "install", h.label())?;
                 record_install_hook(source, &h.run, current.clone());
             }
             crate::hook::HookAct::Skip => {
@@ -2613,7 +2613,7 @@ fn run_uninstall_hooks(
                 println!("running uninstall hook '{}' for {}", h.label(), source_name);
                 // HOOK-53: any failure (optional or required) is a hard stop;
                 // the unmeld stops and the source remains.
-                crate::hook::run_hook(&h.run, &clone_dir, source_name, h.label())?;
+                crate::hook::run_hook(&h.run, &clone_dir, source_name, "uninstall", h.label())?;
             }
             crate::hook::HookAct::Skip => {
                 // spec: CLI-217 -- same for `unmeld --json`.
@@ -7449,7 +7449,7 @@ fn rerun_source_hooks(
                 // in this pass before propagating, so an earlier source's
                 // successful re-run is not lost (and its side effect not
                 // silently re-offered on the next pass).
-                if let Err(e) = crate::hook::run_hook(&cmd, &dir, &source.name, &cmd) {
+                if let Err(e) = crate::hook::run_hook(&cmd, &dir, &source.name, "install", &cmd) {
                     if changed {
                         registry.save(paths)?;
                     }

@@ -1005,8 +1005,17 @@ fn run_checks(
             // the entrypoint script, and the `TOOL.md` that declares its `bin`.
             // Flag only files present on disk (the gitignored/unadded case); a
             // file that does not exist at all is a different, already-local defect.
+            // spec: IGN-11 -- a file the item's ignore set excludes is not part
+            // of the item mind installs, so an ignored `bin`/`TOOL.md` is not a
+            // shipping defect worth flagging.
+            let ignore = item
+                .ignore_set()
+                .unwrap_or_else(|_| crate::ignore::IgnoreSet::builtin());
             let mut untracked: Vec<String> = Vec::new();
             for rel in [bin.as_str(), "TOOL.md"] {
+                if ignore.is_under_ignored(Path::new(rel)) {
+                    continue;
+                }
                 let file = item.path.join(rel);
                 if file.is_file() && !crate::git::is_tracked(source_dir, &file) {
                     untracked.push(rel.to_string());
@@ -1049,8 +1058,20 @@ fn run_checks(
                 let Ok(content) = std::fs::read_to_string(&file) else {
                     continue;
                 };
-                for (token, target) in referenced_source_files(&content, item, &source_items) {
+                for (token, target, owner) in referenced_source_files(&content, item, &source_items)
+                {
                     if !target.is_file() || crate::git::is_tracked(source_dir, &target) {
+                        continue;
+                    }
+                    // spec: IGN-11 -- a file the owning item's ignore set
+                    // excludes is not part of what mind installs, so it is
+                    // not a shipping defect worth flagging even when it
+                    // resolves in the working tree.
+                    let ignore = owner
+                        .ignore_set()
+                        .unwrap_or_else(|_| crate::ignore::IgnoreSet::builtin());
+                    let rel = target.strip_prefix(&owner.path).unwrap_or(&target);
+                    if ignore.is_under_ignored(rel) {
                         continue;
                     }
                     if !seen.insert((item.key().as_str().to_string(), target.clone())) {
@@ -1367,11 +1388,11 @@ fn path_remainder(after_close: &str) -> Option<String> {
 /// is absent from a clone (CLI-191). A token with no `/`-path remainder addresses
 /// the item directory itself, not a specific file, and is skipped. `{{path:...}}`
 /// is resolved against `source_items` (same-source siblings).
-fn referenced_source_files(
+fn referenced_source_files<'a>(
     content: &str,
-    item: &CatalogItem,
-    source_items: &[&CatalogItem],
-) -> Vec<(String, PathBuf)> {
+    item: &'a CatalogItem,
+    source_items: &[&'a CatalogItem],
+) -> Vec<(String, PathBuf, &'a CatalogItem)> {
     let mut out = Vec::new();
     let mut rest = content;
     while let Some(pos) = rest.find("{{") {
@@ -1383,10 +1404,12 @@ fn referenced_source_files(
         let Some(remainder) = path_remainder(tail) else {
             continue;
         };
-        // The directory the token addresses: the item's own dir (`{{self}}`) or a
-        // named same-source sibling's dir (`{{path:[kind:]name}}`).
-        let base: Option<PathBuf> = if inner == "self" {
-            Some(item.path.clone())
+        // The item that owns the addressed directory: the item itself
+        // (`{{self}}`) or a named same-source sibling (`{{path:[kind:]name}}`).
+        // Returned alongside the target so the caller can consult *its* ignore
+        // set (IGN-11), not the referencing item's.
+        let owner: Option<&'a CatalogItem> = if inner == "self" {
+            Some(item)
         } else if let Some(reference) = inner.strip_prefix("path:") {
             let reference = reference.trim();
             let (want_kind, name) = match reference.split_once(':') {
@@ -1396,13 +1419,13 @@ fn referenced_source_files(
             source_items
                 .iter()
                 .find(|s| s.name == name && want_kind.is_none_or(|k| s.kind == k))
-                .map(|s| s.path.clone())
+                .copied()
         } else {
             None
         };
-        if let Some(base) = base {
+        if let Some(owner) = owner {
             let token = format!("{{{{{inner}}}}}/{remainder}");
-            out.push((token, base.join(&remainder)));
+            out.push((token, owner.path.join(&remainder), owner));
         }
     }
     out

@@ -244,24 +244,42 @@ fn create_capture_file() -> Option<std::fs::File> {
     file
 }
 
-/// Run `f` with the process stdout redirected to a capture buffer, returning its
-/// result and whatever it wrote (TUI-24). The dup2 mutates the process-global
-/// stdout fd, so the whole sequence is serialized and the original fd is always
-/// restored, even if `f` panics.
+/// Run `f` with the process stdout AND stderr redirected to the same capture
+/// buffer, returning its result and whatever the two streams wrote (TUI-24).
+///
+/// Both streams are captured, not just stdout: `action_needs_suspension`
+/// suspends the TUI only for Meld/Unmeld (TUI-44), so Learn/Upgrade/Forget --
+/// which can run a tool `build:` hook or a per-item install/uninstall hook
+/// (HOOK-71/81/82) -- execute here, in raw mode, on the alternate screen. A
+/// hook's stdout and stderr are both inherited (HOOK-30), so leaving stderr
+/// unredirected would let a hook write straight through mid-render: the
+/// cell-diff redraw does not repair terminal damage it did not cause, and any
+/// frame text this module still `println!`s would end up captured while the
+/// hook's raw stderr bytes went straight to the screen, unframed and
+/// unidentified. Routing both to the same file also preserves the interleaving
+/// HOOK-30 describes for a CLI run of the same hook, rather than splitting them
+/// into two disjoint blocks.
+///
+/// The dup2 mutates the process-global stdout/stderr fds, so the whole
+/// sequence is serialized and the original fds are always restored, even if
+/// `f` panics.
 #[cfg(unix)]
 fn with_captured_stdout<R>(f: impl FnOnce() -> R) -> (R, String) {
     use std::io::{Read, Seek, Write};
     use std::os::unix::io::AsRawFd;
 
-    /// Restore the saved stdout fd on drop, so a panic in the action cannot leave
-    /// the terminal redirected.
-    struct FdRestore(libc::c_int);
+    /// Restore the saved stdout/stderr fds on drop, so a panic in the action
+    /// cannot leave the terminal redirected.
+    struct FdRestore(libc::c_int, libc::c_int);
     impl Drop for FdRestore {
         fn drop(&mut self) {
             let _ = std::io::stdout().flush();
+            let _ = std::io::stderr().flush();
             unsafe {
                 libc::dup2(self.0, libc::STDOUT_FILENO);
                 libc::close(self.0);
+                libc::dup2(self.1, libc::STDERR_FILENO);
+                libc::close(self.1);
             }
         }
     }
@@ -277,15 +295,25 @@ fn with_captured_stdout<R>(f: impl FnOnce() -> R) -> (R, String) {
     };
 
     let _ = std::io::stdout().flush();
-    let saved = unsafe { libc::dup(libc::STDOUT_FILENO) };
-    if saved < 0 {
+    let _ = std::io::stderr().flush();
+    // spec: HOOK-32 -- F_DUPFD_CLOEXEC, not a plain `dup`: a hook spawned from
+    // inside `f` must not inherit these saved real fds (mirrors main.rs's
+    // `move_stdout_aside`, which the same finding applies to).
+    let saved_out = unsafe { libc::fcntl(libc::STDOUT_FILENO, libc::F_DUPFD_CLOEXEC, 0) };
+    if saved_out < 0 {
+        return (f(), String::new());
+    }
+    let saved_err = unsafe { libc::fcntl(libc::STDERR_FILENO, libc::F_DUPFD_CLOEXEC, 0) };
+    if saved_err < 0 {
+        unsafe { libc::close(saved_out) };
         return (f(), String::new());
     }
     let result = {
         unsafe {
             libc::dup2(file.as_raw_fd(), libc::STDOUT_FILENO);
+            libc::dup2(file.as_raw_fd(), libc::STDERR_FILENO);
         }
-        let _restore = FdRestore(saved); // restores stdout on drop (incl. panic)
+        let _restore = FdRestore(saved_out, saved_err); // restores on drop (incl. panic)
         f()
     };
 
@@ -341,6 +369,43 @@ mod tests {
              println! first); got {captured:?} instead -- if this now \
              contains {marker:?}, in-process prose assertions on captured \
              TUI output are sound again and the comment above is stale"
+        );
+    }
+
+    #[test]
+    // spec: HOOK-32
+    fn with_captured_stdout_also_captures_stderr() {
+        // H3: `action_needs_suspension` (tui/mod.rs) suspends the TUI only for
+        // Meld/Unmeld; Learn/Upgrade/Forget run under `with_captured_stdout`
+        // while the TUI still holds the terminal, and those are exactly the
+        // paths that can run a hook whose stdout AND stderr are both inherited
+        // (HOOK-30). Before this fix only stdout was dup2'd, so a hook's
+        // stderr wrote straight through mid-render.
+        //
+        // A `println!`/`eprintln!` issued directly from a `#[test]` closure is
+        // intercepted by cargo test's own OUTPUT_CAPTURE before it ever
+        // reaches a raw write(2) syscall (see
+        // `with_captured_stdout_cannot_observe_println_content_under_cargo_test`
+        // above), so this spawns a real CHILD PROCESS: its writes go through
+        // the OS-level fds this function actually redirects, which the test
+        // harness cannot intercept.
+        let out_marker = "TUI-H3-stdout-must-land-in-the-capture-buffer";
+        let err_marker = "TUI-H3-stderr-must-land-in-the-capture-buffer";
+        let (status, captured) = with_captured_stdout(|| {
+            std::process::Command::new("sh")
+                .args(["-c", &format!("echo {out_marker}; echo {err_marker} 1>&2")])
+                .status()
+                .expect("run sh")
+        });
+        assert!(status.success(), "the child process must run to completion");
+        assert!(
+            captured.contains(out_marker),
+            "with_captured_stdout must still capture stdout: {captured:?}"
+        );
+        assert!(
+            captured.contains(err_marker),
+            "with_captured_stdout must also capture stderr, not just stdout: \
+             {captured:?}"
         );
     }
 

@@ -52,8 +52,7 @@ const ALLOWLIST: &[&str] = &[
     // with stable IDs ahead of implementation. Each must move to a citing test
     // when built, at which point it is removed from this allowlist.
     //   ignored files (spec/ignore.md, IGN-1..21) are now implemented and cited
-    //   from src/ignore.rs and tests/cli_ignore.rs; no IGN IDs remain
-    //   allowlisted.
+    //   from src/ignore.rs and tests/cli_ignore.rs.
     //   unmanaged lobe items (see spec/unmanaged.md): the scan + recall + probe
     //   listing + forget (UNM-1..5) are implemented and cited from src/unmanaged.rs
     //   and tests/cli.rs; the interactive TUI group node (UNM-6) is implemented

@@ -117,39 +117,61 @@ CLI-17).
   The run is framed by `====== (hook: <name>) ======` before the spawn and
   `====== (end hook: <name>) ======` after it, so the hook's output stays
   demarcated from `mind`'s own and from whatever it prints next (e.g. the
-  install preview). Two consequences follow from streaming and are intended: the
-  two streams interleave exactly as they would in a terminal, so there are no
-  longer separate `hook-stdout`/`hook-stderr` blocks, and the frame is
-  unconditional, since nothing is buffered and `mind` cannot know in advance
-  whether the hook will print anything. A third consequence is the visible
-  behavior change: a hook's stderr now lands on `mind`'s STDERR instead of being
-  replayed onto stdout, so each stream keeps its identity and a caller's
-  redirection means what it says (`2>/dev/null` silences a noisy hook's warnings,
-  and a hook's diagnostics no longer contaminate a stdout pipe). A non-zero exit is a `HookFailed` error
-  and fails the `meld`: the source is not left registered (the clone is removed,
-  as for any failed meld), and the error points at the frame already on screen
-  rather than repeating its contents, since nothing was captured to repeat. It
-  points there WITHOUT asserting that output exists ("its output, if any, is in
-  the frame above"): inherited streams mean `mind` never saw a byte, so it
-  cannot distinguish a silent hook from a talkative one, and a message claiming
-  either would be wrong half the time. Detecting emptiness would require piping
-  the streams through `mind`, which costs the hook its terminal: `isatty` turns
-  false, so tools drop colour and progress rendering, and C stdio switches from
-  line buffering to 4 KiB blocks, delivering a long build's output in bursts.
-  That trade loses more than the wording gains. A hook that fails to SPAWN is
-  the exception: it never ran, so that error carries the spawn failure's own
-  reason instead. Side effects the hook already had on
-  the system (an installed binary, a global package) are outside `mind`'s state
-  and are not rolled back.
-- `HOOK-32` Streaming is safe under `--json` (CLI-217) without a special case:
-  the whole run executes with fd 1 pointed at fd 2 by a real `dup2`, and an
-  inherited child writes to that same redirected descriptor, so a hook's output
-  cannot reach the result document on stdout. The same holds for the TUI, which
-  redirects stdout by the identical dance while an action runs.
+  install preview). The frame itself is printed on `mind`'s stdout only, never
+  stderr, so `mind meld > /dev/null` discards both frame lines even though the
+  hook's own inherited stderr still reaches the terminal, unframed -- an
+  asymmetry the streaming design does not close, since framing stderr the same
+  way would mean buffering it, the same cost the emptiness-detection
+  discussion below rules out. Two consequences follow from streaming and are
+  intended: the two streams interleave exactly as they would in a terminal, so
+  there are no longer separate `hook-stdout`/`hook-stderr` blocks, and the
+  frame is unconditional, since nothing is buffered and `mind` cannot know in
+  advance whether the hook will print anything. A third consequence is the
+  visible behavior change: a hook's stderr now lands on `mind`'s STDERR
+  instead of being replayed onto stdout, so each stream keeps its identity and
+  a caller's redirection means what it says (`2>/dev/null` silences a noisy
+  hook's warnings, and a hook's diagnostics no longer contaminate a stdout
+  pipe). A non-zero exit is a `HookFailed` error and fails the `meld`: the
+  source is not left registered (the clone is removed, as for any failed
+  meld), and the error points at the frame already on screen rather than
+  repeating its contents, since nothing was captured to repeat. It points
+  there WITHOUT asserting that output exists ("its output, if any, is in the
+  frame above"): inherited streams mean `mind` never saw a byte, so it cannot
+  distinguish a silent hook from a talkative one, and a message claiming
+  either would be wrong half the time. Detecting emptiness would require
+  piping the streams through `mind`, which costs the hook its terminal:
+  `isatty` turns false, so tools drop color and progress rendering, and C
+  stdio switches from line buffering to 4 KiB blocks, delivering a long
+  build's output in bursts. That trade loses more than the wording gains. A
+  hook that fails to SPAWN is the exception: it never ran, so that error
+  carries the spawn failure's own reason instead. Side effects the hook
+  already had on the system (an installed binary, a global package) are
+  outside `mind`'s state and are not rolled back.
+  The message names the hook's EVENT (`install`, `uninstall`, `build`), which
+  the call site fixes, so a failing uninstall or build hook is never reported
+  as an install one. When the frame's heading differs from the event it is
+  named too, quoted, so the error points at the frame the user actually saw:
+  a source hook is headed by its author's `[[hooks]].name`, or by the command
+  itself when it declares none (HOOK-51), while a per-item lifecycle hook's
+  heading already IS its event and is not repeated.
 - `HOOK-31` `mind` records the in-effect hook command and the commit it ran at on
   the source registry entry, so `upgrade` can detect a changed command or commit
   and re-prompt (HOOK-11), and `recall` / `introspect` can report that a source
   has an install hook.
+- `HOOK-32` Streaming is safe under `--json` (CLI-217) without a special
+  case, on unix (the redirect is `#[cfg(unix)]`; a non-unix build performs no
+  redirect and relies on discipline instead): the whole run executes with fd
+  1 pointed at fd 2 by a real `dup2`, and an inherited child writes to that
+  same redirected descriptor, so a hook's output cannot reach the result
+  document on stdout. The descriptor `--json` saves aside to write that
+  document once the run succeeds (`REAL_STDOUT` in main.rs's `json_stdout`)
+  is itself opened close-on-exec (`F_DUPFD_CLOEXEC`, not a plain `dup`), so a
+  hook cannot reach the real stdout through an inherited copy of that
+  descriptor either (e.g. `>&3`, the lowest fd `Command` leaves unrewired):
+  only `mind`'s own process keeps it open, and a child's exec closes its copy
+  before the hook's own code runs. The same holds for the TUI, which
+  redirects both stdout and stderr by the identical close-on-exec dance while
+  an action runs (`tui/action.rs`'s `with_captured_stdout`).
 
 ## Validation (`mind review`)
 
@@ -335,11 +357,12 @@ the item is in place and is for host side effects.
   at `unmeld` (which removes the source's items), and for the OLD item when an
   `upgrade` renames it (a namespace change removes the old item via its registry).
   It runs with the same working directory as the install hook (HOOK-81) before the
-  store copy and links are removed, so cleanup can use the installed files. It does NOT run on an in-place
-  upgrade (same effective name, content swapped), since the item is not removed,
-  only its install hook re-runs (HOOK-81). A non-zero exit is a hard stop
-  (HOOK-53): the removal stops and the item is left installed, mirroring a failed
-  source uninstall hook leaving the source melded (HOOK-54).
+  store copy and links are removed, so cleanup can use the installed files. It
+  does NOT run on an in-place upgrade (same effective name, content swapped),
+  since the item is not removed, only its install hook re-runs (HOOK-81). A
+  non-zero exit is a hard stop (HOOK-53): the removal stops and the item is
+  left installed, mirroring a failed source uninstall hook leaving the source
+  melded (HOOK-54).
 - `HOOK-83` Item install and uninstall hooks are arbitrary code, so each is
   disclosed and its output framed exactly as other hooks (HOOK-20, HOOK-30). On a
   TTY each is prompted two-way (run / skip), like the build hook (HOOK-72): for an

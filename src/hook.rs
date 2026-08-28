@@ -394,14 +394,33 @@ pub fn apply_install_override(
 /// The frame below is a plain `println!` on purpose, NOT `render::note`: what
 /// it surrounds is arbitrary text chosen by the source author, so no per-line
 /// routing rule could bound it (a hook that printed `note:`-prefixed lines, or
-/// a forged result envelope, would defeat one). Under `--json` the process runs
-/// with fd 1 pointed at fd 2 for the whole run (main.rs's `json_stdout`, a real
-/// `dup2`), and an inherited child writes to that same redirected descriptor,
-/// so a streaming hook cannot corrupt the result document either.
+/// a forged result envelope, would defeat one). Under `--json`, `main.rs`'s
+/// `json_stdout` points fd 1 at fd 2 for the whole run (a real `dup2`) and
+/// marks the saved real stdout close-on-exec, so no descriptor that reaches
+/// the result document is inherited by the child: a streaming hook cannot
+/// corrupt the result document either.
+///
+/// `event` is what the hook is ("install", "uninstall", "build") and is fixed
+/// by the call site, never by the source. `label` is what the frame is headed
+/// with and IS source-controlled (a `[[hooks]].name` from `mind.toml`, or the
+/// raw `run` command when there is none), so it is sanitized (`strip_ansi`,
+/// DSC-95) before it reaches the frame or any `HookFailed` this returns:
+/// unsanitized, a hook name carrying cursor-control escapes could erase mind's
+/// own progress output the moment the frame opens. Keeping the two apart is
+/// what stops a failing uninstall hook from being reported as an install one.
 // spec: CLI-217 HOOK-30
-pub fn run_hook(command: &str, clone_dir: &Path, identity: &str, label: &str) -> Result<()> {
-    // Flush mind's own buffered output first so it does not interleave with the
-    // hook's output blocks.
+pub fn run_hook(
+    command: &str,
+    clone_dir: &Path,
+    identity: &str,
+    event: &'static str,
+    label: &str,
+) -> Result<()> {
+    let label = crate::sanitize::strip_ansi(label);
+    let command_clean = crate::sanitize::strip_ansi(command);
+
+    // Flush mind's own buffered output first so it does not interleave with
+    // the streamed hook output below.
     let _ = std::io::stdout().flush();
 
     // Opened before the spawn so the header is on screen while the hook runs,
@@ -417,18 +436,26 @@ pub fn run_hook(command: &str, clone_dir: &Path, identity: &str, label: &str) ->
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .status()
-        .map_err(|e| MindError::HookFailed {
-            identity: identity.to_string(),
-            command: command.to_string(),
-            status: None,
-            stderr: e.to_string(),
-            // Spawn failed, so nothing was streamed: the error carries the
-            // reason itself rather than pointing at output that never existed.
-            streamed: false,
+        .map_err(|e| {
+            // The spawn never ran, so the frame opened above is left dangling
+            // unless we close it here too (L2): HOOK-30 describes the frame as
+            // a pair, and the opener must still print before the spawn is
+            // attempted (so the header is visible while mind decides whether
+            // the spawn will even succeed).
+            println!("====== (end hook: {label}) ======");
+            MindError::HookFailed {
+                event,
+                label: label.clone(),
+                identity: identity.to_string(),
+                command: command_clean.clone(),
+                status: None,
+                reason: e.to_string(),
+                // Spawn failed, so nothing was streamed: the error carries the
+                // reason itself rather than pointing at output that never existed.
+                streamed: false,
+            }
         })?;
 
-    // The hook wrote straight to the terminal, so its last line may not have
-    // ended in a newline; the divider would otherwise be glued to it.
     println!("====== (end hook: {label}) ======");
 
     if status.success() {
@@ -441,10 +468,12 @@ pub fn run_hook(command: &str, clone_dir: &Path, identity: &str, label: &str) ->
         // byte, so it cannot tell those apart, and the message says where
         // output WOULD be rather than asserting that any exists (HOOK-30).
         Err(MindError::HookFailed {
+            event,
+            label,
             identity: identity.to_string(),
-            command: command.to_string(),
+            command: command_clean,
             status: Some(status),
-            stderr: String::new(),
+            reason: String::new(),
             streamed: true,
         })
     }
@@ -1302,13 +1331,140 @@ mod tests {
     // ---- run_hook ----
 
     // spec: HOOK-30
+    // M11: `label` is source-controlled (a mind.toml `[[hooks]].name`, or the
+    // raw `run` command as a fallback) and is written directly into both hook
+    // frame lines (`println!("====== (hook: {label}) ======")` and its
+    // closing pair) as well as into any `HookFailed` this returns. An
+    // ANSI-bearing label (e.g. cursor-erase sequences) must not reach the
+    // real terminal at the moment the frame opens -- that is precisely when
+    // mind guarantees it happens, on every hook run, and could erase mind's
+    // own just-printed progress output. `command` is displayed raw by
+    // `HookFailed`'s `Display` too, so it must be sanitized for the error even
+    // though the unsanitized value is still what actually gets executed.
+    //
+    // This asserts on the exact `label`/`command` strings `run_hook` feeds to
+    // both `println!` and `HookFailed` (returned here, and embedded in its
+    // `Display`) rather than capturing the real terminal: genuine OS-level fd
+    // capture is not reliable under `cargo test`'s parallel harness, where
+    // other tests' own status lines and child-process output share the same
+    // real stdout descriptor. This mirrors how `disclosure_text` /
+    // `hook_disclosure_text` are tested elsewhere in this file (asserting on
+    // the sanitized string content, not the terminal).
+    #[test]
+    fn run_hook_sanitizes_ansi_in_label_and_command_for_the_error() {
+        let dir = TempDir::new("ansi-label");
+        let evil_label = "\x1b[2K\x1b[1A\x1b[2Kbuild";
+        // '#' starts a comment in `sh`, so the trailing escape bytes are
+        // inert: this always exits 9, while `command` (as text) still carries
+        // a raw ESC for the sanitization check below.
+        let evil_command = "exit 9 # \x1b[31mcolor\x1b[0m";
+
+        let result = run_hook(
+            evil_command,
+            dir.path(),
+            "github.com/test/repo",
+            "install",
+            evil_label,
+        );
+        let err = result.expect_err("a non-zero exit must produce HookFailed");
+        let msg = err.to_string();
+        assert!(
+            !msg.contains('\x1b'),
+            "raw ESC must not appear in the rendered error: {msg:?}"
+        );
+
+        match err {
+            MindError::HookFailed {
+                ref label,
+                ref command,
+                ..
+            } => {
+                assert!(
+                    !label.contains('\x1b'),
+                    "label field must not carry raw ESC: {label:?}"
+                );
+                assert!(
+                    label.contains("build"),
+                    "sanitized label text must remain: {label:?}"
+                );
+                assert!(
+                    !command.contains('\x1b'),
+                    "command field must not carry raw ESC: {command:?}"
+                );
+                assert!(
+                    command.contains("color"),
+                    "sanitized command text must remain: {command:?}"
+                );
+            }
+            other => panic!("expected HookFailed, got: {other:?}"),
+        }
+    }
+
+    // spec: HOOK-30
+    // L2: a spawn failure returns right after the opening frame is printed;
+    // the closing divider must still print on that path so the frame stays a
+    // matched pair (HOOK-30), not just when a process actually ran. The
+    // return-value shape (`streamed: false`, a non-empty `reason`, `status:
+    // None`) is exercised elsewhere; this specifically exercises that the
+    // spawn-failure branch is the one taken (a nonexistent `clone_dir` makes
+    // the underlying `chdir` in the child fail, so `Command::status()` itself
+    // returns an `Err` rather than the process running and exiting non-zero).
+    #[test]
+    fn run_hook_spawn_failure_produces_unstreamed_hook_failed() {
+        let missing_dir = std::env::temp_dir().join(format!(
+            "mind-hook-test-missing-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::SeqCst)
+        ));
+        assert!(
+            !missing_dir.exists(),
+            "the dir must not exist for this test to force a spawn failure"
+        );
+
+        let result = run_hook(
+            "true",
+            &missing_dir,
+            "github.com/test/repo",
+            "install",
+            "spawn-fail",
+        );
+        match result {
+            Err(MindError::HookFailed {
+                ref label,
+                status,
+                streamed,
+                ref reason,
+                ..
+            }) => {
+                assert_eq!(label, "spawn-fail");
+                assert!(!streamed, "a spawn failure never ran the hook");
+                assert!(
+                    status.is_none(),
+                    "a process that never ran has no exit status"
+                );
+                assert!(
+                    !reason.is_empty(),
+                    "a spawn failure must carry its own reason, since nothing was streamed"
+                );
+            }
+            other => panic!("expected a spawn failure to produce HookFailed, got: {other:?}"),
+        }
+    }
+
+    // spec: HOOK-30
     #[test]
     fn run_hook_success_creates_marker_file() {
         let dir = TempDir::new("success");
         let marker = dir.path().join("marker.txt");
         let marker_str = marker.to_str().expect("marker path is utf8");
         let command = format!("touch {marker_str}");
-        let result = run_hook(&command, dir.path(), "github.com/test/repo", "test-label");
+        let result = run_hook(
+            &command,
+            dir.path(),
+            "github.com/test/repo",
+            "install",
+            "test-label",
+        );
         assert!(result.is_ok(), "expected Ok, got: {result:?}");
         assert!(
             marker.exists(),
@@ -1320,17 +1476,27 @@ mod tests {
     #[test]
     fn run_hook_nonzero_exit_returns_hook_failed() {
         let dir = TempDir::new("fail");
-        let result = run_hook("exit 3", dir.path(), "github.com/test/repo", "test-label");
+        let result = run_hook(
+            "exit 3",
+            dir.path(),
+            "github.com/test/repo",
+            "install",
+            "test-label",
+        );
         match result {
             Err(
                 ref e @ MindError::HookFailed {
+                    event,
+                    ref label,
                     ref identity,
                     ref command,
                     status,
-                    ref stderr,
+                    reason: ref stderr,
                     streamed,
                 },
             ) => {
+                assert_eq!(event, "install", "wrong event");
+                assert_eq!(label, "test-label", "wrong label");
                 assert_eq!(identity, "github.com/test/repo", "wrong identity");
                 assert_eq!(command, "exit 3", "wrong command");
                 assert!(
@@ -1380,13 +1546,14 @@ mod tests {
             "echo 'hook output'; exit 2",
             dir.path(),
             "github.com/test/repo",
+            "install",
             "test-label",
         );
         match result {
             Err(
                 ref e @ MindError::HookFailed {
                     streamed,
-                    ref stderr,
+                    reason: ref stderr,
                     ..
                 },
             ) => {
@@ -1419,6 +1586,7 @@ mod tests {
             "echo 'hook stderr' >&2; exit 1",
             dir.path(),
             "github.com/test/repo",
+            "install",
             "test-label",
         );
         match result {
@@ -1438,7 +1606,13 @@ mod tests {
     #[test]
     fn run_hook_identity_and_command_propagate_to_error() {
         let dir = TempDir::new("propagate");
-        let result = run_hook("false", dir.path(), "github.com/acme/special", "my-hook");
+        let result = run_hook(
+            "false",
+            dir.path(),
+            "github.com/acme/special",
+            "install",
+            "my-hook",
+        );
         match result {
             Err(MindError::HookFailed {
                 ref identity,

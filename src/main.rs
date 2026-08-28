@@ -83,16 +83,29 @@ mod json_stdout {
     /// discard.
     static ERROR_DETAILS: Mutex<Option<serde_json::Value>> = Mutex::new(None);
 
-    /// Duplicate fd 1, then point fd 1 at fd 2. Returns the duplicate (the real
-    /// stdout) on success. Mirrors the TUI's stdout-capture redirect
-    /// (`tui::action::with_captured_stdout`), which does the same dance.
+    /// Duplicate fd 1 as close-on-exec, then point fd 1 at fd 2. Returns the
+    /// duplicate (the real stdout) on success. Mirrors the TUI's stdout-capture
+    /// redirect (`tui::action::with_captured_stdout`), which does the same
+    /// dance.
+    ///
+    /// The duplicate is created with `F_DUPFD_CLOEXEC` (not a plain `dup`)
+    /// specifically so a hook or other child process spawned later in this run
+    /// cannot inherit it: `dup` clears FD_CLOEXEC on the new descriptor, and
+    /// `Command` only rewires fds 0/1/2 for a child, leaving every other open
+    /// fd -- including this saved stdout, typically fd 3 -- inherited as-is. A
+    /// hook could otherwise reach the preserved real stdout directly (e.g. a
+    /// shell redirect naming fd 3 explicitly) and inject arbitrary text ahead
+    /// of or instead of the one JSON document HOOK-32 promises stays
+    /// uncorrupted (see the CLI-217/HOOK-32 docs above and in
+    /// install-hooks.md).
+    // spec: HOOK-32
     #[cfg(unix)]
     fn move_stdout_aside() -> Option<std::fs::File> {
         use std::os::fd::FromRawFd;
         // Nothing should be buffered this early, but flush before the swap so a
         // stray byte cannot land on the wrong description.
         let _ = std::io::stdout().flush();
-        let saved = unsafe { libc::dup(libc::STDOUT_FILENO) };
+        let saved = unsafe { libc::fcntl(libc::STDOUT_FILENO, libc::F_DUPFD_CLOEXEC, 0) };
         if saved < 0 {
             return None;
         }

@@ -85,7 +85,20 @@ ignore = ["scratch/", "**/*.tmp"]        # exclude from install + hash
   item reads as drifted after every commit. A `[[items]].ignore` replaces this
   list for that item. Version-control directories (`.git`, `.hg`, `.svn`, `.bzr`)
   are excluded with or without a declaration; build output such as `target/` or
-  `node_modules/` is not, and must be listed. See
+  `node_modules/` is not, and must be listed.
+
+  A pattern is matched item-relative, with `/` as the separator: `*` stops at a
+  `/`, `**` crosses it, and a pattern with no `/` at all anchors at the ITEM
+  ROOT. That last rule means `ignore = ["target/"]` does NOT exclude
+  `sub/target/`: it excludes only a top-level `target/`. Verified against the
+  binary: with `ignore = ["target", "docs/**"]`, `sub/target/o.bin` was still
+  copied into the store and hashed, with no error and no warning. To exclude
+  build output at any depth, write `**/target/` and `**/node_modules/` instead
+  of `target/` and `node_modules/`. Also note `foo/` removes the directory
+  itself, while `foo/**` removes only its contents and leaves an empty `foo/`
+  in the store copy. `ignore` is a silent no-op on an agent or rule item: the
+  item's path IS a single file, so there is no path inside it for a pattern to
+  match. See
   [spec/ignore.md](https://github.com/jaemk/mind/blob/main/spec/ignore.md).
 
 ## `[[hooks]]` - lifecycle hooks
@@ -131,6 +144,7 @@ bin = "detect.sh"                # tool only: what {{tools:detect}} resolves to
 build = "make"                   # tool only: per-item build, run in staging at install
 install = "./setup.sh"           # any kind: host side effect run after install
 uninstall = "./teardown.sh"      # any kind: host cleanup run before removal
+ignore = ["scratch/"]            # replaces [source].ignore for this item
 ```
 
 - **`bin`** and **`build`** are valid only on a `tool`; on any other kind they are
@@ -138,6 +152,10 @@ uninstall = "./teardown.sh"      # any kind: host cleanup run before removal
 - **`install`** / **`uninstall`** are per-item lifecycle hooks (valid on any kind),
   distinct from `build` (which produces the item's content) and from the
   source-level `[[hooks]]`.
+- **`ignore`** on an item REPLACES `[source].ignore` for that item rather than
+  adding to it; the built-in VCS-directory set (`.git`, `.hg`, `.svn`, `.bzr`)
+  still applies either way. `ignore = []` is the only way to opt one item out of
+  a source-wide `[source].ignore` list.
 
 ## `[discover]` - glob-based discovery
 

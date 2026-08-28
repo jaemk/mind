@@ -41,6 +41,14 @@ struct Rule {
 
 /// The compiled ignore set for one item: the built-ins plus whatever the source
 /// declared for it (IGN-1).
+///
+/// `#[derive(Default)]` gives the EMPTY set: zero rules, not even the
+/// built-ins. That is deliberate and distinct from [`IgnoreSet::builtin()`]
+/// (the built-ins with no source declaration, IGN-2) and from
+/// [`IgnoreSet::new`] (a source declaration plus the built-ins): `default()`
+/// exists for a caller that has not yet resolved any ignore list at all (e.g.
+/// hashing a path with no item context), not as a shorthand for "no
+/// declaration".
 #[derive(Debug, Clone, Default)]
 pub struct IgnoreSet {
     rules: Vec<Rule>,
@@ -74,7 +82,23 @@ impl IgnoreSet {
                 ));
             }
             let dir_only = entry.ends_with('/');
-            let body = entry.trim_end_matches('/');
+            let mut body = entry.trim_end_matches('/');
+            // spec: IGN-4 -- `is_ignored` drops a `CurDir` component when
+            // rendering the real path being matched, so a pattern that keeps a
+            // leading "./" in its own text can never match anything: it reads
+            // like `scratch/` but is silently inert, exactly what IGN-4 exists
+            // to prevent. Normalize any number of leading "./" away instead of
+            // accepting a pattern that can never fire.
+            while let Some(stripped) = body.strip_prefix("./") {
+                body = stripped;
+            }
+            if body.is_empty() {
+                return Err(bad_ignore(
+                    item,
+                    raw,
+                    "it is empty after removing leading './' components",
+                ));
+            }
             if body.split('/').any(|c| c == "..") {
                 return Err(bad_ignore(
                     item,
@@ -88,10 +112,18 @@ impl IgnoreSet {
         }
         // The built-ins are appended last and are never user-supplied, so they
         // cannot fail to compile.
+        //
+        // spec: IGN-2 IGN-21 -- `dir_only: false`, matching a FILE of the same
+        // name too, not only a directory: `.git` is a regular FILE in a
+        // submodule, a `git worktree` checkout, and `git init
+        // --separate-git-dir`, exactly the trees IGN-21 names as this
+        // feature's reach. Matching only a directory would leave a dangling
+        // `.git` pointer FILE in the store copy, which is what this whole
+        // built-in set exists to prevent.
         for name in BUILTIN_IGNORES {
             rules.push(Rule {
                 pattern: glob::Pattern::new(name).expect("built-in ignore is a valid glob"),
-                dir_only: true,
+                dir_only: false,
             });
         }
         Ok(IgnoreSet { rules })
@@ -180,9 +212,12 @@ mod tests {
         .expect("compiles")
     }
 
-    /// The built-in set applies with no declaration at all, and only to
-    /// directories: a FILE named `.git` is an ordinary file.
-    // spec: IGN-2
+    /// The built-in set applies with no declaration at all, and matches a
+    /// directory OR a file of the same name: `.git` is a regular FILE (not a
+    /// directory) in a submodule, a `git worktree` checkout, and `git init
+    /// --separate-git-dir`, so the built-in set must catch that shape too, not
+    /// only the ordinary top-level-clone directory shape.
+    // spec: IGN-2 IGN-21
     #[test]
     fn builtin_vcs_dirs_are_ignored_without_any_declaration() {
         let s = IgnoreSet::builtin();
@@ -192,8 +227,9 @@ mod tests {
                 "{name} must be ignored as a directory"
             );
             assert!(
-                !s.is_ignored(&PathBuf::from(name), false),
-                "{name} as a FILE is ordinary content"
+                s.is_ignored(&PathBuf::from(name), false),
+                "{name} must be ignored as a FILE too (a submodule/worktree/\
+                 separate-git-dir `.git` is a file, not a directory)"
             );
         }
         // Build output is deliberately not implied.
@@ -272,5 +308,25 @@ mod tests {
     fn the_item_root_is_never_ignored() {
         let s = set(&["*"]);
         assert!(!s.is_ignored(&PathBuf::from(""), true));
+    }
+
+    /// A leading `./` is normalized away rather than left in the compiled
+    /// pattern: `is_ignored` drops a `CurDir` component when rendering the
+    /// real path it matches against, so a pattern that keeps "./" in its own
+    /// text can never match anything -- it reads like `scratch/` but is
+    /// silently inert.
+    // spec: IGN-4
+    #[test]
+    fn a_leading_cur_dir_component_is_normalized_not_left_inert() {
+        let s = set(&["./scratch/"]);
+        assert!(
+            s.is_ignored(&PathBuf::from("scratch"), true),
+            "`./scratch/` must behave exactly like `scratch/`, not match nothing"
+        );
+        let s2 = set(&["././nested/file.md"]);
+        assert!(
+            s2.is_ignored(&PathBuf::from("nested/file.md"), false),
+            "repeated leading './' components must all be stripped"
+        );
     }
 }

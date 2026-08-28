@@ -797,7 +797,7 @@ fn run_build_hook(
         // (main.rs's `json_stdout`), so it cannot reach the result document.
         // spec: CLI-217
         println!("running build hook for {}", item.display_key());
-        crate::hook::run_hook(build, staging, &item.source, "build")?;
+        crate::hook::run_hook(build, staging, &item.source, "build", "build")?;
     } else if crate::hook::is_tty() && !dangerously_skip {
         // spec: CLI-217
         crate::render::note(format!(
@@ -838,7 +838,7 @@ fn hook_cwd(store: &Path) -> std::path::PathBuf {
 /// (e.g. [`CatalogItem::display_key`]/[`InstalledItem::display_key`]), never a
 /// raw item key.
 fn run_item_hook(
-    event: &str,
+    event: &'static str,
     display_key: &str,
     source: &str,
     cmd: &str,
@@ -881,7 +881,7 @@ fn run_item_hook(
         // mode, unreachable from `--json` stdout by the process-wide redirect.
         // spec: CLI-217
         println!("running {event} hook for {display_key}");
-        crate::hook::run_hook(cmd, &cwd, source, event)?;
+        crate::hook::run_hook(cmd, &cwd, source, event, event)?;
     } else if crate::hook::is_tty() && !dangerously_skip {
         // spec: CLI-217
         crate::render::note(format!(
@@ -1126,9 +1126,17 @@ fn copy_recursive_at(
             let entry = entry.map_err(|e| MindError::io(src, e))?;
             let from = entry.path();
             // spec: IGN-10 -- excluded here, and by the identical test in the
-            // hash walk, so what is not installed is not hashed.
+            // hash walk, so what is not installed is not hashed. Classified with
+            // `symlink_metadata` (no-follow), same as the hash walk, so a
+            // symlink pointing at a directory is never a directory to either: a
+            // directory-only rule (all four built-ins, and any `name/` entry)
+            // does not match it, so it hard-fails LIFE-42's symlink rejection
+            // instead of being silently skipped; a no-slash rule matches it in
+            // both walks and it is skipped by both.
             let rel = from.strip_prefix(root).unwrap_or(&from);
-            let is_dir = from.is_dir();
+            let from_meta =
+                std::fs::symlink_metadata(&from).map_err(|e| MindError::io(&from, e))?;
+            let is_dir = from_meta.is_dir();
             if ignore.is_ignored(rel, is_dir) {
                 continue;
             }
@@ -1163,6 +1171,8 @@ fn symlink(target: &Path, link: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use crate::error::ItemKind;
+    use crate::hash::hash_path_ignoring;
+    use crate::ignore::IgnoreSet;
     use crate::paths::Lobe;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -2320,5 +2330,170 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&src);
         let _ = std::fs::remove_dir_all(&dst);
+    }
+
+    // ---- IGN-10: copy/hash agreement on symlink classification ---------------
+
+    /// A symlink pointing at a directory is classified with `symlink_metadata`
+    /// (no-follow), same as the hash walk, so it is never a directory to the
+    /// ignore matcher. A no-slash pattern matches an entry regardless of
+    /// `is_dir`, so it excludes the symlink from both the copy and the hash
+    /// identically, and the excluded entry contributes nothing to either.
+    #[cfg(unix)]
+    #[test]
+    fn symlink_to_dir_ignored_by_no_slash_pattern_is_skipped_by_copy_and_hash() {
+        // spec: IGN-10 LIFE-42
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let src = std::env::temp_dir().join(format!(
+            "mind-symdir-noslash-src-{}-{n}",
+            std::process::id()
+        ));
+        let dst = std::env::temp_dir().join(format!(
+            "mind-symdir-noslash-dst-{}-{n}",
+            std::process::id()
+        ));
+        let target = std::env::temp_dir().join(format!(
+            "mind-symdir-noslash-tgt-{}-{n}",
+            std::process::id()
+        ));
+        let reference = std::env::temp_dir().join(format!(
+            "mind-symdir-noslash-ref-{}-{n}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&src);
+        let _ = std::fs::remove_dir_all(&dst);
+        let _ = std::fs::remove_dir_all(&target);
+        let _ = std::fs::remove_dir_all(&reference);
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("keep.txt"), b"kept").unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("inner.txt"), b"outside the item").unwrap();
+        std::os::unix::fs::symlink(&target, src.join("scratch")).unwrap();
+
+        // Reference tree: what the item looks like with "scratch" absent
+        // entirely, i.e. what the hash must equal if "scratch" contributes
+        // nothing.
+        std::fs::create_dir_all(&reference).unwrap();
+        std::fs::write(reference.join("keep.txt"), b"kept").unwrap();
+
+        let ignore = IgnoreSet::new(&["scratch".to_string()], "skill:t").unwrap();
+
+        copy_recursive_ignoring(&src, &dst, &ignore)
+            .expect("a no-slash pattern excludes the symlink before LIFE-42's check ever sees it");
+        assert!(
+            std::fs::symlink_metadata(dst.join("scratch")).is_err(),
+            "the ignored symlink must not be copied"
+        );
+        assert!(dst.join("keep.txt").is_file());
+
+        let hash_with_scratch =
+            hash_path_ignoring(&src, &ignore).expect("hash walk must also skip the symlink");
+        let hash_without_scratch = hash_path_ignoring(&reference, &IgnoreSet::default())
+            .expect("reference tree hashes cleanly");
+        assert_eq!(
+            hash_with_scratch, hash_without_scratch,
+            "an ignored symlink must contribute nothing to the hash (IGN-10)"
+        );
+
+        let _ = std::fs::remove_dir_all(&src);
+        let _ = std::fs::remove_dir_all(&dst);
+        let _ = std::fs::remove_dir_all(&target);
+        let _ = std::fs::remove_dir_all(&reference);
+    }
+
+    /// A directory-only ignore rule does NOT match a symlink pointing at a
+    /// directory, because `is_dir` comes from `symlink_metadata` (no-follow)
+    /// rather than a following `is_dir()`. So the entry is never skipped by a
+    /// `name/` rule (nor by any of the four built-ins) and instead reaches
+    /// LIFE-42's symlink rejection, hard-failing the install exactly as it
+    /// would without any ignore rule in play.
+    #[cfg(unix)]
+    #[test]
+    fn symlink_to_dir_not_matched_by_dir_only_pattern_hard_fails_life42() {
+        // spec: IGN-10 LIFE-42
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let src =
+            std::env::temp_dir().join(format!("mind-symdir-slash-src-{}-{n}", std::process::id()));
+        let dst =
+            std::env::temp_dir().join(format!("mind-symdir-slash-dst-{}-{n}", std::process::id()));
+        let target =
+            std::env::temp_dir().join(format!("mind-symdir-slash-tgt-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&src);
+        let _ = std::fs::remove_dir_all(&dst);
+        let _ = std::fs::remove_dir_all(&target);
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("keep.txt"), b"kept").unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        std::os::unix::fs::symlink(&target, src.join("scratch")).unwrap();
+
+        let ignore = IgnoreSet::new(&["scratch/".to_string()], "skill:t").unwrap();
+
+        let result = copy_recursive_ignoring(&src, &dst, &ignore);
+        assert!(
+            result.is_err(),
+            "a directory-only rule must not exclude a symlink named `scratch`; the \
+             install must hard-fail on it via LIFE-42 rather than silently install it"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("symlink"),
+            "the failure must be the LIFE-42 symlink rejection: {msg}"
+        );
+
+        let _ = std::fs::remove_dir_all(&src);
+        let _ = std::fs::remove_dir_all(&dst);
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    /// For a tree mixing plain files, a nested directory, and a symlink
+    /// excluded by an ignore rule, the copy and the hash walk must agree on
+    /// exactly which entries survive: hashing the copied output (no further
+    /// ignores needed, since the excluded entry was never copied) must equal
+    /// hashing the source tree through the real ignore set.
+    #[cfg(unix)]
+    #[test]
+    fn copy_and_hash_agree_on_file_set_for_mixed_tree() {
+        // spec: IGN-10
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let src = std::env::temp_dir().join(format!("mind-mixed-src-{}-{n}", std::process::id()));
+        let dst = std::env::temp_dir().join(format!("mind-mixed-dst-{}-{n}", std::process::id()));
+        let target =
+            std::env::temp_dir().join(format!("mind-mixed-tgt-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&src);
+        let _ = std::fs::remove_dir_all(&dst);
+        let _ = std::fs::remove_dir_all(&target);
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("top.txt"), b"top level").unwrap();
+        std::fs::create_dir_all(src.join("sub")).unwrap();
+        std::fs::write(src.join("sub/nested.txt"), b"nested content").unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("outside.txt"), b"must never appear").unwrap();
+        std::os::unix::fs::symlink(&target, src.join("link")).unwrap();
+
+        // "link" (no trailing slash) matches the symlink whether or not it is
+        // classified as a directory, so both walks must skip it identically.
+        let ignore = IgnoreSet::new(&["link".to_string()], "skill:t").unwrap();
+
+        copy_recursive_ignoring(&src, &dst, &ignore)
+            .expect("the symlink is ignored, so it never reaches the LIFE-42 check");
+        assert!(
+            std::fs::symlink_metadata(dst.join("link")).is_err(),
+            "the ignored symlink must not be copied"
+        );
+        assert!(dst.join("top.txt").is_file());
+        assert!(dst.join("sub").join("nested.txt").is_file());
+
+        let hash_src = hash_path_ignoring(&src, &ignore)
+            .expect("source hashes cleanly with the symlink excluded");
+        let hash_dst = hash_path_ignoring(&dst, &IgnoreSet::default())
+            .expect("copied output has no symlink left to trip over");
+        assert_eq!(
+            hash_src, hash_dst,
+            "the copy and the hash walk must agree on the resulting file set (IGN-10)"
+        );
+
+        let _ = std::fs::remove_dir_all(&src);
+        let _ = std::fs::remove_dir_all(&dst);
+        let _ = std::fs::remove_dir_all(&target);
     }
 }

@@ -47,7 +47,23 @@ pub(crate) fn hash_str(s: &str) -> String {
     h.finish_hex()
 }
 
-/// Hash an item path: a single file, or a directory hashed recursively.
+/// Hash an item path: a single file, or a directory hashed recursively, with
+/// NO ignore rules applied -- not even the IGN-2 built-ins (`.git`, `.hg`,
+/// `.svn`, `.bzr`): it calls [`hash_path_ignoring`] with
+/// `IgnoreSet::default()`, which is an empty rule set and is NOT the same as
+/// [`crate::ignore::IgnoreSet::builtin()`].
+///
+/// NEVER compare this result against a recorded manifest hash: the manifest
+/// hash was computed with the item's own effective ignore set (its declared
+/// patterns plus the IGN-2 built-ins), so a directory containing anything
+/// those rules would exclude -- most commonly `.git/`, which every
+/// `path = "."` item has -- hashes differently here forever, and the
+/// comparison reports permanent, unfixable drift (H1). Prefer
+/// [`crate::catalog::CatalogItem::content_hash`], which cannot be called
+/// without the item's own ignore set, for any comparison against a manifest
+/// hash. This is `pub(crate)`, not `pub`: the one remaining caller
+/// (`review.rs`) hashes single files it already knows carry no ignorable
+/// content, never a value compared against a recorded hash.
 ///
 /// Symlinks are never followed (LIFE-34): a symlink entry is hashed by its
 /// relative path and link-target string, so retargeting is detected and a
@@ -58,7 +74,7 @@ pub(crate) fn hash_str(s: &str) -> String {
 /// This prevents distinct `(path, content)` pairs from colliding due to
 /// ambiguous byte boundaries, and prevents a regular file whose name begins
 /// with "symlink:" from producing the same hash as a symlink of that stem.
-pub fn hash_path(path: &Path) -> Result<String> {
+pub(crate) fn hash_path(path: &Path) -> Result<String> {
     hash_path_ignoring(path, &crate::ignore::IgnoreSet::default())
 }
 
@@ -107,11 +123,20 @@ pub fn hash_path_ignoring(path: &Path, ignore: &crate::ignore::IgnoreSet) -> Res
     Ok(h.finish_hex())
 }
 
-/// A cheap change-detection fingerprint for the same tree [`hash_path`] hashes:
-/// the identical walk, but reading each entry's stat fields -- `mtime`, `size`,
-/// and, under `cfg(unix)`, `ctime` and inode number -- instead of its contents.
-/// Symlinks are still not followed and still contribute their target string
-/// (which is cheap and catches a retarget).
+/// Test-only convenience: [`stat_fingerprint_ignoring`] with an empty
+/// (`IgnoreSet::default()`) rule set. See that function's doc for the full
+/// rationale; the shipping code always calls the ignoring form so it sees the
+/// same tree the recorded hash does (IGN-10).
+#[cfg(test)]
+pub(crate) fn stat_fingerprint(path: &Path) -> Result<String> {
+    stat_fingerprint_ignoring(path, &crate::ignore::IgnoreSet::default())
+}
+
+/// A cheap change-detection fingerprint for the same tree [`hash_path_ignoring`]
+/// hashes: the identical walk, but reading each entry's stat fields -- `mtime`,
+/// `size`, and, under `cfg(unix)`, `ctime` and inode number -- instead of its
+/// contents. Symlinks are still not followed and still contribute their target
+/// string (which is cheap and catches a retarget).
 ///
 /// This is NOT a content hash and must never be compared against a recorded
 /// manifest hash. Its only use is to decide whether re-reading content is
@@ -126,14 +151,9 @@ pub fn hash_path_ignoring(path: &Path, ignore: &crate::ignore::IgnoreSet) -> Res
 /// mtime" replace (write a new file, then rename it over the old path) swaps
 /// the inode too. This is why the only caller is the TUI's display-side
 /// staleness memo (tui/data.rs, TUI-72); every path that ACTS on a hash
-/// (`upgrade`, `introspect`, `recall`) calls `hash_path` directly and is
+/// (`upgrade`, `introspect`, `recall`) calls `CatalogItem::content_hash`
+/// (which calls `hash_path_ignoring` with the item's own ignore set) and is
 /// unaffected by any residual gap here.
-#[cfg(test)]
-pub(crate) fn stat_fingerprint(path: &Path) -> Result<String> {
-    stat_fingerprint_ignoring(path, &crate::ignore::IgnoreSet::default())
-}
-
-/// [`stat_fingerprint`], excluding what `ignore` matches.
 ///
 /// The fingerprint gates whether the TUI re-hashes (TUI-72), so it has to see
 /// the same tree the hash does: a fingerprint that noticed an ignored file
@@ -436,6 +456,42 @@ mod tests {
                 "a symlink retarget must change the fingerprint"
             );
         }
+    }
+
+    // spec: TUI-72 IGN-10
+    #[test]
+    fn stat_fingerprint_ignoring_skips_ignored_dir_and_still_sees_tracked_changes() {
+        // M16-a: every other fingerprint test in this module calls the walk
+        // with `IgnoreSet::default()` (zero rules), so none of them ever
+        // exercise `stat_fingerprint_ignoring`'s `ignore.is_ignored(..)` filter
+        // (collect_stats) with a rule that actually MATCHES. A regression that
+        // deleted that filter would pass every existing test here while
+        // reintroducing a permanent ~1 Hz full-tree rehash for any item
+        // containing a `.git` dir -- the exact cost TUI-72 exists to avoid.
+        let dir = tmp("fingerprint-ignoring-git");
+        std::fs::write(dir.join("SKILL.md"), b"tracked v1").unwrap();
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::fs::write(dir.join(".git").join("HEAD"), b"ref: refs/heads/main").unwrap();
+
+        let ignore = crate::ignore::IgnoreSet::builtin();
+        let before = stat_fingerprint_ignoring(&dir, &ignore).unwrap();
+
+        // A mutation INSIDE the ignored `.git` dir must NOT move the
+        // fingerprint: it is excluded from the walk entirely.
+        std::fs::write(dir.join(".git").join("HEAD"), b"ref: refs/heads/other").unwrap();
+        let after_git_edit = stat_fingerprint_ignoring(&dir, &ignore).unwrap();
+        assert_eq!(
+            before, after_git_edit,
+            "a change inside an ignored .git dir must not move the fingerprint"
+        );
+
+        // A mutation to a TRACKED file must still move the fingerprint.
+        std::fs::write(dir.join("SKILL.md"), b"tracked v2, different").unwrap();
+        let after_tracked_edit = stat_fingerprint_ignoring(&dir, &ignore).unwrap();
+        assert_ne!(
+            after_git_edit, after_tracked_edit,
+            "a change to a tracked file must still move the fingerprint"
+        );
     }
 
     // spec: TUI-72

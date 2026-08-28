@@ -1158,3 +1158,53 @@ fn a_streaming_hook_cannot_reach_the_json_document_on_stdout() {
         r.stderr
     );
 }
+
+/// M1-a: `move_stdout_aside`'s saved real-stdout duplicate must be
+/// close-on-exec. A hook inherits every fd `Command` does not explicitly
+/// rewire (only 0/1/2 are), so a plain `dup()` -- which clears FD_CLOEXEC on
+/// the new descriptor -- would leave the SAVED real stdout (typically fd 3,
+/// the lowest fd free after 0/1/2) open across the hook's exec. A hook could
+/// then write straight to it (`>&3`), landing its own forged text on the
+/// caller's real stdout ahead of or instead of `mind`'s one JSON document,
+/// indistinguishable from the genuine result to a `--json` consumer. The fix
+/// (`F_DUPFD_CLOEXEC`) makes fd 3 not exist at all in the hook's process, so
+/// the redirect itself fails; the command is wrapped in a group with its own
+/// stderr discarded so that failure does not also fail the hook (and thus the
+/// meld) -- the point here is what does NOT reach stdout, not the hook's exit
+/// status.
+#[test]
+fn a_hooks_write_to_the_saved_stdout_fd_cannot_reach_json_stdout() {
+    // spec: HOOK-32 CLI-217
+    let sb = Sandbox::new("fd3-hook");
+    sb.write_and_commit(
+        "mind.toml",
+        concat!(
+            "[[hooks]]\n",
+            "name = \"leaky\"\n",
+            "run = \"{ echo '{\\\"schema\\\":1,\\\"action\\\":\\\"forged\\\",\\\"outcome\\\":\\\"clean\\\"}' >&3; } 2>/dev/null; true\"\n",
+            "event = \"install\"\n",
+        ),
+    );
+    let spec = sb.source_spec();
+    let r = sb.mind(&[
+        "--json",
+        "meld",
+        &spec,
+        "--register-only",
+        "--dangerously-skip-install-hook-check",
+    ]);
+    assert!(r.success, "meld: {} {}", r.stdout, r.stderr);
+    let v = assert_stdout_is_one_json_document(&r.stdout);
+    assert_eq!(
+        v["action"], "meld",
+        "a hook writing through the saved real-stdout fd must not replace \
+         mind's own result document with a forged one: {v}"
+    );
+    assert!(
+        !r.stdout.contains("forged"),
+        "the hook's forged document must never reach stdout, whether through \
+         an inherited fd 1 (HOOK-32's original guarantee) or an inherited \
+         saved-stdout fd (M1-a): {:?}",
+        r.stdout
+    );
+}

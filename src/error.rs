@@ -538,6 +538,10 @@ pub enum MindError {
     ///
     /// DSC-95: `item` and `entry` are source-controlled (`mind.toml` text), so
     /// both are sanitized at the construction site.
+    ///
+    /// `item` carries the declaration site: the item key for an item-level
+    /// `ignore` list, or the literal `mind.toml [source].ignore` for a
+    /// source-level one.
     #[error("{item}: invalid ignore pattern '{entry}': {reason}")]
     BadIgnorePattern {
         item: String,
@@ -549,6 +553,10 @@ pub enum MindError {
     /// (`SKILL.md`, `TOOL.md`, or the single file that IS an agent/rule item).
     /// Without this an item could be declared and then install as an empty
     /// directory, which discovery still offers and the harness cannot use.
+    ///
+    /// `item` carries the declaration site: the item key for an item-level
+    /// `ignore` list, or the literal `mind.toml [source].ignore` for a
+    /// source-level one.
     #[error(
         "{item}: ignore pattern '{entry}' would exclude the item's own {anchor}; an item cannot ignore the file that defines it"
     )]
@@ -562,6 +570,10 @@ pub enum MindError {
     /// from the item. The two directives contradict: `expand:` asks for token
     /// expansion in a file `ignore` says is not part of the item. An authoring
     /// mistake, so it names both rather than resolving silently by precedence.
+    ///
+    /// `item` carries the declaration site: the item key for an item-level
+    /// `ignore` list, or the literal `mind.toml [source].ignore` for a
+    /// source-level one.
     #[error(
         "{item}: '{file}' is listed in `expand:` but is excluded by the ignore pattern '{entry}'; a file cannot be both expanded and ignored"
     )]
@@ -653,7 +665,18 @@ pub enum MindError {
     LobesLocked { action: String },
 
     #[error(
-        "install hook for source '{identity}' failed{}: {}\n  command: {command}",
+        "{} for source '{identity}' failed{}: {}\n  command: {command}",
+        // The event is what the hook IS (install/uninstall/build); the label is
+        // what the frame above was headed with, which is the author's
+        // `[[hooks]].name` or, absent one, the command itself (HOOK-51). They
+        // coincide for per-item lifecycle hooks and diverge for source hooks, so
+        // name both only when they differ: the reader needs the event to know
+        // what failed, and the label to find the frame it streamed into.
+        if event == label {
+            format!("{event} hook")
+        } else {
+            format!("{event} hook '{label}'")
+        },
         status_suffix(*status),
         if *streamed {
             // spec: HOOK-30 -- the hook's streams are inherited, so mind never
@@ -663,23 +686,34 @@ pub enum MindError {
             // empty frame, or "(no output)" over a screen of build errors, would
             // each be wrong half the time.
             "its output, if any, is in the frame above"
-        } else if stderr.is_empty() {
+        } else if reason.is_empty() {
             "(no output)"
         } else {
-            stderr.as_str()
+            reason.as_str()
         }
     )]
     HookFailed {
+        /// What the hook is: "install", "uninstall", or "build". This is the
+        /// lifecycle event, never the author's display name, so an uninstall
+        /// hook is never reported as an install one. Always a call-site
+        /// literal, so it is borrowed rather than owned: `MindError` sits just
+        /// under clippy's `result_large_err` threshold and a `String` here
+        /// pushes every `Result` in the crate over it.
+        event: &'static str,
+        /// The heading the hook's output frame carried: the author's
+        /// `[[hooks]].name`, or the command itself when there is none
+        /// (HOOK-51). Equal to `event` for per-item lifecycle hooks.
+        label: String,
         identity: String,
         command: String,
         status: Option<ExitStatus>,
         /// The failure's own reason, for a hook that never ran (a spawn error).
         /// Empty for a hook that ran, whose output went straight to the terminal
         /// and was never captured.
-        stderr: String,
+        reason: String,
         /// True when the hook actually ran, so its output (if it produced any)
         /// was streamed live inside the frame. False only when the spawn itself
-        /// failed, where `stderr` carries the reason instead.
+        /// failed, where `reason` carries the failure reason instead.
         streamed: bool,
     },
 
@@ -1746,10 +1780,12 @@ mod tests {
     fn hook_failed_displays_identity_and_command() {
         // spec: HOOK-30
         let e = MindError::HookFailed {
+            event: "install",
+            label: "install".into(),
             identity: "github.com/acme/tools".into(),
             command: "make install".into(),
             status: None,
-            stderr: "boom".into(),
+            reason: "boom".into(),
             streamed: false,
         };
         let msg = e.to_string();
@@ -1758,16 +1794,70 @@ mod tests {
         assert!(msg.contains("boom"), "msg: {msg}");
     }
 
+    // Display names the hook's own event, not a hardcoded "install", so a
+    // failing uninstall or build hook is not reported as an install one.
+    #[test]
+    fn hook_failed_displays_its_own_event_not_hardcoded_install() {
+        // spec: HOOK-30
+        let e = MindError::HookFailed {
+            event: "uninstall",
+            label: "uninstall".into(),
+            identity: "github.com/acme/tools".into(),
+            command: "make uninstall".into(),
+            status: None,
+            reason: String::new(),
+            streamed: true,
+        };
+        let msg = e.to_string();
+        assert!(
+            msg.starts_with("uninstall hook for source 'github.com/acme/tools'"),
+            "message must lead with the uninstall event: {msg}"
+        );
+        // Note "uninstall hook" itself contains "install hook", so the check
+        // that this is not the install message has to be anchored.
+        assert!(
+            !msg.starts_with("install hook"),
+            "message must not report an uninstall hook as an install one: {msg}"
+        );
+    }
+
+    // A source hook carries an author-chosen label (its `[[hooks]].name`, or
+    // the command itself when it has none, HOOK-51), which is what the output
+    // frame is headed with. The message names both: the event says what failed,
+    // the quoted label says which frame to look at. Without the event a source
+    // install hook with no name would report as "'exit 1' hook", naming the
+    // command twice and the lifecycle event not at all.
+    #[test]
+    fn hook_failed_names_both_event_and_label_when_they_differ() {
+        // spec: HOOK-30
+        let e = MindError::HookFailed {
+            event: "install",
+            label: "exit 1".into(),
+            identity: "github.com/acme/tools".into(),
+            command: "exit 1".into(),
+            status: None,
+            reason: String::new(),
+            streamed: true,
+        };
+        let msg = e.to_string();
+        assert!(
+            msg.starts_with("install hook 'exit 1' for source 'github.com/acme/tools'"),
+            "message must name the event and the frame's label: {msg}"
+        );
+    }
+
     // spec: HOOK-30
     // A silent hook failure (no stdout/stderr) must render "(no output)" so the
     // error message does not point at framed output blocks that were never printed.
     #[test]
     fn hook_failed_silent_exit_renders_no_output() {
         let e = MindError::HookFailed {
+            event: "install",
+            label: "install".into(),
             identity: "github.com/acme/tools".into(),
             command: "exit 1".into(),
             status: None,
-            stderr: String::new(),
+            reason: String::new(),
             streamed: false,
         };
         let msg = e.to_string();
@@ -1787,10 +1877,12 @@ mod tests {
     #[test]
     fn hook_failed_with_stderr_renders_stderr_not_no_output() {
         let e = MindError::HookFailed {
+            event: "install",
+            label: "install".into(),
             identity: "github.com/acme/tools".into(),
             command: "make install".into(),
             status: None,
-            stderr: "some diagnostic".into(),
+            reason: "some diagnostic".into(),
             streamed: false,
         };
         let msg = e.to_string();
@@ -1812,10 +1904,12 @@ mod tests {
     #[test]
     fn hook_failed_with_streamed_points_at_the_frame_not_no_output() {
         let e = MindError::HookFailed {
+            event: "install",
+            label: "install".into(),
             identity: "github.com/acme/tools".into(),
             command: "make install".into(),
             status: None,
-            stderr: String::new(),
+            reason: String::new(),
             streamed: true,
         };
         let msg = e.to_string();
@@ -1910,10 +2004,12 @@ mod tests {
     #[test]
     fn hook_failed_streamed_priority_over_stderr_content() {
         let e = MindError::HookFailed {
+            event: "install",
+            label: "install".into(),
             identity: "github.com/acme/tools".into(),
             command: "make install".into(),
             status: None,
-            stderr: "some content".into(),
+            reason: "some content".into(),
             streamed: true,
         };
         let msg = e.to_string();

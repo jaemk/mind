@@ -16408,7 +16408,7 @@ fn recall_status_view_marks_install_state() {
 }
 
 #[test]
-fn install_hook_output_is_mirrored_to_mind_stdout() {
+fn install_hook_stdout_streams_to_mind_stdout() {
     // spec: HOOK-30 - a hook's streams are inherited, so its stdout reaches
     // mind's stdout as it is produced, inside one frame around the whole run.
     let sb = Sandbox::bare("hook-output");
@@ -16449,7 +16449,7 @@ fn install_hook_output_is_mirrored_to_mind_stdout() {
 }
 
 #[test]
-fn install_hook_stderr_is_framed_and_mirrored() {
+fn install_hook_stderr_goes_to_mind_stderr_not_stdout() {
     // spec: HOOK-30 - with the streams inherited, a hook's stderr goes to MIND's
     // stderr rather than being captured and mirrored into stdout. That is the
     // point of streaming (each stream keeps its identity, so a caller's

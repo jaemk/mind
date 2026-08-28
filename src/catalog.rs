@@ -185,10 +185,16 @@ impl CatalogItem {
     /// The item's anchor file, the one an ignore pattern may not exclude
     /// (IGN-5): `SKILL.md` / `TOOL.md` for a directory item, and for a
     /// single-file item the file itself, which is the item.
+    ///
+    /// A tool's `TOOL.md` is optional (a tool needs no anchor file at all), so
+    /// IGN-5 protects it only when the tool actually has one: a tool with no
+    /// `TOOL.md` has nothing under it named `TOOL.md` for an ignore pattern to
+    /// exclude, so naming that file in an error would refer to a file the tool
+    /// does not ship.
     pub fn anchor_file(&self) -> Option<&'static str> {
         match self.kind {
             ItemKind::Skill => Some("SKILL.md"),
-            ItemKind::Tool => Some("TOOL.md"),
+            ItemKind::Tool => self.path.join("TOOL.md").is_file().then_some("TOOL.md"),
             // An agent/rule item IS its file: `path` names the file, so there is
             // nothing under the item an ignore pattern could match at all.
             ItemKind::Agent | ItemKind::Rule => None,
@@ -361,14 +367,34 @@ pub(crate) fn scan_source_at(
 /// [`crate::ignore::IgnoreSet`] and applies to every item either way, so it
 /// cannot be lost by an item declaring an empty list.
 fn resolve_ignores(items: &mut [CatalogItem], source_ignore: &[String]) -> Result<()> {
+    // spec: DSC-95 -- the literal declaration site named below carries no
+    // source-controlled text, so it needs no sanitizing (unlike a display key,
+    // which does and gets it from `display_key()`).
+    const SOURCE_LABEL: &str = "mind.toml [source].ignore";
     for item in items.iter_mut() {
-        if item.ignore.is_none() {
+        // M9-a: capture whether THIS item declared its own list before it gets
+        // overwritten by the inherited one below, so an error can still name
+        // where the bad pattern was actually written. Without this, a bad
+        // entry in `[source].ignore` is reported against whichever item's scan
+        // happened to reach the check first (`skill:a: invalid ignore pattern
+        // ...`), sending the author to look for an `ignore` key on that item
+        // that does not exist, and the blamed item can change across a re-run.
+        let declared_own = item.ignore.is_some();
+        if !declared_own {
             item.ignore = Some(source_ignore.to_vec());
         }
+        let label = if declared_own {
+            item.display_key()
+        } else {
+            SOURCE_LABEL.to_string()
+        };
         // Compiling validates every pattern (IGN-4) at scan, so a malformed or
         // unsafe entry is reported when the source is read rather than at the
-        // install that would silently not exclude what it names.
-        let set = item.ignore_set()?;
+        // install that would silently not exclude what it names. Compiled
+        // directly here (not via `item.ignore_set()`, which always labels by
+        // the item) so the error names the declaration site above.
+        let set =
+            crate::ignore::IgnoreSet::new(item.ignore.as_deref().unwrap_or_default(), &label)?;
 
         // spec: IGN-5 -- an item may not ignore the file that defines it, which
         // would install it as an empty directory that discovery still offers.
@@ -387,7 +413,7 @@ fn resolve_ignores(items: &mut [CatalogItem], source_ignore: &[String]) -> Resul
                 .cloned()
                 .unwrap_or_else(|| anchor.to_string());
             return Err(MindError::IgnoresOwnAnchor {
-                item: item.display_key(),
+                item: label,
                 entry: crate::sanitize::strip_ansi(&entry),
                 anchor: anchor.to_string(),
             });
@@ -411,15 +437,32 @@ fn resolve_ignores(items: &mut [CatalogItem], source_ignore: &[String]) -> Resul
                         .is_ok_and(|one| one.is_under_ignored(rel))
                 })
                 .cloned()
+                // L14: when no declared entry matched, the exclusion came from
+                // the built-in set; name the specific one (`.git`/`.hg`/`.svn`/
+                // `.bzr`) rather than the generic "a built-in ignore" prose.
+                .or_else(|| builtin_match(rel).map(str::to_string))
                 .unwrap_or_else(|| "a built-in ignore".to_string());
             return Err(MindError::ExpandsIgnoredFile {
-                item: item.display_key(),
+                item: label,
                 file: crate::sanitize::strip_ansi(file),
                 entry: crate::sanitize::strip_ansi(&entry),
             });
         }
     }
     Ok(())
+}
+
+/// Whether `rel` (or an ancestor of it) has a path component that names one of
+/// the built-in VCS directories (IGN-2), so an error can name the specific
+/// built-in that excluded a path instead of a generic placeholder (L14).
+fn builtin_match(rel: &Path) -> Option<&'static str> {
+    rel.components().find_map(|c| match c {
+        std::path::Component::Normal(name) => crate::ignore::BUILTIN_IGNORES
+            .iter()
+            .find(|n| **n == name.to_string_lossy())
+            .copied(),
+        _ => None,
+    })
 }
 
 /// Catalog an item-link source instance (LNK-7): the one skill directory at
