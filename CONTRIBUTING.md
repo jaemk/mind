@@ -9,8 +9,22 @@ cargo test
 
 `make ci-local` (alias `make check`) is the local gate: `cargo fmt` (in place)
 + `cargo clippy --all-targets --all-features -- -D warnings` + `cargo test
---all-features`. Run it before opening a PR; CI runs the read-only variant
-(`make ci`: `fmt --check` instead of `fmt`).
+--all-features` + `cargo audit`. Run it before opening a PR; CI runs the
+read-only variant (`make ci`: `fmt --check` instead of `fmt`).
+
+The audit step scans the locked dependency tree against the RustSec advisory
+database. It is skipped, with a note on stderr, when `cargo-audit` is not
+installed (`cargo install cargo-audit --locked`), so a passing gate does not on
+its own mean a scan ran. It is the only step that reaches the network, and the
+only one whose result can change without the tree changing, so
+`make ci-local SKIP_AUDIT=1` opts out when you are offline or an unrelated
+upstream advisory is blocking you. CI scans every push and every tag regardless
+and does not read that variable.
+
+`make build-release` builds the binary the release workflow ships, with a
+dependency SBOM embedded by `cargo auditable` (install the pinned version:
+`cargo install cargo-auditable --version 0.7.5 --locked`). `cargo audit bin
+target/release/mind` then scans the built artifact without its source.
 
 ## The spec
 

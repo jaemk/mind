@@ -14,7 +14,7 @@ help:
 	@echo "  fmt-check  cargo fmt --check"
 	@echo "  clippy     cargo clippy (all targets + features, warnings as errors)"
 	@echo "  test       cargo test (all features)"
-	@echo "  audit      cargo audit (RustSec advisories; skipped if not installed)"
+	@echo "  audit      cargo audit (RustSec advisories; skipped if not installed or SKIP_AUDIT=1)"
 	@echo "  check      local gate: fmt (fix) + clippy + test + audit"
 	@echo "  ci         CI gate: fmt-check + clippy + test + audit"
 	@echo "  ci-local   like ci but formats in place (fmt) instead of fmt-check"
@@ -32,7 +32,7 @@ build:
 # <path>` can scan an already-built artifact without its source or lockfile.
 # Keep this in step with the workflow's build step.
 build-release:
-	@command -v cargo-auditable >/dev/null || { echo "error: cargo-auditable not found; install with 'cargo install cargo-auditable --locked'"; exit 1; }
+	@command -v cargo-auditable >/dev/null || { echo "error: cargo-auditable not found; install the version release.yml pins: cargo install cargo-auditable --version 0.7.5 --locked"; exit 1; }
 	cargo auditable build --release --locked --bin mind
 
 fmt:
@@ -59,12 +59,24 @@ test:
 # The skip means `make ci` passing does NOT imply an advisory scan ran. Install
 # cargo-audit locally if you want the gate to mean that.
 #
+# `cargo audit` fetches the RustSec advisory database, so this is the one step
+# in the gate that reaches the network, and the one whose result can change
+# without the tree changing: an advisory published upstream today fails a gate
+# that passed yesterday, including for a transitive dependency with no fixed
+# release to move to. `make ci-local SKIP_AUDIT=1` opts out when you are offline
+# or unblocking unrelated work. It is not a way to ship past an advisory: CI
+# scans every push and every tag and does not read this variable.
+#
 # `cargo audit` exits non-zero on a vulnerability but not on an informational
 # advisory (`unmaintained`, `unsound`, `notice`), which matches the CI job's
 # behavior: those are reported as warnings and are frequently in a transitive
 # dependency with no fixed release to move to.
 audit:
-	@command -v cargo-audit >/dev/null 2>&1 \
+	@if [ -n "$(SKIP_AUDIT)" ]; then \
+		echo "note: NO advisory scan ran (SKIP_AUDIT set; CI scans every push and every tag)" >&2; \
+		exit 0; \
+	fi; \
+	command -v cargo-audit >/dev/null 2>&1 \
 		|| { echo "note: NO advisory scan ran (cargo-audit not installed; CI scans every push and every tag). Install: cargo install cargo-audit --locked" >&2; exit 0; }; \
 	cargo audit
 
