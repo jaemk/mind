@@ -358,16 +358,24 @@ mod tests {
         // which spawns the compiled binary and reads its real, unintercepted
         // stdout.
         //
-        // If this assertion ever starts failing (`captured` becomes
-        // non-empty), `cargo test`'s capture behavior changed and prose
+        // If this assertion ever starts failing (the MARKER appears in
+        // `captured`), `cargo test`'s capture behavior changed and prose
         // assertions become sound to write in-process again.
+        //
+        // The assertion is "the marker is absent", not "the capture is empty".
+        // Emptiness was a usable proxy while this redirected fd 1 alone; now
+        // that it redirects fd 2 as well, the window can pick up libtest's own
+        // progress lines ("test some::other::test ... ok") written by OTHER
+        // tests running concurrently in this binary. Those are foreign output,
+        // not this closure's, so asserting on emptiness made the test race
+        // against the rest of the suite while proving nothing extra.
         let marker = "TUI-62-diagnostic-canary-line-that-must-not-be-observed";
         let (_, captured) = with_captured_stdout(|| println!("{marker}"));
         assert!(
-            captured.is_empty(),
-            "expected with_captured_stdout to see nothing (libtest intercepts \
-             println! first); got {captured:?} instead -- if this now \
-             contains {marker:?}, in-process prose assertions on captured \
+            !captured.contains(marker),
+            "expected with_captured_stdout NOT to observe the closure's own \
+             `println!` (libtest intercepts it first); got {captured:?}, which \
+             contains {marker:?} -- in-process prose assertions on captured \
              TUI output are sound again and the comment above is stale"
         );
     }
