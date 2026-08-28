@@ -264,15 +264,18 @@ manifest, and store.
   a set that changes which entries the walk sees already moves the fingerprint,
   and two sets that walk the identical files agree on the content hash too
   (IGN-10). Keying this way means an entry per path per distinct fingerprint
-  observed, so the memo is bounded by a fixed LRU capacity (4096) rather than by
-  pruning to the live catalog on each full load. That capacity must stay well
-  ABOVE the installed-item count, not merely near it: the poll hashes every
-  installed item once per tick in a stable order, which is a cyclic sequential
-  scan, so at more items than capacity each tick evicts exactly the entries the
-  next tick reaches for first. The hit rate does not degrade gradually there, it
-  collapses, and the memo becomes pure overhead: a full re-read of every item
-  tree every second, the cost this rule exists to avoid. A hash FAILURE is not
-  cached, so it is retried on the next poll instead of being remembered.
+  observed, so the memo carries an LRU bound as well as the prune. Each full
+  load drops entries whose path has left the catalog (a source unmelded, an item
+  removed upstream) AND grows the capacity to fit the live set, so the bound
+  tracks the workload rather than a constant fixed in advance. The capacity must
+  stay above the installed-item count, which is why it is derived rather than
+  chosen: the poll hashes every installed item once per tick in a stable order,
+  a cyclic sequential scan, so at more items than capacity each tick evicts
+  exactly the entries the next tick reaches for first. The hit rate would not
+  degrade gradually there, it would collapse, leaving the memo pure overhead: a
+  full re-read of every item tree every second, the cost this rule exists to
+  avoid. A hash FAILURE is not cached, so it is retried on the next poll instead
+  of being remembered.
 - `TUI-73` Applying the TUI-63 upgrade confirm (`u`, TUI-22) for a NON-EMPTY
   confirmed key set runs the NO-SYNC, KEY-SCOPED upgrade
   (`commands::upgrade_no_sync_keys`, extending CLI-169's no-sync form with an

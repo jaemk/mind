@@ -9,7 +9,7 @@
 
 use std::path::PathBuf;
 
-use cached::cached;
+use cached::Cached as _;
 
 use crate::catalog;
 use crate::config::Config;
@@ -150,7 +150,8 @@ pub struct SnapshotUnmanaged {
     pub paths: Vec<PathBuf>,
 }
 
-/// The content hash of `path` as of `fingerprint`, memoized on both.
+/// Memo of item content hashes for the TUI's staleness check, keyed on the
+/// pair (item path, cheap stat fingerprint).
 ///
 /// The poll tick runs about once a second and computes TUI-63 staleness for
 /// every installed item, which means a full content hash of every item's source
@@ -163,16 +164,20 @@ pub struct SnapshotUnmanaged {
 /// check to get wrong, and no way to serve a value whose fingerprint does not
 /// match the one asked for.
 ///
-/// `ignore` is deliberately NOT part of the key. A changed ignore set changes
+/// The ignore set is deliberately NOT part of the key. A changed set changes
 /// which entries the fingerprint walk sees, so it already moves the
-/// fingerprint; and two ignore sets that walk the identical set of files agree
-/// on the content hash too, so they are interchangeable here (IGN-10).
+/// fingerprint; and two sets that walk the identical files agree on the content
+/// hash too, so they are interchangeable here (IGN-10).
 ///
-/// Bounded by `max_size`: an entry is added per path per distinct fingerprint
-/// it has been observed at, so a long session with many edits is capped by LRU
-/// eviction rather than growing for the life of the process. `None` is not
-/// cached (`cached`'s default for an `Option` return), so a hash failure is
-/// retried on the next tick instead of being remembered as a failure.
+/// Sized and pruned by [`fit_hash_memo`] on every full load rather than held at
+/// a fixed capacity. Capacity is a runtime value for a reason: `load_inner`
+/// hashes every installed item once per tick in a stable order, which is a
+/// cyclic sequential scan, the worst case for LRU. At N items and capacity C
+/// the hit rate is ~100% while N <= C and collapses to ~0% the moment N > C,
+/// because each tick evicts exactly the entries the next tick reaches for
+/// first. That is a cliff, not a slope, and past it the memo costs a full
+/// re-read of every item tree every second: precisely what it exists to
+/// prevent. Deriving C from the catalog keeps N below it by construction.
 ///
 /// Display-side only (TUI-72): `upgrade`/`introspect`/`recall` all call
 /// `CatalogItem::content_hash` directly, never this memo, so a missed
@@ -180,39 +185,54 @@ pub struct SnapshotUnmanaged {
 /// the TUI-63 confirm modal list fewer stale items than the no-sync apply
 /// (TUI-73) then acts on, since that apply always re-hashes for real. A miss is
 /// NOT bounded to "one tick": with no TTL it is served until the entry is
-/// evicted by LRU pressure. `stat_fingerprint`'s `ctime`/inode fields close the
+/// pruned or evicted. `stat_fingerprint`'s `ctime`/inode fields close the
 /// realistic miss case -- a same-size, mtime-preserving replace (`cp -p`,
 /// `rsync -a`, `tar -p`, `touch -r`) -- but the fingerprint is still not a
 /// content hash and must never be compared against a recorded manifest hash.
-/// The capacity has to sit above the number of installed items, not merely at
-/// a plausible one. `load_inner` calls this once per installed item per tick,
-/// in the same order every time, which is a cyclic sequential scan: the worst
-/// case for LRU. At N items with a capacity of C, the hit rate is ~100% while
-/// N <= C and collapses to ~0% the moment N > C, because each tick evicts
-/// exactly the entries the next tick reaches for first. That is a cliff, not a
-/// slope, and past it the memo costs a full re-read of every item tree every
-/// second: precisely what it exists to prevent. Entries are roughly 100 bytes,
-/// so 4096 costs well under a megabyte and clears any realistic install by a
-/// wide margin. Raise it rather than let it be approached. The number is
-/// pinned by `the_memo_capacity_clears_any_realistic_installed_item_count`;
-/// `max_size` takes a literal, so changing it means changing both. See TUI-72.
-#[cached(
-    name = "HASH_MEMO",
-    max_size = 4096,
-    key = "(PathBuf, String)",
-    convert = r#"{ (path.to_path_buf(), fingerprint.to_string()) }"#
-)]
-fn hash_at_fingerprint(
-    path: &std::path::Path,
-    fingerprint: &str,
-    ignore: &crate::ignore::IgnoreSet,
-) -> Option<String> {
-    // `fingerprint` is key-only: the `convert` above folds it into the cache
-    // key, and reaching this body at all means that key missed, so there is
-    // nothing left to compare it against. Binding it keeps the parameter from
-    // reading as dead while saying why it is not used.
-    let _ = fingerprint;
-    crate::hash::hash_path_ignoring(path, ignore).ok()
+static HASH_MEMO: std::sync::LazyLock<
+    cached::sync_sync::RwLock<cached::LruCache<(PathBuf, String), String>>,
+> = std::sync::LazyLock::new(|| cached::sync_sync::RwLock::new(new_hash_memo(HASH_MEMO_FLOOR)));
+
+/// The capacity the memo starts at and never drops below, covering the load
+/// before the first [`fit_hash_memo`] call and every install smaller than it.
+const HASH_MEMO_FLOOR: usize = 1024;
+
+/// Entries per installed item. One holds the item's current fingerprint; the
+/// spare absorbs an in-flight edit without evicting a neighbour, so a user
+/// editing items in a loop does not push the working set over capacity.
+const HASH_MEMO_PER_ITEM: usize = 2;
+
+fn new_hash_memo(capacity: usize) -> cached::LruCache<(PathBuf, String), String> {
+    cached::LruCache::builder()
+        .max_size(capacity.max(1))
+        .build()
+        .expect("a non-zero max_size is the only failure mode")
+}
+
+/// Drop entries whose path left the catalog, and grow the memo if the current
+/// catalog no longer fits. Called once per full load with the freshly scanned
+/// item paths.
+///
+/// This is what keeps the LRU bound from becoming a cliff (see [`HASH_MEMO`]):
+/// capacity tracks the workload instead of a constant chosen in advance, so the
+/// N > C regime is not reachable by installing more items. The prune half also
+/// keeps a dead path (its source unmelded, or the item removed upstream) from
+/// occupying capacity that live items need, which a bare LRU would let it do
+/// until it aged out on its own.
+fn fit_hash_memo(live_paths: &std::collections::HashSet<PathBuf>) {
+    let needed = (live_paths.len() * HASH_MEMO_PER_ITEM).max(HASH_MEMO_FLOOR);
+    let mut memo = HASH_MEMO.write();
+    memo.retain(|(path, _), _| live_paths.contains(path));
+    if memo.capacity() < needed {
+        // `capacity` has no setter, so growing means rebuilding. Carry the
+        // surviving entries over in LRU order so a grow does not throw away
+        // the work the memo exists to preserve.
+        let mut grown = new_hash_memo(needed);
+        for (key, value) in memo.iter_order() {
+            grown.cache_set(key, value);
+        }
+        *memo = grown;
+    }
 }
 
 /// Test-only: seed `HASH_MEMO` with the entry `memoized_hash` would look up
@@ -269,10 +289,21 @@ pub(crate) fn poison_memo_for_test(
 /// `ignore` list) also changes the fingerprint, since the newly excluded
 /// entries' stats were part of it, so the memo misses and re-hashes.
 fn memoized_hash(path: &std::path::Path, ignore: &crate::ignore::IgnoreSet) -> Option<String> {
-    match crate::hash::stat_fingerprint_ignoring(path, ignore).ok() {
-        Some(fp) => hash_at_fingerprint(path, &fp, ignore),
-        None => crate::hash::hash_path_ignoring(path, ignore).ok(),
+    // No fingerprint (an unsupported-mtime platform): hash every time and cache
+    // nothing, exactly as before the memo existed.
+    let Ok(fingerprint) = crate::hash::stat_fingerprint_ignoring(path, ignore) else {
+        return crate::hash::hash_path_ignoring(path, ignore).ok();
+    };
+
+    let key = (path.to_path_buf(), fingerprint);
+    if let Some(hit) = HASH_MEMO.write().cache_get(&key) {
+        return Some(hit.clone());
     }
+    // A failure is not stored, so it is retried on the next tick rather than
+    // remembered for the life of the entry.
+    let hash = crate::hash::hash_path_ignoring(path, ignore).ok()?;
+    HASH_MEMO.write().cache_set(key, hash.clone());
+    Some(hash)
 }
 
 /// Load the initial snapshot under a blocking shared lock (called once at
@@ -327,6 +358,12 @@ fn load_inner(paths: &Paths) -> Result<Snapshot> {
     let registry = Registry::load(paths)?;
     let manifest = Manifest::load(paths)?;
     let catalog_items = catalog::scan(paths, &registry)?;
+
+    // spec: TUI-72 -- size the memo to this catalog and drop entries whose path
+    // has left it, before it is consulted below.
+    let live_paths: std::collections::HashSet<PathBuf> =
+        catalog_items.iter().map(|c| c.path.clone()).collect();
+    fit_hash_memo(&live_paths);
 
     // L10: one sibling index for both passes below. Each walks every item, so
     // rebuilding it per row (what `deps::direct_dependency_keys` does) made a
@@ -642,22 +679,68 @@ mod tests {
 
     // spec: TUI-72
     #[test]
-    fn the_memo_capacity_clears_any_realistic_installed_item_count() {
-        // The number itself is the thing worth pinning. `load_inner` hashes
-        // every installed item once per tick in a stable order, so the memo
-        // sees a cyclic sequential scan: at N items over capacity C, LRU
-        // evicts exactly what the next tick wants first and the hit rate goes
-        // to ~0, re-reading every tree every second. Asserting `size <=
-        // capacity` instead would be a tautology the `cached` crate already
-        // guarantees, and would pass at a capacity of 1. This does not write
-        // to the shared static, so it cannot evict a sibling test's entry.
-        use cached::Cached as _;
-        assert_eq!(
-            HASH_MEMO.read().cache_capacity(),
-            Some(4096),
-            "the memo must stay a SIZED cache at the capacity TUI-72 documents: \
-             past it the memo does not degrade, it stops working, so lowering \
-             this number is a behavior change and not a tuning knob"
+    fn fitting_the_memo_grows_capacity_past_a_large_catalog() {
+        // The property that matters is that capacity TRACKS the catalog, not
+        // that it equals any particular number. `load_inner` hashes every
+        // installed item once per tick in a stable order, so the memo sees a
+        // cyclic sequential scan: at N items over capacity C the LRU evicts
+        // exactly what the next tick wants first and the hit rate goes to ~0,
+        // re-reading every tree every second. A fixed capacity makes that
+        // regime reachable by installing more items; deriving it from the live
+        // set does not.
+        let many: std::collections::HashSet<PathBuf> = (0..5000)
+            .map(|i| PathBuf::from(format!("/fake/item-{i}")))
+            .collect();
+        fit_hash_memo(&many);
+
+        let capacity = HASH_MEMO.read().capacity();
+        assert!(
+            capacity >= many.len(),
+            "capacity must cover the catalog ({} items), got {capacity}: below \
+             it the memo does not degrade, it stops working",
+            many.len()
+        );
+
+        // And it never drops below the floor for a small catalog.
+        fit_hash_memo(&std::collections::HashSet::new());
+        assert!(
+            HASH_MEMO.read().capacity() >= HASH_MEMO_FLOOR,
+            "capacity must never fall below the floor"
+        );
+    }
+
+    // spec: TUI-72
+    #[test]
+    fn fitting_the_memo_drops_entries_whose_path_left_the_catalog() {
+        // A dead path (its source unmelded, or the item removed upstream)
+        // otherwise sits in the memo occupying capacity that live items need,
+        // until it happens to age out on its own.
+        let live = PathBuf::from("/fake/still-in-catalog");
+        let dead = PathBuf::from("/fake/dropped-from-catalog");
+        HASH_MEMO
+            .write()
+            .cache_set((live.clone(), "fp".into()), "hash-live".into());
+        HASH_MEMO
+            .write()
+            .cache_set((dead.clone(), "fp".into()), "hash-dead".into());
+
+        let mut live_paths = std::collections::HashSet::new();
+        live_paths.insert(live.clone());
+        fit_hash_memo(&live_paths);
+
+        assert!(
+            HASH_MEMO
+                .write()
+                .cache_get(&(live, "fp".to_string()))
+                .is_some(),
+            "a path still in the catalog must survive the prune"
+        );
+        assert!(
+            HASH_MEMO
+                .write()
+                .cache_get(&(dead, "fp".to_string()))
+                .is_none(),
+            "a path no longer in the catalog must be dropped, not retained"
         );
     }
 
@@ -677,17 +760,25 @@ mod tests {
         let ignore = crate::ignore::IgnoreSet::default();
 
         assert!(
-            hash_at_fingerprint(&missing, "fixed-fingerprint", &ignore).is_none(),
+            memoized_hash(&missing, &ignore).is_none(),
             "hashing a path that does not exist must fail"
+        );
+        assert!(
+            !HASH_MEMO
+                .read()
+                .key_order()
+                .iter()
+                .any(|(path, _)| path == &missing),
+            "a failed hash must leave NO entry behind: a stored failure would \
+             be served for the life of the entry instead of being retried"
         );
 
         crate::paths::mkdir_p(&missing).unwrap();
         std::fs::write(missing.join("SKILL.md"), b"now it exists").unwrap();
 
         assert!(
-            hash_at_fingerprint(&missing, "fixed-fingerprint", &ignore).is_some(),
-            "the SAME key must recompute after the failure, not serve a \
-             remembered None"
+            memoized_hash(&missing, &ignore).is_some(),
+            "the next poll must recompute rather than serve a remembered failure"
         );
 
         cleanup(&base);

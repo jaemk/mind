@@ -38,9 +38,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The `probe` TUI's staleness memo now uses the `cached` crate, adding it as a
   dependency. Its stat fingerprint became part of the cache key rather than a
   token stored beside the value and compared by hand, so a tree whose
-  fingerprint moved is a key that misses. Eviction changed with it: entries were
-  pruned to the live catalog on every full load, and are now bounded by a fixed
-  4096-entry LRU, which is well above any realistic installed-item count.
+  fingerprint moved is a key that misses. Entries are still pruned to the live
+  catalog on every full load, and now carry an LRU bound as well, whose capacity
+  is grown to fit the live set rather than fixed in advance.
 - Lifecycle hooks (install, uninstall, build) stream their output: stdout and
   stderr are inherited, so a build or package install is visible as it runs
   instead of appearing all at once when the command exits. The run is framed by
