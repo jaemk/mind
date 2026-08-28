@@ -127,10 +127,18 @@ CLI-17).
   redirection means what it says (`2>/dev/null` silences a noisy hook's warnings,
   and a hook's diagnostics no longer contaminate a stdout pipe). A non-zero exit is a `HookFailed` error
   and fails the `meld`: the source is not left registered (the clone is removed,
-  as for any failed meld), and the error points at the framed output already on
-  screen rather than repeating it, since nothing was captured to repeat. A
-  hook that fails to SPAWN is the exception: nothing was streamed, so that error
-  carries the spawn failure's own reason. Side effects the hook already had on
+  as for any failed meld), and the error points at the frame already on screen
+  rather than repeating its contents, since nothing was captured to repeat. It
+  points there WITHOUT asserting that output exists ("its output, if any, is in
+  the frame above"): inherited streams mean `mind` never saw a byte, so it
+  cannot distinguish a silent hook from a talkative one, and a message claiming
+  either would be wrong half the time. Detecting emptiness would require piping
+  the streams through `mind`, which costs the hook its terminal: `isatty` turns
+  false, so tools drop colour and progress rendering, and C stdio switches from
+  line buffering to 4 KiB blocks, delivering a long build's output in bursts.
+  That trade loses more than the wording gains. A hook that fails to SPAWN is
+  the exception: it never ran, so that error carries the spawn failure's own
+  reason instead. Side effects the hook already had on
   the system (an installed binary, a global package) are outside `mind`'s state
   and are not rolled back.
 - `HOOK-32` Streaming is safe under `--json` (CLI-217) without a special case:

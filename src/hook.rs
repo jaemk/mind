@@ -424,7 +424,7 @@ pub fn run_hook(command: &str, clone_dir: &Path, identity: &str, label: &str) ->
             stderr: e.to_string(),
             // Spawn failed, so nothing was streamed: the error carries the
             // reason itself rather than pointing at output that never existed.
-            printed_output: false,
+            streamed: false,
         })?;
 
     // The hook wrote straight to the terminal, so its last line may not have
@@ -436,16 +436,16 @@ pub fn run_hook(command: &str, clone_dir: &Path, identity: &str, label: &str) ->
     } else {
         // The hook wrote straight to the terminal, so there is nothing to
         // replay and nothing captured to attach: whatever it said is already on
-        // screen inside the frame above. `printed_output` is unconditionally
-        // true here (unlike the captured form, which could tell a silent hook
-        // from a talkative one), so the message points at the frame rather than
-        // claiming "(no output)" for a hook that printed plenty (HOOK-30).
+        // screen inside the frame above. `streamed` means "the process ran",
+        // not "it printed something": with inherited streams mind never saw a
+        // byte, so it cannot tell those apart, and the message says where
+        // output WOULD be rather than asserting that any exists (HOOK-30).
         Err(MindError::HookFailed {
             identity: identity.to_string(),
             command: command.to_string(),
             status: Some(status),
             stderr: String::new(),
-            printed_output: true,
+            streamed: true,
         })
     }
 }
@@ -1328,7 +1328,7 @@ mod tests {
                     ref command,
                     status,
                     ref stderr,
-                    printed_output,
+                    streamed,
                 },
             ) => {
                 assert_eq!(identity, "github.com/test/repo", "wrong identity");
@@ -1341,7 +1341,7 @@ mod tests {
                 assert_eq!(code, Some(3), "expected exit code 3, got {code:?}");
                 // spec: HOOK-30 -- the hook's streams were inherited, so nothing
                 // was captured to attach and the frame is already on screen.
-                // `printed_output` is therefore true even for a hook that
+                // `streamed` is therefore true even for a hook that
                 // printed nothing: streaming cannot tell a silent hook from a
                 // talkative one, and the message points at the (empty) frame
                 // rather than claiming "(no output)" for a hook that may have
@@ -1351,12 +1351,12 @@ mod tests {
                     "an inherited hook captures no stderr to attach"
                 );
                 assert!(
-                    printed_output,
+                    streamed,
                     "a hook that ran streamed its own output, so the error points at the frame"
                 );
                 let msg = e.to_string();
                 assert!(
-                    msg.contains("(see output above)"),
+                    msg.contains("its output, if any, is in the frame above"),
                     "a streamed hook failure must point at the frame: {msg}"
                 );
                 assert!(
@@ -1370,10 +1370,10 @@ mod tests {
 
     // spec: HOOK-30
     // A hook that prints output before failing must produce a HookFailed with
-    // printed_output=true, so its Display says "(see output above)" rather than
+    // streamed=true, so its Display says "its output, if any, is in the frame above" rather than
     // the contradictory "(no output)".
     #[test]
-    fn run_hook_with_output_before_failure_renders_see_output_above() {
+    fn run_hook_with_output_before_failure_points_at_the_frame() {
         let dir = TempDir::new("output-fail");
         // Print to stdout, then exit non-zero.
         let result = run_hook(
@@ -1385,23 +1385,20 @@ mod tests {
         match result {
             Err(
                 ref e @ MindError::HookFailed {
-                    printed_output,
+                    streamed,
                     ref stderr,
                     ..
                 },
             ) => {
-                assert!(
-                    printed_output,
-                    "printed_output must be true when hook produced stdout"
-                );
+                assert!(streamed, "streamed must be true when hook produced stdout");
                 assert!(
                     stderr.is_empty(),
                     "stderr field must be empty (output was streamed, not captured)"
                 );
                 let msg = e.to_string();
                 assert!(
-                    msg.contains("(see output above)"),
-                    "must say '(see output above)' when output was streamed: {msg}"
+                    msg.contains("its output, if any, is in the frame above"),
+                    "must point at the frame when output was streamed: {msg}"
                 );
                 assert!(
                     !msg.contains("(no output)"),
@@ -1416,7 +1413,7 @@ mod tests {
     // Same as above but with stderr output (not stdout): the framed output path
     // uses `printed_any` which covers either stream.
     #[test]
-    fn run_hook_with_stderr_output_before_failure_renders_see_output_above() {
+    fn run_hook_with_stderr_output_before_failure_points_at_the_frame() {
         let dir = TempDir::new("stderr-fail");
         let result = run_hook(
             "echo 'hook stderr' >&2; exit 1",
@@ -1425,14 +1422,11 @@ mod tests {
             "test-label",
         );
         match result {
-            Err(ref e @ MindError::HookFailed { printed_output, .. }) => {
-                assert!(
-                    printed_output,
-                    "printed_output must be true when hook produced stderr"
-                );
+            Err(ref e @ MindError::HookFailed { streamed, .. }) => {
+                assert!(streamed, "streamed must be true when hook produced stderr");
                 let msg = e.to_string();
                 assert!(
-                    msg.contains("(see output above)"),
+                    msg.contains("its output, if any, is in the frame above"),
                     "stderr output must also trigger '(see output above)': {msg}"
                 );
             }

@@ -41,7 +41,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   separate `hook-stdout`/`hook-stderr` blocks, and a hook's stderr now goes to
   mind's stderr instead of being replayed onto stdout, so redirecting one stream
   no longer moves the other's output with it. Under `--json` a hook's output
-  stays off the result document, as before (HOOK-30, HOOK-32).
+  stays off the result document, as before. A failing hook's error points at the
+  frame without claiming output exists ("its output, if any, is in the frame
+  above"): with the streams inherited mind never sees them, so it cannot tell a
+  silent hook from a talkative one (HOOK-30, HOOK-32).
 - An item link's unsatisfiable intra-source references are reconciled instead of
   failing with a generic missing-reference error. A link instance offers exactly
   one skill, so a reference to a sibling can never resolve: a `requires:` entry

@@ -655,19 +655,32 @@ pub enum MindError {
     #[error(
         "install hook for source '{identity}' failed{}: {}\n  command: {command}",
         status_suffix(*status),
-        if *printed_output { "(see output above)" } else if stderr.is_empty() { "(no output)" } else { stderr.as_str() }
+        if *streamed {
+            // spec: HOOK-30 -- the hook's streams are inherited, so mind never
+            // saw a byte of them and cannot tell a silent hook from a talkative
+            // one. The message therefore does not assert that output exists: it
+            // says where output WOULD be. Claiming "its output, if any, is in the frame above" over an
+            // empty frame, or "(no output)" over a screen of build errors, would
+            // each be wrong half the time.
+            "its output, if any, is in the frame above"
+        } else if stderr.is_empty() {
+            "(no output)"
+        } else {
+            stderr.as_str()
+        }
     )]
     HookFailed {
         identity: String,
         command: String,
         status: Option<ExitStatus>,
-        /// The stderr captured from the hook process, or empty when the hook's
-        /// output was already streamed live to the terminal (`printed_output` true).
+        /// The failure's own reason, for a hook that never ran (a spawn error).
+        /// Empty for a hook that ran, whose output went straight to the terminal
+        /// and was never captured.
         stderr: String,
-        /// True when the hook produced output that was already printed to the
-        /// terminal in framed blocks before the failure was detected. When true,
-        /// the Display shows "(see output above)" instead of "(no output)".
-        printed_output: bool,
+        /// True when the hook actually ran, so its output (if it produced any)
+        /// was streamed live inside the frame. False only when the spawn itself
+        /// failed, where `stderr` carries the reason instead.
+        streamed: bool,
     },
 
     #[error("no prebuilt `mind` binary for this platform ({os}/{arch}); build from source instead")]
@@ -1737,7 +1750,7 @@ mod tests {
             command: "make install".into(),
             status: None,
             stderr: "boom".into(),
-            printed_output: false,
+            streamed: false,
         };
         let msg = e.to_string();
         assert!(msg.contains("github.com/acme/tools"), "msg: {msg}");
@@ -1755,7 +1768,7 @@ mod tests {
             command: "exit 1".into(),
             status: None,
             stderr: String::new(),
-            printed_output: false,
+            streamed: false,
         };
         let msg = e.to_string();
         assert!(
@@ -1778,7 +1791,7 @@ mod tests {
             command: "make install".into(),
             status: None,
             stderr: "some diagnostic".into(),
-            printed_output: false,
+            streamed: false,
         };
         let msg = e.to_string();
         assert!(
@@ -1793,22 +1806,22 @@ mod tests {
 
     // spec: HOOK-30
     // When a hook produced output that was already streamed to the terminal
-    // (`printed_output` true), HookFailed must say "(see output above)" rather
+    // (`streamed` true), HookFailed must say "its output, if any, is in the frame above" rather
     // than the misleading "(no output)" -- even when stderr is empty, because
     // the diagnostics were already visible on screen.
     #[test]
-    fn hook_failed_with_printed_output_renders_see_output_above_not_no_output() {
+    fn hook_failed_with_streamed_points_at_the_frame_not_no_output() {
         let e = MindError::HookFailed {
             identity: "github.com/acme/tools".into(),
             command: "make install".into(),
             status: None,
             stderr: String::new(),
-            printed_output: true,
+            streamed: true,
         };
         let msg = e.to_string();
         assert!(
-            msg.contains("(see output above)"),
-            "printed_output=true must say '(see output above)': {msg}"
+            msg.contains("its output, if any, is in the frame above"),
+            "streamed=true must point at the frame: {msg}"
         );
         assert!(
             !msg.contains("(no output)"),
@@ -1892,21 +1905,21 @@ mod tests {
     }
 
     // spec: HOOK-30
-    // printed_output=true takes priority over a non-empty stderr field (the field
+    // streamed=true takes priority over a non-empty stderr field (the field
     // is empty in production but this guards the priority rule explicitly).
     #[test]
-    fn hook_failed_printed_output_priority_over_stderr_content() {
+    fn hook_failed_streamed_priority_over_stderr_content() {
         let e = MindError::HookFailed {
             identity: "github.com/acme/tools".into(),
             command: "make install".into(),
             status: None,
             stderr: "some content".into(),
-            printed_output: true,
+            streamed: true,
         };
         let msg = e.to_string();
         assert!(
-            msg.contains("(see output above)"),
-            "printed_output=true must take priority: {msg}"
+            msg.contains("its output, if any, is in the frame above"),
+            "streamed=true must take priority: {msg}"
         );
         assert!(
             !msg.contains("(no output)"),
