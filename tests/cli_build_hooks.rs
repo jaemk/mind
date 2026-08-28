@@ -411,3 +411,66 @@ fn build_hook_is_skipped_without_flag_in_non_tty() {
         "output must mention that the build hook was skipped (HOOK-72): {combined}"
     );
 }
+
+#[test]
+fn build_hook_output_streams_like_every_other_hook() {
+    // spec: HOOK-30
+    // Build hooks are not a separate execution path: `install::run_build_hook`
+    // delegates to `hook::run_hook`, so they inherit their streams like source
+    // and item hooks do. This pins that funnel. A build hook is the likeliest
+    // one to be slow and chatty (it is a build), so a regression here that
+    // reintroduced capture-and-dump would hit exactly the case streaming is for,
+    // and nothing else in the suite would notice.
+    let sb = Sandbox::new("bld-stream");
+    let toml = concat!(
+        "[[items]]\n",
+        "kind = \"tool\"\n",
+        "name = \"mytool\"\n",
+        "path = \"tools/mytool\"\n",
+        "build = \"echo BUILD-ON-STDOUT; echo BUILD-ON-STDERR 1>&2\"\n",
+    );
+    sb.write_and_commit(
+        "tools/mytool/TOOL.md",
+        "---\ndescription: test tool\n---\n# mytool\n",
+    );
+    sb.write_and_commit("mind.toml", toml);
+
+    let spec = sb.source_spec();
+    assert!(sb.mind(&["meld", &spec, "--link-only"]).success);
+    let learn = sb.mind(&[
+        "learn",
+        "tool:mytool",
+        "--dangerously-skip-build-hook-check",
+    ]);
+    assert!(
+        learn.success,
+        "learn failed: {} {}",
+        learn.stdout, learn.stderr
+    );
+
+    // The frame is mind's own output, so it is on stdout ...
+    assert!(
+        learn.stdout.contains("====== (hook: build) ======")
+            && learn.stdout.contains("====== (end hook: build) ======"),
+        "the build hook must be framed: {}",
+        learn.stdout
+    );
+    // ... the hook's stdout reaches stdout ...
+    assert!(
+        learn.stdout.contains("BUILD-ON-STDOUT"),
+        "the build hook's stdout must reach mind's stdout: {}",
+        learn.stdout
+    );
+    // ... and its stderr reaches stderr, not replayed onto stdout. A captured
+    // implementation would put both on stdout, which is what this catches.
+    assert!(
+        learn.stderr.contains("BUILD-ON-STDERR"),
+        "the build hook's stderr must reach mind's stderr: {}",
+        learn.stderr
+    );
+    assert!(
+        !learn.stdout.contains("BUILD-ON-STDERR"),
+        "and must not be copied onto stdout: {}",
+        learn.stdout
+    );
+}
