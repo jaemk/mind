@@ -15816,111 +15816,14 @@ fn evolve_check_json_includes_target_triple_key() {
     assert_eq!(v.get("outcome").and_then(|o| o.as_str()), Some("available"));
 }
 
-/// A fake `curl` on PATH (no network) that answers every request with content
-/// that fails SHA256SUMS verification: a file-fetch (`-o dest`, used for the
-/// release archive) writes placeholder bytes to `dest`; any other invocation
-/// (the SHA256SUMS string-fetch) prints one sums-file line for a filename
-/// that never matches the real archive name, so `parse_sha256sums` reports
-/// "not found" regardless of platform triple or version string.
-fn fake_curl_bin_dir(dir: &Path) -> PathBuf {
-    let bin_dir = dir.join("fake-curl-bin");
-    std::fs::create_dir_all(&bin_dir).unwrap();
-    let bogus_digest = "0".repeat(64);
-    let script = format!(
-        "#!/bin/sh\nout=\"\"\nprev=\"\"\nfor a in \"$@\"; do\n  \
-         if [ \"$prev\" = \"-o\" ]; then\n    out=\"$a\"\n  fi\n  prev=\"$a\"\n\
-         done\nif [ -n \"$out\" ]; then\n  printf 'not a real archive' > \"$out\"\n\
-         else\n  printf '%s  wrong-file.tar.gz\\n' \"{bogus_digest}\"\nfi\nexit 0\n"
-    );
-    let script_path = bin_dir.join("curl");
-    std::fs::write(&script_path, &script).unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    bin_dir
-}
-
-/// `evolve` is the one verb `json_reserves_stdout` (CLI-217) deliberately
-/// excludes: "evolve writes its own document straight to stdout from
-/// selfupdate.rs rather than through commands.rs, so redirecting fd 1 would
-/// silence it". That means evolve gets none of CLI-217's structural
-/// protection -- its own hand-written `if !out.json { println!(...) }` guards
-/// around the download progress lines (STO-46..STO-49) are the ONLY thing
-/// keeping `--json` stdout clean. This drives the real download corridor (no
-/// network: a fake `curl` on PATH) far enough to pass the "downloading mind
-/// ..." progress line and then fail on a SHA256SUMS digest mismatch, exactly
-/// the stretch between the guarded progress lines and the final
-/// `print_evolve_json`/error return.
-#[test]
-fn evolve_json_download_failure_keeps_stdout_one_document() {
-    // spec: CLI-217 STO-47
-    let sb = Sandbox::bare("evolve-json");
-    let fake_dir = fake_curl_bin_dir(&sb.base);
-    let new_path = prepend_path(&fake_dir);
-
-    let r = sb.mind_env(
-        &["--json", "evolve", "--yes", "--version", "99.0.0"],
-        &[("PATH", &new_path)],
-    );
-    assert!(
-        !r.success,
-        "the crafted SHA256SUMS response must fail digest verification: {} {}",
-        r.stdout, r.stderr
-    );
-    let doc: serde_json::Value = serde_json::from_str(r.stdout.trim()).unwrap_or_else(|e| {
-        panic!(
-            "stdout under --json must parse as a single JSON document even on \
-             evolve's own download failure, which the CLI-217 redirect does NOT \
-             cover ({e}): {:?}",
-            r.stdout
-        )
-    });
-    assert!(
-        doc.get("error").is_some(),
-        "a download failure must answer with the CLI-181 error envelope: {doc:#}"
-    );
-    assert!(
-        !r.stdout.contains("downloading mind"),
-        "the download progress line must not leak into --json stdout: {:?}",
-        r.stdout
-    );
-}
-
-/// The text-mode control for the test above: without `--json` the same
-/// corridor DOES print the progress line on stdout (the `if !out.json`
-/// guards are conditional, not a silent drop), and the DigestMismatch failure
-/// is reported on stderr as an ordinary structured-error message. Without
-/// this, the `--json` test above could pass by coincidence if the progress
-/// line were deleted outright rather than routed.
-#[test]
-fn evolve_text_mode_download_failure_still_shows_progress() {
-    // spec: STO-47
-    let sb = Sandbox::bare("evolve-text");
-    let fake_dir = fake_curl_bin_dir(&sb.base);
-    let new_path = prepend_path(&fake_dir);
-
-    let r = sb.mind_env(
-        &["evolve", "--yes", "--version", "99.0.0"],
-        &[("PATH", &new_path)],
-    );
-    assert!(
-        !r.success,
-        "the crafted SHA256SUMS response must fail digest verification: {} {}",
-        r.stdout, r.stderr
-    );
-    assert!(
-        r.stdout.contains("downloading mind"),
-        "text mode must still show the download progress line: {} {}",
-        r.stdout,
-        r.stderr
-    );
-    assert!(
-        r.stderr.contains("digest")
-            || r.stderr.contains("SHA256SUMS")
-            || r.stderr.contains("not found"),
-        "the digest-mismatch failure must be reported: {}",
-        r.stderr
-    );
-}
+// `evolve`'s download corridor no longer has an integration test. It used to be
+// driven hermetically by a fake `curl` on PATH; the downloader is the
+// `self_update` crate now, so a PATH stub intercepts nothing and the same test
+// would make a real network call. What those two tests pinned -- that the
+// "downloading mind ..." progress line is routed by the `--json` guard rather
+// than deleted (CLI-217, STO-47) -- is asserted in
+// `selfupdate::tests::download_banner_is_suppressed_under_json` instead, which
+// needs no download at all.
 
 #[test]
 fn help_lists_upgrade_evolve_and_self_update_alias() {

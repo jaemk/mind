@@ -6,6 +6,24 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- `evolve` downloads, verifies, extracts, and swaps the binary through the
+  `self_update` crate instead of shelling out to curl or wget and `tar`. Neither
+  downloader has to be on `PATH` any more; TLS is rustls, so a static musl build
+  no longer depends on the system OpenSSL layout. The verification chain is
+  unchanged in what it enforces: the `SHA256SUMS` digest for the release asset
+  (STO-47) and `gh attestation verify` over the downloaded archive (STO-66),
+  both before extraction, and the swap stays atomic behind the global exclusive
+  lock (STO-45, STO-46). GitHub's per-asset digest is now verified as well.
+  Behavior differences worth knowing: an unwritable install path is reported
+  before the download rather than after it, the API token is read as `GH_TOKEN`
+  then `GITHUB_TOKEN` (the `gh` CLI's order, previously the reverse), and a
+  token that cannot be encoded as an HTTP header fails the request instead of
+  degrading to an unauthenticated one. `MIND_HTTP_TIMEOUT_SECS` still sets the
+  request timeout. `resources/install.sh` is unchanged and still uses curl or
+  wget, since it runs before `mind` exists.
+
 ## [0.25.0] - 2026-08-28
 
 ### Added

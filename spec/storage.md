@@ -351,31 +351,48 @@ prevent the lost-update and torn-read races a plain read-modify-write would allo
 
 ## `evolve` binary swap
 
-- `STO-45` `evolve` stages the replacement binary in the same directory as the
-  running executable under a unique name `.mind-update.<pid>.<nanos>` rather
-  than a fixed name. If the staged path already exists before the copy begins,
-  `evolve` refuses and returns an `Io` error, preventing a pre-creation race.
+- `STO-45` `evolve` replaces the running executable in place through the
+  `self_update` crate, which stages the replacement beside the target (so the
+  rename never crosses a filesystem) and swaps it atomically: a failure at any
+  point leaves the existing binary intact. An install path the process cannot
+  write is `TargetNotWritable` naming the path, and `evolve` asks for that
+  answer BEFORE downloading (`check_install_path_writable`), so a
+  root-owned-binary refusal costs no download. Only a definite permission
+  refusal aborts early; an indeterminate probe result proceeds and lets the
+  swap itself report.
+
+  Superseding a previous scheme: `evolve` used to stage the new binary itself
+  under `.mind-update.<pid>.<nanos>` in the target's directory and refuse if
+  that path already existed (a pre-creation race guard). The staging, the
+  same-filesystem rename, and the failure-leaves-the-old-binary property are
+  the crate's now, and are tested there rather than here.
 - `STO-46` `evolve` holds the global exclusive lock (STO-40) for the entire
   download-and-swap step, serializing concurrent `mind evolve` invocations so
   two processes cannot download and swap over each other.
-- `STO-47` Before extracting a release archive, `evolve` downloads the
-  `SHA256SUMS` asset for that release and verifies the archive's SHA-256
-  digest. The `SHA256SUMS` format is standard `sha256sum` output: lowercase hex
-  digest, two spaces, bare filename, one line per file. A digest mismatch, or a
-  sums file that has no entry for the archive, is a `DigestMismatch` error and
-  the archive is not extracted. Version-pinned `evolve` (`--to V`) verifies
-  the pinned release's `SHA256SUMS`.
+- `STO-47` Before extracting a release archive, `evolve` verifies it against the
+  digest published in that release's `SHA256SUMS` asset
+  (`checksum_from_asset("SHA256SUMS")`). The sums asset is fetched before the
+  archive, so a release that does not carry one fails without downloading the
+  artifact first. A digest mismatch, or a sums file with no entry for the
+  archive, is a `DigestMismatch` error and the archive is not extracted --
+  neither degrades to an unverified install. Version-pinned `evolve` (`--to V`)
+  verifies the pinned release's `SHA256SUMS`.
+
+  GitHub also publishes a per-asset digest in its release API, which the
+  updater verifies by default in addition to the above. Both are integrity
+  checks served by the same host as the artifact, so neither is a substitute
+  for the build-provenance check in STO-66.
 - `STO-76` The resolved `evolve` target version -- from an explicit `--to`, a
   managed-policy pin, or a fetched `releases/latest` `tag_name` -- is validated
   as safe to use as a single URL path segment
-  (`mindfile::is_plausible_release_tag`) before it is interpolated into either
-  URL it drives: the release asset URL (STO-47's download) and the
-  `SHA256SUMS` URL. This runs before either URL is built and before any
-  download-step network call. Without it, a value carrying path segments (e.g.
+  (`mindfile::is_plausible_release_tag`) immediately on resolution, before
+  anything downstream uses it: the release-tag lookup it drives, the
+  confirmation prompt it is echoed into, and the `--json` result. This runs
+  before any download-step network call. Without it, a value carrying path segments (e.g.
   `1/../../../../attacker/mind/releases/download/v1`, from a repo/release
   takeover, a TLS-intercepting proxy, or a `--to` value copied from a
   malicious "install these steps" doc) re-points BOTH URLs at the same
-  attacker-controlled location once curl normalizes the `..` segments, so the
+  attacker-controlled location wherever a path segment is normalized, so the
   `SHA256SUMS` digest check would compare the attacker's binary against the
   attacker's own digest file and silently pass. A rejected value fails with a
   structured error naming the value (`SelfUpdateInvalidTarget`, a DIFFERENT
@@ -506,10 +523,14 @@ prevent the lost-update and torn-read races a plain read-modify-write would allo
   archive's GitHub build-provenance attestation (`actions/attest-build-provenance`)
   via `gh attestation verify <archive> --repo jaemk/mind` when a `gh` binary is
   present on PATH, mirroring `resources/install.sh`'s `gh attestation verify`
-  step. The check runs after the `SHA256SUMS` digest check (STO-47) and before
-  extraction, inside the same transactional download-and-swap step (STO-46): a
-  failure here leaves the existing binary untouched, exactly like every other
-  failure in that step.
+  step. It is wired in as the updater's pre-extraction archive hook
+  (`verify_archive`), which is what points `gh` at the downloaded `.tar.gz` --
+  the file the release workflow attests (`subject-path: mind-*.tar.gz`) -- and
+  not at the binary extracted from it, which has a different digest and no
+  attestation of its own. The check runs after the digest checks (STO-47) and
+  before extraction, inside the same transactional download-and-swap step
+  (STO-46): a failure here leaves the existing binary untouched, exactly like
+  every other failure in that step.
   - `gh` absent from PATH: `evolve` proceeds silently, with no note, matching
     install.sh's `if command -v gh` gate exactly.
   - `gh` present but the check could not be attempted (a `gh` build with no
@@ -561,78 +582,63 @@ prevent the lost-update and torn-read races a plain read-modify-write would allo
 
 ## Network fetch timeouts
 
-- `STO-52` The network fetches in `evolve` (`fetch_to_string` and `fetch_to_file`)
-  use a configurable connect timeout (default 15 s, overridable by the
-  `MIND_HTTP_TIMEOUT_SECS` environment variable) and a generous max-time ceiling of
-  600 s to accommodate slow downloads. For curl, the flags are `--connect-timeout N
-  --max-time 600`; for wget, `--timeout=N`. A missing, non-numeric, or zero value
-  of `MIND_HTTP_TIMEOUT_SECS` falls back to 15 (zero means "no limit" in both curl
-  and wget, which defeats the purpose of the knob). The argument vectors are built
-  by pure helper functions (`curl_string_args`, `wget_string_args`,
-  `curl_file_args`, `wget_file_args`) and are unit-testable without spawning a
-  process. `resources/install.sh` applies the same flags with a fixed 15 s connect
-  timeout and 600 s max-time; it does not read `MIND_HTTP_TIMEOUT_SECS`, because it
-  runs before `mind` is installed.
-- `STO-53` All wget invocations in `evolve` and `resources/install.sh` pass
-  `--tries=1`. wget defaults to 20 retries, so without this flag a blackholed
-  endpoint can take up to 20 times the configured timeout before failing. curl is
-  already a single attempt bounded by `--max-time 600`.
-- `STO-54` curl/wget failure output (stderr captured by `fetch_to_string`) is
-  sanitized via `strip_ansi` before it is embedded in `DownloadFailed.reason`.
-  A MITM'd or hostile endpoint controls stderr bytes and can inject ANSI escape
-  sequences or Unicode bidi override characters to spoof terminal output. The
-  sanitization is applied before the proxy-hint logic so the reason field and any
-  appended hint are both free of hostile control sequences.
-- `STO-57` The `evolve` GitHub REST API fetch (the release-latest lookup on
-  `api.github.com`) sends an `Authorization: Bearer <token>` header when a token is
-  present in the environment: `GITHUB_TOKEN` first, else `GH_TOKEN` (matching the
-  `gh` CLI), first non-empty (after trimming surrounding whitespace) wins. This
-  moves the caller out of GitHub's unauthenticated per-IP rate limit (60/hr, shared
-  across a NAT egress and easily exhausted on a workplace network, where the API
-  returns HTTP 403) into the authenticated 5000/hr tier. The header is applied ONLY
-  to `api.github.com` requests, never to the release-artifact or `SHA256SUMS`
-  download on the `github.com` / CDN host, so the token is not forwarded across a
-  cross-host redirect. With no token set, the request is byte-for-byte unchanged.
-  The header args are built by pure helpers (`curl_auth_args`, `wget_auth_args`)
-  and are unit-testable without touching the environment or spawning a process.
-- `STO-61` For curl, `evolve` passes the `Authorization: Bearer <token>` header
-  via a `--config` file rather than on argv, so the token is not exposed in
-  `/proc/<pid>/cmdline` to a local co-tenant during the brief API call. The
-  header is written as `header = "Authorization: Bearer <token>"` to a temp file
-  created mode 0600 inside a fresh 0700 temp directory (the same directory scheme
-  as the download, STO-45), curl is invoked with `--config <file>`, and the file
-  is removed (best effort) after the invocation. The `api.github.com`-only host
-  gating is unchanged (STO-57): the config file is written only for an
-  `api.github.com` URL with a non-empty token. wget keeps the `--header=...` argv
-  form. The config-file content and the `--config` arg are built by pure helpers
-  (`curl_auth_config_content`, `curl_auth_args`) so they are unit-testable
-  without spawning a process.
-- `STO-62` `evolve`'s GitHub token handling fails CLOSED and OPEN, never hard:
-  - **Fails closed on an unsafe token (B10).** A candidate token (`GITHUB_TOKEN`
-    then `GH_TOKEN`) is rejected -- and the next candidate tried, else no
-    authentication -- if it contains a control character (a `\n` could inject
-    an additional `key = value` directive, such as `output = ...` or
-    `url = ...`, into the curl `--config` file from STO-61) or a `"` / `\`
-    (unescaped by the config file's quoted-string syntax, so either could break
-    out of the quoted header value). A warning is printed to stderr naming which
-    env var was rejected; the request proceeds unauthenticated rather than
-    `evolve` erroring out over a malformed token.
-  - **Fails open on a temp-file write failure (C19).** If writing the STO-61
-    auth config file fails (e.g. a read-only or full `TMPDIR`), `evolve` warns
-    on stderr and proceeds with an unauthenticated request instead of
-    propagating the error. An unauthenticated request still succeeds below
-    GitHub's per-IP rate limit, so degrading is strictly better than turning a
-    working `evolve` into a hard failure over an unrelated temp-dir problem.
-  - **Residual exposure (accepted).** The 0600 file inside its 0700 temp
-    directory (STO-61) is removed on both the success and failure branch of the
-    curl invocation, but a `SIGINT` (or `kill -9`) arriving during the API call
-    itself skips that cleanup and can leave the token-bearing file on disk. This
-    is not fully mitigated: `mind` adds no signal handler for it. The exposure
-    window is bounded by the directory's 0700 mode (no other user can read it)
-    and by the file being written fresh per invocation inside a per-process,
-    unpredictably-named directory (STO-61) rather than a shared/reused path, so
-    the residual risk is an orphaned file surviving until the temp dir is
-    reaped, not a cross-user read or a predictable target.
+- `STO-52` `evolve` bounds every request it makes, with a WHOLE-request budget
+  (body included), not a connect timeout. Two budgets, because one value cannot
+  serve both: a metadata request (the release lookup) gets
+  `MIND_HTTP_TIMEOUT_SECS`, 15 s by default, and the artifact download gets a
+  600 s ceiling, matching the `--max-time 600` install.sh passes to curl. A
+  15 s whole-request budget would abort a healthy multi-megabyte download on a
+  slow link, which is why the download does not take the knob's value -- except
+  when that value is ABOVE the ceiling, in which case it wins, since raising the
+  knob asks for more room and not less. A missing, non-numeric, or zero value
+  falls back to 15; zero is treated as missing rather than as "no limit", which
+  would defeat the purpose of the knob. `resources/install.sh` applies an
+  equivalent 15 s connect timeout and 600 s max-time to its own curl/wget calls;
+  it does not read `MIND_HTTP_TIMEOUT_SECS`, because it runs before `mind` is
+  installed.
+- `STO-53` All wget invocations in `resources/install.sh` pass `--tries=1`. wget
+  defaults to 20 retries, so without this flag a blackholed endpoint can take up
+  to 20 times the configured timeout before failing. curl is already a single
+  attempt bounded by `--max-time 600`. This applies to the install script only:
+  `evolve` no longer shells out to a downloader.
+- `STO-54` The failure text `evolve` reports is sanitized via `strip_ansi`
+  before it is embedded in `DownloadFailed.reason`. A MITM'd or hostile endpoint
+  controls part of that text and can inject ANSI escape sequences or Unicode
+  bidi override characters to spoof terminal output. The sanitization is applied
+  before the proxy-hint logic so the reason field and any appended hint are both
+  free of hostile control sequences. The hint names `HTTPS_PROXY` / `HTTP_PROXY`
+  and nothing else: git's `http.proxy` never applied, and `~/.curlrc` stopped
+  applying when the downloader stopped being curl.
+- `STO-57` `evolve`'s GitHub API request carries an authorization token when the
+  environment supplies one (`GH_TOKEN`, else `GITHUB_TOKEN`, matching the `gh`
+  CLI's documented precedence; the first set and non-empty value wins, trimmed).
+  This moves the caller out of GitHub's unauthenticated per-IP rate limit (60/hr,
+  shared across a NAT egress and easily exhausted on a workplace network, where
+  the API answers HTTP 403) into the authenticated 5000/hr tier. The token is
+  attached only to requests on the configured API host, never forwarded to the
+  artifact CDN across a cross-host redirect. With no token set the request is
+  unchanged. Both the lookup and the host gating are the `self_update` crate's
+  (`auth_token_from_env`), and are tested there.
+
+  This supersedes a previous scheme in which `evolve` read the two variables
+  itself and passed the header to curl through a 0600 `--config` file (so the
+  token stayed off argv and out of `/proc/<pid>/cmdline`), rejecting a token
+  carrying a control character, `"`, or `\` because either could break out of
+  that file's quoted-string syntax. There is no config file and no argv to keep
+  a token off now. The precedence also flipped: `GITHUB_TOKEN` used to win over
+  `GH_TOKEN`, and the `gh` order is what applies. A token that cannot be encoded
+  as an HTTP header value is an error at request time rather than a warning and
+  an unauthenticated retry, so a malformed `GITHUB_TOKEN` (a CI expression that
+  expanded wrong, say) fails `evolve` instead of silently degrading it. That is
+  the crate's behavior and is accepted rather than worked around: the failure
+  names the token, and an ambient credential that is broken is worth surfacing.
+- `STO-61` Removed, superseded by STO-57. Stated the curl `--config` file that
+  carried the bearer token off argv; there is no curl invocation to keep a token
+  off the command line now. The number is retained so it is not reused.
+- `STO-62` Removed, superseded by STO-57. Stated `evolve`'s fail-closed handling
+  of an unsafe token value and its fail-open handling of a temp-file write
+  failure, both properties of the curl config file STO-61 described. The number
+  is retained so it is not reused.
 
 ## Schema versions
 

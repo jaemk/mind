@@ -102,6 +102,21 @@ const ALLOWLIST: &[&str] = &[
     //   binary swap (CLI-143) needs a real release and a writable install path,
     //   so it cannot run headlessly and stays allowlisted.
     "CLI-143",
+    // `evolve`'s download, verification, extraction, and in-place swap are the
+    // `self_update` crate's, so the statements describing them have no mind-side
+    // code path a test here could drive without a real release and a real
+    // network. Each is tested in that crate instead.
+    //   STO-45: the atomic same-filesystem swap and the pre-download
+    //   writability probe.
+    //   STO-57: reading GH_TOKEN/GITHUB_TOKEN and gating the header to the API
+    //   host.
+    "STO-45", "STO-57",
+    // Tombstones: STO-61 (the curl `--config` file that kept the bearer token
+    // off argv) and STO-62 (its fail-closed/fail-open token handling) described
+    // a downloader `evolve` no longer has. The statements are kept, marked
+    // removed and superseded by STO-57, so the numbers are not reused; they have
+    // no behavior and so no citing test.
+    "STO-61", "STO-62",
     //   evolve locking (STO-46): the serialization behavior needs two concurrent
     //   processes and a real binary swap, so it has no headless test. The lock
     //   acquisition site in src/selfupdate.rs carries a `// spec:` comment for

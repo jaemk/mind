@@ -44,3 +44,24 @@ unicode-width = "0.2"
 # `#[cached]` attribute: `tui::data` drives `LruCache` directly. `time_stores`
 # is what would supply a TTL store, which TUI-72 notes the memo does not have.
 cached = { version = "3", default-features = false }
+# `evolve`'s downloader/extractor/installer. ureq rather than the default reqwest:
+# nothing here is async, so reqwest would drag tokio into a synchronous CLI. rustls
+# keeps the static musl release builds free of a system OpenSSL. `github` is the only
+# backend mind reads, and `checksums` is what `checksum_from_asset("SHA256SUMS")` needs.
+#
+# This roughly doubles the release binary, 6.2M -> 12.3M, almost all of it the TLS
+# stack and the archive/compression codecs that used to be the system's curl and tar.
+# The trade is deliberate: `evolve` no longer needs a downloader on PATH, and a musl
+# build no longer depends on the host's OpenSSL cert layout.
+#
+# TODO: path dependency until the release carrying `verify_archive` and
+# `checksum_from_asset` is published; then this becomes a plain version requirement.
+self_update = { path = "../self_update", default-features = false, features = [
+    "ureq",
+    "rustls",
+    "github",
+    "progress-bar",
+    "archive-tar",
+    "compression-tar-gz",
+    "checksums",
+] }
