@@ -52,12 +52,12 @@ cargo install --locked mind-cli
 
 Builds from source using the Rust toolchain. This is the recommended path for
 Intel macOS and any other Linux or macOS host not covered by the install script
-or Homebrew tap. Requires Rust 1.88 or later (`rustup` is the standard way to
+or Homebrew tap. Requires Rust 1.98 or later (`rustup` is the standard way to
 install it).
 
 Use `--locked`. Without it `cargo install` re-resolves dependencies instead of
 using the published `Cargo.lock`, and that lockfile is the one tested against
-Rust 1.88 in CI. A fresh resolve can pick a newer dependency needing a newer
+Rust 1.98 in CI. A fresh resolve can pick a newer dependency needing a newer
 compiler, which fails the build with a rustc-version error naming a crate you
 did not ask for.
 

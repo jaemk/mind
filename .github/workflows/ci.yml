@@ -58,10 +58,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      RUSTUP_TOOLCHAIN: "1.88"
+      RUSTUP_TOOLCHAIN: "1.98"
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.88
+      - uses: dtolnay/rust-toolchain@1.98
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --all-targets
 

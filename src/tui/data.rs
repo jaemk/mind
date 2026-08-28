@@ -209,6 +209,11 @@ fn new_hash_memo(capacity: usize) -> cached::LruCache<(PathBuf, String), String>
         .expect("a non-zero max_size is the only failure mode")
 }
 
+/// The capacity that fits `live_paths`, never below the floor.
+fn hash_memo_capacity_for(live_count: usize) -> usize {
+    (live_count * HASH_MEMO_PER_ITEM).max(HASH_MEMO_FLOOR)
+}
+
 /// Drop entries whose path left the catalog, and grow the memo if the current
 /// catalog no longer fits. Called once per full load with the freshly scanned
 /// item paths.
@@ -220,19 +225,24 @@ fn new_hash_memo(capacity: usize) -> cached::LruCache<(PathBuf, String), String>
 /// occupying capacity that live items need, which a bare LRU would let it do
 /// until it aged out on its own.
 fn fit_hash_memo(live_paths: &std::collections::HashSet<PathBuf>) {
-    let needed = (live_paths.len() * HASH_MEMO_PER_ITEM).max(HASH_MEMO_FLOOR);
-    let mut memo = HASH_MEMO.write();
+    fit_memo(&mut HASH_MEMO.write(), live_paths);
+}
+
+/// The prune-and-resize logic behind [`fit_hash_memo`], split out so it can be
+/// unit-tested against a local cache rather than the process-global
+/// `HASH_MEMO`. Every test in this module shares that static, so a test that
+/// pruned the real one would evict a concurrently running test's entries: the
+/// live set it prunes to is its own, and every other test's paths are absent
+/// from it.
+fn fit_memo(
+    memo: &mut cached::LruCache<(PathBuf, String), String>,
+    live_paths: &std::collections::HashSet<PathBuf>,
+) {
     memo.retain(|(path, _), _| live_paths.contains(path));
-    if memo.capacity() < needed {
-        // `capacity` has no setter, so growing means rebuilding. Carry the
-        // surviving entries over in LRU order so a grow does not throw away
-        // the work the memo exists to preserve.
-        let mut grown = new_hash_memo(needed);
-        for (key, value) in memo.iter_order() {
-            grown.cache_set(key, value);
-        }
-        *memo = grown;
-    }
+    // Resizes in place, evicting least-recently-used entries when the new bound
+    // is smaller, so an install set that shrank gives its capacity back instead
+    // of holding it for the rest of the session.
+    memo.set_max_size(hash_memo_capacity_for(live_paths.len()));
 }
 
 /// Test-only: seed `HASH_MEMO` with the entry `memoized_hash` would look up
@@ -688,12 +698,13 @@ mod tests {
         // re-reading every tree every second. A fixed capacity makes that
         // regime reachable by installing more items; deriving it from the live
         // set does not.
+        let mut memo = new_hash_memo(HASH_MEMO_FLOOR);
         let many: std::collections::HashSet<PathBuf> = (0..5000)
             .map(|i| PathBuf::from(format!("/fake/item-{i}")))
             .collect();
-        fit_hash_memo(&many);
+        fit_memo(&mut memo, &many);
 
-        let capacity = HASH_MEMO.read().capacity();
+        let capacity = memo.capacity();
         assert!(
             capacity >= many.len(),
             "capacity must cover the catalog ({} items), got {capacity}: below \
@@ -701,11 +712,18 @@ mod tests {
             many.len()
         );
 
-        // And it never drops below the floor for a small catalog.
-        fit_hash_memo(&std::collections::HashSet::new());
+        // Shrinking back gives the capacity up rather than holding a peak for
+        // the rest of the session, and still never drops below the floor.
+        fit_memo(&mut memo, &std::collections::HashSet::new());
+        let shrunk = memo.capacity();
+        assert_eq!(
+            shrunk, HASH_MEMO_FLOOR,
+            "an empty catalog must return the memo to the floor, not keep the \
+             capacity a since-uninstalled set once needed"
+        );
         assert!(
-            HASH_MEMO.read().capacity() >= HASH_MEMO_FLOOR,
-            "capacity must never fall below the floor"
+            shrunk < capacity,
+            "the shrink must actually reduce the bound ({capacity} -> {shrunk})"
         );
     }
 
@@ -717,29 +735,20 @@ mod tests {
         // until it happens to age out on its own.
         let live = PathBuf::from("/fake/still-in-catalog");
         let dead = PathBuf::from("/fake/dropped-from-catalog");
-        HASH_MEMO
-            .write()
-            .cache_set((live.clone(), "fp".into()), "hash-live".into());
-        HASH_MEMO
-            .write()
-            .cache_set((dead.clone(), "fp".into()), "hash-dead".into());
+        let mut memo = new_hash_memo(HASH_MEMO_FLOOR);
+        memo.cache_set((live.clone(), "fp".into()), "hash-live".into());
+        memo.cache_set((dead.clone(), "fp".into()), "hash-dead".into());
 
         let mut live_paths = std::collections::HashSet::new();
         live_paths.insert(live.clone());
-        fit_hash_memo(&live_paths);
+        fit_memo(&mut memo, &live_paths);
 
         assert!(
-            HASH_MEMO
-                .write()
-                .cache_get(&(live, "fp".to_string()))
-                .is_some(),
+            memo.cache_get(&(live, "fp".to_string())).is_some(),
             "a path still in the catalog must survive the prune"
         );
         assert!(
-            HASH_MEMO
-                .write()
-                .cache_get(&(dead, "fp".to_string()))
-                .is_none(),
+            memo.cache_get(&(dead, "fp".to_string())).is_none(),
             "a path no longer in the catalog must be dropped, not retained"
         );
     }

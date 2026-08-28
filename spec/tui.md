@@ -266,8 +266,9 @@ manifest, and store.
   (IGN-10). Keying this way means an entry per path per distinct fingerprint
   observed, so the memo carries an LRU bound as well as the prune. Each full
   load drops entries whose path has left the catalog (a source unmelded, an item
-  removed upstream) AND grows the capacity to fit the live set, so the bound
-  tracks the workload rather than a constant fixed in advance. The capacity must
+  removed upstream) AND resizes the capacity to fit the live set, in both
+  directions, so the bound tracks the workload rather than a constant fixed in
+  advance and a shrunken install set gives its capacity back. The capacity must
   stay above the installed-item count, which is why it is derived rather than
   chosen: the poll hashes every installed item once per tick in a stable order,
   a cyclic sequential scan, so at more items than capacity each tick evicts

@@ -50,7 +50,7 @@ jobs:
     # input below and silently build the release on a different compiler than
     # the pin names; RUSTUP_TOOLCHAIN outranks the file, so the pin holds.
     env:
-      RUSTUP_TOOLCHAIN: "1.96.0"
+      RUSTUP_TOOLCHAIN: "1.98.0"
     permissions:
       contents: read
       id-token: write
@@ -100,7 +100,7 @@ jobs:
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.96.0"
+          toolchain: "1.98.0"
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
@@ -162,7 +162,7 @@ jobs:
     # Same reason as the build job: keep the deliberate publish pin from being
     # overridden by rust-toolchain.toml, which outranks the `toolchain:` input.
     env:
-      RUSTUP_TOOLCHAIN: "1.96.0"
+      RUSTUP_TOOLCHAIN: "1.98.0"
     permissions:
       contents: write
       id-token: write
@@ -174,7 +174,7 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable, pinned commit (moving branch ref; runs alongside id-token: write)
         with:
-          toolchain: "1.96.0"
+          toolchain: "1.98.0"
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
         id: auth
