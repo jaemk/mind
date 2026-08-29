@@ -6,6 +6,22 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- `evolve` verifies TLS against the machine's certificate store again (STO-78).
+  0.26.0 moved the download onto rustls, whose default root set is Mozilla's
+  bundled list and ignores the machine entirely, so `evolve` failed with
+  `invalid peer certificate: UnknownIssuer` on any network where an intercepting
+  proxy re-signs HTTPS with a company CA. The company CA is installed on the
+  machine, which is what curl read before 0.26.0 and what `evolve` reads now: the
+  system keychain on macOS, the certificate stores on Windows, and the
+  OpenSSL-convention bundle on Linux, where `SSL_CERT_FILE` / `SSL_CERT_DIR`
+  also apply. A host with no usable trust store (a scratch container) now fails
+  where the bundled roots would have worked; `SSL_CERT_FILE` is the escape.
+- A certificate-verification failure carries its own hint naming the trust store
+  and `SSL_CERT_FILE`, instead of the bare transport error or the proxy hint,
+  whose fix is a different setting (STO-79).
+
 ## [0.26.0] - 2026-08-28
 
 ### Changed

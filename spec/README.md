@@ -247,6 +247,7 @@ and verified.
 | An item link's unsatisfiable intra-source references: a `requires` entry is dropped with a warning, a sibling-naming token errors; both name the unmeld-then-`meld --learn` remedy | done | LNK-18 |
 | A dropped `requires` is recorded on the installed item and surfaced by `recall`, `recall --json`, and `introspect` | done | LNK-19 |
 | Ignored files: `[source].ignore` / `[[items]].ignore` plus a built-in VCS set exclude paths from both the store copy and the content hash, so an item can point at a directory holding more than itself | done | [ignore.md](ignore.md) (IGN-1..21) |
+| `evolve` verifies TLS against the machine's certificate store, so an intercepting proxy's company CA is trusted; a certificate failure gets its own hint | done | STO-78, STO-79 |
 
 ## Documents
 

@@ -54,11 +54,18 @@ cached = { version = "3", default-features = false }
 # The trade is deliberate: `evolve` no longer needs a downloader on PATH, and a musl
 # build no longer depends on the host's OpenSSL cert layout.
 #
-# 1.1 is the floor: `verify_archive` and `checksum_from_asset` (STO-66, STO-47)
-# landed there.
-self_update = { version = "1.1", default-features = false, features = [
+# `native-certs` is not optional here (STO-78): without it the ureq client trusts only
+# Mozilla's bundled roots and ignores the machine's certificate store, so `evolve` fails
+# on every network whose proxy re-signs HTTPS with a company CA. curl read the system
+# store, so this is parity with the pre-0.26.0 downloader, not new behavior.
+#
+# TODO: path dependency until the release carrying `native-certs` is published; then
+# this becomes `version = "1.2"`. 1.2 is the floor: `native-certs` (STO-78) landed
+# there, `verify_archive` and `checksum_from_asset` (STO-66, STO-47) in 1.1.
+self_update = { path = "../self_update", default-features = false, features = [
     "ureq",
     "rustls",
+    "native-certs",
     "github",
     "progress-bar",
     "archive-tar",

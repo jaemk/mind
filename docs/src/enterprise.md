@@ -38,8 +38,9 @@ A corporate allowlist needs the hosts each operation contacts:
 
 ## Proxies
 
-The `git`, `curl`, and `wget` subprocesses read proxy environment variables from
-the parent process, but behavior differs by tool:
+`mind` reads proxy environment variables in-process for `evolve`, and the `git`,
+`curl`, and `wget` subprocesses read them from the parent process. Behavior
+differs by tool:
 
 - **git** honors `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`, and their lowercase
   forms, plus its own config:
@@ -54,8 +55,13 @@ the parent process, but behavior differs by tool:
   git config --global http.proxyAuthMethod negotiate
   ```
 
-- **curl** (used by `evolve` and `install.sh`) intentionally ignores uppercase
-  `HTTP_PROXY`. Set `HTTPS_PROXY` or the lowercase form `https_proxy`.
+- **`mind evolve`** honors `ALL_PROXY`, `HTTPS_PROXY`, and `HTTP_PROXY` (first
+  one set wins, in that order), each in either case, plus `NO_PROXY` /
+  `no_proxy`. A proxy needing credentials must carry them in the URL
+  (`http://user:pass@proxy.corp.example:8080`).
+
+- **curl** (used by `install.sh`) intentionally ignores uppercase `HTTP_PROXY`.
+  Set `HTTPS_PROXY` or the lowercase form `https_proxy`.
 
 - **wget** (fallback when curl is absent) reads only lowercase forms
   (`https_proxy`, `http_proxy`, `no_proxy`); uppercase variables are ignored.
@@ -69,33 +75,49 @@ export NO_PROXY=localhost,127.0.0.1
 export no_proxy=localhost,127.0.0.1
 ```
 
-For NTLM or Kerberos proxy authentication, `curl` reads `~/.curlrc` (mind
-exposes no curl argument knob). Add `proxy-negotiate` there:
+For NTLM or Kerberos proxy authentication during `install.sh`, `curl` reads
+`~/.curlrc` (mind exposes no curl argument knob). Add `proxy-negotiate` there:
 
 ```
 proxy = http://proxy.corp.example:8080
 proxy-negotiate
 ```
 
+`~/.curlrc` does not apply to `evolve`, which no longer shells out to curl; it
+speaks HTTP itself and supports only URL-embedded proxy credentials.
+
 `mind` neither sets nor unsets any of these, so whatever works for a bare
-`git clone` or `curl` works for `mind`.
+`git clone` works for every `mind` git operation.
 
 ## Custom CA / TLS-intercepting proxy
 
-Behind a proxy that re-signs TLS with a corporate root CA, point each tool at the
-CA bundle the way you already do:
+Behind a proxy that re-signs TLS with a corporate root CA, the CA has to be
+trusted by whatever makes the connection. Installing it in the **system trust
+store** covers everything below at once and is the recommended fix.
 
-- **git:** `git config --global http.sslCAInfo /path/to/corp-ca.pem`, or install
-  the CA into the system trust store.
-- **curl** (used by `evolve` and `install.sh`): `CURL_CA_BUNDLE` or
-  `SSL_CERT_FILE` in the environment.
+- **`mind evolve`** verifies against the system trust store directly: the
+  keychain on macOS, the certificate stores on Windows, and on Linux the
+  OpenSSL-convention bundle, which means `SSL_CERT_FILE` (a bundle file) and
+  `SSL_CERT_DIR` (a directory of hashed certs) also work:
 
-The `wget` fallback path (used by `install.sh` and `evolve` only when `curl` is
-absent) honors no CA environment variable. Behind a custom root CA, the CA must
-be in the system trust store (or configured in `wgetrc`); an env var alone will
-not help. Prefer `curl`, which reads `CURL_CA_BUNDLE` / `SSL_CERT_FILE`. The
-same `wget` fallback also reads only lowercase proxy environment variables
-(`https_proxy`, not `HTTPS_PROXY`); see [Proxies](#proxies) above.
+  ```
+  SSL_CERT_FILE=/path/to/corp-ca.pem mind evolve
+  ```
+
+  It does not read `CURL_CA_BUNDLE`, and it does not shell out to `curl` or
+  `wget` as of 0.26.0. A failure here reports `invalid peer certificate` and
+  points at this setting.
+
+- **git** (every `meld` / `sync` / `upgrade` fetch):
+  `git config --global http.sslCAInfo /path/to/corp-ca.pem`, or the system trust
+  store.
+
+- **`install.sh`** still uses `curl` or `wget`, since it runs before `mind`
+  exists. `curl` reads `CURL_CA_BUNDLE` or `SSL_CERT_FILE`; the `wget` fallback
+  honors no CA environment variable at all, so behind a custom root CA the CA
+  must be in the system trust store (or configured in `wgetrc`). That same
+  `wget` fallback reads only lowercase proxy environment variables
+  (`https_proxy`, not `HTTPS_PROXY`); see [Proxies](#proxies) above.
 
 ## Private repos
 
@@ -232,8 +254,10 @@ this:
 
 ## Network timeouts
 
-`mind evolve` reads the connect timeout from `MIND_HTTP_TIMEOUT_SECS` (seconds,
-default 15). Raise it for a slow proxy:
+`mind evolve` reads its request budget from `MIND_HTTP_TIMEOUT_SECS` (seconds,
+default 15). It is a whole-request budget, not a connect timeout, and it applies
+to the release lookup; the artifact download gets 600 seconds, or the knob's
+value when that is higher. Raise it for a slow proxy:
 
 ```
 MIND_HTTP_TIMEOUT_SECS=60 mind evolve

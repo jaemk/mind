@@ -609,6 +609,31 @@ prevent the lost-update and torn-read races a plain read-modify-write would allo
   free of hostile control sequences. The hint names `HTTPS_PROXY` / `HTTP_PROXY`
   and nothing else: git's `http.proxy` never applied, and `~/.curlrc` stopped
   applying when the downloader stopped being curl.
+- `STO-78` `evolve` verifies TLS against the MACHINE'S certificate store, not a
+  set of roots baked into the binary. `self_update` is built with its
+  `native-certs` feature, which puts the ureq client on
+  `RootCerts::PlatformVerifier`: the system keychain on macOS, the certificate
+  stores on Windows, and on Linux the OpenSSL-convention bundle, which honors
+  `SSL_CERT_FILE` / `SSL_CERT_DIR`. Without the feature the client trusts only
+  Mozilla's bundled root list and ignores the machine entirely, which breaks
+  every network on which an intercepting proxy re-signs outbound HTTPS with a
+  company CA -- the CA is installed on the machine and is by construction absent
+  from the bundled list, so the handshake fails with `invalid peer certificate:
+  UnknownIssuer`. This restores the behavior `evolve` had while it shelled out
+  to curl (curl reads the system bundle), which the 0.26.0 rewrite regressed.
+  The trade is the reverse failure: on a host whose trust store is empty or
+  unreadable (a scratch container), verification now fails where the bundled
+  roots would have worked, with `SSL_CERT_FILE` as the escape.
+- `STO-79` A certificate-verification failure gets its own hint, distinct from
+  STO-54's proxy hint, because the two have different fixes: the proxy hint is
+  about REACHING the endpoint (`HTTPS_PROXY`), a certificate failure is about
+  TRUSTING it. Recognizing "invalid peer certificate", "certificate verify",
+  "unknownissuer", or "self-signed certificate" (case-insensitive, after
+  sanitization) appends a hint naming the machine's trust store and
+  `SSL_CERT_FILE`, so the message points at the corporate-CA case (STO-78) that
+  produces it rather than leaving a bare rustls string. The hints are mutually
+  exclusive and the proxy hint is checked first: a 407 means the request never
+  got far enough to present a certificate.
 - `STO-57` `evolve`'s GitHub API request carries an authorization token when the
   environment supplies one (`GH_TOKEN`, else `GITHUB_TOKEN`, matching the `gh`
   CLI's documented precedence; the first set and non-empty value wins, trimmed).

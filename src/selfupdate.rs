@@ -782,13 +782,33 @@ fn map_update_error(e: self_update::Error) -> MindError {
     }
 }
 
-/// Append a proxy-setup hint when the failure looks like a proxy error.
+/// Phrases that identify a TLS trust failure rather than a transport failure
+/// (STO-79). Matched case-insensitively against the sanitized reason.
+///
+/// The first is rustls's own wording, which is what mind's client produces --
+/// verified against a local server presenting a cert from an untrusted CA. The
+/// rest cover the other spellings a reader is likely to paste into a bug
+/// report (OpenSSL's, and the self-signed variant of the same root cause).
+const CERT_MARKERS: &[&str] = &[
+    "invalid peer certificate",
+    "certificate verify",
+    "unknownissuer",
+    "self-signed certificate",
+];
+
+/// Append a setup hint when the failure has a known, actionable cause.
+///
+/// Two causes, with different fixes, so they get different hints and never both
+/// fire: a proxy error means the request could not REACH the endpoint, a
+/// certificate error means it reached it and would not TRUST it. Proxy is
+/// checked first because a 407 is answered by the proxy before any certificate
+/// is presented.
 ///
 /// The text comes from the HTTP client and, through it, from the endpoint,
 /// which is untrusted (a MITM'd or hostile endpoint controls those bytes). It
 /// is sanitized via `strip_ansi` before being embedded in the returned string
 /// (STO-54).
-// spec: STO-54
+// spec: STO-54, STO-79
 fn maybe_proxy_hint(reason: &str) -> String {
     let reason = crate::sanitize::strip_ansi(reason);
     let lower = reason.to_ascii_lowercase();
@@ -796,6 +816,16 @@ fn maybe_proxy_hint(reason: &str) -> String {
         format!(
             "{reason}\nhint: if you are behind a proxy, set HTTPS_PROXY or HTTP_PROXY \
              (e.g. export HTTPS_PROXY=http://proxy.example.com:8080)"
+        )
+    } else if CERT_MARKERS.iter().any(|m| lower.contains(m)) {
+        // mind verifies against the machine's trust store (STO-78), so the fix
+        // is to put the CA there -- not to relax verification, which `evolve`
+        // offers no way to do.
+        format!(
+            "{reason}\nhint: mind verifies TLS against your machine's certificate store. \
+             If your network intercepts HTTPS with a company CA, install that CA in the \
+             system store, or point mind at a bundle containing it \
+             (e.g. export SSL_CERT_FILE=/path/to/corporate-ca.pem)"
         )
     } else {
         reason
@@ -1306,6 +1336,120 @@ mod tests {
         assert!(
             !result.contains("HTTPS_PROXY"),
             "a non-proxy reason must NOT append the proxy hint: {result:?}"
+        );
+    }
+
+    #[test]
+    // spec: STO-78
+    fn the_self_update_dependency_trusts_the_machines_certificate_store() {
+        // STO-78 is a Cargo feature, not a code path, so this is where it can be
+        // pinned: drop `native-certs` and every build still compiles and every
+        // other test still passes, while `evolve` silently stops working on any
+        // network that re-signs HTTPS with a company CA. The failure is invisible
+        // to a hermetic suite and only shows up on a user's machine, which is
+        // exactly the kind of regression worth a guard.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let manifest = std::fs::read_to_string(&path).expect("Cargo.toml must be readable");
+        let dep = manifest
+            .split_once("self_update = {")
+            .expect("Cargo.toml must declare the self_update dependency")
+            .1
+            .split_once('}')
+            .expect("the self_update dependency table must be closed")
+            .0;
+        assert!(
+            dep.contains("\"native-certs\""),
+            "self_update must enable `native-certs` so evolve verifies against the \
+             machine's certificate store (STO-78); got: {dep}"
+        );
+    }
+
+    #[test]
+    // spec: STO-79
+    fn maybe_proxy_hint_certificate_failure_points_at_the_trust_store() {
+        // The exact string rustls produces when the peer presents a cert from a CA
+        // that is not in the trust store, captured from a live handshake against a
+        // server holding a cert signed by an untrusted CA. This is what a user
+        // behind an intercepting corporate proxy sees, so it must carry the hint
+        // that names the fix (the trust store / SSL_CERT_FILE) rather than the
+        // proxy hint, which would send them after the wrong setting.
+        let reason = "io: invalid peer certificate: UnknownIssuer";
+        let result = maybe_proxy_hint(reason);
+        assert!(
+            result.starts_with(reason),
+            "the original reason must be preserved ahead of the hint: {result:?}"
+        );
+        assert!(
+            result.contains("SSL_CERT_FILE"),
+            "a certificate failure must name the bundle override: {result:?}"
+        );
+        assert!(
+            result.contains("certificate store"),
+            "a certificate failure must name the machine's trust store: {result:?}"
+        );
+        assert!(
+            !result.contains("HTTPS_PROXY"),
+            "a certificate failure must NOT get the proxy hint: {result:?}"
+        );
+    }
+
+    #[test]
+    // spec: STO-79
+    fn maybe_proxy_hint_certificate_markers_are_matched_case_insensitively() {
+        // The reason text is whatever the transport produced, so the marker match
+        // must not depend on its casing. Each recognized spelling gets the cert
+        // hint, in the casing least likely to match a naive `contains`.
+        for reason in [
+            "Invalid Peer Certificate: UnknownIssuer",
+            "SSL certificate problem: unable to get local issuer certificate verify failed",
+            "tls handshake failed: UNKNOWNISSUER",
+            "Self-Signed Certificate in certificate chain",
+        ] {
+            let result = maybe_proxy_hint(reason);
+            assert!(
+                result.contains("SSL_CERT_FILE"),
+                "{reason:?} must be recognized as a certificate failure: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    // spec: STO-54, STO-79
+    fn maybe_proxy_hint_prefers_the_proxy_hint_when_both_could_match() {
+        // A 407 is answered by the proxy before any certificate is presented, so a
+        // reason carrying both signals is a proxy problem. The two hints are
+        // mutually exclusive; this pins which one wins.
+        let reason = "407 Proxy Authentication Required (invalid peer certificate: UnknownIssuer)";
+        let result = maybe_proxy_hint(reason);
+        assert!(
+            result.contains("HTTPS_PROXY"),
+            "a 407 must take the proxy hint even alongside certificate wording: {result:?}"
+        );
+        assert!(
+            !result.contains("SSL_CERT_FILE"),
+            "the two hints must be mutually exclusive: {result:?}"
+        );
+    }
+
+    #[test]
+    // spec: STO-79
+    fn maybe_proxy_hint_strips_ansi_and_bidi_from_a_certificate_reason() {
+        // The certificate branch is reached with endpoint-controlled text just like
+        // the proxy branch (STO-54), so it must sanitize before it embeds. A hostile
+        // subject/issuer name is exactly where spoofed control sequences would ride in.
+        let hostile = "\x1b[1minvalid peer certificate\x1b[0m: \u{202E}UnknownIssuer";
+        let result = maybe_proxy_hint(hostile);
+        assert!(
+            !result.contains('\x1b'),
+            "ANSI must be stripped in the certificate branch: {result:?}"
+        );
+        assert!(
+            !result.contains('\u{202E}'),
+            "bidi overrides must be stripped in the certificate branch: {result:?}"
+        );
+        assert!(
+            result.contains("SSL_CERT_FILE"),
+            "sanitization must not suppress the certificate hint: {result:?}"
         );
     }
 
