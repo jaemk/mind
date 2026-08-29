@@ -54,9 +54,9 @@ cached = { version = "3", default-features = false }
 # The trade is deliberate: `evolve` no longer needs a downloader on PATH, and a musl
 # build no longer depends on the host's OpenSSL cert layout.
 #
-# TODO: path dependency until the release carrying `verify_archive` and
-# `checksum_from_asset` is published; then this becomes a plain version requirement.
-self_update = { path = "../self_update", default-features = false, features = [
+# 1.1 is the floor: `verify_archive` and `checksum_from_asset` (STO-66, STO-47)
+# landed there.
+self_update = { version = "1.1", default-features = false, features = [
     "ureq",
     "rustls",
     "github",
