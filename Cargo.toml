@@ -4,7 +4,7 @@ name = "mind-cli"
 # from `main` is distinguishable from the released one (`mind --version`, bug
 # reports, `evolve --check`). The release bump drops the suffix; the tag-match
 # check in .github/workflows/release.yml enforces that before a tag is pushed.
-version = "0.25.0"
+version = "0.26.0"
 edition = "2024"
 rust-version = "1.98"
 license = "MIT"

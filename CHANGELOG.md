@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-08-28
+
 ### Changed
 
 - `evolve` downloads, verifies, extracts, and swaps the binary through the
@@ -1526,7 +1528,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovery, frontmatter descriptions, transactional install/upgrade/uninstall
   with a file registry, and a tag-driven release pipeline with a Homebrew tap.
 
-[Unreleased]: https://github.com/jaemk/mind/compare/v0.25.0...HEAD
+[Unreleased]: https://github.com/jaemk/mind/compare/v0.26.0...HEAD
+[0.26.0]: https://github.com/jaemk/mind/compare/v0.25.0...v0.26.0
 [0.25.0]: https://github.com/jaemk/mind/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/jaemk/mind/compare/v0.23.0...v0.24.0
 [0.23.0]: https://github.com/jaemk/mind/compare/v0.22.0...v0.23.0
