@@ -21,6 +21,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A certificate-verification failure carries its own hint naming the trust store
   and `SSL_CERT_FILE`, instead of the bare transport error or the proxy hint,
   whose fix is a different setting (STO-79).
+- Documentation caught up with the 0.26.0 transport change, which several pages
+  still described in terms of curl and wget. The corrected claims that matter:
+  `evolve` does not read `CURL_CA_BUNDLE` or `~/.curlrc`, it no longer exposes a
+  `GH_TOKEN`/`GITHUB_TOKEN` on any subprocess command line (so the advice to
+  prefer curl over wget on shared hosts is obsolete, and the exposure it warned
+  about is gone), and the binary-update trust model now names `gh attestation
+  verify` as the only origin check.
 
 ## [0.26.0] - 2026-08-28
 
