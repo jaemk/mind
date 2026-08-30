@@ -69,9 +69,11 @@ on Windows. On Windows, run `mind` under WSL (Windows Subsystem for Linux).
 `mind evolve` updates the binary itself to the latest release. It reports the
 target version and the resolved target triple (the exact artifact it would
 fetch) and prompts before downloading, unless `--yes` is given (`--check`
-reports without changing anything, `--to <v>` pins a target). It uses the
-same download path as the install script and verifies the `SHA256SUMS` asset
-before swapping in the new binary.
+reports without changing anything, `--to <v>` pins a target). It downloads the
+same release artifacts the install script uses and verifies the `SHA256SUMS`
+asset before swapping in the new binary. Unlike the install script, it makes the
+request itself rather than shelling out to `curl` or `wget`, so neither needs to
+be on `PATH`, and it verifies TLS against the machine's certificate store.
 
 If a `gh` binary is on `PATH`, `evolve` also verifies the downloaded archive's
 build-provenance attestation (`gh attestation verify`) before swapping. Without

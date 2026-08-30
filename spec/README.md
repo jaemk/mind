@@ -136,7 +136,7 @@ and verified.
 | Managed-policy permission warning: warn when the system policy file or its parent dir is group/world-writable or not root-owned; skipped for `$MIND_POLICY_FILE` | done | POL-64, POL-65 |
 | Managed-policy pin skew warning: when running binary is above the policy pin, print a human-only warning that the pin is an upper bound and does not downgrade; `--json` outcome is the machine hook | done | POL-66 |
 | `evolve`/install.sh network fetch timeouts (`MIND_HTTP_TIMEOUT_SECS`) | done | STO-52 |
-| `evolve` GitHub API auth: send `GITHUB_TOKEN`/`GH_TOKEN` as a bearer header on `api.github.com` to escape the unauthenticated per-IP 403 rate limit; curl gets the header via a 0600 `--config` file, not argv | done | STO-57, STO-61 |
+| `evolve` GitHub API auth: send `GH_TOKEN`/`GITHUB_TOKEN` as a bearer header on `api.github.com` to escape the unauthenticated per-IP 403 rate limit, never forwarded to the artifact host across a redirect | done | STO-57 |
 | Actionable git-failure hints: auth (SSH/config/helper), proxy (407); clone errors lead with stderr, detail behind `--verbose`; `learn` typo points at `probe` | done | CLI-177, CLI-178, CLI-179, CLI-180 |
 | `--json` error envelope on stdout (`{"schema":1,"error":{"kind","message"}}`); stable per-variant `kind`; clap usage errors stay text | done | CLI-181, CLI-182, CLI-183 |
 | `-n` reserved for `--dry-run`; `-N` short for `--namespace`; `probe --no-tui` long-only | done | CLI-163, CLI-164, TUI-54 |
@@ -160,7 +160,7 @@ and verified.
 | Item links in `dump`: emit a link instance as a reconstructed deep-URL source entry | done | LNK-13 |
 | Repo-spec identity parts (`host`, `owner`, `repo`) must each be a single safe path component; refused at parse time before any clone or delete | done | CLI-204 |
 | TUI stdout capture writes to an exclusively created 0600 file in a 0700 temp dir, not a predictable create-and-truncate path | done | TUI-61 |
-| `evolve` token safety: a token carrying characters that would inject curl config directives is refused (no auth header), and a temp-config write failure degrades to an unauthenticated request | done | STO-62 |
+| `evolve` token safety: refuse a token carrying characters that would inject curl config directives | removed (STO-62: no curl invocation carries the token since 0.26.0; an unencodable token now fails the request) | STO-62 |
 | A zero-item `meld` names the convention paths it scanned and the `--root`/`--add-root`/`--flat-skills` escapes, instead of reporting success with `(0 item(s))` | done | CLI-205 |
 | A re-meld notes which discovery flags it ignored, instead of dropping them silently | done | CLI-206 |
 | `meld --pin` on an already-melded source re-pins it: resolves against the current pin, re-checks-out the clone if the commit differs, records the new pin and commit | done | CLI-209 |

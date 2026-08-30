@@ -1,9 +1,15 @@
 # Restricted networks and enterprise
 
-`mind` has no built-in HTTP client. Every network touch is a `git`, `curl`, or
-`wget` subprocess spawned with the parent environment inherited, so the same
-proxy, CA, and credential configuration you already use for those tools applies
-unchanged. `mind` sets or strips nothing from the environment (in TUI mode it sets
+`mind` makes network calls in two places. Source operations (`meld`, `sync`,
+`upgrade`) are `git` subprocesses spawned with the parent environment inherited,
+so your existing git proxy, CA, and credential configuration applies unchanged.
+`mind evolve` speaks HTTPS in-process (as of 0.26.0; it previously shelled out to
+`curl` or `wget`), reading proxy settings from the environment and verifying
+against the machine's certificate store. `install.sh` still uses `curl` or
+`wget`, since it runs before `mind` exists. Where the three differ, each section
+below says so.
+
+`mind` sets or strips nothing from the environment (in TUI mode it sets
 `GIT_TERMINAL_PROMPT=0` and wraps `GIT_SSH_COMMAND` to suppress interactive git
 prompts; immaterial for non-interactive CLI use), and there is no telemetry or
 phone-home. This page lists the egress endpoints a firewall allowlist needs and
@@ -23,7 +29,7 @@ A corporate allowlist needs the hosts each operation contacts:
   or a local path). No fixed host: it is exactly the source URLs you register.
 - **`mind evolve` (binary self-update).**
   - `https://api.github.com/repos/jaemk/mind/releases/latest` (skipped with
-    `--version`, see below).
+    `--to <v>`, see below).
   - `https://github.com/jaemk/mind/releases/download/...` for the release asset
     and its `SHA256SUMS`. These redirect to
     `https://release-assets.githubusercontent.com/...`; allowlist that host.
@@ -182,22 +188,35 @@ broken.
 
 `SHA256SUMS` is fetched over the same HTTPS channel as the release artifact
 itself. The checksums verify integrity (no corruption or truncation in transit)
-but not origin or authenticity: a host-trusted TLS-terminating proxy can
-substitute both the artifact and its matching checksums without triggering a
-checksum mismatch. Releases are not code-signed. For environments where egress
-goes through an intercepting proxy you do not fully trust, the correct posture is
-`self-update = false` combined with IT-distributed binaries delivered through a
-separately audited channel.
+but not origin: a host-trusted TLS-terminating proxy can substitute both the
+artifact and its matching checksums without triggering a mismatch. Releases are
+not code-signed.
 
-**`GITHUB_TOKEN`/`GH_TOKEN` visibility on shared hosts.** `evolve` sends
-`GITHUB_TOKEN` (or `GH_TOKEN`) as a bearer header on `api.github.com` requests
-(see [Troubleshooting](troubleshooting.md) for why you'd set one). With curl,
-the header is passed via a private (mode `0600`) config file, not the command
-line. The `wget` fallback (used only when `curl` is absent) has no equivalent,
-so it passes the header on the command line, where it is briefly visible to
-other local users via the process table (e.g. `ps`, `/proc/<pid>/cmdline`) for
-the duration of the API call. On shared hosts, prefer curl over wget when a
-token is set.
+Origin is covered separately, and only when a `gh` binary is on `PATH`: `evolve`
+verifies the downloaded archive's GitHub build-provenance attestation before
+extracting it, and aborts the swap when `gh` reports the artifact does not
+verify. That check is anchored in a public transparency log rather than in the
+TLS channel, so an intercepting proxy cannot forge it. Without `gh` the step is
+skipped silently and checksums are the only gate.
+
+For environments where egress goes through an intercepting proxy you do not fully
+trust, either require `gh` on the hosts that run `evolve`, or set
+`self-update = false` and distribute IT-built binaries through a separately
+audited channel.
+
+Note that `evolve` trusts the machine's certificate store (so that it works
+behind an intercepting proxy at all). On a host whose store an untrusted party
+can write to, that party can terminate the TLS connection. The provenance check
+above is what closes that gap; a policy pin does not.
+
+**`GH_TOKEN`/`GITHUB_TOKEN` visibility on shared hosts.** `evolve` sends the token
+as a bearer header on `api.github.com` requests (see
+[Troubleshooting](troubleshooting.md) for why you'd set one). Since 0.26.0 it
+builds the request in-process, so the token never reaches a subprocess command
+line and is not visible to other local users through the process table. Before
+0.26.0 the `wget` fallback did expose it there; that path is gone. The token is
+sent only to the configured API host, never forwarded to the artifact download
+across a redirect.
 
 ## Air-gapped and api-blocked installs
 

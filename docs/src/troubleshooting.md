@@ -66,18 +66,24 @@
   or git's own `http.proxy` (`git config --global http.proxy
   http://proxy.corp:8080`). See [Restricted networks and
   enterprise](enterprise.md#proxies).
-- A clone or `evolve` fails with a TLS/certificate error behind a company proxy.
-  Point the tool at the corporate CA: git via `http.sslCAInfo` (`git config
-  --global http.sslCAInfo /path/to/corp-ca.pem`), curl (used by `evolve` and
-  `install.sh`) via `CURL_CA_BUNDLE` or `SSL_CERT_FILE`. Note that the `wget`
-  fallback path honors no CA environment variable, so if only `wget` is present
-  the corporate CA must be in the system trust store (or `wgetrc`); prefer having
-  `curl` installed. See [Restricted networks and
-  enterprise](enterprise.md#custom-ca--tls-intercepting-proxy).
+- A clone or `evolve` fails with a TLS/certificate error behind a company proxy
+  (`evolve` reports `invalid peer certificate`). Installing the corporate CA in
+  the system trust store fixes every case at once. Otherwise, point each tool at
+  it separately: git via `http.sslCAInfo` (`git config --global http.sslCAInfo
+  /path/to/corp-ca.pem`), and `evolve` via `SSL_CERT_FILE` (it reads the system
+  trust store directly and does not read `CURL_CA_BUNDLE`). `install.sh` runs
+  before `mind` exists and still uses curl, which reads `CURL_CA_BUNDLE` or
+  `SSL_CERT_FILE`; its `wget` fallback honors no CA environment variable, so
+  there the CA must be in the system trust store (or `wgetrc`). See [Restricted
+  networks and enterprise](enterprise.md#custom-ca--tls-intercepting-proxy).
+  Note that `evolve` needs mind 0.26.1 or newer to read the system trust store;
+  0.26.0 trusted only a bundled root list and fails here regardless of the
+  environment, so reinstall with `install.sh` to get past it.
 - `evolve` fails with a 403 from `https://api.github.com/repos/.../releases/latest`.
   This is GitHub's unauthenticated REST API rate limit (60 requests/hour per source
-  IP), which a shared workplace egress IP exhausts quickly. Set `GITHUB_TOKEN` (or
-  `GH_TOKEN`) to any GitHub token; `evolve` sends it as a bearer header on the API
+  IP), which a shared workplace egress IP exhausts quickly. Set `GH_TOKEN` (or
+  `GITHUB_TOKEN`; `GH_TOKEN` wins when both are set, matching the `gh` CLI) to any
+  GitHub token; `evolve` sends it as a bearer header on the API
   request, moving you into the authenticated 5000/hour tier. The token is only sent
   to `api.github.com`, never to the artifact download. As a stopgap without a token,
   `mind evolve --to <v>` resolves the target from the flag and skips the API
