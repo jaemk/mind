@@ -348,6 +348,7 @@ fn run_source_hooks(
 
             let disclosure = crate::hook::hook_disclosure_text(
                 h.label(),
+                h.event.as_str(),
                 h.optional,
                 &source_name,
                 &pin_desc,

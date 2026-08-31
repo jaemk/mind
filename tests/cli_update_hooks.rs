@@ -289,6 +289,52 @@ fn item_update_hook_replaces_the_install_hook_on_upgrade() {
     );
 }
 
+/// A `learn` naming an already-installed item installs nothing (CLI-157), so it
+/// runs neither the install nor the update hooks: the re-install path that
+/// swaps update hooks in is `upgrade`, not a repeat `learn`.
+#[test]
+fn relearning_an_installed_item_is_a_no_op_and_runs_no_hook() {
+    // spec: HOOK-125 CLI-157
+    let sb = Sandbox::new("relearn-src");
+    let install = sb.tally("install.log");
+    let update = sb.tally("update.log");
+    sb.write_and_commit(
+        "skills/scanner/SKILL.md",
+        &format!(
+            "---\ndescription: scanner\ninstall: {install}\nupdate: {update}\n---\n# scanner\n"
+        ),
+    );
+
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    assert!(
+        sb.mind(&["learn", "scanner", "--dangerously-skip-install-hook-check"])
+            .success
+    );
+    assert_eq!(sb.runs("install.log"), 1);
+    assert_eq!(sb.runs("update.log"), 0);
+
+    // Same item, same name, already installed: nothing is installed again.
+    let r = sb.mind(&["learn", "scanner", "--dangerously-skip-install-hook-check"]);
+    assert!(r.success, "re-learn: {}\n{}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("already installed"),
+        "a repeat learn is a no-op: {}",
+        r.stdout
+    );
+    assert_eq!(
+        sb.runs("update.log"),
+        0,
+        "a no-op learn runs no update hook: {}",
+        r.stdout
+    );
+    assert_eq!(
+        sb.runs("install.log"),
+        1,
+        "a no-op learn re-runs no install hook: {}",
+        r.stdout
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Where an item declares its hooks (HOOK-130, HOOK-131, HOOK-133)
 // ---------------------------------------------------------------------------

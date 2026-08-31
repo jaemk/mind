@@ -355,6 +355,7 @@ fn run_install_hooks(
         let browse_url = source.browse_url(&commit);
         let disclosure = crate::hook::hook_disclosure_text(
             h.label(),
+            h.event.as_str(),
             h.optional,
             &name,
             &pin_desc,
@@ -2591,6 +2592,7 @@ fn run_uninstall_hooks(
         let browse_url = registry.sources[idx].browse_url(&commit);
         let disclosure = crate::hook::hook_disclosure_text(
             h.label(),
+            h.event.as_str(),
             h.optional,
             source_name,
             &pin_desc,
@@ -5025,9 +5027,11 @@ fn colliding_install(targets: &[&CatalogItem]) -> Option<(String, Vec<String>)> 
 /// (HOOK-74).
 ///
 /// `is_update` says this install replaces an existing install of the same
-/// effective name (an `upgrade`, or a `learn` of an already-installed item), in
-/// which case the item's update hooks run in place of its install hooks when it
-/// declares any (HOOK-125).
+/// effective name, in which case the item's update hooks run in place of its
+/// install hooks when it declares any (HOOK-125). In practice that is
+/// `upgrade`'s in-place swap: the `learn` paths drop already-installed items
+/// from the closure before reaching here (CLI-157, DEP-23), and an upgrade
+/// RENAME is a removal plus a first install, not a re-install.
 #[allow(clippy::too_many_arguments)]
 fn install_item(
     paths: &Paths,
@@ -7442,6 +7446,7 @@ fn rerun_source_hooks(
                 let browse_url = source.browse_url(&commit);
                 let disclosure = crate::hook::hook_disclosure_text(
                     &hook.label,
+                    event,
                     hook.optional,
                     &source.name,
                     &pin_desc,

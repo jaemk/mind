@@ -195,12 +195,20 @@ pub fn decide(disclosure: &str, optional: bool, dangerously_skip: bool) -> Resul
     })
 }
 
-/// Like `disclosure_text` but prefixed with the hook's label and whether it is
-/// required or optional, for the multi-hook disclosures (HOOK-52). Prepends a
-/// `====== hook: {label} ======` header so the block is visually distinct.
+/// Like `disclosure_text` but prefixed with the hook's label, its lifecycle
+/// event, and whether it is required or optional, for the multi-hook
+/// disclosures (HOOK-52). Prepends a `====== hook: {label} ======` header so the
+/// block is visually distinct.
+///
+/// spec: HOOK-20 HOOK-120 -- the `Event:` line is what tells the user WHICH
+/// step they are approving. Without it an update hook's disclosure is
+/// indistinguishable from an install hook's (and an uninstall hook's from
+/// either), on the one surface where the answer decides whether arbitrary
+/// source code runs.
 #[allow(clippy::too_many_arguments)]
 pub fn hook_disclosure_text(
     label: &str,
+    event: &str,
     optional: bool,
     identity: &str,
     pin_desc: &str,
@@ -223,6 +231,11 @@ pub fn hook_disclosure_text(
     out.push_str(" (");
     out.push_str(kind);
     out.push_str(")\n");
+    // The event is `mind`'s own word (install/update/uninstall/build), not
+    // source-derived, so it needs no sanitizing.
+    out.push_str("  Event:     ");
+    out.push_str(event);
+    out.push('\n');
     // Append the base disclosure fields (without its own header since we
     // already prepended one above; call the inner builder directly).
     out.push_str(&disclosure_body(
@@ -888,6 +901,7 @@ mod tests {
         let ansi_label = "\x1b[31mbuild\x1b[0m\u{202E}";
         let text2 = hook_disclosure_text(
             ansi_label,
+            "install",
             false,
             bidi_identity,
             "main",
@@ -1082,6 +1096,7 @@ mod tests {
     fn hook_disclosure_text_has_separator_header_with_label() {
         let text = hook_disclosure_text(
             "Build step",
+            "install",
             true,
             "github.com/acme/tools",
             "main",
@@ -1097,11 +1112,37 @@ mod tests {
         );
     }
 
+    /// The consent block names the lifecycle event, so approving an update or
+    /// uninstall hook is never indistinguishable from approving an install one.
+    #[test]
+    fn hook_disclosure_text_names_the_lifecycle_event() {
+        // spec: HOOK-20 HOOK-120
+        for event in ["install", "update", "uninstall"] {
+            let text = hook_disclosure_text(
+                "Build step",
+                event,
+                false,
+                "github.com/acme/tools",
+                "main",
+                "abc1234",
+                "/tmp/clone",
+                "make install",
+                None,
+                None,
+            );
+            assert!(
+                text.contains(&format!("Event:     {event}")),
+                "the disclosure must name the {event} event: {text}"
+            );
+        }
+    }
+
     // spec: HOOK-52
     #[test]
     fn hook_disclosure_text_optional_contains_label_and_optional_marker() {
         let text = hook_disclosure_text(
             "Build step",
+            "install",
             true,
             "github.com/acme/tools",
             "main",
@@ -1124,6 +1165,7 @@ mod tests {
     fn hook_disclosure_text_required_contains_required_marker() {
         let text = hook_disclosure_text(
             "setup.sh",
+            "install",
             false,
             "github.com/acme/tools",
             "v1.0",
@@ -1144,6 +1186,7 @@ mod tests {
     fn hook_disclosure_text_override_shows_both_commands() {
         let text = hook_disclosure_text(
             "custom.sh",
+            "install",
             false,
             "github.com/acme/tools",
             "main",

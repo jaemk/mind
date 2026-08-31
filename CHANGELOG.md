@@ -15,7 +15,9 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and is expected to be idempotent; `init-source` now says so in its scaffold and
   shows the update event as the escape for a step that cannot be. `hooks run` and
   `hooks list` accept `--event update`, with the same pending/recorded semantics
-  as the install event.
+  as the install event. The hook consent disclosure now names the lifecycle
+  event it is asking about (HOOK-20), so approving an update or an uninstall
+  hook is no longer indistinguishable from approving an install hook.
 - A Claude plugin's `commands/<name>.md` maps to the `command` kind (MKT-18), on
   both plugin paths: a directly melded `.claude-plugin/plugin.json` and each
   in-repo entry of a `.claude-plugin/marketplace.json`. They are namespaced by

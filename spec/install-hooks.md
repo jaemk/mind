@@ -60,10 +60,14 @@ CLI-17).
 
 - `HOOK-20` Before running any hook, `mind` prints a disclosure framed by a
   `====== hook: <name> ======` header (so it is visibly distinct from the
-  surrounding `melded <source>` output): the source identity, the resolved pin
+  surrounding `melded <source>` output): the source identity, the hook's
+  lifecycle event (HOOK-120), the resolved pin
   (the branch, tag, or ref) and the commit, the clone path, and the exact command
   that will run, with a clear warning that this executes arbitrary code from the
-  source. It then offers `[Y/n/a]`: run the hook (`y`/`Y`/Enter), skip it but
+  source. The event is named because the block is otherwise identical across
+  events: without it, approving an update or uninstall hook looks exactly like
+  approving an install hook, on the one surface where the answer decides whether
+  arbitrary source code runs. It then offers `[Y/n/a]`: run the hook (`y`/`Y`/Enter), skip it but
   continue installing the source and its items without building the tooling
   (`n`/`N`), or abort and install nothing (`a`/`A`). The default (a bare Enter) is
   run; an unrecognized reply skips, so an unclear answer never runs the hook. When
@@ -723,11 +727,16 @@ installed.
   at the source's current commit is not re-offered by a second `upgrade` at that
   commit.
 - `HOOK-125` An item's update hooks run in place of its install hooks whenever
-  the item is re-installed over an existing install of the same effective name --
-  an `upgrade`, or a `learn` of an already-installed item -- with the same
-  working directory, ordering, recording, and rollback contract as the install
-  hooks they replace (HOOK-81, HOOK-110). On a first install the install hooks
-  run and the update hooks do not. An item that declares no update hook re-runs
+  the item is re-installed over an existing install of the same effective name,
+  with the same working directory, ordering, recording, and rollback contract as
+  the install hooks they replace (HOOK-81, HOOK-110). On a first install the
+  install hooks run and the update hooks do not. In practice the re-install path
+  is `upgrade`'s in-place swap: a `learn` naming an already-installed item is a
+  no-op that installs nothing and so runs no hook at all (CLI-157, DEP-23), and
+  an `upgrade` that RENAMES an item (a namespace change) is not a re-install
+  either -- the old name is removed with its uninstall hooks and the new name is
+  a first install. `hooks run --event update` (HOOK-126) runs an item's update
+  hooks on demand without reinstalling it. An item that declares no update hook re-runs
   its install hooks on every (re)install, unchanged (HOOK-84). An item's
   `build` hook is unaffected: it is content-producing and always runs (HOOK-73).
 - `HOOK-126` `--event update` is valid for `hooks run` and `hooks list` (CLI-195)
