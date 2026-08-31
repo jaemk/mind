@@ -525,3 +525,45 @@ fn review_item_hook_dangling_osc_does_not_eat_disclosure() {
         "no raw ESC byte should reach stdout: {line:?}"
     );
 }
+
+/// `mind review` discloses an item's hooks from its RESOLVED hook list, so a
+/// hook declared in the item's own directory manifest or frontmatter is
+/// reported alongside a root-manifest one, each naming its own event.
+/// spec: HOOK-134, HOOK-131, HOOK-130
+#[test]
+fn review_lists_item_hooks_from_every_declaration_site() {
+    let sb = Sandbox::new("agents");
+    // A skill that declares its hooks in its own directory manifest.
+    write(
+        &sb.source.join("skills/scanner/SKILL.md"),
+        "---\ndescription: scanner\n---\n# scanner\n",
+    );
+    write(
+        &sb.source.join("skills/scanner/mind.toml"),
+        "[[hooks]]\nrun = \"setup.sh\"\n\n[[hooks]]\nrun = \"migrate.sh\"\nevent = \"update\"\n",
+    );
+    // A skill that declares one in frontmatter.
+    write(
+        &sb.source.join("skills/fetcher/SKILL.md"),
+        "---\ndescription: fetcher\nuninstall: teardown.sh\n---\n# fetcher\n",
+    );
+
+    let target = sb.source_spec();
+    let r = sb.mind(&["review", &target]);
+    assert!(
+        r.success,
+        "item-hook findings are advisory only: {}",
+        r.stdout
+    );
+    for expected in [
+        "skill:scanner: declares an install hook 'setup.sh'",
+        "skill:scanner: declares an update hook 'migrate.sh'",
+        "skill:fetcher: declares an uninstall hook 'teardown.sh'",
+    ] {
+        assert!(
+            r.stdout.contains(expected),
+            "review must disclose {expected:?}: {}",
+            r.stdout
+        );
+    }
+}

@@ -269,15 +269,6 @@ fn clone_dir_checked(paths: &Paths, source: &crate::source::Source) -> Result<st
     }
 }
 
-/// Whether `upgrade` should re-offer a source's install hooks (HOOK-11, HOOK-55):
-/// any recorded install hook whose `ran_at` differs from the source's current
-/// commit (never ran, or the source advanced past the run commit).
-fn hook_rerun_warranted(source: &crate::source::Source) -> bool {
-    !source
-        .pending_install_hooks(source.commit.as_deref())
-        .is_empty()
-}
-
 /// Whether a recorded install hook has already run at `current` (a real commit).
 fn hook_ran_at(source: &crate::source::Source, command: &str, current: Option<&str>) -> bool {
     current.is_some()
@@ -3549,6 +3540,10 @@ fn learn_selected(
         }
         let siblings = siblings_of(&items, &target.source);
         let force = clobber == Clobber::Force;
+        // spec: HOOK-125 -- a `learn` over an item already installed under this
+        // effective name is a re-install, so its update hooks (if any) run in
+        // place of its install hooks.
+        let is_update = manifest.items.contains_key(target.key().as_str());
         let mut result = install_item(
             paths,
             target,
@@ -3557,6 +3552,7 @@ fn learn_selected(
             force,
             dangerously_skip,
             dangerously_skip_build,
+            is_update,
         );
         // CLI-34: a conflicting (non-mind) target refuses by default. With
         // `Prompt` (the default `learn`), offer to overwrite it on a TTY; on a
@@ -3584,6 +3580,7 @@ fn learn_selected(
                     true,
                     dangerously_skip,
                     dangerously_skip_build,
+                    is_update,
                 )
             } else {
                 Err(MindError::LinkOccupied { path })
@@ -3718,6 +3715,8 @@ fn learn_collecting_selected(
         }
         let siblings = siblings_of(&items, &target.source);
         let force = clobber == Clobber::Force;
+        // spec: HOOK-125 -- same re-install test as the `learn` path above.
+        let is_update = manifest.items.contains_key(target.key().as_str());
         let result = install_item(
             paths,
             target,
@@ -3726,6 +3725,7 @@ fn learn_collecting_selected(
             force,
             dangerously_skip,
             dangerously_skip_build,
+            is_update,
         );
         match result {
             Ok(mut installed) => {
@@ -5019,6 +5019,12 @@ fn colliding_install(targets: &[&CatalogItem]) -> Option<(String, Vec<String>)> 
 /// error. `dangerously_skip` runs item install/uninstall hooks unattended
 /// (HOOK-83); `dangerously_skip_build` runs the item's build hook unattended
 /// (HOOK-74).
+///
+/// `is_update` says this install replaces an existing install of the same
+/// effective name (an `upgrade`, or a `learn` of an already-installed item), in
+/// which case the item's update hooks run in place of its install hooks when it
+/// declares any (HOOK-125).
+#[allow(clippy::too_many_arguments)]
 fn install_item(
     paths: &Paths,
     item: &CatalogItem,
@@ -5027,6 +5033,7 @@ fn install_item(
     force: bool,
     dangerously_skip: bool,
     dangerously_skip_build: bool,
+    is_update: bool,
 ) -> Result<crate::manifest::InstalledItem> {
     // spec: LIFE-50 -- refuse cleanly on a platform mind's symlink model does not
     // support, before creating (or reusing) any link.
@@ -5036,7 +5043,8 @@ fn install_item(
     // HOOK-86: run every resolved install hook in declaration order (the scalar
     // shorthand is folded in as the first required hook). On a hook failure, roll
     // the just-installed item back.
-    let install_hooks = item.install_hooks();
+    // spec: HOOK-125 -- on a re-install the item's update hooks replace them.
+    let install_hooks = item.install_time_hooks(is_update);
     if !install_hooks.is_empty() {
         let store = paths.mind_home.join(&installed.store);
         match install::run_item_install_hooks(
@@ -7229,6 +7237,11 @@ fn upgrade_inner_scoped(
                 return Err(e);
             }
         };
+        // spec: HOOK-125 -- an in-place upgrade re-installs over the existing
+        // install, so the item's update hooks (if any) replace its install
+        // hooks. A rename (a prefix change) is not: the old item is removed
+        // with its uninstall hooks and the new name is a first install.
+        let is_update = up.new_name == up.old.name;
         let installed = match install_item(
             paths,
             &cat,
@@ -7237,6 +7250,7 @@ fn upgrade_inner_scoped(
             false,
             dangerously_skip_hook_check,
             dangerously_skip_build_hook_check,
+            is_update,
         ) {
             Ok(mut i) => {
                 // spec: LNK-19 -- carry the LNK-18 drop record across the
@@ -7341,13 +7355,21 @@ fn upgrade_inner_scoped(
     Ok(None)
 }
 
-/// HOOK-11, HOOK-55: re-run each source's install hooks when warranted (any
-/// recorded hook whose `ran_at` differs from the source's current commit). Same
-/// trust boundary as `meld`: prompt and disclose, unless
+/// HOOK-11, HOOK-55, HOOK-121: run each source's pending hooks for an update.
+///
+/// Which hooks those are depends on the source (HOOK-122): a source that
+/// declares any `event = "update"` hook offers its pending UPDATE hooks and does
+/// not re-run its install hooks; one that declares none re-offers its pending
+/// install hooks, as before. Pending means the same thing for both (HOOK-55,
+/// HOOK-124): a recorded run-commit that is absent or behind the source's
+/// current commit.
+///
+/// Same trust boundary as `meld`: prompt and disclose, unless
 /// `--dangerously-skip-install-hook-check` is set or there is no TTY. In
 /// `upgrade`, Abort is treated as Skip: the source is already registered, so
 /// declining the re-run just leaves the existing install in place. Persists the
 /// registry only if a hook was run and its recorded commit advanced.
+// spec: HOOK-121 HOOK-122 HOOK-124
 fn rerun_source_hooks(
     paths: &Paths,
     registry: &mut Registry,
@@ -7357,7 +7379,9 @@ fn rerun_source_hooks(
 ) -> Result<()> {
     let mut changed = false;
     for source in &mut registry.sources {
-        if !hook_rerun_warranted(source) {
+        let dir = source.clone_dir(paths);
+        let pending = pending_update_hooks(source, &dir);
+        if pending.hooks.is_empty() {
             continue;
         }
         // HOOK-11 scope: a scoped `upgrade <item>` restricts the hook re-run to
@@ -7376,38 +7400,24 @@ fn rerun_source_hooks(
         {
             if !json_mode() {
                 println!(
-                    "skipping install hook for {}: source not permitted by the managed policy's allowlist",
-                    source.name
+                    "skipping {} hook for {}: source not permitted by the managed policy's allowlist",
+                    pending.event, source.name
                 );
             }
             continue;
         }
 
-        let dir = source.clone_dir(paths);
+        let event = pending.event;
         let pin_desc = pin_description(&source.pin);
         let commit = source.commit.clone().unwrap_or_default();
         let clone_path = dir.display().to_string();
 
-        // Collect indices of pending hooks so we can mutate by index below.
-        // A hook is pending when it has never run (ran_at=None) OR its run-commit
-        // differs from the source's current commit. Treating ran_at=None as always
-        // pending ensures hooks skipped on a commitless linked source are re-offered.
-        let pending_indices: Vec<usize> = source
-            .install_hooks
-            .iter()
-            .enumerate()
-            .filter(|(_, h)| h.ran_at.is_none() || h.ran_at.as_deref() != source.commit.as_deref())
-            .map(|(i, _)| i)
-            .collect();
-
-        for idx in pending_indices {
-            let cmd = source.install_hooks[idx].command.clone();
-
+        for hook in pending.hooks {
             let run = if dangerously_skip_hook_check {
                 // HOOK-23: re-run without prompting.
                 if !json_mode() {
                     println!(
-                        "note: re-running install hook for {} without the safety prompt (--dangerously-skip-install-hook-check)",
+                        "note: running {event} hook for {} without the safety prompt (--dangerously-skip-install-hook-check)",
                         source.name
                     );
                 }
@@ -7416,7 +7426,7 @@ fn rerun_source_hooks(
                 // HOOK-22: no TTY; never run silently. Skip the re-run.
                 if !json_mode() {
                     println!(
-                        "note: skipped re-running the install hook for {} (no TTY); its tooling may be out of date until the hook is re-run",
+                        "note: skipped the {event} hook for {} (no TTY); its tooling may be out of date until the hook is run",
                         source.name
                     );
                 }
@@ -7424,21 +7434,32 @@ fn rerun_source_hooks(
             } else {
                 // spec: HOOK-24 - show a browse URL pinned to the disclosed commit.
                 let browse_url = source.browse_url(&commit);
-                let disclosure = crate::hook::disclosure_text(
+                let disclosure = crate::hook::hook_disclosure_text(
+                    &hook.label,
+                    hook.optional,
                     &source.name,
                     &pin_desc,
                     &commit,
                     &clone_path,
-                    &cmd,
+                    &hook.run,
                     None,
                     browse_url.as_deref(),
                 );
                 // Abort is treated as Skip here (the source is already registered,
-                // per the HOOK-11 note).
-                matches!(
-                    crate::hook::prompt_choice(&disclosure)?,
-                    crate::hook::HookChoice::RunAndContinue
-                )
+                // per the HOOK-11 note), so an optional and a required hook get
+                // the same two outcomes; only the prompt's shape differs
+                // (HOOK-52).
+                if hook.optional {
+                    matches!(
+                        crate::hook::prompt_choice_optional(&disclosure)?,
+                        crate::hook::OptionalChoice::Run
+                    )
+                } else {
+                    matches!(
+                        crate::hook::prompt_choice(&disclosure)?,
+                        crate::hook::HookChoice::RunAndContinue
+                    )
+                }
             };
 
             if run {
@@ -7449,17 +7470,22 @@ fn rerun_source_hooks(
                 // in this pass before propagating, so an earlier source's
                 // successful re-run is not lost (and its side effect not
                 // silently re-offered on the next pass).
-                if let Err(e) = crate::hook::run_hook(&cmd, &dir, &source.name, "install", &cmd) {
+                if let Err(e) =
+                    crate::hook::run_hook(&hook.run, &dir, &source.name, event, &hook.label)
+                {
                     if changed {
                         registry.save(paths)?;
                     }
                     return Err(e);
                 }
-                // HOOK-55: record the commit the hook ran at.
-                source.install_hooks[idx].ran_at = source.commit.clone();
+                // HOOK-55, HOOK-124: record the commit the hook ran at. An
+                // update hook shares the install hooks' recorded set, keyed by
+                // command, so this upserts for either event.
+                let ran_at = source.commit.clone();
+                record_install_hook(source, &hook.run, ran_at);
                 changed = true;
                 if !json_mode() {
-                    println!("re-ran install hook for {}", source.name);
+                    println!("ran {event} hook for {}", source.name);
                 }
             }
         }
@@ -7468,6 +7494,80 @@ fn rerun_source_hooks(
         registry.save(paths)?;
     }
     Ok(())
+}
+
+/// One hook `upgrade` should offer for a source, resolved to what the run and
+/// the disclosure need.
+struct UpgradeHook {
+    run: String,
+    label: String,
+    optional: bool,
+}
+
+/// The hooks `upgrade` should offer for one source, and the event they belong
+/// to (HOOK-121, HOOK-122).
+struct PendingUpgradeHooks {
+    event: &'static str,
+    hooks: Vec<UpgradeHook>,
+}
+
+/// Select the hooks an `upgrade` offers for `source`, whose clone is at
+/// `clone_dir` (HOOK-122).
+///
+/// A source that declares any update hook offers its pending update hooks and
+/// none of its install hooks; one that declares none re-offers its pending
+/// recorded install hooks (HOOK-11/55), which is the unchanged behavior for
+/// every source that has not opted in.
+///
+/// The update hooks come from the clone's `mind.toml`, not from the recorded
+/// set: the record is keyed by command alone and does not say which event a
+/// command belongs to, and a newly declared update hook has no record yet. A
+/// clone that cannot be read or whose manifest does not parse contributes no
+/// update hooks, leaving the install-hook path: `upgrade` reports a broken
+/// source through the scan below, and must not turn a malformed manifest into a
+/// silent change of which arbitrary code runs.
+// spec: HOOK-121 HOOK-122 HOOK-124
+fn pending_update_hooks(
+    source: &crate::source::Source,
+    clone_dir: &std::path::Path,
+) -> PendingUpgradeHooks {
+    let current = source.commit.as_deref();
+    let declared = match MindToml::load(clone_dir) {
+        Ok(Some(mf)) => mf
+            .resolved_hooks(&clone_dir.join("mind.toml"))
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    let updates: Vec<&crate::mindfile::ResolvedHook> = declared
+        .iter()
+        .filter(|h| h.event == HookEvent::Update)
+        .collect();
+    if !updates.is_empty() {
+        return PendingUpgradeHooks {
+            event: "update",
+            hooks: updates
+                .into_iter()
+                .filter(|h| !hook_ran_at(source, &h.run, current))
+                .map(|h| UpgradeHook {
+                    run: h.run.clone(),
+                    label: h.label().to_string(),
+                    optional: h.optional,
+                })
+                .collect(),
+        };
+    }
+    PendingUpgradeHooks {
+        event: "install",
+        hooks: source
+            .pending_install_hooks(current)
+            .into_iter()
+            .map(|h| UpgradeHook {
+                run: h.command.clone(),
+                label: h.command.clone(),
+                optional: false,
+            })
+            .collect(),
+    }
 }
 
 /// What `upgrade` should do with one installed item before the catalog lookup.
@@ -9771,8 +9871,6 @@ mod tests {
             link_rel: None,
             bin: None,
             build: None,
-            install: None,
-            uninstall: None,
             requires,
             expand: Vec::new(),
             hooks: Vec::new(),
@@ -11101,6 +11199,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// Whether `upgrade` would offer any hook for this source, with no clone on
+    /// disk (so no `mind.toml`, so no update hooks: the install-hook path,
+    /// HOOK-122). The `pending_update_hooks` selector replaced the old
+    /// `hook_rerun_warranted` predicate; this keeps the truth table it covered.
+    fn hook_rerun_warranted(source: &crate::source::Source) -> bool {
+        !pending_update_hooks(source, std::path::Path::new("/nonexistent-mind-clone"))
+            .hooks
+            .is_empty()
+    }
+
     /// Build a bare `Source` for the `hook_rerun_warranted` truth table. Uses
     /// `parse_spec` so the identity fields are filled the same way `meld` fills
     /// them; the test only manipulates the commit and install_hooks fields.
@@ -11179,9 +11287,10 @@ mod tests {
         );
     }
 
-    // spec: HOOK-57
-    // The init-source scaffold must include commented [[hooks]] examples for both
-    // install and uninstall events, at least one marked optional = true.
+    // spec: HOOK-57 HOOK-123
+    // The init-source scaffold must include commented [[hooks]] examples for the
+    // install, update, and uninstall events, at least one marked optional = true,
+    // and must state the install hook's idempotence expectation.
     #[test]
     fn init_source_scaffold_includes_hooks_examples() {
         // Create a temp directory to run init_source in.
@@ -11224,6 +11333,18 @@ mod tests {
         assert!(
             contents.contains("optional = true"),
             "scaffold must have at least one optional = true example: {contents}"
+        );
+        // spec: HOOK-123 -- the scaffold states the idempotence expectation an
+        // install hook's re-run at upgrade creates, and shows the update event
+        // as the escape for a step that cannot be made idempotent.
+        assert!(
+            contents.contains("idempotent"),
+            "scaffold must state that an install hook is expected to be \
+             idempotent: {contents}"
+        );
+        assert!(
+            contents.contains("event = \"update\""),
+            "scaffold must show an update-event example: {contents}"
         );
         // All [[hooks]] content is commented out (lines starting with # after trimming).
         // Check that the literal text "[[hooks]]" is preceded by a #.

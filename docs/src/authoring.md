@@ -87,8 +87,8 @@ Findings are **hard** (non-zero exit) or **advisory**:
   classified by what it resolves to), a sibling tool named in prose without a
   token, a misplaced `{{ns:}}` token, a helper script duplicated across items
   (`duplicate-tooling`), a deprecated `[source].install` field (`deprecated-field`,
-  pointing to the `[[hooks]]` form), and each declared install/uninstall hook (so a
-  consumer sees the source will run code).
+  pointing to the `[[hooks]]` form), and each declared source or item hook,
+  whichever event (so a consumer sees the source will run code).
 
 ```
 mind review                      # review the current dir

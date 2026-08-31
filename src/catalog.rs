@@ -51,14 +51,6 @@ pub struct CatalogItem {
     /// A per-item build command run in staging at install (from `TOOL.md`
     /// frontmatter or a `mind.toml` override). `None` means no build step.
     pub build: Option<String>,
-    /// An item install hook (HOOK-80): a host side-effect command run as the
-    /// final install step (from a `mind.toml` `[[items]].install` on any kind,
-    /// or a tool's `TOOL.md` `install:` frontmatter). `None` means none.
-    pub install: Option<String>,
-    /// An item uninstall hook (HOOK-80): a host cleanup command run when the item
-    /// is removed (from a `mind.toml` `[[items]].uninstall` on any kind, or a
-    /// tool's `TOOL.md` `uninstall:` frontmatter). `None` means none.
-    pub uninstall: Option<String>,
     /// Explicit intra-source dependency refs declared in the item's frontmatter
     /// `requires:` key (DEP-4). Whitespace-split raw strings as written, e.g.
     /// `["skill:x", "agent:y"]`. Empty when absent.
@@ -76,12 +68,15 @@ pub struct CatalogItem {
     /// like markdown, with path tokens rendered absolute (TOOL-20). Empty when
     /// absent.
     pub expand: Vec<String>,
-    /// The item's full resolved lifecycle hooks (HOOK-86), in execution order:
-    /// the scalar `install`/`uninstall` shorthand folded in ahead of any
-    /// `[[items.hooks]]` array entries. The scalar fields above stay populated
-    /// alongside this list (HOOK-85 disclosure reads them); this list is what the
-    /// install/uninstall execution iterates. A `TOOL.md`-frontmatter item has
-    /// only its scalars folded in (DSC-21: the array form requires `mind.toml`).
+    /// The item's full resolved lifecycle hooks (HOOK-86, HOOK-132), in
+    /// execution order, from whichever ONE declaration site supplied them: a
+    /// root `mind.toml` `[[items]]` entry (its scalar `install`/`update`/
+    /// `uninstall` shorthand folded in ahead of its `[[items.hooks]]` array),
+    /// else the item directory's own `mind.toml` `[[hooks]]` (HOOK-131), else
+    /// the item's frontmatter scalars (HOOK-130). The sites do not merge, so
+    /// this list always matches something as written in the source. Every
+    /// consumer reads hooks from here: execution, `mind review` (HOOK-134), and
+    /// `hooks list`.
     pub hooks: Vec<ResolvedHook>,
 }
 
@@ -136,6 +131,31 @@ impl CatalogItem {
             .iter()
             .filter(|h| h.event == HookEvent::Install)
             .collect()
+    }
+
+    /// This item's resolved update hooks (HOOK-120, HOOK-125), in execution
+    /// order: what runs in place of the install hooks when the item is
+    /// re-installed over an existing install.
+    // spec: HOOK-125
+    pub fn update_hooks(&self) -> Vec<&ResolvedHook> {
+        self.hooks
+            .iter()
+            .filter(|h| h.event == HookEvent::Update)
+            .collect()
+    }
+
+    /// The hooks to run when installing this item: its update hooks when this
+    /// is a re-install over an existing install of the same effective name and
+    /// the item declares any, else its install hooks (HOOK-125).
+    // spec: HOOK-125
+    pub fn install_time_hooks(&self, is_update: bool) -> Vec<&ResolvedHook> {
+        if is_update {
+            let update = self.update_hooks();
+            if !update.is_empty() {
+                return update;
+            }
+        }
+        self.install_hooks()
     }
 
     /// This item's resolved uninstall hooks (HOOK-86), in execution order.
@@ -496,7 +516,14 @@ fn scan_item_link(
     if !(skill_dir.is_dir() && skill_md.is_file()) {
         return Err(not_a_skill());
     }
-    if let Some(item) = make_item(source, prefix, ItemKind::Skill, skill_dir, &skill_md)? {
+    if let Some(item) = make_item(
+        clone_root,
+        source,
+        prefix,
+        ItemKind::Skill,
+        skill_dir,
+        &skill_md,
+    )? {
         out.push(item);
     }
     Ok(())
@@ -765,7 +792,14 @@ fn scan_add_roots(
             let skill_md = entry.join("SKILL.md");
             if entry.is_dir()
                 && skill_md.is_file()
-                && let Some(item) = make_item(source, prefix, ItemKind::Skill, entry, &skill_md)?
+                && let Some(item) = make_item(
+                    clone_root,
+                    source,
+                    prefix,
+                    ItemKind::Skill,
+                    entry,
+                    &skill_md,
+                )?
             {
                 out.push(item);
             }
@@ -892,11 +926,18 @@ fn from_decl(
     let path = root.join(&decl.path);
     let meta = meta_file(kind, &path);
     // HOOK-86: resolve the item's full lifecycle hook list (scalar shorthand
-    // folded ahead of the `[[items.hooks]]` array, validated). This is the
-    // authoritative list for the `mind.toml` path; the scalar fields below stay
-    // populated for the HOOK-85 disclosure.
-    let hooks = decl.resolved_item_hooks(&root.join("mind.toml"))?;
+    // folded ahead of the `[[items.hooks]]` array, validated).
+    //
+    // spec: HOOK-132 -- only a declaration that says something about hooks is
+    // authoritative. One that says nothing leaves the item free to declare its
+    // own (its directory manifest, else its frontmatter), so pass `None` rather
+    // than an empty list, which would read as "declared: no hooks".
+    let hooks = decl
+        .declares_hooks()
+        .then(|| decl.resolved_item_hooks(&root.join("mind.toml")))
+        .transpose()?;
     build_item(
+        root,
         source,
         prefix,
         kind,
@@ -908,9 +949,7 @@ fn from_decl(
             link: decl.link.clone(),
             bin: decl.bin.clone(),
             build: decl.build.clone(),
-            install: decl.install.clone(),
-            uninstall: decl.uninstall.clone(),
-            hooks: Some(hooks),
+            hooks,
             ignore: decl.ignore.clone(),
         },
     )
@@ -1005,18 +1044,75 @@ fn is_confined_link_target(rel: &str) -> bool {
     }
 }
 
-/// Read a lifecycle hook (`install`/`uninstall`, HOOK-80) from an item's meta
-/// file frontmatter, but only for a tool (a `TOOL.md`). Other kinds declare
-/// these only via `mind.toml` `[[items]]`, so frontmatter is not consulted.
-/// An empty or whitespace-only value is treated as absent (HOOK-3).
+/// Read a lifecycle hook scalar (`install:`/`update:`/`uninstall:`, HOOK-130)
+/// from an item's meta file frontmatter. Read for EVERY kind: a skill's
+/// `SKILL.md`, a tool's `TOOL.md`, and an agent's or rule's own `.md`, so an
+/// item can declare its own hooks without the source's root manifest having to
+/// become authoritative for the whole repo. An empty or whitespace-only value is
+/// treated as absent (HOOK-3).
 ///
+/// spec: HOOK-130
 /// spec: DSC-91 -- the read is size-capped; an oversized meta file surfaces as
 /// `MindError::MetadataTooLarge` rather than being read in full.
-fn lifecycle_frontmatter(kind: ItemKind, meta: &Path, key: &str) -> Result<Option<String>> {
-    if kind != ItemKind::Tool {
-        return Ok(None);
-    }
+fn lifecycle_frontmatter(meta: &Path, key: &str) -> Result<Option<String>> {
     Ok(nonempty(frontmatter::file_field_capped(meta, key)?))
+}
+
+/// The hooks an item declares for itself, for an item whose root `mind.toml`
+/// `[[items]]` entry declared none (or that was found by convention, which has
+/// no entry at all): the item directory's own `mind.toml` `[[hooks]]`
+/// (HOOK-131) when it declares any, else the item's frontmatter scalars
+/// (HOOK-130), each as one required hook of its event.
+///
+/// The two sites do not merge (HOOK-132). Only a directory-backed kind can
+/// carry an item manifest; an agent or rule IS its file and has no directory of
+/// its own to put one in.
+// spec: HOOK-131 HOOK-132
+fn item_declared_hooks(
+    root: &Path,
+    kind: ItemKind,
+    path: &Path,
+    meta: &Path,
+) -> Result<Vec<ResolvedHook>> {
+    // HOOK-131: the source's own root `mind.toml` is never read as an item
+    // manifest. An item may point AT the source root (`[[items]] path = "."`),
+    // where the two files are the same file; reading it as an item manifest
+    // would reject the source's own inventory as an unknown key.
+    // `path.is_dir()`: a declared skill may point at its `SKILL.md` rather than
+    // the directory holding it, and a file has no item manifest beside it.
+    if matches!(kind, ItemKind::Skill | ItemKind::Tool) && path.is_dir() && !same_dir(path, root) {
+        let manifest_path = path.join("mind.toml");
+        if let Some(manifest) = crate::mindfile::ItemToml::load(path)? {
+            let hooks = manifest.resolved_hooks(&manifest_path)?;
+            if !hooks.is_empty() {
+                return Ok(hooks);
+            }
+        }
+    }
+    let mut out: Vec<ResolvedHook> = Vec::new();
+    for (key, event) in [
+        ("install", HookEvent::Install),
+        ("update", HookEvent::Update),
+        ("uninstall", HookEvent::Uninstall),
+    ] {
+        if let Some(run) = lifecycle_frontmatter(meta, key)? {
+            out.push(ResolvedHook {
+                run,
+                name: None,
+                optional: false,
+                event,
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// Whether two paths name the same directory, comparing canonicalized forms
+/// (so `<root>/.` and `<root>` match) and falling back to the literal paths
+/// when either cannot be canonicalized.
+fn same_dir(a: &Path, b: &Path) -> bool {
+    let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    canon(a) == canon(b)
 }
 
 /// Trim a value and treat an empty/whitespace-only string as absent (HOOK-3).
@@ -1052,13 +1148,12 @@ struct ItemOverrides {
     link: Option<String>,
     bin: Option<String>,
     build: Option<String>,
-    install: Option<String>,
-    uninstall: Option<String>,
     /// The item's fully resolved lifecycle hooks (HOOK-86) in execution order:
-    /// the scalar install/uninstall shorthand folded in ahead of any
-    /// `[[items.hooks]]` array entries. `None` lets `build_item` derive the list
-    /// from the resolved scalar fields alone (the convention/TOOL.md path, where
-    /// there is no array form, DSC-21).
+    /// the scalar install/update/uninstall shorthand folded in ahead of any
+    /// `[[items.hooks]]` array entries. `Some` only when the `[[items]]` entry
+    /// declared at least one hook, which makes it authoritative for this item
+    /// (HOOK-132); `None` lets `build_item` fall through to the item's own
+    /// declaration sites (its directory manifest, else its frontmatter).
     hooks: Option<Vec<ResolvedHook>>,
     /// The item's own `[[items]].ignore` (IGN-1), when it declared one. `None`
     /// means "not declared", which `resolve_ignores` fills from the source
@@ -1074,7 +1169,9 @@ struct ItemOverrides {
 /// size-capped; an oversized meta file (`SKILL.md`/`TOOL.md`/agent/rule `.md`)
 /// fails the scan with `MindError::MetadataTooLarge` instead of being read in
 /// full.
+#[allow(clippy::too_many_arguments)]
 fn build_item(
+    root: &Path,
     source: &Source,
     prefix: &Option<String>,
     kind: ItemKind,
@@ -1083,40 +1180,15 @@ fn build_item(
     meta: &Path,
     ov: ItemOverrides,
 ) -> Result<CatalogItem> {
-    // HOOK-80: a `mind.toml` install/uninstall is valid on any kind; a tool's
-    // TOOL.md may also carry one in frontmatter. An empty value is absent. These
-    // scalar fields stay populated for the HOOK-85 disclosure, alongside `hooks`.
-    let install = match nonempty(ov.install) {
-        Some(v) => Some(v),
-        None => lifecycle_frontmatter(kind, meta, "install")?,
+    // HOOK-132: exactly one declaration site supplies an item's hooks. A
+    // `[[items]]` entry that declared any is authoritative and the caller passes
+    // it here (`ItemDecl::resolved_item_hooks`: scalar shorthand folded ahead of
+    // the `[[items.hooks]]` array). Otherwise the item speaks for itself, via
+    // its own directory manifest (HOOK-131) or its frontmatter (HOOK-130).
+    let hooks = match ov.hooks {
+        Some(hooks) => hooks,
+        None => item_declared_hooks(root, kind, &path, meta)?,
     };
-    let uninstall = match nonempty(ov.uninstall) {
-        Some(v) => Some(v),
-        None => lifecycle_frontmatter(kind, meta, "uninstall")?,
-    };
-    // HOOK-86: the full resolved hook list in execution order. On the `mind.toml`
-    // path the caller supplies it via `ItemDecl::resolved_item_hooks` (scalar
-    // shorthand folded ahead of the `[[items.hooks]]` array). On the
-    // convention/TOOL.md path there is no array (DSC-21), so derive it from the
-    // resolved scalar install/uninstall (which may come from TOOL.md frontmatter),
-    // each as one required hook of its event.
-    let hooks = ov.hooks.unwrap_or_else(|| {
-        let mut out: Vec<ResolvedHook> = Vec::new();
-        for (cmd, event) in [
-            (&install, HookEvent::Install),
-            (&uninstall, HookEvent::Uninstall),
-        ] {
-            if let Some(c) = cmd {
-                out.push(ResolvedHook {
-                    run: c.clone(),
-                    name: None,
-                    optional: false,
-                    event,
-                });
-            }
-        }
-        out
-    });
     // DEP-4: read the `requires:` frontmatter scalar and split on whitespace.
     // This is always read from `meta` regardless of kind; absent or empty -> empty Vec.
     let requires: Vec<String> = frontmatter::file_field_capped(meta, "requires")?
@@ -1155,8 +1227,6 @@ fn build_item(
         link_rel: ov.link,
         bin: tool_field(kind, ov.bin, meta, "bin")?,
         build: tool_field(kind, ov.build, meta, "build")?,
-        install,
-        uninstall,
         requires,
         // spec: IGN-1 -- carried as declared; `resolve_ignores` fills a `None`
         // from the source-level list once the whole scan is in hand.
@@ -1182,6 +1252,7 @@ fn scan_globs(
         // anyway rather than assuming.
         if let Some(dir) = skill_md.parent()
             && let Some(item) = make_item(
+                root,
                 source,
                 prefix,
                 ItemKind::Skill,
@@ -1197,7 +1268,7 @@ fn scan_globs(
         (ItemKind::Rule, &discover.rules),
     ] {
         for md in resolve_globs(root, globs, kind)? {
-            if let Some(item) = make_item(source, prefix, kind, md.clone(), &md)? {
+            if let Some(item) = make_item(root, source, prefix, kind, md.clone(), &md)? {
                 out.push(item);
             }
         }
@@ -1206,7 +1277,7 @@ fn scan_globs(
     // metadata source.
     for dir in resolve_globs(root, &discover.tools, ItemKind::Tool)? {
         let meta = dir.join("TOOL.md");
-        if let Some(item) = make_item(source, prefix, ItemKind::Tool, dir, &meta)? {
+        if let Some(item) = make_item(root, source, prefix, ItemKind::Tool, dir, &meta)? {
             out.push(item);
         }
     }
@@ -1252,7 +1323,7 @@ fn scan_convention(
         let skill_md = entry.join("SKILL.md");
         if entry.is_dir()
             && skill_md.is_file()
-            && let Some(item) = make_item(source, prefix, ItemKind::Skill, entry, &skill_md)?
+            && let Some(item) = make_item(root, source, prefix, ItemKind::Skill, entry, &skill_md)?
         {
             out.push(item);
         }
@@ -1263,7 +1334,7 @@ fn scan_convention(
         for entry in read_dir_opt(&kind_dir)? {
             if entry.is_file()
                 && entry.extension().is_some_and(|e| e == "md")
-                && let Some(item) = make_item(source, prefix, kind, entry.clone(), &entry)?
+                && let Some(item) = make_item(root, source, prefix, kind, entry.clone(), &entry)?
             {
                 out.push(item);
             }
@@ -1277,7 +1348,7 @@ fn scan_convention(
     for entry in read_dir_opt(&tools_dir)? {
         if entry.is_dir() {
             let meta = entry.join("TOOL.md");
-            if let Some(item) = make_item(source, prefix, ItemKind::Tool, entry, &meta)? {
+            if let Some(item) = make_item(root, source, prefix, ItemKind::Tool, entry, &meta)? {
                 out.push(item);
             }
         }
@@ -1299,6 +1370,7 @@ fn scan_convention(
 /// spec: DSC-91 -- bubbles a size-cap failure from `build_item`'s capped
 /// frontmatter reads.
 fn make_item(
+    root: &Path,
     source: &Source,
     prefix: &Option<String>,
     kind: ItemKind,
@@ -1325,8 +1397,10 @@ fn make_item(
         return Ok(None);
     }
     // Convention discovery carries no overrides: every field falls back to the
-    // item's frontmatter (HOOK-80: install/uninstall only from a tool's TOOL.md).
+    // item's own declaration sites (HOOK-131/132: its directory manifest, else
+    // its frontmatter).
     build_item(
+        root,
         source,
         prefix,
         kind,
@@ -1356,7 +1430,14 @@ fn scan_plugin_components(
         let skill_md = entry.join("SKILL.md");
         if entry.is_dir()
             && skill_md.is_file()
-            && let Some(item) = make_item(source, prefix, ItemKind::Skill, entry, &skill_md)?
+            && let Some(item) = make_item(
+                plugin_root,
+                source,
+                prefix,
+                ItemKind::Skill,
+                entry,
+                &skill_md,
+            )?
         {
             out.push(item);
         }
@@ -1367,7 +1448,14 @@ fn scan_plugin_components(
     for entry in read_dir_opt(&agents_dir)? {
         if entry.is_file()
             && entry.extension().is_some_and(|e| e == "md")
-            && let Some(item) = make_item(source, prefix, ItemKind::Agent, entry.clone(), &entry)?
+            && let Some(item) = make_item(
+                plugin_root,
+                source,
+                prefix,
+                ItemKind::Agent,
+                entry.clone(),
+                &entry,
+            )?
         {
             out.push(item);
         }
@@ -1487,6 +1575,7 @@ fn scan_marketplace_in_repo_plugins(
                 if skill_dir.is_dir()
                     && skill_md.is_file()
                     && let Some(item) = make_item(
+                        &plugin_root,
                         source,
                         &plugin_prefix,
                         ItemKind::Skill,
@@ -1505,6 +1594,7 @@ fn scan_marketplace_in_repo_plugins(
                 if entry_path.is_dir()
                     && skill_md.is_file()
                     && let Some(item) = make_item(
+                        &plugin_root,
                         source,
                         &plugin_prefix,
                         ItemKind::Skill,
@@ -1523,6 +1613,7 @@ fn scan_marketplace_in_repo_plugins(
             if agent_path.is_file()
                 && agent_path.extension().is_some_and(|e| e == "md")
                 && let Some(item) = make_item(
+                    &plugin_root,
                     source,
                     &plugin_prefix,
                     ItemKind::Agent,
@@ -2459,8 +2550,6 @@ mod tests {
             link_rel: None,
             bin: None,
             build: None,
-            install: None,
-            uninstall: None,
             requires: Vec::new(),
             expand: Vec::new(),
             hooks: Vec::new(),
@@ -2536,8 +2625,6 @@ mod tests {
             link_rel: None,
             bin: None,
             build: None,
-            install: None,
-            uninstall: None,
             requires: Vec::new(),
             expand: Vec::new(),
             hooks: Vec::new(),
@@ -2605,6 +2692,7 @@ mod tests {
             bin: None,
             build: None,
             install: None,
+            update: None,
             uninstall: None,
             hooks: Vec::new(),
             ignore: None,
@@ -2634,6 +2722,7 @@ mod tests {
             bin: None,
             build: None,
             install: None,
+            update: None,
             uninstall: None,
             hooks: Vec::new(),
             ignore: None,
@@ -2706,6 +2795,7 @@ mod tests {
             bin: None,
             build: None,
             install: None,
+            update: None,
             uninstall: None,
             hooks: Vec::new(),
             ignore: None,
@@ -2732,6 +2822,7 @@ mod tests {
             bin: None,
             build: None,
             install: None,
+            update: None,
             uninstall: None,
             hooks: Vec::new(),
             ignore: None,
@@ -2759,6 +2850,7 @@ mod tests {
             bin: Some("x".to_string()),
             build: None,
             install: None,
+            update: None,
             uninstall: None,
             hooks: Vec::new(),
             ignore: None,
@@ -3017,6 +3109,7 @@ mod tests {
             bin: None,
             build: None,
             install: None,
+            update: None,
             uninstall: None,
             hooks: Vec::new(),
             ignore: None,
@@ -3046,6 +3139,7 @@ mod tests {
             bin: None,
             build: None,
             install: None,
+            update: None,
             uninstall: None,
             hooks: Vec::new(),
             ignore: None,
@@ -3074,6 +3168,7 @@ mod tests {
             bin: None,
             build: None,
             install: None,
+            update: None,
             uninstall: None,
             hooks: Vec::new(),
             ignore: None,
@@ -3137,8 +3232,6 @@ mod tests {
             link_rel: None,
             bin: None,
             build: None,
-            install: None,
-            uninstall: None,
             requires: Vec::new(),
             expand: Vec::new(),
             hooks: Vec::new(),
@@ -4821,8 +4914,8 @@ mod lifecycle_tests {
         let mut items = Vec::new();
         scan_source(&paths, &source_for(&clone), &mut items).unwrap();
         let rule = items.iter().find(|i| i.name == "style").unwrap();
-        assert_eq!(rule.install.as_deref(), Some("echo set-up"));
-        assert_eq!(rule.uninstall.as_deref(), Some("echo tear-down"));
+        assert_eq!(rule.install_hooks()[0].run, "echo set-up");
+        assert_eq!(rule.uninstall_hooks()[0].run, "echo tear-down");
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -4844,8 +4937,8 @@ mod lifecycle_tests {
         let mut items = Vec::new();
         scan_source(&paths, &source_for(&clone), &mut items).unwrap();
         let tool = items.iter().find(|i| i.name == "helper").unwrap();
-        assert_eq!(tool.install.as_deref(), Some("make setup"));
-        assert_eq!(tool.uninstall.as_deref(), Some("make cleanup"));
+        assert_eq!(tool.install_hooks()[0].run, "make setup");
+        assert_eq!(tool.uninstall_hooks()[0].run, "make cleanup");
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -4876,15 +4969,18 @@ mod lifecycle_tests {
         let mut items = Vec::new();
         scan_source(&paths, &source_for(&clone), &mut items).unwrap();
         let rule = items.iter().find(|i| i.name == "style").unwrap();
-        assert_eq!(rule.install, None, "whitespace install must be absent");
+        assert!(
+            rule.install_hooks().is_empty(),
+            "whitespace install must be absent"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
-    fn scalar_item_hooks_populate_both_the_scalar_fields_and_the_list() {
-        // spec: HOOK-86
-        // COORDINATION: the scalar install/uninstall fields stay populated (the
-        // HOOK-85 disclosure reads them) AND the resolved hook list is populated.
+    fn scalar_item_hooks_resolve_into_the_hook_list() {
+        // spec: HOOK-86 HOOK-134
+        // The scalar install/uninstall shorthand resolves into the item's hook
+        // list, which is the single place every consumer reads hooks from.
         let base = tmp();
         let clone = base.join("sources/local/test/repo");
         write(
@@ -4909,11 +5005,7 @@ mod lifecycle_tests {
         let mut items = Vec::new();
         scan_source(&paths, &source_for(&clone), &mut items).unwrap();
         let rule = items.iter().find(|i| i.name == "style").unwrap();
-        // Scalar fields still populated.
-        assert_eq!(rule.install.as_deref(), Some("echo set-up"));
-        assert_eq!(rule.uninstall.as_deref(), Some("echo tear-down"));
-        // The resolved list mirrors them: one required install, one required
-        // uninstall, in fold-in order.
+        // One required install and one required uninstall, in fold-in order.
         assert_eq!(rule.hooks.len(), 2);
         let ih = rule.install_hooks();
         assert_eq!(ih.len(), 1);
@@ -4957,8 +5049,6 @@ mod lifecycle_tests {
         let mut items = Vec::new();
         scan_source(&paths, &source_for(&clone), &mut items).unwrap();
         let tool = items.iter().find(|i| i.name == "helper").unwrap();
-        // Scalar field still set.
-        assert_eq!(tool.install.as_deref(), Some("scalar-install"));
         // Full list: scalar install, then the two array entries.
         assert_eq!(tool.hooks.len(), 3);
         let ih = tool.install_hooks();
@@ -4992,13 +5082,252 @@ mod lifecycle_tests {
         let mut items = Vec::new();
         scan_source(&paths, &source_for(&clone), &mut items).unwrap();
         let tool = items.iter().find(|i| i.name == "helper").unwrap();
-        assert_eq!(tool.install.as_deref(), Some("make setup"));
-        assert_eq!(tool.uninstall.as_deref(), Some("make cleanup"));
         // Folded into the list as one required hook each.
         assert_eq!(tool.hooks.len(), 2);
         assert_eq!(tool.install_hooks()[0].run, "make setup");
         assert!(!tool.install_hooks()[0].optional);
         assert_eq!(tool.uninstall_hooks()[0].run, "make cleanup");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn skill_frontmatter_declares_its_own_lifecycle_hooks() {
+        // spec: HOOK-130
+        // The scalar lifecycle keys are read from ANY kind's meta file, so a
+        // convention-discovered skill declares its own hooks in SKILL.md with no
+        // root manifest at all.
+        let base = tmp();
+        let clone = base.join("sources/local/test/repo");
+        write(
+            &clone.join("skills/scanner/SKILL.md"),
+            "---\ndescription: scanner\ninstall: setup.sh\nupdate: migrate.sh\nuninstall: teardown.sh\n---\n# scanner\n",
+        );
+        let paths = Paths {
+            mind_home: base.clone(),
+            claude_home: base.join("claude"),
+        };
+        let mut items = Vec::new();
+        scan_source(&paths, &source_for(&clone), &mut items).unwrap();
+        let skill = items.iter().find(|i| i.name == "scanner").unwrap();
+        assert_eq!(skill.install_hooks()[0].run, "setup.sh");
+        assert_eq!(skill.update_hooks()[0].run, "migrate.sh");
+        assert_eq!(skill.uninstall_hooks()[0].run, "teardown.sh");
+        assert!(
+            !skill.install_hooks()[0].optional,
+            "a frontmatter scalar is one required hook"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn agent_frontmatter_declares_its_own_lifecycle_hooks() {
+        // spec: HOOK-130
+        // Not only directory-backed kinds: a single-file agent reads the same
+        // scalars from its own `.md`.
+        let base = tmp();
+        let clone = base.join("sources/local/test/repo");
+        write(
+            &clone.join("agents/dev.md"),
+            "---\ndescription: dev\ninstall: setup.sh\n---\n# dev\n",
+        );
+        let paths = Paths {
+            mind_home: base.clone(),
+            claude_home: base.join("claude"),
+        };
+        let mut items = Vec::new();
+        scan_source(&paths, &source_for(&clone), &mut items).unwrap();
+        let agent = items.iter().find(|i| i.name == "dev").unwrap();
+        assert_eq!(agent.install_hooks()[0].run, "setup.sh");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn item_directory_manifest_declares_hooks_and_beats_frontmatter() {
+        // spec: HOOK-131 HOOK-132
+        // A skill's own `mind.toml` declares the full `[[hooks]]` form (named,
+        // optional, any event), and REPLACES the frontmatter scalars rather than
+        // merging with them.
+        let base = tmp();
+        let clone = base.join("sources/local/test/repo");
+        write(
+            &clone.join("skills/scanner/SKILL.md"),
+            "---\ndescription: scanner\ninstall: frontmatter-install\n---\n# scanner\n",
+        );
+        write(
+            &clone.join("skills/scanner/mind.toml"),
+            "[[hooks]]\nrun = \"manifest-install\"\nname = \"Set up\"\noptional = true\n\n[[hooks]]\nrun = \"manifest-update\"\nevent = \"update\"\n",
+        );
+        let paths = Paths {
+            mind_home: base.clone(),
+            claude_home: base.join("claude"),
+        };
+        let mut items = Vec::new();
+        scan_source(&paths, &source_for(&clone), &mut items).unwrap();
+        let skill = items.iter().find(|i| i.name == "scanner").unwrap();
+        assert_eq!(skill.hooks.len(), 2, "the two sites must not merge");
+        let ih = skill.install_hooks();
+        assert_eq!(ih.len(), 1);
+        assert_eq!(ih[0].run, "manifest-install");
+        assert!(ih[0].optional, "the manifest form carries `optional`");
+        assert_eq!(ih[0].label(), "Set up");
+        assert_eq!(skill.update_hooks()[0].run, "manifest-update");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn root_items_declaration_beats_the_item_directory_manifest() {
+        // spec: HOOK-132
+        // A `[[items]]` entry that declares any hook is authoritative for that
+        // item; one that declares none leaves the item's own sites in effect.
+        let base = tmp();
+        let clone = base.join("sources/local/test/repo");
+        write(
+            &clone.join("skills/scanner/SKILL.md"),
+            "---\ndescription: scanner\n---\n# scanner\n",
+        );
+        write(
+            &clone.join("skills/scanner/mind.toml"),
+            "[[hooks]]\nrun = \"manifest-install\"\n",
+        );
+        write(
+            &clone.join("skills/quiet/SKILL.md"),
+            "---\ndescription: quiet\n---\n# quiet\n",
+        );
+        write(
+            &clone.join("skills/quiet/mind.toml"),
+            "[[hooks]]\nrun = \"quiet-install\"\n",
+        );
+        write(
+            &clone.join("mind.toml"),
+            concat!(
+                "[[items]]\n",
+                "kind = \"skill\"\n",
+                "name = \"scanner\"\n",
+                "path = \"skills/scanner\"\n",
+                "install = \"root-install\"\n",
+                "\n",
+                "[[items]]\n",
+                "kind = \"skill\"\n",
+                "name = \"quiet\"\n",
+                "path = \"skills/quiet\"\n",
+            ),
+        );
+        let paths = Paths {
+            mind_home: base.clone(),
+            claude_home: base.join("claude"),
+        };
+        let mut items = Vec::new();
+        scan_source(&paths, &source_for(&clone), &mut items).unwrap();
+        let scanner = items.iter().find(|i| i.name == "scanner").unwrap();
+        assert_eq!(scanner.hooks.len(), 1);
+        assert_eq!(scanner.install_hooks()[0].run, "root-install");
+        let quiet = items.iter().find(|i| i.name == "quiet").unwrap();
+        assert_eq!(
+            quiet.install_hooks()[0].run,
+            "quiet-install",
+            "a declaration silent about hooks must not suppress the item's own"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn source_root_mind_toml_is_not_read_as_an_item_manifest() {
+        // spec: HOOK-131
+        // An item may point AT the source root (`path = "."`), where the item
+        // directory's `mind.toml` IS the source manifest. Reading it as an item
+        // manifest would reject the source's own `[[items]]` as an unknown key.
+        let base = tmp();
+        let clone = base.join("sources/local/test/repo");
+        write(
+            &clone.join("SKILL.md"),
+            "---\ndescription: root skill\n---\n# root\n",
+        );
+        write(
+            &clone.join("mind.toml"),
+            concat!(
+                "[[items]]\n",
+                "kind = \"skill\"\n",
+                "name = \"root-skill\"\n",
+                "path = \".\"\n",
+            ),
+        );
+        let paths = Paths {
+            mind_home: base.clone(),
+            claude_home: base.join("claude"),
+        };
+        let mut items = Vec::new();
+        scan_source(&paths, &source_for(&clone), &mut items).expect("the scan must succeed");
+        let skill = items.iter().find(|i| i.name == "root-skill").unwrap();
+        assert!(
+            skill.hooks.is_empty(),
+            "the source manifest must not contribute item hooks"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn item_directory_manifest_schema_error_fails_the_scan() {
+        // spec: HOOK-131
+        // A malformed item manifest must not degrade to "this item declares no
+        // hooks": it exists only to declare code that will run on the host.
+        let base = tmp();
+        let clone = base.join("sources/local/test/repo");
+        write(
+            &clone.join("skills/scanner/SKILL.md"),
+            "---\ndescription: scanner\n---\n# scanner\n",
+        );
+        write(
+            &clone.join("skills/scanner/mind.toml"),
+            "[[hooks]]\nrun = \"setup.sh\"\nevent = \"whenever\"\n",
+        );
+        let paths = Paths {
+            mind_home: base.clone(),
+            claude_home: base.join("claude"),
+        };
+        let mut items = Vec::new();
+        let err = scan_source(&paths, &source_for(&clone), &mut items)
+            .expect_err("an unknown event must fail the scan");
+        assert!(
+            err.to_string().contains("whenever"),
+            "the error must name the bad value: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn update_hooks_replace_install_hooks_only_on_a_reinstall() {
+        // spec: HOOK-125
+        let base = tmp();
+        let clone = base.join("sources/local/test/repo");
+        write(
+            &clone.join("skills/scanner/SKILL.md"),
+            "---\ndescription: scanner\ninstall: setup.sh\nupdate: migrate.sh\n---\n# scanner\n",
+        );
+        write(
+            &clone.join("skills/plain/SKILL.md"),
+            "---\ndescription: plain\ninstall: setup.sh\n---\n# plain\n",
+        );
+        let paths = Paths {
+            mind_home: base.clone(),
+            claude_home: base.join("claude"),
+        };
+        let mut items = Vec::new();
+        scan_source(&paths, &source_for(&clone), &mut items).unwrap();
+
+        let scanner = items.iter().find(|i| i.name == "scanner").unwrap();
+        assert_eq!(scanner.install_time_hooks(false)[0].run, "setup.sh");
+        assert_eq!(
+            scanner.install_time_hooks(true)[0].run,
+            "migrate.sh",
+            "a re-install runs the update hook in place of the install hook"
+        );
+
+        let plain = items.iter().find(|i| i.name == "plain").unwrap();
+        assert_eq!(
+            plain.install_time_hooks(true)[0].run,
+            "setup.sh",
+            "an item with no update hook re-runs its install hook, unchanged"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 

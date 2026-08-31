@@ -6267,3 +6267,176 @@ fn read_log_in_clone(mind_home: &Path, filename: &str) -> Vec<String> {
             .collect(),
     }
 }
+
+// ---------------------------------------------------------------------------
+// --event update (HOOK-126)
+// ---------------------------------------------------------------------------
+
+/// `hooks run <source> --event update` runs the source's update hooks and
+/// records each run, so a second run has nothing pending.
+#[test]
+fn hooks_run_source_update_event_runs_update_hooks() {
+    // spec: HOOK-126 HOOK-124 CLI-195
+    let sb = Sandbox::new("update-src");
+    let install = sb.touch("install.sentinel");
+    let update = sb.touch("update.sentinel");
+    sb.write_and_commit(
+        "mind.toml",
+        &format!(
+            concat!(
+                "[[hooks]]\n",
+                "run = \"{install}\"\n",
+                "\n",
+                "[[hooks]]\n",
+                "run = \"{update}\"\n",
+                "event = \"update\"\n",
+            ),
+            install = install,
+            update = update,
+        ),
+    );
+    sb.write_and_commit(
+        "skills/scanner/SKILL.md",
+        "---\ndescription: scanner\n---\n# scanner\n",
+    );
+
+    let r = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(r.success, "meld: {}", r.stderr);
+    assert!(
+        !sb.sentinel("update.sentinel").exists(),
+        "an update hook must not run at meld (HOOK-121): {}",
+        r.stdout
+    );
+
+    let r = sb.mind(&[
+        "hooks",
+        "run",
+        "--event",
+        "update",
+        "--dangerously-skip-install-hook-check",
+        "update-src",
+    ]);
+    assert!(r.success, "hooks run update: {}\n{}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("running update hook"),
+        "the run must name the update event: {}",
+        r.stdout
+    );
+    assert!(
+        sb.sentinel("update.sentinel").exists(),
+        "the update hook must have run: {}",
+        r.stdout
+    );
+
+    // spec: HOOK-124 -- recorded at the current commit, so a second run has
+    // nothing pending and stays exit 0.
+    std::fs::remove_file(sb.sentinel("update.sentinel")).unwrap();
+    let r = sb.mind(&[
+        "hooks",
+        "run",
+        "--event",
+        "update",
+        "--dangerously-skip-install-hook-check",
+        "update-src",
+    ]);
+    assert!(r.success, "second run: {}\n{}", r.stdout, r.stderr);
+    assert!(
+        !sb.sentinel("update.sentinel").exists(),
+        "an update hook already run at this commit must not be re-offered: {}",
+        r.stdout
+    );
+
+    // spec: HOOK-126 -- `--force` re-offers it regardless of the record.
+    let r = sb.mind(&[
+        "hooks",
+        "run",
+        "--event",
+        "update",
+        "--force",
+        "--dangerously-skip-install-hook-check",
+        "update-src",
+    ]);
+    assert!(r.success, "forced run: {}\n{}", r.stdout, r.stderr);
+    assert!(
+        sb.sentinel("update.sentinel").exists(),
+        "--force must re-run a recorded update hook: {}",
+        r.stdout
+    );
+}
+
+/// `hooks list` reports an update hook with its event and its pending status,
+/// the same recorded state an install hook carries.
+#[test]
+fn hooks_list_shows_update_hook_with_pending_status() {
+    // spec: HOOK-126 HOOK-124 CLI-196
+    let sb = Sandbox::new("update-list-src");
+    sb.write_and_commit(
+        "mind.toml",
+        concat!(
+            "[[hooks]]\n",
+            "run = \"make upgrade\"\n",
+            "event = \"update\"\n",
+        ),
+    );
+    let r = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(r.success, "meld: {}", r.stderr);
+
+    let r = sb.mind(&["hooks", "list", "update-list-src"]);
+    assert!(r.success, "hooks list: {}\n{}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("[update]"),
+        "the update event must be listed: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("pending"),
+        "an update hook carries the recorded pending status: {}",
+        r.stdout
+    );
+}
+
+/// `hooks run <source>#<item> --event update` runs the item's update hooks in
+/// place, against its installed store copy.
+#[test]
+fn hooks_run_item_update_event_runs_update_hooks() {
+    // spec: HOOK-126 HOOK-125 CLI-194
+    let sb = Sandbox::new("item-update-src");
+    sb.write_and_commit(
+        "skills/scanner/SKILL.md",
+        "---\ndescription: scanner\ninstall: touch install.sentinel\nupdate: touch update.sentinel\n---\n# scanner\n",
+    );
+
+    let r = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(r.success, "meld: {}", r.stderr);
+    let r = sb.mind(&["learn", "scanner", "--dangerously-skip-install-hook-check"]);
+    assert!(r.success, "learn: {}", r.stderr);
+
+    let store = sb.mind_home.join("store").join("skill").join("scanner");
+    assert!(
+        store.join("install.sentinel").exists(),
+        "a first install runs the install hook, not the update hook"
+    );
+    assert!(
+        !store.join("update.sentinel").exists(),
+        "a first install must not run the update hook"
+    );
+
+    let r = sb.mind(&[
+        "hooks",
+        "run",
+        "--event",
+        "update",
+        "--dangerously-skip-install-hook-check",
+        "item-update-src#scanner",
+    ]);
+    assert!(
+        r.success,
+        "hooks run item update: {}\n{}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        store.join("update.sentinel").exists(),
+        "the item's update hook must run in the store dir: {}",
+        r.stdout
+    );
+}

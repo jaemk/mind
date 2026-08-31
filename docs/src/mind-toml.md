@@ -111,7 +111,12 @@ a disclosure prompt) at the bound lifecycle event.
 run = "make build"          # the shell command (required)
 name = "build tooling"      # label shown in the disclosure (else the command)
 optional = false            # required (run/skip/abort) vs optional (run/skip)
-event = "install"           # "install" (on meld, default) or "uninstall" (on unmeld)
+event = "install"           # "install" (on meld, default), "update" (on upgrade),
+                            # or "uninstall" (on unmeld)
+
+[[hooks]]
+run = "make upgrade"        # runs at upgrade INSTEAD of re-running the install hooks
+event = "update"
 
 [[hooks]]
 run = "make clean"
@@ -121,6 +126,10 @@ optional = true
 
 `[[hooks]]` is the canonical form. The legacy `[source].install` is a deprecated
 shorthand for one required install hook (still parsed); use `[[hooks]]` instead.
+
+An install hook re-runs whenever the source advances, so write it to be
+idempotent; declare an `event = "update"` hook for a step that cannot be. See
+[Install hooks](install-hooks.md#update-hooks).
 
 ## `[[items]]` - explicit inventory (authoritative)
 
@@ -143,15 +152,26 @@ path = "tools/detect"
 bin = "detect.sh"                # tool only: what {{tools:detect}} resolves to
 build = "make"                   # tool only: per-item build, run in staging at install
 install = "./setup.sh"           # any kind: host side effect run after install
+update = "./migrate.sh"          # any kind: replaces `install` on a re-install
 uninstall = "./teardown.sh"      # any kind: host cleanup run before removal
 ignore = ["scratch/"]            # replaces [source].ignore for this item
+
+# ...or the array form, for multiple, named, or optional item hooks:
+[[items.hooks]]
+run = "./setup.sh"
+name = "Set up"
+event = "install"
 ```
 
 - **`bin`** and **`build`** are valid only on a `tool`; on any other kind they are
   a schema error.
-- **`install`** / **`uninstall`** are per-item lifecycle hooks (valid on any kind),
-  distinct from `build` (which produces the item's content) and from the
-  source-level `[[hooks]]`.
+- **`install`** / **`update`** / **`uninstall`** are per-item lifecycle hooks
+  (valid on any kind), distinct from `build` (which produces the item's content)
+  and from the source-level `[[hooks]]`. An item that declares none here can
+  declare its own, next to the item: a scoped `mind.toml` in a skill or tool
+  directory (`[[hooks]]` only), or the `install:` / `update:` / `uninstall:`
+  frontmatter keys in the item's own file. See
+  [Install hooks](install-hooks.md#where-an-item-declares-its-hooks).
 - **`ignore`** on an item REPLACES `[source].ignore` for that item rather than
   adding to it; the built-in VCS-directory set (`.git`, `.hg`, `.svn`, `.bzr`)
   still applies either way. `ignore = []` is the only way to opt one item out of

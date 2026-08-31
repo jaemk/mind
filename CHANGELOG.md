@@ -6,6 +6,25 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Update hooks: a `[[hooks]]` entry with `event = "update"` runs at `upgrade` in
+  place of re-running the install hooks, for a source and for an item
+  (HOOK-120..126). A source or item that declares none keeps the existing
+  behavior, so an install hook still re-runs when its source or item advances,
+  and is expected to be idempotent; `init-source` now says so in its scaffold and
+  shows the update event as the escape for a step that cannot be. `hooks run` and
+  `hooks list` accept `--event update`, with the same pending/recorded semantics
+  as the install event.
+- An item declares its own hooks, next to the item (HOOK-130..134). The scalar
+  `install:` / `update:` / `uninstall:` frontmatter keys are read from any kind's
+  meta file (`SKILL.md`, `TOOL.md`, an agent's or rule's `.md`), not only a
+  tool's `TOOL.md`, and a skill or tool directory may carry a scoped `mind.toml`
+  declaring the full `[[hooks]]` array. A root `[[items]]` entry that declares
+  hooks still wins; the three sites never merge. `mind review` and `hooks list`
+  report an item's hooks from its resolved list, so array-declared and
+  item-declared hooks are disclosed alongside the scalar ones.
+
 ## [0.26.1] - 2026-08-30
 
 ### Fixed

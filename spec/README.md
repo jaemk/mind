@@ -248,6 +248,8 @@ and verified.
 | A dropped `requires` is recorded on the installed item and surfaced by `recall`, `recall --json`, and `introspect` | done | LNK-19 |
 | Ignored files: `[source].ignore` / `[[items]].ignore` plus a built-in VCS set exclude paths from both the store copy and the content hash, so an item can point at a directory holding more than itself | done | [ignore.md](ignore.md) (IGN-1..21) |
 | `evolve` verifies TLS against the machine's certificate store, so an intercepting proxy's company CA is trusted; a certificate failure gets its own hint | done | STO-78, STO-79 |
+| Update hooks: `event = "update"` runs at `upgrade` instead of re-running install hooks, for a source and for an item; install hooks stay the idempotent default | done | [install-hooks.md](install-hooks.md) (HOOK-120..126), CLI-195 |
+| An item declares its own hooks: `install:`/`update:`/`uninstall:` frontmatter on any kind, and a scoped `mind.toml` (`[[hooks]]` only) in a skill or tool directory | done | [install-hooks.md](install-hooks.md) (HOOK-130..134) |
 
 ## Documents
 

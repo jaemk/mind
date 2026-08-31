@@ -791,10 +791,11 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   HOOK-101) or an item ref `<source>#<item>` (that item's hooks, HOOK-102); a ref that
   matches several sources or items runs each in turn.
 - `CLI-195` `mind hooks run` selects the lifecycle event with `--event
-  <install|uninstall|build>` (default `install`). `install` and `uninstall` are valid
+  <install|update|uninstall|build>` (default `install`). `install`, `update`
+  (HOOK-126), and `uninstall` are valid
   for a source or an item target; `build` is valid only for an item target (a source
-  has no build hook, HOOK-103). For a source install run, only *pending* install hooks
-  run by default (HOOK-55); `--force` also re-runs install hooks already recorded at
+  has no build hook, HOOK-103). For a source install or update run, only *pending* hooks
+  run by default (HOOK-55, HOOK-124); `--force` also re-runs hooks already recorded at
   the current commit (HOOK-101). The `--dangerously-skip-install-hook-check` and
   `--dangerously-skip-build-hook-check` flags apply as they do to the automatic flows
   (HOOK-23/74).
@@ -804,8 +805,8 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   interchangeable in `--help` and on the command line.
 - `CLI-196` `mind hooks list <target>` lists the hooks in effect for a source
   and its installed items -- each hook's event, required/optional flag, command, and,
-  for a recorded source install hook, whether it is pending and the commit it last ran
-  at -- without running anything (HOOK-104). It is the read-only companion to `hooks
+  for a recorded source install or update hook, whether it is pending and the commit it
+  last ran at -- without running anything (HOOK-104). It is the read-only companion to `hooks
   run` and the detail behind the `recall --sources` hook marker (HOOK-58). Under
   `--json` it answers with a document instead of this text listing (CLI-220).
 - `CLI-220` `mind hooks list --json` answers with one JSON document instead of
@@ -845,9 +846,9 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   top-level `sources`/`items` pair: a nested `hooks` or `items` array is
   always present, empty when the source declares no hooks or has no installed
   items with hooks. `status` is present only for a
-  recorded source install hook (mirrors the text mode's pending/last-ran
-  report, HOOK-55); an uninstall hook and every item-level hook carry no
-  `status`. A source's nested installed items are objects (an `item` name
+  recorded source install or update hook (mirrors the text mode's
+  pending/last-ran report, HOOK-55, HOOK-124); an uninstall hook and every
+  item-level hook carry no `status`. A source's nested installed items are objects (an `item` name
   plus its own `hooks` array), not bare strings, so a later addition (e.g. a
   per-item install/uninstall disclosure record) has somewhere to go without a
   breaking shape change.

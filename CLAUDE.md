@@ -129,6 +129,11 @@ Three layers, in precedence order:
 2. **Frontmatter** (always read). Each item's description comes from the YAML
    frontmatter it already carries (`description:` in `SKILL.md` / the agent or
    rule `.md`). Metadata lives next to the thing it describes; nothing duplicated.
+   The same file may declare the item's own lifecycle hooks with the scalar
+   `install:` / `update:` / `uninstall:` keys (HOOK-130); a skill or tool
+   directory may instead ship a scoped `mind.toml` of its own, whose only table
+   is `[[hooks]]` (HOOK-131). A root `[[items]]` entry that declares hooks wins
+   over both; the three sites never merge (HOOK-132).
 3. **`mind.toml`** at the repo root (optional). `[source]` metadata is read
    regardless. If it declares `[[items]]` or `[discover]` it becomes
    *authoritative*: convention scanning is turned off and only what it lists is

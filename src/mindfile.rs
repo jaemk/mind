@@ -18,7 +18,22 @@ use crate::source::Pin;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HookEvent {
     Install,
+    /// Runs at `upgrade` in place of the install hooks (HOOK-120..122), for a
+    /// setup step that must differ when the thing it belongs to is updated
+    /// rather than first installed.
+    Update,
     Uninstall,
+}
+
+impl HookEvent {
+    /// The event's spelling in `mind.toml`, in a disclosure, and in a note.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            HookEvent::Install => "install",
+            HookEvent::Update => "update",
+            HookEvent::Uninstall => "uninstall",
+        }
+    }
 }
 
 /// One raw `[[hooks]]` entry as deserialized from `mind.toml`.
@@ -30,9 +45,9 @@ pub struct Hook {
     pub name: Option<String>,
     #[serde(default)]
     pub optional: bool,
-    /// Raw event string; validated by `resolved_hooks` ("install" | "uninstall",
-    /// default "install"). Kept as a string so an unknown value is a clear
-    /// mind.toml schema error rather than an opaque serde failure.
+    /// Raw event string; validated by `resolved_hooks` ("install" | "update" |
+    /// "uninstall", default "install"). Kept as a string so an unknown value is
+    /// a clear mind.toml schema error rather than an opaque serde failure.
     #[serde(default)]
     pub event: Option<String>,
 }
@@ -186,6 +201,10 @@ pub struct ItemDecl {
     /// side effects (set up a venv, register a helper). Valid on any kind. `None`
     /// means no install hook.
     pub install: Option<String>,
+    /// An item update hook (HOOK-120, HOOK-125): a shell command run in place of
+    /// the item's install hooks when the item is re-installed over an existing
+    /// install. Valid on any kind. `None` means no update hook.
+    pub update: Option<String>,
     /// An item uninstall hook (HOOK-80): a shell command run when this item is
     /// removed (at `forget`/`unmeld`/rename-on-upgrade), before its store copy
     /// and links are removed. Valid on any kind. `None` means no uninstall hook.
@@ -217,10 +236,11 @@ impl ItemDecl {
     pub fn resolved_item_hooks(&self, toml_path: &std::path::Path) -> Result<Vec<ResolvedHook>> {
         let mut out: Vec<ResolvedHook> = Vec::new();
 
-        // HOOK-86: fold the scalar install/uninstall shorthand in first, each as
-        // a required hook of its event.
+        // HOOK-86: fold the scalar install/update/uninstall shorthand in first,
+        // each as a required hook of its event.
         for (scalar, event) in [
             (&self.install, HookEvent::Install),
+            (&self.update, HookEvent::Update),
             (&self.uninstall, HookEvent::Uninstall),
         ] {
             if let Some(cmd) = scalar {
@@ -243,6 +263,22 @@ impl ItemDecl {
         Ok(out)
     }
 
+    /// Whether this declaration says anything at all about the item's hooks: a
+    /// scalar `install`/`update`/`uninstall`, or an `[[items.hooks]]` entry.
+    ///
+    /// A declaration that does is authoritative for the item's hooks and
+    /// suppresses the other two declaration sites (HOOK-132); one that does not
+    /// leaves the item free to declare its own (an item-directory `mind.toml`,
+    /// else frontmatter). Blank values do not count: they are absent (HOOK-3).
+    // spec: HOOK-132
+    pub fn declares_hooks(&self) -> bool {
+        let scalar = [&self.install, &self.update, &self.uninstall]
+            .into_iter()
+            .flatten()
+            .any(|c| !c.trim().is_empty());
+        scalar || self.hooks.iter().any(|h| !h.run.trim().is_empty())
+    }
+
     /// Resolve the `[[items.hooks]]` array entries (HOOK-86), validated in
     /// declaration order. Returns only the array-declared hooks; the scalar
     /// `install`/`uninstall` fold-in is handled by the caller
@@ -250,6 +286,51 @@ impl ItemDecl {
     /// result.
     fn resolved_item_array_hooks(&self, toml_path: &std::path::Path) -> Result<Vec<ResolvedHook>> {
         resolve_hook_array(&self.hooks, toml_path, &format!("item '{}'", self.name))
+    }
+}
+
+/// The optional per-item `mind.toml` a directory-backed item (a skill or a
+/// tool) may ship in its own directory (HOOK-131).
+///
+/// A scoped-down manifest: `[[hooks]]` is the only table it accepts, with
+/// exactly the fields and semantics of a source's `[[hooks]]` (HOOK-51). Any
+/// other key is a schema error (`deny_unknown_fields`), so a source manifest
+/// copied into an item directory fails loudly instead of being half-read.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ItemToml {
+    #[serde(default)]
+    pub hooks: Vec<Hook>,
+}
+
+impl ItemToml {
+    /// Read `<item_dir>/mind.toml`, or `Ok(None)` when the item ships none.
+    ///
+    /// Size-capped like every other metadata read (DSC-91). A parse failure or
+    /// an unknown key is a hard error naming the file: an item manifest exists
+    /// only to declare code that will run on the host, so a malformed one must
+    /// not degrade to "this item declares no hooks".
+    // spec: HOOK-131
+    pub fn load(item_dir: &Path) -> Result<Option<ItemToml>> {
+        let file = item_dir.join("mind.toml");
+        let text = match crate::error::read_capped_metadata(&file) {
+            Ok(text) => text,
+            Err(MindError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(None);
+            }
+            Err(err) => return Err(err),
+        };
+        let parsed: ItemToml = toml::from_str(&text).map_err(|e| MindError::Toml {
+            path: file.clone(),
+            source: e,
+        })?;
+        Ok(Some(parsed))
+    }
+
+    /// This manifest's hooks, validated and in declaration order (HOOK-131).
+    /// `path` is the item manifest's own path, so an error localizes to it.
+    pub fn resolved_hooks(&self, path: &Path) -> Result<Vec<ResolvedHook>> {
+        resolve_hook_array(&self.hooks, path, "item manifest")
     }
 }
 
@@ -277,12 +358,14 @@ fn resolve_hook_array(
         }
         let event = match hook.event.as_deref() {
             None | Some("install") => HookEvent::Install,
+            // spec: HOOK-120
+            Some("update") => HookEvent::Update,
             Some("uninstall") => HookEvent::Uninstall,
             Some(e) => {
                 return Err(MindError::MindToml {
                     path: toml_path.to_path_buf(),
                     msg: format!(
-                        "{location}: unknown hook event '{e}'; expected 'install' or 'uninstall'"
+                        "{location}: unknown hook event '{e}'; expected 'install', 'update', or 'uninstall'"
                     ),
                 });
             }
@@ -1609,6 +1692,158 @@ mod tests {
         assert_eq!(resolved[0].run, "make build && make install");
         assert_eq!(resolved[0].event, HookEvent::Install);
         assert!(!resolved[0].optional);
+    }
+
+    #[test]
+    fn update_event_resolves_and_is_its_own_event() {
+        // spec: HOOK-120
+        let toml = r#"
+            [[hooks]]
+            run = "make install"
+
+            [[hooks]]
+            run = "make upgrade"
+            name = "Upgrade"
+            event = "update"
+        "#;
+        let parsed: MindToml = toml::from_str(toml).expect("parse");
+        let resolved = parsed
+            .resolved_hooks(Path::new("mind.toml"))
+            .expect("resolve");
+        assert_eq!(resolved.len(), 2);
+        assert_eq!(resolved[0].event, HookEvent::Install);
+        assert_eq!(resolved[1].event, HookEvent::Update);
+        assert_eq!(resolved[1].run, "make upgrade");
+        assert_eq!(resolved[1].label(), "Upgrade");
+        assert_eq!(HookEvent::Update.as_str(), "update");
+    }
+
+    #[test]
+    fn unknown_event_names_the_legal_set_including_update() {
+        // spec: HOOK-120 HOOK-51
+        let toml = r#"
+            [[hooks]]
+            run = "make build"
+            event = "upgrade"
+        "#;
+        let parsed: MindToml = toml::from_str(toml).expect("parse");
+        let err = parsed
+            .resolved_hooks(Path::new("mind.toml"))
+            .expect_err("an unknown event is a schema error")
+            .to_string();
+        assert!(err.contains("'upgrade'"), "must name the bad value: {err}");
+        assert!(
+            err.contains("'install', 'update', or 'uninstall'"),
+            "must name the legal set: {err}"
+        );
+    }
+
+    #[test]
+    fn item_scalar_update_folds_in_between_install_and_uninstall() {
+        // spec: HOOK-120 HOOK-125
+        let decl = ItemDecl {
+            kind: "skill".into(),
+            name: "scanner".into(),
+            path: "skills/scanner".into(),
+            link: None,
+            description: None,
+            bin: None,
+            build: None,
+            install: Some("setup.sh".into()),
+            update: Some("migrate.sh".into()),
+            uninstall: Some("teardown.sh".into()),
+            hooks: Vec::new(),
+            ignore: None,
+        };
+        let resolved = decl
+            .resolved_item_hooks(Path::new("mind.toml"))
+            .expect("resolve");
+        let events: Vec<HookEvent> = resolved.iter().map(|h| h.event).collect();
+        assert_eq!(
+            events,
+            vec![HookEvent::Install, HookEvent::Update, HookEvent::Uninstall]
+        );
+        assert_eq!(resolved[1].run, "migrate.sh");
+    }
+
+    #[test]
+    fn declares_hooks_is_true_only_for_a_non_blank_declaration() {
+        // spec: HOOK-132
+        let bare = |install: Option<&str>, hooks: Vec<Hook>| ItemDecl {
+            kind: "skill".into(),
+            name: "scanner".into(),
+            path: "skills/scanner".into(),
+            link: None,
+            description: None,
+            bin: None,
+            build: None,
+            install: install.map(str::to_string),
+            update: None,
+            uninstall: None,
+            hooks,
+            ignore: None,
+        };
+        assert!(
+            !bare(None, Vec::new()).declares_hooks(),
+            "a declaration that says nothing about hooks leaves the item free to              declare its own"
+        );
+        assert!(
+            !bare(Some("   "), Vec::new()).declares_hooks(),
+            "a blank command is absent (HOOK-3), so it declares nothing"
+        );
+        assert!(bare(Some("setup.sh"), Vec::new()).declares_hooks());
+        assert!(
+            bare(
+                None,
+                vec![Hook {
+                    run: "setup.sh".into(),
+                    name: None,
+                    optional: false,
+                    event: None,
+                }],
+            )
+            .declares_hooks()
+        );
+    }
+
+    #[test]
+    fn item_manifest_reads_hooks_and_rejects_source_keys() {
+        // spec: HOOK-131
+        let dir =
+            std::env::temp_dir().join(format!("mind-item-toml-{}-{}", std::process::id(), line!()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        std::fs::write(
+            dir.join("mind.toml"),
+            "[[hooks]]\nrun = \"setup.sh\"\n\n[[hooks]]\nrun = \"migrate.sh\"\nevent = \"update\"\n",
+        )
+        .unwrap();
+        let parsed = ItemToml::load(&dir)
+            .expect("an item manifest parses")
+            .expect("present");
+        let hooks = parsed
+            .resolved_hooks(&dir.join("mind.toml"))
+            .expect("resolve");
+        assert_eq!(hooks.len(), 2);
+        assert_eq!(hooks[0].event, HookEvent::Install);
+        assert_eq!(hooks[1].event, HookEvent::Update);
+
+        // A root manifest's own tables are not part of the item schema.
+        std::fs::write(
+            dir.join("mind.toml"),
+            "[source]\ndescription = \"nope\"\n\n[[hooks]]\nrun = \"setup.sh\"\n",
+        )
+        .unwrap();
+        let err = ItemToml::load(&dir).expect_err("a source key must be rejected");
+        assert!(
+            err.to_string().contains("source"),
+            "the error must name the offending key: {err}"
+        );
+
+        // Absent is absent, not an error.
+        std::fs::remove_file(dir.join("mind.toml")).unwrap();
+        assert!(ItemToml::load(&dir).expect("absent is ok").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -197,8 +197,9 @@ still parsed and folded in (HOOK-50).
 - `HOOK-51` A `[[hooks]]` entry's fields are: `run` (the shell command,
   required), `name` (an optional label shown in the disclosure; defaults to the
   command), `optional` (bool, default `false` = required), and `event`
-  (`"install"` or `"uninstall"`, default `"install"`). An unknown `event` value
-  is a `mind.toml` schema error naming the bad value and the legal set.
+  (`"install"`, `"update"` (HOOK-120), or `"uninstall"`, default `"install"`).
+  An unknown `event` value is a `mind.toml` schema error naming the bad value and
+  the legal set.
 - `HOOK-52` An optional hook (`optional = true`) is disclosed like any hook but
   prompted with a two-way `[Y/n]` choice: run it (`y`/`Y`/Enter, the default), or
   skip it (`n`/`N`). `optional` means the user may decline to run the step (skip
@@ -669,6 +670,120 @@ outside the surrounding verb, under the same consent model.
   is the one branch nothing verifies. The override changes only which branch is
   taken; it never bypasses a prompt or consents on the user's behalf, and a
   prompt that reaches EOF still skips (HOOK-22).
+
+## Update hooks
+
+Status: done. An install hook runs at `meld`, and `upgrade` re-runs it when the
+source advances (HOOK-11), so an install hook is executed many times over a
+source's life. That is the right default -- tooling must track the source it was
+built from -- but it makes idempotence a requirement rather than a courtesy, and
+some setup steps cannot be made idempotent (a first-run migration, a one-shot
+registration). The `update` event is the escape: a source (or an item) that needs
+different behavior on a re-run declares an update hook, which runs *instead of*
+the install hooks when the thing it belongs to is updated rather than first
+installed.
+
+- `HOOK-120` `event = "update"` is a third lifecycle event for a `[[hooks]]`
+  entry (HOOK-51), valid on a source's `[[hooks]]` and on an item's hooks
+  (`[[items.hooks]]`, the item manifest HOOK-131, the `update:` frontmatter
+  scalar HOOK-130). It is otherwise an ordinary hook: same fields, same
+  declaration-order execution, same disclosure, consent, and failure contract as
+  an install hook (HOOK-20, HOOK-30, HOOK-52, HOOK-53, HOOK-83). The
+  disclosure and every note name the event as `update`, so a user consenting to
+  one is never told they are approving an install hook.
+- `HOOK-121` A source's update hooks run at `upgrade` (including `sync
+  --upgrade`), in the source's clone, when the source has a pending hook to run
+  (HOOK-55's pending rule, applied to the update hooks). They do NOT run at
+  `meld`, at a re-meld (HOOK-60), or at `unmeld`: the update event means "this
+  source was already melded and has moved", which is exactly the state `meld`
+  is not in.
+- `HOOK-122` Update hooks supersede install hooks on an update, and only on an
+  update. When a source declares at least one update hook, `upgrade` offers its
+  pending update hooks and does NOT re-run the source's install hooks. When it
+  declares none, `upgrade` re-offers the pending install hooks exactly as before
+  (HOOK-11, HOOK-55). So the default behavior is unchanged for every existing
+  source, and declaring an update hook is the opt-in to a distinct update path.
+  Superseding is per scope: a source's update hooks replace the source's install
+  hooks, and an item's update hooks replace that item's install hooks (HOOK-125);
+  neither replaces the other's.
+- `HOOK-123` Because the default is a re-run, an install hook is expected to be
+  idempotent: safe to run again against a host it already set up. `mind` does not
+  and cannot enforce this -- a hook is an opaque shell command -- so it states it
+  where an author meets the field: the `init-source` scaffold's commented
+  `[[hooks]]` examples say so and show the `update` event as the alternative
+  (HOOK-57), and the documentation says so. An author whose setup cannot be made
+  idempotent declares an update hook instead of relying on the install hook's
+  re-run.
+- `HOOK-124` A source's update hooks are recorded in the same recorded-hook set
+  as its install hooks (`install_hooks`, HOOK-55: an effective command plus the
+  commit it last ran at, or null when skipped), keyed by command. A pending
+  update hook is therefore one whose recorded run-commit is absent or differs
+  from the source's current commit, the same rule install hooks use, and
+  `--force` re-offers every one regardless. An update hook that has already run
+  at the source's current commit is not re-offered by a second `upgrade` at that
+  commit.
+- `HOOK-125` An item's update hooks run in place of its install hooks whenever
+  the item is re-installed over an existing install of the same effective name --
+  an `upgrade`, or a `learn` of an already-installed item -- with the same
+  working directory, ordering, recording, and rollback contract as the install
+  hooks they replace (HOOK-81, HOOK-110). On a first install the install hooks
+  run and the update hooks do not. An item that declares no update hook re-runs
+  its install hooks on every (re)install, unchanged (HOOK-84). An item's
+  `build` hook is unaffected: it is content-producing and always runs (HOOK-73).
+- `HOOK-126` `--event update` is valid for `hooks run` and `hooks list` (CLI-195)
+  on both a source and an item target, and behaves as `--event install` does at
+  that target: it runs the target's pending update hooks (all of them under
+  `--force`), records each run exactly as an install run does (HOOK-101,
+  HOOK-110), and participates in the HOOK-107/HOOK-108 tally and the
+  `HooksNotRun` report. `mind review` lists a declared update hook alongside the
+  install and uninstall ones (HOOK-58, HOOK-85), and `hooks list` reports its
+  event, required/optional flag, command, and pending state.
+
+## Where an item declares its hooks
+
+Status: done. An item's lifecycle hooks (HOOK-80/86) could originally be declared
+only in the source's root `mind.toml`, except for a tool, which could also carry
+scalar `install:`/`uninstall:` keys in its `TOOL.md` frontmatter. That put the
+declaration far from the thing it belongs to for every other kind: a skill that
+needs a setup command had to make its source's root manifest authoritative
+(turning off convention discovery for the whole repo) to say so. An item declares
+its own hooks instead, next to the item.
+
+- `HOOK-130` The scalar lifecycle keys `install:`, `update:`, and `uninstall:`
+  are read from ANY kind's meta file frontmatter -- a skill's `SKILL.md`, a
+  tool's `TOOL.md`, and an agent's or rule's own `.md` -- not only a tool's
+  `TOOL.md`. This supersedes HOOK-80's tool-only restriction on the frontmatter
+  spelling (the `mind.toml` spelling was already valid on any kind). Each is one
+  required hook of its event (HOOK-80), and the frontmatter reader stays
+  scalar-only (DSC-21), so the array form still requires a manifest. An empty or
+  whitespace-only value is absent (HOOK-3).
+- `HOOK-131` A directory-backed item (a skill or a tool) may ship its own
+  `mind.toml` in its item directory: a scoped-down manifest whose only table is
+  `[[hooks]]`, with exactly the fields and semantics of a source's `[[hooks]]`
+  (HOOK-51 plus the `update` event, HOOK-120). Any other key is a `mind.toml`
+  schema error naming the file, so a root manifest copied into an item directory
+  fails loudly instead of being half-read. An item manifest is read only from an
+  item's own directory and never from the source root, and the source's root
+  `mind.toml` is never read as an item manifest, even for a source root that is
+  also an item path.
+- `HOOK-132` The three declaration sites do not merge; exactly one supplies an
+  item's hooks, in this precedence: (1) a root `mind.toml` `[[items]]`
+  declaration for that item that declares any hook (a scalar `install`/`update`/
+  `uninstall` or an `[[items.hooks]]` entry) is authoritative and its hooks are
+  the item's hooks; else (2) the item directory's own `mind.toml` `[[hooks]]`
+  (HOOK-131), when it declares any; else (3) the item's frontmatter scalars
+  (HOOK-130). Replacement rather than composition keeps an item's effective hook
+  list traceable to one origin, so a consumer reading `mind review` or `hooks
+  list` sees a set that exists somewhere as written.
+- `HOOK-133` An item manifest is part of the item's content: it is copied into
+  the store with the rest of the item and participates in the content hash, so
+  editing it upstream is drift like any other file change and `upgrade` picks it
+  up. It is not linked or interpreted by any agent harness; only `mind` reads it.
+- `HOOK-134` `mind review` (HOOK-85) and `hooks list` (HOOK-104) report an
+  item's hooks from its RESOLVED hook list, whichever of the three sites
+  (HOOK-132) supplied it, rather than from the root manifest's scalar fields
+  alone. So an `[[items.hooks]]` array entry, an item-manifest hook, and a
+  frontmatter scalar are all disclosed, each naming its event.
 
 ## Managed-policy composition (research needed)
 

@@ -19,6 +19,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 pub enum HookEventArg {
     /// Run install hooks (default). Valid for source and item targets.
     Install,
+    /// Run update hooks: what runs at `upgrade` in place of the install hooks.
+    /// Valid for source and item targets.
+    Update,
     /// Run uninstall hooks. Valid for source and item targets.
     Uninstall,
     /// Re-install the item through the transactional build path (stage, build,

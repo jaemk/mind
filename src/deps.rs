@@ -1007,8 +1007,6 @@ mod tests {
             link_rel: None,
             bin: None,
             build: None,
-            install: None,
-            uninstall: None,
             requires: Vec::new(),
             expand: Vec::new(),
             hooks: Vec::new(),

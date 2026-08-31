@@ -75,7 +75,8 @@ struct SourceHookJson {
     required: bool,
     command: String,
     /// The CLI-196 pending/last-ran status; present only for a recorded
-    /// install-event hook (an uninstall hook carries no recorded run state).
+    /// install- or update-event hook (HOOK-124; an uninstall hook carries no
+    /// recorded run state).
     #[serde(skip_serializing_if = "Option::is_none")]
     status: Option<String>,
 }
@@ -306,6 +307,9 @@ fn run_source_hooks(
 
         let hook_event = match event {
             HookEventArg::Install => HookEvent::Install,
+            // spec: HOOK-126 -- an update run selects the update hooks and is
+            // otherwise identical to an install run (pending filter, recording).
+            HookEventArg::Update => HookEvent::Update,
             HookEventArg::Uninstall => HookEvent::Uninstall,
             HookEventArg::Build => unreachable!("caller guards build for source targets"),
         };
@@ -333,7 +337,7 @@ fn run_source_hooks(
         for h in &hooks {
             // spec: HOOK-101 -- for install event, skip hooks already at current
             // commit unless --force overrides.
-            if hook_event == HookEvent::Install
+            if recorded_event(hook_event)
                 && !force
                 && hook_already_ran(&registry.sources[idx], &h.run, current.as_deref())
             {
@@ -384,8 +388,9 @@ fn run_source_hooks(
                         }
                         return Err(e);
                     }
-                    // spec: HOOK-101 -- record the run-commit for install hooks.
-                    if hook_event == HookEvent::Install {
+                    // spec: HOOK-101 HOOK-124 -- record the run-commit for
+                    // install and update hooks.
+                    if recorded_event(hook_event) {
                         record_hook_run(&mut registry.sources[idx], &h.run, current.clone());
                         registry_dirty = true;
                     }
@@ -411,9 +416,10 @@ fn run_source_hooks(
                             source_name
                         ));
                     }
-                    // spec: HOOK-101 -- even a skipped install hook is recorded
-                    // (with ran_at = None) so repeat runs know it was offered.
-                    if hook_event == HookEvent::Install {
+                    // spec: HOOK-101 -- even a skipped install (or update)
+                    // hook is recorded (with ran_at = None) so repeat runs know
+                    // it was offered.
+                    if recorded_event(hook_event) {
                         record_hook_run(&mut registry.sources[idx], &h.run, None);
                         registry_dirty = true;
                     }
@@ -545,7 +551,7 @@ fn run_item_hooks(
             HookEventArg::Build => {
                 run_item_build(paths, installed, dangerously_skip_build)?;
             }
-            HookEventArg::Install | HookEventArg::Uninstall => {
+            HookEventArg::Install | HookEventArg::Update | HookEventArg::Uninstall => {
                 run_item_lifecycle_hooks(
                     paths,
                     installed,
@@ -691,12 +697,20 @@ fn run_item_lifecycle_hooks(
     let commit = &installed.commit;
 
     match event {
-        HookEventArg::Install => {
-            let all_hooks = catalog_item.install_hooks();
+        // spec: HOOK-126 -- an update run selects the item's update hooks and is
+        // otherwise identical to an install run: same pending filter (HOOK-110),
+        // same recording, same in-place execution against the store copy.
+        HookEventArg::Install | HookEventArg::Update => {
+            let event_name = event_label(event);
+            let all_hooks = if event == HookEventArg::Update {
+                catalog_item.update_hooks()
+            } else {
+                catalog_item.install_hooks()
+            };
             if all_hooks.is_empty() {
                 // spec: CLI-217
                 crate::render::note(format!(
-                    "note: no install hooks declared for {}",
+                    "note: no {event_name} hooks declared for {}",
                     installed.display_key()
                 ));
                 return Ok(());
@@ -811,11 +825,11 @@ fn list_source_hooks(paths: &Paths, target: &str, selector: &str) -> Result<()> 
         } else {
             for h in &resolved {
                 let kind_str = if h.optional { "optional" } else { "required" };
-                let event_str = match h.event {
-                    HookEvent::Install => "install",
-                    HookEvent::Uninstall => "uninstall",
-                };
-                let status = if h.event == HookEvent::Install {
+                let event_str = h.event.as_str();
+                // spec: HOOK-124 -- an update hook is recorded in the same
+                // set as an install hook, so it carries the same
+                // pending/last-ran status; an uninstall hook records nothing.
+                let status = if matches!(h.event, HookEvent::Install | HookEvent::Update) {
                     Some(install_hook_status(source, &h.run, current))
                 } else {
                     None
@@ -861,10 +875,7 @@ fn list_source_hooks(paths: &Paths, target: &str, selector: &str) -> Result<()> 
                     let mut item_hooks_json: Vec<ItemHookJson> = Vec::new();
                     for h in item_hooks {
                         let kind_str = if h.optional { "optional" } else { "required" };
-                        let event_str = match h.event {
-                            HookEvent::Install => "install",
-                            HookEvent::Uninstall => "uninstall",
-                        };
+                        let event_str = h.event.as_str();
                         println!("    [{event_str}] {kind_str}  {:?}", h.run);
                         item_hooks_json.push(ItemHookJson {
                             event: event_str,
@@ -949,10 +960,7 @@ fn list_item_hooks(paths: &Paths, target: &str, item_ref: &crate::resolve::ItemR
         } else {
             for h in &hooks {
                 let kind_str = if h.optional { "optional" } else { "required" };
-                let event_str = match h.event {
-                    HookEvent::Install => "install",
-                    HookEvent::Uninstall => "uninstall",
-                };
+                let event_str = h.event.as_str();
                 println!("  [{event_str}] {kind_str}  {:?}", h.run);
                 hooks_json.push(ItemHookJson {
                     event: event_str,
@@ -1104,10 +1112,19 @@ fn source_skip_note(event_name: &str, label: &str, source_name: &str) -> String 
     )
 }
 
-/// A human label for a hook event arg.
+/// Whether an event's runs are recorded on the source (HOOK-55, HOOK-124), and
+/// so participate in the pending filter: install and update do, uninstall does
+/// not (it only ever fires at `unmeld` or on demand).
+// spec: HOOK-124
+fn recorded_event(event: HookEvent) -> bool {
+    matches!(event, HookEvent::Install | HookEvent::Update)
+}
+
+/// The label for a `--event` value, as it appears in notes and disclosures.
 fn event_label(event: HookEventArg) -> &'static str {
     match event {
         HookEventArg::Install => "install",
+        HookEventArg::Update => "update",
         HookEventArg::Uninstall => "uninstall",
         HookEventArg::Build => "build",
     }

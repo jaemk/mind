@@ -7,8 +7,8 @@ install the tooling its items rely on. A user can supply or override them with
 The full form is a `[[hooks]]` array-of-tables. Each entry has a required `run`
 field (the shell command), an optional `name` label shown in the disclosure, an
 `optional` bool (default `false`), and an `event` field (`"install"` for `meld`,
-`"uninstall"` for `unmeld`; default `"install"`). The legacy `[source].install`
-string is shorthand for one required install hook:
+`"update"` for `upgrade`, `"uninstall"` for `unmeld`; default `"install"`). The
+legacy `[source].install` string is shorthand for one required install hook:
 
 ```toml
 # mind.toml in a source repo
@@ -23,6 +23,11 @@ run = "pip install -r requirements.txt"
 name = "python deps"
 optional = true
 event = "install"
+
+[[hooks]]
+run = "make upgrade"
+name = "upgrade tooling"
+event = "update"
 
 [[hooks]]
 run = "make clean"
@@ -58,6 +63,34 @@ the hook when a source advances to a new commit. `sync --upgrade` accepts
 unattended. Without the flag, a non-TTY `sync --upgrade` skips hook re-runs (the
 same as `upgrade`).
 
+Because the default is a re-run, write an install hook to be idempotent: safe to
+run again on a host it already set up.
+
+## Update hooks
+
+An `event = "update"` hook runs at `upgrade` INSTEAD of re-running the install
+hooks. Declare one when a step cannot be made idempotent (a first-run migration,
+a one-shot registration):
+
+```toml
+[[hooks]]
+run = "make install"          # runs at meld
+
+[[hooks]]
+run = "make upgrade"          # runs at upgrade, and `make install` does not
+event = "update"
+```
+
+A source that declares no update hook is unaffected: its install hooks re-run as
+before. An update hook never runs at `meld` or on a re-meld, is recorded against
+the commit it ran at exactly as an install hook is (so it is not re-offered until
+the source advances again), and is disclosed and prompted the same way.
+
+The same applies per item: an item that declares an update hook runs it in place
+of its install hooks whenever it is re-installed over an existing install (an
+`upgrade`, or a `learn` of an already-installed item). A `build` hook is
+unaffected and always runs, since it produces the item's content.
+
 ## Uninstall hooks
 
 Uninstall hooks (`event = "uninstall"`) run at `unmeld`, in the source's clone,
@@ -92,7 +125,9 @@ mind hooks list <source>                    # list hooks in effect, run nothing
 `owner/repo#item` ref (that item's hooks); there is no ambiguity check, so a
 filter matching several sources, or a ref matching several items, runs the
 hook for each in turn. `--event` selects the lifecycle event (`install`,
-`uninstall`, or `build`); `build` is valid only for an item target.
+`update`, `uninstall`, or `build`); `build` is valid only for an item target.
+`--event update` behaves as `--event install` does at that target: only pending
+hooks run, and `--force` runs them all.
 
 An item-link instance's own identity is `owner/repo#<path>` (see
 [Item links](commands.md#item-links-install-one-skill-by-url)), which is spelled
@@ -126,11 +161,50 @@ a recorded source install hook whether it is pending and the commit it last ran 
 
 `recall --sources` marks a source that carries hooks with a count-aware token in
 its status bracket (e.g. `1 hook` or `3 hooks`). `mind review <repo>` lists every
-declared hook (install and uninstall), showing each hook's command, event, and
-whether it is required or optional. `mind hooks list <target>` shows the same
+declared hook (source and item, whichever event), showing each hook's command,
+event, and whether it is required or optional. `mind hooks list <target>` shows the same
 detail plus the pending/last-ran state of recorded install hooks.
 
 `[source].install` is deprecated in favor of the `[[hooks]]` form. See
 [The mind.toml file](mind-toml.md) for the schema and
 [spec/install-hooks.md](https://github.com/jaemk/mind/blob/main/spec/install-hooks.md)
 for the full behavior.
+
+## Where an item declares its hooks
+
+An item's own hooks (`install` / `update` / `uninstall`, and a tool's `build`)
+can be declared in three places. They do not merge: the first one that declares
+anything supplies the item's hooks.
+
+1. The source's root `mind.toml`, in the item's `[[items]]` entry (scalar
+   `install`/`update`/`uninstall`, or an `[[items.hooks]]` array).
+2. A scoped `mind.toml` in the item's own directory, for a skill or a tool. Its
+   only table is `[[hooks]]`, with the same fields as a source's; any other key
+   is an error.
+3. The item's frontmatter, in whatever file describes it (`SKILL.md`, `TOOL.md`,
+   or an agent's or rule's `.md`): the scalar `install:`, `update:`, and
+   `uninstall:` keys, one required hook each.
+
+```toml
+# skills/scanner/mind.toml
+[[hooks]]
+run = "./setup.sh"
+name = "Set up"
+
+[[hooks]]
+run = "./migrate.sh"
+event = "update"
+```
+
+```markdown
+<!-- skills/scanner/SKILL.md -->
+---
+description: scanner
+install: ./setup.sh
+update: ./migrate.sh
+---
+```
+
+An item manifest is part of the item's content: it is copied into the store and
+hashed like any other file, so editing it upstream is drift `upgrade` picks up.
+No agent harness reads it; only `mind` does.

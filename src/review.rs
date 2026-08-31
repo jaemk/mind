@@ -360,10 +360,7 @@ fn run_checks(
         match mf.resolved_hooks(&toml_path_for_hooks) {
             Ok(hooks) => {
                 for hook in &hooks {
-                    let event_str = match hook.event {
-                        crate::mindfile::HookEvent::Install => "install",
-                        crate::mindfile::HookEvent::Uninstall => "uninstall",
-                    };
+                    let event_str = hook.event.as_str();
                     let req_str = if hook.optional {
                         "optional"
                     } else {
@@ -531,24 +528,23 @@ fn run_checks(
         }
     }
 
-    // --- Check 8: per-item install/uninstall hooks (advisory) ---
-    // spec: HOOK-85
-    // Surface each item that declares an install or uninstall hook so a consumer
-    // sees, before installing, that the item will run code on the host (the
-    // item-level counterpart of the source-hook disclosure, HOOK-40/58).
+    // --- Check 8: per-item lifecycle hooks (advisory) ---
+    // spec: HOOK-85 HOOK-134
+    // Surface each item that declares an install, update, or uninstall hook so a
+    // consumer sees, before installing, that the item will run code on the host
+    // (the item-level counterpart of the source-hook disclosure, HOOK-40/58).
+    // Read from the item's RESOLVED hook list (HOOK-134), so an `[[items.hooks]]`
+    // array entry, an item-directory manifest hook (HOOK-131), and a frontmatter
+    // scalar (HOOK-130) are all reported, whichever site supplied them.
     for item in &items {
-        for (event, cmd) in [
-            ("install", item.install.as_deref()),
-            ("uninstall", item.uninstall.as_deref()),
-        ] {
-            if let Some(cmd) = cmd {
-                // spec: CLI-224 -- sanitize before composing.
-                let cmd = crate::sanitize::strip_ansi(cmd);
-                advisory.push(Finding::advisory(
-                    "item-hook",
-                    format!("{}: declares an {event} hook '{cmd}'", item.key().as_str()),
-                ));
-            }
+        for hook in &item.hooks {
+            let event = hook.event.as_str();
+            // spec: CLI-224 -- sanitize before composing.
+            let cmd = crate::sanitize::strip_ansi(&hook.run);
+            advisory.push(Finding::advisory(
+                "item-hook",
+                format!("{}: declares an {event} hook '{cmd}'", item.key().as_str()),
+            ));
         }
     }
 
