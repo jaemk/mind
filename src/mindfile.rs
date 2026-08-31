@@ -587,14 +587,28 @@ impl NestedSource {
 }
 
 impl Discover {
+    /// Every per-kind glob list this section can carry, in kind order.
+    ///
+    /// The single enumeration of the kinds: `has_item_globs` and
+    /// `validate_discover_patterns` both read it, so a kind added to
+    /// [`Discover`] cannot be silently honored by one and skipped by the other
+    /// (which is exactly how `commands` first landed: discovered by the scan,
+    /// but neither authoritative nor validated).
+    fn kind_globs(&self) -> [&KindGlobs; 5] {
+        [
+            &self.skills,
+            &self.agents,
+            &self.rules,
+            &self.commands,
+            &self.tools,
+        ]
+    }
+
     /// Whether this section declares item globs (as opposed to only nested
     /// sources). Item globs turn off convention discovery; a bare `sources` list
     /// does not.
     pub fn has_item_globs(&self) -> bool {
-        !self.skills.include.is_empty()
-            || !self.agents.include.is_empty()
-            || !self.rules.include.is_empty()
-            || !self.tools.include.is_empty()
+        self.kind_globs().iter().any(|g| !g.include.is_empty())
     }
 }
 
@@ -603,16 +617,9 @@ impl Discover {
 /// Called at parse time in [`MindToml::load`].
 fn validate_discover_patterns(discover: &Discover, toml_path: &Path) -> Result<()> {
     let all_globs: Vec<&str> = discover
-        .skills
-        .include
-        .iter()
-        .chain(discover.skills.exclude.iter())
-        .chain(discover.agents.include.iter())
-        .chain(discover.agents.exclude.iter())
-        .chain(discover.rules.include.iter())
-        .chain(discover.rules.exclude.iter())
-        .chain(discover.tools.include.iter())
-        .chain(discover.tools.exclude.iter())
+        .kind_globs()
+        .into_iter()
+        .flat_map(|g| g.include.iter().chain(g.exclude.iter()))
         .map(String::as_str)
         .collect();
 
@@ -1696,6 +1703,37 @@ mod tests {
         assert_eq!(resolved[0].run, "make build && make install");
         assert_eq!(resolved[0].event, HookEvent::Install);
         assert!(!resolved[0].optional);
+    }
+
+    #[test]
+    fn a_commands_only_discover_is_authoritative_and_validated() {
+        // spec: CMD-4 DSC-3 DSC-81
+        // Every per-kind glob list must reach both predicates: a `[discover]`
+        // that names only commands turns off convention scanning like any other
+        // item globs, and its patterns are confinement-checked at load.
+        let toml = r#"
+            [discover]
+            commands = { include = ["packages/*/commands/*.md"] }
+        "#;
+        let parsed: MindToml = toml::from_str(toml).expect("parse");
+        assert!(
+            parsed.is_authoritative(),
+            "commands globs are item globs, so they make the file authoritative"
+        );
+
+        for bad in ["/etc/commands/*.md", "../outside/commands/*.md"] {
+            let text = format!("[discover]\ncommands = {{ include = [\"{bad}\"] }}\n");
+            let parsed: MindToml = toml::from_str(&text).expect("parse");
+            let err = validate_discover_patterns(
+                parsed.discover.as_ref().expect("discover"),
+                Path::new("mind.toml"),
+            )
+            .expect_err("an unconfined commands glob must be rejected at load");
+            assert!(
+                err.to_string().contains("discover glob"),
+                "the rejection must name the glob: {err}"
+            );
+        }
     }
 
     #[test]

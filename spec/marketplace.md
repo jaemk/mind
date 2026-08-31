@@ -50,7 +50,7 @@ an independent store and link into the host's discovery location.
   repo's items and the manifest's own-item layer is suppressed for that source
   (the MKT-2 note that a `.claude-plugin/` manifest was found and ignored is
   printed). The own-item directives are: a `[[items]]` entry, a `[discover]` item
-  glob (`skills`/`agents`/`rules`, DSC-33), `[source].roots` (DSC-50), or
+  glob (any kind's, DSC-33), `[source].roots` (DSC-50), or
   `[source].flat-skills` (DSC-74). This broadens the MKT-2 suppression set - which
   named only `[[items]]`/`[discover]` item globs - to add `roots` and
   `flat-skills`, since each redefines how the repo's own items are discovered. A
