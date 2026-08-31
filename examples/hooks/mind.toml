@@ -22,3 +22,13 @@ event = "install"
 name = "remove helper tooling"
 run = "bash ./bin/clean.sh"
 event = "uninstall"
+
+# Update hook: the third lifecycle event. It runs at `mind upgrade`, in place
+# of the install hooks above, once this source has already been melded and
+# moves to a new commit -- never at meld (HOOK-120, HOOK-121). Declare one when
+# a re-run of the install hook cannot express the change, e.g. a one-shot
+# migration step (HOOK-123).
+[[hooks]]
+name = "migrate helper tooling"
+run = "bash ./bin/migrate.sh"
+event = "update"

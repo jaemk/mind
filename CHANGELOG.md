@@ -15,15 +15,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and is expected to be idempotent; `init-source` now says so in its scaffold and
   shows the update event as the escape for a step that cannot be. `hooks run` and
   `hooks list` accept `--event update`, with the same pending/recorded semantics
-  as the install event. The hook consent disclosure now names the lifecycle
-  event it is asking about (HOOK-20), so approving an update or an uninstall
-  hook is no longer indistinguishable from approving an install hook.
-- A Claude plugin's `commands/<name>.md` maps to the `command` kind (MKT-18), on
-  both plugin paths: a directly melded `.claude-plugin/plugin.json` and each
-  in-repo entry of a `.claude-plugin/marketplace.json`. They are namespaced by
-  the plugin name like the plugin's other items, and are no longer counted in
-  the "not installed (no mind equivalent)" note, which now covers `hooks/`,
-  `.mcp.json`, LSP, monitors, themes, and output styles.
+  as the install event, recorded per event so an install and an update hook
+  sharing a command are tracked separately. The hook consent disclosure now
+  names the lifecycle event it is asking about (HOOK-20), so approving an
+  update or an uninstall hook is no longer indistinguishable from approving an
+  install hook.
 - The `command` item kind (CMD-1..9): a `commands/<name>.md` file in a source is
   discovered, stored at `store/command/<name>`, and linked into each admitting
   lobe at `commands/<name>.md`, so a harness slash command installs and upgrades
@@ -39,7 +35,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   working, and a skill is the better shape for something new. The harness
   presets (gemini, codex, universal, windsurf) admit skills only and are
   unaffected. A hand-written command in a lobe now shows up as an unmanaged item
-  in `recall`, and can be `absorb`ed.
+  in `recall`, and can be `absorb`ed. A lobe with no `kinds` filter receives all
+  kinds, commands included, so a hand-added or `link-project` lobe starts
+  receiving `commands/<name>.md` symlinks (CMD-7).
+- A Claude plugin's `commands/<name>.md` maps to the `command` kind (MKT-18), on
+  both plugin paths: a directly melded `.claude-plugin/plugin.json` and each
+  in-repo entry of a `.claude-plugin/marketplace.json`. They are namespaced by
+  the plugin name like the plugin's other items, and are no longer counted in
+  the "not installed (no mind equivalent)" note, which now covers `hooks/`,
+  `.mcp.json`, LSP, monitors, themes, and output styles.
 - An item declares its own hooks, next to the item (HOOK-130..134). The scalar
   `install:` / `update:` / `uninstall:` frontmatter keys are read from any kind's
   meta file (`SKILL.md`, `TOOL.md`, an agent's or rule's `.md`), not only a
@@ -47,7 +51,32 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   declaring the full `[[hooks]]` array. A root `[[items]]` entry that declares
   hooks still wins; the three sites never merge. `mind review` and `hooks list`
   report an item's hooks from its resolved list, so array-declared and
-  item-declared hooks are disclosed alongside the scalar ones.
+  item-declared hooks are disclosed alongside the scalar ones. The scalar
+  `install:`/`update:`/`uninstall:` frontmatter keys were previously ignored on
+  non-tool kinds, so an author who used `install:` there as plain documentation
+  should rename the key; a consumer can check a source with `mind review`
+  before melding.
+
+### Changed
+
+- A malformed `mind.toml` in a skill or tool directory now drops just that item
+  with a warning naming the file, instead of failing the catalog scan for
+  every melded source.
+- A `[[items]]`-declared tool's `TOOL.md` `install:`/`uninstall:` scalars now
+  execute as hooks where they previously populated display-only fields, so the
+  next `upgrade` of such a source offers a consent-prompted command that has
+  never run on that host.
+- A hand-written `~/.claude/commands/*.md` file now shows up as an unmanaged
+  item, visible to `mind forget` and `mind absorb`.
+- Only a `command` may declare a `link` into `commands/`. The other kind
+  directories stay interchangeable (TOOL-4), but `commands/` is the one whose
+  contents the harness invokes, so a source declaring `kind = "rule"` with
+  `link = "commands/deploy.md"` is now rejected (DSC-97).
+- A plugin's `commands/` entries the flat scan does not map (a subdirectory, a
+  non-`.md` file) are counted in the skipped-components note instead of being
+  dropped silently (MKT-4).
+- `mind.toml` parse errors are sanitized before display, so a hostile manifest
+  cannot emit terminal escapes through the error path (DSC-95).
 
 ## [0.26.1] - 2026-08-30
 

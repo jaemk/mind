@@ -1994,10 +1994,12 @@ mod tests {
     }
 
     // HARN-4: each named preset resolves to its parent path and kinds; an unknown
-    // name errors with UnknownPreset.
+    // name errors with UnknownPreset. The `kinds` assertions below are also the
+    // regression test for CMD-7: every preset admits skills only, so a command
+    // never links into a preset lobe.
     #[test]
     fn preset_lookup_and_resolution() {
-        // spec: HARN-4
+        // spec: HARN-4 CMD-7
         let gemini = lookup_preset("gemini").unwrap();
         assert_eq!(gemini.rel_path, ".gemini/config");
         assert_eq!(gemini.kinds, &[ItemKind::Skill]);

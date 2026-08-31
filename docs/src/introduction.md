@@ -1,8 +1,8 @@
 # Introduction
 
-`mind` is a manager for agent tooling: skills, agents, rules, commands, and tools. It melds
-arbitrary git repos and links the items they offer into one or more agent homes
-(default `~/.claude`).
+`mind` is a manager for agent tooling: skills, agents, rules, commands, and
+tools. It melds arbitrary git repos and links the items they offer into one
+or more agent homes (default `~/.claude`).
 
 - A *source* is a melded git repo (`mind meld`). It offers *items*: skills,
   agents, rules, and tools, found by convention or declared in a `mind.toml`.

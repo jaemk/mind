@@ -175,7 +175,7 @@ impl SourceMeta {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ItemDecl {
-    /// `skill`, `agent`, `rule`, or `tool`.
+    /// `skill`, `agent`, `rule`, `command` (CMD-4), or `tool`.
     pub kind: String,
     pub name: String,
     /// Path to the item, relative to the repo root (a dir for skills/tools).
@@ -212,7 +212,7 @@ pub struct ItemDecl {
     /// Item lifecycle hooks declared as an array (HOOK-86), the per-item analog
     /// of the source `[[hooks]]` array (HOOK-50): the field is `[[items.hooks]]`
     /// in `mind.toml`. Same fields/semantics as a source hook. The scalar
-    /// `install`/`uninstall` above are folded in ahead of these (see
+    /// `install`/`update`/`uninstall` above are folded in ahead of these (see
     /// [`ItemDecl::resolved_item_hooks`]).
     #[serde(default)]
     pub hooks: Vec<Hook>,
@@ -227,9 +227,9 @@ pub struct ItemDecl {
 impl ItemDecl {
     /// Resolve this item's lifecycle hooks (HOOK-86) in execution order.
     ///
-    /// Mirrors [`MindToml::resolved_hooks`]: the scalar `install` folds in as the
-    /// first required install hook and the scalar `uninstall` as the first
-    /// required uninstall hook (HOOK-80 shorthand), both ahead of the
+    /// Mirrors [`MindToml::resolved_hooks`]: each scalar folds in as the first
+    /// required hook of its event -- `install` (HOOK-80 shorthand), then
+    /// `update` (HOOK-120), then `uninstall` -- all ahead of the
     /// `[[items.hooks]]` entries, which are then validated and appended in
     /// declaration order. An empty/whitespace `run` is dropped (HOOK-3) and an
     /// unknown `event` is a `mind.toml` schema error.
@@ -307,10 +307,19 @@ impl ItemToml {
     /// Read `<item_dir>/mind.toml`, or `Ok(None)` when the item ships none.
     ///
     /// Size-capped like every other metadata read (DSC-91). A parse failure or
-    /// an unknown key is a hard error naming the file: an item manifest exists
-    /// only to declare code that will run on the host, so a malformed one must
-    /// not degrade to "this item declares no hooks".
-    // spec: HOOK-131
+    /// an unknown key is an error naming the file and the one-table rule: an
+    /// item manifest exists only to declare code that will run on the host, so
+    /// a malformed one must not degrade to "this item declares no hooks". The
+    /// caller (`catalog::item_declared_hooks`) scopes that failure to the one
+    /// item, dropping it from the catalog (DSC-98).
+    ///
+    /// spec: HOOK-131
+    /// spec: DSC-95 -- the error carries the file's own path and the `toml`
+    /// crate's annotated snippet, which quotes the offending input line
+    /// verbatim. Both are source-controlled (a directory name, the file's
+    /// bytes) and a raw ESC byte in a TOML file is itself a parse error, so the
+    /// snippet is the path a hostile source would use; sanitize both here,
+    /// where the message is composed, rather than at each print site.
     pub fn load(item_dir: &Path) -> Result<Option<ItemToml>> {
         let file = item_dir.join("mind.toml");
         let text = match crate::error::read_capped_metadata(&file) {
@@ -320,9 +329,13 @@ impl ItemToml {
             }
             Err(err) => return Err(err),
         };
-        let parsed: ItemToml = toml::from_str(&text).map_err(|e| MindError::Toml {
-            path: file.clone(),
-            source: e,
+        let parsed: ItemToml = toml::from_str(&text).map_err(|e| MindError::MindToml {
+            path: sanitized_path(&file),
+            msg: format!(
+                "not readable as an item manifest, whose only table is `[[hooks]]` (any other \
+                 key is rejected): {}",
+                crate::sanitize::strip_ansi(&e.to_string())
+            ),
         })?;
         Ok(Some(parsed))
     }
@@ -342,9 +355,10 @@ impl ItemToml {
 /// 'style'`, `[source]`, `nested source 'owner/repo'`) so a hook error localizes
 /// which declaration is at fault instead of just naming the file.
 ///
-/// Rules: default event is Install; "uninstall" maps to Uninstall; any other
-/// event string is a `MindToml` error. Empty/whitespace `run` entries are
-/// silently dropped (HOOK-3). `run` is trimmed before storing.
+/// Rules: default event is Install; "update" maps to Update (HOOK-120) and
+/// "uninstall" to Uninstall; any other event string is a `MindToml` error.
+/// Empty/whitespace `run` entries are silently dropped (HOOK-3). `run` is
+/// trimmed before storing.
 fn resolve_hook_array(
     hooks: &[Hook],
     toml_path: &std::path::Path,
@@ -362,8 +376,12 @@ fn resolve_hook_array(
             Some("update") => HookEvent::Update,
             Some("uninstall") => HookEvent::Uninstall,
             Some(e) => {
+                // spec: DSC-95 -- the event string is source-controlled and is
+                // echoed back here, on a message that reaches stderr (as a
+                // scan error, or as the DSC-98 item-drop warning).
+                let e = crate::sanitize::strip_ansi(e);
                 return Err(MindError::MindToml {
-                    path: toml_path.to_path_buf(),
+                    path: sanitized_path(toml_path),
                     msg: format!(
                         "{location}: unknown hook event '{e}'; expected 'install', 'update', or 'uninstall'"
                     ),
@@ -809,6 +827,14 @@ pub fn version_at_least(running: &str, required: &str) -> bool {
     true
 }
 
+/// A path with ANSI/control/bidi code points stripped, for a message that will
+/// be printed (DSC-95). A clone directory carries source-controlled components
+/// (an owner, a repo, an item directory name), so a path is not inherently
+/// safe terminal output.
+fn sanitized_path(path: &Path) -> std::path::PathBuf {
+    std::path::PathBuf::from(crate::sanitize::strip_ansi(&path.display().to_string()))
+}
+
 impl MindToml {
     /// Load `mind.toml` from a repo root, returning `None` if absent.
     ///
@@ -826,9 +852,13 @@ impl MindToml {
             }
             Err(err) => return Err(err),
         };
+        // spec: DSC-95 -- same sanitizing as the item-manifest read above: the
+        // `toml` crate's parse error quotes the offending input line, which is
+        // source-controlled text, and a raw ESC byte in a TOML file is always a
+        // parse error, so this snippet is always reachable from `meld`/`recall`.
         let mut parsed: MindToml = toml::from_str(&text).map_err(|e| MindError::Toml {
-            path: file.clone(),
-            source: e,
+            path: sanitized_path(&file),
+            msg: crate::sanitize::strip_ansi(&e.to_string()),
         })?;
         // spec: DSC-40 — validate format of min-mind-version at parse time.
         if let Some(v) = &parsed.source.min_mind_version {
@@ -1423,13 +1453,14 @@ mod tests {
 
     #[test]
     fn declared_reserved_kind_prefix_is_rejected_on_load() {
-        // spec: NS-25 — a `[source].prefix` equal to a reserved item-kind word
-        // (skill/agent/rule/tool) is rejected at load with ReservedPrefix, before
-        // it can become an effective prefix that would alias `prefix:name` onto a
-        // kind-qualified ref.
+        // spec: NS-25 CMD-9 — a `[source].prefix` equal to a reserved item-kind
+        // word (skill/agent/rule/command/tool) is rejected at load with
+        // ReservedPrefix, before it can become an effective prefix that would
+        // alias `prefix:name` onto a kind-qualified ref. `command` is a kind
+        // word like the rest (CMD-9), so it is reserved on the same terms.
         use std::sync::atomic::{AtomicU32, Ordering};
         static N: AtomicU32 = AtomicU32::new(0);
-        for word in ["skill", "agent", "rule", "tool"] {
+        for word in ["skill", "agent", "rule", "command", "tool"] {
             let n = N.fetch_add(1, Ordering::SeqCst);
             let dir =
                 std::env::temp_dir().join(format!("mind-ns25-bad-{}-{n}", std::process::id()));
@@ -1827,7 +1858,8 @@ mod tests {
         };
         assert!(
             !bare(None, Vec::new()).declares_hooks(),
-            "a declaration that says nothing about hooks leaves the item free to              declare its own"
+            "a declaration that says nothing about hooks leaves the item free to \
+             declare its own"
         );
         assert!(
             !bare(Some("   "), Vec::new()).declares_hooks(),
@@ -1871,8 +1903,9 @@ mod tests {
         assert_eq!(hooks[1].event, HookEvent::Update);
 
         // A root manifest's own tables are not part of the item schema.
+        let manifest = dir.join("mind.toml");
         std::fs::write(
-            dir.join("mind.toml"),
+            &manifest,
             "[source]\ndescription = \"nope\"\n\n[[hooks]]\nrun = \"setup.sh\"\n",
         )
         .unwrap();
@@ -1880,6 +1913,30 @@ mod tests {
         assert!(
             err.to_string().contains("source"),
             "the error must name the offending key: {err}"
+        );
+        // HOOK-131 requires the error to NAME THE FILE: the serde text alone
+        // says only that a key is unknown, which leaves an author who has
+        // several item manifests with nothing to open.
+        assert!(
+            err.to_string().contains(&manifest.display().to_string()),
+            "the error must name the manifest it failed to read: {err}"
+        );
+        // The other half of the schema: an `[[items]]` inventory (the most
+        // likely paste, since it is what a source manifest is mostly made of)
+        // is rejected the same way, not half-read.
+        std::fs::write(
+            &manifest,
+            "[[items]]\nkind = \"skill\"\nname = \"x\"\npath = \"skills/x\"\n",
+        )
+        .unwrap();
+        let err = ItemToml::load(&dir).expect_err("an [[items]] table must be rejected");
+        assert!(
+            err.to_string().contains("items"),
+            "the error must name the offending key: {err}"
+        );
+        assert!(
+            err.to_string().contains(&manifest.display().to_string()),
+            "the error must name the manifest it failed to read: {err}"
         );
 
         // Absent is absent, not an error.

@@ -172,7 +172,10 @@ event = "install"
   declare its own, next to the item: a scoped `mind.toml` in a skill or tool
   directory (`[[hooks]]` only), or the `install:` / `update:` / `uninstall:`
   frontmatter keys in the item's own file. See
-  [Install hooks](install-hooks.md#where-an-item-declares-its-hooks).
+  [Install hooks](install-hooks.md#where-an-item-declares-its-hooks). A hook
+  runs in the item's store directory for a skill or a tool, and in the shared
+  `~/.mind/store/<kind>/` directory for a single-file kind (agent, rule,
+  command), so a relative `./script` only works for a directory-backed item.
 - **`ignore`** on an item REPLACES `[source].ignore` for that item rather than
   adding to it; the built-in VCS-directory set (`.git`, `.hg`, `.svn`, `.bzr`)
   still applies either way. `ignore = []` is the only way to opt one item out of
@@ -188,13 +191,21 @@ Declaring any kind globs makes the file authoritative.
 skills = { include = ["packages/*/skill"], exclude = ["packages/internal/*"] }
 agents = { include = ["agents/**/*.md"] }
 rules  = { include = ["rules/*.md"] }
-commands = { include = ["commands/**/*.md"] }   # reaches nested slash commands
+commands = { include = ["commands/**/*.md"] }   # name is the file STEM: a nested match flattens
 tools  = { include = ["packages/*/tool"] }   # globs match the tool DIRECTORY
 ```
 
 Within a kind, `include` globs are matched first, then anything also matched by an
 `exclude` glob is dropped. Tool globs match the tool directory (its `TOOL.md`, if
 present, supplies metadata), not an anchor file.
+
+A `[discover].commands` glob names each command by its file stem, so
+`commands/frontend/component.md` installs as `component` and is offered as
+`/component`, not the `/frontend:component` the harness gives it in the
+source repo; two files with the same stem collide with a `DuplicateItem`
+error at meld. To keep a grouped name or a nested layout, declare the item
+with an `[[items]]` entry (`kind`/`name`/`path`, plus a `link` when the
+subdirectory itself must be preserved); see [Source layout](source-layout.md).
 
 ## `[discover].sources` - curated super-source
 

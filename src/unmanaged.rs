@@ -1,6 +1,7 @@
-//! Unmanaged lobe items: skills/agents/rules present in a configured agent home
-//! that `mind` did not install (spec/unmanaged.md). They are surfaced read-only
-//! by `recall` and `probe`, and removable via `forget` with a distinct warning.
+//! Unmanaged lobe items: skills/agents/rules/commands present in a configured
+//! agent home that `mind` did not install (spec/unmanaged.md). They are
+//! surfaced read-only by `recall` and `probe`, and removable via `forget` with
+//! a distinct warning.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -11,12 +12,13 @@ use crate::paths::Paths;
 use crate::resolve::ItemRef;
 use crate::sanitize::ItemKey;
 
-/// A skill/agent/rule present in an agent home that `mind` did not install.
+/// A skill/agent/rule/command present in an agent home that `mind` did not
+/// install.
 #[derive(Debug, Clone)]
 pub struct UnmanagedItem {
     pub kind: ItemKind,
-    /// The on-disk entry name: a skill directory name, or an agent/rule file
-    /// stem (the `.md` suffix stripped).
+    /// The on-disk entry name: a skill directory name, or an agent/rule/command
+    /// file stem (the `.md` suffix stripped).
     pub name: String,
     /// The lobe path(s) occupying this item, sorted, one per agent home.
     pub paths: Vec<PathBuf>,
@@ -93,7 +95,10 @@ pub fn scan(paths: &Paths, manifest: &Manifest) -> Result<Vec<UnmanagedItem>> {
 
 /// The item name for a kind-dir entry, or `None` when the entry is not a
 /// well-formed item of that kind. A skill is the directory `skills/<name>`; an
-/// agent/rule is the file `<name>.md`.
+/// agent/rule/command is the file `<name>.md`. Only the immediate children of
+/// the kind directory are scanned (CMD-8): a nested `commands/<group>/<name>.md`
+/// (the grouped layout mirrored on the source side) is not walked into and so
+/// is neither surfaced by `recall`/`probe` nor reachable by `absorb`.
 fn item_name(kind: ItemKind, entry: &std::fs::DirEntry) -> Option<String> {
     let raw = entry.file_name();
     let name = raw.to_str()?;
@@ -323,7 +328,7 @@ mod tests {
     }
 
     /// `key()` is the `kind:name` manifest form, and `item_name` strips `.md`
-    /// only for agents/rules.
+    /// only for agents/rules/commands.
     /// spec: UNM-1
     #[test]
     fn key_and_name_forms() {

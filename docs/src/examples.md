@@ -21,7 +21,7 @@ mind probe
 
 | Example | Shows | Key spec |
 |---------|-------|----------|
-| [starter](https://github.com/jaemk/mind/tree/main/examples/starter) | Convention discovery: a repo with no `mind.toml`, items found by `skills/<n>/SKILL.md`, `agents/<n>.md`, `rules/<n>.md` | [discovery.md](https://github.com/jaemk/mind/blob/main/spec/discovery.md) |
+| [starter](https://github.com/jaemk/mind/tree/main/examples/starter) | Convention discovery: a repo with no `mind.toml`, items found by `skills/<n>/SKILL.md`, `agents/<n>.md`, `rules/<n>.md`, `commands/<n>.md` | [discovery.md](https://github.com/jaemk/mind/blob/main/spec/discovery.md) |
 | [hello](https://github.com/jaemk/mind/tree/main/examples/hello) | The repo-root `mind.toml`'s `[source].roots` scanning `examples/hello`; what `mind meld jaemk/mind` offers | [discovery.md](https://github.com/jaemk/mind/blob/main/spec/discovery.md) |
 | [tooling](https://github.com/jaemk/mind/tree/main/examples/tooling) | The `tool` kind plus path tokens `{{self}}`, `{{tools:name}}`, `{{path:ref}}` | [tooling.md](https://github.com/jaemk/mind/blob/main/spec/tooling.md) |
 | [hooks](https://github.com/jaemk/mind/tree/main/examples/hooks) | Source `[[hooks]]`: build/install tooling at meld, tear down at unmeld, with the disclosure prompt | [install-hooks.md](https://github.com/jaemk/mind/blob/main/spec/install-hooks.md) |
@@ -55,8 +55,8 @@ You are installing and managing tooling that other people authored.
   of repos at once; `meld --recursive` offers every nested source for install. See
   [super-source](https://github.com/jaemk/mind/tree/main/examples/super-source).
 - **Meld a Claude plugin or marketplace.** A repo with a `.claude-plugin/plugin.json`
-  or `.claude-plugin/marketplace.json` melds with no re-packaging; its skills and
-  agents show up as items. See [Claude plugin marketplaces](marketplace.md) and the
+  or `.claude-plugin/marketplace.json` melds with no re-packaging; its skills,
+  agents, and commands show up as items. See [Claude plugin marketplaces](marketplace.md) and the
   [marketplace-plugin](https://github.com/jaemk/mind/tree/main/examples/marketplace-plugin)
   / [marketplace-catalog](https://github.com/jaemk/mind/tree/main/examples/marketplace-catalog)
   examples.
@@ -95,8 +95,14 @@ You are authoring a source repo for others to meld.
 - **Build or install tooling at meld.** Declare a source `[[hooks]]` install entry
   (and an uninstall entry for teardown). See
   [Install hooks](install-hooks.md) and [hooks](https://github.com/jaemk/mind/tree/main/examples/hooks).
-- **Run a host side effect per item.** Declare per-item `install`/`uninstall`
-  hooks (or `[[items.hooks]]`). See [explicit](https://github.com/jaemk/mind/tree/main/examples/explicit).
+- **Run a host side effect per item.** Declare per-item `install`/`update`/
+  `uninstall` hooks: as `install:`/`update:`/`uninstall:` frontmatter scalars on
+  the item's own file, a scoped `mind.toml` inside the item's own directory, or
+  `[[items.hooks]]` in the root `mind.toml`. See
+  [explicit](https://github.com/jaemk/mind/tree/main/examples/explicit) for
+  per-item install/uninstall hooks and
+  [hooks](https://github.com/jaemk/mind/tree/main/examples/hooks) for the
+  `update` event.
 - **Make intra-source references survive a prefix.** Write sibling references as
   `{{ns:name}}` tokens. See [namespacing](https://github.com/jaemk/mind/tree/main/examples/namespacing)
   and [Authoring a source](authoring.md#namespacing).

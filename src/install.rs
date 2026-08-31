@@ -822,12 +822,13 @@ fn hook_cwd(store: &Path) -> std::path::PathBuf {
     }
 }
 
-/// Run a per-item lifecycle hook (`event` is "install", HOOK-81, or "uninstall",
-/// HOOK-82) in the item's store directory: the final step of an install, or the
-/// step before a removal. Disclosed and prompted two-way (run / skip) on a TTY; a
-/// non-TTY context skips it; `dangerously_skip` runs it unattended (HOOK-83). A
-/// non-zero exit is a `HookFailed` hard stop the caller acts on (install rolls
-/// back; uninstall leaves the item installed).
+/// Run a per-item lifecycle hook (`event` is "install", HOOK-81, "update",
+/// HOOK-120/125, or "uninstall", HOOK-82) in the item's store directory: the
+/// final step of an install/update, or the step before a removal. Disclosed and
+/// prompted two-way (run / skip) on a TTY; a non-TTY context skips it;
+/// `dangerously_skip` runs it unattended (HOOK-83). A non-zero exit is a
+/// `HookFailed` hard stop the caller acts on (install/update rolls back;
+/// uninstall leaves the item installed).
 ///
 /// Returns whether the hook actually RAN (`true`) or was skipped (`false`),
 /// so an install-hook caller can record the outcome (HOOK-110).
@@ -837,8 +838,17 @@ fn hook_cwd(store: &Path) -> std::path::PathBuf {
 /// or a filesystem path, so a caller MUST pass an already-sanitized value
 /// (e.g. [`CatalogItem::display_key`]/[`InstalledItem::display_key`]), never a
 /// raw item key.
+///
+/// `label` and `optional` are the hook's own [`crate::mindfile::ResolvedHook`]
+/// fields (its declared `name`/`run`, HOOK-51, and its `optional` flag), routed
+/// through `hook::hook_disclosure_text` so the disclosure names the hook and
+/// its lifecycle event on dedicated `Hook:`/`Event:` lines (HOOK-51, HOOK-120)
+/// instead of smuggling the event into the `Pin:` field.
+#[allow(clippy::too_many_arguments)]
 fn run_item_hook(
     event: &'static str,
+    label: &str,
+    optional: bool,
     display_key: &str,
     source: &str,
     cmd: &str,
@@ -846,11 +856,11 @@ fn run_item_hook(
     commit: &str,
     dangerously_skip: bool,
 ) -> Result<bool> {
-    // The noun for the side effect the hook applies, per event.
-    let effect = if event == "install" {
-        "its side effect is not applied"
-    } else {
-        "its cleanup is not run"
+    // The noun for the side effect the hook applies, per event: install and
+    // update both apply a side effect; uninstall runs cleanup.
+    let effect = match event {
+        "install" | "update" => "its side effect is not applied",
+        _ => "its cleanup is not run",
     };
     let cwd = hook_cwd(store);
     let run = if dangerously_skip {
@@ -862,9 +872,16 @@ fn run_item_hook(
         ));
         false
     } else {
-        let disclosure = crate::hook::disclosure_text(
+        // spec: HOOK-120, HOOK-51 -- name the hook and its own lifecycle event
+        // on dedicated lines, mirroring the source-hook disclosure, rather than
+        // folding the event into the `Pin:` field (which is documented as the
+        // resolved branch/tag/ref, HOOK-20) or dropping the hook's `name`.
+        let disclosure = crate::hook::hook_disclosure_text(
+            label,
+            event,
+            optional,
             source,
-            &format!("(per-item {event})"),
+            "(per-item)",
             commit,
             &cwd.to_string_lossy(),
             cmd,
@@ -891,10 +908,16 @@ fn run_item_hook(
     Ok(run)
 }
 
-/// Run an item's install hooks (HOOK-81, HOOK-86) as the final step of installing
-/// it, in declaration order. Each entry is disclosed, prompted, and fails exactly
-/// as the scalar shorthand does (HOOK-86): a non-zero exit aborts the loop and the
-/// caller rolls the install back. An empty list is a no-op.
+/// Run one batch of an item's lifecycle hooks (HOOK-81, HOOK-86) as the final
+/// step of installing it, in declaration order. Despite the name, `hooks` need
+/// not all be install-event hooks: the callers in `commands.rs`
+/// (`install_item`) and `hooks_cmd.rs` (`hooks run`) also pass an item's
+/// update-event batch here on `upgrade` (HOOK-120/125), since an update batch
+/// is disclosed, prompted, and recorded exactly like an install one, just
+/// under its own `Event:` line (HOOK-51, HOOK-120). Each entry is disclosed,
+/// prompted, and fails exactly as the scalar shorthand does (HOOK-86): a
+/// non-zero exit aborts the loop and the caller rolls the install back. An
+/// empty list is a no-op.
 ///
 /// Returns one [`crate::source::RecordedHook`] per hook offered, in the same
 /// order, so the caller can persist the outcome on the item's manifest record
@@ -924,9 +947,10 @@ pub fn run_item_install_hooks(
     Ok(recorded)
 }
 
-/// Same hook batch as [`run_item_install_hooks`], but for a caller whose item is
-/// already installed and stays installed regardless of the batch's outcome
-/// (`hooks run`, HOOK-102). Returns the hooks recorded before an abort
+/// Same hook batch as [`run_item_install_hooks`] (install- or update-event,
+/// per that function's doc), but for a caller whose item is already installed
+/// and stays installed regardless of the batch's outcome (`hooks run`,
+/// HOOK-102). Returns the hooks recorded before an abort
 /// alongside the error, mirroring `run_source_hooks`'s "save whatever was
 /// recorded so far before propagating the error" (HOOK-53): the caller can
 /// persist the partial vec to the manifest before returning the error, so a
@@ -952,10 +976,11 @@ pub fn run_item_install_hooks_partial(
 }
 
 /// Shared loop backing [`run_item_install_hooks`] and
-/// [`run_item_install_hooks_partial`]: runs each hook in order, pushing its
-/// outcome onto `recorded` as it goes (not only on overall success), so a
-/// caller holding a `&mut` into `recorded` sees every hook that ran or was
-/// offered before an abort even though this function returns early via `?`.
+/// [`run_item_install_hooks_partial`] (install- or update-event batch, per
+/// their docs): runs each hook in order, pushing its outcome onto `recorded`
+/// as it goes (not only on overall success), so a caller holding a `&mut`
+/// into `recorded` sees every hook that ran or was offered before an abort
+/// even though this function returns early via `?`.
 fn run_item_install_hooks_recording(
     item: &CatalogItem,
     hooks: &[&crate::mindfile::ResolvedHook],
@@ -965,10 +990,13 @@ fn run_item_install_hooks_recording(
     recorded: &mut Vec<crate::source::RecordedHook>,
 ) -> Result<()> {
     for hook in hooks {
-        // spec: HOOK-120 -- the disclosure and every note name the hook's own
-        // event, so an update hook is never announced as an install one.
+        // spec: HOOK-120, HOOK-51 -- the disclosure and every note name the
+        // hook's own event and label, so an update hook is never announced as
+        // an install one, and a named hook is never shown anonymously.
         let ran = run_item_hook(
             hook.event.as_str(),
+            hook.label(),
+            hook.optional,
             &item.display_key(),
             &item.source,
             &hook.run,
@@ -997,6 +1025,8 @@ pub fn run_item_uninstall_hooks(
     for hook in hooks {
         run_item_hook(
             "uninstall",
+            hook.label(),
+            hook.optional,
             &item.display_key(),
             &item.source,
             &hook.run,

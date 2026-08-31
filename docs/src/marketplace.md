@@ -177,12 +177,13 @@ scan root) with `name`, and optionally `version` and `description`:
 
 Lay out `skills/<name>/SKILL.md`, `agents/<name>.md`, and `commands/<name>.md`
 next to it, same as any `mind` source ([Source layout](source-layout.md)).
-`hooks/`, `.mcp.json`, and the other Claude-only component kinds are fine to keep
-in the repo for Claude users; `mind` just skips them (with a printed count)
-rather than erroring, so one repo layout serves both consumers. There is no plugin-level
-place for a `rule` or a `tool` - if you want `mind` users to get those, add a
-`mind.toml` with `[[items]]` for them; it composes with the plugin manifest as
-long as it stays metadata-only or covers different items ([Precedence](#precedence-when-a-plugin-manifest-is-used)).
+`hooks/`, `.mcp.json`, and the other Claude-only component kinds are fine to
+keep in the repo for Claude users; `mind` just skips them (with a printed
+count) rather than erroring, so one repo layout serves both consumers. There
+is no plugin-level place for a `rule` or a `tool` - if you want `mind` users
+to get those, add a `mind.toml` with `[[items]]` for them; it composes with
+the plugin manifest as long as it stays metadata-only or covers different
+items ([Precedence](#precedence-when-a-plugin-manifest-is-used)).
 
 Pick `name` deliberately: it becomes every consumer's default namespace prefix
 (`acme-tools:greet`), so treat it like a package name - short, unique enough to

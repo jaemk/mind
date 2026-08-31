@@ -89,7 +89,8 @@ CLI surface and output:
 
 Sources and discovery:
 - `src/source.rs` - repo-spec parsing + the melded-source registry (`sources.json`).
-- `src/catalog.rs` - convention scan for `skills/<n>/SKILL.md`, `agents/<n>.md`, `rules/<n>.md`, `commands/<n>.md`, `tools/<n>/`.
+- `src/catalog.rs` - convention scan for `skills/<n>/SKILL.md`, `agents/<n>.md`,
+  `rules/<n>.md`, `commands/<n>.md`, `tools/<n>/`.
 - `src/frontmatter.rs` - minimal reader for an item's leading `--- ... ---` block (descriptions).
 - `src/mindfile.rs` - the optional `mind.toml` a source repo may ship to declare inventory.
 - `src/plugin_manifest.rs` - Claude plugin manifests (`.claude-plugin/marketplace.json`) read as a source.
@@ -100,7 +101,7 @@ Sources and discovery:
 Install, lifecycle, and state:
 - `src/install.rs` - transactional copy into the store + symlink into each lobe; `{{ns:}}` expansion.
 - `src/manifest.rs` - installed-item manifest (`manifest.json`), keyed `kind:name`, with the file registry.
-- `src/hook.rs` - source/item install, build, and uninstall hooks (the safety-prompted shell commands).
+- `src/hook.rs` - source/item lifecycle hooks (install, update, uninstall) plus tool build hooks (the safety-prompted shell commands).
 - `src/unmanaged.rs` - lobe items `mind` did not install (surfaced in `recall`/`probe`, removable via `forget`).
 - `src/hash.rs` - content hashing (drift detection). `src/git.rs` - the git CLI wrapper.
 - `src/selfupdate.rs` - `evolve`: in-place upgrade of the `mind` binary.
@@ -125,7 +126,8 @@ Three layers, in precedence order:
 
 1. **Convention** (default, no file). The scanner finds `skills/<n>/SKILL.md`,
    `agents/<n>.md`, `rules/<n>.md`, `commands/<n>.md` (a harness slash command,
-   spec/commands.md), and `tools/<n>/` (a tool dir needs no anchor file). Works on any repo, including `~/dev/agents`.
+   spec/commands.md), and `tools/<n>/` (a tool dir needs no anchor file). Works
+   on any repo, including `~/dev/agents`.
 2. **Frontmatter** (always read). Each item's description comes from the YAML
    frontmatter it already carries (`description:` in `SKILL.md` / the agent or
    rule `.md`). Metadata lives next to the thing it describes; nothing duplicated.

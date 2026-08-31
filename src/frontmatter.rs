@@ -32,26 +32,23 @@ pub fn file_field(file: &Path, key: &str) -> Option<String> {
     field(&text, key)
 }
 
-/// Read the top-level `description` from a file's frontmatter, size-capped
-/// (DSC-91). See [`file_field_capped`].
-pub fn description_capped(file: &Path) -> Result<Option<String>> {
-    file_field_capped(file, "description")
-}
-
-/// Read a top-level scalar `key` from a file's frontmatter, refusing a file at
-/// or above [`crate::error::METADATA_SIZE_LIMIT`] with
-/// [`MindError::MetadataTooLarge`] (DSC-91) instead of the plain-`Option`
-/// tolerance [`file_field`] uses for every read failure. An absent file (or any
-/// other I/O failure besides the size cap) still yields `Ok(None)`, matching
-/// `file_field`'s existing "unreadable -> None" behavior; only the new
-/// size-cap failure mode is a hard error.
-pub fn file_field_capped(file: &Path, key: &str) -> Result<Option<String>> {
-    let text = match crate::error::read_capped_metadata(file) {
-        Ok(text) => text,
-        Err(err @ MindError::MetadataTooLarge { .. }) => return Err(err),
-        Err(_) => return Ok(None),
-    };
-    Ok(field(&text, key))
+/// Read a file's whole text once, size-capped (DSC-91), so a caller wanting
+/// several keys out of one frontmatter block pays one read for all of them:
+/// pass the result to [`field`] per key. `catalog::build_item` is that caller,
+/// and it wants six keys, so a read per key was six reads per item per scan.
+///
+/// A file at or above [`crate::error::METADATA_SIZE_LIMIT`] is refused with
+/// [`MindError::MetadataTooLarge`] rather than read in full. An absent or
+/// otherwise unreadable file yields `Ok(String::new())`, which [`field`] reads
+/// as "no frontmatter", matching [`file_field`]'s "unreadable -> None"
+/// tolerance (a tool's `TOOL.md` is optional, so this is the common case, not
+/// an edge). Only the size cap is a hard error.
+pub fn text_capped(file: &Path) -> Result<String> {
+    match crate::error::read_capped_metadata(file) {
+        Ok(text) => Ok(text),
+        Err(err @ MindError::MetadataTooLarge { .. }) => Err(err),
+        Err(_) => Ok(String::new()),
+    }
 }
 
 /// Extract a top-level scalar `key` from the leading frontmatter block.
@@ -575,17 +572,24 @@ mod tests {
     }
 
     #[test]
-    fn description_capped_reads_a_normal_file() {
+    fn text_capped_reads_a_normal_file_once_for_every_key() {
         // spec: DSC-91
+        // The single capped read serves every key the caller wants, so what a
+        // per-key capped read used to return per call comes out of one text.
         let path = tmp("ok");
-        std::fs::write(&path, "---\ndescription: normal size\n---\n").unwrap();
-        let result = description_capped(&path).expect("normal file must not error");
-        assert_eq!(result.as_deref(), Some("normal size"));
+        std::fs::write(
+            &path,
+            "---\ndescription: normal size\ninstall: setup.sh\n---\n",
+        )
+        .unwrap();
+        let text = text_capped(&path).expect("normal file must not error");
+        assert_eq!(field(&text, "description").as_deref(), Some("normal size"));
+        assert_eq!(field(&text, "install").as_deref(), Some("setup.sh"));
         let _ = std::fs::remove_file(&path);
     }
 
     #[test]
-    fn description_capped_refuses_an_oversized_file() {
+    fn text_capped_refuses_an_oversized_file() {
         // spec: DSC-91
         // A SKILL.md-style frontmatter file at (limit + 1) bytes is refused with
         // MetadataTooLarge naming the file, instead of being silently truncated
@@ -595,7 +599,7 @@ mod tests {
         let file = std::fs::File::create(&path).unwrap();
         file.set_len(crate::error::METADATA_SIZE_LIMIT + 1).unwrap();
         drop(file);
-        let err = description_capped(&path).expect_err("oversized frontmatter must be refused");
+        let err = text_capped(&path).expect_err("oversized frontmatter must be refused");
         match &err {
             crate::error::MindError::MetadataTooLarge { path: p, .. } => {
                 assert_eq!(p, &path, "error must name the offending file");
@@ -610,11 +614,13 @@ mod tests {
     }
 
     #[test]
-    fn file_field_capped_missing_file_yields_none_not_error() {
-        // spec: DSC-91 -- an absent file is still `Ok(None)`, matching
-        // `file_field`'s existing tolerance; only the size cap is a hard error.
+    fn text_capped_missing_file_yields_empty_text_not_error() {
+        // spec: DSC-91 -- an absent file is still `Ok`, matching `file_field`'s
+        // existing tolerance (a tool's TOOL.md is optional); only the size cap
+        // is a hard error. The empty text carries no fields.
         let path = tmp("missing");
-        let result = file_field_capped(&path, "description").expect("absent file is not an error");
-        assert_eq!(result, None);
+        let text = text_capped(&path).expect("absent file is not an error");
+        assert!(text.is_empty());
+        assert_eq!(field(&text, "description"), None);
     }
 }

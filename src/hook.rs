@@ -1,7 +1,8 @@
-//! Install hooks: a source-declared (`[source].install`) or user-supplied
-//! (`meld --install-hook`) shell command that builds the tooling a source's
-//! items rely on. Because it is arbitrary code from the source, `mind` discloses
-//! it and prompts before running (see spec/install-hooks.md).
+//! Lifecycle hooks: source-declared (`[source].install`/`[[hooks]]`) or
+//! item-declared (`[[items.hooks]]`, HOOK-86) shell commands that run at
+//! install, update, or uninstall, plus the per-item `build` step. Because each
+//! is arbitrary code from the source, `mind` discloses it and prompts before
+//! running (see spec/install-hooks.md).
 
 use std::io::BufRead;
 use std::io::IsTerminal;
@@ -205,10 +206,18 @@ pub fn decide(disclosure: &str, optional: bool, dangerously_skip: bool) -> Resul
 /// indistinguishable from an install hook's (and an uninstall hook's from
 /// either), on the one surface where the answer decides whether arbitrary
 /// source code runs.
+///
+/// `event` is `&'static str`, mirroring `run_hook`'s `event` parameter: it is
+/// mind's own word ("install"/"update"/"uninstall"), fixed by the call site
+/// and never by the source, never `label` (the next parameter, which IS
+/// source-controlled and IS sanitized below). The `'static` bound makes that
+/// distinction a type-level fact instead of only a comment, so transposing
+/// the two arguments at a call site fails to compile rather than silently
+/// putting an unsanitized source string into the consent block.
 #[allow(clippy::too_many_arguments)]
 pub fn hook_disclosure_text(
     label: &str,
-    event: &str,
+    event: &'static str,
     optional: bool,
     identity: &str,
     pin_desc: &str,

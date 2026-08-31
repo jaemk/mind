@@ -87,8 +87,7 @@ the prompt runs even when only one lobe is affected (spec ABS-7).
    `--yes`).
 4. Moves the item into the destination source at its convention path
    (`skills/<name>/`, `agents/<name>.md`, `rules/<name>.md`,
-   `commands/<name>.md`). Melds the source
-   first if it is not yet registered.
+   `commands/<name>.md`). Melds the source first if it is not yet registered.
 5. Stages and commits the moved item in the destination repo with the message
    `absorb <kind>:<name>` (spec ABS-5).
 6. Runs `learn` on the item; the lobe path is now a managed symlink.

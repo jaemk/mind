@@ -140,8 +140,13 @@ pub fn load_plugin_manifest(path: &Path) -> Result<PluginManifest> {
 /// — are not installed. This struct holds counts per kind so the caller can
 /// render an informative message rather than silently dropping them.
 ///
-/// `commands/` is deliberately absent: a plugin's commands map to the `command`
-/// item kind and are installed (MKT-18), so they are not a skipped component.
+/// A `commands/<name>.md` file is NOT a skipped component: it maps to the
+/// `command` item kind and is installed (MKT-18). A `commands/` entry the flat,
+/// markdown-only plugin scan does not map (a subdirectory such as
+/// `commands/frontend/component.md`, or a non-`.md` file such as
+/// `commands/do.sh`) IS counted, in `commands`: it is dropped by the projection
+/// like any other unsupported component, and MKT-4 is normative that a drop is
+/// never silent.
 ///
 /// Populated by the consumer (catalog/commands shard) from what it finds on
 /// disk and in the manifest. This module owns the type and its rendering only.
@@ -153,6 +158,8 @@ pub struct SkippedComponents {
     pub monitors: u32,
     pub themes: u32,
     pub output_styles: u32,
+    /// `commands/` entries the flat `.md` scan did not map (MKT-4, MKT-18).
+    pub commands: u32,
 }
 
 impl SkippedComponents {
@@ -164,6 +171,7 @@ impl SkippedComponents {
             + self.monitors
             + self.themes
             + self.output_styles
+            + self.commands
     }
 
     /// Human-readable summary, e.g. `"2 hooks, 1 mcp server not installed (no
@@ -183,6 +191,15 @@ impl SkippedComponents {
             self.output_styles,
             "output style",
             "output styles",
+        );
+        // MKT-4/MKT-18: the commands the flat `.md` scan did not map. Named as
+        // entries rather than "commands", so the note cannot be read as saying
+        // that the commands mind DID install were dropped.
+        Self::push_part(
+            &mut parts,
+            self.commands,
+            "unmapped commands/ entry",
+            "unmapped commands/ entries",
         );
         Some(format!(
             "{} not installed (no mind equivalent)",
@@ -1173,6 +1190,38 @@ mod tests {
     }
 
     #[test]
+    fn skipped_unmapped_command_entries_are_counted_and_named() {
+        // spec: MKT-4 MKT-18
+        // A commands/ entry the flat `.md` scan does not map is a drop like any
+        // other unsupported component, so it must reach the summary; the
+        // installed `.md` commands never do.
+        let one = SkippedComponents {
+            commands: 1,
+            ..Default::default()
+        };
+        assert_eq!(one.total(), 1, "an unmapped command entry counts");
+        let summary = one.summary().expect("an unmapped command entry -> Some");
+        assert!(
+            summary.contains("1 unmapped commands/ entry"),
+            "the singular must name the commands/ directory: {summary}"
+        );
+        let many = SkippedComponents {
+            commands: 2,
+            ..Default::default()
+        };
+        assert!(
+            many.summary()
+                .expect("two -> Some")
+                .contains("2 unmapped commands/ entries"),
+            "the plural form must be used for more than one"
+        );
+        assert!(
+            SkippedComponents::default().summary().is_none(),
+            "a plugin whose commands all mapped reports nothing skipped"
+        );
+    }
+
+    #[test]
     fn skipped_output_styles_plural() {
         let s = SkippedComponents {
             output_styles: 2,
@@ -1194,10 +1243,13 @@ mod tests {
             monitors: 1,
             themes: 1,
             output_styles: 1,
+            commands: 0,
         };
         let summary = s.summary().expect("all kinds -> Some");
-        // spec: MKT-18 -- `command` is NOT among them: a plugin's commands are
-        // installed, so the skipped-component summary never names them.
+        // spec: MKT-18 -- a MAPPED command is NOT among them: a plugin's
+        // `commands/<name>.md` files are installed, so the skipped-component
+        // summary never names them (only an unmapped entry, MKT-4, and this
+        // plugin has none).
         assert!(
             !summary.contains("command"),
             "a command is not a skipped component: {summary}"

@@ -15,7 +15,7 @@ use crate::resolve::{
     HookTarget, parse_hook_target, parse_item_ref, select_installed, source_matches_glob,
 };
 use crate::sanitize::strip_ansi;
-use crate::source::{Pin, RecordedHook, Registry, Source};
+use crate::source::{Pin, RecordedEvent, RecordedHook, RecordedSourceHook, Registry, Source};
 
 /// [`crate::commands`]'s `print_json`, mirrored here so `hooks_cmd` stays
 /// self-contained (the same duplication rationale as `pin_description` below):
@@ -158,9 +158,10 @@ pub fn run(
 /// `mind hooks list <target>` -- report declared hooks without running any.
 ///
 /// For a source target, lists the source's hooks (with pending/last-ran info
-/// for install hooks) and the hooks of its installed items. For an item ref,
-/// lists only that item's hooks.
-// spec: HOOK-104 CLI-196 HOOK-105 CLI-220
+/// for the recorded events, install and update) and the hooks of its installed
+/// items. For an item ref, lists only that item's hooks. Every event is
+/// reported: `hooks list` takes no `--event` filter (CLI-196, HOOK-126).
+// spec: HOOK-104 CLI-196 HOOK-105 CLI-220 HOOK-126
 pub fn list(paths: &Paths, target: &str) -> Result<()> {
     match resolve_hook_target(paths, target)? {
         HookTarget::Source(selector) => list_source_hooks(paths, target, &selector),
@@ -251,9 +252,10 @@ fn resolve_hook_target(paths: &Paths, target: &str) -> Result<HookTarget> {
 // Source-level hook runner (HOOK-101)
 // ---------------------------------------------------------------------------
 
-/// Run a source's hooks for the given event (`install` or `uninstall`).
+/// Run a source's hooks for the given event (`install`, `update`, or
+/// `uninstall`; `build` is an item-only event and is refused by the caller).
 /// Returns the HOOK-107 tally on success (CLI-222).
-// spec: HOOK-101
+// spec: HOOK-101 HOOK-126
 fn run_source_hooks(
     paths: &Paths,
     selector: &str,
@@ -318,10 +320,10 @@ fn run_source_hooks(
         let hooks: Vec<&ResolvedHook> = resolved.iter().filter(|h| h.event == hook_event).collect();
 
         if hooks.is_empty() {
-            // spec: CLI-217
+            // spec: CLI-217, DSC-95 -- `source.name` is source-influenced.
             crate::render::note(format!(
                 "note: no {event_name} hooks declared for source {}",
-                source.name
+                strip_ansi(&source.name)
             ));
             continue;
         }
@@ -333,14 +335,25 @@ fn run_source_hooks(
         let clone_path = clone_dir.display().to_string();
         let browse_url = source.browse_url(&commit);
         let mut source_contributed = false;
+        // spec: HOOK-126 -- hooks the pending filter held back (each of which
+        // really ran at this commit; a HOOK-121 baseline does not filter here),
+        // so a run that considered nothing can say WHY instead of exiting 0 in
+        // silence.
+        let mut settled: Vec<String> = Vec::new();
 
         for h in &hooks {
-            // spec: HOOK-101 -- for install event, skip hooks already at current
-            // commit unless --force overrides.
-            if recorded_event(hook_event)
+            // spec: HOOK-101 -- for a recorded event (install or update), skip
+            // hooks already run at the current commit unless --force overrides.
+            if let Some(rec_event) = recorded_event(hook_event)
                 && !force
-                && hook_already_ran(&registry.sources[idx], &h.run, current.as_deref())
+                && hook_already_ran(
+                    &registry.sources[idx],
+                    &h.run,
+                    rec_event,
+                    current.as_deref(),
+                )
             {
+                settled.push(strip_ansi(h.label()));
                 continue;
             }
             existed += 1;
@@ -390,9 +403,14 @@ fn run_source_hooks(
                         return Err(e);
                     }
                     // spec: HOOK-101 HOOK-124 -- record the run-commit for
-                    // install and update hooks.
-                    if recorded_event(hook_event) {
-                        record_hook_run(&mut registry.sources[idx], &h.run, current.clone());
+                    // install and update hooks, under this event's key.
+                    if let Some(rec_event) = recorded_event(hook_event) {
+                        record_hook_run(
+                            &mut registry.sources[idx],
+                            &h.run,
+                            rec_event,
+                            current.clone(),
+                        );
                         registry_dirty = true;
                     }
                 }
@@ -410,18 +428,20 @@ fn run_source_hooks(
                         // spec: CLI-217 HOOK-106
                         crate::render::note(source_skip_note(event_name, h.label(), &source_name));
                     } else {
-                        // spec: CLI-217
+                        // spec: CLI-217, DSC-95 -- the label and the identity are
+                        // both source-controlled and `render::note` does not
+                        // sanitize, so strip each field before composing.
                         crate::render::note(format!(
                             "note: skipped {event_name} hook '{}' for {}",
-                            h.label(),
-                            source_name
+                            strip_ansi(h.label()),
+                            strip_ansi(&source_name)
                         ));
                     }
                     // spec: HOOK-101 -- even a skipped install (or update)
                     // hook is recorded (with ran_at = None) so repeat runs know
                     // it was offered.
-                    if recorded_event(hook_event) {
-                        record_hook_run(&mut registry.sources[idx], &h.run, None);
+                    if let Some(rec_event) = recorded_event(hook_event) {
+                        record_hook_run(&mut registry.sources[idx], &h.run, rec_event, None);
                         registry_dirty = true;
                     }
                 }
@@ -438,6 +458,18 @@ fn run_source_hooks(
         }
         if source_contributed {
             contributors.push(source_name.clone());
+        } else if !settled.is_empty() {
+            // spec: HOOK-126 CLI-217 -- every declared hook was held back by the
+            // pending filter. Without this the run exits 0 having done nothing
+            // and said nothing, which reads exactly like "this source has no
+            // hooks". Name the commit they are settled at and the way to run
+            // them anyway.
+            crate::render::note(nothing_pending_note(
+                event_name,
+                &settled,
+                &source_name,
+                current.as_deref(),
+            ));
         }
     }
 
@@ -830,11 +862,8 @@ fn list_source_hooks(paths: &Paths, target: &str, selector: &str) -> Result<()> 
                 // spec: HOOK-124 -- an update hook is recorded in the same
                 // set as an install hook, so it carries the same
                 // pending/last-ran status; an uninstall hook records nothing.
-                let status = if matches!(h.event, HookEvent::Install | HookEvent::Update) {
-                    Some(install_hook_status(source, &h.run, current))
-                } else {
-                    None
-                };
+                let status = recorded_event(h.event)
+                    .map(|rec_event| install_hook_status(source, &h.run, rec_event, current));
                 println!(
                     "  [{event_str}] {kind_str}  {:?}  {}",
                     h.run,
@@ -1024,14 +1053,29 @@ fn item_hook_target(installed: &InstalledItem) -> String {
     )
 }
 
-/// Whether an install hook has already run at `current` (mirrors the private
-/// `hook_ran_at` in commands.rs).
-fn hook_already_ran(source: &Source, command: &str, current: Option<&str>) -> bool {
+/// Whether a source hook has already RUN at `current` for this event (mirrors
+/// the private `hook_ran_at` in commands.rs).
+///
+/// The event is half the key (HOOK-124). Without it, a source declaring the
+/// same command for `install` and `update` has its update hook considered
+/// already-run the moment the install hook ran, and `hooks run <src> --event
+/// update` exits 0 having run nothing.
+///
+/// A HOOK-121 meld baseline is NOT a run: it holds back the automatic `upgrade`
+/// pass on an unmoved source, not an on-demand `hooks run` where the user named
+/// the target and the event themselves (HOOK-126).
+// spec: HOOK-121 HOOK-124
+fn hook_already_ran(
+    source: &Source,
+    command: &str,
+    event: RecordedEvent,
+    current: Option<&str>,
+) -> bool {
     current.is_some()
         && source
             .install_hooks
             .iter()
-            .any(|r| r.command == command && r.ran_at.as_deref() == current)
+            .any(|r| r.is(command, event) && !r.baseline && r.ran_at.as_deref() == current)
 }
 
 /// Whether an item's install hook has already run at `current` (HOOK-110).
@@ -1071,20 +1115,27 @@ fn record_item_hooks_run(paths: &Paths, key: &str, recorded: &[RecordedHook]) ->
     Ok(())
 }
 
-/// Upsert a hook's run state in `source.install_hooks` (mirrors the private
-/// `record_install_hook` in commands.rs).
-fn record_hook_run(source: &mut Source, command: &str, ran_at: Option<String>) {
+/// Upsert a hook's run state in `source.install_hooks`, keyed by `(command,
+/// event)` (mirrors the private `record_install_hook` in commands.rs). A run
+/// clears the HOOK-121 baseline flag: the record now describes a real run.
+// spec: HOOK-124
+fn record_hook_run(
+    source: &mut Source,
+    command: &str,
+    event: RecordedEvent,
+    ran_at: Option<String>,
+) {
     if let Some(r) = source
         .install_hooks
         .iter_mut()
-        .find(|r| r.command == command)
+        .find(|r| r.is(command, event))
     {
         r.ran_at = ran_at;
+        r.baseline = false;
     } else {
-        source.install_hooks.push(RecordedHook {
-            command: command.to_string(),
-            ran_at,
-        });
+        let mut rec = RecordedSourceHook::install(command, ran_at);
+        rec.event = Some(event);
+        source.install_hooks.push(rec);
     }
 }
 
@@ -1105,7 +1156,13 @@ fn record_hook_run(source: &mut Source, command: &str, ran_at: Option<String>) {
 /// character as its frame entirely. `source_name` also appears once as bare
 /// prose ("for <name>"), which is not a shell command and needs no quoting.
 fn source_skip_note(event_name: &str, label: &str, source_name: &str) -> String {
-    let quoted = crate::error::shell_quote(source_name);
+    // spec: DSC-95 -- `render::note` does not sanitize, and both the label and
+    // the identity are source-controlled: a label of cursor-control escapes can
+    // scroll away or overwrite the region where the NEXT hook's consent
+    // disclosure is about to be drawn. Strip each field before composing.
+    let label = strip_ansi(label);
+    let source_name = strip_ansi(source_name);
+    let quoted = crate::error::shell_quote(&source_name);
     format!(
         "note: skipped {event_name} hook '{label}' for {source_name} (not a terminal); \
          re-run unattended with:\n  mind hooks run {quoted} --event {event_name} \
@@ -1113,12 +1170,41 @@ fn source_skip_note(event_name: &str, label: &str, source_name: &str) -> String 
     )
 }
 
-/// Whether an event's runs are recorded on the source (HOOK-55, HOOK-124), and
-/// so participate in the pending filter: install and update do, uninstall does
-/// not (it only ever fires at `unmeld` or on demand).
+/// The HOOK-126 "nothing pending" note: `hooks run` found hooks for the event
+/// but the pending filter held every one of them back, so the run had nothing
+/// to consider.
+///
+/// `labels` and `source_name` are both source-controlled and land in
+/// `render::note`, which does not sanitize, so each is stripped before it is
+/// composed in (DSC-95). The identity also appears inside a runnable command,
+/// where it is shell-quoted for the same reason `source_skip_note` quotes it.
+fn nothing_pending_note(
+    event_name: &str,
+    settled: &[String],
+    source_name: &str,
+    current: Option<&str>,
+) -> String {
+    let safe_name = strip_ansi(source_name);
+    let quoted = crate::error::shell_quote(&safe_name);
+    let at = match current {
+        Some(c) => format!("already ran at {}", strip_ansi(c)),
+        None => "already ran".to_string(),
+    };
+    let which: Vec<String> = settled.iter().map(|l| format!("'{l}'")).collect();
+    format!(
+        "note: nothing pending for {safe_name}: {event_name} hook(s) {} {at}; \
+         use --force to run them anyway:\n  mind hooks run {quoted} --event {event_name} --force",
+        which.join(", ")
+    )
+}
+
+/// The recorded counterpart of a lifecycle event (HOOK-55, HOOK-124), or `None`
+/// for an event whose runs are not recorded and so does not participate in the
+/// pending filter: install and update are recorded, uninstall is not (it only
+/// ever fires at `unmeld` or on demand).
 // spec: HOOK-124
-fn recorded_event(event: HookEvent) -> bool {
-    matches!(event, HookEvent::Install | HookEvent::Update)
+fn recorded_event(event: HookEvent) -> Option<RecordedEvent> {
+    RecordedEvent::of(event)
 }
 
 /// The label for a `--event` value, as it appears in notes and disclosures.
@@ -1131,22 +1217,43 @@ fn event_label(event: HookEventArg) -> &'static str {
     }
 }
 
-/// Status string for a recorded source install hook shown by `hooks list`.
-/// Returns "pending (never ran)", "pending (last ran at <commit>)", or
-/// "ran at <commit>".
-fn install_hook_status(source: &Source, command: &str, current: Option<&str>) -> String {
-    match source.install_hooks.iter().find(|r| r.command == command) {
+/// Status string for a recorded source hook of `event` shown by `hooks list`.
+/// Returns "pending (never ran)", "pending (last ran at <commit>)", "ran at
+/// <commit>", or, for a HOOK-121 baseline, "not pending (recorded at meld
+/// <commit>)".
+///
+/// The event is part of the lookup key (HOOK-124): a command declared for both
+/// events has two records, and reporting one event's status under the other
+/// would tell the user a hook had run when it had not.
+// spec: HOOK-124
+fn install_hook_status(
+    source: &Source,
+    command: &str,
+    event: RecordedEvent,
+    current: Option<&str>,
+) -> String {
+    match source.install_hooks.iter().find(|r| r.is(command, event)) {
         None => "pending (never ran)".to_string(),
-        Some(RecordedHook { ran_at: None, .. }) => "pending (never ran)".to_string(),
-        Some(RecordedHook {
-            ran_at: Some(ran), ..
-        }) => {
-            if current.is_some_and(|c| c == ran) {
-                format!("ran at {ran}")
-            } else {
-                format!("pending (last ran at {ran})")
+        Some(rec) => match &rec.ran_at {
+            None => "pending (never ran)".to_string(),
+            Some(ran) if rec.baseline => {
+                // HOOK-121: recorded at the meld commit without running, so the
+                // hook is not pending, but it never ran either. Saying "ran at"
+                // here would be a plain untruth on an informational surface.
+                if current.is_some_and(|c| c == ran) {
+                    format!("not pending (recorded at meld {ran})")
+                } else {
+                    format!("pending (never ran; melded at {ran})")
+                }
             }
-        }
+            Some(ran) => {
+                if current.is_some_and(|c| c == ran) {
+                    format!("ran at {ran}")
+                } else {
+                    format!("pending (last ran at {ran})")
+                }
+            }
+        },
     }
 }
 

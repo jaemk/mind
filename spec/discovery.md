@@ -33,10 +33,10 @@ super-source on top of the manifest (MKT-15, MKT-16). See
   is the directory name.
 - `DSC-11` An agent is a file `agents/<name>.md`; its name is the file stem.
 - `DSC-12` A rule is a file `rules/<name>.md`; its name is the file stem.
-- `DSC-13` A missing `skills/`, `agents/`, `commands/`, or `rules/` directory
-  yields no items (not an error).
 - `DSC-14` A command is a file `commands/<name>.md`; its name is the file stem.
   The scan is flat, as for agents and rules (commands.md CMD-1, CMD-2).
+- `DSC-13` A missing `skills/`, `agents/`, `rules/`, `commands/`, or `tools/`
+  directory yields no items (not an error).
 
 ## Frontmatter
 
@@ -134,9 +134,16 @@ run = "make build"
   and `review` sanitizes a finding message (CLI-224); the raw `key()`/`name`
   stays intact for identity, store, link, and manifest matching. Separately,
   every source-controlled string a scan-time error message echoes back (a
-  `[[items]]` name/link/path, a `[discover]` glob pattern, and a matched path in
-  a confinement error) is sanitized (DSC-94 rule) before it reaches stderr, so a
-  rejection cannot itself carry an injection payload.
+  `[[items]]` name/link/path, a `[discover]` glob pattern, a matched path in a
+  confinement error, and the annotated snippet a TOML parse error quotes from
+  the file it failed to read, root manifest or item manifest alike) is sanitized
+  (DSC-94 rule) before it reaches stderr, so a rejection cannot itself carry an
+  injection payload. The parse-error snippet is not an edge case: a raw ESC byte
+  anywhere in a TOML file is itself a parse error, so quoting the offending line
+  is the guaranteed path for that byte, and with DSC-98 it is reachable from
+  `recall`/`probe`, verbs the user did not point at any particular source. A
+  path is sanitized on the same terms as the text: a clone directory carries
+  source-controlled components.
 
   Caveat: sanitizing only at display means a sanitized name may not round-trip
   as an item ref -- but only for a name captured by a binary predating
@@ -194,16 +201,54 @@ run = "make build"
     skipped with a stderr warning instead of failing the whole scan, so one
     hostile filename does not make an otherwise-good repo un-meldable; every
     other item in the source is still discovered.
+- `DSC-98` An item directory's own `mind.toml` (install-hooks.md HOOK-131) that
+  cannot be read as an item manifest -- it does not parse, or it carries a key
+  outside `[[hooks]]`, or one of its hooks names an unknown event -- drops THAT
+  ITEM from the catalog with a sanitized stderr warning naming the file and the
+  one-table rule. It does not fail the scan. The item is dropped rather than
+  treated as hook-free, which preserves HOOK-131's guarantee that a malformed
+  manifest never degrades to "this item declares no hooks": an item that is
+  never offered can run no hook, so this degradation is safe on the verbs that
+  execute hooks (`meld`, `learn`, `upgrade`, `hooks run`) as well as on the
+  read-only ones. The scan-wide alternative is what makes this necessary: item
+  manifests are read on every catalog walk, so a single stray file (a vendored
+  sub-source, a skill that ships a sample manifest, a monorepo matched by a
+  `[discover].skills` glob) would otherwise take down `recall`, `probe`,
+  `learn`, and `upgrade` for EVERY melded source, on verbs where no hook could
+  ever run and with no opt-out. Same shape as DSC-96's name skip and CLI-212's
+  dead-source skip: the narrowest thing that is broken is what stops working.
+  It applies to a `[[items]]`-declared item too, since the manifest it cannot
+  read is the item's own, not the one that declared it. A root `[[items]]` entry
+  that declares hooks is authoritative (HOOK-132) and the item manifest is never
+  read at all, so it cannot be dropped for one.
+- `DSC-99` An item whose source has NO effective namespace prefix
+  (namespacing.md) but whose bare name contains `:` is warned about at scan,
+  naming the item and its source. The name is still installed as written: `:` is
+  legal in an item name and commands.md CMD-2/CMD-6 recommend it for a command
+  group (`commands/frontend:build.md`), so it cannot be rejected. But a prefix
+  component may not contain `:` (NS-72), which is what makes an unprefixed
+  source shipping `commands/acme:deploy.md` a forgery risk: it installs
+  `acme:deploy`, the exact spelling a source prefixed `acme` would produce for
+  its `deploy`, and no later surface can tell the two apart by name alone. The
+  warning is the detection the identity cannot provide; the source column in
+  `recall`/`probe` and the cross-source collision check (NS-43) are what a user
+  reads after it.
 - `DSC-72` A `[[items]]` `link` override (the link target relative to an agent
   home) must be a safe relative path: it is rejected (`MindToml`) when empty,
   absolute, beginning with `~`, containing a `..` (parent) component, or
   containing a NUL byte. So a melded source cannot place a symlink outside the
   agent home (e.g. `link = "../../.bashrc"`). DSC-97 narrows this further: the
-  target must also stay inside one of the four kind directories.
+  target must also stay inside a kind directory.
 - `DSC-97` A `[[items]]` `link` override must, beyond DSC-72's escape-safety
-  rule, have its first path component name one of the four kind directories
-  (`skills/`, `agents/`, `rules/`, `tools/`); anything else is rejected
-  (`MindToml`) at catalog scan, before install ever runs. Without this, DSC-72
+  rule, have its first path component name one of the kind directories
+  (`skills/`, `agents/`, `rules/`, `commands/`, `tools/`); anything else is
+  rejected (`MindToml`) at catalog scan, before install ever runs. `commands/`
+  carries an extra condition: only an item of kind `command` may name it, since
+  a file there is not content the harness merely offers, it is the slash command
+  `/<name>` (commands.md CMD-1). Without that condition a source could declare
+  `kind = "rule", path = "rules/style.md", link = "commands/deploy.md"` and have
+  its prose become `/deploy` in a consumer's agent home, including for a
+  consumer who filtered their install to rules. Without this, DSC-72
   alone accepts any relative path inside the agent home, including its root:
   a source declaring `link = "settings.json"` (or a harness's own hooks/config
   path) and shipping matching content installs, via an ordinary `learn`, as a
@@ -226,8 +271,9 @@ run = "make build"
   is lost. There is no consent-based escape hatch (contrast the hook
   disclosure/prompt machinery): the risk (planting a harness's own config) is
   judged severe enough, and the confined form flexible enough (any name,
-  subdirectory nesting, and any of the four kind directories, not just the
-  item's own kind), that a bypass is not offered. `mind review` (CLI-130..133)
+  subdirectory nesting, and any of the four non-command kind directories, not
+  just the item's own kind), that a bypass is not offered. `mind review`
+  (CLI-130..133)
   discloses every item's custom `link` target as an advisory finding
   (`custom-link`) alongside the hooks and risky references it already reports,
   so a consumer sees where each item will symlink before melding; a link that
@@ -250,8 +296,8 @@ run = "make build"
   glob matches a `SKILL.md` (the item is its parent directory); agent, rule, and
   command globs match the `.md` file directly; a tool glob matches the tool
   directory (TOOL-7). Every kind's globs count equally: any non-empty `include`
-  list makes the file authoritative (DSC-3) and every pattern is confinement-
-  checked at load (DSC-81).
+  list makes the file authoritative (DSC-3) and every pattern is
+  confinement-checked at load (DSC-81).
 - `DSC-34` `[[items]]` and `[discover]` may both appear; their results are unioned.
 - `DSC-35` A source with only `[source]` metadata, or only `[discover].sources`
   (no item globs), still uses convention discovery for its own items.

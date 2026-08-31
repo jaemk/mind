@@ -47,8 +47,11 @@ needed. Rules (`rules/<name>.md`) have no cross-harness directory equivalent (th
 analog in other harnesses is a single concatenated context file like `AGENTS.md`
 or `GEMINI.md`, not a directory of per-rule files), so rules are Claude-only and
 are never linked into a lobe added via a non-Claude preset (HARN-3). Commands
-(`commands/<name>.md`) are the same: the presets admit skills only, so a command
-links into the Claude lobe and into any lobe whose `kinds` names `command`.
+(`commands/<name>.md`) are not linked by the presets either, though for a
+different reason: Gemini and Codex do have command/prompt concepts, but the
+presets admit skills only today. A command links into the default Claude
+lobe, into any lobe with no `kinds` filter (which receives all kinds, see
+above), and into any lobe whose `kinds` names `command`.
 
 Per-harness path table:
 

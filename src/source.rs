@@ -26,10 +26,13 @@ pub enum Pin {
     Ref(String),
 }
 
-/// A recorded install hook for a source (HOOK-55).
+/// A recorded install hook for an ITEM (HOOK-110), kept in
+/// [`crate::manifest::InstalledItem::install_hooks`].
 ///
 /// Tracks the command and the commit at which it last ran. When `ran_at` is
 /// `None` the hook was recorded but skipped, so `upgrade` should re-offer it.
+/// The source-level record is [`RecordedSourceHook`], which additionally
+/// carries the event and the provenance a source hook needs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecordedHook {
     /// The install hook command that was offered.
@@ -39,6 +42,145 @@ pub struct RecordedHook {
     /// `install_hook_commit == None` "recorded but never run" state.
     #[serde(default)]
     pub ran_at: Option<String>,
+}
+
+/// The lifecycle event a source-level hook run is recorded under (HOOK-124).
+///
+/// Only the install and update events are recorded: an uninstall hook fires at
+/// `unmeld` (or on demand) and is never pending (HOOK-55), so it has no run
+/// state to key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RecordedEvent {
+    Install,
+    Update,
+}
+
+impl RecordedEvent {
+    /// The event's spelling, matching `HookEvent::as_str`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RecordedEvent::Install => "install",
+            RecordedEvent::Update => "update",
+        }
+    }
+
+    /// The recorded counterpart of a lifecycle event, or `None` for an event
+    /// that carries no run state (uninstall, HOOK-55).
+    pub fn of(event: crate::mindfile::HookEvent) -> Option<RecordedEvent> {
+        match event {
+            crate::mindfile::HookEvent::Install => Some(RecordedEvent::Install),
+            crate::mindfile::HookEvent::Update => Some(RecordedEvent::Update),
+            crate::mindfile::HookEvent::Uninstall => None,
+        }
+    }
+}
+
+/// Where a recorded source hook's command came from, when it is NOT one the
+/// source's own manifest declares.
+///
+/// A record with no origin is an ordinary declared hook: the clone's
+/// `mind.toml` is its source of truth, and `upgrade` only re-offers it while
+/// the clone still declares it (HOOK-55). The two variants below have no such
+/// backing declaration, so they are carried on the record itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HookOrigin {
+    /// A consumer `meld --install-hook` command (HOOK-56). It replaces the
+    /// source's declared install AND update hooks, so it outlives any single
+    /// declaration and must be re-applied at every `upgrade`.
+    Override,
+    /// A curator `[[discover.sources.hooks]]` entry (DSC-61, HOOK-127). It
+    /// lives in the PARENT super-source's manifest, not in this source's
+    /// clone, so the clone can never be asked what it declares.
+    Curated,
+}
+
+/// A recorded source-level hook (HOOK-55, HOOK-124, HOOK-127).
+///
+/// The record is keyed by `(command, event)`: the same command declared for
+/// both the install and the update event is two independent records, so
+/// running one never marks the other as already run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordedSourceHook {
+    /// The effective hook command that was offered.
+    pub command: String,
+    /// The source commit this hook last RAN at; `None` if it was recorded but
+    /// skipped (so `upgrade` can re-offer it). Mirrors the old
+    /// `install_hook_commit == None` "recorded but never run" state.
+    #[serde(default)]
+    pub ran_at: Option<String>,
+    /// The event this record belongs to (HOOK-124). Absent in a `sources.json`
+    /// written before the record carried one, where every entry was an install
+    /// hook, so `None` reads as `Install`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event: Option<RecordedEvent>,
+    /// The hook's declared `name`, kept only for a record with an `origin`: a
+    /// curated or overriding hook has no manifest entry in the clone to read a
+    /// label back from. `None` for a declared hook (its label comes from the
+    /// clone's `mind.toml`, HOOK-51).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The hook's declared `optional` flag, kept for the same reason as `name`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub optional: bool,
+    /// Where the command came from, when it is not declared by the source's own
+    /// manifest (HOOK-56, HOOK-127). `None` = declared by the source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<HookOrigin>,
+    /// True when `ran_at` is a BASELINE rather than a run: the commit the hook
+    /// was recorded at without ever running (HOOK-121: a declared update hook
+    /// recorded at `meld`, so it is not pending until the source moves).
+    /// Cleared the moment the hook actually runs.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub baseline: bool,
+}
+
+/// `skip_serializing_if` helper: omit a `false` flag from `sources.json`.
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+impl RecordedSourceHook {
+    /// A declared install-event record, the shape every entry had before the
+    /// record carried an event.
+    pub fn install(command: impl Into<String>, ran_at: Option<String>) -> RecordedSourceHook {
+        RecordedSourceHook {
+            command: command.into(),
+            ran_at,
+            event: Some(RecordedEvent::Install),
+            name: None,
+            optional: false,
+            origin: None,
+            baseline: false,
+        }
+    }
+
+    /// The event this record belongs to; a record with none is an install
+    /// record (HOOK-124, back-compat).
+    pub fn event(&self) -> RecordedEvent {
+        self.event.unwrap_or(RecordedEvent::Install)
+    }
+
+    /// Whether this record is the one for `(command, event)`.
+    pub fn is(&self, command: &str, event: RecordedEvent) -> bool {
+        self.command == command && self.event() == event
+    }
+
+    /// Whether the hook is pending at `current` (HOOK-55): never run (or
+    /// skipped), or last run at a different commit than the source is on now.
+    pub fn pending(&self, current: Option<&str>) -> bool {
+        self.ran_at.is_none() || self.ran_at.as_deref() != current
+    }
+
+    /// The label a disclosure shows: the recorded `name` when it carries one,
+    /// else the command (HOOK-51).
+    pub fn label(&self) -> &str {
+        match self.name.as_deref() {
+            Some(n) if !n.trim().is_empty() => n,
+            _ => &self.command,
+        }
+    }
 }
 
 /// How a source's items were discovered, when they came from a Claude plugin
@@ -137,12 +279,13 @@ pub struct Source {
     /// did not come from a plugin manifest or declared no version.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugin_version: Option<String>,
-    /// The install hooks recorded for this source (HOOK-55). Supersedes the
+    /// The hooks recorded for this source (HOOK-55, HOOK-124). Supersedes the
     /// legacy single `install_hook`/`install_hook_commit` pair, which is
-    /// migrated into this on load. Each entry records the command and the commit
-    /// it last ran at.
+    /// migrated into this on load. Each entry records the command, the event it
+    /// belongs to, and the commit it last ran at. Install and update hooks share
+    /// the vec but not a key: the record is keyed by `(command, event)`.
     #[serde(default)]
-    pub install_hooks: Vec<RecordedHook>,
+    pub install_hooks: Vec<RecordedSourceHook>,
     /// Legacy: the install hook command in effect for this source (HOOK-31).
     /// Load-only; migrated into `install_hooks` by `migrate_legacy_hook` and
     /// not re-emitted once migrated.
@@ -318,24 +461,60 @@ impl Source {
             && !cmd.trim().is_empty()
         {
             let ran_at = self.install_hook_commit.take();
-            self.install_hooks.push(RecordedHook {
-                command: cmd,
-                ran_at,
-            });
+            // A legacy pair is always an install hook (the update event did not
+            // exist when it was written), so it migrates as one (HOOK-124).
+            self.install_hooks
+                .push(RecordedSourceHook::install(cmd, ran_at));
         }
         // Clear legacy fields regardless so they stop being emitted.
         self.install_hook = None;
         self.install_hook_commit = None;
     }
 
-    /// The recorded install hooks whose last-run commit differs from `current`
-    /// (i.e. never run, or the source has advanced) - the ones `upgrade` should
-    /// re-offer (HOOK-55). `current` is the source's current commit.
-    pub fn pending_install_hooks(&self, current: Option<&str>) -> Vec<&RecordedHook> {
+    /// The recorded INSTALL hooks `upgrade` should re-offer (HOOK-55): those
+    /// whose last-run commit is absent or differs from `current` AND that the
+    /// source still stands behind.
+    ///
+    /// `current` is the source's current commit. `declared` is the set of
+    /// install-hook commands the clone CURRENTLY declares; a record outside it
+    /// is not re-offered, so a command the source has stopped declaring (or one
+    /// left behind by a manifest that no longer parses) is never replayed from
+    /// local state alone under an `Event: install` disclosure. Two kinds of
+    /// record have no declaration in the clone to match against and are kept
+    /// regardless: a consumer `--install-hook` override (HOOK-56) and, while
+    /// `keep_curated` holds, a curated `[[discover.sources.hooks]]` entry
+    /// (DSC-61, HOOK-127). `keep_curated` is the DSC-60 gate: it is false once
+    /// the source ships a `mind.toml` of its own, since curated values stop
+    /// applying then.
+    // spec: HOOK-55 HOOK-127
+    pub fn pending_install_hooks(
+        &self,
+        current: Option<&str>,
+        declared: &[String],
+        keep_curated: bool,
+    ) -> Vec<&RecordedSourceHook> {
         self.install_hooks
             .iter()
-            .filter(|h| h.ran_at.is_none() || h.ran_at.as_deref() != current)
+            .filter(|h| h.event() == RecordedEvent::Install)
+            .filter(|h| match h.origin {
+                Some(HookOrigin::Override) => true,
+                Some(HookOrigin::Curated) => keep_curated,
+                None => declared.iter().any(|d| d == &h.command),
+            })
+            .filter(|h| h.pending(current))
             .collect()
+    }
+
+    /// The consumer `meld --install-hook` command recorded on this source
+    /// (HOOK-56), if any. It overrides the source's declared install AND update
+    /// hooks at every later `upgrade`, so it is read back from the record
+    /// rather than from the clone.
+    // spec: HOOK-56
+    pub fn override_command(&self) -> Option<&str> {
+        self.install_hooks
+            .iter()
+            .find(|h| h.origin == Some(HookOrigin::Override))
+            .map(|h| h.command.as_str())
     }
 
     /// Re-run the same validation `parse_spec` applies at construction time
@@ -2305,31 +2484,60 @@ mod tests {
     #[test]
     fn recorded_hook_serde_round_trip_with_ran_at_some() {
         // spec: HOOK-55
-        let hook = RecordedHook {
-            command: "make install".into(),
-            ran_at: Some("deadbeef".into()),
-        };
+        let hook = RecordedSourceHook::install("make install", Some("deadbeef".into()));
         let json = serde_json::to_string(&hook).unwrap();
-        let back: RecordedHook = serde_json::from_str(&json).unwrap();
+        let back: RecordedSourceHook = serde_json::from_str(&json).unwrap();
         assert_eq!(
             back, hook,
-            "RecordedHook with ran_at=Some did not round-trip"
+            "RecordedSourceHook with ran_at=Some did not round-trip"
         );
     }
 
     #[test]
     fn recorded_hook_serde_round_trip_with_ran_at_none() {
         // spec: HOOK-55
-        let hook = RecordedHook {
-            command: "make install".into(),
-            ran_at: None,
-        };
+        let hook = RecordedSourceHook::install("make install", None);
         let json = serde_json::to_string(&hook).unwrap();
         // ran_at=None should be absent (default) in the emitted JSON.
-        let back: RecordedHook = serde_json::from_str(&json).unwrap();
+        let back: RecordedSourceHook = serde_json::from_str(&json).unwrap();
         assert_eq!(
             back, hook,
-            "RecordedHook with ran_at=None did not round-trip"
+            "RecordedSourceHook with ran_at=None did not round-trip"
+        );
+    }
+
+    /// An `install_hooks` entry written before the record carried an event has
+    /// only `command` and `ran_at`. It must still load, and it must read as an
+    /// INSTALL record: the update event did not exist when it was written, and
+    /// silently reading it as some other event would either strand the hook or
+    /// replay it under the wrong disclosure.
+    // spec: HOOK-124
+    #[test]
+    fn an_old_format_record_with_no_event_loads_as_an_install_record() {
+        let legacy = r#"{
+            "name":"local/a/b","url":"/a/b","host":"local","owner":"a","repo":"b",
+            "commit":"bbb",
+            "install_hooks":[{"command":"make setup","ran_at":"aaa"}]
+        }"#;
+        let src: Source = serde_json::from_str(legacy).unwrap();
+        assert_eq!(src.install_hooks.len(), 1, "the legacy entry must load");
+        let rec = &src.install_hooks[0];
+        assert_eq!(rec.event, None, "the stored event is absent");
+        assert_eq!(
+            rec.event(),
+            RecordedEvent::Install,
+            "an eventless record reads as an install record"
+        );
+        assert_eq!(rec.origin, None, "a legacy record has no origin");
+        assert!(!rec.baseline, "a legacy record is a run, not a baseline");
+        // It participates in the install-hook pending set exactly as before,
+        // provided the clone still declares it.
+        let declared = vec!["make setup".to_string()];
+        assert_eq!(
+            src.pending_install_hooks(Some("bbb"), &declared, true)
+                .len(),
+            1,
+            "a legacy record that advanced past its run-commit is pending"
         );
     }
 
@@ -2338,14 +2546,8 @@ mod tests {
         // spec: HOOK-55
         let mut s = parse_spec("acme/tools").unwrap();
         s.install_hooks = vec![
-            RecordedHook {
-                command: "make setup".into(),
-                ran_at: Some("aaa".into()),
-            },
-            RecordedHook {
-                command: "make install".into(),
-                ran_at: None,
-            },
+            RecordedSourceHook::install("make setup", Some("aaa".into())),
+            RecordedSourceHook::install("make install", None),
         ];
         let json = serde_json::to_string(&s).unwrap();
         let back: Source = serde_json::from_str(&json).unwrap();
@@ -2444,10 +2646,10 @@ mod tests {
         // When install_hooks already has entries, migration must not add more,
         // even if legacy fields are also present.
         let mut src = parse_spec("acme/tools").unwrap();
-        src.install_hooks = vec![RecordedHook {
-            command: "pre-existing".into(),
-            ran_at: Some("aaa".into()),
-        }];
+        src.install_hooks = vec![RecordedSourceHook::install(
+            "pre-existing",
+            Some("aaa".into()),
+        )];
         src.install_hook = Some("./old-hook.sh".into());
         src.install_hook_commit = Some("bbb".into());
 
@@ -2487,23 +2689,19 @@ mod tests {
         let mut src = parse_spec("acme/tools").unwrap();
         src.install_hooks = vec![
             // Never run (ran_at=None) -> pending regardless of current.
-            RecordedHook {
-                command: "hook-a".into(),
-                ran_at: None,
-            },
+            RecordedSourceHook::install("hook-a", None),
             // Ran at "aaa", current is "bbb" -> advanced -> pending.
-            RecordedHook {
-                command: "hook-b".into(),
-                ran_at: Some("aaa".into()),
-            },
+            RecordedSourceHook::install("hook-b", Some("aaa".into())),
             // Ran at "bbb", current is "bbb" -> up-to-date -> NOT pending.
-            RecordedHook {
-                command: "hook-c".into(),
-                ran_at: Some("bbb".into()),
-            },
+            RecordedSourceHook::install("hook-c", Some("bbb".into())),
         ];
 
-        let pending = src.pending_install_hooks(Some("bbb"));
+        let declared = vec![
+            "hook-a".to_string(),
+            "hook-b".to_string(),
+            "hook-c".to_string(),
+        ];
+        let pending = src.pending_install_hooks(Some("bbb"), &declared, true);
         assert_eq!(pending.len(), 2);
         assert_eq!(pending[0].command, "hook-a");
         assert_eq!(pending[1].command, "hook-b");
@@ -2517,21 +2715,97 @@ mod tests {
         // ran_at=Some(_) are also pending (they differ from current=None).
         let mut src = parse_spec("acme/tools").unwrap();
         src.install_hooks = vec![
-            RecordedHook {
-                command: "hook-a".into(),
-                ran_at: None,
-            },
-            RecordedHook {
-                command: "hook-b".into(),
-                ran_at: Some("aaa".into()),
-            },
+            RecordedSourceHook::install("hook-a", None),
+            RecordedSourceHook::install("hook-b", Some("aaa".into())),
         ];
-        let pending = src.pending_install_hooks(None);
+        let declared = vec!["hook-a".to_string(), "hook-b".to_string()];
+        let pending = src.pending_install_hooks(None, &declared, true);
         // hook-a: ran_at=None -> is_none() -> always pending.
         // hook-b: ran_at=Some("aaa") != current=None -> pending.
         assert_eq!(pending.len(), 2);
         assert_eq!(pending[0].command, "hook-a");
         assert_eq!(pending[1].command, "hook-b");
+    }
+
+    /// A recorded install hook the clone no longer declares is NOT re-offered:
+    /// the source's manifest, not local state, decides what an `Event: install`
+    /// disclosure may propose running. A consumer override (HOOK-56) and a
+    /// curated entry (HOOK-127) have no declaration in the clone to match, so
+    /// they survive; the curated one only while the DSC-60 gate holds.
+    // spec: HOOK-55 HOOK-56 HOOK-127
+    #[test]
+    fn pending_install_hooks_drops_records_the_clone_no_longer_declares() {
+        let mut src = parse_spec("acme/tools").unwrap();
+        let mut curated = RecordedSourceHook::install("curated.sh", None);
+        curated.origin = Some(HookOrigin::Curated);
+        let mut overridden = RecordedSourceHook::install("mine.sh", None);
+        overridden.origin = Some(HookOrigin::Override);
+        src.install_hooks = vec![
+            RecordedSourceHook::install("still-declared", None),
+            RecordedSourceHook::install("withdrawn", None),
+            curated,
+            overridden,
+        ];
+
+        let declared = vec!["still-declared".to_string()];
+        let pending: Vec<&str> = src
+            .pending_install_hooks(Some("bbb"), &declared, true)
+            .into_iter()
+            .map(|h| h.command.as_str())
+            .collect();
+        assert_eq!(pending, vec!["still-declared", "curated.sh", "mine.sh"]);
+
+        // The DSC-60 gate closed (the source now ships its own mind.toml): the
+        // curated record stops applying, the override does not.
+        let pending: Vec<&str> = src
+            .pending_install_hooks(Some("bbb"), &declared, false)
+            .into_iter()
+            .map(|h| h.command.as_str())
+            .collect();
+        assert_eq!(pending, vec!["still-declared", "mine.sh"]);
+    }
+
+    /// The record is keyed by `(command, event)`: one command declared for both
+    /// events is two records, and running one must not settle the other.
+    // spec: HOOK-124
+    #[test]
+    fn a_command_recorded_for_two_events_keeps_two_independent_records() {
+        let mut src = parse_spec("acme/tools").unwrap();
+        let mut update = RecordedSourceHook::install("make setup", None);
+        update.event = Some(RecordedEvent::Update);
+        src.install_hooks = vec![
+            RecordedSourceHook::install("make setup", Some("bbb".into())),
+            update,
+        ];
+
+        let declared = vec!["make setup".to_string()];
+        assert!(
+            src.pending_install_hooks(Some("bbb"), &declared, true)
+                .is_empty(),
+            "the install record ran at the current commit, so nothing pends"
+        );
+        let update_rec = src
+            .install_hooks
+            .iter()
+            .find(|h| h.is("make setup", RecordedEvent::Update))
+            .expect("the update record is addressable by (command, event)");
+        assert!(
+            update_rec.pending(Some("bbb")),
+            "the update record is untouched by the install record's run"
+        );
+    }
+
+    /// `override_command` reads the consumer's `--install-hook` back off the
+    /// source, which is what lets `upgrade` keep applying it (HOOK-56).
+    // spec: HOOK-56
+    #[test]
+    fn override_command_reads_back_the_recorded_consumer_override() {
+        let mut src = parse_spec("acme/tools").unwrap();
+        assert_eq!(src.override_command(), None);
+        let mut overridden = RecordedSourceHook::install("./mine.sh", None);
+        overridden.origin = Some(HookOrigin::Override);
+        src.install_hooks = vec![RecordedSourceHook::install("theirs.sh", None), overridden];
+        assert_eq!(src.override_command(), Some("./mine.sh"));
     }
 
     #[test]

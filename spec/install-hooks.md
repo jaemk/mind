@@ -67,9 +67,10 @@ CLI-17).
   source. The event is named because the block is otherwise identical across
   events: without it, approving an update or uninstall hook looks exactly like
   approving an install hook, on the one surface where the answer decides whether
-  arbitrary source code runs. It then offers `[Y/n/a]`: run the hook (`y`/`Y`/Enter), skip it but
-  continue installing the source and its items without building the tooling
-  (`n`/`N`), or abort and install nothing (`a`/`A`). The default (a bare Enter) is
+  arbitrary source code runs. It then offers `[Y/n/a]`: run the hook
+  (`y`/`Y`/Enter), skip it but continue installing the source and its items
+  without building the tooling (`n`/`N`), or abort and install nothing
+  (`a`/`A`). The default (a bare Enter) is
   run; an unrecognized reply skips, so an unclear answer never runs the hook. When
   a `--install-hook` overrides the source's declared `[source].install` (HOOK-2),
   the prompt also shows the declared command and states plainly that the
@@ -251,10 +252,26 @@ still parsed and folded in (HOOK-50).
   is always treated as pending regardless of whether the source's commit is also
   null (a commitless linked source). Uninstall hooks are not recorded, since they
   only fire at `unmeld`.
+  The record says a command ran, never that it is still wanted: `upgrade`
+  re-offers a pending record only while the source's clone STILL declares that
+  command as an install hook. A record whose declaration is gone (the source
+  withdrew the hook, or its `mind.toml` no longer parses) is not re-offered,
+  because the disclosure would then propose running a command no site declares,
+  at a commit the author controls, under an `Event: install` heading. The two
+  records that have no declaration to match are exempt, since the clone is not
+  where they come from: a consumer override (HOOK-56) and a curated hook
+  (HOOK-127).
 - `HOOK-56` `meld --install-hook <cmd>` (HOOK-2) replaces all of a source's
   declared install hooks with one required install hook running `<cmd>`; the loud
   override disclosure (HOOK-2) shows the declared command(s) it replaced. Declared
   uninstall hooks are unaffected by `--install-hook`.
+  The override is recorded on the source and covers the install AND the update
+  event: at every later `upgrade` it replaces the source's declared hooks for
+  whichever of the two events is in effect (HOOK-122), with the same loud
+  disclosure naming what it replaced. A source that moves its command from
+  `event = "install"` to `event = "update"` therefore does not escape a consumer
+  who replaced it, and the consumer's own command does not silently stop being
+  re-run. There is no separate `--update-hook`: one override covers both.
 - `HOOK-57` `init-source` scaffolds commented `[[hooks]]` examples in the
   `mind.toml` it writes: at least one install hook and one uninstall hook, with
   one marked `optional = true`, each showing `run`, `name`, and `event`, all
@@ -701,6 +718,16 @@ installed.
   `meld`, at a re-meld (HOOK-60), or at `unmeld`: the update event means "this
   source was already melded and has moved", which is exactly the state `meld`
   is not in.
+  `meld` therefore records each declared update hook at the meld commit as a
+  BASELINE: a record that never ran, so the hook is not pending until the source
+  actually moves. Without the baseline the hook has no record at all, absent
+  reads as pending (HOOK-55), and the first `upgrade` after a `meld` runs the
+  update hook at the unmoved meld commit, on top of the install hook that just
+  ran. A baseline never overwrites a real run, and `hooks list` reports it as
+  "not pending (recorded at meld <commit>)" rather than as a run. It holds back
+  only the automatic pass: an on-demand `mind hooks run <source> --event update`
+  (HOOK-126) still considers the hook, since there the user named the target and
+  the event and no run has happened.
 - `HOOK-122` Update hooks supersede install hooks on an update, and only on an
   update. When a source declares at least one update hook, `upgrade` offers its
   pending update hooks and does NOT re-run the source's install hooks. When it
@@ -710,6 +737,9 @@ installed.
   Superseding is per scope: a source's update hooks replace the source's install
   hooks, and an item's update hooks replace that item's install hooks (HOOK-125);
   neither replaces the other's.
+  A consumer `--install-hook` override outranks the supersession: when one is
+  recorded (HOOK-56), it replaces whichever event's hooks are in effect, so the
+  consumer's command is what is offered on either path.
 - `HOOK-123` Because the default is a re-run, an install hook is expected to be
   idempotent: safe to run again against a host it already set up. `mind` does not
   and cannot enforce this -- a hook is an opaque shell command -- so it states it
@@ -720,12 +750,19 @@ installed.
   re-run.
 - `HOOK-124` A source's update hooks are recorded in the same recorded-hook set
   as its install hooks (`install_hooks`, HOOK-55: an effective command plus the
-  commit it last ran at, or null when skipped), keyed by command. A pending
-  update hook is therefore one whose recorded run-commit is absent or differs
-  from the source's current commit, the same rule install hooks use, and
-  `--force` re-offers every one regardless. An update hook that has already run
-  at the source's current commit is not re-offered by a second `upgrade` at that
-  commit.
+  commit it last ran at, or null when skipped), keyed by the command AND the
+  event. A pending update hook is therefore one whose recorded run-commit is
+  absent or differs from the source's current commit, the same rule install
+  hooks use, and `--force` re-offers every one regardless. An update hook that
+  has already run at the source's current commit is not re-offered by a second
+  `upgrade` at that commit.
+  The event is half the key because the same command is a plausible declaration
+  for both events ("same script, different trigger"): keyed by command alone, an
+  install run would settle the update hook, `hooks run <src> --event update`
+  would exit 0 having run nothing, and a run recorded under one event could be
+  re-offered under the other's disclosure. A record written before the event was
+  stored carries none; it reads as an install record, since that is the only
+  event that existed when it was written.
 - `HOOK-125` An item's update hooks run in place of its install hooks whenever
   the item is re-installed over an existing install of the same effective name,
   with the same working directory, ordering, recording, and rollback contract as
@@ -739,14 +776,32 @@ installed.
   hooks on demand without reinstalling it. An item that declares no update hook re-runs
   its install hooks on every (re)install, unchanged (HOOK-84). An item's
   `build` hook is unaffected: it is content-producing and always runs (HOOK-73).
-- `HOOK-126` `--event update` is valid for `hooks run` and `hooks list` (CLI-195)
-  on both a source and an item target, and behaves as `--event install` does at
-  that target: it runs the target's pending update hooks (all of them under
-  `--force`), records each run exactly as an install run does (HOOK-101,
-  HOOK-110), and participates in the HOOK-107/HOOK-108 tally and the
-  `HooksNotRun` report. `mind review` lists a declared update hook alongside the
-  install and uninstall ones (HOOK-58, HOOK-85), and `hooks list` reports its
-  event, required/optional flag, command, and pending state.
+- `HOOK-126` `--event update` is valid for `hooks run` (CLI-195) on both a source
+  and an item target, and behaves as `--event install` does at that target: it
+  runs the target's pending update hooks (all of them under `--force`), records
+  each run exactly as an install run does (HOOK-101, HOOK-110), and participates
+  in the HOOK-107/HOOK-108 tally and the `HooksNotRun` report. `hooks list` takes
+  no `--event` filter (CLI-196): it reports every event, so a declared update
+  hook appears alongside the install and uninstall ones with its event,
+  required/optional flag, command, and pending state. `mind review` lists a
+  declared update hook the same way (HOOK-58, HOOK-85).
+  When `hooks run` finds hooks for the selected event but the pending filter
+  holds every one of them back, it says so: a note naming the hooks, the commit
+  they already ran at, and the `--force` invocation that runs them anyway. A
+  silent exit 0 is indistinguishable from "this source declares no hooks",
+  which is the opposite diagnosis.
+- `HOOK-127` A curator's `[[discover.sources.hooks]]` entries (DSC-61) are
+  recorded on the nested source at `meld`, marked as curated, and are offered by
+  `upgrade` from that record. They are declared in the PARENT super-source's
+  manifest, so the nested clone can never be asked what it declares (HOOK-55),
+  and they apply exactly when the nested source ships no `mind.toml` of its own
+  (the DSC-60 gate). Without the record a curated `event = "update"` entry could
+  never run at all (it is filtered out at `meld` by HOOK-121 and is invisible in
+  the clone), and curated install hooks would be re-offered at every `upgrade`
+  in defiance of HOOK-122's superseding rule. A curated record stops applying
+  once the nested source gains a `mind.toml`, which is the same gate evaluated
+  at `meld`. The record carries the entry's `name` and `optional` flag, since
+  there is no declaration to read them back from.
 
 ## Where an item declares its hooks
 
@@ -766,12 +821,22 @@ its own hooks instead, next to the item.
   required hook of its event (HOOK-80), and the frontmatter reader stays
   scalar-only (DSC-21), so the array form still requires a manifest. An empty or
   whitespace-only value is absent (HOOK-3).
+  Compatibility: frontmatter is free-form, and `mind` previously ignored these
+  keys on every kind but a tool. A repo whose `SKILL.md` carries `install: pip
+  install foo` as documentation therefore now ships a hook to every consumer,
+  who is prompted to run a command the author never meant as one. An author in
+  that position renames the key (there is no reserved-prefix escape: the three
+  names are the hook spelling). A consumer sees it before installing anything,
+  because `mind review` reports every declared item hook (HOOK-85, HOOK-134).
 - `HOOK-131` A directory-backed item (a skill or a tool) may ship its own
   `mind.toml` in its item directory: a scoped-down manifest whose only table is
   `[[hooks]]`, with exactly the fields and semantics of a source's `[[hooks]]`
   (HOOK-51 plus the `update` event, HOOK-120). Any other key is a `mind.toml`
   schema error naming the file, so a root manifest copied into an item directory
-  fails loudly instead of being half-read. An item manifest is read only from an
+  fails loudly instead of being half-read. On a catalog scan the failure is
+  scoped to the affected item: that one item is dropped with a warning naming
+  the file, so one stray manifest cannot take down the source or the registry
+  walk (see [discovery.md](discovery.md)). An item manifest is read only from an
   item's own directory and never from the source root, and the source's root
   `mind.toml` is never read as an item manifest, even for a source root that is
   also an item path.
@@ -784,6 +849,13 @@ its own hooks instead, next to the item.
   (HOOK-130). Replacement rather than composition keeps an item's effective hook
   list traceable to one origin, so a consumer reading `mind review` or `hooks
   list` sees a set that exists somewhere as written.
+  Replacement is whole-site, which is the trap: a site that declares one hook
+  takes over the item's whole hook list, and the hooks the losing sites declared
+  are silently gone. A `[[items]]` entry with only `install = "./setup.sh"`
+  drops the item's own `uninstall:` frontmatter, so its teardown never runs; an
+  item-directory `mind.toml` (HOOK-131) declaring only an update hook drops the
+  frontmatter `install:`, so a first install runs nothing. An author who wants
+  both writes both at the SAME site.
 - `HOOK-133` An item manifest is part of the item's content: it is copied into
   the store with the rest of the item and participates in the content hash, so
   editing it upstream is drift like any other file change and `upgrade` picks it

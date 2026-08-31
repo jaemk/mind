@@ -443,9 +443,10 @@ fn learn_running_build_hook_is_one_document() {
 #[test]
 fn learn_running_item_install_hook_is_one_document() {
     // spec: CLI-217 CLI-153
-    // An item install hook is valid on any kind, but only via an explicit
-    // `mind.toml` [[items]] declaration -- convention discovery has no
-    // `[[items.hooks]]` array to read (DSC-21).
+    // An item install hook is valid on any kind. This fixture declares it via
+    // an explicit `mind.toml` [[items]] entry, but that is not the only route:
+    // a directory-backed item's own frontmatter or scoped `mind.toml` can also
+    // declare one (HOOK-130, HOOK-131) without a root-level [[items]] entry.
     let sb = Sandbox::new("learn-item-hook-leak");
     sb.write_and_commit(
         "mind.toml",

@@ -3037,9 +3037,18 @@ fn hooks_run_glob_counts_only_the_source_with_pending_work() {
         r.stdout
     );
     assert!(
-        !r.stdout.contains("'a-setup'"),
+        !r.stdout.contains("skipped install hook 'a-setup'"),
         "source a's retired hook must never be offered, so it cannot be noted \
          as skipped: {}",
+        r.stdout
+    );
+    // spec: HOOK-126 -- source a is not silent either: the hook it held back is
+    // reported as nothing-pending, with the way to run it anyway.
+    assert!(
+        r.stdout.contains("nothing pending")
+            && r.stdout.contains("'a-setup'")
+            && r.stdout.contains("--force"),
+        "source a must report its settled hook rather than saying nothing: {}",
         r.stdout
     );
 }
@@ -6438,5 +6447,80 @@ fn hooks_run_item_update_event_runs_update_hooks() {
         store.join("update.sentinel").exists(),
         "the item's update hook must run in the store dir: {}",
         r.stdout
+    );
+}
+
+/// `upgrade`'s install-hook fallback discloses the hook the SOURCE declares:
+/// its author-given name and its optional flag. Both come from the declaration,
+/// not from the run record (which carries neither), so a hook declared
+/// `optional = true` must not be prompted as required under its raw command.
+#[test]
+fn upgrade_discloses_a_pending_install_hook_with_its_declared_name_and_flag() {
+    // spec: HOOK-51 HOOK-52 HOOK-55
+    let sb = Sandbox::new("labelled-src");
+    sb.write_and_commit(
+        "mind.toml",
+        concat!(
+            "[[hooks]]\n",
+            "name = \"Build the tooling\"\n",
+            "run = \"echo setup\"\n",
+            "optional = true\n",
+        ),
+    );
+
+    // Non-TTY meld skips the hook (HOOK-22) and records it as never run, so it
+    // is pending at the next upgrade.
+    let r = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(r.success, "meld: {}\n{}", r.stdout, r.stderr);
+
+    // Advance so `upgrade` has something to do, then take the interactive
+    // branch and decline: the disclosure is printed either way.
+    sb.write_and_commit("README.md", "# fixture v2\n");
+    assert!(sb.mind(&["sync"]).success, "sync: {}", r.stderr);
+    let (r, timed_out) =
+        sb.mind_env_stdin_bounded(&["upgrade", "--yes"], &[("MIND_TTY", "1")], "n\n", 30);
+    assert!(
+        !timed_out,
+        "upgrade must not hang: {}\n{}",
+        r.stdout, r.stderr
+    );
+    let out = format!("{}{}", r.stdout, r.stderr);
+    assert!(
+        out.contains("Build the tooling (optional)"),
+        "the disclosure must carry the declared name and optional flag: {out}"
+    );
+    assert!(
+        out.contains("Event:     install"),
+        "the fallback path discloses the install event: {out}"
+    );
+}
+
+/// The non-TTY skip note for a source hook goes through `render::note`, which
+/// does not sanitize, so the hook LABEL and the source identity are stripped at
+/// the call site. A label of cursor-control escapes could otherwise scroll away
+/// or overwrite the region where the next consent disclosure is drawn.
+#[test]
+fn a_skipped_source_hook_note_sanitizes_the_declared_label() {
+    // spec: DSC-95 HOOK-91
+    let sb = Sandbox::new("hostile-label-src");
+    sb.write_and_commit(
+        "mind.toml",
+        "[[hooks]]\nname = \"\\u001b[2Jwiped\"\nrun = \"echo hi\"\n",
+    );
+
+    let r = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(r.success, "meld: {}\n{}", r.stdout, r.stderr);
+
+    // A non-TTY `hooks run --force` reaches the HOOK-106 skip note, which is
+    // where the label lands.
+    let r = sb.mind(&["hooks", "run", "hostile-label-src", "--force"]);
+    let out = format!("{}{}", r.stdout, r.stderr);
+    assert!(
+        out.contains("wiped"),
+        "the note still names the hook: {out:?}"
+    );
+    assert!(
+        !out.contains('\u{1b}'),
+        "no raw escape may reach the note: {out:?}"
     );
 }

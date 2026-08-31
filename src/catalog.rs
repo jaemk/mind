@@ -1,9 +1,11 @@
 //! Scanning melded sources for installable items.
 //!
 //! By convention (mirrors the `agents` repo layout):
-//! - `skills/<name>/SKILL.md`  -> skill `<name>`
-//! - `agents/<name>.md`        -> agent `<name>`
-//! - `rules/<name>.md`         -> rule  `<name>`
+//! - `skills/<name>/SKILL.md`  -> skill   `<name>`
+//! - `agents/<name>.md`        -> agent   `<name>`
+//! - `rules/<name>.md`         -> rule    `<name>`
+//! - `commands/<name>.md`      -> command `<name>`
+//! - `tools/<name>/`           -> tool    `<name>` (no anchor file required)
 //!
 //! A source may instead ship a `mind.toml` (see [`crate::mindfile`]) declaring
 //! its inventory explicitly via `[[items]]` or `[discover]` globs; that takes
@@ -554,7 +556,11 @@ fn scan_source_layers(
             let mut seen: std::collections::HashSet<(crate::error::ItemKind, String)> =
                 std::collections::HashSet::new();
             for decl in &mt.items {
-                let item = from_decl(clone_root, source, prefix, decl)?;
+                // spec: DSC-98 -- a dropped item is simply not offered; the
+                // rest of the declared inventory still is.
+                let Some(item) = from_decl(clone_root, source, prefix, decl)? else {
+                    continue;
+                };
                 let key = (item.kind, item.name.clone());
                 if !seen.insert(key.clone()) {
                     return Err(MindError::DuplicateItem {
@@ -844,12 +850,16 @@ fn scan_add_roots(
 }
 
 /// Build a catalog item from an explicit `[[items]]` declaration.
+///
+/// `Ok(None)` means the item was dropped with a warning (DSC-98), exactly as in
+/// [`make_item`]: a declared item is not exempt, since the manifest it cannot
+/// read is the item's own, not the one that declared it.
 fn from_decl(
     root: &Path,
     source: &Source,
     prefix: &Option<String>,
     decl: &ItemDecl,
-) -> Result<CatalogItem> {
+) -> Result<Option<CatalogItem>> {
     // DSC-95: `decl.*` fields are source-controlled and are echoed back in these
     // rejection messages, so sanitize each before it reaches stderr.
     let safe_name = crate::sanitize::strip_ansi(&decl.name);
@@ -886,15 +896,18 @@ fn from_decl(
         }
         // spec: DSC-97 -- confine the link target to a kind directory so a
         // source cannot plant a file at the agent-home root (e.g.
-        // `settings.json`) or inside a harness's own config directory.
-        if !is_confined_link_target(link) {
+        // `settings.json`) or inside a harness's own config directory, and keep
+        // `commands/` (which makes its contents invocable as `/<name>`) for
+        // command items alone.
+        if !is_confined_link_target(link, kind) {
             return Err(MindError::MindToml {
                 path: root.join("mind.toml"),
                 msg: format!(
                     "item '{safe_name}' has a link '{}' outside a kind directory: it must begin \
-                     with 'skills/', 'agents/', 'rules/', 'commands/', or 'tools/' (a link cannot \
-                     place a file at the agent-home root or inside a harness's own config, \
-                     e.g. 'settings.json')",
+                     with 'skills/', 'agents/', 'rules/', or 'tools/' (a link cannot place a file \
+                     at the agent-home root or inside a harness's own config, e.g. \
+                     'settings.json'), and only a command may link into 'commands/', where a file \
+                     becomes the slash command '/<name>'",
                     crate::sanitize::strip_ansi(link)
                 ),
             });
@@ -938,7 +951,6 @@ fn from_decl(
         .then(|| decl.resolved_item_hooks(&root.join("mind.toml")))
         .transpose()?;
     build_item(
-        root,
         source,
         prefix,
         kind,
@@ -952,6 +964,10 @@ fn from_decl(
             build: decl.build.clone(),
             hooks,
             ignore: decl.ignore.clone(),
+            // An authoritative `[[items]]` path is always repo-root-relative
+            // (DSC-52), so the source manifest that declared this item lives
+            // exactly here.
+            manifest_dir: Some(root),
         },
     )
 }
@@ -1011,9 +1027,10 @@ fn is_safe_link_rel(rel: &str) -> bool {
 }
 
 /// True when a (already `is_safe_link_rel`-checked) link target's first real
-/// path component names one of the four kind directories: `skills`, `agents`,
-/// `rules`, or `tools` (DSC-97). A leading `./` is skipped so `./skills/x` and
-/// `skills/x` are treated alike.
+/// path component names one of the five kind directories -- `skills`, `agents`,
+/// `rules`, `commands`, or `tools` -- and, for `commands/`, the item is itself a
+/// command (DSC-97). A leading `./` is skipped so `./skills/x` and `skills/x`
+/// are treated alike.
 ///
 /// Confines a `[[items]] link` override to landing alongside items an
 /// ordinary (non-`link`) install would produce, so it can change only the
@@ -1024,7 +1041,14 @@ fn is_safe_link_rel(rel: &str) -> bool {
 /// (JSON with a `hooks` key) installed under that name becomes the Claude
 /// harness's own settings file on the next `learn`, executing an
 /// attacker-chosen command with no mind hook-consent prompt involved.
-fn is_confined_link_target(rel: &str) -> bool {
+///
+/// The four original kind directories stay mutually interchangeable (TOOL-4: a
+/// tool surfaced under `agents/`). `commands/` is the exception, because a file
+/// there is not inert content the harness merely offers: it becomes the slash
+/// command `/<name>`, so any kind linking into it turns source-controlled prose
+/// into an invocable command a consumer who filtered their install to "rules
+/// only" never asked for.
+fn is_confined_link_target(rel: &str, kind: ItemKind) -> bool {
     use std::path::Component;
     let mut comps = Path::new(rel)
         .components()
@@ -1032,11 +1056,14 @@ fn is_confined_link_target(rel: &str) -> bool {
     match comps.next() {
         Some(Component::Normal(first)) => {
             let first = first.to_string_lossy();
+            // spec: DSC-97 -- only a command may land in `commands/`.
+            if first == ItemKind::Command.dir() {
+                return kind == ItemKind::Command;
+            }
             [
                 ItemKind::Skill,
                 ItemKind::Agent,
                 ItemKind::Rule,
-                ItemKind::Command,
                 ItemKind::Tool,
             ]
             .iter()
@@ -1047,17 +1074,15 @@ fn is_confined_link_target(rel: &str) -> bool {
 }
 
 /// Read a lifecycle hook scalar (`install:`/`update:`/`uninstall:`, HOOK-130)
-/// from an item's meta file frontmatter. Read for EVERY kind: a skill's
-/// `SKILL.md`, a tool's `TOOL.md`, and an agent's or rule's own `.md`, so an
-/// item can declare its own hooks without the source's root manifest having to
-/// become authoritative for the whole repo. An empty or whitespace-only value is
-/// treated as absent (HOOK-3).
+/// from an item's already-read meta file frontmatter. Read for EVERY kind: a
+/// skill's `SKILL.md`, a tool's `TOOL.md`, and an agent's, rule's, or command's
+/// own `.md`, so an item can declare its own hooks without the source's root
+/// manifest having to become authoritative for the whole repo. An empty or
+/// whitespace-only value is treated as absent (HOOK-3).
 ///
 /// spec: HOOK-130
-/// spec: DSC-91 -- the read is size-capped; an oversized meta file surfaces as
-/// `MindError::MetadataTooLarge` rather than being read in full.
-fn lifecycle_frontmatter(meta: &Path, key: &str) -> Result<Option<String>> {
-    Ok(nonempty(frontmatter::file_field_capped(meta, key)?))
+fn lifecycle_frontmatter(meta_text: &str, key: &str) -> Option<String> {
+    nonempty(frontmatter::field(meta_text, key))
 }
 
 /// The hooks an item declares for itself, for an item whose root `mind.toml`
@@ -1067,27 +1092,50 @@ fn lifecycle_frontmatter(meta: &Path, key: &str) -> Result<Option<String>> {
 /// (HOOK-130), each as one required hook of its event.
 ///
 /// The two sites do not merge (HOOK-132). Only a directory-backed kind can
-/// carry an item manifest; an agent or rule IS its file and has no directory of
-/// its own to put one in.
-// spec: HOOK-131 HOOK-132
+/// carry an item manifest; an agent, rule, or command IS its file and has no
+/// directory of its own to put one in.
+///
+/// `Ok(None)` means "drop this item": its own `mind.toml` is unreadable as an
+/// item manifest, and a warning naming the file has been printed (DSC-98). The
+/// failure is scoped to the item rather than the scan, so one stray manifest in
+/// one source cannot take down `recall`/`probe`/`learn` for every melded
+/// source; dropping the item (rather than treating it as hook-free) keeps the
+/// HOOK-131 guarantee that a malformed manifest never degrades to "this item
+/// declares no hooks", since an item nobody is offered can run no hook.
+// spec: HOOK-131 HOOK-132 DSC-98
 fn item_declared_hooks(
-    root: &Path,
+    manifest_dir: Option<&Path>,
+    source: &Source,
     kind: ItemKind,
+    name: &str,
     path: &Path,
-    meta: &Path,
-) -> Result<Vec<ResolvedHook>> {
+    meta_text: &str,
+) -> Result<Option<Vec<ResolvedHook>>> {
     // HOOK-131: the source's own root `mind.toml` is never read as an item
     // manifest. An item may point AT the source root (`[[items]] path = "."`),
     // where the two files are the same file; reading it as an item manifest
     // would reject the source's own inventory as an unknown key.
     // `path.is_dir()`: a declared skill may point at its `SKILL.md` rather than
     // the directory holding it, and a file has no item manifest beside it.
-    if matches!(kind, ItemKind::Skill | ItemKind::Tool) && path.is_dir() && !same_dir(path, root) {
+    if matches!(kind, ItemKind::Skill | ItemKind::Tool)
+        && path.is_dir()
+        && !manifest_dir.is_some_and(|dir| same_dir(path, dir))
+    {
         let manifest_path = path.join("mind.toml");
-        if let Some(manifest) = crate::mindfile::ItemToml::load(path)? {
-            let hooks = manifest.resolved_hooks(&manifest_path)?;
-            if !hooks.is_empty() {
-                return Ok(hooks);
+        let loaded = crate::mindfile::ItemToml::load(path)
+            .and_then(|m| m.map(|m| m.resolved_hooks(&manifest_path)).transpose());
+        match loaded {
+            Ok(Some(hooks)) if !hooks.is_empty() => return Ok(Some(hooks)),
+            Ok(_) => {}
+            // spec: DSC-98
+            Err(e) => {
+                eprintln!(
+                    "warning: skipping {} '{}' in source '{}': {e}",
+                    kind.as_str(),
+                    crate::sanitize::strip_ansi(name),
+                    crate::sanitize::strip_ansi(&source.name)
+                );
+                return Ok(None);
             }
         }
     }
@@ -1097,7 +1145,7 @@ fn item_declared_hooks(
         ("update", HookEvent::Update),
         ("uninstall", HookEvent::Uninstall),
     ] {
-        if let Some(run) = lifecycle_frontmatter(meta, key)? {
+        if let Some(run) = lifecycle_frontmatter(meta_text, key) {
             out.push(ResolvedHook {
                 run,
                 name: None,
@@ -1106,7 +1154,7 @@ fn item_declared_hooks(
             });
         }
     }
-    Ok(out)
+    Ok(Some(out))
 }
 
 /// Whether two paths name the same directory, comparing canonicalized forms
@@ -1124,28 +1172,27 @@ fn nonempty(v: Option<String>) -> Option<String> {
 
 /// Resolve a tool's `bin`/`build`: an explicit `mind.toml` value wins, else the
 /// `TOOL.md` frontmatter value. Always `None` for a non-tool kind.
-///
-/// spec: DSC-91 -- the frontmatter fallback read is size-capped.
 fn tool_field(
     kind: ItemKind,
     explicit: Option<String>,
-    meta: &Path,
+    meta_text: &str,
     key: &str,
-) -> Result<Option<String>> {
+) -> Option<String> {
     if kind != ItemKind::Tool {
-        return Ok(None);
+        return None;
     }
     match explicit {
-        Some(v) => Ok(Some(v)),
-        None => frontmatter::file_field_capped(meta, key),
+        Some(v) => Some(v),
+        None => frontmatter::field(meta_text, key),
     }
 }
 
-/// Field overrides from a `[[items]]` declaration. Every field is empty for
-/// convention discovery (`make_item`); a `mind.toml` item supplies the ones it
-/// declares (`from_decl`). Each takes precedence over the frontmatter fallback.
+/// Field overrides from a `[[items]]` declaration, plus the per-item scan
+/// context. Every override field is empty for convention discovery
+/// (`make_item`); a `mind.toml` item supplies the ones it declares
+/// (`from_decl`). Each takes precedence over the frontmatter fallback.
 #[derive(Default)]
-struct ItemOverrides {
+struct ItemOverrides<'a> {
     description: Option<String>,
     link: Option<String>,
     bin: Option<String>,
@@ -1161,27 +1208,47 @@ struct ItemOverrides {
     /// means "not declared", which `resolve_ignores` fills from the source
     /// list; `Some(vec![])` is an explicit "no patterns" that overrides it.
     ignore: Option<Vec<String>>,
+    /// The directory whose `mind.toml` is the SOURCE's manifest, never an
+    /// item's (HOOK-131): an item whose path IS that directory
+    /// (`[[items]] path = "."`) must not have the source's own inventory read
+    /// as its item manifest.
+    ///
+    /// Not simply the clone root: a convention scan passes the SCAN root, which
+    /// is `clone_root.join(r)` for each `[source].roots` / `--root` entry, and
+    /// a plugin scan passes the plugin root. So the guard fires only when an
+    /// item sits at the root it was scanned from -- which is where the two
+    /// files could be the same file. `None` disables the guard entirely.
+    manifest_dir: Option<&'a Path>,
 }
 
 /// The single `CatalogItem` constructor: it applies the override-then-frontmatter
 /// fallback policy once, so convention discovery and `[[items]]` declarations
 /// share one definition of how each field is resolved.
 ///
-/// spec: DSC-91 -- every frontmatter read this performs on `meta` is
-/// size-capped; an oversized meta file (`SKILL.md`/`TOOL.md`/agent/rule `.md`)
-/// fails the scan with `MindError::MetadataTooLarge` instead of being read in
-/// full.
-#[allow(clippy::too_many_arguments)]
+/// `Ok(None)` means the item is dropped from the catalog with a warning already
+/// printed: today only DSC-98 (an unreadable item manifest) does that.
+///
+/// spec: DSC-91 -- the meta file (`SKILL.md`/`TOOL.md`/agent/rule/command
+/// `.md`) is read ONCE here, size-capped, and every frontmatter lookup below
+/// runs against that one text; an oversized meta file fails the scan with
+/// `MindError::MetadataTooLarge` instead of being read in full.
 fn build_item(
-    root: &Path,
     source: &Source,
     prefix: &Option<String>,
     kind: ItemKind,
     name: String,
     path: PathBuf,
     meta: &Path,
-    ov: ItemOverrides,
-) -> Result<CatalogItem> {
+    ov: ItemOverrides<'_>,
+) -> Result<Option<CatalogItem>> {
+    // L14: one capped read per item per scan. Each `frontmatter::field` call
+    // below parses this text rather than re-reading the file, so adding a key
+    // to the set an item may declare costs no additional I/O.
+    let meta_text = frontmatter::text_capped(meta)?;
+    // spec: DSC-99 -- an unprefixed source can spell a namespace into a bare
+    // name; say so once, at the single capture point, rather than letting it
+    // pass as an ordinary name in `recall`/`probe`.
+    warn_forged_namespace(source, prefix, kind, &name);
     // HOOK-132: exactly one declaration site supplies an item's hooks. A
     // `[[items]]` entry that declared any is authoritative and the caller passes
     // it here (`ItemDecl::resolved_item_hooks`: scalar shorthand folded ahead of
@@ -1189,17 +1256,24 @@ fn build_item(
     // its own directory manifest (HOOK-131) or its frontmatter (HOOK-130).
     let hooks = match ov.hooks {
         Some(hooks) => hooks,
-        None => item_declared_hooks(root, kind, &path, meta)?,
+        None => {
+            match item_declared_hooks(ov.manifest_dir, source, kind, &name, &path, &meta_text)? {
+                Some(hooks) => hooks,
+                // spec: DSC-98 -- the item's own manifest is unreadable; drop
+                // the item (warned) instead of the whole scan.
+                None => return Ok(None),
+            }
+        }
     };
     // DEP-4: read the `requires:` frontmatter scalar and split on whitespace.
     // This is always read from `meta` regardless of kind; absent or empty -> empty Vec.
-    let requires: Vec<String> = frontmatter::file_field_capped(meta, "requires")?
+    let requires: Vec<String> = frontmatter::field(&meta_text, "requires")
         .map(|s| s.split_whitespace().map(str::to_owned).collect())
         .unwrap_or_default();
     // NS-57: read the `expand:` frontmatter scalar the same way -- a
     // whitespace-split list of item-relative files to expand tokens in, even
     // though they are not markdown. Absent or empty -> empty Vec.
-    let expand: Vec<String> = frontmatter::file_field_capped(meta, "expand")?
+    let expand: Vec<String> = frontmatter::field(&meta_text, "expand")
         .map(|s| s.split_whitespace().map(str::to_owned).collect())
         .unwrap_or_default();
     // NS-56: a `description:` (or any other non-`name:` frontmatter field) may
@@ -1215,11 +1289,11 @@ fn build_item(
     // the raw-ANSI/bidi-override gap for the biggest funnel of source text.
     let description = match ov.description {
         Some(d) => Some(d),
-        None => frontmatter::description_capped(meta)?,
+        None => frontmatter::field(&meta_text, "description"),
     }
     .map(|d| namespace::flatten_display(&d))
     .map(|d| crate::sanitize::strip_ansi(&d));
-    Ok(CatalogItem {
+    Ok(Some(CatalogItem {
         kind,
         name,
         source: source.name.clone(),
@@ -1227,15 +1301,40 @@ fn build_item(
         path,
         description,
         link_rel: ov.link,
-        bin: tool_field(kind, ov.bin, meta, "bin")?,
-        build: tool_field(kind, ov.build, meta, "build")?,
+        bin: tool_field(kind, ov.bin, &meta_text, "bin"),
+        build: tool_field(kind, ov.build, &meta_text, "build"),
         requires,
         // spec: IGN-1 -- carried as declared; `resolve_ignores` fills a `None`
         // from the source-level list once the whole scan is in hand.
         ignore: ov.ignore,
         expand,
         hooks,
-    })
+    }))
+}
+
+/// Warn when an UNPREFIXED source produces a bare name carrying a `:` (L19).
+///
+/// A prefix component may not contain `:` (`namespace::is_safe_prefix_component`,
+/// NS-72), but an item name may: commands.md CMD-2/CMD-6 recommend the spelling
+/// for a command group (`commands/frontend:build.md`), so the character cannot
+/// simply be banned. The consequence is that an unprefixed source shipping
+/// `commands/acme:deploy.md` installs `acme:deploy`, which in `recall`/`probe`
+/// reads exactly like `deploy` from a source prefixed `acme`. Naming it at scan
+/// is the detection the identity itself cannot provide.
+///
+/// spec: DSC-99
+fn warn_forged_namespace(source: &Source, prefix: &Option<String>, kind: ItemKind, name: &str) {
+    if prefix.is_some() || !name.contains(':') {
+        return;
+    }
+    eprintln!(
+        "warning: {} '{}' in source '{}' has no namespace prefix, but its bare name contains \
+         ':', so it installs under a name a PREFIXED source would produce; check the source \
+         column in `mind recall` before trusting it",
+        kind.as_str(),
+        crate::sanitize::strip_ansi(name),
+        crate::sanitize::strip_ansi(&source.name)
+    );
 }
 
 /// Discover items by glob, relative to the repo root. Nested `sources` are
@@ -1373,9 +1472,11 @@ fn scan_convention(
 /// a convention-derived name comes from an arbitrary filename in the source
 /// tree, so one hostile file should not make an otherwise-good repo
 /// un-meldable. A warning is printed to stderr so the skip is not silent.
+/// `build_item` skips on the same terms when the item's own `mind.toml` is
+/// unreadable (DSC-98).
 ///
 /// spec: DSC-91 -- bubbles a size-cap failure from `build_item`'s capped
-/// frontmatter reads.
+/// frontmatter read.
 fn make_item(
     root: &Path,
     source: &Source,
@@ -1405,25 +1506,31 @@ fn make_item(
     }
     // Convention discovery carries no overrides: every field falls back to the
     // item's own declaration sites (HOOK-131/132: its directory manifest, else
-    // its frontmatter).
+    // its frontmatter). `root` is the scan root this item was found under, which
+    // is the one directory whose `mind.toml` could be the source's own.
     build_item(
-        root,
         source,
         prefix,
         kind,
         bare,
         path,
         meta,
-        ItemOverrides::default(),
+        ItemOverrides {
+            manifest_dir: Some(root),
+            ..ItemOverrides::default()
+        },
     )
-    .map(Some)
 }
 
-/// Scan a plugin root for skills and agents only (MKT-3).
+/// Scan a plugin root for the three components a plugin and `mind` share:
+/// skills, agents, and commands (MKT-3, MKT-18).
 ///
-/// A plugin's component layout matches `mind`'s convention layout (DSC-10, DSC-11):
-/// `skills/<name>/SKILL.md` -> Skill, `agents/<name>.md` -> Agent. Rules and tools
-/// have no plugin equivalent and are not emitted. The flat-skills knob and
+/// A plugin's component layout matches `mind`'s convention layout (DSC-10,
+/// DSC-11, DSC-14): `skills/<name>/SKILL.md` -> Skill, `agents/<name>.md` ->
+/// Agent, `commands/<name>.md` -> Command. Rules and tools have no plugin
+/// equivalent and are not emitted, and a plugin component with no `mind`
+/// equivalent (`hooks/`, `.mcp.json`, ...) is reported instead
+/// ([`plugin_skipped_components`], MKT-4). The flat-skills knob and
 /// `[source].roots` do not apply to a plugin.
 fn scan_plugin_components(
     plugin_root: &Path,
@@ -1683,9 +1790,13 @@ fn scan_marketplace_in_repo_plugins(
 /// manifest. This is a dir-based heuristic; commands.rs calls it at meld time
 /// and prints the summary via `SkippedComponents::summary`.
 ///
-/// spec: MKT-18 -- `commands/` is NOT counted: a plugin's commands map to the
-/// `command` kind and are installed, so reporting them as skipped would be a
-/// lie in the one message whose job is to say what was dropped.
+/// spec: MKT-18 -- a `commands/<name>.md` file is NOT counted: it maps to the
+/// `command` kind and is installed, so reporting it as skipped would be a lie
+/// in the one message whose job is to say what was dropped.
+/// spec: MKT-4 -- but a `commands/` entry that same scan does NOT map (it is
+/// flat and `.md`-only, CMD-2) is counted, so a nested
+/// `commands/frontend/component.md` or a `commands/do.sh` is reported rather
+/// than dropped in silence.
 pub fn plugin_skipped_components(plugin_root: &Path) -> plugin_manifest::SkippedComponents {
     let mut sc = plugin_manifest::SkippedComponents::default();
     if plugin_root.join("hooks").is_dir() {
@@ -1694,7 +1805,38 @@ pub fn plugin_skipped_components(plugin_root: &Path) -> plugin_manifest::Skipped
     if plugin_root.join(".mcp.json").is_file() {
         sc.mcp_servers = 1;
     }
+    sc.commands = unmapped_command_entries(&plugin_root.join(ItemKind::Command.dir()));
     sc
+}
+
+/// How many entries of a plugin's `commands/` directory the flat, `.md`-only
+/// command scan ([`scan_plugin_commands`]) leaves behind: every subdirectory
+/// (the nested `commands/<group>/<name>.md` layout the harness allows, CMD-2)
+/// and every non-`.md` file. One count per immediate entry, not per nested
+/// file: the entry is what the user sees in the repo.
+///
+/// A dot-prefixed entry (`.gitkeep`, `.DS_Store`) is not counted: it is not a
+/// component an author meant to publish, and reporting it as a dropped one
+/// would make the note noise. A read failure counts nothing either: this is a
+/// report, and it must not turn a permission error on one directory into a
+/// failed meld.
+// spec: MKT-4
+fn unmapped_command_entries(commands_dir: &Path) -> u32 {
+    let Ok(entries) = std::fs::read_dir(commands_dir) else {
+        return 0;
+    };
+    let mut n = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if file_name(&path).starts_with('.') {
+            continue;
+        }
+        let mapped = path.is_file() && path.extension().is_some_and(|e| e == "md");
+        if !mapped {
+            n += 1;
+        }
+    }
+    n
 }
 
 /// The file whose frontmatter describes an item (SKILL.md for a skill, TOOL.md
@@ -2810,6 +2952,8 @@ mod tests {
     #[test]
     fn is_confined_link_target_requires_a_kind_directory() {
         // spec: DSC-97
+        // The four original kind directories stay mutually interchangeable, so
+        // a rule may still surface under any of them (TOOL-4's cross-kind case).
         for ok in [
             "skills/x",
             "agents/x.md",
@@ -2817,11 +2961,92 @@ mod tests {
             "tools/x",
             "./rules/x.md",
         ] {
-            assert!(is_confined_link_target(ok), "{ok:?} should be accepted");
+            assert!(
+                is_confined_link_target(ok, ItemKind::Rule),
+                "{ok:?} should be accepted"
+            );
         }
         for bad in ["settings.json", "hooks/x.json", ".claude/settings.json", ""] {
-            assert!(!is_confined_link_target(bad), "{bad:?} should be rejected");
+            assert!(
+                !is_confined_link_target(bad, ItemKind::Rule),
+                "{bad:?} should be rejected"
+            );
         }
+    }
+
+    #[test]
+    fn only_a_command_may_link_into_the_commands_directory() {
+        // spec: DSC-97 -- a file under `commands/` is not inert: the harness
+        // offers it as `/<name>`. So the cross-kind allowance stops at that one
+        // directory; otherwise a source's rule (or skill, or tool) content
+        // becomes an invocable slash command a consumer who filtered their
+        // install to "rules only" never asked for.
+        for kind in [
+            ItemKind::Skill,
+            ItemKind::Agent,
+            ItemKind::Rule,
+            ItemKind::Tool,
+        ] {
+            assert!(
+                !is_confined_link_target("commands/deploy.md", kind),
+                "{kind:?} must not be able to link into commands/"
+            );
+        }
+        assert!(
+            is_confined_link_target("commands/deploy.md", ItemKind::Command),
+            "a command's own kind directory must still be allowed"
+        );
+        assert!(
+            is_confined_link_target("commands/frontend/component.md", ItemKind::Command),
+            "a command may still nest inside its own kind directory (CMD-2)"
+        );
+        // The reverse direction is unchanged: a command may surface under
+        // another kind directory, like any other item.
+        assert!(is_confined_link_target(
+            "rules/deploy.md",
+            ItemKind::Command
+        ));
+    }
+
+    #[test]
+    fn from_decl_rejects_a_non_command_linking_into_commands() {
+        // spec: DSC-97 -- the scan-level refusal, so the rejection happens
+        // before install ever runs, and the message says why.
+        let tmp = TmpDir::new();
+        let root = tmp.path();
+        let source = make_source_for(root);
+        let decl = ItemDecl {
+            kind: "rule".to_string(),
+            name: "style".to_string(),
+            path: "rules/style.md".to_string(),
+            link: Some("commands/deploy.md".to_string()),
+            description: None,
+            bin: None,
+            build: None,
+            install: None,
+            update: None,
+            uninstall: None,
+            hooks: Vec::new(),
+            ignore: None,
+        };
+        let err = from_decl(root, &source, &None, &decl).unwrap_err();
+        match &err {
+            MindError::MindToml { msg, .. } => assert!(
+                msg.contains("commands/"),
+                "the message must name the directory it refused: {msg}"
+            ),
+            other => panic!("expected a MindToml schema error, got: {other:?}"),
+        }
+        // The same declaration as a command is accepted.
+        let decl = ItemDecl {
+            kind: "command".to_string(),
+            path: "commands/deploy.md".to_string(),
+            ..decl
+        };
+        assert!(
+            from_decl(root, &source, &None, &decl).is_ok(),
+            "a command linking into commands/ must still be accepted"
+        );
     }
 
     #[test]
@@ -3221,7 +3446,9 @@ mod tests {
             ignore: None,
         };
         // The file need not exist; frontmatter reads return None for absent files.
-        let item = from_decl(root, &source, &None, &decl).unwrap();
+        let item = from_decl(root, &source, &None, &decl)
+            .unwrap()
+            .expect("a well-formed declaration is not dropped");
         assert_eq!(item.name, "style");
         assert_eq!(item.path, root.join("sub/dir/style.md"));
     }
@@ -4258,14 +4485,18 @@ mod plugin_tests {
     }
 
     // plugin_skipped_components counts the dirs with no mind equivalent (MKT-4),
-    // and no longer counts commands/, which now maps to the command kind.
+    // and no longer counts a mapped commands/<name>.md, which now installs as
+    // the command kind.
     #[test]
     fn plugin_skipped_components_counts_unsupported_dirs() {
         // spec: MKT-4 MKT-18
         let tmp = TmpDir::new();
         let plugin_root = tmp.path().join("my-plugin");
 
-        std::fs::create_dir_all(plugin_root.join("commands")).unwrap();
+        write_file(
+            &plugin_root.join("commands/review.md"),
+            "---\ndescription: review\n---\n",
+        );
         std::fs::create_dir_all(plugin_root.join("hooks")).unwrap();
         std::fs::write(plugin_root.join(".mcp.json"), "{}").unwrap();
 
@@ -4278,11 +4509,71 @@ mod plugin_tests {
         assert_eq!(
             skipped.total(),
             2,
-            "a commands/ dir must NOT be counted as skipped: {skipped:?}"
+            "a mapped commands/<name>.md must NOT be counted as skipped: {skipped:?}"
         );
         assert!(
             !skipped.summary().unwrap().contains("command"),
             "the skipped summary must not name commands: {skipped:?}"
+        );
+    }
+
+    // The other half of MKT-4 for commands: what the flat `.md` scan does not
+    // map is still a drop, so it must be counted.
+    #[test]
+    fn plugin_skipped_components_counts_nested_and_non_md_commands() {
+        // spec: MKT-4 MKT-18
+        let tmp = TmpDir::new();
+        let plugin_root = tmp.path().join("my-plugin");
+
+        // Mapped: installed as command:review, never reported as skipped.
+        write_file(
+            &plugin_root.join("commands/review.md"),
+            "---\ndescription: review\n---\n",
+        );
+        // Unmapped: a nested group directory (a layout the harness allows,
+        // CMD-2) and a non-markdown file.
+        write_file(
+            &plugin_root.join("commands/frontend/component.md"),
+            "---\ndescription: component\n---\n",
+        );
+        write_file(&plugin_root.join("commands/do.sh"), "#!/bin/sh\n");
+        // Not a component anyone meant to publish, so not a reported drop.
+        write_file(&plugin_root.join("commands/.gitkeep"), "");
+
+        let skipped = plugin_skipped_components(&plugin_root);
+        assert_eq!(
+            skipped.commands, 2,
+            "the nested dir and the .sh must both count; the .md and the \
+             dotfile must not: {skipped:?}"
+        );
+        assert_eq!(
+            skipped.total(),
+            2,
+            "nothing else is present to count: {skipped:?}"
+        );
+        let summary = skipped.summary().expect("a drop must be reported");
+        assert!(
+            summary.contains("2 unmapped commands/ entries"),
+            "the summary must name what was left behind: {summary}"
+        );
+    }
+
+    #[test]
+    fn plugin_with_no_commands_dir_reports_nothing_skipped() {
+        // spec: MKT-4
+        // The count is dir-based; an absent commands/ is not an error and not a
+        // drop (DSC-13).
+        let tmp = TmpDir::new();
+        let plugin_root = tmp.path().join("my-plugin");
+        write_file(
+            &plugin_root.join("skills/greet/SKILL.md"),
+            "---\ndescription: greet\n---\n",
+        );
+        let skipped = plugin_skipped_components(&plugin_root);
+        assert_eq!(skipped.commands, 0, "no commands/ dir -> nothing unmapped");
+        assert!(
+            skipped.summary().is_none(),
+            "a plugin with only supported components reports nothing: {skipped:?}"
         );
     }
 
@@ -5121,7 +5412,8 @@ mod lifecycle_tests {
         // spec: HOOK-86
         // For a convention-discovered tool, the TOOL.md install:/uninstall:
         // frontmatter scalars (DSC-21: the only form there) fold into the hook
-        // list AND populate the scalar fields.
+        // list, one required hook each. The list is the only representation;
+        // there are no separate scalar fields on the item any more.
         let base = tmp();
         let clone = base.join("sources/local/test/repo");
         write(
@@ -5410,10 +5702,59 @@ mod lifecycle_tests {
     }
 
     #[test]
-    fn item_directory_manifest_schema_error_fails_the_scan() {
-        // spec: HOOK-131
+    fn item_directory_manifest_schema_error_drops_only_that_item() {
+        // spec: HOOK-131 DSC-98
         // A malformed item manifest must not degrade to "this item declares no
-        // hooks": it exists only to declare code that will run on the host.
+        // hooks": it exists only to declare code that will run on the host. So
+        // the item is dropped -- an item nobody is offered can run no hook --
+        // while the rest of the source still scans. Both failure modes of the
+        // item's own manifest behave alike: an unknown hook event and a key
+        // outside `[[hooks]]`.
+        let base = tmp();
+        let clone = base.join("sources/local/test/repo");
+        write(
+            &clone.join("skills/scanner/SKILL.md"),
+            "---\ndescription: scanner\ninstall: frontmatter-install\n---\n# scanner\n",
+        );
+        write(
+            &clone.join("skills/scanner/mind.toml"),
+            "[[hooks]]\nrun = \"setup.sh\"\nevent = \"whenever\"\n",
+        );
+        write(
+            &clone.join("skills/pasted/SKILL.md"),
+            "---\ndescription: pasted\n---\n# pasted\n",
+        );
+        write(
+            &clone.join("skills/pasted/mind.toml"),
+            "[source]\ndescription = \"a source manifest copied into an item dir\"\n",
+        );
+        write(
+            &clone.join("skills/healthy/SKILL.md"),
+            "---\ndescription: healthy\n---\n# healthy\n",
+        );
+        let paths = Paths {
+            mind_home: base.clone(),
+            claude_home: base.join("claude"),
+        };
+        let mut items = Vec::new();
+        scan_source(&paths, &source_for(&clone), &mut items)
+            .expect("one unreadable item manifest must not fail the scan");
+        let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["healthy"],
+            "both items with an unreadable manifest must be dropped, and only those: {names:?}"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_declared_item_with_an_unreadable_manifest_is_dropped_too() {
+        // spec: DSC-98
+        // The drop is not a convention-scan special case: an item declared in
+        // an authoritative `[[items]]` entry that says nothing about hooks
+        // still reads its own directory manifest, so it is dropped on the same
+        // terms and the rest of the declared inventory survives.
         let base = tmp();
         let clone = base.join("sources/local/test/repo");
         write(
@@ -5422,19 +5763,113 @@ mod lifecycle_tests {
         );
         write(
             &clone.join("skills/scanner/mind.toml"),
-            "[[hooks]]\nrun = \"setup.sh\"\nevent = \"whenever\"\n",
+            "[discover]\nskills = { include = [\"*/SKILL.md\"] }\n",
+        );
+        write(
+            &clone.join("skills/other/SKILL.md"),
+            "---\ndescription: other\n---\n# other\n",
+        );
+        write(
+            &clone.join("mind.toml"),
+            concat!(
+                "[[items]]\n",
+                "kind = \"skill\"\n",
+                "name = \"scanner\"\n",
+                "path = \"skills/scanner\"\n",
+                "\n",
+                "[[items]]\n",
+                "kind = \"skill\"\n",
+                "name = \"other\"\n",
+                "path = \"skills/other\"\n",
+            ),
         );
         let paths = Paths {
             mind_home: base.clone(),
             claude_home: base.join("claude"),
         };
         let mut items = Vec::new();
-        let err = scan_source(&paths, &source_for(&clone), &mut items)
-            .expect_err("an unknown event must fail the scan");
-        assert!(
-            err.to_string().contains("whenever"),
-            "the error must name the bad value: {err}"
+        scan_source(&paths, &source_for(&clone), &mut items)
+            .expect("the declared inventory must still scan");
+        let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, vec!["other"], "got: {names:?}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn tool_directory_manifest_declares_hooks_and_beats_frontmatter() {
+        // spec: HOOK-131 HOOK-132
+        // HOOK-131 names a skill OR a tool. A tool needs no anchor file, so its
+        // directory manifest is the one place a convention-discovered tool with
+        // no TOOL.md can declare a hook at all -- and when it has both, the
+        // manifest REPLACES the frontmatter scalars rather than merging.
+        let base = tmp();
+        let clone = base.join("sources/local/test/repo");
+        write(
+            &clone.join("tools/helper/TOOL.md"),
+            "---\ndescription: helper\ninstall: frontmatter-install\nuninstall: frontmatter-uninstall\n---\n# helper\n",
         );
+        write(&clone.join("tools/helper/helper"), "#!/bin/sh\n");
+        write(
+            &clone.join("tools/helper/mind.toml"),
+            "[[hooks]]\nrun = \"manifest-build\"\nname = \"Build it\"\noptional = true\n",
+        );
+        let paths = Paths {
+            mind_home: base.clone(),
+            claude_home: base.join("claude"),
+        };
+        let mut items = Vec::new();
+        scan_source(&paths, &source_for(&clone), &mut items).unwrap();
+        let tool = items.iter().find(|i| i.name == "helper").unwrap();
+        assert_eq!(tool.kind, ItemKind::Tool);
+        assert_eq!(
+            tool.hooks.len(),
+            1,
+            "the manifest replaces the TOOL.md scalars: {:?}",
+            tool.hooks
+        );
+        assert_eq!(tool.install_hooks()[0].run, "manifest-build");
+        assert!(tool.install_hooks()[0].optional);
+        assert_eq!(tool.install_hooks()[0].label(), "Build it");
+        assert!(
+            tool.uninstall_hooks().is_empty(),
+            "the frontmatter uninstall: must not survive the replacement"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_declared_tool_falls_through_to_its_tool_md_scalars() {
+        // spec: HOOK-130 HOOK-132
+        // A `[[items]]` entry silent about hooks does NOT suppress the item's
+        // own sites, so a declared tool's TOOL.md `install:`/`uninstall:` are
+        // real hooks that will be offered for execution. Before HOOK-130 they
+        // populated display-only fields on such an item and never ran, so this
+        // is the pin on that change of effect.
+        let base = tmp();
+        let clone = base.join("sources/local/test/repo");
+        write(
+            &clone.join("tools/helper/TOOL.md"),
+            "---\ndescription: helper\ninstall: make setup\nuninstall: make cleanup\n---\n# helper\n",
+        );
+        write(&clone.join("tools/helper/helper"), "#!/bin/sh\n");
+        write(
+            &clone.join("mind.toml"),
+            concat!(
+                "[[items]]\n",
+                "kind = \"tool\"\n",
+                "name = \"helper\"\n",
+                "path = \"tools/helper\"\n",
+            ),
+        );
+        let paths = Paths {
+            mind_home: base.clone(),
+            claude_home: base.join("claude"),
+        };
+        let mut items = Vec::new();
+        scan_source(&paths, &source_for(&clone), &mut items).unwrap();
+        let tool = items.iter().find(|i| i.name == "helper").unwrap();
+        assert_eq!(tool.install_hooks()[0].run, "make setup");
+        assert_eq!(tool.uninstall_hooks()[0].run, "make cleanup");
         let _ = std::fs::remove_dir_all(&base);
     }
 

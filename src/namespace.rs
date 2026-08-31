@@ -302,7 +302,8 @@ pub(crate) fn is_safe_prefix_component(prefix: &str) -> bool {
 /// Validate that `prefix` is safe to use as a namespace prefix (NS-25, NS-28, NS-29).
 ///
 /// Rejects any prefix that:
-/// - is a reserved item-kind word (`skill`, `agent`, `rule`, `tool`; NS-25), or
+/// - is a reserved item-kind word (`skill`, `agent`, `rule`, `command`, `tool`;
+///   NS-25), or
 /// - is in the extended reserved list (NS-29), or
 /// - is not a single safe path component (NS-28).
 ///
@@ -638,9 +639,9 @@ fn parse_install_path(path: &str) -> Option<(crate::error::ItemKind, String, Str
     let mut seg = tail.splitn(2, '/');
     let first = seg.next()?;
     let rest = seg.next().unwrap_or("").to_string();
-    // An agent/rule file is `<name>.md`; the store copies it as a bare `<name>`,
-    // so stripping a `.md` suffix is correct for both layouts and a no-op for the
-    // store form.
+    // An agent/rule/command file is `<name>.md`; the store copies it as a bare
+    // `<name>`, so stripping a `.md` suffix is correct for both layouts and a
+    // no-op for the store form.
     let name = match kind {
         crate::error::ItemKind::Agent
         | crate::error::ItemKind::Rule
@@ -2249,6 +2250,56 @@ mod tests {
         // A recognized layout naming no sibling is OtherItem with no suggestion.
         assert_eq!(found[3].kind, HardcodedKind::OtherItem);
         assert_eq!(found[3].suggestion, None);
+    }
+
+    #[test]
+    fn parse_install_path_strips_md_suffix_for_agent_rule_and_command() {
+        // spec: M17 -- the `ItemKind::Command` arm of `parse_install_path`'s
+        // `.md`-stripping match had no test. Reverting it (falling into the
+        // `_ => first.to_string()` arm) would leave a command's parsed name as
+        // `deploy.md`, which never matches a sibling bare name, so the
+        // `{{ns:}}` rewrite would silently skip. Cover both the lobe spelling
+        // (`~/.claude/<dir>/<name>.md`) and the store spelling
+        // (`~/.mind/store/<kind>/<name>`, already suffixless), alongside the
+        // agent/rule cases the same match arm shares.
+        for (kind, dir) in [
+            (ItemKind::Agent, "agents"),
+            (ItemKind::Rule, "rules"),
+            (ItemKind::Command, "commands"),
+        ] {
+            let lobe = format!("~/.claude/{dir}/deploy.md");
+            assert_eq!(
+                parse_install_path(&lobe),
+                Some((kind, "deploy".to_string(), String::new())),
+                "lobe spelling for {kind:?}"
+            );
+            let store = format!("~/.mind/store/{}/deploy", kind.as_str());
+            assert_eq!(
+                parse_install_path(&store),
+                Some((kind, "deploy".to_string(), String::new())),
+                "store spelling for {kind:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn token_for_path_maps_command_lobe_and_store_spellings() {
+        // spec: M17 -- exercises `token_for_path`/`parse_install_path` for a
+        // real `Command` sibling through both the lobe and the store path
+        // spellings mirrored by `rewrite_hardcoded_paths`. If the `Command` arm
+        // stopped stripping `.md`, the parsed name `deploy.md` would never
+        // match the sibling's bare `deploy` and neither path would rewrite.
+        let store = Path::new("/m/store");
+        let none = None;
+        let sibs = vec![psib(ItemKind::Command, "deploy", None)];
+        let c = ctx(store, &none, ItemKind::Skill, "review", &sibs);
+        let (out, n) = rewrite_hardcoded_paths(
+            "lobe ~/.claude/commands/deploy.md store ~/.mind/store/command/deploy",
+            &c,
+        );
+        assert_eq!(n, 2, "{out}");
+        assert!(out.contains("lobe {{path:command:deploy}}"), "{out}");
+        assert!(out.contains("store {{path:command:deploy}}"), "{out}");
     }
 
     #[test]

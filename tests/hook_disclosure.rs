@@ -10,6 +10,7 @@
 //! the unit tests in src/hook.rs and src/source.rs, which together prove the
 //! full derivation and sanitization logic without requiring network access.
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -73,6 +74,40 @@ impl Sandbox {
 
     fn source_spec(&self) -> String {
         self.source.to_string_lossy().into_owned()
+    }
+
+    /// Like [`Sandbox::mind`], but with extra environment variables and a
+    /// piped stdin body: `MIND_TTY=1` (HOOK-109) plus a scripted reply is how
+    /// a headless test reaches the interactive consent branches, which
+    /// `Sandbox::mind` (stdin at `/dev/null`, no override) never takes.
+    fn mind_env_stdin(&self, args: &[&str], envs: &[(&str, &str)], stdin: &str) -> Run {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_mind"));
+        cmd.args(args)
+            .env("MIND_HOME", &self.mind_home)
+            .env("CLAUDE_HOME", &self.claude_home)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .stdin(Stdio::piped());
+        for (key, value) in envs {
+            cmd.env(key, value);
+        }
+        let mut child = cmd.spawn().expect("spawn mind");
+        child
+            .stdin
+            .take()
+            .expect("piped stdin")
+            .write_all(stdin.as_bytes())
+            .expect("write stdin");
+        let out = child.wait_with_output().expect("run mind");
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        let combined = format!("{stdout}{stderr}");
+        Run {
+            stdout,
+            stderr,
+            success: out.status.success(),
+            combined,
+        }
     }
 }
 
@@ -196,4 +231,100 @@ fn browse_url_method_produces_tree_url_for_github_host() {
     // Confirm the binary is functional
     let recall = sb.mind(&["recall", "--sources"]);
     assert!(recall.success, "recall --sources must succeed after meld");
+}
+
+// ---------------------------------------------------------------------------
+// HOOK-51, HOOK-120: an item's own lifecycle hook disclosure names its event
+// on a dedicated `Event:` line and shows the hook's declared `name`, exactly
+// as a source-level hook's disclosure does, rather than smuggling the event
+// into the `Pin:` field (which is documented as the resolved branch/tag/ref)
+// or dropping the hook's name.
+// ---------------------------------------------------------------------------
+
+// spec: HOOK-51 HOOK-120
+#[test]
+fn item_update_hook_disclosure_names_event_and_label() {
+    let sb = Sandbox::new("item-upd-disc");
+    init_source(&sb.source);
+    sb.write_and_commit(
+        "skills/scanner/SKILL.md",
+        "---\ndescription: scanner\n---\n# scanner\n",
+    );
+    // HOOK-131: the skill's own scoped mind.toml declares one required install
+    // hook, named, so a later re-install (learn) runs it without prompting.
+    sb.write_and_commit(
+        "skills/scanner/mind.toml",
+        "[[hooks]]\nrun = \"true\"\nname = \"Install step\"\n",
+    );
+
+    let spec = sb.source_spec();
+    assert!(sb.mind(&["meld", &spec]).success, "meld must succeed");
+    let learn = sb.mind(&["learn", "scanner", "--dangerously-skip-install-hook-check"]);
+    assert!(learn.success, "learn: {}\n{}", learn.stdout, learn.stderr);
+
+    // Add a named UPDATE hook, distinct from the install one (a distinct `run`
+    // command, not just `true` again: `hooks run`'s already-ran filter matches
+    // on the command string plus the item's recorded commit, HOOK-110, and a
+    // shared command would false-positive as already run), and advance the
+    // source (mind's clone tracks a recorded commit, so a `sync` is needed for
+    // the new hook to be visible, as in the HOOK-131/133 update-hook tests).
+    sb.write_and_commit(
+        "skills/scanner/mind.toml",
+        concat!(
+            "[[hooks]]\n",
+            "run = \"true\"\n",
+            "name = \"Install step\"\n",
+            "\n",
+            "[[hooks]]\n",
+            "run = \"true # set-up\"\n",
+            "name = \"Set up\"\n",
+            "event = \"update\"\n",
+        ),
+    );
+    assert!(sb.mind(&["sync"]).success, "sync must succeed");
+
+    // Interactively run the item's update hook (MIND_TTY=1, scripted "y"), so
+    // the disclosure this test inspects is the one actually shown before the
+    // hook runs.
+    let result = sb.mind_env_stdin(
+        &["hooks", "run", "--event", "update", "item-upd-disc#scanner"],
+        &[("MIND_TTY", "1")],
+        "y\n",
+    );
+    assert!(
+        result.success,
+        "interactive update hook run must succeed: {}\n{}",
+        result.stdout, result.stderr
+    );
+
+    // M1: the disclosure must name the event on its own `Event:` line, not
+    // inside `Pin:` (which is reserved for the resolved branch/tag/ref).
+    assert!(
+        result.combined.contains("Event:     update"),
+        "the item update hook disclosure must name its own event on a \
+         dedicated Event: line: {}",
+        result.combined
+    );
+    assert!(
+        !result.combined.contains("(per-item update)"),
+        "the event must not be smuggled into the Pin: field: {}",
+        result.combined
+    );
+    // M1: the disclosure must show the hook's declared name (HOOK-51).
+    assert!(
+        result.combined.contains("Set up"),
+        "the item update hook disclosure must show the hook's declared \
+         name: {}",
+        result.combined
+    );
+
+    // M17: the progress line names the event and the item's display key.
+    assert!(
+        result
+            .combined
+            .contains("running update hook for skill:scanner"),
+        "the progress line must read 'running update hook for \
+         skill:scanner': {}",
+        result.combined
+    );
 }

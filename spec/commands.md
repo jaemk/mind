@@ -50,6 +50,13 @@ guide recommend a skill for new items.
   `commands/<group>:<name>.md`; one that wants to keep a nested directory
   reaches it with a `[[items]]` entry (with a `link` when the subdirectory
   itself must be preserved) or a `[discover].commands` glob.
+
+  The group segment must not be a reserved kind word (`skill`, `agent`, `rule`,
+  `command`, `tool`): the item-ref parser reads a pre-colon token as a KIND
+  when it parses as one, so `commands/tool:build.md` installs correctly but is
+  unaddressable as `tool:build` (parsed as kind `tool`, name `build`, failing
+  with an error naming `build`, a string the user never typed); only the
+  fully kind-qualified `command:tool:build` resolves it.
 - `CMD-3` A command's description comes from the top-level `description` in its
   own frontmatter, as for an agent or rule (DSC-20). A harness's other command
   frontmatter keys (`argument-hint`, `allowed-tools`, `model`) are content:
@@ -69,18 +76,26 @@ guide recommend a skill for new items.
   a tool (TOOL-3) it is discovered by the harness, and unlike an agent (NS-40) it
   is linked under its effective name, not a frontmatter-declared one.
 - `CMD-6` A namespace prefix applies to a command as to any kind: the effective
-  name is `<prefix>:<name>` and the link is `commands/<prefix>:<name>.md`, so the
-  harness offers the command as `/<prefix>:<name>`. This is verified behavior,
-  not an inference: a colon in a command file's name is accepted, through a
-  symlink as `mind` installs it, and the resulting command carries the colon in
-  its invoked name. The spelling is the harness's own for a namespaced command
-  (`/<plugin>:<skill>` for a plugin skill, `/<dir>:<name>` for a grouped
-  command), so a prefixed command reads naturally at the prompt rather than as a
-  mangled name. A command's stable identity is `(source, kind, bare_name)`, so a
-  prefix change is a rename matched on identity by `upgrade`/`introspect`
-  (namespacing.md, lifecycle.md). A bare name that already contains a colon
-  (`commands/frontend:component.md`, CMD-2) is carried through unchanged and
-  composes with a prefix as `<prefix>:<group>:<name>`.
+  name is `<prefix>:<name>` and the link is `commands/<prefix>:<name>.md`, so
+  the harness is expected to offer the command as `/<prefix>:<name>`. The
+  single-colon case was verified against a live session: a colon in a command
+  file's name is accepted, through a symlink as `mind` installs it, and the
+  resulting command carries the colon in its invoked name. `mind` cannot verify
+  harness pickup on an ongoing basis: it installs the file and the symlink and
+  nothing more, so if this behavior ever changes, every namespaced command
+  would silently disappear from the prompt while `mind recall` keeps reporting
+  it installed and healthy. Check with `/help` in Claude Code, which lists the
+  command under its colon name. The spelling is the harness's own for a
+  namespaced command (`/<plugin>:<skill>` for a plugin skill, `/<dir>:<name>`
+  for a grouped command), so a prefixed command is expected to read naturally
+  at the prompt rather than as a mangled name. A command's stable identity is
+  `(source, kind, bare_name)`, so a prefix change is a rename matched on
+  identity by `upgrade`/`introspect` (namespacing.md, lifecycle.md). A bare
+  name that already contains a colon (`commands/frontend:component.md`,
+  CMD-2) is carried through unchanged by `mind`'s own linking and composes
+  with a prefix as `<prefix>:<group>:<name>` on disk; this double-colon
+  composition has NOT been verified against a live session, unlike the
+  single-colon case above.
 - `CMD-7` The harness presets (HARN-4: gemini, codex, universal, windsurf) admit
   skills only, so they are unchanged by this kind: a command links into the
   default Claude lobe and into any lobe whose `kinds` filter names `command`. A
@@ -95,9 +110,14 @@ guide recommend a skill for new items.
   frontmatter scalars (HOOK-80, HOOK-130), ignore patterns (IGN-1), `absorb`
   (whose convention path for the kind is `commands/<name>.md`), `dump`,
   `review`, `probe`/`recall` listing, and unmanaged-item detection in a lobe's
-  `commands/` directory (UNM-1). A `[[items]].link` for a command is confined to
-  a kind directory like any other link (DSC-97), with `commands/` now among
-  them.
+  `commands/` directory (UNM-1). Both `absorb` and unmanaged-item detection see
+  only the immediate `.md` children of a lobe's `commands/` directory, matching
+  the flat, non-recursive convention scan (CMD-2): a grouped layout on the
+  consumer side (`~/.claude/commands/frontend/component.md`) is not walked into,
+  so it is invisible to `recall`'s unmanaged listing and `mind absorb
+  frontend:component` fails as not found. A `[[items]].link` for a command is
+  confined to a kind directory like any other link (DSC-97), with `commands/`
+  now among them.
 - `CMD-9` `command` stays a reserved namespace prefix. It was already reserved
   against a future kind (NS-29); it is now reserved as an actual kind word
   (NS-25). The rejection and its error are unchanged, so no existing source's

@@ -1720,6 +1720,213 @@ fn hostile_discover_glob_error_is_sanitized_and_names_the_dsc81_rejection() {
 }
 
 #[test]
+fn a_stray_item_manifest_drops_its_item_not_every_melded_source() {
+    // spec: DSC-98
+    // An item directory's `mind.toml` is read on every catalog walk, so a
+    // source that ships one mind cannot read must not take `probe`/`recall`
+    // down for every OTHER melded source, the way a hard scan failure would.
+    let sb = melded();
+    let stray = Sandbox::bare("stray-item-manifest");
+    stray.write_and_commit(
+        "skills/vendored/SKILL.md",
+        "---\nname: vendored\ndescription: a vendored sub-source\n---\n# vendored\n",
+    );
+    // A whole source manifest copied into a skill directory: `[source]` and
+    // `[[items]]` are outside the item schema, whose only table is `[[hooks]]`.
+    stray.write_and_commit(
+        "skills/vendored/mind.toml",
+        "[source]\ndescription = \"a source manifest in an item dir\"\n",
+    );
+    stray.write_and_commit(
+        "skills/healthy/SKILL.md",
+        "---\nname: healthy\ndescription: a normal sibling\n---\n# healthy\n",
+    );
+    let meld = sb.mind(&["meld", &stray.source_spec(), "--register-only"]);
+    assert!(
+        meld.success,
+        "one unreadable item manifest must not fail the meld: {} {}",
+        meld.stdout, meld.stderr
+    );
+
+    let probe = sb.mind(&["probe"]);
+    assert!(
+        probe.success,
+        "probe must still run: {} {}",
+        probe.stdout, probe.stderr
+    );
+    assert!(
+        probe.stdout.contains("skill:review"),
+        "the other source's items must still be listed: {}",
+        probe.stdout
+    );
+    assert!(
+        probe.stdout.contains("skill:healthy"),
+        "the stray source's other items must still be listed: {}",
+        probe.stdout
+    );
+    assert!(
+        !probe.stdout.contains("vendored"),
+        "the item with the unreadable manifest must not be offered: {}",
+        probe.stdout
+    );
+    // The drop is not silent, and the warning names the file to open and the
+    // rule it broke.
+    assert!(
+        probe.stderr.contains("vendored") && probe.stderr.contains("mind.toml"),
+        "the warning must name the item and its manifest: {}",
+        probe.stderr
+    );
+    assert!(
+        probe.stderr.contains("[[hooks]]"),
+        "the warning must name the one-table rule (HOOK-131): {}",
+        probe.stderr
+    );
+
+    // recall is the other read-only verb that walks every source.
+    let recall = sb.mind(&["recall"]);
+    assert!(recall.success, "recall must still run: {}", recall.stderr);
+
+    // And the hook-executing path is not blocked for anything else: the
+    // dropped item is simply unresolvable, its sibling installs normally.
+    let learn_dropped = sb.mind(&["learn", "vendored", "--yes"]);
+    assert!(
+        !learn_dropped.success,
+        "a dropped item must not be installable: {}",
+        learn_dropped.stdout
+    );
+    let learn_ok = sb.mind(&["learn", "healthy", "--yes"]);
+    assert!(
+        learn_ok.success,
+        "a healthy sibling must still install: {} {}",
+        learn_ok.stdout, learn_ok.stderr
+    );
+}
+
+#[test]
+fn hostile_item_manifest_parse_error_is_sanitized() {
+    // spec: DSC-95 DSC-98
+    // A raw ESC byte in a TOML file is itself a parse error, so the `toml`
+    // crate's annotated snippet (which quotes the offending line verbatim) is
+    // the guaranteed path for that byte to reach a terminal. With DSC-98 that
+    // path runs on `probe`, a verb the user did not point at any source.
+    let sb = melded();
+    let hostile = Sandbox::bare("hostile-item-manifest");
+    hostile.write_and_commit(
+        "skills/trap/SKILL.md",
+        "---\nname: trap\ndescription: trap\n---\n# trap\n",
+    );
+    hostile.write_and_commit(
+        "skills/trap/mind.toml",
+        "\u{1b}[31mINJ\u{1b}[0m\u{202E} = broken\n",
+    );
+    assert!(
+        sb.mind(&["meld", &hostile.source_spec(), "--register-only"])
+            .success
+    );
+
+    let probe = sb.mind(&["probe"]);
+    assert!(probe.success, "probe must still run: {}", probe.stderr);
+    assert!(
+        !probe.stderr.contains('\x1b') && !probe.stderr.contains('\u{202E}'),
+        "the quoted input line must be echoed stripped: {:?}",
+        probe.stderr
+    );
+    // Stripped, not dropped: the text that identifies the offending line is
+    // still there.
+    assert!(
+        probe.stderr.contains("INJ"),
+        "the sanitized snippet must still be shown: {:?}",
+        probe.stderr
+    );
+    assert!(
+        !probe.stdout.contains("trap"),
+        "the item must be dropped: {}",
+        probe.stdout
+    );
+}
+
+#[test]
+fn hostile_root_mind_toml_parse_error_is_sanitized() {
+    // spec: DSC-95
+    // The root manifest's parse error quotes the offending input line the same
+    // way an item manifest's does, and it is reached on the meld of any source
+    // whose `mind.toml` does not parse.
+    let sb = Sandbox::bare("hostile-root-manifest");
+    sb.write_and_commit("mind.toml", "\u{1b}[31mINJ\u{1b}[0m\u{202E} = broken\n");
+    let meld = sb.mind(&["meld", &sb.source_spec()]);
+    assert!(!meld.success, "an unparsable mind.toml must be refused");
+    assert!(
+        meld.stderr.contains("invalid mind.toml"),
+        "the failure must name the file it could not parse: {}",
+        meld.stderr
+    );
+    assert!(
+        !meld.stderr.contains('\x1b') && !meld.stderr.contains('\u{202E}'),
+        "the quoted input line must be echoed stripped: {:?}",
+        meld.stderr
+    );
+    assert!(
+        meld.stderr.contains("INJ"),
+        "the sanitized snippet must still be shown: {:?}",
+        meld.stderr
+    );
+}
+
+#[test]
+fn an_unprefixed_source_shipping_a_colon_name_is_warned_about() {
+    // spec: DSC-99
+    // `:` is legal in an item name (CMD-2/CMD-6 recommend it for a command
+    // group) but illegal in a prefix (NS-72), so an unprefixed source can spell
+    // a name that is indistinguishable from a prefixed source's item. Naming it
+    // at scan is the only detection available.
+    let sb = Sandbox::bare("forged-namespace");
+    sb.write_and_commit(
+        "commands/acme:deploy.md",
+        "---\ndescription: deploy the thing\n---\n# deploy\n",
+    );
+    let meld = sb.mind(&["meld", &sb.source_spec(), "--register-only"]);
+    assert!(meld.success, "the item is still offered: {}", meld.stderr);
+
+    let probe = sb.mind(&["probe"]);
+    assert!(probe.success, "{}", probe.stderr);
+    assert!(
+        probe.stdout.contains("command:acme:deploy"),
+        "the name installs as written, warning or not: {}",
+        probe.stdout
+    );
+    assert!(
+        probe.stderr.contains("acme:deploy") && probe.stderr.contains("no namespace prefix"),
+        "the scan must warn that an unprefixed source spelled a namespace: {}",
+        probe.stderr
+    );
+
+    // A source that IS prefixed produces the same shape legitimately, and must
+    // not be warned about.
+    let prefixed = Sandbox::bare("real-namespace");
+    prefixed.write_and_commit("mind.toml", "[source]\nprefix = \"acme\"\n");
+    prefixed.write_and_commit(
+        "commands/deploy.md",
+        "---\ndescription: deploy the thing\n---\n# deploy\n",
+    );
+    let sb2 = Sandbox::bare("consumer");
+    assert!(
+        sb2.mind(&["meld", &prefixed.source_spec(), "--register-only"])
+            .success
+    );
+    let probe2 = sb2.mind(&["probe"]);
+    assert!(
+        probe2.stdout.contains("command:acme:deploy"),
+        "the prefixed source produces the same effective name: {}",
+        probe2.stdout
+    );
+    assert!(
+        !probe2.stderr.contains("no namespace prefix"),
+        "a real prefix must not be warned about: {}",
+        probe2.stderr
+    );
+}
+
+#[test]
 fn learn_still_resolves_an_item_when_another_source_is_gone() {
     // spec: CLI-213 -- `learn`'s item resolution is named explicitly in the
     // spec as one of the three degrading call sites, and nothing drove it: a
@@ -9369,7 +9576,7 @@ fn example_starter_convention_discovery() {
     let meld = sb.mind(&["meld", &sb.source_spec()]);
     assert!(meld.success, "{}", meld.stderr);
 
-    // probe falls back to the listing on a non-TTY (piped) stdout; all three
+    // probe falls back to the listing on a non-TTY (piped) stdout; the
     // convention items appear with their kinds.
     let probe = sb.mind(&["probe"]);
     assert!(probe.success, "{}", probe.stderr);
@@ -18494,13 +18701,16 @@ fn review_lists_item_install_and_uninstall_hooks() {
         all.contains("item-hook"),
         "review must emit item-hook advisories: {all}"
     );
+    // The advisory carries the required/optional distinction, as the source
+    // hook loop's does: an optional item hook must not read identically to a
+    // required one on the surface whose job is pre-install disclosure.
     assert!(
-        all.contains("declares an install hook"),
-        "review must list the install hook: {all}"
+        all.contains("declares a required install hook"),
+        "review must list the install hook and whether it is required: {all}"
     );
     assert!(
-        all.contains("declares an uninstall hook"),
-        "review must list the uninstall hook: {all}"
+        all.contains("declares a required uninstall hook"),
+        "review must list the uninstall hook and whether it is required: {all}"
     );
 }
 
@@ -24302,10 +24512,11 @@ fn example_marketplace_curator_validates() {
 fn marketplace_plugin_with_only_unsupported_components() {
     // spec: MKT-3, MKT-4, MKT-18
     // A plugin with no skills, agents, or commands (only hooks/, plus a
-    // non-markdown file under commands/) succeeds on meld, prints a
-    // skipped-components note, and contributes zero items to probe. The `.sh`
-    // is the point: the command scan takes `<name>.md` files only, so a
-    // script parked in commands/ is not an item.
+    // non-markdown file and a nested group under commands/) succeeds on meld,
+    // prints a skipped-components note, and contributes zero items to probe.
+    // The `.sh` and the subdirectory are the point: the command scan takes flat
+    // `<name>.md` files only, so neither is an item -- and neither may be
+    // dropped in silence, so both are counted as unmapped commands/ entries.
     let sb = Sandbox::bare("no-items-plugin");
     sb.write_and_commit(
         ".claude-plugin/plugin.json",
@@ -24313,6 +24524,10 @@ fn marketplace_plugin_with_only_unsupported_components() {
     );
     sb.write_and_commit("hooks/post.sh", "#!/bin/sh\n");
     sb.write_and_commit("commands/do.sh", "#!/bin/sh\n");
+    sb.write_and_commit(
+        "commands/frontend/component.md",
+        "---\ndescription: nested\n---\n# component\n",
+    );
 
     let spec = sb.source_spec();
     let r = sb.mind(&["meld", &spec]);
@@ -24326,6 +24541,11 @@ fn marketplace_plugin_with_only_unsupported_components() {
     assert!(
         combined.contains("not installed (no mind equivalent)"),
         "meld must print the skipped-components note: {combined}"
+    );
+    assert!(
+        combined.contains("2 unmapped commands/ entries"),
+        "the note must count the commands/ entries the flat .md scan left \
+         behind, or MKT-4's 'never a silent drop' is false: {combined}"
     );
 
     // Since this is the only melded source, probe must have no item lines.

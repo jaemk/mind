@@ -78,15 +78,16 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   glyph and an explicit guidance line instead of a `melded <repo> (0 item(s))`
   line that reads identically to a legitimate empty source. The guidance names
   the convention paths (`skills/<name>/SKILL.md`, `agents/<name>.md`,
-  `rules/<name>.md`, `commands/<name>.md`, `tools/<name>/`) and the three escapes (`--root <dir>`,
-  `--add-root <dir>`, `--flat-skills`), matching `init-source`'s zero-item
-  message. Suppressed for: a nested/curated meld (not the caller's decision to
-  act on), an authoritative `mind.toml` (`--root`/`--add-root`/`--flat-skills`
-  either don't apply or are ignored there, DSC-52/DSC-76), a pure super-source
-  that only curates other sources via `[discover].sources` (zero own items is
-  expected, not a discovery failure), and a `.claude-plugin/` plugin or
-  marketplace manifest source (which has its own guidance path, MKT-15).
-  Suppressed under `--json`; the JSON result shape is unchanged.
+  `rules/<name>.md`, `commands/<name>.md`, `tools/<name>/`) and the three
+  escapes (`--root <dir>`, `--add-root <dir>`, `--flat-skills`), matching
+  `init-source`'s zero-item message. Suppressed for: a nested/curated meld
+  (not the caller's decision to act on), an authoritative `mind.toml`
+  (`--root`/`--add-root`/`--flat-skills` either don't apply or are ignored
+  there, DSC-52/DSC-76), a pure super-source that only curates other sources
+  via `[discover].sources` (zero own items is expected, not a discovery
+  failure), and a `.claude-plugin/` plugin or marketplace manifest source
+  (which has its own guidance path, MKT-15). Suppressed under `--json`; the
+  JSON result shape is unchanged.
 - `CLI-11` Accepted repo specs: `owner/repo` and `github:owner/repo` (github.com),
   a full git URL (`https://host/owner/repo[.git]`), an SSH form
   (`git@host:owner/repo[.git]`), and a local path or `file://` URL. A spec that
@@ -804,11 +805,12 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   rather than the borrowed `meld --force` clobber sense. Both spellings are
   interchangeable in `--help` and on the command line.
 - `CLI-196` `mind hooks list <target>` lists the hooks in effect for a source
-  and its installed items -- each hook's event, required/optional flag, command, and,
-  for a recorded source install or update hook, whether it is pending and the commit it
-  last ran at -- without running anything (HOOK-104). It is the read-only companion to `hooks
-  run` and the detail behind the `recall --sources` hook marker (HOOK-58). Under
-  `--json` it answers with a document instead of this text listing (CLI-220).
+  and its installed items -- each hook's event, required/optional flag,
+  command, and, for a recorded source install or update hook, whether it is
+  pending and the commit it last ran at -- without running anything
+  (HOOK-104). It is the read-only companion to `hooks run` and the detail
+  behind the `recall --sources` hook marker (HOOK-58). Under `--json` it
+  answers with a document instead of this text listing (CLI-220).
 - `CLI-220` `mind hooks list --json` answers with one JSON document instead of
   the CLI-196 text listing:
 
@@ -845,12 +847,12 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   omitted rather than serialized as `[]`. That elision applies ONLY to the
   top-level `sources`/`items` pair: a nested `hooks` or `items` array is
   always present, empty when the source declares no hooks or has no installed
-  items with hooks. `status` is present only for a
-  recorded source install or update hook (mirrors the text mode's
-  pending/last-ran report, HOOK-55, HOOK-124); an uninstall hook and every
-  item-level hook carry no `status`. A source's nested installed items are objects (an `item` name
-  plus its own `hooks` array), not bare strings, so a later addition (e.g. a
-  per-item install/uninstall disclosure record) has somewhere to go without a
+  items with hooks. `status` is present only for a recorded source install or
+  update hook (mirrors the text mode's pending/last-ran report, HOOK-55,
+  HOOK-124); an uninstall hook and every item-level hook carry no `status`. A
+  source's nested installed items are objects (an `item` name plus its own
+  `hooks` array), not bare strings, so a later addition (e.g. a per-item
+  install/uninstall disclosure record) has somewhere to go without a
   breaking shape change.
 - `CLI-222` `mind hooks run --json` on a successful run (no `MindError`)
   answers with a count-based result rather than nothing:
@@ -1218,6 +1220,24 @@ only appear at meld or install time. It is read-only and installs nothing.
   the source-wide form of the working-tree-vs-clone discrepancy. A metadata-only
   `[source]` block changes no discovery and is not flagged. Local working-tree git
   target only.
+- `CLI-237` `review` reports, as an advisory `command-content` finding, a
+  `command` item whose frontmatter declares `allowed-tools` or whose body
+  contains a `!` bash-execution directive -- the one item payload the
+  harness executes with no `mind` hook at all. This is disclosure only:
+  `mind` still neither reads nor validates a command's frontmatter or body
+  (spec/commands.md CMD-3), and the finding does not gate, block, or refuse
+  the meld. Whether to add a consent prompt at install time for a command
+  carrying `allowed-tools` is a separate, deliberately deferred design
+  decision, not something this advisory implements. The command file is read
+  through the same size-capped path (DSC-91) every metadata read in the
+  codebase uses, since `review` runs against an untrusted, not-yet-melded
+  source; an over-cap file is a hard `metadata-too-large` finding rather than
+  a silently skipped disclosure.
+- `CLI-238` The `item-hook` advisory (HOOK-85) states whether each hook is
+  required or optional, reusing the same `required`/`optional` composition
+  as the source-hook `install-hook` advisory above it (Check 6). Without
+  this, an optional item hook read identically to a required one on a
+  surface whose entire job is pre-install disclosure.
 - `CLI-219` `mind review --json` (either mode: a `<target>` source, or
   `--policy <path>`) answers with one JSON document instead of the CLI-131/132
   text findings:

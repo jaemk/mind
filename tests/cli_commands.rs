@@ -191,7 +191,7 @@ fn a_prefixed_command_links_under_its_namespaced_name() {
         "a prefixed command links at commands/jk:ship.md"
     );
     assert!(
-        !sb.link("ship.md").exists(),
+        sb.link("ship.md").symlink_metadata().is_err(),
         "the bare name must not also be linked"
     );
     assert!(
@@ -240,11 +240,14 @@ fn command_upgrades_and_forgets_like_any_item() {
     );
 }
 
-/// A lobe whose `kinds` filter excludes commands gets no command link, which is
-/// what keeps the skills-only harness presets unaffected by the kind.
+/// A lobe whose `kinds` filter excludes commands gets no command link (HARN-1).
+/// The harness presets' own skills-only `kinds` list is covered separately by
+/// `preset_lookup_and_resolution` in src/paths.rs, which is the actual CMD-7
+/// regression test: a hand-written `kinds = ["skill"]` lobe here exercises the
+/// generic filter, not the preset table.
 #[test]
 fn a_skills_only_lobe_admits_no_commands() {
-    // spec: CMD-7
+    // spec: HARN-1
     let sb = Sandbox::new();
     let other = sb.base.join("gemini");
     std::fs::create_dir_all(&other).unwrap();
@@ -286,5 +289,43 @@ fn a_hand_written_command_is_reported_as_unmanaged() {
         r.stdout.contains("unmanaged") && r.stdout.contains("command:mine"),
         "a hand-written command must be listed as unmanaged: {}",
         r.stdout
+    );
+}
+
+/// Unmanaged-item detection and `absorb` see only the immediate `.md` children
+/// of a lobe's `commands/` directory, matching the flat, non-recursive
+/// convention scan (CMD-2): a nested layout (the grouped shape a source can
+/// also ship on the source side) is invisible to both.
+#[test]
+fn a_nested_hand_written_command_is_not_detected_as_unmanaged() {
+    // spec: CMD-8
+    let sb = Sandbox::new();
+    write(
+        &sb.claude_home.join("commands/frontend/component.md"),
+        "---\ndescription: hand written, nested\n---\n# component\n",
+    );
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+
+    let r = sb.mind(&["recall"]);
+    assert!(r.success, "recall: {}\n{}", r.stdout, r.stderr);
+    assert!(
+        !r.stdout.contains("component"),
+        "a nested command must not be surfaced as unmanaged at all: {}",
+        r.stdout
+    );
+
+    // The harness's own grouped name for this file is `frontend:component`
+    // (CMD-2); `absorb` cannot reach it under that name either, since it never
+    // entered the unmanaged set to begin with.
+    let r = sb.mind(&["absorb", "frontend:component"]);
+    assert!(
+        !r.success,
+        "absorb must not find a nested command: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr.contains("not installed") || r.stderr.contains("NotInstalled"),
+        "error must indicate not installed: {}",
+        r.stderr
     );
 }

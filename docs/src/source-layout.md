@@ -20,6 +20,9 @@ The kinds:
   dir, scripts) ship with it.
 - **agent** / **rule** / **command**: a single markdown file. A command is what
   the harness offers at the prompt as `/<name>`.
+- **tool**: a directory of helper scripts or a compiled binary. A tool is
+  store-only: other items reference it, and by default it is not linked into an
+  agent home (a tool can opt in with an explicit `link`, see [Tooling](tooling.md)).
 
 The command scan is flat: `commands/<name>.md`, no subdirectories. Claude Code
 reads a grouped `commands/frontend/component.md` as `/frontend:component`, and
@@ -27,13 +30,23 @@ you get the same command name from a flat file by putting the colon in the name
 (`commands/frontend:component.md`), which is also what a `mind` namespace
 produces (`jk:review` links as `commands/jk:review.md` and runs as
 `/jk:review`). Keep a real subdirectory only if you need it for Claude users
-directly; then declare the item in `mind.toml` with a `link` that preserves the
-nested path. Note that Claude Code now treats custom commands as skills: a
-`commands/` file and a `skills/<name>/SKILL.md` both produce `/<name>`, and a
-skill is the better shape for something new.
-- **tool**: a directory of helper scripts or a compiled binary. A tool is
-  store-only: other items reference it, and by default it is not linked into an
-  agent home (a tool can opt in with an explicit `link`, see [Tooling](tooling.md)).
+directly; then declare the item in `mind.toml` with a full `[[items]]` entry
+(`kind`, `name`, `path`, and a `link` that preserves the nested path). Note
+that adding any `[[items]]` or `[discover]` entry makes the manifest
+authoritative for the whole repo: convention scanning turns off and only what
+the manifest lists is offered, so a one-entry manifest silently drops every
+other item. Declare everything you ship, or reach the nested file another
+way. See [The mind.toml file](mind-toml.md). Note that Claude Code now treats
+custom commands as skills: a `commands/` file and a `skills/<name>/SKILL.md`
+both produce `/<name>`, and a skill is the better shape for something new.
+See [Commands](commands.md#mental-model) for what happens when a source ships
+both.
+
+A group segment must not be a reserved kind word (`skill`, `agent`, `rule`,
+`command`, `tool`). `commands/tool:build.md` installs as `tool:build`, which
+an item ref reads as kind `tool`, name `build`, so `mind learn tool:build`
+fails with a not-found error naming `build`. Spell it `command:tool:build`,
+or pick another group name.
 
 A `mind.toml` is optional enrichment, never a gate. It carries source metadata, a
 namespace `prefix`, and (when you need it) explicit `[[items]]` or `[discover]`
@@ -42,8 +55,9 @@ globs for non-standard or monorepo layouts. See
 
 A repo published for Claude Code's plugin system needs no changes either: a
 `.claude-plugin/plugin.json` or `.claude-plugin/marketplace.json` is read as a
-discovery input, mapping the plugin's skills, agents, and commands to `mind`
-items. See
+discovery input. The manifest supplies the plugin's name and metadata; `mind`
+maps the plugin root's conventional `skills/`, `agents/`, and `commands/`
+directories to items. See
 [Claude plugin marketplaces](marketplace.md).
 
 ## Where shared helpers belong
@@ -103,8 +117,8 @@ language-specific self-locate; see [Tooling and shared scripts](tooling.md).
 
 `mind learn` copies an item into the store (`~/.mind/store/<kind>/<name>`) and
 symlinks it into each agent home (`~/.claude/skills/<name>`, `agents/<name>.md`,
-`rules/<name>.md`). A tool is the exception: it is store-only and, by default,
-not linked into an agent home.
+`rules/<name>.md`, `commands/<name>.md`). A tool is the exception: it is
+store-only and, by default, not linked into an agent home.
 
 A path you control is fine: pointing at a location your install hook populates
 works as long as your hook and your items agree on it. What is fragile is

@@ -229,12 +229,14 @@ pub enum MindError {
         source: serde_json::Error,
     },
 
-    #[error("invalid mind.toml at {path}: {source}")]
-    Toml {
-        path: PathBuf,
-        #[source]
-        source: toml::de::Error,
-    },
+    /// A `mind.toml` that does not parse. `msg` is the `toml` crate's rendered
+    /// error, already sanitized where it is composed (mindfile.rs): that text
+    /// quotes the offending input line verbatim, and a raw ESC byte in a TOML
+    /// file is itself a parse error, so the snippet is a source-controlled
+    /// string that reaches the terminal (DSC-95). Carrying a `String` rather
+    /// than the `toml::de::Error` is what makes that sanitizing possible.
+    #[error("invalid mind.toml at {path}: {msg}")]
+    Toml { path: PathBuf, msg: String },
 
     #[error("invalid config at {path}: {msg}")]
     ConfigToml { path: PathBuf, msg: String },

@@ -1,9 +1,10 @@
 # mind spec
 
 The behavioral spec for `mind`, a manager for agent tooling (skills, agents,
-rules, commands, tools) that melds arbitrary git repos and links installed items into
-`~/.claude` (a tool is store-only and reached by reference, not linked).
-This directory is the reference the implementation and tests verify against.
+rules, commands, tools) that melds arbitrary git repos and links installed
+items into `~/.claude` (a tool is store-only and reached by reference, not
+linked). This directory is the reference the implementation and tests verify
+against.
 
 ## Feature status
 
@@ -248,7 +249,7 @@ and verified.
 | A dropped `requires` is recorded on the installed item and surfaced by `recall`, `recall --json`, and `introspect` | done | LNK-19 |
 | Ignored files: `[source].ignore` / `[[items]].ignore` plus a built-in VCS set exclude paths from both the store copy and the content hash, so an item can point at a directory holding more than itself | done | [ignore.md](ignore.md) (IGN-1..21) |
 | `evolve` verifies TLS against the machine's certificate store, so an intercepting proxy's company CA is trusted; a certificate failure gets its own hint | done | STO-78, STO-79 |
-| Update hooks: `event = "update"` runs at `upgrade` instead of re-running install hooks, for a source and for an item; install hooks stay the idempotent default | done | [install-hooks.md](install-hooks.md) (HOOK-120..126), CLI-195 |
+| Update hooks: `event = "update"` runs at `upgrade` instead of re-running install hooks, for a source and for an item; install hooks stay the idempotent default | done | [install-hooks.md](install-hooks.md) (HOOK-120..127), CLI-195 |
 | An item declares its own hooks: `install:`/`update:`/`uninstall:` frontmatter on any kind, and a scoped `mind.toml` (`[[hooks]]` only) in a skill or tool directory | done | [install-hooks.md](install-hooks.md) (HOOK-130..134) |
 | The `command` item kind: `commands/<name>.md` discovered, stored, linked, namespaced, and upgraded like any other kind | done | [commands.md](commands.md) (CMD-1..9), DSC-14, STO-2 |
 | A Claude plugin's `commands/` maps to the `command` kind (single plugin and marketplace in-repo entries), and is no longer reported as a skipped component | done | [marketplace.md](marketplace.md) (MKT-18), MKT-3, MKT-4 |
@@ -272,6 +273,10 @@ and verified.
 - [install-hooks.md](install-hooks.md) - install hooks: a source-declared or
   user-supplied build command, gated by a safety prompt before it runs; and
   item-level build hooks (HOOK-70..73) that build an item's tooling at install.
+  Also covers the update event (HOOK-120..127), which runs at `upgrade` in
+  place of re-running install hooks, and where an item declares its own hooks
+  (HOOK-130..132): scalar frontmatter keys, or a scoped `mind.toml` in a skill
+  or tool directory.
 - [tooling.md](tooling.md) - resource and helper tooling: the `tool` item kind,
   path-reference tokens (`{{self}}`, `{{tools:name}}`, `{{path:ref}}`), and how an
   item references the tooling it ships.
@@ -310,8 +315,8 @@ and verified.
   when a defined ID is neither cited by a test nor in its ALLOWLIST. Adding a new
   requirement therefore forces a coverage decision: write a citing test, or
   allowlist it with a reason.
-- "item" means a skill, agent, rule, command, or tool. "source" means a melded repo. "store"
-  means `~/.mind/store`. "link" means a symlink under `~/.claude`.
+- "item" means a skill, agent, rule, command, or tool. "source" means a melded
+  repo. "store" means `~/.mind/store`. "link" means a symlink under `~/.claude`.
 - Statements use present-tense declaratives ("`mind learn` installs ..."). Where
   ordering matters it is stated explicitly.
 - Paths honor the `MIND_HOME` and `CLAUDE_HOME` overrides (see storage.md).

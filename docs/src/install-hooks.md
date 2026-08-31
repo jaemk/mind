@@ -86,10 +86,20 @@ before. An update hook never runs at `meld` or on a re-meld, is recorded against
 the commit it ran at exactly as an install hook is (so it is not re-offered until
 the source advances again), and is disclosed and prompted the same way.
 
-The same applies per item: an item that declares an update hook runs it in place
-of its install hooks whenever it is re-installed over an existing install (an
-`upgrade`, or a `learn` of an already-installed item). A `build` hook is
-unaffected and always runs, since it produces the item's content.
+Update hooks supersede install hooks for the source that declares them: while
+a source declares any update hook, `upgrade` offers its pending update hooks
+and does not re-offer that source's install hooks. An install hook skipped at
+`meld` (the default in a non-TTY run such as CI) is therefore not re-offered
+by a later `upgrade`. Run it explicitly: `mind hooks run <source> --event
+install --force`.
+
+The same applies per item: an item that declares an update hook runs it in
+place of its install hooks when the item is re-installed over an existing
+install, which in practice is `upgrade`'s in-place swap. A `learn` naming an
+already-installed item is a no-op and runs no hook (HOOK-125); to run an
+item's update hooks on demand, use `mind hooks run <source>#<item> --event
+update`. A `build` hook is unaffected and always runs, since it produces the
+item's content.
 
 ## Uninstall hooks
 
@@ -154,8 +164,9 @@ skips the hooks, and a required hook's failure or abort is a non-zero exit.
 
 `mind hooks list <target>` reports the hooks in effect for a source and its
 installed items -- each hook's event, required/optional flag, and command, and for
-a recorded source install hook whether it is pending and the commit it last ran at
--- without running any. It is the read-only companion to `hooks run`.
+a recorded source install or update hook whether it is pending and the commit
+it last ran at -- without running any. It is the read-only companion to
+`hooks run`.
 
 ## Visibility
 
@@ -163,18 +174,16 @@ a recorded source install hook whether it is pending and the commit it last ran 
 its status bracket (e.g. `1 hook` or `3 hooks`). `mind review <repo>` lists every
 declared hook (source and item, whichever event), showing each hook's command,
 event, and whether it is required or optional. `mind hooks list <target>` shows the same
-detail plus the pending/last-ran state of recorded install hooks.
-
-`[source].install` is deprecated in favor of the `[[hooks]]` form. See
-[The mind.toml file](mind-toml.md) for the schema and
-[spec/install-hooks.md](https://github.com/jaemk/mind/blob/main/spec/install-hooks.md)
-for the full behavior.
+detail plus the pending/last-ran state of recorded install and update hooks.
 
 ## Where an item declares its hooks
 
-An item's own hooks (`install` / `update` / `uninstall`, and a tool's `build`)
-can be declared in three places. They do not merge: the first one that declares
-anything supplies the item's hooks.
+An item's own lifecycle hooks (`install` / `update` / `uninstall`) can be
+declared in three places. They do not merge: the first one that declares
+anything supplies the item's hooks. A tool's `build` hook is not one of the
+three: it is declared only as the `[[items]].build` field in the source's
+root `mind.toml` or as the `build:` key in a tool's `TOOL.md` frontmatter,
+and a scoped item `mind.toml` rejects `event = "build"`.
 
 1. The source's root `mind.toml`, in the item's `[[items]]` entry (scalar
    `install`/`update`/`uninstall`, or an `[[items.hooks]]` array).
@@ -205,6 +214,24 @@ update: ./migrate.sh
 ---
 ```
 
+An item hook runs in the item's store directory when the item is
+directory-backed (a skill or a tool), so a relative `./setup.sh` resolves
+against the item's own files. A single-file kind (an agent, a rule, or a
+command) has no directory of its own: its hook runs in the shared kind
+directory (`~/.mind/store/agent/`, `~/.mind/store/rule/`,
+`~/.mind/store/command/`), and the item ships no scripts, so its hook must be
+a command on `PATH` or an absolute path. A relative script there fails the
+install with a `HookFailed` hard stop that rolls the install back.
+
 An item manifest is part of the item's content: it is copied into the store and
 hashed like any other file, so editing it upstream is drift `upgrade` picks up.
-No agent harness reads it; only `mind` does.
+No agent harness reads it; only `mind` does. These keys are `mind`'s, not the
+harness's. An agent harness reads the same frontmatter block, and `mind` does
+not control how a given harness treats keys it does not define, so use the
+scoped item `mind.toml` if you would rather keep the item's frontmatter to
+what the harness itself defines.
+
+`[source].install` is deprecated in favor of the `[[hooks]]` form. See
+[The mind.toml file](mind-toml.md) for the schema and
+[spec/install-hooks.md](https://github.com/jaemk/mind/blob/main/spec/install-hooks.md)
+for the full behavior.

@@ -21,6 +21,7 @@ pub enum HookEventArg {
     Install,
     /// Run update hooks: what runs at `upgrade` in place of the install hooks.
     /// Valid for source and item targets.
+    /// Not `mind update`, which is the alias of `sync` and runs no hooks.
     Update,
     /// Run uninstall hooks. Valid for source and item targets.
     Uninstall,
@@ -187,7 +188,7 @@ EXAMPLES:
         /// each scan root, with no `skills/` container. Turns the layout on for a
         /// source that did not declare `[source].flat-skills`; there is no way to
         /// disable a source's declared flat layout. Applies to skills only (agent,
-        /// rule, and tool discovery are unaffected) and to convention discovery
+        /// rule, command, and tool discovery are unaffected) and to convention discovery
         /// only (ignored for an authoritative `mind.toml`). Persisted on the source
         /// and used by later scans and sync. Only takes effect at the meld that
         /// registers the source: passing it against an already-melded source is
@@ -201,7 +202,10 @@ EXAMPLES:
         /// a prompt offers three choices: run it (the default, a bare Enter),
         /// skip it but still install the source, or abort and install nothing.
         /// Overriding a declared `[source].install` is shown loudly in that
-        /// prompt. Use `mind review <repo>` to see a source's declared hook
+        /// prompt. The command replaces the source's declared install and
+        /// update hooks: `upgrade` offers your command in place of the
+        /// author's for either event.
+        /// Use `mind review <repo>` to see a source's declared hook
         /// before melding. Only takes effect at the meld that registers the
         /// source: passing it against an already-melded source is ignored (a
         /// note lists it and points at `unmeld` + `meld` to change it).
@@ -528,8 +532,8 @@ EXAMPLES:
         #[arg(long)]
         upgrade: bool,
 
-        /// Run install-hook re-runs without the safety prompt during the
-        /// `--upgrade` pass (executes arbitrary code; only with `--upgrade`).
+        /// Run install- and update-hook re-runs without the safety prompt during
+        /// the `--upgrade` pass (executes arbitrary code; only with `--upgrade`).
         #[arg(long, requires = "upgrade")]
         dangerously_skip_install_hook_check: bool,
 
@@ -569,8 +573,8 @@ EXAMPLES:
         #[arg(long)]
         no_sync: bool,
 
-        /// Re-run a source's install hook without the safety prompt when its
-        /// commit advanced. This executes arbitrary code from the source; only
+        /// Re-run a source's install or update hook without the safety prompt
+        /// when its commit advanced. This executes arbitrary code from the source; only
         /// use it for a source you trust. Without this flag, a non-TTY upgrade
         /// (CI, scripts) skips the hook re-run and just prints a note; pass this
         /// to run it unattended.
@@ -813,7 +817,7 @@ EXAMPLES:
     /// Resolves <ref> to a single unmanaged item (an exact `kind:name`; a kind
     /// prefix disambiguates across kinds). Moves the item to the destination source
     /// at the convention path for its kind (`skills/<name>/`, `agents/<name>.md`,
-    /// `rules/<name>.md`), commits it, melds the source if not yet registered, and
+    /// `rules/<name>.md`, `commands/<name>.md`), commits it, melds the source if not yet registered, and
     /// installs it via `learn`. After absorb the item is an ordinary managed item.
     ///
     /// The destination source is resolved from, in precedence order:
@@ -829,8 +833,8 @@ EXAMPLES:
     /// prompting. In a non-interactive (non-TTY) run with no destination configured,
     /// `absorb` refuses with an error.
     Absorb {
-        /// The unmanaged item ref: `name`, `skill:name`, `agent:name`, or
-        /// `rule:name`. A kind prefix disambiguates when the same name exists
+        /// The unmanaged item ref: `name`, `skill:name`, `agent:name`,
+        /// `rule:name`, or `command:name`. A kind prefix disambiguates when the same name exists
         /// across kinds. Glob refs are rejected (absorb claims exactly one item).
         item_ref: String,
 
@@ -936,11 +940,12 @@ pub enum HooksCmd {
     /// There is no ambiguity check: a filter matching several sources, or an
     /// item ref matching several items, runs the hook for each in turn.
     ///
-    /// For a source or item target with `--event install` (the default), only
-    /// *pending* hooks run by default -- those that never ran or did not run at
-    /// the current commit. `--force` re-runs every install hook regardless, for
-    /// both a source target and an item target. Uninstall hooks (source or item)
-    /// carry no recorded run state and always run.
+    /// For a source or item target with `--event install` (the default) or
+    /// `--event update`, only *pending* hooks run by default -- those that
+    /// never ran or did not run at the current commit. `--force` re-runs every
+    /// install or update hook regardless, for both a source target and an item
+    /// target. Uninstall hooks (source or item) carry no recorded run state and
+    /// always run.
     ///
     /// Every hook goes through the same disclosure and consent prompt as an
     /// automatic run; it is never more silently than meld/learn would run it.
@@ -952,26 +957,28 @@ pub enum HooksCmd {
 
         /// The lifecycle event to run (default: install).
         ///
-        /// `install` and `uninstall` are valid for source and item targets.
+        /// `install`, `update`, and `uninstall` are valid for source and item targets.
         /// `build` is valid only for an item target and re-installs the item
         /// through the transactional path (stage, expand, build, swap), leaving
         /// the existing copy untouched if the build fails.
         #[arg(long, value_enum, default_value = "install")]
         event: HookEventArg,
 
-        /// Re-run every install hook (source OR item target) even if it was
-        /// already recorded at the current commit (for lost outputs or transient
-        /// failures), mirroring `meld --force`. No effect on `--event uninstall`
-        /// or `--event build`, neither of which filters by a recorded commit.
+        /// Re-run every install or update hook (source OR item target) even if
+        /// it was already recorded at the current commit (for lost outputs or
+        /// transient failures), mirroring `meld --force`. No effect on
+        /// `--event uninstall` or `--event build`, neither of which filters by
+        /// a recorded commit.
         /// `--rerun` is a visible alias that names this flag's actual meaning
         /// here more directly than the borrowed `--force`.
         // spec: CLI-228
         #[arg(long, visible_alias = "rerun")]
         force: bool,
 
-        /// Run install hooks without the safety prompt. This executes arbitrary
-        /// code from the source; only use it for a source you trust. Without this
-        /// flag, a non-TTY run skips install hooks and prints a note.
+        /// Run install or update hooks without the safety prompt. This executes
+        /// arbitrary code from the source; only use it for a source you trust.
+        /// Without this flag, a non-TTY run skips install or update hooks and
+        /// prints a note.
         #[arg(long)]
         dangerously_skip_install_hook_check: bool,
 
@@ -985,9 +992,10 @@ pub enum HooksCmd {
     /// List the hooks for a source or item without running any.
     ///
     /// For a source target, shows all hooks declared in the source's `mind.toml`
-    /// with their event, required/optional flag, and command; for source install
-    /// hooks, also shows whether the hook is pending and the commit it last ran
-    /// at. Also lists any hooks declared by the source's installed items.
+    /// with their event, required/optional flag, and command; for recorded
+    /// source install and update hooks, also shows whether the hook is pending
+    /// and the commit it last ran at. Also lists any hooks declared by the
+    /// source's installed items.
     ///
     /// For an item ref `<source>#<item>`, shows only that item's hooks.
     // spec: CLI-196

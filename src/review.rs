@@ -4,7 +4,7 @@
 //! that would otherwise only appear at meld/install time. Read-only; installs
 //! nothing and changes nothing on disk.
 //!
-//! spec: CLI-130, CLI-131, CLI-132, CLI-133
+//! spec: CLI-130, CLI-131, CLI-132, CLI-133, CLI-237, CLI-238
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -302,7 +302,8 @@ fn try_registry_match(paths: &Paths, target: &str) -> Result<Option<PathBuf>> {
 
 /// Run all checks against the source directory. Returns collected findings.
 ///
-/// spec: CLI-131, CLI-132, CLI-133, CLI-135, CLI-136, CLI-137, CLI-138
+/// spec: CLI-131, CLI-132, CLI-133, CLI-135, CLI-136, CLI-137, CLI-138,
+/// CLI-237, CLI-238
 fn run_checks(
     _paths: &Paths,
     source_dir: &Path,
@@ -539,13 +540,78 @@ fn run_checks(
     for item in &items {
         for hook in &item.hooks {
             let event = hook.event.as_str();
+            // spec: CLI-238 -- reuse the source-hook loop's required/optional
+            // composition (Check 6 above) so an optional item hook does not
+            // read identically to a required one.
+            let req_str = if hook.optional {
+                "optional"
+            } else {
+                "required"
+            };
             // spec: CLI-224 -- sanitize before composing.
             let cmd = crate::sanitize::strip_ansi(&hook.run);
             advisory.push(Finding::advisory(
                 "item-hook",
-                format!("{}: declares an {event} hook '{cmd}'", item.key().as_str()),
+                format!(
+                    "{}: declares a {req_str} {event} hook '{cmd}'",
+                    item.key().as_str()
+                ),
             ));
         }
+    }
+
+    // --- Check 8b: command payload disclosure (advisory) ---
+    // spec: CLI-237, DSC-91
+    // A `command` item's frontmatter (`allowed-tools`) and body (a `!`
+    // bash-execution directive) are the one payload the harness runs with no
+    // mind hook at all (spec/commands.md CMD-3: mind neither reads nor
+    // validates them). Surface both, before melding, so the audit workflow
+    // `review` exists for does not report a clean bill of health on a source
+    // shipping harness-executed content. This is disclosure, not a gate: it
+    // never contradicts CMD-3 by reading, validating, or refusing the
+    // content, and a consent gate at install time remains a separate,
+    // deliberately deferred design decision (CLI-237).
+    //
+    // `review` runs against an untrusted, not-yet-melded source, so this file
+    // is fully attacker-controlled: read it through the same size-capped path
+    // (DSC-91) every other metadata read in this codebase uses, rather than
+    // an unbounded `std::fs::read_to_string`, and surface an over-cap file as
+    // a hard finding instead of silently dropping the item's disclosure.
+    for item in &items {
+        if item.kind != crate::error::ItemKind::Command {
+            continue;
+        }
+        let content = match crate::frontmatter::text_capped(&item.path) {
+            Ok(c) => c,
+            Err(err @ MindError::MetadataTooLarge { .. }) => {
+                hard.push(Finding::hard("metadata-too-large", format!("{err}")));
+                continue;
+            }
+            Err(_) => continue,
+        };
+        let allowed_tools = crate::frontmatter::field(&content, "allowed-tools");
+        let has_bash_directive = content.contains("!`");
+        if allowed_tools.is_none() && !has_bash_directive {
+            continue;
+        }
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(tools) = &allowed_tools {
+            // spec: CLI-224 -- sanitize before composing.
+            let tools = crate::sanitize::strip_ansi(tools);
+            parts.push(format!("declares allowed-tools: {tools}"));
+        }
+        if has_bash_directive {
+            parts.push("contains a `!` bash-execution directive".to_string());
+        }
+        advisory.push(Finding::advisory(
+            "command-content",
+            format!(
+                "{}: {} -- this runs as the harness executes it; mind neither reads nor \
+                 validates a command's frontmatter or body (spec/commands.md CMD-3)",
+                item.key().as_str(),
+                parts.join(" and "),
+            ),
+        ));
     }
 
     // --- Check 5: {{ns:}} token resolution (hard in markdown, advisory

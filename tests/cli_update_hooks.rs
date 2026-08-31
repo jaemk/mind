@@ -5,11 +5,16 @@
 //! fixture (local git repo, isolated MIND_HOME/CLAUDE_HOME).
 //!
 //! Spec coverage:
-//!   HOOK-121: a source's update hooks run at `upgrade`, never at `meld`
+//!   HOOK-121: a source's update hooks run at `upgrade`, never at `meld`, and
+//!             are baselined at the meld commit so an unmoved source runs none
 //!   HOOK-122: update hooks supersede install hooks on an update; a source that
 //!             declares none re-runs its install hooks unchanged
-//!   HOOK-124: an update hook's run is recorded, so it is not re-offered at the
-//!             same commit
+//!   HOOK-124: an update hook's run is recorded under its own event, so it is
+//!             not re-offered at the same commit and does not alias the install
+//!             hook's record
+//!   HOOK-55:  a recorded install hook the source no longer declares is not
+//!             replayed from local state
+//!   HOOK-56:  a consumer `--install-hook` override covers the update event too
 //!   HOOK-125: an item's update hooks replace its install hooks on a re-install
 //!   HOOK-130: `install:`/`update:`/`uninstall:` frontmatter on any kind
 //!   HOOK-131: a scoped `mind.toml` in a skill's own directory
@@ -80,6 +85,22 @@ impl Sandbox {
 
     fn source_spec(&self) -> String {
         self.source.to_string_lossy().into_owned()
+    }
+
+    /// The registry identity a local-path meld gives this fixture:
+    /// `local/<parent dir>/<repo dir>` (STO-13).
+    fn source_id(&self) -> String {
+        let owner = self
+            .base
+            .file_name()
+            .expect("base has a name")
+            .to_string_lossy();
+        let repo = self
+            .source
+            .file_name()
+            .expect("source has a name")
+            .to_string_lossy();
+        format!("local/{owner}/{repo}")
     }
 
     /// A shell command appending one line to an absolute sandbox path, so a
@@ -236,6 +257,308 @@ fn source_update_hook_is_recorded_and_not_rerun_at_the_same_commit() {
         1,
         "an update hook recorded at the current commit must not re-run: {}",
         r.stdout
+    );
+}
+
+/// `meld` then `upgrade` with the source sitting on the very commit it was
+/// melded at runs NO update hook: the update event means the source has moved,
+/// and it has not. Only once it advances does the hook become pending.
+#[test]
+fn an_unmoved_source_runs_no_update_hook_on_the_first_upgrade() {
+    // spec: HOOK-121
+    let sb = Sandbox::new("baseline-src");
+    let update = sb.tally("update.log");
+    sb.write_and_commit(
+        "mind.toml",
+        &format!("[[hooks]]\nrun = \"{update}\"\nevent = \"update\"\n"),
+    );
+
+    let r = sb.mind(&[
+        "meld",
+        &sb.source_spec(),
+        "--dangerously-skip-install-hook-check",
+    ]);
+    assert!(r.success, "meld: {}", r.stderr);
+    assert_eq!(
+        sb.runs("update.log"),
+        0,
+        "an update hook must not run at meld"
+    );
+
+    // Nothing moved. `sync` records the same commit; `upgrade` must find the
+    // update hook settled at it.
+    assert!(sb.mind(&["sync"]).success, "sync must succeed");
+    let r = sb.mind(&["upgrade", "--yes", "--dangerously-skip-install-hook-check"]);
+    assert!(r.success, "upgrade: {}\n{}", r.stdout, r.stderr);
+    assert_eq!(
+        sb.runs("update.log"),
+        0,
+        "an unmoved source must not run its update hook: {}\n{}",
+        r.stdout,
+        r.stderr
+    );
+
+    // `hooks list` reports the baseline as such, not as a run that happened.
+    let r = sb.mind(&["hooks", "list", &sb.source_id()]);
+    assert!(r.success, "hooks list: {}\n{}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("recorded at meld"),
+        "the baseline must not be reported as a run: {}",
+        r.stdout
+    );
+
+    // The source advances: now it is pending and runs.
+    sb.write_and_commit("README.md", "# fixture v2\n");
+    assert!(sb.mind(&["sync"]).success);
+    let r = sb.mind(&["upgrade", "--yes", "--dangerously-skip-install-hook-check"]);
+    assert!(r.success, "upgrade: {}\n{}", r.stdout, r.stderr);
+    assert_eq!(
+        sb.runs("update.log"),
+        1,
+        "an advanced source runs its update hook: {}",
+        r.stdout
+    );
+}
+
+/// One command declared for BOTH events is two records, keyed by event. An
+/// install run at the current commit must not settle the update hook: keyed by
+/// command alone, `hooks run --event update` would exit 0 having run nothing.
+#[test]
+fn an_install_run_does_not_settle_the_same_command_on_the_update_event() {
+    // spec: HOOK-124
+    let sb = Sandbox::new("aliased-src");
+    let both = sb.tally("both.log");
+    sb.write_and_commit(
+        "mind.toml",
+        &format!(
+            "[[hooks]]\nrun = \"{both}\"\n\n[[hooks]]\nrun = \"{both}\"\nevent = \"update\"\n"
+        ),
+    );
+
+    let r = sb.mind(&[
+        "meld",
+        &sb.source_spec(),
+        "--dangerously-skip-install-hook-check",
+    ]);
+    assert!(r.success, "meld: {}", r.stderr);
+    assert_eq!(sb.runs("both.log"), 1, "the install hook ran at meld");
+
+    // Advance, then run the INSTALL hook on demand at the new commit, so its
+    // record sits exactly at the source's current commit.
+    sb.write_and_commit("README.md", "# fixture v2\n");
+    assert!(sb.mind(&["sync"]).success);
+    let r = sb.mind(&[
+        "hooks",
+        "run",
+        &sb.source_id(),
+        "--event",
+        "install",
+        "--dangerously-skip-install-hook-check",
+    ]);
+    assert!(r.success, "hooks run install: {}\n{}", r.stdout, r.stderr);
+    assert_eq!(
+        sb.runs("both.log"),
+        2,
+        "the install hook ran at the new commit"
+    );
+
+    // The update hook's own record is still the meld baseline, so it is pending
+    // at this commit and must run.
+    let r = sb.mind(&[
+        "hooks",
+        "run",
+        &sb.source_id(),
+        "--event",
+        "update",
+        "--dangerously-skip-install-hook-check",
+    ]);
+    assert!(r.success, "hooks run update: {}\n{}", r.stdout, r.stderr);
+    assert_eq!(
+        sb.runs("both.log"),
+        3,
+        "the update hook is not settled by the install hook's run: {}\n{}",
+        r.stdout,
+        r.stderr
+    );
+}
+
+/// A `hooks run` whose every hook is held back by the pending filter says so,
+/// names the commit, and prints the `--force` invocation, instead of exiting 0
+/// in silence (which reads as "this source declares no hooks").
+#[test]
+fn hooks_run_reports_nothing_pending_instead_of_exiting_silently() {
+    // spec: HOOK-126
+    let sb = Sandbox::new("settled-src");
+    let install = sb.tally("install.log");
+    sb.write_and_commit("mind.toml", &format!("[[hooks]]\nrun = \"{install}\"\n"));
+
+    assert!(
+        sb.mind(&[
+            "meld",
+            &sb.source_spec(),
+            "--dangerously-skip-install-hook-check",
+        ])
+        .success
+    );
+    assert_eq!(sb.runs("install.log"), 1);
+
+    let r = sb.mind(&[
+        "hooks",
+        "run",
+        &sb.source_id(),
+        "--dangerously-skip-install-hook-check",
+    ]);
+    assert!(r.success, "hooks run: {}\n{}", r.stdout, r.stderr);
+    assert_eq!(sb.runs("install.log"), 1, "nothing pending, so nothing ran");
+    let out = format!("{}{}", r.stdout, r.stderr);
+    assert!(
+        out.contains("nothing pending") && out.contains("--force"),
+        "a run with nothing pending must say so and name --force: {out}"
+    );
+
+    // And `--force` does run it, which is what the note advertises.
+    let r = sb.mind(&[
+        "hooks",
+        "run",
+        &sb.source_id(),
+        "--force",
+        "--dangerously-skip-install-hook-check",
+    ]);
+    assert!(r.success, "forced hooks run: {}\n{}", r.stdout, r.stderr);
+    assert_eq!(
+        sb.runs("install.log"),
+        2,
+        "--force re-runs the settled hook"
+    );
+}
+
+/// A recorded install hook the source has since WITHDRAWN is not re-offered at
+/// the next `upgrade`: the record says the command ran, never that the source
+/// still stands behind it.
+#[test]
+fn a_withdrawn_install_hook_is_not_replayed_at_upgrade() {
+    // spec: HOOK-55
+    let sb = Sandbox::new("withdrawn-src");
+    let install = sb.tally("install.log");
+    sb.write_and_commit("mind.toml", &format!("[[hooks]]\nrun = \"{install}\"\n"));
+
+    assert!(
+        sb.mind(&[
+            "meld",
+            &sb.source_spec(),
+            "--dangerously-skip-install-hook-check",
+        ])
+        .success
+    );
+    assert_eq!(sb.runs("install.log"), 1);
+
+    // The source withdraws the hook and advances.
+    sb.write_and_commit("mind.toml", "[source]\ndescription = \"no hooks\"\n");
+    assert!(sb.mind(&["sync"]).success);
+    let r = sb.mind(&["upgrade", "--yes", "--dangerously-skip-install-hook-check"]);
+    assert!(r.success, "upgrade: {}\n{}", r.stdout, r.stderr);
+    assert_eq!(
+        sb.runs("install.log"),
+        1,
+        "a command the source no longer declares must not be replayed: {}\n{}",
+        r.stdout,
+        r.stderr
+    );
+}
+
+/// A curator's `[[discover.sources.hooks]]` update entry (DSC-61) is recorded
+/// on the nested source at `meld` and offered at `upgrade`. It is declared in
+/// the parent's manifest, so without the record it is invisible to the upgrade
+/// selector and can never run at all.
+#[test]
+fn a_curated_update_hook_runs_at_upgrade_and_not_at_meld() {
+    // spec: HOOK-127 HOOK-121
+    let nested = Sandbox::new("curated-nested");
+    let registry = Sandbox::new("curated-registry");
+    let update = registry.tally("curated-update.log");
+    registry.write_and_commit(
+        "mind.toml",
+        &format!(
+            "[[discover.sources]]\nsource = \"{}\"\n\n\
+             [[discover.sources.hooks]]\nrun = \"{update}\"\nevent = \"update\"\n",
+            nested.source_spec()
+        ),
+    );
+
+    let r = registry.mind(&[
+        "meld",
+        &registry.source_spec(),
+        "--dangerously-skip-install-hook-check",
+    ]);
+    assert!(r.success, "meld: {}\n{}", r.stdout, r.stderr);
+    assert_eq!(
+        registry.runs("curated-update.log"),
+        0,
+        "an update hook must not run at meld: {}",
+        r.stdout
+    );
+
+    // The nested source advances.
+    nested.write_and_commit("README.md", "# fixture v2\n");
+    assert!(registry.mind(&["sync"]).success, "sync must succeed");
+    let r = registry.mind(&["upgrade", "--yes", "--dangerously-skip-install-hook-check"]);
+    assert!(r.success, "upgrade: {}\n{}", r.stdout, r.stderr);
+    assert_eq!(
+        registry.runs("curated-update.log"),
+        1,
+        "the curated update hook must run at upgrade: {}\n{}",
+        r.stdout,
+        r.stderr
+    );
+}
+
+/// A consumer who melded with `--install-hook` keeps their command on the
+/// update path too: a source that moves its command to `event = "update"` does
+/// not slip past the override, and the consumer's own command still runs.
+#[test]
+fn a_meld_install_hook_override_covers_the_update_event() {
+    // spec: HOOK-56 HOOK-122
+    let sb = Sandbox::new("override-src");
+    let theirs = sb.tally("theirs.log");
+    let mine = sb.tally("mine.log");
+    sb.write_and_commit("mind.toml", &format!("[[hooks]]\nrun = \"{theirs}\"\n"));
+
+    let r = sb.mind(&[
+        "meld",
+        &sb.source_spec(),
+        "--install-hook",
+        &mine,
+        "--dangerously-skip-install-hook-check",
+    ]);
+    assert!(r.success, "meld: {}\n{}", r.stdout, r.stderr);
+    assert_eq!(sb.runs("mine.log"), 1, "the consumer's command ran");
+    assert_eq!(
+        sb.runs("theirs.log"),
+        0,
+        "the author's command was replaced"
+    );
+
+    // The source moves the same command to the update event and advances.
+    sb.write_and_commit(
+        "mind.toml",
+        &format!("[[hooks]]\nrun = \"{theirs}\"\nevent = \"update\"\n"),
+    );
+    assert!(sb.mind(&["sync"]).success);
+    let r = sb.mind(&["upgrade", "--yes", "--dangerously-skip-install-hook-check"]);
+    assert!(r.success, "upgrade: {}\n{}", r.stdout, r.stderr);
+    assert_eq!(
+        sb.runs("theirs.log"),
+        0,
+        "the override must cover the update event: {}\n{}",
+        r.stdout,
+        r.stderr
+    );
+    assert_eq!(
+        sb.runs("mine.log"),
+        2,
+        "the consumer's command is what runs on the update path: {}\n{}",
+        r.stdout,
+        r.stderr
     );
 }
 

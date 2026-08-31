@@ -6,9 +6,9 @@ Worked examples of mind features; each subdirectory has its own README with a
 ## Start here: [starter/](starter/)
 
 The most common use of mind is melding an arbitrary existing repo you did not
-author and did not modify. Convention discovery finds skills, agents, rules, and
-tools by directory layout alone - no `mind.toml` and no source changes required.
-`starter/` shows this from scratch.
+author and did not modify. Convention discovery finds skills, agents, rules,
+commands, and tools by directory layout alone - no `mind.toml` and no source
+changes required. `starter/` shows this from scratch.
 
 ## Reading order
 
@@ -31,8 +31,8 @@ Simplest to most advanced:
 - [discover/](discover/) - `[discover]` kind globs with include/exclude.
 - [tooling/](tooling/) - a store-only `tool` referenced by a skill through path
   tokens.
-- [hooks/](hooks/) - source build hooks that run on install, with interactive
-  disclosure.
+- [hooks/](hooks/) - source hooks for the install, update, and uninstall
+  lifecycle events, with interactive disclosure.
 - [policy/](policy/) - a managed `policy.toml` validated by `review --policy`.
 - [super-source/](super-source/) - a curated registry that references and pins
   nested sources; `dump` output.

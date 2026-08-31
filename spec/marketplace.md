@@ -49,11 +49,11 @@ an independent store and link into the host's discovery location.
   source-discovery directive, in which case the author is defining their own
   repo's items and the manifest's own-item layer is suppressed for that source
   (the MKT-2 note that a `.claude-plugin/` manifest was found and ignored is
-  printed). The own-item directives are: a `[[items]]` entry, a `[discover]` item
-  glob (any kind's, DSC-33), `[source].roots` (DSC-50), or
-  `[source].flat-skills` (DSC-74). This broadens the MKT-2 suppression set - which
-  named only `[[items]]`/`[discover]` item globs - to add `roots` and
-  `flat-skills`, since each redefines how the repo's own items are discovered. A
+  printed). The own-item directives are: a `[[items]]` entry, a `[discover]`
+  item glob (any kind's, DSC-33), `[source].roots` (DSC-50), or
+  `[source].flat-skills` (DSC-74). This broadens the MKT-2 set - which named only
+  `[[items]]`/`[discover]` item globs - to add `roots` and `flat-skills`, since
+  each redefines how the repo's own items are discovered. A
   consumer `meld --root` / `--flat-skills` override (DSC-51/DSC-75) suppresses the
   manifest's own-item layer the same way a source's own `[source].roots` /
   `flat-skills` does: it is the same "define my own items by convention" signal, so
@@ -111,9 +111,18 @@ is direct.
   count of skipped components on meld (e.g. `2 hooks, 1 mcp server not installed
   (no mind equivalent)`), so the user is not misled into believing the plugin is
   fully represented. The projection is intentionally lossy and stated as such; it
-  is never a silent drop. A `commands/` directory is not counted (MKT-18): its
-  contents are installed, and naming them in the one message whose job is to say
-  what was dropped would be false.
+  is never a silent drop. A mapped `commands/<name>.md` is not counted (MKT-18):
+  it is installed, and naming it in the one message whose job is to say what was
+  dropped would be false. The exception is exact: what the command scan maps is
+  a FLAT `.md` file (CMD-2), so a `commands/` entry it does not map -- a
+  subdirectory such as `commands/frontend/component.md`, or a non-markdown file
+  such as `commands/do.sh` -- IS counted, reported as an unmapped `commands/`
+  entry. Those are real drops, and a nested command group is a layout the
+  harness itself allows, so leaving them uncounted would make this rule false
+  for the most likely plugin that has any. A dot-prefixed entry (`.gitkeep`,
+  `.DS_Store`) is not counted: it is not a component the author published, and
+  counting it would put noise in the one message whose job is to say what was
+  dropped.
 
 - `MKT-18` A plugin's `commands/<name>.md` files map to the `command` item kind
   (commands.md CMD-1), on every path that reads a plugin: a directly melded
@@ -126,7 +135,9 @@ is direct.
   name like any other (MKT-5, MKT-8), installed and upgraded through the normal
   paths -- and is no longer reported as a skipped component (MKT-4). Before this
   rule a plugin's commands were left behind with a "not installed (no mind
-  equivalent)" note, which is now false: the equivalent exists.
+  equivalent)" note, which is now false: the equivalent exists. What the flat
+  scan does not map it does not install, and MKT-4 counts those entries, so
+  nothing under `commands/` is dropped without being reported.
 
 - `MKT-5` A plugin's `name` (from `plugin.json`) is the default effective prefix
   (namespacing.md) for that plugin's items, mirroring Claude's mandatory
