@@ -33,13 +33,15 @@ super-source on top of the manifest (MKT-15, MKT-16). See
   is the directory name.
 - `DSC-11` An agent is a file `agents/<name>.md`; its name is the file stem.
 - `DSC-12` A rule is a file `rules/<name>.md`; its name is the file stem.
-- `DSC-13` A missing `skills/`, `agents/`, or `rules/` directory yields no items
-  (not an error).
+- `DSC-13` A missing `skills/`, `agents/`, `commands/`, or `rules/` directory
+  yields no items (not an error).
+- `DSC-14` A command is a file `commands/<name>.md`; its name is the file stem.
+  The scan is flat, as for agents and rules (commands.md CMD-1, CMD-2).
 
 ## Frontmatter
 
 - `DSC-20` An item's description is the top-level `description` from the YAML
-  frontmatter of its `SKILL.md` (skill) or its `.md` (agent, rule).
+  frontmatter of its `SKILL.md` (skill) or its `.md` (agent, rule, command).
 - `DSC-21` The frontmatter reader handles a leading `--- ... ---` block with
   top-level scalar keys and surrounding quotes, including block scalars (DSC-22).
   Flow collections and nested mappings are not interpreted. No frontmatter yields

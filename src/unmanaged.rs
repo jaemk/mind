@@ -99,7 +99,9 @@ fn item_name(kind: ItemKind, entry: &std::fs::DirEntry) -> Option<String> {
     let name = raw.to_str()?;
     match kind {
         ItemKind::Skill => Some(name.to_string()),
-        ItemKind::Agent | ItemKind::Rule => name.strip_suffix(".md").map(str::to_string),
+        ItemKind::Agent | ItemKind::Rule | ItemKind::Command => {
+            name.strip_suffix(".md").map(str::to_string)
+        }
         ItemKind::Tool => None,
     }
 }

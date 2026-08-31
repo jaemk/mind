@@ -86,7 +86,8 @@ the prompt runs even when only one lobe is affected (spec ABS-7).
 3. Lists the move and any stray copies to delete; prompts `[y/N]` (skipped with
    `--yes`).
 4. Moves the item into the destination source at its convention path
-   (`skills/<name>/`, `agents/<name>.md`, `rules/<name>.md`). Melds the source
+   (`skills/<name>/`, `agents/<name>.md`, `rules/<name>.md`,
+   `commands/<name>.md`). Melds the source
    first if it is not yet registered.
 5. Stages and commits the moved item in the destination repo with the message
    `absorb <kind>:<name>` (spec ABS-5).

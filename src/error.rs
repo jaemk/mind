@@ -66,6 +66,10 @@ pub enum ItemKind {
     Skill,
     Agent,
     Rule,
+    /// A harness slash command: a markdown file the harness offers as
+    /// `/<name>` (commands.md CMD-1). An ordinary linked kind, shaped like an
+    /// agent or rule: one file, named by its stem.
+    Command,
     /// Helper tooling (scripts or a compiled binary) other items reference. A
     /// tool installs to the store but is not linked into an agent home by
     /// default: the harness does not discover it; items reach it by path token.
@@ -78,6 +82,7 @@ impl ItemKind {
             ItemKind::Skill => "skill",
             ItemKind::Agent => "agent",
             ItemKind::Rule => "rule",
+            ItemKind::Command => "command",
             ItemKind::Tool => "tool",
         }
     }
@@ -88,6 +93,7 @@ impl ItemKind {
             "skill" => Some(ItemKind::Skill),
             "agent" => Some(ItemKind::Agent),
             "rule" => Some(ItemKind::Rule),
+            "command" => Some(ItemKind::Command),
             "tool" => Some(ItemKind::Tool),
             _ => None,
         }
@@ -95,13 +101,14 @@ impl ItemKind {
 
     /// The plural directory name for this kind, used by the source-repo
     /// convention layout, the `~/.claude` link layout, and `~/.mind/store`
-    /// (`skills`/`agents`/`rules`/`tools`). The single source of truth for the
+    /// (`skills`/`agents`/`rules`/`commands`/`tools`). The single source of truth for the
     /// kind-to-directory mapping; `from_dir` is its inverse.
     pub fn dir(self) -> &'static str {
         match self {
             ItemKind::Skill => "skills",
             ItemKind::Agent => "agents",
             ItemKind::Rule => "rules",
+            ItemKind::Command => "commands",
             ItemKind::Tool => "tools",
         }
     }
@@ -112,6 +119,7 @@ impl ItemKind {
             "skills" => Some(ItemKind::Skill),
             "agents" => Some(ItemKind::Agent),
             "rules" => Some(ItemKind::Rule),
+            "commands" => Some(ItemKind::Command),
             "tools" => Some(ItemKind::Tool),
             _ => None,
         }
@@ -120,7 +128,12 @@ impl ItemKind {
     /// The kinds linked into an agent home: every kind except `Tool`, which is
     /// store-only and reached by reference (tooling.md TOOL-3). Also the "all
     /// kinds" default for a lobe with no `kinds` filter (HARN-1).
-    pub const LINKABLE: [ItemKind; 3] = [ItemKind::Skill, ItemKind::Agent, ItemKind::Rule];
+    pub const LINKABLE: [ItemKind; 4] = [
+        ItemKind::Skill,
+        ItemKind::Agent,
+        ItemKind::Rule,
+        ItemKind::Command,
+    ];
 
     /// Parse a list of kind strings into [`ItemKind`]s, rejecting any unknown
     /// string with [`MindError::UnknownKind`]. Used by the config `kinds` filter
@@ -239,7 +252,9 @@ pub enum MindError {
     )]
     UnknownLobe { path: String },
 
-    #[error("'{kind}' is not a valid item kind (expected one of: skill, agent, rule, tool)")]
+    #[error(
+        "'{kind}' is not a valid item kind (expected one of: skill, agent, rule, command, tool)"
+    )]
     UnknownKind { kind: String },
 
     #[error(
@@ -327,12 +342,12 @@ pub enum MindError {
     BadItemLink { url: String, reason: String },
 
     #[error(
-        "'{name}' is not a valid item ref (expected 'name', 'skill:name', 'agent:name', 'rule:name', or 'owner/repo#name')"
+        "'{name}' is not a valid item ref (expected 'name', 'skill:name', 'agent:name', 'rule:name', 'command:name', or 'owner/repo#name')"
     )]
     InvalidItemRef { name: String },
 
     #[error(
-        "'{prefix}' cannot be used as a namespace prefix: it is a reserved item-kind word (skill, agent, rule, tool), which would make a prefixed name indistinguishable from a kind-qualified ref"
+        "'{prefix}' cannot be used as a namespace prefix: it is a reserved item-kind word (skill, agent, rule, command, tool), which would make a prefixed name indistinguishable from a kind-qualified ref"
     )]
     ReservedPrefix { prefix: String },
 
@@ -1392,6 +1407,30 @@ impl MindError {
 mod tests {
     use super::*;
     use std::process::Command;
+
+    /// `command` is a full item kind: it parses, names itself, maps to the
+    /// `commands/` directory both ways, and is linked into agent homes.
+    #[test]
+    fn command_is_a_linked_item_kind() {
+        // spec: CMD-1 CMD-4
+        assert_eq!(ItemKind::parse("command"), Some(ItemKind::Command));
+        assert_eq!(ItemKind::Command.as_str(), "command");
+        assert_eq!(ItemKind::Command.dir(), "commands");
+        assert_eq!(ItemKind::from_dir("commands"), Some(ItemKind::Command));
+        assert!(
+            ItemKind::LINKABLE.contains(&ItemKind::Command),
+            "a command is discovered by the harness, so it links into agent homes"
+        );
+        assert!(
+            !ItemKind::LINKABLE.contains(&ItemKind::Tool),
+            "a tool stays store-only (TOOL-3)"
+        );
+        // The kinds filter a lobe may carry accepts it by name (HARN-1).
+        assert_eq!(
+            ItemKind::parse_kinds(&["command".to_string()]).unwrap(),
+            vec![ItemKind::Command]
+        );
+    }
 
     /// `shell_quote` round-trips a malicious identity through a real `sh -c`
     /// invocation byte-for-byte (HOOK-106): the same technique `hook.rs::run_hook`

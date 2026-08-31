@@ -16,6 +16,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   shows the update event as the escape for a step that cannot be. `hooks run` and
   `hooks list` accept `--event update`, with the same pending/recorded semantics
   as the install event.
+- The `command` item kind (CMD-1..9): a `commands/<name>.md` file in a source is
+  discovered, stored at `store/command/<name>`, and linked into each admitting
+  lobe at `commands/<name>.md`, so a harness slash command installs and upgrades
+  like any other item. A namespace gives `commands/<prefix>:<name>.md`, which is
+  the spelling a harness's own command namespacing produces. `--kind command`,
+  `command:<name>` refs, `kind = "command"` in `[[items]]`, and
+  `[discover].commands` globs all work; the convention scan is flat, so a nested
+  `commands/<group>/<name>.md` needs an explicit entry or a glob. The harness
+  presets (gemini, codex, universal, windsurf) admit skills only and are
+  unaffected. A hand-written command in a lobe now shows up as an unmanaged item
+  in `recall`, and can be `absorb`ed.
 - An item declares its own hooks, next to the item (HOOK-130..134). The scalar
   `install:` / `update:` / `uninstall:` frontmatter keys are read from any kind's
   meta file (`SKILL.md`, `TOOL.md`, an agent's or rule's `.md`), not only a

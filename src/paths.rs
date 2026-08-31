@@ -296,7 +296,11 @@ impl Paths {
         let dir = kind.dir();
         match kind {
             ItemKind::Skill => Some(format!("{dir}/{name}")),
-            ItemKind::Agent | ItemKind::Rule => Some(format!("{dir}/{name}.md")),
+            // spec: CMD-5 -- a command links like an agent or rule, under its
+            // effective name, so a prefixed command reads as `/<prefix>:<name>`.
+            ItemKind::Agent | ItemKind::Rule | ItemKind::Command => {
+                Some(format!("{dir}/{name}.md"))
+            }
             ItemKind::Tool => None,
         }
     }
@@ -912,6 +916,34 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    /// A command links like an agent or rule (one `.md` under the kind
+    /// directory), under its EFFECTIVE name, so a prefixed command reads as
+    /// `/<prefix>:<name>` at the harness prompt.
+    #[test]
+    fn command_links_under_commands_with_its_effective_name() {
+        // spec: CMD-5 CMD-6
+        let paths = Paths {
+            mind_home: PathBuf::from("/mind"),
+            claude_home: PathBuf::from("/claude"),
+        };
+        assert_eq!(
+            paths
+                .default_link_rel(ItemKind::Command, "review")
+                .as_deref(),
+            Some("commands/review.md")
+        );
+        assert_eq!(
+            paths
+                .default_link_rel(ItemKind::Command, "jk:review")
+                .as_deref(),
+            Some("commands/jk:review.md")
+        );
+        assert_eq!(
+            paths.store_rel(ItemKind::Command, "jk:review"),
+            "store/command/jk:review"
+        );
+    }
 
     #[test]
     fn absolute_home_resolves_relative_paths() {

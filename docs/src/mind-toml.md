@@ -8,7 +8,8 @@ gate.
 There are four discovery layers, in precedence order:
 
 1. **Convention** (default, no file): the scanner finds `skills/<name>/SKILL.md`,
-   `agents/<name>.md`, `rules/<name>.md`, and `tools/<name>/`.
+   `agents/<name>.md`, `rules/<name>.md`, `commands/<name>.md`, and
+   `tools/<name>/`.
 2. **Frontmatter** (always read): each item's `description` (and a tool's `bin` /
    `build`) come from the frontmatter it already carries.
 3. **Claude plugin manifest** (optional): a `.claude-plugin/plugin.json` or
@@ -139,7 +140,7 @@ scanning for the source.
 
 ```toml
 [[items]]
-kind = "rule"                    # skill | agent | rule | tool (required)
+kind = "rule"                    # skill | agent | rule | command | tool (required)
 name = "style"                   # the bare name (required)
 path = "guidelines/style.md"     # path relative to the repo root; a dir for skills/tools (required)
 link = "rules/house-style.md"    # optional: link target relative to the agent home
@@ -187,6 +188,7 @@ Declaring any kind globs makes the file authoritative.
 skills = { include = ["packages/*/skill"], exclude = ["packages/internal/*"] }
 agents = { include = ["agents/**/*.md"] }
 rules  = { include = ["rules/*.md"] }
+commands = { include = ["commands/**/*.md"] }   # reaches nested slash commands
 tools  = { include = ["packages/*/tool"] }   # globs match the tool DIRECTORY
 ```
 
@@ -294,7 +296,7 @@ event = "install"
 
 ### A regular source
 
-A repo that ships its own skills, agents, rules, and tools. The simplest form is
+A repo that ships its own skills, agents, rules, commands, and tools. The simplest form is
 no `mind.toml` at all (pure convention). Add a `mind.toml` to attach metadata or a
 namespace:
 

@@ -235,7 +235,9 @@ pub fn prefix_choice(answer: &str) -> Option<String> {
 }
 
 /// Extended reserved prefix words (NS-29): plausible future item-kind
-/// or CLI-subsystem names that are banned pre-emptively.
+/// or CLI-subsystem names that are banned pre-emptively. The list is permanent
+/// and append-only, so `command` stays here even though it is now a real kind
+/// word rejected a step earlier by `ItemKind::parse` (commands.md CMD-9).
 const EXTRA_RESERVED: &[&str] = &[
     "command",
     "hook",
@@ -640,9 +642,9 @@ fn parse_install_path(path: &str) -> Option<(crate::error::ItemKind, String, Str
     // so stripping a `.md` suffix is correct for both layouts and a no-op for the
     // store form.
     let name = match kind {
-        crate::error::ItemKind::Agent | crate::error::ItemKind::Rule => {
-            first.strip_suffix(".md").unwrap_or(first).to_string()
-        }
+        crate::error::ItemKind::Agent
+        | crate::error::ItemKind::Rule
+        | crate::error::ItemKind::Command => first.strip_suffix(".md").unwrap_or(first).to_string(),
         _ => first.to_string(),
     };
     if name.is_empty() {
@@ -1824,8 +1826,11 @@ mod tests {
 
     #[test]
     fn validate_prefix_rejects_reserved_kind_words() {
-        // spec: NS-25
-        for word in ["skill", "agent", "rule", "tool"] {
+        // spec: NS-25 CMD-9
+        // `command` is rejected both as a real kind word (NS-25) and by the
+        // extended list it was on before the kind existed (NS-29); the error is
+        // the same either way, so no source's prefix changes validity.
+        for word in ["skill", "agent", "rule", "command", "tool"] {
             let err = validate_prefix(word).unwrap_err();
             assert!(
                 matches!(err, crate::error::MindError::ReservedPrefix { ref prefix } if prefix == word),

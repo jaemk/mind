@@ -390,6 +390,10 @@ pub struct Discover {
     pub agents: KindGlobs,
     #[serde(default)]
     pub rules: KindGlobs,
+    /// Command globs match the command FILE (`commands/<name>.md`), as the agent
+    /// and rule globs do (commands.md CMD-4).
+    #[serde(default)]
+    pub commands: KindGlobs,
     /// Tool globs match the tool DIRECTORY (e.g. `packages/*/tool`), not an
     /// anchor file: the matched directory is the tool.
     #[serde(default)]

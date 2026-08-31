@@ -1,7 +1,7 @@
 # mind spec
 
 The behavioral spec for `mind`, a manager for agent tooling (skills, agents,
-rules, tools) that melds arbitrary git repos and links installed items into
+rules, commands, tools) that melds arbitrary git repos and links installed items into
 `~/.claude` (a tool is store-only and reached by reference, not linked).
 This directory is the reference the implementation and tests verify against.
 
@@ -250,6 +250,7 @@ and verified.
 | `evolve` verifies TLS against the machine's certificate store, so an intercepting proxy's company CA is trusted; a certificate failure gets its own hint | done | STO-78, STO-79 |
 | Update hooks: `event = "update"` runs at `upgrade` instead of re-running install hooks, for a source and for an item; install hooks stay the idempotent default | done | [install-hooks.md](install-hooks.md) (HOOK-120..126), CLI-195 |
 | An item declares its own hooks: `install:`/`update:`/`uninstall:` frontmatter on any kind, and a scoped `mind.toml` (`[[hooks]]` only) in a skill or tool directory | done | [install-hooks.md](install-hooks.md) (HOOK-130..134) |
+| The `command` item kind: `commands/<name>.md` discovered, stored, linked, namespaced, and upgraded like any other kind | done | [commands.md](commands.md) (CMD-1..9), DSC-14, STO-2 |
 
 ## Documents
 
@@ -265,6 +266,8 @@ and verified.
 - [policy.md](policy.md) - the enterprise managed policy: a fixed-path,
   admin-controlled file that restricts a client to trusted sources and locks
   related settings.
+- [commands.md](commands.md) - the `command` item kind: harness slash commands
+  (`commands/<name>.md`) discovered, installed, and namespaced like any item.
 - [install-hooks.md](install-hooks.md) - install hooks: a source-declared or
   user-supplied build command, gated by a safety prompt before it runs; and
   item-level build hooks (HOOK-70..73) that build an item's tooling at install.
@@ -306,7 +309,7 @@ and verified.
   when a defined ID is neither cited by a test nor in its ALLOWLIST. Adding a new
   requirement therefore forces a coverage decision: write a citing test, or
   allowlist it with a reason.
-- "item" means a skill, agent, rule, or tool. "source" means a melded repo. "store"
+- "item" means a skill, agent, rule, command, or tool. "source" means a melded repo. "store"
   means `~/.mind/store`. "link" means a symlink under `~/.claude`.
 - Statements use present-tense declaratives ("`mind learn` installs ..."). Where
   ordering matters it is stated explicitly.

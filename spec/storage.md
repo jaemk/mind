@@ -17,6 +17,7 @@ The on-disk layout and the two persisted JSON files.
   skills/<name>      -> store/skill/<name>
   agents/<name>.md   -> store/agent/<name>
   rules/<name>.md    -> store/rule/<name>
+  commands/<name>.md -> store/command/<name>
 ```
 
 - `STO-1` The mind root is `$MIND_HOME` if set, else `~/.mind`. The claude root is
@@ -24,8 +25,9 @@ The on-disk layout and the two persisted JSON files.
   (`$MIND_DEFAULT_LOBE` takes precedence over `$CLAUDE_HOME`, CLI-170). All
   overrides are honored everywhere.
 - `STO-2` The default link target for an item, relative to an agent home, is
-  `skills/<name>` (skill), `agents/<name>.md` (agent), or `rules/<name>.md`
-  (rule), where `<name>` is the effective name. A tool has no default link
+  `skills/<name>` (skill), `agents/<name>.md` (agent), `rules/<name>.md` (rule),
+  or `commands/<name>.md` (command, commands.md CMD-5), where `<name>` is the
+  effective name. A tool has no default link
   target: it is store-only (tooling.md TOOL-3). A `mind.toml` item may override
   the link target (applied in every home), which is how a tool opts into a link.
   Note: the `skills/<name>` and `agents/<name>.md` layouts are also the

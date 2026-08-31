@@ -12,13 +12,16 @@ manifest and its per-item `links` are defined in [storage.md](storage.md).
 ## Detection
 
 - `UNM-1` An *unmanaged item* is an entry in a configured agent home's kind
-  directory (`skills/<name>/`, `agents/<name>.md`, `rules/<name>.md`) whose path
+  directory (`skills/<name>/`, `agents/<name>.md`, `rules/<name>.md`,
+  `commands/<name>.md`) whose path
   is not a managed link, i.e. not recorded in any manifest item's `links`
   (storage.md STO-21). Its kind is the directory's kind and its name is the entry
-  name (the basename, with a trailing `.md` stripped for an agent or rule). A
+  name (the basename, with a trailing `.md` stripped for an agent, rule, or
+  command). A
   managed link occupies its path, so a given path is either managed or unmanaged,
   never both. Tools are never linked into an agent home (tooling.md TOOL-3), so
-  unmanaged detection covers skills, agents, and rules only. `mind` scans every
+  unmanaged detection covers every linked kind: skills, agents, rules, and
+  commands (commands.md CMD-8). `mind` scans every
   configured lobe (`Paths::agent_homes`, STO-14); an item present in more than one
   lobe is one logical item that records each occupied path.
 

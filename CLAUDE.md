@@ -1,6 +1,6 @@
 # mind
 
-A manager for agent tooling (skills, agents, rules, tools) that melds with
+A manager for agent tooling (skills, agents, rules, commands, tools) that melds with
 arbitrary git repos and links installed items into one or more agent homes
 (default `~/.claude`; see `Paths::agent_homes`). A tool is store-only: it is
 referenced by other items, not linked into an agent home.
@@ -89,7 +89,7 @@ CLI surface and output:
 
 Sources and discovery:
 - `src/source.rs` - repo-spec parsing + the melded-source registry (`sources.json`).
-- `src/catalog.rs` - convention scan for `skills/<n>/SKILL.md`, `agents/<n>.md`, `rules/<n>.md`, `tools/<n>/`.
+- `src/catalog.rs` - convention scan for `skills/<n>/SKILL.md`, `agents/<n>.md`, `rules/<n>.md`, `commands/<n>.md`, `tools/<n>/`.
 - `src/frontmatter.rs` - minimal reader for an item's leading `--- ... ---` block (descriptions).
 - `src/mindfile.rs` - the optional `mind.toml` a source repo may ship to declare inventory.
 - `src/plugin_manifest.rs` - Claude plugin manifests (`.claude-plugin/marketplace.json`) read as a source.
@@ -124,8 +124,8 @@ default** and a manifest is only ever optional enrichment, never a gate.
 Three layers, in precedence order:
 
 1. **Convention** (default, no file). The scanner finds `skills/<n>/SKILL.md`,
-   `agents/<n>.md`, `rules/<n>.md`, and `tools/<n>/` (a tool dir needs no anchor
-   file). Works on any repo, including `~/dev/agents`.
+   `agents/<n>.md`, `rules/<n>.md`, `commands/<n>.md` (a harness slash command,
+   spec/commands.md), and `tools/<n>/` (a tool dir needs no anchor file). Works on any repo, including `~/dev/agents`.
 2. **Frontmatter** (always read). Each item's description comes from the YAML
    frontmatter it already carries (`description:` in `SKILL.md` / the agent or
    rule `.md`). Metadata lives next to the thing it describes; nothing duplicated.
@@ -155,7 +155,7 @@ min-mind-version = "0.2"    # version gate: meld refuses a source the binary is 
 # Explicit inventory (authoritative). Omit [[items]] and [discover] to keep
 # convention scanning while still supplying [source] metadata.
 [[items]]
-kind = "rule"                       # skill | agent | rule
+kind = "rule"                       # skill | agent | rule | command | tool
 name = "style"
 path = "guidelines/style.md"        # relative to repo root; a dir for skills
 link = "rules/style.md"             # optional: link target relative to ~/.claude

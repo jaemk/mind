@@ -46,7 +46,9 @@ now cross-harness conventions. mind links them verbatim -- no content transform 
 needed. Rules (`rules/<name>.md`) have no cross-harness directory equivalent (the
 analog in other harnesses is a single concatenated context file like `AGENTS.md`
 or `GEMINI.md`, not a directory of per-rule files), so rules are Claude-only and
-are never linked into a lobe added via a non-Claude preset (HARN-3).
+are never linked into a lobe added via a non-Claude preset (HARN-3). Commands
+(`commands/<name>.md`) are the same: the presets admit skills only, so a command
+links into the Claude lobe and into any lobe whose `kinds` names `command`.
 
 Per-harness path table:
 

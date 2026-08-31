@@ -31,12 +31,14 @@ pub enum HookEventArg {
 
 use crate::error::ItemKind;
 
-/// An item kind as accepted on the command line (`--kind skill|agent|rule|tool`).
+/// An item kind as accepted on the command line
+/// (`--kind skill|agent|rule|command|tool`).
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum KindArg {
     Skill,
     Agent,
     Rule,
+    Command,
     Tool,
 }
 
@@ -46,6 +48,7 @@ impl KindArg {
             KindArg::Skill => ItemKind::Skill,
             KindArg::Agent => ItemKind::Agent,
             KindArg::Rule => ItemKind::Rule,
+            KindArg::Command => ItemKind::Command,
             KindArg::Tool => ItemKind::Tool,
         }
     }
@@ -59,7 +62,7 @@ impl KindArg {
 #[command(
     name = "mind",
     version,
-    about = "A manager for agent tooling: skills, agents, rules, and tools.",
+    about = "A manager for agent tooling: skills, agents, rules, commands, and tools.",
     propagate_version = true,
     arg_required_else_help = true
 )]

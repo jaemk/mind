@@ -78,7 +78,7 @@ The `mind` command surface. Verbs use a knowledge metaphor.
   glyph and an explicit guidance line instead of a `melded <repo> (0 item(s))`
   line that reads identically to a legitimate empty source. The guidance names
   the convention paths (`skills/<name>/SKILL.md`, `agents/<name>.md`,
-  `rules/<name>.md`, `tools/<name>/`) and the three escapes (`--root <dir>`,
+  `rules/<name>.md`, `commands/<name>.md`, `tools/<name>/`) and the three escapes (`--root <dir>`,
   `--add-root <dir>`, `--flat-skills`), matching `init-source`'s zero-item
   message. Suppressed for: a nested/curated meld (not the caller's decision to
   act on), an authoritative `mind.toml` (`--root`/`--add-root`/`--flat-skills`

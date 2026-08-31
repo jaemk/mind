@@ -105,6 +105,12 @@ impl Sandbox {
         p
     }
 
+    fn place_unmanaged_command(&self, name: &str) -> PathBuf {
+        let p = self.claude_home.join("commands").join(format!("{name}.md"));
+        write_file(&p, &format!("# {name} command\n"));
+        p
+    }
+
     fn dest_spec(&self) -> String {
         self.dest.to_string_lossy().into_owned()
     }
@@ -219,6 +225,37 @@ fn abs1_absorb_agent_installs_managed_symlink() {
     assert!(
         recall.stdout.contains("dev"),
         "dev must appear in recall after absorb"
+    );
+}
+
+/// Absorbing an unmanaged command moves it to commands/<name>.md in the
+/// destination and leaves a managed symlink in the lobe.
+// spec: ABS-1 CMD-8
+#[test]
+fn abs1_absorb_command_installs_managed_symlink() {
+    let sb = Sandbox::new();
+    let lobe_path = sb.place_unmanaged_command("ship");
+
+    let dest = sb.dest_spec();
+    let r = sb.mind(&["absorb", "command:ship", "--to", &dest, "--yes"]);
+    assert!(
+        r.success,
+        "absorb command:ship must succeed: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        is_symlink(&lobe_path),
+        "lobe path must be a managed symlink after absorb"
+    );
+    assert!(
+        sb.dest.join("commands/ship.md").is_file(),
+        "the command must land at commands/<name>.md in the destination source"
+    );
+    let recall = sb.mind(&["recall"]);
+    assert!(
+        recall.stdout.contains("command:ship"),
+        "the absorbed command must be managed: {}",
+        recall.stdout
     );
 }
 

@@ -9,6 +9,7 @@ config:
   skills/<name>/SKILL.md     a skill (the whole directory is the item)
   agents/<name>.md           an agent
   rules/<name>.md            a rule
+  commands/<name>.md         a slash command
   tools/<name>/              a tool (the whole directory; no anchor file)
   mind.toml                  optional: metadata, export control, odd layouts
 ```
@@ -17,7 +18,10 @@ The kinds:
 
 - **skill**: a directory with a `SKILL.md` anchor. Bundled files (a `resources/`
   dir, scripts) ship with it.
-- **agent** / **rule**: a single markdown file.
+- **agent** / **rule** / **command**: a single markdown file. A command is what
+  the harness offers at the prompt as `/<name>`; the scan is flat, so a nested
+  `commands/<group>/<name>.md` needs an explicit `[[items]]` entry or a
+  `[discover].commands` glob.
 - **tool**: a directory of helper scripts or a compiled binary. A tool is
   store-only: other items reference it, and by default it is not linked into an
   agent home (a tool can opt in with an explicit `link`, see [Tooling](tooling.md)).

@@ -10,12 +10,14 @@
 This initializes the source and makes its items available to `mind learn`.
 `mind sync` (or re-melding, re-running `mind meld <repo>`) refreshes the clone.
 
-**Item.** A unit offered by a source, one of four *kinds*:
+**Item.** A unit offered by a source, one of five *kinds*:
 
 - `skill` - a `skills/<name>/` directory containing a `SKILL.md` and any associated
   resources (scripts, templates, etc).
 - `agent` - an `agents/<name>.md` file.
 - `rule` - a `rules/<name>.md` file.
+- `command` - a `commands/<name>.md` file: a harness slash command, offered at the
+  prompt as `/<name>` (`/<prefix>:<name>` under a namespace).
 - `tool` - a `tools/<name>/` directory containing a `TOOL.md`, a script/executable, 
   any associated resources. Tools are an optional feature to assist with managing
   and referencing shared scripts/executables utilized by multiple skills.
@@ -24,7 +26,7 @@ Items are discovered by convention (the paths above) or declared in a
 `mind.toml`.
 
 **Lobe.** A directory `mind` links items into: the directory holding `skills/`,
-`agents/`, and `rules/`. A lobe may be a global agent home (`~/.claude`,
+`agents/`, `rules/`, and `commands/`. A lobe may be a global agent home (`~/.claude`,
 `~/.gemini/config`) or a project subdirectory (`.windsurf` inside a project root).
 The default lobe is `~/.claude`; you can add Gemini, Codex, Windsurf, Antigravity,
 or any directory, each with an optional per-kind filter (see

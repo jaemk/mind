@@ -21,11 +21,13 @@ Unmanaged items, their detection, and single-ref resolution are defined in
   UNM-4 rules (an exact `kind:name`, a kind prefix disambiguates, a glob is
   rejected, a source-qualified ref never matches). It moves that item's lobe entry
   into the destination source at the convention path for its kind (`skills/<name>/`,
-  `agents/<name>.md`, `rules/<name>.md`, relative to the source root or its first
+  `agents/<name>.md`, `rules/<name>.md`, `commands/<name>.md`, relative to the
+  source root or its first
   scan root, DSC-50), commits it (ABS-5), melds the source if it is not yet
   registered, and `learn`s the item. The lobe path is then occupied by a managed
-  link, not the user's own file. Only skills, agents, and rules can be absorbed,
-  since tools are never linked into a lobe (TOOL-3) and so are never unmanaged.
+  link, not the user's own file. Every linked kind can be absorbed (skills,
+  agents, rules, and commands, CMD-8);
+  tools are never linked into a lobe (TOOL-3) and so are never unmanaged.
   A glob ref is an error (`InvalidItemRef`); bulk absorb is not offered.
 - `ABS-8` After absorb the item is an ordinary managed item: it is recorded in the
   manifest keyed `kind:effective-name` with the destination source as its source

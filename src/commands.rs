@@ -1077,6 +1077,7 @@ fn meld_recursive(
             println!(
                 "  no items found by convention scanning \
                  (skills/<name>/SKILL.md, agents/<name>.md, rules/<name>.md, \
+                 commands/<name>.md, \
                  tools/<name>/); if your layout differs, use --root <dir>, \
                  --add-root <dir>, or --flat-skills"
             );
@@ -2343,7 +2344,10 @@ pub fn init_source(
 
     println!("init-source: {}", root.display());
     if items.is_empty() {
-        println!("  no items found (skills/<name>/SKILL.md, agents/<name>.md, rules/<name>.md)");
+        println!(
+            "  no items found (skills/<name>/SKILL.md, agents/<name>.md, rules/<name>.md, \
+             commands/<name>.md)"
+        );
     } else {
         println!("  {} item(s):", items.len());
         for it in &items {
@@ -5123,6 +5127,8 @@ fn convention_path_in_root(
         ItemKind::Skill => root.join("skills").join(name),
         ItemKind::Agent => root.join("agents").join(format!("{name}.md")),
         ItemKind::Rule => root.join("rules").join(format!("{name}.md")),
+        // spec: CMD-8
+        ItemKind::Command => root.join("commands").join(format!("{name}.md")),
         ItemKind::Tool => panic!("tools are never unmanaged; absorb should not reach this"),
     }
 }
@@ -11464,6 +11470,12 @@ mod tests {
             convention_path_in_root(root, ItemKind::Rule, "style"),
             PathBuf::from("/repo/rules/style.md"),
             "rule convention path is rules/<name>.md"
+        );
+        // spec: CMD-8 -- a command absorbs to the same shape as an agent/rule.
+        assert_eq!(
+            convention_path_in_root(root, ItemKind::Command, "ship"),
+            PathBuf::from("/repo/commands/ship.md"),
+            "command convention path is commands/<name>.md"
         );
     }
 

@@ -215,9 +215,9 @@ impl CatalogItem {
         match self.kind {
             ItemKind::Skill => Some("SKILL.md"),
             ItemKind::Tool => self.path.join("TOOL.md").is_file().then_some("TOOL.md"),
-            // An agent/rule item IS its file: `path` names the file, so there is
-            // nothing under the item an ignore pattern could match at all.
-            ItemKind::Agent | ItemKind::Rule => None,
+            // An agent/rule/command item IS its file: `path` names the file, so
+            // there is nothing under the item an ignore pattern could match.
+            ItemKind::Agent | ItemKind::Rule | ItemKind::Command => None,
         }
     }
 
@@ -892,8 +892,9 @@ fn from_decl(
                 path: root.join("mind.toml"),
                 msg: format!(
                     "item '{safe_name}' has a link '{}' outside a kind directory: it must begin \
-                     with 'skills/', 'agents/', 'rules/', or 'tools/' (a link cannot place a file \
-                     at the agent-home root or inside a harness's own config, e.g. 'settings.json')",
+                     with 'skills/', 'agents/', 'rules/', 'commands/', or 'tools/' (a link cannot \
+                     place a file at the agent-home root or inside a harness's own config, \
+                     e.g. 'settings.json')",
                     crate::sanitize::strip_ansi(link)
                 ),
             });
@@ -1035,6 +1036,7 @@ fn is_confined_link_target(rel: &str) -> bool {
                 ItemKind::Skill,
                 ItemKind::Agent,
                 ItemKind::Rule,
+                ItemKind::Command,
                 ItemKind::Tool,
             ]
             .iter()
@@ -1266,6 +1268,8 @@ fn scan_globs(
     for (kind, globs) in [
         (ItemKind::Agent, &discover.agents),
         (ItemKind::Rule, &discover.rules),
+        // spec: CMD-4 -- `[discover].commands` globs match the command FILE.
+        (ItemKind::Command, &discover.commands),
     ] {
         for md in resolve_globs(root, globs, kind)? {
             if let Some(item) = make_item(root, source, prefix, kind, md.clone(), &md)? {
@@ -1297,7 +1301,8 @@ fn resolve_globs(root: &Path, globs: &KindGlobs, kind: ItemKind) -> Result<Vec<P
     Ok(included.difference(&excluded).cloned().collect())
 }
 
-/// Convention scan: fixed `skills/`, `agents/`, `rules/` directories.
+/// Convention scan: fixed `skills/`, `agents/`, `rules/`, `commands/`, and
+/// `tools/` directories.
 ///
 /// When `flat_skills` is true (DSC-74), skills are instead found as bare-name
 /// directories with a direct `SKILL.md` immediately under `root` (no `skills/`
@@ -1329,7 +1334,9 @@ fn scan_convention(
         }
     }
 
-    for kind in [ItemKind::Agent, ItemKind::Rule] {
+    // spec: CMD-1 CMD-2 -- a command is a flat `commands/<name>.md`, the same
+    // shape (and so the same scan) as an agent or a rule.
+    for kind in [ItemKind::Agent, ItemKind::Rule, ItemKind::Command] {
         let kind_dir = root.join(kind.dir());
         for entry in read_dir_opt(&kind_dir)? {
             if entry.is_file()
@@ -1380,7 +1387,7 @@ fn make_item(
     let bare = match kind {
         // Directory-shaped items take the directory name; file items the stem.
         ItemKind::Skill | ItemKind::Tool => file_name(&path),
-        ItemKind::Agent | ItemKind::Rule => path
+        ItemKind::Agent | ItemKind::Rule | ItemKind::Command => path
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default(),
@@ -1657,7 +1664,7 @@ fn meta_file(kind: ItemKind, path: &Path) -> PathBuf {
     match kind {
         ItemKind::Skill => path.join("SKILL.md"),
         ItemKind::Tool => path.join("TOOL.md"),
-        ItemKind::Agent | ItemKind::Rule => path.to_path_buf(),
+        ItemKind::Agent | ItemKind::Rule | ItemKind::Command => path.to_path_buf(),
     }
 }
 
@@ -5087,6 +5094,96 @@ mod lifecycle_tests {
         assert_eq!(tool.install_hooks()[0].run, "make setup");
         assert!(!tool.install_hooks()[0].optional);
         assert_eq!(tool.uninstall_hooks()[0].run, "make cleanup");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn convention_scan_finds_commands_flat_and_reads_their_description() {
+        // spec: CMD-1 CMD-2 CMD-3 DSC-14
+        let base = tmp();
+        let clone = base.join("sources/local/test/repo");
+        write(
+            &clone.join("commands/review.md"),
+            "---\ndescription: Review the diff\nargument-hint: [pr]\n---\n# review\n",
+        );
+        // Nested: NOT discovered by convention, which is flat (CMD-2).
+        write(
+            &clone.join("commands/frontend/component.md"),
+            "---\ndescription: nested\n---\n# component\n",
+        );
+        let paths = Paths {
+            mind_home: base.clone(),
+            claude_home: base.join("claude"),
+        };
+        let mut items = Vec::new();
+        scan_source(&paths, &source_for(&clone), &mut items).unwrap();
+
+        let cmd = items
+            .iter()
+            .find(|i| i.kind == ItemKind::Command)
+            .expect("the command must be discovered");
+        assert_eq!(cmd.name, "review", "the name is the file stem");
+        assert_eq!(cmd.description.as_deref(), Some("Review the diff"));
+        assert_eq!(cmd.key().as_str(), "command:review");
+        assert_eq!(
+            items.iter().filter(|i| i.kind == ItemKind::Command).count(),
+            1,
+            "the convention scan must not descend into commands/ subdirectories"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn commands_are_declarable_by_items_and_by_discover_globs() {
+        // spec: CMD-2 CMD-4
+        // The two escapes that reach a nested command the flat convention scan
+        // does not: an explicit `[[items]]` entry, and a `[discover].commands`
+        // glob. Both also prove `kind = "command"` parses.
+        let base = tmp();
+        let clone = base.join("sources/local/test/repo");
+        write(
+            &clone.join("commands/frontend/component.md"),
+            "---\ndescription: component\n---\n# component\n",
+        );
+        write(
+            &clone.join("packages/api/commands/deploy.md"),
+            "---\ndescription: deploy\n---\n# deploy\n",
+        );
+        write(
+            &clone.join("mind.toml"),
+            concat!(
+                "[[items]]\n",
+                "kind = \"command\"\n",
+                "name = \"component\"\n",
+                "path = \"commands/frontend/component.md\"\n",
+                "link = \"commands/frontend/component.md\"\n",
+                "\n",
+                "[discover]\n",
+                "commands = { include = [\"packages/*/commands/*.md\"] }\n",
+            ),
+        );
+        let paths = Paths {
+            mind_home: base.clone(),
+            claude_home: base.join("claude"),
+        };
+        let mut items = Vec::new();
+        scan_source(&paths, &source_for(&clone), &mut items).unwrap();
+
+        let declared = items
+            .iter()
+            .find(|i| i.name == "component")
+            .expect("the declared command must be offered");
+        assert_eq!(declared.kind, ItemKind::Command);
+        assert_eq!(
+            declared.link_rel.as_deref(),
+            Some("commands/frontend/component.md"),
+            "a nested link target is confined to the commands/ kind directory"
+        );
+        let globbed = items
+            .iter()
+            .find(|i| i.name == "deploy")
+            .expect("the globbed command must be offered");
+        assert_eq!(globbed.kind, ItemKind::Command);
         let _ = std::fs::remove_dir_all(&base);
     }
 
