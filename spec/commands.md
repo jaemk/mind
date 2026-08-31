@@ -15,6 +15,15 @@ as the other kinds are. This document states only what is specific to it;
 everything else follows the general rules in discovery.md, storage.md,
 lifecycle.md, and namespacing.md.
 
+Note on where the harness is going: Claude Code has merged custom commands into
+skills. A file at `commands/deploy.md` and a skill at `skills/deploy/SKILL.md`
+both produce `/deploy`, existing `commands/` files keep working, and skills are
+what its documentation now recommends for new work (a skill can carry supporting
+files and be invoked by Claude as well as by the user). The `command` kind
+exists because sources ship `commands/` today and the harness keeps reading
+them, not because it is the form to steer authors toward; `init-source` and the
+guide recommend a skill for new items.
+
 ## The kind
 
 - `CMD-1` `command` is an item kind. By convention a command is a file
@@ -22,16 +31,25 @@ lifecycle.md, and namespacing.md.
   shape as an agent (DSC-11) and a rule (DSC-12). A missing `commands/` directory
   yields no items, not an error (DSC-13).
 - `CMD-2` The convention scan is flat: it reads the immediate `.md` children of
-  `commands/`, and does not descend into subdirectories. A harness that
-  namespaces commands by subdirectory (`commands/frontend/component.md` ->
-  `/frontend:component`) is therefore not discovered by convention below the
-  first level. Such a layout is reachable through the explicit inventory: a
-  `[[items]]` entry naming the nested `path`, with a `link` pointing at the
-  nested target when the subdirectory itself carries meaning, or a
-  `[discover].commands` glob. This matches agents and rules, whose convention
-  scans are flat for the same reason: a name derived from a nested path would
-  have to encode the separator, and every name `mind` accepts must be a single
-  safe path component (DSC-71).
+  `commands/`, and does not descend into subdirectories. This matches agents and
+  rules, whose convention scans are flat for the same reason: a name derived
+  from a nested path would have to encode the separator, and every name `mind`
+  accepts must be a single safe path component (DSC-71).
+
+  A nested layout still reaches the same end. The Claude harness derives a
+  command's name from a subdirectory as `<dir>:<name>`
+  (`commands/frontend/component.md` is offered as `/frontend:component`;
+  verified against a live session, and NOT what its documentation's
+  name-derivation table states, which says a command file's name is its file
+  name without extension). `mind` produces that spelling by a different route:
+  a colon is legal in a file name, so an item whose effective name is
+  `frontend:component` links to `commands/frontend:component.md` and the
+  harness offers it as `/frontend:component` too. The two layouts converge on
+  one command name, so nothing is lost by not descending. A source that wants
+  the grouped name under convention discovery ships
+  `commands/<group>:<name>.md`; one that wants to keep a nested directory
+  reaches it with a `[[items]]` entry (with a `link` when the subdirectory
+  itself must be preserved) or a `[discover].commands` glob.
 - `CMD-3` A command's description comes from the top-level `description` in its
   own frontmatter, as for an agent or rule (DSC-20). A harness's other command
   frontmatter keys (`argument-hint`, `allowed-tools`, `model`) are content:
@@ -52,12 +70,17 @@ lifecycle.md, and namespacing.md.
   is linked under its effective name, not a frontmatter-declared one.
 - `CMD-6` A namespace prefix applies to a command as to any kind: the effective
   name is `<prefix>:<name>` and the link is `commands/<prefix>:<name>.md`, so the
-  harness offers the command as `/<prefix>:<name>`. That is the same
-  `namespace:command` spelling a harness's own subdirectory namespacing produces,
-  so a prefixed command reads naturally at the prompt rather than as a mangled
-  name. A command's stable identity is `(source, kind, bare_name)`, so a prefix
-  change is a rename matched on identity by `upgrade`/`introspect`
-  (namespacing.md, lifecycle.md).
+  harness offers the command as `/<prefix>:<name>`. This is verified behavior,
+  not an inference: a colon in a command file's name is accepted, through a
+  symlink as `mind` installs it, and the resulting command carries the colon in
+  its invoked name. The spelling is the harness's own for a namespaced command
+  (`/<plugin>:<skill>` for a plugin skill, `/<dir>:<name>` for a grouped
+  command), so a prefixed command reads naturally at the prompt rather than as a
+  mangled name. A command's stable identity is `(source, kind, bare_name)`, so a
+  prefix change is a rename matched on identity by `upgrade`/`introspect`
+  (namespacing.md, lifecycle.md). A bare name that already contains a colon
+  (`commands/frontend:component.md`, CMD-2) is carried through unchanged and
+  composes with a prefix as `<prefix>:<group>:<name>`.
 - `CMD-7` The harness presets (HARN-4: gemini, codex, universal, windsurf) admit
   skills only, so they are unchanged by this kind: a command links into the
   default Claude lobe and into any lobe whose `kinds` filter names `command`. A

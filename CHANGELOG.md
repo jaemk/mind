@@ -30,8 +30,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   like any other item. A namespace gives `commands/<prefix>:<name>.md`, which is
   the spelling a harness's own command namespacing produces. `--kind command`,
   `command:<name>` refs, `kind = "command"` in `[[items]]`, and
-  `[discover].commands` globs all work; the convention scan is flat, so a nested
-  `commands/<group>/<name>.md` needs an explicit entry or a glob. The harness
+  `[discover].commands` globs all work; the convention scan is flat. A grouped
+  command name needs no nested directory: Claude Code reads
+  `commands/frontend/component.md` as `/frontend:component`, and a flat
+  `commands/frontend:component.md` (or a `mind` namespace) produces the same
+  name. Note that Claude Code has merged custom commands into skills, so a
+  `commands/` file and a same-named skill both produce `/<name>`; commands keep
+  working, and a skill is the better shape for something new. The harness
   presets (gemini, codex, universal, windsurf) admit skills only and are
   unaffected. A hand-written command in a lobe now shows up as an unmanaged item
   in `recall`, and can be `absorb`ed.

@@ -17,7 +17,10 @@ This initializes the source and makes its items available to `mind learn`.
 - `agent` - an `agents/<name>.md` file.
 - `rule` - a `rules/<name>.md` file.
 - `command` - a `commands/<name>.md` file: a harness slash command, offered at the
-  prompt as `/<name>` (`/<prefix>:<name>` under a namespace).
+  prompt as `/<name>` (`/<prefix>:<name>` under a namespace). Claude Code has
+  merged custom commands into skills, so a `commands/` file and a skill of the
+  same name both produce `/<name>`; commands keep working and `mind` installs
+  them, but a skill is the better shape for something new.
 - `tool` - a `tools/<name>/` directory containing a `TOOL.md`, a script/executable, 
   any associated resources. Tools are an optional feature to assist with managing
   and referencing shared scripts/executables utilized by multiple skills.

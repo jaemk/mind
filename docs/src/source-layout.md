@@ -19,9 +19,18 @@ The kinds:
 - **skill**: a directory with a `SKILL.md` anchor. Bundled files (a `resources/`
   dir, scripts) ship with it.
 - **agent** / **rule** / **command**: a single markdown file. A command is what
-  the harness offers at the prompt as `/<name>`; the scan is flat, so a nested
-  `commands/<group>/<name>.md` needs an explicit `[[items]]` entry or a
-  `[discover].commands` glob.
+  the harness offers at the prompt as `/<name>`.
+
+The command scan is flat: `commands/<name>.md`, no subdirectories. Claude Code
+reads a grouped `commands/frontend/component.md` as `/frontend:component`, and
+you get the same command name from a flat file by putting the colon in the name
+(`commands/frontend:component.md`), which is also what a `mind` namespace
+produces (`jk:review` links as `commands/jk:review.md` and runs as
+`/jk:review`). Keep a real subdirectory only if you need it for Claude users
+directly; then declare the item in `mind.toml` with a `link` that preserves the
+nested path. Note that Claude Code now treats custom commands as skills: a
+`commands/` file and a `skills/<name>/SKILL.md` both produce `/<name>`, and a
+skill is the better shape for something new.
 - **tool**: a directory of helper scripts or a compiled binary. A tool is
   store-only: other items reference it, and by default it is not linked into an
   agent home (a tool can opt in with an explicit `link`, see [Tooling](tooling.md)).
