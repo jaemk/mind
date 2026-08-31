@@ -8,7 +8,7 @@ re-packaging by its author.
 
 ```
 mind meld owner/claude-plugin-repo   # a repo with .claude-plugin/plugin.json
-mind probe                           # its skills and agents show up as items
+mind probe                           # its skills, agents, and commands show up as items
 mind learn <plugin-name>:<skill>     # install one, same as any source
 ```
 
@@ -29,14 +29,15 @@ that `sync`, `upgrade`, and `introspect` use.
 ## A single plugin (`plugin.json`)
 
 A plugin is a directory with `.claude-plugin/plugin.json` whose component
-directories sit at the plugin root. Claude's layout for skills and agents is
-byte-for-byte `mind`'s convention layout, so the mapping is direct:
+directories sit at the plugin root. Claude's layout for skills, agents, and
+commands is byte-for-byte `mind`'s convention layout, so the mapping is direct:
 
 | Plugin component | `mind` item |
 |------------------|-------------|
 | `skills/<name>/SKILL.md` | a `skill` |
 | `agents/<name>.md` | an `agent` |
-| `commands/`, `hooks/`, `.mcp.json`, LSP, monitors, themes, output-styles | not installed (no `mind` equivalent) |
+| `commands/<name>.md` | a `command` |
+| `hooks/`, `.mcp.json`, LSP, monitors, themes, output-styles | not installed (no `mind` equivalent) |
 
 A plugin has no `rules` or `tools` component, so nothing maps to those kinds.
 
@@ -174,11 +175,11 @@ scan root) with `name`, and optionally `version` and `description`:
 }
 ```
 
-Lay out `skills/<name>/SKILL.md` and `agents/<name>.md` next to it, same as any
-`mind` source ([Source layout](source-layout.md)). `commands/`, `hooks/`,
-`.mcp.json`, and the other Claude-only component kinds are fine to keep in the
-repo for Claude users; `mind` just skips them (with a printed count) rather than
-erroring, so one repo layout serves both consumers. There is no plugin-level
+Lay out `skills/<name>/SKILL.md`, `agents/<name>.md`, and `commands/<name>.md`
+next to it, same as any `mind` source ([Source layout](source-layout.md)).
+`hooks/`, `.mcp.json`, and the other Claude-only component kinds are fine to keep
+in the repo for Claude users; `mind` just skips them (with a printed count)
+rather than erroring, so one repo layout serves both consumers. There is no plugin-level
 place for a `rule` or a `tool` - if you want `mind` users to get those, add a
 `mind.toml` with `[[items]]` for them; it composes with the plugin manifest as
 long as it stays metadata-only or covers different items ([Precedence](#precedence-when-a-plugin-manifest-is-used)).
@@ -219,7 +220,8 @@ Two runnable fixtures live in the repo:
 
 - [examples/marketplace-plugin](https://github.com/jaemk/mind/tree/main/examples/marketplace-plugin)
   - a single plugin: one skill (namespaced by the plugin name), one agent (bare),
-  and unsupported `commands/`/`hooks/` that report a skipped count.
+  a `commands/` slash command, and an unsupported `hooks/` that reports a
+  skipped count.
 - [examples/marketplace-catalog](https://github.com/jaemk/mind/tree/main/examples/marketplace-catalog)
   - a catalog listing two in-repo plugins, each with its own name and items.
 

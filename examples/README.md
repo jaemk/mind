@@ -37,8 +37,8 @@ Simplest to most advanced:
 - [super-source/](super-source/) - a curated registry that references and pins
   nested sources; `dump` output.
 - [marketplace-plugin/](marketplace-plugin/) - a Claude `.claude-plugin/plugin.json`
-  melded as a source: skills and agents become items, unsupported components report
-  a skipped count.
+  melded as a source: skills, agents, and commands become items, unsupported
+  components report a skipped count.
 - [marketplace-catalog/](marketplace-catalog/) - a Claude `.claude-plugin/marketplace.json`
   catalog of in-repo plugins, each a namespaced sub-source.
 - [marketplace-curator/](marketplace-curator/) - a repo that is both a Claude

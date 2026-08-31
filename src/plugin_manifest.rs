@@ -135,17 +135,18 @@ pub fn load_plugin_manifest(path: &Path) -> Result<PluginManifest> {
 
 /// Counts unsupported component kinds found at a plugin root (MKT-4).
 ///
-/// Claude plugin components that have no `mind` equivalent — `commands/`,
-/// `hooks/`, `.mcp.json`/`mcpServers`, LSP servers, monitors, themes, and
-/// output-styles — are not installed. This struct holds counts per kind so
-/// the caller can render an informative message rather than silently dropping
-/// them.
+/// Claude plugin components that have no `mind` equivalent — `hooks/`,
+/// `.mcp.json`/`mcpServers`, LSP servers, monitors, themes, and output-styles
+/// — are not installed. This struct holds counts per kind so the caller can
+/// render an informative message rather than silently dropping them.
+///
+/// `commands/` is deliberately absent: a plugin's commands map to the `command`
+/// item kind and are installed (MKT-18), so they are not a skipped component.
 ///
 /// Populated by the consumer (catalog/commands shard) from what it finds on
 /// disk and in the manifest. This module owns the type and its rendering only.
 #[derive(Debug, Default)]
 pub struct SkippedComponents {
-    pub commands: u32,
     pub hooks: u32,
     pub mcp_servers: u32,
     pub lsp_servers: u32,
@@ -157,8 +158,7 @@ pub struct SkippedComponents {
 impl SkippedComponents {
     /// Total number of skipped component instances across all kinds.
     pub fn total(&self) -> u32 {
-        self.commands
-            + self.hooks
+        self.hooks
             + self.mcp_servers
             + self.lsp_servers
             + self.monitors
@@ -173,7 +173,6 @@ impl SkippedComponents {
             return None;
         }
         let mut parts: Vec<String> = Vec::new();
-        Self::push_part(&mut parts, self.commands, "command", "commands");
         Self::push_part(&mut parts, self.hooks, "hook", "hooks");
         Self::push_part(&mut parts, self.mcp_servers, "mcp server", "mcp servers");
         Self::push_part(&mut parts, self.lsp_servers, "lsp server", "lsp servers");
@@ -1145,15 +1144,15 @@ mod tests {
     #[test]
     fn skipped_multiple_kinds_comma_joined() {
         let s = SkippedComponents {
-            commands: 2,
             hooks: 1,
             mcp_servers: 3,
+            themes: 2,
             ..Default::default()
         };
         let summary = s.summary().expect("multiple kinds -> Some");
         assert!(
-            summary.contains("2 commands"),
-            "should include commands: {summary}"
+            summary.contains("2 themes"),
+            "should include themes: {summary}"
         );
         assert!(
             summary.contains("1 hook"),
@@ -1189,7 +1188,6 @@ mod tests {
     #[test]
     fn skipped_all_kinds_renders_all() {
         let s = SkippedComponents {
-            commands: 1,
             hooks: 1,
             mcp_servers: 1,
             lsp_servers: 1,
@@ -1198,8 +1196,13 @@ mod tests {
             output_styles: 1,
         };
         let summary = s.summary().expect("all kinds -> Some");
+        // spec: MKT-18 -- `command` is NOT among them: a plugin's commands are
+        // installed, so the skipped-component summary never names them.
+        assert!(
+            !summary.contains("command"),
+            "a command is not a skipped component: {summary}"
+        );
         for expected in &[
-            "command",
             "hook",
             "mcp server",
             "lsp server",

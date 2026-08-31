@@ -22648,6 +22648,13 @@ fn marketplace_plugin_meld_discovers_skill_and_agent() {
         "plugin agent must appear in probe: {}",
         probe.stdout
     );
+    // spec: MKT-18 -- the plugin's commands/ maps to the command kind, under
+    // the plugin-name prefix like its other items (MKT-5).
+    assert!(
+        probe.stdout.contains("command:acme-tools:hello"),
+        "plugin command must appear in probe: {}",
+        probe.stdout
+    );
     // MKT-3: no rule or tool items
     assert!(
         !probe.stdout.contains("rule:"),
@@ -22684,10 +22691,10 @@ fn marketplace_plugin_learn_installs_and_links() {
 
 #[test]
 fn marketplace_plugin_skipped_components_note() {
-    // spec: MKT-4
-    // Unsupported component kinds (commands/, hooks/) are not installed; meld
-    // prints a count note so the user is not misled into thinking the plugin is
-    // fully represented.
+    // spec: MKT-4 MKT-18
+    // An unsupported component kind (hooks/) is not installed; meld prints a
+    // count note so the user is not misled into thinking the plugin is fully
+    // represented. The fixture's commands/ is NOT among them: it installs.
     let sb = Sandbox::from_example("marketplace-plugin");
     let spec = sb.source_spec();
     let r = sb.mind(&["meld", &spec]);
@@ -22698,10 +22705,45 @@ fn marketplace_plugin_skipped_components_note() {
         combined.contains("not installed (no mind equivalent)"),
         "meld must print the skipped-components note: {combined}"
     );
-    // The note must mention at least one of the fixture's unsupported kinds.
     assert!(
-        combined.contains("hook") || combined.contains("command"),
-        "skipped-components note must name a kind: {combined}"
+        combined.contains("hook"),
+        "skipped-components note must name the unsupported kind: {combined}"
+    );
+    let note = combined
+        .lines()
+        .find(|l| l.contains("not installed (no mind equivalent)"))
+        .expect("the note line");
+    assert!(
+        !note.contains("command"),
+        "a plugin's commands are installed, so the skipped note must not name \
+         them: {note}"
+    );
+}
+
+#[test]
+fn marketplace_plugin_command_installs_and_links() {
+    // spec: MKT-18 CMD-5
+    // A plugin's command rides the normal store+symlink pipeline, linking under
+    // the plugin-name prefix at commands/<prefix>:<name>.md.
+    let sb = Sandbox::from_example("marketplace-plugin");
+    let spec = sb.source_spec();
+    assert!(sb.mind(&["meld", &spec, "--link-only"]).success);
+
+    let r = sb.mind(&["learn", "command:acme-tools:hello"]);
+    assert!(r.success, "learn command failed: {} {}", r.stdout, r.stderr);
+
+    let link = sb.claude_home.join("commands/acme-tools:hello.md");
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false),
+        "the plugin command must be linked at commands/acme-tools:hello.md"
+    );
+    assert!(
+        std::fs::read_to_string(&link)
+            .expect("read the linked command")
+            .contains("Greet the current project"),
+        "the linked file must be the plugin's command"
     );
 }
 
@@ -22912,6 +22954,13 @@ fn marketplace_catalog_melds_in_repo_plugins() {
         "beta's agent must appear in probe (prefixed effective name): {}",
         probe.stdout
     );
+    // spec: MKT-18 -- an in-repo entry's commands/ is always scanned, like its
+    // agents, and namespaced by the entry name (MKT-8).
+    assert!(
+        probe.stdout.contains("command:beta:ship"),
+        "beta's command must appear in probe: {}",
+        probe.stdout
+    );
 
     // Items from sub-sources are installable through the normal `learn` path.
     let r = sb.mind(&["learn", "alpha:one"]);
@@ -22935,6 +22984,18 @@ fn marketplace_catalog_melds_in_repo_plugins() {
     assert!(
         sb.claude_home.join("agents/two.md").exists(),
         "beta's agent link must be at agents/two.md (bare harness name)"
+    );
+
+    // spec: MKT-18 -- and its command installs like any other item.
+    let r = sb.mind(&["learn", "command:beta:ship"]);
+    assert!(
+        r.success,
+        "learn beta's command failed: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        sb.claude_home.join("commands/beta:ship.md").exists(),
+        "beta's command link must be at commands/beta:ship.md"
     );
 }
 
@@ -24239,9 +24300,12 @@ fn example_marketplace_curator_validates() {
 
 #[test]
 fn marketplace_plugin_with_only_unsupported_components() {
-    // spec: MKT-3, MKT-4
-    // A plugin with no skills or agents (only hooks/, commands/) succeeds
-    // on meld, prints a skipped-components note, and contributes zero items to probe.
+    // spec: MKT-3, MKT-4, MKT-18
+    // A plugin with no skills, agents, or commands (only hooks/, plus a
+    // non-markdown file under commands/) succeeds on meld, prints a
+    // skipped-components note, and contributes zero items to probe. The `.sh`
+    // is the point: the command scan takes `<name>.md` files only, so a
+    // script parked in commands/ is not an item.
     let sb = Sandbox::bare("no-items-plugin");
     sb.write_and_commit(
         ".claude-plugin/plugin.json",
@@ -24270,8 +24334,43 @@ fn marketplace_plugin_with_only_unsupported_components() {
         !probe.stdout.contains("skill:")
             && !probe.stdout.contains("agent:")
             && !probe.stdout.contains("rule:")
+            && !probe.stdout.contains("command:")
             && !probe.stdout.contains("tool:"),
         "a hooks-only plugin must contribute zero items to probe: {}",
+        probe.stdout
+    );
+}
+
+#[test]
+fn marketplace_plugin_with_only_commands_installs_them_without_a_skipped_note() {
+    // spec: MKT-18, MKT-4
+    // The inverse of the case above: a plugin whose only component is a
+    // commands/ directory of markdown now contributes items, and nothing is
+    // reported as skipped.
+    let sb = Sandbox::bare("commands-only-plugin");
+    sb.write_and_commit(
+        ".claude-plugin/plugin.json",
+        r#"{"name":"cmds","version":"1.0"}"#,
+    );
+    sb.write_and_commit(
+        "commands/ship.md",
+        "---\ndescription: Ship it\n---\n# ship\n",
+    );
+
+    let spec = sb.source_spec();
+    let r = sb.mind(&["meld", &spec]);
+    assert!(r.success, "meld failed: {} {}", r.stdout, r.stderr);
+
+    let combined = format!("{}\n{}", r.stdout, r.stderr);
+    assert!(
+        !combined.contains("not installed (no mind equivalent)"),
+        "a plugin whose commands all install must print no skipped note: {combined}"
+    );
+
+    let probe = sb.mind(&["probe"]);
+    assert!(
+        probe.stdout.contains("command:cmds:ship"),
+        "the plugin's command must be offered: {}",
         probe.stdout
     );
 }

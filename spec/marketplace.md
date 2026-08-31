@@ -94,14 +94,16 @@ an independent store and link into the host's discovery location.
 ## A single plugin (`plugin.json`)
 
 A plugin is a directory containing `.claude-plugin/plugin.json` whose component
-directories sit at the plugin root. Claude's plugin component layout for skills
-and agents is byte-for-byte `mind`'s convention layout, so the mapping is direct.
+directories sit at the plugin root. Claude's plugin component layout for skills,
+agents, and commands is byte-for-byte `mind`'s convention layout, so the mapping
+is direct.
 
 - `MKT-3` A `.claude-plugin/plugin.json` defines a plugin rooted at the manifest's
   parent directory. Its components map to `mind` item kinds by the convention rules
-  (DSC-10..12) applied at the plugin root: `skills/<name>/SKILL.md` -> a `skill`,
-  `agents/<name>.md` -> an `agent`. Component kinds the native format defines that
-  have no `mind` equivalent - `commands/`, `hooks/`, `.mcp.json`, LSP, monitors,
+  (DSC-10..12, DSC-14) applied at the plugin root: `skills/<name>/SKILL.md` -> a
+  `skill`, `agents/<name>.md` -> an `agent`, `commands/<name>.md` -> a `command`
+  (MKT-18). Component kinds the native format defines that
+  have no `mind` equivalent - `hooks/`, `.mcp.json`, LSP, monitors,
   themes, output-styles - are not installed. A plugin has no `rules` or `tools`
   component, so nothing maps to those `mind` kinds from a plugin.
 
@@ -109,7 +111,22 @@ and agents is byte-for-byte `mind`'s convention layout, so the mapping is direct
   count of skipped components on meld (e.g. `2 hooks, 1 mcp server not installed
   (no mind equivalent)`), so the user is not misled into believing the plugin is
   fully represented. The projection is intentionally lossy and stated as such; it
-  is never a silent drop.
+  is never a silent drop. A `commands/` directory is not counted (MKT-18): its
+  contents are installed, and naming them in the one message whose job is to say
+  what was dropped would be false.
+
+- `MKT-18` A plugin's `commands/<name>.md` files map to the `command` item kind
+  (commands.md CMD-1), on every path that reads a plugin: a directly melded
+  `.claude-plugin/plugin.json` (MKT-3) and each in-repo entry of a
+  `.claude-plugin/marketplace.json` (MKT-14). The scan is the same flat one
+  convention discovery uses (CMD-2), rooted at the plugin root, and it always
+  runs: an entry's explicit `skills` array narrows only its skill scan, never
+  its agents or commands, since that array names skill directories alone. A
+  mapped command is an ordinary item from there on -- namespaced by the plugin
+  name like any other (MKT-5, MKT-8), installed and upgraded through the normal
+  paths -- and is no longer reported as a skipped component (MKT-4). Before this
+  rule a plugin's commands were left behind with a "not installed (no mind
+  equivalent)" note, which is now false: the equivalent exists.
 
 - `MKT-5` A plugin's `name` (from `plugin.json`) is the default effective prefix
   (namespacing.md) for that plugin's items, mirroring Claude's mandatory

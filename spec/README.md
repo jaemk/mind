@@ -251,6 +251,7 @@ and verified.
 | Update hooks: `event = "update"` runs at `upgrade` instead of re-running install hooks, for a source and for an item; install hooks stay the idempotent default | done | [install-hooks.md](install-hooks.md) (HOOK-120..126), CLI-195 |
 | An item declares its own hooks: `install:`/`update:`/`uninstall:` frontmatter on any kind, and a scoped `mind.toml` (`[[hooks]]` only) in a skill or tool directory | done | [install-hooks.md](install-hooks.md) (HOOK-130..134) |
 | The `command` item kind: `commands/<name>.md` discovered, stored, linked, namespaced, and upgraded like any other kind | done | [commands.md](commands.md) (CMD-1..9), DSC-14, STO-2 |
+| A Claude plugin's `commands/` maps to the `command` kind (single plugin and marketplace in-repo entries), and is no longer reported as a skipped component | done | [marketplace.md](marketplace.md) (MKT-18), MKT-3, MKT-4 |
 
 ## Documents
 

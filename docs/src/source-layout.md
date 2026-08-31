@@ -33,7 +33,8 @@ globs for non-standard or monorepo layouts. See
 
 A repo published for Claude Code's plugin system needs no changes either: a
 `.claude-plugin/plugin.json` or `.claude-plugin/marketplace.json` is read as a
-discovery input, mapping the plugin's skills and agents to `mind` items. See
+discovery input, mapping the plugin's skills, agents, and commands to `mind`
+items. See
 [Claude plugin marketplaces](marketplace.md).
 
 ## Where shared helpers belong

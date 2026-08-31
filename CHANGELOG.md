@@ -16,6 +16,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   shows the update event as the escape for a step that cannot be. `hooks run` and
   `hooks list` accept `--event update`, with the same pending/recorded semantics
   as the install event.
+- A Claude plugin's `commands/<name>.md` maps to the `command` kind (MKT-18), on
+  both plugin paths: a directly melded `.claude-plugin/plugin.json` and each
+  in-repo entry of a `.claude-plugin/marketplace.json`. They are namespaced by
+  the plugin name like the plugin's other items, and are no longer counted in
+  the "not installed (no mind equivalent)" note, which now covers `hooks/`,
+  `.mcp.json`, LSP, monitors, themes, and output styles.
 - The `command` item kind (CMD-1..9): a `commands/<name>.md` file in a source is
   discovered, stored at `store/command/<name>`, and linked into each admitting
   lobe at `commands/<name>.md`, so a harness slash command installs and upgrades

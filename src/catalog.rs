@@ -1467,6 +1467,41 @@ fn scan_plugin_components(
             out.push(item);
         }
     }
+    // Commands: commands/<name>.md at the plugin root (DSC-14, MKT-18). A
+    // plugin's commands sit at mind's own convention path, so they map like
+    // agents do; the scan is flat, per CMD-2.
+    scan_plugin_commands(plugin_root, source, prefix, out)?;
+    Ok(())
+}
+
+/// Scan a plugin root's `commands/<name>.md` files (MKT-18).
+///
+/// Shared by the single-plugin scan and the marketplace in-repo entry scan, so
+/// both map a plugin's commands the same way. A missing `commands/` directory
+/// yields nothing (DSC-13).
+// spec: MKT-18 CMD-1
+fn scan_plugin_commands(
+    plugin_root: &Path,
+    source: &Source,
+    prefix: &Option<String>,
+    out: &mut Vec<CatalogItem>,
+) -> Result<()> {
+    let commands_dir = plugin_root.join(ItemKind::Command.dir());
+    for entry in read_dir_opt(&commands_dir)? {
+        if entry.is_file()
+            && entry.extension().is_some_and(|e| e == "md")
+            && let Some(item) = make_item(
+                plugin_root,
+                source,
+                prefix,
+                ItemKind::Command,
+                entry.clone(),
+                &entry,
+            )?
+        {
+            out.push(item);
+        }
+    }
     Ok(())
 }
 
@@ -1614,7 +1649,10 @@ fn scan_marketplace_in_repo_plugins(
             }
         }
 
-        // 4. Scan agents (always): agents/<name>.md at the plugin root (DSC-11, MKT-3).
+        // 4. Scan agents and commands (always): agents/<name>.md and
+        //    commands/<name>.md at the plugin root (DSC-11, DSC-14, MKT-3,
+        //    MKT-18). Neither is ever narrowed by the entry's explicit `skills`
+        //    list, which only ever names skill directories.
         let agents_dir = plugin_root.join(ItemKind::Agent.dir());
         for agent_path in read_dir_opt(&agents_dir)? {
             if agent_path.is_file()
@@ -1631,23 +1669,25 @@ fn scan_marketplace_in_repo_plugins(
                 out.push(item);
             }
         }
+        scan_plugin_commands(&plugin_root, source, &plugin_prefix, out)?;
     }
     Ok(())
 }
 
 /// Count unsupported Claude plugin components present at a plugin root (MKT-4).
 ///
-/// Checks for directory-based components: `commands/` and `hooks/` (which have no
-/// `mind` equivalent), and a `.mcp.json` file (mcpServers). Manifest-declared keys
-/// beyond these (lsp servers, monitors, themes, output styles) are not counted here
+/// Checks for the directory-based component with no `mind` equivalent
+/// (`hooks/`) and a `.mcp.json` file (mcpServers). Manifest-declared keys beyond
+/// these (lsp servers, monitors, themes, output styles) are not counted here
 /// because they leave no directory marker — they would require re-parsing the
-/// manifest. This is a dir-based heuristic; commands.rs (shard 4) calls this at
-/// meld time and prints the summary via `SkippedComponents::summary`.
+/// manifest. This is a dir-based heuristic; commands.rs calls it at meld time
+/// and prints the summary via `SkippedComponents::summary`.
+///
+/// spec: MKT-18 -- `commands/` is NOT counted: a plugin's commands map to the
+/// `command` kind and are installed, so reporting them as skipped would be a
+/// lie in the one message whose job is to say what was dropped.
 pub fn plugin_skipped_components(plugin_root: &Path) -> plugin_manifest::SkippedComponents {
     let mut sc = plugin_manifest::SkippedComponents::default();
-    if plugin_root.join("commands").is_dir() {
-        sc.commands = 1;
-    }
     if plugin_root.join("hooks").is_dir() {
         sc.hooks = 1;
     }
@@ -4217,25 +4257,32 @@ mod plugin_tests {
         );
     }
 
-    // plugin_skipped_components counts commands/ and hooks/ dirs (MKT-4).
+    // plugin_skipped_components counts the dirs with no mind equivalent (MKT-4),
+    // and no longer counts commands/, which now maps to the command kind.
     #[test]
     fn plugin_skipped_components_counts_unsupported_dirs() {
+        // spec: MKT-4 MKT-18
         let tmp = TmpDir::new();
         let plugin_root = tmp.path().join("my-plugin");
 
         std::fs::create_dir_all(plugin_root.join("commands")).unwrap();
         std::fs::create_dir_all(plugin_root.join("hooks")).unwrap();
+        std::fs::write(plugin_root.join(".mcp.json"), "{}").unwrap();
 
         let skipped = plugin_skipped_components(&plugin_root);
-        assert!(
-            skipped.commands > 0,
-            "commands/ dir must be counted as skipped"
-        );
         assert!(skipped.hooks > 0, "hooks/ dir must be counted as skipped");
         assert!(
-            skipped.total() >= 2,
-            "at least 2 skipped components: {:?}",
-            skipped
+            skipped.mcp_servers > 0,
+            ".mcp.json must be counted as skipped"
+        );
+        assert_eq!(
+            skipped.total(),
+            2,
+            "a commands/ dir must NOT be counted as skipped: {skipped:?}"
+        );
+        assert!(
+            !skipped.summary().unwrap().contains("command"),
+            "the skipped summary must not name commands: {skipped:?}"
         );
     }
 
