@@ -396,6 +396,12 @@ pub enum MindError {
     )]
     SourceNotFound { name: String },
 
+    /// CUR-16: `curate --adopt <identity>` given an identity that is not, right
+    /// now, an unowned source some registered curator lists. `reason` names
+    /// which: not registered, not listed by any curator, or already owned.
+    #[error("'{name}' cannot be adopted: {reason}")]
+    NotAnAdoptCandidate { name: String, reason: String },
+
     #[error("'{pattern}' is not a valid glob selector: {source}")]
     InvalidPattern {
         pattern: String,
@@ -1396,6 +1402,7 @@ impl MindError {
             MindError::NamespaceLocked { .. } => "namespace-locked",
             MindError::SourceExists { .. } => "source-exists",
             MindError::SourceNotFound { .. } => "source-not-found",
+            MindError::NotAnAdoptCandidate { .. } => "not-an-adopt-candidate",
             MindError::InvalidPattern { .. } => "invalid-pattern",
             MindError::AmbiguousSource { .. } => "ambiguous-source",
             MindError::ItemNotFound { .. } => "item-not-found",

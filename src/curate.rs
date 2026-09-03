@@ -1,4 +1,4 @@
-//! Implementation of `mind curate` (spec/curate.md, CUR-1..CUR-14).
+//! Implementation of `mind curate` (spec/curate.md, CUR-1..CUR-19).
 //!
 //! One pass over every registered curator: read what each declares now, compare
 //! it against what is registered and installed, report the difference as a plan,
@@ -15,9 +15,9 @@ use std::collections::{HashMap, HashSet};
 use serde::Serialize;
 
 use crate::catalog;
-use crate::commands::{self, InstallFlow, PinRequest};
+use crate::commands::{self, InstallFlow, PinRequest, SkippedEntry};
 use crate::config::Config;
-use crate::error::Result;
+use crate::error::{MindError, Result};
 use crate::manifest::Manifest;
 use crate::mindfile::{MindToml, NestedSource};
 use crate::paths::Paths;
@@ -25,8 +25,8 @@ use crate::policy::Policy;
 use crate::sanitize::strip_ansi;
 use crate::source::{Pin, Registry, Source, parse_spec_quiet};
 
-/// The flags `curate` reads, as one value (the CLI has five and they compose).
-#[derive(Clone, Copy, Default)]
+/// The flags `curate` reads, as one value (the CLI has six and they compose).
+#[derive(Clone, Default)]
 pub struct CurateFlags {
     /// Report the plan and apply nothing (CUR-9). Outranks `yes`.
     pub check: bool,
@@ -36,12 +36,17 @@ pub struct CurateFlags {
     pub prune: bool,
     /// Plan against the clones on disk instead of fetching first (CUR-2).
     pub no_sync: bool,
+    /// CUR-16: stamp provenance on one unowned identity instead of planning.
+    pub adopt: Option<String>,
     pub dangerously_skip_hook_check: bool,
     pub dangerously_skip_build_hook_check: bool,
 }
 
 /// One proposed change, in the shape `--json` emits (CUR-13). `action` carries
-/// what applying it does and is not serialized.
+/// what applying it does and is not serialized. Every field that can carry
+/// curator-controlled text is sanitized (`strip_ansi`) at construction (CUR-18):
+/// the plan is the consent surface for the single `[Y/n]` prompt, so a curated
+/// repo must not be able to spoof what another line says.
 #[derive(Serialize)]
 struct Change {
     kind: &'static str,
@@ -72,7 +77,7 @@ enum Action {
     Upgrade { source: String },
     /// Uninstall and drop a source no curator lists (CUR-7). `--prune` only.
     Unlist { source: String },
-    /// Reported, never applied (CUR-8).
+    /// Reported, never applied (CUR-8, CUR-16).
     Advisory,
 }
 
@@ -86,26 +91,36 @@ struct CurateResult {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     applied: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    skipped: Vec<commands::SkippedEntry>,
+    skipped: Vec<SkippedEntry>,
 }
 
 /// Run `mind curate`.
 pub fn run(paths: &Paths, flags: CurateFlags) -> Result<()> {
     paths.ensure_layout()?;
-    let out = crate::render::ctx();
 
-    // spec: CUR-2 -- refresh first, so the lists read below and the commits
-    // compared are current. Reuses the upgrade pass's per-source fetch: it
-    // reports and skips a per-source failure (CLI-54) rather than aborting, and
-    // (unlike `sync`) it registers nothing on its own, which is what keeps
-    // `--check` free of side effects.
-    let mut registry = Registry::load(paths)?;
-    if !flags.no_sync {
-        commands::sync_sources_for_upgrade(paths, &mut registry, None, &out)?;
-        registry.save(paths)?;
+    // spec: CUR-16 -- `--adopt` is a distinct, narrow sub-mode: it stamps
+    // provenance on one identity and does nothing else, so it never mutates
+    // anything under an unattended `--yes` run that did not ask for it by name.
+    if let Some(identity) = &flags.adopt {
+        return run_adopt(paths, identity);
     }
 
-    let plan = build_plan(paths, &registry)?;
+    let out = crate::render::ctx();
+    let mut registry = Registry::load(paths)?;
+
+    // spec: CUR-19 -- scope the CUR-2 refresh to curators and curated sources,
+    // not the whole registry: an unrelated directly-melded source has no
+    // reason to be re-fetched (network calls, a rewritten `commit`) just
+    // because the consumer also happens to run `curate`. Read from the clones
+    // already on disk: membership (is this a curator? is that a curated
+    // source?) changes slowly, so a pre-sync read is a fine basis for scoping
+    // the sync that follows.
+    if !flags.no_sync {
+        let scope = sync_scope(paths, &registry);
+        commands::sync_sources_for_upgrade_scoped(paths, &mut registry, None, Some(&scope), &out)?;
+    }
+
+    let (plan, mut skipped) = build_plan(paths, &registry)?;
 
     if plan.is_empty() {
         if out.json {
@@ -115,32 +130,151 @@ pub fn run(paths: &Paths, flags: CurateFlags) -> Result<()> {
                 outcome: "clean",
                 changes: Vec::new(),
                 applied: Vec::new(),
-                skipped: Vec::new(),
+                skipped,
             });
         }
         println!("{} curated sources are up to date", out.ok());
+        report_skipped(&skipped);
         return Ok(());
     }
 
-    report(&plan, flags);
+    report(&plan, flags.prune);
 
     // spec: CUR-9 -- `--check` reports and applies nothing, and outranks `--yes`.
     if flags.check {
-        return finish(&plan, Vec::new(), Vec::new(), flags);
+        return finish(&plan, Vec::new(), skipped, flags);
     }
-    if !should_apply(&plan, flags)? {
-        return finish(&plan, Vec::new(), Vec::new(), flags);
+    if !should_apply(&plan, flags.yes)? {
+        return finish(&plan, Vec::new(), skipped, flags);
     }
 
-    let (applied, skipped) = apply(paths, plan_in_apply_order(&plan), flags)?;
+    let (applied, apply_skipped) = apply(paths, plan_in_apply_order(&plan), &flags)?;
+    skipped.extend(apply_skipped);
     finish(&plan, applied, skipped, flags)
+}
+
+/// `mind curate --adopt <identity>` (CUR-16): stamp `curated_by` on a source
+/// that is registered, unowned, and currently listed (unowned) by exactly the
+/// named curator's entry -- the only state `--adopt` accepts, so a stale or
+/// mistyped identity fails loudly rather than silently doing nothing.
+fn run_adopt(paths: &Paths, identity: &str) -> Result<()> {
+    let out = crate::render::ctx();
+    let mut registry = Registry::load(paths)?;
+    if registry.find(identity).is_none() {
+        return Err(MindError::NotAnAdoptCandidate {
+            name: identity.to_string(),
+            reason: "no melded source has that identity".to_string(),
+        });
+    }
+    if let Some(owner) = registry.find(identity).and_then(|s| s.curated_by.clone()) {
+        return Err(MindError::NotAnAdoptCandidate {
+            name: identity.to_string(),
+            reason: format!("already curated by {owner}"),
+        });
+    }
+    let (curators_list, _) = curators(paths, &registry)?;
+    let claimant = curators_list.iter().find_map(|c| {
+        entry_targets(c, identity).next().map(|_| c.source.name.clone())
+    });
+    let Some(curator_name) = claimant else {
+        return Err(MindError::NotAnAdoptCandidate {
+            name: identity.to_string(),
+            reason: "no registered curator currently lists it".to_string(),
+        });
+    };
+    if let Some(source) = registry.sources.iter_mut().find(|s| s.name == identity) {
+        source.curated_by = Some(curator_name.clone());
+    }
+    registry.save(paths)?;
+    if out.json {
+        return commands::print_json(&serde_json::json!({
+            "schema": 1,
+            "action": "curate-adopt",
+            "outcome": "applied",
+            "source": identity,
+            "curator": curator_name,
+        }));
+    }
+    println!(
+        "{} {} is now curated by {}",
+        out.ok(),
+        strip_ansi(identity),
+        strip_ansi(&curator_name)
+    );
+    Ok(())
+}
+
+/// Every identity a curator's entries or marketplace catalog resolve `target`
+/// to (there is at most one match; this returns 0 or 1 items so the caller can
+/// use `.next()`), excluding a self-listed entry (CUR-17).
+fn entry_targets<'a>(curator: &'a Curator, target: &'a str) -> impl Iterator<Item = ()> + 'a {
+    let from_entries = curator.entries.iter().filter_map(move |entry| {
+        let mut spec = parse_spec_quiet(&entry.source).ok()?;
+        spec.apply_alias(entry.effective_alias());
+        (spec.name == target && spec.name != curator.source.name).then_some(())
+    });
+    let from_market = curator
+        .market
+        .iter()
+        .filter(move |spec| spec.name == target && spec.name != curator.source.name)
+        .map(|_| ());
+    from_entries.chain(from_market)
+}
+
+/// The sources the CUR-2 refresh should fetch (CUR-19): every source any
+/// curator currently owns (STO-82, so its content is fresh for the CUR-4/5/6
+/// comparisons), plus every source that CARRIES a `mind.toml` or marketplace
+/// manifest file, whether or not it currently declares anything -- checked by
+/// file presence, not by parsing (a source whose `[discover].sources` reads
+/// empty right now is exactly the case that needs a fresh fetch to stop
+/// reading empty). A source curated before this consumer's binary knew
+/// `curated_by` existed reads back unowned (STO-82) and so falls outside the
+/// "already owned" half of this scope until `--adopt` claims it, but is still
+/// covered by the file-presence half if it is itself a curator.
+///
+/// The one gap this cannot close: a source that adds its very first
+/// `mind.toml` (or marketplace manifest) and populates `[discover].sources` in
+/// that same push is invisible to a file-presence check made before the
+/// fetch. It surfaces on the next `curate` (or an explicit `mind sync`),
+/// exactly like a plain `sync` needing a second run to notice a source that
+/// only just started existing.
+fn sync_scope(paths: &Paths, registry: &Registry) -> HashSet<String> {
+    let mut scope = HashSet::new();
+    for source in &registry.sources {
+        // spec: LNK-8 -- an item-link instance curates nothing and owns nothing.
+        if source.item_path.is_some() {
+            continue;
+        }
+        if let Some(curator) = &source.curated_by {
+            scope.insert(source.name.clone());
+            scope.insert(curator.clone());
+            continue;
+        }
+        let clone = source.clone_dir(paths);
+        if clone.join("mind.toml").is_file()
+            || crate::plugin_manifest::find_marketplace_manifest(&clone).is_some()
+        {
+            scope.insert(source.name.clone());
+        }
+    }
+    scope
+}
+
+fn report_skipped(skipped: &[SkippedEntry]) {
+    let out = crate::render::ctx();
+    if out.json || skipped.is_empty() {
+        return;
+    }
+    for s in skipped {
+        println!("  {} {}", out.dim("skipped"), s.describe());
+    }
 }
 
 /// Emit the result document (`--json`) or the closing text line.
 fn finish(
     plan: &[Change],
     applied: Vec<String>,
-    skipped: Vec<commands::SkippedEntry>,
+    skipped: Vec<SkippedEntry>,
     flags: CurateFlags,
 ) -> Result<()> {
     let out = crate::render::ctx();
@@ -170,17 +304,18 @@ fn finish(
             skipped,
         });
     }
-    if applied.is_empty() && !flags.check {
+    report_skipped(&skipped);
+    let applicable = plan.iter().filter(|c| applies(c, flags.prune)).count();
+    if applied.is_empty() && !flags.check && applicable > 0 {
         println!(
-            "note: nothing applied; run `mind curate --yes` to apply {} change(s)",
-            plan.len()
+            "note: nothing applied; run `mind curate --yes` to apply {applicable} change(s)"
         );
     }
     Ok(())
 }
 
 /// Print the plan, one line per change (CUR-1).
-fn report(plan: &[Change], flags: CurateFlags) {
+fn report(plan: &[Change], prune: bool) {
     let out = crate::render::ctx();
     if out.json {
         return;
@@ -197,7 +332,7 @@ fn report(plan: &[Change], flags: CurateFlags) {
     // spec: CUR-7 / CUR-8 -- say plainly which listed changes an apply will not
     // touch, rather than letting a reported-but-never-applied line read as one
     // the run is about to handle.
-    if plan.iter().any(|c| c.kind == "unlist") && !flags.prune {
+    if plan.iter().any(|c| c.kind == "unlist") && !prune {
         println!(
             "note: `unlist` changes uninstall a source's items; pass --prune to apply them too"
         );
@@ -205,11 +340,16 @@ fn report(plan: &[Change], flags: CurateFlags) {
     if plan.iter().any(|c| c.kind == "namespace") {
         println!("note: `namespace` changes are advisory; adopt one with the command shown above");
     }
+    if plan.iter().any(|c| c.kind == "adopt") {
+        println!(
+            "note: `adopt` changes are advisory; run the `mind curate --adopt` command shown above to apply one"
+        );
+    }
 }
 
 /// The single confirmation gate (CUR-9).
-fn should_apply(plan: &[Change], flags: CurateFlags) -> Result<bool> {
-    if flags.yes {
+fn should_apply(plan: &[Change], yes: bool) -> Result<bool> {
+    if yes {
         return Ok(true);
     }
     // spec: CUR-9 -- json mode and a non-TTY run apply nothing without `--yes`;
@@ -217,7 +357,7 @@ fn should_apply(plan: &[Change], flags: CurateFlags) -> Result<bool> {
     if crate::render::ctx().json || !crate::hook::is_tty() {
         return Ok(false);
     }
-    let applicable = plan.iter().filter(|c| applies(c, flags)).count();
+    let applicable = plan.iter().filter(|c| applies(c, false)).count();
     if applicable == 0 {
         return Ok(false);
     }
@@ -225,11 +365,11 @@ fn should_apply(plan: &[Change], flags: CurateFlags) -> Result<bool> {
 }
 
 /// Whether a change is one this run would apply, as opposed to one it only
-/// reports (CUR-7's `unlist` without `--prune`, CUR-8's advisory).
-fn applies(change: &Change, flags: CurateFlags) -> bool {
+/// reports (CUR-7's `unlist` without `--prune`, CUR-8/CUR-16's advisories).
+fn applies(change: &Change, prune: bool) -> bool {
     match change.action {
         Action::Advisory => false,
-        Action::Unlist { .. } => flags.prune,
+        Action::Unlist { .. } => prune,
         _ => true,
     }
 }
@@ -254,11 +394,11 @@ fn plan_in_apply_order(plan: &[Change]) -> Vec<&Change> {
 fn apply(
     paths: &Paths,
     ordered: Vec<&Change>,
-    flags: CurateFlags,
-) -> Result<(Vec<String>, Vec<commands::SkippedEntry>)> {
+    flags: &CurateFlags,
+) -> Result<(Vec<String>, Vec<SkippedEntry>)> {
     let out = crate::render::ctx();
     let mut applied: Vec<String> = Vec::new();
-    let mut skipped: Vec<commands::SkippedEntry> = Vec::new();
+    let mut skipped: Vec<SkippedEntry> = Vec::new();
     let flow = InstallFlow {
         yes: true,
         clobber: commands::Clobber::Prompt,
@@ -270,7 +410,7 @@ fn apply(
     let mut upgrade_scope: Vec<String> = Vec::new();
 
     for change in ordered {
-        if !applies(change, flags) {
+        if !applies(change, flags.prune) {
             continue;
         }
         match &change.action {
@@ -403,26 +543,45 @@ struct Curator {
 /// A source with neither is not a curator and contributes nothing to the plan.
 /// A source that curates ONLY through a marketplace manifest is still a curator:
 /// missing that is what would make its entries look unlisted (CUR-7).
-fn curators(paths: &Paths, registry: &Registry) -> Result<Vec<Curator>> {
+///
+/// spec: CUR-15 -- a source whose clone is missing, or whose `mind.toml` /
+/// marketplace manifest fails to read, is NOT the same as a source with no
+/// curator list: the former is reported in the second return value rather than
+/// silently read as "curates nothing", which is what would make CUR-7 propose
+/// `unlist` for everything it legitimately registered.
+fn curators(paths: &Paths, registry: &Registry) -> Result<(Vec<Curator>, HashSet<String>)> {
     let mut out = Vec::new();
+    let mut unreadable = HashSet::new();
     for source in &registry.sources {
         // spec: LNK-8 -- an item-link instance curates nothing.
         if source.item_path.is_some() {
             continue;
         }
         let clone = source.clone_dir(paths);
-        let entries = MindToml::load(&clone)
-            .ok()
-            .flatten()
-            .and_then(|m| m.discover)
-            .map(|d| d.sources)
-            .unwrap_or_default();
+        if !clone.is_dir() {
+            // A registered source's clone should exist; if it does not, we
+            // cannot tell "never a curator" from "was one, unreadable now".
+            // Treat as the latter so CUR-7 does not sweep what it owns.
+            unreadable.insert(source.name.clone());
+            continue;
+        }
+        let entries = match MindToml::load(&clone) {
+            Ok(Some(m)) => m.discover.map(|d| d.sources).unwrap_or_default(),
+            Ok(None) => Vec::new(),
+            Err(_) => {
+                unreadable.insert(source.name.clone());
+                continue;
+            }
+        };
         // `marketplace_subsources` already applies the MKT-2 suppression (an
         // authoritative mind.toml wins) and each entry's MKT-8 alias.
-        let market: Vec<Source> = commands::marketplace_subsources(paths, source)?
-            .into_iter()
-            .map(|(spec, _in_repo)| spec)
-            .collect();
+        let market: Vec<Source> = match commands::marketplace_subsources(paths, source) {
+            Ok(list) => list.into_iter().map(|(spec, _in_repo)| spec).collect(),
+            Err(_) => {
+                unreadable.insert(source.name.clone());
+                continue;
+            }
+        };
         if entries.is_empty() && market.is_empty() {
             continue;
         }
@@ -433,24 +592,31 @@ fn curators(paths: &Paths, registry: &Registry) -> Result<Vec<Curator>> {
             market,
         });
     }
-    Ok(out)
+    Ok((out, unreadable))
 }
 
-/// Build the plan (CUR-1).
-fn build_plan(paths: &Paths, registry: &Registry) -> Result<Vec<Change>> {
+/// Build the plan (CUR-1). The second element is every per-source or
+/// per-entry failure that CUR-15 kept from aborting the whole run.
+fn build_plan(paths: &Paths, registry: &Registry) -> Result<(Vec<Change>, Vec<SkippedEntry>)> {
     let manifest = Manifest::load(paths)?;
     let mut plan: Vec<Change> = Vec::new();
+    let mut skipped: Vec<SkippedEntry> = Vec::new();
     // Every identity any curator lists, for the CUR-7 unlist pass.
     let mut listed: HashSet<String> = HashSet::new();
     // Curated sources reached this run, for the CUR-6 upgrade pass.
     let mut curated: Vec<String> = Vec::new();
+
+    let (curators_list, unreadable) = curators(paths, registry)?;
+    for name in &unreadable {
+        skipped.push(SkippedEntry::new(name.clone(), "curator_unreadable"));
+    }
 
     for Curator {
         source: curator,
         toml_path,
         entries,
         market,
-    } in curators(paths, registry)?
+    } in curators_list
     {
         for entry in entries {
             // spec: CLI-216 -- resolving an entry to the identity it registers
@@ -461,6 +627,14 @@ fn build_plan(paths: &Paths, registry: &Registry) -> Result<Vec<Change>> {
             // spec: STO-58/DSC-78 -- an entry registers under its effective
             // alias, so compare against that identity.
             spec.apply_alias(entry.effective_alias());
+
+            // spec: CUR-17 -- an entry naming the curator's OWN identity
+            // contributes nothing, not even to `listed`: otherwise a source
+            // could list itself and stay immune to CUR-7 unlisting forever,
+            // even after its actual curator drops it.
+            if spec.name == curator.name {
+                continue;
+            }
             listed.insert(spec.name.clone());
 
             let Some(registered) = registry.find(&spec.name) else {
@@ -507,7 +681,7 @@ fn build_plan(paths: &Paths, registry: &Registry) -> Result<Vec<Change>> {
                     Some(Some(refs)) => format!(
                         "listed by {}; register and install {}",
                         strip_ansi(&curator.name),
-                        refs.join(", ")
+                        strip_ansi(&refs.join(", "))
                     ),
                     Some(None) => format!(
                         "listed by {}; register and install its items",
@@ -528,59 +702,95 @@ fn build_plan(paths: &Paths, registry: &Registry) -> Result<Vec<Change>> {
                 });
                 continue;
             };
-            // spec: CUR-4/CUR-5 -- an entry naming an identity already
-            // registered by someone else (a direct meld, or a different
-            // curator) must not let THIS entry mutate it: only the curator
-            // that actually owns it (STO-82) may propose install/repin, and
-            // it joins the CUR-6 sweep only through its owner. The `listed`
-            // insert above still stands regardless, so any curator naming it
-            // still protects it from CUR-7 unlisting.
+            // spec: CUR-12 -- an entry naming an identity already registered
+            // by someone else (a direct meld, or a different curator) must not
+            // let THIS entry mutate it: only the curator that actually owns it
+            // (STO-82) may propose install/repin, and it joins the CUR-6 sweep
+            // only through its owner. The `listed` insert above still stands
+            // regardless, so any curator naming it still protects it from
+            // CUR-7 unlisting.
             if registered.curated_by.as_deref() != Some(curator.name.as_str()) {
+                // spec: CUR-16 -- an identity no one owns yet is an adopt
+                // candidate: report it, but only `mind curate --adopt` (never
+                // this run, even under --yes) may claim it.
+                if registered.curated_by.is_none() {
+                    plan.push(Change {
+                        kind: "adopt",
+                        curator: curator.name.clone(),
+                        source: registered.name.clone(),
+                        detail: format!(
+                            "{} lists this source but does not own it; run `mind curate --adopt {}` to let it manage it",
+                            strip_ansi(&curator.name),
+                            crate::error::shell_quote(&strip_ansi(&registered.name))
+                        ),
+                        action: Action::Advisory,
+                    });
+                }
                 continue;
             }
             curated.push(registered.name.clone());
 
             // spec: CUR-4 -- declared items that are not installed.
             if let Some(declared) = declared_installs(&entry) {
-                let pending = pending_installs(paths, &manifest, registered, &declared)?;
-                if !pending.is_empty() {
-                    plan.push(Change {
-                        kind: "install",
-                        curator: curator.name.clone(),
-                        source: registered.name.clone(),
-                        detail: format!(
-                            "{} declares {} not installed: {}",
-                            strip_ansi(&curator.name),
-                            pending.len(),
-                            pending.join(", ")
-                        ),
-                        action: Action::Install {
+                match pending_installs(paths, &manifest, registered, &declared) {
+                    Ok(pending) if !pending.is_empty() => {
+                        plan.push(Change {
+                            kind: "install",
+                            curator: curator.name.clone(),
                             source: registered.name.clone(),
-                            refs: declared,
-                        },
-                    });
+                            detail: format!(
+                                "{} declares {} not installed: {}",
+                                strip_ansi(&curator.name),
+                                pending.len(),
+                                strip_ansi(&pending.join(", "))
+                            ),
+                            action: Action::Install {
+                                source: registered.name.clone(),
+                                refs: declared,
+                            },
+                        });
+                    }
+                    Ok(_) => {}
+                    // spec: CUR-15 -- one curated source's scan failing (a
+                    // renamed upstream file, an oversized manifest) reports
+                    // and skips rather than aborting the whole plan.
+                    Err(e) => {
+                        warn_skip(&registered.name, "could not check declared items", &e);
+                        skipped.push(SkippedEntry::new(
+                            registered.name.clone(),
+                            "declared_items_check_failed",
+                        ));
+                    }
                 }
             }
 
             // spec: CUR-5 -- the entry's pin directive against the recorded pin.
-            if let Some(pin) = entry.pin_directive(&toml_path)?
-                && pin != registered.pin
-            {
-                plan.push(Change {
-                    kind: "repin",
-                    curator: curator.name.clone(),
-                    source: registered.name.clone(),
-                    detail: format!(
-                        "{} declares {}; registered as {}",
-                        strip_ansi(&curator.name),
-                        commands::pin_description(&pin),
-                        commands::pin_description(&registered.pin)
-                    ),
-                    action: Action::Repin {
+            match entry.pin_directive(&toml_path) {
+                Ok(Some(pin)) if pin != registered.pin => {
+                    plan.push(Change {
+                        kind: "repin",
+                        curator: curator.name.clone(),
                         source: registered.name.clone(),
-                        pin,
-                    },
-                });
+                        detail: format!(
+                            "{} declares {}; registered as {}",
+                            strip_ansi(&curator.name),
+                            strip_ansi(&commands::pin_description(&pin)),
+                            strip_ansi(&commands::pin_description(&registered.pin))
+                        ),
+                        action: Action::Repin {
+                            source: registered.name.clone(),
+                            pin,
+                        },
+                    });
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    warn_skip(&registered.name, "could not read the pin directive", &e);
+                    skipped.push(SkippedEntry::new(
+                        registered.name.clone(),
+                        "pin_directive_invalid",
+                    ));
+                }
             }
         }
 
@@ -588,12 +798,19 @@ fn build_plan(paths: &Paths, registry: &Registry) -> Result<Vec<Change>> {
         // declare no install directive of their own, so they propose no
         // install: what they contribute is membership. An external entry still
         // in the manifest is still listed (so it is not proposed for unlisting,
-        // CUR-7), and a registered one joins the CUR-6 upgrade sweep. In-repo
+        // CUR-7), and a registered one joins the CUR-6 upgrade sweep, subject
+        // to the same CUR-12 ownership check as any other entry. In-repo
         // plugins are items of the curator source itself (MKT-14), never
         // separately registered sources, so they never appear here.
         for spec in market {
+            // spec: CUR-17 -- same self-listing exclusion as the entry loop.
+            if spec.name == curator.name {
+                continue;
+            }
             listed.insert(spec.name.clone());
-            if let Some(registered) = registry.find(&spec.name) {
+            if let Some(registered) = registry.find(&spec.name)
+                && registered.curated_by.as_deref() == Some(curator.name.as_str())
+            {
                 curated.push(registered.name.clone());
             }
         }
@@ -601,20 +818,26 @@ fn build_plan(paths: &Paths, registry: &Registry) -> Result<Vec<Change>> {
 
     // spec: CUR-6 -- curated sources whose installed items are out of date.
     for source in dedup(curated) {
-        if let Some(count) = outdated_count(paths, registry, &manifest, &source)?
-            && count > 0
-        {
-            let curator = registry
-                .find(&source)
-                .and_then(|s| s.curated_by.clone())
-                .unwrap_or_default();
-            plan.push(Change {
-                kind: "upgrade",
-                curator,
-                source: source.clone(),
-                detail: format!("{count} installed item(s) out of date"),
-                action: Action::Upgrade { source },
-            });
+        match outdated_count(paths, registry, &manifest, &source) {
+            Ok(Some(count)) if count > 0 => {
+                let curator = registry
+                    .find(&source)
+                    .and_then(|s| s.curated_by.clone())
+                    .unwrap_or_default();
+                plan.push(Change {
+                    kind: "upgrade",
+                    curator,
+                    source: source.clone(),
+                    detail: format!("{count} installed item(s) out of date"),
+                    action: Action::Upgrade { source },
+                });
+            }
+            Ok(_) => {}
+            // spec: CUR-15 -- likewise for the CUR-6 drift check.
+            Err(e) => {
+                warn_skip(&source, "could not check for drift", &e);
+                skipped.push(SkippedEntry::new(source.clone(), "drift_check_failed"));
+            }
         }
     }
 
@@ -624,6 +847,12 @@ fn build_plan(paths: &Paths, registry: &Registry) -> Result<Vec<Change>> {
             continue; // no provenance: never proposed for unlisting
         };
         if listed.contains(&source.name) {
+            continue;
+        }
+        // spec: CUR-15 -- a curator this run could not read contributes
+        // nothing, including no `unlist`: an unreadable list must not read as
+        // an empty one.
+        if unreadable.contains(curator) {
             continue;
         }
         // A curator that is itself gone takes its entries' provenance with it:
@@ -643,7 +872,18 @@ fn build_plan(paths: &Paths, registry: &Registry) -> Result<Vec<Change>> {
         });
     }
 
-    Ok(plan)
+    Ok((plan, skipped))
+}
+
+/// A per-source or per-entry failure CUR-15 kept from aborting the plan:
+/// printed as a warning in text mode (mirroring `sync_sources_for_upgrade`'s
+/// own per-source failure warning), with the full error detail. The `--json`
+/// `skipped` slug carries no free text (CUR-13), so this is the only place a
+/// human reads why.
+fn warn_skip(source: &str, doing: &str, e: &MindError) {
+    if !crate::render::ctx().json {
+        eprintln!("  warning: {doing} for {}: {e}", strip_ansi(source));
+    }
 }
 
 fn dedup(mut names: Vec<String>) -> Vec<String> {

@@ -714,7 +714,7 @@ fn a_marketplace_entry_still_listed_is_not_proposed_for_unlisting() {
 
 #[test]
 fn an_entry_naming_a_directly_melded_source_proposes_nothing_against_it() {
-    // spec: CUR-4 CUR-5 CUR-12
+    // spec: CUR-4 CUR-5 CUR-12 CUR-16
     // A curator's entry can resolve to the same identity as a source the
     // consumer melded by hand (same repo, no alias). That entry must not be
     // able to install into or repin a source it does not own: CUR-12 says
@@ -754,6 +754,12 @@ fn an_entry_naming_a_directly_melded_source_proposes_nothing_against_it() {
         "an entry naming an identity it does not own must propose nothing: {}",
         plan.stdout
     );
+    // spec: CUR-16
+    assert!(
+        plan.stdout.contains("adopt") && plan.stdout.contains("--adopt"),
+        "the unowned identity must be reported as an adopt candidate: {}",
+        plan.stdout
+    );
 
     let applied = env.mind(&["curate", "--yes"]);
     assert!(applied.success, "curate --yes failed: {}", applied.stderr);
@@ -761,5 +767,298 @@ fn an_entry_naming_a_directly_melded_source_proposes_nothing_against_it() {
         !env.sources_json().contains("\"kind\": \"ref\""),
         "the directly melded source's pin must not move off the default branch: {}",
         env.sources_json()
+    );
+}
+
+#[test]
+fn a_marketplace_entry_naming_a_directly_melded_source_proposes_no_upgrade() {
+    // spec: CUR-6 CUR-12
+    // The same ownership guard applies to the marketplace `market` loop as to
+    // the `[discover].sources` entry loop: a catalog plugin that resolves to
+    // an identity it does not itself own must not pull that source into the
+    // CUR-6 upgrade sweep.
+    let env = Env::new();
+    let lib = env.repo("lib");
+    lib.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\ndescription: Review\n---\n# review\n",
+    );
+    let direct = env.mind(&["meld", &lib.spec(), "--namespace", "mine", "--yes"]);
+    assert!(direct.success, "meld failed: {} {}", direct.stdout, direct.stderr);
+    assert!(
+        !env.sources_json().contains("curated_by"),
+        "a direct meld records no curator: {}",
+        env.sources_json()
+    );
+
+    let catalog = env.repo("catalog");
+    catalog.write_and_commit(
+        ".claude-plugin/marketplace.json",
+        &format!(
+            r#"{{"name":"Cat","plugins":[{{"name":"mine","source":{{"url":"{}"}}}}]}}"#,
+            lib.spec()
+        ),
+    );
+    let m = env.mind(&["meld", &catalog.spec(), "--register-only"]);
+    assert!(m.success, "meld failed: {} {}", m.stdout, m.stderr);
+
+    // Upstream moves, so a source curate is willing to touch would be flagged.
+    lib.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\ndescription: Review\n---\n# review\nsecond\n",
+    );
+
+    let plan = env.mind(&["curate", "--check"]);
+    assert!(plan.success, "curate failed: {}", plan.stderr);
+    assert!(
+        !plan.stdout.contains("upgrade"),
+        "a marketplace entry naming an identity it does not own must propose nothing: {}",
+        plan.stdout
+    );
+}
+
+#[test]
+fn a_source_cannot_shield_itself_from_unlisting_by_listing_itself() {
+    // spec: CUR-17
+    // Without the self-listing exclusion, a curated source could list its own
+    // identity in its own mind.toml and stay in the CUR-7 "still listed" set
+    // forever, even after the curator that actually registered it drops it.
+    let env = Env::new();
+    let (lib, curator) = lib_and_curator(&env, ", install = true");
+    let m = env.mind(&["meld", &curator.spec(), "--yes"]);
+    assert!(m.success, "meld failed: {} {}", m.stdout, m.stderr);
+    assert!(
+        env.claude_home.join("skills/review").exists(),
+        "the curated item must install: {}",
+        m.stdout
+    );
+
+    // The curated source lists itself.
+    lib.write_and_commit(
+        "mind.toml",
+        &format!("[discover]\nsources = [{{ source = \"{}\" }}]\n", lib.spec()),
+    );
+    // The real curator drops it.
+    curator.curate_list(&[]);
+
+    let plan = env.mind(&["curate", "--check", "--prune"]);
+    assert!(plan.success, "curate failed: {}", plan.stderr);
+    assert!(
+        plan.stdout.contains("unlist") && plan.stdout.contains(&env.ident("lib")),
+        "self-listing must not shield a source from unlisting once its real curator drops it: {}",
+        plan.stdout
+    );
+}
+
+#[test]
+fn an_unreadable_curator_does_not_sweep_its_sources_into_unlist() {
+    // spec: CUR-15
+    // A curator's clone disappearing (moved, unmounted) must not read the
+    // same as "this curator lists nothing now": that would propose `unlist`
+    // for every source it legitimately owns.
+    let env = Env::new();
+    let (_lib, curator) = lib_and_curator(&env, ", install = true");
+    let m = env.mind(&["meld", &curator.spec(), "--yes"]);
+    assert!(m.success, "meld failed: {} {}", m.stdout, m.stderr);
+    assert!(env.claude_home.join("skills/review").exists());
+
+    std::fs::rename(&curator.path, env.base.join("curator-moved")).unwrap();
+
+    let plan = env.mind(&["curate", "--check", "--prune"]);
+    assert!(plan.success, "curate failed: {} {}", plan.stdout, plan.stderr);
+    assert!(
+        !plan.stdout.contains("unlist"),
+        "an unreadable curator must not sweep the sources it owns into unlist: {}",
+        plan.stdout
+    );
+    assert!(
+        plan.stdout.contains("skipped"),
+        "the unreadable curator should be reported, not silently dropped: {}",
+        plan.stdout
+    );
+}
+
+#[test]
+fn one_entrys_invalid_pin_directive_does_not_abort_the_whole_plan() {
+    // spec: CUR-15
+    let env = Env::new();
+    let ok_lib = env.repo("ok-lib");
+    ok_lib.write_and_commit("skills/ok/SKILL.md", "---\ndescription: Ok\n---\n# ok\n");
+    let bad_lib = env.repo("bad-lib");
+    bad_lib.write_and_commit("skills/bad/SKILL.md", "---\ndescription: Bad\n---\n# bad\n");
+
+    let curator = env.repo("curator");
+    curator.curate_list(&[
+        format!("{{ source = \"{}\", install = true }}", ok_lib.spec()),
+        format!("{{ source = \"{}\", install = true }}", bad_lib.spec()),
+    ]);
+    let m = env.mind(&["meld", &curator.spec(), "--yes"]);
+    assert!(m.success, "meld failed: {} {}", m.stdout, m.stderr);
+    assert!(env.claude_home.join("skills/ok").exists());
+    assert!(env.claude_home.join("skills/bad").exists());
+
+    // bad-lib's entry gains conflicting pin directives (DSC-41's one-of rule).
+    curator.curate_list(&[
+        format!("{{ source = \"{}\", install = true }}", ok_lib.spec()),
+        format!(
+            "{{ source = \"{}\", install = true, pin-ref = \"deadbeef\", follow-branch = \"main\" }}",
+            bad_lib.spec()
+        ),
+    ]);
+    // Upstream moves, so ok-lib shows an upgrade if the run reaches that far.
+    ok_lib.write_and_commit(
+        "skills/ok/SKILL.md",
+        "---\ndescription: Ok\n---\n# ok\nsecond\n",
+    );
+
+    let plan = env.mind(&["curate", "--check"]);
+    assert!(
+        plan.success,
+        "one entry's bad pin directive must not abort the whole plan: {} {}",
+        plan.stdout, plan.stderr
+    );
+    assert!(
+        plan.stdout.contains("upgrade") && plan.stdout.contains(&env.ident("ok-lib")),
+        "the other entry must still be planned: {}",
+        plan.stdout
+    );
+}
+
+#[test]
+fn curate_adopt_stamps_provenance_then_curate_manages_the_source_normally() {
+    // spec: CUR-16
+    let env = Env::new();
+    let lib = env.repo("lib");
+    lib.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\ndescription: Review\n---\n# review\n",
+    );
+    let direct = env.mind(&["meld", &lib.spec(), "--register-only"]);
+    assert!(direct.success, "meld failed: {} {}", direct.stdout, direct.stderr);
+
+    let curator = env.repo("curator");
+    curator.curate_list(&[format!("{{ source = \"{}\", install = true }}", lib.spec())]);
+    let m = env.mind(&["meld", &curator.spec(), "--register-only"]);
+    assert!(m.success, "meld failed: {} {}", m.stdout, m.stderr);
+
+    let plan = env.mind(&["curate", "--check"]);
+    assert!(plan.success, "curate failed: {}", plan.stderr);
+    let identity = env.ident("lib");
+    assert!(
+        plan.stdout.contains("adopt") && plan.stdout.contains(&identity),
+        "an unowned identity a curator lists must be reported as adoptable: {}",
+        plan.stdout
+    );
+
+    let adopted = env.mind(&["curate", "--adopt", &identity]);
+    assert!(
+        adopted.success,
+        "curate --adopt failed: {} {}",
+        adopted.stdout, adopted.stderr
+    );
+    assert!(
+        env.sources_json().contains("\"curated_by\""),
+        "adopt must stamp curated_by: {}",
+        env.sources_json()
+    );
+
+    let after = env.mind(&["curate", "--check"]);
+    assert!(after.success, "curate failed: {}", after.stderr);
+    assert!(
+        after.stdout.contains("install") && !after.stdout.contains("adopt"),
+        "once adopted, curate must plan install/repin/upgrade for it normally: {}",
+        after.stdout
+    );
+}
+
+#[test]
+fn adopting_an_identity_no_curator_lists_is_refused() {
+    // spec: CUR-16
+    let env = Env::new();
+    let lib = env.repo("lib");
+    lib.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\ndescription: Review\n---\n# review\n",
+    );
+    let m = env.mind(&["meld", &lib.spec(), "--register-only"]);
+    assert!(m.success, "meld failed: {} {}", m.stdout, m.stderr);
+
+    let identity = env.ident("lib");
+    let adopted = env.mind(&["curate", "--adopt", &identity]);
+    assert!(
+        !adopted.success,
+        "adopting an identity no curator lists must fail, not silently do nothing: {}",
+        adopted.stdout
+    );
+}
+
+#[test]
+fn ansi_in_a_curators_install_items_is_stripped_from_the_plan() {
+    // spec: CUR-18
+    // The register detail echoes a curator's raw install-items refs before
+    // anything validates them against a real catalog, which is exactly why
+    // that path (unlike the install detail's already-matched item keys) can
+    // carry attacker-controlled text: the entry must still be unregistered
+    // when `curate` reads it, so the curator is melded before the entry (with
+    // its ANSI-laden ref) exists in its list, mirroring
+    // `a_newly_listed_entry_is_registered_and_installed`.
+    let env = Env::new();
+    let curator = env.repo("curator");
+    curator.write_and_commit("mind.toml", "[source]\ndescription = \"curator\"\n");
+    let m = env.mind(&["meld", &curator.spec(), "--register-only"]);
+    assert!(m.success, "meld failed: {} {}", m.stdout, m.stderr);
+
+    let lib = env.repo("lib");
+    lib.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\ndescription: Review\n---\n# review\n",
+    );
+    curator.curate_list(&[format!(
+        "{{ source = \"{}\", install-items = [\"skill:review\\u001b[31mHIDDEN\\u001b[0m\"] }}",
+        lib.spec()
+    )]);
+
+    let plan = env.mind(&["curate", "--check"]);
+    assert!(plan.success, "curate failed: {}", plan.stderr);
+    assert!(
+        !plan.stdout.contains('\u{1b}'),
+        "curator-controlled text reaching the plan must have ANSI stripped: {:?}",
+        plan.stdout
+    );
+}
+
+#[test]
+fn curate_sync_does_not_touch_a_source_that_is_neither_curator_nor_curated() {
+    // spec: CUR-19
+    let env = Env::new();
+    let (_lib, curator) = lib_and_curator(&env, ", install = true");
+    let m = env.mind(&["meld", &curator.spec(), "--register-only"]);
+    assert!(m.success, "meld failed: {} {}", m.stdout, m.stderr);
+
+    let unrelated = env.repo("unrelated");
+    unrelated.write_and_commit("skills/x/SKILL.md", "---\ndescription: X\n---\n# x\n");
+    let u = env.mind(&[
+        "meld",
+        &unrelated.spec(),
+        "--pin",
+        "branch=main",
+        "--register-only",
+    ]);
+    assert!(u.success, "meld failed: {} {}", u.stdout, u.stderr);
+    let before = env.sources_json();
+
+    // Upstream moves; a scoped sync must not notice, since `unrelated` is
+    // neither a curator nor curated by one.
+    unrelated.write_and_commit(
+        "skills/x/SKILL.md",
+        "---\ndescription: X\n---\n# x\nsecond\n",
+    );
+
+    let plan = env.mind(&["curate", "--check"]);
+    assert!(plan.success, "curate failed: {}", plan.stderr);
+    assert_eq!(
+        before,
+        env.sources_json(),
+        "curate's refresh must not touch a source that is neither a curator nor curated"
     );
 }

@@ -916,6 +916,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             check,
             prune,
             no_sync,
+            adopt,
             dangerously_skip_install_hook_check,
             dangerously_skip_build_hook_check,
         } => curate::run(
@@ -927,6 +928,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
                 yes,
                 prune,
                 no_sync,
+                adopt,
                 dangerously_skip_hook_check: dangerously_skip_install_hook_check,
                 dangerously_skip_build_hook_check,
             },

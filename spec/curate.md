@@ -50,10 +50,11 @@ A *curator* is a registered source that declares `[discover].sources` in its
   declared items are all installed already. A marketplace catalog's entries
   (MKT-7) declare no install directive, so they propose no install of their own:
   what a catalog contributes to the plan is membership (an entry still listed is
-  not proposed for unlisting, CUR-7) and its registered entries' place in the
-  CUR-6 upgrade sweep. A catalog's in-repo plugins are items of the curator
-  source itself (MKT-14), not separately registered sources, so they install with
-  that source like any other item.
+  not proposed for unlisting, CUR-7) and, subject to the same CUR-12 ownership
+  rule as any other entry, its registered entries' place in the CUR-6 upgrade
+  sweep. A catalog's in-repo plugins are items of the curator source itself
+  (MKT-14), not separately registered sources, so they install with that source
+  like any other item.
 - `CUR-5` `repin` covers a curated source whose recorded pin (STO-18) differs
   from the pin directive its entry declares (DSC-59, authoritative by DSC-65).
   Applying it re-pins the source exactly as `meld --pin` does on a re-meld
@@ -112,6 +113,62 @@ A *curator* is a registered source that declares `[discover].sources` in its
   direct meld or a different curator proposes nothing against it; it still
   counts toward CUR-7's "still listed" check (any curator listing an identity
   protects it from unlisting), just not toward mutating it.
+
+## Resilience, adoption, and self-listing
+
+- `CUR-15` A per-source or per-entry failure while planning is reported and
+  skipped, never fatal to the run, mirroring CLI-54's per-source sync
+  tolerance:
+  - A curator whose clone is missing, or whose `mind.toml` or marketplace
+    manifest fails to read, contributes nothing to the plan -- **not** an empty
+    list. The distinction matters for CUR-7: an empty list would propose
+    `unlist` for every source that curator owns; "could not be read" proposes
+    nothing about them at all, applying the same absent-provenance reasoning
+    CUR-7 already uses for a source no binary ever stamped.
+  - A curated entry whose pin directive is invalid, or whose catalog scan
+    fails (a renamed upstream file, an oversized manifest), skips only the
+    `install`/`repin`/`upgrade` change that one failure would have produced;
+    every other entry and curator in the run is still planned normally.
+  - Every such failure appears in the `skipped` array (CUR-13) and, in text
+    mode, as a `warning:` line naming the source and the error.
+- `CUR-16` `adopt` covers a registered source that is unowned
+  (`curated_by` absent, STO-82) and that a curator's entry or marketplace
+  membership currently names. It is reported like any other change but is
+  **never** applied by `curate` itself, `--yes` included: only
+  `mind curate --adopt <identity>` claims it, by stamping `curated_by` on that
+  one source and changing nothing else. A later `curate` run then plans
+  `install`/`repin`/`upgrade` for it normally, through the ordinary
+  confirmation gate. This is the one way a source curated before this
+  consumer's binary recorded provenance -- which is to say every source a
+  curator's list currently names but does not yet own -- becomes visible to
+  `install`/`repin`/`upgrade`; until adopted, it is reported (`adopt`) rather
+  than silently treated as up to date. `--adopt` needs no `--yes`: naming the
+  identity is the confirmation.
+- `CUR-17` An entry (or marketplace plugin) whose resolved identity is the
+  curator's OWN registered identity contributes nothing: not a `register`, not
+  `install`/`repin`/`upgrade`, and not membership toward CUR-7's "still
+  listed" check. Without this, a source could list itself in its own
+  `mind.toml` (or marketplace manifest) and stay immune to `unlist` forever,
+  even after the curator that actually registered it drops it -- a
+  self-shield CUR-7's "any curator listing an identity protects it" would
+  otherwise permit.
+- `CUR-18` Every curator-controlled fragment composed into a `Change`'s
+  `detail` (an `install-items` list, a pin directive's value, a namespace) is
+  sanitized (`strip_ansi`) before it is reported. The plan is the text a
+  consumer reads before answering the single `[Y/n]` prompt (CUR-9); a curated
+  repo must not be able to use escape sequences to make one line's report read
+  as a different line's.
+- `CUR-19` Unless `--no-sync`, the CUR-2 refresh scopes its fetch to curators
+  and the sources they own, not the whole registry: a source with no
+  `curated_by` and no `mind.toml`/marketplace manifest file in its clone is
+  not a curator and is not curated, so `curate` has nothing to compare it
+  against and does not re-fetch it. The scope is read from the clones already
+  on disk before the fetch runs (file presence, not parsed content, so a
+  curator whose `[discover].sources` currently reads empty is still in
+  scope). The one gap this leaves: a source that adds its very first
+  `mind.toml` (or marketplace manifest) and populates it in the same push is
+  invisible to a file-presence check made before the fetch, and surfaces on
+  the following `curate` or an explicit `mind sync`.
 
 ## Reporting
 

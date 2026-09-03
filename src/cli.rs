@@ -809,17 +809,24 @@ EXAMPLES:
         action: HooksCmd,
     },
 
-    /// Apply what your curators now declare (spec/curate.md).
+    /// Apply what your curators now declare.
     ///
     /// A curator is a melded source that lists other sources
-    /// (`[discover].sources`, or a Claude marketplace catalog). `curate` fetches
-    /// every curator and curated source, then reports one plan: entries listed
+    /// (`[discover].sources`, or a Claude marketplace catalog). Unlike `sync`
+    /// (which registers a newly listed entry but installs nothing) and
+    /// `upgrade` (which only ever acts on already-installed items), `curate` is
+    /// the one command that applies a curator's own decisions: entries listed
     /// upstream but not registered (registered and installed here), items a
     /// curator declares that are not installed, sources whose pin no longer
     /// matches the curator's directive, curated sources whose items are out of
     /// date, and sources no curator lists any more.
     ///
-    /// Without flags it prints the plan and asks once before applying it.
+    /// `curate` only ever changes a source it (or a curator) actually
+    /// registered: it fetches every curator and every source it owns, then
+    /// prints the plan and asks once before applying it. A source curated
+    /// before this changed nothing: run `mind curate --adopt <identity>` (the
+    /// identity is named in the plan's `adopt` line) to let a curator that
+    /// lists it start managing it.
     #[command(visible_alias = "reconcile")]
     Curate {
         /// Report the plan and change nothing. Outranks `--yes`.
@@ -833,8 +840,17 @@ EXAMPLES:
         prune: bool,
 
         /// Plan against the clones already on disk instead of fetching first.
+        /// Without it, `curate` (even under `--check`) still fetches every
+        /// curator and every source it owns, so a --check run is read-only
+        /// with respect to the plan but not with respect to those clones.
         #[arg(long)]
         no_sync: bool,
+
+        /// Claim ownership of one listed-but-unowned identity (named in the
+        /// plan's `adopt` line) on behalf of the curator that lists it, and do
+        /// nothing else. Never implied by `--yes`.
+        #[arg(long, value_name = "IDENTITY")]
+        adopt: Option<String>,
 
         /// Run install- and update-hook re-runs without the safety prompt
         /// (executes arbitrary code from the source).

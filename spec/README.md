@@ -256,7 +256,7 @@ and verified.
 | A Claude plugin's `commands/` maps to the `command` kind (single plugin and marketplace in-repo entries), and is no longer reported as a skipped component | done | [marketplace.md](marketplace.md) (MKT-18), MKT-3, MKT-4 |
 | Single-file item links: a `blob` URL to an `agent`/`rule`/`command` `.md` file installs as a single-item source instance, kind resolved by explicit `--kind` / `kind =`, else the containing directory, else the file's frontmatter | done | [item-link.md](item-link.md) (LNK-20..22), CLI-239, DSC-100, STO-81 |
 | `dump` emits a file link as a `blob` URL, with `kind` when the instance recorded an explicit one | done | LNK-23 |
-| `mind curate`: one pass over every registered curator that registers and installs newly listed entries, re-pins against the curator's directive, upgrades curated sources, and reports entries the curator dropped (`--check`, `--yes`, `--prune`, `--no-sync`) | done | [curate.md](curate.md) (CUR-1..14), STO-82 |
+| `mind curate`: one pass over every registered curator that registers and installs newly listed entries, re-pins against the curator's directive, upgrades curated sources, reports entries the curator dropped, and offers `--adopt` to bring a pre-existing source under a curator's ownership (`--check`, `--yes`, `--prune`, `--no-sync`, `--adopt`) | done | [curate.md](curate.md) (CUR-1..19), STO-82 |
 
 ## Documents
 

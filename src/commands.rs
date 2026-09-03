@@ -6917,6 +6917,20 @@ pub(crate) fn sync_sources_for_upgrade(
     item_ref: Option<&str>,
     out: &crate::render::OutputCtx,
 ) -> Result<()> {
+    sync_sources_for_upgrade_scoped(paths, registry, item_ref, None, out)
+}
+
+/// As [`sync_sources_for_upgrade`], with an additional optional `names` filter
+/// (curate.rs's CUR-2 refresh, which scopes the pre-plan fetch to curators and
+/// curated sources rather than the whole registry). Both filters must agree a
+/// source is in scope; `None` for either one imposes no restriction from it.
+pub(crate) fn sync_sources_for_upgrade_scoped(
+    paths: &Paths,
+    registry: &mut Registry,
+    item_ref: Option<&str>,
+    names: Option<&HashSet<String>>,
+    out: &crate::render::OutputCtx,
+) -> Result<()> {
     // Determine which source names are in scope. With no filter, all sources sync.
     let in_scope: Option<HashSet<String>> =
         item_ref.and_then(|r| parse_item_ref(r).ok()).map(|f| {
@@ -6931,7 +6945,10 @@ pub(crate) fn sync_sources_for_upgrade(
                 .unwrap_or_default()
         });
 
-    let should_sync = |name: &str| in_scope.as_ref().is_none_or(|s| s.contains(name));
+    let should_sync = |name: &str| {
+        in_scope.as_ref().is_none_or(|s| s.contains(name))
+            && names.is_none_or(|s| s.contains(name))
+    };
 
     for source in &mut registry.sources {
         if !should_sync(&source.name) {
@@ -9981,6 +9998,25 @@ fn lobes_locked_error(action: &str) -> MindError {
 pub(crate) struct SkippedEntry {
     source: String,
     reason: String,
+}
+
+impl SkippedEntry {
+    pub(crate) fn new(source: impl Into<String>, reason: impl Into<String>) -> Self {
+        SkippedEntry {
+            source: source.into(),
+            reason: reason.into(),
+        }
+    }
+
+    /// A one-line, ANSI-stripped `source: reason` rendering for text-mode
+    /// output (curate.rs's `--json`-free skipped report).
+    pub(crate) fn describe(&self) -> String {
+        format!(
+            "{}: {}",
+            crate::sanitize::strip_ansi(&self.source),
+            crate::sanitize::strip_ansi(&self.reason)
+        )
+    }
 }
 
 /// Data returned by `meld()` so the dispatcher can combine it with the
