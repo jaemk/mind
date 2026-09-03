@@ -526,13 +526,19 @@ fn resolve_file_link_kind(source: &Source, item_path: &str, file: &Path) -> Resu
     {
         return Ok(kind);
     }
-    // spec: LNK-21 step 3 -- the file's own frontmatter `kind:`.
-    if let Some(declared) = crate::frontmatter::file_field(file, "kind") {
+    // spec: LNK-21 step 3 -- the file's own frontmatter `kind:`. DSC-91: read
+    // through the size-capped text reader rather than `file_field`'s uncapped
+    // `read_to_string`, so a link to a huge attacker-hosted file cannot force
+    // an unbounded read here.
+    let text = crate::frontmatter::text_capped(file)?;
+    if let Some(declared) = crate::frontmatter::field(&text, "kind") {
         let kind = ItemKind::parse(declared.trim()).ok_or_else(|| MindError::LinkKindMismatch {
             source_name: source.name.clone(),
             path: item_path.to_string(),
             kind: crate::sanitize::strip_ansi(declared.trim()),
-            reason: "not an item kind (expected agent, rule, or command)".to_string(),
+            reason: "not an item kind (expected agent, rule, or command); pass \
+                     --kind <agent|rule|command> to override the frontmatter"
+                .to_string(),
         })?;
         if !is_file_kind(kind) {
             return Err(mismatch(

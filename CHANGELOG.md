@@ -11,25 +11,33 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Item links reach single files: a `blob` URL to any `.md` file other than a
   `SKILL.md` registers as a single-item source offering that one agent, rule, or
   command, so `learn`, `meld`, and a curator's `[discover].sources` can install
-  an individual file item the way they already install a skill.
+  an individual file item the way they already install a skill (LNK-20..23).
 - `meld --kind` / `learn --kind` and a `[discover].sources` entry's `kind =`
-  declare a linked file's item kind. Without one the kind comes from the
-  containing directory (`agents/`, `rules/`, `commands/`), then from the file's
-  own frontmatter `kind:`. An explicit kind is recorded on the instance
-  (`item_kind` in `sources.json`) and reused by later scans.
+  declare a linked file's item kind (CLI-239, DSC-100). Without one the kind
+  comes from the containing directory (`agents/`, `rules/`, `commands/`), then
+  from the file's own frontmatter `kind:`. An explicit kind is recorded on the
+  instance (`item_kind` in `sources.json`, STO-81) and reused by later scans;
+  the CLI flag accepts only `agent`, `rule`, or `command`.
 - `dump` emits a file link as a `blob` URL, carrying `kind` when the instance
-  recorded an explicit one.
+  recorded an explicit one (LNK-23).
 - `mind curate` (alias `reconcile`): one pass over every melded curator that
-  reports what they declare now and offers to apply it. It registers and
-  installs entries added upstream, installs declared items a `sync` left
-  uninstalled, re-pins a source whose curator directive changed, upgrades
-  out-of-date curated sources, and reports entries a curator dropped.
+  reports what they declare now and offers to apply it (curate.md CUR-1..19).
+  It registers and installs entries added upstream, installs declared items a
+  `sync` left uninstalled, re-pins a source whose curator directive changed,
+  upgrades out-of-date curated sources, and reports entries a curator dropped.
   `--check` reports only, `--yes` applies without asking, `--prune` also
   applies the destructive `unlist` changes, `--no-sync` plans against the
-  clones on disk.
+  clones on disk. `curate` only ever mutates a source it (or a curator)
+  actually registered; `--adopt <identity>` brings a source melded before
+  `curate` existed under a curator's ownership, one identity at a time and
+  never implied by `--yes`. A per-source failure (an unreadable curator, a bad
+  pin directive, a failed scan) is reported and skipped rather than aborting
+  the run, and the pre-plan fetch is scoped to curators and the sources they
+  own rather than the whole registry.
 - Sources registered from a curator's list record `curated_by` in
-  `sources.json`, the provenance `curate` reads to tell an unlisted source from
-  a directly melded one.
+  `sources.json` (STO-82), the provenance `curate` reads to tell an unlisted
+  source from a directly melded one, and to keep a curator from mutating a
+  source it does not own (including one it lists in its own `mind.toml`).
 
 ## [0.27.1] - 2026-09-02
 

@@ -629,6 +629,24 @@ fn meld_recursive(
 ) -> Result<usize> {
     let out = crate::render::ctx();
     let mut source = parse_spec(repo)?;
+    // spec: DSC-100 -- a `kind` on an entry whose `source` is not an item link
+    // is a mismatch, caught before any clone: `kind` only ever describes a
+    // file link's item. The CLI's own `--kind` cannot reach here with a
+    // non-link spec (`parse_link_kind` already refused it as `BadKindFlag`);
+    // this is what closes the same gap for a curator's `kind =`, which has no
+    // such upfront check of its own.
+    if let Some(kind) = item_kind
+        && source.item_path.is_none()
+    {
+        return Err(MindError::LinkKindMismatch {
+            source_name: source.name.clone(),
+            path: repo.to_string(),
+            kind: kind.as_str().to_string(),
+            reason: "the source is not an item link; `kind` only applies to a deep \
+                     tree/blob URL entry"
+                .to_string(),
+        });
+    }
     // spec: LNK-22 CLI-239 DSC-100 -- the consumer's (or curator's) explicit
     // kind for a file link, recorded on the instance and read by every later
     // scan. Applied before the catalog scan below, which resolves the kind.
@@ -2240,29 +2258,33 @@ fn link_add_root(item_path: &str, kind: ItemKind) -> String {
     }
 }
 
-/// Parse the consumer's `--kind` flag against the spec it was passed with
-/// (CLI-239).
+/// Validate the consumer's `--kind` flag against the spec it was passed with
+/// (CLI-239). The value itself is already a real item kind: clap's
+/// `LinkKindArg` (agent/rule/command only) rejects anything else, with real
+/// shell completions, before this ever runs.
 ///
-/// Two usage errors are caught here, before any clone: a value that is not an
-/// item kind at all, and a flag passed with a spec that is not an item link
-/// (nothing else about a meld is kind-scoped). Whether the kind FITS the link's
-/// shape needs the clone, so it is decided later, by the catalog scan (LNK-21).
-pub fn parse_link_kind(kind: Option<&str>, spec: &str) -> Result<Option<ItemKind>> {
-    let Some(raw) = kind.map(str::trim).filter(|k| !k.is_empty()) else {
+/// The one usage error left to catch here, before any clone: a flag passed
+/// with a spec that is not an item link (nothing else about a meld is
+/// kind-scoped). Whether the kind FITS the link's shape needs the clone, so
+/// it is decided later, by the catalog scan (LNK-21).
+pub fn parse_link_kind(
+    kind: Option<crate::cli::LinkKindArg>,
+    spec: &str,
+) -> Result<Option<ItemKind>> {
+    let Some(kind) = kind else {
         return Ok(None);
     };
-    let parsed = ItemKind::parse(raw).ok_or_else(|| MindError::BadKindFlag {
-        value: strip_ansi(raw),
-        reason: "not an item kind; expected agent, rule, or command".to_string(),
-    })?;
+    let parsed = kind.to_kind();
     // spec: CLI-216 -- an identity-only parse to classify the spec, not a
     // decision to clone: quiet. A spec that does not parse at all is left to
     // the meld/learn path, which reports its own error.
     if parse_spec_quiet(spec).is_ok_and(|s| s.item_path.is_none()) {
         return Err(MindError::BadKindFlag {
-            value: strip_ansi(raw),
+            value: parsed.as_str().to_string(),
             reason: format!(
-                "'{}' is not an item link, and --kind applies to one only                  (an item link is '<repo-url>/blob/<ref>/<file>.md' or                  '<repo-url>/tree/<ref>/<skill-dir>')",
+                "'{}' is not an item link, and --kind applies to one only \
+                 (an item link is '<repo-url>/blob/<ref>/<file>.md' or \
+                 '<repo-url>/tree/<ref>/<skill-dir>')",
                 strip_ansi(spec)
             ),
         });
@@ -2470,8 +2492,10 @@ fn link_reconciled<'a>(
         // kinds), so no command is printed: one would unmeld and then fail.
         if !link_is_conventionally_placed(source, item.kind) {
             return format!(
-                "the linked file sits outside a conventional {}/ directory, so no whole-repo meld \
-                 discovers it; drop the reference, or move the file under {}/ upstream",
+                "this item cannot be installed any other way than as a link: the linked file \
+                 sits outside a conventional {}/ directory, so no whole-repo meld discovers it. \
+                 Drop the reference; or, if you can push upstream, move the file under {}/ and \
+                 re-link it; or fork the repo, move the file there, and link the fork instead",
                 item.kind.dir(),
                 item.kind.dir()
             );
@@ -3580,17 +3604,26 @@ pub fn learn_link(
             flow.dangerously_skip,
             item_kind, // spec: CLI-239
         )?;
-    } else if pin {
-        // spec: CLI-203 -- the link instance is already melded, so the meld+pin
-        // step is skipped; `--pin` only takes effect at meld/registration time.
-        // Say so rather than silently dropping the flag (suppressed under --json,
-        // consistent with the neighboring meld notes).
+    } else {
+        // spec: CLI-203 CLI-239 -- the link instance is already melded, so
+        // neither `--pin` nor `--kind` has anything left to apply: both only
+        // take effect at meld/registration time. Say so rather than silently
+        // dropping the flag (suppressed under --json, consistent with the
+        // neighboring meld notes).
         let out = crate::render::ctx();
         if !out.json {
-            println!(
-                "note: --pin ignored; {} is already melded (pin applies only at meld time)",
-                spec.name
-            );
+            if pin {
+                println!(
+                    "note: --pin ignored; {} is already melded (pin applies only at meld time)",
+                    spec.name
+                );
+            }
+            if item_kind.is_some() {
+                println!(
+                    "note: --kind ignored; {} is already melded (kind applies only at meld time)",
+                    spec.name
+                );
+            }
         }
     }
     learn(paths, &format!("{}#*", spec.name), dry_run, flow)
@@ -6946,8 +6979,7 @@ pub(crate) fn sync_sources_for_upgrade_scoped(
         });
 
     let should_sync = |name: &str| {
-        in_scope.as_ref().is_none_or(|s| s.contains(name))
-            && names.is_none_or(|s| s.contains(name))
+        in_scope.as_ref().is_none_or(|s| s.contains(name)) && names.is_none_or(|s| s.contains(name))
     };
 
     for source in &mut registry.sources {

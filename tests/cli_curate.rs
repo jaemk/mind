@@ -601,8 +601,14 @@ fn changes_apply_in_a_fixed_order() {
         .iter()
         .map(|v| v.as_str().unwrap_or_default())
         .collect();
-    let register_at = applied.iter().position(|a| a.starts_with("register:"));
-    let upgrade_at = applied.iter().position(|a| a.starts_with("upgrade:"));
+    let register_at = applied
+        .iter()
+        .position(|a| a.starts_with("register:"))
+        .expect("a register change must have applied");
+    let upgrade_at = applied
+        .iter()
+        .position(|a| a.starts_with("upgrade:"))
+        .expect("an upgrade change must have applied");
     assert!(
         register_at < upgrade_at,
         "register must apply before upgrade: {applied:?}"
@@ -784,7 +790,11 @@ fn a_marketplace_entry_naming_a_directly_melded_source_proposes_no_upgrade() {
         "---\ndescription: Review\n---\n# review\n",
     );
     let direct = env.mind(&["meld", &lib.spec(), "--namespace", "mine", "--yes"]);
-    assert!(direct.success, "meld failed: {} {}", direct.stdout, direct.stderr);
+    assert!(
+        direct.success,
+        "meld failed: {} {}",
+        direct.stdout, direct.stderr
+    );
     assert!(
         !env.sources_json().contains("curated_by"),
         "a direct meld records no curator: {}",
@@ -836,7 +846,10 @@ fn a_source_cannot_shield_itself_from_unlisting_by_listing_itself() {
     // The curated source lists itself.
     lib.write_and_commit(
         "mind.toml",
-        &format!("[discover]\nsources = [{{ source = \"{}\" }}]\n", lib.spec()),
+        &format!(
+            "[discover]\nsources = [{{ source = \"{}\" }}]\n",
+            lib.spec()
+        ),
     );
     // The real curator drops it.
     curator.curate_list(&[]);
@@ -865,7 +878,11 @@ fn an_unreadable_curator_does_not_sweep_its_sources_into_unlist() {
     std::fs::rename(&curator.path, env.base.join("curator-moved")).unwrap();
 
     let plan = env.mind(&["curate", "--check", "--prune"]);
-    assert!(plan.success, "curate failed: {} {}", plan.stdout, plan.stderr);
+    assert!(
+        plan.success,
+        "curate failed: {} {}",
+        plan.stdout, plan.stderr
+    );
     assert!(
         !plan.stdout.contains("unlist"),
         "an unreadable curator must not sweep the sources it owns into unlist: {}",
@@ -934,7 +951,11 @@ fn curate_adopt_stamps_provenance_then_curate_manages_the_source_normally() {
         "---\ndescription: Review\n---\n# review\n",
     );
     let direct = env.mind(&["meld", &lib.spec(), "--register-only"]);
-    assert!(direct.success, "meld failed: {} {}", direct.stdout, direct.stderr);
+    assert!(
+        direct.success,
+        "meld failed: {} {}",
+        direct.stdout, direct.stderr
+    );
 
     let curator = env.repo("curator");
     curator.curate_list(&[format!("{{ source = \"{}\", install = true }}", lib.spec())]);

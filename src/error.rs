@@ -560,7 +560,7 @@ pub enum MindError {
     /// LNK-21: an explicit or frontmatter kind the link's shape cannot be: a
     /// directory kind (`skill`, `tool`) on a file link, or anything but `skill`
     /// on a link naming a directory.
-    #[error("source '{source_name}': linked path '{path}' cannot be a {kind}: {reason}")]
+    #[error("{}", link_kind_mismatch_message(source_name, path, kind, reason))]
     LinkKindMismatch {
         source_name: String,
         path: String,
@@ -1315,6 +1315,25 @@ fn invalid_root_message(source_name: &str, root: &str) -> String {
         "source '{}': scan root '{}' is not a directory in the clone",
         crate::sanitize::strip_ansi(source_name),
         crate::sanitize::strip_ansi(root)
+    )
+}
+
+/// The [`MindError::LinkKindMismatch`] message (LNK-21). `kind` is usually one
+/// of the five item-kind words ("agent" is the one that needs "an"), but for
+/// the frontmatter-parse-failure call site it is arbitrary source-controlled
+/// text, so this picks the article rather than hardcoding "a".
+fn link_kind_mismatch_message(source_name: &str, path: &str, kind: &str, reason: &str) -> String {
+    let article = if kind.starts_with(['a', 'e', 'i', 'o', 'u']) {
+        "an"
+    } else {
+        "a"
+    };
+    format!(
+        "source '{}': linked path '{}' cannot be {article} {}: {}",
+        crate::sanitize::strip_ansi(source_name),
+        crate::sanitize::strip_ansi(path),
+        crate::sanitize::strip_ansi(kind),
+        crate::sanitize::strip_ansi(reason)
     )
 }
 

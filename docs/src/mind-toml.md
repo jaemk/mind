@@ -250,6 +250,13 @@ install = true
   expanded here (`install-items = ["skill:*"]` fails at meld), unlike the
   consumer-side `meld --learn <NAME|GLOB>`, which does accept globs and matches
   an item's bare or effective name (see [Commands](commands.md#installing-part-of-a-source)).
+- **`kind`**: `"agent"`, `"rule"`, or `"command"` -- declares what an [item
+  link](commands.md#item-links-install-one-item-by-url)'s linked file is, the
+  curator-side form of `meld --kind`. Only valid when `source` is itself an
+  item link (a deep `tree`/`blob` URL); on an ordinary `source` it is a
+  `LinkKindMismatch` error. Without it, the kind comes from the file's
+  containing directory (`agents/`, `rules/`, `commands/`), then from the
+  file's own frontmatter `kind:`.
 
 By default a melded super-source registers the whole chain but installs only its
 own items plus the `install = true` (or `install-items`) entries.

@@ -89,10 +89,12 @@ mind probe                              # browse available items (interactive)
 mind learn <item>                       # install a specific item
 ```
 
-A pasted skill URL installs just that skill, managed like any source:
+A pasted skill URL installs just that skill, managed like any source, and a
+`blob` URL to a single agent/rule/command file works the same way:
 
 ```
 mind learn https://github.com/owner/repo/tree/main/skills/foo
+mind learn https://github.com/owner/repo/blob/main/agents/reviewer.md
 ```
 
 A repo whose `marketplace.json` lists only some of its skills can be melded

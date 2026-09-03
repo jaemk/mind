@@ -1956,8 +1956,12 @@ fn file_link_with_no_resolvable_kind_errors_and_registers_nothing() {
 }
 
 #[test]
-fn a_directory_kind_on_a_file_link_is_a_mismatch() {
-    // spec: LNK-21
+fn kind_agent_rule_command_are_the_only_cli_kind_flag_values() {
+    // spec: CLI-239
+    // Unlike a curated entry's `kind =` (a bare TOML string, DSC-100), the CLI
+    // flag is a clap ValueEnum over just agent/rule/command: a file link can
+    // never resolve to a directory kind (LNK-21), so `skill`/`tool` are
+    // rejected before any clone, with a real "possible values" list.
     let sb = file_item_sandbox();
     let r = sb.mind(&[
         "learn",
@@ -1967,11 +1971,41 @@ fn a_directory_kind_on_a_file_link_is_a_mismatch() {
     ]);
     assert!(!r.success, "--kind skill on a file must fail: {}", r.stdout);
     assert!(
+        r.stderr.contains("possible values") && r.stderr.contains("agent"),
+        "the error must name the legal set: {}",
+        r.stderr
+    );
+    assert_eq!(source_count(&sb), 0, "nothing registered on failure");
+}
+
+#[test]
+fn a_directory_kind_on_a_curated_file_link_is_a_mismatch() {
+    // spec: LNK-21 DSC-100
+    // The CLI flag can no longer name a directory kind (see the sibling test
+    // above), but a curator's `kind =` is a bare TOML string and can still
+    // declare one; the mismatch LNK-21 describes is still reachable that way.
+    let lib = Sandbox::bare("lib");
+    lib.write_and_commit("agents/dev.md", "---\ndescription: dev\n---\n# dev\n");
+    let curator = Sandbox::bare("curator");
+    curator.write_and_commit(
+        "mind.toml",
+        &format!(
+            "[discover]\nsources = [{{ source = \"{}\", kind = \"skill\" }}]\n",
+            lib.link("blob/main/agents/dev.md")
+        ),
+    );
+    let spec = curator.source.to_string_lossy().into_owned();
+    let r = curator.mind(&["meld", &spec, "--register-only"]);
+    assert!(
+        !r.success,
+        "a directory kind on a curated file link must fail: {}",
+        r.stdout
+    );
+    assert!(
         r.stderr.contains("cannot be a skill"),
         "the error must name the mismatch: {}",
         r.stderr
     );
-    assert_eq!(source_count(&sb), 0, "nothing registered on failure");
 }
 
 #[test]
@@ -1990,7 +2024,7 @@ fn a_non_skill_kind_on_a_directory_link_is_a_mismatch() {
         r.stdout
     );
     assert!(
-        r.stderr.contains("cannot be a agent") || r.stderr.contains("always a skill"),
+        r.stderr.contains("cannot be an agent") || r.stderr.contains("always a skill"),
         "the error must name the mismatch: {}",
         r.stderr
     );
@@ -2039,7 +2073,7 @@ fn an_unknown_kind_value_is_refused() {
     ]);
     assert!(!r.success, "an unknown kind must fail: {}", r.stdout);
     assert!(
-        r.stderr.contains("not an item kind"),
+        r.stderr.contains("possible values") && r.stderr.contains("agent"),
         "the error must name the legal set: {}",
         r.stderr
     );
@@ -2129,6 +2163,36 @@ fn a_curated_entry_with_an_unknown_kind_is_a_mind_toml_error() {
     assert!(
         r.stderr.contains("unknown kind 'wizard'"),
         "the error must name the offending value: {}",
+        r.stderr
+    );
+}
+
+#[test]
+fn a_kind_on_a_non_link_curated_entry_is_a_mismatch() {
+    // spec: DSC-100
+    // The CLI's own `--kind` cannot reach a non-link spec (`parse_link_kind`
+    // refuses it as a usage error before any clone); a curator's `kind =` has
+    // no such flag-parsing chokepoint, so this is caught in `meld_recursive`.
+    let lib = Sandbox::bare("lib");
+    lib.write_and_commit("skills/x/SKILL.md", "---\ndescription: x\n---\n# x\n");
+    let curator = Sandbox::bare("curator");
+    curator.write_and_commit(
+        "mind.toml",
+        &format!(
+            "[discover]\nsources = [{{ source = \"{}\", kind = \"agent\" }}]\n",
+            lib.source.to_string_lossy()
+        ),
+    );
+    let spec = curator.source.to_string_lossy().into_owned();
+    let r = curator.mind(&["meld", &spec, "--register-only"]);
+    assert!(
+        !r.success,
+        "a kind on a non-link entry must fail the meld: {}",
+        r.stdout
+    );
+    assert!(
+        r.stderr.contains("not an item link"),
+        "the error must say the source is not a link: {}",
         r.stderr
     );
 }

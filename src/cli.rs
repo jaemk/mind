@@ -55,6 +55,28 @@ impl KindArg {
     }
 }
 
+/// A file item link's kind, as declared on the command line (`meld`/`learn
+/// --kind agent|rule|command`, CLI-239). Narrower than [`KindArg`] (no
+/// `skill`/`tool`: a file link can never resolve to a directory kind, LNK-21)
+/// so an invalid value is rejected by clap before any clone, with real shell
+/// completions, rather than parsed by hand and only caught after a clone.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum LinkKindArg {
+    Agent,
+    Rule,
+    Command,
+}
+
+impl LinkKindArg {
+    pub fn to_kind(self) -> ItemKind {
+        match self {
+            LinkKindArg::Agent => ItemKind::Agent,
+            LinkKindArg::Rule => ItemKind::Rule,
+            LinkKindArg::Command => ItemKind::Command,
+        }
+    }
+}
+
 // spec: CLI-207 -- with no arguments, print full help to stdout and exit 0
 // (clap's default for a required subcommand with no arguments is a usage
 // error on stderr at exit 2). `command` stays a required (non-Option) enum:
@@ -240,8 +262,8 @@ EXAMPLES:
         /// an `agents/`, `rules/`, or `commands/` directory nor declares
         /// `kind:` in its frontmatter. Item links only.
         // spec: CLI-239, LNK-21
-        #[arg(long, value_name = "agent|rule|command")]
-        kind: Option<String>,
+        #[arg(long)]
+        kind: Option<LinkKindArg>,
 
         /// Install only the items matching this name or glob instead of
         /// offering the source's whole set (repeatable). The pattern selects
@@ -425,8 +447,8 @@ EXAMPLES:
         /// Declare what kind of item a `blob` item link's file is: `agent`,
         /// `rule`, or `command`. Same rule as `meld --kind`; item links only.
         // spec: CLI-239, LNK-21
-        #[arg(long, value_name = "agent|rule|command")]
-        kind: Option<String>,
+        #[arg(long)]
+        kind: Option<LinkKindArg>,
 
         /// Show what would be installed without installing anything.
         #[arg(short = 'n', long = "dry-run")]

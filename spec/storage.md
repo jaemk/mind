@@ -244,8 +244,14 @@ The on-disk layout and the two persisted JSON files.
   catalog) whose list it came from. Set at registration and not changed by
   `sync`; absent for a directly-melded source. This is the provenance `curate`
   reads to tell "no longer listed" from "never curated" (curate.md CUR-7), so an
-  absent value always reads as the latter: a source registered by an older
-  binary is never proposed for unlisting.
+  absent value always reads as the latter -- not just for CUR-7's unlisting: a
+  source with no `curated_by`, or one owned by a different curator than the
+  entry naming it, is never proposed for `install`, `repin`, or the CUR-6
+  upgrade sweep either (CUR-12), so a source registered by a binary older than
+  this field (which is every currently-curated source for every existing
+  consumer, since `curated_by` and `curate` both ship in the same release) is
+  fully invisible to `curate` until `curate --adopt <identity>` (CUR-16) claims
+  it on a curator's behalf.
 - `STO-18` A source records its `pin`: the kind (`follow-branch` | `tag` | `ref`)
   and value (see DSC-41, CLI-17). Persisted at meld and not changed by `sync`. The
   implicit default when unset is `follow-branch` tracking the remote default

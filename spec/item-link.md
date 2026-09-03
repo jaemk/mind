@@ -100,14 +100,28 @@ same repo, and a plain meld of that repo, coexist as separate sources.
   a file under `agents/` is an agent to both. Only agent, rule, and command
   resolve here: `skill` and `tool` are directory kinds, so an explicit or
   frontmatter `kind` naming either on a file link is `LinkKindMismatch`, as is an
-  explicit kind other than `skill` on a link naming a directory. A file link
-  none of the three steps resolves is `LinkKindUnresolved`, which names the three
-  ways to resolve it. Both errors are raised before anything is installed.
+  explicit kind other than `skill` on a link naming a directory. `meld`/`learn
+  --kind` is typed to accept only `agent`, `rule`, or `command` in the first
+  place (a clap value enum, distinct from `recall`/`probe --kind`'s five-kind
+  filter), so `skill`/`tool` there is refused before any clone rather than
+  reaching this mismatch; a curator's `kind =` is a bare TOML string with no
+  such upfront check, so it still reaches LNK-21 directly. A file link none of
+  the three steps resolves is `LinkKindUnresolved`, which names the three ways
+  to resolve it; when step 3's frontmatter `kind:` is present but not an item
+  kind word, the error additionally names `--kind` as the override. Every error
+  here is raised before anything is installed, and before anything registers.
 - `LNK-22` An explicit kind (LNK-21 step 1) is recorded on the source instance
   (`item_kind` in sources.json, STO-81) and applies to every later scan of it,
-  so `recall`, `upgrade`, and `sync` classify the item exactly as the meld did.
-  A kind resolved by directory or frontmatter records nothing: those inputs are
-  re-read from the pinned clone and cannot drift. The field is absent from every
+  so `recall`, `upgrade`, and `sync` classify the item exactly as the meld did,
+  and it is fixed at meld/registration time: `--kind` on a re-meld, or on
+  `learn <url>` of an already-melded link, changes nothing and is noted rather
+  than silently dropped (CLI-206's ignored-flags note covers it on the re-meld
+  path). A kind resolved by directory or frontmatter records nothing, and is
+  re-read from the clone on every scan: for a commit-pinned link those inputs
+  cannot change, but a branch-following link's clone moves on `sync`, so an
+  upstream edit to the file's directory or frontmatter can change the resolved
+  kind (and so the item's `(source, kind, bare_name)` identity) between scans.
+  `--kind` is the way to freeze it against that. The field is absent from every
   source an older binary registered, and absent means the pre-existing reading
   (a skill link), so an existing registry is unaffected.
 
@@ -268,10 +282,13 @@ same repo, and a plain meld of that repo, coexist as separate sources.
   the one shape with no working remedy: convention discovery finds a file item
   only at `<root>/<kind>s/<name>.md` (there is no flat pass for file kinds, the
   way there is for skills), so no `--add-root` value reaches it. Such a link is
-  reachable only as a link, so no command is printed: the error says the file
-  sits outside a conventional `<kind>s/` directory, and that the reference has
-  to be dropped or the file moved under `<kind>s/` upstream. Printing a command
-  that unmelds first and then fails to install is the outcome this replaces.
+  reachable only as a link, so no command is printed: the error says plainly
+  that the item cannot be installed any other way, names why (the file sits
+  outside a conventional `<kind>s/` directory), and names the consumer's own
+  options -- drop the reference, ask upstream to move the file and re-link it,
+  or fork the repo, move the file there, and link the fork -- rather than only
+  the upstream-only remedy a repo author could act on. Printing a command that
+  unmelds first and then fails to install is the outcome this replaces.
 
   The `unmeld` step is required. The link instance is registered before the
   install runs, so it is registered on both paths when this is printed -- the

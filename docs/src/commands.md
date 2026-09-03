@@ -326,8 +326,8 @@ mind learn https://github.com/owner/repo/tree/main/skills/foo
 mind learn https://github.com/owner/repo/blob/main/skills/foo/SKILL.md
 ```
 
-A `blob` URL to any other `.md` file installs that one file as an agent, rule,
-or command:
+A `blob` (or `tree`) URL to any other `.md` file installs that one file as an
+agent, rule, or command:
 
 ```
 mind learn https://github.com/owner/repo/blob/main/agents/reviewer.md
@@ -344,10 +344,15 @@ file that sits elsewhere needs one of the other two:
 mind learn https://github.com/owner/repo/blob/main/vendor/reviewer.md --kind agent
 ```
 
-`--kind` applies to item links only, and only the explicit form is recorded on
-the instance (a directory- or frontmatter-resolved kind is re-read from the
-pinned clone on every scan). Skills and tools are directories, so `--kind
-skill` on a file link (or any non-skill kind on a `tree` link) is refused.
+`--kind` applies to item links only, and is fixed at meld/registration time:
+only the explicit form is recorded on the instance (a directory- or
+frontmatter-resolved kind is re-read from the pinned clone on every scan), and
+re-running `--kind` against an already-melded link changes nothing (noted,
+not silently dropped). Skills and tools are directories, so naming one on a
+file link is refused, and anything but `skill` is refused on a link naming a
+directory; the CLI flag itself only ever accepts `agent`, `rule`, or `command`
+(distinct from `recall`/`probe --kind`'s five-kind filter), so `--kind
+skill`/`--kind tool` there is rejected before any clone.
 
 The repo registers as its own single-item source instance with the identity
 `host/owner/repo#<path>`: it clones, syncs, and upgrades like any source, but
@@ -380,13 +385,14 @@ repo is addressable through `file:///path/to/repo/tree/<branch>/<path>`.
 A link instance offers exactly the linked item, so an item that references a
 sibling (a `requires:` frontmatter entry, or a `{{ns:}}` / `{{tools:}}` /
 `{{path:}}` token, see [Dependencies](dependencies.md)) cannot get it this way. A
-`requires:` entry is metadata, so the skill installs, mind warns which entries
+`requires:` entry is metadata, so the item installs, mind warns which entries
 were dropped, and the drop is recorded on the item (`mind recall <item>` and
-`mind introspect` show it afterwards). A token is rewritten into the skill's
-text, so it is an error and nothing is installed. Both name the same remedy,
-which replaces the link with the whole repo and installs that one skill with its
-dependencies. `mind` checks whether a plain meld of the repo would find the
-skill on its own and prints one of two forms accordingly:
+`mind introspect` show it afterwards). A token is rewritten into the item's
+text, so it is an error and nothing is installed. Both name the same
+kind-qualified remedy, which replaces the link with the whole repo and
+installs that one item with its dependencies. `mind` checks whether a plain
+meld of the repo would find the item on its own and prints one of two forms
+accordingly:
 
 ```
 mind unmeld 'github.com/owner/repo#skills/foo' --yes && \
@@ -551,9 +557,10 @@ A *curator* is a melded source that lists other sources: a `mind.toml` with
 mind curate            # report the plan, ask once, apply
 mind curate --check    # report only
 mind curate --yes      # apply without asking
+mind curate --no-sync  # plan against the clones on disk, fetch nothing
 ```
 
-It fetches every curator and curated source, then reports one plan:
+It fetches every curator and the sources it owns, then reports one plan:
 
 | change | what it means | applying it |
 |--------|---------------|-------------|
@@ -563,9 +570,31 @@ It fetches every curator and curated source, then reports one plan:
 | `upgrade` | a curated source's installed items are out of date | runs the upgrade pass over those sources |
 | `unlist` | a source you registered from a curator's list is no longer on it | `--prune` only: uninstalls its items and drops the source |
 | `namespace` | the entry declares a different namespace than the instance carries | reported only: the namespace is part of a source's identity, so the report prints the `unmeld` + `meld` pair that adopts it |
+| `adopt` | a curator lists a source you already have, but does not (yet) own it | reported only: run the `mind curate --adopt <identity>` command shown to let that curator start managing it |
 
 `unlist` is never applied by `--yes` alone. A curator dropping an entry would
 otherwise uninstall your items in an unattended run, so it takes `--prune`.
+`namespace` and `adopt` are always advisory: neither is ever applied by
+`curate` itself, `--yes` included, only by running the command the report
+names.
+
+**`curate` only ever changes a source it (or a curator) actually
+registered.** A source you melded directly, or one a curator's entry happens
+to name without having registered it, is never mutated: it shows up as
+`adopt` instead of `install`/`repin`/`upgrade`, so you can see it and opt in
+rather than have it silently skipped or silently taken over. This also means
+a source curated before you first ran `curate` (there is no such thing yet in
+an existing registry -- `curated_by` and `curate` ship together) needs one
+`--adopt` per source before `curate` starts managing it; after that it is
+managed like anything registered through a curator from the start.
+
+A per-source failure (an unreadable curator, a bad pin directive, a scan that
+fails on one curated source) is reported in the `skipped` list and does not
+abort the run; on a non-TTY run (CI, a script) with no `--yes`, `curate`
+reports the plan and applies nothing rather than hanging on a prompt.
+Registering and installing run the same consent-gated hooks any meld/learn
+does, so `--dangerously-skip-install-hook-check` and
+`--dangerously-skip-build-hook-check` exist on `curate` too.
 
 What `curate` covers that the other verbs do not: `sync` registers a newly
 listed entry but installs nothing from it, even when the curator marked it
@@ -597,9 +626,11 @@ namespace, scan `roots`, added roots, and the resolved commit pin (DUMP-4,
 DUMP-11).
 
 An [item link](#item-links-install-one-item-by-url) instance is emitted as a
-deep `tree` URL rebuilt from its recorded parts, pinned by `pin-ref` like any
-other entry, so a skill installed from a pasted URL is reproduced by melding the
-dump (LNK-13).
+deep URL rebuilt from its recorded parts -- `tree` for a skill link, `blob` for
+a file link (agent/rule/command), carrying `kind = "..."` when the instance
+recorded an explicit one (LNK-23) -- pinned by `pin-ref` like any other entry,
+so an item installed from a pasted URL is reproduced by melding the dump
+(LNK-13).
 
 **Item filtering.** By default each source entry is stamped with the install
 directive that reproduces exactly which items are installed (DUMP-2):

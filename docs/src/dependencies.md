@@ -45,16 +45,19 @@ Dependencies never cross sources; both `{{ns:}}` tokens and `requires:` entries
 are always resolved within the one source.
 
 One consequence: an [item link](commands.md#item-links-install-one-item-by-url)
-offers a single skill, so a reference to a sibling has nothing to resolve
-against. A `requires:` entry there is dropped and the skill still installs; the
-drop is warned about and recorded, so `mind recall <item>` and `mind introspect`
-show it afterwards. A token (`{{ns:}}`, `{{tools:}}`, `{{path:}}`) is an error,
-since it is rewritten into the item's text. Both point at the same remedy:
-`mind unmeld <identity> --yes && mind meld <repo-url> --learn 'skill:<skill>'
---yes` (adding `--add-root <dir>` before `--learn` when the repo's own inventory
-does not declare the skill), which installs that skill plus its closure. See
-[Item links](commands.md#item-links-install-one-item-by-url) for the full
-command and when each form applies.
+offers a single item (a skill, or -- for a file link -- an agent, rule, or
+command), so a reference to a sibling has nothing to resolve against. A
+`requires:` entry there is dropped and the item still installs; the drop is
+warned about and recorded, so `mind recall <item>` and `mind introspect` show
+it afterwards. A token (`{{ns:}}`, `{{tools:}}`, `{{path:}}`) is an error,
+since it is rewritten into the item's text. Both point at the same
+kind-qualified remedy: `mind unmeld <identity> --yes && mind meld <repo-url>
+--learn '<kind>:<name>' --yes` (adding `--add-root <dir>` before `--learn`
+when the repo's own inventory does not declare the item). For a file link
+whose parent directory is not its kind's container, no whole-repo meld can
+reach the item at all, so no command is printed; see [Item
+links](commands.md#item-links-install-one-item-by-url) for that case and the
+full command for every other form.
 
 ## Partial `learn` pulls in the closure
 

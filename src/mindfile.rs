@@ -552,7 +552,7 @@ impl NestedSource {
                 path: toml_path.to_path_buf(),
                 msg: format!(
                     "nested source '{}': unknown kind '{}'; expected agent, rule, or command",
-                    self.source,
+                    crate::sanitize::strip_ansi(&self.source),
                     crate::sanitize::strip_ansi(raw)
                 ),
             })

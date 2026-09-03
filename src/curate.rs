@@ -86,7 +86,9 @@ struct CurateResult {
     schema: u8,
     action: &'static str,
     outcome: &'static str,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    // spec: CUR-13 -- always present, including `[]` on a clean run: "always
+    // lists the whole plan" would otherwise mean something different for the
+    // empty case than every other one.
     changes: Vec<Change>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     applied: Vec<String>,
@@ -174,7 +176,9 @@ fn run_adopt(paths: &Paths, identity: &str) -> Result<()> {
     }
     let (curators_list, _) = curators(paths, &registry)?;
     let claimant = curators_list.iter().find_map(|c| {
-        entry_targets(c, identity).next().map(|_| c.source.name.clone())
+        entry_targets(c, identity)
+            .next()
+            .map(|_| c.source.name.clone())
     });
     let Some(curator_name) = claimant else {
         return Err(MindError::NotAnAdoptCandidate {
@@ -307,9 +311,7 @@ fn finish(
     report_skipped(&skipped);
     let applicable = plan.iter().filter(|c| applies(c, flags.prune)).count();
     if applied.is_empty() && !flags.check && applicable > 0 {
-        println!(
-            "note: nothing applied; run `mind curate --yes` to apply {applicable} change(s)"
-        );
+        println!("note: nothing applied; run `mind curate --yes` to apply {applicable} change(s)");
     }
     Ok(())
 }
@@ -574,9 +576,16 @@ fn curators(paths: &Paths, registry: &Registry) -> Result<(Vec<Curator>, HashSet
             }
         };
         // `marketplace_subsources` already applies the MKT-2 suppression (an
-        // authoritative mind.toml wins) and each entry's MKT-8 alias.
+        // authoritative mind.toml wins) and each entry's MKT-8 alias. Drop
+        // in-repo entries explicitly (MKT-14: they are items of the curator
+        // source itself, never separately registered) rather than relying on
+        // their synthesized identity never colliding with a real one.
         let market: Vec<Source> = match commands::marketplace_subsources(paths, source) {
-            Ok(list) => list.into_iter().map(|(spec, _in_repo)| spec).collect(),
+            Ok(list) => list
+                .into_iter()
+                .filter(|(_, in_repo)| !in_repo)
+                .map(|(spec, _)| spec)
+                .collect(),
             Err(_) => {
                 unreadable.insert(source.name.clone());
                 continue;
@@ -605,6 +614,9 @@ fn build_plan(paths: &Paths, registry: &Registry) -> Result<(Vec<Change>, Vec<Sk
     let mut listed: HashSet<String> = HashSet::new();
     // Curated sources reached this run, for the CUR-6 upgrade pass.
     let mut curated: Vec<String> = Vec::new();
+    // Identities already proposed for `register` this run, so two curators
+    // listing the same unregistered entry produce one plan line, not two.
+    let mut proposed_register: HashSet<String> = HashSet::new();
 
     let (curators_list, unreadable) = curators(paths, registry)?;
     for name in &unreadable {
@@ -675,6 +687,14 @@ fn build_plan(paths: &Paths, registry: &Registry) -> Result<(Vec<Change>, Vec<Sk
                         ),
                         action: Action::Advisory,
                     });
+                    continue;
+                }
+                // Two curators listing the same unregistered identity would
+                // otherwise each propose their own `register`; the apply side
+                // already tolerates this (the second `meld_curated_entry`
+                // call sees it registered and returns `added == 0`), but the
+                // plan should say so once.
+                if !proposed_register.insert(spec.name.clone()) {
                     continue;
                 }
                 let detail = match declared_installs(&entry) {

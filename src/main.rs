@@ -503,7 +503,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
                     .into_owned(),
                 Some(r) => r.to_string(),
             };
-            let item_kind = commands::parse_link_kind(kind.as_deref(), &repo)?;
+            let item_kind = commands::parse_link_kind(kind, &repo)?;
             // CLI-34: `--force` overwrites a conflicting target; otherwise a
             // conflict prompts on a TTY (Clobber::Prompt).
             let clobber = if force {
@@ -540,6 +540,9 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
                 }
                 if install_hook.is_some() {
                     ignored_flags.push("--install-hook");
+                }
+                if item_kind.is_some() {
+                    ignored_flags.push("--kind");
                 }
                 // spec: CLI-209 -- unlike the discovery flags above, `--pin`
                 // IS honored on a re-meld: it re-pins the source instead of
@@ -692,15 +695,15 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             // item-link instance, then install its skill. spec: CLI-200 -- `--pin`
             // freezes the link's ref while registering.
             if item.contains("://") {
-                let item_kind = commands::parse_link_kind(kind.as_deref(), &item)?;
+                let item_kind = commands::parse_link_kind(kind, &item)?;
                 return commands::learn_link(paths, &item, pin, item_kind, dry_run, flow);
             }
             // spec: CLI-239 -- `--kind` describes an item link's file, so a
             // plain item ref (which names an already-melded source's item, whose
             // kind is already known) is a usage error, not a silent no-op.
-            if let Some(k) = kind.as_deref() {
+            if let Some(k) = kind {
                 return Err(crate::error::MindError::BadKindFlag {
-                    value: crate::sanitize::strip_ansi(k),
+                    value: k.to_kind().as_str().to_string(),
                     reason: format!(
                         "'{}' is an item ref, not an item link; --kind applies to a deep \
                          tree/blob URL only",

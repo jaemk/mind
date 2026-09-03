@@ -298,9 +298,9 @@ and verified.
   agents into non-Claude agent homes (Gemini CLI, Codex CLI, Antigravity) via a
   per-lobe `kinds` filter and detected-home presets.
 - [item-link.md](item-link.md) - item links: a deep `tree`/`blob` URL to one
-  skill inside a repo, consumed as its own single-item source instance with an
-  extended `host/owner/repo#path` identity; several links into the same repo
-  coexist as separate sources.
+  skill, or one agent/rule/command file, inside a repo, consumed as its own
+  single-item source instance with an extended `host/owner/repo#path`
+  identity; several links into the same repo coexist as separate sources.
 - [marketplace.md](marketplace.md) - consume Claude Code's native plugin manifests
   (`.claude-plugin/marketplace.json`, `plugin.json`) as a discovery source so a
   repo published for the built-in plugin system melds without re-packaging; the

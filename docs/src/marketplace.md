@@ -86,7 +86,15 @@ supply the same field, the entry wins (mirroring Claude's non-strict mode, where
 the marketplace overrides the plugin manifest).
 
 The post-meld `probe` hint and the `sync` re-walk apply to a marketplace exactly
-as they do to any super-source.
+as they do to any super-source. A melded catalog is a curator for
+[`mind curate`](commands.md#curate-follow-your-curators) too: its listed
+entries count toward what is still listed (so one is never proposed for
+`unlist` while the catalog still names it), and a registered one joins the
+`upgrade` sweep once you own it. A catalog entry declares no install
+directive of its own, though, so `curate` never proposes `install` for a
+newly published plugin the way it does for a `[discover].sources` entry with
+`install = true` -- `sync` still picks that up as a register-only entry, same
+as before.
 
 ## Installing items the manifest does not list
 
@@ -109,8 +117,9 @@ layout and suppresses the manifest), `--add-root` never suppresses anything; it
 also composes with an authoritative `mind.toml`. The roots persist on the
 source and apply to later scans and `sync`.
 
-**Link one skill directly.** Paste the skill's `tree`/`blob` URL; the manifest
-does not gate it because you named the exact path:
+**Link one item directly.** Paste the skill's `tree`/`blob` URL (or, for an
+agent, rule, or command file, its `blob` URL); the manifest does not gate it
+because you named the exact path:
 
 ```
 mind learn https://github.com/owner/marketplace-repo/tree/main/community/foo

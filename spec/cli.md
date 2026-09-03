@@ -19,7 +19,7 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 | `hooks run <target> [--event E] [--force\|--rerun]` / `hooks list <target>` | run or list a source's or item's hooks on demand |
 | `link-project [dir] [--preset <name>] [--subdir <rel>] [--snapshot] [--force]` | shorthand: link installed skills into a project's harness skills directory |
 | `absorb <item> [--to <path>]` | claim an unmanaged lobe item into a managed source |
-| `curate [--check] [--yes] [--prune] [--no-sync]` | apply what your curators now declare: register/install newly listed sources, re-pin, upgrade, report unlisted |
+| `curate [--check] [--yes] [--prune] [--no-sync] [--adopt <identity>]` (alias: `reconcile`) | apply what your curators now declare: register/install newly listed sources, re-pin, upgrade, report unlisted; `--adopt` claims a pre-existing source a curator lists but does not yet own |
 | `dump [--whole-sources] [--output <path>]` | write a super-source `mind.toml` reproducing the melded + installed state |
 | `config show` / `config lobes ...` | view/edit config |
 | `completions <shell>` | print a shell completion script |
@@ -1627,10 +1627,10 @@ and per-harness `kinds` defaults.
 
 - `CLI-172` Visible aliases added: `add` for `meld`, `install` for `learn`,
   `uninstall` for `forget`, `update` for `sync`, `search` for `probe`, `list` for
-  `recall`, `doctor` for `introspect`, `self-update` for `evolve`. Former aliases
-  `detach` (for `unmeld`) and `target` (for `config lobes`) are removed and are
-  now usage errors; `unlearn` (for `forget`) and `status` (for `recall`) remain
-  visible.
+  `recall`, `doctor` for `introspect`, `self-update` for `evolve`, `reconcile`
+  for `curate`. Former aliases `detach` (for `unmeld`) and `target` (for
+  `config lobes`) are removed and are now usage errors; `unlearn` (for
+  `forget`) and `status` (for `recall`) remain visible.
 
 - `CLI-173` The one-line help for `meld` reflects that melding installs items by
   default (interactive prompt): "Meld with a source repo and install its items."
