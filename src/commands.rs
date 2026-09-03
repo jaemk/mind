@@ -87,6 +87,7 @@ pub fn meld(
         None,  // a top-level meld has no curator-supplied configuration
         &mut meld_skipped,
         item_kind, // spec: CLI-239 -- the consumer's `--kind` for a file link
+        None,      // a top-level meld has no curator
     )?;
     registry.save(paths)?;
     // JSON emission is deferred to the dispatcher (main.rs) so the install
@@ -238,7 +239,7 @@ fn resolve_checkout_pin(consumer_pin: PinRequest, base_pin: Pin) -> (Pin, bool) 
 
 /// A short human description of a `Pin` for the hook disclosure (HOOK-20).
 /// Shared by `meld_recursive` and `upgrade` so both render the pin the same way.
-fn pin_description(pin: &Pin) -> String {
+pub(crate) fn pin_description(pin: &Pin) -> String {
     match pin {
         Pin::DefaultBranch => "default branch".to_string(),
         Pin::FollowBranch(b) => format!("branch {b}"),
@@ -527,7 +528,7 @@ fn stamp_origin(
 /// before recursing; the pin is always applied (DSC-65, authoritative); roots
 /// and hooks are gated (DSC-60) and applied only when the nested source has no
 /// `mind.toml` of its own.
-struct CuratedConfig {
+pub(crate) struct CuratedConfig {
     /// The curator pin directive (follow-branch, pin-tag, or pin-ref), if set.
     /// Authoritative: applied whether or not the nested source has a mind.toml
     /// (DSC-65). NOT included in the DSC-60 gating/warning.
@@ -559,6 +560,33 @@ impl CuratedConfig {
             || self.flat_skills
             || !self.hooks.is_empty()
     }
+}
+
+/// Lift a `[discover].sources` entry's curator-supplied configuration (DSC-59)
+/// into the shape `meld_recursive` applies.
+///
+/// One definition for all three readers of a curator's list: the nested loop in
+/// `meld_recursive`, `sync`'s DSC-57 re-walk, and `curate`'s plan (curate.md
+/// CUR-3). Without it, a key added to the entry shape has to be threaded into
+/// each site by hand, and a site that forgets it silently drops the curator's
+/// directive.
+///
+/// spec: DSC-88 -- `add-roots` is GATED (DSC-60), same as roots/flat-skills/
+/// hooks: it must not reach into a nested source that ships its own mind.toml
+/// and bypass its authoritative export list (DSC-3). Routed through
+/// `CuratedConfig` (not the consumer `--add-root` slot) so `meld_recursive`
+/// applies it only when the nested source has no `mind.toml` of its own.
+pub(crate) fn curated_config_for(
+    entry: &crate::mindfile::NestedSource,
+    toml_path: &std::path::Path,
+) -> Result<CuratedConfig> {
+    Ok(CuratedConfig {
+        pin: entry.pin_directive(toml_path)?,
+        roots: entry.roots.clone(),
+        add_roots: entry.add_roots.clone(),
+        flat_skills: entry.flat_skills,
+        hooks: entry.resolved_hooks(toml_path)?,
+    })
 }
 
 /// Meld one source and then its nested sources. Returns how many sources were
@@ -597,6 +625,7 @@ fn meld_recursive(
     curated: Option<CuratedConfig>,
     skipped: &mut Vec<SkippedEntry>,
     item_kind: Option<ItemKind>,
+    curated_by: Option<String>,
 ) -> Result<usize> {
     let out = crate::render::ctx();
     let mut source = parse_spec(repo)?;
@@ -604,6 +633,12 @@ fn meld_recursive(
     // kind for a file link, recorded on the instance and read by every later
     // scan. Applied before the catalog scan below, which resolves the kind.
     source.item_kind = item_kind;
+    // spec: STO-82 -- provenance: which curator's list this registration came
+    // from. Recorded unconditionally (it is not curator CONFIGURATION, so the
+    // DSC-60 gate that gags roots/hooks/flat-skills does not apply to it), and
+    // read back by `curate` to tell an unlisted source from a directly melded
+    // one (curate.md CUR-7).
+    source.curated_by = curated_by;
     // NS-25: reject a reserved-kind-word prefix at the chokepoint where any alias
     // (top-level `--as`, or a nested source's `as =`) is applied. An empty alias
     // ("no prefix") is accepted by validate_prefix.
@@ -1396,20 +1431,7 @@ fn meld_recursive(
             // `CuratedConfig`: that carries the DSC-60-gated configuration,
             // while a link's kind is what makes the entry installable at all.
             let entry_kind = entry.item_kind(&toml_path)?;
-            let curated = CuratedConfig {
-                pin: entry.pin_directive(&toml_path)?,
-                roots: entry.roots.clone(),
-                // spec: DSC-88 -- a curator/dump entry's add-roots is GATED
-                // (DSC-60), same as roots/flat-skills/hooks: it must not reach
-                // into a nested source that ships its own mind.toml and bypass
-                // its authoritative export list (DSC-3). Routed through
-                // `CuratedConfig` (not the consumer `--add-root` slot) so
-                // `meld_recursive` applies it only when the nested source has
-                // no `mind.toml` of its own.
-                add_roots: entry.add_roots.clone(),
-                flat_skills: entry.flat_skills,
-                hooks: entry.resolved_hooks(&toml_path)?,
-            };
+            let curated = curated_config_for(entry, &toml_path)?;
             // Nested sources from a curated super-source get no consumer pin or
             // root override; the curator config (when applied) supplies them.
             match meld_recursive(
@@ -1432,6 +1454,8 @@ fn meld_recursive(
                 skipped,
                 // spec: DSC-100 -- the entry's own `kind =`, for an item-link entry.
                 entry_kind,
+                // spec: STO-82 -- provenance for `curate` (CUR-7).
+                Some(super_source_name.clone()),
             ) {
                 Ok(n) => added += n,
                 // DSC-68/DSC-69: an auth failure is governed by on-auth-failure
@@ -1607,6 +1631,8 @@ fn meld_recursive(
                 None,  // no curator config
                 skipped,
                 None, // a marketplace entry is a repo, never an item link
+                // spec: STO-82 -- a marketplace catalog curates too (MKT-7).
+                Some(super_source_name.clone()),
             ) {
                 Ok(n) => {
                     added += n;
@@ -2324,6 +2350,7 @@ fn plain_meld_reaches_link(paths: &Paths, source: &crate::source::Source, kind: 
     let whole = crate::source::Source {
         item_path: None,
         item_kind: None,
+        curated_by: None,
         ..source.clone()
     };
     let mut items: Vec<CatalogItem> = Vec::new();
@@ -4707,7 +4734,7 @@ pub fn remeld(
 /// re-evaluated here exactly as they are at a first meld, so a source whose
 /// identity fell out of policy since it was melded cannot be silently
 /// re-pinned around the gate.
-fn repin_source(paths: &Paths, source_name: &str, pin: PinRequest) -> Result<()> {
+pub(crate) fn repin_source(paths: &Paths, source_name: &str, pin: PinRequest) -> Result<()> {
     let out = crate::render::ctx();
     // spec: POL-3 -- load once; Err = invalid policy (fail closed via `?`),
     // None = unmanaged, inert.
@@ -4924,7 +4951,7 @@ pub fn install_curated_sources(
 /// is_in_repo)`. Empty when the source has no marketplace manifest or an
 /// authoritative `mind.toml` suppresses it (MKT-2). In-repo entries install by
 /// default; external entries are register-only unless `--recursive`.
-fn marketplace_subsources(
+pub(crate) fn marketplace_subsources(
     paths: &Paths,
     source: &crate::source::Source,
 ) -> Result<Vec<(crate::source::Source, bool)>> {
@@ -6347,6 +6374,7 @@ pub fn sync_with_selector(
                     None, // auto-meld has no curator-supplied configuration
                     &mut sync_skipped,
                     None, // a policy auto-meld names a repo, never an item link
+                    None, // provisioned by policy, not by a curator (STO-82)
                 ) {
                     Ok(n) => {
                         provisioned += n;
@@ -6596,6 +6624,9 @@ pub fn sync_with_selector(
             /// re-walk registers a curated file link exactly as a fresh meld
             /// would.
             item_kind: Option<ItemKind>,
+            /// The curator whose list named this entry (STO-82), recorded on
+            /// the source the re-walk registers.
+            curator: String,
             /// Auth-failure policy for this entry (DSC-68). Carried so the re-walk
             /// loop can handle auth failures the same way as meld (DSC-68 requires
             /// the same behavior applies during sync).
@@ -6638,6 +6669,7 @@ pub fn sync_with_selector(
                     alias: ns_alias,
                     curated,
                     item_kind: ns_kind,
+                    curator: s.name.clone(), // spec: STO-82
                     on_auth_failure: ns.on_auth_failure,
                 });
             }
@@ -6688,6 +6720,7 @@ pub fn sync_with_selector(
                         hooks: Vec::new(),
                     },
                     item_kind: None, // a marketplace entry is a repo, never an item link
+                    curator: s.name.clone(), // spec: STO-82 (MKT-7)
                     on_auth_failure: None,
                 });
             }
@@ -6722,6 +6755,7 @@ pub fn sync_with_selector(
             // as a generic git error (hard failure).
             let todo_alias = todo.alias.clone();
             let todo_kind = todo.item_kind;
+            let todo_curator = todo.curator.clone();
             match meld_recursive(
                 paths,
                 &mut registry,
@@ -6740,7 +6774,8 @@ pub fn sync_with_selector(
                 true, // sync re-walk is non-interactive (no collision prompt)
                 Some(todo.curated),
                 &mut sync_skipped,
-                todo_kind, // spec: DSC-100
+                todo_kind,          // spec: DSC-100
+                Some(todo_curator), // spec: STO-82
             ) {
                 Ok(n) => discovered += n,
                 Err(e) if git::is_auth_failure(&e) => {
@@ -6876,7 +6911,7 @@ pub fn sync_with_selector(
 /// Sync sources relevant to the upgrade scope. Per-source failures are reported
 /// and skipped (CLI-54 resilience); the upgrade pass uses whatever was refreshed.
 // spec: CLI-169
-fn sync_sources_for_upgrade(
+pub(crate) fn sync_sources_for_upgrade(
     paths: &Paths,
     registry: &mut Registry,
     item_ref: Option<&str>,
@@ -6986,6 +7021,85 @@ pub fn upgrade_no_sync(
         dangerously_skip_hook_check,
         dangerously_skip_build_hook_check,
     )?)
+}
+
+/// An upgrade pass restricted to a set of SOURCE identities, with the pre-pass
+/// fetch already done by the caller (`no_sync`).
+///
+/// What `curate` applies for its `upgrade` changes (curate.md CUR-6): the
+/// ordinary pass (CLI-53), scoped so an item installed from a directly-melded
+/// source is never touched by a command about curated ones. `sync <source>
+/// --upgrade` reaches the same scoped pass through `source_scope` (CLI-232);
+/// this wrapper differs only in skipping the fetch, which `curate` has already
+/// performed for the whole curated set (CUR-2).
+pub(crate) fn upgrade_sources_no_sync(
+    paths: &Paths,
+    yes: bool,
+    sources: &[String],
+    dangerously_skip_hook_check: bool,
+    dangerously_skip_build_hook_check: bool,
+) -> Result<()> {
+    emit_upgrade_result(upgrade_inner_scoped(
+        paths,
+        yes,
+        None,
+        true,
+        Some(sources),
+        None,
+        None,
+        dangerously_skip_hook_check,
+        dangerously_skip_build_hook_check,
+    )?)
+}
+
+/// Register one `[discover].sources` entry of `curator`, exactly as the meld
+/// nested loop and the DSC-57 re-walk do (curate.md CUR-3).
+///
+/// Register-only: the entry's declared items are installed by the caller's
+/// install pass (CUR-4), so this is the registration half alone. Returns how
+/// many sources it added (0 when the entry was already registered, or was
+/// skipped).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn meld_curated_entry(
+    paths: &Paths,
+    registry: &mut Registry,
+    curator: &str,
+    toml_path: &std::path::Path,
+    entry: &crate::mindfile::NestedSource,
+    policy: Option<&Policy>,
+    prefer_ssh: bool,
+    dangerously_skip_hook_check: bool,
+    skipped: &mut Vec<SkippedEntry>,
+) -> Result<usize> {
+    entry.validate(toml_path)?; // spec: DSC-64
+    let curated = curated_config_for(entry, toml_path)?;
+    let item_kind = entry.item_kind(toml_path)?; // spec: DSC-100
+    let mut visited: HashSet<String> = registry
+        .sources
+        .iter()
+        .map(|s| format!("{}|{}", s.name, s.url))
+        .collect();
+    meld_recursive(
+        paths,
+        registry,
+        &entry.source,
+        entry.effective_alias(), // spec: DSC-78
+        vec![],
+        vec![],
+        false,
+        PinRequest::None, // the curator's directive supplies the pin (DSC-65)
+        false,            // nested, not top-level
+        &mut visited,
+        policy,
+        None, // no consumer install hook
+        dangerously_skip_hook_check,
+        prefer_ssh,
+        true, // non-interactive: `curate` has already taken the user's decision
+        Some(curated),
+        skipped,
+        item_kind,
+        Some(curator.to_string()), // spec: STO-82
+    )
 }
 
 /// A no-sync upgrade restricted to an explicit set of item KEYS (`kind:name`),
@@ -9940,7 +10054,7 @@ fn json_mode() -> bool {
 /// stdout, whatever the call site does. Outside that mode it is
 /// `render::print_json` unchanged.
 // spec: CLI-217
-fn print_json<T: Serialize>(value: &T) -> Result<()> {
+pub(crate) fn print_json<T: Serialize>(value: &T) -> Result<()> {
     if crate::json_stdout::is_reserved() {
         let s =
             serde_json::to_string_pretty(value).map_err(|e| MindError::json("json output", e))?;
@@ -9968,7 +10082,7 @@ fn print_json_envelope<T: Serialize>(items: &[T]) -> Result<()> {
 }
 
 /// A throwaway registry holding just one source, for catalog scans during meld.
-fn single(source: &crate::source::Source) -> Registry {
+pub(crate) fn single(source: &crate::source::Source) -> Registry {
     Registry {
         sources: vec![source.clone()],
     }
@@ -10571,6 +10685,7 @@ mod tests {
             add_roots: None,
             item_path: Some(item_path.to_string()),
             item_kind: None,
+            curated_by: None,
             origin: None,
             plugin_version: None,
             install_hooks: Vec::new(),
@@ -10639,6 +10754,7 @@ mod tests {
         let ordinary = crate::source::Source {
             item_path: None,
             item_kind: None,
+            curated_by: None,
             ..source.clone()
         };
         assert!(plain_meld_reaches_link(&paths, &ordinary, ItemKind::Skill));
@@ -12826,6 +12942,7 @@ mod tests {
             add_roots: None,
             item_path: None,
             item_kind: None,
+            curated_by: None,
             origin: None,
             plugin_version: None,
             install_hooks: Vec::new(),

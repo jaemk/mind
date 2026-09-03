@@ -239,6 +239,13 @@ The on-disk layout and the two persisted JSON files.
   from the clone on every scan (the containing directory, else the file's
   frontmatter), which is also how every source registered before this field
   reads back.
+- `STO-82` A source registered from a curator's list records `curated_by`: the
+  identity of the curator (a `[discover].sources` super-source, or a marketplace
+  catalog) whose list it came from. Set at registration and not changed by
+  `sync`; absent for a directly-melded source. This is the provenance `curate`
+  reads to tell "no longer listed" from "never curated" (curate.md CUR-7), so an
+  absent value always reads as the latter: a source registered by an older
+  binary is never proposed for unlisting.
 - `STO-18` A source records its `pin`: the kind (`follow-branch` | `tag` | `ref`)
   and value (see DSC-41, CLI-17). Persisted at meld and not changed by `sync`. The
   implicit default when unset is `follow-branch` tracking the remote default

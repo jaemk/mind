@@ -19,6 +19,17 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`item_kind` in `sources.json`) and reused by later scans.
 - `dump` emits a file link as a `blob` URL, carrying `kind` when the instance
   recorded an explicit one.
+- `mind curate` (alias `reconcile`): one pass over every melded curator that
+  reports what they declare now and offers to apply it. It registers and
+  installs entries added upstream, installs declared items a `sync` left
+  uninstalled, re-pins a source whose curator directive changed, upgrades
+  out-of-date curated sources, and reports entries a curator dropped.
+  `--check` reports only, `--yes` applies without asking, `--prune` also
+  applies the destructive `unlist` changes, `--no-sync` plans against the
+  clones on disk.
+- Sources registered from a curator's list record `curated_by` in
+  `sources.json`, the provenance `curate` reads to tell an unlisted source from
+  a directly melded one.
 
 ## [0.27.1] - 2026-09-02
 

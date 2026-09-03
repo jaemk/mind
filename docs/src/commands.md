@@ -116,6 +116,7 @@ anything; `evolve` updates the `mind` binary itself.
 | `mind forget [--yes] [-f\|--force] [--unmanaged] [--dangerously-skip-hook-check] [<item>]` (alias `unlearn`) | remove an installed item (glob removes many; a multi-match glob confirms first, `--yes` skips). `--unmanaged` scopes removal to unmanaged lobe items only; with no `<item>`, removes every unmanaged item across all lobes. `-f`/`--force` skips the dependents confirmation when the item being removed has dependents. `--dangerously-skip-hook-check` runs uninstall hooks without the safety prompt |
 | `mind sync [source] [--upgrade] [--dangerously-skip-install-hook-check] [--dangerously-skip-build-hook-check]` | refresh source clones (all, or every source whose name matches the optional `[source]` filter: exactly, by trailing suffix, or by glob; a suffix shared by several sources matches, and syncs, all of them, unlike `unmeld`'s ref-style source selection, since `sync` has no ambiguity check and is a non-destructive refresh). `--upgrade` is deprecated sugar for `sync` followed by `upgrade`, scoped to the matched sources when `[source]` is given; when the scope spans more than one source, a disclosure names every matched source before the install-hook re-run pass -- even with nothing pending -- and this is not suppressed by `--yes` (the two hook-check flags are valid only with `--upgrade`) |
 | `mind upgrade [--yes] [--no-sync] [--dangerously-skip-install-hook-check] [--dangerously-skip-build-hook-check] [item]` | fetch each involved source, then upgrade installed items to their latest version (re-runs install hooks on sources that advance, or their update hooks when they declare any); `item` is a filter over installed items (a glob matches several, and a bare non-glob name multi-matches only across kinds, e.g. `upgrade greet` hitting both `skill:greet` and `agent:greet`); an embedded `owner/repo#` source qualifier is also a filter, not a ref -- a trailing-suffix match with no ambiguity check, so it can span several sources and re-run each one's install hook; when the scope spans more than one source, a disclosure names every matched source before the hook re-run pass, even with nothing pending, and `--yes` does not suppress it; `--no-sync` skips the fetch step |
+| `mind curate [--check] [--yes] [--prune] [--no-sync] [--dangerously-skip-install-hook-check] [--dangerously-skip-build-hook-check]` (alias: `reconcile`) | apply what your curators declare now: fetch every curator and curated source, then report one plan (entries listed upstream but not registered, declared items not installed, pins that no longer match the curator's directive, curated sources whose items are out of date, sources no curator lists any more) and offer to apply it. `--check` reports and changes nothing; `--yes` applies without asking; `--prune` also applies the `unlist` changes, which uninstall a source's items and drop it; `--no-sync` plans against the clones already on disk. See [Curate: follow your curators](#curate-follow-your-curators) |
 | `mind hooks run <target> [--event install\|update\|uninstall\|build] [--force\|--rerun] [--dangerously-skip-install-hook-check] [--dangerously-skip-build-hook-check] [--json]` / `mind hooks list <target> [--json]` | run a source's or an item's hooks on demand (outside meld/learn/forget/upgrade), or list the hooks in effect without running any. `--rerun` is a visible alias for `--force` (re-run a hook already recorded as run, mirroring `meld --force`). `<target>` is a source filter or an `owner/repo#item` ref; there is no ambiguity check, so a filter matching several sources, or a ref matching several items, runs the hook for each in turn. See [Install hooks](install-hooks.md#running-hooks-on-demand) |
 | `mind evolve [--check] [--yes] [--to <v>]` | upgrade the mind binary itself to the latest release, or to a pinned `--to <v>` (accepts a prerelease like `1.2.3-rc1` -- the only way to reach one, since the latest-release lookup never surfaces a prerelease -- and strips a single leading `v`; `--version` is a deprecated alias) |
 | `mind recall [item] [--sources] [--kind K] [--source S] [--tree] [--json]` (alias `status`) | status: each source with its items, marked installed or available; `--sources` narrows to sources; `<item>` shows one item's details; `--tree` renders installed items as a dependency forest (with an item ref, scopes to that item's subtree) |
@@ -539,6 +540,42 @@ arbitrary code from the source; only use it for sources you trust.
 
 For an end-to-end CI provisioning recipe, see [Team / CI provisioning
 recipe](enterprise.md#team--ci-provisioning-recipe).
+
+## Curate: follow your curators
+
+A *curator* is a melded source that lists other sources: a `mind.toml` with
+`[discover].sources` (a super-source), or a Claude plugin marketplace catalog.
+`mind curate` is the command to run when one of them changes:
+
+```
+mind curate            # report the plan, ask once, apply
+mind curate --check    # report only
+mind curate --yes      # apply without asking
+```
+
+It fetches every curator and curated source, then reports one plan:
+
+| change | what it means | applying it |
+|--------|---------------|-------------|
+| `register` | the curator lists a source you do not have | registers it, then installs what the entry declares |
+| `install` | the entry declares items (`install = true` / `install-items`) that are not installed | installs them |
+| `repin` | the entry's `pin-ref`/`follow-branch`/`pin-tag` no longer matches the recorded pin | re-pins and re-checks-out the clone |
+| `upgrade` | a curated source's installed items are out of date | runs the upgrade pass over those sources |
+| `unlist` | a source you registered from a curator's list is no longer on it | `--prune` only: uninstalls its items and drops the source |
+| `namespace` | the entry declares a different namespace than the instance carries | reported only: the namespace is part of a source's identity, so the report prints the `unmeld` + `meld` pair that adopts it |
+
+`unlist` is never applied by `--yes` alone. A curator dropping an entry would
+otherwise uninstall your items in an unattended run, so it takes `--prune`.
+
+What `curate` covers that the other verbs do not: `sync` registers a newly
+listed entry but installs nothing from it, even when the curator marked it
+`install = true`, and neither `sync` nor `upgrade` re-reads a curator's pin or
+notices an entry the curator dropped. Changes apply in a fixed order
+(`register`, `install`, `repin`, `upgrade`, `unlist`), pending changes exit 0,
+and `--json` answers with one document (`outcome` is `clean`, `pending`, or
+`applied`).
+
+Spec: [spec/curate.md](https://github.com/jaemk/mind/blob/main/spec/curate.md).
 
 ## dump
 

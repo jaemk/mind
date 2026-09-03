@@ -61,6 +61,7 @@ maintained by hand.
 | `sync [source] [--upgrade]` | fetch every source (or only those matching `[source]`), refresh recorded commit (`--upgrade` then runs an upgrade pass) |
 | `upgrade [item]` | report each installed item's hash/commit delta, prompt, then re-link the changed ones (syncs involved sources first; `--no-sync` opts out) |
 | `hooks run <target>` / `hooks list <target>` | run a source's or an item's hooks on demand (outside meld/learn/forget/upgrade), or list the hooks in effect; reuses the meld/learn consent machinery |
+| `curate [--check] [--yes] [--prune]` | apply what melded curators declare now: register + install newly listed entries, re-pin, upgrade curated sources, report entries a curator dropped (`--prune` applies those) |
 | `evolve [--check] [--to V]` | update the `mind` binary itself to the latest release (or a pinned version) |
 | `recall [--sources] [item]` | what's installed / source list / item details (marks out-of-date items) |
 | `probe [query]` | search melded catalogs (interactive TUI by default; `--no-tui` for plain output) |
@@ -113,6 +114,7 @@ Foundations and cross-cutting:
 - `src/config.rs` - user config at `~/.mind/config.toml` (`lobes`, `ssh`, `absorb-to`).
 - `src/lock.rs` - advisory file-lock + atomic registry writes guarding all persisted state.
 - `src/policy.rs` - enterprise managed policy (trusted sources, pins, lobe lock, self-update control).
+- `src/curate.rs` - `curate`: reconcile the melded state with what the registered curators declare.
 - `src/dump.rs` - `dump`: emit a pinned super-source `mind.toml` from the installed set.
 - `src/review.rs` - `review`: author/consumer-side source validation.
 

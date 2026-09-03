@@ -268,6 +268,14 @@ pub struct Source {
     /// source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub item_path: Option<String>,
+    /// The curator this source was registered from (STO-82): the identity of the
+    /// `[discover].sources` super-source (or marketplace catalog) whose list
+    /// named it. Set at registration and not changed by `sync`; absent for a
+    /// directly-melded source, and absent for every source a binary older than
+    /// STO-82 registered. `curate` reads it to tell "no longer listed" from
+    /// "never curated" (curate.md CUR-7).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub curated_by: Option<String>,
     /// The consumer's explicit kind for a file link (STO-81, LNK-21/LNK-22):
     /// `meld/learn --kind <kind>` or a `[discover].sources` entry's `kind =`.
     /// Persisted at meld and not changed by `sync`. None means the kind is
@@ -1118,6 +1126,7 @@ fn make_source(spec: &str, host: &str, owner: &str, repo: &str, url: String) -> 
         add_roots: None,
         item_path: None,
         item_kind: None,
+        curated_by: None,
         origin: None,
         plugin_version: None,
         install_hooks: Vec::new(),

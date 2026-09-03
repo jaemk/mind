@@ -488,6 +488,7 @@ mod tests {
             add_roots: None,
             item_path: None,
             item_kind: None,
+            curated_by: None,
             origin: None,
             plugin_version: None,
             install_hooks: vec![],

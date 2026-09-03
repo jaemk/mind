@@ -2,6 +2,7 @@ mod catalog;
 mod cli;
 mod commands;
 mod config;
+mod curate;
 mod deps;
 mod dump;
 mod error;
@@ -299,6 +300,9 @@ fn lock_mode(command: &Command, json: bool, ascii: bool) -> LockMode {
 
         // Mutating commands.
         Command::Meld { .. }
+        // curate registers, installs, re-pins, upgrades, and (with --prune)
+        // unmelds: the same exclusive-lock class as the verbs it applies.
+        | Command::Curate { .. }
         | Command::Unmeld { .. }
         | Command::Learn { .. }
         | Command::Forget { .. }
@@ -907,6 +911,26 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             ),
             HooksCmd::List { target } => hooks_cmd::list(paths, &target),
         },
+        // spec: CUR-1 -- one pass over every registered curator.
+        Command::Curate {
+            check,
+            prune,
+            no_sync,
+            dangerously_skip_install_hook_check,
+            dangerously_skip_build_hook_check,
+        } => curate::run(
+            paths,
+            curate::CurateFlags {
+                check,
+                // spec: CUR-9 -- the global `--yes` is the apply gate, as it is
+                // for every other prompting verb.
+                yes,
+                prune,
+                no_sync,
+                dangerously_skip_hook_check: dangerously_skip_install_hook_check,
+                dangerously_skip_build_hook_check,
+            },
+        ),
         Command::Dump {
             output,
             whole_sources,
@@ -1139,6 +1163,7 @@ mod tests {
             &["config", "lobes", "remove"],
             &["mind", "config", "lobes", "remove", "/some/home"],
         ),
+        (&["curate"], &["mind", "curate", "--check"]),
         (&["hooks", "run"], &["mind", "hooks", "run", "agents"]),
         (&["hooks", "list"], &["mind", "hooks", "list", "agents"]),
         // The CLI-218 exclusions.

@@ -19,6 +19,7 @@ The `mind` command surface. Verbs use a knowledge metaphor.
 | `hooks run <target> [--event E] [--force\|--rerun]` / `hooks list <target>` | run or list a source's or item's hooks on demand |
 | `link-project [dir] [--preset <name>] [--subdir <rel>] [--snapshot] [--force]` | shorthand: link installed skills into a project's harness skills directory |
 | `absorb <item> [--to <path>]` | claim an unmanaged lobe item into a managed source |
+| `curate [--check] [--yes] [--prune] [--no-sync]` | apply what your curators now declare: register/install newly listed sources, re-pin, upgrade, report unlisted |
 | `dump [--whole-sources] [--output <path>]` | write a super-source `mind.toml` reproducing the melded + installed state |
 | `config show` / `config lobes ...` | view/edit config |
 | `completions <shell>` | print a shell completion script |

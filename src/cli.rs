@@ -809,6 +809,43 @@ EXAMPLES:
         action: HooksCmd,
     },
 
+    /// Apply what your curators now declare (spec/curate.md).
+    ///
+    /// A curator is a melded source that lists other sources
+    /// (`[discover].sources`, or a Claude marketplace catalog). `curate` fetches
+    /// every curator and curated source, then reports one plan: entries listed
+    /// upstream but not registered (registered and installed here), items a
+    /// curator declares that are not installed, sources whose pin no longer
+    /// matches the curator's directive, curated sources whose items are out of
+    /// date, and sources no curator lists any more.
+    ///
+    /// Without flags it prints the plan and asks once before applying it.
+    #[command(visible_alias = "reconcile")]
+    Curate {
+        /// Report the plan and change nothing. Outranks `--yes`.
+        #[arg(long)]
+        check: bool,
+
+        /// Also apply `unlist` changes, which uninstall a source's items and
+        /// drop the source. Without it they are reported and left alone, so an
+        /// unattended `curate --yes` never uninstalls anything.
+        #[arg(long)]
+        prune: bool,
+
+        /// Plan against the clones already on disk instead of fetching first.
+        #[arg(long)]
+        no_sync: bool,
+
+        /// Run install- and update-hook re-runs without the safety prompt
+        /// (executes arbitrary code from the source).
+        #[arg(long)]
+        dangerously_skip_install_hook_check: bool,
+
+        /// Run item build hooks without the safety prompt.
+        #[arg(long)]
+        dangerously_skip_build_hook_check: bool,
+    },
+
     /// Write a super-source `mind.toml` reproducing the current melded and
     /// installed state so melding the output recreates the same source set.
     ///
