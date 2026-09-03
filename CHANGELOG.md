@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.27.1] - 2026-09-02
+
 ### Changed
 
 - `evolve` reports a request GitHub refuses as its own error rather than as a
@@ -1642,7 +1644,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovery, frontmatter descriptions, transactional install/upgrade/uninstall
   with a file registry, and a tag-driven release pipeline with a Homebrew tap.
 
-[Unreleased]: https://github.com/jaemk/mind/compare/v0.27.0...HEAD
+[Unreleased]: https://github.com/jaemk/mind/compare/v0.27.1...HEAD
+[0.27.1]: https://github.com/jaemk/mind/compare/v0.27.0...v0.27.1
 [0.27.0]: https://github.com/jaemk/mind/compare/v0.26.1...v0.27.0
 [0.26.1]: https://github.com/jaemk/mind/compare/v0.26.0...v0.26.1
 [0.26.0]: https://github.com/jaemk/mind/compare/v0.25.0...v0.26.0
