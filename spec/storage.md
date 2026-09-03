@@ -659,6 +659,45 @@ prevent the lost-update and torn-read races a plain read-modify-write would allo
   expanded wrong, say) fails `evolve` instead of silently degrading it. That is
   the crate's behavior and is accepted rather than worked around: the failure
   names the token, and an ambient credential that is broken is worth surfacing.
+- `STO-80` A GitHub request `evolve` makes that the endpoint REFUSES -- a rate
+  limit (HTTP 429, or a 403 reporting a spent quota or a `Retry-After`) or an
+  authorization failure (a bare 401/403) -- is its own error,
+  `SelfUpdateRefused` (`--json` kind `self-update-refused`), not a
+  `DownloadFailed`: nothing was downloaded, and the URL that failed is the API
+  endpoint rather than the release page `DownloadFailed` names. It renders as
+  two lines, a status line and a hint line:
+
+  ```
+  GitHub rate limited this request: HTTP 403 from https://api.github.com/repos/jaemk/mind/releases/latest (retry in 40m11s)
+  hint: the request went out unauthenticated, and GitHub's anonymous budget of 60 requests/hour is counted per source IP, so a NAT'd or proxied network shares one budget. Set GH_TOKEN or GITHUB_TOKEN for the authenticated 5000/hour budget, e.g. GH_TOKEN=$(gh auth token) mind evolve
+  ```
+
+  The status line names the status, the endpoint, and the wait when the response
+  supplied one (`Retry-After`, else the quota reset); an unknown wait is omitted
+  rather than reported as zero. The wait is rendered in units rather than as a
+  raw second count, at most two of them, largest first (`40m11s`, `1h1m`, `45s`):
+  a primary limit resets up to an hour out, so the raw form is four digits the
+  reader has to divide before it means anything, and seconds are noise once there
+  is an hour to report. A zero component is omitted, not padded (`1h`, never
+  `1h0m`). The hint is chosen by what the environment
+  actually supplies. With NO token set (`GH_TOKEN`/`GITHUB_TOKEN` unset, empty,
+  or whitespace, matching the lookup's own trimming) it is the text above: this
+  is the case STO-57 provides for but never advertises, and on a corporate
+  network the per-IP budget is spent by other people entirely, so the remedy is
+  stated in a runnable form rather than as a variable name. With a token ALREADY
+  set the hint does not tell the user to set one: a rate limit becomes "that
+  token's own budget, retry once it resets" and an authorization failure becomes
+  "the token was rejected, check that it is valid" -- opposite fixes, so they are
+  not merged.
+
+  The message is composed from the error's own accessors (status, url, and the
+  folded `Retry-After`/reset wait) rather than from its `Display`, which closes
+  every rate limit with a generic "set an auth token to raise the limit": beside
+  the unauthenticated hint that says the same thing twice, and beside the
+  token-set hint it contradicts it. The endpoint-supplied URL is passed through
+  `strip_ansi` before it is embedded (STO-54). This hint replaces rather than
+  supplements STO-54's proxy hint and STO-79's certificate hint, which are about
+  reaching and trusting the endpoint rather than about being let through by it.
 - `STO-61` Removed, superseded by STO-57. Stated the curl `--config` file that
   carried the bearer token off argv; there is no curl invocation to keep a token
   off the command line now. The number is retained so it is not reused.

@@ -740,6 +740,16 @@ pub enum MindError {
     #[error("failed to download {url}: {reason}")]
     DownloadFailed { url: String, reason: String },
 
+    /// `evolve`'s GitHub request was refused BY the endpoint rather than failing
+    /// on the way to it: a spent rate-limit quota or a rejected credential
+    /// (STO-80). Kept distinct from `DownloadFailed` because nothing was
+    /// downloaded, the URL that failed is the API endpoint rather than the
+    /// release page, and the remedy is a token rather than a retry. `reason`
+    /// carries the composed status/endpoint line and the token hint, built in
+    /// `selfupdate::auth_refusal` alongside the module's other failure wording.
+    #[error("{reason}")]
+    SelfUpdateRefused { reason: String },
+
     #[error("the downloaded release archive did not contain a 'mind' binary")]
     ReleaseAssetEmpty,
 
@@ -1379,6 +1389,7 @@ impl MindError {
             MindError::HookFailed { .. } => "hook-failed",
             MindError::UnsupportedPlatform { .. } => "unsupported-platform",
             MindError::DownloadFailed { .. } => "download-failed",
+            MindError::SelfUpdateRefused { .. } => "self-update-refused",
             MindError::ReleaseAssetEmpty => "release-asset-empty",
             MindError::TargetNotWritable { .. } => "target-not-writable",
             MindError::NotADirectory { .. } => "not-a-directory",

@@ -6,6 +6,21 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- `evolve` reports a request GitHub refuses as its own error rather than as a
+  download failure, and names the token remedy (STO-80). A rate limit (HTTP 429,
+  or a 403 reporting a spent quota or a `Retry-After`) or an authorization
+  failure is now `self-update-refused`, naming the status, the API endpoint, and
+  the wait when the response supplied one (in units, `retry in 40m11s`), instead
+  of `download-failed` naming the release page. With no
+  `GH_TOKEN`/`GITHUB_TOKEN` set it adds that the
+  request went out unauthenticated, that GitHub's anonymous 60/hour budget is
+  counted per source IP and so is shared across a NAT'd or proxied egress, and
+  how to supply a token (`GH_TOKEN=$(gh auth token) mind evolve`). With a token
+  already set it does not tell you to set one: a rate limit says to retry once it
+  resets, a rejected credential says to check the token.
+
 ## [0.27.0] - 2026-08-31
 
 ### Added

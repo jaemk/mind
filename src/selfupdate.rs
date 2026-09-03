@@ -775,6 +775,15 @@ fn map_update_error(e: self_update::Error) -> MindError {
         },
         // No asset for this platform's triple in the release.
         self_update::Error::NoReleaseFound { .. } => MindError::ReleaseAssetEmpty,
+        // spec: STO-80 -- a spent quota and a rejected credential are the two
+        // failures whose fix is a token, so they get the token hint instead of
+        // `maybe_proxy_hint`'s transport advice.
+        ref rate_limited @ self_update::Error::RateLimited { .. } => {
+            auth_refusal(rate_limited, true)
+        }
+        ref unauthorized @ self_update::Error::Unauthorized { .. } => {
+            auth_refusal(unauthorized, false)
+        }
         other => MindError::DownloadFailed {
             url: release_url,
             reason: maybe_proxy_hint(&other.to_string()),
@@ -829,6 +838,119 @@ fn maybe_proxy_hint(reason: &str) -> String {
         )
     } else {
         reason
+    }
+}
+
+/// The environment variables the updater's token lookup reads, in its precedence
+/// order (STO-57: `gh`'s order, first set and non-empty wins).
+///
+/// The crate's own list is `pub(crate)`, so it is mirrored here rather than
+/// imported. It is only ever used to decide WHICH hint to print -- the lookup
+/// that actually authorizes the request is the crate's `auth_token_from_env`.
+const AUTH_TOKEN_ENV_VARS: &[&str] = &["GH_TOKEN", "GITHUB_TOKEN"];
+
+/// Whether the environment supplied a token the updater would have sent.
+///
+/// Matches the crate's emptiness rule (a variable set to whitespace is no token),
+/// so the hint does not claim the request was authenticated when it was not.
+fn auth_token_in_env() -> bool {
+    AUTH_TOKEN_ENV_VARS
+        .iter()
+        .any(|var| std::env::var(var).is_ok_and(|v| !v.trim().is_empty()))
+}
+
+/// The remedy line for a refused request (STO-80), chosen by whether the
+/// environment actually supplied a token.
+///
+/// GitHub's anonymous budget is 60 requests/hour counted per SOURCE IP, so on a
+/// NAT'd or proxied corporate egress it is shared with everyone else on that IP
+/// and is routinely exhausted by other people entirely. The remedy is a token,
+/// and it is named ONLY when none is set: telling someone to set a variable they
+/// already set sends them after the wrong thing.
+///
+/// `rate_limited` splits the two token-set cases, which have opposite fixes: a
+/// spent quota on a valid token is a wait, a rejected credential is not.
+// spec: STO-80
+fn token_hint(rate_limited: bool) -> &'static str {
+    match (auth_token_in_env(), rate_limited) {
+        (false, _) => {
+            "hint: the request went out unauthenticated, and GitHub's anonymous budget of 60 \
+             requests/hour is counted per source IP, so a NAT'd or proxied network shares one \
+             budget. Set GH_TOKEN or GITHUB_TOKEN for the authenticated 5000/hour budget, e.g. \
+             GH_TOKEN=$(gh auth token) mind evolve"
+        }
+        (true, true) => {
+            "hint: GH_TOKEN/GITHUB_TOKEN is set, so this is that token's own budget; retry once \
+             it resets"
+        }
+        (true, false) => {
+            "hint: GH_TOKEN/GITHUB_TOKEN is set and was rejected; check that it is valid and not \
+             expired (gh auth status)"
+        }
+    }
+}
+
+/// Render a wait in the units a reader thinks in (STO-80).
+///
+/// A GitHub primary rate limit resets up to an hour out, so the raw value is
+/// routinely four digits of seconds -- `2411s` is a number the reader has to do
+/// arithmetic on before it means anything.
+///
+/// At most two units, largest first, so the value stays short and the precision
+/// stays proportionate: seconds are dropped once there is an hour to report,
+/// where they are noise. A zero component is omitted rather than padded (`1h`,
+/// not `1h0m`), and a wait under a minute keeps its seconds.
+// spec: STO-80
+fn humanize_secs(secs: u64) -> String {
+    let (hours, minutes, seconds) = (secs / 3600, (secs % 3600) / 60, secs % 60);
+    match (hours, minutes, seconds) {
+        (0, 0, s) => format!("{s}s"),
+        (0, m, 0) => format!("{m}m"),
+        (0, m, s) => format!("{m}m{s}s"),
+        (h, 0, _) => format!("{h}h"),
+        (h, m, _) => format!("{h}h{m}m"),
+    }
+}
+
+/// Compose the message for a request the endpoint refused (STO-80).
+///
+/// The message is built from the error's accessors rather than its `Display`,
+/// which appends its own generic "set an auth token to raise the limit" advice:
+/// that duplicates `token_hint`'s unauthenticated branch and flatly contradicts
+/// its token-set branch, where a token IS set and the fix is to wait.
+///
+/// `rate_limited` is the caller's variant match, not a re-derivation: the crate
+/// already decided (a 429, or a 403 whose headers report a spent quota or a
+/// `Retry-After`), and that decision is the whole reason the two variants exist.
+///
+/// The URL is endpoint-derived, so it is sanitized before it is embedded
+/// (STO-54), exactly as in `maybe_proxy_hint`.
+// spec: STO-80 STO-54
+fn auth_refusal(err: &self_update::Error, rate_limited: bool) -> MindError {
+    let what = if rate_limited {
+        "rate limited"
+    } else {
+        "rejected"
+    };
+    // Both accessors are `Some` for these two variants; the fallbacks keep the
+    // message well-formed rather than asserting on the crate's internals.
+    let status = err
+        .http_status()
+        .map(|s| format!("HTTP {s}"))
+        .unwrap_or_else(|| "a refusal".to_string());
+    let url = crate::sanitize::strip_ansi(err.url().unwrap_or("the GitHub API"));
+    // `rate_limit_delay` folds `Retry-After` and the quota reset into one wait,
+    // preferring the server's explicit `Retry-After`; it is `None` when neither
+    // is known (a bare 429) and on every `Unauthorized`.
+    let wait = err
+        .rate_limit_delay()
+        .map(|d| format!(" (retry in {})", humanize_secs(d.as_secs())))
+        .unwrap_or_default();
+    MindError::SelfUpdateRefused {
+        reason: format!(
+            "GitHub {what} this request: {status} from {url}{wait}\n{}",
+            token_hint(rate_limited)
+        ),
     }
 }
 
@@ -1337,6 +1459,295 @@ mod tests {
             !result.contains("HTTPS_PROXY"),
             "a non-proxy reason must NOT append the proxy hint: {result:?}"
         );
+    }
+
+    /// Run `body` with `GH_TOKEN`/`GITHUB_TOKEN` forced to a known state, then
+    /// restore whatever the process had. The lock is the crate-wide `ENV_LOCK`
+    /// because token state is process-wide (see the `use` above).
+    fn with_token_env<T>(token: Option<&str>, body: impl FnOnce() -> T) -> T {
+        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved: Vec<(&str, Option<String>)> = AUTH_TOKEN_ENV_VARS
+            .iter()
+            .map(|var| (*var, std::env::var(var).ok()))
+            .collect();
+        // SAFETY: ENV_LOCK is held across every mutation and the body.
+        unsafe {
+            for (var, _) in &saved {
+                std::env::remove_var(var);
+            }
+            if let Some(value) = token {
+                std::env::set_var("GH_TOKEN", value);
+            }
+        }
+        let result = body();
+        // SAFETY: ENV_LOCK is still held.
+        unsafe {
+            for (var, value) in &saved {
+                match value {
+                    Some(v) => std::env::set_var(var, v),
+                    None => std::env::remove_var(var),
+                }
+            }
+        }
+        drop(guard);
+        result
+    }
+
+    /// The API endpoint `evolve`'s release lookup hits, as the crate reports it
+    /// back on a refusal.
+    const API_URL: &str = "https://api.github.com/repos/jaemk/mind/releases/latest";
+
+    /// A spent-quota 403: what GitHub answers an unauthenticated caller whose
+    /// per-IP budget is gone. The reset is `reset_in` seconds out, so the
+    /// rendered wait is that value less the sub-second rounding.
+    fn spent_quota_403(reset_in: u64) -> self_update::Error {
+        let reset = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after the epoch")
+            .as_secs()
+            + reset_in;
+        let mut headers = self_update::http_client::HeaderMap::new();
+        headers.insert("x-ratelimit-remaining", "0".parse().unwrap());
+        headers.insert("x-ratelimit-reset", reset.to_string().parse().unwrap());
+        self_update::Error::http_status_error_with_headers(403, API_URL, &headers)
+    }
+
+    /// GitHub's *secondary* rate limit: a 403 carrying an explicit `Retry-After`
+    /// while the primary quota is untouched. Preferred over `spent_quota_403`
+    /// wherever a test asserts the rendered wait, because the delay is stated by
+    /// the response rather than derived from the clock, so it is exact.
+    fn retry_after_403(secs: u64) -> self_update::Error {
+        let mut headers = self_update::http_client::HeaderMap::new();
+        headers.insert("retry-after", secs.to_string().parse().unwrap());
+        self_update::Error::http_status_error_with_headers(403, API_URL, &headers)
+    }
+
+    #[test]
+    // spec: STO-80
+    fn a_refused_request_names_the_token_when_the_environment_supplies_none() {
+        // The corporate-network case: GitHub's anonymous budget is per source IP,
+        // so a NAT'd egress spends it on other people's requests and `evolve`
+        // fails for a user who never ran it before. The remedy is a token, which
+        // nothing else in the message names, and it comes with a runnable form --
+        // "set GH_TOKEN" alone leaves the user hunting for a value.
+        let msg = with_token_env(None, || map_update_error(spent_quota_403(2400))).to_string();
+        assert!(
+            msg.contains("GH_TOKEN") && msg.contains("GITHUB_TOKEN"),
+            "the hint must name both variables the lookup reads: {msg:?}"
+        );
+        assert!(
+            msg.contains("gh auth token"),
+            "the hint must give a runnable way to supply a token: {msg:?}"
+        );
+        assert!(
+            msg.contains("per source IP"),
+            "the hint must explain why a shared egress exhausts the budget: {msg:?}"
+        );
+        assert!(
+            msg.contains("HTTP 403") && msg.contains(API_URL),
+            "the message must name the status and the endpoint that refused: {msg:?}"
+        );
+        assert!(
+            msg.contains("retry in 39m") || msg.contains("retry in 40m"),
+            "a known quota reset must be reported as a wait: {msg:?}"
+        );
+    }
+
+    #[test]
+    // spec: STO-80
+    fn a_reported_wait_is_humanized_not_a_raw_second_count() {
+        // The value a reader acts on. A GitHub primary limit resets up to an hour
+        // out, so the raw form is four digits of seconds and the reader has to
+        // divide before knowing whether to wait or give up.
+        let msg = with_token_env(None, || map_update_error(retry_after_403(2411))).to_string();
+        assert!(
+            msg.contains("(retry in 40m11s)"),
+            "the wait must be rendered in minutes and seconds: {msg:?}"
+        );
+        assert!(
+            !msg.contains("2411"),
+            "the raw second count must not survive: {msg:?}"
+        );
+    }
+
+    #[test]
+    // spec: STO-80
+    fn humanize_secs_shows_at_most_two_units_largest_first() {
+        // The boundaries, including the ones that decide whether a component is
+        // omitted or padded: a zero component is dropped (`1h`, not `1h0m`), and
+        // seconds disappear once there is an hour to report, where they are noise
+        // against a wait the user is not going to time precisely.
+        for (secs, expected) in [
+            (0, "0s"),
+            (1, "1s"),
+            (59, "59s"),
+            (60, "1m"),
+            (61, "1m1s"),
+            (2411, "40m11s"),
+            (3599, "59m59s"),
+            (3600, "1h"),
+            (3601, "1h"),
+            (3660, "1h1m"),
+            (3661, "1h1m"),
+            (7322, "2h2m"),
+        ] {
+            assert_eq!(
+                humanize_secs(secs),
+                expected,
+                "humanize_secs({secs}) must render as {expected}"
+            );
+        }
+    }
+
+    #[test]
+    // spec: STO-80
+    fn a_refused_request_does_not_tell_you_to_set_a_token_you_already_set() {
+        // With a token in the environment the request WAS authenticated, so the
+        // "set GH_TOKEN" advice would send the user after a variable they already
+        // have. A rate limit is then their own 5000/hour budget (wait), and an
+        // authorization failure is a bad credential (check it) -- opposite fixes,
+        // so neither may collapse into the other's wording.
+        let limited = with_token_env(Some("t"), || map_update_error(spent_quota_403(60)));
+        let limited = limited.to_string();
+        assert!(
+            limited.contains("retry once it resets"),
+            "an authenticated rate limit must advise waiting: {limited:?}"
+        );
+        assert!(
+            !limited.contains("gh auth token"),
+            "an authenticated failure must NOT advise setting a token: {limited:?}"
+        );
+
+        let rejected = with_token_env(Some("t"), || {
+            map_update_error(self_update::Error::http_status_error(401, API_URL))
+        });
+        let rejected = rejected.to_string();
+        assert!(
+            rejected.contains("was rejected") && rejected.contains("gh auth status"),
+            "a rejected credential must advise checking the token: {rejected:?}"
+        );
+        assert!(
+            !rejected.contains("retry once it resets"),
+            "a rejected credential is not a wait: {rejected:?}"
+        );
+    }
+
+    #[test]
+    // spec: STO-80
+    fn a_refused_request_treats_a_blank_token_as_no_token() {
+        // The crate's lookup trims and skips an empty value, so a variable set to
+        // whitespace sends the request unauthenticated. The hint keys on the same
+        // rule; keying on `var().is_ok()` instead would print "your token was
+        // rejected" for a request that carried no token at all.
+        let msg = with_token_env(Some("   "), || map_update_error(spent_quota_403(60))).to_string();
+        assert!(
+            msg.contains("unauthenticated") && msg.contains("gh auth token"),
+            "a whitespace-only token must count as no token: {msg:?}"
+        );
+    }
+
+    #[test]
+    // spec: STO-80
+    fn a_refused_request_does_not_repeat_the_crates_generic_token_advice() {
+        // The crate's own Display closes a rate limit with "set an auth token to
+        // raise the limit, or check less often". Composing the message from the
+        // error's accessors instead of its Display is what keeps that clause out:
+        // beside the unauthenticated hint it says the same thing twice, and beside
+        // the token-set hint it tells the user to set a token they just set.
+        let msg = with_token_env(Some("t"), || map_update_error(spent_quota_403(60))).to_string();
+        assert!(
+            !msg.contains("set an auth token"),
+            "the crate's generic advice must not survive into the message: {msg:?}"
+        );
+        assert_eq!(
+            msg.matches("GH_TOKEN").count(),
+            1,
+            "the token must be named exactly once: {msg:?}"
+        );
+    }
+
+    #[test]
+    // spec: STO-80
+    fn a_bare_rate_limit_reports_no_wait_it_does_not_know() {
+        // A 429 from a proxy or CDN carries no quota headers at all, so there is
+        // no reset to report. The message must omit the wait rather than
+        // inventing one or printing "retry in 0s".
+        let msg = with_token_env(None, || {
+            map_update_error(self_update::Error::http_status_error(429, API_URL))
+        })
+        .to_string();
+        assert!(
+            !msg.contains("retry in"),
+            "an unknown wait must be omitted, not guessed: {msg:?}"
+        );
+        assert!(
+            msg.contains("HTTP 429"),
+            "the status must still be reported: {msg:?}"
+        );
+    }
+
+    #[test]
+    // spec: STO-80 STO-54
+    fn a_refused_request_sanitizes_the_endpoint_controlled_url() {
+        // The URL is echoed back from the endpoint, which is untrusted on the
+        // network this hint exists for (an intercepting proxy), so it is stripped
+        // before it is embedded -- otherwise a crafted response could dress itself
+        // up as mind's own output right where the user is being told to go find a
+        // credential.
+        let hostile = "https://api.github.com/\x1b[31mx\x1b[0m";
+        let msg = with_token_env(None, || {
+            map_update_error(self_update::Error::http_status_error(403, hostile))
+        })
+        .to_string();
+        assert!(
+            !msg.contains('\x1b'),
+            "ANSI must be stripped from the endpoint-supplied URL: {msg:?}"
+        );
+    }
+
+    #[test]
+    // spec: STO-80
+    fn map_update_error_routes_refusals_away_from_the_transport_hints() {
+        // The two crate variants that mean "the endpoint would not let this
+        // request through" must reach the token hint rather than
+        // `maybe_proxy_hint`, whose advice (HTTPS_PROXY, SSL_CERT_FILE) is about
+        // reaching and trusting the endpoint and does not apply here. They must
+        // also leave `DownloadFailed` behind: nothing was downloaded, and that
+        // variant's wording names the release page rather than the endpoint that
+        // actually refused.
+        // The crate's variants are `#[non_exhaustive]`, so they are built through
+        // its public status constructor: 429 classifies as `RateLimited` on the
+        // status alone (RFC 6585) and a header-blind 403 as `Unauthorized`.
+        let rate_limited = self_update::Error::http_status_error(429, API_URL);
+        let unauthorized = self_update::Error::http_status_error(403, API_URL);
+        assert!(
+            matches!(rate_limited, self_update::Error::RateLimited { .. })
+                && matches!(unauthorized, self_update::Error::Unauthorized { .. }),
+            "the fixtures must be the two variants under test"
+        );
+
+        for err in [rate_limited, unauthorized] {
+            let label = err.to_string();
+            let mapped = with_token_env(None, || map_update_error(err));
+            assert_eq!(
+                mapped.kind(),
+                "self-update-refused",
+                "{label} must carry its own error kind"
+            );
+            let msg = mapped.to_string();
+            assert!(
+                msg.contains("GH_TOKEN"),
+                "{label} must carry the token hint: {msg:?}"
+            );
+            assert!(
+                !msg.contains("HTTPS_PROXY") && !msg.contains("SSL_CERT_FILE"),
+                "{label} must not carry transport advice: {msg:?}"
+            );
+            assert!(
+                !msg.contains("failed to download"),
+                "{label} must not be reported as a download failure: {msg:?}"
+            );
+        }
     }
 
     #[test]
@@ -2420,5 +2831,30 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    // spec: STO-80
+    fn a_refused_request_renders_as_one_status_line_and_one_hint_line() {
+        // Pins the shape the user actually reads, which the per-branch tests
+        // above only assert pieces of: a status/endpoint line, then the hint on
+        // its own line, and nothing else. `main` prints this after an `error: `
+        // prefix and then walks the source chain, so a stray third line or a
+        // trailing newline would show up as a blank line in the terminal.
+        let msg = with_token_env(Some("t"), || {
+            map_update_error(self_update::Error::http_status_error(401, API_URL))
+        })
+        .to_string();
+        let lines: Vec<&str> = msg.lines().collect();
+        assert_eq!(
+            lines,
+            vec![
+                "GitHub rejected this request: HTTP 401 from \
+                 https://api.github.com/repos/jaemk/mind/releases/latest",
+                "hint: GH_TOKEN/GITHUB_TOKEN is set and was rejected; check that it is valid and \
+                 not expired (gh auth status)",
+            ],
+            "the rendered shape changed: {msg:?}"
+        );
     }
 }
