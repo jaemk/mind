@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-09-03
+
 ### Added
 
 - Item links reach single files: a `blob` URL to any `.md` file other than a
@@ -1677,7 +1679,8 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   discovery, frontmatter descriptions, transactional install/upgrade/uninstall
   with a file registry, and a tag-driven release pipeline with a Homebrew tap.
 
-[Unreleased]: https://github.com/jaemk/mind/compare/v0.27.1...HEAD
+[Unreleased]: https://github.com/jaemk/mind/compare/v0.28.0...HEAD
+[0.28.0]: https://github.com/jaemk/mind/compare/v0.27.1...v0.28.0
 [0.27.1]: https://github.com/jaemk/mind/compare/v0.27.0...v0.27.1
 [0.27.0]: https://github.com/jaemk/mind/compare/v0.26.1...v0.27.0
 [0.26.1]: https://github.com/jaemk/mind/compare/v0.26.0...v0.26.1
