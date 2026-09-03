@@ -123,7 +123,13 @@ fn dispatch(paths: &Paths, kind: ActionKind, upgrade_keys: &[String]) -> Result<
                 commands::PinRequest::None,
                 None,
                 false,
-                None, // the TUI melds a repo spec, never an item link
+                // The TUI's spec input is forwarded verbatim, so it can meld
+                // a deep item-link URL; it just has no field to supply an
+                // explicit `--kind`, so a file link outside a conventional
+                // directory with no resolvable frontmatter kind fails here
+                // (LinkKindUnresolved) with no way to work around it from the
+                // browser.
+                None,
             )?;
         }
         // spec: TUI-21

@@ -1292,8 +1292,20 @@ mod tests {
         // A tree link naming the SKILL.md directly is also accepted.
         let t = parse_spec("https://github.com/o/r/tree/main/skills/foo/SKILL.md").unwrap();
         assert_eq!(t.item_path.as_deref(), Some("skills/foo"));
-        // A blob link NOT ending in SKILL.md is invalid, not a repo spec.
+        // A blob link not ending in `.md` at all is invalid, not a repo spec.
         assert!(parse_spec("https://github.com/o/r/blob/main/skills/foo").is_err());
+    }
+
+    // spec: LNK-20
+    #[test]
+    fn parses_a_remote_blob_link_to_a_single_file() {
+        let s = parse_spec("https://github.com/o/r/blob/main/agents/dev.md").unwrap();
+        assert_eq!(s.item_path.as_deref(), Some("agents/dev.md"));
+        assert_eq!(s.name, "github.com/o/r#agents/dev.md");
+        // A tree link to the same file path takes the file branch too.
+        let t = parse_spec("https://github.com/o/r/tree/main/agents/dev.md").unwrap();
+        assert_eq!(t.item_path.as_deref(), Some("agents/dev.md"));
+        assert_eq!(t.name, "github.com/o/r#agents/dev.md");
     }
 
     // spec: LNK-1

@@ -846,9 +846,16 @@ fn build_plan(paths: &Paths, registry: &Registry) -> Result<(Vec<Change>, Vec<Sk
                     .unwrap_or_default();
                 plan.push(Change {
                     kind: "upgrade",
-                    curator,
+                    curator: curator.clone(),
                     source: source.clone(),
-                    detail: format!("{count} installed item(s) out of date"),
+                    // spec: CUR-1 -- the text report doesn't print `curator`
+                    // as its own column, so with several curators registered
+                    // the detail is the only place a reader can tell whose
+                    // list is behind this line.
+                    detail: format!(
+                        "{count} installed item(s) out of date ({})",
+                        strip_ansi(&curator)
+                    ),
                     action: Action::Upgrade { source },
                 });
             }

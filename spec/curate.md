@@ -54,7 +54,12 @@ A *curator* is a registered source that declares `[discover].sources` in its
   rule as any other entry, its registered entries' place in the CUR-6 upgrade
   sweep. A catalog's in-repo plugins are items of the curator source itself
   (MKT-14), not separately registered sources, so they install with that source
-  like any other item.
+  like any other item. "Not installed" is checked against the current
+  manifest, not against install history: `forget`ting one item of an
+  `install = true` (or `install-items`-listed) source makes `install` propose
+  it again on the next `curate`, same as it would for any other declared-but-
+  missing item. There is no per-item opt-out; the escapes are unmelding the
+  curated source or asking the curator to drop the entry.
 - `CUR-5` `repin` covers a curated source whose recorded pin (STO-18) differs
   from the pin directive its entry declares (DSC-59, authoritative by DSC-65).
   Applying it re-pins the source exactly as `meld --pin` does on a re-meld
@@ -75,7 +80,20 @@ A *curator* is a registered source that declares `[discover].sources` in its
   silently uninstalling a consumer's items in an unattended run, while still
   surfacing it. A source registered without provenance (a direct meld, or a
   curated meld by a binary older than STO-82) is never proposed for unlisting:
-  absent provenance reads as "not curated", never as "no longer listed".
+  absent provenance reads as "not curated", never as "no longer listed". Two
+  consequences of provenance being fixed at registration and never rewritten
+  (CUR-12): `unmeld`ing a curator does not clear the `curated_by` its entries
+  recorded, so on the next `curate --prune --yes` every source it registered
+  is now unlisted (no curator lists it any more) and gets uninstalled in one
+  run -- a large effect from unmelding one source, worth knowing before
+  running `--prune` unattended. And if a DIFFERENT curator lists an identity
+  whose `curated_by` still names the departed one, CUR-7 keeps it listed (any
+  curator naming it is enough) while CUR-12 still refuses to let the new
+  curator mutate it, since ownership did not transfer: the source is frozen
+  (no install, no repin, no upgrade) until `--adopt` re-claims it -- adopt
+  requires no owner today, so an orphaned source (a curator gone, no
+  `curated_by` match) is not yet a valid `--adopt` target; only a genuinely
+  unowned one is.
 - `CUR-8` `namespace` covers an entry whose declared namespace (DSC-78) differs
   from the registered instance's identity alias (STO-58). It is reported and
   never applied: the alias is part of the instance's identity, so adopting a new
