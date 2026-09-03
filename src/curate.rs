@@ -383,11 +383,27 @@ fn declared_installs(entry: &NestedSource) -> Option<Option<Vec<String>>> {
 // Planning
 // ---------------------------------------------------------------------------
 
-/// Every registered curator, paired with the entries it declares now.
-fn curators(
-    paths: &Paths,
-    registry: &Registry,
-) -> Vec<(Source, std::path::PathBuf, Vec<NestedSource>)> {
+/// A registered curator and what it declares now (see [`curators`]).
+struct Curator {
+    /// The curator source itself.
+    source: Source,
+    /// Its `mind.toml` path, for the DSC-59 directives its entries carry.
+    toml_path: std::path::PathBuf,
+    /// Its `[discover].sources` entries (DSC-38).
+    entries: Vec<NestedSource>,
+    /// The sub-sources its marketplace catalog names (MKT-7), resolved to the
+    /// identities they register under.
+    market: Vec<Source>,
+}
+
+/// Every registered curator, paired with what it declares now: its
+/// `[discover].sources` entries (DSC-38) and the sub-sources of its marketplace
+/// catalog, if it ships one (MKT-7).
+///
+/// A source with neither is not a curator and contributes nothing to the plan.
+/// A source that curates ONLY through a marketplace manifest is still a curator:
+/// missing that is what would make its entries look unlisted (CUR-7).
+fn curators(paths: &Paths, registry: &Registry) -> Result<Vec<Curator>> {
     let mut out = Vec::new();
     for source in &registry.sources {
         // spec: LNK-8 -- an item-link instance curates nothing.
@@ -401,12 +417,23 @@ fn curators(
             .and_then(|m| m.discover)
             .map(|d| d.sources)
             .unwrap_or_default();
-        if entries.is_empty() {
+        // `marketplace_subsources` already applies the MKT-2 suppression (an
+        // authoritative mind.toml wins) and each entry's MKT-8 alias.
+        let market: Vec<Source> = commands::marketplace_subsources(paths, source)?
+            .into_iter()
+            .map(|(spec, _in_repo)| spec)
+            .collect();
+        if entries.is_empty() && market.is_empty() {
             continue;
         }
-        out.push((source.clone(), clone.join("mind.toml"), entries));
+        out.push(Curator {
+            source: source.clone(),
+            toml_path: clone.join("mind.toml"),
+            entries,
+            market,
+        });
     }
-    out
+    Ok(out)
 }
 
 /// Build the plan (CUR-1).
@@ -418,7 +445,13 @@ fn build_plan(paths: &Paths, registry: &Registry) -> Result<Vec<Change>> {
     // Curated sources reached this run, for the CUR-6 upgrade pass.
     let mut curated: Vec<String> = Vec::new();
 
-    for (curator, toml_path, entries) in curators(paths, registry) {
+    for Curator {
+        source: curator,
+        toml_path,
+        entries,
+        market,
+    } in curators(paths, registry)?
+    {
         for entry in entries {
             // spec: CLI-216 -- resolving an entry to the identity it registers
             // under is a question, not a decision to clone: quiet.
@@ -541,32 +574,17 @@ fn build_plan(paths: &Paths, registry: &Registry) -> Result<Vec<Change>> {
             }
         }
 
-        // spec: CUR-4/MKT-7 -- a marketplace catalog curates too; its in-repo
-        // plugins are the entries that declare an install.
-        for (spec, in_repo) in commands::marketplace_subsources(paths, &curator)? {
+        // spec: CUR-4 MKT-7 -- a marketplace catalog curates too. Its entries
+        // declare no install directive of their own, so they propose no
+        // install: what they contribute is membership. An external entry still
+        // in the manifest is still listed (so it is not proposed for unlisting,
+        // CUR-7), and a registered one joins the CUR-6 upgrade sweep. In-repo
+        // plugins are items of the curator source itself (MKT-14), never
+        // separately registered sources, so they never appear here.
+        for spec in market {
             listed.insert(spec.name.clone());
             if let Some(registered) = registry.find(&spec.name) {
                 curated.push(registered.name.clone());
-                if in_repo {
-                    let pending = pending_installs(paths, &manifest, registered, &None)?;
-                    if !pending.is_empty() {
-                        plan.push(Change {
-                            kind: "install",
-                            curator: curator.name.clone(),
-                            source: registered.name.clone(),
-                            detail: format!(
-                                "{} declares {} not installed: {}",
-                                strip_ansi(&curator.name),
-                                pending.len(),
-                                pending.join(", ")
-                            ),
-                            action: Action::Install {
-                                source: registered.name.clone(),
-                                refs: None,
-                            },
-                        });
-                    }
-                }
             }
         }
     }

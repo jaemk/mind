@@ -47,8 +47,13 @@ A *curator* is a registered source that declares `[discover].sources` in its
   that are not installed, under the ordinary precedence (DSC-62 `install-items`
   over DSC-58 `install`). An entry that declares neither is register-only by the
   curator's choice, so it is never proposed for install; nor is an entry whose
-  declared items are all installed already. A marketplace entry's in-repo plugins
-  count as declared (MKT-7), its external entries do not.
+  declared items are all installed already. A marketplace catalog's entries
+  (MKT-7) declare no install directive, so they propose no install of their own:
+  what a catalog contributes to the plan is membership (an entry still listed is
+  not proposed for unlisting, CUR-7) and its registered entries' place in the
+  CUR-6 upgrade sweep. A catalog's in-repo plugins are items of the curator
+  source itself (MKT-14), not separately registered sources, so they install with
+  that source like any other item.
 - `CUR-5` `repin` covers a curated source whose recorded pin (STO-18) differs
   from the pin directive its entry declares (DSC-59, authoritative by DSC-65).
   Applying it re-pins the source exactly as `meld --pin` does on a re-meld

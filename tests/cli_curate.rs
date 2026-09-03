@@ -662,3 +662,52 @@ fn hook_consent_passes_through_to_the_registrations_curate_applies() {
         skipped.stderr
     );
 }
+
+#[test]
+fn a_marketplace_entry_still_listed_is_not_proposed_for_unlisting() {
+    // spec: CUR-4 CUR-7
+    // A marketplace catalog curates too (MKT-7): its entries declare no install
+    // directive, so they propose nothing while they are listed, and drop out of
+    // the listed set (an `unlist`) when the manifest stops naming them.
+    let env = Env::new();
+    let plugin = env.repo("plugin");
+    plugin.write_and_commit("skills/kit/SKILL.md", "---\ndescription: Kit\n---\n# kit\n");
+    let catalog = env.repo("catalog");
+    // An external entry: a source object with a `url`, which for a hermetic
+    // fixture is the plugin repo's local path.
+    catalog.write_and_commit(
+        ".claude-plugin/marketplace.json",
+        &format!(
+            r#"{{"name":"Cat","plugins":[{{"name":"kit","source":{{"url":"{}"}}}}]}}"#,
+            plugin.spec()
+        ),
+    );
+    let m = env.mind(&["meld", &catalog.spec(), "--register-only"]);
+    assert!(m.success, "meld failed: {} {}", m.stdout, m.stderr);
+    let sources = env.mind(&["recall", "--sources"]);
+    assert!(
+        sources.stdout.contains("@kit"),
+        "the external marketplace entry must register: {}",
+        sources.stdout
+    );
+
+    let listed = env.mind(&["curate", "--check"]);
+    assert!(listed.success, "curate failed: {}", listed.stderr);
+    assert!(
+        !listed.stdout.contains("unlist"),
+        "an entry still in the manifest must not be proposed for unlisting: {}",
+        listed.stdout
+    );
+
+    // The catalog drops the entry.
+    catalog.write_and_commit(
+        ".claude-plugin/marketplace.json",
+        r#"{"name":"Cat","plugins":[]}"#,
+    );
+    let dropped = env.mind(&["curate", "--check"]);
+    assert!(
+        dropped.stdout.contains("unlist") && dropped.stdout.contains("@kit"),
+        "a dropped catalog entry must be reported: {}",
+        dropped.stdout
+    );
+}
