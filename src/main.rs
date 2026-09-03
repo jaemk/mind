@@ -467,6 +467,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             dangerously_skip_install_hook_check,
             dangerously_skip_build_hook_check,
             register_only,
+            kind,
             learn_patterns,
             recursive,
             force,
@@ -482,6 +483,9 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             // aliases) into one request; more than one is a structured
             // ConflictingPin error rather than a clap usage string.
             let pin = commands::parse_pin_flags(pin, follow_branch, pin_tag, pin_ref)?;
+            // spec: CLI-239 -- `--kind` declares a file link's item kind; a bad
+            // value, or one passed with a plain repo spec, is refused before the
+            // clone. Resolved after `repo` is defaulted below.
             // spec: CLI-236 -- reject an unusable `--learn` value before the
             // clone, so a typo does not leave a registered source behind.
             commands::validate_learn_patterns(&learn_patterns)?;
@@ -495,6 +499,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
                     .into_owned(),
                 Some(r) => r.to_string(),
             };
+            let item_kind = commands::parse_link_kind(kind.as_deref(), &repo)?;
             // CLI-34: `--force` overwrites a conflicting target; otherwise a
             // conflict prompts on a TTY (Clobber::Prompt).
             let clobber = if force {
@@ -557,6 +562,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
                     pin,
                     install_hook,
                     dangerously_skip_install_hook_check,
+                    item_kind,
                 )?;
                 // CLI-23: by default, offer to install the melded source's items
                 // right away (preview + prompt). `--register-only` stops at registering.
@@ -658,6 +664,7 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             item,
             all,
             pin,
+            kind,
             dry_run,
             force,
             dangerously_skip_install_hook_check,
@@ -681,7 +688,21 @@ fn dispatch(cli: Cli, paths: &Paths) -> Result<()> {
             // item-link instance, then install its skill. spec: CLI-200 -- `--pin`
             // freezes the link's ref while registering.
             if item.contains("://") {
-                return commands::learn_link(paths, &item, pin, dry_run, flow);
+                let item_kind = commands::parse_link_kind(kind.as_deref(), &item)?;
+                return commands::learn_link(paths, &item, pin, item_kind, dry_run, flow);
+            }
+            // spec: CLI-239 -- `--kind` describes an item link's file, so a
+            // plain item ref (which names an already-melded source's item, whose
+            // kind is already known) is a usage error, not a silent no-op.
+            if let Some(k) = kind.as_deref() {
+                return Err(crate::error::MindError::BadKindFlag {
+                    value: crate::sanitize::strip_ansi(k),
+                    reason: format!(
+                        "'{}' is an item ref, not an item link; --kind applies to a deep \
+                         tree/blob URL only",
+                        crate::sanitize::strip_ansi(&item)
+                    ),
+                });
             }
             // spec: CLI-200 -- `--pin` only applies to a deep-link URL; for a
             // plain item ref (an already-melded source) it is a no-op, noted here.

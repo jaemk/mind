@@ -46,6 +46,7 @@ pub fn meld(
     pin: PinRequest,
     install_hook: Option<String>,
     dangerously_skip_install_hook_check: bool,
+    item_kind: Option<ItemKind>,
 ) -> Result<MeldSummary> {
     paths.ensure_layout()?;
     // POL-3: the managed policy is authoritative over user intent. Load it once
@@ -85,6 +86,7 @@ pub fn meld(
         false, // yes: top-level meld does not yet thread --yes (non-TTY always fires NS-45)
         None,  // a top-level meld has no curator-supplied configuration
         &mut meld_skipped,
+        item_kind, // spec: CLI-239 -- the consumer's `--kind` for a file link
     )?;
     registry.save(paths)?;
     // JSON emission is deferred to the dispatcher (main.rs) so the install
@@ -594,9 +596,14 @@ fn meld_recursive(
     yes: bool,
     curated: Option<CuratedConfig>,
     skipped: &mut Vec<SkippedEntry>,
+    item_kind: Option<ItemKind>,
 ) -> Result<usize> {
     let out = crate::render::ctx();
     let mut source = parse_spec(repo)?;
+    // spec: LNK-22 CLI-239 DSC-100 -- the consumer's (or curator's) explicit
+    // kind for a file link, recorded on the instance and read by every later
+    // scan. Applied before the catalog scan below, which resolves the kind.
+    source.item_kind = item_kind;
     // NS-25: reject a reserved-kind-word prefix at the chokepoint where any alias
     // (top-level `--as`, or a nested source's `as =`) is applied. An empty alias
     // ("no prefix") is accepted by validate_prefix.
@@ -1383,6 +1390,12 @@ fn meld_recursive(
             // The pin directive is authoritative (DSC-65). Hooks and roots are
             // gated (DSC-60). All are resolved here against the super-source's
             // mind.toml path; the gate lives in the recursive call.
+            // spec: DSC-100 -- an item-link entry's declared kind. Parsed here
+            // (a bad word is a MindToml error naming the entry) and threaded
+            // through as the instance's explicit kind, NOT through
+            // `CuratedConfig`: that carries the DSC-60-gated configuration,
+            // while a link's kind is what makes the entry installable at all.
+            let entry_kind = entry.item_kind(&toml_path)?;
             let curated = CuratedConfig {
                 pin: entry.pin_directive(&toml_path)?,
                 roots: entry.roots.clone(),
@@ -1417,6 +1430,8 @@ fn meld_recursive(
                 false,      // nested sources inherit non-interactive mode but not --yes
                 Some(curated),
                 skipped,
+                // spec: DSC-100 -- the entry's own `kind =`, for an item-link entry.
+                entry_kind,
             ) {
                 Ok(n) => added += n,
                 // DSC-68/DSC-69: an auth failure is governed by on-auth-failure
@@ -1591,6 +1606,7 @@ fn meld_recursive(
                 false, // marketplace nested sources inherit non-interactive
                 None,  // no curator config
                 skipped,
+                None, // a marketplace entry is a repo, never an item link
             ) {
                 Ok(n) => {
                     added += n;
@@ -2180,17 +2196,11 @@ fn siblings_of(items: &[CatalogItem], source: &str) -> Vec<CatalogItem> {
 ///
 /// The repo root itself is spelled `.`, which is what `validate_scan_root`
 /// accepts for "scan the whole clone".
-fn link_add_root(item_path: &str) -> String {
-    let skill_dir = std::path::Path::new(item_path);
-    let root = match skill_dir.parent() {
-        // `<...>/skills/<name>` -> the parent of the container.
-        Some(parent)
-            if parent
-                .file_name()
-                .is_some_and(|n| n == ItemKind::Skill.dir()) =>
-        {
-            parent.parent()
-        }
+fn link_add_root(item_path: &str, kind: ItemKind) -> String {
+    let item = std::path::Path::new(item_path);
+    let root = match item.parent() {
+        // `<...>/<kind>s/<name>` -> the parent of the container.
+        Some(parent) if parent.file_name().is_some_and(|n| n == kind.dir()) => parent.parent(),
         // A flat skill dir -> its own parent.
         other => other,
     };
@@ -2204,7 +2214,64 @@ fn link_add_root(item_path: &str) -> String {
     }
 }
 
-fn link_meld_remedy(identity: &str, url: &str, item_name: &str, add_root: Option<&str>) -> String {
+/// Parse the consumer's `--kind` flag against the spec it was passed with
+/// (CLI-239).
+///
+/// Two usage errors are caught here, before any clone: a value that is not an
+/// item kind at all, and a flag passed with a spec that is not an item link
+/// (nothing else about a meld is kind-scoped). Whether the kind FITS the link's
+/// shape needs the clone, so it is decided later, by the catalog scan (LNK-21).
+pub fn parse_link_kind(kind: Option<&str>, spec: &str) -> Result<Option<ItemKind>> {
+    let Some(raw) = kind.map(str::trim).filter(|k| !k.is_empty()) else {
+        return Ok(None);
+    };
+    let parsed = ItemKind::parse(raw).ok_or_else(|| MindError::BadKindFlag {
+        value: strip_ansi(raw),
+        reason: "not an item kind; expected agent, rule, or command".to_string(),
+    })?;
+    // spec: CLI-216 -- an identity-only parse to classify the spec, not a
+    // decision to clone: quiet. A spec that does not parse at all is left to
+    // the meld/learn path, which reports its own error.
+    if parse_spec_quiet(spec).is_ok_and(|s| s.item_path.is_none()) {
+        return Err(MindError::BadKindFlag {
+            value: strip_ansi(raw),
+            reason: format!(
+                "'{}' is not an item link, and --kind applies to one only                  (an item link is '<repo-url>/blob/<ref>/<file>.md' or                  '<repo-url>/tree/<ref>/<skill-dir>')",
+                strip_ansi(spec)
+            ),
+        });
+    }
+    Ok(Some(parsed))
+}
+
+/// Whether a whole-repo meld could discover the linked item at all (LNK-18).
+///
+/// A skill link always can: a skill is found flat (a bare child directory of a
+/// scan root) as well as under a `skills/` container, so the derived
+/// `--add-root` reaches it wherever it sits. A FILE link can only when its
+/// parent directory is its kind's container (`agents/`, `rules/`, `commands/`):
+/// convention discovery has no flat pass for file kinds, so a file anywhere
+/// else is reachable only through the link.
+fn link_is_conventionally_placed(source: &crate::source::Source, kind: ItemKind) -> bool {
+    let Some(item_path) = source.item_path.as_deref() else {
+        return true;
+    };
+    if !catalog::is_file_link(item_path) {
+        return true;
+    }
+    std::path::Path::new(item_path)
+        .parent()
+        .and_then(|p| p.file_name())
+        .is_some_and(|n| n == kind.dir())
+}
+
+fn link_meld_remedy(
+    identity: &str,
+    url: &str,
+    item_name: &str,
+    kind: ItemKind,
+    add_root: Option<&str>,
+) -> String {
     // spec: CLI-28 -- `unmeld`'s selector is glob-aware too, and a link
     // identity embeds the skill's repo path (LNK-4), so a skill directory
     // named `pdf[x]` yields the identity `host/o/r#skills/pdf[x]`, which
@@ -2215,7 +2282,8 @@ fn link_meld_remedy(identity: &str, url: &str, item_name: &str, add_root: Option
     let identity = crate::error::shell_quote(&glob::Pattern::escape(&strip_ansi(identity)));
     let url = crate::error::shell_quote(&strip_ansi(url));
     let pattern = crate::error::shell_quote(&format!(
-        "skill:{}",
+        "{}:{}",
+        kind.as_str(),
         glob::Pattern::escape(&strip_ansi(item_name))
     ));
     // spec: CLI-225 -- the root is derived from the source-controlled link path,
@@ -2248,13 +2316,14 @@ fn link_meld_remedy(identity: &str, url: &str, item_name: &str, add_root: Option
 /// that would have been discovered anyway (DSC-85 drops the duplicate). It is
 /// called only when a remedy is about to be printed, so an ordinary link
 /// install never pays for a whole-clone scan.
-fn plain_meld_reaches_link(paths: &Paths, source: &crate::source::Source) -> bool {
+fn plain_meld_reaches_link(paths: &Paths, source: &crate::source::Source, kind: ItemKind) -> bool {
     let Some(item_path) = source.item_path.as_deref() else {
         return true;
     };
     let clone_dir = source.clone_dir(paths);
     let whole = crate::source::Source {
         item_path: None,
+        item_kind: None,
         ..source.clone()
     };
     let mut items: Vec<CatalogItem> = Vec::new();
@@ -2265,10 +2334,10 @@ fn plain_meld_reaches_link(paths: &Paths, source: &crate::source::Source) -> boo
     let target = canon(&clone_dir.join(item_path));
     items
         .iter()
-        .any(|it| it.kind == ItemKind::Skill && canon(&it.path) == target)
+        .any(|it| it.kind == kind && canon(&it.path) == target)
 }
 
-/// Whether a `requires` entry (DEP-4) can resolve inside a single-skill item
+/// Whether a `requires` entry (DEP-4) can resolve inside a single-item
 /// link instance, whose only sibling is the linked skill itself (LNK-7).
 ///
 /// A malformed or source-qualified entry returns `true` so it stays with the
@@ -2333,7 +2402,7 @@ fn expandable_files(item: &CatalogItem) -> Result<Vec<std::path::PathBuf>> {
         .collect())
 }
 
-/// spec: LNK-18 -- reconcile a single-skill item-link instance's intra-source
+/// spec: LNK-18 -- reconcile a single-item item-link instance's intra-source
 /// references before it is installed.
 ///
 /// A link instance's catalog is exactly the linked skill (LNK-7), so a
@@ -2368,13 +2437,37 @@ fn link_reconciled<'a>(
     // Computed lazily: the reachability probe scans the whole clone, and most
     // link installs never print a remedy at all.
     let remedy = || {
+        // spec: LNK-18 -- a file link outside its kind's container directory is
+        // reachable only as a link (convention discovery finds a file item only
+        // at `<root>/<kind>s/<name>.md`, and there is no flat pass for file
+        // kinds), so no command is printed: one would unmeld and then fail.
+        if !link_is_conventionally_placed(source, item.kind) {
+            return format!(
+                "the linked file sits outside a conventional {}/ directory, so no whole-repo meld \
+                 discovers it; drop the reference, or move the file under {}/ upstream",
+                item.kind.dir(),
+                item.kind.dir()
+            );
+        }
         // The added root is derived from the link's own path, not fixed at `.`:
-        // an added root is scanned only one level deep, so a skill nested under
+        // an added root is scanned only one level deep, so an item nested under
         // `vendor/pkg/skills/` needs that directory named (LNK-18).
-        let add_root = (!plain_meld_reaches_link(paths, source))
-            .then(|| source.item_path.as_deref().map(link_add_root))
+        let add_root = (!plain_meld_reaches_link(paths, source, item.kind))
+            .then(|| {
+                source
+                    .item_path
+                    .as_deref()
+                    .map(|p| link_add_root(p, item.kind))
+            })
             .flatten();
-        link_meld_remedy(&source.name, &source.url, &item.name, add_root.as_deref())
+        let command = link_meld_remedy(
+            &source.name,
+            &source.url,
+            &item.name,
+            item.kind,
+            add_root.as_deref(),
+        );
+        format!("meld the whole repo and install just this item: `{command}`")
     };
 
     // A token naming anything but the linked skill is a hard stop. Scan exactly
@@ -2416,9 +2509,9 @@ fn link_reconciled<'a>(
     // installed item is what `recall`/`introspect`/`--json` surface later.
     let remedy = remedy();
     crate::render::warn(format!(
-        "{} declares requires {listed}, which was dropped: source {} is a single-skill item \
-         link with no siblings, so the requirement cannot resolve. To install this skill \
-         together with what it requires, replace the link with the whole repo: `{remedy}`",
+        "{} declares requires {listed}, which was dropped: source {} is a single-item \
+         link with no siblings, so the requirement cannot resolve. To install this item \
+         together with what it requires, {remedy}",
         item.display_key(),
         strip_ansi(&item.source)
     ));
@@ -3427,6 +3520,7 @@ pub fn learn_link(
     paths: &Paths,
     url: &str,
     pin: bool,
+    item_kind: Option<ItemKind>,
     dry_run: bool,
     flow: InstallFlow,
 ) -> Result<()> {
@@ -3457,6 +3551,7 @@ pub fn learn_link(
             pin_req,
             None,
             flow.dangerously_skip,
+            item_kind, // spec: CLI-239
         )?;
     } else if pin {
         // spec: CLI-203 -- the link instance is already melded, so the meld+pin
@@ -3654,7 +3749,7 @@ fn learn_selected(
                 break;
             }
         };
-        // spec: LNK-18 -- a single-skill link instance has no siblings, so its
+        // spec: LNK-18 -- a single-item link instance has no siblings, so its
         // intra-source references are reconciled (token: hard stop with the
         // remedy; requires: warn and drop) before install validates them.
         let (reconciled, dropped_requires) = match link_reconciled(paths, &registry, target) {
@@ -5538,6 +5633,7 @@ pub fn absorb(
             PinRequest::None,
             None,
             false,
+            None, // absorb melds a directory, never an item link
         );
         if let Err(e) = meld_err {
             // Restore: source lobe still intact; clean up dest copy.
@@ -6250,6 +6346,7 @@ pub fn sync_with_selector(
                     true, // auto-meld is non-interactive (no collision prompt)
                     None, // auto-meld has no curator-supplied configuration
                     &mut sync_skipped,
+                    None, // a policy auto-meld names a repo, never an item link
                 ) {
                     Ok(n) => {
                         provisioned += n;
@@ -6495,6 +6592,10 @@ pub fn sync_with_selector(
             spec: String,
             alias: Option<String>,
             curated: CuratedConfig,
+            /// The entry's declared item-link kind (DSC-100), carried so a
+            /// re-walk registers a curated file link exactly as a fresh meld
+            /// would.
+            item_kind: Option<ItemKind>,
             /// Auth-failure policy for this entry (DSC-68). Carried so the re-walk
             /// loop can handle auth failures the same way as meld (DSC-68 requires
             /// the same behavior applies during sync).
@@ -6530,10 +6631,13 @@ pub fn sync_with_selector(
                 // `namespace =` key is honored (not just the legacy `as =` key).
                 // Compute before consuming fields of `ns`.
                 let ns_alias = ns.effective_alias();
+                // spec: DSC-100 -- the entry's `kind =`, same parse as meld's.
+                let ns_kind = ns.item_kind(&toml_path)?;
                 nested.push(NestedTodo {
                     spec: ns.source,
                     alias: ns_alias,
                     curated,
+                    item_kind: ns_kind,
                     on_auth_failure: ns.on_auth_failure,
                 });
             }
@@ -6583,6 +6687,7 @@ pub fn sync_with_selector(
                         flat_skills: false,
                         hooks: Vec::new(),
                     },
+                    item_kind: None, // a marketplace entry is a repo, never an item link
                     on_auth_failure: None,
                 });
             }
@@ -6616,6 +6721,7 @@ pub fn sync_with_selector(
             // meld_recursive. Without on-auth-failure, the error propagates
             // as a generic git error (hard failure).
             let todo_alias = todo.alias.clone();
+            let todo_kind = todo.item_kind;
             match meld_recursive(
                 paths,
                 &mut registry,
@@ -6634,6 +6740,7 @@ pub fn sync_with_selector(
                 true, // sync re-walk is non-interactive (no collision prompt)
                 Some(todo.curated),
                 &mut sync_skipped,
+                todo_kind, // spec: DSC-100
             ) {
                 Ok(n) => discovered += n,
                 Err(e) if git::is_auth_failure(&e) => {
@@ -8148,7 +8255,7 @@ pub fn recall(
                 "  {}{}",
                 out.dim("dropped "),
                 out.yellow(&format!(
-                    "requires {} (unsatisfiable from a single-skill item link)",
+                    "requires {} (unsatisfiable from a single-item link)",
                     found
                         .dropped_requires
                         .iter()
@@ -8925,7 +9032,7 @@ pub fn introspect(paths: &Paths, fix: bool, json: bool) -> Result<()> {
             // `mind recall <source>` is not a command at all (H2), and
             // `mind recall --sources` needs no interpolation to be correct.
             message: format!(
-                "{}: installed from a single-skill item link (source '{source}'), so its \
+                "{}: installed from a single-item link (source '{source}'), so its \
                  `requires {listed}` was dropped and the item it names is not installed; \
                  meld the whole repo to get both (`mind recall --sources` lists the melded \
                  sources)",
@@ -10115,7 +10222,7 @@ mod tests {
         }
     }
 
-    /// Which `requires` entries a single-skill link instance drops, and which
+    /// Which `requires` entries a single-item link instance drops, and which
     /// it keeps so install still reports their specific DEP-7 cause.
     // spec: LNK-18
     #[test]
@@ -10297,7 +10404,13 @@ mod tests {
     // spec: LNK-18 CLI-236
     #[test]
     fn link_remedy_escapes_glob_metacharacters_in_an_item_name() {
-        let remedy = link_meld_remedy("local/t/repo#skills/pdf[x]", "/tmp/repo", "pdf[x]", None);
+        let remedy = link_meld_remedy(
+            "local/t/repo#skills/pdf[x]",
+            "/tmp/repo",
+            "pdf[x]",
+            ItemKind::Skill,
+            None,
+        );
         assert!(
             !remedy.contains("--learn 'pdf[x]'") && !remedy.contains("--learn 'skill:pdf[x]'"),
             "the raw name would be read as a glob: {remedy}"
@@ -10383,12 +10496,19 @@ mod tests {
     // spec: LNK-18 DSC-84
     #[test]
     fn link_remedy_adds_a_scan_root_when_a_plain_meld_would_not_reach_the_skill() {
-        let plain = link_meld_remedy("local/t/repo#skills/review", "/tmp/repo", "review", None);
+        let plain = link_meld_remedy(
+            "local/t/repo#skills/review",
+            "/tmp/repo",
+            "review",
+            ItemKind::Skill,
+            None,
+        );
         let rooted = link_meld_remedy(
             "local/t/repo#skills/review",
             "/tmp/repo",
             "review",
-            Some(&link_add_root("skills/review")),
+            ItemKind::Skill,
+            Some(&link_add_root("skills/review", ItemKind::Skill)),
         );
         assert_eq!(
             plain,
@@ -10410,17 +10530,23 @@ mod tests {
     #[test]
     fn link_add_root_names_the_directory_the_scan_must_start_from() {
         // The containered layout at the repo root: the whole clone.
-        assert_eq!(link_add_root("skills/review"), ".");
+        assert_eq!(link_add_root("skills/review", ItemKind::Skill), ".");
         // A flat skill at the repo root: also the whole clone.
-        assert_eq!(link_add_root("review"), ".");
+        assert_eq!(link_add_root("review", ItemKind::Skill), ".");
         // Containered, but nested: the parent of the `skills/` container, not
         // the container itself (which would make the skill a grandchild).
-        assert_eq!(link_add_root("vendor/pkg/skills/review"), "vendor/pkg");
+        assert_eq!(
+            link_add_root("vendor/pkg/skills/review", ItemKind::Skill),
+            "vendor/pkg"
+        );
         // Flat, but nested: the skill's own parent.
-        assert_eq!(link_add_root("vendor/review"), "vendor");
+        assert_eq!(link_add_root("vendor/review", ItemKind::Skill), "vendor");
         // A directory that merely ends in something skills-like is not the
         // container, so it is treated as the flat parent.
-        assert_eq!(link_add_root("my-skills/review"), "my-skills");
+        assert_eq!(
+            link_add_root("my-skills/review", ItemKind::Skill),
+            "my-skills"
+        );
     }
 
     // ----- LNK-18: the reachability probe behind the two remedy forms -----
@@ -10444,6 +10570,7 @@ mod tests {
             flat_skills: false,
             add_roots: None,
             item_path: Some(item_path.to_string()),
+            item_kind: None,
             origin: None,
             plugin_version: None,
             install_hooks: Vec::new(),
@@ -10493,7 +10620,7 @@ mod tests {
         );
         let source = link_source_at(&dir, "skills/review");
         assert!(
-            !plain_meld_reaches_link(&paths, &source),
+            !plain_meld_reaches_link(&paths, &source, ItemKind::Skill),
             "a same-named skill at a DIFFERENT path must not count as reachable, \
              or the remedy would install the decoy"
         );
@@ -10502,7 +10629,7 @@ mod tests {
         // finds the skill at the very path the link points at.
         std::fs::remove_file(dir.join("mind.toml")).unwrap();
         assert!(
-            plain_meld_reaches_link(&paths, &source),
+            plain_meld_reaches_link(&paths, &source, ItemKind::Skill),
             "a plain convention layout really is reachable, so the plain remedy \
              form must still be chosen for it"
         );
@@ -10511,9 +10638,10 @@ mod tests {
         // (there is nothing to reconcile, so no remedy is ever composed).
         let ordinary = crate::source::Source {
             item_path: None,
+            item_kind: None,
             ..source.clone()
         };
-        assert!(plain_meld_reaches_link(&paths, &ordinary));
+        assert!(plain_meld_reaches_link(&paths, &ordinary, ItemKind::Skill));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -10535,7 +10663,7 @@ mod tests {
         let missing = dir.join("no-such-clone");
         let source = link_source_at(&missing, "skills/review");
         assert!(
-            !plain_meld_reaches_link(&paths, &source),
+            !plain_meld_reaches_link(&paths, &source, ItemKind::Skill),
             "an unreadable clone must answer 'not reachable', not propagate"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -11339,6 +11467,7 @@ mod tests {
             PinRequest::None,
             None,
             false,
+            None,
         )
         .expect("meld");
         for item_key in ["skill:applies", "skill:resolved"] {
@@ -12696,6 +12825,7 @@ mod tests {
             flat_skills: false,
             add_roots: None,
             item_path: None,
+            item_kind: None,
             origin: None,
             plugin_version: None,
             install_hooks: Vec::new(),

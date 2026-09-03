@@ -61,7 +61,14 @@ pub fn read_capped_metadata(path: &Path) -> Result<String> {
 }
 
 /// The item kinds `mind` knows how to install.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+///
+/// Serialized as its lowercase name (`"agent"`, ...), the same spelling
+/// [`ItemKind::parse`] accepts, so a persisted `item_kind` (STO-81) reads the
+/// same as the `--kind` flag and the `kind =` key that set it.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "lowercase")]
 pub enum ItemKind {
     Skill,
     Agent,
@@ -334,12 +341,12 @@ pub enum MindError {
     /// LNK-1/LNK-2: a URL that carries a `tree`/`blob` link marker (so it is
     /// unambiguously an attempted item link, not a plain repo spec) but whose
     /// tail fails to parse as one. Kept distinct from [`MindError::InvalidRepoSpec`]
-    /// so the message names the two link shapes instead of telling a user who
+    /// so the message names the link shapes instead of telling a user who
     /// pasted a real forge URL that it is not a valid URL at all (`reason`
-    /// carries the specific defect: missing ref, missing skill path, a `blob`
-    /// link not ending in `/SKILL.md`, or an unsafe path/ref value).
+    /// carries the specific defect: missing ref, missing item path, a `blob`
+    /// link not ending in `.md`, or an unsafe path/ref value).
     #[error(
-        "'{url}' is not a valid item-link URL ({reason}); expected '<repo-url>/tree/<ref>/<skill-dir>' or '<repo-url>/blob/<ref>/<skill-dir>/SKILL.md' (GitLab's '/-/tree/' and '/-/blob/' forms also work)"
+        "'{url}' is not a valid item-link URL ({reason}); expected '<repo-url>/tree/<ref>/<skill-dir>', '<repo-url>/blob/<ref>/<skill-dir>/SKILL.md', or '<repo-url>/blob/<ref>/<file>.md' for a single agent, rule, or command (GitLab's '/-/tree/' and '/-/blob/' forms also work)"
     )]
     BadItemLink { url: String, reason: String },
 
@@ -523,21 +530,54 @@ pub enum MindError {
     )]
     LinkNotASkill { source_name: String, path: String },
 
-    /// LNK-18: an item-link instance's catalog is exactly the linked skill
+    /// CLI-239: `--kind` given a value that is not an item kind, or given
+    /// alongside a spec that is not an item link. Both are usage errors caught
+    /// before any clone; whether the kind FITS the link's shape is decided
+    /// later, against the clone (`LinkKindMismatch`).
+    #[error("--kind {value}: {reason}")]
+    BadKindFlag { value: String, reason: String },
+
+    /// LNK-20: a file link whose `<path>` does not name a file in the clone.
+    /// The sibling of `LinkNotASkill` for the file shape.
+    #[error("source '{source_name}': linked path '{path}' is not a file in the clone")]
+    LinkNotAFile { source_name: String, path: String },
+
+    /// LNK-21: a file link whose kind none of the three resolution steps
+    /// answered. The message names all three so the user can pick one.
+    #[error(
+        "source '{source_name}': cannot tell what kind of item '{path}' is; it is not under an \
+         agents/, rules/, or commands/ directory and declares no `kind:` in its frontmatter. \
+         Pass --kind <agent|rule|command> (or set kind = \"...\" on the [discover].sources entry)"
+    )]
+    LinkKindUnresolved { source_name: String, path: String },
+
+    /// LNK-21: an explicit or frontmatter kind the link's shape cannot be: a
+    /// directory kind (`skill`, `tool`) on a file link, or anything but `skill`
+    /// on a link naming a directory.
+    #[error("source '{source_name}': linked path '{path}' cannot be a {kind}: {reason}")]
+    LinkKindMismatch {
+        source_name: String,
+        path: String,
+        kind: String,
+        reason: String,
+    },
+
+    /// LNK-18: an item-link instance's catalog is exactly the linked item
     /// (LNK-7), so a `{{ns:name}}` token naming a sibling can never resolve, no
     /// matter how the repo is laid out. This variant is not limited to that
     /// token: it is also raised for a `{{tools:name}}` or `{{path:kind:name}}`
-    /// token naming a sibling, since a single-skill link has no siblings for
+    /// token naming a sibling, since a single-item link has no siblings for
     /// either to reach. A token must be rewritten into the item body (NS-10),
     /// so unlike a `requires` entry it cannot be left dangling: this is a hard
-    /// error that names the one-command remedy.
+    /// error that names the remedy.
     ///
     /// DSC-95: `item`, `referent`, and `in_source` are all source-controlled
     /// and interpolated verbatim, so each is sanitized at the call site;
     /// `remedy` is composed there from a shell-quoted, sanitized URL and item
-    /// name.
+    /// name (or, for a file link no whole-repo meld reaches, is the sentence
+    /// that says so instead of a command).
     #[error(
-        "{item}: reference {referent} names a sibling, but source '{in_source}' is a single-skill item link with no siblings; meld the whole repo and install just this skill: `{remedy}`"
+        "{item}: reference {referent} names a sibling, but source '{in_source}' is a single-item link with no siblings; {remedy}"
     )]
     LinkRefUnsatisfiable {
         item: String,
@@ -1373,6 +1413,10 @@ impl MindError {
             MindError::BadPinSpec { .. } => "bad-pin-spec",
             MindError::InvalidRoot { .. } => "invalid-root",
             MindError::LinkNotASkill { .. } => "link-not-a-skill",
+            MindError::BadKindFlag { .. } => "bad-kind-flag",
+            MindError::LinkNotAFile { .. } => "link-not-a-file",
+            MindError::LinkKindUnresolved { .. } => "link-kind-unresolved",
+            MindError::LinkKindMismatch { .. } => "link-kind-mismatch",
             MindError::LinkRefUnsatisfiable { .. } => "link-ref-unsatisfiable",
             MindError::BadIgnorePattern { .. } => "bad-ignore-pattern",
             MindError::IgnoresOwnAnchor { .. } => "ignores-own-anchor",

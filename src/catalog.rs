@@ -487,9 +487,76 @@ fn builtin_match(rel: &Path) -> Option<&'static str> {
     })
 }
 
-/// Catalog an item-link source instance (LNK-7): the one skill directory at
-/// `item_path`. The path was validated at parse (LNK-10); the confinement
-/// re-check here guards a hand-edited sources.json.
+/// Whether an item-link path names a single FILE item rather than a skill
+/// directory (LNK-20): any `.md` path, since a `.../SKILL.md` link has already
+/// had its anchor segment stripped at parse (LNK-1).
+pub(crate) fn is_file_link(item_path: &str) -> bool {
+    item_path.ends_with(".md")
+}
+
+/// Resolve a file link's kind (LNK-21), first hit wins: the consumer's explicit
+/// kind, else the containing directory (`agents/`, `rules/`, `commands/`), else
+/// the file's own frontmatter `kind:`.
+///
+/// Directory outranks frontmatter so a link installs the same item a whole-repo
+/// meld would: a convention scan classifies by directory (DSC-11..14).
+fn resolve_file_link_kind(source: &Source, item_path: &str, file: &Path) -> Result<ItemKind> {
+    let mismatch = |kind: ItemKind, reason: &str| MindError::LinkKindMismatch {
+        source_name: source.name.clone(),
+        path: item_path.to_string(),
+        kind: kind.as_str().to_string(),
+        reason: reason.to_string(),
+    };
+    // spec: LNK-21 step 1 -- `--kind` / the curator entry's `kind =`.
+    if let Some(kind) = source.item_kind {
+        if !is_file_kind(kind) {
+            return Err(mismatch(
+                kind,
+                "the link names a file, and a skill or tool is a directory",
+            ));
+        }
+        return Ok(kind);
+    }
+    // spec: LNK-21 step 2 -- the containing directory.
+    if let Some(kind) = Path::new(item_path)
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|n| ItemKind::from_dir(&n.to_string_lossy()))
+        .filter(|k| is_file_kind(*k))
+    {
+        return Ok(kind);
+    }
+    // spec: LNK-21 step 3 -- the file's own frontmatter `kind:`.
+    if let Some(declared) = crate::frontmatter::file_field(file, "kind") {
+        let kind = ItemKind::parse(declared.trim()).ok_or_else(|| MindError::LinkKindMismatch {
+            source_name: source.name.clone(),
+            path: item_path.to_string(),
+            kind: crate::sanitize::strip_ansi(declared.trim()),
+            reason: "not an item kind (expected agent, rule, or command)".to_string(),
+        })?;
+        if !is_file_kind(kind) {
+            return Err(mismatch(
+                kind,
+                "its frontmatter declares a directory kind, but the link names a file",
+            ));
+        }
+        return Ok(kind);
+    }
+    Err(MindError::LinkKindUnresolved {
+        source_name: source.name.clone(),
+        path: item_path.to_string(),
+    })
+}
+
+/// Whether a kind is one a single file can be (LNK-20): skills and tools are
+/// directories.
+fn is_file_kind(kind: ItemKind) -> bool {
+    matches!(kind, ItemKind::Agent | ItemKind::Rule | ItemKind::Command)
+}
+
+/// Catalog an item-link source instance (LNK-7): the one item at `item_path`,
+/// a skill directory or a single file (LNK-20). The path was validated at parse
+/// (LNK-10); the confinement re-check here guards a hand-edited sources.json.
 fn scan_item_link(
     clone_root: &Path,
     source: &Source,
@@ -497,35 +564,56 @@ fn scan_item_link(
     item_path: &str,
     out: &mut Vec<CatalogItem>,
 ) -> Result<()> {
-    let not_a_skill = || MindError::LinkNotASkill {
-        source_name: source.name.clone(),
-        path: item_path.to_string(),
+    let file_link = is_file_link(item_path);
+    let bad_target = || {
+        if file_link {
+            MindError::LinkNotAFile {
+                source_name: source.name.clone(),
+                path: item_path.to_string(),
+            }
+        } else {
+            MindError::LinkNotASkill {
+                source_name: source.name.clone(),
+                path: item_path.to_string(),
+            }
+        }
     };
     if !plugin_manifest::is_safe_manifest_path(item_path) {
-        return Err(not_a_skill());
+        return Err(bad_target());
     }
-    let skill_dir = clone_root.join(item_path);
-    let canon = skill_dir
-        .canonicalize()
-        .unwrap_or_else(|_| skill_dir.clone());
+    let target = clone_root.join(item_path);
+    let canon = target.canonicalize().unwrap_or_else(|_| target.clone());
     let canon_root = clone_root
         .canonicalize()
         .unwrap_or_else(|_| clone_root.to_path_buf());
     if !canon.starts_with(&canon_root) {
-        return Err(not_a_skill());
+        return Err(bad_target());
     }
-    let skill_md = skill_dir.join("SKILL.md");
-    if !(skill_dir.is_dir() && skill_md.is_file()) {
-        return Err(not_a_skill());
-    }
-    if let Some(item) = make_item(
-        clone_root,
-        source,
-        prefix,
-        ItemKind::Skill,
-        skill_dir,
-        &skill_md,
-    )? {
+    let (kind, path, meta) = if file_link {
+        if !target.is_file() {
+            return Err(bad_target());
+        }
+        // spec: LNK-21 -- a file item is its own metadata anchor.
+        let kind = resolve_file_link_kind(source, item_path, &target)?;
+        (kind, target.clone(), target)
+    } else {
+        // spec: LNK-21 -- a directory link is always the skill reading, so an
+        // explicit kind naming anything else is a mismatch.
+        if let Some(kind) = source.item_kind.filter(|k| *k != ItemKind::Skill) {
+            return Err(MindError::LinkKindMismatch {
+                source_name: source.name.clone(),
+                path: item_path.to_string(),
+                kind: kind.as_str().to_string(),
+                reason: "the link names a directory, which is always a skill".to_string(),
+            });
+        }
+        let skill_md = target.join("SKILL.md");
+        if !(target.is_dir() && skill_md.is_file()) {
+            return Err(bad_target());
+        }
+        (ItemKind::Skill, target, skill_md)
+    };
+    if let Some(item) = make_item(clone_root, source, prefix, kind, path, &meta)? {
         out.push(item);
     }
     Ok(())
@@ -2023,6 +2111,7 @@ mod tests {
             flat_skills: false,
             add_roots: None,
             item_path: None,
+            item_kind: None,
             origin: None,
             plugin_version: None,
             install_hooks: Vec::new(),
@@ -4120,6 +4209,7 @@ mod plugin_tests {
             flat_skills: false,
             add_roots: None,
             item_path: None,
+            item_kind: None,
             origin: None,
             plugin_version: None,
             install_hooks: Vec::new(),
@@ -5222,6 +5312,7 @@ mod lifecycle_tests {
             flat_skills: false,
             add_roots: None,
             item_path: None,
+            item_kind: None,
             origin: None,
             plugin_version: None,
             install_hooks: Vec::new(),

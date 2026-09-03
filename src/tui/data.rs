@@ -971,6 +971,7 @@ mod tests {
             crate::commands::PinRequest::None,
             None,
             false,
+            None,
         )
         .expect("meld");
         crate::commands::learn(
@@ -1159,6 +1160,7 @@ mod tests {
             crate::commands::PinRequest::None,
             None,
             false,
+            None,
         )
         .expect("meld");
         crate::commands::learn(

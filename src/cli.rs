@@ -116,7 +116,8 @@ EXAMPLES:
         ///
         /// - Item link:    `https://host/owner/repo/tree/<ref>/<path>` (or the
         ///   `blob/.../SKILL.md` form): registers a single-item source offering
-        ///   just that skill
+        ///   just that skill. A `blob/.../<file>.md` link does the same for one
+        ///   agent, rule, or command (see `--kind`)
         ///
         /// Defaults to the current directory (`.`) when omitted.
         repo: Option<String>,
@@ -233,6 +234,14 @@ EXAMPLES:
         // spec: CLI-165 - canonical name; --link-only is a hidden deprecated alias.
         #[arg(long, alias = "link-only")]
         register_only: bool,
+
+        /// Declare what kind of item a `blob` item link's file is: `agent`,
+        /// `rule`, or `command`. Only needed for a file that neither sits under
+        /// an `agents/`, `rules/`, or `commands/` directory nor declares
+        /// `kind:` in its frontmatter. Item links only.
+        // spec: CLI-239, LNK-21
+        #[arg(long, value_name = "agent|rule|command")]
+        kind: Option<String>,
 
         /// Install only the items matching this name or glob instead of
         /// offering the source's whole set (repeatable). The pattern selects
@@ -388,9 +397,10 @@ EXAMPLES:
     )]
     Learn {
         /// Item ref or glob: `name`, `skill:name`, `owner/repo#name`, `'review*'`, `'*'`.
-        /// Also accepts a deep tree/blob URL to one skill
-        /// (`https://host/owner/repo/tree/<ref>/<path>`): the repo registers as a
-        /// single-item source and the skill installs in one step.
+        /// Also accepts a deep tree/blob URL to one item
+        /// (`https://host/owner/repo/tree/<ref>/<path>` for a skill,
+        /// `.../blob/<ref>/<file>.md` for one agent, rule, or command): the repo
+        /// registers as a single-item source and the item installs in one step.
         item: String,
 
         /// Install every item of the source named by the ref. Shorthand for the
@@ -411,6 +421,12 @@ EXAMPLES:
         // ref value for the flag to accept.
         #[arg(long)]
         pin: bool,
+
+        /// Declare what kind of item a `blob` item link's file is: `agent`,
+        /// `rule`, or `command`. Same rule as `meld --kind`; item links only.
+        // spec: CLI-239, LNK-21
+        #[arg(long, value_name = "agent|rule|command")]
+        kind: Option<String>,
 
         /// Show what would be installed without installing anything.
         #[arg(short = 'n', long = "dry-run")]

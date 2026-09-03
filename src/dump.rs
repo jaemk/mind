@@ -58,6 +58,13 @@ struct DumpEntry {
     #[serde(rename = "namespace", skip_serializing_if = "Option::is_none")]
     namespace: Option<String>,
 
+    /// An item link's explicit kind (LNK-23, DSC-100): emitted only when the
+    /// instance recorded one (STO-81). A kind resolved from the containing
+    /// directory or the file's frontmatter re-resolves identically from the
+    /// pinned clone, so it is not emitted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kind: Option<String>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     roots: Option<Vec<String>>,
 
@@ -238,6 +245,8 @@ fn build_link_entry(
     Ok(Some(DumpEntry {
         source: url,
         namespace: source.as_alias.clone(),
+        // spec: LNK-23 -- the recorded explicit kind, when there is one.
+        kind: source.item_kind.map(|k| k.as_str().to_string()),
         roots: None,
         add_roots: None,
         flat_skills: None,
@@ -251,10 +260,13 @@ fn build_link_entry(
 /// `repo`/`item_path` and its recorded commit (LNK-13). Returns `None` when
 /// the source has no `item_path` or no recorded commit.
 ///
-/// Always uses the `tree/<ref>/<path>` shape (never `blob/.../SKILL.md`):
-/// `parse_link_tail` (source.rs) accepts a `tree` link naming the skill
-/// directory directly, so there is no need to reconstruct the `blob` +
-/// trailing `/SKILL.md` alternative. A local (`host == "local"`) source's
+/// A skill link always uses the `tree/<ref>/<path>` shape (never
+/// `blob/.../SKILL.md`): `parse_link_tail` (source.rs) accepts a `tree` link
+/// naming the skill directory directly, so there is no need to reconstruct the
+/// `blob` + trailing `/SKILL.md` alternative. A FILE link (LNK-20) uses
+/// `blob/<ref>/<path>` instead (LNK-23): a blob URL is what a forge uses to
+/// name a file, and it is the shape the link was pasted in. A local
+/// (`host == "local"`) source's
 /// `url` field holds a bare filesystem path (no `file://` prefix, stripped at
 /// parse time), so the `file://` scheme is re-added here to reach the local
 /// link branch of `parse_spec`.
@@ -271,13 +283,22 @@ fn build_link_entry(
 fn build_link_url(source: &Source) -> Option<String> {
     let item_path = source.item_path.as_deref()?;
     let commit = source.commit.as_deref()?;
+    // spec: LNK-23 -- a file link is a blob URL, a skill link a tree URL.
+    let marker = if crate::catalog::is_file_link(item_path) {
+        "blob"
+    } else {
+        "tree"
+    };
     if source.is_local() {
         // A local source's `url` is a bare filesystem path (never rewritten
         // by prefer_ssh), so it is still safe to build from directly here.
-        Some(format!("file://{}/tree/{commit}/{item_path}", source.url))
+        Some(format!(
+            "file://{}/{marker}/{commit}/{item_path}",
+            source.url
+        ))
     } else {
         Some(format!(
-            "https://{}/{}/{}/tree/{commit}/{item_path}",
+            "https://{}/{}/{}/{marker}/{commit}/{item_path}",
             source.host, source.owner, source.repo
         ))
     }
@@ -332,6 +353,8 @@ fn build_entry(
     Ok(DumpEntry {
         source: source_spec,
         namespace: effective_alias,
+        // An ordinary source is not an item link, so it carries no kind (LNK-23).
+        kind: None,
         roots,
         add_roots,
         flat_skills,
@@ -464,6 +487,7 @@ mod tests {
             flat_skills: false,
             add_roots: None,
             item_path: None,
+            item_kind: None,
             origin: None,
             plugin_version: None,
             install_hooks: vec![],
@@ -501,6 +525,7 @@ mod tests {
         let entry = DumpEntry {
             source: "/some/path".into(),
             namespace: None,
+            kind: None,
             roots: None,
             add_roots: None,
             flat_skills: None,
@@ -536,6 +561,7 @@ mod tests {
         let entry = DumpEntry {
             source: "/some/path".into(),
             namespace: None,
+            kind: None,
             roots: None,
             add_roots: None,
             flat_skills: None,
@@ -576,6 +602,7 @@ mod tests {
         let entry = DumpEntry {
             source: "/some/path".into(),
             namespace: None,
+            kind: None,
             roots: None,
             add_roots: None,
             flat_skills: None,
@@ -622,6 +649,7 @@ mod tests {
         let entry = DumpEntry {
             source: "/some/path".into(),
             namespace: None,
+            kind: None,
             roots: None,
             add_roots: None,
             flat_skills: None,
@@ -660,6 +688,7 @@ mod tests {
                     DumpEntry {
                         source: "/path/to/repo".into(),
                         namespace: Some("pfx".into()),
+                        kind: None,
                         roots: Some(vec!["packages".into()]),
                         add_roots: Some(vec!["extra".into()]),
                         flat_skills: Some(true),
@@ -670,6 +699,7 @@ mod tests {
                     DumpEntry {
                         source: "https://github.com/owner/repo".into(),
                         namespace: None,
+                        kind: None,
                         roots: None,
                         add_roots: None,
                         flat_skills: None,
@@ -781,6 +811,7 @@ mod tests {
         let entry_with_commit = DumpEntry {
             source: "/a/b".into(),
             namespace: None,
+            kind: None,
             roots: None,
             add_roots: None,
             flat_skills: None,
@@ -791,6 +822,7 @@ mod tests {
         let entry_no_commit = DumpEntry {
             source: "/a/b".into(),
             namespace: None,
+            kind: None,
             roots: None,
             add_roots: None,
             flat_skills: None,
@@ -881,6 +913,7 @@ mod tests {
         let entry = DumpEntry {
             source: "/a/b".into(),
             namespace: None,
+            kind: None,
             roots: None,
             add_roots: None,
             flat_skills: None,
@@ -921,6 +954,7 @@ mod tests {
         let entry = DumpEntry {
             source: "/a/b".into(),
             namespace: Some("pfx".into()),
+            kind: None,
             roots: None,
             add_roots: None,
             flat_skills: None,

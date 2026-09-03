@@ -116,7 +116,7 @@ does not gate it because you named the exact path:
 mind learn https://github.com/owner/marketplace-repo/tree/main/community/foo
 ```
 
-See [item links](commands.md#item-links-install-one-skill-by-url).
+See [item links](commands.md#item-links-install-one-item-by-url).
 
 ## Precedence: when a plugin manifest is used
 

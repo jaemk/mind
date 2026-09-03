@@ -785,6 +785,7 @@ mod tests {
             crate::commands::PinRequest::None,
             None,
             false,
+            None,
         )
         .expect("meld");
 
@@ -901,6 +902,7 @@ mod tests {
             crate::commands::PinRequest::None,
             None,
             false,
+            None,
         )
         .expect("meld");
 
@@ -1004,6 +1006,7 @@ mod tests {
             crate::commands::PinRequest::None,
             None,
             false,
+            None,
         )
         .expect("meld");
 
@@ -1175,6 +1178,7 @@ mod tests {
             crate::commands::PinRequest::None,
             None,
             false,
+            None,
         )
         .expect("meld");
         crate::source::Registry::load(paths).unwrap().sources[0]

@@ -44,7 +44,7 @@ ambiguous bare name, or source-qualified ref) is a hard error at install.
 Dependencies never cross sources; both `{{ns:}}` tokens and `requires:` entries
 are always resolved within the one source.
 
-One consequence: an [item link](commands.md#item-links-install-one-skill-by-url)
+One consequence: an [item link](commands.md#item-links-install-one-item-by-url)
 offers a single skill, so a reference to a sibling has nothing to resolve
 against. A `requires:` entry there is dropped and the skill still installs; the
 drop is warned about and recorded, so `mind recall <item>` and `mind introspect`
@@ -53,7 +53,7 @@ since it is rewritten into the item's text. Both point at the same remedy:
 `mind unmeld <identity> --yes && mind meld <repo-url> --learn 'skill:<skill>'
 --yes` (adding `--add-root <dir>` before `--learn` when the repo's own inventory
 does not declare the skill), which installs that skill plus its closure. See
-[Item links](commands.md#item-links-install-one-skill-by-url) for the full
+[Item links](commands.md#item-links-install-one-item-by-url) for the full
 command and when each form applies.
 
 ## Partial `learn` pulls in the closure

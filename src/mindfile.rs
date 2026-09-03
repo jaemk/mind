@@ -10,7 +10,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use crate::error::{MindError, Result};
+use crate::error::{ItemKind, MindError, Result};
 use crate::git::validate_ref_value;
 use crate::source::Pin;
 
@@ -465,6 +465,12 @@ pub struct NestedSource {
     /// Legacy alias key kept for backwards compatibility (DSC-78). Prefer `namespace`.
     #[serde(rename = "as", default)]
     pub alias: Option<String>,
+    /// The kind of the item an item-link `source` names (DSC-100, LNK-21):
+    /// `agent`, `rule`, or `command`. Read as a string here and parsed by
+    /// [`NestedSource::item_kind`] so an unknown value is a `MindToml` error
+    /// naming the entry, not an opaque deserialize failure.
+    #[serde(default)]
+    pub kind: Option<String>,
     /// When true, melding the super-source offers this nested source's items for
     /// install (the curator recommends installing it), instead of leaving them
     /// only registered and available. Default false (DSC-58).
@@ -524,6 +530,32 @@ impl NestedSource {
     /// are set, `namespace` wins. Returns `None` when neither is set.
     pub fn effective_alias(&self) -> Option<String> {
         self.namespace.clone().or_else(|| self.alias.clone())
+    }
+
+    /// The parsed `kind =` of this entry (DSC-100), or `None` when absent.
+    ///
+    /// An unknown kind word is a `MindToml` error naming the entry and the
+    /// legal set. Whether the kind FITS the entry's link shape (LNK-21) is
+    /// decided later, against the clone.
+    pub fn item_kind(&self, toml_path: &Path) -> Result<Option<ItemKind>> {
+        let Some(raw) = self
+            .kind
+            .as_deref()
+            .map(str::trim)
+            .filter(|k| !k.is_empty())
+        else {
+            return Ok(None);
+        };
+        ItemKind::parse(raw)
+            .map(Some)
+            .ok_or_else(|| MindError::MindToml {
+                path: toml_path.to_path_buf(),
+                msg: format!(
+                    "nested source '{}': unknown kind '{}'; expected agent, rule, or command",
+                    self.source,
+                    crate::sanitize::strip_ansi(raw)
+                ),
+            })
     }
 
     /// Validate this entry for mutual-exclusion constraints (DSC-64).
@@ -2417,6 +2449,7 @@ mod tests {
         let ns = NestedSource {
             source: "x".into(),
             namespace: None,
+            kind: None,
             alias: None,
             install: false,
             install_items: None,
@@ -2441,6 +2474,7 @@ mod tests {
         let ns = NestedSource {
             source: "x".into(),
             namespace: None,
+            kind: None,
             alias: None,
             install: false,
             install_items: None,
@@ -2589,6 +2623,7 @@ mod tests {
         let ns = NestedSource {
             source: "x".into(),
             namespace: None,
+            kind: None,
             alias: None,
             install: false,
             install_items: None,
@@ -2620,6 +2655,7 @@ mod tests {
             let ns = NestedSource {
                 source: "x".into(),
                 namespace: None,
+                kind: None,
                 alias: None,
                 install: false,
                 install_items: None,
@@ -2805,6 +2841,7 @@ mod tests {
         let ns = NestedSource {
             source: "github:owner/repo".into(),
             namespace: None,
+            kind: None,
             alias: None,
             install: true,
             install_items: Some(vec!["skill:review".into()]),
@@ -2843,6 +2880,7 @@ mod tests {
         let ns = NestedSource {
             source: "github:owner/repo".into(),
             namespace: None,
+            kind: None,
             alias: None,
             install: true,
             install_items: Some(vec![]), // empty is fine
@@ -2868,6 +2906,7 @@ mod tests {
         let ns = NestedSource {
             source: "github:owner/repo".into(),
             namespace: None,
+            kind: None,
             alias: None,
             install: false,
             install_items: Some(vec!["skill:review".into(), "agent:dev".into()]),
@@ -3063,6 +3102,7 @@ mod tests {
         let ns = NestedSource {
             source: "x".into(),
             namespace: None,
+            kind: None,
             alias: None,
             install: false,
             install_items: None,
@@ -3088,6 +3128,7 @@ mod tests {
         let ns = NestedSource {
             source: "x".into(),
             namespace: None,
+            kind: None,
             alias: None,
             install: false,
             install_items: None,
@@ -3113,6 +3154,7 @@ mod tests {
         let ns = NestedSource {
             source: "x".into(),
             namespace: None,
+            kind: None,
             alias: None,
             install: false,
             install_items: None,
@@ -3138,6 +3180,7 @@ mod tests {
         let ns = NestedSource {
             source: "x".into(),
             namespace: None,
+            kind: None,
             alias: None,
             install: false,
             install_items: None,
@@ -3163,6 +3206,7 @@ mod tests {
         let ns = NestedSource {
             source: "x".into(),
             namespace: None,
+            kind: None,
             alias: None,
             install: false,
             install_items: None,
@@ -3188,6 +3232,7 @@ mod tests {
         let ns = NestedSource {
             source: "x".into(),
             namespace: None,
+            kind: None,
             alias: None,
             install: false,
             install_items: None,
@@ -3412,6 +3457,7 @@ mod tests {
         let ns = NestedSource {
             source: "github:owner/repo".into(),
             namespace: None,
+            kind: None,
             alias: None,
             install: false,
             install_items: None,

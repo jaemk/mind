@@ -57,7 +57,7 @@ pub struct InstalledItem {
     pub install_hooks: Vec<RecordedHook>,
 
     /// `requires:` entries (DEP-4) dropped at install because the item came
-    /// from a single-skill item-link instance, whose catalog cannot contain the
+    /// from a single-item item-link instance, whose catalog cannot contain the
     /// sibling they name (LNK-18). Recorded so the degradation stays
     /// discoverable after the install-time warning scrolls away: `recall` shows
     /// it on the item, `introspect` reports it, and it rides in the `--json`

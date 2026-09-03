@@ -260,13 +260,22 @@ pub struct Source {
     /// changed by sync. None means no additional roots.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub add_roots: Option<Vec<String>>,
-    /// The item path of an item-link source instance (LNK-4): the skill
-    /// directory's repo-root-relative path parsed from a deep tree/blob URL.
+    /// The item path of an item-link source instance (LNK-4): the linked item's
+    /// repo-root-relative path parsed from a deep tree/blob URL (a skill
+    /// directory, or the `.md` file itself for a file link, LNK-20).
     /// When set, the source's identity (`name`) carries a `#<path>` suffix and
-    /// its catalog is exactly that one skill (LNK-7). None for an ordinary
+    /// its catalog is exactly that one item (LNK-7). None for an ordinary
     /// source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub item_path: Option<String>,
+    /// The consumer's explicit kind for a file link (STO-81, LNK-21/LNK-22):
+    /// `meld/learn --kind <kind>` or a `[discover].sources` entry's `kind =`.
+    /// Persisted at meld and not changed by `sync`. None means the kind is
+    /// resolved from the clone on every scan (containing directory, else
+    /// frontmatter), which is also how a source registered before this field
+    /// reads back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_kind: Option<crate::error::ItemKind>,
     /// The manifest origin of this source's items (MKT-10), when they came from
     /// a Claude plugin manifest (`.claude-plugin/plugin.json` or
     /// `marketplace.json`). `None` for a convention- or `mind.toml`-discovered
@@ -925,25 +934,30 @@ fn parse_link_tail(spec: &str, marker: &str, rest: &str) -> Result<(Pin, String)
         .next()
         .filter(|s| !s.is_empty())
         .ok_or_else(|| bad("missing a ref (branch, tag, or commit) after tree/blob"))?;
-    // spec: LNK-1 -- a blob link must end in /SKILL.md (the skill directory is
-    // its parent); a tree link naming the SKILL.md directly is also accepted.
+    // spec: LNK-1 LNK-20 -- a path ending in /SKILL.md names the skill directory
+    // that is its parent; any other `.md` path names that single file (an
+    // agent, rule, or command); any other path names a skill directory. A blob
+    // link must end in `.md`: a forge blob URL names a file.
     // spec: LNK-17 -- drop `.` segments before the path becomes identity, so a
     // `./`-variant URL dedups to the plain form's instance instead of
-    // registering a second one for the same on-disk skill.
+    // registering a second one for the same on-disk item.
     let mut parts: Vec<&str> = segs.filter(|p| *p != ".").collect();
+    let last_is_md = parts.last().is_some_and(|p| p.ends_with(".md"));
     if parts.last() == Some(&"SKILL.md") {
         parts.pop();
-    } else if marker == "blob" {
-        return Err(bad("a blob link must end in /SKILL.md"));
+    } else if marker == "blob" && !last_is_md {
+        return Err(bad(
+            "a blob link must name a `.md` file (an item file, or a skill's SKILL.md)",
+        ));
     }
     if parts.is_empty() || parts.iter().any(|p| p.is_empty()) {
-        return Err(bad("missing the skill directory path after the ref"));
+        return Err(bad("missing the item path after the ref"));
     }
     let item_path = parts.join("/");
     // spec: LNK-10 -- safe relative path and a valid git ref value, rejected
     // before any clone.
     if !crate::plugin_manifest::is_safe_manifest_path(&item_path) {
-        return Err(bad("the skill path is not a safe repo-relative path"));
+        return Err(bad("the item path is not a safe repo-relative path"));
     }
     // spec: LNK-16 -- the same collision STO-64 closes for `repo`, one segment
     // over. A link instance's identity is `host/owner/repo#<item_path>`, and an
@@ -952,7 +966,7 @@ fn parse_link_tail(spec: &str, marker: &str, rest: &str) -> Result<(Pin, String)
     // compute the same identity. `#` would likewise produce a second marker.
     if item_path.contains(['@', '#']) {
         return Err(bad(
-            "the skill path may not contain '@' or '#'; they are identity markers",
+            "the item path may not contain '@' or '#'; they are identity markers",
         ));
     }
     if crate::git::validate_ref_value(r).is_err() {
@@ -1103,6 +1117,7 @@ fn make_source(spec: &str, host: &str, owner: &str, repo: &str, url: String) -> 
         flat_skills: false,
         add_roots: None,
         item_path: None,
+        item_kind: None,
         origin: None,
         plugin_version: None,
         install_hooks: Vec::new(),
@@ -2011,11 +2026,11 @@ mod tests {
             );
             assert_eq!(s.item_path.as_deref(), Some("skills/foo"), "{url}");
         }
-        // A path that is nothing but `.` segments has no skill directory left.
+        // A path that is nothing but `.` segments has no item path left.
         match parse_spec("https://github.com/acme/repo/tree/main/./.") {
             Err(MindError::BadItemLink { reason, .. }) => assert!(
-                reason.contains("missing the skill directory"),
-                "an all-dots path must report a missing skill path, got {reason:?}"
+                reason.contains("missing the item path"),
+                "an all-dots path must report a missing item path, got {reason:?}"
             ),
             other => panic!("expected BadItemLink for an all-dots path, got {other:?}"),
         }

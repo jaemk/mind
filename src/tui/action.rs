@@ -123,6 +123,7 @@ fn dispatch(paths: &Paths, kind: ActionKind, upgrade_keys: &[String]) -> Result<
                 commands::PinRequest::None,
                 None,
                 false,
+                None, // the TUI melds a repo spec, never an item link
             )?;
         }
         // spec: TUI-21
@@ -768,6 +769,7 @@ mod tests {
             commands::PinRequest::None,
             None,
             false,
+            None,
         )
         .expect("meld");
         commands::learn(
@@ -890,6 +892,7 @@ mod tests {
             commands::PinRequest::None,
             None,
             false,
+            None,
         )
         .expect("meld");
         commands::learn(
@@ -1039,6 +1042,7 @@ mod tests {
                 commands::PinRequest::None,
                 None,
                 false,
+                None,
             )
             .expect("meld");
             commands::learn(
@@ -1246,6 +1250,7 @@ mod tests {
             commands::PinRequest::None,
             None,
             false,
+            None,
         )
         .expect("meld prerequisite");
         let source_name = crate::source::Registry::load(&paths).unwrap().sources[0]
@@ -1295,6 +1300,7 @@ mod tests {
             commands::PinRequest::None,
             None,
             false,
+            None,
         )
         .expect("meld");
         let source_name = crate::source::Registry::load(paths).unwrap().sources[0]
@@ -1585,6 +1591,7 @@ mod tests {
             commands::PinRequest::None,
             None,
             false,
+            None,
         )
         .expect("meld");
         commands::learn(
@@ -1668,6 +1675,7 @@ mod tests {
             commands::PinRequest::None,
             None,
             false,
+            None,
         )
         .expect("meld");
         commands::learn(
@@ -1781,6 +1789,7 @@ mod tests {
             commands::PinRequest::None,
             None,
             false,
+            None,
         )
         .expect("meld");
         commands::learn(
@@ -1945,6 +1954,7 @@ mod tests {
             commands::PinRequest::None,
             None,
             false,
+            None,
         )
         .expect("meld dep-source");
 
@@ -2072,6 +2082,7 @@ mod tests {
             commands::PinRequest::None,
             None,
             false,
+            None,
         )
         .expect("meld chain-source");
 
@@ -2151,6 +2162,7 @@ mod tests {
             commands::PinRequest::None,
             None,
             false,
+            None,
         )
         .expect("meld dep-source");
         let source_name = crate::source::Registry::load(&paths).unwrap().sources[0]
@@ -2278,6 +2290,7 @@ mod tests {
             commands::PinRequest::None,
             None,
             false,
+            None,
         )
         .expect("meld source-alpha");
         commands::meld(
@@ -2290,6 +2303,7 @@ mod tests {
             commands::PinRequest::None,
             None,
             false,
+            None,
         )
         .expect("meld source-beta");
 

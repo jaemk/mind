@@ -316,6 +316,14 @@ run = "make build"
   past). Each source in the transitive set is therefore processed at most once.
 - `DSC-39` A `[discover].sources` entry may set `as = "<prefix>"` to impose a
   namespace on that nested source (equivalent to `meld --as`).
+- `DSC-100` A `[discover].sources` entry whose `source` is an item link
+  (item-link.md LNK-2) may set `kind = "<agent|rule|command>"` to declare what
+  the linked file is (equivalent to `meld --kind`, CLI-239). It is the first
+  step of the LNK-21 resolution order, so it outranks the containing directory
+  and the file's frontmatter. A `kind` on an entry whose `source` is not an item
+  link, or one naming a kind the link's shape cannot be (`skill`/`tool` on a
+  file link, anything but `skill` on a directory link), is `LinkKindMismatch`
+  (LNK-21).
 - `DSC-92` A `[discover].sources` entry's `source` spec is parsed exactly like a
   `meld` argument (DSC-38), so it may itself be a local-path spec (`./rel/path`
   or `../rel/path`). When it is, `MindToml::load` rewrites that relative path to

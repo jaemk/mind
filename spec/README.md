@@ -254,6 +254,8 @@ and verified.
 | An item declares its own hooks: `install:`/`update:`/`uninstall:` frontmatter on any kind, and a scoped `mind.toml` (`[[hooks]]` only) in a skill or tool directory | done | [install-hooks.md](install-hooks.md) (HOOK-130..134) |
 | The `command` item kind: `commands/<name>.md` discovered, stored, linked, namespaced, and upgraded like any other kind | done | [commands.md](commands.md) (CMD-1..9), DSC-14, STO-2 |
 | A Claude plugin's `commands/` maps to the `command` kind (single plugin and marketplace in-repo entries), and is no longer reported as a skipped component | done | [marketplace.md](marketplace.md) (MKT-18), MKT-3, MKT-4 |
+| Single-file item links: a `blob` URL to an `agent`/`rule`/`command` `.md` file installs as a single-item source instance, kind resolved by explicit `--kind` / `kind =`, else the containing directory, else the file's frontmatter | done | [item-link.md](item-link.md) (LNK-20..22), CLI-239, DSC-100, STO-81 |
+| `dump` emits a file link as a `blob` URL, with `kind` when the instance recorded an explicit one | done | LNK-23 |
 
 ## Documents
 

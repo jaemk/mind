@@ -6,6 +6,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Item links reach single files: a `blob` URL to any `.md` file other than a
+  `SKILL.md` registers as a single-item source offering that one agent, rule, or
+  command, so `learn`, `meld`, and a curator's `[discover].sources` can install
+  an individual file item the way they already install a skill.
+- `meld --kind` / `learn --kind` and a `[discover].sources` entry's `kind =`
+  declare a linked file's item kind. Without one the kind comes from the
+  containing directory (`agents/`, `rules/`, `commands/`), then from the file's
+  own frontmatter `kind:`. An explicit kind is recorded on the instance
+  (`item_kind` in `sources.json`) and reused by later scans.
+- `dump` emits a file link as a `blob` URL, carrying `kind` when the instance
+  recorded an explicit one.
+
 ## [0.27.1] - 2026-09-02
 
 ### Changed

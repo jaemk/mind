@@ -140,7 +140,7 @@ hook for each in turn. `--event` selects the lifecycle event (`install`,
 hooks run, and `--force` runs them all.
 
 An item-link instance's own identity is `owner/repo#<path>` (see
-[Item links](commands.md#item-links-install-one-skill-by-url)), which is spelled
+[Item links](commands.md#item-links-install-one-item-by-url)), which is spelled
 the same way as "item `<path>` in source `owner/repo`". When a target matches
 both a registered source and an installed item, `mind` refuses it rather than
 picking one, and names both disambiguated forms. Force either reading:

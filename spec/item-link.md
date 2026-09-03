@@ -1,10 +1,13 @@
 # Item links (single-item source instances)
 
-How `mind` consumes a deep link to one skill inside a repo - the URL a user
+How `mind` consumes a deep link to one item inside a repo - the URL a user
 copies from their forge's file browser - as a self-contained, managed install.
 A repo may publish a `.claude-plugin/marketplace.json` that lists only a subset
-of its skills (marketplace.md); an item link reaches a skill the manifest does
+of its skills (marketplace.md); an item link reaches an item the manifest does
 not list, because the consumer names the exact path.
+
+The linked item is a skill directory (the original form) or, when the link names
+a single markdown file, an agent, rule, or command (LNK-20..23).
 
 Each accepted link becomes its own *source instance*: a registry entry with an
 extended identity, its own clone, pin, and lifecycle. Several links into the
@@ -12,24 +15,31 @@ same repo, and a plain meld of that repo, coexist as separate sources.
 
 ## Link form
 
-- `LNK-1` An item link is a URL naming a directory or `SKILL.md` inside a
-  repo: `https://<host>/<owner>/<repo>/tree/<ref>/<path>` or
-  `https://<host>/<owner>/<repo>/blob/<ref>/<path>/SKILL.md`, plus the GitLab
-  `/-/tree/<ref>/<path>` and `/-/blob/<ref>/<path>/SKILL.md` variants, and the
+- `LNK-1` An item link is a URL naming a directory or a file inside a repo:
+  `https://<host>/<owner>/<repo>/tree/<ref>/<path>` or
+  `https://<host>/<owner>/<repo>/blob/<ref>/<path>`, plus the GitLab
+  `/-/tree/<ref>/<path>` and `/-/blob/<ref>/<path>` variants, and the
   `file:///<repo-path>/tree|blob/...` form for a local repo (the marker is
   only recognized in the explicit `file://` spelling, so a bare local path
-  containing a `tree` directory stays a plain repo spec). A `blob` link must
-  end in `/SKILL.md` and names the skill directory's anchor file; the skill
-  directory is its parent. A `tree` link names the skill directory itself (a
-  trailing `/SKILL.md` is also accepted). A query string or fragment
-  (`?plain=1`, `#L10`) is stripped before parsing. Item links apply to the
-  skill kind only (the `SKILL.md` anchor is what makes the target
-  classifiable); a link to an agent, rule, or tool path is not recognized. A
-  local `file://` link instance is always a cloned snapshot at its pin (the
-  CLI-27 pinned-local flow), never a live-read working tree.
+  containing a `tree` directory stays a plain repo spec). A query string or
+  fragment (`?plain=1`, `#L10`) is stripped before parsing. The `<path>`
+  decides what is linked:
+  - ending in `/SKILL.md`: the skill directory that is its parent (the anchor
+    file names the skill),
+  - any other path ending in `.md`: that single file, an agent, rule, or
+    command (LNK-20),
+  - any other path: the skill directory itself.
+
+  A `blob` link must end in `.md`: a forge blob URL names a file, and a blob
+  path with any other extension (or none) is a `BadItemLink`. A `tree` link
+  accepts either shape. A local `file://` link instance is always a cloned
+  snapshot at its pin (the CLI-27 pinned-local flow), never a live-read working
+  tree. Tools are not linkable: a tool directory has no anchor file to
+  classify it by, and a tool is store-only (tooling.md), meaningful only
+  alongside the item that references it.
 - `LNK-2` An item link is accepted anywhere a repo spec (CLI-11) is: `meld`,
   `learn` (LNK-6), and a `[discover].sources` entry (DSC-38), so a curator can
-  curate individual skills. A URL with a `tree`/`blob` segment whose tail fails
+  curate individual items. A URL with a `tree`/`blob` segment whose tail fails
   to complete as a valid item link is `BadItemLink` (LNK-14), not the generic
   `InvalidRepoSpec`. For a remote URL (the `scheme://host/owner/repo/...`
   branch), this holds only once the `owner/repo` portion ahead of the marker
@@ -57,19 +67,55 @@ same repo, and a plain meld of that repo, coexist as separate sources.
   unambiguously an attempted item link, so once the `owner/repo` portion ahead
   of the marker parses, every failure in its `<ref>/<path>` tail reports
   `BadItemLink`, never the generic `InvalidRepoSpec`: a missing ref, a missing
-  skill path, a `blob` link not ending in `/SKILL.md`, and an unsafe path or
+  item path, a `blob` link not ending in `.md`, and an unsafe path or
   ref value (LNK-10) all take this branch. The message names the offending URL
-  and the two expected shapes, `<repo-url>/tree/<ref>/<skill-dir>` and
-  `<repo-url>/blob/<ref>/<skill-dir>/SKILL.md` (plus the GitLab `/-/tree/` and
+  and the three expected shapes, `<repo-url>/tree/<ref>/<skill-dir>`,
+  `<repo-url>/blob/<ref>/<skill-dir>/SKILL.md`, and
+  `<repo-url>/blob/<ref>/<file>.md` (plus the GitLab `/-/tree/` and
   `/-/blob/` spellings), instead of the generic repo-spec message, so a user
   who pasted a real forge URL is told what shape a link needs rather than that
   the URL is invalid. A spec with no `tree`/`blob` marker at all is not an
   attempted link and keeps reporting `InvalidRepoSpec` unchanged.
 
+## Single-file items
+
+- `LNK-20` A link whose `<path>` names a `.md` file other than `SKILL.md` is a
+  FILE link: the linked item is that one file, installed as an agent, rule, or
+  command (kind by LNK-21), bare name the file stem. Everything else about the
+  instance is the skill-link behavior unchanged: identity (LNK-4), clone and pin
+  (LNK-3), lifecycle (LNK-5), no nested sources (LNK-8), reference reconciliation
+  (LNK-18). This is what lets a `[discover].sources` entry (LNK-2) curate an
+  individual agent or rule the way it already curates a skill.
+- `LNK-21` A file link's kind is resolved in this order, first hit wins:
+  1. the consumer's explicit kind: `meld`/`learn --kind <kind>` (CLI-239), or a
+     `[discover].sources` entry's `kind = "<kind>"` (DSC-100);
+  2. the containing directory, by the DSC-11..14 convention names:
+     `agents/` -> agent, `rules/` -> rule, `commands/` -> command, so a link
+     into a conventional layout needs no annotation;
+  3. the file's own frontmatter `kind:` scalar, for a file that sits outside a
+     conventional directory.
+
+  Directory outranks frontmatter so that a link installs the SAME item a plain
+  meld of the repo would (a whole-repo scan classifies by directory, DSC-11..14):
+  a file under `agents/` is an agent to both. Only agent, rule, and command
+  resolve here: `skill` and `tool` are directory kinds, so an explicit or
+  frontmatter `kind` naming either on a file link is `LinkKindMismatch`, as is an
+  explicit kind other than `skill` on a link naming a directory. A file link
+  none of the three steps resolves is `LinkKindUnresolved`, which names the three
+  ways to resolve it. Both errors are raised before anything is installed.
+- `LNK-22` An explicit kind (LNK-21 step 1) is recorded on the source instance
+  (`item_kind` in sources.json, STO-81) and applies to every later scan of it,
+  so `recall`, `upgrade`, and `sync` classify the item exactly as the meld did.
+  A kind resolved by directory or frontmatter records nothing: those inputs are
+  re-read from the pinned clone and cannot drift. The field is absent from every
+  source an older binary registered, and absent means the pre-existing reading
+  (a skill link), so an existing registry is unaffected.
+
 ## Identity and lifecycle
 
 - `LNK-4` An item-link source's identity is `host/owner/repo#<path>`, where
-  `<path>` is the skill directory's repo-root-relative path. An identity alias
+  `<path>` is the linked item's repo-root-relative path: the skill directory,
+  or the file itself for a file link (LNK-20). An identity alias
   composes as a trailing `@<alias>` segment (STO-58): `host/owner/repo#<path>@<alias>`.
   Instances from the same repo, and a plain meld of `host/owner/repo`, are
   distinct registry entries with independent pins, commits, and lifecycles.
@@ -132,32 +178,36 @@ same repo, and a plain meld of that repo, coexist as separate sources.
   skill in one step. `meld <url>` follows the standard meld flow (the CLI-23
   install offer, `--register-only`, `--yes`). The meld flags apply to a link
   meld unchanged (`--namespace`, pin flags, `--install-hook`).
-- `LNK-7` A link instance's catalog is exactly one skill: the directory at
-  `<path>` containing `SKILL.md`, bare name the directory's basename,
-  description from frontmatter (DSC-30). Discovery bypasses the repo's declared
+- `LNK-7` A link instance's catalog is exactly one item: for a skill link the
+  directory at `<path>` containing `SKILL.md`, bare name the directory's
+  basename; for a file link (LNK-20) the file at `<path>`, bare name its stem,
+  kind resolved by LNK-21. Either way the
+  description comes from frontmatter (DSC-30). Discovery bypasses the repo's declared
   inventory: an authoritative `mind.toml` (DSC-3) and a `.claude-plugin/`
-  manifest (MKT-2/MKT-14) do not gate the link, so it can install a skill the
+  manifest (MKT-2/MKT-14) do not gate the link, so it can install an item the
   repo does not export - the consumer named the exact path. The
   `min-mind-version` gate (DSC-40) and `[source]` metadata (description,
-  declared prefix) still apply. A `<path>` whose clone content has no
-  `SKILL.md` is an error (`LinkNotASkill`) and nothing is registered.
+  declared prefix) still apply. A skill link whose `<path>` has no `SKILL.md`
+  in the clone is an error (`LinkNotASkill`), and a file link whose `<path>` is
+  not a file there is an error (`LinkNotAFile`); either way nothing is
+  registered.
 - `LNK-8` A link instance registers no nested sources: `[discover].sources`
   entries and marketplace external plugins in the linked repo are not walked.
   The link is a single-item grab, not a super-source adoption.
-- `LNK-18` A link instance's catalog is exactly the linked skill (LNK-7), so an
+- `LNK-18` A link instance's catalog is exactly the linked item (LNK-7), so an
   intra-source reference (dependencies.md, tooling.md) to any other name can
   never resolve, however the repo is laid out. The two reference FORMS are
   handled differently, following DEP-4's own distinction between them:
-  - A `requires:` entry (DEP-4) that names something other than the linked skill
+  - A `requires:` entry (DEP-4) that names something other than the linked item
     is NOT the DEP-6 `BadReference` error here. It is dropped, recorded
-    (LNK-19), and warned about, and the skill installs. `requires` is pure
+    (LNK-19), and warned about, and the item installs. `requires` is pure
     metadata (DEP-4): it is never rewritten into the item body, so a dangling
-    entry degrades the item rather than corrupting it, and refusing would make a
-    skill that declares one unreachable by link at all. Other `requires`
+    entry degrades the item rather than corrupting it, and refusing would make an
+    item that declares one unreachable by link at all. Other `requires`
     failures keep their DEP-7 causes as hard errors: a malformed ref
     (`InvalidRef`) and a source-qualified ref (`CrossSource`) are wrong
     regardless of the catalog. `AmbiguousKind` cannot arise, since a single-item
-    catalog offers at most one match. An entry naming the linked skill's own
+    catalog offers at most one match. An entry naming the linked item's own
     name under the WRONG kind (`agent:<skill-name>`) is a `NoMatch` like any
     other and is dropped with the rest.
   - A TOKEN naming a sibling stays a hard error and nothing is installed: a
@@ -171,20 +221,20 @@ same repo, and a plain meld of that repo, coexist as separate sources.
     file the item lists in `expand:` (NS-57); scanning a narrower set would let a
     reference slip through to the blunt error this rule exists to replace. The
     error is `LinkRefUnsatisfiable`, not the generic `BadReference`/TOOL-17
-    cause: it names the token as written, says the source is a single-skill item
+    cause: it names the token as written, says the source is a single-item
     link with no siblings, and carries the remedy, so a user who pasted a deep
-    URL is told what to run instead of being told the skill references something
+    URL is told what to run instead of being told the item references something
     missing.
 
   *The remedy.* Both paths name one of two forms of the same two-step command,
   decided by scanning the clone already on disk as an ordinary whole-repo
-  source (the same `Source`, with `item_path` cleared). When that scan finds a
-  `Skill` at the exact path the link points at (a same-named skill declared at
-  a DIFFERENT path in the repo does not count), a plain meld would discover it
-  on its own:
+  source (the same `Source`, with `item_path` cleared). When that scan finds an
+  item of the linked kind at the exact path the link points at (a same-named
+  item declared at a DIFFERENT path in the repo does not count), a plain meld
+  would discover it on its own:
 
   ```
-  mind unmeld '<identity>' --yes && mind meld '<repo-url>' --learn 'skill:<skill>' --yes
+  mind unmeld '<identity>' --yes && mind meld '<repo-url>' --learn '<kind>:<name>' --yes
   ```
 
   Otherwise -- an authoritative `mind.toml` or `.claude-plugin` manifest that
@@ -192,26 +242,36 @@ same repo, and a plain meld of that repo, coexist as separate sources.
   would not reach it, so the remedy adds a scan root:
 
   ```
-  mind unmeld '<identity>' --yes && mind meld '<repo-url>' --add-root '<root>' --learn 'skill:<skill>' --yes
+  mind unmeld '<identity>' --yes && mind meld '<repo-url>' --add-root '<root>' --learn '<kind>:<name>' --yes
   ```
 
   (CLI-236, DSC-84). Either form drops the link instance and then melds the
-  whole repo, installing just that skill together with its dependency closure
+  whole repo, installing just that item together with its dependency closure
   (DEP-30). Any error from the reachability scan -- an unreadable clone, a
   malformed `mind.toml`, a version gate -- answers "not reachable" rather than
   propagating, so the remedy falls back to the added-root form; the scan
   runs only when a remedy is about to be printed, not on every link install.
 
   The `<root>` is DERIVED from the link's own path, not fixed at `.`. An added
-  root is convention-scanned one level deep (flat child directories, plus a
-  `skills/` container directly under it), so the root that reaches the linked
-  skill is its parent directory, or its grandparent when that parent is the
-  `skills/` container: `skills/foo` and a flat `foo` both give `.`, while
+  root is convention-scanned one level deep (flat child directories, plus the
+  kind containers `skills/`, `agents/`, `rules/`, `commands/`, `tools/`
+  directly under it), so the root that reaches the linked item is its parent
+  directory, or its grandparent when that parent is the kind's container:
+  `skills/foo` and a flat `foo` both give `.`, `agents/dev.md` gives `.`, while
   `vendor/pkg/skills/foo` gives `vendor/pkg` and a flat `vendor/foo` gives
-  `vendor`. A fixed `.` would reach only a skill at the repo root, so for
+  `vendor`. A fixed `.` would reach only an item at the repo root, so for
   anything deeper the meld half would fail with `LearnPatternNoMatch` AFTER the
   unmeld half had already succeeded -- the destroy-then-fail sequence this
   two-branch remedy exists to prevent.
+
+  A file link (LNK-20) whose parent directory is NOT its kind's container is
+  the one shape with no working remedy: convention discovery finds a file item
+  only at `<root>/<kind>s/<name>.md` (there is no flat pass for file kinds, the
+  way there is for skills), so no `--add-root` value reaches it. Such a link is
+  reachable only as a link, so no command is printed: the error says the file
+  sits outside a conventional `<kind>s/` directory, and that the reference has
+  to be dropped or the file moved under `<kind>s/` upstream. Printing a command
+  that unmelds first and then fails to install is the outcome this replaces.
 
   The `unmeld` step is required. The link instance is registered before the
   install runs, so it is registered on both paths when this is printed -- the
@@ -223,9 +283,9 @@ same repo, and a plain meld of that repo, coexist as separate sources.
 
   The `<identity>` is the instance's registered identity (LNK-4) and the
   `<repo-url>` its recorded clone URL, never the deep link URL. The pattern is
-  kind-qualified (`skill:<name>`): an item link is always a skill (LNK-7), and
-  a bare name would additionally match a same-named agent or rule in the repo,
-  installing prompt content the user never asked for. Each of the three values
+  kind-qualified (`<kind>:<name>`) with the linked item's own kind (LNK-21):
+  a bare name would additionally match a same-named item of another kind in the
+  repo, installing content the user never asked for. Each of the three values
   is sanitized (DSC-95) and shell-quoted (CLI-225) before composition, and the
   identity and the name are also glob-escaped: `--learn`'s pattern and
   `unmeld`'s selector (CLI-28) both read `*`, `?`, and `[` as glob syntax, and
@@ -236,7 +296,7 @@ same repo, and a plain meld of that repo, coexist as separate sources.
   its first command. Escaping is a no-op for an identity or name with no
   metacharacters, so both commands above are unchanged for the common case.
 
-  *Where it applies.* Wherever a link instance's skill is installed: `learn
+  *Where it applies.* Wherever a link instance's item is installed: `learn
   <url>` (LNK-6), the install pass of `meld <url>`, and a later `upgrade` of the
   instance, so an upstream edit that adds a `requires` entry does not turn every
   subsequent upgrade of that link into a hard failure.
@@ -332,3 +392,10 @@ same repo, and a plain meld of that repo, coexist as separate sources.
   after the meld, and that form cannot express a `tree/<ref>/<path>` link
   suffix, so `dump` always derives the link URL from the identity parts
   rather than echoing `url` verbatim.
+- `LNK-23` A file link instance (LNK-20) is emitted with the `blob/<ref>/<path>`
+  shape instead of `tree/<ref>/<path>`: a forge blob URL is what names a file,
+  and it is the shape the link was pasted in. The entry also carries
+  `kind = "<kind>"` when, and only when, the instance recorded an explicit kind
+  (LNK-22); a kind that came from the containing directory or the file's
+  frontmatter re-resolves identically from the pinned clone, so emitting it
+  would add nothing. Everything else about the entry is LNK-13 unchanged.

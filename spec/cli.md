@@ -1238,6 +1238,13 @@ only appear at meld or install time. It is read-only and installs nothing.
   as the source-hook `install-hook` advisory above it (Check 6). Without
   this, an optional item hook read identically to a required one on a
   surface whose entire job is pre-install disclosure.
+- `CLI-239` `meld <url> --kind <agent|rule|command>` and `learn <url> --kind
+  <...>` declare what an item link's file is (item-link.md LNK-21), for a file
+  that does not sit under a conventional `agents/`, `rules/`, or `commands/`
+  directory and carries no frontmatter `kind:`. The flag applies to an item
+  link only: passing it with a plain repo spec is an error naming the link
+  forms, since nothing else about a meld is kind-scoped. The value is recorded
+  on the instance (STO-81) and reused by every later scan (LNK-22).
 - `CLI-219` `mind review --json` (either mode: a `<target>` source, or
   `--policy <path>`) answers with one JSON document instead of the CLI-131/132
   text findings:

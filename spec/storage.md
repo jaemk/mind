@@ -233,6 +233,12 @@ The on-disk layout and the two persisted JSON files.
   `--flat-skills` override (see DSC-75). Persisted at meld and not changed by
   `sync`. Absent or false means convention discovery uses `[source].flat-skills`
   or the `skills/` container (DSC-74).
+- `STO-81` An item-link source records an optional `item_kind`: the consumer's
+  explicit `--kind` / curator `kind =` value for a file link (LNK-21, LNK-22).
+  Persisted at meld and not changed by `sync`. Absent means the kind is resolved
+  from the clone on every scan (the containing directory, else the file's
+  frontmatter), which is also how every source registered before this field
+  reads back.
 - `STO-18` A source records its `pin`: the kind (`follow-branch` | `tag` | `ref`)
   and value (see DSC-41, CLI-17). Persisted at meld and not changed by `sync`. The
   implicit default when unset is `follow-branch` tracking the remote default

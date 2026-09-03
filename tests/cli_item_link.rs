@@ -491,7 +491,7 @@ fn link_install_warns_about_an_unsatisfiable_requires_and_still_installs() {
     );
     let combined = format!("{}{}", r.stdout, r.stderr);
     assert!(
-        combined.contains("agent:dev") && combined.contains("single-skill item link"),
+        combined.contains("agent:dev") && combined.contains("single-item link"),
         "the warning must name the unresolved entry and why it cannot resolve: {combined}"
     );
     assert!(
@@ -1018,7 +1018,7 @@ fn link_install_of_a_skill_with_a_tools_token_errors_with_the_remedy() {
         r.stdout
     );
     assert!(
-        r.stderr.contains("{{tools:fmt}}") && r.stderr.contains("single-skill item link"),
+        r.stderr.contains("{{tools:fmt}}") && r.stderr.contains("single-item link"),
         "the error must name the token and the single-item catalog: {}",
         r.stderr
     );
@@ -1052,7 +1052,7 @@ fn link_install_scans_expand_listed_files_for_tokens_too() {
         r.stdout
     );
     assert!(
-        r.stderr.contains("{{ns:dev}}") && r.stderr.contains("single-skill item link"),
+        r.stderr.contains("{{ns:dev}}") && r.stderr.contains("single-item link"),
         "the expand:-listed file must get the LNK-18 error, not the blunt one: {}",
         r.stderr
     );
@@ -1078,7 +1078,7 @@ fn link_install_of_a_skill_with_an_ns_token_errors_with_the_remedy() {
     let r = sb.mind(&["learn", &sb.link("tree/main/skills/review")]);
     assert!(!r.success, "an unresolvable token must fail: {}", r.stdout);
     assert!(
-        r.stderr.contains("{{ns:dev}}") && r.stderr.contains("single-skill item link"),
+        r.stderr.contains("{{ns:dev}}") && r.stderr.contains("single-item link"),
         "the error must name the token and the single-item catalog: {}",
         r.stderr
     );
@@ -1800,5 +1800,522 @@ fn dump_emits_a_reconstructed_link_entry_not_a_skip_note() {
         r.stdout.contains("skills/review"),
         "an entry reconstructing the link instance must be emitted: {}",
         r.stdout
+    );
+}
+
+// ----- LNK-20..23: single-file item links (agent / rule / command) -----
+
+/// A sandbox repo carrying one file item per kind, plus one at an
+/// unconventional path.
+fn file_item_sandbox() -> Sandbox {
+    let sb = Sandbox::bare("lib");
+    sb.write_and_commit(
+        "agents/dev.md",
+        "---\ndescription: The dev agent\n---\n# dev\n",
+    );
+    sb.write_and_commit(
+        "rules/style.md",
+        "---\ndescription: House style\n---\n# style\n",
+    );
+    sb.write_and_commit(
+        "commands/ship.md",
+        "---\ndescription: Ship it\n---\n# ship\n",
+    );
+    sb
+}
+
+#[test]
+fn blob_link_to_an_agent_file_installs_just_that_agent() {
+    // spec: LNK-20 LNK-21 LNK-7
+    // A blob link to `agents/dev.md` is a file link: the item is that one
+    // file, kind from the containing directory, name from the file stem.
+    let sb = file_item_sandbox();
+    let r = sb.mind(&["learn", &sb.link("blob/main/agents/dev.md")]);
+    assert!(r.success, "learn failed: {} {}", r.stdout, r.stderr);
+    assert!(
+        sb.claude_home.join("agents/dev.md").exists(),
+        "the linked agent must be installed"
+    );
+    assert!(
+        !sb.claude_home.join("rules/style.md").exists(),
+        "the repo's other items must NOT be installed"
+    );
+    let sources = sb.mind(&["recall", "--sources"]);
+    assert!(
+        sources.stdout.contains("#agents/dev.md"),
+        "the instance identity carries the file path: {}",
+        sources.stdout
+    );
+    let probe = sb.mind(&["probe"]);
+    assert!(
+        probe.stdout.contains("agent:dev") && !probe.stdout.contains("rule:style"),
+        "the catalog is exactly the linked file: {}",
+        probe.stdout
+    );
+}
+
+#[test]
+fn file_link_kind_comes_from_the_containing_directory() {
+    // spec: LNK-21
+    // rules/ -> rule and commands/ -> command, with no annotation.
+    for (path, target) in [
+        ("blob/main/rules/style.md", "rules/style.md"),
+        ("blob/main/commands/ship.md", "commands/ship.md"),
+    ] {
+        let sb = file_item_sandbox();
+        let r = sb.mind(&["learn", &sb.link(path)]);
+        assert!(r.success, "{path}: learn failed: {} {}", r.stdout, r.stderr);
+        assert!(
+            sb.claude_home.join(target).exists(),
+            "{path}: must install as {target}"
+        );
+    }
+}
+
+#[test]
+fn file_link_kind_falls_back_to_frontmatter() {
+    // spec: LNK-21
+    // A file outside a conventional directory is classified by its own
+    // frontmatter `kind:`.
+    let sb = Sandbox::bare("lib");
+    sb.write_and_commit(
+        "vendor/style.md",
+        "---\nkind: rule\ndescription: House style\n---\n# style\n",
+    );
+    let r = sb.mind(&["learn", &sb.link("blob/main/vendor/style.md")]);
+    assert!(r.success, "learn failed: {} {}", r.stdout, r.stderr);
+    assert!(
+        sb.claude_home.join("rules/style.md").exists(),
+        "frontmatter kind decides where it links"
+    );
+}
+
+#[test]
+fn explicit_kind_outranks_the_containing_directory_and_is_recorded() {
+    // spec: LNK-21 LNK-22 CLI-239 STO-81
+    // `--kind` is step 1 of the resolution order, and it is persisted on the
+    // instance so every later scan classifies the item the same way.
+    let sb = file_item_sandbox();
+    let r = sb.mind(&[
+        "learn",
+        &sb.link("blob/main/agents/dev.md"),
+        "--kind",
+        "rule",
+    ]);
+    assert!(r.success, "learn failed: {} {}", r.stdout, r.stderr);
+    assert!(
+        sb.claude_home.join("rules/dev.md").exists()
+            && !sb.claude_home.join("agents/dev.md").exists(),
+        "--kind rule must win over the agents/ directory"
+    );
+    let json = std::fs::read_to_string(sb.mind_home.join("sources.json")).expect("sources.json");
+    assert!(
+        json.contains("\"item_kind\": \"rule\"") || json.contains("\"item_kind\":\"rule\""),
+        "the explicit kind must be recorded on the instance: {json}"
+    );
+    // A later scan reads the recorded kind back.
+    let recall = sb.mind(&["recall"]);
+    assert!(
+        recall.stdout.contains("rule:dev"),
+        "the recorded kind is what recall reports: {}",
+        recall.stdout
+    );
+}
+
+#[test]
+fn a_directory_resolved_kind_records_nothing() {
+    // spec: LNK-22
+    // Only an explicit kind is persisted; a directory-resolved one is
+    // re-derived from the pinned clone on every scan.
+    let sb = file_item_sandbox();
+    let r = sb.mind(&["learn", &sb.link("blob/main/agents/dev.md")]);
+    assert!(r.success, "learn failed: {} {}", r.stdout, r.stderr);
+    let json = std::fs::read_to_string(sb.mind_home.join("sources.json")).expect("sources.json");
+    assert!(
+        !json.contains("item_kind"),
+        "no explicit kind was given, so none is recorded: {json}"
+    );
+}
+
+#[test]
+fn file_link_with_no_resolvable_kind_errors_and_registers_nothing() {
+    // spec: LNK-21
+    let sb = Sandbox::bare("lib");
+    sb.write_and_commit(
+        "vendor/thing.md",
+        "---\ndescription: mystery\n---\n# thing\n",
+    );
+    let r = sb.mind(&["learn", &sb.link("blob/main/vendor/thing.md")]);
+    assert!(!r.success, "an unclassifiable file must fail: {}", r.stdout);
+    assert!(
+        r.stderr.contains("--kind") && r.stderr.contains("frontmatter"),
+        "the error must name the ways to resolve it: {}",
+        r.stderr
+    );
+    assert_eq!(source_count(&sb), 0, "nothing registered on failure");
+}
+
+#[test]
+fn a_directory_kind_on_a_file_link_is_a_mismatch() {
+    // spec: LNK-21
+    let sb = file_item_sandbox();
+    let r = sb.mind(&[
+        "learn",
+        &sb.link("blob/main/agents/dev.md"),
+        "--kind",
+        "skill",
+    ]);
+    assert!(!r.success, "--kind skill on a file must fail: {}", r.stdout);
+    assert!(
+        r.stderr.contains("cannot be a skill"),
+        "the error must name the mismatch: {}",
+        r.stderr
+    );
+    assert_eq!(source_count(&sb), 0, "nothing registered on failure");
+}
+
+#[test]
+fn a_non_skill_kind_on_a_directory_link_is_a_mismatch() {
+    // spec: LNK-21
+    let sb = Sandbox::new();
+    let r = sb.mind(&[
+        "learn",
+        &sb.link("tree/main/skills/review"),
+        "--kind",
+        "agent",
+    ]);
+    assert!(
+        !r.success,
+        "--kind agent on a directory must fail: {}",
+        r.stdout
+    );
+    assert!(
+        r.stderr.contains("cannot be a agent") || r.stderr.contains("always a skill"),
+        "the error must name the mismatch: {}",
+        r.stderr
+    );
+}
+
+#[test]
+fn kind_flag_without_an_item_link_is_refused() {
+    // spec: CLI-239
+    // --kind describes an item link's file; with a plain repo spec (meld) or a
+    // plain item ref (learn) it is a usage error, not a silent no-op.
+    let sb = file_item_sandbox();
+    let spec = sb.source.to_string_lossy().into_owned();
+    let m = sb.mind(&["meld", &spec, "--kind", "agent", "--register-only"]);
+    assert!(
+        !m.success,
+        "--kind with a repo spec must fail: {}",
+        m.stdout
+    );
+    assert!(
+        m.stderr.contains("--kind") && m.stderr.contains("item link"),
+        "the error must say --kind applies to an item link: {}",
+        m.stderr
+    );
+    let l = sb.mind(&["learn", "agent:dev", "--kind", "agent"]);
+    assert!(
+        !l.success,
+        "--kind with an item ref must fail: {}",
+        l.stdout
+    );
+    assert!(
+        l.stderr.contains("--kind"),
+        "the error must name the flag: {}",
+        l.stderr
+    );
+}
+
+#[test]
+fn an_unknown_kind_value_is_refused() {
+    // spec: CLI-239
+    let sb = file_item_sandbox();
+    let r = sb.mind(&[
+        "learn",
+        &sb.link("blob/main/agents/dev.md"),
+        "--kind",
+        "wizard",
+    ]);
+    assert!(!r.success, "an unknown kind must fail: {}", r.stdout);
+    assert!(
+        r.stderr.contains("not an item kind"),
+        "the error must name the legal set: {}",
+        r.stderr
+    );
+}
+
+#[test]
+fn blob_link_to_a_non_markdown_file_reports_bad_item_link() {
+    // spec: LNK-1 LNK-14 LNK-20
+    let sb = file_item_sandbox();
+    let url = sb.link("blob/main/scripts/run.sh");
+    let r = sb.mind(&["learn", &url]);
+    assert!(!r.success, "a non-.md blob link must fail: {}", r.stdout);
+    assert!(
+        r.stderr.contains(&url) && r.stderr.contains("blob/<ref>/<file>.md"),
+        "the error must name the URL and the file shape: {}",
+        r.stderr
+    );
+    assert!(
+        !r.stderr.contains("not a valid repo spec"),
+        "it must not fall back to the generic repo-spec message: {}",
+        r.stderr
+    );
+}
+
+#[test]
+fn a_file_link_whose_path_is_not_a_file_errors() {
+    // spec: LNK-7 LNK-20
+    let sb = file_item_sandbox();
+    let r = sb.mind(&["learn", &sb.link("blob/main/agents/missing.md")]);
+    assert!(!r.success, "a missing file must fail: {}", r.stdout);
+    assert!(
+        r.stderr.contains("is not a file in the clone"),
+        "the error must say the path is not a file: {}",
+        r.stderr
+    );
+    assert_eq!(source_count(&sb), 0, "nothing registered on failure");
+}
+
+#[test]
+fn curated_sources_entry_can_be_a_file_link_with_a_kind() {
+    // spec: DSC-100 LNK-2 LNK-20
+    // A curator lists a deep blob URL to one file and declares its kind; the
+    // entry registers as a file-link instance and installs under that kind.
+    let lib = Sandbox::bare("lib");
+    lib.write_and_commit(
+        "vendor/style.md",
+        "---\ndescription: House style\n---\n# style\n",
+    );
+    let curator = Sandbox::bare("curator");
+    curator.write_and_commit(
+        "mind.toml",
+        &format!(
+            "[discover]\nsources = [{{ source = \"{}\", kind = \"rule\", install = true }}]\n",
+            lib.link("blob/main/vendor/style.md")
+        ),
+    );
+    let spec = curator.source.to_string_lossy().into_owned();
+    let r = curator.mind(&["meld", &spec, "--yes"]);
+    assert!(r.success, "curator meld failed: {} {}", r.stdout, r.stderr);
+    assert!(
+        curator.claude_home.join("rules/style.md").exists(),
+        "the curated file link must install under the declared kind: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn a_curated_entry_with_an_unknown_kind_is_a_mind_toml_error() {
+    // spec: DSC-100
+    let lib = Sandbox::bare("lib");
+    lib.write_and_commit("agents/dev.md", "---\ndescription: dev\n---\n# dev\n");
+    let curator = Sandbox::bare("curator");
+    curator.write_and_commit(
+        "mind.toml",
+        &format!(
+            "[discover]\nsources = [{{ source = \"{}\", kind = \"wizard\" }}]\n",
+            lib.link("blob/main/agents/dev.md")
+        ),
+    );
+    let spec = curator.source.to_string_lossy().into_owned();
+    let r = curator.mind(&["meld", &spec, "--register-only"]);
+    assert!(
+        !r.success,
+        "an unknown kind must fail the meld: {}",
+        r.stdout
+    );
+    assert!(
+        r.stderr.contains("unknown kind 'wizard'"),
+        "the error must name the offending value: {}",
+        r.stderr
+    );
+}
+
+#[test]
+fn dump_emits_a_file_link_as_a_blob_url_and_carries_an_explicit_kind() {
+    // spec: LNK-23
+    let sb = Sandbox::bare("lib");
+    sb.write_and_commit(
+        "vendor/style.md",
+        "---\ndescription: House style\n---\n# style\n",
+    );
+    let r = sb.mind(&[
+        "learn",
+        &sb.link("blob/main/vendor/style.md"),
+        "--kind",
+        "rule",
+    ]);
+    assert!(r.success, "learn failed: {} {}", r.stdout, r.stderr);
+    let d = sb.mind(&["dump"]);
+    assert!(d.success, "dump failed: {} {}", d.stdout, d.stderr);
+    let sha = sb.head_sha();
+    assert!(
+        d.stdout.contains(&format!("/blob/{sha}/vendor/style.md")),
+        "a file link dumps as a blob URL at the recorded commit: {}",
+        d.stdout
+    );
+    assert!(
+        d.stdout.contains("kind = \"rule\""),
+        "the recorded explicit kind must be emitted: {}",
+        d.stdout
+    );
+}
+
+#[test]
+fn dump_omits_kind_for_a_directory_resolved_file_link() {
+    // spec: LNK-23
+    let sb = file_item_sandbox();
+    let r = sb.mind(&["learn", &sb.link("blob/main/agents/dev.md")]);
+    assert!(r.success, "learn failed: {} {}", r.stdout, r.stderr);
+    let d = sb.mind(&["dump"]);
+    assert!(
+        d.stdout.contains("/blob/") && !d.stdout.contains("kind ="),
+        "no explicit kind was recorded, so none is emitted: {}",
+        d.stdout
+    );
+}
+
+#[test]
+fn a_dumped_file_link_re_melds_to_the_same_instance() {
+    // spec: LNK-23 LNK-20
+    let sb = file_item_sandbox();
+    let learned = sb.mind(&["learn", &sb.link("blob/main/agents/dev.md")]);
+    assert!(learned.success, "learn failed: {}", learned.stderr);
+    let identity = sb.link_name("agents/dev.md");
+    let dumped = sb.mind(&["dump"]);
+    let super_source = sb.base.join("super");
+    std::fs::create_dir_all(&super_source).unwrap();
+    write(&super_source.join("mind.toml"), &dumped.stdout);
+    git(
+        &super_source,
+        &["-c", "init.defaultBranch=main", "init", "-q"],
+    );
+    git(&super_source, &["config", "user.email", "t@t"]);
+    git(&super_source, &["config", "user.name", "t"]);
+    git(&super_source, &["add", "-A"]);
+    git(&super_source, &["commit", "-qm", "dumped"]);
+    // Drop the instance, then reproduce it from the dump.
+    let un = sb.mind(&["unmeld", &identity, "--yes"]);
+    assert!(un.success, "unmeld failed: {} {}", un.stdout, un.stderr);
+    let re = sb.mind(&["meld", &super_source.to_string_lossy(), "--yes"]);
+    assert!(re.success, "re-meld failed: {} {}", re.stdout, re.stderr);
+    let sources = sb.mind(&["recall", "--sources"]);
+    assert!(
+        sources.stdout.contains("#agents/dev.md"),
+        "the dumped entry must reproduce the file-link instance: {}",
+        sources.stdout
+    );
+}
+
+#[test]
+fn a_file_link_remedy_is_kind_qualified() {
+    // spec: LNK-18 LNK-20
+    // The unsatisfiable-token remedy names the linked item's own kind, not
+    // `skill:`.
+    let sb = Sandbox::bare("lib");
+    sb.write_and_commit(
+        "agents/dev.md",
+        "---\ndescription: dev\n---\n# dev\nsee {{ns:other}}\n",
+    );
+    sb.write_and_commit("agents/other.md", "---\ndescription: other\n---\n# other\n");
+    let r = sb.mind(&["learn", &sb.link("blob/main/agents/dev.md")]);
+    assert!(
+        !r.success,
+        "a sibling token must fail the install: {}",
+        r.stdout
+    );
+    assert!(
+        r.stderr.contains("--learn 'agent:dev'"),
+        "the remedy must be kind-qualified with the link's kind: {}",
+        r.stderr
+    );
+}
+
+#[test]
+fn a_file_link_outside_its_kind_container_names_no_remedy_command() {
+    // spec: LNK-18 LNK-20 LNK-21
+    // No --add-root reaches a file item outside `<kind>s/`, so the error says
+    // so instead of printing a command that would unmeld and then fail.
+    let sb = Sandbox::bare("lib");
+    sb.write_and_commit(
+        "vendor/dev.md",
+        "---\nkind: agent\ndescription: dev\n---\n# dev\nsee {{ns:other}}\n",
+    );
+    let r = sb.mind(&["learn", &sb.link("blob/main/vendor/dev.md")]);
+    assert!(
+        !r.success,
+        "a sibling token must fail the install: {}",
+        r.stdout
+    );
+    assert!(
+        r.stderr
+            .contains("outside a conventional agents/ directory"),
+        "the error must explain why no command is offered: {}",
+        r.stderr
+    );
+    assert!(
+        !r.stderr.contains("mind unmeld"),
+        "no destroy-then-fail command may be printed: {}",
+        r.stderr
+    );
+}
+
+#[test]
+fn a_file_link_upgrades_like_any_source() {
+    // spec: LNK-5 LNK-20
+    let sb = file_item_sandbox();
+    let r = sb.mind(&["learn", &sb.link("blob/main/agents/dev.md")]);
+    assert!(r.success, "learn failed: {} {}", r.stdout, r.stderr);
+    sb.write_and_commit(
+        "agents/dev.md",
+        "---\ndescription: The dev agent\n---\n# dev\nupdated\n",
+    );
+    let up = sb.mind(&["upgrade", "--yes"]);
+    assert!(up.success, "upgrade failed: {} {}", up.stdout, up.stderr);
+    let installed =
+        std::fs::read_to_string(sb.claude_home.join("agents/dev.md")).expect("installed agent");
+    assert!(
+        installed.contains("updated"),
+        "the upgrade must land the new content: {installed}"
+    );
+}
+
+#[test]
+fn syncs_re_walk_registers_a_curated_file_link_with_its_kind() {
+    // spec: DSC-100 LNK-20
+    // A curator adds a file-link entry after the initial meld; the sync
+    // re-walk registers it under the declared kind, as a fresh meld would.
+    let lib = Sandbox::bare("lib");
+    lib.write_and_commit(
+        "vendor/style.md",
+        "---\ndescription: House style\n---\n# style\n",
+    );
+    let curator = Sandbox::bare("curator");
+    curator.write_and_commit("mind.toml", "[source]\ndescription = \"curator\"\n");
+    let spec = curator.source.to_string_lossy().into_owned();
+    let m = curator.mind(&["meld", &spec, "--register-only"]);
+    assert!(m.success, "initial meld failed: {} {}", m.stdout, m.stderr);
+    curator.write_and_commit(
+        "mind.toml",
+        &format!(
+            "[discover]\nsources = [{{ source = \"{}\", kind = \"rule\" }}]\n",
+            lib.link("blob/main/vendor/style.md")
+        ),
+    );
+    let sy = curator.mind(&["sync"]);
+    assert!(sy.success, "sync failed: {} {}", sy.stdout, sy.stderr);
+    let sources = curator.mind(&["recall", "--sources"]);
+    assert!(
+        sources.stdout.contains("#vendor/style.md"),
+        "the re-walk must register the curated file link: {}",
+        sources.stdout
+    );
+    let probe = curator.mind(&["probe"]);
+    assert!(
+        probe.stdout.contains("rule:style"),
+        "the entry's declared kind must apply on the re-walk: {}",
+        probe.stdout
     );
 }
