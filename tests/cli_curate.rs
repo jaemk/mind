@@ -711,3 +711,55 @@ fn a_marketplace_entry_still_listed_is_not_proposed_for_unlisting() {
         dropped.stdout
     );
 }
+
+#[test]
+fn an_entry_naming_a_directly_melded_source_proposes_nothing_against_it() {
+    // spec: CUR-4 CUR-5 CUR-12
+    // A curator's entry can resolve to the same identity as a source the
+    // consumer melded by hand (same repo, no alias). That entry must not be
+    // able to install into or repin a source it does not own: CUR-12 says
+    // `curate` never changes a directly-melded source, and that must hold
+    // even when some OTHER curator's list happens to name it.
+    let env = Env::new();
+    let lib = env.repo("lib");
+    lib.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\ndescription: Review\n---\n# review\n",
+    );
+    let direct = env.mind(&["meld", &lib.spec(), "--register-only"]);
+    assert!(
+        direct.success,
+        "meld failed: {} {}",
+        direct.stdout, direct.stderr
+    );
+    assert!(
+        !env.sources_json().contains("curated_by"),
+        "a direct meld records no curator: {}",
+        env.sources_json()
+    );
+
+    let curator = env.repo("curator");
+    curator.curate_list(&[format!(
+        "{{ source = \"{}\", install = true, pin-ref = \"{}\" }}",
+        lib.spec(),
+        lib.head()
+    )]);
+    let m = env.mind(&["meld", &curator.spec(), "--register-only"]);
+    assert!(m.success, "meld failed: {} {}", m.stdout, m.stderr);
+
+    let plan = env.mind(&["curate", "--check"]);
+    assert!(plan.success, "curate failed: {}", plan.stderr);
+    assert!(
+        !plan.stdout.contains("repin") && !plan.stdout.contains("install"),
+        "an entry naming an identity it does not own must propose nothing: {}",
+        plan.stdout
+    );
+
+    let applied = env.mind(&["curate", "--yes"]);
+    assert!(applied.success, "curate --yes failed: {}", applied.stderr);
+    assert!(
+        !env.sources_json().contains("\"kind\": \"ref\""),
+        "the directly melded source's pin must not move off the default branch: {}",
+        env.sources_json()
+    );
+}

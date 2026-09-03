@@ -528,6 +528,16 @@ fn build_plan(paths: &Paths, registry: &Registry) -> Result<Vec<Change>> {
                 });
                 continue;
             };
+            // spec: CUR-4/CUR-5 -- an entry naming an identity already
+            // registered by someone else (a direct meld, or a different
+            // curator) must not let THIS entry mutate it: only the curator
+            // that actually owns it (STO-82) may propose install/repin, and
+            // it joins the CUR-6 sweep only through its owner. The `listed`
+            // insert above still stands regardless, so any curator naming it
+            // still protects it from CUR-7 unlisting.
+            if registered.curated_by.as_deref() != Some(curator.name.as_str()) {
+                continue;
+            }
             curated.push(registered.name.clone());
 
             // spec: CUR-4 -- declared items that are not installed.

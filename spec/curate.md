@@ -104,7 +104,14 @@ A *curator* is a registered source that declares `[discover].sources` in its
 - `CUR-12` `curate` proposes only what a curator declares. It never installs an
   item no entry names, never registers a source no list contains, and never
   changes a directly-melded source: the plan is a function of the curators'
-  `mind.toml` (and marketplace manifests) plus the registry and manifest.
+  `mind.toml` (and marketplace manifests) plus the registry and manifest. This
+  holds even when an entry's identity collides with a source registered some
+  other way: `install` (CUR-4), `repin` (CUR-5), and the CUR-6 upgrade sweep
+  act on a registered source only when its recorded curator (STO-82) is the
+  one whose entry matched it. An entry naming an identity already owned by a
+  direct meld or a different curator proposes nothing against it; it still
+  counts toward CUR-7's "still listed" check (any curator listing an identity
+  protects it from unlisting), just not toward mutating it.
 
 ## Reporting
 
