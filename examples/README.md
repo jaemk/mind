@@ -35,7 +35,8 @@ Simplest to most advanced:
   lifecycle events, with interactive disclosure.
 - [policy/](policy/) - a managed `policy.toml` validated by `review --policy`.
 - [super-source/](super-source/) - a curated registry that references and pins
-  nested sources; `dump` output.
+  nested sources; `dump` output; `mind curate` reconciling the registry after
+  the curator's list changes.
 - [marketplace-plugin/](marketplace-plugin/) - a Claude `.claude-plugin/plugin.json`
   melded as a source: skills, agents, and commands become items, unsupported
   components report a skipped count.

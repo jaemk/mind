@@ -29,7 +29,7 @@ mind probe
 | [monorepo](https://github.com/jaemk/mind/tree/main/examples/monorepo) | `[source].roots`: convention discovery rooted at per-package subtrees | [discovery.md](https://github.com/jaemk/mind/blob/main/spec/discovery.md) |
 | [discover](https://github.com/jaemk/mind/tree/main/examples/discover) | `[discover]` kind globs with per-kind `include`/`exclude` lists, for layouts `roots` cannot express | [discovery.md](https://github.com/jaemk/mind/blob/main/spec/discovery.md) |
 | [namespacing](https://github.com/jaemk/mind/tree/main/examples/namespacing) | A prefix plus `{{ns:name}}` reference tokens that survive a rename | [namespacing.md](https://github.com/jaemk/mind/blob/main/spec/namespacing.md) |
-| [super-source](https://github.com/jaemk/mind/tree/main/examples/super-source) | `[discover].sources`: a curated registry that melds other repos, optionally namespaced or auto-installed | [discovery.md](https://github.com/jaemk/mind/blob/main/spec/discovery.md) |
+| [super-source](https://github.com/jaemk/mind/tree/main/examples/super-source) | `[discover].sources`: a curated registry that melds other repos, optionally namespaced or auto-installed, plus `mind curate` reconciling it after the list changes | [discovery.md](https://github.com/jaemk/mind/blob/main/spec/discovery.md), [curate.md](https://github.com/jaemk/mind/blob/main/spec/curate.md) |
 | [marketplace-plugin](https://github.com/jaemk/mind/tree/main/examples/marketplace-plugin) | A Claude `.claude-plugin/plugin.json`: skills, agents, and commands mapped to items, unsupported components reported | [marketplace.md](https://github.com/jaemk/mind/blob/main/spec/marketplace.md) |
 | [marketplace-catalog](https://github.com/jaemk/mind/tree/main/examples/marketplace-catalog) | A Claude `.claude-plugin/marketplace.json`: a catalog of in-repo plugins, each a namespaced sub-source | [marketplace.md](https://github.com/jaemk/mind/blob/main/spec/marketplace.md) |
 | [marketplace-curator](https://github.com/jaemk/mind/tree/main/examples/marketplace-curator) | A repo that is both a Claude marketplace and a mind curator: `[discover].sources` composes with the plugin manifest instead of suppressing it | [marketplace.md](https://github.com/jaemk/mind/blob/main/spec/marketplace.md) |
@@ -52,8 +52,12 @@ You are installing and managing tooling that other people authored.
   [namespacing](https://github.com/jaemk/mind/tree/main/examples/namespacing) and
   [Troubleshooting](troubleshooting.md).
 - **Pull from a curated registry.** Meld a super-source to register a whole chain
-  of repos at once; `meld --recursive` offers every nested source for install. See
-  [super-source](https://github.com/jaemk/mind/tree/main/examples/super-source).
+  of repos at once; `meld --recursive` offers every nested source for install.
+  When the curator's list changes later, `mind curate` is the command to
+  reconcile: it registers and installs a newly listed entry, re-pins a source
+  whose directive changed, and reports one a curator dropped. See
+  [super-source](https://github.com/jaemk/mind/tree/main/examples/super-source)
+  and [Commands](commands.md#curate-follow-your-curators).
 - **Meld a Claude plugin or marketplace.** A repo with a `.claude-plugin/plugin.json`
   or `.claude-plugin/marketplace.json` melds with no re-packaging; its skills,
   agents, and commands show up as items. See [Claude plugin marketplaces](marketplace.md) and the

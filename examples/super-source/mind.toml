@@ -34,18 +34,19 @@ install = true
 source = "../tooling"
 install-items = ["skill:scan"]
 
-# Adopt an un-onboarded source: ../starter ships no mind.toml of its own, so the
-# roots and hooks below are applied as if it had declared them itself
-# (DSC-59/60/61). roots and hooks are fallback-only: if the source ever gains a
-# mind.toml, that file takes over and they are ignored (a warning is emitted).
-# The pin directive (follow-branch here) is NOT gated: it is authoritative and
-# overrides the source's own [source] pin whether or not it ships a mind.toml
-# (DSC-65). The roots value below is illustrative of the shape, not tied to
-# ../starter's actual layout.
+# Adopt an un-onboarded source: ../starter ships no mind.toml of its own, so
+# the hook below runs as if it had declared it itself (DSC-59/60/61). Hooks
+# (and roots, DSC-50/60, not needed here since ../starter's own convention
+# layout already needs no override) are fallback-only: if the source ever
+# gains a mind.toml, that file takes over and they are ignored (a warning is
+# emitted). A pin directive (follow-branch/pin-tag/pin-ref) would go on this
+# same entry, and is NOT gated: it is authoritative and overrides the
+# source's own [source] pin whether or not the source ships a mind.toml
+# (DSC-65). It is omitted here because it needs a real git history to clone
+# from, which ../starter (a plain directory in this tree, not its own repo)
+# does not have; see tests/cli.rs (search DSC-65) for a working pin demo.
 [[discover.sources]]
 source = "../starter"
-follow-branch = "main"             # authoritative pin for the nested source (DSC-65)
-roots = ["packages/agents"]        # fallback scan root, applied only if no mind.toml (DSC-50/60)
 
 [[discover.sources.hooks]]         # build hook, same shape as [[hooks]] (HOOK-50)
 run = "make build"

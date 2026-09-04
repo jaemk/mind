@@ -100,9 +100,14 @@ mind.toml                 [source] metadata + [discover].sources curating the ch
   installed, namespaced to `rev:`.
 
 * `../tooling` with `install-items = ["skill:scan"]`: only `skill:scan` installed.
-* `../starter` adopt entry: an authoritative `follow-branch` pin plus
-  fallback-only `roots`/`hooks` for a source that ships no `mind.toml`
-  (DSC-59/60/65).
+* `../starter` adopt entry: a fallback-only `hooks` entry for a source that
+  ships no `mind.toml` (DSC-59/60/61; `roots`, DSC-50, works the same way but
+  is omitted here since `../starter`'s own convention layout needs no
+  override). An authoritative pin directive (`follow-branch`/`pin-tag`/
+  `pin-ref`, DSC-65) would go on this same entry too, but it needs a real git
+  history to clone from, which `../starter` (a plain directory in this tree,
+  not its own repo) does not have; see `tests/cli.rs` (search `DSC-65`) for a
+  working pin demo.
 
 The nested specs are local paths (`../explicit` and friends) to the sibling
 example repos in this tree, so the file is safe to read and copy; a real
@@ -137,7 +142,8 @@ path; the bare repo names are used below for brevity:
 + melded explicit (2 item(s))
 + melded namespacing (4 item(s))
 + melded tooling (2 item(s))
-+ melded starter (1 item(s))
++ melded starter (4 item(s))
+note: skipped install hook 'build adopted tooling' for starter; its items may not work until it runs
 melded 5 source(s)
 learned skill:team-onboard from super-source
 learned skill:rev:review from namespacing
@@ -229,6 +235,37 @@ each source's own `mind.toml` when the output is melded. `mind dump
 --whole-sources` instead emits `install = true` for every source regardless of
 how many of its items are installed. Use `--output <path>` to write to a file.
 
+### Reconciling with `mind curate`
+
+Right after melding, the curated chain is already up to date: a plain meld
+registers every listed source and installs what each entry declares, which is
+the same work `mind curate` would otherwise do for a newly listed one.
+
+```
+mind curate --check
+```
+
+```
+* curated sources are up to date
+```
+
+The gap `curate` exists to close shows up once the curator's list changes
+after the initial meld. Say `mind.toml` gains a new entry (or an existing
+`install`/`install-items` directive changes) after you have already melded
+this super-source: `mind sync` would register a newly listed entry but never
+install it, and neither `sync` nor `upgrade` notice a changed pin directive or
+an entry the curator dropped. `mind curate --check` reports all of that in one
+plan; `mind curate --yes` applies it (`--prune` to also uninstall an entry the
+curator dropped). See [Commands](../../docs/src/commands.md#curate-follow-your-curators)
+and [spec/curate.md](../../spec/curate.md).
+
+`curate` only ever changes a source it (or a curator) actually registered.
+Since this example's four nested sources were registered by melding this
+super-source (not by hand), they are all owned by it from the start; a source
+you melded some other way first, and only later folded under this curator's
+list, would show up as `curate`'s `adopt` change instead of `install`/`repin`,
+until `mind curate --adopt <identity>` claims it.
+
 ### Teardown
 
 Use the source names `recall --sources` reports for your clone (a local path
@@ -252,10 +289,16 @@ the super-source; removing it stays an explicit `unmeld` per source.
 ## Verified
 
 `tests/cli.rs::example_super_source_validates` runs `review` on this directory
-and asserts it validates, so the example stays correct as the code changes.
+and asserts it validates. `tests/cli.rs::example_super_source_curate_reports_up_to_date`
+melds the real example end to end (all five sources, DSC-59/60/61's fallback
+hook included) and asserts `mind curate --check` reports the curated chain as
+up to date, so the "Reconciling with `mind curate`" section above stays true
+as the code changes.
 
 ## See also
 
+`../../spec/curate.md` (CUR-1..19: `mind curate`, the ownership model that
+scopes it to sources it or a curator registered, and `--adopt`) and
 `../../spec/discovery.md` (DSC-58, DSC-59, DSC-60, DSC-61, DSC-62, DSC-63,
 DSC-64, DSC-65, DSC-78: the `[discover].sources` registry, per-entry install
 control, the `namespace` prefix and its `as` alias, the authoritative pin, and
