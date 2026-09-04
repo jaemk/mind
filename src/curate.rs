@@ -1,4 +1,4 @@
-//! Implementation of `mind curate` (spec/curate.md, CUR-1..CUR-19).
+//! Implementation of `mind curate` (spec/curate.md, CUR-1..CUR-21).
 //!
 //! One pass over every registered curator: read what each declares now, compare
 //! it against what is registered and installed, report the difference as a plan,
@@ -399,13 +399,22 @@ fn local_path_key(source: &Source) -> String {
 fn sync_scope(paths: &Paths, registry: &Registry) -> HashSet<String> {
     let mut scope = HashSet::new();
     for source in &registry.sources {
-        // spec: LNK-8 -- an item-link instance curates nothing and owns nothing.
-        if source.item_path.is_some() {
-            continue;
-        }
+        // A source someone owns is in scope whatever kind of source it is --
+        // an item-link instance included. LNK-8 says a link instance curates
+        // NOTHING; it says nothing about being CURATED, and a curator may
+        // perfectly well list a deep skill URL. Excluding it here left its
+        // clone permanently stale, so the CUR-4/CUR-5/CUR-6 checks compared
+        // against content no `curate` run ever refreshed.
         if let Some(curator) = &source.curated_by {
             scope.insert(source.name.clone());
             scope.insert(curator.clone());
+            continue;
+        }
+        // spec: LNK-8 -- past this point the question is "could this source be
+        // a CURATOR?", which a link instance never is: it exports one item and
+        // has no list of its own, so any `mind.toml` sitting in its clone is
+        // read as an item's file, never as a registry.
+        if source.item_path.is_some() {
             continue;
         }
         let clone = source.clone_dir(paths);
@@ -646,9 +655,17 @@ fn apply(
                 // spec: CUR-7 -- `--prune` only (guarded by `applies`), and the
                 // ordinary uninstall path: hooks, links, and store copies all
                 // go through `unmeld`.
+                // spec: CLI-28 -- `unmeld`'s selector is glob-aware, and a link
+                // instance's identity embeds the linked repo path (LNK-4), so
+                // `host/o/r#skills/pdf[x]` would be compiled as a PATTERN:
+                // `unmeld` would drop whatever unrelated source that pattern
+                // happens to match, or fail outright on an unbalanced bracket.
+                // Escaping is a no-op for an identity with no metacharacters,
+                // so the ordinary case is unchanged. Same idiom as
+                // `link_meld_remedy`'s.
                 commands::unmeld(
                     paths,
-                    source,
+                    &glob::Pattern::escape(source),
                     false,
                     true,
                     flags.dangerously_skip_hook_check,
@@ -811,6 +828,12 @@ fn build_plan(paths: &Paths, registry: &Registry) -> Result<(Vec<Change>, Vec<Sk
     for name in &unreadable {
         skipped.push(SkippedEntry::new(name.clone(), "curator_unreadable"));
     }
+    // spec: CUR-15 -- every curator whose declarations this run could not read
+    // IN FULL: the `curators()` failures above, plus (in the entry loop below)
+    // a curator with an entry whose `source` value would not parse. A list read
+    // only in part is not evidence that anything was dropped from it, so such a
+    // curator proposes no `unlist` -- the same reasoning, one entry down.
+    let mut incomplete = unreadable;
 
     for Curator {
         source: curator,
@@ -822,8 +845,26 @@ fn build_plan(paths: &Paths, registry: &Registry) -> Result<(Vec<Change>, Vec<Sk
         for entry in entries {
             // spec: CLI-216 -- resolving an entry to the identity it registers
             // under is a question, not a decision to clone: quiet.
-            let Ok(mut spec) = parse_spec_quiet(&entry.source) else {
-                continue;
+            let mut spec = match parse_spec_quiet(&entry.source) {
+                Ok(spec) => spec,
+                // spec: CUR-15 -- an entry that stopped parsing (edited into a
+                // malformed URL upstream) is a per-entry failure: report it.
+                // Dropping it silently would also drop the identity it used to
+                // contribute to `listed`, so the source it named would read as
+                // "no longer listed by its curator" and `--prune` would
+                // uninstall it -- the exact opposite of what a failure to READ
+                // a curator's list may cause. Mark the curator incomplete so it
+                // proposes no `unlist` this run.
+                Err(e) => {
+                    // The entry's `source` is curator-controlled free text that
+                    // never became an identity, so it is sanitized here rather
+                    // than by `Change::new` (CUR-18).
+                    let shown = strip_ansi(&entry.source);
+                    warn_skip(&shown, "could not read the entry's source", &e);
+                    skipped.push(SkippedEntry::new(shown, "entry_spec_unparseable"));
+                    incomplete.insert(curator.name.clone());
+                    continue;
+                }
             };
             // spec: STO-58/DSC-78 -- an entry registers under its effective
             // alias, so compare against that identity.
@@ -1133,10 +1174,11 @@ fn build_plan(paths: &Paths, registry: &Registry) -> Result<(Vec<Change>, Vec<Sk
         if listed.contains(&source.name) {
             continue;
         }
-        // spec: CUR-15 -- a curator this run could not read contributes
-        // nothing, including no `unlist`: an unreadable list must not read as
-        // an empty one.
-        if unreadable.contains(curator) {
+        // spec: CUR-15 -- a curator this run could not read IN FULL contributes
+        // nothing, including no `unlist`: a list that could not be read (or an
+        // entry within it that could not be parsed) must not read as an empty
+        // one.
+        if incomplete.contains(curator) {
             continue;
         }
         // A curator that is itself gone takes its entries' provenance with it:

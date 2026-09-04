@@ -2507,3 +2507,465 @@ fn a_refused_curator_pin_that_already_matches_the_recorded_pin_proposes_nothing(
         "a changed out-of-namespace pin is refused and reported: {doc}"
     );
 }
+
+#[test]
+fn a_curated_item_link_source_is_refreshed_by_curate() {
+    // spec: CUR-19 CUR-6 LNK-8
+    // An item-link instance curates nothing (LNK-8), but it can perfectly well
+    // BE curated. The CUR-19 scope excluded it from the refresh entirely, so
+    // its clone (a link is pinned to its ref, hence cloned, never a linked
+    // working tree) was never fetched by `curate`: the CUR-6 drift check read
+    // permanently stale content and only a separate bare `mind sync` helped.
+    let env = Env::new();
+    let lib = env.repo("lib");
+    lib.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\ndescription: Review\n---\n# review\n",
+    );
+    let link = format!(
+        "file://{}/tree/main/skills/review",
+        lib.path.to_string_lossy()
+    );
+    let curator = env.repo("curator");
+    curator.curate_list(&[format!("{{ source = \"{link}\", install = true }}")]);
+    let m = env.mind(&["meld", &curator.spec(), "--yes"]);
+    assert!(m.success, "meld failed: {} {}", m.stdout, m.stderr);
+    assert!(
+        env.claude_home.join("skills/review").exists(),
+        "the curated link's skill installs: {}",
+        m.stdout
+    );
+    let identity = format!("{}#skills/review", env.ident("lib"));
+    assert!(
+        env.sources_json().contains(&identity),
+        "the entry must register as a link instance: {}",
+        env.sources_json()
+    );
+
+    lib.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\ndescription: Review\n---\n# review\nupdated\n",
+    );
+
+    let plan = env.mind(&["curate", "--check"]);
+    assert!(
+        plan.success,
+        "curate failed: {} {}",
+        plan.stdout, plan.stderr
+    );
+    assert!(
+        plan.stdout.contains("upgrade") && plan.stdout.contains(&identity),
+        "curate must refresh the curated link's clone and see the drift, with \
+         no separate `mind sync`: {}",
+        plan.stdout
+    );
+
+    let applied = env.mind(&["curate", "--yes"]);
+    assert!(
+        applied.success,
+        "curate --yes failed: {} {}",
+        applied.stdout, applied.stderr
+    );
+    let installed =
+        std::fs::read_to_string(env.claude_home.join("skills/review/SKILL.md")).expect("installed");
+    assert!(
+        installed.contains("updated"),
+        "and land the new content: {installed}"
+    );
+}
+
+#[test]
+fn an_item_link_a_curator_lists_but_does_not_own_is_left_out_of_the_refresh() {
+    // spec: CUR-19 CUR-16 LNK-8
+    // The CUR-19 scope is "sources a curator OWNS, plus sources that carry a
+    // curator file". An item link is excluded from the second half (LNK-8: it
+    // exports one item and curates nothing), so a link a curator merely LISTS
+    // is out of scope until `--adopt` stamps ownership. That is deliberate,
+    // and it is the other side of the fix that put OWNED links back in scope,
+    // so it gets a test of its own rather than an assumption.
+    let env = Env::new();
+    let lib = env.repo("lib");
+    lib.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\ndescription: Review\n---\n# review\n",
+    );
+    let link = format!(
+        "file://{}/tree/main/skills/review",
+        lib.path.to_string_lossy()
+    );
+    let direct = env.mind(&["meld", &link, "--yes"]);
+    assert!(
+        direct.success,
+        "meld failed: {} {}",
+        direct.stdout, direct.stderr
+    );
+    assert!(env.claude_home.join("skills/review").exists());
+    let identity = format!("{}#skills/review", env.ident("lib"));
+    assert_eq!(
+        curated_by(&env, &identity),
+        None,
+        "a direct meld leaves the link unowned: {}",
+        env.sources_json()
+    );
+
+    let curator = env.repo("curator");
+    curator.curate_list(&[format!("{{ source = \"{link}\", install = true }}")]);
+    let m = env.mind(&["meld", &curator.spec(), "--register-only"]);
+    assert!(m.success, "meld failed: {} {}", m.stdout, m.stderr);
+    let before = env.sources_json();
+
+    lib.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\ndescription: Review\n---\n# review\nupdated\n",
+    );
+
+    let plan = env.mind(&["curate", "--check"]);
+    assert!(
+        plan.success,
+        "curate failed: {} {}",
+        plan.stdout, plan.stderr
+    );
+    assert_eq!(
+        before,
+        env.sources_json(),
+        "a listed-but-unowned link is not refreshed by curate"
+    );
+    assert!(
+        plan.stdout.contains("adopt") && plan.stdout.contains(&identity),
+        "it is reported as an adopt candidate instead: {}",
+        plan.stdout
+    );
+    assert!(
+        !plan.stdout.contains("upgrade"),
+        "and proposes nothing against a source no curator owns: {}",
+        plan.stdout
+    );
+
+    // Adopting it is what brings it into scope: the very next run refreshes
+    // the clone and sees the drift.
+    let adopted = env.mind(&["curate", "--adopt", &identity]);
+    assert!(
+        adopted.success,
+        "curate --adopt failed: {} {}",
+        adopted.stdout, adopted.stderr
+    );
+    let owned = env.mind(&["curate", "--check"]);
+    assert!(
+        owned.success,
+        "curate failed: {} {}",
+        owned.stdout, owned.stderr
+    );
+    assert!(
+        owned.stdout.contains("upgrade") && owned.stdout.contains(&identity),
+        "once owned, the same link IS refreshed and its drift seen: {}",
+        owned.stdout
+    );
+}
+
+#[test]
+fn an_unparseable_entry_is_reported_and_never_prunes_its_source() {
+    // spec: CUR-15 CUR-7
+    // A `source` value edited into something unparseable was dropped in
+    // silence, taking the identity it contributed to the "still listed" set
+    // with it. The source it named then looked unlisted, and `--prune`
+    // uninstalled it: a failure to READ a curator's list turning into the
+    // strongest action `curate` can take.
+    let env = Env::new();
+    let (_lib, curator) = lib_and_curator(&env, ", install = true");
+    let m = env.mind(&["meld", &curator.spec(), "--yes"]);
+    assert!(m.success, "meld failed: {} {}", m.stdout, m.stderr);
+    assert!(env.claude_home.join("skills/review").exists());
+    assert!(
+        env.sources_json().contains("curated_by"),
+        "the source must be curated for CUR-7 to be able to unlist it: {}",
+        env.sources_json()
+    );
+
+    // The entry is edited into a malformed spec (no owner/repo shape).
+    curator.curate_list(&["{ source = \"not a repo spec\", install = true }".to_string()]);
+
+    let r = env.mind(&["curate", "--check", "--prune"]);
+    assert!(
+        r.success,
+        "one unparseable entry must not fail the run: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        !r.stdout.contains("unlist"),
+        "an entry that could not be read must not read as a dropped entry: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("skipped") && r.stdout.contains("not a repo spec"),
+        "the unparseable entry must be reported: {}",
+        r.stdout
+    );
+    assert!(
+        r.stderr.contains("warning:"),
+        "and warned about: {}",
+        r.stderr
+    );
+
+    let doc: serde_json::Value =
+        serde_json::from_str(&env.mind(&["curate", "--json", "--check", "--prune"]).stdout)
+            .expect("json");
+    assert_eq!(
+        doc["skipped"][0]["reason"], "entry_spec_unparseable",
+        "the CUR-13 skipped slug must name the cause: {doc}"
+    );
+
+    // And the apply path agrees with the plan: nothing is pruned.
+    let pruned = env.mind(&["curate", "--yes", "--prune"]);
+    assert!(
+        pruned.success,
+        "curate --prune failed: {} {}",
+        pruned.stdout, pruned.stderr
+    );
+    assert!(
+        env.claude_home.join("skills/review").exists(),
+        "--prune must not uninstall the source an unreadable entry named: {}",
+        pruned.stdout
+    );
+    let sources = env.mind(&["recall", "--sources"]);
+    assert!(
+        sources.stdout.contains(&env.ident("lib")),
+        "nor drop it: {}",
+        sources.stdout
+    );
+}
+
+#[test]
+fn one_unparseable_entry_shields_the_curators_other_dropped_entries_too() {
+    // spec: CUR-15 CUR-7
+    // The blast radius of the CUR-15 tolerance, pinned deliberately:
+    // "incomplete" is per CURATOR, not per entry, so ONE entry that stopped
+    // parsing suppresses the unlist pass for every source that curator owns,
+    // including one it really did drop. That is the intended trade -- a list
+    // read only in part is not evidence that anything was dropped from it, and
+    // the alternative acts on that partial read with the most destructive
+    // change `curate` has. The consumer still sees the drop on the next run,
+    // once the curator's list parses again.
+    let env = Env::new();
+    let a = env.repo("lib-a");
+    a.write_and_commit("skills/a/SKILL.md", "---\ndescription: A\n---\n# a\n");
+    let b = env.repo("lib-b");
+    b.write_and_commit("skills/b/SKILL.md", "---\ndescription: B\n---\n# b\n");
+    let curator = env.repo("curator");
+    curator.curate_list(&[
+        format!("{{ source = \"{}\", install = true }}", a.spec()),
+        format!("{{ source = \"{}\", install = true }}", b.spec()),
+    ]);
+    let m = env.mind(&["meld", &curator.spec(), "--yes"]);
+    assert!(m.success, "meld failed: {} {}", m.stdout, m.stderr);
+    assert!(env.claude_home.join("skills/a").exists());
+    assert!(env.claude_home.join("skills/b").exists());
+
+    // lib-a's entry stops parsing; lib-b's is dropped outright.
+    curator.curate_list(&["{ source = \"not a repo spec\", install = true }".to_string()]);
+
+    let plan = env.mind(&["curate", "--check", "--prune"]);
+    assert!(
+        plan.success,
+        "curate failed: {} {}",
+        plan.stdout, plan.stderr
+    );
+    assert!(
+        !plan.stdout.contains("unlist"),
+        "neither the unreadable entry's source nor the genuinely dropped one \
+         may be proposed for unlisting: {}",
+        plan.stdout
+    );
+
+    let pruned = env.mind(&["curate", "--yes", "--prune"]);
+    assert!(
+        pruned.success,
+        "curate --prune failed: {} {}",
+        pruned.stdout, pruned.stderr
+    );
+    assert!(
+        env.claude_home.join("skills/a").exists() && env.claude_home.join("skills/b").exists(),
+        "and --prune uninstalls neither: {}",
+        pruned.stdout
+    );
+    let sources = env.mind(&["recall", "--sources"]);
+    assert!(
+        sources.stdout.contains(&env.ident("lib-a"))
+            && sources.stdout.contains(&env.ident("lib-b")),
+        "nor drops either source: {}",
+        sources.stdout
+    );
+
+    // Once the list parses again, the genuine drop is acted on: the shield is
+    // for the run that could not read the list, not a permanent immunity.
+    curator.curate_list(&[format!("{{ source = \"{}\", install = true }}", a.spec())]);
+    let again = env.mind(&["curate", "--yes", "--prune"]);
+    assert!(
+        again.success,
+        "curate --prune failed: {} {}",
+        again.stdout, again.stderr
+    );
+    assert!(
+        env.claude_home.join("skills/a").exists(),
+        "the still-listed source stays: {}",
+        again.stdout
+    );
+    assert!(
+        !env.claude_home.join("skills/b").exists(),
+        "and the dropped one is finally pruned: {}",
+        again.stdout
+    );
+}
+
+#[test]
+fn an_identity_with_glob_metacharacters_is_pruned_literally() {
+    // spec: CUR-7 CLI-28
+    // `unmeld`'s selector is glob-aware, so the raw identity `local/b/lib[x]`
+    // was compiled as a PATTERN: it matched no source (a character class, not
+    // the literal name), and `curate --prune --yes` failed with
+    // `no melded source matches ...` instead of pruning. A repo directory may
+    // legitimately carry `[`, and a link identity embeds the whole repo path
+    // (LNK-4), so this is reachable from the source side.
+    let env = Env::new();
+    let lib = env.repo("lib[x]");
+    lib.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\ndescription: Review\n---\n# review\n",
+    );
+    let curator = env.repo("curator");
+    curator.curate_list(&[format!("{{ source = \"{}\", install = true }}", lib.spec())]);
+    let m = env.mind(&["meld", &curator.spec(), "--yes"]);
+    assert!(m.success, "meld failed: {} {}", m.stdout, m.stderr);
+    let identity = env.ident("lib[x]");
+    assert!(
+        env.sources_json().contains(&identity),
+        "the fixture must register under a glob-metacharacter identity: {}",
+        env.sources_json()
+    );
+    assert!(env.claude_home.join("skills/review").exists());
+
+    curator.curate_list(&[]);
+    let pruned = env.mind(&["curate", "--yes", "--prune"]);
+    assert!(
+        pruned.success,
+        "prune must not read the identity as a glob pattern: {} {}",
+        pruned.stdout, pruned.stderr
+    );
+    assert!(
+        !env.claude_home.join("skills/review").exists(),
+        "the items must be uninstalled: {}",
+        pruned.stdout
+    );
+    let sources = env.mind(&["recall", "--sources"]);
+    assert!(
+        !sources.stdout.contains(&identity),
+        "and the source dropped: {}",
+        sources.stdout
+    );
+}
+
+#[test]
+fn a_star_in_an_identity_prunes_only_that_source() {
+    // spec: CUR-7 CLI-28
+    // The `[x]` case above proves an escaped identity still matches ITSELF.
+    // This one proves the escape targets correctly: `*` is the metacharacter
+    // that widens a pattern, so a sibling source the UNESCAPED identity would
+    // also have matched must survive the prune. `unmeld` removes every source
+    // a glob selector matches (CLI-28) and `curate` passes `yes = true`, so an
+    // unescaped `local/<base>/lib*` would silently uninstall `libZ` as well --
+    // a source no curator ever dropped.
+    let env = Env::new();
+    let star = env.repo("lib*");
+    star.write_and_commit(
+        "skills/star/SKILL.md",
+        "---\ndescription: Star\n---\n# star\n",
+    );
+    let sibling = env.repo("libZ");
+    sibling.write_and_commit("skills/zed/SKILL.md", "---\ndescription: Zed\n---\n# zed\n");
+    let curator = env.repo("curator");
+    curator.curate_list(&[
+        format!("{{ source = \"{}\", install = true }}", star.spec()),
+        format!("{{ source = \"{}\", install = true }}", sibling.spec()),
+    ]);
+    let m = env.mind(&["meld", &curator.spec(), "--yes"]);
+    assert!(m.success, "meld failed: {} {}", m.stdout, m.stderr);
+    assert!(env.claude_home.join("skills/star").exists());
+    assert!(env.claude_home.join("skills/zed").exists());
+
+    // Only the `*` entry is dropped.
+    curator.curate_list(&[format!(
+        "{{ source = \"{}\", install = true }}",
+        sibling.spec()
+    )]);
+    let pruned = env.mind(&["curate", "--yes", "--prune"]);
+    assert!(
+        pruned.success,
+        "curate --prune failed: {} {}",
+        pruned.stdout, pruned.stderr
+    );
+    assert!(
+        !env.claude_home.join("skills/star").exists(),
+        "the unlisted source's items must go: {}",
+        pruned.stdout
+    );
+    assert!(
+        env.claude_home.join("skills/zed").exists(),
+        "but a sibling the unescaped pattern would have matched must not: {}",
+        pruned.stdout
+    );
+    let sources = env.mind(&["recall", "--sources"]);
+    assert!(
+        !sources.stdout.contains(&env.ident("lib*")),
+        "the unlisted source is dropped: {}",
+        sources.stdout
+    );
+    assert!(
+        sources.stdout.contains(&env.ident("libZ")),
+        "and the sibling stays registered: {}",
+        sources.stdout
+    );
+}
+
+#[test]
+fn an_unbalanced_bracket_in_an_identity_still_prunes() {
+    // spec: CUR-7 CLI-28
+    // `lib[x` is not a valid glob at all: compiled as a pattern it is
+    // `InvalidPattern`, so an unescaped selector makes `curate --prune` fail
+    // outright rather than merely mis-target. A balanced `[x]` compiles (it is
+    // a character class), so it exercises a different half of the escape.
+    let env = Env::new();
+    let odd = env.repo("lib[x");
+    odd.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\ndescription: Review\n---\n# review\n",
+    );
+    let curator = env.repo("curator");
+    curator.curate_list(&[format!("{{ source = \"{}\", install = true }}", odd.spec())]);
+    let m = env.mind(&["meld", &curator.spec(), "--yes"]);
+    assert!(m.success, "meld failed: {} {}", m.stdout, m.stderr);
+    let identity = env.ident("lib[x");
+    assert!(
+        env.sources_json().contains(&identity),
+        "the fixture must register under an unbalanced-bracket identity: {}",
+        env.sources_json()
+    );
+    assert!(env.claude_home.join("skills/review").exists());
+
+    curator.curate_list(&[]);
+    let pruned = env.mind(&["curate", "--yes", "--prune"]);
+    assert!(
+        pruned.success,
+        "an identity that is not a valid glob must still prune: {} {}",
+        pruned.stdout, pruned.stderr
+    );
+    assert!(
+        !env.claude_home.join("skills/review").exists(),
+        "the items must be uninstalled: {}",
+        pruned.stdout
+    );
+    let sources = env.mind(&["recall", "--sources"]);
+    assert!(
+        !sources.stdout.contains(&identity),
+        "and the source dropped: {}",
+        sources.stdout
+    );
+}

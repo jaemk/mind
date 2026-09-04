@@ -10033,22 +10033,27 @@ pub(crate) struct SkippedEntry {
 }
 
 impl SkippedEntry {
-    /// `source` is curator- or source-controlled text (an identity assembled
-    /// from repo parts, or the raw entry spec that failed to parse), so it is
-    /// sanitized here, at capture (CUR-18). `describe()` strips again for text
-    /// mode, but `--json` serializes the field directly: stripping only on the
-    /// text path left a bidi override or a zero-width character -- neither of
-    /// which `validate_identity_part`'s control-character screen rejects --
-    /// intact in the JSON a caller reads.
+    /// Build a skipped entry, sanitizing both string fields (CUR-18).
+    ///
+    /// `source` is either a curator's free-text entry spec or a source
+    /// identity, and an identity is assembled from parts that
+    /// `validate_identity_part` screens only for `char::is_control()`: a bidi
+    /// override or a zero-width character passes it. `describe()` strips on
+    /// the way out, but `--json` serializes these fields directly, so the
+    /// sanitizing has to happen where the value is captured -- the same reason
+    /// `curate::Change::new` does it in the constructor rather than at each
+    /// print site.
     pub(crate) fn new(source: impl Into<String>, reason: impl Into<String>) -> Self {
         SkippedEntry {
             source: crate::sanitize::strip_ansi(&source.into()),
-            reason: reason.into(),
+            reason: crate::sanitize::strip_ansi(&reason.into()),
         }
     }
 
     /// A one-line, ANSI-stripped `source: reason` rendering for text-mode
-    /// output (curate.rs's `--json`-free skipped report).
+    /// output (curate.rs's `--json`-free skipped report). The fields are
+    /// already sanitized at construction; re-running `strip_ansi` here is
+    /// idempotent, not a second pass.
     pub(crate) fn describe(&self) -> String {
         format!(
             "{}: {}",

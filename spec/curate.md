@@ -229,16 +229,17 @@ A *curator* is a registered source that declares `[discover].sources` in its
   wider `git.rs` ref validation.
 - `CUR-18` Every field of a `Change` that can carry curator-controlled text --
   `curator` (the curator's identity), `source` (the acted-on identity), and
-  `detail` (an `install-items` list, a pin directive's value, a namespace) --
-  is sanitized (`strip_ansi`) at construction, before it is reported. The plan
-  is the text a consumer reads before answering the single `[Y/n]` prompt
-  (CUR-9); a curated repo must not be able to use escape sequences to make one
-  line's report read as a different line's, or to spoof the curator/source
-  identity shown for a change. The same holds for the `source` of a CUR-13
-  `skipped` entry, which names an identity assembled from repo parts that are
-  screened for control characters but not for the wider blocked set (a bidi
-  override, a zero-width character): it is sanitized where it is captured
-  rather than only where text mode prints it.
+  `detail` (an `install-items` list, a pin directive's value, a namespace, a
+  resolved URL/path) -- is sanitized (`strip_ansi`) at construction, before it
+  is reported. The plan is the text a consumer reads before answering the
+  single `[Y/n]` prompt (CUR-9); a curated repo must not be able to use escape
+  sequences to make one line's report read as a different line's, or to spoof
+  the curator/source identity shown for a change. The same holds for the
+  `source` of a CUR-13 `skipped` entry, which names either an identity or the
+  raw entry spec that failed to parse: an identity is assembled from repo
+  parts that are screened for control characters but not for the wider blocked
+  set (a bidi override, a zero-width character), so it is sanitized where it
+  is captured rather than only where text mode prints it.
 - `CUR-19` Unless `--no-sync`, the CUR-2 refresh scopes its fetch to curators
   and the sources they own, not the whole registry: a source with no
   `curated_by` and no `mind.toml`/marketplace manifest file in its clone is
