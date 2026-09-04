@@ -10033,9 +10033,16 @@ pub(crate) struct SkippedEntry {
 }
 
 impl SkippedEntry {
+    /// `source` is curator- or source-controlled text (an identity assembled
+    /// from repo parts, or the raw entry spec that failed to parse), so it is
+    /// sanitized here, at capture (CUR-18). `describe()` strips again for text
+    /// mode, but `--json` serializes the field directly: stripping only on the
+    /// text path left a bidi override or a zero-width character -- neither of
+    /// which `validate_identity_part`'s control-character screen rejects --
+    /// intact in the JSON a caller reads.
     pub(crate) fn new(source: impl Into<String>, reason: impl Into<String>) -> Self {
         SkippedEntry {
-            source: source.into(),
+            source: crate::sanitize::strip_ansi(&source.into()),
             reason: reason.into(),
         }
     }

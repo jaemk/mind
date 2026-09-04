@@ -549,7 +549,13 @@ fn json_reports_the_plan_and_what_was_applied() {
     assert_eq!(doc["action"], "curate");
     assert_eq!(doc["outcome"], "pending");
     assert_eq!(doc["changes"][0]["kind"], "install");
-    assert!(doc["applied"].is_null(), "nothing applied under --check");
+    // spec: CUR-13 -- `applied` is always present, even empty, not omitted.
+    assert_eq!(
+        doc["applied"],
+        serde_json::json!([]),
+        "nothing applied under --check, but the key must still be an empty array: {}",
+        pending.stdout
+    );
 
     let applied = env.mind(&["curate", "--json", "--yes"]);
     assert!(applied.success, "apply failed: {}", applied.stderr);
@@ -1081,5 +1087,163 @@ fn curate_sync_does_not_touch_a_source_that_is_neither_curator_nor_curated() {
         before,
         env.sources_json(),
         "curate's refresh must not touch a source that is neither a curator nor curated"
+    );
+}
+
+#[test]
+fn json_clean_run_still_emits_empty_applied_and_skipped_arrays() {
+    // spec: CUR-13
+    // `applied` and `skipped` must always be present, as `[]` when there is
+    // nothing to report, never omitted -- a caller should not have to
+    // distinguish "key absent" from "key present but empty".
+    let env = Env::new();
+    let plain = env.repo("plain");
+    plain.write_and_commit(
+        "skills/solo/SKILL.md",
+        "---\ndescription: solo\n---\n# solo\n",
+    );
+    let m = env.mind(&["meld", &plain.spec(), "--register-only"]);
+    assert!(m.success, "meld failed: {} {}", m.stdout, m.stderr);
+
+    let r = env.mind(&["curate", "--json"]);
+    assert!(r.success, "curate failed: {} {}", r.stdout, r.stderr);
+    let doc: serde_json::Value = serde_json::from_str(&r.stdout).expect("json");
+    assert_eq!(doc["outcome"], "clean");
+    assert_eq!(
+        doc["changes"],
+        serde_json::json!([]),
+        "changes must be an empty array, not absent: {}",
+        r.stdout
+    );
+    assert_eq!(
+        doc["applied"],
+        serde_json::json!([]),
+        "applied must be an empty array, not absent: {}",
+        r.stdout
+    );
+    assert_eq!(
+        doc["skipped"],
+        serde_json::json!([]),
+        "skipped must be an empty array, not absent: {}",
+        r.stdout
+    );
+}
+#[test]
+fn invisible_unicode_in_curator_and_source_identities_is_stripped_from_json() {
+    // spec: CUR-18
+    // Unlike a curator-controlled *value* embedded in `detail` (an
+    // install-items ref, a pin directive), `curator` and `source` are
+    // identity strings assembled from directory names. The identity
+    // validator (`validate_identity_part` in source.rs) only rejects Rust's
+    // narrow `char::is_control()` set, which blocks a raw ANSI escape (ESC is
+    // a C0 control) but NOT the wider "blocked Unicode" set `strip_ansi` also
+    // removes (a bidi override, a zero-width character). So a curator or
+    // curated source whose local directory name carries one of those must
+    // still have it stripped from `--json`'s `curator`/`source` fields, not
+    // just from `detail`.
+    let env = Env::new();
+    let curator = env.repo("curator\u{202E}evil");
+    curator.write_and_commit("mind.toml", "[source]\ndescription = \"curator\"\n");
+    let m = env.mind(&["meld", &curator.spec(), "--register-only"]);
+    assert!(m.success, "meld failed: {} {}", m.stdout, m.stderr);
+
+    let lib = env.repo("lib\u{200B}sneaky");
+    lib.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\ndescription: Review the diff\n---\n# review\n",
+    );
+    curator.curate_list(&[format!("{{ source = \"{}\", install = true }}", lib.spec())]);
+
+    let plan = env.mind(&["curate", "--check", "--json"]);
+    assert!(
+        plan.success,
+        "curate failed: {} {}",
+        plan.stdout, plan.stderr
+    );
+    let doc: serde_json::Value = serde_json::from_str(&plan.stdout).expect("json");
+    let change = &doc["changes"][0];
+    let curator_field = change["curator"].as_str().expect("curator field");
+    let source_field = change["source"].as_str().expect("source field");
+    assert!(
+        !curator_field.contains('\u{202E}'),
+        "the bidi override must be stripped from the curator field: {curator_field:?}"
+    );
+    assert!(
+        !source_field.contains('\u{200B}'),
+        "the zero-width space must be stripped from the source field: {source_field:?}"
+    );
+    assert!(
+        curator_field.contains("curator"),
+        "curator field must still name the curator: {curator_field:?}"
+    );
+    assert!(
+        source_field.contains("lib"),
+        "source field must still name the entry: {source_field:?}"
+    );
+}
+#[test]
+fn a_skipped_entry_strips_invisible_unicode_from_the_identity_it_names() {
+    // spec: CUR-18 CUR-13
+    // `Change` is not the only curator-controlled text `curate` prints: the
+    // CUR-13 `skipped` array names identities too, and an identity is
+    // assembled from directory names that `validate_identity_part` screens
+    // only for C0/C1 controls -- a bidi override or a zero-width character
+    // passes it (the same reasoning that made `Change::new` sanitize `curator`
+    // and `source`). Text mode strips it on the way out; `--json` is the
+    // surface that could still hand a reader an invisible character.
+    let env = Env::new();
+    let lib = env.repo("lib");
+    lib.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\ndescription: Review\n---\n# review\n",
+    );
+    let curator = env.repo("curator\u{202E}evil");
+    curator.curate_list(&[format!("{{ source = \"{}\", install = true }}", lib.spec())]);
+    let m = env.mind(&["meld", &curator.spec(), "--register-only"]);
+    assert!(m.success, "meld failed: {} {}", m.stdout, m.stderr);
+    assert!(
+        env.sources_json().contains('\u{202E}'),
+        "the fixture is only meaningful if the identity really carries the \
+         bidi override: {}",
+        env.sources_json()
+    );
+
+    // The curator's clone disappears: CUR-15 reports it as `curator_unreadable`,
+    // naming the identity.
+    std::fs::rename(&curator.path, env.base.join("curator-moved")).unwrap();
+
+    let text = env.mind(&["curate", "--check"]);
+    assert!(
+        text.success,
+        "curate failed: {} {}",
+        text.stdout, text.stderr
+    );
+    assert!(
+        !text.stdout.contains('\u{202E}'),
+        "text mode must not print the bidi override: {:?}",
+        text.stdout
+    );
+
+    let json = env.mind(&["curate", "--check", "--json"]);
+    assert!(
+        json.success,
+        "curate --json failed: {} {}",
+        json.stdout, json.stderr
+    );
+    let doc: serde_json::Value = serde_json::from_str(&json.stdout).expect("json");
+    assert_eq!(
+        doc["skipped"][0]["reason"], "curator_unreadable",
+        "fixture must produce the skipped entry under test: {doc}"
+    );
+    let named = doc["skipped"][0]["source"]
+        .as_str()
+        .expect("skipped source");
+    assert!(
+        !named.contains('\u{202E}'),
+        "the bidi override must be stripped from the skipped identity too: {named:?}"
+    );
+    assert!(
+        named.contains("curator"),
+        "while still naming the curator: {named:?}"
     );
 }

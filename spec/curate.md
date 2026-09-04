@@ -24,7 +24,9 @@ A *curator* is a registered source that declares `[discover].sources` in its
   - `upgrade`: a curated source whose installed items are out of date (CUR-6),
   - `unlist`: a registered source no curator lists any more (CUR-7),
   - `namespace`: an entry whose declared namespace differs from the instance's
-    (CUR-8; advisory, never applied).
+    (CUR-8; advisory, never applied),
+  - `adopt`: a registered but unowned source a curator claims (CUR-16;
+    advisory, applied only by `mind curate --adopt <identity>`).
 
   With no pending change, `curate` reports that the curated set is up to date.
   A consumer with no curators registered gets the same report, not an error.
@@ -170,12 +172,18 @@ A *curator* is a registered source that declares `[discover].sources` in its
   even after the curator that actually registered it drops it -- a
   self-shield CUR-7's "any curator listing an identity protects it" would
   otherwise permit.
-- `CUR-18` Every curator-controlled fragment composed into a `Change`'s
-  `detail` (an `install-items` list, a pin directive's value, a namespace) is
-  sanitized (`strip_ansi`) before it is reported. The plan is the text a
-  consumer reads before answering the single `[Y/n]` prompt (CUR-9); a curated
-  repo must not be able to use escape sequences to make one line's report read
-  as a different line's.
+- `CUR-18` Every field of a `Change` that can carry curator-controlled text --
+  `curator` (the curator's identity), `source` (the acted-on identity), and
+  `detail` (an `install-items` list, a pin directive's value, a namespace) --
+  is sanitized (`strip_ansi`) at construction, before it is reported. The plan
+  is the text a consumer reads before answering the single `[Y/n]` prompt
+  (CUR-9); a curated repo must not be able to use escape sequences to make one
+  line's report read as a different line's, or to spoof the curator/source
+  identity shown for a change. The same holds for the `source` of a CUR-13
+  `skipped` entry, which names an identity assembled from repo parts that are
+  screened for control characters but not for the wider blocked set (a bidi
+  override, a zero-width character): it is sanitized where it is captured
+  rather than only where text mode prints it.
 - `CUR-19` Unless `--no-sync`, the CUR-2 refresh scopes its fetch to curators
   and the sources they own, not the whole registry: a source with no
   `curated_by` and no `mind.toml`/marketplace manifest file in its clone is
@@ -207,7 +215,10 @@ A *curator* is a registered source that declares `[discover].sources` in its
   nothing was applied (no `--yes`, a non-TTY run, or `--check`), and `applied`
   when at least one change was applied. `changes` always lists the whole plan,
   including the changes an apply skipped (`unlist` without `--prune`, `namespace`
-  always), so a caller sees what was proposed as well as what ran.
+  always), so a caller sees what was proposed as well as what ran. `changes`,
+  `applied`, and `skipped` are always present, each as `[]` when there is
+  nothing to report, never omitted: a caller can always index all three keys
+  without first checking they exist.
 - `CUR-14` `curate` exits 0 whenever it produced a plan, pending changes
   included, matching `evolve --check` (CLI-141): pending curation is a state to
   report, not a failure. Only a genuine error (an unreadable registry, a failed

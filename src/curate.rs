@@ -44,8 +44,9 @@ pub struct CurateFlags {
 
 /// One proposed change, in the shape `--json` emits (CUR-13). `action` carries
 /// what applying it does and is not serialized. Every field that can carry
-/// curator-controlled text is sanitized (`strip_ansi`) at construction (CUR-18):
-/// the plan is the consent surface for the single `[Y/n]` prompt, so a curated
+/// curator-controlled text -- `curator`, `source`, and `detail` -- is
+/// sanitized (`strip_ansi`) at construction (CUR-18), via [`Change::new`]: the
+/// plan is the consent surface for the single `[Y/n]` prompt, so a curated
 /// repo must not be able to spoof what another line says.
 #[derive(Serialize)]
 struct Change {
@@ -55,6 +56,28 @@ struct Change {
     detail: String,
     #[serde(skip)]
     action: Action,
+}
+
+impl Change {
+    /// Build a `Change`, sanitizing every curator-controlled string field
+    /// (CUR-18). This is the ONLY place a `Change` is constructed, so a new
+    /// field added here is sanitized for free rather than depending on every
+    /// call site remembering to do it.
+    fn new(
+        kind: &'static str,
+        curator: impl Into<String>,
+        source: impl Into<String>,
+        detail: impl Into<String>,
+        action: Action,
+    ) -> Change {
+        Change {
+            kind,
+            curator: strip_ansi(&curator.into()),
+            source: strip_ansi(&source.into()),
+            detail: strip_ansi(&detail.into()),
+            action,
+        }
+    }
 }
 
 /// What applying a change does. Each variant maps to one existing verb path.
@@ -86,13 +109,13 @@ struct CurateResult {
     schema: u8,
     action: &'static str,
     outcome: &'static str,
-    // spec: CUR-13 -- always present, including `[]` on a clean run: "always
-    // lists the whole plan" would otherwise mean something different for the
-    // empty case than every other one.
+    // spec: CUR-13 -- `changes`, `applied`, and `skipped` are all always
+    // present, including `[]` on a clean run: "always lists the whole plan"
+    // would otherwise mean something different for the empty case than every
+    // other one, and a caller checking `doc["applied"]` should never have to
+    // distinguish an absent key from an empty list.
     changes: Vec<Change>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     applied: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     skipped: Vec<SkippedEntry>,
 }
 
@@ -195,8 +218,8 @@ fn run_adopt(paths: &Paths, identity: &str) -> Result<()> {
             "schema": 1,
             "action": "curate-adopt",
             "outcome": "applied",
-            "source": identity,
-            "curator": curator_name,
+            "source": strip_ansi(identity),
+            "curator": strip_ansi(&curator_name),
         }));
     }
     println!(
@@ -287,12 +310,16 @@ fn finish(
         // what was proposed as well as what ran.
         let changes = plan
             .iter()
-            .map(|c| Change {
-                kind: c.kind,
-                curator: c.curator.clone(),
-                source: c.source.clone(),
-                detail: c.detail.clone(),
-                action: Action::Advisory,
+            .map(|c| {
+                // Fields are already sanitized (CUR-18); re-running strip_ansi
+                // here is idempotent, not a second sanitization pass.
+                Change::new(
+                    c.kind,
+                    c.curator.clone(),
+                    c.source.clone(),
+                    c.detail.clone(),
+                    Action::Advisory,
+                )
             })
             .collect();
         return commands::print_json(&CurateResult {
@@ -324,12 +351,9 @@ fn report(plan: &[Change], prune: bool) {
     }
     println!("{} curated changes pending:", out.bullet());
     for c in plan {
-        println!(
-            "  {:<10} {}  {}",
-            out.dim(c.kind),
-            strip_ansi(&c.source),
-            c.detail
-        );
+        // spec: CUR-18 -- `c.source` is already sanitized at construction
+        // (`Change::new`), so this print site needs no strip_ansi of its own.
+        println!("  {:<10} {}  {}", out.dim(c.kind), c.source, c.detail);
     }
     // spec: CUR-7 / CUR-8 -- say plainly which listed changes an apply will not
     // touch, rather than letting a reported-but-never-applied line read as one
@@ -664,11 +688,11 @@ fn build_plan(paths: &Paths, registry: &Registry) -> Result<(Vec<Change>, Vec<Sk
                     // Still listed, just under a different alias: not an unlist.
                     listed.insert(existing.name.clone());
                     curated.push(existing.name.clone());
-                    plan.push(Change {
-                        kind: "namespace",
-                        curator: curator.name.clone(),
-                        source: existing.name.clone(),
-                        detail: format!(
+                    plan.push(Change::new(
+                        "namespace",
+                        curator.name.clone(),
+                        existing.name.clone(),
+                        format!(
                             "{} now declares namespace {}; adopt it with `mind unmeld {} --yes && mind meld {} {}--yes`",
                             strip_ansi(&curator.name),
                             entry
@@ -685,8 +709,8 @@ fn build_plan(paths: &Paths, registry: &Registry) -> Result<(Vec<Change>, Vec<Sk
                                 ))
                                 .unwrap_or_default(),
                         ),
-                        action: Action::Advisory,
-                    });
+                        Action::Advisory,
+                    ));
                     continue;
                 }
                 // Two curators listing the same unregistered identity would
@@ -709,17 +733,17 @@ fn build_plan(paths: &Paths, registry: &Registry) -> Result<(Vec<Change>, Vec<Sk
                     ),
                     None => format!("listed by {}; register", strip_ansi(&curator.name)),
                 };
-                plan.push(Change {
-                    kind: "register",
-                    curator: curator.name.clone(),
-                    source: spec.name.clone(),
+                plan.push(Change::new(
+                    "register",
+                    curator.name.clone(),
+                    spec.name.clone(),
                     detail,
-                    action: Action::Register {
+                    Action::Register {
                         curator: curator.name.clone(),
                         toml_path: toml_path.clone(),
                         entry: Box::new(entry),
                     },
-                });
+                ));
                 continue;
             };
             // spec: CUR-12 -- an entry naming an identity already registered
@@ -734,17 +758,17 @@ fn build_plan(paths: &Paths, registry: &Registry) -> Result<(Vec<Change>, Vec<Sk
                 // candidate: report it, but only `mind curate --adopt` (never
                 // this run, even under --yes) may claim it.
                 if registered.curated_by.is_none() {
-                    plan.push(Change {
-                        kind: "adopt",
-                        curator: curator.name.clone(),
-                        source: registered.name.clone(),
-                        detail: format!(
+                    plan.push(Change::new(
+                        "adopt",
+                        curator.name.clone(),
+                        registered.name.clone(),
+                        format!(
                             "{} lists this source but does not own it; run `mind curate --adopt {}` to let it manage it",
                             strip_ansi(&curator.name),
                             crate::error::shell_quote(&strip_ansi(&registered.name))
                         ),
-                        action: Action::Advisory,
-                    });
+                        Action::Advisory,
+                    ));
                 }
                 continue;
             }
@@ -754,21 +778,21 @@ fn build_plan(paths: &Paths, registry: &Registry) -> Result<(Vec<Change>, Vec<Sk
             if let Some(declared) = declared_installs(&entry) {
                 match pending_installs(paths, &manifest, registered, &declared) {
                     Ok(pending) if !pending.is_empty() => {
-                        plan.push(Change {
-                            kind: "install",
-                            curator: curator.name.clone(),
-                            source: registered.name.clone(),
-                            detail: format!(
+                        plan.push(Change::new(
+                            "install",
+                            curator.name.clone(),
+                            registered.name.clone(),
+                            format!(
                                 "{} declares {} not installed: {}",
                                 strip_ansi(&curator.name),
                                 pending.len(),
                                 strip_ansi(&pending.join(", "))
                             ),
-                            action: Action::Install {
+                            Action::Install {
                                 source: registered.name.clone(),
                                 refs: declared,
                             },
-                        });
+                        ));
                     }
                     Ok(_) => {}
                     // spec: CUR-15 -- one curated source's scan failing (a
@@ -787,21 +811,21 @@ fn build_plan(paths: &Paths, registry: &Registry) -> Result<(Vec<Change>, Vec<Sk
             // spec: CUR-5 -- the entry's pin directive against the recorded pin.
             match entry.pin_directive(&toml_path) {
                 Ok(Some(pin)) if pin != registered.pin => {
-                    plan.push(Change {
-                        kind: "repin",
-                        curator: curator.name.clone(),
-                        source: registered.name.clone(),
-                        detail: format!(
+                    plan.push(Change::new(
+                        "repin",
+                        curator.name.clone(),
+                        registered.name.clone(),
+                        format!(
                             "{} declares {}; registered as {}",
                             strip_ansi(&curator.name),
                             strip_ansi(&commands::pin_description(&pin)),
                             strip_ansi(&commands::pin_description(&registered.pin))
                         ),
-                        action: Action::Repin {
+                        Action::Repin {
                             source: registered.name.clone(),
                             pin,
                         },
-                    });
+                    ));
                 }
                 Ok(_) => {}
                 Err(e) => {
@@ -844,20 +868,20 @@ fn build_plan(paths: &Paths, registry: &Registry) -> Result<(Vec<Change>, Vec<Sk
                     .find(&source)
                     .and_then(|s| s.curated_by.clone())
                     .unwrap_or_default();
-                plan.push(Change {
-                    kind: "upgrade",
-                    curator: curator.clone(),
-                    source: source.clone(),
+                plan.push(Change::new(
+                    "upgrade",
+                    curator.clone(),
+                    source.clone(),
                     // spec: CUR-1 -- the text report doesn't print `curator`
                     // as its own column, so with several curators registered
                     // the detail is the only place a reader can tell whose
                     // list is behind this line.
-                    detail: format!(
+                    format!(
                         "{count} installed item(s) out of date ({})",
                         strip_ansi(&curator)
                     ),
-                    action: Action::Upgrade { source },
-                });
+                    Action::Upgrade { source },
+                ));
             }
             Ok(_) => {}
             // spec: CUR-15 -- likewise for the CUR-6 drift check.
@@ -885,18 +909,18 @@ fn build_plan(paths: &Paths, registry: &Registry) -> Result<(Vec<Change>, Vec<Sk
         // A curator that is itself gone takes its entries' provenance with it:
         // report against the recorded name either way, so the line still says
         // where the source came from.
-        plan.push(Change {
-            kind: "unlist",
-            curator: curator.to_string(),
-            source: source.name.clone(),
-            detail: format!(
+        plan.push(Change::new(
+            "unlist",
+            curator.to_string(),
+            source.name.clone(),
+            format!(
                 "no longer listed by {}; --prune uninstalls its items and drops it",
                 strip_ansi(curator)
             ),
-            action: Action::Unlist {
+            Action::Unlist {
                 source: source.name.clone(),
             },
-        });
+        ));
     }
 
     Ok((plan, skipped))
@@ -976,4 +1000,57 @@ fn outdated_count(
         }
     }
     Ok(Some(count))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // spec: CUR-18
+    // `Change::new` is the only constructor: pin that it sanitizes ALL three
+    // curator-controlled string fields, not just `detail`. `curator` and
+    // `source` were previously assigned straight from the caller's `String`
+    // with no `strip_ansi` pass of their own.
+    #[test]
+    fn change_new_sanitizes_curator_source_and_detail() {
+        let hostile = "evil\u{1b}[31mHIDDEN\u{1b}[0m";
+        let change = Change::new(
+            "register",
+            hostile,
+            hostile,
+            hostile.to_string(),
+            Action::Advisory,
+        );
+        assert_eq!(change.curator, strip_ansi(hostile));
+        assert_eq!(change.source, strip_ansi(hostile));
+        assert_eq!(change.detail, strip_ansi(hostile));
+        assert!(!change.curator.contains('\u{1b}'));
+        assert!(!change.source.contains('\u{1b}'));
+        assert!(!change.detail.contains('\u{1b}'));
+    }
+
+    // spec: CUR-18
+    // The identity validator that gates a repo's `host`/`owner`/`repo`
+    // (`validate_identity_part` in source.rs) only rejects Rust's narrow
+    // `char::is_control()` set (C0/C1 controls, which is what blocks a raw
+    // ANSI escape), not the wider "blocked Unicode" set `strip_ansi` also
+    // removes (a bidi override, a zero-width character). So a curator/source
+    // identity built from such a directory name can still carry one of those
+    // through to a `Change` unless the constructor strips it too.
+    #[test]
+    fn change_new_strips_invisible_unicode_curator_and_source_never_reach_validate_identity_part() {
+        let bidi = "curator\u{202E}evil";
+        let zero_width = "lib\u{200B}sneaky";
+        let change = Change::new(
+            "register",
+            bidi.to_string(),
+            zero_width.to_string(),
+            "detail".to_string(),
+            Action::Advisory,
+        );
+        assert!(!change.curator.contains('\u{202E}'));
+        assert!(!change.source.contains('\u{200B}'));
+        assert!(change.curator.contains("curator"));
+        assert!(change.source.contains("lib"));
+    }
 }
