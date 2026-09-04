@@ -126,8 +126,11 @@ pub fn run(paths: &Paths, flags: CurateFlags) -> Result<()> {
     // spec: CUR-16 -- `--adopt` is a distinct, narrow sub-mode: it stamps
     // provenance on one identity and does nothing else, so it never mutates
     // anything under an unattended `--yes` run that did not ask for it by name.
+    // spec: CUR-9 -- `--check` outranks it too: the flag's promise is that a
+    // `--check` run is always safe to paste, which cannot depend on which
+    // other flags happen to accompany it.
     if let Some(identity) = &flags.adopt {
-        return run_adopt(paths, identity);
+        return run_adopt(paths, identity, flags.check);
     }
 
     let out = crate::render::ctx();
@@ -179,36 +182,102 @@ pub fn run(paths: &Paths, flags: CurateFlags) -> Result<()> {
 }
 
 /// `mind curate --adopt <identity>` (CUR-16): stamp `curated_by` on a source
-/// that is registered, unowned, and currently listed (unowned) by exactly the
-/// named curator's entry -- the only state `--adopt` accepts, so a stale or
-/// mistyped identity fails loudly rather than silently doing nothing.
-fn run_adopt(paths: &Paths, identity: &str) -> Result<()> {
+/// that is registered, unowned, and currently claimed by exactly one curator
+/// whose claim resolves to the same upstream (CUR-20) -- the only state
+/// `--adopt` accepts, so a stale or mistyped identity fails loudly rather than
+/// silently doing nothing.
+///
+/// `check` is the CUR-9 `--check` flag: every validation below still runs (so
+/// a bad, ambiguous, or mismatched identity errors exactly as it would without
+/// it), the resolution is reported, and the function returns before the
+/// registry is written.
+fn run_adopt(paths: &Paths, identity: &str, check: bool) -> Result<()> {
     let out = crate::render::ctx();
     let mut registry = Registry::load(paths)?;
-    if registry.find(identity).is_none() {
+    let Some(registered) = registry.find(identity).cloned() else {
         return Err(MindError::NotAnAdoptCandidate {
             name: identity.to_string(),
             reason: "no melded source has that identity".to_string(),
         });
-    }
-    if let Some(owner) = registry.find(identity).and_then(|s| s.curated_by.clone()) {
+    };
+    if let Some(owner) = &registered.curated_by {
         return Err(MindError::NotAnAdoptCandidate {
             name: identity.to_string(),
-            reason: format!("already curated by {owner}"),
+            reason: format!("already curated by {}", strip_ansi(owner)),
         });
     }
     let (curators_list, _) = curators(paths, &registry)?;
-    let claimant = curators_list.iter().find_map(|c| {
-        entry_targets(c, identity)
-            .next()
-            .map(|_| c.source.name.clone())
-    });
-    let Some(curator_name) = claimant else {
+    let claims: Vec<Claim> = curators_list
+        .iter()
+        .flat_map(|c| entry_claims(c, identity))
+        .collect();
+    if claims.is_empty() {
         return Err(MindError::NotAnAdoptCandidate {
             name: identity.to_string(),
             reason: "no registered curator currently lists it".to_string(),
         });
-    };
+    }
+    // spec: CUR-20 -- exactly one curator may claim an identity. Taking the
+    // first claimant in registry order would hand ownership to whichever
+    // curator happens to sort first, silently, with the losing claim never
+    // reported; refuse and name them instead.
+    let mut claimants: Vec<String> = claims
+        .iter()
+        .map(|c| strip_ansi(&c.curator))
+        .collect::<Vec<_>>();
+    claimants.sort();
+    claimants.dedup();
+    if claimants.len() > 1 {
+        return Err(MindError::NotAnAdoptCandidate {
+            name: identity.to_string(),
+            reason: format!(
+                "{} registered curators claim it ({}); exactly one curator may claim an identity",
+                claimants.len(),
+                claimants.join(", ")
+            ),
+        });
+    }
+    // spec: CUR-20 -- and that one claim must point at the upstream the source
+    // is actually registered from. Identity alone is not proof: two local
+    // paths (or two forges reached by different URLs) can derive the same
+    // `host/owner/repo`, so without this a curator could claim a source by
+    // listing something that merely resolves to its name.
+    if let Some(bad) = claims
+        .iter()
+        .find(|c| !same_upstream(&c.source, &registered))
+    {
+        return Err(MindError::NotAnAdoptCandidate {
+            name: identity.to_string(),
+            reason: format!(
+                "{} claims it via {} as {}, but it is registered from {}",
+                strip_ansi(&bad.curator),
+                bad.via,
+                strip_ansi(&bad.source.url),
+                strip_ansi(&registered.url)
+            ),
+        });
+    }
+    let curator_name = claims[0].curator.clone();
+    // spec: CUR-9 -- report the resolution and stop: no `registry.save`, so
+    // `--check --adopt` leaves sources.json byte-identical.
+    if check {
+        if out.json {
+            return commands::print_json(&serde_json::json!({
+                "schema": 1,
+                "action": "curate-adopt",
+                "outcome": "pending",
+                "source": strip_ansi(identity),
+                "curator": strip_ansi(&curator_name),
+            }));
+        }
+        println!(
+            "{} would adopt {} for {} (--check: nothing written)",
+            out.bullet(),
+            strip_ansi(identity),
+            strip_ansi(&curator_name)
+        );
+        return Ok(());
+    }
     if let Some(source) = registry.sources.iter_mut().find(|s| s.name == identity) {
         source.curated_by = Some(curator_name.clone());
     }
@@ -231,21 +300,83 @@ fn run_adopt(paths: &Paths, identity: &str) -> Result<()> {
     Ok(())
 }
 
-/// Every identity a curator's entries or marketplace catalog resolve `target`
-/// to (there is at most one match; this returns 0 or 1 items so the caller can
-/// use `.next()`), excluding a self-listed entry (CUR-17).
-fn entry_targets<'a>(curator: &'a Curator, target: &'a str) -> impl Iterator<Item = ()> + 'a {
+/// One curator's claim on an identity (CUR-20): which curator, through which
+/// mechanism, and -- the part identity alone does not carry -- the source the
+/// claim itself resolves to, so `--adopt` can check it against the source that
+/// is actually registered.
+struct Claim {
+    /// The claiming curator's registered identity.
+    curator: String,
+    /// The mechanism, for the refusal message.
+    via: &'static str,
+    /// What the claim resolves to (its URL/path is the CUR-20 comparison).
+    source: Source,
+}
+
+/// Every claim a curator's entries or marketplace catalog make on `target`
+/// (CUR-20), excluding a self-listed entry (CUR-17). A curator may claim one
+/// identity more than once (an entry and its own catalog naming the same
+/// repo); all of them are yielded, so no claim is validated away unseen.
+fn entry_claims<'a>(curator: &'a Curator, target: &'a str) -> impl Iterator<Item = Claim> + 'a {
     let from_entries = curator.entries.iter().filter_map(move |entry| {
         let mut spec = parse_spec_quiet(&entry.source).ok()?;
         spec.apply_alias(entry.effective_alias());
-        (spec.name == target && spec.name != curator.source.name).then_some(())
+        (spec.name == target && spec.name != curator.source.name).then(|| Claim {
+            curator: curator.source.name.clone(),
+            via: "a [discover].sources entry",
+            source: spec,
+        })
     });
     let from_market = curator
         .market
         .iter()
         .filter(move |spec| spec.name == target && spec.name != curator.source.name)
-        .map(|_| ());
+        .map(|spec| Claim {
+            curator: curator.source.name.clone(),
+            via: "its marketplace catalog",
+            source: spec.clone(),
+        });
     from_entries.chain(from_market)
+}
+
+/// Whether a curator's claim resolves to the same upstream as the registered
+/// source (CUR-20).
+///
+/// Compares the identity parts a URL derives -- `host`/`owner`/`repo` and an
+/// item-link `#path` -- never the URL text: an entry written `owner/repo`
+/// resolves to `https://github.com/owner/repo`, or to `git@github.com:owner/repo`
+/// once the consumer's `ssh = true` config rewrites it (`Source::prefer_ssh`),
+/// and a URL may carry a trailing slash or a `.git` suffix. All of those are
+/// the same upstream, and a comparison that said otherwise would refuse adopt
+/// for ordinary, correctly melded sources.
+///
+/// A local source is the one case where those parts are not enough: `host` is
+/// the literal `local` and `owner`/`repo` are only the last two path segments,
+/// so `/a/proj/lib` and `/b/proj/lib` share an identity while being different
+/// repos. There the absolute path is compared too (trailing slash and a `.git`
+/// suffix normalized away, as identity derivation already does).
+fn same_upstream(claim: &Source, registered: &Source) -> bool {
+    if claim.base_identity() != registered.base_identity()
+        || claim.item_path != registered.item_path
+    {
+        return false;
+    }
+    if claim.is_local() || registered.is_local() {
+        return local_path_key(claim) == local_path_key(registered);
+    }
+    true
+}
+
+/// A local source's path, normalized for the CUR-20 comparison: the `file://`
+/// prefix, a trailing slash, and a `.git` suffix all dropped, since none of
+/// them changes which directory the source is read from.
+fn local_path_key(source: &Source) -> String {
+    let path = source.url.strip_prefix("file://").unwrap_or(&source.url);
+    let path = path.trim_end_matches('/');
+    path.strip_suffix(".git")
+        .unwrap_or(path)
+        .trim_end_matches('/')
+        .to_string()
 }
 
 /// The sources the CUR-2 refresh should fetch (CUR-19): every source any
@@ -669,6 +800,12 @@ fn build_plan(paths: &Paths, registry: &Registry) -> Result<(Vec<Change>, Vec<Sk
     // Identities already proposed for `register` this run, so two curators
     // listing the same unregistered entry produce one plan line, not two.
     let mut proposed_register: HashSet<String> = HashSet::new();
+    // spec: CUR-20 -- `(curator, identity)` pairs already proposed for
+    // `adopt`, so a curator that claims a source through BOTH a
+    // `[discover].sources` entry and its own marketplace catalog reports one
+    // line, not two. Keyed by the pair, not the identity alone: two different
+    // curators claiming one identity is an ambiguity the reader must see.
+    let mut proposed_adopt: HashSet<(String, String)> = HashSet::new();
 
     let (curators_list, unreadable) = curators(paths, registry)?;
     for name in &unreadable {
@@ -794,16 +931,14 @@ fn build_plan(paths: &Paths, registry: &Registry) -> Result<(Vec<Change>, Vec<Sk
                 // spec: CUR-16 -- an identity no one owns yet is an adopt
                 // candidate: report it, but only `mind curate --adopt` (never
                 // this run, even under --yes) may claim it.
-                if registered.curated_by.is_none() {
+                if registered.curated_by.is_none()
+                    && proposed_adopt.insert((curator.name.clone(), registered.name.clone()))
+                {
                     plan.push(Change::new(
                         "adopt",
                         curator.name.clone(),
                         registered.name.clone(),
-                        format!(
-                            "{} lists this source but does not own it; run `mind curate --adopt {}` to let it manage it",
-                            strip_ansi(&curator.name),
-                            crate::error::shell_quote(&strip_ansi(&registered.name))
-                        ),
+                        adopt_detail(&curator.name, &registered.name),
                         Action::Advisory,
                     ));
                 }
@@ -889,10 +1024,28 @@ fn build_plan(paths: &Paths, registry: &Registry) -> Result<(Vec<Change>, Vec<Sk
                 continue;
             }
             listed.insert(spec.name.clone());
-            if let Some(registered) = registry.find(&spec.name)
-                && registered.curated_by.as_deref() == Some(curator.name.as_str())
-            {
+            let Some(registered) = registry.find(&spec.name) else {
+                continue;
+            };
+            if registered.curated_by.as_deref() == Some(curator.name.as_str()) {
                 curated.push(registered.name.clone());
+                continue;
+            }
+            // spec: CUR-20 -- marketplace membership is a claim exactly as a
+            // `[discover].sources` entry is: `--adopt` will resolve ownership
+            // from it, so it must appear in the plan the consumer reads first.
+            // Without this line a catalog could take ownership of a source the
+            // reviewed plan never mentioned.
+            if registered.curated_by.is_none()
+                && proposed_adopt.insert((curator.name.clone(), registered.name.clone()))
+            {
+                plan.push(Change::new(
+                    "adopt",
+                    curator.name.clone(),
+                    registered.name.clone(),
+                    adopt_detail(&curator.name, &registered.name),
+                    Action::Advisory,
+                ));
             }
         }
     }
@@ -961,6 +1114,16 @@ fn build_plan(paths: &Paths, registry: &Registry) -> Result<(Vec<Change>, Vec<Sk
     }
 
     Ok((plan, skipped))
+}
+
+/// The `detail` of an `adopt` line (CUR-16, CUR-20). Shared by the entry loop
+/// and the marketplace loop so a claim reads the same however it was made.
+fn adopt_detail(curator: &str, identity: &str) -> String {
+    format!(
+        "{} lists this source but does not own it; run `mind curate --adopt {}` to let it manage it",
+        strip_ansi(curator),
+        crate::error::shell_quote(&strip_ansi(identity))
+    )
 }
 
 /// A per-source or per-entry failure CUR-15 kept from aborting the plan:
@@ -1111,5 +1274,151 @@ mod tests {
             mixed.contains("uninstall") && mixed.contains("--prune"),
             "and say what applying them does: {mixed}"
         );
+    }
+
+    fn spec(s: &str) -> Source {
+        parse_spec_quiet(s).expect("fixture spec must parse")
+    }
+
+    // spec: CUR-20
+    // The permissive half of the CUR-20 upstream check: every URL form that
+    // names ONE repo must compare equal, or `--adopt` would refuse ordinary,
+    // correctly melded sources. A curator entry written `owner/repo` resolves
+    // to https, and to `git@host:owner/repo` for a consumer with `ssh = true`
+    // (`Source::prefer_ssh`), so the two forms meet constantly in practice.
+    #[test]
+    fn same_upstream_ignores_url_form_ssh_https_dot_git_and_trailing_slash() {
+        let https = spec("https://github.com/acme/agents");
+        assert!(same_upstream(
+            &https,
+            &spec("https://github.com/acme/agents")
+        ));
+        assert!(
+            same_upstream(&spec("git@github.com:acme/agents.git"), &https),
+            "the ssh form of a repo is the same upstream as its https form"
+        );
+        assert!(
+            same_upstream(&spec("ssh://git@github.com/acme/agents"), &https),
+            "an ssh:// URL with userinfo is the same upstream too"
+        );
+        assert!(
+            same_upstream(&spec("https://github.com/acme/agents/"), &https),
+            "a trailing slash does not change the upstream"
+        );
+        assert!(
+            same_upstream(&spec("acme/agents"), &https),
+            "the bare owner/repo shorthand resolves to the same upstream"
+        );
+        // The same shorthand after the consumer's `ssh = true` rewrite.
+        let mut ssh_pref = spec("acme/agents");
+        ssh_pref.prefer_ssh(true);
+        assert_eq!(ssh_pref.url, "git@github.com:acme/agents");
+        assert!(
+            same_upstream(&ssh_pref, &https),
+            "config `ssh = true` rewrites the URL, never the upstream"
+        );
+    }
+
+    // spec: CUR-20
+    // The strict half: a claim that resolves somewhere else is not the same
+    // upstream, whatever identity it derives.
+    #[test]
+    fn same_upstream_rejects_a_different_repo_owner_host_or_item_path() {
+        let registered = spec("https://github.com/acme/agents");
+        assert!(!same_upstream(
+            &spec("https://github.com/acme/other"),
+            &registered
+        ));
+        assert!(!same_upstream(
+            &spec("https://github.com/evil/agents"),
+            &registered
+        ));
+        assert!(!same_upstream(
+            &spec("https://evil.example/acme/agents"),
+            &registered
+        ));
+        // An item-link instance is a different upstream from the whole repo
+        // (LNK-4), and from a link to a different item in it.
+        let link = spec("https://github.com/acme/agents/tree/main/skills/review");
+        assert!(link.item_path.is_some(), "fixture must be an item link");
+        assert!(!same_upstream(&link, &registered));
+        assert!(!same_upstream(
+            &spec("https://github.com/acme/agents/tree/main/skills/other"),
+            &link
+        ));
+    }
+
+    // spec: CUR-20
+    // The case that makes the check load-bearing rather than theoretical: a
+    // local source's identity is `local/<parent>/<dir>`, only the last two
+    // path segments, so two unrelated directories can derive one identity. A
+    // curator claiming `/decoy/proj/lib` must not be able to adopt the source
+    // melded from `/real/proj/lib`.
+    #[test]
+    fn same_upstream_compares_the_whole_path_for_local_sources() {
+        let registered = spec("/real/proj/lib");
+        assert_eq!(registered.name, "local/proj/lib");
+        let decoy = spec("/decoy/proj/lib");
+        assert_eq!(
+            decoy.name, registered.name,
+            "the fixture is only meaningful if the two derive ONE identity"
+        );
+        assert!(
+            !same_upstream(&decoy, &registered),
+            "a different directory that derives the same identity is not the same upstream"
+        );
+        assert!(same_upstream(&spec("/real/proj/lib"), &registered));
+        assert!(
+            same_upstream(&spec("file:///real/proj/lib"), &registered),
+            "the file:// form of a local path is the same upstream"
+        );
+        // Trailing slash / `.git` normalization, built directly: parse_spec
+        // lexically normalizes a path, so these forms are constructed here
+        // rather than parsed.
+        let mut slashed = registered.clone();
+        slashed.url = "/real/proj/lib/".to_string();
+        assert!(same_upstream(&slashed, &registered));
+        let mut dotgit = registered.clone();
+        dotgit.url = "/real/proj/lib.git".to_string();
+        assert!(same_upstream(&dotgit, &registered));
+    }
+
+    // spec: CUR-20
+    // The mixed case the two halves above never meet: a remote claim against a
+    // local registration, and the reverse. `host` alone separates the ordinary
+    // form, but a URL whose HOST IS the literal `local` derives exactly the
+    // `local/<owner>/<repo>` identity a filesystem path does -- so a curator
+    // could claim `https://local/proj/lib` and, on a `base_identity`
+    // comparison alone, take ownership of the source melded from
+    // `/real/proj/lib`. The `is_local()` branch is what refuses it, and it
+    // fires when EITHER side is local, not only when both are.
+    #[test]
+    fn same_upstream_never_matches_a_remote_claim_against_a_local_source() {
+        let local = spec("/real/proj/lib");
+        assert!(local.is_local());
+        let remote = spec("https://github.com/proj/lib");
+        assert!(
+            !same_upstream(&remote, &local),
+            "a remote claim is not the same upstream as a local registration"
+        );
+        assert!(
+            !same_upstream(&local, &remote),
+            "nor the reverse: a local claim on a remote registration"
+        );
+
+        // The adversarial spelling: same derived identity, different upstream.
+        let mut host_local = local.clone();
+        host_local.url = "https://local/proj/lib".to_string();
+        assert_eq!(
+            host_local.base_identity(),
+            local.base_identity(),
+            "the fixture is only meaningful if the two derive ONE identity"
+        );
+        assert!(
+            !same_upstream(&host_local, &local),
+            "a URL that merely derives the `local/...` identity is not the \
+             directory the source is registered from"
+        );
+        assert!(!same_upstream(&local, &host_local));
     }
 }

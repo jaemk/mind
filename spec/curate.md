@@ -113,7 +113,12 @@ A *curator* is a registered source that declares `[discover].sources` in its
   prompting per change. `--yes` applies without asking. `--check` reports and
   applies nothing, and outranks `--yes` when both are given, so a `--check` run
   is always safe to paste. A non-TTY run without `--yes` reports the plan,
-  applies nothing, and says how to apply it. The prompt counts the changes THIS
+  applies nothing, and says how to apply it. `--check` outranks `--adopt`
+  (CUR-16) too: `curate --check --adopt <identity>` runs every validation the
+  claim must pass (CUR-20), so a stale, ambiguous, or mismatched identity still
+  fails, reports the curator the identity would be adopted for, and writes
+  nothing. "Safe to paste" cannot depend on which other flags accompany
+  `--check`. The prompt counts the changes THIS
   run would apply, `--prune` included, so it never disagrees with what
   answering `y` does: a plan of nothing but `unlist` changes under `--prune`
   still prompts rather than silently applying nothing, and a plan that mixes
@@ -171,7 +176,9 @@ A *curator* is a registered source that declares `[discover].sources` in its
   curator's list currently names but does not yet own -- becomes visible to
   `install`/`repin`/`upgrade`; until adopted, it is reported (`adopt`) rather
   than silently treated as up to date. `--adopt` needs no `--yes`: naming the
-  identity is the confirmation.
+  identity is the confirmation, and which curator the claim resolves to is
+  CUR-20's rule. `--check` still outranks it (CUR-9): under both flags the
+  claim is resolved and reported, and nothing is written.
 - `CUR-17` An entry (or marketplace plugin) whose resolved identity is the
   curator's OWN registered identity contributes nothing: not a `register`, not
   `install`/`repin`/`upgrade`, and not membership toward CUR-7's "still
@@ -180,6 +187,25 @@ A *curator* is a registered source that declares `[discover].sources` in its
   even after the curator that actually registered it drops it -- a
   self-shield CUR-7's "any curator listing an identity protects it" would
   otherwise permit.
+- `CUR-20` A claim on an identity is a curator's `[discover].sources` entry
+  (DSC-38) or its marketplace catalog membership (MKT-7) resolving to that
+  identity; both count equally, and every claim on a registered but unowned
+  source is reported as an `adopt` line (CUR-16), one line per curator and
+  identity, so a curator claiming a source through both mechanisms reports
+  once. `--adopt` applies a claim only when:
+  - exactly one registered curator claims the identity. Two curators claiming
+    it is an ambiguity `--adopt` refuses, naming the claimants, rather than
+    handing ownership to whichever the registry happens to list first; and
+  - the claim resolves to the same upstream as the source is registered from.
+    The comparison is on the identity the URL derives (`host`/`owner`/`repo`,
+    plus an item-link `#path`, plus the absolute path for a local source),
+    never on the URL text, so the ssh and https forms of one repo, a `.git`
+    suffix, and a trailing slash are all the same upstream, and a consumer's
+    `ssh = true` rewrite (DSC-66) changes nothing. A claim that resolves
+    elsewhere (another repo, another item-link path, another local directory
+    that happens to derive the same `local/<parent>/<dir>` identity) is
+    refused, naming both, so a curator cannot capture a source by listing
+    something that only shares its name.
 - `CUR-18` Every field of a `Change` that can carry curator-controlled text --
   `curator` (the curator's identity), `source` (the acted-on identity), and
   `detail` (an `install-items` list, a pin directive's value, a namespace) --

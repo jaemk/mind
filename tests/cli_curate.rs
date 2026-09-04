@@ -1541,3 +1541,671 @@ fn a_prune_run_whose_plan_has_no_unlist_prompts_without_the_destructive_wording(
         r.stdout
     );
 }
+
+/// A library repo melded directly (so it is registered and unowned) plus a
+/// curator that lists it: the shape every `--adopt` case starts from.
+fn unowned_lib_and_claiming_curator(env: &Env, curator_name: &str) -> (Repo, Repo) {
+    let lib = env.repo("lib");
+    lib.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\ndescription: Review\n---\n# review\n",
+    );
+    let direct = env.mind(&["meld", &lib.spec(), "--register-only"]);
+    assert!(
+        direct.success,
+        "meld failed: {} {}",
+        direct.stdout, direct.stderr
+    );
+    let curator = env.repo(curator_name);
+    curator.curate_list(&[format!("{{ source = \"{}\", install = true }}", lib.spec())]);
+    let m = env.mind(&["meld", &curator.spec(), "--register-only"]);
+    assert!(m.success, "meld failed: {} {}", m.stdout, m.stderr);
+    (lib, curator)
+}
+
+#[test]
+fn check_outranks_adopt_and_writes_nothing() {
+    // spec: CUR-9 CUR-16
+    // `--check` reports and applies nothing, and that promise cannot depend on
+    // which other flags accompany it. `--adopt` used to be dispatched before
+    // `check` was consulted anywhere, so `curate --check --adopt <id>` stamped
+    // `curated_by` and saved the registry: a "safe to paste" run that wrote.
+    let env = Env::new();
+    let (_lib, _curator) = unowned_lib_and_claiming_curator(&env, "curator");
+    let identity = env.ident("lib");
+
+    let before = env.sources_json();
+    assert!(
+        !before.contains("curated_by"),
+        "the fixture must start unowned: {before}"
+    );
+    let checked = env.mind(&["curate", "--check", "--adopt", &identity]);
+    assert!(
+        checked.success,
+        "curate --check --adopt failed: {} {}",
+        checked.stdout, checked.stderr
+    );
+    assert_eq!(
+        before,
+        env.sources_json(),
+        "--check --adopt must leave sources.json byte-identical"
+    );
+    assert!(
+        checked.stdout.contains("would adopt")
+            && checked.stdout.contains(&identity)
+            && checked.stdout.contains(&env.ident("curator")),
+        "--check --adopt must report the claim it would apply: {}",
+        checked.stdout
+    );
+
+    // spec: CUR-13
+    // The `--json` shape of the same run: `pending`, the same outcome word the
+    // plan path uses for "a change exists and nothing was applied".
+    let json = env.mind(&["curate", "--check", "--adopt", &identity, "--json"]);
+    assert!(
+        json.success,
+        "curate --check --adopt --json failed: {} {}",
+        json.stdout, json.stderr
+    );
+    let doc: serde_json::Value = serde_json::from_str(&json.stdout).expect("json");
+    assert_eq!(doc["schema"], 1);
+    assert_eq!(doc["action"], "curate-adopt");
+    assert_eq!(doc["outcome"], "pending");
+    assert_eq!(doc["source"], identity.as_str());
+    assert_eq!(doc["curator"], env.ident("curator").as_str());
+    assert_eq!(
+        before,
+        env.sources_json(),
+        "--check --adopt --json must not write either"
+    );
+
+    // Without --check the same command writes, so the assertions above are
+    // testing the flag and not a fixture that could never adopt anyway.
+    let applied = env.mind(&["curate", "--adopt", &identity]);
+    assert!(
+        applied.success,
+        "curate --adopt failed: {} {}",
+        applied.stdout, applied.stderr
+    );
+    assert!(
+        env.sources_json().contains("curated_by"),
+        "the same identity must be adoptable without --check: {}",
+        env.sources_json()
+    );
+}
+
+#[test]
+fn check_adopt_of_an_identity_no_curator_lists_still_fails() {
+    // spec: CUR-9 CUR-16
+    // `--check` suppresses the write, never the validation: a stale or
+    // mistyped identity must fail as loudly under `--check` as without it,
+    // otherwise a `--check` run reports a claim a real run would refuse.
+    let env = Env::new();
+    let lib = env.repo("lib");
+    lib.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\ndescription: Review\n---\n# review\n",
+    );
+    let m = env.mind(&["meld", &lib.spec(), "--register-only"]);
+    assert!(m.success, "meld failed: {} {}", m.stdout, m.stderr);
+
+    let checked = env.mind(&["curate", "--check", "--adopt", &env.ident("lib")]);
+    assert!(
+        !checked.success,
+        "an unclaimed identity must fail under --check too: {} {}",
+        checked.stdout, checked.stderr
+    );
+}
+
+#[test]
+fn two_curators_claiming_one_identity_refuse_adopt_and_both_appear_in_the_plan() {
+    // spec: CUR-20
+    // Ownership used to go to the first curator in registry order that listed
+    // the identity, silently, with the losing claim never mentioned. Both
+    // claims are the user's to see: the plan reports one `adopt` line per
+    // curator, and `--adopt` refuses rather than choosing for them.
+    let env = Env::new();
+    let (lib, _curator_a) = unowned_lib_and_claiming_curator(&env, "curator-a");
+    let curator_b = env.repo("curator-b");
+    curator_b.curate_list(&[format!("{{ source = \"{}\", install = true }}", lib.spec())]);
+    let m = env.mind(&["meld", &curator_b.spec(), "--register-only"]);
+    assert!(m.success, "meld failed: {} {}", m.stdout, m.stderr);
+
+    let plan = env.mind(&["curate", "--check"]);
+    assert!(plan.success, "curate failed: {}", plan.stderr);
+    assert!(
+        plan.stdout.contains("adopt")
+            && plan.stdout.contains(&env.ident("curator-a"))
+            && plan.stdout.contains(&env.ident("curator-b")),
+        "both claims must be reported, one line each: {}",
+        plan.stdout
+    );
+
+    let identity = env.ident("lib");
+    let adopted = env.mind(&["curate", "--adopt", &identity]);
+    assert!(
+        !adopted.success,
+        "an ambiguous claim must not silently pick a curator: {} {}",
+        adopted.stdout, adopted.stderr
+    );
+    let said = format!("{}{}", adopted.stdout, adopted.stderr);
+    assert!(
+        said.contains(&env.ident("curator-a")) && said.contains(&env.ident("curator-b")),
+        "the refusal must name both claimants: {said}"
+    );
+    assert!(
+        !env.sources_json().contains("curated_by"),
+        "a refused adopt must write nothing: {}",
+        env.sources_json()
+    );
+
+    // spec: CUR-9
+    // `--check` suppresses the write, never the validation: an ambiguous claim
+    // must fail under it too, or a `--check` run would report a resolution the
+    // real run refuses.
+    let checked = env.mind(&["curate", "--check", "--adopt", &identity]);
+    assert!(
+        !checked.success,
+        "--check --adopt must refuse an ambiguous claim as well: {} {}",
+        checked.stdout, checked.stderr
+    );
+    assert!(
+        !checked.stdout.contains("would adopt"),
+        "and must not report a resolution it does not have: {}",
+        checked.stdout
+    );
+
+    // spec: CLI-181 -- and the same refusal is one JSON error envelope.
+    let refused = adopt_json_refusal(&env, &identity);
+    assert!(
+        refused.contains(&env.ident("curator-a")) && refused.contains(&env.ident("curator-b")),
+        "the json refusal must name both claimants too: {refused}"
+    );
+    assert!(
+        !env.sources_json().contains("curated_by"),
+        "and still write nothing: {}",
+        env.sources_json()
+    );
+}
+
+#[test]
+fn a_claim_resolving_to_a_different_path_is_refused_naming_both() {
+    // spec: CUR-20
+    // A local source's identity is `local/<parent>/<dir>`, only the last two
+    // path segments, so a curator can list a directory it controls that
+    // derives the SAME identity as a source the consumer melded from
+    // somewhere else. Matching on identity alone let that claim take
+    // ownership; the claim's resolved path must match the registered one.
+    let env = Env::new();
+    let lib = env.repo("lib");
+    lib.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\ndescription: Review\n---\n# review\n",
+    );
+    let direct = env.mind(&["meld", &lib.spec(), "--register-only"]);
+    assert!(
+        direct.success,
+        "meld failed: {} {}",
+        direct.stdout, direct.stderr
+    );
+
+    // A decoy repo whose parent directory is named like the env base, so it
+    // derives the same `local/<base>/lib` identity from a different path.
+    let base_name = env.base.file_name().unwrap().to_string_lossy().into_owned();
+    let decoy = env.repo(&format!("decoy/{base_name}/lib"));
+    decoy.write_and_commit(
+        "skills/evil/SKILL.md",
+        "---\ndescription: Evil\n---\n# evil\n",
+    );
+    let curator = env.repo("curator");
+    curator.curate_list(&[format!(
+        "{{ source = \"{}\", install = true }}",
+        decoy.spec()
+    )]);
+    let m = env.mind(&["meld", &curator.spec(), "--register-only"]);
+    assert!(m.success, "meld failed: {} {}", m.stdout, m.stderr);
+
+    let identity = env.ident("lib");
+    let adopted = env.mind(&["curate", "--adopt", &identity]);
+    assert!(
+        !adopted.success,
+        "a claim pointing at a different path must not adopt the registered source: {} {}",
+        adopted.stdout, adopted.stderr
+    );
+    let said = format!("{}{}", adopted.stdout, adopted.stderr);
+    assert!(
+        said.contains(&decoy.spec()) && said.contains(&lib.spec()),
+        "the refusal must name the claimed path and the registered one: {said}"
+    );
+    assert!(
+        !env.sources_json().contains("curated_by"),
+        "a refused adopt must write nothing: {}",
+        env.sources_json()
+    );
+
+    // spec: CUR-9
+    // The CUR-20 upstream check runs under `--check` too: the flag decides
+    // whether the claim is WRITTEN, never whether it is validated.
+    let checked = env.mind(&["curate", "--check", "--adopt", &identity]);
+    assert!(
+        !checked.success,
+        "--check --adopt must refuse a mismatched claim as well: {} {}",
+        checked.stdout, checked.stderr
+    );
+    assert!(
+        !checked.stdout.contains("would adopt"),
+        "and must not report a resolution it does not have: {}",
+        checked.stdout
+    );
+
+    // spec: CLI-181 -- and the same refusal is one JSON error envelope.
+    let refused = adopt_json_refusal(&env, &identity);
+    assert!(
+        refused.contains(&decoy.spec()) && refused.contains(&lib.spec()),
+        "the json refusal must name both paths too: {refused}"
+    );
+    assert!(
+        !env.sources_json().contains("curated_by"),
+        "and still write nothing: {}",
+        env.sources_json()
+    );
+}
+
+#[test]
+fn a_marketplace_only_claim_is_reported_in_the_plan_and_can_be_adopted() {
+    // spec: CUR-16 CUR-20
+    // `--adopt` resolves ownership from a marketplace catalog's membership
+    // (MKT-7) exactly as it does from a `[discover].sources` entry, but only
+    // the entry loop emitted an `adopt` line: a catalog could take ownership
+    // of a source the reviewed plan never mentioned.
+    let env = Env::new();
+    let lib = env.repo("lib");
+    lib.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\ndescription: Review\n---\n# review\n",
+    );
+    // Melded under the same namespace the catalog entry's name supplies
+    // (MKT-8), so the catalog resolves to this already-registered identity.
+    let direct = env.mind(&["meld", &lib.spec(), "--namespace", "kit", "--register-only"]);
+    assert!(
+        direct.success,
+        "meld failed: {} {}",
+        direct.stdout, direct.stderr
+    );
+    assert!(
+        !env.sources_json().contains("curated_by"),
+        "a direct meld records no curator: {}",
+        env.sources_json()
+    );
+
+    let catalog = env.repo("catalog");
+    catalog.write_and_commit(
+        ".claude-plugin/marketplace.json",
+        &format!(
+            r#"{{"name":"Cat","plugins":[{{"name":"kit","source":{{"url":"{}"}}}}]}}"#,
+            lib.spec()
+        ),
+    );
+    let m = env.mind(&["meld", &catalog.spec(), "--register-only"]);
+    assert!(m.success, "meld failed: {} {}", m.stdout, m.stderr);
+
+    let identity = format!("{}@kit", env.ident("lib"));
+    let plan = env.mind(&["curate", "--check"]);
+    assert!(plan.success, "curate failed: {}", plan.stderr);
+    assert!(
+        plan.stdout.contains("adopt") && plan.stdout.contains(&identity),
+        "a marketplace claim on an unowned source must appear in the plan: {}",
+        plan.stdout
+    );
+
+    let adopted = env.mind(&["curate", "--adopt", &identity]);
+    assert!(
+        adopted.success,
+        "curate --adopt failed: {} {}",
+        adopted.stdout, adopted.stderr
+    );
+    assert!(
+        env.sources_json().contains("curated_by"),
+        "the marketplace claim must be adoptable: {}",
+        env.sources_json()
+    );
+}
+
+/// The `curated_by` recorded for `identity`, read straight from `sources.json`
+/// rather than by substring: several fixtures below have more than one source
+/// registered, so "the file mentions curated_by somewhere" proves nothing about
+/// which source was stamped.
+fn curated_by(env: &Env, identity: &str) -> Option<String> {
+    let doc: serde_json::Value = serde_json::from_str(&env.sources_json()).expect("sources.json");
+    let source = doc["sources"]
+        .as_array()
+        .expect("sources array")
+        .iter()
+        .find(|s| s["name"] == identity)?;
+    source["curated_by"].as_str().map(str::to_string)
+}
+
+/// Run `curate --adopt <identity> --json`, require it to refuse, and return the
+/// CLI-181 error envelope's `message`.
+fn adopt_json_refusal(env: &Env, identity: &str) -> String {
+    let r = env.mind(&["curate", "--adopt", identity, "--json"]);
+    assert!(
+        !r.success,
+        "adopt of {identity} must be refused: {} {}",
+        r.stdout, r.stderr
+    );
+    let doc: serde_json::Value =
+        serde_json::from_str(&r.stdout).expect("one JSON error envelope on stdout");
+    assert_eq!(doc["schema"], 1, "{doc}");
+    assert_eq!(
+        doc["error"]["kind"], "not-an-adopt-candidate",
+        "the refusal must carry the structured kind, not just prose: {doc}"
+    );
+    doc["error"]["message"]
+        .as_str()
+        .expect("error message")
+        .to_string()
+}
+
+#[test]
+fn a_curator_claiming_through_both_an_entry_and_its_catalog_reports_one_adopt_line() {
+    // spec: CUR-20
+    // Both mechanisms are claims, and `entry_claims` yields every one of them.
+    // A curator that lists a repo in `[discover].sources` AND ships a
+    // marketplace catalog naming it makes two claims on one identity: the plan
+    // must report that once (the pair, not the identity, is what is deduped),
+    // and `--adopt` must read it as one curator, not as the CUR-20 ambiguity.
+    let env = Env::new();
+    let lib = env.repo("lib");
+    lib.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\ndescription: Review\n---\n# review\n",
+    );
+    // Melded under the namespace the catalog entry's name supplies (MKT-8), so
+    // both claims resolve to this one already-registered identity.
+    let direct = env.mind(&["meld", &lib.spec(), "--namespace", "kit", "--register-only"]);
+    assert!(
+        direct.success,
+        "meld failed: {} {}",
+        direct.stdout, direct.stderr
+    );
+
+    let curator = env.repo("curator");
+    curator.write_and_commit(
+        ".claude-plugin/marketplace.json",
+        &format!(
+            r#"{{"name":"Cat","plugins":[{{"name":"kit","source":{{"url":"{}"}}}}]}}"#,
+            lib.spec()
+        ),
+    );
+    // A bare `[discover].sources` list is not an authoritative inventory
+    // (MKT-2/MKT-16), so the catalog is still read alongside it.
+    curator.curate_list(&[format!(
+        "{{ source = \"{}\", namespace = \"kit\" }}",
+        lib.spec()
+    )]);
+    let m = env.mind(&["meld", &curator.spec(), "--register-only"]);
+    assert!(m.success, "meld failed: {} {}", m.stdout, m.stderr);
+
+    let identity = format!("{}@kit", env.ident("lib"));
+    let plan = env.mind(&["curate", "--check", "--json"]);
+    assert!(
+        plan.success,
+        "curate failed: {} {}",
+        plan.stdout, plan.stderr
+    );
+    let doc: serde_json::Value = serde_json::from_str(&plan.stdout).expect("json");
+    let adopts: Vec<&serde_json::Value> = doc["changes"]
+        .as_array()
+        .expect("changes array")
+        .iter()
+        .filter(|c| c["kind"] == "adopt")
+        .collect();
+    assert_eq!(
+        adopts.len(),
+        1,
+        "one curator claiming one identity through both mechanisms reports once: {doc}"
+    );
+    assert_eq!(adopts[0]["source"], identity.as_str(), "{doc}");
+    assert_eq!(adopts[0]["curator"], env.ident("curator").as_str(), "{doc}");
+
+    let adopted = env.mind(&["curate", "--adopt", &identity]);
+    assert!(
+        adopted.success,
+        "two claims from ONE curator are not an ambiguity: {} {}",
+        adopted.stdout, adopted.stderr
+    );
+    assert_eq!(
+        curated_by(&env, &identity),
+        Some(env.ident("curator")),
+        "and the source ends owned by that curator: {}",
+        env.sources_json()
+    );
+}
+
+#[test]
+fn one_curator_listing_two_paths_for_one_identity_is_a_mismatch_not_an_ambiguity() {
+    // spec: CUR-20
+    // Two entries in ONE curator resolving to the same identity by DIFFERENT
+    // paths: the claimant set has one member, so the ambiguity rule does not
+    // fire and the upstream check is what must catch it. A curator whose list
+    // contains a decoy path alongside the real one must not be able to launder
+    // the decoy into ownership just by also naming the real repo.
+    let env = Env::new();
+    let lib = env.repo("lib");
+    lib.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\ndescription: Review\n---\n# review\n",
+    );
+    let direct = env.mind(&["meld", &lib.spec(), "--register-only"]);
+    assert!(
+        direct.success,
+        "meld failed: {} {}",
+        direct.stdout, direct.stderr
+    );
+
+    let base_name = env.base.file_name().unwrap().to_string_lossy().into_owned();
+    let decoy = env.repo(&format!("decoy/{base_name}/lib"));
+    decoy.write_and_commit(
+        "skills/evil/SKILL.md",
+        "---\ndescription: Evil\n---\n# evil\n",
+    );
+    let curator = env.repo("curator");
+    curator.curate_list(&[
+        format!("{{ source = \"{}\" }}", lib.spec()),
+        format!("{{ source = \"{}\" }}", decoy.spec()),
+    ]);
+    let m = env.mind(&["meld", &curator.spec(), "--register-only"]);
+    assert!(m.success, "meld failed: {} {}", m.stdout, m.stderr);
+
+    let identity = env.ident("lib");
+    let plan = env.mind(&["curate", "--check", "--json"]);
+    assert!(plan.success, "curate failed: {}", plan.stderr);
+    let doc: serde_json::Value = serde_json::from_str(&plan.stdout).expect("json");
+    let adopts = doc["changes"]
+        .as_array()
+        .expect("changes")
+        .iter()
+        .filter(|c| c["kind"] == "adopt")
+        .count();
+    assert_eq!(
+        adopts, 1,
+        "the (curator, identity) pair is deduped however many entries make it: {doc}"
+    );
+
+    let refused = adopt_json_refusal(&env, &identity);
+    assert!(
+        refused.contains(&decoy.spec()) && refused.contains(&lib.spec()),
+        "the refusal must name the claim that does not match and the registered \
+         upstream: {refused}"
+    );
+    assert!(
+        !refused.contains("curators claim it"),
+        "one curator listing an identity twice is not the multi-curator \
+         ambiguity, and must not be reported as one: {refused}"
+    );
+    assert_eq!(
+        curated_by(&env, &identity),
+        None,
+        "a refused adopt writes nothing: {}",
+        env.sources_json()
+    );
+}
+
+#[test]
+fn every_adopt_refusal_is_one_json_error_envelope_that_writes_nothing() {
+    // spec: CUR-16 CLI-181 CLI-217
+    // The refusal paths were only ever exercised in text mode. Under `--json`
+    // each must be exactly one error envelope on stdout with the structured
+    // `kind` a caller branches on, and must leave `sources.json` untouched.
+    let env = Env::new();
+    let (_lib, curator) = lib_and_curator(&env, ", install = true");
+    let m = env.mind(&["meld", &curator.spec(), "--yes"]);
+    assert!(m.success, "meld failed: {} {}", m.stdout, m.stderr);
+    let plain = env.repo("plain");
+    plain.write_and_commit(
+        "skills/solo/SKILL.md",
+        "---\ndescription: Solo\n---\n# solo\n",
+    );
+    let p = env.mind(&["meld", &plain.spec(), "--register-only"]);
+    assert!(p.success, "meld failed: {} {}", p.stdout, p.stderr);
+    let before = env.sources_json();
+    assert_eq!(
+        curated_by(&env, &env.ident("lib")),
+        Some(env.ident("curator")),
+        "the fixture must start with one owned and one unowned source: {before}"
+    );
+
+    // No source carries that identity at all.
+    let missing = adopt_json_refusal(&env, "example.com/no/such");
+    assert!(
+        missing.contains("no melded source") && missing.contains("example.com/no/such"),
+        "a mistyped identity must say it is not registered: {missing}"
+    );
+    // Registered, but a curator already owns it.
+    let owned = adopt_json_refusal(&env, &env.ident("lib"));
+    assert!(
+        owned.contains("already curated by") && owned.contains(&env.ident("curator")),
+        "an owned source must name its owner: {owned}"
+    );
+    // Registered and unowned, but no curator lists it.
+    let unclaimed = adopt_json_refusal(&env, &env.ident("plain"));
+    assert!(
+        unclaimed.contains("no registered curator"),
+        "an unclaimed source must say so: {unclaimed}"
+    );
+    assert_eq!(
+        before,
+        env.sources_json(),
+        "no refusal path may write to the registry"
+    );
+}
+
+#[test]
+fn a_curator_that_lists_only_itself_offers_nothing_to_adopt() {
+    // spec: CUR-17 CUR-16
+    // CUR-17 excludes a self-listing entry from the plan; the same exclusion
+    // has to hold in `--adopt`'s own claim resolution, or a source could list
+    // itself, be adopted as its own curator, and become permanently immune to
+    // CUR-7 unlisting -- exactly the self-shield CUR-17 exists to close.
+    let env = Env::new();
+    let curator = env.repo("curator");
+    curator.curate_list(&[format!(
+        "{{ source = \"{}\", install = true }}",
+        curator.spec()
+    )]);
+    let m = env.mind(&["meld", &curator.spec(), "--register-only"]);
+    assert!(m.success, "meld failed: {} {}", m.stdout, m.stderr);
+    let identity = env.ident("curator");
+
+    let plan = env.mind(&["curate", "--check"]);
+    assert!(
+        plan.success,
+        "curate failed: {} {}",
+        plan.stdout, plan.stderr
+    );
+    assert!(
+        !plan.stdout.contains("adopt"),
+        "a self-listed entry must not be reported as an adopt candidate: {}",
+        plan.stdout
+    );
+
+    let refused = adopt_json_refusal(&env, &identity);
+    assert!(
+        refused.contains("no registered curator"),
+        "and --adopt must refuse it as unlisted, not adopt it to itself: {refused}"
+    );
+    assert_eq!(
+        curated_by(&env, &identity),
+        None,
+        "nothing may be written: {}",
+        env.sources_json()
+    );
+}
+
+#[test]
+fn adopt_applies_no_other_change_even_with_prune_and_yes() {
+    // spec: CUR-16
+    // `--adopt` is a narrow sub-mode that returns before a plan is built, so
+    // the destructive flags that would otherwise ride along on the same
+    // command line must do nothing: an unattended `curate --adopt X --prune
+    // --yes` must not also uninstall a source the plan lists for CUR-7
+    // unlisting, nor install the adopted source's items.
+    let env = Env::new();
+    let dropped = env.repo("dropped");
+    dropped.write_and_commit(
+        "skills/dropped/SKILL.md",
+        "---\ndescription: Dropped\n---\n# dropped\n",
+    );
+    let curator = env.repo("curator");
+    curator.curate_list(&[format!(
+        "{{ source = \"{}\", install = true }}",
+        dropped.spec()
+    )]);
+    let m = env.mind(&["meld", &curator.spec(), "--yes"]);
+    assert!(m.success, "meld failed: {} {}", m.stdout, m.stderr);
+    assert!(env.claude_home.join("skills/dropped").exists());
+
+    let lib = env.repo("lib");
+    lib.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\ndescription: Review\n---\n# review\n",
+    );
+    let direct = env.mind(&["meld", &lib.spec(), "--register-only"]);
+    assert!(
+        direct.success,
+        "meld failed: {} {}",
+        direct.stdout, direct.stderr
+    );
+    // The curator now drops `dropped` (a pending unlist) and claims `lib`.
+    curator.curate_list(&[format!("{{ source = \"{}\", install = true }}", lib.spec())]);
+
+    let r = env.mind(&["curate", "--adopt", &env.ident("lib"), "--prune", "--yes"]);
+    assert!(
+        r.success,
+        "curate --adopt failed: {} {}",
+        r.stdout, r.stderr
+    );
+    assert_eq!(
+        curated_by(&env, &env.ident("lib")),
+        Some(env.ident("curator")),
+        "the claim is applied: {}",
+        env.sources_json()
+    );
+    assert!(
+        env.claude_home.join("skills/dropped").exists(),
+        "--prune alongside --adopt must apply no unlist: {}",
+        r.stdout
+    );
+    let sources = env.mind(&["recall", "--sources"]);
+    assert!(
+        sources.stdout.contains(&env.ident("dropped")),
+        "nor drop the source: {}",
+        sources.stdout
+    );
+    assert!(
+        !env.claude_home.join("skills/review").exists(),
+        "--yes alongside --adopt must install nothing either: {}",
+        r.stdout
+    );
+}

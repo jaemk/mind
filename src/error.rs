@@ -397,8 +397,13 @@ pub enum MindError {
     SourceNotFound { name: String },
 
     /// CUR-16: `curate --adopt <identity>` given an identity that is not, right
-    /// now, an unowned source some registered curator lists. `reason` names
-    /// which: not registered, not listed by any curator, or already owned.
+    /// now, an unowned source exactly one registered curator lists and whose
+    /// claim resolves to the registered upstream. `reason` names which
+    /// condition failed: not registered, not listed by any curator, already
+    /// owned, claimed by more than one curator (the CUR-20 ambiguity, which
+    /// names the claimants), or claimed via a spec that resolves to a
+    /// different upstream than the source is registered from (the CUR-20
+    /// verification, which names both).
     #[error("'{name}' cannot be adopted: {reason}")]
     NotAnAdoptCandidate { name: String, reason: String },
 
