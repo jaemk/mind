@@ -297,7 +297,7 @@ as the code changes.
 
 ## See also
 
-`../../spec/curate.md` (CUR-1..19: `mind curate`, the ownership model that
+`../../spec/curate.md` (CUR-1..21: `mind curate`, the ownership model that
 scopes it to sources it or a curator registered, and `--adopt`) and
 `../../spec/discovery.md` (DSC-58, DSC-59, DSC-60, DSC-61, DSC-62, DSC-63,
 DSC-64, DSC-65, DSC-78: the `[discover].sources` registry, per-entry install

@@ -6,7 +6,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.28.0] - 2026-09-03
+## [0.28.0] - 2026-09-04
 
 ### Added
 
@@ -23,19 +23,28 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `dump` emits a file link as a `blob` URL, carrying `kind` when the instance
   recorded an explicit one (LNK-23).
 - `mind curate` (alias `reconcile`): one pass over every melded curator that
-  reports what they declare now and offers to apply it (curate.md CUR-1..19).
+  reports what they declare now and offers to apply it (curate.md CUR-1..21).
   It registers and installs entries added upstream, installs declared items a
   `sync` left uninstalled, re-pins a source whose curator directive changed,
   upgrades out-of-date curated sources, and reports entries a curator dropped.
   `--check` reports only, `--yes` applies without asking, `--prune` also
   applies the destructive `unlist` changes, `--no-sync` plans against the
-  clones on disk. `curate` only ever mutates a source it (or a curator)
-  actually registered; `--adopt <identity>` brings a source melded before
-  `curate` existed under a curator's ownership, one identity at a time and
-  never implied by `--yes`. A per-source failure (an unreadable curator, a bad
-  pin directive, a failed scan) is reported and skipped rather than aborting
-  the run, and the pre-plan fetch is scoped to curators and the sources they
-  own rather than the whole registry.
+  clones on disk. The confirmation prompt counts what the run would apply,
+  `--prune` included, and names how many of those changes are destructive
+  `unlist`s. `curate` only ever mutates a source it (or a curator) actually
+  registered; `--adopt <identity>` brings a source melded before `curate`
+  existed under a curator's ownership, one identity at a time and never
+  implied by `--yes`. Adoption resolves ownership explicitly (CUR-20): it
+  needs exactly one claiming curator, and the claim must resolve to the
+  upstream the source is registered from, so an ambiguous or mismatched claim
+  is refused rather than settled by registry order. A pin a curator declares
+  may name only a branch, a tag, or a commit (CUR-21): `refs/pull/<n>/head`
+  and other non-branch/tag namespaces are refused, since `curate` re-applies a
+  curator's directive on every run. A per-source failure (an unreadable
+  curator, an entry whose source will not parse, a bad pin directive, a failed
+  scan) is reported and skipped rather than aborting the run, and never
+  causes an `unlist`; the pre-plan fetch is scoped to curators and the sources
+  they own rather than the whole registry.
 - Sources registered from a curator's list record `curated_by` in
   `sources.json` (STO-82), the provenance `curate` reads to tell an unlisted
   source from a directly melded one, and to keep a curator from mutating a
