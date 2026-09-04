@@ -44,7 +44,10 @@ A *curator* is a registered source that declares `[discover].sources` in its
   policy (POL-11) like any meld. It then installs the entry's declared items
   (CUR-4) in the same run. That second half is the difference from `sync`, which
   registers a newly listed entry and stops, leaving an `install = true` entry
-  registered but empty until the consumer notices.
+  registered but empty until the consumer notices. A `register` change's
+  `detail` names the entry's resolved URL or filesystem path (from parsing its
+  spec), not just the curator and the item refs, so a reader of the plan or
+  `--json`'s `detail` field sees what is about to be cloned before it happens.
 - `CUR-4` `install` covers a registered curated source whose entry declares items
   that are not installed, under the ordinary precedence (DSC-62 `install-items`
   over DSC-58 `install`). An entry that declares neither is register-only by the
@@ -110,7 +113,12 @@ A *curator* is a registered source that declares `[discover].sources` in its
   prompting per change. `--yes` applies without asking. `--check` reports and
   applies nothing, and outranks `--yes` when both are given, so a `--check` run
   is always safe to paste. A non-TTY run without `--yes` reports the plan,
-  applies nothing, and says how to apply it.
+  applies nothing, and says how to apply it. The prompt counts the changes THIS
+  run would apply, `--prune` included, so it never disagrees with what
+  answering `y` does: a plan of nothing but `unlist` changes under `--prune`
+  still prompts rather than silently applying nothing, and a plan that mixes
+  them with ordinary changes names how many are destructive `unlist`s instead
+  of reporting a bare total.
 - `CUR-10` Changes apply in a fixed order: `register`, `install`, `repin`,
   `upgrade`, then `unlist`. A newly registered entry's items therefore install in
   the same run, a repin lands before the upgrade pass compares content, and a

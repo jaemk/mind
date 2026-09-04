@@ -43,15 +43,41 @@ impl Env {
     }
 
     fn mind(&self, args: &[&str]) -> Run {
-        let out = Command::new(env!("CARGO_BIN_EXE_mind"))
-            .args(args)
+        self.mind_env(args, &[], None)
+    }
+
+    /// `mind` with extra environment and optional scripted stdin. With
+    /// `("MIND_TTY", "1")` (HOOK-109, the same seam `cli_hooks.rs` and
+    /// `cli_install_items.rs` use) plus a reply, the CUR-9 confirmation prompt
+    /// is drivable from a headless test: the child gets a pipe, not a
+    /// terminal, so without the override `hook::is_tty()` is false and
+    /// `should_apply` never asks. `stdin: None` gives the child `/dev/null`,
+    /// whose EOF `read_confirm` reads as No.
+    fn mind_env(&self, args: &[&str], envs: &[(&str, &str)], stdin: Option<&str>) -> Run {
+        use std::io::Write;
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_mind"));
+        cmd.args(args)
             .env("MIND_HOME", &self.mind_home)
             .env("CLAUDE_HOME", &self.claude_home)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .stdin(Stdio::null())
-            .output()
-            .expect("run mind");
+            .stdin(match stdin {
+                Some(_) => Stdio::piped(),
+                None => Stdio::null(),
+            });
+        for (k, v) in envs {
+            cmd.env(k, v);
+        }
+        let mut child = cmd.spawn().expect("run mind");
+        if let Some(text) = stdin {
+            child
+                .stdin
+                .as_mut()
+                .expect("piped stdin")
+                .write_all(text.as_bytes())
+                .expect("write stdin");
+        }
+        let out = child.wait_with_output().expect("wait for mind");
         Run {
             stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
@@ -1245,5 +1271,273 @@ fn a_skipped_entry_strips_invisible_unicode_from_the_identity_it_names() {
     assert!(
         named.contains("curator"),
         "while still naming the curator: {named:?}"
+    );
+}
+
+#[test]
+fn register_detail_names_the_resolved_url_or_path() {
+    // spec: CUR-1 CUR-3
+    // A `register` change's `detail` must name the entry's resolved URL/path
+    // (from parsing its spec), not just the curator identity and the item
+    // refs, so a reader sees what is about to be cloned.
+    let env = Env::new();
+    let curator = env.repo("curator");
+    curator.write_and_commit("mind.toml", "[source]\ndescription = \"curator\"\n");
+    let m = env.mind(&["meld", &curator.spec(), "--register-only"]);
+    assert!(m.success, "meld failed: {} {}", m.stdout, m.stderr);
+
+    let lib = env.repo("lib");
+    lib.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\ndescription: Review the diff\n---\n# review\n",
+    );
+    curator.curate_list(&[format!("{{ source = \"{}\", install = true }}", lib.spec())]);
+
+    let plan = env.mind(&["curate", "--check", "--json"]);
+    assert!(
+        plan.success,
+        "curate failed: {} {}",
+        plan.stdout, plan.stderr
+    );
+    let doc: serde_json::Value = serde_json::from_str(&plan.stdout).expect("json");
+    let detail = doc["changes"][0]["detail"].as_str().expect("detail field");
+    assert_eq!(doc["changes"][0]["kind"], "register");
+    assert!(
+        detail.contains(&lib.spec()),
+        "the register detail must name the resolved path: {detail:?}"
+    );
+
+    // Also visible in the plain-text plan, not just `--json`.
+    let text_plan = env.mind(&["curate", "--check"]);
+    assert!(
+        text_plan.stdout.contains(&lib.spec()),
+        "the printed plan must also name the resolved path: {}",
+        text_plan.stdout
+    );
+}
+
+#[test]
+fn a_prune_only_plan_still_prompts_and_applies_on_yes() {
+    // spec: CUR-9 CUR-7 HOOK-109
+    // The confirmation gate counted applicable changes with `prune = false`
+    // while the apply used the real flag, so a plan of nothing but `unlist`
+    // changes under `--prune` on a terminal short-circuited to "nothing
+    // applicable": no prompt, no apply, no error, exit 0.
+    let env = Env::new();
+    let (_lib, curator) = lib_and_curator(&env, ", install = true");
+    let m = env.mind(&["meld", &curator.spec(), "--yes"]);
+    assert!(m.success, "meld failed: {} {}", m.stdout, m.stderr);
+    assert!(env.claude_home.join("skills/review").exists());
+
+    // The curator drops the entry: the whole plan is now one `unlist`.
+    curator.curate_list(&[]);
+
+    let r = env.mind_env(&["curate", "--prune"], &[("MIND_TTY", "1")], Some("y\n"));
+    assert!(
+        r.success,
+        "curate --prune failed: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stdout.contains("apply these 1 change(s)"),
+        "a prune-only plan must still reach the confirmation prompt: {}",
+        r.stdout
+    );
+    assert!(
+        !env.claude_home.join("skills/review").exists(),
+        "answering yes must apply the unlist: {}",
+        r.stdout
+    );
+    let sources = env.mind(&["recall", "--sources"]);
+    assert!(
+        !sources.stdout.contains(&env.ident("lib")),
+        "and drop the source: {}",
+        sources.stdout
+    );
+}
+
+#[test]
+fn a_prune_only_plan_answered_no_applies_nothing() {
+    // spec: CUR-9 CUR-7 HOOK-109
+    // The other side of the gate: reaching the prompt is not the same as
+    // applying, so `n` must leave the source and its items in place.
+    let env = Env::new();
+    let (_lib, curator) = lib_and_curator(&env, ", install = true");
+    let m = env.mind(&["meld", &curator.spec(), "--yes"]);
+    assert!(m.success, "meld failed: {} {}", m.stdout, m.stderr);
+    curator.curate_list(&[]);
+
+    let r = env.mind_env(&["curate", "--prune"], &[("MIND_TTY", "1")], Some("n\n"));
+    assert!(
+        r.success,
+        "curate --prune failed: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        env.claude_home.join("skills/review").exists(),
+        "a declined prompt must uninstall nothing: {}",
+        r.stdout
+    );
+    let sources = env.mind(&["recall", "--sources"]);
+    assert!(
+        sources.stdout.contains(&env.ident("lib")),
+        "nor drop the source: {}",
+        sources.stdout
+    );
+}
+
+#[test]
+fn a_mixed_prune_plan_names_the_destructive_changes_in_the_prompt() {
+    // spec: CUR-9 CUR-7 HOOK-109
+    // With `prune = false` hardcoded in the count, the prompt for this plan
+    // read "apply these 1 change(s) now?" while answering yes ALSO uninstalled
+    // and dropped a second source. The count must match what applies, and the
+    // destructive part of it must be named.
+    let env = Env::new();
+    let a = env.repo("lib-a");
+    a.write_and_commit("skills/a/SKILL.md", "---\ndescription: A\n---\n# a\n");
+    let b = env.repo("lib-b");
+    b.write_and_commit("skills/b/SKILL.md", "---\ndescription: B\n---\n# b\n");
+    let curator = env.repo("curator");
+    curator.curate_list(&[
+        format!("{{ source = \"{}\", install = true }}", a.spec()),
+        format!("{{ source = \"{}\", install = true }}", b.spec()),
+    ]);
+    let m = env.mind(&["meld", &curator.spec(), "--yes"]);
+    assert!(m.success, "meld failed: {} {}", m.stdout, m.stderr);
+    assert!(env.claude_home.join("skills/a").exists());
+    assert!(env.claude_home.join("skills/b").exists());
+
+    // One pending `install` (a declared item forgotten) ...
+    let forget = env.mind(&["forget", "skill:a", "--yes"]);
+    assert!(
+        forget.success,
+        "forget failed: {} {}",
+        forget.stdout, forget.stderr
+    );
+    // ... and one pending `unlist` (lib-b dropped from the list).
+    curator.curate_list(&[format!("{{ source = \"{}\", install = true }}", a.spec())]);
+
+    let r = env.mind_env(&["curate", "--prune"], &[("MIND_TTY", "1")], Some("y\n"));
+    assert!(
+        r.success,
+        "curate --prune failed: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stdout.contains("apply these 2 change(s)"),
+        "the prompt must count every change this run would apply: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("1 `unlist`") && r.stdout.contains("uninstall"),
+        "and say that one of them uninstalls a source: {}",
+        r.stdout
+    );
+    assert!(
+        env.claude_home.join("skills/a").exists(),
+        "yes must apply the install: {}",
+        r.stdout
+    );
+    assert!(
+        !env.claude_home.join("skills/b").exists(),
+        "and the unlist: {}",
+        r.stdout
+    );
+}
+
+#[test]
+fn json_mode_applies_nothing_and_prompts_nobody_even_with_prune() {
+    // spec: CUR-9 CUR-13
+    // `should_apply` now reads the whole flag set, so the `--prune` count is
+    // real; the json/non-TTY bail must still come FIRST. A `--json` run on a
+    // terminal with an answer already waiting on stdin is the adversarial
+    // shape: there is no prompt to answer, so the run must report and stop.
+    let env = Env::new();
+    let (_lib, curator) = lib_and_curator(&env, ", install = true");
+    let m = env.mind(&["meld", &curator.spec(), "--yes"]);
+    assert!(m.success, "meld failed: {} {}", m.stdout, m.stderr);
+    assert!(env.claude_home.join("skills/review").exists());
+    curator.curate_list(&[]); // the whole plan is now one `unlist`
+
+    let r = env.mind_env(
+        &["curate", "--prune", "--json"],
+        &[("MIND_TTY", "1")],
+        Some("y\n"),
+    );
+    assert!(r.success, "curate failed: {} {}", r.stdout, r.stderr);
+    let doc: serde_json::Value = serde_json::from_str(&r.stdout).expect("json");
+    assert_eq!(doc["outcome"], "pending", "{doc}");
+    assert_eq!(doc["changes"][0]["kind"], "unlist", "{doc}");
+    assert_eq!(
+        doc["applied"],
+        serde_json::json!([]),
+        "--json without --yes applies nothing, --prune or not: {doc}"
+    );
+    assert!(
+        !r.stdout.contains("apply these"),
+        "and never prompts: {}",
+        r.stdout
+    );
+    assert!(
+        env.claude_home.join("skills/review").exists(),
+        "the source's items stay installed: {}",
+        r.stdout
+    );
+
+    // The same plan in text mode on a non-TTY: reported, not applied, with the
+    // note counting what `--prune` WOULD apply.
+    let text = env.mind(&["curate", "--prune"]);
+    assert!(
+        text.success,
+        "curate failed: {} {}",
+        text.stdout, text.stderr
+    );
+    assert!(
+        text.stdout.contains("nothing applied") && text.stdout.contains("1 change(s)"),
+        "a non-TTY run says how to apply the change it counted: {}",
+        text.stdout
+    );
+    assert!(
+        env.claude_home.join("skills/review").exists(),
+        "and applies nothing: {}",
+        text.stdout
+    );
+}
+
+#[test]
+fn a_prune_run_whose_plan_has_no_unlist_prompts_without_the_destructive_wording() {
+    // spec: CUR-9 CUR-7
+    // The other end of the destructive-count wording: `--prune` given on a
+    // plan that contains no `unlist` at all must read exactly as it does
+    // without the flag. A prompt that warned about uninstalls on a plan that
+    // performs none teaches the user to ignore the warning.
+    let env = Env::new();
+    let (_lib, curator) = lib_and_curator(&env, ", install = true");
+    let m = env.mind(&["meld", &curator.spec(), "--yes"]);
+    assert!(m.success, "meld failed: {} {}", m.stdout, m.stderr);
+    let forget = env.mind(&["forget", "skill:review", "--yes"]);
+    assert!(
+        forget.success,
+        "forget failed: {} {}",
+        forget.stdout, forget.stderr
+    );
+
+    let r = env.mind_env(&["curate", "--prune"], &[("MIND_TTY", "1")], Some("y\n"));
+    assert!(r.success, "curate failed: {} {}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("apply these 1 change(s) now?"),
+        "a prune run with no unlist must use the plain wording: {}",
+        r.stdout
+    );
+    assert!(
+        !r.stdout.contains("unlist"),
+        "nothing in the run mentions unlisting: {}",
+        r.stdout
+    );
+    assert!(
+        env.claude_home.join("skills/review").exists(),
+        "and answering yes still applies the install: {}",
+        r.stdout
     );
 }

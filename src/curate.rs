@@ -169,7 +169,7 @@ pub fn run(paths: &Paths, flags: CurateFlags) -> Result<()> {
     if flags.check {
         return finish(&plan, Vec::new(), skipped, flags);
     }
-    if !should_apply(&plan, flags.yes)? {
+    if !should_apply(&plan, &flags)? {
         return finish(&plan, Vec::new(), skipped, flags);
     }
 
@@ -374,8 +374,8 @@ fn report(plan: &[Change], prune: bool) {
 }
 
 /// The single confirmation gate (CUR-9).
-fn should_apply(plan: &[Change], yes: bool) -> Result<bool> {
-    if yes {
+fn should_apply(plan: &[Change], flags: &CurateFlags) -> Result<bool> {
+    if flags.yes {
         return Ok(true);
     }
     // spec: CUR-9 -- json mode and a non-TTY run apply nothing without `--yes`;
@@ -383,11 +383,39 @@ fn should_apply(plan: &[Change], yes: bool) -> Result<bool> {
     if crate::render::ctx().json || !crate::hook::is_tty() {
         return Ok(false);
     }
-    let applicable = plan.iter().filter(|c| applies(c, false)).count();
+    // spec: CUR-9 CUR-7 -- count what THIS run would apply, `--prune`
+    // included. `apply` and `finish` both read `flags.prune`, so a count taken
+    // with `prune = false` disagrees with both: a plan of nothing but `unlist`
+    // changes under `--prune` would short-circuit to "no applicable change"
+    // and apply nothing without ever prompting, and a mixed plan would
+    // understate what answering `y` authorizes.
+    let applicable = plan.iter().filter(|c| applies(c, flags.prune)).count();
     if applicable == 0 {
         return Ok(false);
     }
-    commands::confirm_default_yes(&format!("apply these {applicable} change(s) now?"))
+    let destructive = plan
+        .iter()
+        .filter(|c| applies(c, flags.prune) && matches!(c.action, Action::Unlist { .. }))
+        .count();
+    commands::confirm_default_yes(&confirm_prompt(applicable, destructive))
+}
+
+/// The CUR-9 prompt text. Pure, so the destructive-change wording is testable
+/// without a terminal.
+///
+/// `destructive` is how many of the counted changes are `--prune`-driven
+/// `unlist`s, which uninstall a source's items and drop the source (CUR-7). A
+/// bare count would let one `[Y/n]` answer authorize that alongside ordinary
+/// installs without ever naming it, so it is called out separately.
+fn confirm_prompt(applicable: usize, destructive: usize) -> String {
+    if destructive == 0 {
+        return format!("apply these {applicable} change(s) now?");
+    }
+    format!(
+        "apply these {applicable} change(s) now, including {destructive} `unlist` \
+         change(s) that --prune applies by uninstalling that source's items and \
+         dropping it?"
+    )
 }
 
 /// Whether a change is one this run would apply, as opposed to one it only
@@ -721,17 +749,26 @@ fn build_plan(paths: &Paths, registry: &Registry) -> Result<(Vec<Change>, Vec<Sk
                 if !proposed_register.insert(spec.name.clone()) {
                     continue;
                 }
+                // spec: CUR-3 -- name the resolved URL/path so a reader of the
+                // plan (or `--json`'s `detail`) sees what is about to be
+                // cloned, not just the curator and the item refs.
                 let detail = match declared_installs(&entry) {
                     Some(Some(refs)) => format!(
-                        "listed by {}; register and install {}",
+                        "listed by {}; register {} and install {}",
                         strip_ansi(&curator.name),
+                        strip_ansi(&spec.url),
                         strip_ansi(&refs.join(", "))
                     ),
                     Some(None) => format!(
-                        "listed by {}; register and install its items",
-                        strip_ansi(&curator.name)
+                        "listed by {}; register {} and install its items",
+                        strip_ansi(&curator.name),
+                        strip_ansi(&spec.url)
                     ),
-                    None => format!("listed by {}; register", strip_ansi(&curator.name)),
+                    None => format!(
+                        "listed by {}; register {}",
+                        strip_ansi(&curator.name),
+                        strip_ansi(&spec.url)
+                    ),
                 };
                 plan.push(Change::new(
                     "register",
@@ -1052,5 +1089,27 @@ mod tests {
         assert!(!change.source.contains('\u{200B}'));
         assert!(change.curator.contains("curator"));
         assert!(change.source.contains("lib"));
+    }
+
+    // spec: CUR-9 CUR-7
+    // The prompt must say when a `y` also uninstalls and drops sources. With
+    // the bare wording, one answer covered an install and a prune-driven
+    // unlist identically.
+    #[test]
+    fn confirm_prompt_names_destructive_unlists_only_when_there_are_some() {
+        assert_eq!(
+            confirm_prompt(3, 0),
+            "apply these 3 change(s) now?",
+            "with no prune-driven unlist the wording is unchanged"
+        );
+        let mixed = confirm_prompt(2, 1);
+        assert!(
+            mixed.contains("2 change(s)") && mixed.contains("1 `unlist`"),
+            "a mixed plan must count both: {mixed}"
+        );
+        assert!(
+            mixed.contains("uninstall") && mixed.contains("--prune"),
+            "and say what applying them does: {mixed}"
+        );
     }
 }
