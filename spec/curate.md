@@ -206,6 +206,27 @@ A *curator* is a registered source that declares `[discover].sources` in its
     that happens to derive the same `local/<parent>/<dir>` identity) is
     refused, naming both, so a curator cannot capture a source by listing
     something that only shares its name.
+- `CUR-21` A pin directive a CURATOR declares (DSC-59) may name only a branch,
+  a tag, or a commit: a ref value that starts with `refs/` must continue
+  `refs/heads/<branch>` or `refs/tags/<tag>`, while a plain branch/tag name
+  (no `refs/` prefix) and a commit sha are always allowed. Anything else under
+  `refs/` -- `refs/pull/<n>/head` above all, and equally `refs/remotes/*` and
+  `refs/changes/*` -- is refused: those name content that is on no branch of
+  the repo and that, on the common forges, anyone at all can create and choose
+  the contents of, on a repo the consumer otherwise trusts. The allowlist
+  applies uniformly to a curator-declared pin regardless of whether the source
+  it names is already installed and being re-pinned, or not yet registered and
+  about to be registered under that pin: a refused directive produces no
+  `repin` change on an already-registered source, and no `register` change on
+  one that is not yet registered, so the source is not cloned at all rather
+  than being cloned once with an unchecked pin. Either way it is reported
+  through the CUR-15 tolerance path (a `skipped` entry and, in text mode, a
+  `warning:` line) so one bad declaration degrades to a skipped change rather
+  than failing the run, and every other change is still planned. The
+  restriction is on curator-sourced pins only, because `curate` re-applies a
+  curator's directive on every run: a consumer's own `meld --pin`, the DSC-57
+  re-walk, and managed policy pins are the user's one-time choice and keep the
+  wider `git.rs` ref validation.
 - `CUR-18` Every field of a `Change` that can carry curator-controlled text --
   `curator` (the curator's identity), `source` (the acted-on identity), and
   `detail` (an `install-items` list, a pin directive's value, a namespace) --

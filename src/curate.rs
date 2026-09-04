@@ -886,6 +886,36 @@ fn build_plan(paths: &Paths, registry: &Registry) -> Result<(Vec<Change>, Vec<Sk
                 if !proposed_register.insert(spec.name.clone()) {
                     continue;
                 }
+                // spec: CUR-21 -- the same ref allowlist applies before a
+                // not-yet-registered entry is proposed for `register`: a
+                // curator's `follow-branch`/`ref`/`tag` directive is about to
+                // become the pin `meld_curated_entry` clones with, so this is
+                // the register-path counterpart of the repin-path check below.
+                // Left unchecked here, a curator could point a brand-new
+                // entry at `refs/pull/<n>/head` and have it happen to fail
+                // only because `git clone --branch` cannot resolve it -- an
+                // accident of `git.rs`, not a policy decision. Same CUR-15
+                // tolerance as the repin site: no `register` change, a
+                // `skipped` entry and a warning, the run continues.
+                match entry.pin_directive(&toml_path) {
+                    Ok(Some(pin)) => {
+                        if let Err(e) = curator_pin_allowed(&pin, &toml_path) {
+                            warn_skip(&spec.name, "ignored the pin directive", &e);
+                            skipped
+                                .push(SkippedEntry::new(spec.name.clone(), "pin_ref_not_allowed"));
+                            continue;
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        warn_skip(&spec.name, "could not read the pin directive", &e);
+                        skipped.push(SkippedEntry::new(
+                            spec.name.clone(),
+                            "pin_directive_invalid",
+                        ));
+                        continue;
+                    }
+                }
                 // spec: CUR-3 -- name the resolved URL/path so a reader of the
                 // plan (or `--json`'s `detail`) sees what is about to be
                 // cloned, not just the curator and the item refs.
@@ -983,21 +1013,34 @@ fn build_plan(paths: &Paths, registry: &Registry) -> Result<(Vec<Change>, Vec<Sk
             // spec: CUR-5 -- the entry's pin directive against the recorded pin.
             match entry.pin_directive(&toml_path) {
                 Ok(Some(pin)) if pin != registered.pin => {
-                    plan.push(Change::new(
-                        "repin",
-                        curator.name.clone(),
-                        registered.name.clone(),
-                        format!(
-                            "{} declares {}; registered as {}",
-                            strip_ansi(&curator.name),
-                            strip_ansi(&commands::pin_description(&pin)),
-                            strip_ansi(&commands::pin_description(&registered.pin))
-                        ),
-                        Action::Repin {
-                            source: registered.name.clone(),
-                            pin,
-                        },
-                    ));
+                    // spec: CUR-21 -- a curator may not point the clone at a
+                    // ref outside refs/heads and refs/tags. Treated exactly
+                    // like the CUR-15 tolerance cases: no `repin` change, a
+                    // `skipped` entry and a warning, and every other change in
+                    // the run still planned.
+                    if let Err(e) = curator_pin_allowed(&pin, &toml_path) {
+                        warn_skip(&registered.name, "ignored the pin directive", &e);
+                        skipped.push(SkippedEntry::new(
+                            registered.name.clone(),
+                            "pin_ref_not_allowed",
+                        ));
+                    } else {
+                        plan.push(Change::new(
+                            "repin",
+                            curator.name.clone(),
+                            registered.name.clone(),
+                            format!(
+                                "{} declares {}; registered as {}",
+                                strip_ansi(&curator.name),
+                                strip_ansi(&commands::pin_description(&pin)),
+                                strip_ansi(&commands::pin_description(&registered.pin))
+                            ),
+                            Action::Repin {
+                                source: registered.name.clone(),
+                                pin,
+                            },
+                        ));
+                    }
                 }
                 Ok(_) => {}
                 Err(e) => {
@@ -1124,6 +1167,53 @@ fn adopt_detail(curator: &str, identity: &str) -> String {
         strip_ansi(curator),
         crate::error::shell_quote(&strip_ansi(identity))
     )
+}
+
+/// Whether a CURATOR-declared pin (CUR-21) names something `curate` will
+/// re-pin to. `git.rs`'s `validate_ref_value` decides whether a ref value is
+/// *well formed*; this decides whether it is a ref a curator may point a
+/// consumer's clone at, which is a narrower question and only asked here.
+///
+/// A value under `refs/` must be `refs/heads/<x>` or `refs/tags/<x>`. Anything
+/// else in that namespace -- `refs/pull/<n>/head` above all, but equally
+/// `refs/remotes/*` and Gerrit's `refs/changes/*` -- names content that is not
+/// on any branch of the repo: on most forges anyone at all can create a pull
+/// request and therefore choose what `refs/pull/<n>/head` resolves to, on a
+/// repo the consumer otherwise trusts. A plain branch/tag name (no `refs/`
+/// prefix) and a commit sha carry no such namespace and stay allowed.
+///
+/// This is checked at both points a curator's directive is about to take
+/// effect: where it would become a `repin` change on an already-registered
+/// source, and where it would become part of a `register` change proposing a
+/// brand-new one. It is NOT checked in `validate_ref_value` or
+/// `pin_directive`: those are shared with the consumer's own `meld --pin`, the
+/// DSC-57 re-walk, and managed policy, where the ref is the user's own
+/// one-time choice. A curator's pin is different in kind -- `curate`
+/// re-applies it on every run, so it is a standing, repeating channel for
+/// substituting content, whether the source is new or already installed.
+fn curator_pin_allowed(pin: &Pin, toml_path: &std::path::Path) -> Result<()> {
+    let value = match pin {
+        Pin::DefaultBranch => return Ok(()),
+        Pin::FollowBranch(v) | Pin::Tag(v) | Pin::Ref(v) => v.as_str(),
+    };
+    let Some(rest) = value.strip_prefix("refs/") else {
+        return Ok(()); // a plain branch/tag name or a commit sha
+    };
+    let named = |ns: &str| {
+        rest.strip_prefix(ns)
+            .is_some_and(|name| !name.trim().is_empty())
+    };
+    if named("heads/") || named("tags/") {
+        return Ok(());
+    }
+    Err(MindError::MindToml {
+        path: toml_path.to_path_buf(),
+        msg: format!(
+            "curator-declared pin '{}' is not a branch or a tag; a curator may pin only \
+             refs/heads/<branch>, refs/tags/<tag>, a plain branch/tag name, or a commit",
+            strip_ansi(value)
+        ),
+    })
 }
 
 /// A per-source or per-entry failure CUR-15 kept from aborting the plan:
@@ -1420,5 +1510,91 @@ mod tests {
              directory the source is registered from"
         );
         assert!(!same_upstream(&local, &host_local));
+    }
+
+    fn pin_check(pin: Pin) -> Result<()> {
+        curator_pin_allowed(&pin, std::path::Path::new("mind.toml"))
+    }
+
+    // spec: CUR-21
+    // The permissive half: what a curator legitimately pins to. A plain
+    // branch/tag name is by far the common form, and the fully qualified
+    // `refs/heads` / `refs/tags` spellings name the same things.
+    #[test]
+    fn curator_pin_allows_plain_names_shas_and_refs_heads_or_tags() {
+        assert!(pin_check(Pin::DefaultBranch).is_ok());
+        assert!(pin_check(Pin::FollowBranch("main".into())).is_ok());
+        assert!(pin_check(Pin::FollowBranch("release/2.0".into())).is_ok());
+        assert!(pin_check(Pin::Tag("v1.2.3".into())).is_ok());
+        assert!(
+            pin_check(Pin::Ref("0123456789abcdef0123456789abcdef01234567".into())).is_ok(),
+            "a commit sha names immutable content and is always allowed"
+        );
+        assert!(pin_check(Pin::FollowBranch("refs/heads/main".into())).is_ok());
+        assert!(pin_check(Pin::Tag("refs/tags/v1.2.3".into())).is_ok());
+        assert!(
+            pin_check(Pin::Ref("refs/heads/main".into())).is_ok(),
+            "the namespace is what is checked, not which directive declared it"
+        );
+    }
+
+    // spec: CUR-21
+    // The strict half, and the reason the rule exists: `refs/pull/<n>/head` is
+    // writable by anyone who can open a pull request, on a repo the consumer
+    // otherwise trusts, and `curate` re-applies a curator's pin on EVERY run.
+    // `git.rs`'s `validate_ref_value` accepts all of these (they are
+    // well-formed refs), which is exactly why the check lives here.
+    #[test]
+    fn curator_pin_rejects_pull_remotes_and_other_ref_namespaces() {
+        for bad in [
+            "refs/pull/9999/head",
+            "refs/pull/9999/merge",
+            "refs/remotes/origin/main",
+            "refs/changes/12/34/1",
+            "refs/notes/commits",
+            "refs/stash",
+            "refs/heads",      // the namespace itself names no branch
+            "refs/tags/",      // ...nor does an empty tag name
+            "refs/headsfoo/x", // a prefix match is not a namespace match
+        ] {
+            assert!(
+                crate::git::validate_ref_value(bad).is_ok(),
+                "the fixture must be a ref the SHARED validator accepts, or \
+                 this narrower rule proves nothing: {bad}"
+            );
+            assert!(
+                pin_check(Pin::FollowBranch(bad.to_string())).is_err(),
+                "a curator must not be able to pin {bad}"
+            );
+            assert!(
+                pin_check(Pin::Ref(bad.to_string())).is_err(),
+                "nor via pin-ref: {bad}"
+            );
+            assert!(
+                pin_check(Pin::Tag(bad.to_string())).is_err(),
+                "nor via pin-tag: {bad}"
+            );
+        }
+    }
+
+    // spec: CUR-21
+    // The refusal names the offending value, and sanitizes it: the ref is
+    // curator-controlled text that reaches the text-mode `warning:` line
+    // through `warn_skip`, which prints the error directly (CUR-18).
+    #[test]
+    fn curator_pin_refusal_names_the_ref_with_ansi_stripped() {
+        let err = pin_check(Pin::FollowBranch(
+            "refs/pull/9999/\u{1b}[31mhead\u{1b}[0m".into(),
+        ))
+        .expect_err("must be refused");
+        let text = err.to_string();
+        assert!(
+            text.contains("refs/pull/9999/head"),
+            "the refusal must name the ref: {text}"
+        );
+        assert!(
+            !text.contains('\u{1b}'),
+            "curator-controlled text must be sanitized: {text:?}"
+        );
     }
 }

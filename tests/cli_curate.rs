@@ -2209,3 +2209,301 @@ fn adopt_applies_no_other_change_even_with_prune_and_yes() {
         r.stdout
     );
 }
+
+/// Rewrite `identity`'s recorded pin in `sources.json` to `Pin::Ref(value)`.
+///
+/// Some registry states cannot be produced by any command this binary offers
+/// (a pin `git clone` never fetches, a value a newer rule now refuses), yet a
+/// registry written by an older binary can hold them. Writing the state
+/// directly is the only hermetic way to plan against it.
+fn set_recorded_pin(env: &Env, identity: &str, value: &str) {
+    let path = env.mind_home.join("sources.json");
+    let mut doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("sources.json"))
+            .expect("sources.json parses");
+    let source = doc["sources"]
+        .as_array_mut()
+        .expect("sources array")
+        .iter_mut()
+        .find(|s| s["name"] == identity)
+        .expect("the fixture must have registered that identity");
+    source["pin"] = serde_json::json!({ "kind": "ref", "value": value });
+    std::fs::write(&path, serde_json::to_string_pretty(&doc).unwrap()).expect("write sources.json");
+}
+
+#[test]
+fn a_curator_pin_outside_refs_heads_or_tags_is_skipped_not_applied() {
+    // spec: CUR-21 CUR-15
+    // `refs/pull/<n>/head` is a well-formed ref that `validate_ref_value`
+    // accepts, points at content anyone can push to a repo the consumer
+    // otherwise trusts, and `curate` re-applies a curator's pin on every run.
+    let env = Env::new();
+    let (lib, curator) = lib_and_curator(&env, ", install = true");
+    let m = env.mind(&["meld", &curator.spec(), "--yes"]);
+    assert!(m.success, "meld failed: {} {}", m.stdout, m.stderr);
+    assert!(env.claude_home.join("skills/review").exists());
+
+    // Control: an ordinary branch directive DOES propose a repin, so the
+    // refusal below is the rule at work rather than a fixture that would have
+    // proposed nothing either way.
+    curator.curate_list(&[format!(
+        "{{ source = \"{}\", install = true, follow-branch = \"main\" }}",
+        lib.spec()
+    )]);
+    let ok = env.mind(&["curate", "--check"]);
+    assert!(ok.success, "curate failed: {} {}", ok.stdout, ok.stderr);
+    assert!(
+        ok.stdout.contains("repin"),
+        "a branch directive must propose a repin: {}",
+        ok.stdout
+    );
+
+    curator.curate_list(&[format!(
+        "{{ source = \"{}\", install = true, follow-branch = \"refs/pull/9999/head\" }}",
+        lib.spec()
+    )]);
+    let r = env.mind(&["curate", "--check"]);
+    assert!(
+        r.success,
+        "one refused pin must not fail the run: {} {}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        !r.stdout.contains("repin"),
+        "a refs/pull pin must propose no repin: {}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("skipped") && r.stdout.contains(&env.ident("lib")),
+        "the refused directive must be reported as skipped: {}",
+        r.stdout
+    );
+    assert!(
+        r.stderr.contains("warning:") && r.stderr.contains("refs/pull/9999/head"),
+        "and warned about by name: {}",
+        r.stderr
+    );
+
+    let doc: serde_json::Value =
+        serde_json::from_str(&env.mind(&["curate", "--json", "--check"]).stdout).expect("json");
+    assert_eq!(
+        doc["skipped"][0]["reason"], "pin_ref_not_allowed",
+        "the CUR-13 skipped slug must name the cause: {doc}"
+    );
+    assert!(
+        doc["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c["kind"] != "repin"),
+        "and no repin change is emitted: {doc}"
+    );
+}
+
+#[test]
+fn a_curator_pin_outside_refs_heads_or_tags_blocks_registering_a_new_entry() {
+    // spec: CUR-21 CUR-15
+    // The repin-path test above covers an ALREADY-registered source. This
+    // covers the other branch of `build_plan`: an entry no one has registered
+    // yet. Left unchecked there, `curator_pin_allowed` would only ever run on
+    // a repin, so a curator's `refs/pull/<n>/head` on a brand-new entry would
+    // reach `meld_curated_entry` unexamined -- happening to fail only because
+    // `git clone --branch` cannot resolve it, not because policy refused it.
+    let env = Env::new();
+    let curator = env.repo("curator");
+    curator.write_and_commit("mind.toml", "[source]\ndescription = \"curator\"\n");
+    let m = env.mind(&["meld", &curator.spec(), "--register-only"]);
+    assert!(m.success, "meld failed: {} {}", m.stdout, m.stderr);
+
+    let lib = env.repo("lib");
+    lib.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\ndescription: Review the diff\n---\n# review\n",
+    );
+    curator.curate_list(&[format!(
+        "{{ source = \"{}\", install = true, follow-branch = \"refs/pull/9999/head\" }}",
+        lib.spec()
+    )]);
+
+    let plan = env.mind(&["curate", "--check"]);
+    assert!(
+        plan.success,
+        "one refused pin must not fail the run: {} {}",
+        plan.stdout, plan.stderr
+    );
+    assert!(
+        !plan.stdout.contains("register"),
+        "a refs/pull pin must propose no register: {}",
+        plan.stdout
+    );
+    assert!(
+        plan.stdout.contains("skipped") && plan.stdout.contains(&env.ident("lib")),
+        "the refused entry must be reported as skipped: {}",
+        plan.stdout
+    );
+    assert!(
+        plan.stderr.contains("warning:") && plan.stderr.contains("refs/pull/9999/head"),
+        "and warned about by name: {}",
+        plan.stderr
+    );
+
+    let doc: serde_json::Value =
+        serde_json::from_str(&env.mind(&["curate", "--json", "--check"]).stdout).expect("json");
+    assert_eq!(
+        doc["skipped"][0]["reason"], "pin_ref_not_allowed",
+        "the CUR-13 skipped slug must name the cause: {doc}"
+    );
+    assert!(
+        doc["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c["kind"] != "register"),
+        "and no register change is emitted: {doc}"
+    );
+
+    // Even with `--yes`, the entry must never be cloned/installed: a refused
+    // register-path pin is not a "register with an unchecked pin", it is no
+    // change at all for that entry.
+    let applied = env.mind(&["curate", "--yes"]);
+    assert!(applied.success, "curate --yes failed: {}", applied.stderr);
+    assert!(
+        !env.sources_json().contains(&env.ident("lib")),
+        "the source must never be registered: {}",
+        env.sources_json()
+    );
+    assert!(
+        !env.claude_home.join("skills/review").exists(),
+        "and its items must never be installed: {}",
+        applied.stdout
+    );
+}
+
+#[test]
+fn a_curator_pin_tag_or_pin_ref_outside_refs_heads_or_tags_is_skipped_too() {
+    // spec: CUR-21 CUR-15
+    // CUR-21 is a rule about the ref VALUE, so it must hold whichever
+    // directive carries it. The stage's own integration test covered
+    // `follow-branch` only; a curator that could smuggle
+    // `refs/pull/<n>/head` in through `pin-ref` would have exactly the
+    // standing substitution channel the rule exists to close.
+    let env = Env::new();
+    let (lib, curator) = lib_and_curator(&env, ", install = true");
+    let m = env.mind(&["meld", &curator.spec(), "--yes"]);
+    assert!(m.success, "meld failed: {} {}", m.stdout, m.stderr);
+
+    // Control: `pin-tag` DOES reach the repin path with an ordinary value, so
+    // the refusals below are the rule at work and not an inert directive.
+    curator.curate_list(&[format!(
+        "{{ source = \"{}\", install = true, pin-tag = \"v1.0\" }}",
+        lib.spec()
+    )]);
+    let ok = env.mind(&["curate", "--check"]);
+    assert!(ok.success, "curate failed: {} {}", ok.stdout, ok.stderr);
+    assert!(
+        ok.stdout.contains("repin"),
+        "a plain tag directive must propose a repin: {}",
+        ok.stdout
+    );
+
+    for (directive, value) in [
+        ("pin-ref", "refs/pull/9999/head"),
+        ("pin-tag", "refs/remotes/origin/main"),
+    ] {
+        curator.curate_list(&[format!(
+            "{{ source = \"{}\", install = true, {directive} = \"{value}\" }}",
+            lib.spec()
+        )]);
+        let r = env.mind(&["curate", "--check", "--json"]);
+        assert!(
+            r.success,
+            "one refused pin must not fail the run ({directive}): {} {}",
+            r.stdout, r.stderr
+        );
+        let doc: serde_json::Value = serde_json::from_str(&r.stdout).expect("json");
+        assert!(
+            doc["changes"]
+                .as_array()
+                .expect("changes")
+                .iter()
+                .all(|c| c["kind"] != "repin"),
+            "{directive} = {value} must propose no repin: {doc}"
+        );
+        assert_eq!(
+            doc["skipped"][0]["reason"], "pin_ref_not_allowed",
+            "and be reported as skipped ({directive}): {doc}"
+        );
+    }
+}
+
+#[test]
+fn a_refused_curator_pin_that_already_matches_the_recorded_pin_proposes_nothing() {
+    // spec: CUR-21 CUR-5
+    // CUR-21 is reached only through a `repin` CHANGE, and a directive equal
+    // to the recorded pin is not a change: `curate` proposes nothing and
+    // reports nothing, rather than warning on every run about a pin it is not
+    // about to apply. The rule is about what `curate` would newly point a
+    // clone at, not an audit of what the clone is already on.
+    let env = Env::new();
+    let lib = env.repo("lib");
+    lib.write_and_commit(
+        "skills/review/SKILL.md",
+        "---\ndescription: Review\n---\n# review\n",
+    );
+    git(&lib.path, &["tag", "v1"]);
+    let curator = env.repo("curator");
+    // Pinned, so the source is CLONED rather than linked (`is_linked` is
+    // "local AND unpinned"): the rewritten pin below must leave a readable
+    // clone behind, or the run would report an unreadable source instead of
+    // planning against it.
+    curator.curate_list(&[format!(
+        "{{ source = \"{}\", install = true, pin-tag = \"v1\" }}",
+        lib.spec()
+    )]);
+    let m = env.mind(&["meld", &curator.spec(), "--yes"]);
+    assert!(m.success, "meld failed: {} {}", m.stdout, m.stderr);
+    assert!(env.claude_home.join("skills/review").exists());
+
+    // The recorded pin is already the ref the curator declares. A clone never
+    // fetches `refs/pull/*`, so this state is only reachable from a registry
+    // written earlier (a consumer's own pin, or a binary older than CUR-21);
+    // it is written directly here rather than through a meld that cannot
+    // produce it.
+    set_recorded_pin(&env, &env.ident("lib"), "refs/pull/1/head");
+    curator.curate_list(&[format!(
+        "{{ source = \"{}\", install = true, pin-ref = \"refs/pull/1/head\" }}",
+        lib.spec()
+    )]);
+
+    let r = env.mind(&["curate", "--check", "--no-sync"]);
+    assert!(r.success, "curate failed: {} {}", r.stdout, r.stderr);
+    assert!(
+        !r.stdout.contains("repin"),
+        "an unchanged pin is no change: {}",
+        r.stdout
+    );
+    assert!(
+        !r.stdout.contains("skipped") && !r.stderr.contains("warning:"),
+        "and nothing is reported about it: {} {}",
+        r.stdout,
+        r.stderr
+    );
+
+    // Control: the moment the curator declares a DIFFERENT out-of-namespace
+    // ref, that IS a change, and CUR-21 refuses it.
+    curator.curate_list(&[format!(
+        "{{ source = \"{}\", install = true, pin-ref = \"refs/pull/2/head\" }}",
+        lib.spec()
+    )]);
+    let after = env.mind(&["curate", "--check", "--no-sync", "--json"]);
+    assert!(
+        after.success,
+        "curate failed: {} {}",
+        after.stdout, after.stderr
+    );
+    let doc: serde_json::Value = serde_json::from_str(&after.stdout).expect("json");
+    assert_eq!(
+        doc["skipped"][0]["reason"], "pin_ref_not_allowed",
+        "a changed out-of-namespace pin is refused and reported: {doc}"
+    );
+}
