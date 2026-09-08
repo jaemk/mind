@@ -88,6 +88,23 @@ impl CatalogItem {
         namespace::apply(&self.name, &self.prefix)
     }
 
+    /// Whether this item's UNPREFIXED source spelled a namespace into its bare
+    /// name (DSC-99).
+    ///
+    /// A prefix component may not contain `:` (`namespace::is_safe_prefix_component`,
+    /// NS-72), but an item name may: commands.md CMD-2/CMD-6 recommend the
+    /// spelling for a command group (`commands/frontend:build.md`), so the
+    /// character cannot be banned. The consequence is that an unprefixed source
+    /// shipping `commands/acme:deploy.md` installs `acme:deploy`, which reads
+    /// exactly like `deploy` from a source prefixed `acme`. This predicate is
+    /// the detection the identity itself cannot provide; it is pure, and the
+    /// verbs that decide trust (`meld`, `learn`, `review`) are what report it.
+    ///
+    /// spec: DSC-99
+    pub fn forges_namespace(&self) -> bool {
+        self.prefix.is_none() && self.name.contains(':')
+    }
+
     /// The harness-visible name for an agent: the frontmatter `name:` field when
     /// it is non-empty and a safe single path component, else the bare catalog
     /// name (`self.name`). Returns `None` for non-agent kinds.
@@ -284,7 +301,8 @@ pub fn scan(paths: &Paths, registry: &Registry) -> Result<Vec<CatalogItem>> {
         if let Err(e) = scan_source(paths, source, &mut items) {
             // spec: CLI-212 CLI-213
             if matches!(e, MindError::LinkedSourceGone { .. }) {
-                eprintln!("warning: {e}");
+                // spec: DSC-102 -- muted while the TUI owns the terminal.
+                crate::render::scan_warn(format!("warning: {e}"));
                 continue;
             }
             return Err(e);
@@ -1221,14 +1239,14 @@ fn item_declared_hooks(
         match loaded {
             Ok(Some(hooks)) if !hooks.is_empty() => return Ok(Some(hooks)),
             Ok(_) => {}
-            // spec: DSC-98
+            // spec: DSC-98 DSC-102
             Err(e) => {
-                eprintln!(
+                crate::render::scan_warn(format!(
                     "warning: skipping {} '{}' in source '{}': {e}",
                     kind.as_str(),
                     crate::sanitize::strip_ansi(name),
                     crate::sanitize::strip_ansi(&source.name)
-                );
+                ));
                 return Ok(None);
             }
         }
@@ -1339,10 +1357,6 @@ fn build_item(
     // below parses this text rather than re-reading the file, so adding a key
     // to the set an item may declare costs no additional I/O.
     let meta_text = frontmatter::text_capped(meta)?;
-    // spec: DSC-99 -- an unprefixed source can spell a namespace into a bare
-    // name; say so once, at the single capture point, rather than letting it
-    // pass as an ordinary name in `recall`/`probe`.
-    warn_forged_namespace(source, prefix, kind, &name);
     // HOOK-132: exactly one declaration site supplies an item's hooks. A
     // `[[items]]` entry that declared any is authoritative and the caller passes
     // it here (`ItemDecl::resolved_item_hooks`: scalar shorthand folded ahead of
@@ -1404,31 +1418,6 @@ fn build_item(
         expand,
         hooks,
     }))
-}
-
-/// Warn when an UNPREFIXED source produces a bare name carrying a `:` (L19).
-///
-/// A prefix component may not contain `:` (`namespace::is_safe_prefix_component`,
-/// NS-72), but an item name may: commands.md CMD-2/CMD-6 recommend the spelling
-/// for a command group (`commands/frontend:build.md`), so the character cannot
-/// simply be banned. The consequence is that an unprefixed source shipping
-/// `commands/acme:deploy.md` installs `acme:deploy`, which in `recall`/`probe`
-/// reads exactly like `deploy` from a source prefixed `acme`. Naming it at scan
-/// is the detection the identity itself cannot provide.
-///
-/// spec: DSC-99
-fn warn_forged_namespace(source: &Source, prefix: &Option<String>, kind: ItemKind, name: &str) {
-    if prefix.is_some() || !name.contains(':') {
-        return;
-    }
-    eprintln!(
-        "warning: {} '{}' in source '{}' has no namespace prefix, but its bare name contains \
-         ':', so it installs under a name a PREFIXED source would produce; check the source \
-         column in `mind recall` before trusting it",
-        kind.as_str(),
-        crate::sanitize::strip_ansi(name),
-        crate::sanitize::strip_ansi(&source.name)
-    );
 }
 
 /// Discover items by glob, relative to the repo root. Nested `sources` are
@@ -1587,15 +1576,15 @@ fn make_item(
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default(),
     };
-    // spec: DSC-96
+    // spec: DSC-96 DSC-102
     if !is_safe_item_name(&bare) {
-        eprintln!(
+        crate::render::scan_warn(format!(
             "warning: skipping {} '{}' in source '{}': unsafe item name (a control character or \
              a bidi/zero-width Unicode code point)",
             kind.as_str(),
             crate::sanitize::strip_ansi(&bare),
             crate::sanitize::strip_ansi(&source.name)
-        );
+        ));
         return Ok(None);
     }
     // Convention discovery carries no overrides: every field falls back to the

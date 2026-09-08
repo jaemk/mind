@@ -232,6 +232,8 @@ and verified.
 | `sync <filter> --upgrade` names the filter's matched sources in the confirmation when it matched more than one | done | CLI-233 |
 | Item-name capture rejects control/bidi/zero-width code points: a hard error for a `mind.toml` declaration, skip-with-warning in the convention scan | done | DSC-96 |
 | `[[items]] link` target is confined to the item kind's directory; anything else is refused | done | DSC-97 |
+| An unprefixed source whose bare item name contains `:` (the spelling a prefixed source produces) is warned about by `meld` and `learn` and reported by `review` as a `forged-namespace` advisory; the catalog scan itself stays silent, so the read-only surfaces and the `probe` TUI's poll tick never print it | done | DSC-99, DSC-101 |
+| The scan's remaining degraded-state warnings (dead linked source, unparseable item manifest, unsafe item name, revalidation-dropped registry entry) are muted while the TUI owns the terminal and restored when it gives it back, so a persistent condition is not redrawn into the alternate screen every poll tick | done | DSC-102 |
 | Blocked-character set extended to the Unicode format class (tag block, variation selectors, U+00AD, U+180E, U+2061-2064, U+206A-206F, U+FFF9-FFFB, U+3164, U+115F) | done | NS-73 |
 | Broken-symlink diagnosis is substituted only for an `AlreadyExists` mkdir failure whose offending component is a `NotFound` symlink | done | HARN-23 |
 | Resolved `evolve` target version is validated as a plausible release tag (which may carry a semver prerelease/build suffix) before any URL is built | done | STO-76 |

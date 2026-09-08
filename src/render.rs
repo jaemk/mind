@@ -55,6 +55,39 @@ pub fn warn(msg: impl AsRef<str>) {
     note(format!("{} {}", out.warn(), msg.as_ref()));
 }
 
+/// Whether the catalog scan's degraded-state warnings are muted (DSC-102).
+static SCAN_QUIET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Mute (or unmute) the catalog scan's degraded-state warnings for this process.
+///
+/// The TUI sets this for as long as it owns the terminal. Unlike [`set_ctx`],
+/// which resolves once from the global flags, this is a live toggle: the scan
+/// runs on the TUI's ~1s poll tick (TUI-15), so a warning about a persistent
+/// condition (a linked source whose directory is gone, an item manifest that
+/// will not parse) is not a one-time notice there but a line written into the
+/// alternate screen every second.
+///
+/// spec: DSC-102
+pub fn set_scan_quiet(quiet: bool) {
+    SCAN_QUIET.store(quiet, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether [`set_scan_quiet`] is currently in effect.
+pub fn scan_quiet() -> bool {
+    SCAN_QUIET.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Emit one degraded-state warning from the catalog scan, unless muted by
+/// [`set_scan_quiet`]. `msg` is already composed and sanitized by the caller.
+///
+/// spec: DSC-102
+pub fn scan_warn(msg: impl AsRef<str>) {
+    if scan_quiet() {
+        return;
+    }
+    eprintln!("{}", msg.as_ref());
+}
+
 /// Install the process-wide output context. Call once, early in `main`, after
 /// parsing the global flags. A second call is ignored.
 pub fn set_ctx(ctx: OutputCtx) {

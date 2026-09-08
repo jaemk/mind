@@ -222,8 +222,8 @@ run = "make build"
   that declares hooks is authoritative (HOOK-132) and the item manifest is never
   read at all, so it cannot be dropped for one.
 - `DSC-99` An item whose source has NO effective namespace prefix
-  (namespacing.md) but whose bare name contains `:` is warned about at scan,
-  naming the item and its source. The name is still installed as written: `:` is
+  (namespacing.md) but whose bare name contains `:` is warned about, naming the
+  item and its source. The name is still installed as written: `:` is
   legal in an item name and commands.md CMD-2/CMD-6 recommend it for a command
   group (`commands/frontend:build.md`), so it cannot be rejected. But a prefix
   component may not contain `:` (NS-72), which is what makes an unprefixed
@@ -233,6 +233,26 @@ run = "make build"
   warning is the detection the identity cannot provide; the source column in
   `recall`/`probe` and the cross-source collision check (NS-43) are what a user
   reads after it.
+- `DSC-101` The DSC-99 warning is emitted by the verbs at which the user decides
+  to trust a source -- `meld` (over the offered inventory) and `learn` (over the
+  install closure, `--dry-run` included) -- and by `review` as a
+  `forged-namespace` advisory. The catalog scan itself only computes the
+  predicate and never writes it: `catalog::scan` runs on every read-only surface,
+  and the `probe` TUI re-scans on its ~1s poll tick (TUI-15), so a warning
+  emitted from the scan repeats forever and is written straight into the
+  alternate screen, corrupting the display. Read-only surfaces (`recall`,
+  `probe`, `introspect`) therefore emit nothing; the source column they already
+  show is what distinguishes the two spellings there.
+- `DSC-102` The scan's remaining degraded-state warnings -- a linked source whose
+  directory is gone (CLI-212), an item manifest that will not parse (DSC-98), an
+  unsafe item name skipped by the convention scan (DSC-96), and a registry entry
+  dropped by revalidation on `Registry::load` (STO-68) -- are muted for as long
+  as the TUI owns the terminal, and restored when it gives it back. Each reports
+  a persistent condition, so on the ~1s poll tick (TUI-15) it is not a one-time
+  notice but a line written into the alternate screen every second. Muting is a
+  live process-wide toggle the TUI sets, not a property of the output context
+  (which resolves once from the global flags): the same process runs the TUI and,
+  through it, the verbs. Outside the TUI every one of these still prints.
 - `DSC-72` A `[[items]]` `link` override (the link target relative to an agent
   home) must be a safe relative path: it is rejected (`MindToml`) when empty,
   absolute, beginning with `~`, containing a `..` (parent) component, or

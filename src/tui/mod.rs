@@ -46,6 +46,10 @@ pub fn run(
     // Install terminal restore + panic hook before entering raw mode so a
     // crash or early return always leaves the terminal usable (TUI-40).
     let _guard = term::TermGuard::enter()?;
+    // spec: DSC-102 -- the scan and the registry load run again on every poll
+    // tick, so their degraded-state warnings would be written into the
+    // alternate screen once a second for as long as the condition holds.
+    let _quiet = ScanQuiet::enter();
 
     // Build initial App state seeded with any CLI args.
     // spec: TUI-2
@@ -63,6 +67,26 @@ pub fn run(
     event_loop(paths, &mut app)?;
 
     Ok(())
+}
+
+/// Mutes the catalog scan's degraded-state warnings for as long as the TUI owns
+/// the terminal, restoring them on drop (including on a panic unwind, so the
+/// next CLI verb in the same process is not left silenced).
+///
+/// spec: DSC-102
+struct ScanQuiet;
+
+impl ScanQuiet {
+    fn enter() -> Self {
+        crate::render::set_scan_quiet(true);
+        Self
+    }
+}
+
+impl Drop for ScanQuiet {
+    fn drop(&mut self) {
+        crate::render::set_scan_quiet(false);
+    }
 }
 
 fn event_loop(paths: &Paths, app: &mut app::App) -> Result<()> {
@@ -531,6 +555,33 @@ mod tests {
             mind_home: base.join("mind"),
             claude_home: base.join("claude"),
         }
+    }
+
+    /// `ScanQuiet` mutes the scan's degraded-state warnings while the TUI owns
+    /// the terminal, and restores them on drop, so a later CLI verb in the same
+    /// process (the TUI runs them) is not left silenced.
+    /// spec: DSC-102
+    #[test]
+    fn scan_quiet_guard_mutes_then_restores() {
+        // The toggle is process-wide, so serialize the two tests that move it.
+        static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _held = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+
+        assert!(
+            !crate::render::scan_quiet(),
+            "the scan speaks by default, outside the TUI"
+        );
+        {
+            let _quiet = ScanQuiet::enter();
+            assert!(
+                crate::render::scan_quiet(),
+                "the poll tick's warnings must be muted while the TUI holds the terminal"
+            );
+        }
+        assert!(
+            !crate::render::scan_quiet(),
+            "dropping the guard must give the warnings back"
+        );
     }
 
     fn key(code: KeyCode) -> KeyEvent {

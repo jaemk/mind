@@ -6,6 +6,21 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- The forged-namespace warning (an unprefixed source whose bare item name
+  contains `:`) no longer comes from the catalog scan, which ran on every
+  read-only surface and re-ran on the `probe` TUI's ~1s poll tick, repeating the
+  line into the alternate screen. `meld` and `learn` emit it at the point the
+  user decides to trust the source, `review` reports it as a `forged-namespace`
+  advisory, and `recall`/`probe`/`introspect` stay quiet (DSC-101).
+- The scan's other degraded-state warnings (a linked source whose directory is
+  gone, an item manifest that will not parse, an unsafe item name, a registry
+  entry dropped by revalidation) are muted while the TUI owns the terminal and
+  restored when it gives it back. Each reports a persistent condition, so on the
+  poll tick it was redrawn into the alternate screen every second. Outside the
+  TUI every one of them still prints (DSC-102).
+
 ## [0.28.0] - 2026-09-04
 
 ### Added

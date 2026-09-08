@@ -1886,6 +1886,19 @@ fn an_unprefixed_source_shipping_a_colon_name_is_warned_about() {
     );
     let meld = sb.mind(&["meld", &sb.source_spec(), "--register-only"]);
     assert!(meld.success, "the item is still offered: {}", meld.stderr);
+    assert!(
+        meld.stderr.contains("acme:deploy") && meld.stderr.contains("no namespace prefix"),
+        "meld must warn that an unprefixed source spelled a namespace: {}",
+        meld.stderr
+    );
+
+    let learn = sb.mind(&["learn", "command:acme:deploy", "--dry-run"]);
+    assert!(learn.success, "{}", learn.stderr);
+    assert!(
+        learn.stderr.contains("no namespace prefix"),
+        "learn must warn over the closure it would install: {}",
+        learn.stderr
+    );
 
     let probe = sb.mind(&["probe"]);
     assert!(probe.success, "{}", probe.stderr);
@@ -1894,10 +1907,19 @@ fn an_unprefixed_source_shipping_a_colon_name_is_warned_about() {
         "the name installs as written, warning or not: {}",
         probe.stdout
     );
+    // spec: DSC-101 -- the scan never writes the warning: `probe` re-scans on
+    // its ~1s TUI poll tick, so a scan-time stderr line would repeat forever
+    // and land in the alternate screen.
     assert!(
-        probe.stderr.contains("acme:deploy") && probe.stderr.contains("no namespace prefix"),
-        "the scan must warn that an unprefixed source spelled a namespace: {}",
+        !probe.stderr.contains("no namespace prefix"),
+        "a read-only surface must not warn: {}",
         probe.stderr
+    );
+    let recall = sb.mind(&["recall"]);
+    assert!(
+        !recall.stderr.contains("no namespace prefix"),
+        "a read-only surface must not warn: {}",
+        recall.stderr
     );
 
     // A source that IS prefixed produces the same shape legitimately, and must

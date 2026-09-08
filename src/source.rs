@@ -1190,9 +1190,12 @@ impl Registry {
                 for src in &mut reg.sources {
                     src.migrate_legacy_hook();
                 }
-                // spec: STO-68 -- drop (not hard-error) any entry that fails
-                // revalidation, warning on stderr.
-                reg.sources = revalidate_sources(reg.sources, |msg| eprintln!("{msg}"));
+                // spec: STO-68 DSC-102 -- drop (not hard-error) any entry that
+                // fails revalidation, warning on stderr. `Registry::load` runs
+                // on the TUI's poll tick too, so the warning is muted while the
+                // TUI owns the terminal.
+                reg.sources =
+                    revalidate_sources(reg.sources, |msg: &str| crate::render::scan_warn(msg));
                 // spec: STO-73 -- migrate a relative local `url` to an absolute
                 // form when it still resolves, so a later `cd` cannot make an
                 // already-registered local source unreachable (U40). Rewrites

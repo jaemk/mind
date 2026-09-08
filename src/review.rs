@@ -768,6 +768,23 @@ fn run_checks(
         }
     }
 
+    // --- Check 7b: a forged namespace (advisory, only when NO prefix is in effect) ---
+    // spec: DSC-99 -- `review` is the pre-meld inspection verb, so it reports
+    // what `meld`/`learn` warn about at trust time. The mirror image of check 7:
+    // that one needs a prefix to matter, this one needs the absence of one.
+    for item in &items {
+        if item.forges_namespace() {
+            advisory.push(Finding::advisory(
+                "forged-namespace",
+                format!(
+                    "{}: no namespace prefix is in effect, but the bare name contains ':', so it \
+                     installs under a name a PREFIXED source would produce",
+                    item.key().as_str()
+                ),
+            ));
+        }
+    }
+
     // Per-source path-token resolver: every item's (kind, name, entrypoint).
     // The store_root is a placeholder; review only cares whether a token
     // resolves (Ok) or not (Err), never the concrete install path.
@@ -2064,6 +2081,46 @@ mod tests {
                 .any(|f| f.kind == "unguarded-reference"),
             "expected unguarded-reference advisory: {:?}",
             result.advisory
+        );
+    }
+
+    /// An unprefixed source shipping a `:`-bearing bare name is advisory, and
+    /// the same name under a real prefix is not.
+    /// spec: DSC-99, DSC-101
+    #[test]
+    fn forged_namespace_is_advisory_only_without_a_prefix() {
+        let tmp = TmpDir::new();
+        let base = tmp.path();
+        let source_dir = base.join("src");
+        write_file(
+            &source_dir.join("commands/acme:deploy.md"),
+            "---\ndescription: deploy\n---\n# deploy\n",
+        );
+        let paths = paths_for(base);
+
+        let result = run_checks(&paths, &source_dir, None, false, true).unwrap();
+        assert!(
+            result.hard.is_empty(),
+            "a forged namespace must not be hard: {:?}",
+            result.hard
+        );
+        assert!(
+            result.advisory.iter().any(|f| f.kind == "forged-namespace"),
+            "expected forged-namespace advisory: {:?}",
+            result.advisory
+        );
+
+        // With a prefix in effect the `:` is the namespace separator doing its
+        // job, so there is nothing to report.
+        let prefixed =
+            run_checks(&paths, &source_dir, Some("jk".to_string()), false, true).unwrap();
+        assert!(
+            !prefixed
+                .advisory
+                .iter()
+                .any(|f| f.kind == "forged-namespace"),
+            "a prefixed source must not be flagged: {:?}",
+            prefixed.advisory
         );
     }
 

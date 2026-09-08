@@ -1237,6 +1237,7 @@ fn meld_recursive(
         }
     }
 
+    warn_forged_namespaces(&items); // spec: DSC-99 advisory
     warn_unguarded_references(&items);
     warn_agent_collisions(paths, &items); // spec: NS-41 advisory
     if !out.json {
@@ -1992,6 +1993,35 @@ fn handle_top_level_clone_err(
             stderr: "(git output above)".to_string(),
         },
         other => other,
+    }
+}
+
+/// Warn when an unprefixed source spelled a namespace into a bare item name
+/// (DSC-99): `commands/acme:deploy.md` from a source with no prefix installs
+/// `acme:deploy`, the exact spelling a source prefixed `acme` produces for its
+/// `deploy`, and no later surface can tell the two apart by name alone.
+///
+/// Emitted by the verbs where the user is deciding to trust a source (`meld`,
+/// `learn`) and NOT from the scan itself: `catalog::scan` runs on every
+/// read-only surface, including the `probe` TUI's ~1s poll tick, where writing
+/// to stderr both repeats forever and corrupts the alternate screen.
+///
+/// spec: DSC-99 DSC-101
+fn warn_forged_namespaces<'a>(items: impl IntoIterator<Item = &'a CatalogItem>) {
+    for item in items {
+        if !item.forges_namespace() {
+            continue;
+        }
+        // spec: DSC-95 -- both the name and the source are source-controlled, so
+        // each field is sanitized before the line is composed.
+        eprintln!(
+            "warning: {} '{}' in source '{}' has no namespace prefix, but its bare name contains \
+             ':', so it installs under a name a PREFIXED source would produce; check the source \
+             column in `mind recall` before trusting it",
+            item.kind.as_str(),
+            item.display_name(),
+            crate::sanitize::strip_ansi(&item.source)
+        );
     }
 }
 
@@ -3728,6 +3758,11 @@ fn learn_selected(
             candidates: sources,
         });
     }
+
+    // spec: DSC-99 -- name a forged namespace over the whole closure, before the
+    // dry-run report as well as the install, so it reaches the user while the
+    // decision to install is still theirs.
+    warn_forged_namespaces(closure.iter().copied());
 
     // DEP-32: --dry-run renders the dependency tree (when deps were added) and
     // lists the full closure, installing nothing.
