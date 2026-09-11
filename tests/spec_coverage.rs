@@ -102,6 +102,13 @@ const ALLOWLIST: &[&str] = &[
     //   binary swap (CLI-143) needs a real release and a writable install path,
     //   so it cannot run headlessly and stays allowlisted.
     "CLI-143",
+    // The `workflow` item kind (spec/workflows.md, WF-1..52): documented ahead of
+    // implementation. Each moves to a citing test as it is built; WF-11 (the
+    // harness loader admits a symlinked workflow file) is an observation about
+    // Claude Code, not mind behavior, so it stays allowlisted permanently.
+    "WF-1", "WF-2", "WF-3", "WF-4", "WF-5", "WF-6", "WF-7", "WF-8", "WF-10", "WF-11", "WF-12",
+    "WF-13", "WF-20", "WF-21", "WF-22", "WF-23", "WF-24", "WF-25", "WF-26", "WF-27", "WF-28",
+    "WF-30", "WF-31", "WF-32", "WF-40", "WF-41", "WF-42", "WF-50", "WF-51", "WF-52",
     // `evolve`'s download, verification, extraction, and in-place swap are the
     // `self_update` crate's, so the statements describing them have no mind-side
     // code path a test here could drive without a real release and a real

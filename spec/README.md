@@ -259,6 +259,7 @@ and verified.
 | Single-file item links: a `blob` URL to an `agent`/`rule`/`command` `.md` file installs as a single-item source instance, kind resolved by explicit `--kind` / `kind =`, else the containing directory, else the file's frontmatter | done | [item-link.md](item-link.md) (LNK-20..22), CLI-239, DSC-100, STO-81 |
 | `dump` emits a file link as a `blob` URL, with `kind` when the instance recorded an explicit one | done | LNK-23 |
 | `mind curate`: one pass over every registered curator that registers and installs newly listed entries, re-pins against the curator's directive, upgrades curated sources, reports entries the curator dropped, and offers `--adopt` to bring a pre-existing source under a curator's ownership (`--check`, `--yes`, `--prune`, `--no-sync`, `--adopt`) | done | [curate.md](curate.md) (CUR-1..21), STO-82 |
+| The `workflow` item kind: `workflows/<name>.js` discovered, stored, linked, namespaced, and upgraded like any other kind; `meta` read for the description, `{{ns:}}` expanded in the file, plugin `workflows/` mapped | planned | [workflows.md](workflows.md) (WF-1..52) |
 
 ## Documents
 
@@ -276,6 +277,9 @@ and verified.
   related settings.
 - [commands.md](commands.md) - the `command` item kind: harness slash commands
   (`commands/<name>.md`) discovered, installed, and namespaced like any item.
+- [workflows.md](workflows.md) - the `workflow` item kind: harness subagent
+  orchestration scripts (`workflows/<name>.js`), whose harness-facing name comes
+  from the script's own `meta` rather than its file name.
 - [install-hooks.md](install-hooks.md) - install hooks: a source-declared or
   user-supplied build command, gated by a safety prompt before it runs; and
   item-level build hooks (HOOK-70..73) that build an item's tooling at install.
