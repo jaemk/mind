@@ -130,16 +130,31 @@ that mind depends on is called out at the requirement that depends on it.
   `<plugin>:<meta.name>`), so an expanded name reads as the harness's own, not as
   a mangled one.
 - `WF-24` When an installed workflow's `meta.name` (as read by WF-5, after
-  expansion) is a string that differs from the item's effective name, mind warns.
-  That workflow is installed and healthy by every check mind makes, and the
-  harness answers to it under a different name than `mind recall` reports. The
-  warning is advisory: the divergence is legal, and a source may want it.
+  expansion) is a string that differs from the item's effective name, mind warns:
+  once at `learn`, as a `review` finding beside the WF-30 ones, and in the
+  `recall <item>` detail view. That workflow is installed and healthy by every
+  check mind makes, and the harness answers to it under a different name than
+  `mind recall` reports. The warning is advisory: the divergence is legal, and a
+  source may want it.
+
+  It is absent from the `recall` listing and from `introspect`. Introspect's
+  subject is drift, broken symlinks, and unsynced sources, and its `--fix`
+  repairs exactly those; a divergence is none of them and is nothing mind could
+  repair, so reporting it there would put unactionable noise in the one command
+  whose output is meant to be acted on.
+
+  The warning is quiet in the common case. The harness writes a workflow it saves
+  to `.claude/workflows/<slug(meta.name)>.js`, so an unprefixed source's file stem
+  already equals its `meta.name`, and a prefixed source that tokenizes `meta.name`
+  (WF-23) matches after expansion. What is left to warn about is a hand-authored
+  file whose stem was chosen independently of `meta.name`, and a prefixed source
+  that never tokenized.
 - `WF-25` All four token families expand in a workflow file: `{{ns:}}`,
   `{{path:}}`, `{{tools:}}`, and `{{self}}`, over the whole file, with the same
   resolver and the same hard bad-reference failure as a markdown file (NS-11,
-  NS-12). This is an exception to NS-53, which expands by extension alone and
-  would otherwise leave a `.js` file untouched. It is granted on the kind, not
-  the extension: a workflow's content is agent prompts, so a sibling reference in
+  NS-12). The extension test alone would leave a `.js` file untouched, so NS-53's
+  gate reads the item's kind as well and grants this one. It is granted on the
+  kind, not the extension: a workflow's content is agent prompts, so a sibling reference in
   one is the designed use of the token and not the incidental `{{ }}` of a
   templating language that NS-53 declines to fight. It also makes WF-23 work,
   which the meta-only alternative would do at the cost of leaving a token in a
@@ -155,6 +170,20 @@ that mind depends on is called out at the requirement that depends on it.
   Tokens expand there (WF-25), so the finding would be false.
 - `WF-28` The unguarded-reference scan (NS-20) covers a workflow file, as it
   covers every text file of an item.
+- `WF-29` Two installed workflows whose effective `meta.name` (WF-5, after
+  expansion) is the same string are one name to the harness (WF-20), whichever
+  sources they came from. mind warns at `learn` and reports a `review` finding,
+  and installs both. This is the same check as WF-24 with the comparison made
+  against every other installed workflow instead of against the item's own
+  effective name, and it is reported at the same three sites.
+
+  It is deliberately softer than the agent collision it otherwise resembles
+  (NS-41), for two reasons. It is not a link-path collision: the two items link
+  under distinct names (`workflows/<a>.js`, `workflows/<b>.js`), both installs
+  are correct by every check mind makes, and there is no link being silently
+  repointed to prevent. And the duplicate is read out of file content by a reader
+  that is not the harness's (WF-5), which WF-31 forbids from blocking an install.
+  A prefix does not avert it, as WF-22 records.
 
 ## Reporting a workflow the harness will not load
 
@@ -170,6 +199,16 @@ that mind depends on is called out at the requirement that depends on it.
 - `WF-32` The size cap is reported, not enforced, for the same reason: DSC-90
   records that mind does not cap the size of item content it reads, and a cap
   mind enforced would be mind's cap, not the harness's.
+
+Not a requirement, recorded so the omission is deliberate: the harness also
+declines to load workflows for reasons that have nothing to do with a file. The
+feature is gated by a session toggle and can be turned off wholesale by managed
+settings (`disableWorkflows`) or by an org policy (`allow_workflows`), and under
+any of those a correctly installed, correctly named workflow is simply absent.
+mind does not read the harness's settings and reports none of this. The flag is
+not a property of the item, and predicting an experimental feature's gating would
+couple the store to a config shape mind has never depended on. This is the WF-11
+posture: state the assumption, do not defend it.
 
 ## Plugins
 
@@ -195,18 +234,28 @@ that mind depends on is called out at the requirement that depends on it.
 - `WF-50` A workflow participates in every kind-generic mechanism with no
   workflow-specific behavior: `learn`/`forget`/`upgrade`/`introspect`, drift
   hashing (LIFE-15), `requires` dependencies (DEP-4), item lifecycle hooks
-  including the frontmatter scalars (HOOK-80, HOOK-130), which for a workflow can
-  only come from an `[[items]]` entry or a scoped `mind.toml` since the file
-  carries no frontmatter, ignore patterns (IGN-1), `absorb` (whose convention
-  path for the kind is `workflows/<name>.js`), `dump`, `probe`/`recall` listing,
-  and unmanaged-item detection in a lobe's `workflows/` directory (UNM-1). As
-  with commands (CMD-8), `absorb` and unmanaged detection see only the immediate
+  (HOOK-80), ignore patterns (IGN-1), `absorb` (whose convention path for the
+  kind is `workflows/<name>.js`), `dump`, `probe`/`recall` listing, and
+  unmanaged-item detection in a lobe's `workflows/` directory (UNM-1). As with
+  commands (CMD-8), `absorb` and unmanaged detection see only the immediate
   `.js` children of a lobe's `workflows/` directory, matching the flat convention
   scan (WF-2).
+
+  A workflow's hooks can come only from a root `mind.toml` `[[items]]` entry.
+  The frontmatter scalars (HOOK-130) need frontmatter, which a `.js` file has
+  none of, and a scoped item `mind.toml` (HOOK-131) is read only from a
+  directory-backed item's own directory, which a one-file kind does not have.
+  This is the agent, rule, and command position, not a new restriction.
 - `WF-51` `probe` and `recall` surface a workflow's `whenToUse` (WF-5) where an
   item's description is shown, appended to the description as the harness's own
-  workflow list renders it (`<description> - <whenToUse>`). No other kind has a
-  second description field; a workflow without one is unaffected.
+  workflow list renders it (`<description> - <whenToUse>`). It is a field of its
+  own on the catalog item, not folded into the description at scan time: a
+  `mind.toml` `[[items]].description` override (WF-4, DSC-32) replaces the
+  description and leaves `whenToUse` standing, which folding would make
+  impossible to express. The field is display-only. It is not recorded in the
+  manifest, and `dump` does not emit it, `dump` emitting no item description at
+  all. No other kind has a second description field; a workflow without one is
+  unaffected.
 - `WF-52` `workflow` becomes a reserved namespace prefix, appended to the NS-29
   list, which is append-only for exactly this case. A source whose `[source]
   .prefix` is the literal string `workflow` is refused from that point on, with

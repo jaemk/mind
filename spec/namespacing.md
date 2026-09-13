@@ -234,13 +234,22 @@ at runtime. Prefixing changes installed names, so references must be rewritten.
   a path token is prose (a skill telling Claude to run `{{tools:detect}}`), and
   templating a file written in a language with its own `{{ }}` convention
   (Jinja, Handlebars, Go templates) is a liability with no offsetting benefit.
-  The rule is judged by extension alone, not by content or by item kind: an
-  agent or a rule item is always a single markdown file by discovery convention
-  and so is unaffected in practice, but a `mind.toml`-declared item is free to
-  point at any path, and this still governs it. Widening later (an opt-in
-  `mind.toml` glob naming additional files to scan) stays backward-compatible;
-  narrowing later would not, which is why it is done now, pre-1.0. The widening
-  is NS-57.
+  The rule is judged by extension and never by content: an agent or a rule item
+  is always a single markdown file by discovery convention and so is unaffected
+  in practice, but a `mind.toml`-declared item is free to point at any path, and
+  this still governs it. Widening later (an opt-in `mind.toml` glob naming
+  additional files to scan) stays backward-compatible; narrowing later would
+  not, which is why it is done now, pre-1.0. The widening is NS-57.
+
+  Item kind is the one other thing the gate reads, and it grants rather than
+  denies: a `workflow` item's file expands whatever its extension
+  (workflows.md, WF-25). The rationale above is what admits it -- a workflow is
+  JavaScript, a language with no `{{ }}` convention of its own to fight, and its
+  strings are agent prompts, which is the prose case the token families were
+  designed for. So the gate is: a markdown extension, or the `workflow` kind, or
+  a file on an item's NS-57 `expand:` list. It remains one chokepoint; a caller
+  asking "does a token expand here" answers it in one place, now with the item's
+  kind in hand as well as its path.
 - `NS-57` An item may opt specific non-markdown files into expansion with an
   `expand:` frontmatter key: a whitespace-separated list of item-relative file
   paths (the same scalar form `requires:` uses, DEP-4). At install, each listed

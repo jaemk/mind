@@ -1113,7 +1113,10 @@ only appear at meld or install time. It is read-only and installs nothing.
   written, since it never expanded there either (NS-53).
 - `CLI-223` `review` reports, as an advisory `inert-token` finding, every
   `{{...}}` token found in a non-markdown item file, regardless of whether the
-  token would resolve: no token family expands outside markdown (NS-53), so a
+  token would resolve. The exceptions are the two files a token does reach
+  outside markdown: one on an item's NS-57 `expand:` list, and a `workflow`
+  item's own file (workflows.md, WF-25, WF-27). Outside those, no token family
+  expands outside markdown (NS-53), so a
   token there never reaches install either way, and one that would resolve if
   the file were markdown (e.g. a `{{tools:name}}` naming a real sibling tool,
   in a bundled `.sh`) is otherwise silently left literal and breaks at
