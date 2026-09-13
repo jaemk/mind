@@ -43,7 +43,7 @@ unicode-width = "0.2"
 # darling and a second TOML parser into the build, and nothing here uses the
 # `#[cached]` attribute: `tui::data` drives `LruCache` directly. `time_stores`
 # is what would supply a TTL store, which TUI-72 notes the memo does not have.
-cached = { version = "3", default-features = false }
+cached = { version = "4", default-features = false }
 # `evolve`'s downloader/extractor/installer. ureq rather than the default reqwest:
 # nothing here is async, so reqwest would drag tokio into a synchronous CLI. rustls
 # keeps the static musl release builds free of a system OpenSSL. `github` is the only
