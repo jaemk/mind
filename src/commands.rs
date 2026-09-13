@@ -2467,9 +2467,10 @@ fn expandable_files(item: &CatalogItem) -> Result<Vec<std::path::PathBuf>> {
     Ok(files
         .into_iter()
         .filter(|file| {
-            // A single-file item (agent/rule) has no bundled files, so only its
-            // own path applies and its markdown-ness is read from that path.
-            if crate::namespace::is_markdown(file) {
+            // A single-file item (agent/rule/workflow) has no bundled files, so
+            // only its own path applies and its markdown-ness is read from that
+            // path. spec: WF-25 -- a workflow's `.js` expands too.
+            if crate::namespace::expands_tokens(file, item.kind) {
                 return true;
             }
             if !item.path.is_dir() {
@@ -2825,15 +2826,15 @@ pub fn init_source(
     Ok(())
 }
 
-/// Read all of an item's MARKDOWN text files into one buffer, for `{{ns:}}`
-/// dependency-edge detection (DEP-1). Narrowed to markdown
-/// (`namespace::is_markdown`, NS-53) so a `{{ns:}}` token in a non-markdown
-/// file -- which install no longer expands and no longer treats as a
-/// dependency -- does not create a phantom dependency edge here either.
+/// Read all of an item's token-expanding text files into one buffer, for
+/// `{{ns:}}` dependency-edge detection (DEP-1). Narrowed to the files install
+/// expands (`namespace::expands_tokens`, NS-53, WF-25) so a `{{ns:}}` token in a
+/// file install never expands -- and so never treats as a dependency -- does not
+/// create a phantom dependency edge here either.
 fn read_item_text(item: &CatalogItem) -> String {
     let mut buf = String::new();
     for file in crate::review::item_files(item) {
-        if !crate::namespace::is_markdown(&file) {
+        if !crate::namespace::expands_tokens(&file, item.kind) {
             continue;
         }
         if let Ok(content) = std::fs::read_to_string(&file) {
@@ -3417,13 +3418,13 @@ fn resolve_learn(
 
     // The `read` closure feeds each item's concatenated UTF-8 text to the
     // resolver so it can scan for `{{ns:}}` tokens (DEP-1). Mirrors
-    // `read_item_text`: only markdown files are scanned
-    // (`namespace::is_markdown`, NS-53), since install never expands a
+    // `read_item_text`: only the files install expands are scanned
+    // (`namespace::expands_tokens`, NS-53, WF-25), since install never expands a
     // `{{ns:}}` token in any other file either.
     let read = |item: &CatalogItem| -> String {
         let mut parts: Vec<String> = Vec::new();
         for file in crate::review::item_files(item) {
-            if !crate::namespace::is_markdown(&file) {
+            if !crate::namespace::expands_tokens(&file, item.kind) {
                 continue;
             }
             if let Ok(content) = std::fs::read_to_string(&file) {
@@ -5444,6 +5445,7 @@ fn item_catalog_match<'a>(
 /// - agent   -> `agents/<name>.md`
 /// - rule    -> `rules/<name>.md`
 /// - command -> `commands/<name>.md` (CMD-8)
+/// - workflow -> `workflows/<name>.js` (WF-50)
 ///
 /// A tool is never unmanaged (it is store-only, so it is never linked into a
 /// lobe for `absorb` to find), and panics.
@@ -5458,6 +5460,8 @@ fn convention_path_in_root(
         ItemKind::Rule => root.join("rules").join(format!("{name}.md")),
         // spec: CMD-8
         ItemKind::Command => root.join("commands").join(format!("{name}.md")),
+        // spec: WF-50
+        ItemKind::Workflow => root.join("workflows").join(format!("{name}.js")),
         ItemKind::Tool => panic!("tools are never unmanaged; absorb should not reach this"),
     }
 }
@@ -8793,7 +8797,11 @@ pub fn probe(
                     name: it.display_effective_name(),
                     source: crate::sanitize::strip_ansi(&it.source),
                     hash: it.content_hash().ok(),
-                    description: it.description.as_deref().map(crate::sanitize::strip_ansi),
+                    // spec: WF-51
+                    description: it
+                        .display_description()
+                        .as_deref()
+                        .map(crate::sanitize::strip_ansi),
                     unmanaged: false,
                     dependencies,
                 }
@@ -8860,7 +8868,8 @@ pub fn probe(
         } else {
             String::new()
         };
-        let mut desc = summary(it.description.as_deref(), 60);
+        // spec: WF-51
+        let mut desc = summary(it.display_description().as_deref(), 60);
         if outdated {
             desc = format!("{desc} {}", out.yellow("(outdated; run `mind upgrade`)"));
         }
@@ -10441,6 +10450,7 @@ mod tests {
             prefix: None,
             path: PathBuf::from("/nonexistent"),
             description: None,
+            when_to_use: None,
             link_rel: None,
             bin: None,
             build: None,

@@ -77,6 +77,11 @@ pub enum ItemKind {
     /// `/<name>` (commands.md CMD-1). An ordinary linked kind, shaped like an
     /// agent or rule: one file, named by its stem.
     Command,
+    /// A harness workflow: a JavaScript file the harness loads from
+    /// `workflows/` and offers to its `Workflow` tool (workflows.md WF-1). An
+    /// ordinary linked kind, shaped like an agent or a command -- one file,
+    /// named by its stem -- but with a `.js` extension rather than `.md`.
+    Workflow,
     /// Helper tooling (scripts or a compiled binary) other items reference. A
     /// tool installs to the store but is not linked into an agent home by
     /// default: the harness does not discover it; items reach it by path token.
@@ -90,6 +95,7 @@ impl ItemKind {
             ItemKind::Agent => "agent",
             ItemKind::Rule => "rule",
             ItemKind::Command => "command",
+            ItemKind::Workflow => "workflow",
             ItemKind::Tool => "tool",
         }
     }
@@ -101,6 +107,7 @@ impl ItemKind {
             "agent" => Some(ItemKind::Agent),
             "rule" => Some(ItemKind::Rule),
             "command" => Some(ItemKind::Command),
+            "workflow" => Some(ItemKind::Workflow),
             "tool" => Some(ItemKind::Tool),
             _ => None,
         }
@@ -116,6 +123,7 @@ impl ItemKind {
             ItemKind::Agent => "agents",
             ItemKind::Rule => "rules",
             ItemKind::Command => "commands",
+            ItemKind::Workflow => "workflows",
             ItemKind::Tool => "tools",
         }
     }
@@ -127,6 +135,7 @@ impl ItemKind {
             "agents" => Some(ItemKind::Agent),
             "rules" => Some(ItemKind::Rule),
             "commands" => Some(ItemKind::Command),
+            "workflows" => Some(ItemKind::Workflow),
             "tools" => Some(ItemKind::Tool),
             _ => None,
         }
@@ -135,11 +144,12 @@ impl ItemKind {
     /// The kinds linked into an agent home: every kind except `Tool`, which is
     /// store-only and reached by reference (tooling.md TOOL-3). Also the "all
     /// kinds" default for a lobe with no `kinds` filter (HARN-1).
-    pub const LINKABLE: [ItemKind; 4] = [
+    pub const LINKABLE: [ItemKind; 5] = [
         ItemKind::Skill,
         ItemKind::Agent,
         ItemKind::Rule,
         ItemKind::Command,
+        ItemKind::Workflow,
     ];
 
     /// Parse a list of kind strings into [`ItemKind`]s, rejecting any unknown
@@ -1517,6 +1527,35 @@ mod tests {
         assert_eq!(
             ItemKind::parse_kinds(&["command".to_string()]).unwrap(),
             vec![ItemKind::Command]
+        );
+    }
+
+    /// `workflow` is a full item kind on the same terms: it parses, names
+    /// itself, maps to the `workflows/` directory both ways, and is linked into
+    /// agent homes (the harness discovers it, unlike a tool).
+    #[test]
+    fn workflow_is_a_linked_item_kind() {
+        // spec: WF-1 WF-6
+        assert_eq!(ItemKind::parse("workflow"), Some(ItemKind::Workflow));
+        assert_eq!(ItemKind::Workflow.as_str(), "workflow");
+        assert_eq!(ItemKind::Workflow.dir(), "workflows");
+        assert_eq!(ItemKind::from_dir("workflows"), Some(ItemKind::Workflow));
+        assert!(
+            ItemKind::LINKABLE.contains(&ItemKind::Workflow),
+            "the harness reads workflows out of the agent home, so the kind links"
+        );
+        // The kinds filter a lobe may carry accepts it by name (HARN-1, WF-12).
+        assert_eq!(
+            ItemKind::parse_kinds(&["workflow".to_string()]).unwrap(),
+            vec![ItemKind::Workflow]
+        );
+        // The serialized form round-trips, so a persisted `item_kind` (STO-81)
+        // reads back as the same kind.
+        let json = serde_json::to_string(&ItemKind::Workflow).unwrap();
+        assert_eq!(json, "\"workflow\"");
+        assert_eq!(
+            serde_json::from_str::<ItemKind>(&json).unwrap(),
+            ItemKind::Workflow
         );
     }
 

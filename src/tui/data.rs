@@ -492,7 +492,8 @@ fn load_inner(paths: &Paths) -> Result<Snapshot> {
                 name: strip_ansi(&it.effective_name()),
                 source: strip_ansi(&it.source),
                 kind: it.kind,
-                description: it.description.as_deref().map(strip_ansi),
+                // spec: WF-51
+                description: it.display_description().as_deref().map(strip_ansi),
                 path: it.path.clone(),
                 deps,
             }

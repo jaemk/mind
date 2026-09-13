@@ -549,9 +549,10 @@ pub(crate) fn ensure_link(store: &Path, link: &Path) -> Result<()> {
     symlink(store, link)
 }
 
-/// Rewrite reference tokens in every markdown file under the staged copy (the
-/// extension test `namespace::is_markdown`, NS-53; a token in a non-markdown
-/// file is left literal): the `{{ns:name}}` name tokens, then the `{{self}}` /
+/// Rewrite reference tokens in every file under the staged copy that expands
+/// them (`namespace::expands_tokens`, NS-53: a markdown file, or a workflow's
+/// own `.js` per WF-25; a token anywhere else is left literal): the
+/// `{{ns:name}}` name tokens, then the `{{self}}` /
 /// `{{tools:name}}` / `{{path:ref}}` path tokens. Both resolve against
 /// `siblings` (every item in the same source) and a bad reference in either
 /// pass aborts the staged install.
@@ -708,11 +709,15 @@ fn expand_references(
         //
         // A directory item (skill/tool) stages every file under its original
         // name, so `file` itself carries the right extension to check. A
-        // single-file item (agent/rule) stages as a bare name with no
+        // single-file item (agent/rule/workflow) stages as a bare name with no
         // extension at all (matching its store form), so its markdown-ness is
         // read from the source path instead.
+        //
+        // spec: WF-25 -- and a workflow's own `.js` expands whatever its
+        // extension, which is what makes the `{{ns:}}` in its `meta.name`
+        // (WF-23) render as the name mind installed it under.
         let source_like: &Path = if root.is_dir() { &file } else { &item.path };
-        let is_md = namespace::is_markdown(source_like);
+        let expands = namespace::expands_tokens(source_like, item.kind);
         // NS-57: a file listed in `expand:` is expanded like markdown even
         // though its extension is not, so a bundled script can reference a
         // sibling tool. Its relative path (under the staged dir) is what the
@@ -722,7 +727,7 @@ fn expand_references(
                 .strip_prefix(root)
                 .map(|rel| expand_set.contains(rel))
                 .unwrap_or(false);
-        if !is_md && !is_listed {
+        if !expands && !is_listed {
             continue;
         }
         // Skip anything that is not valid UTF-8 text.
@@ -734,7 +739,11 @@ fn expand_references(
         }
         // TOOL-20: a listed non-markdown file renders path tokens absolute; a
         // markdown file keeps the TOOL-16 `~` form.
-        let path_ctx = if is_listed && !is_md { &ctx_abs } else { &ctx };
+        let path_ctx = if is_listed && !expands {
+            &ctx_abs
+        } else {
+            &ctx
+        };
         let expanded =
             namespace::expand(&content, &item.prefix, &names, &bare_names).map_err(|name| {
                 // spec: DSC-95 -- `name` is the raw `{{ns:name}}` inner text
@@ -1345,6 +1354,7 @@ mod tests {
             prefix: None,
             path,
             description: None,
+            when_to_use: None,
             link_rel: None,
             bin: None,
             build: Some(build.to_string()),
@@ -1397,6 +1407,7 @@ mod tests {
             prefix: None,
             path,
             description: None,
+            when_to_use: None,
             link_rel: None,
             bin: None,
             build: None,
@@ -1415,6 +1426,7 @@ mod tests {
             prefix: None,
             path,
             description: None,
+            when_to_use: None,
             link_rel: None,
             bin: None,
             build: None,
@@ -1535,6 +1547,7 @@ mod tests {
             prefix: None,
             path: std::path::PathBuf::from("/src/agents/shared.md"),
             description: None,
+            when_to_use: None,
             link_rel: None,
             bin: None,
             build: None,
@@ -1550,6 +1563,7 @@ mod tests {
             prefix: None,
             path: std::path::PathBuf::from("/src/rules/shared.md"),
             description: None,
+            when_to_use: None,
             link_rel: None,
             bin: None,
             build: None,
@@ -1599,6 +1613,7 @@ mod tests {
             prefix: None,
             path: std::path::PathBuf::from("/src/agents/shared.md"),
             description: None,
+            when_to_use: None,
             link_rel: None,
             bin: None,
             build: None,
@@ -1614,6 +1629,7 @@ mod tests {
             prefix: None,
             path: std::path::PathBuf::from("/src/rules/shared.md"),
             description: None,
+            when_to_use: None,
             link_rel: None,
             bin: None,
             build: None,
@@ -2130,6 +2146,7 @@ mod tests {
             prefix: None,
             path: src_file,
             description: None,
+            when_to_use: None,
             link_rel: None, // defaults to agents/myagent.md under each lobe
             bin: None,
             build: None,

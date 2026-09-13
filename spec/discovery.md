@@ -261,14 +261,15 @@ run = "make build"
   target must also stay inside a kind directory.
 - `DSC-97` A `[[items]]` `link` override must, beyond DSC-72's escape-safety
   rule, have its first path component name one of the kind directories
-  (`skills/`, `agents/`, `rules/`, `commands/`, `tools/`); anything else is
-  rejected (`MindToml`) at catalog scan, before install ever runs. `commands/`
-  carries an extra condition: only an item of kind `command` may name it, since
-  a file there is not content the harness merely offers, it is the slash command
-  `/<name>` (commands.md CMD-1). Without that condition a source could declare
-  `kind = "rule", path = "rules/style.md", link = "commands/deploy.md"` and have
-  its prose become `/deploy` in a consumer's agent home, including for a
-  consumer who filtered their install to rules. Without this, DSC-72
+  (`skills/`, `agents/`, `rules/`, `commands/`, `workflows/`, `tools/`);
+  anything else is rejected (`MindToml`) at catalog scan, before install ever
+  runs. `commands/` and `workflows/` carry an extra condition: only an item of
+  that kind may name the directory, since a file in either is not content the
+  harness merely offers, it is the slash command `/<name>` (commands.md CMD-1)
+  or a workflow the harness runs (workflows.md WF-8). Without that condition a
+  source could declare `kind = "rule", path = "rules/style.md", link =
+  "commands/deploy.md"` and have its prose become `/deploy` in a consumer's
+  agent home, including for a consumer who filtered their install to rules. Without this, DSC-72
   alone accepts any relative path inside the agent home, including its root:
   a source declaring `link = "settings.json"` (or a harness's own hooks/config
   path) and shipping matching content installs, via an ordinary `learn`, as a

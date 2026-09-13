@@ -1,6 +1,6 @@
 # Introduction
 
-`mind` is a manager for agent tooling: skills, agents, rules, commands, and
+`mind` is a manager for agent tooling: skills, agents, rules, commands, workflows, and
 tools. It melds arbitrary git repos and links the items they offer into one
 or more agent homes (default `~/.claude`).
 

@@ -95,7 +95,8 @@ pub fn scan(paths: &Paths, manifest: &Manifest) -> Result<Vec<UnmanagedItem>> {
 
 /// The item name for a kind-dir entry, or `None` when the entry is not a
 /// well-formed item of that kind. A skill is the directory `skills/<name>`; an
-/// agent/rule/command is the file `<name>.md`. Only the immediate children of
+/// agent/rule/command is the file `<name>.md`; a workflow the file `<name>.js`
+/// (WF-50). Only the immediate children of
 /// the kind directory are scanned (CMD-8): a nested `commands/<group>/<name>.md`
 /// (the grouped layout mirrored on the source side) is not walked into and so
 /// is neither surfaced by `recall`/`probe` nor reachable by `absorb`.
@@ -107,6 +108,10 @@ fn item_name(kind: ItemKind, entry: &std::fs::DirEntry) -> Option<String> {
         ItemKind::Agent | ItemKind::Rule | ItemKind::Command => {
             name.strip_suffix(".md").map(str::to_string)
         }
+        // spec: WF-50 -- a workflow is the file `<name>.js`, and only the
+        // immediate children of `workflows/` are scanned, matching the flat
+        // convention scan (WF-2).
+        ItemKind::Workflow => name.strip_suffix(".js").map(str::to_string),
         ItemKind::Tool => None,
     }
 }

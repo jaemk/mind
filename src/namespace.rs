@@ -20,18 +20,39 @@ const MARKDOWN_EXTENSIONS: &[&str] = &["md", "markdown", "mdown", "mkd"];
 /// Whether `path` is a markdown file, by a case-insensitive extension match
 /// against [`MARKDOWN_EXTENSIONS`].
 ///
-/// The single chokepoint for "does a token expand here" (NS-53): all four
-/// token families (`{{ns:}}`, `{{path:}}`, `{{tools:}}`, `{{self}}`) expand only
-/// in a file this returns `true` for. `install.rs` skips any other file before
-/// expansion; `review --fix` reports but never rewrites one (NS-54). Every
-/// caller that needs this question answered goes through here rather than
-/// repeating an extension check.
+/// The extension half of NS-53. Ask [`expands_tokens`] instead for the question
+/// "does a token expand in this file", which this alone no longer answers; what
+/// is left here is the narrower "is this prose", which `review --fix` and
+/// `init-source --template` still gate their REWRITES on (NS-54).
 pub fn is_markdown(path: &std::path::Path) -> bool {
     path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
         MARKDOWN_EXTENSIONS
             .iter()
             .any(|md| e.eq_ignore_ascii_case(md))
     })
+}
+
+/// Whether a token expands in `path`, a file belonging to an item of `kind`.
+///
+/// The single chokepoint for "does a token expand here" (NS-53): all four token
+/// families (`{{ns:}}`, `{{path:}}`, `{{tools:}}`, `{{self}}`) expand only in a
+/// file this returns `true` for. `install.rs` skips any other file before
+/// expansion. Every caller that needs this question answered goes through here
+/// rather than repeating an extension check.
+///
+/// The gate is a markdown extension, or the `workflow` kind (WF-25). A workflow
+/// item IS one `.js` file, so the kind test names exactly that file. It is
+/// granted on the kind and not on the extension: a workflow's content is agent
+/// prompts, so a sibling reference in one is the designed use of the token,
+/// where a `.js` file bundled inside some other item is ordinary code whose
+/// `{{ }}` is more likely a templating language's than a mind token.
+///
+/// The third way in, an item's NS-57 `expand:` list, is per-item rather than
+/// per-kind and stays with the callers that hold the item (`item_expands_file`).
+///
+/// spec: NS-53 WF-25
+pub fn expands_tokens(path: &std::path::Path, kind: crate::error::ItemKind) -> bool {
+    is_markdown(path) || kind == crate::error::ItemKind::Workflow
 }
 
 /// Render `{{ns:name}}` tokens in `text` as their bare `name`, for a display
@@ -240,6 +261,10 @@ pub fn prefix_choice(answer: &str) -> Option<String> {
 /// word rejected a step earlier by `ItemKind::parse` (commands.md CMD-9).
 const EXTRA_RESERVED: &[&str] = &[
     "command",
+    // spec: WF-52 -- appended when `workflow` became a real kind, for the same
+    // reason `command` is here: the list is permanent, so a word that enters it
+    // never leaves, whether or not `ItemKind::parse` now rejects it first.
+    "workflow",
     "hook",
     "mcp",
     "plugin",
@@ -639,13 +664,15 @@ fn parse_install_path(path: &str) -> Option<(crate::error::ItemKind, String, Str
     let mut seg = tail.splitn(2, '/');
     let first = seg.next()?;
     let rest = seg.next().unwrap_or("").to_string();
-    // An agent/rule/command file is `<name>.md`; the store copies it as a bare
-    // `<name>`, so stripping a `.md` suffix is correct for both layouts and a
-    // no-op for the store form.
+    // An agent/rule/command file is `<name>.md` and a workflow `<name>.js`; the
+    // store copies either as a bare `<name>`, so stripping the kind's extension
+    // is correct for both layouts and a no-op for the store form.
     let name = match kind {
         crate::error::ItemKind::Agent
         | crate::error::ItemKind::Rule
         | crate::error::ItemKind::Command => first.strip_suffix(".md").unwrap_or(first).to_string(),
+        // spec: WF-10
+        crate::error::ItemKind::Workflow => first.strip_suffix(".js").unwrap_or(first).to_string(),
         _ => first.to_string(),
     };
     if name.is_empty() {
@@ -1543,6 +1570,77 @@ mod tests {
                 "{name} should not be recognized as markdown"
             );
         }
+    }
+
+    #[test]
+    fn expands_tokens_grants_a_workflow_on_its_kind_not_its_extension() {
+        // spec: NS-53 WF-25 -- the gate is a markdown extension OR the
+        // `workflow` kind. A workflow item IS one `.js` file, so the kind test
+        // names exactly that file.
+        use crate::error::ItemKind;
+        let js = std::path::Path::new("review.js");
+        assert!(
+            expands_tokens(js, ItemKind::Workflow),
+            "a workflow's own file expands whatever its extension"
+        );
+        // The store form carries no extension at all (install stages a
+        // single-file item under its bare name), and the kind still grants it.
+        assert!(expands_tokens(
+            std::path::Path::new("review"),
+            ItemKind::Workflow
+        ));
+        // Granted on the kind, not the extension: a `.js` bundled inside some
+        // other item is ordinary code and stays closed.
+        for kind in [
+            ItemKind::Skill,
+            ItemKind::Agent,
+            ItemKind::Rule,
+            ItemKind::Command,
+            ItemKind::Tool,
+        ] {
+            assert!(
+                !expands_tokens(js, kind),
+                "{kind:?} must not expand tokens in a .js file"
+            );
+            assert!(
+                expands_tokens(std::path::Path::new("SKILL.md"), kind),
+                "{kind:?} still expands markdown"
+            );
+        }
+    }
+
+    #[test]
+    fn workflow_is_a_reserved_prefix() {
+        // spec: WF-52 NS-29 -- appended to the permanent reserved list when the
+        // kind landed, as `command` was.
+        assert!(EXTRA_RESERVED.contains(&"workflow"));
+        assert!(
+            validate_prefix("workflow").is_err(),
+            "a source may not take `workflow` as its namespace prefix"
+        );
+        // The plural directory name is not itself reserved, matching every
+        // other kind word (`commands`, `skills`, ... are not on the list).
+        assert!(validate_prefix("workflows").is_ok());
+    }
+
+    #[test]
+    fn parse_install_path_strips_a_workflow_js_extension() {
+        // spec: WF-10 -- the link form carries `.js`, the store form is bare;
+        // both must read back as the same item name.
+        use crate::error::ItemKind;
+        assert_eq!(
+            parse_install_path("~/.claude/workflows/review.js"),
+            Some((ItemKind::Workflow, "review".to_string(), String::new()))
+        );
+        assert_eq!(
+            parse_install_path("~/.mind/store/workflow/review"),
+            Some((ItemKind::Workflow, "review".to_string(), String::new()))
+        );
+        // A prefixed name keeps its `:` and loses only the extension.
+        assert_eq!(
+            parse_install_path("~/.claude/workflows/jk:review.js"),
+            Some((ItemKind::Workflow, "jk:review".to_string(), String::new()))
+        );
     }
 
     #[test]

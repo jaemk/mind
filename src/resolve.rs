@@ -441,6 +441,7 @@ mod tests {
             prefix: None,
             path: PathBuf::new(),
             description: None,
+            when_to_use: None,
             link_rel: None,
             bin: None,
             build: None,

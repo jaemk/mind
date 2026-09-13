@@ -42,8 +42,20 @@ pub struct CatalogItem {
     pub prefix: Option<String>,
     /// Path to the item root on disk (a dir for skills, a file for agents/rules).
     pub path: PathBuf,
-    /// One-line description, from frontmatter or a `mind.toml` override.
+    /// One-line description, from frontmatter or a `mind.toml` override. For a
+    /// workflow it comes from the `meta` object instead, a `.js` file having no
+    /// frontmatter (WF-4).
     pub description: Option<String>,
+    /// A workflow's `meta.whenToUse` (WF-5), shown beside the description
+    /// wherever an item's description is shown (WF-51). `None` for every other
+    /// kind, and for a workflow that declares none.
+    ///
+    /// A field of its own rather than something folded into `description` at
+    /// scan time: a `mind.toml` `[[items]].description` override (DSC-32)
+    /// replaces the description and leaves this standing, which folding would
+    /// make impossible to express. Display-only -- it is not recorded in the
+    /// manifest, and `dump` does not emit it.
+    pub when_to_use: Option<String>,
     /// Optional link target relative to `~/.claude` (from `mind.toml`); `None`
     /// means use the default location for the kind.
     pub link_rel: Option<String>,
@@ -234,9 +246,33 @@ impl CatalogItem {
         match self.kind {
             ItemKind::Skill => Some("SKILL.md"),
             ItemKind::Tool => self.path.join("TOOL.md").is_file().then_some("TOOL.md"),
-            // An agent/rule/command item IS its file: `path` names the file, so
-            // there is nothing under the item an ignore pattern could match.
-            ItemKind::Agent | ItemKind::Rule | ItemKind::Command => None,
+            // An agent/rule/command/workflow item IS its file: `path` names the
+            // file, so there is nothing under the item an ignore pattern could
+            // match.
+            ItemKind::Agent | ItemKind::Rule | ItemKind::Command | ItemKind::Workflow => None,
+        }
+    }
+
+    /// The description as a display surface shows it: the description itself,
+    /// with a workflow's `whenToUse` appended as `<description> - <whenToUse>`,
+    /// the way the harness's own workflow list renders the pair (WF-51).
+    ///
+    /// Every surface that shows a description goes through here, `--json`
+    /// included: `when_to_use` is not recorded in the manifest and `dump` does
+    /// not emit it, so a JSON consumer reading the raw description alone would
+    /// have no way left to see it. An item with no `whenToUse` -- every item of
+    /// every other kind -- reads exactly as `description` does.
+    ///
+    /// spec: WF-51
+    pub fn display_description(&self) -> Option<String> {
+        match (&self.description, &self.when_to_use) {
+            (Some(d), Some(w)) => Some(format!("{d} - {w}")),
+            (Some(d), None) => Some(d.clone()),
+            // A workflow whose `meta` gave a `whenToUse` and no `description`
+            // is malformed by the harness's own rules (WF-30 reports it), but
+            // showing what it does have beats showing nothing.
+            (None, Some(w)) => Some(w.clone()),
+            (None, None) => None,
         }
     }
 
@@ -278,8 +314,9 @@ pub(crate) fn matches_query(item: &CatalogItem, query: &str) -> bool {
     if item.effective_name().to_lowercase().contains(&q) {
         return true;
     }
-    item.description
-        .as_deref()
+    // spec: WF-51 -- the displayed description, so a query matches the
+    // `whenToUse` a workflow row actually shows.
+    item.display_description()
         .is_some_and(|d| d.to_lowercase().contains(&q))
 }
 
@@ -1139,10 +1176,10 @@ fn is_safe_link_rel(rel: &str) -> bool {
 }
 
 /// True when a (already `is_safe_link_rel`-checked) link target's first real
-/// path component names one of the five kind directories -- `skills`, `agents`,
-/// `rules`, `commands`, or `tools` -- and, for `commands/`, the item is itself a
-/// command (DSC-97). A leading `./` is skipped so `./skills/x` and `skills/x`
-/// are treated alike.
+/// path component names one of the six kind directories -- `skills`, `agents`,
+/// `rules`, `commands`, `workflows`, or `tools` -- and, for `commands/` and
+/// `workflows/`, the item is itself of that kind (DSC-97, WF-8). A leading `./`
+/// is skipped so `./skills/x` and `skills/x` are treated alike.
 ///
 /// Confines a `[[items]] link` override to landing alongside items an
 /// ordinary (non-`link`) install would produce, so it can change only the
@@ -1155,11 +1192,12 @@ fn is_safe_link_rel(rel: &str) -> bool {
 /// attacker-chosen command with no mind hook-consent prompt involved.
 ///
 /// The four original kind directories stay mutually interchangeable (TOOL-4: a
-/// tool surfaced under `agents/`). `commands/` is the exception, because a file
-/// there is not inert content the harness merely offers: it becomes the slash
-/// command `/<name>`, so any kind linking into it turns source-controlled prose
-/// into an invocable command a consumer who filtered their install to "rules
-/// only" never asked for.
+/// tool surfaced under `agents/`). `commands/` and `workflows/` are the
+/// exceptions, because a file in either is not inert content the harness merely
+/// offers: it becomes the slash command `/<name>`, or a workflow the `Workflow`
+/// tool will run. Any kind linking into one of them turns source-controlled
+/// prose into something invocable, which a consumer who filtered their install
+/// to "rules only" never asked for.
 fn is_confined_link_target(rel: &str, kind: ItemKind) -> bool {
     use std::path::Component;
     let mut comps = Path::new(rel)
@@ -1168,9 +1206,13 @@ fn is_confined_link_target(rel: &str, kind: ItemKind) -> bool {
     match comps.next() {
         Some(Component::Normal(first)) => {
             let first = first.to_string_lossy();
-            // spec: DSC-97 -- only a command may land in `commands/`.
-            if first == ItemKind::Command.dir() {
-                return kind == ItemKind::Command;
+            // spec: DSC-97 WF-8 -- only a command may land in `commands/`, and
+            // only a workflow in `workflows/`; both turn a file into something
+            // the harness runs rather than content it offers.
+            for invocable in [ItemKind::Command, ItemKind::Workflow] {
+                if first == invocable.dir() {
+                    return kind == invocable;
+                }
             }
             [
                 ItemKind::Skill,
@@ -1395,12 +1437,26 @@ fn build_item(
     // --no-tui`, `--json`) from this one capture point, so sanitize it here
     // exactly as the plugin-manifest path already does (commands.rs), closing
     // the raw-ANSI/bidi-override gap for the biggest funnel of source text.
+    //
+    // spec: WF-4 WF-5 WF-51 -- a workflow's description and `whenToUse` come
+    // from its `meta` object rather than a frontmatter block, read out of the
+    // same one capped text (`meta_text` IS the whole `.js` file here). An
+    // `[[items]].description` override still wins, as for every kind (DSC-32),
+    // and leaves `whenToUse` standing.
+    let wf_meta = if kind == ItemKind::Workflow {
+        crate::workflow_meta::parse(&meta_text)
+    } else {
+        crate::workflow_meta::WorkflowMeta::default()
+    };
+    let sanitized = |d: String| crate::sanitize::strip_ansi(&namespace::flatten_display(&d));
     let description = match ov.description {
         Some(d) => Some(d),
-        None => frontmatter::field(&meta_text, "description"),
+        None => match kind {
+            ItemKind::Workflow => wf_meta.description,
+            _ => frontmatter::field(&meta_text, "description"),
+        },
     }
-    .map(|d| namespace::flatten_display(&d))
-    .map(|d| crate::sanitize::strip_ansi(&d));
+    .map(sanitized);
     Ok(Some(CatalogItem {
         kind,
         name,
@@ -1408,6 +1464,7 @@ fn build_item(
         prefix: prefix.clone(),
         path,
         description,
+        when_to_use: wf_meta.when_to_use.map(sanitized),
         link_rel: ov.link,
         bin: tool_field(kind, ov.bin, &meta_text, "bin"),
         build: tool_field(kind, ov.build, &meta_text, "build"),
@@ -1451,7 +1508,10 @@ fn scan_globs(
         (ItemKind::Agent, &discover.agents),
         (ItemKind::Rule, &discover.rules),
         // spec: CMD-4 -- `[discover].commands` globs match the command FILE.
+        // spec: WF-6 -- and `[discover].workflows` the workflow FILE, as the
+        // agent, rule, and command globs do.
         (ItemKind::Command, &discover.commands),
+        (ItemKind::Workflow, &discover.workflows),
     ] {
         for md in resolve_globs(root, globs, kind)? {
             if let Some(item) = make_item(root, source, prefix, kind, md.clone(), &md)? {
@@ -1483,8 +1543,21 @@ fn resolve_globs(root: &Path, globs: &KindGlobs, kind: ItemKind) -> Result<Vec<P
     Ok(included.difference(&excluded).cloned().collect())
 }
 
-/// Convention scan: fixed `skills/`, `agents/`, `rules/`, `commands/`, and
-/// `tools/` directories.
+/// The file extension a single-file kind's convention scan requires, without the
+/// dot. A directory kind (skill, tool) has none and reports `""`, which no
+/// `Path::extension` ever equals, so it never matches a file.
+///
+/// spec: WF-3 -- `.js` for a workflow, `.md` for every other file kind.
+fn kind_extension(kind: ItemKind) -> &'static str {
+    match kind {
+        ItemKind::Agent | ItemKind::Rule | ItemKind::Command => "md",
+        ItemKind::Workflow => "js",
+        ItemKind::Skill | ItemKind::Tool => "",
+    }
+}
+
+/// Convention scan: fixed `skills/`, `agents/`, `rules/`, `commands/`,
+/// `workflows/`, and `tools/` directories.
 ///
 /// When `flat_skills` is true (DSC-74), skills are instead found as bare-name
 /// directories with a direct `SKILL.md` immediately under `root` (no `skills/`
@@ -1518,11 +1591,21 @@ fn scan_convention(
 
     // spec: CMD-1 CMD-2 -- a command is a flat `commands/<name>.md`, the same
     // shape (and so the same scan) as an agent or a rule.
-    for kind in [ItemKind::Agent, ItemKind::Rule, ItemKind::Command] {
+    // spec: WF-1 WF-2 WF-3 -- a workflow is the same shape again, flat under
+    // `workflows/`, differing only in extension. `.js` is compared
+    // case-sensitively, as the harness compares it: a `.JS`, `.mjs`, or `.ts`
+    // sibling would never load, so mind does not discover it either.
+    for kind in [
+        ItemKind::Agent,
+        ItemKind::Rule,
+        ItemKind::Command,
+        ItemKind::Workflow,
+    ] {
+        let ext = kind_extension(kind);
         let kind_dir = root.join(kind.dir());
         for entry in read_dir_opt(&kind_dir)? {
             if entry.is_file()
-                && entry.extension().is_some_and(|e| e == "md")
+                && entry.extension().is_some_and(|e| e == ext)
                 && let Some(item) = make_item(root, source, prefix, kind, entry.clone(), &entry)?
             {
                 out.push(item);
@@ -1571,7 +1654,9 @@ fn make_item(
     let bare = match kind {
         // Directory-shaped items take the directory name; file items the stem.
         ItemKind::Skill | ItemKind::Tool => file_name(&path),
-        ItemKind::Agent | ItemKind::Rule | ItemKind::Command => path
+        // spec: WF-1 WF-21 -- a workflow's name is its file stem, as for every
+        // other file-shaped kind, and NOT its `meta.name` (WF-20).
+        ItemKind::Agent | ItemKind::Rule | ItemKind::Command | ItemKind::Workflow => path
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default(),
@@ -1929,7 +2014,12 @@ fn meta_file(kind: ItemKind, path: &Path) -> PathBuf {
     match kind {
         ItemKind::Skill => path.join("SKILL.md"),
         ItemKind::Tool => path.join("TOOL.md"),
-        ItemKind::Agent | ItemKind::Rule | ItemKind::Command => path.to_path_buf(),
+        // A workflow has no frontmatter file either; its own `.js` is what
+        // `build_item` reads, for the `meta` object rather than a `---` block
+        // (WF-4, WF-5).
+        ItemKind::Agent | ItemKind::Rule | ItemKind::Command | ItemKind::Workflow => {
+            path.to_path_buf()
+        }
     }
 }
 
@@ -2821,6 +2911,7 @@ mod tests {
             prefix: None,
             path: PathBuf::from("/tmp/fake"),
             description: description.map(|s| s.to_string()),
+            when_to_use: None,
             link_rel: None,
             bin: None,
             build: None,
@@ -2896,6 +2987,7 @@ mod tests {
             prefix: None,
             path: dir,
             description: None,
+            when_to_use: None,
             link_rel: None,
             bin: None,
             build: None,
@@ -3091,6 +3183,136 @@ mod tests {
             "rules/deploy.md",
             ItemKind::Command
         ));
+    }
+
+    #[test]
+    fn only_a_workflow_may_link_into_the_workflows_directory() {
+        // spec: WF-8 -- `workflows/` carries DSC-97's extra condition for the
+        // same reason `commands/` does: a file there is not content the harness
+        // offers, it is something the harness runs.
+        for kind in [
+            ItemKind::Skill,
+            ItemKind::Agent,
+            ItemKind::Rule,
+            ItemKind::Command,
+            ItemKind::Tool,
+        ] {
+            assert!(
+                !is_confined_link_target("workflows/deploy.js", kind),
+                "{kind:?} must not be able to link into workflows/"
+            );
+        }
+        assert!(
+            is_confined_link_target("workflows/deploy.js", ItemKind::Workflow),
+            "a workflow's own kind directory must be allowed"
+        );
+        // `workflows/` joins the accepted set, so a workflow may still surface
+        // under another kind directory and the two conditions do not interfere.
+        assert!(is_confined_link_target(
+            "rules/deploy.md",
+            ItemKind::Workflow
+        ));
+        assert!(!is_confined_link_target(
+            "commands/deploy.md",
+            ItemKind::Workflow
+        ));
+    }
+
+    #[test]
+    fn a_workflow_takes_its_description_and_when_to_use_from_meta() {
+        // spec: WF-1 WF-2 WF-3 WF-4 WF-51
+        let tmp = TmpDir::new();
+        let root = tmp.path();
+        write_file(
+            &root.join("workflows/review.js"),
+            "export const meta = {\n  name: 'review-changes',\n  \
+             description: 'Review changed files',\n  whenToUse: 'before a PR',\n}\n",
+        );
+        // Flat and `.js`-only: neither of these is an item (WF-2, WF-3).
+        write_file(
+            &root.join("workflows/nested/deep.js"),
+            "export const meta = {}",
+        );
+        write_file(&root.join("workflows/modern.mjs"), "export const meta = {}");
+        let paths = paths_for(root);
+        let source = make_source_for(root);
+        let mut items = Vec::new();
+        scan_source(&paths, &source, &mut items).unwrap();
+
+        let wfs: Vec<_> = items
+            .iter()
+            .filter(|i| i.kind == ItemKind::Workflow)
+            .collect();
+        assert_eq!(wfs.len(), 1, "one flat `.js` workflow only: {items:?}");
+        let wf = wfs[0];
+        // spec: WF-21 -- the name is the file stem, NOT the `meta.name`.
+        assert_eq!(wf.name, "review");
+        assert_eq!(wf.description.as_deref(), Some("Review changed files"));
+        assert_eq!(wf.when_to_use.as_deref(), Some("before a PR"));
+        assert_eq!(
+            wf.display_description().as_deref(),
+            Some("Review changed files - before a PR"),
+            "a display surface reads the pair as the harness renders it"
+        );
+    }
+
+    #[test]
+    fn a_declared_description_overrides_meta_and_leaves_when_to_use() {
+        // spec: WF-4 WF-51 DSC-32 -- the `[[items]]` override replaces the
+        // description read from `meta`; `whenToUse` is a separate field, so it
+        // survives, which is the case folding the two together could not express.
+        let tmp = TmpDir::new();
+        let root = tmp.path();
+        write_file(
+            &root.join("workflows/review.js"),
+            "export const meta = {\n  description: 'from meta',\n  \
+             whenToUse: 'before a PR',\n}\n",
+        );
+        write_file(
+            &root.join("mind.toml"),
+            "[[items]]\nkind = \"workflow\"\nname = \"review\"\n\
+             path = \"workflows/review.js\"\ndescription = \"declared\"\n",
+        );
+        let paths = paths_for(root);
+        let source = make_source_for(root);
+        let mut items = Vec::new();
+        scan_source(&paths, &source, &mut items).unwrap();
+
+        let wf = items
+            .iter()
+            .find(|i| i.kind == ItemKind::Workflow)
+            .expect("the declared workflow");
+        assert_eq!(wf.description.as_deref(), Some("declared"));
+        assert_eq!(wf.when_to_use.as_deref(), Some("before a PR"));
+        assert_eq!(
+            wf.display_description().as_deref(),
+            Some("declared - before a PR")
+        );
+    }
+
+    #[test]
+    fn an_unreadable_workflow_meta_lists_without_a_description() {
+        // spec: WF-5 WF-31 -- the reader never fails a scan on the shape of a
+        // workflow's code. A file with no `meta` at all is still an item.
+        let tmp = TmpDir::new();
+        let root = tmp.path();
+        write_file(
+            &root.join("workflows/odd.js"),
+            "const meta = buildMeta()\nexport { meta }\n",
+        );
+        let paths = paths_for(root);
+        let source = make_source_for(root);
+        let mut items = Vec::new();
+        scan_source(&paths, &source, &mut items).unwrap();
+
+        let wf = items
+            .iter()
+            .find(|i| i.kind == ItemKind::Workflow)
+            .expect("the workflow is still discovered");
+        assert_eq!(wf.name, "odd");
+        assert_eq!(wf.description, None);
+        assert_eq!(wf.when_to_use, None);
+        assert_eq!(wf.display_description(), None);
     }
 
     #[test]
@@ -3588,6 +3810,7 @@ mod tests {
             prefix: None,
             path,
             description: None,
+            when_to_use: None,
             link_rel: None,
             bin: None,
             build: None,

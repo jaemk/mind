@@ -10,7 +10,7 @@
 This initializes the source and makes its items available to `mind learn`.
 `mind sync` (or re-melding, re-running `mind meld <repo>`) refreshes the clone.
 
-**Item.** A unit offered by a source, one of five *kinds*:
+**Item.** A unit offered by a source, one of six *kinds*:
 
 - `skill` - a `skills/<name>/` directory containing a `SKILL.md` and any associated
   resources (scripts, templates, etc).
@@ -27,6 +27,8 @@ This initializes the source and makes its items available to `mind learn`.
   linking into different lobe directories, so `mind` does not report a
   collision the way it does for two agents of the same name. Both offer
   `/foo` to the harness. Install only one unless you mean to have both.
+- `workflow` - a `workflows/<name>.js` file: a script the harness loads and offers
+  to its `Workflow` tool. See [Workflows](workflows.md).
 - `tool` - a `tools/<name>/` directory containing a `TOOL.md`, a script/executable, 
   any associated resources. Tools are an optional feature to assist with managing
   and referencing shared scripts/executables utilized by multiple skills.
@@ -35,7 +37,7 @@ Items are discovered by convention (the paths above) or declared in a
 `mind.toml`.
 
 **Lobe.** A directory `mind` links items into: the directory holding `skills/`,
-`agents/`, `rules/`, and `commands/`. A lobe may be a global agent home (`~/.claude`,
+`agents/`, `rules/`, `commands/`, and `workflows/`. A lobe may be a global agent home (`~/.claude`,
 `~/.gemini/config`) or a project subdirectory (`.windsurf` inside a project root).
 The default lobe is `~/.claude`; you can add Gemini, Codex, Windsurf, Antigravity,
 or any directory, each with an optional per-kind filter (see
@@ -130,7 +132,7 @@ anything; `evolve` updates the `mind` binary itself.
 | `mind completions <shell>` / `mind man` | shell completions / man page |
 
 A source repo exposes items by convention (`skills/<n>/SKILL.md`,
-`agents/<n>.md`, `rules/<n>.md`, `commands/<n>.md`, `tools/<n>/`), via a `mind.toml`, or via a Claude
+`agents/<n>.md`, `rules/<n>.md`, `commands/<n>.md`, `workflows/<n>.js`, `tools/<n>/`), via a `mind.toml`, or via a Claude
 `.claude-plugin/` manifest (see [Claude plugin marketplaces](marketplace.md)). See
 [Source layout](source-layout.md) and the
 [examples/](https://github.com/jaemk/mind/tree/main/examples): `starter` for the
@@ -427,7 +429,7 @@ Spec: [spec/item-link.md](https://github.com/jaemk/mind/blob/main/spec/item-link
 
 `recall` and `probe` accept two composable filters:
 
-- `--kind <skill|agent|rule|command|tool>` narrows to one item kind.
+- `--kind <skill|agent|rule|command|workflow|tool>` narrows to one item kind.
 - `--source <filter>` narrows to items from a matching source. The filter is
   an exact name, a trailing suffix (`repo` or `owner/repo`; a multi-source
   match is normal, not an error), or a glob matched against the full

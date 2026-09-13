@@ -67,7 +67,12 @@ that mind depends on is called out at the requirement that depends on it.
   the cap is reported rather than enforced.
 - `WF-8` A `[[items]]` entry may declare a workflow at any path, as for any kind.
   Its `link` is confined to a kind directory (DSC-97), with `workflows/` now
-  among them.
+  among them. `workflows/` carries DSC-97's extra condition, the one `commands/`
+  carries: only an item of kind `workflow` may name it. The reason is the same
+  one DSC-97 gives. A file there is not content the harness merely offers, it is
+  something the harness runs, so without the condition a source could declare
+  `kind = "rule", link = "workflows/deploy.js"` and turn prose into an
+  orchestration a consumer who filtered their install to rules never asked for.
 
 ## Storage and linking
 
@@ -167,7 +172,20 @@ that mind depends on is called out at the requirement that depends on it.
   prompts read by an agent, which is the reader TOOL-16's form is for.
 - `WF-27` `review`'s `inert-token` finding (CLI-223), which reports any `{{...}}`
   in a non-markdown item file as dead text, does not apply to a workflow file.
-  Tokens expand there (WF-25), so the finding would be false.
+  Tokens expand there (WF-25), so the finding would be false. The same follows
+  for every other check NS-53 gates on whether a file expands: an unresolved
+  token in a workflow is the hard `bad-reference` a markdown file's would be,
+  not the downgraded advisory a dead one gets, and a `{{ns:}}` token in one is
+  not misplaced (NS-24).
+
+  What does NOT follow is the automatic REWRITING: `review --fix` and
+  `init-source --template` leave a workflow file alone, as they leave every
+  non-markdown file alone (NS-54). NS-54's own reason does not survive here (a
+  token written into a workflow would expand), but the other one does: those two
+  rewrite bare prose into tokens by matching sibling names as words, and a
+  workflow file is code, where a sibling name may be an identifier, a key, or a
+  substring of one. The unguarded-reference scan still reports what it sees
+  there (WF-28); an author acts on it by hand.
 - `WF-28` The unguarded-reference scan (NS-20) covers a workflow file, as it
   covers every text file of an item.
 - `WF-29` Two installed workflows whose effective `meta.name` (WF-5, after
@@ -246,8 +264,8 @@ posture: state the assumption, do not defend it.
   none of, and a scoped item `mind.toml` (HOOK-131) is read only from a
   directory-backed item's own directory, which a one-file kind does not have.
   This is the agent, rule, and command position, not a new restriction.
-- `WF-51` `probe` and `recall` surface a workflow's `whenToUse` (WF-5) where an
-  item's description is shown, appended to the description as the harness's own
+- `WF-51` `probe` surfaces a workflow's `whenToUse` (WF-5) where an item's
+  description is shown, appended to the description as the harness's own
   workflow list renders it (`<description> - <whenToUse>`). It is a field of its
   own on the catalog item, not folded into the description at scan time: a
   `mind.toml` `[[items]].description` override (WF-4, DSC-32) replaces the
@@ -256,6 +274,18 @@ posture: state the assumption, do not defend it.
   manifest, and `dump` does not emit it, `dump` emitting no item description at
   all. No other kind has a second description field; a workflow without one is
   unaffected.
+
+  The appending is done once, at the one accessor every display surface reads,
+  `--json` included. `whenToUse` is in no persisted file, so a JSON consumer
+  given the bare description would have no remaining way to see it.
+
+  `recall` does not show it. `recall` reports INSTALLED items and reads them
+  from the manifest, which is where the description it prints was captured at
+  install time; it does not scan the catalog, so there is no `whenToUse` in
+  hand at that point. Surfacing it there would mean recording it in the
+  manifest -- persisting a display string, for one kind, that nothing else
+  reads -- and that is a worse trade than the omission. `probe`, which scans,
+  is the browsing surface the harness's own workflow list corresponds to.
 - `WF-52` `workflow` becomes a reserved namespace prefix, appended to the NS-29
   list, which is append-only for exactly this case. A source whose `[source]
   .prefix` is the literal string `workflow` is refused from that point on, with

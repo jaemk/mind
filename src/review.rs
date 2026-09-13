@@ -638,8 +638,10 @@ fn run_checks(
             };
             // NS-57/CLI-226: an `expand:`-listed file expands like markdown, so
             // an unresolved token in it is a real install failure (hard), not the
-            // dead text a plain non-markdown file gets.
-            let expands = crate::namespace::is_markdown(&file) || item_expands_file(item, &file);
+            // dead text a plain non-markdown file gets. WF-25/WF-27: so does a
+            // workflow's own `.js`, which `expands_tokens` grants on the kind.
+            let expands = crate::namespace::expands_tokens(&file, item.kind)
+                || item_expands_file(item, &file);
             // The bare_names set is empty here: review validates token resolution
             // (whether the name exists), not the expansion form, so bare vs.
             // prefixed output is irrelevant for this check.
@@ -809,9 +811,12 @@ fn run_checks(
             // A non-markdown item file (a script, data) is entirely code: any
             // `{{ns:}}` in it is misplaced (NS-24), and no token family expands
             // there at all (NS-53) -- unless the item opts the file into
-            // expansion with `expand:`, which makes it behave like markdown for
-            // every token check (NS-57, CLI-226).
-            let expands = crate::namespace::is_markdown(&file) || item_expands_file(item, &file);
+            // expansion with `expand:` (NS-57, CLI-226), or it is a workflow's
+            // own `.js`, which expands on its kind (WF-25). Either makes the
+            // file behave like markdown for every token check below, WF-27's
+            // exemption from the inert-token net included.
+            let expands = crate::namespace::expands_tokens(&file, item.kind)
+                || item_expands_file(item, &file);
             // The one path token Check 8 (below) reports as `bad-reference` for
             // this file, if any, so Check 14 does not re-report the same span
             // (CLI-223). `expand_paths` stops at the first bad token, so this is

@@ -412,6 +412,10 @@ pub struct Discover {
     /// and rule globs do (commands.md CMD-4).
     #[serde(default)]
     pub commands: KindGlobs,
+    /// Workflow globs match the workflow FILE (`workflows/<name>.js`), as the
+    /// agent, rule, and command globs do (workflows.md WF-6).
+    #[serde(default)]
+    pub workflows: KindGlobs,
     /// Tool globs match the tool DIRECTORY (e.g. `packages/*/tool`), not an
     /// anchor file: the matched directory is the tool.
     #[serde(default)]
@@ -644,12 +648,13 @@ impl Discover {
     /// [`Discover`] cannot be silently honored by one and skipped by the other
     /// (which is exactly how `commands` first landed: discovered by the scan,
     /// but neither authoritative nor validated).
-    fn kind_globs(&self) -> [&KindGlobs; 5] {
+    fn kind_globs(&self) -> [&KindGlobs; 6] {
         [
             &self.skills,
             &self.agents,
             &self.rules,
             &self.commands,
+            &self.workflows,
             &self.tools,
         ]
     }

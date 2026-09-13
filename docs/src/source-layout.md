@@ -10,6 +10,7 @@ config:
   agents/<name>.md           an agent
   rules/<name>.md            a rule
   commands/<name>.md         a slash command
+  workflows/<name>.js        a workflow the harness runs
   tools/<name>/              a tool (the whole directory; no anchor file)
   mind.toml                  optional: metadata, export control, odd layouts
 ```
@@ -20,6 +21,8 @@ The kinds:
   dir, scripts) ship with it.
 - **agent** / **rule** / **command**: a single markdown file. A command is what
   the harness offers at the prompt as `/<name>`.
+- **workflow**: a single `.js` file the harness loads from `workflows/` and
+  offers to its `Workflow` tool. See [Workflows](workflows.md).
 - **tool**: a directory of helper scripts or a compiled binary. A tool is
   store-only: other items reference it, and by default it is not linked into an
   agent home (a tool can opt in with an explicit `link`, see [Tooling](tooling.md)).
@@ -43,7 +46,7 @@ See [Commands](commands.md#mental-model) for what happens when a source ships
 both.
 
 A group segment must not be a reserved kind word (`skill`, `agent`, `rule`,
-`command`, `tool`). `commands/tool:build.md` installs as `tool:build`, which
+`command`, `workflow`, `tool`). `commands/tool:build.md` installs as `tool:build`, which
 an item ref reads as kind `tool`, name `build`, so `mind learn tool:build`
 fails with a not-found error naming `build`. Spell it `command:tool:build`,
 or pick another group name.
