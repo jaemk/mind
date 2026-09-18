@@ -557,3 +557,275 @@ fn only_a_workflow_may_link_into_the_workflows_directory() {
         "nothing may be linked into workflows/ by a non-workflow item"
     );
 }
+
+/// `review` reports every workflow the harness would skip -- an unreadable
+/// `meta`, a missing or empty `name`/`description`, and a file over the size cap
+/// -- as advisory findings that do not fail the run.
+#[test]
+fn review_reports_a_workflow_the_harness_will_not_load() {
+    // spec: WF-7 WF-30 WF-32
+    let sb = Sandbox::new();
+    sb.write_and_commit("workflows/no-meta.js", "phase('Review')\nagent('go')\n");
+    sb.write_and_commit(
+        "workflows/blank-name.js",
+        "export const meta = {\n  name: '   ',\n  description: 'Review the diff',\n}\n",
+    );
+    sb.write_and_commit(
+        "workflows/no-description.js",
+        "export const meta = {\n  name: 'no-description',\n}\n",
+    );
+    // 524288 bytes is the cap; one byte past it is an overage.
+    let padded = format!(
+        "export const meta = {{\n  name: 'huge',\n  description: 'Huge',\n}}\n// {}\n",
+        "x".repeat(524_289)
+    );
+    sb.write_and_commit("workflows/huge.js", &padded);
+
+    let r = sb.mind(&["review", &sb.source_spec()]);
+    assert!(
+        r.success,
+        "an unloadable workflow is advisory, never a failure: {}\n{}",
+        r.stdout, r.stderr
+    );
+    let findings: Vec<&str> = r
+        .stdout
+        .lines()
+        .filter(|l| l.contains("[workflow-unloadable]"))
+        .collect();
+    let joined = findings.join("\n");
+    assert!(
+        joined.contains("workflow:no-meta") && joined.contains("no `meta` object"),
+        "an unreadable meta must be reported: {joined}"
+    );
+    assert!(
+        joined.contains("workflow:blank-name") && joined.contains("`meta.name` is empty"),
+        "an empty name must be reported: {joined}"
+    );
+    assert!(
+        joined.contains("workflow:no-description")
+            && joined.contains("`meta.description` is missing"),
+        "a missing description must be reported: {joined}"
+    );
+    assert!(
+        joined.contains("workflow:huge") && joined.contains("524288-byte cap"),
+        "a file over the cap must be reported: {joined}"
+    );
+    assert!(
+        !joined.contains("workflow:review-changes"),
+        "a complete workflow must not be reported: {joined}"
+    );
+
+    // spec: WF-32 -- reported, not enforced: the over-cap file still installs.
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    let r = sb.mind(&["learn", "workflow:huge"]);
+    assert!(r.success, "learn: {}\n{}", r.stdout, r.stderr);
+    assert!(
+        sb.link("huge.js").symlink_metadata().is_ok(),
+        "the over-cap workflow is installed anyway"
+    );
+}
+
+/// `learn` warns about a workflow the harness would skip and installs it: mind's
+/// reader disagreeing with the harness's must not decide an install.
+#[test]
+fn learn_warns_about_an_unloadable_workflow_and_installs_it() {
+    // spec: WF-30 WF-31
+    let sb = Sandbox::new();
+    sb.write_and_commit("workflows/no-meta.js", "phase('Review')\nagent('go')\n");
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+
+    let r = sb.mind(&["learn", "workflow:no-meta"]);
+    assert!(
+        r.success,
+        "the install must succeed: {}\n{}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr.contains("the harness will not load this workflow")
+            && r.stderr.contains("installed anyway"),
+        "learn must warn and say it installed anyway: {}",
+        r.stderr
+    );
+    assert!(
+        sb.link("no-meta.js").symlink_metadata().is_ok(),
+        "the workflow is installed despite the warning"
+    );
+
+    // A complete workflow in the same source draws no warning.
+    let r = sb.mind(&["learn", "workflow:review-changes"]);
+    assert!(r.success, "learn: {}\n{}", r.stdout, r.stderr);
+    assert!(
+        !r.stderr.contains("will not load"),
+        "a loadable workflow must be silent: {}",
+        r.stderr
+    );
+}
+
+/// A `meta.name` that differs from the item's effective name is reported at
+/// `learn` and by `review`, and stays visible in the `recall <item>` detail.
+#[test]
+fn a_diverging_meta_name_is_reported_at_learn_review_and_recall() {
+    // spec: WF-24
+    let sb = Sandbox::new();
+    // The file stem is `review-changes`; the harness will answer to `deploy`.
+    sb.write_and_commit(
+        "workflows/review-changes.js",
+        "export const meta = {\n  name: 'deploy',\n  description: 'Review changed files',\n}\n",
+    );
+
+    let r = sb.mind(&["review", &sb.source_spec()]);
+    assert!(r.success, "review: {}\n{}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("[workflow-name]")
+            && r.stdout.contains("resolves it as 'deploy'")
+            && r.stdout.contains("not 'review-changes'"),
+        "review must report the divergence: {}",
+        r.stdout
+    );
+
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    let r = sb.mind(&["learn", "workflow:review-changes"]);
+    assert!(r.success, "learn: {}\n{}", r.stdout, r.stderr);
+    assert!(
+        r.stderr.contains("resolves it as 'deploy'"),
+        "learn must warn about the divergence: {}",
+        r.stderr
+    );
+
+    let r = sb.mind(&["recall", "workflow:review-changes"]);
+    assert!(r.success, "recall: {}\n{}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("resolves it as 'deploy'"),
+        "the detail view must keep reporting it: {}",
+        r.stdout
+    );
+
+    // spec: WF-24 -- absent from the listing and from introspect, where it would
+    // be unactionable noise.
+    let r = sb.mind(&["recall"]);
+    assert!(r.success, "recall: {}\n{}", r.stdout, r.stderr);
+    assert!(
+        !r.stdout.contains("resolves it as"),
+        "the listing must stay quiet: {}",
+        r.stdout
+    );
+    let r = sb.mind(&["introspect"]);
+    assert!(
+        !r.stdout.contains("resolves it as") && !r.stderr.contains("resolves it as"),
+        "introspect must stay quiet: {}\n{}",
+        r.stdout,
+        r.stderr
+    );
+}
+
+/// A prefixed source whose `meta.name` is tokenized does NOT diverge: the token
+/// expands to the effective name, which is the whole point of WF-23.
+#[test]
+fn a_tokenized_meta_name_draws_no_divergence_warning() {
+    // spec: WF-23 WF-24
+    let sb = Sandbox::new();
+    sb.write_and_commit(
+        "workflows/review-changes.js",
+        "export const meta = {\n  name: '{{ns:review-changes}}',\n  description: 'Review changed files',\n}\n",
+    );
+    let r = sb.mind(&["review", &sb.source_spec(), "--as", "jk"]);
+    assert!(r.success, "review: {}\n{}", r.stdout, r.stderr);
+    assert!(
+        !r.stdout.contains("[workflow-name]"),
+        "a tokenized meta.name matches the prefixed effective name: {}",
+        r.stdout
+    );
+
+    assert!(
+        sb.mind(&["meld", &sb.source_spec(), "--namespace", "jk"])
+            .success
+    );
+    let r = sb.mind(&["learn", "workflow:jk:review-changes"]);
+    assert!(r.success, "learn: {}\n{}", r.stdout, r.stderr);
+    assert!(
+        !r.stderr.contains("resolves it as"),
+        "learn must stay quiet: {}",
+        r.stderr
+    );
+}
+
+/// Two workflows whose `meta.name` agree are one workflow to the harness. mind
+/// reports it at `learn`, in `review`, and in the `recall <item>` detail, and
+/// installs both.
+#[test]
+fn two_workflows_sharing_a_meta_name_are_reported() {
+    // spec: WF-29
+    let sb = Sandbox::new();
+    sb.write_and_commit(
+        "workflows/deploy-staging.js",
+        "export const meta = {\n  name: 'deploy',\n  description: 'Deploy to staging',\n}\n",
+    );
+    sb.write_and_commit(
+        "workflows/deploy-prod.js",
+        "export const meta = {\n  name: 'deploy',\n  description: 'Deploy to prod',\n}\n",
+    );
+
+    let r = sb.mind(&["review", &sb.source_spec()]);
+    assert!(
+        r.success,
+        "a name collision is advisory, never a failure: {}\n{}",
+        r.stdout, r.stderr
+    );
+    let findings: Vec<&str> = r
+        .stdout
+        .lines()
+        .filter(|l| l.contains("[workflow-name-collision]"))
+        .collect();
+    assert_eq!(
+        findings.len(),
+        2,
+        "both sides of the collision are reported: {:?}",
+        findings
+    );
+    assert!(
+        findings.iter().all(|f| f.contains("harness name 'deploy'")),
+        "the finding names the shared harness name: {findings:?}"
+    );
+
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    let r = sb.mind(&["learn", "--all", "agents"]);
+    assert!(r.success, "learn: {}\n{}", r.stdout, r.stderr);
+    assert!(
+        r.stderr.contains("harness name 'deploy'"),
+        "learn must warn about the shared name: {}",
+        r.stderr
+    );
+    // spec: WF-29 -- both install; nothing is blocked.
+    assert!(sb.link("deploy-staging.js").symlink_metadata().is_ok());
+    assert!(sb.link("deploy-prod.js").symlink_metadata().is_ok());
+
+    let r = sb.mind(&["recall", "workflow:deploy-prod"]);
+    assert!(r.success, "recall: {}\n{}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("workflow:deploy-staging"),
+        "the detail view names the other claimant: {}",
+        r.stdout
+    );
+}
+
+/// The unguarded-reference scan covers a workflow file, as it covers every text
+/// file of an item.
+#[test]
+fn the_unguarded_reference_scan_covers_a_workflow_file() {
+    // spec: WF-28
+    let sb = Sandbox::new();
+    sb.write_and_commit(
+        "workflows/review-changes.js",
+        "export const meta = {\n  name: '{{ns:review-changes}}',\n  description: 'Review changed files',\n}\n\
+         agent('follow the review skill')\n",
+    );
+
+    let r = sb.mind(&["review", &sb.source_spec(), "--as", "jk"]);
+    assert!(r.success, "review: {}\n{}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("[unguarded-reference]")
+            && r.stdout.contains("workflow:jk:review-changes"),
+        "a bare sibling name in a workflow's prompt must be reported: {}",
+        r.stdout
+    );
+}

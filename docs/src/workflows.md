@@ -49,6 +49,23 @@ item simply lists without a description; it never fails a scan or an install on
 the shape of a workflow's code. The harness's own reader is the authority on what
 actually loads.
 
+## What mind reports but will not enforce
+
+The harness skips a workflow with no readable `meta`, a missing or empty `name`
+or `description`, or a file over 524288 bytes. `review` reports each as a
+`workflow-unloadable` advisory, and `learn` warns and installs it anyway:
+
+```text
+$ mind review ./agents
+advisory [workflow-unloadable]: workflow:deploy: the harness will not load this
+  workflow: `meta.description` is missing
+```
+
+Nothing here is a gate. mind does not judge item content for any other kind, its
+`meta` reader is looser than the harness's, and a disagreement between two
+readers is not a reason to refuse an install. The size cap is the harness's, so
+mind reports an overage rather than enforcing a limit of its own.
+
 ## The name the harness answers to
 
 The harness keys a workflow by the `name` in its `meta` object, not by its file
@@ -68,6 +85,19 @@ It expands at install to the effective name (`review-changes` unprefixed,
 `jk:review-changes` under a namespace), which is also the spelling the harness
 uses for a plugin's workflow. So the installed file carries a plain string
 literal that matches the name `mind recall` reports.
+
+When the two do not match, `learn` says so and installs anyway, `review` reports
+it as `workflow-name`, and `mind recall workflow:<name>` keeps showing it:
+
+```text
+$ mind recall workflow:review-changes
+workflow:review-changes
+  ...
+  harness the harness resolves it as 'deploy', not 'review-changes' -- ...
+```
+
+Two workflows whose `meta.name` agree are one workflow to the harness. Both
+install; both are reported, the same three places.
 
 All four token families expand in a workflow file, not just in `meta`, since a
 workflow's strings are agent prompts:

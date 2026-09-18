@@ -259,8 +259,8 @@ and verified.
 | Single-file item links: a `blob` URL to an `agent`/`rule`/`command` `.md` file installs as a single-item source instance, kind resolved by explicit `--kind` / `kind =`, else the containing directory, else the file's frontmatter | done | [item-link.md](item-link.md) (LNK-20..22), CLI-239, DSC-100, STO-81 |
 | `dump` emits a file link as a `blob` URL, with `kind` when the instance recorded an explicit one | done | LNK-23 |
 | `mind curate`: one pass over every registered curator that registers and installs newly listed entries, re-pins against the curator's directive, upgrades curated sources, reports entries the curator dropped, and offers `--adopt` to bring a pre-existing source under a curator's ownership (`--check`, `--yes`, `--prune`, `--no-sync`, `--adopt`) | done | [curate.md](curate.md) (CUR-1..21), STO-82 |
-| The `workflow` item kind: `workflows/<name>.js` discovered, stored, linked, namespaced, and upgraded like any other kind; `meta` read for the description, `{{ns:}}` expanded in the file | done | [workflows.md](workflows.md) (WF-1..8, WF-10, WF-12, WF-21..23, WF-25..27, WF-50..52) |
-| A workflow the harness will not load, a `meta.name` that diverges from the item name, and a duplicate `meta.name` are reported by `learn`/`review` | planned | [workflows.md](workflows.md) (WF-24, WF-29, WF-30, WF-32) |
+| The `workflow` item kind: `workflows/<name>.js` discovered, stored, linked, namespaced, and upgraded like any other kind; `meta` read for the description, `{{ns:}}` expanded in the file | done | [workflows.md](workflows.md) (WF-1..6, WF-8, WF-10, WF-12, WF-21..23, WF-25..27, WF-50..52) |
+| A workflow the harness will not load, a `meta.name` that diverges from the item name, and a duplicate `meta.name` are reported by `learn`/`review`/`recall <item>`, never enforced | done | [workflows.md](workflows.md) (WF-7, WF-24, WF-28..32) |
 | A plugin root's `workflows/` maps to the `workflow` kind | planned | [workflows.md](workflows.md) (WF-40..42) |
 
 ## Documents

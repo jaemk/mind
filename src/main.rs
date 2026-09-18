@@ -29,6 +29,7 @@ mod selfupdate;
 mod source;
 mod tui;
 mod unmanaged;
+mod workflow_check;
 mod workflow_meta;
 
 use std::io::IsTerminal;

@@ -1243,6 +1243,77 @@ fn run_checks(
         }
     }
 
+    // Check 17: a workflow the harness would not load, or would load under a
+    // name mind does not report (advisory, WF-24/WF-29/WF-30).
+    //
+    // Every one of these is a report and nothing more. mind does not gatekeep
+    // the validity of item content for any other kind, and the harness's own
+    // `meta` reader is stricter than mind's and is the authority on what loads
+    // (WF-5), so a disagreement between the two readers must not be able to
+    // block an install (WF-31). The size cap is in the same position (WF-32):
+    // DSC-90 records that mind does not cap item content, and a cap mind
+    // enforced would be mind's cap, not the harness's.
+    //
+    // The WF-29 comparison set here is the reviewed source's OWN workflows.
+    // `review` reads a source, not the host: its target is usually not melded
+    // and by design may be a repo the user has not yet decided to trust, so the
+    // installed set is not its subject. `learn` and `recall` make the same
+    // comparison against everything installed.
+    {
+        let mut claims: Vec<(String, String)> = Vec::new();
+        for item in &items {
+            if item.kind != crate::error::ItemKind::Workflow {
+                continue;
+            }
+            let (meta, size) = crate::workflow_check::read(&item.path);
+            for reason in crate::workflow_check::skip_reasons(&meta, size) {
+                advisory.push(Finding::advisory(
+                    "workflow-unloadable",
+                    format!(
+                        "{}: the harness will not load this workflow: {reason}",
+                        item.key().as_str()
+                    ),
+                ));
+            }
+            // The prefix and sibling set are the same ones Check 5 validated
+            // tokens against, so a `{{ns:}}` in `meta.name` (WF-23) is compared
+            // in its expanded form, exactly as installed.
+            let Some(harness) = crate::workflow_check::harness_name(&meta, &prefix, &siblings)
+            else {
+                continue;
+            };
+            if let Some(msg) =
+                crate::workflow_check::divergence(&item.effective_name(), Some(&harness))
+            {
+                advisory.push(Finding::advisory(
+                    "workflow-name",
+                    format!("{}: {msg}", item.key().as_str()),
+                ));
+            }
+            claims.push((harness, item.key().as_str().to_string()));
+        }
+        // spec: WF-29 -- two workflows answering to one harness name.
+        for (i, (harness, _)) in claims.iter().enumerate() {
+            let others: Vec<String> = claims
+                .iter()
+                .enumerate()
+                .filter(|(j, (other, _))| *j != i && other == harness)
+                .map(|(_, (_, key))| key.clone())
+                .collect();
+            if others.is_empty() {
+                continue;
+            }
+            advisory.push(Finding::advisory(
+                "workflow-name-collision",
+                format!(
+                    "{}: {}",
+                    claims[i].1,
+                    crate::workflow_check::collision(harness, &others)
+                ),
+            ));
+        }
+    }
+
     // Fix (CLI-138): rewrite the local working copy in place. Local-path target
     // only; a registry selector or repo spec is refused with nothing changed.
     let mut fixed: Vec<String> = Vec::new();

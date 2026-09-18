@@ -2212,6 +2212,77 @@ fn agent_collision(
     Ok(None)
 }
 
+/// Warn about each freshly installed workflow the harness would skip (WF-30/31),
+/// answer to under a name mind does not report (WF-24), or share a name with
+/// (WF-29). Installs nothing back and fails nothing: every one of these is
+/// advisory by construction (see `workflow_check`), so an unreadable manifest or
+/// store file drops the warning rather than propagating.
+///
+/// Runs AFTER the install, against the STORE copies, which is what makes it
+/// exact: `{{ns:}}` in a `meta.name` (WF-23) is already expanded there, so the
+/// comparison is against the literal string the harness will read, with no
+/// second expansion to keep in step with `install.rs`. It also means the WF-29
+/// comparison set is the whole installed set, freshly written, including the
+/// other items of this same closure.
+///
+/// spec: WF-24 WF-29 WF-30 WF-31
+fn warn_workflows(paths: &Paths, manifest: &Manifest, installed_keys: &[String]) {
+    // Every installed workflow's harness-facing name, read once. The tokens in
+    // a store copy are expanded, so no prefix or sibling set is needed.
+    let no_prefix: Option<String> = None;
+    let no_siblings: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut claimed: Vec<(String, String)> = Vec::new();
+    for entry in manifest.items.values() {
+        if entry.kind != ItemKind::Workflow {
+            continue;
+        }
+        let (meta, _) = crate::workflow_check::read(&paths.mind_home.join(&entry.store));
+        if let Some(name) = crate::workflow_check::harness_name(&meta, &no_prefix, &no_siblings) {
+            claimed.push((name, entry.key().as_str().to_string()));
+        }
+    }
+
+    for key in installed_keys {
+        let Some(entry) = manifest.items.get(key.as_str()) else {
+            continue;
+        };
+        if entry.kind != ItemKind::Workflow {
+            continue;
+        }
+        let store = paths.mind_home.join(&entry.store);
+        let (meta, size) = crate::workflow_check::read(&store);
+        // spec: WF-31 -- warn and keep the install. The item is already on disk
+        // by the time this runs, which is the point: mind's reader disagreeing
+        // with the harness's must not be able to decide an install.
+        for reason in crate::workflow_check::skip_reasons(&meta, size) {
+            eprintln!(
+                "warning: {}: the harness will not load this workflow: {reason}; installed anyway",
+                entry.display_key()
+            );
+        }
+        let harness = crate::workflow_check::harness_name(&meta, &no_prefix, &no_siblings);
+        // spec: WF-24
+        if let Some(msg) = crate::workflow_check::divergence(&entry.name, harness.as_deref()) {
+            eprintln!("warning: {}: {msg}", entry.display_key());
+        }
+        // spec: WF-29
+        if let Some(harness) = harness {
+            let others: Vec<String> = claimed
+                .iter()
+                .filter(|(name, other)| *name == harness && other != key)
+                .map(|(_, other)| crate::sanitize::strip_ansi(other))
+                .collect();
+            if !others.is_empty() {
+                eprintln!(
+                    "warning: {}: {}",
+                    entry.display_key(),
+                    crate::workflow_check::collision(&harness, &others)
+                );
+            }
+        }
+    }
+}
+
 /// The set of bare item names belonging to a source, for reference validation.
 /// Every catalog item belonging to `source`, used to validate and expand an
 /// item's reference tokens at install (the `{{ns:}}` names plus the `{{self}}` /
@@ -3938,6 +4009,10 @@ fn learn_selected(
         }
     }
     manifest.save(paths)?;
+    // spec: WF-24 WF-29 WF-30 WF-31 -- after the manifest is written, so the
+    // warnings read the store copies and the full installed set. Reported even
+    // when the batch failed part-way: the items that did install are on disk.
+    warn_workflows(paths, &manifest, &installed_keys);
     match failure {
         Some(e) => Err(e),
         None => {
@@ -4069,6 +4144,10 @@ fn learn_collecting_selected(
         }
     }
     manifest.save(paths)?;
+    // spec: WF-31 -- the same warnings as the `learn` path above; they route to
+    // stderr, which is where this flow's other advisories go under `--json`
+    // (CLI-217).
+    warn_workflows(paths, &manifest, &installed_keys);
     match failure {
         Some(e) => Err(e),
         None => Ok(installed_keys),
@@ -8466,6 +8545,50 @@ pub fn recall(
                         .join(", ")
                 ))
             );
+        }
+        // spec: WF-24 WF-29 -- a workflow answers to its `meta.name`, not to the
+        // name printed above, so the two are shown together when they differ.
+        // This is a property of the installed item, not a one-off install
+        // message, so it belongs in the detail view the way LNK-19's dropped
+        // requirement does. Deliberately absent from the `recall` LISTING and
+        // from `introspect`: the divergence is legal and nothing mind can
+        // repair, so it would be unactionable noise in the one command whose
+        // output is meant to be acted on.
+        if found.kind == ItemKind::Workflow {
+            let (meta, _) = crate::workflow_check::read(&paths.mind_home.join(&found.store));
+            let harness = crate::workflow_check::harness_name(
+                &meta,
+                &None,
+                &std::collections::HashSet::new(),
+            );
+            if let Some(msg) = crate::workflow_check::divergence(&found.name, harness.as_deref()) {
+                println!("  {}{}", out.dim("harness "), out.yellow(&msg));
+            }
+            if let Some(harness) = harness {
+                let others: Vec<String> = manifest
+                    .items
+                    .values()
+                    .filter(|e| e.kind == ItemKind::Workflow && e.name != found.name)
+                    .filter(|e| {
+                        let (m, _) = crate::workflow_check::read(&paths.mind_home.join(&e.store));
+                        crate::workflow_check::harness_name(
+                            &m,
+                            &None,
+                            &std::collections::HashSet::new(),
+                        )
+                        .as_deref()
+                            == Some(harness.as_str())
+                    })
+                    .map(|e| e.display_key())
+                    .collect();
+                if !others.is_empty() {
+                    println!(
+                        "  {}{}",
+                        out.dim("harness "),
+                        out.yellow(&crate::workflow_check::collision(&harness, &others))
+                    );
+                }
+            }
         }
         // CLI-75 / LIFE-11: mark out of date exactly when `upgrade` would act --
         // source-content hash changed, or effective name changed (rename).

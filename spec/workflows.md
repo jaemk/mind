@@ -154,6 +154,20 @@ that mind depends on is called out at the requirement that depends on it.
   (WF-23) matches after expansion. What is left to warn about is a hand-authored
   file whose stem was chosen independently of `meta.name`, and a prefixed source
   that never tokenized.
+
+  A workflow with no readable `meta.name` does not diverge: it is unloadable,
+  which WF-30 reports, and a second warning saying it also answers to the wrong
+  name would be one defect reported twice. The same holds for a `meta.name` whose
+  token resolves to no sibling, which is already the hard `bad-reference` of
+  WF-27.
+
+  At `learn` and `recall <item>` the comparison reads the INSTALLED copy, where
+  the tokens are already expanded, so it is against the literal string the
+  harness will read and there is no second expansion to keep in step with
+  `install.rs`. `review` has no installed copy and expands `meta.name` itself,
+  against the prefix and sibling set it already validated the file's other tokens
+  with. The `review` finding is tagged `workflow-name`, and WF-29's
+  `workflow-name-collision`.
 - `WF-25` All four token families expand in a workflow file: `{{ns:}}`,
   `{{path:}}`, `{{tools:}}`, and `{{self}}`, over the whole file, with the same
   resolver and the same hard bad-reference failure as a markdown file (NS-11,
@@ -203,13 +217,28 @@ that mind depends on is called out at the requirement that depends on it.
   that is not the harness's (WF-5), which WF-31 forbids from blocking an install.
   A prefix does not avert it, as WF-22 records.
 
+  The comparison set differs by site, because the installed set is not every
+  site's subject. `learn` and `recall <item>` compare against everything
+  installed, which is what "two installed workflows" means. `review` compares the
+  reviewed source's own workflows against each other: its target is a source, not
+  the host, and by design usually a repo the user has not yet decided to trust,
+  so reporting what it would collide with once installed would answer a question
+  `review` was not asked. Two workflows in one source that already share a name
+  are a defect in the source, which is exactly what `review` is for.
+
 ## Reporting a workflow the harness will not load
 
-- `WF-30` `review` reports a workflow the harness would skip, as a finding
-  alongside its existing hook and reference findings: no readable `meta`, a
-  missing or empty `name` or `description`, or a file over the WF-7 size cap.
-  Such a workflow does not exist as far as the harness is concerned, and nothing
-  else in mind's model would say so.
+- `WF-30` `review` reports a workflow the harness would skip, as a
+  `workflow-unloadable` advisory finding alongside its existing hook and
+  reference findings: no readable `meta`, a missing or empty `name` or
+  `description`, or a file over the WF-7 size cap. Such a workflow does not exist
+  as far as the harness is concerned, and nothing else in mind's model would say
+  so. Each condition is its own finding, except an unreadable `meta`, which is
+  one finding and not also a missing `name` and a missing `description`.
+
+  An empty finding list is not a promise the file loads. The harness's reader is
+  stricter than mind's and is the authority (WF-5), so this reports what mind can
+  see and no more. That asymmetry is why it is a report and not a gate.
 - `WF-31` `learn` warns on the same condition and installs anyway. mind does not
   gatekeep the validity of item content for any other kind, and the harness's own
   reader is the authority (WF-5); a reader disagreement must not be able to

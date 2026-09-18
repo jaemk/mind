@@ -37,11 +37,8 @@
 //! and an empty `description` is the catalog's; conflating either with "absent"
 //! here would throw away the distinction before its reader sees it.
 //!
-//! The consumers (the catalog scan for WF-4, the WF-24 and WF-29 name checks,
-//! the WF-30 findings, and WF-51's listing) arrive with the rest of the kind,
-//! so the allow covers a surface that is exercised by the tests below and not
-//! yet called from the binary.
-#![allow(dead_code)]
+//! The consumers are the catalog scan (WF-4, WF-51) and `workflow_check`, which
+//! turns what is read here into the WF-24, WF-29, and WF-30 reports.
 
 use std::path::Path;
 

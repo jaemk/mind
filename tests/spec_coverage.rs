@@ -103,19 +103,18 @@ const ALLOWLIST: &[&str] = &[
     //   so it cannot run headlessly and stays allowlisted.
     "CLI-143",
     // The `workflow` item kind (spec/workflows.md, WF-1..52). The kind, its
-    // discovery, storage, linking, namespacing, and token expansion are cited by
-    // tests; what is left here is the reporting still to be built (WF-7/WF-24/
-    // WF-28/WF-29/WF-30/WF-32) and the plugin mapping (WF-40..42).
+    // discovery, storage, linking, namespacing, token expansion, and the
+    // reporting it does instead of enforcing (WF-24/WF-29/WF-30..32) are cited by
+    // tests; what is left to build here is the plugin mapping (WF-40..42).
     //
-    // Two stay allowlisted permanently: WF-11 (the harness loader admits a
+    // Three stay allowlisted permanently: WF-11 (the harness loader admits a
     // symlinked workflow file) and WF-20 (the harness keys a workflow by
     // `meta.name`, not its file name) are observations about Claude Code, not
     // mind behavior. Nothing in mind can assert either; what mind does about
     // WF-20 is WF-21 and WF-24, which are cited. WF-13 is the same shape: it
     // records that a project lobe needs no special handling, so there is no
     // workflow-specific behavior for a test to drive.
-    "WF-7", "WF-11", "WF-13", "WF-20", "WF-24", "WF-28", "WF-29", "WF-30", "WF-32", "WF-40",
-    "WF-41", "WF-42",
+    "WF-11", "WF-13", "WF-20", "WF-40", "WF-41", "WF-42",
     // `evolve`'s download, verification, extraction, and in-place swap are the
     // `self_update` crate's, so the statements describing them have no mind-side
     // code path a test here could drive without a real release and a real
