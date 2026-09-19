@@ -990,6 +990,133 @@ fn abs8_effective_name_follows_destination_prefix() {
     );
 }
 
+/// The same, for a workflow: the destination's prefix reaches the one kind
+/// whose convention path is not `<name>.md`, so the file lands bare at
+/// `workflows/deploy.js` in the source while the lobe link takes the prefixed
+/// name with the extension AFTER it (`workflows/mypfx:deploy.js`, WF-22) --
+/// not `workflows/mypfx:deploy` and not `mypfx:deploy.js.js`.
+///
+/// It also makes a WF-24 divergence out of nothing the user wrote: the file's
+/// `meta.name` is still `deploy` while mind installed it as `mypfx:deploy`, so
+/// the absorb must say so rather than leave a silently shadowed workflow.
+// spec: ABS-8 WF-22 WF-24 WF-50
+#[test]
+fn abs8_effective_name_follows_destination_prefix_for_a_workflow() {
+    let sb = Sandbox::new();
+    sb.place_unmanaged_workflow("deploy");
+
+    write_file(&sb.dest.join("mind.toml"), "[source]\nprefix = \"mypfx\"\n");
+    git(&sb.dest, &["add", "-A"]);
+    git(&sb.dest, &["commit", "-qm", "add mind.toml"]);
+
+    let dest = sb.dest_spec();
+    let r = sb.mind(&["absorb", "workflow:deploy", "--to", &dest, "--yes"]);
+    assert!(
+        r.success,
+        "absorb must succeed with a prefixed dest: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+
+    // The source copy keeps the BARE name: the prefix is an install-time
+    // transform, not part of the item's identity in the repo.
+    assert!(
+        sb.dest.join("workflows/deploy.js").is_file(),
+        "the destination source must hold the bare workflows/deploy.js"
+    );
+    assert!(
+        !sb.dest.join("workflows/mypfx:deploy.js").exists(),
+        "the prefix must not be baked into the source path"
+    );
+
+    let recall = sb.mind(&["recall", "workflow:mypfx:deploy"]);
+    assert!(
+        recall.success,
+        "recall workflow:mypfx:deploy must work after a prefixed absorb: \
+         stdout={} stderr={}",
+        recall.stdout, recall.stderr
+    );
+
+    // spec: WF-22 -- prefix in the stem, `.js` still last.
+    let link = sb.claude_home.join("workflows").join("mypfx:deploy.js");
+    assert!(
+        is_symlink(&link),
+        "managed link must be at workflows/mypfx:deploy.js: {link:?}"
+    );
+    assert!(
+        !sb.claude_home.join("workflows/deploy.js").exists(),
+        "the unprefixed lobe entry must be gone (absorb claimed it)"
+    );
+    assert!(
+        !sb.claude_home.join("workflows/mypfx:deploy").exists(),
+        "the link must not drop the extension"
+    );
+
+    // spec: WF-24 -- the prefix created a divergence; absorb's install reports it.
+    assert!(
+        r.stderr
+            .contains("the harness resolves it as 'deploy', not 'mypfx:deploy'"),
+        "a prefixed absorb must report the harness-name divergence it created: {}",
+        r.stderr
+    );
+}
+
+/// `forget` is the inverse for a workflow too: the `.js` lobe link and the
+/// store copy go, and the destination repo's own copy stays (forget does not
+/// own the source). The kind's non-`.md` extension is exactly the sort of
+/// detail an uninstall that recomputed paths from kind+name would get wrong;
+/// the file registry is what makes it right.
+// spec: ABS-8 WF-50
+#[test]
+fn abs8_forget_is_inverse_of_absorb_for_a_workflow() {
+    let sb = Sandbox::new();
+    let lobe = sb.place_unmanaged_workflow("deploy");
+    let dest = sb.dest_spec();
+
+    let absorb = sb.mind(&["absorb", "workflow:deploy", "--to", &dest, "--yes"]);
+    assert!(
+        absorb.success,
+        "absorb must succeed: stdout={} stderr={}",
+        absorb.stdout, absorb.stderr
+    );
+    assert!(
+        is_symlink(&lobe),
+        "lobe must be a managed symlink after absorb"
+    );
+    let store = sb.mind_home.join("store/workflow/deploy");
+    assert!(
+        store.exists(),
+        "the absorbed workflow must have a store copy: {store:?}"
+    );
+
+    let forget = sb.mind(&["forget", "workflow:deploy", "--yes"]);
+    assert!(
+        forget.success,
+        "forget of an absorbed workflow must succeed: stdout={} stderr={}",
+        forget.stdout, forget.stderr
+    );
+
+    assert!(
+        !is_symlink(&lobe) && !lobe.exists(),
+        "forget must remove the managed .js symlink absorb installed"
+    );
+    assert!(
+        !store.exists(),
+        "forget must remove the store copy as well: {store:?}"
+    );
+    // The destination repo keeps its copy: forget does not own the source.
+    assert!(
+        sb.dest.join("workflows/deploy.js").is_file(),
+        "forget must not reach into the destination source repo"
+    );
+    let recall = sb.mind(&["recall", "workflow:deploy"]);
+    assert!(
+        !recall.success,
+        "workflow:deploy must not resolve as managed after forget: \
+         stdout={} stderr={}",
+        recall.stdout, recall.stderr
+    );
+}
+
 // ---- ABS-9: help text states the three destination ways --------------------
 
 /// absorb --help contains the three destination ways and their precedence.

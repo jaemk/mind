@@ -391,6 +391,123 @@ fn link_to_a_workflow_names_it_as_unsupported() {
 }
 
 #[test]
+fn a_blob_link_to_a_workflow_fails_at_parse_not_at_scan() {
+    // spec: LNK-3 LNK-20 WF-6
+    // The `blob/` form of the same path never reaches the WF-6 message: a blob
+    // URL must name a `.md` file, which `parse_link_tail` enforces before any
+    // clone. The two errors are easy to conflate, and the distinction is
+    // load-bearing -- the blob refusal costs no network and registers nothing,
+    // while the tree refusal is a judgement about a path mind did fetch.
+    let sb = Sandbox::new();
+    sb.write_and_commit(
+        "workflows/deploy.js",
+        "export const meta = { name: 'deploy', description: 'Deploy it' };\n",
+    );
+    let r = sb.mind(&["learn", &sb.link("blob/main/workflows/deploy.js")]);
+    assert!(!r.success, "a blob link to a `.js` must fail: {}", r.stdout);
+    assert!(
+        r.stderr.contains("a blob link must name a `.md` file"),
+        "the blob form must fail the LNK-3 parse rule: {}",
+        r.stderr
+    );
+    assert!(
+        !r.stderr.contains("does not support installing a workflow"),
+        "the blob form must NOT borrow the WF-6 wording -- it never gets far \
+         enough to classify the path: {}",
+        r.stderr
+    );
+    assert_eq!(source_count(&sb), 0, "nothing registered on failure");
+}
+
+#[test]
+fn an_explicit_kind_on_a_workflow_shaped_link_is_a_mismatch() {
+    // spec: LNK-21 WF-6
+    // `--kind agent` cannot rescue a workflow-shaped link. The path is not
+    // `.md`, so it takes the directory reading, where any explicit kind other
+    // than `skill` is a mismatch -- the explicit kind is answered before the
+    // WF-6 refusal, and both are refusals, so nothing installs either way.
+    let sb = Sandbox::new();
+    sb.write_and_commit(
+        "workflows/deploy.js",
+        "export const meta = { name: 'deploy', description: 'Deploy it' };\n",
+    );
+    let r = sb.mind(&[
+        "--json",
+        "learn",
+        &sb.link("tree/main/workflows/deploy.js"),
+        "--kind",
+        "agent",
+    ]);
+    assert!(
+        !r.success,
+        "`--kind agent` on a workflow path must fail: {}",
+        r.stdout
+    );
+    let v: serde_json::Value = serde_json::from_str(r.stdout.trim())
+        .unwrap_or_else(|e| panic!("stdout must be one JSON document: {e}\n{}", r.stdout));
+    assert_eq!(
+        v["error"]["kind"], "link-kind-mismatch",
+        "the explicit kind is answered first, as a mismatch: {v}"
+    );
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("agent")),
+        "the error must name the kind that was asked for: {v}"
+    );
+    assert_eq!(source_count(&sb), 0, "nothing registered on failure");
+    // And `--kind workflow` is not a way in either: the flag's own value set
+    // refuses it, or the link path does.
+    let wf = sb.mind(&[
+        "learn",
+        &sb.link("tree/main/workflows/deploy.js"),
+        "--kind",
+        "workflow",
+    ]);
+    assert!(
+        !wf.success,
+        "`--kind workflow` must not open a path WF-6 closes: {}",
+        wf.stdout
+    );
+    assert_eq!(source_count(&sb), 0, "nothing registered on failure");
+}
+
+#[test]
+fn a_workflow_shaped_link_is_refused_by_shape_not_by_what_is_on_disk() {
+    // spec: LNK-20 WF-6
+    // The refusal is a judgement about the PATH (`workflows/` parent, or a
+    // `.js` extension), so it holds for a file the repo does not have -- the
+    // user gets the kind-specific remedy rather than a bare "not a skill
+    // directory" that would send them looking for a typo.
+    let sb = Sandbox::new();
+    let absent = sb.mind(&["learn", &sb.link("tree/main/workflows/absent.js")]);
+    assert!(!absent.success, "{}", absent.stdout);
+    assert!(
+        absent
+            .stderr
+            .contains("does not support installing a workflow"),
+        "a workflow-shaped path that is not in the repo still gets the WF-6 \
+         message: {}",
+        absent.stderr
+    );
+
+    // A `.js` ANYWHERE takes the same message: the extension alone decides.
+    // (Reported, not asserted as ideal: `lib/util.js` is not a workflow, and
+    // the message calls it one.)
+    sb.write_and_commit("lib/util.js", "export const x = 1;\n");
+    let stray = sb.mind(&["learn", &sb.link("tree/main/lib/util.js")]);
+    assert!(!stray.success, "{}", stray.stdout);
+    assert!(
+        stray
+            .stderr
+            .contains("does not support installing a workflow"),
+        "a `.js` outside workflows/ takes the same refusal: {}",
+        stray.stderr
+    );
+    assert_eq!(source_count(&sb), 0, "nothing registered on failure");
+}
+
+#[test]
 fn branch_link_upgrades_with_the_branch() {
     // spec: LNK-5
     // A tree/<branch> link follows that branch: sync + upgrade pick up an

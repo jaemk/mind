@@ -72,6 +72,12 @@ impl Sandbox {
         );
     }
 
+    /// Write `workflows/<name>.js` with arbitrary contents (a `meta` mind
+    /// cannot read, a missing key, a padded over-cap file, ...).
+    fn write_workflow_raw(&self, name: &str, body: &str) {
+        write_file(&self.src.join("workflows").join(format!("{name}.js")), body);
+    }
+
     fn commit_src(&self, msg: &str) {
         git(&self.src, &["add", "-A"]);
         git(&self.src, &["commit", "-qm", msg]);
@@ -285,6 +291,344 @@ fn wf24_upgrade_reports_a_renamed_workflow_under_its_new_key() {
         up.stderr
             .contains("the harness resolves it as 'alpha', not 'labs:alpha'"),
         "upgrade must report the divergence a prefix change introduces: {}",
+        up.stderr
+    );
+}
+
+// ---- CLI-217: the warnings survive `--json` -------------------------------
+
+/// `upgrade --json --yes` still emits the workflow warnings, on stderr, leaving
+/// stdout holding exactly one JSON document (CLI-217). The `warn_workflows`
+/// call sits ahead of the `--json` return, so a caller scripting upgrades is
+/// not the one caller who silently stops hearing about a shadowed harness name.
+// spec: WF-24 WF-29 CLI-217
+#[test]
+fn wf24_wf29_upgrade_warnings_reach_stderr_under_json() {
+    let sb = Sandbox::new();
+    sb.write_workflow("alpha", "alpha");
+    sb.write_workflow("beta", "beta");
+    sb.commit_src("add workflows");
+
+    let spec = sb.src_spec();
+    assert!(sb.mind(&["meld", &spec, "--register-only"]).success);
+    assert!(sb.mind(&["learn", "workflow:alpha"]).success);
+    assert!(sb.mind(&["learn", "workflow:beta"]).success);
+
+    sb.write_workflow("alpha", "beta");
+    sb.commit_src("alpha now answers to beta");
+    assert!(sb.mind(&["sync"]).success);
+
+    let up = sb.mind(&["upgrade", "--yes", "--json"]);
+    assert!(
+        up.success,
+        "upgrade --json must succeed: stdout={} stderr={}",
+        up.stdout, up.stderr
+    );
+
+    // spec: CLI-217 -- stdout is the document and nothing else. Parsing is the
+    // assertion: a warning printed to stdout would leave prose before `{`.
+    let doc: serde_json::Value = serde_json::from_str(up.stdout.trim())
+        .unwrap_or_else(|e| panic!("stdout must be one JSON document: {e}\n{}", up.stdout));
+    assert_eq!(
+        doc["action"].as_str(),
+        Some("upgrade"),
+        "the document must answer the invoked verb: {}",
+        up.stdout
+    );
+    assert!(
+        !up.stdout.contains("warning:"),
+        "no warning may land on stdout under --json: {}",
+        up.stdout
+    );
+
+    // spec: WF-24 WF-29 -- and both warnings are still reported, on stderr.
+    assert!(
+        up.stderr
+            .contains("the harness resolves it as 'beta', not 'alpha'"),
+        "the WF-24 divergence must survive --json (on stderr): {}",
+        up.stderr
+    );
+    assert!(
+        up.stderr
+            .contains("it answers to the harness name 'beta', which workflow:beta also claims"),
+        "the WF-29 collision must survive --json (on stderr): {}",
+        up.stderr
+    );
+}
+
+// ---- WF-30 / WF-31: the unloadable warnings on the upgrade path -----------
+
+/// An upstream edit that makes an installed workflow unloadable is reported by
+/// the `upgrade` that applies it, on the same terms `learn` reports it on:
+/// warn, install anyway (WF-31). Two shapes in one batch -- a `meta` mind can
+/// read but that is missing `description`, and a file with no `meta` at all --
+/// because they take different branches of `skip_reasons`.
+///
+/// The file with no readable `meta` must draw the unloadable warning and NOT a
+/// WF-24 divergence: it has no harness name to diverge, and reporting one would
+/// be a second complaint about the same defect.
+// spec: WF-30 WF-31
+#[test]
+fn wf30_wf31_upgrade_warns_when_an_edit_makes_a_workflow_unloadable() {
+    let sb = Sandbox::new();
+    sb.write_workflow("gamma", "gamma");
+    sb.write_workflow("delta", "delta");
+    sb.commit_src("add workflows");
+
+    let spec = sb.src_spec();
+    assert!(sb.mind(&["meld", &spec, "--register-only"]).success);
+    let learn_g = sb.mind(&["learn", "workflow:gamma"]);
+    assert!(learn_g.success, "learn gamma: {}", learn_g.stderr);
+    let learn_d = sb.mind(&["learn", "workflow:delta"]);
+    assert!(learn_d.success, "learn delta: {}", learn_d.stderr);
+    // The install run is clean, so the upgrade assertions below are the ones
+    // doing the work.
+    assert!(
+        !learn_g.stderr.contains("will not load this workflow")
+            && !learn_d.stderr.contains("will not load this workflow"),
+        "a loadable workflow must draw no WF-30 warning at learn: {} {}",
+        learn_g.stderr,
+        learn_d.stderr
+    );
+
+    // gamma keeps a readable `meta` but loses its `description`; delta loses
+    // the `meta` object entirely.
+    sb.write_workflow_raw("gamma", "export const meta = {\n  name: 'gamma',\n}\n");
+    sb.write_workflow_raw("delta", "// no meta here at all\nconst x = 1\n");
+    sb.commit_src("break both workflows");
+    assert!(sb.mind(&["sync"]).success);
+
+    let up = sb.mind(&["upgrade", "--yes"]);
+    // spec: WF-31 -- advisory: the upgrade still applies.
+    assert!(
+        up.success,
+        "upgrade must succeed despite the WF-30 findings: stdout={} stderr={}",
+        up.stdout, up.stderr
+    );
+    assert!(
+        up.stderr.contains(
+            "workflow:gamma: the harness will not load this workflow: `meta.description` is \
+             missing; installed anyway"
+        ),
+        "upgrade must report the missing `meta.description`: {}",
+        up.stderr
+    );
+    assert!(
+        up.stderr.contains(
+            "workflow:delta: the harness will not load this workflow: it declares no `meta` \
+             object mind can read; installed anyway"
+        ),
+        "upgrade must report the unreadable `meta`: {}",
+        up.stderr
+    );
+    // spec: WF-24 WF-30 -- no name, so no divergence complaint on top.
+    assert!(
+        !up.stderr.contains("the harness resolves it as"),
+        "an unloadable workflow must not also draw a divergence warning: {}",
+        up.stderr
+    );
+    // spec: WF-31 -- and the new (broken) content is what is installed.
+    let installed = std::fs::read_to_string(sb.claude_home.join("workflows/delta.js"))
+        .expect("the link must still resolve after the upgrade");
+    assert!(
+        installed.contains("no meta here at all"),
+        "the upgrade must have applied the unloadable version: {installed}"
+    );
+}
+
+/// A workflow that grows past the harness's 524288-byte cap upstream is
+/// reported by `upgrade` and installed anyway (WF-7, WF-32). The cap is the one
+/// WF-30 reason that is a property of the file rather than of its `meta`, and
+/// the only one that can fire while `meta` reads perfectly.
+// spec: WF-7 WF-30 WF-31 WF-32
+#[test]
+fn wf32_upgrade_reports_a_workflow_that_grew_past_the_cap_and_installs_it() {
+    let sb = Sandbox::new();
+    sb.write_workflow("big", "big");
+    sb.commit_src("add workflow");
+
+    let spec = sb.src_spec();
+    assert!(sb.mind(&["meld", &spec, "--register-only"]).success);
+    let learn = sb.mind(&["learn", "workflow:big"]);
+    assert!(learn.success, "learn: {}", learn.stderr);
+    assert!(
+        !learn.stderr.contains("byte cap"),
+        "the under-cap install must draw no overage warning: {}",
+        learn.stderr
+    );
+
+    // Same readable `meta`, padded past the cap by a trailing comment.
+    let mut body = String::from("export const meta = {\n  name: 'big',\n  description: 'Big'\n}\n");
+    body.push_str("// ");
+    body.push_str(&"p".repeat(524_288));
+    body.push('\n');
+    sb.write_workflow_raw("big", &body);
+    sb.commit_src("pad past the cap");
+    assert!(sb.mind(&["sync"]).success);
+
+    let up = sb.mind(&["upgrade", "--yes"]);
+    // spec: WF-32 -- reported, never enforced.
+    assert!(
+        up.success,
+        "an over-cap upgrade must still succeed: stdout={} stderr={}",
+        up.stdout, up.stderr
+    );
+    assert!(
+        up.stderr
+            .contains("over the harness's 524288-byte cap; installed anyway"),
+        "upgrade must report the overage: {}",
+        up.stderr
+    );
+    assert!(
+        up.stderr.contains("workflow:big"),
+        "the overage must be keyed to the item: {}",
+        up.stderr
+    );
+    let installed = std::fs::metadata(sb.claude_home.join("workflows/big.js"))
+        .expect("the over-cap workflow must still be installed");
+    assert!(
+        installed.len() > 524_288,
+        "the over-cap file must be what landed, unmodified: {} bytes",
+        installed.len()
+    );
+}
+
+// ---- the early return: only what was upgraded is reported -----------------
+
+/// Upgrading a NON-workflow item while a defective workflow sits installed
+/// reports nothing about the workflow. `warn_workflows` returns early when
+/// nothing in the batch is a workflow, and the guarantee that matters is not
+/// the saved scan but this silence: the comparison set is the whole installed
+/// set, so a loop keyed off that set instead of off the upgraded keys would
+/// re-report every old defect on every unrelated upgrade.
+// spec: WF-24 WF-29
+#[test]
+fn an_upgrade_that_touches_no_workflow_reports_no_workflow_warning() {
+    let sb = Sandbox::new();
+    // An installed workflow whose harness name already diverges: every run
+    // that DOES look at it warns, so silence here is meaningful.
+    sb.write_workflow("alpha", "not-alpha");
+    write_file(
+        &sb.src.join("skills/review/SKILL.md"),
+        "---\nname: review\ndescription: Review the diff\n---\n# review\n",
+    );
+    sb.commit_src("add a workflow and a skill");
+
+    let spec = sb.src_spec();
+    assert!(sb.mind(&["meld", &spec, "--register-only"]).success);
+    let learn_w = sb.mind(&["learn", "workflow:alpha"]);
+    assert!(learn_w.success, "learn workflow: {}", learn_w.stderr);
+    assert!(
+        learn_w
+            .stderr
+            .contains("the harness resolves it as 'not-alpha'"),
+        "the fixture's divergence must be real, or this test proves nothing: {}",
+        learn_w.stderr
+    );
+    assert!(sb.mind(&["learn", "skill:review"]).success);
+
+    // Only the skill changes upstream.
+    write_file(
+        &sb.src.join("skills/review/SKILL.md"),
+        "---\nname: review\ndescription: Review the diff\n---\n# review\n\nNow with detail.\n",
+    );
+    sb.commit_src("edit the skill");
+    assert!(sb.mind(&["sync"]).success);
+
+    let up = sb.mind(&["upgrade", "skill:review", "--yes"]);
+    assert!(
+        up.success,
+        "upgrade must succeed: stdout={} stderr={}",
+        up.stdout, up.stderr
+    );
+    assert!(
+        up.stdout.contains("upgraded"),
+        "the skill must actually have upgraded: {}",
+        up.stdout
+    );
+    assert!(
+        !up.stderr.contains("the harness resolves it as"),
+        "an upgrade that touched no workflow must say nothing about one: {}",
+        up.stderr
+    );
+    assert!(
+        !up.stderr.contains("will not load this workflow"),
+        "an upgrade that touched no workflow must say nothing about one: {}",
+        up.stderr
+    );
+}
+
+// ---- the failure path: `upgrade` is NOT `learn` here ----------------------
+
+/// CHARACTERIZATION, not an endorsement. `learn` warns about the workflows it
+/// installed even when the batch failed part-way (`commands.rs`: the
+/// `warn_workflows` call precedes the `match failure`). `upgrade` does not: its
+/// three `return Err(e)` paths save the manifest and return without warning, so
+/// a workflow that DID upgrade earlier in the same batch upgrades silently and
+/// its new defect is reported by no run -- the next `upgrade` finds it already
+/// current and never looks at it again.
+///
+/// The upgrade batch is ordered by manifest key (a `BTreeMap` of `kind:name`),
+/// so `workflow:alpha` is applied before `workflow:zbad` fails on an
+/// unresolvable `{{ns:}}` reference. The assertions below pin: the batch fails,
+/// alpha's new content IS live (so the silence is about a real, applied
+/// upgrade), and -- the reported defect -- nothing is said about it.
+///
+/// If this test starts failing, the asymmetry was closed; delete the last
+/// assertion and keep the rest.
+// spec: WF-24 LIFE-48
+#[test]
+fn upgrade_does_not_warn_about_a_workflow_applied_before_a_later_item_failed() {
+    let sb = Sandbox::new();
+    sb.write_workflow("alpha", "alpha");
+    sb.write_workflow("zbad", "zbad");
+    sb.commit_src("add workflows");
+
+    let spec = sb.src_spec();
+    assert!(sb.mind(&["meld", &spec, "--register-only"]).success);
+    assert!(sb.mind(&["learn", "workflow:alpha"]).success);
+    assert!(sb.mind(&["learn", "workflow:zbad"]).success);
+
+    // alpha's harness name diverges; zbad gains a reference to no sibling, so
+    // its install fails at expansion time, after alpha has been applied.
+    sb.write_workflow("alpha", "renamed-upstream");
+    sb.write_workflow_raw(
+        "zbad",
+        "export const meta = {\n  name: 'zbad',\n  description: 'Bad'\n}\n\
+         // {{ns:no-such-sibling}}\n",
+    );
+    sb.commit_src("diverge alpha, break zbad");
+    assert!(sb.mind(&["sync"]).success);
+
+    let up = sb.mind(&["upgrade", "--yes"]);
+    assert!(
+        !up.success,
+        "the batch must fail on zbad's bad reference: stdout={} stderr={}",
+        up.stdout, up.stderr
+    );
+
+    // spec: LIFE-48 -- alpha was applied and persisted before the failure.
+    let installed = std::fs::read_to_string(sb.claude_home.join("workflows/alpha.js"))
+        .expect("alpha must still be installed");
+    assert!(
+        installed.contains("name: 'renamed-upstream'"),
+        "alpha's upgrade must have been applied before zbad failed: {installed}"
+    );
+    let recall = sb.mind(&["recall"]);
+    assert!(
+        recall.success && recall.stdout.contains("alpha"),
+        "alpha must remain recorded after the failed batch: {} {}",
+        recall.stdout,
+        recall.stderr
+    );
+
+    // The reported defect: `learn` would have warned here; `upgrade` does not.
+    assert!(
+        !up.stderr
+            .contains("the harness resolves it as 'renamed-upstream'"),
+        "EXPECTED-DEFECT drifted: upgrade now reports the workflow it applied \
+         before the batch failed. That is the better behavior -- drop this \
+         assertion: {}",
         up.stderr
     );
 }

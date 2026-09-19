@@ -4413,3 +4413,130 @@ fn wf13_project_lobe_with_no_kinds_filter_admits_a_workflow() {
         learned.stdout
     );
 }
+
+// WF-13 (the negative half): `link-project` can never produce a lobe that
+// admits a workflow. Both of its forms carry a `kinds` filter -- the default
+// windsurf preset (the `paths.rs` preset table, `kinds: &[ItemKind::Skill]`)
+// and `--subdir` (`paths.rs`, `kinds: Some(vec![ItemKind::Skill])`) -- and
+// there is no `claude` preset to opt out with. So a workflow learned while a
+// project lobe is registered lands in the default Claude lobe and NOWHERE in
+// the project.
+//
+// The `--subdir .claude` case is the load-bearing one: it points the project
+// lobe at exactly the directory the harness reads project workflows from, so
+// the workflow's absence there cannot be explained away as a path mismatch.
+// The skill assertions are the control -- both lobes are live and receiving
+// links at the moment the workflow is refused.
+#[test]
+fn wf13_link_project_lobe_never_links_a_workflow() {
+    // spec: WF-13 WF-12
+    let sb = Sandbox::new();
+    write(
+        &sb.source.join("workflows/deploy.js"),
+        "export const meta = {\n  name: 'deploy',\n  description: 'Deploy it',\n}\n",
+    );
+    git(&sb.source, &["add", "-A"]);
+    git(&sb.source, &["commit", "-qm", "add workflow"]);
+
+    // Form 1: the default preset (windsurf).
+    let ws_proj = sb.base.join("ws-proj");
+    std::fs::create_dir_all(&ws_proj).unwrap();
+    let ws_str = ws_proj.to_string_lossy().into_owned();
+    let r1 = sb.mind(&["link-project", &ws_str]);
+    assert!(r1.success, "link-project failed: {}", r1.stderr);
+
+    // Form 2: `--subdir .claude` -- the harness's own project workflow dir.
+    let sd_proj = sb.base.join("sd-proj");
+    std::fs::create_dir_all(&sd_proj).unwrap();
+    let sd_str = sd_proj.to_string_lossy().into_owned();
+    let r2 = sb.mind(&["link-project", &sd_str, "--subdir", ".claude"]);
+    assert!(r2.success, "link-project --subdir failed: {}", r2.stderr);
+
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    let learned = sb.mind(&["learn", "workflow:deploy"]);
+    assert!(
+        learned.success,
+        "learn workflow: {}\n{}",
+        learned.stdout, learned.stderr
+    );
+    let learned_skill = sb.mind(&["learn", "review"]);
+    assert!(
+        learned_skill.success,
+        "learn skill: {}\n{}",
+        learned_skill.stdout, learned_skill.stderr
+    );
+
+    // Control: the skill fans into BOTH project lobes, so they are registered
+    // and live.
+    assert!(
+        std::fs::symlink_metadata(ws_proj.join(".windsurf/skills/review")).is_ok(),
+        "the windsurf project lobe must receive the skill: {}",
+        learned_skill.stdout
+    );
+    assert!(
+        std::fs::symlink_metadata(sd_proj.join(".claude/skills/review")).is_ok(),
+        "the --subdir project lobe must receive the skill: {}",
+        learned_skill.stdout
+    );
+
+    // spec: WF-13 -- and neither receives the workflow.
+    assert!(
+        std::fs::symlink_metadata(ws_proj.join(".windsurf/workflows/deploy.js")).is_err(),
+        "a link-project (windsurf preset) lobe must not link a workflow"
+    );
+    assert!(
+        std::fs::symlink_metadata(ws_proj.join(".windsurf/workflows")).is_err(),
+        "a link-project (windsurf preset) lobe must not even create workflows/"
+    );
+    assert!(
+        std::fs::symlink_metadata(sd_proj.join(".claude/workflows/deploy.js")).is_err(),
+        "a link-project --subdir lobe must not link a workflow even when it is \
+         rooted at the harness's own project workflow directory"
+    );
+    assert!(
+        std::fs::symlink_metadata(sd_proj.join(".claude/workflows")).is_err(),
+        "a link-project --subdir lobe must not even create workflows/"
+    );
+
+    // Control: the unfiltered default Claude lobe did receive it, so the
+    // absences above are the kinds filter and not a failed install.
+    assert!(
+        std::fs::symlink_metadata(sb.claude_home.join("workflows/deploy.js")).is_ok(),
+        "the default (unfiltered) lobe must link the workflow: {}",
+        learned.stdout
+    );
+}
+
+// WF-13: there is no `claude` preset, so a caller cannot ask `link-project`
+// for a lobe that admits a workflow by naming the Claude harness. The verb
+// fails rather than quietly resolving to something skill-only.
+#[test]
+fn wf13_link_project_has_no_claude_preset() {
+    // spec: WF-13
+    let sb = Sandbox::new();
+    let proj = sb.base.join("claude-proj");
+    std::fs::create_dir_all(&proj).unwrap();
+    let proj_str = proj.to_string_lossy().into_owned();
+
+    let r = sb.mind(&["--json", "link-project", &proj_str, "--preset", "claude"]);
+    assert!(
+        !r.success,
+        "`--preset claude` must fail, not resolve: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+    let err = parse_json(&r.stdout);
+    assert_eq!(
+        err["error"]["kind"], "unknown-preset",
+        "`claude` must be an unknown preset, not a silently skill-only one: {err}"
+    );
+    // Nothing registered, so nothing can later link a workflow here.
+    let listed = sb.mind(&["config", "lobes", "list", "--json"]);
+    let v = parse_json(&listed.stdout);
+    assert!(
+        !v["lobes"].as_array().unwrap().iter().any(|l| l["path"]
+            .as_str()
+            .is_some_and(|p| p.contains("claude-proj"))),
+        "a failed preset add must register no lobe: {}",
+        listed.stdout
+    );
+}

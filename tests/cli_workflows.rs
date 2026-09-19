@@ -887,6 +887,136 @@ fn a_workflow_meta_the_reader_cannot_model_does_not_stall_a_scan() {
     );
 }
 
+/// A `meta` whose every entry is a shape the reader does not model: an
+/// unbalanced `)` inside a regex literal, an arrow body that closes one paren
+/// too many, a computed key holding a closer, and a nested array that does the
+/// same. Each one leaves a character in the entry position that neither the key
+/// reader nor the value skipper will consume - the no-progress case - and the
+/// two string keys on the ends prove the reader still read around all of it.
+const PATHOLOGICAL_JS: &str = "export const meta = {\n  name: 'deploy',\n  \
+     tagPattern: /rel)ease/,\n  arrow: () => x),\n  [)]: 1,\n  \
+     phases: [{ title: 'a' ) }],\n  description: 'Deploy a release',\n  \
+     whenToUse: 'when shipping',\n}\nphase('Deploy')\n";
+
+/// The `meta` reader runs on every discovered workflow in the ordinary catalog
+/// scan, and again on the installed store copy for the WF-24/WF-29/WF-30
+/// reports, so a cursor that stops advancing hangs whatever verb touched it
+/// while that verb holds the process lock - blocking every other `mind` process
+/// too. `meld`, `probe`, and `learn` are covered above; these are the rest of
+/// the verbs that reach the same reader. Every run is bounded, so a regression
+/// fails the test instead of hanging the suite.
+#[test]
+fn a_pathological_workflow_meta_stalls_no_verb_that_scans() {
+    // spec: WF-5
+    let sb = Sandbox::new();
+    sb.write_and_commit("workflows/deploy.js", PATHOLOGICAL_JS);
+    let r = sb.mind_bounded(&["meld", &sb.source_spec()]);
+    assert!(r.success, "meld: {}\n{}", r.stdout, r.stderr);
+    let r = sb.mind_bounded(&["learn", "workflow:deploy"]);
+    assert!(r.success, "learn: {}\n{}", r.stdout, r.stderr);
+
+    // `sync` rescans the source; `introspect` and `dump` walk the installed set
+    // and the catalog behind it.
+    for args in [
+        vec!["sync"],
+        vec!["introspect"],
+        vec!["dump"],
+        vec!["recall", "--sources"],
+    ] {
+        let r = sb.mind_bounded(&args);
+        assert!(
+            r.success,
+            "`mind {}` failed: {}\n{}",
+            args.join(" "),
+            r.stdout,
+            r.stderr
+        );
+    }
+
+    // `recall` reads the STORE copy through `workflow_check`, a second reach
+    // into the same reader that the source-side scan does not cover.
+    let r = sb.mind_bounded(&["recall"]);
+    assert!(r.success, "recall: {}\n{}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("workflow:deploy"),
+        "the item is listed as installed: {}",
+        r.stdout
+    );
+    let r = sb.mind_bounded(&["recall", "workflow:deploy"]);
+    assert!(r.success, "recall detail: {}\n{}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("Deploy a release"),
+        "the keys around the unreadable ones still describe the item: {}",
+        r.stdout
+    );
+
+    // `review` reads every item file of the source through the same check.
+    let r = sb.mind_bounded(&["review", &sb.source_spec()]);
+    assert!(r.success, "review: {}\n{}", r.stdout, r.stderr);
+
+    // And the item still upgrades and forgets: the reader yields less on a
+    // shape it cannot model, it never fails an operation.
+    sb.write_and_commit(
+        "workflows/deploy.js",
+        &PATHOLOGICAL_JS.replace("Deploy a release", "Deploy a release v2"),
+    );
+    let r = sb.mind_bounded(&["upgrade", "--yes"]);
+    assert!(r.success, "upgrade: {}\n{}", r.stdout, r.stderr);
+    assert!(
+        std::fs::read_to_string(sb.link("deploy.js"))
+            .unwrap()
+            .contains("Deploy a release v2"),
+        "the new content is linked: {}",
+        r.stdout
+    );
+    let r = sb.mind_bounded(&["forget", "workflow:deploy", "--yes"]);
+    assert!(r.success, "forget: {}\n{}", r.stdout, r.stderr);
+    assert!(
+        sb.link("deploy.js").symlink_metadata().is_err(),
+        "forget removes the lobe link"
+    );
+}
+
+/// The same reader on the curate path: a curator that lists the source pulls
+/// its catalog through the identical scan, with `curate` holding the lock for
+/// the whole reconcile.
+#[test]
+fn curate_does_not_stall_on_a_pathological_workflow_meta() {
+    // spec: WF-5
+    let sb = Sandbox::new();
+    sb.write_and_commit("workflows/deploy.js", PATHOLOGICAL_JS);
+
+    let curator = sb.base.join("curator");
+    write(
+        &curator.join("mind.toml"),
+        &format!(
+            "[discover]\nsources = [\n  {{ source = \"{}\", install = true }}\n]\n",
+            sb.source_spec()
+        ),
+    );
+    git(&curator, &["-c", "init.defaultBranch=main", "init", "-q"]);
+    git(&curator, &["config", "user.email", "t@t"]);
+    git(&curator, &["config", "user.name", "t"]);
+    git(&curator, &["add", "-A"]);
+    git(&curator, &["commit", "-qm", "curator"]);
+
+    let spec = curator.to_string_lossy().into_owned();
+    let r = sb.mind_bounded(&["meld", &spec, "--register-only"]);
+    assert!(r.success, "meld curator: {}\n{}", r.stdout, r.stderr);
+
+    let r = sb.mind_bounded(&["curate", "--check"]);
+    assert!(r.success, "curate --check: {}\n{}", r.stdout, r.stderr);
+
+    let r = sb.mind_bounded(&["curate", "--yes"]);
+    assert!(r.success, "curate --yes: {}\n{}", r.stdout, r.stderr);
+    assert!(
+        sb.link("deploy.js").symlink_metadata().is_ok(),
+        "the curated source's workflow installs: {}\n{}",
+        r.stdout,
+        r.stderr
+    );
+}
+
 /// The unguarded-reference scan covers a workflow file, as it covers every text
 /// file of an item.
 #[test]

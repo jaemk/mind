@@ -69,6 +69,14 @@ impl Sandbox {
         let target = self.source.to_string_lossy().into_owned();
         self.mind(&["review", &target])
     }
+
+    /// `review <target>` with extra flags (`--json`, `--fix`).
+    fn review_with(&self, extra: &[&str]) -> Run {
+        let target = self.source.to_string_lossy().into_owned();
+        let mut args = vec!["review", target.as_str()];
+        args.extend_from_slice(extra);
+        self.mind(&args)
+    }
 }
 
 impl Drop for Sandbox {
@@ -78,6 +86,11 @@ impl Drop for Sandbox {
 }
 
 fn write(path: &Path, contents: &str) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, contents).unwrap();
+}
+
+fn write_bytes(path: &Path, contents: &[u8]) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, contents).unwrap();
 }
@@ -293,5 +306,438 @@ fn a_meta_name_naming_a_sibling_agent_is_predicted_bare_under_a_prefix() {
     assert!(
         collisions.iter().all(|l| l.contains("harness name 'dev'")),
         "the shared name is the bare agent name: {collisions:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// WF-53 under `--json` (CLI-218/CLI-219): the finding has a machine shape too
+// ---------------------------------------------------------------------------
+
+/// The `workflow-content` disclosure is a first-class finding, so a `--json`
+/// consumer sees it as one: `kind: "workflow-content"` in the `advisory`
+/// array, one per workflow, with the item key in its message. The text-mode
+/// tests above assert on a rendered line, which would still pass if the
+/// finding were printed ad hoc instead of pushed onto `advisory`.
+// spec: WF-53 CLI-218 CLI-219
+#[test]
+fn the_workflow_content_finding_has_a_json_shape() {
+    let sb = Sandbox::new("wf");
+    write(
+        &sb.source.join("workflows/deploy.js"),
+        "export const meta = { name: 'deploy', description: 'Deploy it' }\n",
+    );
+    write(
+        &sb.source.join("skills/widget/SKILL.md"),
+        "---\ndescription: a widget\n---\n# widget\n",
+    );
+
+    let r = sb.review_with(&["--json"]);
+    assert!(
+        r.success,
+        "an advisory-only review exits 0: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+    let v: serde_json::Value = serde_json::from_str(r.stdout.trim())
+        .unwrap_or_else(|e| panic!("stdout must be one JSON document: {e}\n{}", r.stdout));
+    assert_eq!(v["action"], "review", "{v}");
+    // spec: WF-53 -- a source shipping a workflow is never "clean".
+    assert_eq!(
+        v["outcome"], "advisory",
+        "a workflow alone must move the outcome off `clean`: {v}"
+    );
+    assert_eq!(v["hard"], serde_json::json!([]), "{v}");
+
+    let advisory = v["advisory"]
+        .as_array()
+        .unwrap_or_else(|| panic!("advisory must be an array: {v}"));
+    let disclosures: Vec<&serde_json::Value> = advisory
+        .iter()
+        .filter(|f| f["kind"] == "workflow-content")
+        .collect();
+    assert_eq!(
+        disclosures.len(),
+        1,
+        "exactly one disclosure, for the one workflow: {v}"
+    );
+    let msg = disclosures[0]["message"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the finding must carry a message: {v}"));
+    assert!(
+        msg.contains("workflow:deploy"),
+        "the message must name the item: {msg}"
+    );
+    // spec: WF-54 -- and the skill's presence proves the run reached the other
+    // checks, which found nothing to say about either item.
+    assert!(
+        !advisory.iter().any(|f| f["kind"] == "missing-description"
+            && f["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("workflow:"))),
+        "no missing-description for a workflow, in JSON either: {v}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The disclosure is unconditional: it does not merge with, or defer to, the
+// other workflow findings
+// ---------------------------------------------------------------------------
+
+/// Three workflows, three different states -- clean, unloadable, and colliding
+/// -- draw three `workflow-content` disclosures and one per item, in item
+/// order. A disclosure suppressed once another finding fired for the same file
+/// would be the easy mistake, and the two-clean-workflows test above cannot
+/// catch it.
+// spec: WF-53 WF-30
+#[test]
+fn every_workflow_is_disclosed_whatever_else_was_found_about_it() {
+    let sb = Sandbox::new("wf");
+    write(
+        &sb.source.join("workflows/aclean.js"),
+        "export const meta = { name: 'aclean', description: 'Clean' }\n",
+    );
+    // Unloadable: no description.
+    write(
+        &sb.source.join("workflows/bbroken.js"),
+        "export const meta = { name: 'bbroken' }\n",
+    );
+    // Colliding: two files claiming `dup`.
+    write(
+        &sb.source.join("workflows/cdup.js"),
+        "export const meta = { name: 'dup', description: 'One' }\n",
+    );
+    write(
+        &sb.source.join("workflows/ddup.js"),
+        "export const meta = { name: 'dup', description: 'Two' }\n",
+    );
+
+    let r = sb.review();
+    assert!(r.success, "stdout={} stderr={}", r.stdout, r.stderr);
+
+    let lines = findings(&r.stdout, "workflow-content");
+    assert_eq!(lines.len(), 4, "one disclosure per workflow: {}", r.stdout);
+    for key in [
+        "workflow:aclean:",
+        "workflow:bbroken:",
+        "workflow:cdup:",
+        "workflow:ddup:",
+    ] {
+        assert_eq!(
+            lines.iter().filter(|l| l.contains(key)).count(),
+            1,
+            "{key} must be disclosed exactly once: {}",
+            r.stdout
+        );
+    }
+    // The other findings are still there, unmerged.
+    assert_eq!(
+        findings(&r.stdout, "workflow-unloadable").len(),
+        1,
+        "{}",
+        r.stdout
+    );
+    assert_eq!(
+        findings(&r.stdout, "workflow-name-collision").len(),
+        2,
+        "both claimants: {}",
+        r.stdout
+    );
+    // spec: WF-24 -- `cdup`/`ddup` diverge from their file names as well, and
+    // that is a separate finding from the collision.
+    let names = findings(&r.stdout, "workflow-name");
+    assert_eq!(
+        names.len(),
+        2,
+        "the two `dup` claimants each diverge from their item name: {}",
+        r.stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A workflow the convention scan would never find
+// ---------------------------------------------------------------------------
+
+/// A `[[items]]`-declared workflow at a non-convention path (WF-8) draws the
+/// same findings: the checks read `item.path`, so an authoritative `mind.toml`
+/// cannot move a workflow out of the reviewer's sight. Its `mind.toml`
+/// `description` must NOT suppress the WF-30 report of a missing
+/// `meta.description` either: the two describe different things -- what mind
+/// displays versus what the harness needs to load the file -- and the harness
+/// never reads `mind.toml`.
+// spec: WF-8 WF-53 WF-30 WF-54
+#[test]
+fn a_declared_workflow_at_an_odd_path_is_disclosed_and_checked() {
+    let sb = Sandbox::new("wf");
+    write(
+        &sb.source.join("mind.toml"),
+        "[source]\ndescription = \"odd layout\"\n\n\
+         [[items]]\nkind = \"workflow\"\nname = \"deploy\"\n\
+         path = \"packages/deploy/flow.js\"\n\
+         description = \"Deploy, as mind.toml says\"\n",
+    );
+    write(
+        &sb.source.join("packages/deploy/flow.js"),
+        "export const meta = { name: 'deploy' }\n",
+    );
+    // A decoy at the convention path that the authoritative mind.toml excludes:
+    // if a check scanned `workflows/` instead of the declared inventory, the
+    // counts below would move.
+    write(
+        &sb.source.join("workflows/decoy.js"),
+        "export const meta = { name: 'decoy', description: 'Not in the inventory' }\n",
+    );
+
+    let r = sb.review();
+    assert!(
+        r.success,
+        "every workflow finding is advisory: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+
+    let disclosures = findings(&r.stdout, "workflow-content");
+    assert_eq!(
+        disclosures.len(),
+        1,
+        "only the declared workflow is an item: {}",
+        r.stdout
+    );
+    assert!(
+        disclosures[0].contains("workflow:deploy:"),
+        "the declared workflow must be disclosed: {}",
+        disclosures[0]
+    );
+
+    // spec: WF-30 -- read from the declared path, and not suppressed by the
+    // `mind.toml` description.
+    let unloadable = findings(&r.stdout, "workflow-unloadable");
+    assert_eq!(unloadable.len(), 1, "{}", r.stdout);
+    assert!(
+        unloadable[0].contains("workflow:deploy:")
+            && unloadable[0].contains("`meta.description` is missing"),
+        "a mind.toml description must not answer for the harness's: {}",
+        unloadable[0]
+    );
+    // spec: WF-54 -- and the generic check stays off the kind regardless.
+    assert!(
+        findings(&r.stdout, "missing-description").is_empty(),
+        "{}",
+        r.stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Files mind's reader cannot read
+// ---------------------------------------------------------------------------
+
+/// A workflow whose bytes are not UTF-8 is still disclosed (WF-53) and is
+/// reported as unloadable (WF-30), and neither is a hard failure: mind does not
+/// gatekeep workflow content. The disclosure is the load-bearing half -- it
+/// comes from a read that can fail, and swallowing the failure silently would
+/// hide exactly the file a reviewer most wants flagged.
+// spec: WF-53 WF-30 WF-31
+#[test]
+fn a_non_utf8_workflow_is_still_disclosed_and_reported_unloadable() {
+    let sb = Sandbox::new("wf");
+    // Valid JS shape, invalid UTF-8 in the middle (a lone 0x80 continuation).
+    let mut bytes: Vec<u8> = b"export const meta = { name: 'deploy', description: '".to_vec();
+    bytes.extend_from_slice(&[0x80, 0xff, 0xfe]);
+    bytes.extend_from_slice(b"' }\n");
+    write_bytes(&sb.source.join("workflows/deploy.js"), &bytes);
+
+    let r = sb.review();
+    assert!(
+        r.success,
+        "an unreadable workflow body is advisory, never hard: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+    let disclosures = findings(&r.stdout, "workflow-content");
+    assert_eq!(
+        disclosures.len(),
+        1,
+        "a file mind cannot decode is still JavaScript the harness will run: {}",
+        r.stdout
+    );
+    assert!(
+        disclosures[0].contains("workflow:deploy:"),
+        "{}",
+        disclosures[0]
+    );
+    let unloadable = findings(&r.stdout, "workflow-unloadable");
+    assert_eq!(unloadable.len(), 1, "{}", r.stdout);
+    assert!(
+        unloadable[0].contains("it declares no `meta` object mind can read"),
+        "an undecodable file reads as no readable meta: {}",
+        unloadable[0]
+    );
+    assert!(
+        !r.stderr.contains("error ["),
+        "nothing about a workflow's body is a hard finding: {}",
+        r.stderr
+    );
+}
+
+/// A workflow over the harness's 524288-byte cap (WF-7) is reported as
+/// unloadable and nothing else changes: mind reads its `meta` fine, discloses
+/// it, and exits 0. The cap is the harness's, and mind reports it rather than
+/// enforcing a cap of its own (WF-32).
+// spec: WF-7 WF-30 WF-32
+#[test]
+fn an_over_cap_workflow_is_reported_and_review_still_exits_zero() {
+    let sb = Sandbox::new("wf");
+    let mut body = String::from("export const meta = { name: 'big', description: 'Big' }\n// ");
+    body.push_str(&"p".repeat(524_288));
+    body.push('\n');
+    write(&sb.source.join("workflows/big.js"), &body);
+
+    let r = sb.review();
+    assert!(
+        r.success,
+        "the harness's cap is reported, not enforced: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+    let unloadable = findings(&r.stdout, "workflow-unloadable");
+    assert_eq!(
+        unloadable.len(),
+        1,
+        "the overage is the only complaint -- the `meta` itself is complete: {}",
+        r.stdout
+    );
+    assert!(
+        unloadable[0].contains("over the harness's 524288-byte cap"),
+        "{}",
+        unloadable[0]
+    );
+    assert_eq!(
+        findings(&r.stdout, "workflow-content").len(),
+        1,
+        "an over-cap file is still disclosed: {}",
+        r.stdout
+    );
+    assert!(
+        !r.stderr.contains("metadata-too-large"),
+        "the harness cap is far below mind's metadata cap; this file trips only \
+         the former: {}",
+        r.stderr
+    );
+}
+
+/// CHARACTERIZATION. A workflow past mind's own metadata read cap (DSC-91,
+/// 8 MiB) does not reach any workflow check at all: the CATALOG SCAN reads
+/// every item's text through the same capped read (`catalog.rs`'s
+/// `frontmatter::text_capped(meta)?`, one read per item), and for a workflow
+/// that text IS the whole `.js`. The scan therefore fails, `review` records a
+/// hard `scan-error` and returns immediately, and every later check -- the
+/// WF-53 disclosure, the WF-30 report, and everything the source's OTHER items
+/// would have drawn -- is skipped.
+///
+/// Two consequences this pins, both reported rather than fixed here:
+///   1. Check 8c's `metadata-too-large` arm (review.rs) is unreachable for a
+///      workflow: the scan that builds `items` hard-fails before it, so the
+///      finding the arm exists to raise can only come from a file that grew
+///      between the two reads.
+///   2. One oversized `.js` takes the whole source with it, for `review` and
+///      for every other verb that scans a catalog -- which sits oddly beside
+///      WF-32/DSC-90, where the harness's own (far smaller) 524288-byte cap is
+///      something mind reports and refuses to enforce.
+// spec: WF-30 WF-32 DSC-91
+#[test]
+fn a_workflow_past_minds_own_read_cap_fails_the_scan_and_ends_the_review() {
+    let sb = Sandbox::new("wf");
+    // A perfectly ordinary second workflow: its findings are the blast radius.
+    write(
+        &sb.source.join("workflows/fine.js"),
+        "export const meta = { name: 'fine', description: 'Fine' }\n",
+    );
+    let path = sb.source.join("workflows/huge.js");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    // Sparse: the test must not allocate 8 MiB of its own.
+    let f = std::fs::File::create(&path).unwrap();
+    f.set_len(8 * 1024 * 1024 + 1).unwrap();
+    drop(f);
+
+    let r = sb.review();
+    assert!(
+        !r.success,
+        "a hard finding fails review: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+    assert!(
+        r.stderr.contains("error [scan-error]"),
+        "the oversized read surfaces as a scan error, NOT as Check 8c's \
+         metadata-too-large finding: {}",
+        r.stderr
+    );
+    assert!(
+        r.stderr.contains("huge.js") && r.stderr.contains("8 MiB size cap"),
+        "the error must name the offending file and the cap: {}",
+        r.stderr
+    );
+    // The blast radius: nothing else about this source is reported.
+    assert!(
+        findings(&r.stdout, "workflow-content").is_empty(),
+        "the scan aborted, so not even the healthy workflow is disclosed: {}",
+        r.stdout
+    );
+    assert!(
+        findings(&r.stdout, "workflow-unloadable").is_empty(),
+        "no workflow check runs after a failed scan: {}",
+        r.stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `--fix` and a workflow file
+// ---------------------------------------------------------------------------
+
+/// `--fix` never rewrites a workflow's `.js` (NS-54: markdown only), so a
+/// reviewed workflow comes back byte-identical even when the rewrite passes
+/// would have something to say about it. The sibling markdown item in the same
+/// source IS rewritten, so this is the extension rule and not a `--fix` that
+/// did nothing at all.
+///
+/// Note for the spec's benefit: NS-54 justifies the markdown-only rule with
+/// "a token in a non-markdown file never expands", which WF-25 makes untrue
+/// for a workflow -- install DOES expand tokens in a `.js`. The behavior pinned
+/// here is today's; the rationale is the part that no longer covers this kind.
+// spec: NS-54 WF-25
+#[test]
+fn fix_leaves_a_workflow_js_untouched() {
+    let sb = Sandbox::new("wf");
+    write(
+        &sb.source.join("agents/dev.md"),
+        "---\nname: dev\ndescription: dev agent\n---\n# dev\n",
+    );
+    // A bare sibling mention in a workflow body: `templatize` would wrap this
+    // as `{{ns:dev}}` in a markdown file.
+    let js = "export const meta = { name: 'drive', description: 'Drive dev' }\n\
+              const done = await agent('dev', 'Do the work.')\n";
+    write(&sb.source.join("workflows/drive.js"), js);
+    // The markdown control, carrying the same bare mention.
+    let md = "---\ndescription: Calls the dev agent\n---\n# helper\n\nHand off to dev.\n";
+    write(&sb.source.join("skills/helper/SKILL.md"), md);
+
+    let r = sb.review_with(&["--fix"]);
+    assert!(
+        r.success,
+        "--fix on a local source must succeed: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+
+    let after_js = std::fs::read_to_string(sb.source.join("workflows/drive.js")).unwrap();
+    assert_eq!(
+        after_js, js,
+        "--fix must leave a workflow's .js byte-identical (NS-54)"
+    );
+    let after_md = std::fs::read_to_string(sb.source.join("skills/helper/SKILL.md")).unwrap();
+    assert_ne!(
+        after_md, md,
+        "the markdown control must have been rewritten, or this test proves \
+         only that --fix did nothing: {after_md}"
+    );
+    // spec: WF-53 -- and the disclosure still fires on a `--fix` run.
+    assert_eq!(
+        findings(&r.stdout, "workflow-content").len(),
+        1,
+        "{}",
+        r.stdout
     );
 }

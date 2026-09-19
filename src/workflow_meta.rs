@@ -906,4 +906,116 @@ const flaky = await agent('grep CI logs for retry markers', { schema: FLAKY_SCHE
             }
         });
     }
+
+    // spec: WF-5 -- the other loop in this reader. `seek_meta_object` scans the
+    // whole file before the object exists, so a shape it will not consume is the
+    // same class of hang one phase earlier, reached on any `.js` file in the
+    // source whether or not it declares a `meta` at all.
+    #[test]
+    fn every_prologue_before_the_object_terminates() {
+        for text in [
+            ")",
+            "]",
+            "}",
+            "$",
+            "${",
+            "\\",
+            "//",
+            "/*",
+            "*/",
+            "/",
+            "export",
+            "export const",
+            "export const meta",
+            "export const meta =",
+            "export const meta =/*",
+            "export const meta = `",
+            "export const meta = '",
+            "export const meta = \"",
+            "export const meta /* c */ =",
+            "export const const meta = {",
+            "export meta const = {",
+            "export const meta = { } )",
+            "`export const meta = { name: 'in a template' }`",
+            "\u{0}export\u{0}const\u{0}meta\u{0}=\u{0}{",
+            "export const meta\u{FEFF}= {",
+            "export const metameta = { name: 'x' }",
+            "exportconstmeta = { name: 'x' }",
+        ] {
+            let m = parse_bounded(text);
+            assert!(m.is_empty(), "expected nothing from {text:?}, got {m:?}");
+        }
+        // The seek drops what it cannot consume rather than giving up, so a real
+        // declaration behind a run of junk (quoted closers, a stray `)`) is
+        // still found.
+        let m = parse_bounded("')))'\n)\nexport const meta = { name: 'found anyway' }");
+        assert_eq!(m.name.as_deref(), Some("found anyway"));
+    }
+
+    // spec: WF-5 -- the cursor walks `char`s, not bytes, so a multi-byte
+    // character is one step of the drop-and-carry-on path and a value keeps
+    // every code point it was written with. A byte-indexed regression truncates
+    // these values or splits one of them mid-character.
+    #[test]
+    fn multibyte_text_is_read_and_skipped_one_character_at_a_time() {
+        let m = parse_bounded(
+            "export const meta = { 🚀: 1, name: 'ünïcode 🚀 ✓', description: '日本語の説明' }",
+        );
+        assert_eq!(m.name.as_deref(), Some("ünïcode 🚀 ✓"));
+        assert_eq!(m.description.as_deref(), Some("日本語の説明"));
+        // A stray closer wedged between multi-byte characters is still dropped
+        // by itself, and the key after it still reads.
+        let m = parse_bounded("export const meta = { 🚀 ) ✓ ] name: 'x', whenToUse: '✔' }");
+        assert_eq!(m.name.as_deref(), Some("x"));
+        assert_eq!(m.when_to_use.as_deref(), Some("✔"));
+    }
+
+    // spec: WF-5 -- `file_meta` is the entry point `workflow_check` uses (the
+    // `review`/`recall`/`learn` reports), so the termination guarantee has to
+    // hold through the on-disk path too, not only through `parse`.
+    #[test]
+    fn file_meta_returns_on_a_shape_the_reader_cannot_model() {
+        let dir = std::env::temp_dir().join(format!("mind-wfmeta-stall-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("deploy.js");
+        std::fs::write(
+            &file,
+            "export const meta = {\n  name: 'deploy',\n  tag: /rel)ease/,\n  arrow: () => x),\n  \
+             [)]: 1,\n  description: 'Deploy a release',\n}\nphase('Deploy')\n",
+        )
+        .unwrap();
+        let read = file.clone();
+        let m = run_bounded("file_meta", 10, move || file_meta(&read).unwrap());
+        assert_eq!(m.name.as_deref(), Some("deploy"));
+        assert_eq!(m.description.as_deref(), Some("Deploy a release"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // spec: WF-5 -- dropping a stray closer costs one pass of the loop, so a
+    // body that is mostly strays is linear in its length. A regression that
+    // rescans from the top of the object each time still terminates, which the
+    // other checks here would not catch; at this size it does not finish.
+    #[test]
+    fn a_body_that_is_mostly_strays_stays_linear() {
+        let text = format!(
+            "export const meta = {{ {}name: 'survivor' }}",
+            ")] , ".repeat(40_000)
+        );
+        let m = run_bounded("a 200k-character malformed body", 20, move || parse(&text));
+        assert_eq!(m.name.as_deref(), Some("survivor"));
+    }
+
+    // spec: WF-5 -- nesting is counted, not recursed into, so a file that opens
+    // a hundred thousand brackets and closes none reads as nothing instead of
+    // overflowing the stack. The worker thread this runs on has the default
+    // stack, so a recursive rewrite of `skip_value` fails here.
+    #[test]
+    fn unbounded_nesting_yields_nothing_rather_than_overflowing() {
+        let text = format!(
+            "export const meta = {{ a: {}, name: 'never reached' }}",
+            "[".repeat(100_000)
+        );
+        let m = run_bounded("a deeply nested value", 20, move || parse(&text));
+        assert!(m.is_empty(), "the open bracket swallows the rest: {m:?}");
+    }
 }
