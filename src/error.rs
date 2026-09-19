@@ -563,6 +563,20 @@ pub enum MindError {
     #[error("source '{source_name}': linked path '{path}' is not a file in the clone")]
     LinkNotAFile { source_name: String, path: String },
 
+    /// LNK-20: an item-link path that names a file kind mind deliberately does
+    /// not support installing by item link -- a workflow's `.js`, since the
+    /// blob/tree link form takes `.md` files only. Distinct from
+    /// `LinkNotASkill`/`LinkNotAFile`, which mean the path itself is wrong:
+    /// this path is understood fine, it is just a kind the link form refuses.
+    /// The message names the kind and the remedy instead of claiming the path
+    /// is unrecognized.
+    #[error(
+        "source '{source_name}': linked path '{path}' names a workflow, and mind does not \
+         support installing a workflow by item link (the blob/tree link form takes `.md` \
+         files only); meld the repo instead, or run `mind learn workflow:<name>`"
+    )]
+    LinkKindNotSupported { source_name: String, path: String },
+
     /// LNK-21: a file link whose kind none of the three resolution steps
     /// answered. The message names all three so the user can pick one.
     #[error(
@@ -1456,6 +1470,7 @@ impl MindError {
             MindError::LinkNotASkill { .. } => "link-not-a-skill",
             MindError::BadKindFlag { .. } => "bad-kind-flag",
             MindError::LinkNotAFile { .. } => "link-not-a-file",
+            MindError::LinkKindNotSupported { .. } => "link-kind-not-supported",
             MindError::LinkKindUnresolved { .. } => "link-kind-unresolved",
             MindError::LinkKindMismatch { .. } => "link-kind-mismatch",
             MindError::LinkRefUnsatisfiable { .. } => "link-ref-unsatisfiable",

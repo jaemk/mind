@@ -4368,3 +4368,48 @@ fn learn_into_a_lobe_whose_directory_is_a_dangling_symlink_names_the_broken_link
         "expected the broken-symlink-path error kind: {v}"
     );
 }
+
+// WF-13: a project lobe carrying no `kinds` filter needs no special handling
+// for a workflow -- the harness reads project workflows from
+// `<project>/.claude/workflows/`, exactly where such a lobe already links one
+// by WF-10. The failure mode this closes is a project lobe that DOES carry a
+// kinds filter: `--subdir` and every harness preset (windsurf included,
+// cli.rs:969/987) admit skills only, and `a_skills_only_lobe_admits_no_workflows`
+// (tests/cli_workflows.rs) proves that filter is live. `link-project`'s own
+// default (the windsurf preset) and its `--subdir` form are both skill-only,
+// so neither exercises the no-filter path; the bare `config lobes add <path>`
+// form is the one with no kinds restriction (`Lobe::all_kinds`, paths.rs),
+// which is what registers the project lobe here.
+#[test]
+fn wf13_project_lobe_with_no_kinds_filter_admits_a_workflow() {
+    // spec: WF-13
+    let sb = Sandbox::new();
+    write(
+        &sb.source.join("workflows/deploy.js"),
+        "export const meta = {\n  name: 'deploy',\n  description: 'Deploy it',\n}\n",
+    );
+    git(&sb.source, &["add", "-A"]);
+    git(&sb.source, &["commit", "-qm", "add workflow"]);
+
+    let proj = sb.base.join("proj");
+    std::fs::create_dir_all(&proj).unwrap();
+    let lobe = proj.join(".claude");
+    let lobe_str = lobe.to_string_lossy().into_owned();
+
+    let added = sb.mind(&["config", "lobes", "add", &lobe_str]);
+    assert!(added.success, "config lobes add failed: {}", added.stderr);
+
+    assert!(sb.mind(&["meld", &sb.source_spec()]).success);
+    let learned = sb.mind(&["learn", "workflow:deploy"]);
+    assert!(
+        learned.success,
+        "learn workflow: {}\n{}",
+        learned.stdout, learned.stderr
+    );
+
+    assert!(
+        std::fs::symlink_metadata(proj.join(".claude/workflows/deploy.js")).is_ok(),
+        "a project lobe with no kinds filter must link the workflow (WF-13): {}",
+        learned.stdout
+    );
+}

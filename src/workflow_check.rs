@@ -88,16 +88,37 @@ pub fn skip_reasons(meta: &WorkflowMeta, size: Option<u64>) -> Vec<String> {
 /// `bad-reference` wherever this is called (NS-12, WF-27), so guessing at what
 /// the token meant here would only add a second, derived complaint.
 ///
-/// For an INSTALLED file the tokens are already expanded, so the caller passes
-/// no prefix and no siblings and this is a trim.
+/// This form models an INSTALLED file, where the tokens are already expanded, so
+/// the caller passes no prefix and no siblings and this is a trim. It passes an
+/// empty bare-name set, which is exact for that case: there is no token left to
+/// expand, bare or prefixed. A caller that expands an UNINSTALLED file under a
+/// prefix must use [`harness_name_with_bare`] instead, or a `{{ns:}}` naming a
+/// sibling agent is predicted with a prefix install would not write (NS-42).
 pub fn harness_name(
     meta: &WorkflowMeta,
     prefix: &Option<String>,
     siblings: &HashSet<String>,
 ) -> Option<String> {
-    let raw = meta.name.as_deref()?;
     let no_bare: HashSet<String> = HashSet::new();
-    let expanded = crate::namespace::expand(raw, prefix, siblings, &no_bare).ok()?;
+    harness_name_with_bare(meta, prefix, siblings, &no_bare)
+}
+
+/// [`harness_name`] with the NS-42 bare-name set spelled out.
+///
+/// This form models what INSTALL will write (`install.rs`'s `expand_references`):
+/// a `{{ns:}}` token naming a sibling agent expands BARE even under a prefix, so
+/// predicting the harness-facing name without that set would report a `prefix:x`
+/// the store never contains and raise a false WF-24 divergence. `bare_names` is
+/// the set install computes: sibling agent names minus any name a non-agent
+/// sibling also holds (the cross-kind shadow rule).
+pub fn harness_name_with_bare(
+    meta: &WorkflowMeta,
+    prefix: &Option<String>,
+    siblings: &HashSet<String>,
+    bare_names: &HashSet<String>,
+) -> Option<String> {
+    let raw = meta.name.as_deref()?;
+    let expanded = crate::namespace::expand(raw, prefix, siblings, bare_names).ok()?;
     let trimmed = expanded.trim();
     match trimmed.is_empty() {
         true => None,
@@ -256,6 +277,23 @@ mod tests {
     fn an_unresolvable_token_in_a_meta_name_yields_no_harness_name() {
         let m = meta(Some("{{ns:typo}}"), Some("d"));
         assert_eq!(harness_name(&m, &None, &HashSet::new()), None);
+    }
+
+    /// A `{{ns:}}` naming a sibling AGENT expands bare even under a prefix, the
+    /// way install writes it, so the predicted name carries no prefix and there
+    /// is no divergence to report.
+    // spec: NS-42 WF-23 WF-24
+    #[test]
+    fn an_agent_referent_in_a_meta_name_expands_bare_under_a_prefix() {
+        let m = meta(Some("{{ns:review}}"), Some("d"));
+        let siblings: HashSet<String> = ["review".to_string()].into_iter().collect();
+        let bare: HashSet<String> = ["review".to_string()].into_iter().collect();
+        let name = harness_name_with_bare(&m, &Some("jk".to_string()), &siblings, &bare);
+        assert_eq!(name.as_deref(), Some("review"));
+        assert_eq!(divergence("review", name.as_deref()), None);
+        // The empty-bare form is the INSTALLED-file model and still prefixes.
+        let installed = harness_name(&m, &Some("jk".to_string()), &siblings);
+        assert_eq!(installed.as_deref(), Some("jk:review"));
     }
 
     /// The collision message agrees in number with how many others claim it.

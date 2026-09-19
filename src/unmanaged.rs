@@ -1,7 +1,7 @@
-//! Unmanaged lobe items: skills/agents/rules/commands present in a configured
-//! agent home that `mind` did not install (spec/unmanaged.md). They are
-//! surfaced read-only by `recall` and `probe`, and removable via `forget` with
-//! a distinct warning.
+//! Unmanaged lobe items: skills/agents/rules/commands/workflows present in a
+//! configured agent home that `mind` did not install (spec/unmanaged.md). They
+//! are surfaced read-only by `recall` and `probe`, and removable via `forget`
+//! with a distinct warning.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -12,13 +12,14 @@ use crate::paths::Paths;
 use crate::resolve::ItemRef;
 use crate::sanitize::ItemKey;
 
-/// A skill/agent/rule/command present in an agent home that `mind` did not
-/// install.
+/// A skill/agent/rule/command/workflow present in an agent home that `mind`
+/// did not install.
 #[derive(Debug, Clone)]
 pub struct UnmanagedItem {
     pub kind: ItemKind,
-    /// The on-disk entry name: a skill directory name, or an agent/rule/command
-    /// file stem (the `.md` suffix stripped).
+    /// The on-disk entry name: a skill directory name, an agent/rule/command
+    /// file stem (the `.md` suffix stripped), or a workflow file stem (the
+    /// `.js` suffix stripped).
     pub name: String,
     /// The lobe path(s) occupying this item, sorted, one per agent home.
     pub paths: Vec<PathBuf>,

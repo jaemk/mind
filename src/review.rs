@@ -492,7 +492,18 @@ fn run_checks(
 
     // --- Check 4: missing descriptions (advisory) ---
     // CLI-132: missing description is advisory only.
+    //
+    // spec: WF-54 -- a workflow is exempt. Its description comes from `meta`
+    // (WF-4) and a `.js` file has no frontmatter at all, so this message's
+    // "no description in frontmatter or mind.toml" would point the author at a
+    // site the kind does not have. Check 17 below already reports a missing,
+    // empty, or unreadable one as `workflow-unloadable` (WF-30), in the terms
+    // the harness actually applies, so the exemption collapses a double report
+    // onto that single finding.
     for item in &items {
+        if item.kind == crate::error::ItemKind::Workflow {
+            continue;
+        }
         if item.description.is_none() {
             advisory.push(Finding::advisory(
                 "missing-description",
@@ -614,6 +625,43 @@ fn run_checks(
         ));
     }
 
+    // --- Check 8c: workflow payload disclosure (advisory) ---
+    // spec: WF-53, CLI-237, DSC-91
+    // The workflow counterpart of Check 8b. A workflow is not content the
+    // harness offers, it is JavaScript the harness evaluates to drive subagents
+    // (workflows.md WF-1, WF-5), and mind neither reads nor validates its body:
+    // the `meta` reader looks at one object literal and nothing else. So a
+    // source shipping workflows must not review as a clean bill of health, and
+    // every workflow item is disclosed, not just one that tripped some pattern.
+    // Disclosure, not a gate: WF-31/WF-32 keep every workflow check a report.
+    //
+    // Read through the same size-capped path (DSC-91) the rest of this file
+    // uses -- `review` runs against an untrusted, not-yet-melded source -- and
+    // surface an over-cap file as the existing hard `metadata-too-large`
+    // finding rather than dropping the disclosure in silence.
+    for item in &items {
+        if item.kind != crate::error::ItemKind::Workflow {
+            continue;
+        }
+        match crate::frontmatter::text_capped(&item.path) {
+            Ok(_) => {}
+            Err(err @ MindError::MetadataTooLarge { .. }) => {
+                hard.push(Finding::hard("metadata-too-large", format!("{err}")));
+                continue;
+            }
+            Err(_) => {}
+        }
+        // spec: CLI-224 -- the key is source-derived; sanitize before composing.
+        let key = crate::sanitize::strip_ansi(item.key().as_str());
+        advisory.push(Finding::advisory(
+            "workflow-content",
+            format!(
+                "{key}: this is JavaScript the harness evaluates to drive subagents -- mind \
+                 neither reads nor validates a workflow's body (spec/workflows.md WF-53)"
+            ),
+        ));
+    }
+
     // --- Check 5: {{ns:}} token resolution (hard in markdown, advisory
     // otherwise) ---
     // An unresolved {{ns:}} token would be a BadReference at install time --
@@ -625,6 +673,8 @@ fn run_checks(
     // spec: CLI-132
     let source_name = source.name.clone();
     let siblings = siblings_of_source(&items, &source_name);
+    // spec: NS-42 -- used by Check 17 to predict an installed `meta.name`.
+    let bare_names = bare_names_of_source(&items, &source_name);
     let prefix = source
         .alias
         .clone()
@@ -1278,8 +1328,18 @@ fn run_checks(
             // The prefix and sibling set are the same ones Check 5 validated
             // tokens against, so a `{{ns:}}` in `meta.name` (WF-23) is compared
             // in its expanded form, exactly as installed.
-            let Some(harness) = crate::workflow_check::harness_name(&meta, &prefix, &siblings)
-            else {
+            //
+            // spec: NS-42 -- "exactly as installed" includes the bare-name rule:
+            // a token naming a sibling AGENT expands bare even under a prefix
+            // (`install.rs`'s `expand_references`). Predicting `prefix:x` for one
+            // would raise a WF-24 divergence against a name the store never
+            // holds, so this call is the bare-aware form.
+            let Some(harness) = crate::workflow_check::harness_name_with_bare(
+                &meta,
+                &prefix,
+                &siblings,
+                &bare_names,
+            ) else {
                 continue;
             };
             if let Some(msg) =
@@ -1419,6 +1479,27 @@ fn siblings_of_source(items: &[CatalogItem], source: &str) -> HashSet<String> {
         .filter(|it| it.source == source)
         .map(|it| it.name.clone())
         .collect()
+}
+
+/// The NS-42 bare-name set for one source: sibling AGENT names, minus any name a
+/// non-agent sibling also holds.
+///
+/// Computed exactly as `install.rs`'s `expand_references` computes it, because
+/// its whole purpose is to predict what install will write: a `{{ns:}}` naming
+/// one of these expands bare even under a prefix, and a name held by both an
+/// agent and another kind keeps the prefix (the cross-kind shadow rule).
+fn bare_names_of_source(items: &[CatalogItem], source: &str) -> HashSet<String> {
+    let agents: HashSet<String> = items
+        .iter()
+        .filter(|it| it.source == source && it.kind == crate::error::ItemKind::Agent)
+        .map(|it| it.name.clone())
+        .collect();
+    let others: HashSet<String> = items
+        .iter()
+        .filter(|it| it.source == source && it.kind != crate::error::ItemKind::Agent)
+        .map(|it| it.name.clone())
+        .collect();
+    agents.difference(&others).cloned().collect()
 }
 
 /// Detect helper files duplicated byte-for-byte across two or more items, which

@@ -93,6 +93,7 @@ Sources and discovery:
 - `src/catalog.rs` - convention scan for `skills/<n>/SKILL.md`, `agents/<n>.md`,
   `rules/<n>.md`, `commands/<n>.md`, `workflows/<n>.js`, `tools/<n>/`.
 - `src/frontmatter.rs` - minimal reader for an item's leading `--- ... ---` block (descriptions).
+- `src/workflow_meta.rs` - minimal reader for a workflow's `export const meta` object (description, `whenToUse`, harness name).
 - `src/mindfile.rs` - the optional `mind.toml` a source repo may ship to declare inventory.
 - `src/plugin_manifest.rs` - Claude plugin manifests (`.claude-plugin/marketplace.json`) read as a source.
 - `src/resolve.rs` - item-ref parsing (`name`, `skill:name`, `owner/repo#name`) + resolution.
@@ -104,6 +105,7 @@ Install, lifecycle, and state:
 - `src/manifest.rs` - installed-item manifest (`manifest.json`), keyed `kind:name`, with the file registry.
 - `src/hook.rs` - source/item lifecycle hooks (install, update, uninstall) plus tool build hooks (the safety-prompted shell commands).
 - `src/unmanaged.rs` - lobe items `mind` did not install (surfaced in `recall`/`probe`, removable via `forget`).
+- `src/workflow_check.rs` - the workflow unloadable / name-divergence / name-collision messages shared by `learn`, `upgrade`, `recall`, and `review`.
 - `src/hash.rs` - content hashing (drift detection). `src/git.rs` - the git CLI wrapper.
 - `src/selfupdate.rs` - `evolve`: in-place upgrade of the `mind` binary.
 - `src/scaffold.rs` - pure helpers for `init-source` scaffolding.

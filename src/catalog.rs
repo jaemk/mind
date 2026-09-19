@@ -257,11 +257,16 @@ impl CatalogItem {
     /// with a workflow's `whenToUse` appended as `<description> - <whenToUse>`,
     /// the way the harness's own workflow list renders the pair (WF-51).
     ///
-    /// Every surface that shows a description goes through here, `--json`
-    /// included: `when_to_use` is not recorded in the manifest and `dump` does
-    /// not emit it, so a JSON consumer reading the raw description alone would
-    /// have no way left to see it. An item with no `whenToUse` -- every item of
-    /// every other kind -- reads exactly as `description` does.
+    /// Every CATALOG-derived surface that shows a description goes through
+    /// here, `--json` included: `when_to_use` is not recorded in the manifest
+    /// and `dump` does not emit it, so a JSON consumer reading the raw
+    /// description alone would have no way left to see it. An item with no
+    /// `whenToUse` -- every item of every other kind -- reads exactly as
+    /// `description` does.
+    ///
+    /// The probe TUI's installed-item rows are the one surface NOT reached: they
+    /// read the manifest (`src/tui/data.rs`), which never records `whenToUse`,
+    /// so an installed workflow shows there with its bare description.
     ///
     /// spec: WF-51
     pub fn display_description(&self) -> Option<String> {
@@ -549,6 +554,25 @@ pub(crate) fn is_file_link(item_path: &str) -> bool {
     item_path.ends_with(".md")
 }
 
+/// Whether an item-link path names a workflow's own file (LNK-20): its parent
+/// directory is `workflows/`, or its extension is `.js`. A workflow is never a
+/// valid item-link target -- the blob/tree link form takes `.md` files only
+/// (LNK-20) -- so `scan_item_link` uses this to tell "the path names a
+/// deliberately unsupported kind" apart from "the path is simply wrong",
+/// raising [`MindError::LinkKindNotSupported`] instead of the generic
+/// `LinkNotASkill`.
+fn is_workflow_link_path(item_path: &str) -> bool {
+    let path = Path::new(item_path);
+    let parent_is_workflows = path
+        .parent()
+        .and_then(|p| p.file_name())
+        .is_some_and(|n| n == ItemKind::Workflow.dir());
+    let ext_is_js = path
+        .extension()
+        .is_some_and(|e| e == kind_extension(ItemKind::Workflow));
+    parent_is_workflows || ext_is_js
+}
+
 /// Resolve a file link's kind (LNK-21), first hit wins: the consumer's explicit
 /// kind, else the containing directory (`agents/`, `rules/`, `commands/`), else
 /// the file's own frontmatter `kind:`.
@@ -670,6 +694,12 @@ fn scan_item_link(
         }
         let skill_md = target.join("SKILL.md");
         if !(target.is_dir() && skill_md.is_file()) {
+            if is_workflow_link_path(item_path) {
+                return Err(MindError::LinkKindNotSupported {
+                    source_name: source.name.clone(),
+                    path: item_path.to_string(),
+                });
+            }
             return Err(bad_target());
         }
         (ItemKind::Skill, target, skill_md)
@@ -1544,8 +1574,12 @@ fn resolve_globs(root: &Path, globs: &KindGlobs, kind: ItemKind) -> Result<Vec<P
 }
 
 /// The file extension a single-file kind's convention scan requires, without the
-/// dot. A directory kind (skill, tool) has none and reports `""`, which no
-/// `Path::extension` ever equals, so it never matches a file.
+/// dot. A directory kind (skill, tool) reports `""` as a sentinel meaning "no
+/// file extension applies"; that is safe only because every current caller in
+/// this loop passes Agent/Rule/Command/Workflow, never Skill or Tool.
+/// `Path::extension` is NOT guaranteed to never equal `""`: a file literally
+/// named `foo.` (`Path::new("foo.").extension()`) is `Some("")`, so a Skill or
+/// Tool arm added here later would need its own guard, not this sentinel.
 ///
 /// spec: WF-3 -- `.js` for a workflow, `.md` for every other file kind.
 fn kind_extension(kind: ItemKind) -> &'static str {
@@ -1974,8 +2008,14 @@ pub fn plugin_skipped_components(plugin_root: &Path) -> plugin_manifest::Skipped
     if plugin_root.join(".mcp.json").is_file() {
         sc.mcp_servers = 1;
     }
-    sc.commands = unmapped_flat_entries(&plugin_root.join(ItemKind::Command.dir()), "md");
-    sc.workflows = unmapped_flat_entries(&plugin_root.join(ItemKind::Workflow.dir()), "js");
+    sc.commands = unmapped_flat_entries(
+        &plugin_root.join(ItemKind::Command.dir()),
+        kind_extension(ItemKind::Command),
+    );
+    sc.workflows = unmapped_flat_entries(
+        &plugin_root.join(ItemKind::Workflow.dir()),
+        kind_extension(ItemKind::Workflow),
+    );
     sc
 }
 

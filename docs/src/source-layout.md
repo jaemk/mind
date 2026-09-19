@@ -59,8 +59,8 @@ globs for non-standard or monorepo layouts. See
 A repo published for Claude Code's plugin system needs no changes either: a
 `.claude-plugin/plugin.json` or `.claude-plugin/marketplace.json` is read as a
 discovery input. The manifest supplies the plugin's name and metadata; `mind`
-maps the plugin root's conventional `skills/`, `agents/`, and `commands/`
-directories to items. See
+maps the plugin root's conventional `skills/`, `agents/`, `commands/`, and
+`workflows/` directories to items. See
 [Claude plugin marketplaces](marketplace.md).
 
 ## Where shared helpers belong
@@ -120,7 +120,7 @@ language-specific self-locate; see [Tooling and shared scripts](tooling.md).
 
 `mind learn` copies an item into the store (`~/.mind/store/<kind>/<name>`) and
 symlinks it into each agent home (`~/.claude/skills/<name>`, `agents/<name>.md`,
-`rules/<name>.md`, `commands/<name>.md`). A tool is the exception: it is
+`rules/<name>.md`, `commands/<name>.md`, `workflows/<name>.js`). A tool is the exception: it is
 store-only and, by default, not linked into an agent home.
 
 A path you control is fine: pointing at a location your install hook populates

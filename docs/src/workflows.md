@@ -24,9 +24,11 @@ loader: a `workflows/nested/deep.js`, a `.mjs`, or a `.ts` is not an item.
 
 ## Descriptions come from `meta`
 
-A `.js` file has no YAML frontmatter, so `probe` and `recall` read the item's
-description out of the `meta` object instead. `whenToUse` is shown beside it, the
-way the harness's own workflow list renders the pair:
+A `.js` file has no YAML frontmatter, so the item's description comes from the
+`meta` object instead. `probe` shows `whenToUse` beside it, the way the
+harness's own workflow list renders the pair; `recall` reads an installed
+item's description from the manifest, where `whenToUse` is never recorded, and
+shows the description alone.
 
 ```js
 export const meta = {
@@ -110,7 +112,9 @@ A path token renders in the `~` home form there, the reading an agent gets, not
 the absolute form an [`expand:`-listed script](tooling.md) gets.
 
 One consequence: a literal `{{` in a workflow's code is read as a token. That is
-the same rule markdown items have lived under.
+the same rule markdown items have lived under, and it has the same
+consequence: a token that resolves to no sibling is a hard install failure
+(`BadReference`), not inert text.
 
 ## Plugins
 
@@ -128,16 +132,30 @@ items take the plugin name as their default namespace. So the `{{ns:}}` token
 expands to exactly that spelling. See
 `examples/marketplace-plugin/workflows/deploy.js`.
 
-A manifest's `workflows` key is a component-path override, and `mind` ignores it
-as it ignores every other one: the convention directory is what gets scanned.
-What that flat `.js` scan does not map (a subdirectory, a `.ts`) is counted in
-the skipped-components note rather than dropped in silence.
+A manifest's `workflows` key points elsewhere on purpose, and `mind` ignores it
+as it ignores every other component-path override, so the harness loads from
+the declared path while `mind` scans only `workflows/`, and the two disagree.
+A plugin that sets the key contributes no workflow items from the declared
+path, and the skipped-components note says nothing about it. Setting the key
+is not harmless.
+
+A workflow cannot be installed by item link either: a deep `tree`/`blob` URL
+takes `.md` files only, so `mind` refuses the link by name. Meld the repo, or
+`learn workflow:<name>`, instead.
 
 ## Lobes
 
 A workflow links into the default Claude lobe and into any lobe whose `kinds`
 filter names `workflow`. A lobe with no filter admits it. The non-Claude harness
 presets (gemini, codex, universal, windsurf) admit skills only, so they are
-unaffected. A project lobe needs nothing special: the harness reads project
-workflows from `<project>/.claude/workflows/`, which is where a project lobe
-already links one.
+unaffected. That includes `link-project`, which resolves to one of those presets
+(windsurf by default) or, with `--subdir`, to a skill-only filter: neither links
+a workflow.
+
+A project lobe still needs nothing special, but it has to be one that admits the
+kind. The harness reads project workflows from `<project>/.claude/workflows/`,
+and the lobe that links one there is the bare form:
+
+```text
+$ mind config lobes add ./myproject/.claude
+```

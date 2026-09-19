@@ -346,6 +346,51 @@ fn link_without_skill_md_is_an_error_and_registers_nothing() {
 }
 
 #[test]
+fn link_to_a_workflow_names_it_as_unsupported() {
+    // spec: WF-6 LNK-20
+    // A workflow's `.js` cannot be item-linked (the blob/tree form is
+    // `.md`-only). The path is understood -- it names a real workflow file --
+    // so the error must say so by name and point at the remedy, rather than
+    // falling into the generic "not a skill directory" / "not under an
+    // agents/, rules/, or commands/ directory" wording a merely-wrong path
+    // gets.
+    let sb = Sandbox::new();
+    sb.write_and_commit(
+        "workflows/deploy.js",
+        "export const meta = { name: 'deploy', description: 'Deploy it' };\n",
+    );
+    let r = sb.mind(&["learn", &sb.link("tree/main/workflows/deploy.js")]);
+    assert!(
+        !r.success,
+        "an item link to a workflow must fail: {}",
+        r.stdout
+    );
+    assert!(
+        r.stderr.contains("workflow"),
+        "the error must name workflows as the unsupported kind: {}",
+        r.stderr
+    );
+    assert!(
+        r.stderr.contains("mind learn workflow:") || r.stderr.contains("meld"),
+        "the error must point at melding the repo or `learn workflow:<name>` \
+         instead: {}",
+        r.stderr
+    );
+    assert!(
+        !r.stderr.contains("not a skill directory"),
+        "must not fall into the skill-directory wording: {}",
+        r.stderr
+    );
+    assert!(
+        !r.stderr
+            .contains("not under an agents/, rules/, or commands/ directory"),
+        "must not fall into the LNK-21 unresolved-kind wording: {}",
+        r.stderr
+    );
+    assert_eq!(source_count(&sb), 0, "nothing registered on failure");
+}
+
+#[test]
 fn branch_link_upgrades_with_the_branch() {
     // spec: LNK-5
     // A tree/<branch> link follows that branch: sync + upgrade pick up an

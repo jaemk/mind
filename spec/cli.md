@@ -940,7 +940,7 @@ define the non-interactive catalog listing, which `probe` prints instead when
 - `CLI-82` List outputs (`probe`, `recall`) left-align columns padded to the
   widest value in each column, so rows stay aligned regardless of item-name
   length.
-- `CLI-83` `probe` and `recall` accept `--kind <skill|agent|rule|tool>` and
+- `CLI-83` `probe` and `recall` accept `--kind <skill|agent|rule|command|workflow|tool>` and
   `--source <selector>` filters that narrow the listing, composing with `probe`'s
   substring query. For `recall` they apply to the installed-items listing, not to
   `--sources` or a single-item lookup (use a `kind:` / `owner/repo#` ref there);
@@ -1039,11 +1039,12 @@ only appear at meld or install time. It is read-only and installs nothing.
   references, missing descriptions, hardcoded paths, bare tool references, and an
   unresolved `{{ns:}}` / path token in a non-markdown item file) exit zero. It
   changes nothing on disk in either case, except under `--fix` (CLI-138). An
-  unresolved `{{ns:}}` token is hard only in a markdown file
-  (`namespace::is_markdown`, NS-53): install expands `{{ns:}}` in markdown only,
-  so the identical unresolved token in a non-markdown item file (a script, data)
-  is dead text that cannot break an install and is downgraded to advisory,
-  mirroring the path-token treatment (CLI-135).
+  unresolved `{{ns:}}` token is hard only in a file install expands
+  (`namespace::expands_tokens`, NS-53): a markdown file, a workflow's own `.js`
+  (workflows.md WF-25, WF-27), or a file an item's `expand:` list names
+  (NS-57, CLI-226). The identical unresolved token in any other item file (a
+  script, data) is dead text that cannot break an install and is downgraded to
+  advisory, mirroring the path-token treatment (CLI-135).
 - `CLI-133` `review --as <prefix>` evaluates the source under a prospective
   namespace, so token expansion and the unguarded-reference scan are checked as
   they would install under that prefix. With no flag the effective prefix is the
@@ -1056,12 +1057,14 @@ only appear at meld or install time. It is read-only and installs nothing.
   token whose referent does not resolve in this source (a `{{tools:}}` naming a
   non-tool or a tool with no entrypoint, a `{{path:}}` miss or cross-kind
   ambiguity) is a hard `bad-reference` finding, which would be a `BadReference` at
-  install (tooling.md, TOOL-11/12), in a markdown file (`namespace::is_markdown`,
-  NS-53). The identical unresolved token in a non-markdown item file (a script,
-  data) is only an advisory `bad-reference` finding, never hard: install never
-  expands any token there either, so it is dead text that cannot break an
-  install, matching how Check 9 (CLI-136) and Check 11 (CLI-139) already treat a
-  non-markdown file. Every bad token is reported, not just the first.
+  install (tooling.md, TOOL-11/12), in a file install expands
+  (`namespace::expands_tokens`, NS-53): a markdown file, a workflow's own `.js`
+  (workflows.md WF-25), or an `expand:`-listed file (NS-57, CLI-226). The
+  identical unresolved token in any other item file (a script, data) is only an
+  advisory `bad-reference` finding, never hard: install never expands any token
+  there either, so it is dead text that cannot break an install, matching how
+  Check 9 (CLI-136) and Check 11 (CLI-139) already treat such a file. Every bad
+  token is reported, not just the first.
 - `CLI-136` `review` reports, as an advisory `hardcoded-path` finding, an item
   file that hardcodes a mind install path that a path token should replace. It
   recognizes the three install layouts (`.mind/store/<kind>/...`, the agent-home
@@ -1109,8 +1112,11 @@ only appear at meld or install time. It is read-only and installs nothing.
   of the unguarded-reference scan (CLI-131): one finds a bare name that should be
   a token, the other a token that should be a bare word. The finding is reported
   in any text file, markdown or not, but `--fix` only un-wraps it in a markdown
-  file (CLI-138, NS-54); in a non-markdown file the misplaced token is left as
-  written, since it never expanded there either (NS-53).
+  file (CLI-138, NS-54); in any other file the misplaced token is left as
+  written. For a file that does not expand, it never expanded there either
+  (NS-53); for a workflow's `.js`, which does expand (WF-25), `--fix` still
+  leaves it alone, because the rewrite passes match sibling names as words and a
+  workflow file is code (WF-27).
 - `CLI-223` `review` reports, as an advisory `inert-token` finding, every
   `{{...}}` token found in a non-markdown item file, regardless of whether the
   token would resolve. The exceptions are the two files a token does reach

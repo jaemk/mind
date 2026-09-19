@@ -1,6 +1,6 @@
 # The `workflow` item kind
 
-Status: planned. Claude Code reads user-authored workflows from a `workflows/`
+Status: done. Claude Code reads user-authored workflows from a `workflows/`
 directory of the agent home (`~/.claude/workflows/<file>.js`) and offers each one
 to the `Workflow` tool by name. A workflow is a JavaScript file that orchestrates
 subagents: it declares `export const meta = {...}` and a body that calls
@@ -60,8 +60,16 @@ that mind depends on is called out at the requirement that depends on it.
 - `WF-6` `mind.toml` accepts `kind = "workflow"` wherever a kind is named: an
   `[[items]]` entry, a `[discover].workflows` glob list (matching the workflow
   FILE, as the agent, rule, and command globs do), and a lobe's `kinds` filter
-  (HARN-1). `--kind workflow` selects the kind wherever the CLI takes one, and
+  (HARN-1). `workflow` is also the `probe`/`recall --kind` filter value, and
   `workflow:<name>` is an item ref wherever a ref is taken.
+
+  One CLI kind flag excludes it: `--kind` on `meld`/`learn` is the ITEM-LINK
+  kind flag, and it takes `agent`, `rule`, or `command` only. An item link's
+  blob form names a single `.md` file (LNK-20), and a workflow is a `.js` file,
+  so a workflow cannot be item-linked at all. An item-link path naming one is
+  refused by name, saying workflows are deliberately unsupported and pointing at
+  melding the repo or `learn workflow:<name>`, rather than reporting the
+  directory as unrecognized.
 - `WF-7` The harness caps a workflow file at 524288 bytes and skips a larger one.
   mind installs it regardless and reports the overage (WF-30); see WF-32 for why
   the cap is reported rather than enforced.
@@ -94,7 +102,12 @@ that mind depends on is called out at the requirement that depends on it.
   lobe with no filter admits every linked kind, workflows included.
 - `WF-13` A project lobe (HARN-19) needs no special handling: the harness reads
   project workflows from `<project>/.claude/workflows/`, which is where a project
-  lobe already links a `workflow` item by WF-10.
+  lobe already links a `workflow` item by WF-10. It has to be a lobe that admits
+  the kind, and `link-project` never produces one: it resolves to a preset
+  (windsurf by default, CLI-198) or, with `--subdir`, to a skill-only filter, and
+  both admit skills alone by WF-12. The project lobe that links a workflow is the
+  bare `config lobes add <project>/.claude`, which carries no filter. There is no
+  `claude` preset, so this is not a gap a preset could close.
 
 ## Identity and namespacing
 
@@ -136,7 +149,9 @@ that mind depends on is called out at the requirement that depends on it.
   a mangled one.
 - `WF-24` When an installed workflow's `meta.name` (as read by WF-5, after
   expansion) is a string that differs from the item's effective name, mind warns:
-  once at `learn`, as a `review` finding beside the WF-30 ones, and in the
+  once at `learn`, once at `upgrade` (where a new version of a source can
+  introduce the divergence into an item that did not have one), as a `review`
+  finding beside the WF-30 ones, and in the
   `recall <item>` detail view. That workflow is installed and healthy by every
   check mind makes, and the harness answers to it under a different name than
   `mind recall` reports. The warning is advisory: the divergence is legal, and a
@@ -161,9 +176,9 @@ that mind depends on is called out at the requirement that depends on it.
   token resolves to no sibling, which is already the hard `bad-reference` of
   WF-27.
 
-  At `learn` and `recall <item>` the comparison reads the INSTALLED copy, where
-  the tokens are already expanded, so it is against the literal string the
-  harness will read and there is no second expansion to keep in step with
+  At `learn`, `upgrade`, and `recall <item>` the comparison reads the INSTALLED
+  copy, where the tokens are already expanded, so it is against the literal
+  string the harness will read and there is no second expansion to keep in step with
   `install.rs`. `review` has no installed copy and expands `meta.name` itself,
   against the prefix and sibling set it already validated the file's other tokens
   with. The `review` finding is tagged `workflow-name`, and WF-29's
@@ -204,10 +219,10 @@ that mind depends on is called out at the requirement that depends on it.
   covers every text file of an item.
 - `WF-29` Two installed workflows whose effective `meta.name` (WF-5, after
   expansion) is the same string are one name to the harness (WF-20), whichever
-  sources they came from. mind warns at `learn` and reports a `review` finding,
-  and installs both. This is the same check as WF-24 with the comparison made
-  against every other installed workflow instead of against the item's own
-  effective name, and it is reported at the same three sites.
+  sources they came from. mind warns at `learn` and at `upgrade` and reports a
+  `review` finding, and installs both. This is the same check as WF-24 with the
+  comparison made against every other installed workflow instead of against the
+  item's own effective name, and it is reported at the same four sites.
 
   It is deliberately softer than the agent collision it otherwise resembles
   (NS-41), for two reasons. It is not a link-path collision: the two items link
@@ -218,10 +233,10 @@ that mind depends on is called out at the requirement that depends on it.
   A prefix does not avert it, as WF-22 records.
 
   The comparison set differs by site, because the installed set is not every
-  site's subject. `learn` and `recall <item>` compare against everything
-  installed, which is what "two installed workflows" means. `review` compares the
-  reviewed source's own workflows against each other: its target is a source, not
-  the host, and by design usually a repo the user has not yet decided to trust,
+  site's subject. `learn`, `upgrade`, and `recall <item>` compare against
+  everything installed, which is what "two installed workflows" means. `review`
+  compares the reviewed source's own workflows against each other: its target is
+  a source, not the host, and by design usually a repo the user has not yet decided to trust,
   so reporting what it would collide with once installed would answer a question
   `review` was not asked. Two workflows in one source that already share a name
   are a defect in the source, which is exactly what `review` is for.
@@ -246,6 +261,28 @@ that mind depends on is called out at the requirement that depends on it.
 - `WF-32` The size cap is reported, not enforced, for the same reason: DSC-90
   records that mind does not cap the size of item content it reads, and a cap
   mind enforced would be mind's cap, not the harness's.
+- `WF-53` `review` reports EVERY workflow item as a `workflow-content` advisory
+  finding, the workflow counterpart of the command disclosure (CLI-237, DSC-91).
+  A workflow is not content the harness offers, it is JavaScript the harness
+  evaluates to drive subagents, and mind neither reads nor validates its body:
+  the WF-5 reader looks at one object literal and nothing else. So a source
+  shipping workflows must not review as a clean bill of health, and the finding
+  is unconditional rather than pattern-triggered, since there is no subset of a
+  program that is the dangerous part. It is disclosure, not a gate: it refuses
+  nothing, and like every other check here it cannot block an install (WF-31).
+  The file is read through the size-capped metadata path (DSC-91), because
+  `review`'s target is an untrusted, not-yet-melded source; an over-cap file is
+  the existing hard `metadata-too-large` finding, not a silently dropped
+  disclosure.
+- `WF-54` `review` does not emit the generic `missing-description` finding
+  (CLI-132) for a workflow. A workflow's description comes from `meta` (WF-4)
+  and a `.js` file has no frontmatter, so that finding's wording points the
+  author at a site the kind does not have, and WF-30 already reports a missing,
+  empty, or unreadable one as `workflow-unloadable` in the terms the harness
+  applies. One defect is reported once, and `workflow-unloadable` is the single
+  report. A `mind.toml` `[[items]].description` still overrides (DSC-32); it
+  changes what mind displays, not what the harness reads, so supplying one does
+  not clear a WF-30 finding.
 
 Not a requirement, recorded so the omission is deliberate: the harness also
 declines to load workflows for reasons that have nothing to do with a file. The
@@ -302,6 +339,15 @@ posture: state the assumption, do not defend it.
   none of, and a scoped item `mind.toml` (HOOK-131) is read only from a
   directory-backed item's own directory, which a one-file kind does not have.
   This is the agent, rule, and command position, not a new restriction.
+
+  A workflow's `requires` is restricted the same way, and more sharply: it can
+  be declared only where a workflow can carry metadata, and there is no such
+  site. The scan reads `requires` from an item's frontmatter, which a `.js` file
+  has none of, and a root `[[items]]` entry has no `requires` key for any kind.
+  A workflow therefore participates in DEP-4 with nothing to declare: it is
+  resolved as a dependency of another item, and its own dependency list is
+  always empty. Recorded here so the emptiness reads as a consequence of the
+  kind's shape rather than as a scan that missed something.
 - `WF-51` `probe` surfaces a workflow's `whenToUse` (WF-5) where an item's
   description is shown, appended to the description as the harness's own
   workflow list renders it (`<description> - <whenToUse>`). It is a field of its

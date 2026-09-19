@@ -35,8 +35,8 @@ super-source on top of the manifest (MKT-15, MKT-16). See
 - `DSC-12` A rule is a file `rules/<name>.md`; its name is the file stem.
 - `DSC-14` A command is a file `commands/<name>.md`; its name is the file stem.
   The scan is flat, as for agents and rules (commands.md CMD-1, CMD-2).
-- `DSC-13` A missing `skills/`, `agents/`, `rules/`, `commands/`, or `tools/`
-  directory yields no items (not an error).
+- `DSC-13` A missing `skills/`, `agents/`, `rules/`, `commands/`, `workflows/`,
+  or `tools/` directory yields no items (not an error).
 
 ## Frontmatter
 
@@ -86,7 +86,7 @@ follow-branch = "main"       # optional; pin directive, one of
                              #   follow-branch / pin-tag / pin-ref (DSC-41)
 
 [[items]]                     # explicit inventory (authoritative)
-kind = "skill"               # skill | agent | rule | tool
+kind = "skill"               # skill | agent | rule | command | workflow | tool
 name = "review"
 path = "skills/review"       # relative to repo root; a dir for skills
 link = "rules/x.md"          # optional; link target relative to ~/.claude
@@ -312,12 +312,12 @@ run = "make build"
 - `DSC-32` An item's description is its `mind.toml` `description` if given, else
   its frontmatter description.
 - `DSC-33` Each `[discover]` kind (`skills`, `agents`, `rules`, `commands`,
-  `tools`) is a table with
+  `workflows`, `tools`) is a table with
   `include` and optional `exclude` glob lists, relative to the repo root. A skill
-  glob matches a `SKILL.md` (the item is its parent directory); agent, rule, and
-  command globs match the `.md` file directly; a tool glob matches the tool
-  directory (TOOL-7). Every kind's globs count equally: any non-empty `include`
-  list makes the file authoritative (DSC-3) and every pattern is
+  glob matches a `SKILL.md` (the item is its parent directory); agent, rule,
+  command, and workflow globs match the item FILE directly; a tool glob matches
+  the tool directory (TOOL-7). Every kind's globs count equally: any non-empty
+  `include` list makes the file authoritative (DSC-3) and every pattern is
   confinement-checked at load (DSC-81).
 - `DSC-34` `[[items]]` and `[discover]` may both appear; their results are unioned.
 - `DSC-35` A source with only `[source]` metadata, or only `[discover].sources`

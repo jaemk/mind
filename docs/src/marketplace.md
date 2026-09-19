@@ -29,14 +29,15 @@ that `sync`, `upgrade`, and `introspect` use.
 ## A single plugin (`plugin.json`)
 
 A plugin is a directory with `.claude-plugin/plugin.json` whose component
-directories sit at the plugin root. Claude's layout for skills, agents, and
-commands is byte-for-byte `mind`'s convention layout, so the mapping is direct:
+directories sit at the plugin root. Claude's layout for skills, agents, commands, and
+workflows is byte-for-byte `mind`'s convention layout, so the mapping is direct:
 
 | Plugin component | `mind` item |
 |------------------|-------------|
 | `skills/<name>/SKILL.md` | a `skill` |
 | `agents/<name>.md` | an `agent` |
 | `commands/<name>.md` | a `command` |
+| `workflows/<name>.js` | a `workflow` |
 | `hooks/`, `.mcp.json`, LSP, monitors, themes, output-styles | not installed (no `mind` equivalent) |
 
 A plugin has no `rules` or `tools` component, so nothing maps to those kinds.
@@ -230,8 +231,8 @@ Two runnable fixtures live in the repo:
 
 - [examples/marketplace-plugin](https://github.com/jaemk/mind/tree/main/examples/marketplace-plugin)
   - a single plugin: one skill (namespaced by the plugin name), one agent (bare),
-  a `commands/` slash command, and an unsupported `hooks/` that reports a
-  skipped count.
+  a `commands/` slash command, a `workflows/` workflow, and an unsupported
+  `hooks/` that reports a skipped count.
 - [examples/marketplace-catalog](https://github.com/jaemk/mind/tree/main/examples/marketplace-catalog)
   - a catalog listing two in-repo plugins, each with its own name and items.
 

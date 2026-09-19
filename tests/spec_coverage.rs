@@ -107,14 +107,12 @@ const ALLOWLIST: &[&str] = &[
     // the plugin mapping (WF-40..42), and the reporting it does instead of
     // enforcing (WF-24/WF-29/WF-30..32).
     //
-    // Three stay allowlisted permanently: WF-11 (the harness loader admits a
+    // Two stay allowlisted permanently: WF-11 (the harness loader admits a
     // symlinked workflow file) and WF-20 (the harness keys a workflow by
     // `meta.name`, not its file name) are observations about Claude Code, not
     // mind behavior. Nothing in mind can assert either; what mind does about
-    // WF-20 is WF-21 and WF-24, which are cited. WF-13 is the same shape: it
-    // records that a project lobe needs no special handling, so there is no
-    // workflow-specific behavior for a test to drive.
-    "WF-11", "WF-13", "WF-20",
+    // WF-20 is WF-21 and WF-24, which are cited.
+    "WF-11", "WF-20",
     // `evolve`'s download, verification, extraction, and in-place swap are the
     // `self_update` crate's, so the statements describing them have no mind-side
     // code path a test here could drive without a real release and a real

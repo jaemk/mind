@@ -266,6 +266,16 @@ impl Cursor<'_> {
 
     /// Read the depth-1 keys of the object literal the cursor sits inside,
     /// having just consumed its `{`.
+    ///
+    /// Every pass of the loop advances the cursor, unconditionally. Neither
+    /// `read_ident` nor `skip_value` consumes a character the other cannot
+    /// start with - a stray `)` or `]` at depth 0, say, which `read_ident`
+    /// refuses and `skip_value` leaves for a caller that is not there - so
+    /// without the explicit bump below the loop would restart on the same index
+    /// forever. This reader runs on every discovered workflow in the ordinary
+    /// catalog scan, holding the process lock, so a no-progress path is a hang
+    /// of every verb, not a bad read. WF-5 lets this yield less on malformed
+    /// code; it never lets it fail or stall.
     fn read_meta_object(&mut self) -> WorkflowMeta {
         let mut meta = WorkflowMeta::default();
         loop {
@@ -282,6 +292,7 @@ impl Cursor<'_> {
                 }
                 _ => {}
             }
+            let entry_start = self.i;
 
             // The key: bare, quoted, or computed. A computed key is read as no
             // key at all, so its value is skipped like any unrecognized one.
@@ -299,6 +310,12 @@ impl Cursor<'_> {
                 // Shorthand (`name,`), a method (`run() {}`), or a spread.
                 // Nothing to bind, so skip to the next entry.
                 self.skip_value();
+                if self.i == entry_start {
+                    // Nothing here was consumable. Drop the character and carry
+                    // on: the object is malformed, and the keys after it are
+                    // still worth reading.
+                    self.i += 1;
+                }
                 continue;
             }
             self.i += 1;
@@ -587,5 +604,306 @@ const flaky = await agent('grep CI logs for retry markers', { schema: FLAKY_SCHE
             m.when_to_use.as_deref(),
             Some("When CI is red intermittently")
         );
+    }
+
+    /// [`parse`] under a deadline, so a no-progress regression fails the test
+    /// rather than hanging the whole suite on it. A stuck worker thread is
+    /// abandoned: the test has already failed and the process is going down.
+    fn parse_bounded(text: &str) -> WorkflowMeta {
+        let owned = text.to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(parse(&owned));
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(m) => m,
+            Err(_) => panic!("parse did not return on {text:?}: the cursor is not advancing"),
+        }
+    }
+
+    // spec: WF-5 -- a stray closer at depth 0 is a character no key reader will
+    // start on and no value skipper will consume, so the entry loop has to drop
+    // it itself. This reader runs on every discovered workflow while the
+    // process lock is held, so standing still here would wedge every verb.
+    #[test]
+    fn returns_on_a_stray_closing_paren() {
+        assert!(parse_bounded("export const meta = { )").is_empty());
+    }
+
+    // spec: WF-5 -- the same dead end reached through the value position.
+    #[test]
+    fn returns_on_a_stray_closing_bracket_in_the_value_position() {
+        let m = parse_bounded("export const meta = { name: ]");
+        assert_eq!(m.name, None);
+        assert!(m.is_empty());
+    }
+
+    // spec: WF-5 -- a regex literal is a shape this reader does not know, and a
+    // `)` inside one reads as an unbalanced closer. Dropping it must cost only
+    // that key: the string keys on either side still read.
+    #[test]
+    fn reads_around_a_regex_literal_holding_a_closing_paren() {
+        let m = parse_bounded(
+            "export const meta = { name: 'deploy', pattern: /foo)bar/, description: 'Deploy it' }",
+        );
+        assert_eq!(m.name.as_deref(), Some("deploy"));
+        assert_eq!(m.description.as_deref(), Some("Deploy it"));
+    }
+
+    // spec: WF-5 -- an arrow body whose parens do not balance leaves a closer
+    // in the entry position, and the object still ends where its `}` says.
+    #[test]
+    fn returns_on_an_unbalanced_arrow_body() {
+        let m = parse_bounded("export const meta = { arrow: () => x), }");
+        assert!(m.is_empty());
+    }
+
+    /// Run `f` on a worker thread under a deadline, the way [`parse_bounded`]
+    /// runs one parse, for the checks below that cover many inputs at once. A
+    /// stuck worker is abandoned: the test has already failed.
+    fn run_bounded<T: Send + 'static>(
+        what: &str,
+        secs: u64,
+        f: impl FnOnce() -> T + Send + 'static,
+    ) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(secs)) {
+            Ok(v) => v,
+            Err(_) => panic!("{what} did not return: the cursor is not advancing"),
+        }
+    }
+
+    // spec: WF-5 -- `skip_value` returns at a closer it did not open, so an
+    // unbalanced one inside a nested context surfaces in the entry position
+    // once the nesting it did open is spent. The entry loop drops it and reads
+    // on; only a closer that balances the value's own opener (the `}` case)
+    // ends the literal early, which costs the keys after it but never a stall.
+    #[test]
+    fn returns_on_a_closer_nested_inside_a_value() {
+        for (text, expected) in [
+            ("export const meta = { a: [ ) ], name: 'x' }", Some("x")),
+            ("export const meta = { a: [ } ], name: 'x' }", Some("x")),
+            ("export const meta = { a: ( ] ), name: 'x' }", Some("x")),
+            ("export const meta = { a: [[[)))]]], name: 'x' }", Some("x")),
+            ("export const meta = { [)]: 1, name: 'x' }", Some("x")),
+            ("export const meta = { a: { ) }, name: 'x' }", None),
+        ] {
+            let m = parse_bounded(text);
+            assert_eq!(m.name.as_deref(), expected, "from {text:?}");
+        }
+    }
+
+    // spec: WF-5 -- the same dead end at the very first entry, where
+    // `seek_meta_object` hands a cursor sitting directly on the closer.
+    #[test]
+    fn returns_on_a_closer_immediately_after_the_opening_brace() {
+        for (text, expected) in [
+            ("export const meta = {)", None),
+            ("export const meta = {]", None),
+            ("export const meta = {)))", None),
+            ("export const meta = {)name: 'x' }", Some("x")),
+            ("export const meta = {]]]name: 'x'}", Some("x")),
+            ("export const meta = {)}name: 'late'}", None),
+        ] {
+            let m = parse_bounded(text);
+            assert_eq!(m.name.as_deref(), expected, "from {text:?}");
+        }
+    }
+
+    // spec: WF-5 -- dropping a stray closer costs exactly that character: the
+    // key after it is still read, and the key before it is kept.
+    #[test]
+    fn a_dropped_closer_costs_only_itself() {
+        let m = parse_bounded("export const meta = { name: 'a' ) description: 'b' }");
+        assert_eq!(m.name.as_deref(), Some("a"));
+        assert_eq!(m.description.as_deref(), Some("b"));
+    }
+
+    // spec: WF-5 -- the value position, entered only after a `:` has been
+    // consumed, on every malformed shape worth naming. None of these can bind a
+    // value, and none of them may fail to return.
+    #[test]
+    fn every_malformed_value_position_terminates() {
+        for text in [
+            "export const meta = { name: )",
+            "export const meta = { name: ]",
+            "export const meta = { name: }",
+            "export const meta = { name: :",
+            "export const meta = { name: ,",
+            "export const meta = { name: ",
+            "export const meta = { name:",
+            "export const meta = { name: /re)gex/ }",
+            "export const meta = { name: () => ) }",
+            "export const meta = { name: [ ) }",
+            "export const meta = { name: { ) } }",
+            "export const meta = { name: `${",
+            "export const meta = { name: `open",
+            "export const meta = { name: '",
+            "export const meta = { name: \"",
+            "export const meta = { name: 'abc\\",
+            "export const meta = { name: \\ }",
+            "export const meta = { name: /* unterminated",
+            "export const meta = { name: // eol only",
+            "export const meta = { name: 0x, description: ) }",
+            "export const meta = { name: ...spread }",
+        ] {
+            let m = parse_bounded(text);
+            assert_eq!(m.name, None, "nothing readable in {text:?}");
+        }
+    }
+
+    // spec: WF-5 -- an unterminated literal in the value position consumes to
+    // end of file (that is what keeps its body from being re-read as code), so
+    // the keys after it are inside the literal and absent, not misread.
+    #[test]
+    fn an_unterminated_value_swallows_the_rest_of_the_object() {
+        for text in [
+            "export const meta = { description: `open, name: 'x' }",
+            "export const meta = { description: 'open, name: 'x' }",
+        ] {
+            let m = parse_bounded(text);
+            assert_eq!(m.name, None, "from {text:?}");
+        }
+    }
+
+    // spec: WF-5 -- a long run of characters that neither reader will consume
+    // is dropped one per pass, and the keys after it still read. A no-progress
+    // regression shows up here as a hang rather than a wrong value.
+    #[test]
+    fn a_long_run_of_stray_closers_still_terminates() {
+        let text = format!(
+            "export const meta = {{ {}{}, name: 'survivor' }}",
+            ")".repeat(5000),
+            "]".repeat(5000)
+        );
+        let m = parse_bounded(&text);
+        assert_eq!(m.name.as_deref(), Some("survivor"));
+    }
+
+    /// Drive [`Cursor::read_string`] directly. Its "consumed either way"
+    /// contract is what stops the entry loop from re-reading a literal's body
+    /// as code, and `parse` shows only the half where a value comes back.
+    fn read_string_at(text: &str) -> (Option<String>, usize) {
+        let chars: Vec<char> = text.chars().collect();
+        let mut cur = Cursor { s: &chars, i: 0 };
+        let value = cur.read_string();
+        (value, cur.i)
+    }
+
+    // spec: WF-5 -- an unterminated template runs to end of file, so the caller
+    // is left at EOF and returns rather than re-reading the body.
+    #[test]
+    fn an_unterminated_template_consumes_to_end_of_file() {
+        let text = "`no closer here";
+        let (value, at) = read_string_at(text);
+        assert_eq!(value, None);
+        assert_eq!(at, text.chars().count());
+        // The same for the other two quote forms.
+        assert_eq!(read_string_at("'open").0, None);
+        assert_eq!(read_string_at("\"open").0, None);
+    }
+
+    // spec: WF-5 -- an interpolated template yields no value but is consumed
+    // through its closing backtick, leaving the cursor on the code after it.
+    #[test]
+    fn an_interpolated_template_is_consumed_through_its_closer() {
+        let (value, at) = read_string_at("`a${b}c`, name: 'x'");
+        assert_eq!(value, None);
+        assert_eq!(at, 8, "the cursor sits on the comma after the template");
+    }
+
+    // spec: WF-5 -- a literal ending in a dangling escape is unterminated, and
+    // the escape consumes the end of input rather than looping on it.
+    #[test]
+    fn a_trailing_backslash_ends_an_unterminated_literal() {
+        let (value, at) = read_string_at("'abc\\");
+        assert_eq!(value, None);
+        assert_eq!(at, 5);
+    }
+
+    // spec: WF-5 -- `${` is interpolation only in a template; elsewhere it is
+    // two ordinary characters, and a lone `$` in a template is literal too.
+    #[test]
+    fn a_dollar_outside_an_interpolation_is_literal() {
+        assert_eq!(read_string_at("`cost: $5`").0.as_deref(), Some("cost: $5"));
+        assert_eq!(read_string_at("'${x}'").0.as_deref(), Some("${x}"));
+        assert_eq!(read_string_at("\"${x}\"").0.as_deref(), Some("${x}"));
+    }
+
+    // spec: WF-5 -- asked to read a literal where there is none, it declines
+    // without moving, so the key reader keeps the character for `read_ident`.
+    #[test]
+    fn read_string_declines_a_non_literal_without_moving() {
+        let (value, at) = read_string_at("name: 'x'");
+        assert_eq!(value, None);
+        assert_eq!(at, 0);
+    }
+
+    // spec: WF-5 -- a randomized sweep over the tokens an object literal is
+    // made of. The reader must return on every arrangement of them, balanced or
+    // not; the seed is fixed, so any failure reproduces exactly. This is the
+    // general form of the hang: a character that no reader in the loop will
+    // consume, reached in a position nobody wrote a case for.
+    #[test]
+    fn a_randomized_sweep_of_object_bodies_always_returns() {
+        const TOKENS: [&str; 28] = [
+            "{",
+            "}",
+            "[",
+            "]",
+            "(",
+            ")",
+            "'",
+            "\"",
+            "`",
+            ",",
+            ":",
+            "/",
+            "*",
+            "\\",
+            "$",
+            "${",
+            "=>",
+            "//",
+            "/*",
+            "*/",
+            " ",
+            "\n",
+            "name",
+            "description",
+            "whenToUse",
+            "meta",
+            "export const meta =",
+            "x",
+        ];
+        let mut state: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as usize
+        };
+        let mut cases: Vec<String> = Vec::with_capacity(4000);
+        for n in 0..4000usize {
+            let len = 1 + next() % 24;
+            let mut body = String::new();
+            for _ in 0..len {
+                body.push_str(TOKENS[next() % TOKENS.len()]);
+            }
+            // Half the cases are handed straight to `read_meta_object` through a
+            // well-formed opening; the other half also exercise the seek.
+            cases.push(match n % 2 {
+                0 => format!("export const meta = {{{body}"),
+                _ => body,
+            });
+        }
+        run_bounded("the randomized sweep", 60, move || {
+            for case in &cases {
+                let _ = parse(case);
+            }
+        });
     }
 }

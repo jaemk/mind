@@ -111,6 +111,32 @@ impl Sandbox {
         p
     }
 
+    /// Place an unmanaged workflow in the lobe: a lobe's workflow is a bare
+    /// `workflows/<name>.js` whose metadata lives in its `meta` object, not in
+    /// frontmatter (WF-50).
+    fn place_unmanaged_workflow(&self, name: &str) -> PathBuf {
+        let p = self
+            .claude_home
+            .join("workflows")
+            .join(format!("{name}.js"));
+        write_file(
+            &p,
+            &format!(
+                "export const meta = {{\n  \
+                 name: '{name}',\n  \
+                 description: 'Run the {name} pass',\n  \
+                 phases: [{{ title: 'Go' }}],\n\
+                 }}\n\
+                 \n\
+                 phase('Go')\n\
+                 const done = await agent('Do the {name} work.')\n\
+                 \n\
+                 return done\n"
+            ),
+        );
+        p
+    }
+
     fn dest_spec(&self) -> String {
         self.dest.to_string_lossy().into_owned()
     }
@@ -255,6 +281,52 @@ fn abs1_absorb_command_installs_managed_symlink() {
     assert!(
         recall.stdout.contains("command:ship"),
         "the absorbed command must be managed: {}",
+        recall.stdout
+    );
+}
+
+/// Absorbing an unmanaged workflow moves it to workflows/<name>.js in the
+/// destination, commits it there, and leaves a managed symlink in the lobe.
+/// A workflow is a one-file kind like a command, but with the `.js` extension
+/// the harness loads (WF-50), so it is the one absorb path where the
+/// convention name is not `<name>.md`.
+// spec: ABS-1 ABS-5 WF-50
+#[test]
+fn abs1_absorb_workflow_installs_managed_symlink() {
+    let sb = Sandbox::new();
+    let lobe_path = sb.place_unmanaged_workflow("deploy");
+
+    let dest = sb.dest_spec();
+    let r = sb.mind(&["absorb", "workflow:deploy", "--to", &dest, "--yes"]);
+    assert!(
+        r.success,
+        "absorb workflow:deploy must succeed: stdout={} stderr={}",
+        r.stdout, r.stderr
+    );
+    // spec: WF-50 -- the convention path is workflows/<name>.js, not .md.
+    assert!(
+        sb.dest.join("workflows/deploy.js").is_file(),
+        "the workflow must land at workflows/<name>.js in the destination source"
+    );
+    assert!(
+        !sb.dest.join("workflows/deploy.md").exists(),
+        "the workflow must not be written under a markdown extension"
+    );
+    // spec: ABS-5 -- absorb commits the moved item in the destination repo.
+    assert_eq!(
+        last_commit_msg(&sb.dest),
+        "absorb workflow:deploy",
+        "absorb must commit the workflow in the destination repo"
+    );
+    // spec: ABS-1 -- and the lobe entry is replaced by a managed symlink.
+    assert!(
+        is_symlink(&lobe_path),
+        "lobe path must be a managed symlink after absorb"
+    );
+    let recall = sb.mind(&["recall"]);
+    assert!(
+        recall.stdout.contains("workflow:deploy"),
+        "the absorbed workflow must be managed: {}",
         recall.stdout
     );
 }

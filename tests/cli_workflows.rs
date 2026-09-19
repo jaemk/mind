@@ -12,11 +12,15 @@
 //!   WF-50: the kind-generic machinery (upgrade, forget, unmanaged) covers it
 //!   WF-51: `probe` shows `whenToUse` beside the description
 
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{Duration, Instant};
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
+/// Names the capture files of a single [`Sandbox::mind_bounded`] run.
+static BOUNDED_COUNTER: AtomicU32 = AtomicU32::new(0);
 
 /// A workflow whose `meta` carries all three keys the reader extracts.
 const REVIEW_JS: &str = r#"export const meta = {
@@ -97,6 +101,46 @@ impl Sandbox {
             stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
             success: out.status.success(),
+        }
+    }
+
+    /// `mind` under a deadline, so a scan that stops making progress fails the
+    /// test instead of hanging the suite. Output goes to files rather than
+    /// pipes: a child that has to be killed cannot then deadlock the reader.
+    fn mind_bounded(&self, args: &[&str]) -> Run {
+        // One pair of capture files per call, not per sandbox: two bounded runs
+        // sharing a sandbox (a test that drives several verbs, or two threads
+        // inside one) would otherwise truncate each other's output and the
+        // assertions would read whichever won.
+        let n = BOUNDED_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let out_path = self.base.join(format!("bounded-{n}.out"));
+        let err_path = self.base.join(format!("bounded-{n}.err"));
+        let mut child = Command::new(env!("CARGO_BIN_EXE_mind"))
+            .args(args)
+            .env("MIND_HOME", &self.mind_home)
+            .env("CLAUDE_HOME", &self.claude_home)
+            .env_remove("MIND_AGENT_HOMES")
+            .stdout(Stdio::from(File::create(&out_path).unwrap()))
+            .stderr(Stdio::from(File::create(&err_path).unwrap()))
+            .stdin(Stdio::null())
+            .spawn()
+            .expect("spawn mind");
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let status = loop {
+            match child.try_wait().expect("wait for mind") {
+                Some(status) => break status,
+                None if Instant::now() >= deadline => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("`mind {}` did not finish within 60s", args.join(" "));
+                }
+                None => std::thread::sleep(Duration::from_millis(25)),
+            }
+        };
+        Run {
+            stdout: String::from_utf8_lossy(&std::fs::read(&out_path).unwrap()).into_owned(),
+            stderr: String::from_utf8_lossy(&std::fs::read(&err_path).unwrap()).into_owned(),
+            success: status.success(),
         }
     }
 
@@ -805,6 +849,41 @@ fn two_workflows_sharing_a_meta_name_are_reported() {
         r.stdout.contains("workflow:deploy-staging"),
         "the detail view names the other claimant: {}",
         r.stdout
+    );
+}
+
+/// A workflow whose `meta` holds a shape the reader does not model - a regex
+/// literal carrying an unbalanced `)` - is read, not stalled on. The `meta`
+/// reader runs on every discovered workflow in the ordinary catalog scan while
+/// the process lock is held, so a cursor that stops advancing hangs `meld`,
+/// `probe`, `learn`, and every other verb, and blocks every other `mind`
+/// process behind the lock. Each run here is bounded, so a regression fails.
+#[test]
+fn a_workflow_meta_the_reader_cannot_model_does_not_stall_a_scan() {
+    // spec: WF-5
+    let sb = Sandbox::new();
+    sb.write_and_commit(
+        "workflows/deploy.js",
+        "export const meta = {\n  name: 'deploy',\n  tagPattern: /release\\)/,\n  \
+         description: 'Deploy a release',\n}\nphase('Deploy')\n",
+    );
+
+    let r = sb.mind_bounded(&["meld", &sb.source_spec()]);
+    assert!(r.success, "meld: {}\n{}", r.stdout, r.stderr);
+
+    let r = sb.mind_bounded(&["probe", "--no-tui", "--kind", "workflow"]);
+    assert!(r.success, "probe: {}\n{}", r.stdout, r.stderr);
+    assert!(
+        r.stdout.contains("Deploy a release"),
+        "the keys around the unreadable one still read: {}",
+        r.stdout
+    );
+
+    let r = sb.mind_bounded(&["learn", "workflow:deploy"]);
+    assert!(r.success, "learn: {}\n{}", r.stdout, r.stderr);
+    assert!(
+        sb.link("deploy.js").symlink_metadata().is_ok(),
+        "the workflow installs: the reader yields less, it never fails an install"
     );
 }
 

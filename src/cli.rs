@@ -215,7 +215,7 @@ EXAMPLES:
         /// each scan root, with no `skills/` container. Turns the layout on for a
         /// source that did not declare `[source].flat-skills`; there is no way to
         /// disable a source's declared flat layout. Applies to skills only (agent,
-        /// rule, command, and tool discovery are unaffected) and to convention discovery
+        /// rule, command, workflow, and tool discovery are unaffected) and to convention discovery
         /// only (ignored for an authoritative `mind.toml`). Persisted on the source
         /// and used by later scans and sync. Only takes effect at the meld that
         /// registers the source: passing it against an already-melded source is
@@ -264,7 +264,9 @@ EXAMPLES:
         /// Declare what kind of item a `blob` item link's file is: `agent`,
         /// `rule`, or `command`. Only needed for a file that neither sits under
         /// an `agents/`, `rules/`, or `commands/` directory nor declares
-        /// `kind:` in its frontmatter. Item links only.
+        /// `kind:` in its frontmatter. Item links only. A workflow cannot be
+        /// item-linked, since the blob form takes `.md` files only; meld the
+        /// repo, or use `learn workflow:<name>` instead.
         // spec: CLI-239, LNK-21
         #[arg(long)]
         kind: Option<LinkKindArg>,
@@ -912,7 +914,7 @@ EXAMPLES:
     /// Resolves <ref> to a single unmanaged item (an exact `kind:name`; a kind
     /// prefix disambiguates across kinds). Moves the item to the destination source
     /// at the convention path for its kind (`skills/<name>/`, `agents/<name>.md`,
-    /// `rules/<name>.md`, `commands/<name>.md`), commits it, melds the source if not yet registered, and
+    /// `rules/<name>.md`, `commands/<name>.md`, `workflows/<name>.js`), commits it, melds the source if not yet registered, and
     /// installs it via `learn`. After absorb the item is an ordinary managed item.
     ///
     /// The destination source is resolved from, in precedence order:
@@ -929,7 +931,7 @@ EXAMPLES:
     /// `absorb` refuses with an error.
     Absorb {
         /// The unmanaged item ref: `name`, `skill:name`, `agent:name`,
-        /// `rule:name`, or `command:name`. A kind prefix disambiguates when the same name exists
+        /// `rule:name`, `command:name`, or `workflow:name`. A kind prefix disambiguates when the same name exists
         /// across kinds. Glob refs are rejected (absorb claims exactly one item).
         item_ref: String,
 

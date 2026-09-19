@@ -110,8 +110,8 @@ The rest of this document states these rules normatively.
 - `NS-29` The reserved-kind-word list (NS-25) is permanent and append-only.
   The following additional words are reserved against plausible future
   item kinds or CLI subsystem names: `command`, `hook`, `mcp`, `plugin`,
-  `prompt`, `mode`, `output-style`. A prefix equal to any of these is rejected
-  with the same `ReservedPrefix` error as the kind-word list.
+  `prompt`, `mode`, `output-style`, `workflow`. A prefix equal to any of these
+  is rejected with the same `ReservedPrefix` error as the kind-word list.
 
 ## Collision-triggered namespace prompt
 
@@ -210,16 +210,19 @@ at runtime. Prefixing changes installed names, so references must be rewritten.
 
 - `NS-10` An intra-source reference is written `{{ns:name}}`, where `name` is a
   sibling's bare name.
-- `NS-11` At install, each `{{ns:name}}` token in a markdown item file (NS-53) is
+- `NS-11` At install, each `{{ns:name}}` token in an item file NS-53 admits: a
+  markdown file, or a workflow's own `.js` (workflows.md WF-25) is
   expanded to the effective name: `name` when unprefixed, `p:name` when prefixed.
 - `NS-12` A token whose `name` is not a sibling in the same source is an error
-  (`BadReference`), naming the referencing item and the bad referent. Applies only
-  within a markdown file (NS-53): a token with no resolvable referent in a
-  non-markdown file is not an error, since it is never expanded there either.
-- `NS-13` Content with no `{{ns:` tokens is copied unchanged. A non-markdown file
-  (NS-53) is not scanned at all, so its content -- non-UTF-8 or otherwise -- is
+  (`BadReference`), naming the referencing item and the bad referent. Applies within
+  any file NS-53 admits (a markdown file, or a workflow's `.js`): a token with no
+  resolvable referent in a file that does not expand is not an error, since it is
+  never expanded there either. In a workflow's `.js` it IS an error, because that
+  file does expand (WF-25, WF-27).
+- `NS-13` Content with no `{{ns:` tokens is copied unchanged. A file NS-53 does
+  not admit is not scanned at all, so its content -- non-UTF-8 or otherwise -- is
   never read for tokens; a markdown file that is not valid UTF-8 is likewise not
-  scanned.
+  scanned. A workflow's `.js` is scanned exactly as a markdown file is.
 - `NS-14` Expansion runs whether or not a prefix is in effect, so a token-using
   source installs correctly with or without a namespace.
 - `NS-15` Token edge cases: whitespace inside a token (`{{ns: name }}`) is
@@ -309,7 +312,10 @@ at runtime. Prefixing changes installed names, so references must be rewritten.
   `description:` value is a field wrapping may *create* one in (NS-56). Code and
   paths reference an
   item by path token instead (`{{self}}`, `{{tools:}}`, `{{path:}}`;
-  tooling.md), never by `{{ns:}}`. `review` detects misplaced tokens (CLI-139) and
+  tooling.md), never by `{{ns:}}`. The one exception is a workflow's `meta.name`:
+  it is the one structured field where a `{{ns:}}` token is correct (WF-23),
+  since install expands it to the effective name the harness answers to; the
+  code/path rule above is otherwise unchanged. `review` detects misplaced tokens (CLI-139) and
   `init-source --template` does not create them (INIT-5).
 - `NS-54` `review --fix` (CLI-138) rewrites only a markdown file (NS-53): for a
   file the extension test rejects, every rewrite pass (un-wrapping a misplaced

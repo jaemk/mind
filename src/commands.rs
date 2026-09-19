@@ -2225,8 +2225,24 @@ fn agent_collision(
 /// comparison set is the whole installed set, freshly written, including the
 /// other items of this same closure.
 ///
+/// Returns immediately when nothing in `installed_keys` is a workflow, which is
+/// the common case: every warning below is keyed off one, so without one there
+/// is nothing to report, and the scan of the whole manifest that builds the
+/// WF-29 comparison set would be pure cost (it reads and parses every installed
+/// workflow's store copy). Behavior is otherwise unchanged.
+///
 /// spec: WF-24 WF-29 WF-30 WF-31
 fn warn_workflows(paths: &Paths, manifest: &Manifest, installed_keys: &[String]) {
+    let touches_workflow = installed_keys.iter().any(|key| {
+        manifest
+            .items
+            .get(key.as_str())
+            .is_some_and(|entry| entry.kind == ItemKind::Workflow)
+    });
+    if !touches_workflow {
+        return;
+    }
+
     // Every installed workflow's harness-facing name, read once. The tokens in
     // a store copy are expanded, so no prefix or sibling set is needed.
     let no_prefix: Option<String> = None;
@@ -7747,6 +7763,11 @@ fn upgrade_inner_scoped(
 
     let mut manifest = manifest;
     let mut applied: Vec<String> = Vec::new();
+    // The manifest keys (`kind:name`) of what this pass installed, as `learn`
+    // collects them: `applied` holds DISPLAY keys, which do not index the
+    // manifest. A rename (a prefix change) records the NEW key, since the old
+    // entry is gone by the time the warnings run.
+    let mut applied_keys: Vec<String> = Vec::new();
     let mut renamed = false;
     for up in &pending {
         let siblings = siblings_of(&catalog, &up.cat.source);
@@ -7878,9 +7899,15 @@ fn upgrade_inner_scoped(
         }
         // spec: DSC-95
         applied.push(installed.display_key());
+        applied_keys.push(installed.key().into());
         manifest.insert(installed);
     }
     manifest.save(paths)?;
+    // spec: WF-24 WF-29 WF-30 WF-31 -- the same post-install warnings `learn`
+    // emits, on the same terms: after the manifest is written, so they read the
+    // store copies and compare against the whole installed set. Advisory only:
+    // an upgrade is never failed or altered by one.
+    warn_workflows(paths, &manifest, &applied_keys);
     if out.json {
         let outcome = if renamed { "renamed" } else { "upgraded" };
         let mut result = MutationResult::new("upgrade", target, outcome);
@@ -12318,6 +12345,13 @@ mod tests {
             convention_path_in_root(root, ItemKind::Command, "ship"),
             PathBuf::from("/repo/commands/ship.md"),
             "command convention path is commands/<name>.md"
+        );
+        // spec: WF-50 -- a workflow is a one-file kind like a command, but its
+        // extension is `.js`, not `.md`.
+        assert_eq!(
+            convention_path_in_root(root, ItemKind::Workflow, "deploy"),
+            PathBuf::from("/repo/workflows/deploy.js"),
+            "workflow convention path is workflows/<name>.js"
         );
     }
 

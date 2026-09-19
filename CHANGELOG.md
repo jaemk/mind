@@ -21,6 +21,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   file over the harness's 524288-byte cap). All three are reports: none blocks
   an install, since `mind`'s `meta` reader is looser than the harness's and the
   size cap is the harness's (WF-24, WF-29, WF-30..32).
+- `probe` appends `- <whenToUse>` to a workflow's description on every display
+  surface, `--json` included, so a JSON consumer sees a description shaped
+  differently for this kind; `recall` reads the manifest and shows the
+  description alone (WF-51).
+
+### Changed
+
+- `workflow` is now a reserved namespace prefix. A source whose
+  `[source].prefix` is `workflow`, or a `meld -N workflow` that worked in
+  0.28.1, is now refused with `ReservedPrefix` (WF-52).
 
 ## [0.28.1] - 2026-09-08
 
