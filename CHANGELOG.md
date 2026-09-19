@@ -6,6 +6,22 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- A sixth item kind, `workflow`: a flat `workflows/<name>.js` discovered,
+  installed, and linked like any other item, with its description read from the
+  file's `export const meta` object (spec/workflows.md). A Claude plugin's
+  `workflows/` directory maps to it the way its `commands/` does, on a directly
+  melded plugin and on each in-repo entry of a marketplace catalog (WF-40..42).
+- The harness keys a workflow by its `meta.name`, not its file name, so
+  `meta.name: '{{ns:<name>}}'` expands at install to the name `mind` installed
+  under. `review`, `learn`, and `recall <item>` report a `meta.name` that
+  diverges from it, two workflows claiming one name, and a file the harness
+  would skip (no readable `meta`, a missing or empty `name`/`description`, or a
+  file over the harness's 524288-byte cap). All three are reports: none blocks
+  an install, since `mind`'s `meta` reader is looser than the harness's and the
+  size cap is the harness's (WF-24, WF-29, WF-30..32).
+
 ## [0.28.1] - 2026-09-08
 
 ### Fixed

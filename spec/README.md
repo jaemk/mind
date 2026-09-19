@@ -261,7 +261,7 @@ and verified.
 | `mind curate`: one pass over every registered curator that registers and installs newly listed entries, re-pins against the curator's directive, upgrades curated sources, reports entries the curator dropped, and offers `--adopt` to bring a pre-existing source under a curator's ownership (`--check`, `--yes`, `--prune`, `--no-sync`, `--adopt`) | done | [curate.md](curate.md) (CUR-1..21), STO-82 |
 | The `workflow` item kind: `workflows/<name>.js` discovered, stored, linked, namespaced, and upgraded like any other kind; `meta` read for the description, `{{ns:}}` expanded in the file | done | [workflows.md](workflows.md) (WF-1..6, WF-8, WF-10, WF-12, WF-21..23, WF-25..27, WF-50..52) |
 | A workflow the harness will not load, a `meta.name` that diverges from the item name, and a duplicate `meta.name` are reported by `learn`/`review`/`recall <item>`, never enforced | done | [workflows.md](workflows.md) (WF-7, WF-24, WF-28..32) |
-| A plugin root's `workflows/` maps to the `workflow` kind | planned | [workflows.md](workflows.md) (WF-40..42) |
+| A plugin root's `workflows/` maps to the `workflow` kind | done | [workflows.md](workflows.md) (WF-40..42) |
 
 ## Documents
 

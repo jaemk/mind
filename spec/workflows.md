@@ -262,7 +262,16 @@ posture: state the assumption, do not defend it.
 - `WF-40` A plugin root's `workflows/` directory maps to the `workflow` kind and
   its files install as items, the way `commands/` does (MKT-18). The harness
   loads a plugin's workflows from that directory under the same rules as an agent
-  home's (WF-2, WF-3, WF-11).
+  home's (WF-2, WF-3, WF-11). This holds on every path that reads a plugin: a
+  directly melded `.claude-plugin/plugin.json` (MKT-3) and each in-repo entry of
+  a marketplace catalog (MKT-14).
+
+  The scan is the convention scan, so it is flat and `.js`-exact (WF-2, WF-3),
+  and what it does not map is counted as a skipped component rather than dropped
+  in silence (MKT-4): a `workflows/` subdirectory or a `workflows/deploy.ts` is
+  reported as an unmapped `workflows/` entry. A mapped `workflows/<name>.js` is
+  never counted, for the reason MKT-4 gives about commands: it is installed, and
+  naming it in the message whose job is to say what was dropped would be false.
 - `WF-41` A plugin manifest's `workflows` key (a path or list of paths, and the
   `experimental.workflows` spelling beside it) is a component-path override that
   mind ignores, as it ignores `commands`, `outputStyles`, and the rest (MKT-3).

@@ -22985,6 +22985,12 @@ fn marketplace_plugin_skipped_components_note() {
         "a plugin's commands are installed, so the skipped note must not name \
          them: {note}"
     );
+    // spec: WF-40 -- and the same for its workflows.
+    assert!(
+        !note.contains("workflow"),
+        "a plugin's workflows are installed, so the skipped note must not name \
+         them: {note}"
+    );
 }
 
 #[test]
@@ -23011,6 +23017,83 @@ fn marketplace_plugin_command_installs_and_links() {
             .expect("read the linked command")
             .contains("Greet the current project"),
         "the linked file must be the plugin's command"
+    );
+}
+
+#[test]
+fn marketplace_plugin_workflow_installs_and_links() {
+    // spec: WF-40 WF-42
+    // A plugin's workflows/ maps to the workflow kind and rides the normal
+    // store+symlink pipeline, linking under the plugin-name prefix (MKT-5). The
+    // fixture's `meta.name` is the `{{ns:}}` token, so it expands at install to
+    // exactly the `<plugin>:<name>` string the harness names a plugin workflow
+    // (WF-42), and `learn` prints no WF-24 divergence warning.
+    let sb = Sandbox::from_example("marketplace-plugin");
+    let spec = sb.source_spec();
+    assert!(sb.mind(&["meld", &spec, "--link-only"]).success);
+
+    let probe = sb.mind(&["probe"]);
+    assert!(
+        probe.stdout.contains("workflow:acme-tools:deploy"),
+        "the plugin workflow must appear in probe: {}",
+        probe.stdout
+    );
+
+    let r = sb.mind(&["learn", "workflow:acme-tools:deploy"]);
+    assert!(
+        r.success,
+        "learn workflow failed: {} {}",
+        r.stdout, r.stderr
+    );
+
+    let link = sb.claude_home.join("workflows/acme-tools:deploy.js");
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false),
+        "the plugin workflow must be linked at workflows/acme-tools:deploy.js"
+    );
+    let body = std::fs::read_to_string(&link).expect("read the linked workflow");
+    assert!(
+        body.contains("name: 'acme-tools:deploy'"),
+        "the token must expand to the harness's <plugin>:<meta.name> spelling: {body}"
+    );
+    assert!(
+        !r.stderr.contains("the harness resolves it as"),
+        "an expanded token agrees with the installed name, so no WF-24 \
+         divergence warning: {}",
+        r.stderr
+    );
+}
+
+#[test]
+fn marketplace_plugin_manifest_workflows_key_is_ignored() {
+    // spec: WF-41
+    // The fixture's plugin.json sets `workflows` to a path that does not exist.
+    // It is a component-path override mind ignores, as it ignores every other
+    // one (MKT-3), so the manifest still parses and the convention directory is
+    // what gets scanned.
+    let sb = Sandbox::from_example("marketplace-plugin");
+    let spec = sb.source_spec();
+    let r = sb.mind(&["meld", &spec, "--link-only"]);
+    assert!(
+        r.success,
+        "an unknown component-override key must not fail the meld: {} {}",
+        r.stdout, r.stderr
+    );
+
+    let manifest = std::fs::read_to_string(sb.source.join(".claude-plugin/plugin.json"))
+        .expect("read the fixture manifest");
+    assert!(
+        manifest.contains("\"workflows\""),
+        "the fixture must actually declare the override key: {manifest}"
+    );
+
+    let probe = sb.mind(&["probe"]);
+    assert!(
+        probe.stdout.contains("workflow:acme-tools:deploy"),
+        "the convention workflows/ dir is scanned, not the declared path: {}",
+        probe.stdout
     );
 }
 
@@ -23228,6 +23311,13 @@ fn marketplace_catalog_melds_in_repo_plugins() {
         "beta's command must appear in probe: {}",
         probe.stdout
     );
+    // spec: WF-40 -- and so is its workflows/, on this path as well as the
+    // directly-melded plugin one.
+    assert!(
+        probe.stdout.contains("workflow:beta:ship-it"),
+        "beta's workflow must appear in probe: {}",
+        probe.stdout
+    );
 
     // Items from sub-sources are installable through the normal `learn` path.
     let r = sb.mind(&["learn", "alpha:one"]);
@@ -23263,6 +23353,25 @@ fn marketplace_catalog_melds_in_repo_plugins() {
     assert!(
         sb.claude_home.join("commands/beta:ship.md").exists(),
         "beta's command link must be at commands/beta:ship.md"
+    );
+
+    // spec: WF-40 WF-42 -- the workflow installs the same way, and its
+    // `{{ns:}}` name expands to the entry-namespaced spelling.
+    let r = sb.mind(&["learn", "workflow:beta:ship-it"]);
+    assert!(
+        r.success,
+        "learn beta's workflow failed: {} {}",
+        r.stdout, r.stderr
+    );
+    let link = sb.claude_home.join("workflows/beta:ship-it.js");
+    assert!(
+        link.exists(),
+        "beta's workflow link must be at workflows/beta:ship-it.js"
+    );
+    let body = std::fs::read_to_string(&link).expect("read the linked workflow");
+    assert!(
+        body.contains("name: 'beta:ship-it'"),
+        "the token must expand to the entry-prefixed name: {body}"
     );
 }
 

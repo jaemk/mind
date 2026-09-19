@@ -112,6 +112,27 @@ the absolute form an [`expand:`-listed script](tooling.md) gets.
 One consequence: a literal `{{` in a workflow's code is read as a token. That is
 the same rule markdown items have lived under.
 
+## Plugins
+
+A Claude plugin's `workflows/` directory maps to the kind the same way its
+`commands/` does, on a directly melded `.claude-plugin/plugin.json` and on each
+in-repo entry of a marketplace catalog:
+
+```text
+$ mind probe --no-tui deploy
+  workflow:acme-tools:deploy   acme-tools  ab12cd3  Stage, verify, and cut a release
+```
+
+The harness names a plugin's workflow `<plugin>:<meta.name>`, and a plugin's
+items take the plugin name as their default namespace. So the `{{ns:}}` token
+expands to exactly that spelling. See
+`examples/marketplace-plugin/workflows/deploy.js`.
+
+A manifest's `workflows` key is a component-path override, and `mind` ignores it
+as it ignores every other one: the convention directory is what gets scanned.
+What that flat `.js` scan does not map (a subdirectory, a `.ts`) is counted in
+the skipped-components note rather than dropped in silence.
+
 ## Lobes
 
 A workflow links into the default Claude lobe and into any lobe whose `kinds`

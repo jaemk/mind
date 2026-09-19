@@ -1690,15 +1690,15 @@ fn make_item(
     )
 }
 
-/// Scan a plugin root for the three components a plugin and `mind` share:
-/// skills, agents, and commands (MKT-3, MKT-18).
+/// Scan a plugin root for the four components a plugin and `mind` share:
+/// skills, agents, commands, and workflows (MKT-3, MKT-18, WF-40).
 ///
 /// A plugin's component layout matches `mind`'s convention layout (DSC-10,
-/// DSC-11, DSC-14): `skills/<name>/SKILL.md` -> Skill, `agents/<name>.md` ->
-/// Agent, `commands/<name>.md` -> Command. Rules and tools have no plugin
-/// equivalent and are not emitted, and a plugin component with no `mind`
-/// equivalent (`hooks/`, `.mcp.json`, ...) is reported instead
-/// ([`plugin_skipped_components`], MKT-4). The flat-skills knob and
+/// DSC-11, DSC-14, WF-2): `skills/<name>/SKILL.md` -> Skill, `agents/<name>.md`
+/// -> Agent, `commands/<name>.md` -> Command, `workflows/<name>.js` -> Workflow.
+/// Rules and tools have no plugin equivalent and are not emitted, and a plugin
+/// component with no `mind` equivalent (`hooks/`, `.mcp.json`, ...) is reported
+/// instead ([`plugin_skipped_components`], MKT-4). The flat-skills knob and
 /// `[source].roots` do not apply to a plugin.
 fn scan_plugin_components(
     plugin_root: &Path,
@@ -1742,39 +1742,39 @@ fn scan_plugin_components(
             out.push(item);
         }
     }
-    // Commands: commands/<name>.md at the plugin root (DSC-14, MKT-18). A
-    // plugin's commands sit at mind's own convention path, so they map like
-    // agents do; the scan is flat, per CMD-2.
-    scan_plugin_commands(plugin_root, source, prefix, out)?;
+    // Commands and workflows: flat `commands/<name>.md` (DSC-14, MKT-18) and
+    // `workflows/<name>.js` (WF-2, WF-40) at the plugin root. Both sit at mind's
+    // own convention path, so they map like agents do.
+    scan_plugin_flat_items(plugin_root, source, prefix, out)?;
     Ok(())
 }
 
-/// Scan a plugin root's `commands/<name>.md` files (MKT-18).
+/// Scan a plugin root's flat single-file components: `commands/<name>.md`
+/// (MKT-18) and `workflows/<name>.js` (WF-40).
 ///
 /// Shared by the single-plugin scan and the marketplace in-repo entry scan, so
-/// both map a plugin's commands the same way. A missing `commands/` directory
-/// yields nothing (DSC-13).
-// spec: MKT-18 CMD-1
-fn scan_plugin_commands(
+/// both map a plugin's commands and workflows the same way. A missing directory
+/// yields nothing (DSC-13). The scan is flat and extension-exact, per CMD-2 and
+/// WF-2/WF-3; what it leaves behind is counted by [`unmapped_flat_entries`] so
+/// the drop is not silent (MKT-4).
+// spec: MKT-18 CMD-1 WF-40
+fn scan_plugin_flat_items(
     plugin_root: &Path,
     source: &Source,
     prefix: &Option<String>,
     out: &mut Vec<CatalogItem>,
 ) -> Result<()> {
-    let commands_dir = plugin_root.join(ItemKind::Command.dir());
-    for entry in read_dir_opt(&commands_dir)? {
-        if entry.is_file()
-            && entry.extension().is_some_and(|e| e == "md")
-            && let Some(item) = make_item(
-                plugin_root,
-                source,
-                prefix,
-                ItemKind::Command,
-                entry.clone(),
-                &entry,
-            )?
-        {
-            out.push(item);
+    for kind in [ItemKind::Command, ItemKind::Workflow] {
+        let ext = kind_extension(kind);
+        let kind_dir = plugin_root.join(kind.dir());
+        for entry in read_dir_opt(&kind_dir)? {
+            if entry.is_file()
+                && entry.extension().is_some_and(|e| e == ext)
+                && let Some(item) =
+                    make_item(plugin_root, source, prefix, kind, entry.clone(), &entry)?
+            {
+                out.push(item);
+            }
         }
     }
     Ok(())
@@ -1944,7 +1944,7 @@ fn scan_marketplace_in_repo_plugins(
                 out.push(item);
             }
         }
-        scan_plugin_commands(&plugin_root, source, &plugin_prefix, out)?;
+        scan_plugin_flat_items(&plugin_root, source, &plugin_prefix, out)?;
     }
     Ok(())
 }
@@ -1958,13 +1958,14 @@ fn scan_marketplace_in_repo_plugins(
 /// manifest. This is a dir-based heuristic; commands.rs calls it at meld time
 /// and prints the summary via `SkippedComponents::summary`.
 ///
-/// spec: MKT-18 -- a `commands/<name>.md` file is NOT counted: it maps to the
-/// `command` kind and is installed, so reporting it as skipped would be a lie
-/// in the one message whose job is to say what was dropped.
-/// spec: MKT-4 -- but a `commands/` entry that same scan does NOT map (it is
-/// flat and `.md`-only, CMD-2) is counted, so a nested
-/// `commands/frontend/component.md` or a `commands/do.sh` is reported rather
-/// than dropped in silence.
+/// spec: MKT-18 WF-40 -- a `commands/<name>.md` or `workflows/<name>.js` file
+/// is NOT counted: it maps to the `command` or `workflow` kind and is
+/// installed, so reporting it as skipped would be a lie in the one message
+/// whose job is to say what was dropped.
+/// spec: MKT-4 -- but an entry those scans do NOT map (both are flat and
+/// extension-exact, CMD-2 and WF-2/WF-3) is counted, so a nested
+/// `commands/frontend/component.md`, a `commands/do.sh`, or a
+/// `workflows/deploy.ts` is reported rather than dropped in silence.
 pub fn plugin_skipped_components(plugin_root: &Path) -> plugin_manifest::SkippedComponents {
     let mut sc = plugin_manifest::SkippedComponents::default();
     if plugin_root.join("hooks").is_dir() {
@@ -1973,15 +1974,17 @@ pub fn plugin_skipped_components(plugin_root: &Path) -> plugin_manifest::Skipped
     if plugin_root.join(".mcp.json").is_file() {
         sc.mcp_servers = 1;
     }
-    sc.commands = unmapped_command_entries(&plugin_root.join(ItemKind::Command.dir()));
+    sc.commands = unmapped_flat_entries(&plugin_root.join(ItemKind::Command.dir()), "md");
+    sc.workflows = unmapped_flat_entries(&plugin_root.join(ItemKind::Workflow.dir()), "js");
     sc
 }
 
-/// How many entries of a plugin's `commands/` directory the flat, `.md`-only
-/// command scan ([`scan_plugin_commands`]) leaves behind: every subdirectory
-/// (the nested `commands/<group>/<name>.md` layout the harness allows, CMD-2)
-/// and every non-`.md` file. One count per immediate entry, not per nested
-/// file: the entry is what the user sees in the repo.
+/// How many entries of a plugin's `commands/` or `workflows/` directory the
+/// flat, extension-exact scan ([`scan_plugin_flat_items`]) leaves behind: every
+/// subdirectory (the nested `commands/<group>/<name>.md` layout the harness
+/// allows, CMD-2) and every file with the wrong extension. One count per
+/// immediate entry, not per nested file: the entry is what the user sees in the
+/// repo.
 ///
 /// A dot-prefixed entry (`.gitkeep`, `.DS_Store`) is not counted: it is not a
 /// component an author meant to publish, and reporting it as a dropped one
@@ -1989,8 +1992,8 @@ pub fn plugin_skipped_components(plugin_root: &Path) -> plugin_manifest::Skipped
 /// report, and it must not turn a permission error on one directory into a
 /// failed meld.
 // spec: MKT-4
-fn unmapped_command_entries(commands_dir: &Path) -> u32 {
-    let Ok(entries) = std::fs::read_dir(commands_dir) else {
+fn unmapped_flat_entries(dir: &Path, ext: &str) -> u32 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
         return 0;
     };
     let mut n = 0;
@@ -1999,7 +2002,7 @@ fn unmapped_command_entries(commands_dir: &Path) -> u32 {
         if file_name(&path).starts_with('.') {
             continue;
         }
-        let mapped = path.is_file() && path.extension().is_some_and(|e| e == "md");
+        let mapped = path.is_file() && path.extension().is_some_and(|e| e == ext);
         if !mapped {
             n += 1;
         }
@@ -4864,6 +4867,40 @@ mod plugin_tests {
         let summary = skipped.summary().expect("a drop must be reported");
         assert!(
             summary.contains("2 unmapped commands/ entries"),
+            "the summary must name what was left behind: {summary}"
+        );
+    }
+
+    // `workflows/` is counted by the same rule as `commands/`: a mapped flat
+    // `.js` installs and is never named, what the scan leaves is a reported
+    // drop.
+    #[test]
+    fn plugin_skipped_components_counts_nested_and_non_js_workflows() {
+        // spec: MKT-4 WF-40
+        let tmp = TmpDir::new();
+        let plugin_root = tmp.path().join("my-plugin");
+
+        // Mapped: installed as workflow:deploy, never reported as skipped.
+        write_file(
+            &plugin_root.join("workflows/deploy.js"),
+            "export const meta = { name: 'deploy', description: 'd' }\n",
+        );
+        // Unmapped: a nested directory and a file the `.js`-exact scan skips
+        // (WF-3), which the harness would not load either.
+        write_file(&plugin_root.join("workflows/nested/deep.js"), "");
+        write_file(&plugin_root.join("workflows/deploy.ts"), "");
+        write_file(&plugin_root.join("workflows/.gitkeep"), "");
+
+        let skipped = plugin_skipped_components(&plugin_root);
+        assert_eq!(
+            skipped.workflows, 2,
+            "the nested dir and the .ts must both count; the .js and the \
+             dotfile must not: {skipped:?}"
+        );
+        assert_eq!(skipped.total(), 2, "nothing else is present: {skipped:?}");
+        let summary = skipped.summary().expect("a drop must be reported");
+        assert!(
+            summary.contains("2 unmapped workflows/ entries"),
             "the summary must name what was left behind: {summary}"
         );
     }

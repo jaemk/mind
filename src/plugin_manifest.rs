@@ -148,6 +148,10 @@ pub fn load_plugin_manifest(path: &Path) -> Result<PluginManifest> {
 /// like any other unsupported component, and MKT-4 is normative that a drop is
 /// never silent.
 ///
+/// `workflows/` reads the same way (WF-40): a flat `workflows/<name>.js` maps to
+/// the `workflow` kind and is installed, and what that scan leaves behind is
+/// counted in `workflows`.
+///
 /// Populated by the consumer (catalog/commands shard) from what it finds on
 /// disk and in the manifest. This module owns the type and its rendering only.
 #[derive(Debug, Default)]
@@ -160,6 +164,8 @@ pub struct SkippedComponents {
     pub output_styles: u32,
     /// `commands/` entries the flat `.md` scan did not map (MKT-4, MKT-18).
     pub commands: u32,
+    /// `workflows/` entries the flat `.js` scan did not map (MKT-4, WF-40).
+    pub workflows: u32,
 }
 
 impl SkippedComponents {
@@ -172,6 +178,7 @@ impl SkippedComponents {
             + self.themes
             + self.output_styles
             + self.commands
+            + self.workflows
     }
 
     /// Human-readable summary, e.g. `"2 hooks, 1 mcp server not installed (no
@@ -200,6 +207,13 @@ impl SkippedComponents {
             self.commands,
             "unmapped commands/ entry",
             "unmapped commands/ entries",
+        );
+        // MKT-4/WF-40: the same, for what the flat `.js` workflow scan left.
+        Self::push_part(
+            &mut parts,
+            self.workflows,
+            "unmapped workflows/ entry",
+            "unmapped workflows/ entries",
         );
         Some(format!(
             "{} not installed (no mind equivalent)",
@@ -1244,15 +1258,16 @@ mod tests {
             themes: 1,
             output_styles: 1,
             commands: 0,
+            workflows: 0,
         };
         let summary = s.summary().expect("all kinds -> Some");
-        // spec: MKT-18 -- a MAPPED command is NOT among them: a plugin's
-        // `commands/<name>.md` files are installed, so the skipped-component
-        // summary never names them (only an unmapped entry, MKT-4, and this
-        // plugin has none).
+        // spec: MKT-18 WF-40 -- a MAPPED command or workflow is NOT among them:
+        // a plugin's `commands/<name>.md` and `workflows/<name>.js` files are
+        // installed, so the skipped-component summary never names them (only an
+        // unmapped entry, MKT-4, and this plugin has none).
         assert!(
-            !summary.contains("command"),
-            "a command is not a skipped component: {summary}"
+            !summary.contains("command") && !summary.contains("workflow"),
+            "a command or workflow is not a skipped component: {summary}"
         );
         for expected in &[
             "hook",
