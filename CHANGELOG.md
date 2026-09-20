@@ -25,6 +25,13 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   surface, `--json` included, so a JSON consumer sees a description shaped
   differently for this kind; `recall` reads the manifest and shows the
   description alone (WF-51).
+- `--max-metadata-size <SIZE>`, a global flag setting the ceiling on every
+  metadata file read from a source (a `mind.toml`, an item's frontmatter, a
+  plugin or marketplace manifest, a workflow's `meta`). It outranks
+  `MIND_MAX_METADATA_SIZE`, which outranks the new `max-metadata-size` config
+  key; absent all three the cap is the 8 MiB it has always been. Takes a byte
+  count, a binary or decimal suffixed size, or `unlimited`. `config show`
+  reports the cap in force (DSC-103..107, CLI-240, CLI-241).
 
 ### Changed
 

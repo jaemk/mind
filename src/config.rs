@@ -168,6 +168,52 @@ pub struct Config {
         skip_serializing_if = "Option::is_none"
     )]
     pub absorb_to: Option<String>,
+
+    /// Ceiling for every source-controlled metadata read (DSC-103). Stored as
+    /// written (`"32MiB"`, `"16777216"`, `"unlimited"`) and parsed at startup by
+    /// [`resolve_metadata_limit`]; absent means the [`METADATA_SIZE_LIMIT`]
+    /// default. The lowest-precedence of the three ways to set it: the
+    /// `--max-metadata-size` flag and `MIND_MAX_METADATA_SIZE` both outrank it
+    /// (DSC-104).
+    // spec: DSC-103
+    #[serde(
+        rename = "max-metadata-size",
+        alias = "max_metadata_size",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_metadata_size: Option<String>,
+}
+
+/// The environment variable that sets the metadata cap (DSC-104), between the
+/// `--max-metadata-size` flag and the config key in precedence.
+pub const MAX_METADATA_SIZE_ENV: &str = "MIND_MAX_METADATA_SIZE";
+
+/// Resolve the metadata size cap from its three origins, highest precedence
+/// first: the `--max-metadata-size` flag, `MIND_MAX_METADATA_SIZE`, then the
+/// `max-metadata-size` config key. `None` everywhere yields the
+/// [`METADATA_SIZE_LIMIT`] default (DSC-104).
+///
+/// Pure in its three inputs so the precedence is testable without a process
+/// environment shared by every other test in the binary; `main::run` gathers
+/// them. A value that is present but unparseable is a hard error naming its
+/// origin, never a silent fallback to the next one down: an operator who typed
+/// a cap and got the default instead would have no way to tell (DSC-105).
+pub fn resolve_metadata_limit(
+    flag: Option<&str>,
+    env: Option<&str>,
+    configured: Option<&str>,
+) -> Result<u64> {
+    let (raw, origin) = match (flag, env, configured) {
+        (Some(raw), _, _) => (raw, "--max-metadata-size"),
+        (None, Some(raw), _) => (raw, MAX_METADATA_SIZE_ENV),
+        (None, None, Some(raw)) => (raw, "the 'max-metadata-size' config key"),
+        (None, None, None) => return Ok(crate::error::METADATA_SIZE_LIMIT),
+    };
+    crate::error::parse_metadata_size(raw).map_err(|msg| MindError::BadMetadataSize {
+        origin: origin.to_string(),
+        msg,
+    })
 }
 
 impl Config {
@@ -210,6 +256,74 @@ mod tests {
         assert_eq!(cfg.lobes.len(), 1);
         assert_eq!(cfg.lobes[0].path(), "~/.claude");
         assert_eq!(cfg.lobes[0].kinds(), None, "bare entry admits all kinds");
+    }
+
+    /// The flag beats the environment, which beats the config key, and none of
+    /// the three yields the default.
+    // spec: DSC-104
+    #[test]
+    fn metadata_limit_precedence_is_flag_then_env_then_config() {
+        let mib = 1024 * 1024;
+        assert_eq!(
+            resolve_metadata_limit(Some("1MiB"), Some("2MiB"), Some("3MiB")).unwrap(),
+            mib
+        );
+        assert_eq!(
+            resolve_metadata_limit(None, Some("2MiB"), Some("3MiB")).unwrap(),
+            2 * mib
+        );
+        assert_eq!(
+            resolve_metadata_limit(None, None, Some("3MiB")).unwrap(),
+            3 * mib
+        );
+        assert_eq!(
+            resolve_metadata_limit(None, None, None).unwrap(),
+            crate::error::METADATA_SIZE_LIMIT
+        );
+    }
+
+    /// A bad value fails, naming its own origin, and a valid lower-precedence
+    /// value does not rescue it: a typo that silently fell through to the
+    /// default would leave the operator no way to see the cap was not applied.
+    // spec: DSC-105
+    #[test]
+    fn a_bad_metadata_limit_fails_naming_where_it_came_from() {
+        for (flag, env, cfg, origin) in [
+            (
+                Some("1.5MiB"),
+                Some("2MiB"),
+                Some("3MiB"),
+                "--max-metadata-size",
+            ),
+            (None, Some("nope"), Some("3MiB"), MAX_METADATA_SIZE_ENV),
+            (None, None, Some("huge"), "max-metadata-size"),
+        ] {
+            let err = resolve_metadata_limit(flag, env, cfg)
+                .expect_err("an unparseable value must be a hard error");
+            assert_eq!(err.kind(), "bad-metadata-size");
+            let msg = err.to_string();
+            assert!(
+                msg.contains(origin),
+                "message must name the origin '{origin}': {msg}"
+            );
+            assert!(
+                msg.contains("unlimited") && msg.contains("32MiB"),
+                "message must show the accepted forms: {msg}"
+            );
+        }
+    }
+
+    /// The config key accepts both its canonical kebab-case spelling and the
+    /// snake_case alias, like `absorb-to`.
+    // spec: DSC-103
+    #[test]
+    fn max_metadata_size_parses_under_both_spellings() {
+        let kebab: Config = toml::from_str("max-metadata-size = \"32MiB\"\n").unwrap();
+        assert_eq!(kebab.max_metadata_size.as_deref(), Some("32MiB"));
+        let snake: Config = toml::from_str("max_metadata_size = \"32MiB\"\n").unwrap();
+        assert_eq!(snake.max_metadata_size.as_deref(), Some("32MiB"));
+        let absent: Config = toml::from_str("ssh = true\n").unwrap();
+        assert_eq!(absent.max_metadata_size, None);
     }
 
     /// A table lobe entry parses its path and `kinds` filter.

@@ -203,6 +203,34 @@ To authenticate with an SSH key instead of an https username/password, meld the
 `owner/repo` shorthand clones over SSH. An https remote still prompts (or uses a
 credential helper) as git normally does.
 
+## Metadata size cap
+
+Every metadata file `mind` reads from a source is size-capped: a `mind.toml`, an
+item's frontmatter, a plugin or marketplace manifest, and a workflow's `meta`
+object (which is its whole `.js` body). The default is 8 MiB, and a file past it
+is refused rather than read.
+
+Raise it for a source with a legitimately large metadata file, or lower it to
+bound how much a source you do not trust can make `mind` allocate while scanning
+it:
+
+```bash
+mind meld owner/repo --max-metadata-size 32MiB
+```
+
+```toml
+max-metadata-size = "32MiB"
+```
+
+The flag outranks `MIND_MAX_METADATA_SIZE`, which outranks the config key. A
+value is a byte count (`16777216`), a binary size (`32MiB`, `512KiB`, `2GiB`, or
+the bare `32M`/`512K`/`2G`), a decimal size (`16MB` = 16000000), or `unlimited`
+for no ceiling. `mind config show` reports the cap in force.
+
+Only the workflow kind treats an over-cap file as recoverable: it lists with no
+description and installs, as any workflow whose `meta` cannot be read does. For
+every other kind an over-cap file fails the scan of its source.
+
 ## Config example
 
 A single `~/.mind/config.toml` may contain any combination of the keys:
@@ -211,13 +239,15 @@ A single `~/.mind/config.toml` may contain any combination of the keys:
 lobes = ["~/.claude", { path = "~/.gemini/config", kinds = ["skill"] }]
 ssh = true
 absorb-to = "~/dev/my-agent-library"
+max-metadata-size = "32MiB"
 ```
 
 ## Paths
 
 ```
 ~/.mind/
-  config.toml                   persistent settings (lobes, ssh, absorb-to)
+  config.toml                   persistent settings (lobes, ssh, absorb-to,
+                                max-metadata-size)
   sources.json                  source registry (melded repos)
   manifest.json                 installed-item manifest and file registry
   sources/<host>/<owner>/<repo> clone of each melded repo

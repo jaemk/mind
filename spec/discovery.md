@@ -790,7 +790,8 @@ field lets the curator opt in to named handling.
 ## Metadata size cap
 
 - `DSC-91` Every read of a source-controlled **metadata** file is size-capped at
-  a fixed ceiling (`METADATA_SIZE_LIMIT` in `src/error.rs`, currently 8 MiB),
+  a ceiling that defaults to 8 MiB (`METADATA_SIZE_LIMIT` in `src/error.rs`) and
+  is configurable per invocation (DSC-103),
   shared by every metadata reader through one helper
   (`error::read_capped_metadata`) so the limit and the refusal are defined
   exactly once. "Metadata" here means the hand-authored files a maintainer
@@ -821,6 +822,65 @@ field lets the curator opt in to named handling.
   melded source can force `mind` to allocate while scanning or installing it:
   narrow enough to matter, wide enough that no real-world metadata file is
   expected to ever approach it.
+
+## Configuring the metadata cap
+
+- `DSC-103` The DSC-91 cap is a default, not a fixed property of the format. An
+  operator sets the ceiling for an invocation with the global
+  `--max-metadata-size <SIZE>` flag (CLI-240), for an environment with
+  `MIND_MAX_METADATA_SIZE`, or persistently with the `max-metadata-size` key in
+  `~/.mind/config.toml`. The resolved value is installed once, before any verb
+  dispatches, and every metadata read in that run uses it: the knob is the same
+  one helper DSC-91 names, so no reader can be capped differently from another.
+  Absent all three, the default applies and behavior is exactly as before.
+
+  Raising it exists for a source with a legitimately large metadata file, which
+  DSC-91 does not deny is possible (a generated `mind.toml`, a marketplace
+  catalog of hundreds of plugins, a workflow whose whole `.js` body is its
+  metadata, WF-55). Lowering it is equally supported, and is the reason the knob
+  is not simply an `--allow-large-metadata` boolean: an operator melding sources
+  they do not trust can bound the allocation further than the default does.
+
+- `DSC-104` Precedence, highest first: `--max-metadata-size`, then
+  `MIND_MAX_METADATA_SIZE`, then the config key, then the DSC-91 default. Only
+  the highest-precedence value present is parsed; a lower one is not consulted,
+  and never silently repairs a higher one that is invalid (DSC-105). An empty or
+  whitespace-only `MIND_MAX_METADATA_SIZE` reads as unset rather than as an
+  invalid value, matching the shell convention that `VAR=` clears a variable.
+
+  The config file is read only when neither the flag nor the environment
+  supplied a value, and a `config.toml` that will not parse falls back to the
+  default cap rather than failing the run: commands that never read the config
+  (`completions`, `man`) must not start failing on a malformed one, and the
+  commands that do read it report the parse error themselves, in their own
+  context.
+
+- `DSC-105` An accepted size is a whole number of bytes (`16777216`), a
+  binary-suffixed size (`32MiB`, `512KiB`, `2GiB`, and the bare `32M`/`512K`/
+  `2G` spellings, which are binary), a decimal-suffixed size (`16MB` =
+  16000000), an explicit `512B`, or one of `unlimited`, `none`, or `0` for no
+  ceiling. Case and internal whitespace are not significant. A fraction
+  (`1.5MiB`) is refused rather than rounded, so a value that cannot be
+  represented exactly is never silently changed to a different one.
+
+  A value that is present but unparseable is a hard `MindError::BadMetadataSize`
+  before any other work, naming which of the three origins supplied it. It is
+  never a fallback to the default: an operator who typed a cap and silently got
+  the default instead would have no way to tell.
+
+- `DSC-106` The cap in effect appears in `MindError::MetadataTooLarge` (so the
+  refusal names the ceiling the operator can change, and its remedy names the
+  flag) and in `config show` (CLI-241). Both report the *effective* value, not
+  the config key, since the flag and the environment outrank it.
+
+- `DSC-107` `unlimited` removes the bound, which re-enters the DSC-90 accepted
+  risk for metadata files: a source can then make `mind` allocate as much as its
+  largest metadata file. That is the operator's decision to make for a source
+  they chose to meld, and it is the reason the default stays 8 MiB rather than
+  being raised to accommodate the rare large file. The bounded-read guarantee
+  itself is unchanged at every other setting: the reader still takes at most
+  cap-plus-one bytes, so the cost of an oversized file is bounded by the cap and
+  not by the file.
 
 ## Accepted risks
 

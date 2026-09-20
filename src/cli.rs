@@ -112,6 +112,25 @@ pub struct Cli {
     #[arg(short = 'v', long, global = true, help_heading = "Global options")]
     pub verbose: bool,
 
+    /// Ceiling on every metadata file `mind` reads from a source: a `mind.toml`,
+    /// an item's frontmatter, a plugin or marketplace manifest, a workflow's
+    /// `meta` (default 8MiB).
+    ///
+    /// Takes a byte count (`16777216`), a suffixed size (`32MiB`, `512KiB`,
+    /// `16MB`), or `unlimited` for no ceiling. Raise it for a source with a
+    /// legitimately large metadata file; lower it to bound how much a source you
+    /// do not trust can make `mind` allocate while scanning it. Also settable as
+    /// `MIND_MAX_METADATA_SIZE` or the `max-metadata-size` config key, which
+    /// this flag outranks.
+    // spec: CLI-240
+    #[arg(
+        long,
+        global = true,
+        value_name = "SIZE",
+        help_heading = "Global options"
+    )]
+    pub max_metadata_size: Option<String>,
+
     #[command(subcommand)]
     pub command: Command,
 }

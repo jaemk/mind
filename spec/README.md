@@ -169,6 +169,7 @@ and verified.
 | Per-part `@`/`#` legality in `host`/`owner`/`repo`, closing an identity and clone-path collision between a repo named `foo@bar` and repo `foo` aliased `@bar` | done | STO-64, CLI-204 |
 | An item link's path may not carry `@` or `#`, closing the same collision one segment over | done | LNK-16 |
 | Metadata reads (`mind.toml`, item frontmatter, plugin and marketplace manifests) are size-capped at 8 MiB | done | DSC-91 |
+| The metadata cap is configurable per invocation, per environment, or per config, and reported by `config show` | done | DSC-103..107, CLI-240, CLI-241 |
 | `evolve` names the resolved release target triple before downloading, so a gnu to musl artifact change is visible up front | done | STO-65 |
 | `evolve` verifies the downloaded archive's build-provenance attestation with `gh` when present: a genuine verification failure aborts the swap, a tooling error or absent `gh` proceeds | done | STO-66 |
 | Bare `mind` prints help on stdout at exit 0 | done | CLI-207 |

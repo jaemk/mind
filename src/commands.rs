@@ -9599,12 +9599,18 @@ pub fn config_show(paths: &Paths) -> Result<()> {
     paths.ensure_config()?;
     let file = paths.config_file();
     let cfg = Config::load(paths)?;
+    // spec: CLI-241 -- the effective cap, not the config key: the flag and the
+    // environment outrank it (DSC-104), so reporting the key alone would name a
+    // value that is not the one in force.
+    let limit = crate::error::metadata_size_limit();
     if out.json {
         return print_json(&serde_json::json!({
             "config_file": file.display().to_string(),
             "lobes": cfg.lobes,
             "default_lobe": paths.claude_home.display().to_string(),
             "ssh": cfg.ssh,
+            "max_metadata_size": crate::error::format_metadata_size(limit),
+            "max_metadata_size_bytes": limit,
         }));
     }
     println!("{} config file: {}", out.bullet(), file.display());
@@ -9622,6 +9628,11 @@ pub fn config_show(paths: &Paths) -> Result<()> {
         "  {} ssh = {}  (prefer SSH for melded remotes)",
         out.dim("·"),
         cfg.ssh
+    );
+    println!(
+        "  {} max-metadata-size = {}  (cap on every metadata file read from a source)",
+        out.dim("·"),
+        crate::error::format_metadata_size(limit)
     );
     if let Some(env) = std::env::var_os("MIND_AGENT_HOMES") {
         println!(

@@ -1583,6 +1583,23 @@ and per-harness `kinds` defaults.
   reference warning emitted during `meld` when a prefix is in effect (CLI-14,
   NS-20). It does not affect the color/Unicode capability gate (CLI-151).
 
+- `CLI-240` `--max-metadata-size <SIZE>` is a global flag accepted before or after
+  the verb, resolved at the top level like `--json`, `--yes`, and `--ascii`
+  (CLI-150). It sets the ceiling on every source-controlled metadata read for
+  that invocation (DSC-103), outranking `MIND_MAX_METADATA_SIZE` and the
+  `max-metadata-size` config key (DSC-104). The accepted forms and the refusal
+  of an unparseable one are DSC-105. Being global, it applies to every verb that
+  reads a source, including the ones that read one without installing anything
+  (`review`, `probe`, `recall`, `introspect`).
+
+- `CLI-241` `config show` reports `max-metadata-size` alongside `lobes` and
+  `ssh`, as the effective cap rather than the config key's value (DSC-106), so a
+  run under a flag or an environment override does not report a number that is
+  not in force. `--json` carries it twice: `max_metadata_size` as the rendered
+  string a human reads, and `max_metadata_size_bytes` as the byte count a
+  consumer compares against, with an unlimited cap rendering as `"unlimited"` /
+  `18446744073709551615`.
+
 - `CLI-163` The short flag `-n` is reserved for `--dry-run` on `learn` (CLI-32),
   which already owned it. As a consequence, `--namespace` on `meld`, `review`, and
   `init-source` moves to short `-N` (uppercase). No other short is assigned to

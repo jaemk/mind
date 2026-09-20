@@ -37,6 +37,7 @@ use std::io::IsTerminal;
 use clap::{CommandFactory, Parser};
 
 use cli::{Cli, Command, ConfigCmd, HooksCmd, LobesCmd};
+use config::MAX_METADATA_SIZE_ENV;
 use error::Result;
 use paths::Paths;
 
@@ -434,6 +435,33 @@ fn run(cli: Cli) -> Result<()> {
     }
 
     let paths = Paths::resolve()?;
+
+    // spec: DSC-103 DSC-104 -- install the metadata cap before any dispatch, so
+    // every metadata read in this run uses one ceiling.
+    //
+    // The config file is consulted only when neither the flag nor the
+    // environment supplied a value, and a config that will not parse falls back
+    // to the default rather than failing here: verbs that never read config
+    // (`completions`, `man`, `recall`) must not start failing on a malformed
+    // one, and the verbs that do read it report the parse error themselves,
+    // with the context this early in the run does not have.
+    // An empty `MIND_MAX_METADATA_SIZE=` reads as unset, the shell convention,
+    // rather than as an unparseable value.
+    let env = std::env::var(MAX_METADATA_SIZE_ENV)
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    let configured = if cli.max_metadata_size.is_none() && env.is_none() {
+        config::Config::load(&paths)
+            .ok()
+            .and_then(|c| c.max_metadata_size)
+    } else {
+        None
+    };
+    error::set_metadata_size_limit(config::resolve_metadata_limit(
+        cli.max_metadata_size.as_deref(),
+        env.as_deref(),
+        configured.as_deref(),
+    )?);
 
     // spec: STO-40 STO-41 STO-42
     // Completions and man touch no persisted state: skip the lock. All other

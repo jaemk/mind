@@ -43,6 +43,12 @@ meld a source you do not control:
   reader takes at most cap-plus-one bytes, so the cost of an oversized file is
   bounded by the cap rather than by the file itself. Recorded as `DSC-91` in
   [spec/discovery.md](spec/discovery.md).
+
+  The 8 MiB is a default: `--max-metadata-size` (or `MIND_MAX_METADATA_SIZE`, or
+  the `max-metadata-size` config key) sets it per invocation, and accepts
+  `unlimited`. Lowering it tightens the bound; `unlimited` removes it, which
+  puts metadata reads back under the accepted risk below. The bounded-read
+  guarantee holds at every other setting. Recorded as `DSC-103`..`DSC-107`.
 - **Item content reads are not size-capped.** Beyond the metadata cap above, no
   other read of source-controlled content has a size or nesting-depth limit:
   every file in an item tree during `{{ns:}}` expansion at install, the
